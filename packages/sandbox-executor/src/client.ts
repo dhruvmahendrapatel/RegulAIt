@@ -1,6 +1,6 @@
 /**
  * ADR-0190 I3 — THE CHANNEL CLIENT: the executor's seven routes, plus I4's
- * two stdio session routes (`EXECUTOR_STDIO_ROUTES`), and nothing else. Every request is authorised by the
+ * two stdio session routes (`EXECUTOR_STDIO_ROUTES`) and I5's two engine task input routes, and nothing else. Every request is authorised by the
  * `ChannelCredential`; every answer is parsed with the shared schema before
  * it is believed. As ADR-0187's runner client: a request is bounded in time;
  * a timeout, a 5xx, a 408, a 429 or a success whose body is not a valid
@@ -18,6 +18,8 @@ import {
   executorStdioMessageSchema,
   executorStdioPostResponseSchema,
   executorStreamMessageSchema,
+  engineTaskInputManifestSchema,
+  type EngineTaskInputManifest,
   type ExecutorAnnounce,
   type ExecutorStdioMessage,
   type ExecutorStdioPost,
@@ -82,7 +84,7 @@ export async function probeGatewayReachable(
   }
 }
 
-export type ExecutorRoute = "announce" | "self-test" | "stream" | "accept" | "decline" | "report" | "end" | "stdio";
+export type ExecutorRoute = "announce" | "self-test" | "stream" | "accept" | "decline" | "report" | "end" | "stdio" | "input";
 
 /** the HTTP seam: `fetch`-shaped, with a body that may stream (the stream route) or be whole text */
 export interface ExecutorHttp {
@@ -94,6 +96,8 @@ export interface ExecutorHttpResponse {
   text(): Promise<string>;
   /** the body as it arrives (the stream route); absent = read `text()` once */
   lines?: () => AsyncIterable<string>;
+  /** I5: the body's raw bytes as they arrive (an engine task's input file); absent = this seam cannot carry bytes */
+  bytes?: () => AsyncIterable<Uint8Array>;
 }
 
 export interface ExecutorClientOptions {
@@ -149,6 +153,19 @@ export function fetchExecutorHttp(fetchImpl: typeof fetch = fetch): ExecutorHttp
     return {
       status: res.status,
       text: () => res.text(),
+      bytes: async function* () {
+        if (!res.body) return;
+        const reader = res.body.getReader();
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) return;
+            if (value) yield value;
+          }
+        } finally {
+          await reader.cancel().catch(() => undefined);
+        }
+      },
       lines: async function* () {
         if (!res.body) return;
         const reader = res.body.getReader();
@@ -319,6 +336,33 @@ export class ExecutorClient {
   /** ADR-0190 I4: sandbox → gateway, a batch of stdout frames and/or eof */
   async stdioPost(offerId: string, body: ExecutorStdioPost) {
     return this.answer("stdio", await this.call("stdio", "POST", `/offers/${encodeURIComponent(offerId)}/stdio`, body), 200, executorStdioPostResponseSchema);
+  }
+
+  /** ADR-0190 I5: an accepted engine task's input manifest (refused `engine_task_unknown` by a process not holding it) */
+  async inputManifest(offerId: string): Promise<EngineTaskInputManifest> {
+    return this.answer("input", await this.call("input", "GET", `/offers/${encodeURIComponent(offerId)}/input`), 200, engineTaskInputManifestSchema);
+  }
+
+  /**
+   * ADR-0190 I5: file `n` of an accepted engine task's input, as it arrives (the backend verifies size and sha256 while
+   * it writes). Bounded by the file's size, not by the request timeout: the caller's own deadline (the offer's report
+   * deadline) bounds it.
+   */
+  async inputFile(offerId: string, n: number, signal?: AbortSignal): Promise<AsyncIterable<Uint8Array>> {
+    const url = this.url(`/offers/${encodeURIComponent(offerId)}/input/${Math.max(0, Math.floor(n))}`);
+    const auth = await this.opts.credential.authorizeRequest("GET", url, undefined);
+    const res = await this.http(url, { method: "GET", headers: auth, ...(signal ? { signal } : {}) });
+    if (!is2xx(res.status)) {
+      let j: { error?: unknown; next?: unknown } = {};
+      try {
+        j = JSON.parse(await res.text()) as typeof j;
+      } catch {
+        // a refusal with no JSON body still refuses
+      }
+      throw new ExecutorHttpError("input", res.status, typeof j.error === "string" ? j.error : null, nextOf(j.next));
+    }
+    if (!res.bytes) throw new ExecutorMalformedResponseError("input", res.status, "unparseable");
+    return res.bytes();
   }
 
   private async readStream<M>(

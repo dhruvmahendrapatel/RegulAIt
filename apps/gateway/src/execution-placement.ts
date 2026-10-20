@@ -20,10 +20,16 @@
  * The governed call paths (I4 stdio, I5 engines) call `decidePlacement` before
  * any upstream contact; this slice builds the decision and its evidence.
  *
- * Where each fact comes from (read for I2):
- *  - sensitivity: a project has no sensitivity column; the strictest
- *    `data_sensitivity` of the AI use cases linked to the project. No project,
- *    or a project with no linked use case, does NOT resolve (never defaulted).
+ * Where each fact comes from (read for I2, amended by owner decisions C and D, migration 0201):
+ *  - sensitivity: MAX(the strictest `data_sensitivity` of the AI use cases
+ *    linked to the project, the admin-set `projects.isolation_sensitivity`),
+ *    which can only raise. No project, or a project with neither, does NOT
+ *    resolve (never defaulted).
+ *  - a person's own stdio call (owner decision C): an `mcp_stdio` call with no
+ *    agent from an interactive person (`interactivePersonCaller`) in a scope
+ *    (server or project) with an active `execution_person_stdio_relaxations`
+ *    row has its unknown-agent floor at L2 and is placed under its configured
+ *    profile. Every other floor still counts; an API key never qualifies.
  *  - compliance floors: the project's classification tags, each resolved
  *    through its ACTIVE compliance-profile version (`complianceProfilesForTags`);
  *    an unresolvable version does not resolve.
@@ -45,10 +51,12 @@ import {
   builderAgents,
   delegationGrants,
   eq,
+  executionPersonStdioRelaxations,
   executionProfiles,
   isNull,
   mcpServers,
   projects,
+  sql,
   workloadIdentities,
   type Db,
   type ExecutionProfileRow,
@@ -65,8 +73,12 @@ import {
   isolationClassRank,
   ISOLABLE_WORKLOAD_KINDS,
   NO_AUTONOMY_CLASS_FLOOR,
+  INTERACTIVE_SESSION_ORIGINS,
   NON_ISOLABLE_EXECUTION,
-  PLACEMENT_SENSITIVITIES,
+  PERSON_STDIO_RELAXATION_KIND,
+  PERSON_STDIO_SUBJECT_KIND,
+  projectIsolationSensitivity,
+  REQUIRABLE_ISOLATION_CLASSES,
   SENSITIVITY_FLOOR_KEYS,
   workloadKindFloor,
   type AgentAssurance,
@@ -74,6 +86,7 @@ import {
   type ExecutionProfileUnavailable,
   type ExecutionRefusalReason,
   type IsolableWorkloadKind,
+  type PersonStdioRelaxationScope,
   type PlacementSensitivity,
   type RequirableIsolationClass,
   type RequiredClassFloor,
@@ -105,6 +118,34 @@ export interface PlacementRequest {
   mcpServerId?: string | null;
   /** the grant the call is made under, on a delegated call (decision 7 item 6) */
   parentGrantId?: string | null;
+  /**
+   * Owner decision C: the caller is a PERSON in an INTERACTIVE session (`interactivePersonCaller`: a password, OIDC
+   * or SAML session, no delegation grant). Only then may a "person's own stdio call" relaxation lower the
+   * unknown-agent floor. Absent or false = never relaxed (an API key, a workload token, a worker loop, an engine).
+   */
+  interactivePerson?: boolean;
+}
+
+/** owner decision C: the relaxation one requirement used (recorded on the decision and the placement audit) */
+export interface PersonStdioRelaxationUse {
+  kind: typeof PERSON_STDIO_RELAXATION_KIND;
+  subjectKind: typeof PERSON_STDIO_SUBJECT_KIND;
+  /** the `execution_person_stdio_relaxations` row relied on */
+  relaxationId: string;
+  scopeKind: PersonStdioRelaxationScope;
+  scopeId: string;
+}
+
+/**
+ * Owner decision C, the one predicate for "a person in an interactive session": a session credential whose origin
+ * is a person's sign-in (password, OIDC, SAML), with no delegation grant behind the call. The origin is the one the
+ * server derived (`abacPrincipalFromRequest`, from the session row); a worker loop supplies none. An API key, a
+ * session exchanged from one (`api_key`), the bootstrap identity and a workload token are never interactive.
+ */
+export function interactivePersonCaller(principal: { sessionOrigin?: string | null } | null | undefined, delegationGrantId: string | null | undefined): boolean {
+  if (delegationGrantId) return false;
+  const origin = principal?.sessionOrigin;
+  return typeof origin === "string" && INTERACTIVE_SESSION_ORIGINS.includes(origin);
 }
 
 /** a resolved profile version */
@@ -130,33 +171,67 @@ export type Requirement =
       profile: ResolvedProfile;
       sensitivity: PlacementSensitivity;
       agentAssurance: AgentAssurance;
+      /** owner decision C: the relaxation that lowered the unknown-agent floor to L2, or null */
+      relaxation: PersonStdioRelaxationUse | null;
     }
   | { kind: "unresolved"; workloadKind: WorkloadKind; fact: RequirementFact };
 
 const isIsolable = (k: unknown): k is IsolableWorkloadKind => typeof k === "string" && (ISOLABLE_WORKLOAD_KINDS as readonly string[]).includes(k);
-const SENSITIVITY_RANK: Record<PlacementSensitivity, number> = { public: 0, internal: 1, confidential: 2, regulated: 3 };
+const isRequirableClass = (c: unknown): c is RequirableIsolationClass => typeof c === "string" && (REQUIRABLE_ISOLATION_CLASSES as readonly string[]).includes(c);
 
 function profileView(row: ExecutionProfileRow, source: ResolvedProfile["source"]): ResolvedProfile {
   return { id: row.id, name: row.name, version: row.version, digest: row.digest, minClass: row.minClass as RequirableIsolationClass, retired: row.retiredAt !== null, source };
 }
 
-/** the latest version of a shipped profile (the default a kind runs under when nothing is assigned) */
+/**
+ * The latest version of a shipped profile (the default a kind runs under when nothing is assigned). A revert is a new
+ * version too (I5 follow-up), so the newest version is always the one in force; a retired one refuses
+ * `profile_retired` (no fallback).
+ */
 async function shippedProfile(db: Db, name: string): Promise<ExecutionProfileRow | null> {
   const rows = await db.select().from(executionProfiles).where(eq(executionProfiles.name, name));
   return rows.sort((a, b) => b.version - a.version)[0] ?? null;
 }
 
-/** the strictest sensitivity of the project's linked AI use cases; undefined = does not resolve */
-async function projectSensitivity(db: Db, projectId: string | null): Promise<PlacementSensitivity | undefined> {
+/**
+ * Owner decision D: MAX(the strictest sensitivity of the project's linked AI use cases, the admin-set project field).
+ * The field can only raise. No project, a project that does not exist, or one with neither does not resolve
+ * (undefined; never defaulted). A value outside the vocabulary does not resolve either.
+ */
+export async function projectSensitivity(db: Db, projectId: string | null): Promise<PlacementSensitivity | undefined> {
   if (!projectId) return undefined;
+  const [p] = await db.select({ field: projects.isolationSensitivity }).from(projects).where(eq(projects.id, projectId));
+  if (!p) return undefined;
   const rows = await db.select({ s: aiUseCases.dataSensitivity }).from(aiUseCases).where(eq(aiUseCases.projectId, projectId));
-  let out: PlacementSensitivity | undefined;
-  for (const r of rows) {
-    if (!(PLACEMENT_SENSITIVITIES as readonly string[]).includes(r.s)) return undefined;
-    const s = r.s as PlacementSensitivity;
-    if (out === undefined || SENSITIVITY_RANK[s] > SENSITIVITY_RANK[out]) out = s;
+  return projectIsolationSensitivity(rows.map((r) => r.s), p.field);
+}
+
+/**
+ * Owner decision C: the active relaxation in scope for this call (the server's first, then the project's), or null.
+ * Only for an `mcp_stdio` call with no agent, no grant and an interactive person; nothing else ever reads one.
+ * ADR-0197 Q3: active = not cleared AND not expired, on the database clock; an expired row is no relaxation (fail
+ * closed: the call is back at L3 until an admin renews it).
+ */
+async function personStdioRelaxation(db: Db, req: PlacementRequest): Promise<PersonStdioRelaxationUse | null> {
+  if (req.workloadKind !== "mcp_stdio" || req.agent !== null || req.interactivePerson !== true || req.parentGrantId) return null;
+  const scopes: Array<{ kind: PersonStdioRelaxationScope; id: string }> = [];
+  if (req.mcpServerId) scopes.push({ kind: "mcp_server", id: req.mcpServerId });
+  if (req.projectId) scopes.push({ kind: "project", id: req.projectId });
+  for (const s of scopes) {
+    const [row] = await db
+      .select({ id: executionPersonStdioRelaxations.id })
+      .from(executionPersonStdioRelaxations)
+      .where(
+        and(
+          eq(executionPersonStdioRelaxations.scopeKind, s.kind),
+          eq(executionPersonStdioRelaxations.scopeId, s.id),
+          isNull(executionPersonStdioRelaxations.clearedAt),
+          sql`${executionPersonStdioRelaxations.expiresAt} > now()`,
+        ),
+      );
+    if (row) return { kind: PERSON_STDIO_RELAXATION_KIND, subjectKind: PERSON_STDIO_SUBJECT_KIND, relaxationId: row.id, scopeKind: s.kind, scopeId: s.id };
   }
-  return out;
+  return null;
 }
 
 /** each tag's `min_isolation_class` through its active version; undefined = a version did not resolve */
@@ -254,9 +329,21 @@ export async function resolveRequirement(db: Db, req: PlacementRequest): Promise
     if (row) configured = profileView(row, "shipped_default");
   }
   if (!configured) return { kind: "unresolved", workloadKind: kind, fact: "configuredProfileFloor" };
-  raise(configured.minClass);
+  // ADR-0190 I5 (review LOW-1): an agent-null engine run's configured profile is the engine-worker default (its LATEST
+  // version: the profile is versioned, I5 follow-up); its class as a configured floor is capped at the org's
+  // engine-worker floor, so relaxing that setting (a `settings_relax` step-up, audited, never below L1: the floors are
+  // requirable classes) is honoured here. The profile's own minClass still bounds where it can be PLACED (the broker
+  // raises the requirement to it; the shipped version 1 is L2). An L1 engine placement therefore needs the org floor,
+  // the sensitivity floor AND an engine-worker version at L1 (each a step-up), and an executor attesting L1: the runc
+  // backend attests L1 only, and an L1 attestation never meets an L2 or L3 requirement (the broker's rank check).
+  const engineWorkerFloor = org.isolationFloorEngineWorker as unknown;
+  const relaxable = kind === "engine_worker" && req.agent === null && !serverRow && !agentRow && isRequirableClass(engineWorkerFloor);
+  raise(relaxable && isolationClassRank(engineWorkerFloor) < isolationClassRank(configured.minClass) ? engineWorkerFloor : configured.minClass);
   if (agentRow && agentRow.id !== configured.id) raise(agentRow.minClass as RequirableIsolationClass);
-  if (assurance !== "known") {
+  // owner decision C: an interactive person's own stdio call (no agent) in a relaxed scope is placed under the
+  // CONFIGURED profile with the unknown-agent floor at L2 (`unknownAgentFloor`); every other floor still counts
+  const relaxation = assurance === "unknown" ? await personStdioRelaxation(db, req) : null;
+  if (assurance !== "known" && !relaxation) {
     const row = await shippedProfile(db, defaultProfileFor(kind, assurance));
     if (row) profile = profileView(row, "most_restrictive");
   } else profile = configured;
@@ -284,6 +371,7 @@ export async function resolveRequirement(db: Db, req: PlacementRequest): Promise
     agentAssurance: assurance,
     configuredProfileFloor: configuredFloor,
     parentRequiredClass,
+    personStdioRelaxed: relaxation !== null,
   };
   const r = computeRequiredClass(facts);
   if (!r.ok) return { kind: "unresolved", workloadKind: kind, fact: r.unresolved };
@@ -296,6 +384,7 @@ export async function resolveRequirement(db: Db, req: PlacementRequest): Promise
     profile,
     sensitivity: sensitivity!,
     agentAssurance: assurance,
+    relaxation,
   };
 }
 
@@ -368,6 +457,8 @@ export async function decidePlacement(
         profileSource: requirement.profile.source,
         sensitivity: requirement.sensitivity,
         agentAssurance: requirement.agentAssurance,
+        // owner decision C: the subject kind and the relaxation relied on (null = none)
+        relaxation: requirement.relaxation,
         projectId: req.projectId,
         agent: req.agent,
         mcpServerId: req.mcpServerId ?? null,

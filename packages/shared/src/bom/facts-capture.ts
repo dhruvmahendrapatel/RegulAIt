@@ -64,6 +64,7 @@ import {
   bomRowDigest,
   bomUuidSchema,
   DECISION_FACTS_CURRENT_VERSION,
+  decisionExecutionRelaxationSchema,
   decisionFactsV2Schema,
   isBomSpiffeId,
   projectBomRow,
@@ -195,6 +196,13 @@ const asText = (v: unknown): string | null => (typeof v === "string" ? v : null)
  */
 export function buildExecutionFacts(row: DecisionAuditRow, reads: DecisionFactReads): DecisionExecutionFacts | null {
   const p = reads.placements?.get(row.id);
+  const engineRunEntitlement = row.objectType === "agent" && asRecord(row.detail)?.phase === ENGINE_RUN_ENTITLEMENT_PHASE;
+  // ADR-0190 I5: an ALLOWED engine run entitlement decision is the run's task start, and its engine_worker placement is
+  // written in the same transaction. Without one (or with another kind of workload) the I5 contract is broken: the
+  // capture fails, and the decision with it (fail closed), rather than record a run whose isolation is unknown.
+  if (engineRunEntitlement && row.effect === "allow" && (!p || p.placement.workloadKind !== "engine_worker")) {
+    throw new DecisionFactsCaptureError(row.id, "an allowed engine run entitlement decision has no engine_worker placement in its transaction (ADR-0190 I5)");
+  }
   if (p) {
     const pl = p.placement;
     const profile = p.profile
@@ -211,6 +219,16 @@ export function buildExecutionFacts(row: DecisionAuditRow, reads: DecisionFactRe
       : null;
     const outcome = asText(pl.outcome);
     const report = asText(pl.reportSha256);
+    // ADR-0190 owner decision C: the relaxation the decision's requirement relied on, as the gateway wrote it on the
+    // decision row in this transaction (`detail.execution.relaxation`). Absent = none. A malformed one is a capture
+    // failure (fail closed), never dropped: the decision would otherwise read as an unrelaxed L3 requirement.
+    const rawRelaxation = asRecord(asRecord(row.detail)?.execution)?.relaxation;
+    let relaxation: DecisionExecutionFacts["relaxation"] = null;
+    if (rawRelaxation !== undefined && rawRelaxation !== null) {
+      const parsed = decisionExecutionRelaxationSchema.safeParse(rawRelaxation);
+      if (!parsed.success) throw new DecisionFactsCaptureError(row.id, "the decision names a person's own stdio relaxation that is not well formed (ADR-0190 owner decision C)");
+      relaxation = parsed.data;
+    }
     const att = p.executorAttestation;
     return {
       workloadKind: pl.workloadKind,
@@ -226,6 +244,8 @@ export function buildExecutionFacts(row: DecisionAuditRow, reads: DecisionFactRe
       offerId: outcome === "offered" ? asText(pl.offerId) : null,
       imageDigest: asText(pl.imageDigest),
       runtimeFlagsSha256: asText(pl.runtimeFlagsSha256),
+      // written only when one was used: facts with none stay byte-identical to the pre-0201 capture
+      ...(relaxation ? { relaxation } : {}),
       attestation:
         outcome === "refused"
           ? null
@@ -233,9 +253,10 @@ export function buildExecutionFacts(row: DecisionAuditRow, reads: DecisionFactRe
     } as DecisionExecutionFacts;
   }
   const none = { placementId: null, requiredClass: null, requiredBy: null, refusalCode: null, profile: null, executor: null, attestation: null };
-  // an engine run's entitlement decision governs an engine worker (placed by an executor from slice I5), not a
-  // model call in the gateway: until I5 writes its placement row, its location is NOT RECORDED, never a guess
-  if (row.objectType === "agent" && asRecord(row.detail)?.phase === ENGINE_RUN_ENTITLEMENT_PHASE) return null;
+  // an engine run's entitlement decision governs an engine worker, not a model call in the gateway. From I5 an
+  // allowed one always has its placement (above). A refusal written before any task start (run creation, the
+  // lease's re-check) placed nothing: its location is NOT RECORDED (`no_placement`), never a guess
+  if (engineRunEntitlement) return null;
   if (row.objectType === "agent") return { workloadKind: "model_call", placement: "in_gateway", appliedClass: "in_gateway", ...none };
   if (row.objectType === "connector") return { workloadKind: "connector_call", placement: "in_gateway", appliedClass: "in_gateway", ...none };
   if (row.objectType === "mcp_tool") {

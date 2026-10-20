@@ -1,0 +1,224 @@
+{
+  "_about": "ADR-0196 design-token ratchet (scripts/preflight-ui-tokens.mjs). Counts may only shrink.",
+  "entries": {
+    "apps/web/src/shell/commandPalette.module.css": {
+      "declaration-property-unit-disallowed-list": 16
+    },
+    "apps/web/src/shell/shell.module.css": {
+      "declaration-property-unit-disallowed-list": 28
+    },
+    "apps/web/src/stepup/StepUpDialog.tsx": {
+      "ts-spacing-literal": 1
+    },
+    "apps/web/src/theme/global.css": {
+      "function-disallowed-list": 1
+    },
+    "apps/web/src/ui/RefusalNotice.module.css": {
+      "declaration-property-unit-disallowed-list": 3
+    },
+    "apps/web/src/ui/TotpQrCode.tsx": {
+      "ts-color-literal": 2
+    },
+    "apps/web/src/ui/brand.module.css": {
+      "declaration-property-unit-disallowed-list": 1
+    },
+    "apps/web/src/ui/logos/Logo.tsx": {
+      "ts-color-literal": 8
+    },
+    "apps/web/src/ui/logos/logo.module.css": {
+      "color-no-hex": 1
+    },
+    "apps/web/src/ui/modelPicker.module.css": {
+      "declaration-property-unit-disallowed-list": 17,
+      "function-disallowed-list": 1
+    },
+    "apps/web/src/ui/runGraph/RunGraphCanvas.tsx": {
+      "ts-spacing-literal": 1
+    },
+    "apps/web/src/ui/runGraph/runGraph.module.css": {
+      "declaration-property-unit-disallowed-list": 15
+    },
+    "apps/web/src/ui/totpQrCode.module.css": {
+      "color-no-hex": 1
+    },
+    "apps/web/src/views/account/ModelKeysCard.tsx": {
+      "ts-spacing-literal": 1
+    },
+    "apps/web/src/views/admin/cost/CostDashboardPage.tsx": {
+      "ts-spacing-literal": 1
+    },
+    "apps/web/src/views/admin/governance/AdmissionReviewPage.tsx": {
+      "ts-spacing-literal": 5
+    },
+    "apps/web/src/views/admin/governance/AnnotationQueuesPage.tsx": {
+      "ts-spacing-literal": 4
+    },
+    "apps/web/src/views/admin/governance/CopilotPage.tsx": {
+      "ts-spacing-literal": 1
+    },
+    "apps/web/src/views/admin/governance/CopilotProposalForm.tsx": {
+      "ts-spacing-literal": 2
+    },
+    "apps/web/src/views/admin/governance/EvalsPage.tsx": {
+      "ts-spacing-literal": 1
+    },
+    "apps/web/src/views/admin/governance/ModelArtifactsTab.tsx": {
+      "ts-spacing-literal": 8
+    },
+    "apps/web/src/views/admin/governance/RiskAcceptancePanel.tsx": {
+      "ts-spacing-literal": 4
+    },
+    "apps/web/src/views/admin/governance/VendorsPage.tsx": {
+      "ts-spacing-literal": 1
+    },
+    "apps/web/src/views/admin/governance/modelArtifacts.module.css": {
+      "declaration-property-unit-disallowed-list": 11
+    },
+    "apps/web/src/views/admin/governance/modelPolicy.module.css": {
+      "declaration-property-unit-disallowed-list": 14
+    },
+    "apps/web/src/views/admin/identity/ClientAccessPage.tsx": {
+      "ts-spacing-literal": 2
+    },
+    "apps/web/src/views/admin/identity/CredentialsPage.tsx": {
+      "ts-spacing-literal": 4
+    },
+    "apps/web/src/views/admin/identity/UserRoleProvenancePanel.tsx": {
+      "ts-spacing-literal": 2
+    },
+    "apps/web/src/views/admin/identity/workloadIdentities.module.css": {
+      "declaration-property-unit-disallowed-list": 1
+    },
+    "apps/web/src/views/admin/integrations/AgentsPage.tsx": {
+      "ts-spacing-literal": 2
+    },
+    "apps/web/src/views/admin/integrations/EngineSchedulesCard.tsx": {
+      "ts-spacing-literal": 1
+    },
+    "apps/web/src/views/admin/integrations/EnginesPage.tsx": {
+      "ts-spacing-literal": 2
+    },
+    "apps/web/src/views/admin/integrations/McpRegistriesPanel.tsx": {
+      "ts-spacing-literal": 2
+    },
+    "apps/web/src/views/admin/integrations/McpServersPage.tsx": {
+      "ts-spacing-literal": 1
+    },
+    "apps/web/src/views/admin/integrations/ModelCredentialsPage.tsx": {
+      "ts-spacing-literal": 1
+    },
+    "apps/web/src/views/admin/integrations/WebhooksPage.tsx": {
+      "ts-spacing-literal": 4
+    },
+    "apps/web/src/views/admin/integrations/customProviders.module.css": {
+      "declaration-property-unit-disallowed-list": 6
+    },
+    "apps/web/src/views/admin/llm/RegulAItLlmPage.tsx": {
+      "ts-spacing-literal": 2
+    },
+    "apps/web/src/views/admin/observability/TracesAutomationsTab.tsx": {
+      "ts-spacing-literal": 2
+    },
+    "apps/web/src/views/admin/observability/monitoring.module.css": {
+      "color-no-hex": 18
+    },
+    "apps/web/src/views/admin/observability/traces.module.css": {
+      "declaration-property-unit-disallowed-list": 5
+    },
+    "apps/web/src/views/admin/settings/FirstRunPage.tsx": {
+      "ts-spacing-literal": 1
+    },
+    "apps/web/src/views/auth/auth.module.css": {
+      "declaration-property-unit-disallowed-list": 3
+    },
+    "apps/web/src/views/builder/AgentConfigure.tsx": {
+      "ts-spacing-literal": 27
+    },
+    "apps/web/src/views/builder/AgentDialogs.tsx": {
+      "ts-spacing-literal": 22
+    },
+    "apps/web/src/views/builder/AutonomyPanel.tsx": {
+      "ts-spacing-literal": 15
+    },
+    "apps/web/src/views/builder/BuilderAgentEditorPage.tsx": {
+      "ts-spacing-literal": 8
+    },
+    "apps/web/src/views/builder/BuilderAgentsPage.tsx": {
+      "ts-spacing-literal": 6
+    },
+    "apps/web/src/views/builder/BuilderChatPage.tsx": {
+      "ts-spacing-literal": 6
+    },
+    "apps/web/src/views/builder/BuilderInboxPage.tsx": {
+      "ts-spacing-literal": 4
+    },
+    "apps/web/src/views/builder/BuilderIntegrationsPage.tsx": {
+      "ts-spacing-literal": 7
+    },
+    "apps/web/src/views/builder/BuilderPlaygroundPage.tsx": {
+      "ts-spacing-literal": 14
+    },
+    "apps/web/src/views/builder/BuilderPromptDetailPage.tsx": {
+      "ts-spacing-literal": 22
+    },
+    "apps/web/src/views/builder/BuilderPromptsPage.tsx": {
+      "ts-spacing-literal": 8
+    },
+    "apps/web/src/views/builder/BuilderSkillsPage.tsx": {
+      "ts-spacing-literal": 11
+    },
+    "apps/web/src/views/builder/BuilderTemplateDetailPage.tsx": {
+      "ts-spacing-literal": 10
+    },
+    "apps/web/src/views/builder/BuilderTemplatesPage.tsx": {
+      "ts-spacing-literal": 4
+    },
+    "apps/web/src/views/builder/BuilderUi.tsx": {
+      "ts-color-literal": 28,
+      "ts-spacing-literal": 11
+    },
+    "apps/web/src/views/builder/BuilderUsagePage.tsx": {
+      "ts-spacing-literal": 4
+    },
+    "apps/web/src/views/builder/builder.module.css": {
+      "color-no-hex": 2,
+      "declaration-property-unit-disallowed-list": 98
+    },
+    "apps/web/src/views/builder/builderLogic.ts": {
+      "ts-color-literal": 8
+    },
+    "apps/web/src/views/builder/prompts.module.css": {
+      "declaration-property-unit-disallowed-list": 12
+    },
+    "apps/web/src/views/chat/chat.module.css": {
+      "declaration-property-unit-disallowed-list": 7
+    },
+    "apps/web/src/views/feedback/FeedbackFormPage.tsx": {
+      "ts-spacing-literal": 2
+    },
+    "apps/web/src/views/incidents/IncidentDetailPage.tsx": {
+      "ts-spacing-literal": 3
+    },
+    "apps/web/src/views/incidents/IncidentsPage.tsx": {
+      "ts-spacing-literal": 4
+    },
+    "apps/web/src/views/models/models.module.css": {
+      "declaration-property-unit-disallowed-list": 10
+    },
+    "apps/web/src/views/pm/PmAndDecisions.tsx": {
+      "ts-spacing-literal": 1
+    },
+    "apps/web/src/views/runs/RunDetailPage.tsx": {
+      "ts-spacing-literal": 1
+    },
+    "apps/web/src/views/spend/spend.module.css": {
+      "declaration-property-unit-disallowed-list": 1
+    },
+    "apps/web/src/views/workflows/WorkflowDetailPage.tsx": {
+      "ts-color-literal": 1
+    },
+    "apps/web/src/views/workflows/workflows.module.css": {
+      "declaration-property-unit-disallowed-list": 1
+    }
+  }
+}

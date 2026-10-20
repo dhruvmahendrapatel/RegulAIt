@@ -4,29 +4,45 @@
  * assignment rules and the compliance cascade still apply) and link the
  * finding to it, or link a workflow that already exists. Linking marks the
  * finding confirmed, so it is confirmed first.
+ *
+ * ADR-0195 A4: a workflow that started but whose link failed is held by the
+ * SERVER (the plan's `pendingLink`), not the browser, so after a reload the
+ * screen still offers only to link that workflow: starting another and linking
+ * a different one both stay disabled until it is linked.
+ *
+ * R3: while the finding's link stands, both stay disabled too. A link to a
+ * workflow that ended denied, aborted or rolled back does not stand: a new
+ * workflow may replace it, and the server audits the replace.
  */
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { WorkflowListResponse } from "../../../api/types";
 import { ago } from "../../../api/format";
-import { Badge, Button, ConfirmModal, Field, Input, Select } from "../../../ui/kit";
+import { Badge, Button, ConfirmModal, Field, InfoButton, Input, Select, SeverityBadge } from "../../../ui/kit";
+import { DrawerActions } from "../../../ui/DetailDrawer";
 import { QueryGate, optionEls, projectOpts, useAction, useProjects } from "../adminKit";
 import { withRefusalCopy } from "./refusalCopy";
 import {
   SHADOW_REMEDIATION_REFUSALS,
+  linkStands,
+  linkableInstances,
   startFormFrom,
   startInstanceBody,
+  startWillMatch,
   type RemediationPlan,
   type StartForm,
   type StartInstanceBody,
 } from "./shadowRemediationModel";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+import rm from "./shadowAi.module.css";
 
 type Pending = { kind: "start"; body: StartInstanceBody } | { kind: "link"; instanceId: string };
 
-export function ShadowRemediationPanel(props: { findingId: string; onClose: () => void; onLinked: () => void }) {
+/** `inDrawer` (A1): the shared DetailDrawer supplies the title, the (i), Close and the test id, and pins the Start and
+ * Link buttons in its footer (L2), so the panel shows only its body */
+export function ShadowRemediationPanel(props: { findingId: string; onClose: () => void; onLinked: () => void; inDrawer?: boolean }) {
   const plan = useQuery({
     queryKey: ["admin", "shadow-ai-remediation-plan", props.findingId],
     queryFn: () =>
@@ -35,16 +51,25 @@ export function ShadowRemediationPanel(props: { findingId: string; onClose: () =
         SHADOW_REMEDIATION_REFUSALS,
       ),
   });
+  // SH4: the plan opens below the findings table, so it is brought into view when it opens
+  const section = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (!props.inDrawer) section.current?.scrollIntoView({ block: "nearest" });
+  }, [props.inDrawer]);
   return (
-    <section className={a.subSection} aria-label="Remediation plan" data-testid="shadow-remediation">
-      <div className={v.row}>
+    <section ref={section} className={props.inDrawer ? undefined : a.subSection} aria-label="Remediation plan" data-testid={props.inDrawer ? undefined : "shadow-remediation"}>
+      {props.inDrawer ? null : <div className={v.row}>
         <div className={v.sectionTitle} style={{ flex: 1 }}>
           Remediation plan
+          <InfoButton label="a remediation plan">
+            A remediation plan turns a finding into tracked work: a governed workflow with a separate approver. The
+            workflow tracks the change and its sign-off. It does not change systems by itself.
+          </InfoButton>
         </div>
         <Button size="sm" variant="ghost" onClick={props.onClose}>
           Close plan
         </Button>
-      </div>
+      </div>}
       <QueryGate loading={plan.isLoading} error={plan.error} onRetry={() => void plan.refetch()}>
         {plan.data ? <PlanBody key={plan.data.findingId} plan={plan.data} onLinked={props.onLinked} /> : null}
       </QueryGate>
@@ -52,7 +77,7 @@ export function ShadowRemediationPanel(props: { findingId: string; onClose: () =
   );
 }
 
-function PlanBody(props: { plan: RemediationPlan; onLinked: () => void }) {
+export function PlanBody(props: { plan: RemediationPlan; onLinked: () => void }) {
   const p = props.plan;
   const projects = useProjects();
   const act = useAction();
@@ -61,9 +86,12 @@ function PlanBody(props: { plan: RemediationPlan; onLinked: () => void }) {
   const [problem, setProblem] = useState<string | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
   const [linked, setLinked] = useState<string | null>(null);
-  // a workflow that started but whose link failed: a retry links THIS one and never starts another
-  const [startedUnlinked, setStartedUnlinked] = useState<string | null>(null);
-  const ids = { note: useId(), env: useId(), problem: useId() };
+  // a workflow that started but whose link failed: a retry links THIS one and never starts or links another.
+  // Seeded from the server, so it survives a reload
+  const [startedUnlinked, setStartedUnlinked] = useState<string | null>(p.pendingLink?.instanceId ?? null);
+  const ids = { note: useId(), env: useId(), problem: useId(), start: useId(), link: useId() };
+  // linked to a workflow that is still live (or completed): nothing here may start or link another
+  const locked = startedUnlinked !== null || linkStands(p);
   const instances = useQuery({
     queryKey: ["admin", "shadow-ai-link-instances"],
     queryFn: () => api.get<WorkflowListResponse>("/v1/workflows/instances"),
@@ -106,40 +134,74 @@ function PlanBody(props: { plan: RemediationPlan; onLinked: () => void }) {
       <div className={v.row}>
         <strong>{p.subject}</strong>
         <Badge tone="neutral">{p.provider}</Badge>
-        <Badge tone={p.severity === "critical" ? "danger" : p.severity === "high" ? "warn" : "neutral"}>{p.severity}</Badge>
+        <SeverityBadge severity={p.severity} />
         {p.replacementAgent ? (
           <Badge tone="ok">governed replacement: {p.replacementAgent.name}</Badge>
         ) : (
           <Badge tone="warn">no governed replacement registered</Badge>
         )}
       </div>
-      <ol className={v.stackTight}>
-        {p.steps.map((s) => (
-          <li key={s.step}>
-            <strong>{s.step}</strong> <span className={v.faint}>— {s.why}</span>
+      {/* SH5: the plan as a stepper. The plan reports what blocks a step, not which steps are done, so a step shows
+          its number or "Blocked" and never claims progress the server did not report */}
+      <ol className={rm.steps} aria-label="Remediation steps">
+        {p.steps.map((s, i) => (
+          <li key={s.step} className={s.blocked ? rm.stepBlocked : rm.step}>
+            <span className={rm.stepMark} aria-hidden="true">{i + 1}</span>
+            <strong>{s.step.charAt(0).toUpperCase() + s.step.slice(1)}</strong>
             {s.blocked ? (
-              <div>
-                <Badge tone="danger">blocked</Badge> <span className={v.dim}>{s.blocked}</span>
-              </div>
+              <span>
+                <Badge tone="danger">Blocked</Badge> <span className={v.dim}>{s.blocked}</span>
+              </span>
             ) : null}
+            <span className={v.dim}>{s.why}</span>
           </li>
         ))}
       </ol>
+      <aside className={rm.whoNext} aria-label="Who acts next">
+        <strong>Who acts next</strong>
+        <span>By default, a plan-only stage runs first and changes nothing. Then a human sign-off.</span>
+        <span className={v.row}>
+          <Badge tone="info">Separate approver</Badge>
+          <InfoButton label="the second approver">
+            By default, a different admin must sign off: you cannot approve your own remediation.
+          </InfoButton>
+        </span>
+      </aside>
       <p className={v.faint} id={ids.note}>
         {p.note}
       </p>
-      {p.assignment && !p.assignment.ruleConfigured ? (
+      {p.assignment && !startWillMatch(p) ? (
         <p role="note" data-testid="shadow-no-assignment-rule">
           <Badge tone="warn">no workflow assigned</Badge>{" "}
           <span className={v.dim}>
-            No workflow is assigned to the change type <code>{p.assignment.changeType}</code>, and none is by default. An admin must add an
+            No workflow is assigned to the change type <code>{p.assignment.changeType}</code>
+            {p.assignment.defaultTemplate?.state === "retired" ? ", and its default workflow was retired" : ""}. An admin must add an
             assignment rule for it under Workflow templates before a remediation workflow can start; until then, link a workflow started
             another way.
           </span>
         </p>
       ) : null}
+      {p.assignment?.defaultTemplate?.state === "not_installed" && !p.assignment.ruleConfigured ? (
+        <p className={v.faint} data-testid="shadow-default-workflow">
+          The default remediation workflow (a plan-only stage, then a human sign-off) is set up when the first one starts.
+        </p>
+      ) : null}
+
+      {p.currentLink && !linked ? (
+        <p role="note" data-testid="shadow-current-link">
+          <Badge tone={p.currentLink.replaceable ? "warn" : "ok"}>linked</Badge>{" "}
+          <span className={v.dim}>
+            This finding is linked to workflow <code>{p.currentLink.instanceId}</code>
+            {p.currentLink.status ? ` (${p.currentLink.status.replaceAll("_", " ")})` : ""}.
+            {p.currentLink.replaceable
+              ? " That workflow ended without remediating the finding, so a new one can be started or linked; it replaces the old link, and the replace is recorded in the audit log."
+              : " A new workflow can replace it only if that one is denied, aborted or rolled back."}
+          </span>
+        </p>
+      ) : null}
 
       <form
+        id={ids.start}
         aria-label="Start a remediation workflow"
         aria-describedby={ids.note}
         className={v.stack}
@@ -157,32 +219,41 @@ function PlanBody(props: { plan: RemediationPlan; onLinked: () => void }) {
           <Field label="Change description" grow>
             <Input value={form.description} onChange={(e) => set("description", e.target.value)} />
           </Field>
-          <Field label="Environment">
+          <Field
+            label="Environment"
+            help="Where the change will be made. Workflow assignment rules may give some environments extra stages."
+          >
             <Input required value={form.environment} placeholder="for example production" aria-describedby={ids.env} onChange={(e) => set("environment", e.target.value)} />
           </Field>
-          <Field label="Bill to project (optional)">
+          <Field label="Bill to project (optional)" help="Charges the workflow's AI spend to this project's budget.">
             <Select value={form.projectId} onChange={(e) => set("projectId", e.target.value)}>
               {optionEls(projectOpts(projects.data?.projects), "— no project —")}
             </Select>
           </Field>
         </div>
+        <p className={v.faint}>
+          Linked to <Badge>Finding {p.findingId.slice(0, 8)}</Badge> automatically: the reference is added to the workflow
+          for you.
+        </p>
         <p className={v.faint} id={ids.env}>
           Where the ungoverned usage runs today. Workflow assignment rules and a project's compliance requirements decide
           which stages the workflow has.
         </p>
-        <div className={v.row}>
+        <DrawerActions className={v.row}>
           <Button
             type="submit"
+            form={ids.start}
             variant="primary"
-            disabled={act.busy || startedUnlinked !== null}
+            disabled={act.busy || locked}
             aria-describedby={problem ? ids.problem : undefined}
           >
             Start remediation workflow…
           </Button>
-        </div>
+        </DrawerActions>
       </form>
 
       <form
+        id={ids.link}
         aria-label="Link an existing workflow"
         className={a.formRow}
         onSubmit={(e) => {
@@ -191,13 +262,18 @@ function PlanBody(props: { plan: RemediationPlan; onLinked: () => void }) {
             setProblem("Choose the workflow to link.");
             return;
           }
+          if (locked) return;
           setPending({ kind: "link", instanceId: existing });
         }}
       >
         <Field label="Or link an existing workflow" grow>
-          <Select value={existing} onChange={(e) => { setProblem(null); setExisting(e.target.value); }}>
+          <Select
+            value={existing}
+            disabled={locked}
+            onChange={(e) => { setProblem(null); setExisting(e.target.value); }}
+          >
             {optionEls(
-              (instances.data?.instances ?? []).map((i) => ({
+              linkableInstances(p.findingId, instances.data?.instances ?? []).map((i) => ({
                 v: i.id,
                 l: `${i.change?.description ?? i.id.slice(0, 8)} · ${i.status} · ${ago(i.createdAt)}`,
               })),
@@ -205,14 +281,16 @@ function PlanBody(props: { plan: RemediationPlan; onLinked: () => void }) {
             )}
           </Select>
         </Field>
-        <Button type="submit" disabled={act.busy}>
-          Link workflow…
-        </Button>
+        <DrawerActions>
+          <Button type="submit" form={ids.link} disabled={act.busy || locked}>
+            Link workflow…
+          </Button>
+        </DrawerActions>
       </form>
 
       {startedUnlinked && (
         <div className={v.row} data-testid="shadow-started-unlinked">
-          <p role="alert" className={v.errLine} style={{ margin: 0 }}>
+          <p role="alert" className={`${v.errLine} ${v.flush}`}>
             Workflow <code>{startedUnlinked}</code> was started but is not linked to this finding yet. Retry the link; a
             second workflow will not be started.
           </p>

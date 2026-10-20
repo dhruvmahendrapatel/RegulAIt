@@ -22,6 +22,15 @@ export interface NavEntry {
   also?: string[];
 }
 
+/**
+ * True when another entry's route matches `pathname` more specifically than `to`. The rail then highlights only
+ * that entry: on /admin/shadow-ai/discovery-sources, Discovery sources, not also Shadow-AI discovery.
+ */
+export function shadowedByMoreSpecific(to: string, pathname: string, routes: readonly string[]): boolean {
+  const under = (p: string) => pathname === p || pathname.startsWith(`${p}/`);
+  return routes.some((r) => r !== to && r.startsWith(`${to === "/" ? "" : to}/`) && under(r));
+}
+
 export const WORKSPACE: NavEntry[] = [
   { label: "Home", to: "/" },
   { label: "Chat", to: "/chat" },
@@ -142,6 +151,8 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // ADR-0055 — the land-and-expand wedge: what AI are we NOT governing?
       // A discovered row is a governance gap, not a connection to configure.
       { label: "Shadow-AI discovery", to: "/admin/shadow-ai" },
+      // ADR-0195 SD0 — where RegulAIt may scan, read-only, for shadow AI; every source off until enabled
+      { label: "Discovery sources", to: "/admin/shadow-ai/discovery-sources" },
     ],
   },
   {
@@ -186,6 +197,9 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // point: what is in the payload vs. where the call may go vs. who may
       // make it under which attributes.
       { label: "Guardrails", to: "/admin/guardrails" },
+      // ADR-0193 (I4) — what turns the guardrails' injection DETECTION into a defense: which sources' content
+      // may drive a write (trust tiers, untrusted by default), and the provenance evidence of every result.
+      { label: "Content trust", to: "/admin/content-trust" },
       // ADR-0173 §3 — the same question asked of the MODEL: which bindings each
       // feature (chat, builder, copilot, …) may call, with a default per feature.
       // It only subtracts from a person's grants, like ABAC beside it.

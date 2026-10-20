@@ -1,0 +1,35 @@
+[
+  {
+    "name": "entry JS (index)",
+    "path": "dist/assets/index-*.js",
+    "gzip": true,
+    "limit": "137.5 kB"
+  },
+  {
+    "name": "entry CSS (index)",
+    "path": "dist/assets/index-*.css",
+    "gzip": true,
+    "limit": "10.6 kB"
+  },
+  {
+    "name": "lazy: SeriesLineChart",
+    "path": "dist/assets/SeriesLineChart-*.js",
+    "gzip": true,
+    "limit": "109 kB"
+  },
+  {
+    "name": "lazy: RunGraphCanvas",
+    "path": [
+      "dist/assets/RunGraphCanvas-*.js",
+      "dist/assets/RunGraphCanvas-*.css"
+    ],
+    "gzip": true,
+    "limit": "78 kB"
+  },
+  {
+    "name": "all JS",
+    "path": "dist/assets/*.js",
+    "gzip": true,
+    "limit": "1035 kB"
+  }
+]

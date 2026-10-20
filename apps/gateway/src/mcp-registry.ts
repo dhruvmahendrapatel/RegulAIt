@@ -128,6 +128,7 @@ import { CHANGED_CONCURRENTLY, checkStepUp, requireStepUp } from "./step-up.js";
 import { REGISTRATION_ADMISSION_STATE } from "./mcp-admission.js";
 import { recordSighting } from "./release-age.js";
 import { createHash } from "node:crypto";
+import { errMessage } from "./err-serializer.js";
 
 /**
  * ADR-0175 A5 — the identity of ONE registry entry release: which registry,
@@ -492,7 +493,7 @@ export async function syncRegistry(
     }
     if (cursor) counts.truncated = true;
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errMessage(err);
     const reason = `MCP registry '${registry.name}' sync failed after ${counts.pages} page(s): ${message}`;
     // A failure is NOT a refusal and NOT a deletion: whatever the catalogue
     // already holds stays exactly as it is, and nothing is marked missing.

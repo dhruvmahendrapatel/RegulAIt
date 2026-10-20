@@ -51,7 +51,7 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
-import { trackEgressAllowHosts } from "./testing/egress-allow-cleanup.js";
+import { removeEgressAllowEntry, trackEgressAllowHosts } from "./testing/egress-allow-cleanup.js";
 import { encryptSecret } from "./secrets.js";
 import { checkConnectionBaseUrl } from "./connection-egress.js";
 
@@ -141,7 +141,11 @@ const invokeConnector = (connectorId: string, payload: Record<string, unknown>) 
     payload: { operation: "write", object: "customer-records", payload },
   });
 
-async function allowLoopback(note: string): Promise<string> {
+/** M-068: the loopback allow entry the endpoint-validation block created, removed by id in its afterAll */
+let allowHostId: string | undefined;
+
+/** allow-list 127.0.0.1 and record the entry's id in `allowHostId` */
+async function allowLoopback(note: string): Promise<void> {
   const res = await relaxStepUpAround(db, () => app.inject({
     method: "POST",
     headers: AUTH,
@@ -149,7 +153,7 @@ async function allowLoopback(note: string): Promise<string> {
     payload: { host: "127.0.0.1", allowPrivateRanges: true, allowPlaintextHttp: true, note },
   }));
   expect(res.statusCode).toBe(201);
-  return res.json().id as string;
+  allowHostId = res.json().id as string;
 }
 
 let restoreSb1Posture: (() => Promise<void>) | undefined;
@@ -615,12 +619,13 @@ describe("call time: rows that never went through an endpoint are still refused"
     // The literal is never trusted and neither is the name: what matters is
     // what it answers. Resolution is injected so the case is deterministic and
     // needs no network — the allow-list it is checked against is the real one.
-    const allowed = await app.inject({
+    // ADR-0034 owner amendment 2026-10-16: adding any entry is a stepped-up relaxation; this suite is about the guard
+    const allowed = await relaxStepUpAround(db, () => app.inject({
       method: "POST",
       headers: AUTH,
       url: "/v1/egress-allow-hosts",
       payload: { host: perTest.trackHost("hooks.partner-cdn.example"), note: "looks like an ordinary SaaS receiver" },
-    });
+    }));
     expect(allowed.statusCode).toBe(201);
     const rebound = await checkConnectionBaseUrl(db, "https://hooks.partner-cdn.example/hook", {
       resolve: async () => [{ address: "169.254.169.254", family: 4 }],
@@ -650,12 +655,11 @@ describe("call time: rows that never went through an endpoint are still refused"
 // ---------------------------------------------------------------------------
 
 describe("the allow-listed loopback receiver an air-gapped operator actually wants", () => {
-  let allowHostId: string;
   let webhookConnectorId: string;
 
   beforeAll(async () => {
     collectorHits = [];
-    allowHostId = await allowLoopback("connection-egress suite: local receiver");
+    await allowLoopback("connection-egress suite: local receiver");
     const created = await app.inject({
       method: "POST",
       headers: AUTH,
@@ -679,7 +683,7 @@ describe("the allow-listed loopback receiver an air-gapped operator actually wan
   });
 
   afterAll(async () => {
-    await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/egress-allow-hosts/${allowHostId}` });
+    (await removeEgressAllowEntry(app, AUTH, { id: allowHostId })).assertRemoved();
   });
 
   it("stores the endpoint and delivers the payload end to end, with the Host header pinned", async () => {
@@ -710,7 +714,7 @@ describe("the allow-listed loopback receiver an air-gapped operator actually wan
       expect(collectorHits).toHaveLength(before);
       expect(JSON.stringify(collectorHits)).not.toContain(CANARY);
     } finally {
-      allowHostId = await allowLoopback("restored");
+      await allowLoopback("restored");
     }
   });
 

@@ -35,6 +35,16 @@ import {
   type WorkloadIdentityView,
 } from "./workloadIdentityModel";
 import { kidOk, type DelegationGrantDetailView, type IdentitySigningKeyListView } from "./signingKeyModel";
+import {
+  bundleDraftError,
+  type PutSpiffeBundleEndpointBody,
+  type SpiffeBundleEndpointListView,
+  type SpiffeBundleEndpointView,
+  type PutSpiffeTrustBundleBody,
+  type SpiffeTrustBundleListView,
+  type SpiffeTrustBundleRevokeResult,
+  type SpiffeTrustBundleView,
+} from "./spiffeBundleModel";
 
 export const workloadIdentityKeys = {
   root: ["admin", "workload-identities"] as const,
@@ -177,7 +187,7 @@ export function revokeDelegationGrant(grantId: string): Promise<unknown> {
   return withStepUp((h) => stepUpApi.post(path, {}, h));
 }
 
-// ---- ADR-0188: the issuer's signing keys, and one delegation grant -----------
+// ---- ADR-0188: the issuer's signing keys (a `key_management` step-up, migration 0203), and one delegation grant
 
 export const signingKeyKeys = { list: ["admin", "workload-identities", "signing-keys"] as const };
 
@@ -198,6 +208,52 @@ export function revokeSigningKey(kid: string): Promise<{ kid: string; tokensRevo
   if (!kidOk(kid)) return Promise.reject(new Error("That key id could not be read. Refresh the list."));
   const path = `/v1/identity/signing-keys/${encodeURIComponent(kid)}/revoke`;
   return withStepUp((h) => stepUpApi.post<{ kid: string; tokensRevoked: number }>(path, {}, h));
+}
+
+// ---- ADR-0188 S9: SPIFFE trust bundles (identity_manage step-up on every write) --
+
+export const spiffeBundleKeys = { list: ["admin", "workload-identities", "spiffe-trust-bundles"] as const };
+
+/** `GET /v1/identity/spiffe-trust-bundles`: every bundle ever recorded, public facts only */
+export function listSpiffeTrustBundles(): Promise<SpiffeTrustBundleListView> {
+  return api.get<SpiffeTrustBundleListView>("/v1/identity/spiffe-trust-bundles");
+}
+
+/** upload a trust domain's bundle; `replacesBundleId` names the active bundle it replaces (null for the first) */
+export function uploadSpiffeTrustBundle(input: PutSpiffeTrustBundleBody): Promise<SpiffeTrustBundleView> {
+  const problem = bundleDraftError(input);
+  if (problem) return Promise.reject(new Error(problem));
+  if (input.replacesBundleId !== null) seg(input.replacesBundleId);
+  const body = deepFreeze({ trustDomain: input.trustDomain, bundle: input.bundle, replacesBundleId: input.replacesBundleId });
+  return withStepUp((h) => stepUpApi.post<SpiffeTrustBundleView>("/v1/identity/spiffe-trust-bundles", body, h));
+}
+
+/** end a domain's SPIFFE trust: its tokens and grants are revoked; never undone */
+export function revokeSpiffeTrustBundle(bundleId: string): Promise<SpiffeTrustBundleRevokeResult> {
+  const id = seg(bundleId);
+  return withStepUp((h) => stepUpApi.post<SpiffeTrustBundleRevokeResult>(`/v1/identity/spiffe-trust-bundles/${id}/revoke`, {}, h));
+}
+
+// ---- ADR-0188 S9 follow-up: SPIFFE bundle endpoints (identity_manage step-up on every write) --
+
+export const spiffeEndpointKeys = { list: ["admin", "workload-identities", "spiffe-bundle-endpoints"] as const };
+
+/** `GET /v1/identity/spiffe-bundle-endpoints`: every configured endpoint and its refresh state */
+export function listSpiffeBundleEndpoints(): Promise<SpiffeBundleEndpointListView> {
+  return api.get<SpiffeBundleEndpointListView>("/v1/identity/spiffe-bundle-endpoints");
+}
+
+/** set (or stop) where a domain's bundle is fetched from; an enabled endpoint is fetched once at once */
+export interface SetSpiffeBundleEndpointResult {
+  endpoint: SpiffeBundleEndpointView;
+  /** the fetch made at once when enabled: changed, unchanged or failed (with its code) */
+  refresh: { outcome: string; code?: string } | null;
+}
+
+export function setSpiffeBundleEndpoint(trustDomain: string, input: PutSpiffeBundleEndpointBody): Promise<SetSpiffeBundleEndpointResult> {
+  // the form checked the draft (endpointDraftError); the gateway checks it again, exactly
+  const body = deepFreeze({ url: input.url, profile: input.profile, endpointSpiffeId: input.profile === "https_spiffe" ? input.endpointSpiffeId : null, enabled: input.enabled });
+  return withStepUp((h) => stepUpApi.put<SetSpiffeBundleEndpointResult>(`/v1/identity/spiffe-bundle-endpoints/${encodeURIComponent(trustDomain)}`, body, h));
 }
 
 /** `GET /v1/delegation-grants/:grantId`: one grant with its incoming and outgoing allocations */

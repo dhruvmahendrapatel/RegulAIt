@@ -22,6 +22,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 import {
   agents,
   and,
@@ -65,7 +66,7 @@ let agentId: string;
 const createdUserIds: string[] = [];
 const createdTraceIds: string[] = [];
 let priorOrg: Record<string, unknown> | null = null;
-let createdEgressRow: string | null = null;
+let createdEgressRow: string | undefined;
 
 const MODEL = `t2c-model-${RUN}`;
 const SCORE = `t2c-score-${RUN}`;
@@ -161,29 +162,34 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
-  await restoreAdminKeyMfa?.();
-  await restoreSb1Posture?.();
-  if (priorOrg) {
-    await db
-      .update(orgSettings)
-      .set({
-        tracingEnabled: priorOrg["tracingEnabled"] as boolean,
-        tracingCaptureContent: priorOrg["tracingCaptureContent"] as boolean,
-        tracingOtlpEndpoint: (priorOrg["tracingOtlpEndpoint"] ?? null) as string | null,
-      })
-      .where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  // M-068: the allow entry goes first, through the audited route, while the app is up; asserted at the end
+  const egress = await removeEgressAllowEntry(app, AUTH, { id: createdEgressRow });
+  try {
+    await restoreAdminKeyMfa?.();
+    await restoreSb1Posture?.();
+    if (priorOrg) {
+      await db
+        .update(orgSettings)
+        .set({
+          tracingEnabled: priorOrg["tracingEnabled"] as boolean,
+          tracingCaptureContent: priorOrg["tracingCaptureContent"] as boolean,
+          tracingOtlpEndpoint: (priorOrg["tracingOtlpEndpoint"] ?? null) as string | null,
+        })
+        .where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    }
+    if (createdUserIds.length) await db.delete(traces).where(inArray(traces.userId, createdUserIds));
+    if (createdTraceIds.length) {
+      await db.delete(traceEvaluations).where(inArray(traceEvaluations.traceId, createdTraceIds));
+      await db.delete(traces).where(inArray(traces.id, createdTraceIds));
+    }
+    if (agentId) await db.delete(agents).where(eq(agents.id, agentId));
+    if (createdUserIds.length) await db.delete(users).where(inArray(users.id, createdUserIds));
+    app.server.closeAllConnections();
+    await restoreSb2Gates();
+    await app.close();
+  } finally {
+    egress.assertRemoved();
   }
-  if (createdEgressRow) await db.delete(egressAllowHosts).where(eq(egressAllowHosts.id, createdEgressRow));
-  if (createdUserIds.length) await db.delete(traces).where(inArray(traces.userId, createdUserIds));
-  if (createdTraceIds.length) {
-    await db.delete(traceEvaluations).where(inArray(traceEvaluations.traceId, createdTraceIds));
-    await db.delete(traces).where(inArray(traces.id, createdTraceIds));
-  }
-  if (agentId) await db.delete(agents).where(eq(agents.id, agentId));
-  if (createdUserIds.length) await db.delete(users).where(inArray(users.id, createdUserIds));
-  app.server.closeAllConnections();
-  await restoreSb2Gates();
-  await app.close();
 });
 
 const list = (auth: Auth, qs: string) => app.inject({ method: "GET", url: `/v1/traces?limit=200&${qs}`, headers: auth });
@@ -386,7 +392,7 @@ describe("3. export profiles", () => {
       .values({ host: "127.0.0.42", allowPrivateRanges: true, allowPlaintextHttp: true, note: "t2c test" })
       .onConflictDoNothing()
       .returning({ id: egressAllowHosts.id });
-    createdEgressRow = eg?.id ?? null;
+    createdEgressRow = eg?.id;
     await db
       .update(orgSettings)
       .set({ tracingOtlpEndpoint: "http://127.0.0.42:4318/v1/traces", tracingCaptureContent: true })

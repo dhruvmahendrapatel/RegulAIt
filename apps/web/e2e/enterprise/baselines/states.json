@@ -1,0 +1,8 @@
+{
+  "_about": "ADR-0196: loading and error state findings per screen. Counts may only shrink.",
+  "entries": {
+    "/builder/playground": {
+      "error-not-shown": 1
+    }
+  }
+}

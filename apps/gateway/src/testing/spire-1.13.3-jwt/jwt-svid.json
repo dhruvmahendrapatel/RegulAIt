@@ -1,0 +1,6 @@
+{
+  "_comment": "a REAL SPIRE 1.13.3 JWT-SVID (ADR-0188 S9 follow-up), split into its three compact segments; the test joins them with '.'",
+  "protected": "eyJhbGciOiJFUzI1NiIsImtpZCI6IjhzVWFVYUxDMk5xQmZOS2FaNWo5N1dnZUpPYlpmdXM2IiwidHlwIjoiSldUIn0",
+  "payload": "eyJhdWQiOlsiaHR0cHM6Ly9nYXRld2F5LmV4YW1wbGUudGVzdCJdLCJleHAiOjE3OTIzMzI3MTcsImlhdCI6MTc5MjMzMjQxNywic3ViIjoic3BpZmZlOi8vYnlvYy5leGFtcGxlLm9yZy93b3JrZXIvcnVudGltZS0xIn0",
+  "signature": "JazTl3NB4D_Hn9eZeoaqLK37M7WcuS0wnG-ViRfNq1f1FRF0E1UBSc7cnI7_tauAT6EXnq-2tIkgUFglcOFUSw"
+}

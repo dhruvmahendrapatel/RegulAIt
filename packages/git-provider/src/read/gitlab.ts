@@ -1,0 +1,226 @@
+// GitLab (gitlab.com and self-managed) read-only reader, REST v4.
+// Pagination follows the offset `x-next-page` header (empty on the last page).
+
+import { GitProviderError } from "../types.js";
+import {
+  assertCommitSha,
+  base64EnvelopeCap,
+  readJsonCapped,
+  clampLimit,
+  decodeBase64Text,
+  encodeRepoPath,
+  HistoryScanDisabledError,
+  ReadClient,
+  repoSegments,
+} from "./http.js";
+import {
+  REPO_READ_DEFAULTS,
+  type CommitSummary,
+  type CredentialScopeReport,
+  type ListCommitsOptions,
+  type ListReposOptions,
+  type ReadFileOptions,
+  type ReadFileResult,
+  type ReadResponse,
+  type RepoListResult,
+  type RepoReader,
+  type RepoReaderOptions,
+  type RepoTree,
+  type TreeEntry,
+  type TreeOptions,
+} from "./types.js";
+import { trimTrailingSlashes } from "../url.js";
+
+const hint = (status: number): string =>
+  status === 401
+    ? " (token rejected: a personal/project/group access token is sent as PRIVATE-TOKEN)"
+    : status === 404
+      ? " (not found, or the token cannot see it: repo is 'group/project')"
+      : "";
+
+/**
+ * ALLOW-LIST (secure by default, ADR-0180): the token scopes known to be
+ * read-only. Any other scope (api, write_*, sudo, admin_mode, self_rotate,
+ * ai_features, an unknown future scope) counts as write.
+ */
+const GITLAB_READ_ONLY_SCOPES = new Set(["read_api", "read_repository", "read_user", "read_registry", "read_virtual_registry", "openid", "profile", "email"]);
+
+interface GlProject {
+  path_with_namespace?: string;
+  default_branch?: string | null;
+  archived?: boolean;
+}
+
+export class GitLabRepoReader implements RepoReader {
+  readonly kind = "gitlab" as const;
+  readonly historyEnabled: boolean;
+  private readonly http: ReadClient;
+
+  constructor(opts: RepoReaderOptions) {
+    // ADR-0195 A5: this provider takes no federated credential, only a stored token
+    if ((opts.credentialKind ?? "token") !== "token") throw new GitProviderError(`gitlab does not take a ${opts.credentialKind} credential`);
+    this.historyEnabled = opts.allowHistory === true;
+    const root = trimTrailingSlashes(opts.baseUrl ?? "https://gitlab.com/api/v4");
+    this.http = new ReadClient({
+      label: "gitlab",
+      baseUrl: root.endsWith("/api/v4") ? root : `${root}/api/v4`,
+      token: opts.token,
+      authHeaders: { "private-token": opts.token, accept: "application/json" },
+      opts,
+    });
+  }
+
+  private project(repo: string): string {
+    // group/subgroup/.../project: nested groups are allowed (up to 20 levels)
+    return encodeURIComponent(repoSegments(repo, 2, 21).join("/"));
+  }
+
+  /** follow x-next-page until done, the item cap or the page cap */
+  private async paged<T>(first: string, max: number, take: (item: T) => void, count: () => number): Promise<boolean> {
+    const sep = first.includes("?") ? "&" : "?";
+    let page: string | null = "1";
+    let pages = 0;
+    while (page) {
+      if (pages++ >= this.http.maxPages || count() >= max) return true;
+      const got: { body: T[]; res: ReadResponse } = await this.http.getJson<T[]>(`${first}${sep}page=${encodeURIComponent(page)}`, hint);
+      for (const item of Array.isArray(got.body) ? got.body : []) take(item);
+      const next: string = (this.http.header(got.res, "x-next-page") ?? "").trim();
+      page = next && [...next].every((c) => c >= "0" && c <= "9") && next.length <= 9 ? next : null;
+    }
+    return count() > max;
+  }
+
+  async listRepos(opts: ListReposOptions = {}): Promise<RepoListResult> {
+    const max = clampLimit(opts.maxRepos, REPO_READ_DEFAULTS.maxRepos);
+    const first = opts.namespace
+      ? `/groups/${encodeURIComponent(opts.namespace)}/projects?include_subgroups=true&archived=false&per_page=100`
+      : "/projects?membership=true&archived=false&per_page=100";
+    const repos: RepoListResult["repos"] = [];
+    const truncated = await this.paged<GlProject>(
+      first,
+      max,
+      (p) => {
+        if (typeof p.path_with_namespace === "string") {
+          repos.push({ fullName: p.path_with_namespace, defaultBranch: p.default_branch ?? null, archived: p.archived === true });
+        }
+      },
+      () => repos.length,
+    );
+    return { repos: repos.slice(0, max), truncated };
+  }
+
+  private async tree(repo: string, sha: string, opts: TreeOptions): Promise<{ entries: TreeEntry[]; truncated: boolean }> {
+    const max = clampLimit(opts.maxTreeEntries, REPO_READ_DEFAULTS.maxTreeEntries);
+    const entries: TreeEntry[] = [];
+    const truncated = await this.paged<{ path?: string; type?: string }>(
+      `/projects/${this.project(repo)}/repository/tree?ref=${assertCommitSha(sha)}&recursive=true&per_page=100`,
+      max,
+      (t) => {
+        if (t.type === "blob" && typeof t.path === "string") entries.push({ path: t.path, size: null });
+      },
+      () => entries.length,
+    );
+    return { entries: entries.slice(0, max), truncated };
+  }
+
+  async getTree(repo: string, opts: TreeOptions = {}): Promise<RepoTree> {
+    const id = this.project(repo);
+    const { body: meta } = await this.http.getJson<GlProject>(`/projects/${id}`, hint);
+    const branch = meta.default_branch ?? null;
+    if (!branch) return { repo, ref: null, commitSha: "", author: null, entries: [], truncated: false };
+    const { body: b } = await this.http.getJson<{ commit?: { id?: string; author_name?: string; author_email?: string } }>(
+      `/projects/${id}/repository/branches/${encodeURIComponent(branch)}`,
+      hint,
+    );
+    const sha = b.commit?.id ?? "";
+    const { entries, truncated } = await this.tree(repo, sha, opts);
+    return {
+      repo,
+      ref: branch,
+      commitSha: sha,
+      author: b.commit ? { name: b.commit.author_name ?? null, email: b.commit.author_email ?? null } : null,
+      entries,
+      truncated,
+    };
+  }
+
+  async readFile(repo: string, path: string, opts: ReadFileOptions): Promise<ReadFileResult> {
+    const maxBytes = clampLimit(opts.maxBytes, REPO_READ_DEFAULTS.maxFileBytes, REPO_READ_DEFAULTS.maxFileBytesCeiling);
+    const encodedPath = encodeURIComponent(decodeURIComponent(encodeRepoPath(path)));
+    const url = `/projects/${this.project(repo)}/repository/files/${encodedPath}?ref=${assertCommitSha(opts.commitSha)}`;
+    // HEAD first: X-Gitlab-Size says how big the file is before any of it is downloaded
+    const head = await this.http.get(url, {}, "HEAD");
+    if (head.status === 404) return { status: "not_found" };
+    if (head.status >= 400) await this.http.fail(head, hint);
+    const declared = Number(this.http.header(head, "x-gitlab-size") ?? "NaN");
+    if (Number.isFinite(declared) && declared > maxBytes) return { status: "too_large", size: declared };
+    const res = await this.http.get(url);
+    if (res.status === 404) return { status: "not_found" };
+    if (res.status >= 400) await this.http.fail(res, hint);
+    const capped = await readJsonCapped<{ size?: number; encoding?: string; content?: string }>(res, base64EnvelopeCap(maxBytes));
+    if (capped.tooLarge || !capped.body) return { status: "too_large", size: Number.isFinite(declared) ? declared : null };
+    const body = capped.body;
+    const size = typeof body.size === "number" ? body.size : null;
+    if (size !== null && size > maxBytes) return { status: "too_large", size };
+    if (body.encoding !== "base64" || typeof body.content !== "string") return { status: "binary", size };
+    const text = decodeBase64Text(body.content);
+    if (text === null) return { status: "binary", size };
+    if (Buffer.byteLength(text) > maxBytes) return { status: "too_large", size };
+    return { status: "ok", content: text, size: size ?? Buffer.byteLength(text) };
+  }
+
+  async inspectCredential(): Promise<CredentialScopeReport> {
+    const res = await this.http.get("/personal_access_tokens/self");
+    if (res.status === 404 || res.status === 403) {
+      return { status: "unverified", scopes: [], detail: "this GitLab version or token type cannot report its scopes; write scope unverified" };
+    }
+    if (res.status >= 400) await this.http.fail(res, hint);
+    const body = await this.http.metadataJson<{ scopes?: unknown }>(res);
+    const rawScopes: unknown[] = Array.isArray(body.scopes) ? body.scopes : [];
+    // a non-string entry is a response we do not understand: never read_only on it (secure by default)
+    if (rawScopes.some((s) => typeof s !== "string")) {
+      return { status: "unverified", scopes: [], detail: "GitLab returned a scope list this reader does not understand; write scope unverified" };
+    }
+    const scopes = rawScopes as string[];
+    const write = scopes.filter((s) => !GITLAB_READ_ONLY_SCOPES.has(s));
+    if (write.length > 0) return { status: "write_scope", scopes, detail: `the token grants write scope(s): ${write.join(", ")}` };
+    // no scopes array, or an empty one, proves nothing: it must not clear the "write scope unverified" posture row
+    if (scopes.length === 0) return { status: "unverified", scopes, detail: "GitLab reported no scopes for this token; write scope unverified" };
+    return { status: "read_only", scopes, detail: "token scopes are read-only" };
+  }
+
+  async listCommits(repo: string, opts: ListCommitsOptions = {}): Promise<CommitSummary[]> {
+    if (!this.historyEnabled) throw new HistoryScanDisabledError();
+    const max = clampLimit(opts.maxCommits, REPO_READ_DEFAULTS.maxCommits);
+    const ref = opts.ref ? `&ref_name=${encodeURIComponent(opts.ref)}` : "";
+    const out: CommitSummary[] = [];
+    await this.paged<{ id?: string; author_name?: string; author_email?: string; committed_date?: string }>(
+      `/projects/${this.project(repo)}/repository/commits?per_page=100${ref}`,
+      max,
+      (c) => {
+        if (typeof c.id === "string") {
+          out.push({ sha: c.id, author: { name: c.author_name ?? null, email: c.author_email ?? null }, committedAt: c.committed_date ?? null });
+        }
+      },
+      () => out.length,
+    );
+    return out.slice(0, max);
+  }
+
+  async getTreeAt(repo: string, commitSha: string, opts: TreeOptions = {}): Promise<RepoTree> {
+    if (!this.historyEnabled) throw new HistoryScanDisabledError();
+    const { body } = await this.http.getJson<{ id?: string; author_name?: string; author_email?: string }>(
+      `/projects/${this.project(repo)}/repository/commits/${assertCommitSha(commitSha)}`,
+      hint,
+    );
+    const { entries, truncated } = await this.tree(repo, commitSha, opts);
+    return {
+      repo,
+      ref: null,
+      commitSha,
+      author: { name: body.author_name ?? null, email: body.author_email ?? null },
+      entries,
+      truncated,
+    };
+  }
+}

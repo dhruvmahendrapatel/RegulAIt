@@ -63,6 +63,8 @@ test("a custom signature is added, and its match type is derived correctly", asy
 
   await page.goto("/ui/admin/shadow-ai");
   await expect(page.getByRole("heading", { name: "Shadow-AI discovery", exact: true })).toBeVisible();
+  // A2 (#453): adding a signature is on the Detection catalogue tab
+  await page.getByRole("tab", { name: "Detection catalogue" }).click();
 
   const host = `llm.sig-e2e-${Date.now()}.internal.example`;
 

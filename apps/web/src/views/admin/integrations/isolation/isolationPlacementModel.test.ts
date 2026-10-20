@@ -3,11 +3,13 @@
  * the execution profile selector use. Anything malformed is unreadable or
  * unmeasured, never a default and never silently dropped.
  */
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   assignableProfiles,
   parseAssignment,
   parsePlacements,
+  placementsPageUrl,
   parseProfiles,
   parseProfileVersion,
   profileText,
@@ -20,7 +22,12 @@ import {
   versionBody,
   parseWorkerIdentities,
   parsePlacementDetail,
+  IDENTITY_PICKER_MAX,
+  ATTESTATION_STRENGTHS,
+  strengthText,
 } from "./isolationModel";
+
+const sharedFile = (rel: string) => new URL(`../../../../../../../packages/shared/src/${rel}`, import.meta.url).pathname;
 
 const at = "2026-10-12T10:00:00.000Z";
 const profile = (over: Record<string, unknown> = {}) => ({
@@ -72,26 +79,59 @@ describe("a new profile", () => {
 describe("worker identities for registering an executor (ADR-0188 S6 picker sources)", () => {
   it("offers only well-formed options; an unreadable answer is null, never an empty list", () => {
     const id = "11111111-1111-4111-8111-111111111111";
-    expect(parseWorkerIdentities({ workerIdentities: [{ id, label: "spiffe://x/w" }, { id: "nope", label: "y" }, { id }], truncated: true })).toEqual({
+    expect(parseWorkerIdentities({ workerIdentities: [{ id, label: "spiffe://x/w" }, { id: "nope", label: "y" }, { id }], truncated: false })).toEqual({
       options: [{ id, label: "spiffe://x/w" }],
-      truncated: true,
+      truncated: false,
     });
     expect(parseWorkerIdentities({ workerIdentities: [] })).toEqual({ options: [], truncated: false });
     for (const bad of [null, {}, { workerIdentities: "x" }, []]) expect(parseWorkerIdentities(bad)).toBeNull();
   });
+  it("the gateway's truncated flag is one for every list: it marks THIS list cut only when this list is at the cap", () => {
+    const id = "11111111-1111-4111-8111-111111111111";
+    // another list was cut; this short one was not
+    expect(parseWorkerIdentities({ workerIdentities: [{ id, label: "spiffe://x/w" }], truncated: true })?.truncated).toBe(false);
+    const full = Array.from({ length: IDENTITY_PICKER_MAX }, (_, i) => ({ id: `11111111-1111-4111-8111-${String(i).padStart(12, "0")}`, label: `spiffe://x/w${i}` }));
+    expect(parseWorkerIdentities({ workerIdentities: full, truncated: true })?.truncated).toBe(true);
+    expect(parseWorkerIdentities({ workerIdentities: full, truncated: false })?.truncated).toBe(false);
+  });
+  it("the gateway's per-list flag decides exactly: this list is cut only when the gateway names it", () => {
+    const id = "11111111-1111-4111-8111-111111111111";
+    const one = [{ id, label: "spiffe://x/w" }];
+    expect(parseWorkerIdentities({ workerIdentities: one, truncated: true, truncatedLists: ["workerIdentities"] })?.truncated).toBe(true);
+    expect(parseWorkerIdentities({ workerIdentities: one, truncated: true, truncatedLists: ["roles"] })?.truncated).toBe(false);
+    expect(parseWorkerIdentities({ workerIdentities: one, truncated: false, truncatedLists: [] })?.truncated).toBe(false);
+  });
+  it("the cap is the shared contract's", () => {
+    const src = readFileSync(sharedFile("identity/contract.ts"), "utf8");
+    expect(/export const IDENTITY_PICKER_MAX = (\d+);/.exec(src)?.[1]).toBe(String(IDENTITY_PICKER_MAX));
+  });
 });
 
 describe("one placement's evidence", () => {
-  it("reads the audit row and the report hash; anything else is not reported, and a body without an id is null", () => {
-    expect(parsePlacementDetail({ id: "p", reportSha256: "a".repeat(64), audit: { id: "x", ruleId: "execution-placed", reason: "placed" } })).toEqual({
+  it("reads the audit row, the report hash and the attestation strength; a body without an id is null", () => {
+    expect(
+      parsePlacementDetail({ id: "p", reportSha256: "a".repeat(64), attestationStrength: "software_attested", audit: { id: "x", ruleId: "execution-placed", reason: "placed" } }),
+    ).toEqual({
       id: "p",
       auditId: "x",
       auditRuleId: "execution-placed",
       auditReason: "placed",
-      reportSha256: "a".repeat(64),
+      report: { kind: "hash", sha256: "a".repeat(64) },
+      attestationStrength: "software_attested",
     });
-    expect(parsePlacementDetail({ id: "p", reportSha256: "zz", audit: null })).toMatchObject({ auditId: null, reportSha256: null });
     for (const bad of [null, {}, [], { id: 1 }]) expect(parsePlacementDetail(bad)).toBeNull();
+  });
+  it("no report is 'none'; a malformed hash is unreadable, never 'none'", () => {
+    expect(parsePlacementDetail({ id: "p", reportSha256: null, audit: null })).toMatchObject({ auditId: null, report: { kind: "none" } });
+    for (const bad of ["zz", "A".repeat(64), 7, undefined]) expect(parsePlacementDetail({ id: "p", reportSha256: bad })?.report).toEqual({ kind: "unreadable" });
+  });
+  it("the strength is the gateway's word: missing or unknown is said, never assumed", () => {
+    expect(parsePlacementDetail({ id: "p", reportSha256: null })?.attestationStrength).toBeNull();
+    expect(parsePlacementDetail({ id: "p", reportSha256: null, attestationStrength: "hardware_attested" })?.attestationStrength).toBeNull();
+    expect(strengthText("software_attested")).toBe("software-attested");
+    expect(strengthText(null)).toBe("attestation strength not reported");
+    const src = readFileSync(sharedFile("isolation/contract.ts"), "utf8");
+    expect(/export const ATTESTATION_STRENGTH = "([a-z_]+)" as const;/.exec(src)?.[1]).toBe(ATTESTATION_STRENGTHS[0]);
   });
 });
 
@@ -125,6 +165,16 @@ describe("placements", () => {
     expect(out.unrecorded[0]).toMatchObject({ code: "policy_unresolved", unresolvedFact: "sensitivity" });
     expect(out.unrecorded[1]).toEqual({ unreadable: true, index: 1 });
     for (const bad of [null, {}, { placements: [] }, { placements: {}, refusalsWithoutPlacement: [] }]) expect(parsePlacements(bad)).toBeNull();
+  });
+
+  it("N11: reads each list's keyset cursor, and a next page carries only the cursors it has", () => {
+    const out = parsePlacements({ placements: [placed], refusalsWithoutPlacement: [], nextCursor: "c1", refusalsNextCursor: null })!;
+    expect(out).toMatchObject({ nextCursor: "c1", refusalsNextCursor: null });
+    // a cursor that is not a short string ends paging rather than being guessed at
+    for (const bad of [42, "", "x".repeat(257), {}]) expect(parsePlacements({ placements: [], refusalsWithoutPlacement: [], nextCursor: bad })!.nextCursor).toBeNull();
+    expect(placementsPageUrl(null)).toBe("/v1/execution-placements?limit=50");
+    expect(placementsPageUrl({ cursor: "c1", refusalsCursor: null })).toBe("/v1/execution-placements?limit=50&cursor=c1");
+    expect(placementsPageUrl({ cursor: null, refusalsCursor: "r 1" })).toBe("/v1/execution-placements?limit=50&refusalsCursor=r+1");
   });
 
   it("I4: a governed stdio call's placement offered and awaiting its report reads as offered, with the class it was offered at", () => {

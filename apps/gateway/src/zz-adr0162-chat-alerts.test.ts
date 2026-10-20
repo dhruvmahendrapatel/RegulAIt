@@ -14,6 +14,7 @@ import http from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 // an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
 import { relaxStepUpAround } from "./testing/step-up-posture.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -45,7 +46,8 @@ let db: Db;
 let app: ReturnType<typeof buildApp>;
 let upstream: http.Server;
 const posted: Array<Record<string, any>> = [];
-let addedAllow = false;
+/** M-068: the id of the 127.0.0.1 allow entry this file added (undefined when another file owns it) */
+let allowId: string | undefined;
 let connectionId = "";
 let useCaseName = "";
 let useCaseId = "";
@@ -87,7 +89,7 @@ beforeAll(async () => {
       host: "127.0.0.1", allowPrivateRanges: true, allowPlaintextHttp: true, note: "adr0162 suite: local fake Slack",
     }));
     expect([200, 201]).toContain(allow.statusCode);
-    addedAllow = true;
+    allowId = allow.json().id;
   }
 
   const u = await call("POST", "/v1/users", AUTH, { email: `g162-${RUN}@example.com`, displayName: "Chat admin", isAdmin: true });
@@ -118,12 +120,17 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
-  await restoreAdminKeyMfa?.();
-  await db.delete(chatopsConnections).where(eq(chatopsConnections.id, connectionId));
-  if (addedAllow) await db.delete(egressAllowHosts).where(eq(egressAllowHosts.host, "127.0.0.1"));
-  app.server.closeAllConnections();
-  await app.close();
-  await new Promise<void>((r) => upstream.close(() => r()));
+  // M-068: the allow entry goes first, through the audited route, while the app is up; asserted at the end
+  const loopback = await removeEgressAllowEntry(app, AUTH, { id: allowId });
+  try {
+    await restoreAdminKeyMfa?.();
+    await db.delete(chatopsConnections).where(eq(chatopsConnections.id, connectionId));
+    app.server.closeAllConnections();
+    await app.close();
+    await new Promise<void>((r) => upstream.close(() => r()));
+  } finally {
+    loopback.assertRemoved();
+  }
 });
 
 describe("ADR-0162 governance alerts in chat", () => {
@@ -172,7 +179,7 @@ describe("ADR-0162 governance alerts in chat", () => {
   });
 
   it("an egress refusal is audited, returned, and never fails the monitor", async () => {
-    if (!addedAllow) return; // another file owns the allow entry — do not remove it from under it
+    if (!allowId) return; // another file owns the allow entry — do not remove it from under it
     await db.delete(egressAllowHosts).where(eq(egressAllowHosts.host, "127.0.0.1"));
     try {
       const [alert] = await db.select().from(governanceAlerts).where(eq(governanceAlerts.subjectKey, `use_case:${useCaseId}`));
@@ -186,9 +193,11 @@ describe("ADR-0162 governance alerts in chat", () => {
       await call("PATCH", `/v1/chatops/connections/${connectionId}`, admin.auth, { notifyAlertMinSeverity: "medium" });
       expect((await call("POST", "/v1/governance/monitor/evaluate", admin.auth)).statusCode).toBe(200);
     } finally {
-      await relaxStepUpAround(db, () => call("POST", "/v1/egress-allow-hosts", AUTH, {
+      // the restore is a new row: its id replaces the one afterAll removes
+      const restored = await relaxStepUpAround(db, () => call("POST", "/v1/egress-allow-hosts", AUTH, {
         host: "127.0.0.1", allowPrivateRanges: true, allowPlaintextHttp: true, note: "adr0162 suite: local fake Slack",
       }));
+      allowId = restored.json().id;
     }
   });
 });

@@ -28,8 +28,8 @@ auto-assigned public IPv4 is **released on every stop and a different one issued
 on the next start**. A nightly power cycle would therefore change the URL every
 morning, invalidate the certificate, and force a fresh ACME issuance daily. This
 is not hypothetical either: while writing this ADR the box was already found
-**stopped**, and Terraform state had drifted from the `3.237.199.248` still
-written into `infra/caddy/Caddyfile` and the docs to `98.86.163.252`. The
+**stopped**, and Terraform state had drifted from the `<first-address>` still
+written into `infra/caddy/Caddyfile` and the docs to `<second-address>`. The
 hostname had already broken once, silently.
 
 **3. The box must be usable after an automated start with no human step.** A
@@ -168,7 +168,7 @@ the scheduler role, its inline policy, and the two schedules. None of them is an
 **Easier.** The dev bill drops from ≈$20.43/month to ≈$10.67/month (~48%), and
 the floor with the instance never started is $5.25/month (EIP + EBS). The
 hostname stops being a moving target — the class of bug that silently broke
-`3-237-199-248.sslip.io` cannot recur. The box also becomes self-healing across
+`<dashed-first-address>.sslip.io` cannot recur. The box also becomes self-healing across
 power cycles for the first time.
 
 **Harder / given up.**
@@ -192,7 +192,7 @@ power cycles for the first time.
 1. Run the documented SSM install of `boot-resync.sh` once, on the next start.
    Until then the first start after the EIP attaches needs a manual Caddy
    re-point (the box is currently stopped and its old address is already gone).
-2. `infra/caddy/Caddyfile`'s default `3-237-199-248.sslip.io` and the same string
+2. `infra/caddy/Caddyfile`'s default `<dashed-first-address>.sslip.io` and the same string
    in README/STATE are stale. Once the EIP exists they should be updated to the
    EIP-derived name — one stable value, updated once, instead of a per-boot
    lottery.
@@ -257,7 +257,7 @@ policy, and both schedules are live:
 
 ```
 power_window = ENABLED | start=cron(0 8 ? * MON-FRI *) | stop=cron(0 20 ? * MON-FRI *)
-             | tz=America/New_York | instances=i-013c62adc887c76bb
+             | tz=America/New_York | instances=<instance-id>
 public_ip_is_stable = true
 ```
 
@@ -271,6 +271,6 @@ stopped". It was not — it was mid-restart during a concurrent `terraform apply
 that changed `user_data`, which the EC2 provider applies by stopping and
 starting the instance. That same apply is what moved the address the first
 time. The address moved twice in one day in total
-(`3.237.199.248` → `98.86.163.252` → `3.229.246.126`, the last on EIP
+(`<first-address>` → `<second-address>` → `<eip-address>`, the last on EIP
 attachment), which if anything strengthens the case the ADR makes for pinning
 it.

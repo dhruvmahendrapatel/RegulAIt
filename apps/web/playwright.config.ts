@@ -16,7 +16,8 @@ export default defineConfig({
   // on :4179) and each selects its spec by testMatch. Collected here they fail
   // on an unrelated precondition (no shadow-AI findings in the seed, no Vite
   // server), which made the documented `pnpm e2e` unable to pass.
-  testIgnore: ["**/demo-*.spec.ts", "**/*.mock.spec.ts"],
+  // The enterprise UI harness (e2e/enterprise, ADR-0196) has its own config and server too.
+  testIgnore: ["**/demo-*.spec.ts", "**/*.mock.spec.ts", "**/enterprise/**"],
   globalSetup: "./e2e/global-setup.ts",
   globalTeardown: "./e2e/global-teardown.ts",
   timeout: 60_000,
@@ -28,6 +29,9 @@ export default defineConfig({
   use: {
     baseURL: process.env.E2E_BASE_URL ?? "http://127.0.0.1:3105",
     browserName: "chromium",
+    // e2e only: reduced motion, under which global.css removes every transition and animation,
+    // so an axe check right after a theme switch never reads a colour mid-way through a 120 ms transition (N9)
+    contextOptions: { reducedMotion: "reduce" },
     launchOptions: process.env.E2E_CHROMIUM_EXECUTABLE
       ? { executablePath: process.env.E2E_CHROMIUM_EXECUTABLE }
       : undefined,

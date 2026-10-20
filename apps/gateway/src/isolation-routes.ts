@@ -11,6 +11,8 @@
  *   /v1/executors[...]              register, list, inspect, attestations, quarantine,
  *                                   re-enable, revoke, the customer_declared mapping (I3: BUILT)
  *   /v1/execution-placements[...]   placement decisions and refusals (I2: BUILT)
+ *   /v1/execution-person-stdio-relaxations[...], /v1/execution-project-sensitivities[...]
+ *                                   owner decisions C and D (`isolation-subject-routes.ts`)
  *
  * The executor's own channel (ADR-0188 credentials, the outbound stream, its
  * reports) is `executor-channel.ts` (I3).
@@ -31,11 +33,16 @@
  *    (RFC 8785) and its SHA-256 is the digest every placement names. A change
  *    is version n+1; a running workload keeps the version it started with.
  *  - Any field looser than the shipped `restricted` profile (or, for a new
- *    version, than the version it replaces) is a RELAXATION: a
+ *    version, a revert included, than the version it replaces) is a RELAXATION: a
  *    `settings_relax` step-up and an `execution-profile-relaxed` audit row
  *    naming each field (ADR-0180, ADR-0186 decision 26).
- *  - The shipped profiles are the strict reference: never versioned or
- *    retired here. Retiring a profile is a tightening (its calls then refuse
+ *  - `restricted` and `restricted-microvm` are the strict references: never
+ *    versioned or retired here. `engine-worker` is versioned like a custom
+ *    profile (the I5 follow-up: its shipped body is version 1 and its own
+ *    strict reference, so a version looser than that body or than the version
+ *    it replaces, a lower `minClass` included, is a step-up and an audited
+ *    relaxation), keeps its shape (`engineWorkerProfileProblem`) and is never
+ *    retired. Retiring a profile is a tightening (its calls then refuse
  *    `profile_retired`), so it needs no step-up; it is audited.
  *  - ASSIGNMENT (decision 7 item 5, decision 8): a profile version on an
  *    agent's workload identity or a stdio MCP server. Assigning a profile
@@ -47,6 +54,7 @@ import { z } from "zod";
 import {
   agents,
   and,
+  asc,
   auditLog,
   builderAgents,
   desc,
@@ -70,12 +78,15 @@ import {
 import {
   canonicalExecutionProfile,
   createExecutionProfileSchema,
+  engineWorkerProfileProblem,
   EXECUTION_PROFILE_NAME_RE,
   EXECUTION_PROFILE_TARGET_KINDS,
   executionPlacementsQuerySchema,
   executionProfileBodySchema,
   executionProfileDigest,
+  executionProfileReference,
   executionProfileRelaxations,
+  executionProfileVersionable,
   quarantineExecutorSchema,
   registerExecutorSchema,
   RESTRICTED_EXECUTION_PROFILE,
@@ -89,10 +100,12 @@ import {
   type RequirableIsolationClass,
 } from "@regulait/shared";
 import { identityServiceFailure } from "./delegation.js";
-import { auditExecutor, freshAttestation, quarantineExecutor, executorView } from "./executor-channel.js";
+import { auditExecutor, freshAttestation, quarantineExecutor, executorView, pickLinkedReport } from "./executor-channel.js";
 import { databaseNow } from "./delegation.js";
+import { afterCursorDesc, atTextSql, decodeCursor, encodeCursor } from "./pagination.js";
 import { deploymentEnvironment } from "./oauth/common.js";
 import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
+import { registerIsolationSubjectRoutes } from "./isolation-subject-routes.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 const idParam = z.object({ executorId: z.string().uuid() });
@@ -165,6 +178,8 @@ async function adminExecutorView(db: Db, row: ExecutorRow) {
 }
 
 export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
+  // owner decisions C and D: the person's own stdio relaxation and the admin-set project sensitivity
+  registerIsolationSubjectRoutes(app, db);
   const actor = (req: FastifyRequest) => req.authCtx?.userId ?? NO_IDENTITY;
   const byId = async (req: FastifyRequest, reply: FastifyReply): Promise<ExecutorRow | null> => {
     const p = idParam.safeParse(req.params);
@@ -194,62 +209,123 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
     return reply.send({ name: p.data.name, versions: rows.map((r) => ({ ...profileVersionView(r), body: parseBody(r) })) });
   });
 
-  /** create version 1, or version n+1 of `name`; every relaxation is a step-up and an audited relaxation */
+  /**
+   * Create version 1, or version n+1 of `name`; every relaxation is a step-up and an audited relaxation.
+   *
+   * REVERT (I5 follow-up, review of #397): a body whose controls equal an EARLIER version of the same profile is
+   * written as a NEW version (the next number) whose body is that earlier body plus the gateway's `revertOf` marker.
+   * Nothing is retired or changed: retirement stays terminal and a retired newest version still blocks new versions
+   * (migration 0183's guard, unchanged). The marker only makes the digest (unique per row) differ; no control reads
+   * it. A revert is judged like any version, against the strict reference and the version in force, so going back to
+   * a stricter body (an L1 engine-worker back to its shipped L2 body) needs no step-up. Executors attest the new
+   * digest before it places (fail closed until their next self-test).
+   */
   async function writeVersion(req: FastifyRequest, reply: FastifyReply, name: string | null) {
     const parsed = createExecutionProfileSchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.status(400).send({ error: "invalid_body", issues: parsed.error.issues });
-    const body = parsed.data.body;
+    // the revert marker is the gateway's own: a client's value (a copied body, say) is dropped, never trusted
+    const { revertOf: _clientMarker, ...submitted } = parsed.data.body;
+    let body: ExecutionProfileBody = submitted;
     if (name !== null && body.name !== name) return reply.status(400).send({ error: "profile_name_mismatch", detail: "the body names another profile" });
     const latest = await latestVersion(db, body.name);
     if (name === null && latest) return reply.status(409).send({ error: "execution_profile_exists", detail: "a profile of that name exists; add a version instead" });
     if (name !== null && !latest) return reply.status(404).send({ error: "execution_profile_not_found" });
-    if (SHIPPED_NAMES.has(body.name)) return reply.status(409).send({ error: "shipped_profile_immutable", detail: "a shipped profile is the strict reference; create a profile of your own" });
+    // restricted and restricted-microvm are the strict references (never versioned); engine-worker is versioned (I5
+    // follow-up) and must keep the shape every engine task needs
+    if (SHIPPED_NAMES.has(body.name) && (name === null || !executionProfileVersionable(body.name))) {
+      return reply.status(409).send({ error: "shipped_profile_immutable", detail: "a shipped profile is the strict reference; create a profile of your own" });
+    }
+    if (body.name === "engine-worker") {
+      const problem = engineWorkerProfileProblem(body);
+      if (problem) return reply.status(400).send({ error: "engine_worker_profile_shape", detail: problem });
+    }
     if (latest?.retiredAt) return reply.status(409).send({ error: "execution_profile_retired", detail: "a retired profile is not versioned again" });
+    // the version in force is the newest version (`latest`); its controls, without a revert marker
+    const current = latest;
+    const bare = (b: ExecutionProfileBody) => {
+      const { revertOf: _m, ...controls } = b;
+      return canonicalExecutionProfile(controls);
+    };
+    if (current && bare(parseBody(current)) === bare(body)) return reply.status(409).send({ error: "execution_profile_unchanged", detail: "the version in force has exactly these controls" });
+    let revertOf: { version: number; digest: string; replacing: number } | null = null;
+    const [same] = await db.select().from(executionProfiles).where(eq(executionProfiles.digest, executionProfileDigest(body)));
+    if (same) {
+      if (!current || name === null || same.name !== body.name) return reply.status(409).send({ error: "execution_profile_unchanged", detail: "a version with this exact body exists" });
+      // REVERT: an earlier version's exact controls, as a new version with the gateway's marker
+      revertOf = { version: same.version, digest: same.digest, replacing: current.version };
+      body = { ...body, revertOf };
+    }
     const text = canonicalExecutionProfile(body);
     const digest = executionProfileDigest(body);
-    const [same] = await db.select({ id: executionProfiles.id }).from(executionProfiles).where(eq(executionProfiles.digest, digest));
-    if (same) return reply.status(409).send({ error: "execution_profile_unchanged", detail: "a version with this exact body exists" });
-    // judged against the strict reference AND the version it replaces (ADR-0186 decision 26)
+    // judged against the strict reference AND the version it replaces (ADR-0186 decision 26). The reference is
+    // `restricted`, or a versionable shipped profile's own shipped body (engine-worker: its posture was accepted when it
+    // shipped; a lower minClass, or anything else looser than that body, is a relaxation)
+    const reference = executionProfileReference(body.name);
+    const vsReference = executionProfileRelaxations(body, reference);
     const vsRestricted = executionProfileRelaxations(body, RESTRICTED_EXECUTION_PROFILE);
-    const vsPrevious = latest ? executionProfileRelaxations(body, parseBody(latest)) : [];
-    const relaxations = [...new Set([...vsRestricted, ...vsPrevious])];
+    const vsPrevious = current ? executionProfileRelaxations(body, parseBody(current)) : [];
+    const relaxations = [...new Set([...vsReference, ...vsPrevious])];
     let stepUp: string | null = null;
     if (relaxations.length > 0) {
-      const su = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { op: name === null ? "execution_profile_create" : "execution_profile_version", name: body.name, digest, relaxations } });
+      const op = name === null ? "execution_profile_create" : revertOf ? "execution_profile_revert" : "execution_profile_version";
+      const su = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { op, name: body.name, digest, relaxations } });
       if (!su.ok) return reply;
       stepUp = su.method;
     }
     const version = (latest?.version ?? 0) + 1;
-    let row: ExecutionProfileRow;
+    let row: ExecutionProfileRow | null;
     try {
-      [row] = (await db
-        .insert(executionProfiles)
-        .values({ name: body.name, version, body: text, digest, minClass: body.minClass, shipped: false, createdBy: req.authCtx?.userId ?? null })
-        .returning()) as [ExecutionProfileRow];
+      // compare-and-set (review of #397): under the per-name lock the guard takes, the newest version must still be the
+      // one judged above; another version in between refuses
+      row = await db.transaction(async (tx) => {
+        const txDb = tx as unknown as Db;
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`execution_profiles:${body.name}`}))`);
+        const nowLatest = await latestVersion(txDb, body.name);
+        if ((nowLatest?.id ?? null) !== (latest?.id ?? null) || (nowLatest?.retiredAt ?? null) !== null) return null;
+        const [inserted] = (await txDb
+          .insert(executionProfiles)
+          .values({ name: body.name, version, body: text, digest, minClass: body.minClass, shipped: false, createdBy: req.authCtx?.userId ?? null })
+          .returning()) as [ExecutionProfileRow];
+        await auditExecutor(txDb, {
+          userId: actor(req),
+          objectType: "execution_profile",
+          objectId: inserted.id,
+          ruleId: version === 1 ? "execution-profile-created" : "execution-profile-versioned",
+          detail: { name: inserted.name, version, digest, minClass: inserted.minClass, previousDigest: current?.digest ?? null, relaxations, revertOf },
+          reason: `execution profile ${inserted.name} v${version} (${inserted.minClass}) ${version === 1 ? "created" : "versioned"}; digest ${digest.slice(0, 12)} (ADR-0190 decision 2)`,
+        });
+        if (revertOf) {
+          await auditExecutor(txDb, {
+            userId: actor(req),
+            objectType: "execution_profile",
+            objectId: inserted.id,
+            ruleId: "execution-profile-reverted",
+            detail: { name: inserted.name, version, digest, minClass: inserted.minClass, revertOf, reference: reference.name, relaxations, stepUp },
+            reason: `execution profile ${inserted.name} v${version} (${inserted.minClass}) reverts to the controls of v${revertOf.version}, replacing v${revertOf.replacing}; nothing was retired (ADR-0190 decision 2)`,
+          });
+        }
+        if (relaxations.length > 0) {
+          await auditExecutor(txDb, {
+            userId: actor(req),
+            objectType: "execution_profile",
+            objectId: inserted.id,
+            ruleId: "execution-profile-relaxed",
+            detail: { name: inserted.name, version, digest, reference: reference.name, relaxedAgainstReference: vsReference, relaxedAgainstRestricted: vsRestricted, relaxedAgainstPrevious: vsPrevious, stepUp, ...(revertOf ? { revert: true } : {}) },
+            reason: `execution profile ${inserted.name} v${version} is looser than ${vsPrevious.length > 0 ? "the version it replaces" : `the shipped ${reference.name} profile`} in: ${relaxations.join(", ")} (ADR-0180; step-up ${stepUp})`,
+          });
+        }
+        return inserted;
+      });
     } catch (e) {
       // a concurrent version took the number (the guard serialises versioning per name)
-      if (uniqueViolation(e) || String((e as Error)?.message ?? "").includes("must be version")) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
+      // log-safe: matched against fixed trigger wording only, never logged or stored
+      const message = String((e as Error)?.message ?? "") + String((e as { cause?: Error })?.cause?.message ?? "");
+      if (uniqueViolation(e) || message.includes("must be version")) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
+      if (message.includes("is retired")) return reply.status(409).send({ error: "execution_profile_retired", detail: "a retired profile is not versioned again" });
       throw e;
     }
-    await auditExecutor(db, {
-      userId: actor(req),
-      objectType: "execution_profile",
-      objectId: row.id,
-      ruleId: version === 1 ? "execution-profile-created" : "execution-profile-versioned",
-      detail: { name: row.name, version, digest, minClass: row.minClass, previousDigest: latest?.digest ?? null, relaxations },
-      reason: `execution profile ${row.name} v${version} (${row.minClass}) ${version === 1 ? "created" : "versioned"}; digest ${digest.slice(0, 12)} (ADR-0190 decision 2)`,
-    });
-    if (relaxations.length > 0) {
-      await auditExecutor(db, {
-        userId: actor(req),
-        objectType: "execution_profile",
-        objectId: row.id,
-        ruleId: "execution-profile-relaxed",
-        detail: { name: row.name, version, digest, relaxedAgainstRestricted: vsRestricted, relaxedAgainstPrevious: vsPrevious, stepUp },
-        reason: `execution profile ${row.name} v${version} is looser than ${vsPrevious.length > 0 ? "the version it replaces" : "the shipped restricted profile"} in: ${relaxations.join(", ")} (ADR-0180; step-up ${stepUp})`,
-      });
-    }
-    return reply.status(201).send({ ...profileVersionView(row), body: parseBody(row) });
+    if (!row) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
+    return reply.status(201).send({ ...profileVersionView(row), body: parseBody(row), ...(revertOf ? { revertOf } : {}) });
   }
 
   app.post("/v1/execution-profiles", async (req, reply) => writeVersion(req, reply, null));
@@ -265,7 +341,8 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
     if (!p.success) return reply.status(400).send({ error: "invalid_profile_name" });
     const b = retireExecutionProfileSchema.safeParse(req.body ?? {});
     if (!b.success) return reply.status(400).send({ error: "invalid_body", issues: b.error.issues });
-    if (SHIPPED_NAMES.has(p.data.name)) return reply.status(409).send({ error: "shipped_profile_immutable", detail: "a shipped profile is the strict reference and is never retired" });
+    // engine-worker included: engines always run under its latest version, so it is versioned, never retired
+    if (SHIPPED_NAMES.has(p.data.name)) return reply.status(409).send({ error: "shipped_profile_immutable", detail: "a shipped profile is never retired" });
     const latest = await latestVersion(db, p.data.name);
     if (!latest) return reply.status(404).send({ error: "execution_profile_not_found" });
     // retiring tightens (its calls refuse `profile_retired`, decision 7): no step-up, audited
@@ -590,13 +667,19 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
   // I4 (migration 0198): a governed stdio decision's row is `offered`; how it ended is its linked report row. The
   // view shows the EFFECTIVE outcome (the report's, else `offered`: still awaiting the sandbox's report), and names
   // the decision-time evidence (image, runtime flags hash, attestation) beside it.
+  // N11 fix round B2: ONE row per placement (a placement may carry up to three report rows, 0198), so the
+  // `(at, id)` keyset is unique per row; the effective report is `pickLinkedReport`'s, and every report row is
+  // listed beside it (`reports`, oldest first) so none is hidden.
+  type ReportRow = typeof executionPlacementReports.$inferSelect;
   const placementView = (r: {
     placement: typeof executionPlacements.$inferSelect;
-    report: typeof executionPlacementReports.$inferSelect | null;
+    reports: readonly ReportRow[];
     profileName: string | null;
     profileVersion: number | null;
     executorName: string | null;
-  }) => ({
+  }) => {
+    const report = pickLinkedReport(r.reports);
+    return {
     id: r.placement.id,
     auditId: r.placement.auditId,
     workloadKind: r.placement.workloadKind,
@@ -608,21 +691,59 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
     profileVersion: r.profileVersion,
     executorId: r.placement.executorId,
     executorName: r.executorName,
-    appliedClass: r.report?.appliedClass ?? r.placement.appliedClass,
-    reportSha256: r.report?.reportSha256 ?? r.placement.reportSha256,
-    outcome: r.report?.outcome ?? r.placement.outcome,
-    refusalCode: r.report?.refusalCode ?? r.placement.refusalCode,
+    appliedClass: report?.appliedClass ?? r.placement.appliedClass,
+    reportSha256: report?.reportSha256 ?? r.placement.reportSha256,
+    outcome: report?.outcome ?? r.placement.outcome,
+    refusalCode: report?.refusalCode ?? r.placement.refusalCode,
     imageDigest: r.placement.imageDigest,
     runtimeFlagsSha256: r.placement.runtimeFlagsSha256,
     attestationId: r.placement.attestationId,
     decidedAs: r.placement.outcome,
     createdAt: r.placement.createdAt.toISOString(),
-  });
+    reports: r.reports.map((x) => ({
+      id: x.id,
+      auditId: x.auditId,
+      outcome: x.outcome,
+      appliedClass: x.appliedClass,
+      reportSha256: x.reportSha256,
+      refusalCode: x.refusalCode,
+      endCode: x.endCode,
+      createdAt: x.createdAt.toISOString(),
+    })),
+    };
+  };
+  /** the report rows of these placements, oldest first, grouped by placement */
+  const reportsOf = async (placementIds: readonly string[]): Promise<Map<string, ReportRow[]>> => {
+    const out = new Map<string, ReportRow[]>();
+    if (placementIds.length === 0) return out;
+    const rows = await db
+      .select()
+      .from(executionPlacementReports)
+      .where(inArray(executionPlacementReports.placementId, [...placementIds]))
+      .orderBy(asc(executionPlacementReports.createdAt), asc(executionPlacementReports.id));
+    for (const r of rows) out.set(r.placementId, [...(out.get(r.placementId) ?? []), r]);
+    return out;
+  };
+  // a placement matches an outcome (or a refusal code) when one of its report rows does, or, with no report row,
+  // when its own decision does: the same placements the earlier per-report join listed, each once
+  const anyReportOr = (
+    reportCol: typeof executionPlacementReports.outcome | typeof executionPlacementReports.refusalCode,
+    placementCol: typeof executionPlacements.outcome | typeof executionPlacements.refusalCode,
+    value: string,
+  ) =>
+    sql`(exists (select 1 from ${executionPlacementReports} where ${executionPlacementReports.placementId} = ${executionPlacements.id} and ${reportCol} = ${value})
+      or (not exists (select 1 from ${executionPlacementReports} where ${executionPlacementReports.placementId} = ${executionPlacements.id}) and ${placementCol} = ${value}))`;
   const placementSelect = () =>
     db
-      .select({ placement: executionPlacements, report: executionPlacementReports, profileName: executionProfiles.name, profileVersion: executionProfiles.version, executorName: executors.name })
+      .select({
+        placement: executionPlacements,
+        profileName: executionProfiles.name,
+        profileVersion: executionProfiles.version,
+        executorName: executors.name,
+        // the keyset cursor's microsecond-exact instant (pagination.ts)
+        atText: atTextSql(executionPlacements.createdAt),
+      })
       .from(executionPlacements)
-      .leftJoin(executionPlacementReports, eq(executionPlacementReports.placementId, executionPlacements.id))
       .leftJoin(executionProfiles, eq(executionProfiles.digest, executionPlacements.profileDigest))
       .leftJoin(executors, eq(executors.id, executionPlacements.executorId));
 
@@ -630,24 +751,37 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
     const q = executionPlacementsQuerySchema.safeParse(req.query ?? {});
     if (!q.success) return reply.status(400).send({ error: "invalid_query", issues: q.error.issues });
     const { limit, outcome, workloadKind, reason, before } = q.data;
+    // N11: an `(at, id)` keyset cursor per list, so rows sharing the last row's instant are never skipped
+    const cursor = q.data.cursor ? decodeCursor(q.data.cursor) : null;
+    const refusalsCursor = q.data.refusalsCursor ? decodeCursor(q.data.refusalsCursor) : null;
+    if ((q.data.cursor && !cursor) || (q.data.refusalsCursor && !refusalsCursor)) return reply.status(400).send({ error: "invalid_cursor" });
+    const continuing = cursor !== null || refusalsCursor !== null;
     const conds = [
-      // the effective outcome: a linked report's, else the row's own
-      outcome ? sql`coalesce(${executionPlacementReports.outcome}, ${executionPlacements.outcome}) = ${outcome}` : undefined,
+      outcome ? anyReportOr(executionPlacementReports.outcome, executionPlacements.outcome, outcome) : undefined,
       workloadKind ? eq(executionPlacements.workloadKind, workloadKind) : undefined,
-      reason ? sql`coalesce(${executionPlacementReports.refusalCode}, ${executionPlacements.refusalCode}) = ${reason}` : undefined,
+      reason ? anyReportOr(executionPlacementReports.refusalCode, executionPlacements.refusalCode, reason) : undefined,
       before ? lt(executionPlacements.createdAt, new Date(before)) : undefined,
+      cursor ? afterCursorDesc(executionPlacements.createdAt, executionPlacements.id, cursor) : undefined,
     ].filter((c) => c !== undefined);
-    const rows = await placementSelect()
-      .where(conds.length ? and(...conds) : undefined)
-      .orderBy(desc(executionPlacements.createdAt))
-      .limit(limit);
+    // one extra row decides whether there is a next page
+    const fetched =
+      !continuing || cursor
+        ? await placementSelect()
+            .where(conds.length ? and(...conds) : undefined)
+            .orderBy(desc(executionPlacements.createdAt), desc(executionPlacements.id))
+            .limit(limit + 1)
+        : [];
+    const page = fetched.slice(0, limit);
+    const reports = await reportsOf(page.map((r) => r.placement.id));
+    const rows = page.map((r) => ({ ...r, reports: reports.get(r.placement.id) ?? [] }));
+    const lastRow = fetched.length > limit ? rows[rows.length - 1] : undefined;
     // refusals decided before any placement row could be written (policy_unresolved; a digest no profile names):
     // they exist only as audit rows, and are listed so none is hidden (owner decision B)
-    const showUnrecorded = !outcome || outcome === "refused";
-    const unrecorded =
+    const showUnrecorded = (!continuing || refusalsCursor !== null) && (!outcome || outcome === "refused");
+    const unrecordedFetched =
       showUnrecorded && !workloadKind && (!reason || reason === "policy_unresolved" || reason === "profile_retired")
         ? await db
-            .select({ id: auditLog.id, at: auditLog.at, detail: auditLog.detail, reason: auditLog.reason })
+            .select({ id: auditLog.id, at: auditLog.at, detail: auditLog.detail, reason: auditLog.reason, atText: atTextSql(auditLog.at) })
             .from(auditLog)
             .where(
               and(
@@ -656,11 +790,14 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
                 isNull(auditLog.objectId),
                 ...(reason ? [sql`${auditLog.detail} ->> 'code' = ${reason}`] : []),
                 ...(before ? [lt(auditLog.at, new Date(before))] : []),
+                ...(refusalsCursor ? [afterCursorDesc(auditLog.at, auditLog.id, refusalsCursor)] : []),
               ),
             )
-            .orderBy(desc(auditLog.at))
-            .limit(limit)
+            .orderBy(desc(auditLog.at), desc(auditLog.id))
+            .limit(limit + 1)
         : [];
+    const unrecorded = unrecordedFetched.slice(0, limit);
+    const lastUnrecorded = unrecordedFetched.length > limit ? unrecorded[unrecorded.length - 1] : undefined;
     return reply.send({
       placements: rows.map(placementView),
       refusalsWithoutPlacement: unrecorded.map((a) => {
@@ -674,6 +811,8 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
           reason: a.reason,
         };
       }),
+      nextCursor: lastRow ? encodeCursor({ at: lastRow.atText, id: lastRow.placement.id }) : null,
+      refusalsNextCursor: lastUnrecorded ? encodeCursor({ at: lastUnrecorded.atText, id: lastUnrecorded.id }) : null,
       attestationStrength: "software_attested",
     });
   });
@@ -681,8 +820,9 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
   app.get("/v1/execution-placements/:placementId", async (req, reply) => {
     const p = placementParam.safeParse(req.params);
     if (!p.success) return reply.status(400).send({ error: "invalid_placement_id" });
-    const [row] = await placementSelect().where(eq(executionPlacements.id, p.data.placementId));
-    if (!row) return reply.status(404).send({ error: "placement_not_found" });
+    const [found] = await placementSelect().where(eq(executionPlacements.id, p.data.placementId));
+    if (!found) return reply.status(404).send({ error: "placement_not_found" });
+    const row = { ...found, reports: (await reportsOf([found.placement.id])).get(found.placement.id) ?? [] };
     const [audit] = await db
       .select({ id: auditLog.id, at: auditLog.at, ruleId: auditLog.ruleId, effect: auditLog.effect, reason: auditLog.reason, detail: auditLog.detail })
       .from(auditLog)

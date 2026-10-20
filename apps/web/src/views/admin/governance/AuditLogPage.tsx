@@ -18,6 +18,7 @@ import { DecisionReceiptsPanel } from "./DecisionReceiptsPanel";
 import { AnchorTimestampsPanel } from "./AnchorTimestampsPanel";
 import { lazy, Suspense, useMemo, useState } from "react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
 import type { AuditEntry } from "../../../api/types";
 import { UUID_RE, actorLabel, fmtAt, frameworkLabel, humanize, plural, shortId } from "../../../api/format";
@@ -69,14 +70,19 @@ export default function AuditLogPage() {
   const [deployMode, setDeployMode] = useState("");
   const [confirmPrune, setConfirmPrune] = useState(false);
   const [bomAuditId, setBomAuditId] = useState<string | null>(null);
+  // ADR-0190 owner decision C (A1): `?id=<audit row>` shows that one row (an evidence link, e.g. from a Decision BOM)
+  const [search, setSearch] = useSearchParams();
+  const rowParam = search.get("id");
+  const onlyRow = rowParam !== null && UUID_RE.test(rowParam) ? rowParam.toLowerCase() : null;
 
   const qs = useMemo(() => {
     const p = new URLSearchParams();
+    if (onlyRow) p.set("id", onlyRow);
     if (userId) p.set("userId", userId);
     if (deployMode) p.set("deployMode", deployMode);
     const s = p.toString();
     return s ? `?${s}` : "";
-  }, [userId, deployMode]);
+  }, [onlyRow, userId, deployMode]);
 
   const retention = useQuery({
     queryKey: ["admin", "audit-retention"],
@@ -87,7 +93,7 @@ export default function AuditLogPage() {
   // older rows existed (UIA-02); now it says how many are shown and loads
   // older pages on request.
   const audit = useInfiniteQuery({
-    queryKey: ["admin", "audit", userId, deployMode],
+    queryKey: ["admin", "audit", onlyRow, userId, deployMode],
     queryFn: ({ pageParam }) =>
       api.get<AuditPage>(`/v1/audit${qs}${pageParam ? `${qs ? "&" : "?"}cursor=${encodeURIComponent(pageParam)}` : ""}`),
     initialPageParam: null as string | null,
@@ -138,40 +144,15 @@ export default function AuditLogPage() {
         }
       />
       <div className={v.stack}>
-        <DecisionReceiptsPanel />
-        <AnchorTimestampsPanel />
-        <Card title="Retention">
-          {ret == null ? (
-            <span className={v.dim}>Loading retention…</span>
-          ) : ret.retainedDays == null ? (
-            <p className={v.dim}>
-              No compliance profile sets a retention — nothing is eligible for pruning (all rows kept).
-            </p>
-          ) : (
-            <div className={v.row}>
-              <span>
-                Global floor <strong>{ret.retainedDays} days</strong>{" "}
-                <span className={v.dim}>
-                  (set by {(ret.floorSource ?? []).map(frameworkLabel).join(", ") || "the organisation default"}) ·{" "}
-                  <strong>{plural(ret.prunable, "row")}</strong> older than that
-                </span>
-              </span>
-              <span className={v.grow} />
-              <Button disabled={!ret.prunable} onClick={() => setConfirmPrune(true)}>
-                Prune audit log
-              </Button>
-            </div>
-          )}
-          <p className={v.faint}>
-            Retention is the longest period any active compliance profile requires, combined with the
-            organisation default — a framework with a shorter period never shortens another framework's
-            trail. Pruning is itself audited.
-          </p>
-        </Card>
-
-        <ChainIntegrityCard />
-
         <Card>
+          {onlyRow && (
+            <p role="status" data-testid="audit-only-row">
+              Showing one audit row, <code className={v.mono}>{onlyRow}</code>.{" "}
+              <Button size="sm" variant="ghost" onClick={() => setSearch((p) => { const n = new URLSearchParams(p); n.delete("id"); return n; })}>
+                Show every row
+              </Button>
+            </p>
+          )}
           <div className={a.formRow}>
             <Field label="Filter by user">
               <Select value={userId} onChange={(e) => setUserId(e.target.value)}>
@@ -292,6 +273,39 @@ export default function AuditLogPage() {
             <DecisionBomPanel key={bomAuditId} auditId={bomAuditId} onClose={() => setBomAuditId(null)} />
           </Suspense>
         )}
+        {/* the trail first, so the newest decisions are on screen without scrolling; the evidence tools follow it */}
+        <DecisionReceiptsPanel />
+        <AnchorTimestampsPanel />
+        <Card title="Retention">
+          {ret == null ? (
+            <span className={v.dim}>Loading retention…</span>
+          ) : ret.retainedDays == null ? (
+            <p className={v.dim}>
+              No compliance profile sets a retention — nothing is eligible for pruning (all rows kept).
+            </p>
+          ) : (
+            <div className={v.row}>
+              <span>
+                Global floor <strong>{ret.retainedDays} days</strong>{" "}
+                <span className={v.dim}>
+                  (set by {(ret.floorSource ?? []).map(frameworkLabel).join(", ") || "the organisation default"}) ·{" "}
+                  <strong>{plural(ret.prunable, "row")}</strong> older than that
+                </span>
+              </span>
+              <span className={v.grow} />
+              <Button disabled={!ret.prunable} onClick={() => setConfirmPrune(true)}>
+                Prune audit log
+              </Button>
+            </div>
+          )}
+          <p className={v.faint}>
+            Retention is the longest period any active compliance profile requires, combined with the
+            organisation default — a framework with a shorter period never shortens another framework's
+            trail. Pruning is itself audited.
+          </p>
+        </Card>
+
+        <ChainIntegrityCard />
       </div>
 
       <ConfirmModal

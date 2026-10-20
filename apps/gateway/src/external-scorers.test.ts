@@ -216,10 +216,10 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  // M-068: a pre-flight test withdraws and re-inserts the 127.0.0.1 entry (a new id),
-  // so it is removed by host. It goes first, while the app is open; its outcome is
-  // asserted only after every other restore has run.
-  const loopback = await removeEgressAllowEntry(app, AUTH, { host: "127.0.0.1" });
+  // M-068: a pre-flight test withdraws and re-inserts the 127.0.0.1 entry and records
+  // its new id in loopbackId, so it is removed by that id. It goes first, while the app
+  // is open; its outcome is asserted only after every other restore has run.
+  const loopback = await removeEgressAllowEntry(app, AUTH, { id: loopbackId });
   try {
     srv.closeAllConnections();
     await new Promise<void>((r) => srv.close(() => r()));
@@ -289,12 +289,13 @@ describe("the scorer URL is a typed destination under the full egress guard", ()
   });
 
   it("refuses an IMDS baseUrl outright, allow-listed or not", async () => {
-    const listed = await app.inject({
+    // ADR-0034 owner amendment 2026-10-16: adding any entry is a stepped-up relaxation; this suite is about the guard
+    const listed = await relaxStepUpAround(db, () => app.inject({
       method: "POST",
       url: "/v1/egress-allow-hosts",
       headers: AUTH,
       payload: { host: perTest.trackHost("169.254.169.254"), note: "deliberate SSRF attempt for the test" },
-    });
+    }));
     expect(listed.statusCode).toBe(201);
     const res = await app.inject({
       method: "POST",
@@ -350,11 +351,13 @@ describe("the scorer URL is a typed destination under the full egress guard", ()
 // ---------------------------------------------------------------------------
 
 let shimId: string;
+/** the 127.0.0.1 allow entry's id, removed in afterAll (re-recorded when a test re-inserts it) */
+let loopbackId: string | undefined;
 const SHIM = "xs-fiddler-shim";
 
 describe("register → test → enable, the custom-provider lifecycle verbatim", () => {
   it("registers DISABLED once 127.0.0.1 is allow-listed, and never returns the key", async () => {
-    // egress-allow-cleanup: afterAll — the loopback entry the lifecycle tests share; afterAll removes it by host
+    // egress-allow-cleanup: afterAll — the loopback entry the lifecycle tests share; afterAll removes it by its id
     const allow = await relaxStepUpAround(db, () => app.inject({
       method: "POST",
       url: "/v1/egress-allow-hosts",
@@ -367,6 +370,7 @@ describe("register → test → enable, the custom-provider lifecycle verbatim",
       },
     }));
     expect(allow.statusCode).toBe(201);
+    loopbackId = allow.json().id;
 
     const res = await app.inject({
       method: "POST",
@@ -616,12 +620,17 @@ describe("a named-but-unusable instrument refuses the run BEFORE any row is writ
       expect(outcome.error).toBe("external_scorer_unreachable");
       expect(outcome.detail).toMatch(/not in the egress allow-list/);
     } finally {
-      await db.insert(egressAllowHosts).values({
-        host: entry!.host,
-        allowPrivateRanges: entry!.allowPrivateRanges,
-        allowPlaintextHttp: entry!.allowPlaintextHttp,
-        note: entry!.note,
-      });
+      // egress-allow-cleanup: afterAll — the file's loopback entry under a new id, recorded in loopbackId
+      const [restored] = await db
+        .insert(egressAllowHosts)
+        .values({
+          host: "127.0.0.1",
+          allowPrivateRanges: entry!.allowPrivateRanges,
+          allowPlaintextHttp: entry!.allowPlaintextHttp,
+          note: entry!.note,
+        })
+        .returning({ id: egressAllowHosts.id });
+      loopbackId = restored!.id;
     }
   });
 });

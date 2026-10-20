@@ -15,7 +15,7 @@
  *    and leaves the root usable; a chain read before a revocation is refused
  *    at the next read.
  *  - SIGNING KEYS: JWKS public halves only; rotate and revoke need the
- *    `identity_manage` step-up (refused for an API key) and are audited;
+ *    `key_management` step-up (refused for an API key) and are audited;
  *    overlap; revocation refuses every token of the kid.
  *  - DECISION 13 VERIFIER: a stolen token is useless off its binding (no or
  *    wrong proof, wrong htm/htu, replay, stale proof, no nonce, wrong aud/env,
@@ -984,13 +984,13 @@ describe("ADR-0188 S3 — signing keys, JWKS and the decision 13 verifier", () =
     expect(after.ok ? "" : after.code).toBe("chain_grant_revoked");
   });
 
-  it("rotate and revoke need the identity_manage step-up (an API key is refused), are audited, and rotation keeps old tokens until the overlap ends", async () => {
+  it("rotate and revoke need the key_management step-up (an API key is refused), are audited, and rotation keeps old tokens until the overlap ends", async () => {
     const before = await mint(rootExt);
     const k1 = before.kid;
     writeIssuerKeys([issuerKeys[0]!, issuerKeys[1]!]);
     const strict = await inject("POST", "/v1/identity/signing-keys/rotate", adminAuth, {});
     expect(strict.statusCode, strict.body).toBe(403);
-    expect(strict.json().error).toBe("step_up_required");
+    expect(strict.json()).toMatchObject({ error: "step_up_required", actionKind: "key_management" });
     const restore = await relaxStepUpForTest(db);
     try {
       const rot = await inject("POST", "/v1/identity/signing-keys/rotate", adminAuth, {});

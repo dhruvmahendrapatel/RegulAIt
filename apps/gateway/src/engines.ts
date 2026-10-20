@@ -72,6 +72,7 @@ import { ensureIdentityFor } from "./in-process-delegation.js";
 import { databaseNow } from "./delegation.js";
 import { workloadIssuerPosture } from "./oauth/common.js";
 import { endActiveRunsOfEngineTx, endRunsHeldByRevokedRunnersTx, engineRunTestHooks, notifyWorkflowsOfEndedRuns } from "./engine-runs.js";
+import { engineWorkerAttestationBasis } from "./engine-worker-attestation.js";
 
 export const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -84,6 +85,8 @@ export interface EngineOptions {
   taxonomy?: EngineTaxonomy;
   /** the gateway's OpenAI-compatible base as a runner reaches it on the engines network */
   gatewayBaseUrl?: string;
+  /** ADR-0190 I5: where an engine task's artifact input is read from (default: the artifact store from the environment) */
+  artifactStore?: import("./model-artifacts.js").ArtifactStore | null;
 }
 
 export function manifestOf(opts: EngineOptions): Readonly<Record<EngineId, EngineManifestEntry>> {
@@ -375,7 +378,8 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
     await syncEngineManifest(db, manifest);
     const [current] = await db.select().from(engines).where(eq(engines.id, engineId));
     if (!current) return reply.status(404).send({ error: "engine_not_found" });
-    const now = new Date();
+    // N11 fix round N1 (M-075): the self-test age on the database clock, as `selfTestPassedAt` is stamped
+    const now = await databaseNow(db);
     // PR #205 review round 13 [95]: an outdated replica never enables (its manifest would judge the
     // self-test against an older build); switching off and lowering dials stay available
     if (body.enabled === true && engineManifestOutdated(current, manifest[engineId])) {
@@ -484,7 +488,8 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
   app.post("/v1/engines/:engineId/self-test", async (req, reply) => {
     const { engineId } = engineParam.parse(req.params);
     await syncEngineManifest(db, manifest);
-    const now = new Date();
+    // N11 fix round N1 (M-075): `selfTestPassedAt` is stamped on the database clock, the clock a lease judges it by
+    const now = await databaseNow(db);
     // PR #205 review round 6 [71]: the engine row is taken FOR UPDATE, so a failing verdict that
     // switches the engine off serialises with a lease deciding under its FOR SHARE lock.
     // PR #205 review round 11 (sweep): the report judged is read in the same transaction, locked
@@ -514,10 +519,13 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
               .for("share");
       if (!runner || !runnerCountsForCurrentBuild(m, runner)) return { kind: "no_current_runner" as const };
       const report = runner.selfTest as Parameters<typeof evaluateRunnerSelfTest>[1];
-      const verdict = evaluateRunnerSelfTest(m, report, now);
+      // ADR-0190 I5: the worker switches may rest on a fresh executor attestation (recorded as the verdict's basis)
+      const executorAttestation = await engineWorkerAttestationBasis(tx as unknown as Db);
+      const verdict = evaluateRunnerSelfTest(m, report, now, { executorAttested: executorAttestation.attested });
       const record = {
         passed: verdict.passed,
         failures: verdict.failures,
+        executorAttestation,
         runnerId: runner.id,
         imageDigest: report?.imageDigest ?? null,
         version: report?.engineVersion ?? null,
@@ -667,7 +675,9 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
         detail: "this image is not the engine's current build: deploy the current image (the engine's manifest names its digest and version), then enrol its runner",
       });
     }
-    const verdict = evaluateRunnerSelfTest(manifest[engineId], body.selfTest, new Date());
+    // ADR-0190 I5: the worker switches may rest on a fresh executor attestation (its basis is part of the verdict)
+    const executorAttestation = await engineWorkerAttestationBasis(db);
+    const verdict = { ...evaluateRunnerSelfTest(manifest[engineId], body.selfTest, now, { executorAttested: executorAttestation.attested }), executorAttestation };
     const replay = async () => {
       const [existing] = await db.select().from(engineRunners).where(eq(engineRunners.enrollmentTokenId, tokenId));
       if (!existing || existing.revokedAt !== null || !(await runnerHoldsKey(db, existing.id, jkt))) {
@@ -854,8 +864,11 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
         detail: "this runner runs a build that is not the current one: deploy the current image and re-enrol it with a new enrolment token",
       });
     }
-    const now = new Date();
-    const verdict = evaluateRunnerSelfTest(m, selfTest, now);
+    // N11 fix round N1 (M-075): `selfTestPassedAt` is stamped on the database clock, the clock a lease judges it by
+    const now = await databaseNow(db);
+    // ADR-0190 I5: the worker switches may rest on a fresh executor attestation (its basis is part of the verdict)
+    const executorAttestation = await engineWorkerAttestationBasis(db);
+    const verdict = { ...evaluateRunnerSelfTest(m, selfTest, now, { executorAttested: executorAttestation.attested }), executorAttestation };
     await engineRunTestHooks.beforeSelfTestTx?.(runnerId);
     const out = await db.transaction(async (tx) => {
       // PR #205 review round 4 [65]: the runner row is LOCKED and its revocation re-read here, like

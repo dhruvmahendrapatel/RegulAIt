@@ -984,10 +984,14 @@ const draftName = (state: unknown) => {
   return name ? ` of “${name}”` : "";
 };
 
-/** what the person needs to know about their draft, in one quiet line */
+/**
+ * what the person needs to know about their draft, in one quiet line. A draft store that could not be read is said
+ * at once, as an alert, before anything is typed: the page's own load failed (ADR-0196 states, `error-not-shown`).
+ */
 function DraftLine(props: { status: DraftStatus; dirty: boolean; unsaved: boolean }) {
   const { status } = props;
-  if (!props.dirty || status.kind === "done" || status.kind === "loading" || status.kind === "offer") return null;
+  const unavailable = status.kind === "off" && status.reason === "unavailable";
+  if ((!props.dirty && !unavailable) || status.kind === "done" || status.kind === "loading" || status.kind === "offer") return null;
   const text =
     status.kind === "off"
       ? status.reason === "not-signed-in"
@@ -1000,7 +1004,7 @@ function DraftLine(props: { status: DraftStatus; dirty: boolean; unsaved: boolea
         : status.kind === "saved" && !props.unsaved
           ? `Draft saved ${savedAtText(status.at)}. Only you can open it.`
           : "Saving your draft…";
-  return <p className={ix.draftLine}>{text}</p>;
+  return <p className={ix.draftLine} role={unavailable || status.kind === "error" ? "alert" : undefined}>{text}</p>;
 }
 
 /** AER-051: what a re-draft from changed answers would change, and the proposer's choice */
@@ -1219,7 +1223,12 @@ function SimilarUseCases(props: { name: string; description: string; excludeIds:
   return (
     <aside className={rg.rail} aria-labelledby="similar-use-cases-title">
       <h2 id="similar-use-cases-title" className={rg.railTitle}>Similar use cases</h2>
-      <p className={rg.railSummary} aria-live="polite">{summary}</p>
+      {/* a failed registry read is an alert, not a status line: the duplicate check did not happen */}
+      {list.isError ? (
+        <p className={rg.railSummary} role="alert">{summary}</p>
+      ) : (
+        <p className={rg.railSummary} role="status" aria-busy={list.isLoading || undefined}>{summary}</p>
+      )}
       {matches.length > 0 && (
         <ul className={rg.railList}>
           {matches.map(({ useCase }) => (

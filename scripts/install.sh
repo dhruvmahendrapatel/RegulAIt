@@ -365,9 +365,67 @@ volume_exists() {
   docker volume inspect "${PROJECT}_$1" >/dev/null 2>&1
 }
 
+# ADR-0190 I5 follow-up: the Caddy image. ONLINE, compose runs docker-compose.yml's `x-caddy-image`, this digest
+# reference. AIR-GAPPED, a digest reference does not survive `docker save`/`docker load` on Docker's classic image
+# store (the image arrives untagged, with no repository digest), so the bundle also carries the plain tag, the
+# air-gapped override runs the tag, and the loaded image's id must be one of CADDY_IMAGE_IDS. The ids, read from the
+# Docker Hub registry API on 2026-10-17 for the index below: on the classic store an image's id is its platform's
+# config digest (linux/amd64 sha256:f77f856a..., linux/arm64 sha256:f6a22072...); on the containerd image store it
+# is the index digest (sha256:d8542f48...), or the platform manifest digest when only one platform was pulled
+# (linux/amd64 sha256:173b2630..., linux/arm64 sha256:84058f1a...). Re-pin with docker-compose.yml and
+# scripts/build-image-bundle.sh together.
+CADDY_IMAGE="caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f"
+CADDY_TAG="caddy:2.11.7-alpine"
+CADDY_IMAGE_IDS="sha256:f77f856a30f0004200b36b322d61da17fade31e24875699d77fb968399b9eb77 sha256:f6a2207268b0f0914df9d3569e1824d6adcfa7b59fbffe0f3cbc5d2d60423f71 sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f sha256:173b26306d711395accaeba8b67afcaad2a085ccb1e6bf26010bfe8c095a5229 sha256:84058f1a0e5beb97664a9b79dcfd267b594c033d5bb88d8463cdfb59c0779197"
+
 image_present() {
   docker_up || return 1
   docker image inspect "$1" >/dev/null 2>&1
+}
+
+# the loaded Caddy tag is the pinned image (air-gapped: the tag is what runs)
+caddy_image_id_ok() {
+  local id
+  docker_up || return 1
+  id="$(docker image inspect --format '{{.Id}}' "$CADDY_TAG" 2>/dev/null)" || return 1
+  case " $CADDY_IMAGE_IDS " in *" $id "*) return 0 ;; esac
+  return 1
+}
+
+# ENG-IMG: an engine image a bundle carries (`build-image-bundle.sh --with-engines`) runs air-gapped as the fixed tag
+# regulait/engine-<engine>:bundled. Its id must be the one engines/images.lock.json records for that engine (the
+# config digest on the classic image store, the manifest digest on the containerd store). The lock is written one
+# field per line by scripts/engine-images-lock.mjs, so the engine's block is the 8 lines after its name.
+ENGINE_IDS="promptfoo modelscan garak"
+engine_bundled_id_ok() { # engine
+  local id entry
+  docker_up || return 1
+  id="$(docker image inspect --format '{{.Id}}' "regulait/engine-$1:bundled" 2>/dev/null)" || return 1
+  printf '%s' "$id" | grep -Eq '^sha256:[0-9a-f]{64}$' || return 1
+  # the lock read as JSON (as build-image-bundle.sh does), never by line layout. No node: the check fails closed.
+  have node || { warn "node is needed to read engines/images.lock.json and check the bundled engine images"; return 1; }
+  # one line: <manifestDigest> <imageId>, or nothing when the engine was never published
+  entry="$(node -e '
+    const l = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+    const e = l.engines[process.argv[2]];
+    if (e && e.manifestDigest && e.imageId) console.log(`${e.manifestDigest} ${e.imageId}`);
+  ' "$SCRIPT_DIR/../engines/images.lock.json" "$1" 2>/dev/null)" || return 1
+  [ -n "$entry" ] || return 1
+  case " $entry " in
+    *" $id "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# ADR-0197 Q2: the locked engine image is also the one the publish workflow signed keylessly. Verified OFFLINE, before
+# the image is used, against the Sigstore bundle and trusted root the checkout carries (engines/signatures/, written by
+# `engine-images-lock.mjs --apply`): cosign v3.1.3, pinned by SHA-256, checks the Fulcio chain, the Rekor inclusion
+# proof, the certificate identity (engine-images.yml on refs/heads/main of this repository), the GitHub OIDC issuer,
+# and that the signed statement names exactly the lock's manifest digest, image id and source commit. No cosign, no
+# node, no bundle or any refusal: the check fails closed. COSIGN names the binary when it is not on PATH.
+engine_signature_ok() { # engine
+  have node || { warn "node is needed to verify the bundled engine images' signatures"; return 1; }
+  node "$SCRIPT_DIR/engine-images-lock-verify.mjs" --engine "$1"
 }
 
 # ===========================================================================
@@ -611,6 +669,7 @@ fi
 . "$SCRIPT_DIR/lib/first-admin.sh"
 FIRST_ADMIN_USERNAME="$(printf '%s' "${FIRST_ADMIN_USERNAME:-admin}" | tr '[:upper:]' '[:lower:]')"
 if [ -n "$FIRST_ADMIN_PASSWORD_FILE" ]; then
+  [ "$(uname -s)" = "Linux" ] || die "REGULAIT_FIRST_ADMIN_PASSWORD_FILE is supported on Linux only: run the installer interactively for the first admin."
   problem="$(fa_password_file_problem "$FIRST_ADMIN_PASSWORD_FILE")"
   [ -z "$problem" ] || die "REGULAIT_FIRST_ADMIN_PASSWORD_FILE: $problem"
   [ -n "$FIRST_ADMIN_EMAIL" ] || die "REGULAIT_FIRST_ADMIN_PASSWORD_FILE is set but REGULAIT_FIRST_ADMIN_EMAIL is not: the first admin needs an email."
@@ -752,9 +811,13 @@ if [ "$MODE" = "air_gapped" ]; then
   fi
   if [ "$DAEMON_OK" = "1" ] && [ -z "$IMAGE_BUNDLE" ]; then
     missing=""
-    for img in "$GATEWAY_IMAGE" postgres:16 caddy:2-alpine; do
+    # air-gapped runs the Caddy TAG (see CADDY_IMAGE_IDS), and only when its image id is a pinned one
+    for img in "$GATEWAY_IMAGE" postgres:16 "$CADDY_TAG"; do
       image_present "$img" || missing="$missing $img"
     done
+    if image_present "$CADDY_TAG" && ! caddy_image_id_ok; then
+      missing="$missing $CADDY_TAG(image-id-not-pinned)"
+    fi
     # In --check mode this is a finding, not a refusal: the point of check mode
     # is to exercise preflight + render, and an operator planning an air-gapped
     # install on a connected workstation legitimately has no images yet.
@@ -981,6 +1044,24 @@ YML
   db:
     pull_policy: never
   caddy:
+    image: $CADDY_TAG
+    pull_policy: never
+  executor-front:
+    image: $CADDY_TAG
+    pull_policy: never
+  executor-front-ca:
+    image: $CADDY_TAG
+    pull_policy: never
+  # ENG-IMG: the engine runners (profile engines) run the bundle's fixed tags; the task images are the same images,
+  # which the executor starts by image id. Without a bundle that carries them (--with-engines), nothing is found.
+  engine-promptfoo:
+    image: regulait/engine-promptfoo:bundled
+    pull_policy: never
+  engine-modelscan:
+    image: regulait/engine-modelscan:bundled
+    pull_policy: never
+  engine-garak:
+    image: regulait/engine-garak:bundled
     pull_policy: never
 YML
   fi
@@ -1035,6 +1116,16 @@ if [ -n "$IMAGE_BUNDLE" ]; then
   step "Loading pre-seeded images (air-gapped path — nothing is pulled)"
   docker load -i "$IMAGE_BUNDLE"
   ok "images loaded"
+  if [ "$MODE" = "air_gapped" ]; then
+    caddy_image_id_ok || die "the bundle's $CADDY_TAG is missing or is not the pinned image (allowed ids: $CADDY_IMAGE_IDS)"
+    ok "$CADDY_TAG is the pinned image"
+    for engine in $ENGINE_IDS; do
+      image_present "regulait/engine-$engine:bundled" || continue
+      engine_bundled_id_ok "$engine" || die "the bundle's regulait/engine-$engine:bundled is not the image engines/images.lock.json records for $engine"
+      engine_signature_ok "$engine" || die "regulait/engine-$engine:bundled has no signature that verifies (engines/signatures/$engine.sigstore.json, cosign v3.1.3 on PATH or in COSIGN): an unsigned or unverified engine image is never run"
+      ok "regulait/engine-$engine:bundled is the locked image, signed by the publish workflow on main"
+    done
+  fi
 fi
 
 step "Bringing the stack up"
@@ -1137,11 +1228,13 @@ first_admin_exec() {
 }
 FIRST_ADMIN_STATE="skipped"   # created | exists | skipped | failed
 FIRST_ADMIN_NAME=""
+FIRST_ADMIN_DEMO_ONLY=0       # 1 when every admin is a demo seed persona (first-admin.js --status says so)
 FA_STATUS_RC=0
 FA_STATUS_LINE="$(first_admin_exec --status </dev/null 2>&1)" || FA_STATUS_RC=$?
 case "$FA_STATUS_RC" in
   3)
     ok "an active admin already exists — skipped, nothing changed"
+    case "$FA_STATUS_LINE" in *"only the demo seed's personas are admins"*) FIRST_ADMIN_DEMO_ONLY=1 ;; esac
     FIRST_ADMIN_STATE="exists" ;;
   0)
     if [ -n "$FIRST_ADMIN_PASSWORD_FILE" ]; then
@@ -1231,7 +1324,7 @@ case "$FIRST_ADMIN_STATE" in
     if [ "$FIRST_ADMIN_STATE" = "created" ]; then
       FA_HEADLINE="Created: '$FIRST_ADMIN_NAME'. Sign in at the URL above with the password you chose.
     The first sign-in enrols an authenticator app (MFA is required for admins)."
-    elif [ "$SEED_DEMO" = "1" ]; then
+    elif [ "$SEED_DEMO" = "1" ] && [ "$FIRST_ADMIN_DEMO_ONLY" = "1" ]; then
       # --seed-demo: the demo seed made its personas first, so the demo admin IS the existing admin
       FA_HEADLINE="The demo dataset is loaded (--seed-demo), so its personas are the admins
     (admin@regulait.local) and you were not asked for one. Their one-time passwords are
@@ -1239,19 +1332,22 @@ case "$FIRST_ADMIN_STATE" in
     own account, sign in as the demo admin, create your admin under Admin -> Users, then
     deactivate the demo personas. With the token retired, the demo seed that re-runs at
     each gateway start can no longer act and logs a failure; the loaded data stays."
+    elif [ "$SEED_DEMO" = "1" ]; then
+      # a real admin existed, so the demo seed's guard (seed-demo-guard.ts) refused: nothing was loaded
+      FA_HEADLINE="An admin of your own already exists, so --seed-demo loaded nothing: the demo seed
+    never touches a database with a real admin (the refusal is in docker compose -p $PROJECT logs gateway).
+    This run did not change any account."
     else
       FA_HEADLINE="An admin already exists; this run did not change any account."
     fi
-    if [ "$BOOTSTRAP_RETIRED" = "1" ]; then
-      FA_TOKEN_LINE="The bootstrap token is retired."
-      if [ "$TOKEN_RETIRED_NOW" = "1" ]; then
-        FA_TOKEN_LINE="The bootstrap token is retired: removed from $ENV_FILE, gateway restarted."
-      fi
-    elif [ "$TOKEN_REOPENED" = "1" ]; then
+    # created|exists always retires the token above (or dies trying) unless --admin-token re-opened it
+    if [ "$TOKEN_REOPENED" = "1" ]; then
       FA_TOKEN_LINE="The bootstrap token is OPEN: you re-opened it with --admin-token. Re-run without
     --admin-token to retire it again."
+    elif [ "$TOKEN_RETIRED_NOW" = "1" ]; then
+      FA_TOKEN_LINE="The bootstrap token is retired: removed from $ENV_FILE, gateway restarted."
     else
-      FA_TOKEN_LINE="The bootstrap token is still live: re-run this installer to retire it."
+      FA_TOKEN_LINE="The bootstrap token is retired."
     fi
     cat <<SUMMARY
 

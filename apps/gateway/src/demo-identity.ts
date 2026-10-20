@@ -6,7 +6,10 @@
  *    (FX2). The prep tooling acts as Ada through keys, so the seed enrols her
  *    TOTP through the real routes before minting one, and prints the
  *    authenticator secret ONCE beside her one-time password (`enrolAdminTotp`
- *    below). Dana and Avery are not admins.
+ *    below). Dana and Avery are not admins. Morgan Reyes, the security lead, is
+ *    the demo's second admin (ADR-0197 addendum): the shipped remediation
+ *    sign-off is owed to an admin OTHER than the initiator, so the seed enrols
+ *    her the same way, in the same first-admin-setup window (`enrolAdminsTotp`).
  *  - Passwords need three character classes; the one-time passwords the seed
  *    prints already have four, and `demo:set-passwords` checks the presenter's
  *    own password against the same policy.
@@ -18,6 +21,14 @@
 import { totpCode, totpStep } from "./totp.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** the demo's second admin persona: fictional, created and MFA-enrolled by the seed beside Ada (ADR-0197 addendum) */
+export const DEMO_SECURITY_LEAD = Object.freeze({
+  email: "morgan@regulait.local",
+  displayName: "Morgan Reyes",
+  username: "morgan",
+  role: "Security Lead",
+});
 
 /** the persona keys `seed` prints for the presenter (programmatic / IDE use) */
 export const SEED_PERSONA_KEY_TTL_DAYS = 30;
@@ -122,22 +133,54 @@ export async function enrolAdminTotp(
   bootstrapToken: string,
   userId: string,
 ): Promise<AdminTotpEnrolment> {
+  return (await enrolAdminsTotp(app, bootstrapToken, [userId]))[0]!;
+}
+
+/**
+ * `enrolAdminTotp` for several admin personas at once (Ada and Morgan, ADR-0197 addendum). Issuing a password is a
+ * settings_relax step-up, which the bootstrap credential passes only while NO admin can step up (B4S-06), and the
+ * first activation ends that window. So every one-time password is issued first, while the window is open, and only
+ * then does each persona sign in, enrol and activate (none of which is a step-up). One result per id, in order.
+ */
+export async function enrolAdminsTotp(
+  app: AnyInjector,
+  bootstrapToken: string,
+  userIds: readonly string[],
+): Promise<AdminTotpEnrolment[]> {
   const boot = { authorization: `Bearer ${bootstrapToken}` };
-  const csrf = { "x-regulait-csrf": "1" };
   const list = await app.inject({ method: "GET", url: "/v1/users", headers: boot });
-  const user = ((list.json() as { users?: Array<Record<string, unknown>> }).users ?? []).find((u) => u.id === userId);
-  if (!user) return { status: "refused", reason: `user ${userId} not found` };
-  if (user.totpEnabled === true) return { status: "already" };
-  const email = String(user.email);
-  if (user.hasPassword === true) {
-    return {
-      status: "refused",
-      reason: `${email} already has a password but no TOTP: sign in as ${email} once (the app enrols TOTP at that sign-in), then re-run`,
-    };
+  const listed = (list.json() as { users?: Array<Record<string, unknown>> }).users ?? [];
+  const issued: Array<AdminTotpEnrolment | { status: "issued"; email: string; password: string }> = [];
+  for (const userId of userIds) {
+    const user = listed.find((u) => u.id === userId);
+    if (!user) {
+      issued.push({ status: "refused", reason: `user ${userId} not found` });
+      continue;
+    }
+    if (user.totpEnabled === true) {
+      issued.push({ status: "already" });
+      continue;
+    }
+    const email = String(user.email);
+    if (user.hasPassword === true) {
+      issued.push({
+        status: "refused",
+        reason: `${email} already has a password but no TOTP: sign in as ${email} once (the app enrols TOTP at that sign-in), then re-run`,
+      });
+      continue;
+    }
+    const r = await app.inject({ method: "POST", url: `/v1/users/${userId}/set-initial-password`, headers: boot, payload: {} });
+    if (r.statusCode !== 200) issued.push({ status: "refused", reason: `one-time password: ${r.statusCode}` });
+    else issued.push({ status: "issued", email, password: (r.json() as { password: string }).password });
   }
-  const issued = await app.inject({ method: "POST", url: `/v1/users/${userId}/set-initial-password`, headers: boot, payload: {} });
-  if (issued.statusCode !== 200) return { status: "refused", reason: `one-time password: ${issued.statusCode}` };
-  const password = (issued.json() as { password: string }).password;
+  const out: AdminTotpEnrolment[] = [];
+  for (const i of issued) out.push(i.status === "issued" ? await activateTotp(app, i.email, i.password) : i);
+  return out;
+}
+
+/** sign in with the one-time password, enrol and activate TOTP, sign out */
+async function activateTotp(app: AnyInjector, email: string, password: string): Promise<AdminTotpEnrolment> {
+  const csrf = { "x-regulait-csrf": "1" };
   const login = await app.inject({ method: "POST", url: "/auth/login", headers: csrf, payload: { identifier: email, password } });
   const setCookie = ([] as unknown[]).concat(login.headers["set-cookie"] ?? []).map(String);
   const session = setCookie.map((c) => /^regulait_session=([^;]+)/.exec(c)?.[1]).find(Boolean);

@@ -299,7 +299,7 @@ export async function addTracesToDataset(db: Db, input: AddTracesToDatasetInput)
       );
     } catch (e) {
       // a webhook is a notification, never a reason to undo an audited write
-      input.log?.warn({ err: (e as Error).message }, "trace.added_to_dataset webhook enqueue failed");
+      input.log?.warn({ err: e }, "trace.added_to_dataset webhook enqueue failed");
     }
   }
 

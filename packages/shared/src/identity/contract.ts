@@ -19,7 +19,7 @@ import { z } from "zod";
 // ---------------------------------------------------------------------------
 
 /** what a `workload_identities` row identifies (exactly one subject FK, or none for the external kinds) */
-export const WORKLOAD_IDENTITY_KINDS = ["agent", "builder_agent", "engine_runner", "worker_runtime", "pdp"] as const;
+export const WORKLOAD_IDENTITY_KINDS = ["agent", "builder_agent", "engine_runner", "worker_runtime", "pdp", "endpoint_agent"] as const;
 export type WorkloadIdentityKind = (typeof WORKLOAD_IDENTITY_KINDS)[number];
 
 /** the kinds whose subject is a row of ours, and the column that names it */
@@ -29,6 +29,8 @@ export const WORKLOAD_IDENTITY_SUBJECT_COLUMN: Readonly<Record<WorkloadIdentityK
   engine_runner: "engineRunnerId",
   worker_runtime: null,
   pdp: null,
+  // ADR-0195 SD4b: a device user's agent. Its device is `endpoint_agent_identities` (migration 0207), not a column here
+  endpoint_agent: null,
 };
 
 /** `revoked` is terminal (a trigger in migration 0180 refuses leaving it) */
@@ -317,8 +319,18 @@ export const WORKLOAD_CLIENT_AUTH_METHODS = [
   "tls_client_auth",
   "self_signed_tls_client_auth",
   "spiffe_svid",
+  // ADR-0188 S9 follow-up: a SPIFFE JWT-SVID as the client assertion (draft-ietf-oauth-spiffe-client-auth). A bearer
+  // credential, so it is OFF by default (not in `WORKLOAD_CLIENT_AUTH_METHODS_DEFAULT`); adding it is a relaxation
+  "spiffe_jwt_svid",
 ] as const;
 export type WorkloadClientAuthMethod = (typeof WORKLOAD_CLIENT_AUTH_METHODS)[number];
+/** the strict default (migration 0180's column default): every method but the bearer JWT-SVID */
+export const WORKLOAD_CLIENT_AUTH_METHODS_DEFAULT: readonly WorkloadClientAuthMethod[] = [
+  "private_key_jwt",
+  "tls_client_auth",
+  "self_signed_tls_client_auth",
+  "spiffe_svid",
+];
 
 /** `mcp_servers.identity_propagation` (decision 8; OWNER DECISION 6: default `none`) */
 export const IDENTITY_PROPAGATION_MODES = ["none", "signed_assertion"] as const;
@@ -339,6 +351,8 @@ export const TOKEN_TYPE_ACCESS_TOKEN = "urn:ietf:params:oauth:token-type:access_
 export const TOKEN_TYPE_DELEGATION_PROOF = "urn:regulait:params:oauth:token-type:delegation-proof" as const;
 export const TOKEN_TYPE_DELEGATION_AUTHZ = "urn:regulait:params:oauth:token-type:delegation-authz" as const;
 export const CLIENT_ASSERTION_TYPE_JWT_BEARER = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer" as const;
+/** draft-ietf-oauth-spiffe-client-auth §3.1: a SPIFFE JWT-SVID as the client assertion */
+export const CLIENT_ASSERTION_TYPE_JWT_SPIFFE = "urn:ietf:params:oauth:client-assertion-type:jwt-spiffe" as const;
 /** JOSE `typ` of the human's one-use delegation proof (decision 15) */
 export const DELEGATION_PROOF_TYP = "regulait-delegation-proof+jwt" as const;
 /** JOSE `typ` of a parent's delegation authorization (decision 23) */
@@ -400,7 +414,7 @@ export const JWK_THUMBPRINT_URI_PREFIX = "urn:ietf:params:oauth:jwk-thumbprint:s
  * resource (RFC 8707, a path under the issuer) each may name. A runner's token
  * reaches the runner routes; a PDP client's reaches `POST /v1/authz/check`.
  */
-export const WORKLOAD_SELF_RESOURCE_PATHS = { engine_runner: "/v1/engine-runner", pdp: "/v1/authz/check" } as const;
+export const WORKLOAD_SELF_RESOURCE_PATHS = { engine_runner: "/v1/engine-runner", pdp: "/v1/authz/check", endpoint_agent: "/v1/endpoint-agent" } as const;
 export type WorkloadSelfKind = keyof typeof WORKLOAD_SELF_RESOURCE_PATHS;
 export const WORKLOAD_SELF_KINDS = Object.keys(WORKLOAD_SELF_RESOURCE_PATHS) as WorkloadSelfKind[];
 /**
@@ -517,6 +531,8 @@ export const createWorkloadIdentitySchema = z
   })
   .strict()
   .superRefine((v, ctx) => {
+    // ADR-0195 SD4b: an endpoint agent's identity is made only by its own registration with a device ticket
+    if (v.kind === "endpoint_agent") ctx.addIssue({ code: z.ZodIssueCode.custom, message: "an endpoint agent identity is created by the agent's registration", path: ["kind"] });
     const want = WORKLOAD_IDENTITY_SUBJECT_COLUMN[v.kind];
     for (const k of ["agentId", "builderAgentId", "engineRunnerId"] as const) {
       const present = v[k] !== undefined;
@@ -855,7 +871,8 @@ export interface WorkloadIdentityRevokeResult {
   /** unexpired external tokens naming the identity (as actor, or authenticated by one of its credentials) */
   tokensRevoked: number;
   /** delegation grants revoked (`identity_revoked`, descendants `cascade`) */
-  grantsRevoked: string[];  /**
+  grantsRevoked: string[];
+  /**
    * the grant cascade runs after the revocation commits (security review Low 6): `incomplete` means some grant could
    * not be ended on the record (a `workload-identity-cascade-incomplete` row says which); each is still refused at
    * its next use, because what it rests on is revoked
@@ -870,7 +887,8 @@ export interface WorkloadCredentialRevokeResult {
   /** unexpired tokens it authenticated or that are bound to its key (decision 12) */
   tokensRevoked: number;
   /** grants it authenticated, and their descendants (`credential_revoked` / `cascade`) */
-  grantsRevoked: string[];  /**
+  grantsRevoked: string[];
+  /**
    * the grant cascade runs after the revocation commits (security review Low 6): `incomplete` means some grant could
    * not be ended on the record (a `workload-identity-cascade-incomplete` row says which); each is still refused at
    * its next use, because what it rests on is revoked
@@ -943,6 +961,34 @@ export const IDENTITY_PICKER_MAX = 1000;
 export const IDENTITY_PICKER_TOOLS_PER_SERVER = 500;
 export const IDENTITY_PICKER_TOOLS_TOTAL = 5000;
 
+/** the picker lists `truncatedLists` may name, in response order (`tools`: any server's tool list, or all of them) */
+export const IDENTITY_PICKER_LISTS = [
+  "sponsors",
+  "subjects.agent",
+  "subjects.builder_agent",
+  "subjects.engine_runner",
+  "environments",
+  "servers",
+  "agents",
+  "connectors",
+  "roles",
+  "workerIdentities",
+  "tools",
+] as const;
+export type IdentityPickerListName = (typeof IDENTITY_PICKER_LISTS)[number];
+
+/**
+ * The lists that were cut, in `IDENTITY_PICKER_LISTS` order: each list read up to one past the cap reports how many
+ * rows it read (more than `max` means cut); `tools` reports its own verdict (per-server and total caps).
+ */
+export function identityPickerTruncatedLists(
+  read: Readonly<Record<Exclude<IdentityPickerListName, "tools">, number>>,
+  toolsCut: boolean,
+  max: number = IDENTITY_PICKER_MAX,
+): IdentityPickerListName[] {
+  return IDENTITY_PICKER_LISTS.filter((l) => (l === "tools" ? toolsCut : read[l] > max));
+}
+
 /**
  * `GET /v1/identity/picker-sources`: what the identity forms may offer. Only
  * objects that exist and that an admin may name; a picker never offers a free
@@ -968,6 +1014,8 @@ export interface IdentityPickerSourcesView {
   workerIdentities: IdentityPickerOption[];
   /** S6: true when any list above reached `IDENTITY_PICKER_MAX`, or a tool list its per-server or total cap */
   truncated: boolean;
+  /** which lists were cut (`truncated` is true exactly when this is not empty), so a form can say which one */
+  truncatedLists: IdentityPickerListName[];
 }
 
 export interface IdentitySigningKeyView {
@@ -1005,8 +1053,8 @@ export interface IdentitySigningKeyListView {
 export const IDENTITY_SIGNING_KID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 
 /**
- * `POST /v1/identity/signing-keys/rotate` (S3; admin, `identity_manage`
- * step-up, audited). The new key's PRIVATE half is a deploy-time secret
+ * `POST /v1/identity/signing-keys/rotate` (S3; admin, a `key_management`
+ * step-up bound to the key rotated to, migration 0203; audited). The new key's PRIVATE half is a deploy-time secret
  * (`REGULAIT_IDENTITY_SIGNING_KEY`), never sent here: the operator deploys it
  * first, then this activates it and retires the current signer (overlap keeps
  * the retired key's public half in the JWKS until every token it signed has
@@ -1020,6 +1068,181 @@ export type RotateIdentitySigningKey = z.infer<typeof rotateIdentitySigningKeySc
 
 /** `POST /v1/identity/signing-keys/:kid/revoke` (S3): compromise; every token it signed is refused; never undone */
 export const revokeIdentitySigningKeySchema = z.object({}).strict();
+
+// ---------------------------------------------------------------------------
+// ADR-0188 S9 — SPIFFE trust bundles, in audited storage (decisions 10, 12, 21)
+// ---------------------------------------------------------------------------
+
+/** the largest bundle text accepted (a SPIFFE JWKS or a PEM file) */
+export const SPIFFE_BUNDLE_MAX_BYTES = 256 * 1024;
+/** the most X.509 authorities one bundle may hold */
+export const SPIFFE_BUNDLE_MAX_AUTHORITIES = 64;
+/** how the bundle was supplied: concatenated PEM certificates, or the SPIFFE bundle format (an RFC 7517 JWKS with `x5c`) */
+export const SPIFFE_BUNDLE_FORMATS = ["pem", "spiffe_jwks"] as const;
+export type SpiffeBundleFormat = (typeof SPIFFE_BUNDLE_FORMATS)[number];
+/** `active` is trusted; `superseded` was replaced (rotation, nothing revoked); `revoked` ended with a cascade */
+export const SPIFFE_BUNDLE_STATUSES = ["active", "superseded", "revoked"] as const;
+export type SpiffeBundleStatus = (typeof SPIFFE_BUNDLE_STATUSES)[number];
+/** the environment variable S5 read bundles from; ignored from S9 on (the boot log and the list view say so) */
+export const SPIFFE_TRUST_BUNDLES_LEGACY_ENV = "REGULAIT_SPIFFE_TRUST_BUNDLES";
+
+/**
+ * `POST /v1/identity/spiffe-trust-bundles` (S9; admin, `identity_manage`
+ * step-up bound to the trust domain, the bundle's digest and the bundle it
+ * replaces, audited). Uploads the X.509 authorities of one trust domain. A
+ * domain has at most one active bundle: the first upload names
+ * `replacesBundleId: null`; a later one must name the active bundle's id
+ * (compare-and-set), which it supersedes. Nothing is ever fetched: the bundle
+ * is uploaded (air-gapped safe).
+ */
+export const putSpiffeTrustBundleSchema = z
+  .object({
+    trustDomain: z.string().regex(SPIFFE_TRUST_DOMAIN_PATTERN),
+    bundle: z.string().min(1).max(SPIFFE_BUNDLE_MAX_BYTES),
+    replacesBundleId: z.string().uuid().nullable(),
+  })
+  .strict();
+export type PutSpiffeTrustBundle = z.infer<typeof putSpiffeTrustBundleSchema>;
+
+/** `POST /v1/identity/spiffe-trust-bundles/:bundleId/revoke` (S9): the domain's SPIFFE trust ends, with decision 12's cascade */
+export const revokeSpiffeTrustBundleSchema = z.object({}).strict();
+
+/** one X.509 authority of a bundle: public facts only */
+export interface SpiffeTrustAuthorityView {
+  /** base64url SHA-256 of the certificate DER */
+  thumbprint: string;
+  subject: string;
+  notBefore: string;
+  notAfter: string;
+}
+
+/** one JWT authority (a `jwt-svid` key) of a bundle: public facts only */
+export interface SpiffeJwtAuthorityView {
+  kid: string;
+  kty: string;
+  /** the curve of an EC key, else null */
+  crv: string | null;
+  /** RFC 7638 SHA-256 thumbprint (base64url) */
+  thumbprint: string;
+}
+
+export interface SpiffeTrustBundleView {
+  id: string;
+  trustDomain: string;
+  status: SpiffeBundleStatus;
+  format: SpiffeBundleFormat;
+  /**
+   * hex SHA-256 over the sorted authority thumbprints (what the step-up binds). A bundle with JWT authorities covers
+   * them too (S9 follow-up), so a JWT-key change is never `spiffe_bundle_unchanged`
+   */
+  digest: string;
+  authorities: SpiffeTrustAuthorityView[];
+  /** the bundle's `jwt-svid` keys (S9 follow-up: stored, they verify JWT-SVIDs) */
+  jwtAuthorities: SpiffeJwtAuthorityView[];
+  /** `jwt-svid` keys of a bundle recorded before the S9 follow-up: counted, not stored (always 0 since) */
+  jwtAuthoritiesIgnored: number;
+  /** `upload`: an admin uploaded it; `fetch`: fetched from the domain's bundle endpoint */
+  source: SpiffeBundleSource;
+  /** a fetched bundle's `spiffe_sequence`, when it carried one */
+  sequence: number | null;
+  createdBy: string;
+  createdAt: string;
+  supersededAt: string | null;
+  supersededByBundleId: string | null;
+  revokedAt: string | null;
+  revokedBy: string | null;
+}
+
+/** `GET /v1/identity/spiffe-trust-bundles`: every bundle ever recorded, active first */
+export interface SpiffeTrustBundleListView {
+  items: SpiffeTrustBundleView[];
+  /** true when `REGULAIT_SPIFFE_TRUST_BUNDLES` is set: it is ignored, and the admin should remove it */
+  legacyEnvironmentIgnored: boolean;
+}
+
+/** where a stored bundle came from */
+export const SPIFFE_BUNDLE_SOURCES = ["upload", "fetch"] as const;
+export type SpiffeBundleSource = (typeof SPIFFE_BUNDLE_SOURCES)[number];
+/** the most JWT authorities (`jwt-svid` keys) one bundle may hold */
+export const SPIFFE_BUNDLE_MAX_JWT_AUTHORITIES = 64;
+
+// ---------------------------------------------------------------------------
+// ADR-0188 S9 follow-up — the SPIFFE bundle endpoint (SPIFFE Federation §5)
+// ---------------------------------------------------------------------------
+
+/** SPIFFE Federation §5.2: the two endpoint profiles. A profile is never inferred from the URL */
+export const SPIFFE_BUNDLE_ENDPOINT_PROFILES = ["https_web", "https_spiffe"] as const;
+export type SpiffeBundleEndpointProfile = (typeof SPIFFE_BUNDLE_ENDPOINT_PROFILES)[number];
+/** the refresh interval bounds a `spiffe_refresh_hint` is clamped to, and the default when a bundle names none (§5: five minutes) */
+export const SPIFFE_REFRESH_HINT_FLOOR_SECONDS = 60;
+export const SPIFFE_REFRESH_HINT_CEILING_SECONDS = 24 * 3600;
+export const SPIFFE_REFRESH_DEFAULT_SECONDS = 300;
+/**
+ * A FETCHED bundle is trusted for at most this long after its last successful fetch. A failed refresh keeps the last
+ * good bundle (it never clears trust), but only until then: after it, the domain's fetched bundle authenticates
+ * nothing until a fetch succeeds again (fail closed). An uploaded bundle has no such limit (it is pinned).
+ */
+export const SPIFFE_FETCHED_BUNDLE_MAX_AGE_SECONDS = 24 * 3600;
+/** a fetch's whole budget (connect, headers, body) */
+export const SPIFFE_BUNDLE_FETCH_TIMEOUT_MS = 10_000;
+
+/**
+ * `PUT /v1/identity/spiffe-bundle-endpoints/:trustDomain` (admin, `identity_manage` step-up bound to every field,
+ * audited). Off by default (ADR-0180): no domain has an endpoint until an admin sets one; `enabled: false` stops
+ * fetching (the last fetched bundle stays until it is replaced or revoked, and lapses at its maximum age). The URL
+ * must be `https` with no userinfo, and is checked against the egress allow-list when it is set and at every fetch.
+ * `https_spiffe` names the endpoint server's SPIFFE ID; its trust domain must already have an active bundle (upload
+ * one first to bootstrap, SPIFFE Federation §5.2.2).
+ */
+export const putSpiffeBundleEndpointSchema = z
+  .object({
+    url: z.string().min(1).max(2048),
+    profile: z.enum(SPIFFE_BUNDLE_ENDPOINT_PROFILES),
+    endpointSpiffeId: z.string().max(SPIFFE_ID_MAX_LENGTH).nullable(),
+    enabled: z.boolean(),
+  })
+  .strict()
+  .superRefine((v, ctx) => {
+    if ((v.profile === "https_spiffe") !== (v.endpointSpiffeId !== null)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["endpointSpiffeId"], message: "https_spiffe names the endpoint server's SPIFFE ID; https_web names none" });
+    }
+    if (v.endpointSpiffeId !== null && !isSpiffeId(v.endpointSpiffeId)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["endpointSpiffeId"], message: "not a SPIFFE ID" });
+    }
+  });
+export type PutSpiffeBundleEndpoint = z.infer<typeof putSpiffeBundleEndpointSchema>;
+
+export interface SpiffeBundleEndpointView {
+  trustDomain: string;
+  url: string;
+  profile: SpiffeBundleEndpointProfile;
+  endpointSpiffeId: string | null;
+  enabled: boolean;
+  /** the next scheduled fetch, while enabled */
+  nextRefreshAt: string | null;
+  lastAttemptAt: string | null;
+  lastSuccessAt: string | null;
+  /** the last failure's code (never the response text), cleared by a success */
+  lastErrorCode: string | null;
+  consecutiveFailures: number;
+  /** the fetched bundle authenticates until then; null before the first success */
+  trustUntil: string | null;
+  updatedBy: string;
+  updatedAt: string;
+}
+
+export interface SpiffeBundleEndpointListView {
+  items: SpiffeBundleEndpointView[];
+}
+
+export interface SpiffeTrustBundleRevokeResult {
+  bundle: SpiffeTrustBundleView;
+  /** unexpired tokens authenticated by a SPIFFE ID credential in this domain, revoked in the same transaction */
+  tokensRevoked: number;
+  grantsRevoked: string[];
+  cascade: "complete" | "incomplete";
+  grantsNotRevoked: string[];
+}
 
 // ---------------------------------------------------------------------------
 // The routes (S1 registers every one as a 501 stub)
@@ -1068,4 +1291,10 @@ export const IDENTITY_ROUTES: ReadonlyArray<{ method: "GET" | "POST" | "PUT" | "
   { method: "GET", path: "/v1/identity/signing-keys", cls: "admin", slice: "S3" },
   { method: "POST", path: "/v1/identity/signing-keys/rotate", cls: "admin", slice: "S3" },
   { method: "POST", path: "/v1/identity/signing-keys/:kid/revoke", cls: "admin", slice: "S3" },
+  { method: "GET", path: "/v1/identity/spiffe-trust-bundles", cls: "admin", slice: "S9" },
+  { method: "POST", path: "/v1/identity/spiffe-trust-bundles", cls: "admin", slice: "S9" },
+  { method: "POST", path: "/v1/identity/spiffe-trust-bundles/:bundleId/revoke", cls: "admin", slice: "S9" },
+  // S9 follow-up: the SPIFFE bundle endpoint (fetch)
+  { method: "GET", path: "/v1/identity/spiffe-bundle-endpoints", cls: "admin", slice: "S9" },
+  { method: "PUT", path: "/v1/identity/spiffe-bundle-endpoints/:trustDomain", cls: "admin", slice: "S9" },
 ];

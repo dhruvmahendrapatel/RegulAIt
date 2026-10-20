@@ -403,7 +403,7 @@ test("X14 keyboard: acknowledgement interstitial announces entry and focuses the
   await expect(gate).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Feedback and appeals", level: 1 })).toBeFocused();
   expect(cap.acks).toHaveLength(1);
-  await expect(page.locator('[aria-live="polite"]')).toContainText("Acknowledged");
+  await expect(page.locator('[aria-live="polite"]').filter({ hasText: "Acknowledged" })).toContainText("Acknowledged");
   await page.screenshot({ path: testInfo.outputPath("x14-acknowledgement.png") });
 });
 

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 // an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
 import { relaxStepUpAround } from "./testing/step-up-posture.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,7 +11,6 @@ import {
   auditLog,
   createDb,
   desc,
-  egressAllowHosts,
   eq,
   projects,
   runMigrations,
@@ -163,10 +163,15 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await db.delete(egressAllowHosts).where(eq(egressAllowHosts.id, allowHostId));
-  receiver.closeAllConnections();
-  await new Promise<void>((r) => receiver.close(() => r()));
-  await app.close();
+  // M-068: remove the loopback allow entry this file created, while the app is up; asserted last
+  const loopback = await removeEgressAllowEntry(app, AUTH, { id: allowHostId });
+  try {
+    receiver.closeAllConnections();
+    await new Promise<void>((r) => receiver.close(() => r()));
+    await app.close();
+  } finally {
+    loopback.assertRemoved();
+  }
 });
 
 describe("the exhausted project blocks a connector invoke BEFORE the upstream is contacted", () => {

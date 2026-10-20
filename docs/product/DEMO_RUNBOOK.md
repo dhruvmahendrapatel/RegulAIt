@@ -4,6 +4,10 @@ For a **capability demo** driven by us, to a prospective customer. It is not a t
 nothing in it is production: every provider is a mock, every upstream is a loopback double, and every
 credential it mints is printed once and dies with the database.
 
+Sections 1-6 describe that local, seeded environment. **§7** adds what the 2026-11-01 demo needs on top: the hosted
+dev instance, the real-account discovery sources (read-only scans of a GitLab demo group, a non-production AWS sandbox
+account, an Azure subscription and an endpoint device, ADR-0197), and the pre-demo checklist.
+
 ---
 
 ## 1. Stand it up (about three minutes)
@@ -44,8 +48,10 @@ pnpm --filter @regulait/gateway demo:mcp
 #     the NIST and EU packs, and creates the use case (d) is about.
 pnpm --filter @regulait/gateway demo:setup
 
-# (4b) OPTIONAL (ADR-0174) — one password you chose for Ada, Dana and Avery instead of the
-#     one-time passwords from (2). Read from the environment or a 0600 secret file, checked
+# (4b) OPTIONAL (ADR-0174) — one password you chose for Ada, Dana, Avery and Morgan (the
+#     security lead, the second admin of ADR-0197's addendum) instead of the one-time passwords
+#     from (2). It also clears the authenticators the seed enrolled for the two admins, Ada and
+#     Morgan (ADR-0181 FX2): each enrols her own at her next sign-in (below). Read from the environment or a 0600 secret file, checked
 #     against the password policy, never printed, audited without the password. Runs only
 #     AFTER (4): it requires the ephemeral demo licence (4) installs, and refuses with no
 #     licence, an expired one, or a customer licence. (demo:prepare runs (4) for you.)
@@ -58,9 +64,13 @@ pnpm --filter @regulait/gateway demo:set-passwords && unset REGULAIT_DEMO_USER_P
 HOST=127.0.0.1 REGULAIT_OFFLINE_CHECKS=1 pnpm --filter @regulait/gateway start
 ```
 
-**Ada enrols two-factor once (ADR-0181).** MFA is required for admins by default. At Ada's first
-sign-in the app shows an enrolment secret: add it to an authenticator app on the presenting phone
-and type the 6-digit code. Every later sign-in as Ada asks for a code. Dana and Avery are not
+**Ada and Morgan enrol two-factor once (ADR-0181).** MFA is required for admins by default, and
+both are admins. Without `demo:set-passwords` (4b), `seed` has already enrolled both and printed
+each one's otpauth URI once in its output: add the two URIs to an authenticator app on the
+presenting phone. After (4b), which clears the seed's enrolment, each admin enrols at her next
+sign-in: the app shows an enrolment secret, add it to the authenticator and type the 6-digit code. Every later sign-in asks for a code. **Morgan enrols
+before her Approve in `/ui/inbox`** (the remediation sign-off, script S3): until she has, `demo:check`
+FAILs "1 Remediation plan" and its hint says to sign in as her and enrol. Dana and Avery are not
 admins and are not asked. Do this during preparation, not in front of the audience. The API keys
 that `seed` and `demo:setup` print expire after 30 days; the keys the intake, traffic, check and
 gate scripts mint for their own run expire after one day.
@@ -434,3 +444,94 @@ The §1.1 native path was walked end to end on 2026-09-26 — fresh database, `s
 
 Re-walk this after any change to the seed, the preset or the kill switch. A runbook that has not
 been run is a guess — the `openssl rand -base64 32` line that used to be in §1.1 is the proof.
+
+---
+
+## 7. The 2026-11-01 demo: hosted dev instance and real-account discovery (ADR-0197)
+
+This section is for `DEMO_SCRIPT_2026-11-01.md`. Sections 1-6 above still describe the local, seeded environment;
+the fallback stack below is prepared the same way. **Every step in this section is pending execution** (M-041)
+unless it says otherwise: none of it has been run yet. The infrastructure itself (the AWS sandbox account, the Azure
+app registration, the GitLab demo group, the public federation issuer) is Terraform and runbooks written by a
+separate lane under `infra/`; the owner runs or approves every apply (ADR-0197 decision 6). Steps that depend on it
+point there rather than repeating commands nobody has run.
+
+### 7.1 What runs where
+
+- **Live instance:** the hosted dev instance over public HTTPS (ADR-0197 decision 1). The laptop is only a browser.
+  Its database carries the governance seed and the four real discovery sources, and **only real findings**: what the real
+  GitLab, AWS and Azure scans and the real endpoint device find (owner, 2026-10-19, ADR-0197 addendum decision 3,
+  option A). No seeded discovery dataset. Prepare it from empty with
+  `pnpm --filter @regulait/gateway demo:prepare --live`: the same pipeline without either `demo:shadow` phase, with
+  `demo:intake --live` (the shipped signature catalogues, not the synthetic SaaS export), ending in
+  `demo:check --live`. That check FAILs on any trace of the fictional dataset, and on "1 Real discovery sources" until
+  one real source is enabled, so on a fresh database it ends with that one FAIL: add the sources (§7.2) and re-run
+  `pnpm --filter @regulait/gateway demo:check --live`. CI runs both on an empty database (`demo.yml`, `demo-live`);
+  on the dev instance host this is **pending execution**.
+- **Fallback:** the local docker compose stack on the presenting laptop (§1.3), prepared with `demo:prepare` the night
+  before (addendum, decision 4), including the seeded discovery dataset (ADR-0197 decision 7). It must pass
+  `demo:check` with 0 fail; read the pass count off its output. For the endpoint device to enrol, the stack needs
+  `REGULAIT_PUBLIC_URL` and the identity signing key (the `demo:check` hint says so). **Pending execution.**
+- **Deploy gate:** `demo:gate` runs live from a terminal on the dev instance host (SSH or Session Manager; addendum,
+  decision 2), with the T-24h captured output as the fallback. The command and environment on that host are
+  **pending execution** and are written here only once run there.
+- **Recording:** a screen recording of one real scan, Discovery sources → Run now → Recent runs → Shadow-AI
+  discovery, captured from the live instance. Kept as a local file on the presenting laptop.
+
+### 7.2 Discovery sources on the live instance (pending execution)
+
+Each source is added on `/ui/admin/shadow-ai/discovery-sources` (**Add a source** → **Add source (disabled)**), given
+a credential (**Add credential** → **Save credential**), then **Enable**d with a step-up. The scanner's API host is
+added to the egress allow list first (ADR-0195 decision 8; adding an allow entry is a `settings_relax` step-up).
+Target and credential fields, from the code on `main`:
+
+| Source kind (Kind label) | Target (key=value lines) | Scope | Credential |
+|---|---|---|---|
+| `repo_gitlab` (GitLab repositories) | `namespace=<demo-group>`; optional `baseUrl` (https), `history`, `historyDepth` (`REPO_TARGET_KEYS`) | the repositories as `group/project`, or organisation-level | **static** read-only group access token, scopes `read_api` and `read_repository` (ADR-0197 decision 5). Static is a relaxation: the step-up is asked and the posture page lists it. The repo scanner refuses a federated credential today |
+| `cloud_aws` (AWS) | `accountId=<sandbox-account-id>`; optional `stsRegion`, `trailBucket`, `trailBucketRegion`, `trailPrefix`, `federation=oidc` (default) or `principal` | the regions, or organisation-level (every enabled region) | **federated**, public config `roleArn=<read-only role in the sandbox>`. The role trusts the federation issuer (ADR-0195 SD2b; owner decision Q12 keeps the trust mode per source, default OIDC) |
+| `cloud_azure` (Azure) | `tenantId=<tenant-id>`; optional `managementGroupId`, `logAnalyticsWorkspaceIds`, `authorityHost` | the subscription ids, or organisation-level (needs `managementGroupId`) | **federated**, public config `tenantId`, `clientId` of the app registration whose federated credential trusts the issuer |
+| `endpoint_agent` (RegulAIt endpoint agent) | none: the gateway checks a target only for AWS (`targetProblem`); leave the box empty | tick **Organisation-level scope** (the add form asks for a scope on every kind); fed by uploads, no schedule | none. Enrol the device: **Endpoint agent enrolment** → choose the source → **Token name**, **Device cap (required)**, **Expires in (days, at most 30)** → **Issue enrolment token**, then deliver the enrolment file shown once (root-owned, mode 0600) and run the agent's install step on the device (`agents/endpoint/README.md`) |
+
+Then, on the **Cloud federation** card: **Generate key** → **Turn on with this key** (a step-up). The card says the
+issuer needs the deployment's public URL (`REGULAIT_PUBLIC_URL`); its discovery document and key set must be reachable
+from AWS and Azure (ADR-0197 decision 3).
+
+Real values (account, tenant, client and group identifiers) are never written into this repository. They live in the
+owner's notes and the infrastructure lane's state.
+
+### 7.3 Pre-demo checklist
+
+| When | Check | Status |
+|---|---|---|
+| T-7d | First real-account round trip done for each source: a run **succeeded**, **Reads** says *all read* or names what it could not read, findings appear | pending execution |
+| T-7d | The endpoint agent has reported at least once since enrolment (the `endpoint_agent` source is upload-fed: **Run now** only commits reports the device already uploaded) | pending execution |
+| T-7d | The remediation workflow walked once on a rehearsal database as Ada: start → **Finish planning** → **Submit for sign-off** → Morgan's **Approve** in `/ui/inbox` | pending execution |
+| T-7d | Morgan Reyes (security lead) is an active admin, Ada is the only other admin, and Morgan has enrolled her authenticator (after `demo:set-passwords`, at her next sign-in) | pending execution |
+| T-3d | Code freeze held (2026-10-29: only demo-blocker fixes merge, ADR-0197 decision 9); the live instance runs the frozen build | pending execution |
+| T-24h | **Run now** on every live source (the endpoint agent's only if the device has reported since); each run **succeeded**; choose the rows S2-S4 walk from the real findings on `/ui/admin/shadow-ai` | pending execution |
+| T-24h | On the live database, the chosen finding has **no** remediation workflow yet (S3 creates one). On the fallback, `gitlab:acme-bank-demo/credit-memo-assistant`'s workflow waits on Morgan (`demo:check` "1 Remediation plan" PASS); nobody approved it at rehearsal | pending execution |
+| T-24h | The environment S3 types (`staging` on a `demo:prepare`d database) is configured on the live instance | pending execution |
+| T-24h | `demo:check --live` on the live instance: 0 fail (no fictional-dataset trace, every real source listed with its last run) | pending execution |
+| T-24h | Screen recording of one real scan captured and played back once | pending execution |
+| T-24h | Fallback stack on the laptop prepared with `demo:prepare` (the night before); `demo:check` 0 fail; Ada, Avery and Morgan signed in there too, in a separate browser | pending execution |
+| T-24h | `demo:gate` run once from the dev instance host terminal; its output captured to `real-gate.txt` as the fallback (the 10-05 fallback step 1) | pending execution |
+| T-24h | Neither demo budget alert has fired (AWS USD 40 and Azure USD 10, USD 50 in total; each alerts at 80%, USD 32 and USD 8, `docs/deployment/DEMO_REAL_ACCOUNTS.md`); planted usage still within budget (ADR-0197 decision 4) | pending execution |
+| T-1h | Browsers: Profile A (Ada), Profile B (Avery) and Profile C (Morgan) on the live instance, all signed in; the fallback browser signed in to the laptop stack; one spare browser installed | pending execution |
+| T-1h | A terminal open on the dev instance host for G3 | pending execution |
+| T-1h | Navigation pinned in every profile (**Pin navigation**) | pending execution |
+| T-1h | Themes: the same theme in every profile (user menu, **Switch to dark theme** / **Switch to light theme**), chosen for the room's projector | pending execution |
+| T-1h | Ada's and Morgan's authenticators on the presenting phone; the phone charged and silenced | pending execution |
+| T-1h | The live instance answers over HTTPS from the venue network (open `/ui` in each profile) | pending execution |
+| After | Teardown of the sandbox resources and the Azure deployment, tracked as a follow-up (ADR-0197 consequences) | pending execution |
+
+### 7.4 If something breaks on the day
+
+| Symptom | Cause | Do |
+|---|---|---|
+| A source's last run reads **failed** with an error code | a credential, trust or egress problem since T-24h | do not debug live: show the previous succeeded run in **Recent runs**, or switch to the fallback stack |
+| **Run now** stays *queued* | the worker has not leased the run yet | do not wait on it: the script never runs a scan live |
+| The **Cloud federation** card reads *off* | federation was turned off, or the issuer URL is not set | federated cloud runs cannot run; switch to the fallback stack for S1 (its runs are recorded replays; its own card reads *off* by design) |
+| Starting the remediation workflow answers *second_approver_unavailable* | no other active admin exists (Morgan missing or deactivated) | switch to the fallback stack; fix the personas after the demo |
+| Morgan's **Approve** asks for a code she cannot give | her authenticator was not enrolled after `demo:set-passwords` | switch to the fallback stack; never relax MFA live |
+| The remediation panel says **no workflow assigned** | an admin rule replaced the default assignment | link a workflow started another way, or switch to the fallback stack |
+| The live instance does not load | network or instance failure | play the recording for S1-S2, then the fallback stack on the laptop or the screenshot deck |

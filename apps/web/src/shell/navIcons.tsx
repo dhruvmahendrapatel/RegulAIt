@@ -55,6 +55,8 @@ const G = {
   flask: "M9.5 4.5h5M10.5 4.5v5L6 18a1.4 1.4 0 0 0 1.2 2h9.6A1.4 1.4 0 0 0 18 18l-4.5-8.5v-5M8.2 14.5h7.6",
   template: "M4.5 4.5h15v5h-15zM4.5 12.5h6v7h-6zM13.5 12.5h6v7h-6z",
   bars: "M4 19.5h16M6.5 19V12M10.5 19V6.5M14.5 19v-4.5M18.5 19V9.5",
+  // ADR-0195 SD0 — a sweep over a field: where discovery may scan (distinct from Shadow-AI discovery's eye)
+  radar: `${ring(12, 12, 7.5)}M12 12l5.3-5.3M12 7.5a4.5 4.5 0 1 0 4.5 4.5M12 10.5a1.5 1.5 0 1 0 1.5 1.5`,
   crosshair: `${ring(12, 12, 6.5)}M12 3.5v4M12 16.5v4M3.5 12h4M16.5 12h4`,
   star: "M12 4.5l2.3 4.8 5.2.7-3.8 3.6.9 5.2-4.6-2.5-4.6 2.5.9-5.2L4.5 10l5.2-.7L12 4.5z",
   person: `${ring(12, 8.5, 3.5)}M5.5 19.5c.8-3.3 3.4-5 6.5-5s5.7 1.7 6.5 5`,
@@ -132,6 +134,7 @@ const BY_ROUTE: Record<string, keyof typeof G> = {
   "/admin/vendors": "building",
   "/admin/risks": "warning",
   "/admin/shadow-ai": "eye",
+  "/admin/shadow-ai/discovery-sources": "radar", // ADR-0195 SD0
   "/admin/inventory": "robot",
   "/admin/recommendations": "bulb",
   "/admin/certification": "ribbon",
@@ -139,6 +142,7 @@ const BY_ROUTE: Record<string, keyof typeof G> = {
   "/admin/rules": "sliders",
   "/admin/abac-policies": "tag",
   "/admin/guardrails": "rails",
+  "/admin/content-trust": "shield", // ADR-0193 (I4)
   "/admin/model-policy": "modelGrid",
   "/admin/prompt-versions": "history",
   "/admin/simulation": "flask",
@@ -187,6 +191,11 @@ const BY_ROUTE: Record<string, keyof typeof G> = {
   "/admin/first-run": "flag",
   "/admin/setup": "compass",
 };
+
+/** the glyph a destination draws, or null for the monogram fallback (exported for the unit test) */
+export function navGlyphKey(to: string): string | null {
+  return BY_ROUTE[to] ?? null;
+}
 
 /** true when a destination has a drawn glyph (exported for the unit test) */
 export function hasNavGlyph(to: string): boolean {

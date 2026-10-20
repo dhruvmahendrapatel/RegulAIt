@@ -66,7 +66,7 @@ const OBJECT_TYPES: Array<[string, string]> = [
   ["infra_operation", "infrastructure operation"],
   ["model_card", "model-card sign-off (MRM)"],
   ["copilot_proposal", "governance-copilot proposal"],
-  ["training_job", "RegulAIt-LLM training run"],
+  ["training_job", "regulAIt-LLM training run"],
   ["grant_certification", "certification-campaign item"],
   ["sod_override", "separation-of-duties override"],
   ["remediation", "governance-alert remediation"],
@@ -240,7 +240,7 @@ export default function ApprovalsAdminPage() {
                   const override = !toolCall && me !== r.approverUserId && !r.delegatedFrom;
                   if (toolCall && r.myDecision) {
                     return (
-                      <span className={v.stack} style={{ alignItems: "flex-end", gap: 4 }}>
+                      <span className={v.stack} style={{ alignItems: "flex-end", gap: "var(--s0)" }}>
                         <QuorumProgress approval={r} />
                         <span className={v.faint}>You {r.myDecision} this; waiting for another approver.</span>
                       </span>
@@ -273,12 +273,12 @@ export default function ApprovalsAdminPage() {
                           {rowErrors[r.id]}
                         </span>
                       )}
-                      {isBoundAction(r) && act.error && <span role="alert">{act.error}</span>}
+                      {isBoundAction(r) && act.error && <span className={v.errLine} role="alert">{act.error}</span>}
                     </span>
                   );
                   return isBoundAction(r)
                     ? (
-                      <span className={v.stack} style={{ alignItems: "flex-end", gap: 4 }}>
+                      <span className={v.stack} style={{ alignItems: "flex-end", gap: "var(--s0)" }}>
                         {toolCall && <QuorumProgress approval={r} />}
                         <McpActionReview approval={r} controls={controls} />
                       </span>
@@ -401,7 +401,7 @@ function SavedViewsCard(props: {
         <Field label="Name this view" grow>
           <Input required value={name} onChange={(e) => setName(e.target.value)} maxLength={200} placeholder="My pending copilot proposals" />
         </Field>
-        <label style={{ display: "inline-flex", gap: 6, alignItems: "center", whiteSpace: "nowrap" }}>
+        <label style={{ display: "inline-flex", gap: "var(--s0-5)", alignItems: "center", whiteSpace: "nowrap" }}>
           <input type="checkbox" checked={shared} onChange={(e) => setShared(e.target.checked)} />
           <span>share with everyone</span>
         </label>

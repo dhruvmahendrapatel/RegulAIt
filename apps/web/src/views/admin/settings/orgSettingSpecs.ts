@@ -104,6 +104,8 @@ export const STEP_UP_ACTION_KINDS: readonly Choice[] = [
   { value: "passkey_manage", label: "Managing passkeys" },
   { value: "owner_change", label: "Changing an owner" },
   { value: "identity_manage", label: "Managing agent identities" },
+  { value: "pseudonym_reveal", label: "Revealing a person's name" },
+  { value: "key_management", label: "Managing signing keys" },
 ];
 export const VENDORED_DETECTION_PACKS: readonly Choice[] = [
   { value: "pipelock-secrets", label: "Secret patterns (pipelock-secrets)" },
@@ -116,6 +118,7 @@ export const WORKLOAD_CLIENT_AUTH_METHODS: readonly Choice[] = [
   { value: "tls_client_auth", label: "CA-issued client certificate (tls_client_auth)" },
   { value: "self_signed_tls_client_auth", label: "Registered self-signed certificate (self_signed_tls_client_auth)" },
   { value: "spiffe_svid", label: "SPIFFE identity (spiffe_svid)" },
+  { value: "spiffe_jwt_svid", label: "SPIFFE JWT bearer token (spiffe_jwt_svid)" },
 ];
 export const INTERNATIONAL_PII_CATEGORIES: readonly Choice[] = [
   { value: "aadhaar", label: "India: Aadhaar number" },
@@ -137,7 +140,8 @@ export const DEPLOY_MODES: readonly Choice[] = [
 
 const STEP_UP_ALL = values(STEP_UP_ACTION_KINDS);
 const PACKS_ALL = values(VENDORED_DETECTION_PACKS);
-const AUTH_ALL = values(WORKLOAD_CLIENT_AUTH_METHODS);
+// every method but the bearer JWT-SVID (ADR-0188 S9 follow-up: off by default)
+const AUTH_STRICT = values(WORKLOAD_CLIENT_AUTH_METHODS).filter((m) => m !== "spiffe_jwt_svid");
 const SIGNATURE_RANK: Record<string, number> = { passkey: 2, step_up: 1, off: 0 };
 
 // ---------------------------------------------------------------------------
@@ -182,8 +186,8 @@ export const BATCH4_SPECS: Readonly<Record<string, OrgSettingSpec>> = {
     label: "Actions that need a step-up",
     strictDefault: STEP_UP_ALL,
     strict:
-      "All seven: deciding an approval, relaxing a setting, overriding an evidence hold, break-glass, managing passkeys, " +
-      "changing an owner and managing agent identities.",
+      "All nine: deciding an approval, relaxing a setting, overriding an evidence hold, break-glass, managing passkeys, " +
+      "changing an owner, managing agent identities, revealing a person's name and managing signing keys.",
     relaxed: "Each action removed from the list can be done with the session alone.",
     control: { kind: "set", options: STEP_UP_ACTION_KINDS },
     isRelaxed: (v) => missingAny(v, STEP_UP_ALL),
@@ -413,13 +417,13 @@ export const IDENTITY_SPECS: Readonly<Record<string, OrgSettingSpec>> = {
   workloadClientAuthMethods: {
     key: "workloadClientAuthMethods",
     label: "How workloads may sign in",
-    strictDefault: AUTH_ALL,
+    strictDefault: AUTH_STRICT,
     strict:
-      "Signed assertions from a registered key, client certificates and SPIFFE identities. Shared secrets are " +
-      "never offered.",
-    relaxed: "Adding back a method you removed lets workloads sign in that way again.",
+      "Signed assertions from a registered key, client certificates and SPIFFE identities; not SPIFFE JWT bearer " +
+      "tokens. Shared secrets are never offered.",
+    relaxed: "Adding a method lets workloads sign in that way.",
     control: { kind: "set", options: WORKLOAD_CLIENT_AUTH_METHODS },
-    isRelaxed: () => false,
+    isRelaxed: (v) => Array.isArray(v) && v.includes("spiffe_jwt_svid"),
     looser: addsAny,
   },
   dpopNonceRequired: {

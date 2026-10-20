@@ -7,4 +7,5 @@ export * from "./mapper.js";
 export * from "./adapter.js";
 export * from "./job.js";
 export * from "./exchange.js";
+export * from "./worker.js";
 export * from "./worker-selftest.js";

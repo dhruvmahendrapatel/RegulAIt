@@ -20,11 +20,12 @@ import {
   normaliseEngineResult,
   type EngineLease,
 } from "@regulait/shared";
-import type { ProcessGroupOptions, ProcessGroupResult } from "@regulait/engine-runner";
+import type { ProcessGroupOptions, ProcessGroupResult } from "@regulait/engine-runner/worker";
 import { garakAdapter } from "./adapter.js";
 import { linkPreseededDatasets } from "./garak-run.js";
 import { assertGatewayOnly, buildGarakConfig, buildGarakEnv, GarakConfigRefused, planGarakRun, type PlannedProbe } from "./config.js";
-import { ExchangeGarakExecutor, garakJobSchema, LocalGarakExecutor, workerTick, type GarakExecutor, type GarakJob } from "./exchange.js";
+import { ExchangeGarakExecutor, garakJobSchema, type GarakExecutor, type GarakJob } from "./exchange.js";
+import { LocalGarakExecutor, workerTick } from "./worker.js";
 import { boundedCounts, mapGarakProbe, mapGarakRun, readGarakProbeReport, type GarakProbeOutcome } from "./mapper.js";
 import { garakRunnerSelfTest, judgeWorkerSelfTest, writeWorkerSelfTest } from "./selftest.js";
 

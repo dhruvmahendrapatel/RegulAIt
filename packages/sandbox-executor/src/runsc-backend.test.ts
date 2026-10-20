@@ -42,17 +42,15 @@ import {
 } from "@regulait/shared";
 import {
   dockerRunArgs,
-  probesFrom,
   readLines,
-  RunscBackendError,
   STDIO_SANDBOX_BLANKED_ENV,
-  RunscDockerBackend,
   runtimeFromInfo,
   unsupportedProfileFeature,
   type DockerChild,
   type ExecutorSideObservation,
   type InitObservation,
-} from "./runsc-backend.js";
+} from "./docker-backend.js";
+import { probesFrom, RunscBackendError, RunscDockerBackend } from "./runsc-backend.js";
 import { buildReport } from "./report.js";
 import { RUNSC_RELEASES, SANDBOX_INIT_SHA256 } from "./init-pin.js";
 
@@ -128,10 +126,15 @@ describe("the sandbox as docker run arguments (restricted profile)", () => {
     expect(valuesAfter(a, "--security-opt")).toContain("seccomp=/etc/regulait/seccomp/tight.json");
   });
 
-  it("refuses, before any sandbox, the profile features I4 does not provide", () => {
+  it("refuses, before any sandbox, the profile features it does not provide (I5 adds the jobs input and task-scoped secrets)", () => {
     expect(unsupportedProfileFeature(restricted)).toBeNull();
-    expect(unsupportedProfileFeature(SHIPPED_EXECUTION_PROFILES["engine-worker"])).not.toBeNull();
-    expect(unsupportedProfileFeature({ ...restricted, secrets: "task_scoped" })).toBe("secrets: task_scoped");
+    // I5: the engine-worker profile's one `jobs` input needs this executor's input volume
+    expect(unsupportedProfileFeature(SHIPPED_EXECUTION_PROFILES["engine-worker"])).toMatch(/no input volume/);
+    expect(unsupportedProfileFeature(SHIPPED_EXECUTION_PROFILES["engine-worker"], { inputVolume: true })).toBeNull();
+    const other = SHIPPED_EXECUTION_PROFILES["engine-worker"];
+    expect(unsupportedProfileFeature({ ...other, filesystem: { ...other.filesystem, inputs: [{ name: "models", mountPath: "/models" }] } }, { inputVolume: true })).toMatch(/other than the one jobs input/);
+    expect(unsupportedProfileFeature({ ...restricted, secrets: "task_scoped" })).toBeNull();
+    expect(unsupportedProfileFeature({ ...restricted, secrets: "injected_at_egress" })).toBe("secrets: injected_at_egress");
     expect(unsupportedProfileFeature({ ...restricted, persistence: "scoped_volume" })).toBe("a scoped volume");
     expect(unsupportedProfileFeature({ ...restricted, network: { mode: "allow_list", entries: [{ host: "a.example", port: 443 }] } })).toBe("an allow-list network");
   });
@@ -383,7 +386,9 @@ describe("the handshake with the real sandbox init (run on this host in place of
     const b = backend(calls);
     expect(b.describe()).toEqual({ backend: "gvisor", runtimeVersion: "release-20261005.0", classes: ["user_space_kernel"] });
     await expect(b.startCanary(restricted, "hardened_container")).rejects.toThrow(/user_space_kernel only/);
-    await expect(b.start({ ...offer, workloadKind: "engine_worker" }, restricted, "user_space_kernel")).rejects.toThrow(/mcp_stdio/);
+    await expect(b.start({ ...offer, workloadKind: "code_exec" }, restricted, "user_space_kernel")).rejects.toThrow(/mcp_stdio and engine_worker/);
+    // I5: an engine task needs its input; a profile that declares none cannot run one
+    await expect(b.start({ ...offer, workloadKind: "engine_worker" }, restricted, "user_space_kernel")).rejects.toThrow(/declares no input/);
     await expect(b.start(offer, SHIPPED_EXECUTION_PROFILES["engine-worker"], "user_space_kernel")).rejects.toThrow(/nothing was started/);
     expect(calls, "no docker run for a refused sandbox").toEqual([]);
   });

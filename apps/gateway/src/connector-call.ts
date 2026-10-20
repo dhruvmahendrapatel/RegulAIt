@@ -41,6 +41,7 @@
  * a re-submit after the decision executes the identical call. A READ under the
  * dial is still refused, as before: the hold is defined for writes.
  */
+import { randomUUID } from "node:crypto";
 import type { GovernedActor } from "@regulait/policy-kernel";
 import { DelegationRefusedError, settleDelegationCharge } from "./delegation.js";
 import { actorColumns, actorForGrant, delegationRefusalDecision, usdToMicros } from "./in-process-delegation.js";
@@ -77,6 +78,9 @@ import {
   guardrailWithheldMarker,
   redactPiiPayload,
   type PiiHit,
+  CONTENT_TRUST_REFUSAL_CODE,
+  CONTENT_TRUST_RULE_ID,
+  contentTrustRefusalReason,
 } from "@regulait/shared";
 import { ConnectorPolicyChangedError, prepareConnectorPiiAction } from "./connector-pii.js";
 import { killSwitchState, loadExecutionDial, postureOf } from "./execution-posture.js";
@@ -119,6 +123,7 @@ import {
 import { beginTrace, finishTrace, recordSpan, type TraceContext } from "./tracing.js";
 // ADR-0185 G5 — the decision counter (a no-op seam until the meter lands)
 import { recordDecision } from "./metrics.js";
+import { classifyScannedContent, contentTrustGate, recordContentProvenance } from "./content-provenance.js";
 import { CREDENTIAL_AUDIENCE_ERROR, CREDENTIAL_AUDIENCE_RULE_ID, refuseOutboundCredentialAudience } from "./outbound-audience.js";
 
 /**
@@ -201,6 +206,12 @@ export interface GovernedConnectorCallArgs {
    * Absent = the person's own call (`actor: null`).
    */
   delegationGrantId?: string | undefined;
+  /**
+   * ADR-0193 P1 — the causal context this call runs in (a builder thread). Its result is recorded under it, and a
+   * WRITE is refused when the context already holds content from a source below the write floor. Absent = the
+   * direct invoke route, whose context the gateway cannot see: recorded (P0), not gated.
+   */
+  contextId?: string | null | undefined;
 }
 
 /** the approval-queue object type of a held connector write */
@@ -369,6 +380,21 @@ export async function executeGovernedConnectorCall(
   const policyChangedBody = () => ({ error: "connector_policy_changed", detail: "Connector policy changed; result withheld. Review external effects before retrying.",
     externalRequests, mayHaveExecuted: externalRequests > 0, retrySafe: externalRequests === 0,
     costUsd: sink.costUsd ?? null, withheld: true });
+  /** a `connector_policy_changed` refusal after the decision committed (at execution, at the trace commit or at
+   * release) writes ONE deny audit row, not only a trace span; the decision-commit refusal and the billed-and-withheld
+   * output check write their own rows and set this too, so no refusal is recorded twice. */
+  let policyChangedAudited = false;
+  const auditPolicyChangedAfterDecision = async (conn: Db, phase: "execution" | "trace-commit" | "release") => {
+    if (policyChangedAudited) return;
+    policyChangedAudited = true;
+    await conn.insert(auditLog).values({ userId, objectType: "connector", objectId: connectorId,
+      detail: { phase, operation: body.operation, ...(projectId ? { projectId } : {}), ...(args.detail ?? {}),
+        decidedPolicyEpoch: admissionGeneration?.epoch ?? null, externalRequests, mayHaveExecuted: externalRequests > 0,
+        withheld: true, receiptClass: "decision" },
+      effect: "deny", ruleId: "connector-policy-changed", ruleChain: [],
+      reason: `Connector policy changed at ${phase}; result withheld` +
+        (externalRequests > 0 ? " (the call may have executed: review its external effects before retrying)" : " (nothing was sent)") });
+  };
   /** filled at the ONE place the ledger row is written, so the span
    * REFERENCES that row rather than recomputing its figures (rule 1). */
   const sink: { usageEventId?: string | null; costUsd?: number | null } = {};
@@ -505,11 +531,14 @@ export async function executeGovernedConnectorCall(
     }
 
     // Order evidence containing routing identity against policy activation.
+    // ADR-0193 P0: the decision row's id, which the result's provenance record names
+    const decisionAuditId = randomUUID();
     const audited = await db.transaction(async (tx) => {
       await runDecisionRecheckHookForTest();
       const [current] = await tx.select().from(governancePolicyEpoch).for("share");
       if (!admissionGeneration || current?.epoch !== admissionGeneration.epoch) return false;
       await tx.insert(auditLog).values({
+        id: decisionAuditId,
         userId,
         objectType: "connector",
         objectId: connectorId,
@@ -549,6 +578,7 @@ export async function executeGovernedConnectorCall(
         decidedPolicyEpoch: admissionGeneration?.epoch ?? null,
         detail: { operation: body.operation, ...(body.object ? { object: body.object } : {}), projectId: projectId ?? null, ...(args.detail ?? {}) },
       });
+      policyChangedAudited = true;
       policyChanged = true;
       return out.status(409).send(policyChangedBody());
     }
@@ -556,6 +586,42 @@ export async function executeGovernedConnectorCall(
     // A DENIED call bills nothing and executes nothing (mirror the model path).
     if (decision.effect === "deny") {
       return out.status(403).send({ decision });
+    }
+
+    // ADR-0193 P1 — CONTENT TRUST, connector path (as on the MCP path): a write whose causal context already holds
+    // content from a source below the write floor is refused, before the budget gate, the hold, the credential and
+    // the provider, so it executes and bills nothing. Categorical, so it beats approval.
+    if (body.operation === "write" && args.contextId) {
+      const trust = await contentTrustGate(db, "write", args.contextId);
+      if (!trust.ok) {
+        const reason = contentTrustRefusalReason(trust.lowest, trust.floor, `${connector.name}.write`);
+        await db.insert(auditLog).values({
+          userId,
+          objectType: "connector",
+          objectId: connectorId,
+          detail: {
+            ...(args.detail ?? {}),
+            phase: "content-trust",
+            code: CONTENT_TRUST_REFUSAL_CODE,
+            contextId: args.contextId,
+            lowestTier: trust.lowest,
+            writeFloor: trust.floor,
+            operation: body.operation,
+            ...(body.object ? { object: body.object } : {}),
+            projectId,
+            receiptClass: "decision",
+          },
+          effect: "deny",
+          ruleId: CONTENT_TRUST_RULE_ID,
+          ruleChain: [],
+          reason,
+        });
+        return out.status(403).send({
+          decision: { effect: "deny", ruleId: CONTENT_TRUST_RULE_ID, ruleChain: [], reason },
+          error: CONTENT_TRUST_REFUSAL_CODE,
+          detail: reason,
+        });
+      }
     }
 
     // PILLAR 5 enforcement, connector path (F02 / ADR-0103 amendment
@@ -1035,6 +1101,7 @@ export async function executeGovernedConnectorCall(
     } catch (err) {
       if (err instanceof ConnectorPolicyChangedError || !await generationCurrent()) {
         policyChanged = true;
+        await auditPolicyChangedAfterDecision(db, "execution");
         return out.status(409).send(policyChangedBody());
       }
       // ADR-0034 amendment #2 — a refusal raised by the GUARDED FETCH itself
@@ -1227,6 +1294,7 @@ export async function executeGovernedConnectorCall(
             ? "Connector output transformation refused; billed and withheld"
             : `output contains PII: ${piiCategoryList(outputHits)} — billed and withheld`,
         });
+        if (policyChanged) policyChangedAudited = true;
       } else if (piiMode === "warn" && anyHits) {
         await evidenceDb.insert(auditLog).values({
           userId,
@@ -1247,6 +1315,18 @@ export async function executeGovernedConnectorCall(
       }
 
       if (policyChanged) return out.status(409).send(policyChangedBody());
+      // ADR-0193 P0 — the provenance label and both digests (the provider's body, the delivered body), in the
+      // evidence transaction: a failure to record rolls the evidence back and delivers nothing.
+      await recordContentProvenance(evidenceDb as unknown as Db, dataKey, {
+        userId,
+        source: { kind: "connector", connectorId, operation: body.operation, object: body.object ?? null },
+        upstream: result.body ?? null,
+        delivered: respBody,
+        classification: classifyScannedContent({ scanned: Boolean(piiMode), piiHits: outputHits.length, piiWithheld: withheld }),
+        decisionAuditId,
+        contextId: args.contextId ?? null,
+        projectId,
+      });
       return out.send({
         decision,
         result: { status: result.status, body: respBody },
@@ -1296,6 +1376,7 @@ export async function executeGovernedConnectorCall(
     if (!admissionGeneration || traceGeneration?.epoch !== admissionGeneration.epoch) {
       policyChanged = true;
       outcome = { status: 409, body: policyChangedBody() };
+      await auditPolicyChangedAfterDecision(tx as unknown as Db, "trace-commit");
     }
     const errCode =
       typeof outcome.body["error"] === "string" ? (outcome.body["error"] as string) : null;
@@ -1351,6 +1432,7 @@ export async function executeGovernedConnectorCall(
     await recordSpan(db, traceCtx, { kind: "connector", name: `${connector.name}.response-policy`,
       status: "denied", statusReason: "Connector policy changed before response release", startedAt: spanStartedAt,
       connectorId, contentWithheld: true, attributes: { operation: body.operation, error: "connector_policy_changed" } });
+    await auditPolicyChangedAfterDecision(db, "release");
     if (ownTrace) await finishTrace(db, traceCtx, "denied", spanStartedAt);
     return { status: 409, body: policyChangedBody() };
   }

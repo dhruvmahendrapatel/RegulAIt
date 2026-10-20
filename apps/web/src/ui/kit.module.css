@@ -6,7 +6,7 @@
   align-items: center;
   justify-content: center;
   gap: var(--s0);
-  padding: 6px 14px;
+  padding: var(--s0-5) var(--s1-5);
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
   background: var(--surface-1);
@@ -82,7 +82,7 @@
   color: var(--text);
 }
 .btnSm {
-  padding: 3px 10px;
+  padding: var(--s0) var(--s1-5);
   font-size: var(--text-xs);
 }
 
@@ -130,7 +130,7 @@
 .select,
 .textarea {
   width: 100%;
-  padding: 6px 10px;
+  padding: var(--s0-5) var(--s1-5);
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
   background: var(--surface-1);
@@ -142,9 +142,12 @@
   color: var(--text-faint);
 }
 .input:focus-visible,
-.select:focus-visible,
 .textarea:focus-visible {
   box-shadow: var(--focus-ring);
+  border-color: var(--primary);
+}
+/* its ring is the outline in global.css (WebKit drops box-shadow on a native select) */
+.select:focus {
   border-color: var(--primary);
 }
 .textarea {
@@ -196,6 +199,41 @@
   overflow: hidden;
 }
 
+/* ---- Contained card body (X6) ----
+   Scrolls inside the card past the limit, so the next section still peeks in;
+   the sticky header, the bottom rule, the row count and Expand say there is
+   more. Phones keep the page scroll (a nested scroll box traps the thumb) and
+   still get Expand: Card measures against this limit in script. Focus ring: the global
+   :focus-visible. (Entry CSS headroom is ~200 B, so no scroll-shadow layers.) */
+.contain {
+  max-block-size: min(60vh, 560px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  border-block-end: 1px solid var(--border);
+}
+/* the table scrolls with the box, so its header can stick to the box */
+.contain .tableWrap {
+  overflow: visible;
+}
+.contain .table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-1);
+}
+@media (max-width: 600px) {
+  .contain {
+    max-block-size: none;
+  }
+}
+.rowActions {
+  display: grid;
+  align-items: center;
+  justify-items: start;
+  gap: var(--s1);
+  white-space: nowrap;
+}
+
 /* ---- Table ---- */
 .tableWrap {
   overflow-x: auto;
@@ -209,7 +247,7 @@
    from the rows, the same way the rows separate from each other. */
 .table th {
   text-align: left;
-  padding: 12px 16px;
+  padding: var(--s1-5) var(--s2);
   font-size: var(--text-sm);
   font-weight: 600;
   color: var(--text-dim);
@@ -226,11 +264,11 @@
   color: var(--text);
 }
 .sortArrow {
-  margin-left: 4px;
+  margin-left: var(--s0);
   font-size: 9px;
 }
 .table td {
-  padding: 12px 16px;
+  padding: var(--s1-5) var(--s2);
   border-bottom: 1px solid var(--border);
   vertical-align: middle;
 }
@@ -257,8 +295,8 @@
 .badge {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 1px 8px;
+  gap: var(--s0);
+  padding: var(--s-hair) var(--s1);
   border-radius: 999px;
   font-size: var(--text-xs);
   font-weight: 600;
@@ -346,7 +384,7 @@
   border-left: 3px solid var(--primary);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-md);
-  padding: 10px 14px;
+  padding: var(--s1-5);
   font-size: var(--text-sm);
   animation: toastIn 160ms ease;
 }
@@ -391,6 +429,13 @@
 .modalWide {
   max-width: 820px;
 }
+.modalFull {
+  max-width: none;
+  inline-size: calc(100vw - 2 * var(--s3));
+  block-size: calc(100vh - 2 * var(--s3));
+  block-size: calc(100dvh - 2 * var(--s3));
+  max-height: none;
+}
 .modalTitle {
   font-size: var(--text-lg);
   font-weight: 600;
@@ -414,7 +459,7 @@
   border-bottom: 1px solid var(--border);
 }
 .tab {
-  padding: 6px 12px;
+  padding: var(--s0-5) var(--s1-5);
   border: none;
   background: none;
   color: var(--text-dim);
@@ -422,7 +467,7 @@
   font-weight: 600;
   cursor: pointer;
   border-bottom: 2px solid transparent;
-  margin-bottom: -1px;
+  margin-bottom: calc(-1 * var(--s-hair));
 }
 .tab:hover {
   color: var(--text);
@@ -507,8 +552,15 @@
   background: var(--surface-2);
   border: none;
   border-radius: 4px;
-  padding: 1px 6px;
+  padding: var(--s-hair) var(--s0-5);
   cursor: pointer;
+  /* WCAG 2.2 SC 2.5.8 (axe target-size): a 24px minimum target, also inside a clickable row */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
+  min-width: 24px;
+  vertical-align: middle;
 }
 .idChip:hover {
   color: var(--text-dim);
@@ -604,6 +656,7 @@ a.barLabel {
 }
 
 .infoBtn {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -618,6 +671,12 @@ a.barLabel {
   color: var(--text-faint);
   cursor: pointer;
   transition: color var(--rg-dur-fast) var(--rg-ease), background var(--rg-dur-fast) var(--rg-ease);
+}
+/* a 44px touch target around the 24px visual, without moving the layout */
+.infoBtn::before {
+  content: "";
+  position: absolute;
+  inset: -10px;
 }
 .infoBtn svg {
   inline-size: 14px;
@@ -664,6 +723,12 @@ a.barLabel {
   inset-inline-start: auto;
   inset-inline-end: 0;
 }
+/* in the top layer (A4) the panel is placed by script against the viewport */
+.infoPanel:popover-open {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+}
 .infoPanel code {
   font-family: var(--rg-font-mono);
   font-size: 0.92em;
@@ -676,8 +741,8 @@ a.barLabel {
 .tagPicker { display: flex; flex-direction: column; gap: var(--s0); min-width: 0; }
 .tagList { display: flex; flex-wrap: wrap; gap: var(--s0); list-style: none; margin: 0; padding: 0; }
 .tagChip {
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 3px 6px 3px 10px;
+  display: inline-flex; align-items: center; gap: var(--s0-5);
+  padding: var(--s0) var(--s0-5) var(--s0) var(--s1-5);
   border: 1px solid var(--rg-signal-ring);
   border-radius: var(--rg-r-pill);
   background: var(--rg-signal-tint);
@@ -689,8 +754,8 @@ a.barLabel {
 .tagChipUnbound { border-color: var(--rg-medium); background: var(--rg-medium-tint); }
 .tagUnboundMark { font-style: normal; font-size: 0.85em; color: var(--rg-medium-deep); text-transform: uppercase; letter-spacing: 0.04em; }
 .tagChip button {
-  border: 0; background: transparent; cursor: pointer; padding: 0 2px;
-  font-size: 15px; line-height: 1; color: var(--text-dim); border-radius: var(--rg-r-sm);
+  border: 0; background: transparent; cursor: pointer; padding: 0 var(--s-half);
+  font-size: var(--text-lg); line-height: 1; color: var(--text-dim); border-radius: var(--rg-r-sm);
 }
 .tagChip button:hover { color: var(--danger); }
 .tagChip button:focus-visible { outline: 2px solid var(--rg-signal); outline-offset: 1px; }

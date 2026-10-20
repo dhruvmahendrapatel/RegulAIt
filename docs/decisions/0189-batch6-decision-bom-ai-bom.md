@@ -2215,3 +2215,92 @@ an accepted decision or needs an owner choice.
 with the code `step_up_<status>`. A prompt is sent and not recorded, as on every other protected route. A refusal
 nobody can answer (an API key or the bootstrap credential, no method enrolled) is recorded under the body's own code
 (`step_up_required` with `credentialKind`, or `step_up_unavailable`). See ADR-0186, As built 2026-10-12.
+
+## B8 as built — 2026-10-16: verification runbooks
+
+Slice B8 (rollout table; R43's drain step) ships two runbooks and three small CLIs. No migration. One product change
+came from the review (H1 below).
+
+- **[docs/ops/BOM_VERIFICATION.md](../ops/BOM_VERIFICATION.md)**, for the auditor and the customer operator,
+  air-gapped and BYOC (§6, §10, R19). Part A has the auditor prepare a verifier kit on their own connected staging machine (a built
+  checkout, and a wheelhouse for `spdx3-validate` that the auditor downloads from PyPI against our hash lock; we
+  provide the lock and the instructions, never the wheels, so nothing under amendment 6's CI-only licence admission
+  is redistributed by us). Part B verifies on the air-gapped machine: install the
+  SPDX validator from the wheelhouse; prove the toolchain on specification vectors (each must give the outcome the
+  vector expects; of the 31 positives the offline script can express, 24 are `VALID` and 7 `UNVERIFIABLE`, and every
+  negative is `INVALID` with its named check and reason) before trusting it; check the
+  keys received against the auditor's out-of-band trust record by script; check the envelope with `verify-export-bundle.sh` and the body, receipt,
+  chain and renderings with `verify-bom.mjs`; then validate the CycloneDX and SPDX renderings against the bundled
+  official schemas and SPDX SHACL. Part C lists the operator's side (keys, `GET /v1/exports/signing-key`,
+  `GET /v1/receipts/export`, the bundle routes, `POST /v1/boms/verify` as a convenience only).
+- **[docs/ops/RECEIPT_V2_CUTOVER.md](../ops/RECEIPT_V2_CUTOVER.md)**, R43's drain of old replicas before the receipt
+  v2 cutover. It states the required steps and why, but holds **no cutover or drain command**: the receipt v2
+  cutover is not built (`RECEIPT_EMITTER_SUPPORTS_V2` is `false`), and the slice that builds it must execute and
+  write those commands (M-041). It does show, executed, what an auditor sees from a stray v1 receipt after the
+  boundary (vector N-R12: `receipt_facts_binding` `invalid` `v1_receipt_after_boundary`).
+- **`scripts/bom-vector-bundle.mjs`** writes one B4 vector (`packages/shared/test-vectors/decision-bom/b4-vectors.json`)
+  as a real archive through the product's `writeBomTar`, refusing unless the tar is the vector's pinned `tarSha256`,
+  plus its TEST-ONLY trust root files. It is the known-answer self-test of an auditor's kit. It refuses, writing
+  nothing, any vector the offline script cannot express exactly (non-file entries; the online vectors P20, P21,
+  N-M02 and N-M05; an export keyring fingerprint that is not its key's; N-M04's export key id named twice; a trust
+  root with no boundary), and a CI test sweeps all 141 vectors: each is refused or gives its expected outcome and
+  every check and reason the vector names.
+- **`scripts/bom-trust-check.mjs`** compares the keys an auditor is sent (export `.pub` files, a receipt keyring and
+  its boundary) with the auditor's trust record by exact string, printing `MATCH` or `NOT IN RECORD` and exiting
+  non-zero on any difference.
+- **`scripts/validate-bom-rendering.mjs`** validates a rendering file against the schemas `@regulait/shared` already
+  compiles (CycloneDX 1.7 and 1.6, SPDX 3.0.1) with a stated format. It also requires `bomFormat` and `specVersion`
+  to match the stated CycloneDX version, because the bundled 1.6 schema alone accepts a 1.7 document (executed), and
+  refuses a file over the archive cap (`BOM_ARCHIVE_MAX_TAR_BYTES`) without reading it.
+- **Review H1, fail-open fixed in the product verifier.** `GET /v1/receipts/keys` carries no receipt v2 boundary, and
+  `verify-bom.mjs` read a keyring without one as "no cutover", so an N-R12 bundle (a v1 receipt at the boundary)
+  came out `VALID`. Now an absent boundary is never defaulted: `verify-bom.mjs` refuses (exit 2) a keyring without
+  `receiptV2FromAuditSeq`, and pinned receipt fingerprints without `--receipt-v2-from`; and `verifyBomBundle`,
+  `verifyStoredDecisionBom` and `verifyStoredAiBom` throw a `TypeError` for a trust boundary that is not `null` or a
+  positive audit seq. An explicit `null` still means "no cutover recorded". No vector's expected outcome changed.
+  After the recheck, `--receipt-v2-from` no longer overrides a boundary the keyring states: a different value is a
+  conflict (exit 2), so the flag cannot turn a recorded boundary back into "none"; and the keyring and the bundle
+  are read with size caps, a malformed keyring answering exit 2 without echoing its content.
+- **Review M2, the trust record.** The trust root is no longer whatever keyring arrives: the export and receipt key
+  fingerprints and the boundary are recorded out of band once (key generation or first engagement), every later
+  keyring is checked against that record by script, and a key not in it needs a separate attestation.
+- **Open source first (ADR-0176).** Searched: the repo already has the verifiers (`verify-bom.mjs`,
+  `verify-export-bundle.sh` on stock `openssl`), the pinned Ajv schemas, the product's B4.1 tar writer and the
+  `spdx3-validate` offline driver; both CLIs are thin wrappers over that code, with no new dependency. A standalone
+  CycloneDX validator binary was considered and not taken: it would add a second, separately pinned toolchain to an
+  air-gapped kit, and would not validate with the schema files the product validated with at snapshot time.
+
+**Executed (2026-10-16, on this PR's tree based on `6b35301`; Node 22.22.2, CPython 3.11.15, OpenSSL 3.0.13).** Every
+fenced command in both runbooks was extracted and re-run verbatim after the review fixes, Part A (online by design)
+on the build machine and Part B and the N-R12 check inside `unshare --net`: the kit build; the wheelhouse download
+and its offline install; vectors P01 (Decision BOM) and A02 (AI BOM with CycloneDX 1.7) `VALID`, NA01 and N-R12
+`INVALID`; the trust-record check (`MATCH`, and `MISMATCH` plus the verifier's refusal for a keyring with no
+boundary); the envelope check; `verify-bom.mjs` text and JSON reports and its refusal without a trust root; the
+unpack gated on both checks; the rendering hash cross-check; CycloneDX 1.7 schema validation; SPDX
+schema and SHACL validation of the product's B5 fixture renderings. Also run while building (not as runbook blocks):
+A01, A03, N-M01 and N-B12 through `verify-bom.mjs`, the pinned-fingerprint trust form, the 1.7-stated-as-1.6
+refusal, the SHACL negative control failing as required, and `--require-offline` refusing on a connected machine
+(exit 3). The two CLIs have tests (`scripts/*.test.mjs`, run by CI's `vitest run --dir scripts`).
+
+**Pending, not executed (listed in the runbooks without commands):** verification of bundles exported by a running
+deployment, including a `regulait.decision-bom.v2` body and AI BOMs in every format; an anchored Decision BOM with an
+RFC 3161 token under `--tsa-trust` (no vector carries one, no internal TSA was available); an SPDX file from a real
+bundle; moving a packed kit to a separate air-gapped machine; the out-of-band trust record and key attestation in a real
+engagement; Python 3.12 or later (its `venv` bundles no
+`setuptools`, which the offline `halo` build needs); offline verification of the release's own AI BOM (B7; its
+air-gapped trust root is owner item 2); and the whole receipt v2 cutover with the replica drain.
+
+**B8 follow-ups (2026-10-17).** The two runbooks are linked from `docs/deployment/INSTALL.md` (already on main when
+checked). `scripts/release-ai-bom.test.mjs` sets an explicit 60 s timeout per case, like the other `scripts/bom-*`
+CLI tests: each case spawns processes, and the gate's near-miss case takes about 3 s alone, too close to vitest's
+default 5 s under CI's parallel sweep. The prebuilt `halo` wheel is **not taken**: no pinned Python 3 wheel of
+`halo` 0.0.31 exists from its publisher (only a `py2` wheel, which pip on CPython 3 never selects, and the sdist), and
+`spdx3-validate` 0.0.7 needs `halo>=0.0.31`. So `--no-build-isolation` and the Python 3.11 `setuptools` dependency
+stay; the reason is written in `BOM_VERIFICATION.md`.
+
+## As built — 2026-10-17: `validateCycloneDx` and the declared spec version (SEC-DEFAULTS re-check)
+
+Verified on main, no change in this batch: `validateCycloneDx(doc, "1.6")` refuses a document whose `specVersion` is
+not `"1.6"` (the official schemas type the field as any string, so a 1.7 document could pass the 1.6 schema). Added in
+commit `c9a2fb8` with its test.
+

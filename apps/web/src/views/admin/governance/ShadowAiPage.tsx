@@ -33,13 +33,13 @@
  *    failure for a discovery product; `report_and_continue` is the explicit
  *    opt-in and is labelled as such.
  */
-import { useMemo, useState, type ReactNode } from "react";
-import { Link } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
-import { ago, evidenceLabel, providerLabel } from "../../../api/format";
+import { ago, evidenceLabel, humanize, plural, providerLabel } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, CodeBlock, EmptyState, Field, Input, Select, SeverityBadge, Table, Textarea } from "../../../ui/kit";
+import { Badge, Button, Card, CodeBlock, EmptyState, Field, InfoButton, Input, RowActions, Select, SeverityBadge, Table, Tabs, tabIds, Textarea } from "../../../ui/kit";
 import {
   OutcomePanel,
   QueryGate,
@@ -52,7 +52,12 @@ import {
 } from "../adminKit";
 import a from "../admin.module.css";
 import { ShadowRemediationPanel } from "./ShadowRemediationPanel";
+import { DetailDrawer, DrawerActions } from "../../../ui/DetailDrawer";
+import { DiscoverySightings } from "./DiscoverySightings";
+import type { SightingView } from "./discoverySourcesModel";
+import { IMPORT_EXAMPLE } from "./shadowAiExample";
 import v from "../../views.module.css";
+import sh from "./shadowAi.module.css";
 
 interface Signature {
   id: string;
@@ -66,6 +71,12 @@ interface Signature {
   provenance: string;
   enabled: boolean;
   lastUpdatedAt: string;
+  /** ADR-0195 SD0: scope, tool id, note, confidence */
+  os?: string | null;
+  ecosystem?: string | null;
+  toolId?: string | null;
+  note?: string | null;
+  confidence?: "high" | "medium" | "low";
 }
 interface CatalogueResponse {
   signatures: Signature[];
@@ -89,6 +100,8 @@ interface Finding {
   replacementAgent: { id: string; name: string; provider: string; enabled: boolean } | null;
   replacementNote: string | null;
   dispositionStale: boolean;
+  /** ADR-0195: the bounded sightings (location, names, actor pseudonym) */
+  evidence?: SightingView[];
 }
 interface FindingsResponse {
   findings: Finding[];
@@ -257,16 +270,7 @@ const ADAPTER_CONFIG_HINT: Record<string, string> = {
     'REQUIRED: {"kind":"egress_log"} (or code_scan / saas_export / self_reported). Add "mapping" to name the columns yourself; omit it and header inference proposes them and REFUSES on ambiguity.',
 };
 
-const EXAMPLE = JSON.stringify(
-  {
-    kind: "egress_log",
-    mode: "dry_run",
-    source: "acme forward proxy, week 31",
-    rows: [{ observedAt: "2026-07-28T09:00:00Z", destinationHost: "api.openai.com", sourceIdentity: "build-runner-01", requestCount: 412 }],
-  },
-  null,
-  2,
-);
+const EXAMPLE = JSON.stringify(IMPORT_EXAMPLE, null, 2);
 
 export default function ShadowAiPage() {
   const catalogue = useQuery({ queryKey: ["shadow-ai", "catalogue"], queryFn: () => api.get<CatalogueResponse>("/v1/shadow-ai/catalogue") });
@@ -293,6 +297,15 @@ export default function ShadowAiPage() {
   const [remediationFor, setRemediationFor] = useState<string | null>(null);
   const [disposition, setDisposition] = useState("sanctioned");
   const [reason, setReason] = useState("");
+  // A2: one tab per job; the tab is in the URL so a link (and a test) can open it directly
+  const [params, setParams] = useSearchParams();
+  const tab = TAB_IDS.includes(params.get("tab") ?? "") ? params.get("tab")! : "findings";
+  const setTab = (next: string) => setParams((prev) => { const out = new URLSearchParams(prev); out.set("tab", next); return out; }, { replace: true });
+  const [statusFilter, setStatusFilter] = useState<StatusGroup>("all");
+  // A1: triage and the remediation plan open in the shared detail drawer, named after their row
+  const dispositionRef = useRef<HTMLElement>(null);
+  const closeRemediation = useCallback(() => setRemediationFor(null), []);
+  const closeDisposition = useCallback(() => setDispositionFor(null), []);
 
   // ---- ADR-0071 raw-file import ----
   const [rawAdapter, setRawAdapter] = useState("cef");
@@ -416,121 +429,250 @@ export default function ShadowAiPage() {
     if (ok) refresh();
   };
 
+  const findingRows = (findings.data?.findings ?? []).filter((f) => statusFilter === "all" || statusGroup(f.disposition) === statusFilter);
+  const statusCounts = useMemo(() => {
+    const out: Record<string, number> = { all: 0, open: 0, confirmed: 0, closed: 0 };
+    for (const f of findings.data?.findings ?? []) {
+      out.all = (out.all ?? 0) + 1;
+      const g = statusGroup(f.disposition);
+      out[g] = (out[g] ?? 0) + 1;
+    }
+    return out;
+  }, [findings.data]);
+  const seenAgain = (findings.data?.findings ?? []).filter((f) => f.dispositionStale);
+  const subjectOf = (id: string | null) => findings.data?.findings.find((f) => f.id === id)?.subject ?? "this finding";
+  const panel = { id: "shadow", tab: tabIds("shadow", tab) };
+
   return (
     <>
       <PageHeader
         title="Shadow-AI discovery"
-        sub="Inventory ungoverned LLM usage from evidence you already have — and pull it into governance."
+        sub="AI use that nobody registered, found in evidence you already hold. Triage each lead and bring it into governance."
+        info={
+          <>
+            Shadow AI is AI use that is not registered or routed through regulAIt. Findings come from evidence:
+            discovery scans and files you import. regulAIt does not watch live traffic, so coverage is only as wide as
+            the evidence.
+          </>
+        }
+        actions={
+          <div className={v.row}>
+            <Link to="/admin/shadow-ai/discovery-sources">Discovery sources</Link>
+            <Button variant="primary" onClick={() => setTab("import")}>Import evidence</Button>
+          </div>
+        }
       />
 
-      <div className={v.stack}>
-      {/* what this can and cannot see, stated once, on the face of the page */}
-      <p className={v.dim}>
-        {findings.data?.coverage.statement ?? "Loading coverage…"}
-        {findings.data?.posture ? <> {findings.data.posture}</> : null}
-      </p>
+      {/* five tabs outgrow a phone: the row scrolls on its own instead of widening the page */}
+      <div className={sh.tabsScroll}>
+      <Tabs
+        tabs={[
+          { id: "findings", label: `Findings · ${statusCounts.all ?? 0}` },
+          { id: "coverage", label: "Coverage" },
+          { id: "import", label: "Import evidence" },
+          { id: "catalogue", label: "Detection catalogue" },
+          { id: "history", label: "Import history" },
+        ]}
+        active={tab}
+        onChange={setTab}
+        idPrefix={panel.id}
+      />
+      </div>
 
-      <Card>
-        <div className={v.kpiStrip}>
-          <KpiFigure value={bySeverity.critical} label="Critical (leaked credential)" />
-          <KpiFigure value={bySeverity.high} label="High (observed model traffic)" />
-          <KpiFigure value={(bySeverity.medium ?? 0) + (bySeverity.low ?? 0)} label="Medium / low" />
-          <KpiFigure
-            value={`${findings.data?.coverage.sourcesOn ?? 0} / ${findings.data?.coverage.sourcesPossible ?? 4}`}
-            label="Evidence classes supplied"
-          />
+      <div className={v.stack} role="tabpanel" id={panel.tab.panel} aria-labelledby={panel.tab.tab}>
+      {tab === "findings" && (
+        <>
+      {/* what this can and cannot see, stated once, on the face of the page */}
+      <div className={sh.callout} role="note">
+        <span>
+          <strong>What this can see.</strong> {findings.data?.coverage.statement ?? "Loading coverage…"}
+          {findings.data?.posture ? <> {findings.data.posture}</> : null}{" "}
+          <button type="button" className={sh.linkButton} onClick={() => setTab("coverage")}>See coverage</button>
+        </span>
+      </div>
+
+      <div className={sh.kpis}>
+        <KpiFigure tone="critical" value={bySeverity.critical} label="Critical" hint="Leaked credential"
+          info="A live credential for an AI service was found, for example an API key in code or logs. Treat it as exposed: revoke it, then triage the finding." />
+        <KpiFigure tone="high" value={bySeverity.high} label="High" hint="Observed model traffic"
+          info="Evidence shows traffic to an AI model endpoint from a person, team or system with no registered use case." />
+        <KpiFigure tone="medium" value={(bySeverity.medium ?? 0) + (bySeverity.low ?? 0)} label="Medium or low" hint="Looser signals to check" />
+        <KpiFigure
+          tone="low"
+          value={`${findings.data?.coverage.sourcesOn ?? 0} / ${findings.data?.coverage.sourcesPossible ?? 4}`}
+          label="Evidence classes supplied"
+          info="The four kinds of evidence you can import: network egress logs, code scans, SaaS and identity records, and self-reported use. Each kind not supplied is a blind spot. Findings from discovery sources (repository, cloud and endpoint scans) are not counted here."
+        />
+      </div>
+
+      {/* ADR-0180: a warning never sits only inside a scroll box, so every finding seen again after it was closed is
+          also listed here, above the contained Inventory, with its review action */}
+      {seenAgain.length > 0 ? (
+        <div className={sh.callout} role="note" aria-label="Seen again after closing" data-testid="shadow-seen-again" style={{ flexWrap: "wrap", alignItems: "center" }}>
+          <span>
+            <Badge tone="danger">Seen again {seenAgain.length}</Badge>{" "}
+            New evidence arrived after {seenAgain.length === 1 ? "this finding was" : "these findings were"} closed. Review the disposition again.
+          </span>
+          <span className={v.row}>
+            {seenAgain.map((f) => (
+              <Button key={f.id} size="sm" aria-label={`Review ${f.subject} again`} onClick={() => { setDispositionFor(f.id); setReason(""); }}>
+                {f.subject}
+              </Button>
+            ))}
+          </span>
         </div>
-      </Card>
+      ) : null}
 
       {/* the findings are the point of the page: they come straight after the figures */}
-      <Card title="Inventory">
+      <Card
+        title="Inventory"
+        contain
+        actions={
+          <div className={v.row} role="group" aria-label="Filter by status">
+            {(["all", "open", "confirmed", "closed"] as const).map((g) => (
+              <button key={g} type="button" className={sh.chip} aria-pressed={statusFilter === g} onClick={() => setStatusFilter(g)}>
+                {STATUS_GROUP_LABEL[g]} {statusCounts[g] ?? 0}
+              </button>
+            ))}
+          </div>
+        }
+      >
         <p className={v.faint}>Every row is a lead for triage, not a verdict.</p>
         <QueryGate loading={findings.isLoading} error={findings.error} onRetry={refresh}>
           {(findings.data?.findings.length ?? 0) === 0 ? (
-            <EmptyState title="No findings yet" body="Import an egress-log, code-scan, SaaS or self-reported evidence file below." />
+            <EmptyState title="No findings yet" body="Import an egress-log, code-scan, SaaS or self-reported evidence file under Import evidence." />
+          ) : findingRows.length === 0 ? (
+            <EmptyState title="No finding has this status" body="Choose another status above." />
           ) : (
             <Table<Finding>
-              rows={findings.data?.findings ?? []}
+              rows={findingRows}
               rowKey={(r) => r.id}
               columns={[
                 { key: "severity", header: "Severity", render: (r) => <SeverityBadge severity={r.severity} /> },
-                { key: "subject", header: "Subject", // a floor so a name never wraps to one word per line (the actions stack below it)
-                render: (r) => <span title={r.subjectKind} style={{ display: "inline-block", minWidth: "14ch" }}>{r.subject}</span> },
-                { key: "provider", header: "Provider", render: (r) => providerLabel(r.provider) },
-                { key: "sources", header: "Sources", render: (r) => r.signalSources.map(evidenceLabel).join(", ") },
-                { key: "confidence", header: "Confidence", render: (r) => r.confidence },
-                { key: "observations", header: "Observations", render: (r) => r.observationCount },
-                { key: "last_seen", header: "Last seen", render: (r) => ago(r.lastSeenAt) },
-                {
-                  key: "replacement",
-                  header: "Governed replacement",
-                  render: (r) =>
-                    r.replacementAgent ? (
-                      <Badge tone="ok">{r.replacementAgent.name}</Badge>
-                    ) : (
-                      <span className={v.dim}>{r.replacementNote ?? "none registered"}</span>
-                    ),
-                },
+                { key: "subject", header: "Subject", // a floor so a name never wraps to one word per line
+                  render: (r) => (
+                    <span title={r.subjectKind} style={{ display: "inline-block", minWidth: "14ch" }}>
+                      <strong>{r.subject}</strong>
+                      <span className={v.dim} style={{ display: "block" }}>
+                        {providerLabel(r.provider)}
+                        {r.replacementAgent ? <> · alternative: {r.replacementAgent.name}</> : r.replacementNote ? <> · {r.replacementNote}</> : null}
+                      </span>
+                    </span>
+                  ) },
+                { key: "sources", header: "Evidence", render: (r) => (
+                  <span className={v.row}>{r.signalSources.map((src) => <Badge key={src}>{evidenceLabel(src)}</Badge>)}</span>
+                ) },
+                { key: "confidence", header: "Confidence", info: CONFIDENCE_HELP,
+                  render: (r) => <Badge tone={r.confidence === "high" ? "ok" : r.confidence === "medium" ? "warn" : "info"}>{humanize(r.confidence)}</Badge> },
+                { key: "observations", header: "Seen", render: (r) => (
+                  <span style={{ whiteSpace: "nowrap" }}>
+                    {plural(r.observationCount, "time")}
+                    <span className={v.dim} style={{ display: "block" }}>{ago(r.lastSeenAt)}</span>
+                  </span>
+                ) },
+                // ADR-0195 SD0: where scanners saw it (path, line, commit), names seen, and who (as a pseudonym)
+                { key: "sightings", header: "Where seen",
+                  info: "Where the evidence was seen: file and line, commit, or log source, and the pseudonymised person involved.",
+                  render: (r) => <DiscoverySightings evidence={r.evidence} collapsed /> },
                 {
                   key: "disposition",
-                  header: "Disposition",
+                  header: "Status",
+                  info: DISPOSITION_HELP,
                   render: (r) => (
-                    <>
-                      <Badge tone="neutral">{r.disposition}</Badge>
-                      {r.dispositionStale ? <Badge tone="danger">seen again since</Badge> : null}
-                    </>
+                    <span className={v.row}>
+                      <Badge tone={r.disposition === "remediated" ? "ok" : r.disposition === "confirmed" ? "info" : "neutral"}>{DISPOSITION_LABEL[r.disposition] ?? humanize(r.disposition)}</Badge>
+                      {r.dispositionStale ? (
+                        <Badge tone="danger" info="New evidence arrived after this finding was closed. Review the disposition again.">Seen again</Badge>
+                      ) : null}
+                    </span>
                   ),
                 },
                 {
                   key: "triage",
-                  header: "",
-                  render: (r) => (
-                    <div className={v.stackTight} style={{ alignItems: "flex-start", whiteSpace: "nowrap" }}>
-                      <Link to={`/admin/governance/intake?source=shadow-ai&findingId=${encodeURIComponent(r.id)}&title=${encodeURIComponent(`Govern ${r.subject}`)}&description=${encodeURIComponent(`Register and govern the ${providerLabel(r.provider)} usage observed for ${r.subject}. Evidence: ${r.signalSources.map(evidenceLabel).join(", ")}.`)}`}>Register as use case</Link>
-                      <Button variant="ghost" onClick={() => { setDispositionFor(r.id); setReason(""); }}>Triage</Button>
+                  header: "Next step",
+                  render: (r) => {
+                    const plan = (
                       <Button
-                        variant="ghost"
-                        aria-label={`Remediation plan for ${r.subject}`}
+                        variant={r.disposition === "open" || r.disposition === "confirmed" ? "primary" : "default"}
+                        aria-label={`Plan remediation for ${r.subject}`}
                         aria-pressed={remediationFor === r.id}
-                        onClick={() => setRemediationFor(remediationFor === r.id ? null : r.id)}
+                        onClick={() => { setDispositionFor(null); setRemediationFor(remediationFor === r.id ? null : r.id); }}
                       >
-                        Remediation plan
+                        Plan remediation
                       </Button>
-                    </div>
-                  ),
+                    );
+                    const triage = r.dispositionStale ? (
+                      <Button onClick={() => { setRemediationFor(null); setDispositionFor(r.id); setReason(""); }}>Review again</Button>
+                    ) : (
+                      <Button variant="ghost" onClick={() => { setRemediationFor(null); setDispositionFor(r.id); setReason(""); }}>Triage</Button>
+                    );
+                    return (
+                      <RowActions
+                        slot="11rem"
+                        stacked
+                        // X7 (owner): the plan button sits in the primary slot on every row, so it aligns on every row; a
+                        // closed finding shows it at default weight instead of moving it
+                        primary={plan}
+                        secondary={triage}
+                        rest={
+                          <span className={v.stackTight} style={{ alignItems: "flex-start" }}>
+                            <Link to={`/admin/governance/intake?source=shadow-ai&findingId=${encodeURIComponent(r.id)}&title=${encodeURIComponent(`Govern ${r.subject}`)}&description=${encodeURIComponent(`Register and govern the ${providerLabel(r.provider)} usage observed for ${r.subject}. Evidence: ${r.signalSources.map(evidenceLabel).join(", ")}.`)}`}>Register as use case</Link>
+                          </span>
+                        }
+                      />
+                    );
+                  },
                 },
               ]}
             />
           )}
         </QueryGate>
+      </Card>
 
+        {/* A1: a finding's remediation plan and its triage open in the one shared detail drawer */}
         {remediationFor ? (
-          <ShadowRemediationPanel
-            key={remediationFor}
-            findingId={remediationFor}
-            onClose={() => setRemediationFor(null)}
-            onLinked={refresh}
-          />
+          <DetailDrawer
+            type="Remediation plan"
+            title={subjectOf(remediationFor)}
+            subjectKey={remediationFor}
+            closeLabel="Close plan"
+            data-testid="shadow-remediation"
+            meta={
+              <InfoButton label="a remediation plan">
+                A remediation plan turns a finding into tracked work: a governed workflow with a separate approver. The
+                workflow tracks the change and its sign-off. It does not change systems by itself.
+              </InfoButton>
+            }
+            onClose={closeRemediation}
+          >
+            <ShadowRemediationPanel
+              key={remediationFor}
+              findingId={remediationFor}
+              onClose={closeRemediation}
+              onLinked={refresh}
+              inDrawer
+            />
+          </DetailDrawer>
         ) : null}
 
         {dispositionFor ? (
-          <section className={a.subSection}>
-            <div className={v.sectionTitle}>Record a disposition</div>
+          <DetailDrawer type="Triage" title={subjectOf(dispositionFor)} subjectKey={dispositionFor} closeLabel="Close triage" onClose={closeDisposition}>
+          <section ref={dispositionRef} aria-label={`Record a disposition for ${subjectOf(dispositionFor)}`}>
             <p className={v.faint}>
               Moving a finding off &lsquo;open&rsquo; requires a reason — a later reviewer has to be able to audit the
               judgement.
             </p>
-            <Field label="Disposition">
+            <Field label="Disposition" help={DISPOSITION_HELP}>
               <Select value={disposition} onChange={(e) => setDisposition(e.target.value)}>
                 {["confirmed", "sanctioned", "false_positive", "remediated", "open"].map((d) => (
-                  <option key={d} value={d}>{d}</option>
+                  <option key={d} value={d}>{DISPOSITION_LABEL[d]}</option>
                 ))}
               </Select>
             </Field>
             <Field label="Reason">
               <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="why this judgement" />
             </Field>
-            <div className={v.row}>
+            <DrawerActions className={v.row}>
               <Button
                 variant="primary"
                 disabled={act.busy}
@@ -555,30 +697,37 @@ export default function ShadowAiPage() {
                 Record
               </Button>
               <Button onClick={() => setDispositionFor(null)}>Cancel</Button>
-            </div>
+            </DrawerActions>
           </section>
+          </DetailDrawer>
         ) : null}
-      </Card>
+        </>
+      )}
 
-
-      <Card title="Coverage scorecard">
+      {tab === "coverage" && (
+      <Card title="Coverage" info="For each kind of evidence: whether you supplied it, and what it can and cannot see. Use it to explain gaps, not to claim full coverage.">
         <p className={v.faint}>Gaps are shown, never papered over.</p>
         <QueryGate loading={findings.isLoading} error={findings.error} onRetry={refresh}>
-          <Table<FindingsResponse["coverage"]["sources"][number]>
-            rows={findings.data?.coverage.sources ?? []}
-            rowKey={(r) => r.kind}
-            columns={[
-              { key: "evidence_class", header: "Evidence class", render: (r) => evidenceLabel(r.kind) },
-              { key: "supplied", header: "Supplied", render: (r) => (r.on ? "on" : "off") },
-              { key: "imports", header: "Imports", render: (r) => r.imports },
-              { key: "rows", header: "Rows", render: (r) => r.rows },
-              { key: "what_it_sees", header: "What it sees", render: (r) => <span className={v.dim}>{r.whatItSees}</span> },
-              { key: "what_it_misses", header: "What it misses", render: (r) => <span className={v.dim}>{r.whatItMisses}</span> },
-            ]}
-          />
+          <ul className={sh.tiles} aria-label="Coverage by evidence class">
+            {(findings.data?.coverage.sources ?? []).map((r) => (
+              <li key={r.kind} className={r.on ? sh.tile : sh.tileMissing}>
+                <span className={v.row} style={{ justifyContent: "space-between" }}>
+                  <strong>{evidenceLabel(r.kind)}</strong>
+                  <Badge tone={r.on ? "ok" : "warn"}>{r.on ? "Supplied" : "Missing"}</Badge>
+                </span>
+                <span className={v.dim}>{plural(r.imports, "import")} · {plural(r.rows, "row")}</span>
+                <span>Sees: {r.whatItSees}</span>
+                <span>Misses: {r.whatItMisses}</span>
+                {r.on ? null : <button type="button" className={sh.linkButton} onClick={() => setTab("import")}>Import this evidence</button>}
+              </li>
+            ))}
+          </ul>
         </QueryGate>
       </Card>
+      )}
 
+      {tab === "import" && (
+        <>
       {/* ================= ADR-0071 — the format adapters ================= */}
       <Card title="Import a raw log file (format adapters)">
         <QueryGate loading={adapters.isLoading} error={adapters.error} onRetry={() => void adapters.refetch()}>
@@ -697,7 +846,7 @@ export default function ShadowAiPage() {
                 value={rawContent}
                 onChange={(e) => setRawContent(e.target.value)}
                 spellCheck={false}
-                placeholder="CEF:0|Acme|Proxy|1.0|100|allowed|3|dhost=api.openai.com suser=alice"
+                placeholder="CEF:0|Acme|Proxy|1.0|100|allowed|3|dhost=llm.example suser=psn:4d2e"
                 data-testid="raw-content"
               />
             </Field>
@@ -842,7 +991,7 @@ export default function ShadowAiPage() {
                 placeholder={
                   discIsManifest
                     ? '{"dependencies": {"openai": "^4.0.0"}}'
-                    : "Aug 20 10:00:01 dnsmasq[812]: query[A] api.openai.com from 10.1.2.3"
+                    : "Aug 20 10:00:01 dnsmasq[812]: query[A] llm.example from laptop-07.example"
                 }
                 data-testid="disc-content"
               />
@@ -985,7 +1134,7 @@ export default function ShadowAiPage() {
         <Field label="Evidence JSON" grow>
           <Textarea rows={10} value={evidence} onChange={(e) => setEvidence(e.target.value)} spellCheck={false} />
         </Field>
-        {act.error ? <p className={v.errLine}>{act.error}</p> : null}
+        {act.error ? <p className={v.errLine} role="alert">{act.error}</p> : null}
         <div className={v.row}>
           <Button disabled={act.busy} onClick={() => void submitEvidence("dry_run")}>
             Analyze (dry run)
@@ -999,7 +1148,12 @@ export default function ShadowAiPage() {
         ) : null}
       </Card>
 
-      <Card title="Detection catalogue">
+        </>
+      )}
+
+      {tab === "catalogue" && (
+        <>
+      <Card title="Detection catalogue" info="The signatures evidence is matched against: AI service hostnames, SDK package names and API key formats. You can add your own.">
         <p className={v.faint}>{catalogue.data?.posture ?? ""}</p>
         <QueryGate loading={catalogue.isLoading} error={catalogue.error} onRetry={refresh}>
           <div className={v.row}>
@@ -1011,6 +1165,11 @@ export default function ShadowAiPage() {
             </Button>
           </div>
           <AddSignatureForm onAdded={refresh} />
+        </QueryGate>
+      </Card>
+
+      <Card title="Signatures" contain>
+        <QueryGate loading={catalogue.isLoading} error={catalogue.error} onRetry={refresh}>
           <Table<Signature>
             rows={catalogue.data?.signatures ?? []}
             rowKey={(r) => r.id}
@@ -1019,6 +1178,17 @@ export default function ShadowAiPage() {
               { key: "kind", header: "Kind", render: (r) => evidenceLabel(r.kind) },
               { key: "value", header: "Value", render: (r) => <code>{r.value}</code> },
               { key: "match", header: "Match", render: (r) => evidenceLabel(r.matchType) + (r.minLength ? ` (≥${r.minLength})` : "") },
+              {
+                key: "scope",
+                header: "Scope",
+                render: (r) => [r.os, r.ecosystem].filter(Boolean).join(" · ") || <span className={v.dim}>any</span>,
+              },
+              {
+                key: "confidence",
+                header: "Confidence",
+                render: (r) => <Badge tone={r.confidence === "low" ? "warn" : r.confidence === "medium" ? "info" : "ok"}>{r.confidence ?? "high"}</Badge>,
+              },
+              { key: "tool", header: "Tool / note", render: (r) => <span className={v.dim}>{[r.toolId, r.note].filter(Boolean).join(" — ") || "—"}</span> },
               { key: "provenance", header: "Provenance", render: (r) => r.provenance },
               { key: "updated", header: "Updated", render: (r) => ago(r.lastUpdatedAt) },
               { key: "enabled", header: "Enabled", render: (r) => <Badge tone={r.enabled ? "ok" : "neutral"}>{r.enabled ? "yes" : "no"}</Badge> },
@@ -1039,8 +1209,11 @@ export default function ShadowAiPage() {
           />
         </QueryGate>
       </Card>
+        </>
+      )}
 
-      <Card title="Import history">
+      {tab === "history" && (
+      <Card title="Import history" contain>
         <p className={v.faint}>
           Including refusals — an evidence file that tried to carry a privilege field is recorded, not discarded.
         </p>
@@ -1059,16 +1232,40 @@ export default function ShadowAiPage() {
           />
         </QueryGate>
       </Card>
+      )}
       </div>
     </>
   );
 }
 
-function KpiFigure(props: { value: ReactNode; label: string }) {
+const TAB_IDS = ["findings", "coverage", "import", "catalogue", "history"];
+
+type StatusGroup = "all" | "open" | "confirmed" | "closed";
+const statusGroup = (d: string): Exclude<StatusGroup, "all"> => (d === "open" ? "open" : d === "confirmed" ? "confirmed" : "closed");
+const STATUS_GROUP_LABEL: Record<StatusGroup, string> = { all: "All", open: "Open", confirmed: "Confirmed", closed: "Closed" };
+
+const DISPOSITION_LABEL: Record<string, string> = {
+  open: "Open",
+  confirmed: "Confirmed",
+  sanctioned: "Sanctioned",
+  false_positive: "False positive",
+  remediated: "Remediated",
+};
+const DISPOSITION_HELP =
+  "Your triage decision. Open: not reviewed. Confirmed: real ungoverned use. Sanctioned: allowed as it is. False positive: not AI use. Remediated: fixed. Moving a finding off Open needs a reason.";
+const CONFIDENCE_HELP =
+  "How many independent kinds of evidence agree. High: three or more. Medium: two. Low: one, so check it by hand.";
+
+/** a figure tile; `tone` paints the severity stripe, so the tile that needs attention reads first */
+function KpiFigure(props: { value: ReactNode; label: string; hint?: string; info?: ReactNode; tone?: "critical" | "high" | "medium" | "low" }) {
   return (
-    <div className={v.stat}>
+    <div className={`${v.stat} ${props.tone ? sh[props.tone] : ""}`}>
       <span className={v.statValue}>{props.value}</span>
-      <span className={v.statLabel}>{props.label}</span>
+      <span className={v.statLabel}>
+        {props.label}
+        {props.info != null && <InfoButton label={props.label}>{props.info}</InfoButton>}
+      </span>
+      {props.hint ? <span className={v.faint}>{props.hint}</span> : null}
     </div>
   );
 }
@@ -1093,14 +1290,20 @@ function KpiFigure(props: { value: ReactNode; label: string }) {
 function AddSignatureForm(props: { onAdded: () => void }) {
   const act = useAction();
   const [provider, setProvider] = useState("");
-  const [kind, setKind] = useState<"hostname" | "sdk_package" | "api_key_prefix" | "web_app">("hostname");
+  const [kind, setKind] = useState<string>("hostname");
+  const [os, setOs] = useState("");
+  const [ecosystem, setEcosystem] = useState("");
+  const [toolId, setToolId] = useState("");
+  const [note, setNote] = useState("");
+  const [confidence, setConfidence] = useState<"high" | "medium" | "low">("high");
+  const isArtifact = ["cloud_ai_service", "desktop_app", "ide_extension", "browser_extension", "local_runtime", "assistant_config"].includes(kind);
   const [value, setValue] = useState("");
   const [hostMatch, setHostMatch] = useState<"exact_host" | "host_suffix">("host_suffix");
   const [minLength, setMinLength] = useState("20");
 
   // the one pairing the gateway will accept for this kind
   const matchType =
-    kind === "sdk_package" ? "package" : kind === "api_key_prefix" ? "key_prefix" : hostMatch;
+    kind === "sdk_package" ? "package" : kind === "api_key_prefix" ? "key_prefix" : isArtifact ? "identifier" : hostMatch;
 
   return (
     <form
@@ -1119,6 +1322,12 @@ function AddSignatureForm(props: { onAdded: () => void }) {
                 // that happens to start with it, so the gateway requires one.
                 ...(kind === "api_key_prefix" ? { minLength: Number(minLength) } : {}),
                 provenance: "admin",
+                // ADR-0195 SD0: optional OS / ecosystem scope, tool id, note and confidence
+                ...(os ? { os } : {}),
+                ...(ecosystem.trim() ? { ecosystem: ecosystem.trim().toLowerCase() } : {}),
+                ...(toolId.trim() ? { toolId: toolId.trim().toLowerCase() } : {}),
+                ...(note.trim() ? { note: note.trim() } : {}),
+                confidence,
               }),
             "Signature added",
           )
@@ -1140,9 +1349,39 @@ function AddSignatureForm(props: { onAdded: () => void }) {
           <option value="web_app">web app</option>
           <option value="sdk_package">SDK package</option>
           <option value="api_key_prefix">API key prefix</option>
+          <option value="cloud_ai_service">cloud AI service</option>
+          <option value="desktop_app">desktop app</option>
+          <option value="ide_extension">IDE extension</option>
+          <option value="browser_extension">browser extension</option>
+          <option value="local_runtime">local model runtime</option>
+          <option value="assistant_config">assistant config file</option>
         </Select>
       </Field>
-      <Field label={kind === "sdk_package" ? "Package name" : kind === "api_key_prefix" ? "Key prefix" : "Hostname"}>
+      <Field label="OS (optional)">
+        <Select value={os} onChange={(e) => setOs(e.target.value)}>
+          <option value="">any</option>
+          <option value="macos">macOS</option>
+          <option value="windows">Windows</option>
+          <option value="linux">Linux</option>
+        </Select>
+      </Field>
+      <Field label="Ecosystem (optional)">
+        <Input value={ecosystem} maxLength={64} onChange={(e) => setEcosystem(e.target.value)} placeholder="npm" />
+      </Field>
+      <Field label="Tool id (optional)">
+        <Input value={toolId} maxLength={128} onChange={(e) => setToolId(e.target.value)} />
+      </Field>
+      <Field label="Note (optional)">
+        <Input value={note} maxLength={500} onChange={(e) => setNote(e.target.value)} />
+      </Field>
+      <Field label="Confidence">
+        <Select value={confidence} onChange={(e) => setConfidence(e.target.value as typeof confidence)}>
+          <option value="high">high</option>
+          <option value="medium">medium</option>
+          <option value="low">low</option>
+        </Select>
+      </Field>
+      <Field label={kind === "sdk_package" ? "Package name" : kind === "api_key_prefix" ? "Key prefix" : isArtifact ? "Identifier (exact)" : "Hostname"}>
         <Input
           required
           value={value}

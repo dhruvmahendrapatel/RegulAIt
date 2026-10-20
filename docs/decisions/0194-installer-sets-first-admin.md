@@ -93,3 +93,28 @@ ADR-0180 (secure by default), and a known default administrator credential is a 
 6. **Demo seed (`--seed-demo`).** The demo personas count as the existing admin, so the step is skipped and the
    summary says so. The token is still retired, so the seed that re-runs at each gateway start can no longer
    authenticate. It logs a failure and the loaded data stays. This is the stricter choice, and it was kept.
+
+## As built — 2026-10-17: review Lows on the installer
+
+- **The password file is opened once.** `first_admin_from_file` opens the file on descriptor 9, re-runs every check
+  through that descriptor (`/dev/fd/9`; the path must still name the same device and inode), and hands the runner that
+  same descriptor as stdin. Checking the path and then redirecting it again left a window for a swap.
+- **Invalid UTF-8 is refused.** `fa_password_file_problem` also refuses bytes that are not valid UTF-8 (truncated or
+  stray continuation bytes, overlong forms, surrogates, code points above U+10FFFF), with `od` and `awk` only.
+- **A truthful `--seed-demo` summary.** `first-admin.js --status` now says when every admin is one of the demo
+  seed's personas (the seed guard's own test). Only then does the summary say the demo admin is the admin. With a real
+  admin present, the seed refuses, and the summary now says it loaded nothing.
+- **The unreachable "bootstrap token is still live" summary line is removed.** When an admin exists, the installer
+  always retires the token (or stops on failure), unless `--admin-token` re-opened it.
+- **The password file's directory is checked too (independent review, Info).** The directory must be owned by the
+  installing user or root, and no one else may write to it. Otherwise another user could swap the file, or put a FIFO
+  in its place, between the path check and the open; a FIFO would block the installer.
+- **The password file is Linux only.** The re-check relies on Linux's `/dev/fd`, which re-opens the file at offset 0.
+  On macOS and the BSDs it duplicates the descriptor and shares its offset, so the checks would consume the password.
+  There `install.sh` refuses `REGULAIT_FIRST_ADMIN_PASSWORD_FILE` at the start and the interactive prompt is the way
+  in. `INSTALL.md` says so.
+- **Two race tests through `first_admin_from_file`.** One swaps a file the checks refuse (group-readable, or a symlink)
+  in after the path-only check: the re-check on descriptor 9 refuses it and the runner is never called. The other
+  swaps a valid file in just before the re-check (refused as changed while it was being opened) and just after it (the
+  runner receives the checked content, not the file now at the path). Both fail against the old check-then-redirect.
+  The second also fails against a version that keeps the re-check but redirects the path again for the runner.

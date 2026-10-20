@@ -64,6 +64,7 @@ import {
 import { CREDENTIAL_MATERIAL_RULES, scrubAuditText } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -379,16 +380,14 @@ describe("3. the siting: no route, no helper, and a third write shape", () => {
 
   it("scrubs the UPSERT branch — onConflictDoUpdate({ set }) writes the same columns", async () => {
     const host = `ps-upsert-${randomUUID().slice(0, 8)}.example.com`;
+    // ADR-0034 owner amendment 2026-10-16: adding an entry is a stepped-up relaxation; this suite is about the scrub
     // egress-allow-cleanup: afterAll — the first POST's id is recorded in upsertAllowHostId, which afterAll removes
-    const post = (note: string) =>
-      app.inject({
-        method: "POST",
-        headers: AUTH,
-        url: "/v1/egress-allow-hosts",
-        payload: { host, note },
-      });
-
-    const first = await post("initial registration, reviewed by security");
+    const first = await relaxStepUpAround(db, () => app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/egress-allow-hosts",
+      payload: { host, note: "initial registration, reviewed by security" },
+    }));
     expect(first.statusCode).toBeLessThan(300);
     upsertAllowHostId = first.json().id;
     // the INSERT branch left ordinary prose byte-identical …
@@ -399,7 +398,13 @@ describe("3. the siting: no route, no helper, and a third write shape", () => {
     // scrubs too. `custom-providers.ts` passes the SAME object to `.values()`
     // and to `.onConflictDoUpdate({ set })`, so a fix applied to only one of
     // them would pass the first assertion and fail here.
-    const second = await post(`re-registered with ${AWS_KEY} pasted from the runbook`);
+    // egress-allow-cleanup: afterAll — the same host (an upsert keeps the row id)
+    const second = await relaxStepUpAround(db, () => app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/egress-allow-hosts",
+      payload: { host, note: `re-registered with ${AWS_KEY} pasted from the runbook` },
+    }));
     expect(second.statusCode).toBeLessThan(300);
     const updated = await raw("egress_allow_hosts", second.json().id);
     expect(updated.id).toBe(created.id);
@@ -466,6 +471,7 @@ describe("5. ONE detector, shared with the audit path", () => {
       "dlp.secret.stripe_key": `sk_live_${"aZ09Kq7x".repeat(3)}`,
       "dlp.secret.google_api_key": `AIza${"Sy09_-Kq".repeat(5).slice(0, 35)}`,
       "dlp.secret.gitlab_pat": `glpat-${"aZ09_-Kq".repeat(3)}`,
+      "dlp.secret.huggingface_token": `hf_${"aZqKxbYw".repeat(5).slice(0, 34)}`,
     };
     // every shipped rule has a sample here — a NEW rule added to
     // `guardrails.ts` fails this line until it is exercised on this path too
@@ -511,6 +517,8 @@ describe("6. the covered / NOT-covered inventory", () => {
     "agents.halted_reason",
     "agents.lifecycle_reason",
     "ai_endpoint_signatures.replacement_note",
+    // ADR-0195 SD0 (migration 0202): an admin's note on a catalogue row
+    "ai_endpoint_signatures.note",
     "ai_risks.acceptance_note",
     "ai_use_cases.retired_reason",
     "ai_vendors.retired_reason",

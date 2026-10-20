@@ -23,6 +23,10 @@
  *     any claim.) The adapter refuses a client-assertion claim with no
  *     preflight on record, so a provider upgrade that moved the hook fails
  *     closed (and `provider-contract.test.ts` fails the build).
+ *     ADR-0188 S9 follow-up: a JWT-SVID (`jwt-spiffe` assertion type) is
+ *     verified and matched before the provider runs, like a certificate, and
+ *     the provider is told the outcome; its replay key is claimed first in
+ *     the grant handler, after the same preflight.
  *  2. OUR DPoP PROFILE: signature by the embedded public key (`jose`), `htm`
  *     POST, `htu` = this endpoint, `iat` within 60 s (at most 5 s ahead) on the
  *     DATABASE clock, and the gateway's 5-minute HMAC nonce (decision 20).
@@ -62,6 +66,7 @@ import {
 import { auditLog, delegationGrants, engineRunners, eq, type Db, type DelegationGrantRow } from "@regulait/db";
 import {
   CLIENT_ASSERTION_MAX_AGE_SECONDS,
+  CLIENT_ASSERTION_TYPE_JWT_SPIFFE,
   CLIENT_CREDENTIALS_GRANT_TYPE,
   clientCredentialsRequestSchema,
   CREDENTIAL_NOT_AFTER_RESPONSE_MEMBER,
@@ -94,11 +99,22 @@ import {
   type IdentitySecrets,
 } from "../delegated-token.js";
 import { loadOrgSettings } from "../org-settings.js";
-import { assertionCredentialOf, clientJwks, findWorkloadClient, matchCertificateCredential, type CertificateMatch, type WorkloadClient } from "./clients.js";
+import {
+  assertionCredentialOf,
+  clientJwks,
+  findWorkloadClient,
+  matchCertificateCredential,
+  matchJwtSvidCredential,
+  type CertificateMatch,
+  type JwtSvidMatch,
+  type WorkloadClient,
+} from "./clients.js";
 import { deploymentEnvironment, gatewayResource, identityIssuer, identitySecretsFor, OAUTH_TOKEN_ROUTE_PATH, tokenEndpointUrl } from "./common.js";
 import { rootCapFor, verifyDelegationProof, type VerifiedDelegationProof } from "./delegation-proof.js";
 import { presentedClientCertificate } from "./x509.js";
+import { lockSpiffeBundleUnrevoked } from "./spiffe-trust-domains.js";
 import { mintWorkloadSelfToken, selfKindForResource } from "./workload-self.js";
+import { endpointAgentContext } from "../endpoint-agent.js";
 
 /** the form parameters the exchange grant reads (everything else is stripped by the provider) */
 export const EXCHANGE_PARAMS = [
@@ -132,7 +148,7 @@ let requestTimeoutMs = TOKEN_REQUEST_TIMEOUT_MS;
  * transaction just before its timeout re-check. Production code never sets
  * either; `setTokenRequestTimeoutForTest` returns the restore.
  */
-export const tokenEndpointTestHooks: { beforeGrantCommit?: () => Promise<void> } = {};
+export const tokenEndpointTestHooks: { beforeGrantCommit?: () => Promise<void>; afterCertificateMatch?: () => Promise<void> } = {};
 export function setTokenRequestTimeoutForTest(ms: number): () => void {
   const before = requestTimeoutMs;
   requestTimeoutMs = ms;
@@ -178,6 +194,12 @@ interface RequestState {
   dpopIat?: number;
   /** decision 21: the certificate this request presented, matched to a credential (or why not) */
   mtls?: { clientId: string; match: CertificateMatch } | null;
+  /**
+   * ADR-0188 S9 follow-up: a JWT-SVID client assertion (`jwt-spiffe`), verified and matched to a `spiffe_id`
+   * credential BEFORE the provider ran, like a certificate. The provider never sees the assertion: it is told the
+   * outcome through the same pre-authenticated path as mTLS. Its replay key is claimed in the grant handler.
+   */
+  jwtSvid?: { clientId: string; match: JwtSvidMatch } | null;
   /** what to audit */
   outcome?: { grantId: string; parentGrantId: string | null; jti: string; actorIdentityId: string };
   /** ADR-0188 S7: a self token that was issued (audited as such, never as a delegation) */
@@ -197,6 +219,18 @@ interface RequestState {
 }
 
 const als = new AsyncLocalStorage<RequestState>();
+
+/**
+ * The credential that authenticated `clientId` BEFORE the provider ran (decision 21's certificate, or the S9
+ * follow-up's JWT-SVID), with the SPIFFE bundle that vouched for it, or null.
+ */
+function preAuthenticated(s: RequestState, clientId: string): { credentialId: string; spiffeBundleId?: string } | null {
+  if (s.mtls && s.mtls.clientId === clientId && s.mtls.match.ok) {
+    return { credentialId: s.mtls.match.credentialId, ...(s.mtls.match.spiffeBundleId !== undefined ? { spiffeBundleId: s.mtls.match.spiffeBundleId } : {}) };
+  }
+  if (s.jwtSvid && s.jwtSvid.clientId === clientId && s.jwtSvid.match.ok) return { credentialId: s.jwtSvid.match.credentialId, spiffeBundleId: s.jwtSvid.match.spiffeBundleId };
+  return null;
+}
 const state = (): RequestState => {
   const s = als.getStore();
   if (!s) throw new Error("token endpoint: no request state");
@@ -227,7 +261,7 @@ function adapterFor(db: Db) {
       const self = (WORKLOAD_SELF_KINDS as readonly string[]).includes(client.identity.kind);
       const grantTypes = client.alias ? [CLIENT_CREDENTIALS_GRANT_TYPE] : self ? [TOKEN_EXCHANGE_GRANT_TYPE, CLIENT_CREDENTIALS_GRANT_TYPE] : [TOKEN_EXCHANGE_GRANT_TYPE];
       const base = { client_id: id, grant_types: grantTypes, response_types: [], redirect_uris: [] };
-      if (s.mtls && s.mtls.clientId === id && !client.alias) {
+      if (preAuthenticated(s, id) !== null && !client.alias) {
         // decision 21: the certificate was validated and matched BEFORE the provider ran; the provider is told the
         // outcome through certificateAuthorized/certificateSubjectMatches. The SAN property only satisfies its schema.
         return { ...base, token_endpoint_auth_method: "tls_client_auth", tls_client_auth_san_uri: id };
@@ -375,6 +409,10 @@ async function selfPreflight(ctx: KoaContextLike, s: RequestState): Promise<Pref
     if (!runner) throw refuse(new InvalidClientAuth("no such engine runner"), "engine_runner_unknown");
     if (runner.revokedAt !== null) throw refuse(new InvalidClientAuth("this engine runner was revoked"), "engine_runner_revoked");
   }
+  // ADR-0195 SD4b: an endpoint agent's device must exist and not be revoked
+  if (kind === "endpoint_agent" && !(await endpointAgentContext(s.db, client.identity.id)).ok) {
+    throw refuse(new InvalidClientAuth("this device was revoked"), "device_revoked");
+  }
   const dpop = await requestDpop(ctx, s);
   if (!dpop) throw refuse(new InvalidDpopProof("a DPoP proof is required"), "dpop_required");
   // a self token is bound to the SAME key that authenticated the client: a workload cannot bind its token to some
@@ -413,7 +451,8 @@ async function preflight(ctx: KoaContextLike, s: RequestState): Promise<Prefligh
   const clientId = ctx.oidc.client.clientId;
   const client = await findWorkloadClient(s.db, clientId, s.now);
   if (!client) throw refuse(new InvalidClientAuth("unknown client"), "client_unknown");
-  const authCredentialId = s.mtls && s.mtls.clientId === clientId && s.mtls.match.ok ? s.mtls.match.credentialId : s.assertionCredentialId;
+  // a JWT-SVID is a bearer credential: no certificate binding is possible, so the DPoP check below is required of it
+  const authCredentialId = preAuthenticated(s, clientId)?.credentialId ?? s.assertionCredentialId;
   if (!authCredentialId) throw refuse(new InvalidClientAuth("no authenticating credential"), "credential_unknown");
 
   // the OUTPUT binding: the DPoP key when a proof is sent, else (mTLS clients only) the certificate
@@ -562,6 +601,14 @@ async function exchangeSteps(provider: Provider, ctx: KoaContextLike, s: Request
   const pf = s.preflight;
   const clientId = ctx.oidc.client.clientId;
 
+  // ADR-0188 S9 follow-up: the JWT-SVID is single-use (decision 5), claimed first, as the provider claims an
+  // assertion's jti, now that the whole request has been checked (R11 rule 1)
+  const svid = s.jwtSvid && s.jwtSvid.clientId === clientId && s.jwtSvid.match.ok ? s.jwtSvid.match : null;
+  if (svid) {
+    const ok = await claimReplay(s.db, "client_assertion", svid.replayKey, new Date((svid.exp + DPOP_PROOF_MAX_FUTURE_SECONDS) * 1000));
+    if (!ok) throw refuse(new InvalidClientAuth("client assertion replayed"), "assertion_replayed");
+  }
+
   // the claims, each atomic and in its own statement (decision 14), in R11's order
   s.phase = "as_dpop";
   if (pf.binding.kind === "dpop") await checkDpopReplay(provider, ctx, { jti: pf.binding.dpopJti! }, clientId, InvalidDpopProof);
@@ -583,6 +630,14 @@ async function exchangeSteps(provider: Provider, ctx: KoaContextLike, s: Request
       const txDb = tx as unknown as Db;
       let grantId: string;
       let parentGrantId: string | null = null;
+      // ADR-0188 S9 (#389 review M1, recheck Low 3): a client authenticated by an X.509-SVID holds EVERY bundle row of
+      // its trust domain FOR SHARE for the whole issue (`lockSpiffeBundleUnrevoked`), so no revocation or rotation can
+      // interleave, and refuses when its bundle was revoked or a rotation away from it ended in a revocation
+      const pre = preAuthenticated(s, clientId);
+      const spiffeBundleId = pre && pf.authCredentialId === pre.credentialId ? pre.spiffeBundleId : undefined;
+      if (spiffeBundleId !== undefined && !(await lockSpiffeBundleUnrevoked(txDb, spiffeBundleId))) {
+        throw refuse(new InvalidClientAuth("the SPIFFE trust bundle that authenticated this client was revoked, or a rotation away from it ended in a revocation"), "spiffe_bundle_revoked");
+      }
       try {
         if (pf.root) {
           const b = pf.root.proof.body;
@@ -741,17 +796,19 @@ export function tokenProviderFor(db: Db, issuer: string): Provider {
         tlsClientAuth: true,
         selfSignedTlsClientAuth: false,
         certificateBoundAccessTokens: false,
+        // decision 21 and the S9 follow-up: a certificate or a JWT-SVID was validated and matched BEFORE the provider
+        // ran; the provider's tls_client_auth path is only told the outcome
         getCertificate: () => {
           const s = als.getStore();
-          return s?.mtls?.match.ok ? "validated-by-regulait" : undefined;
+          return s?.mtls?.match.ok || s?.jwtSvid?.match.ok ? "validated-by-regulait" : undefined;
         },
         certificateAuthorized: (ctx: KoaContextLike) => {
           const s = als.getStore();
-          return !!s?.mtls && s.mtls.match.ok && s.mtls.clientId === ctx.oidc.client.clientId;
+          return !!s && preAuthenticated(s, ctx.oidc.client.clientId) !== null;
         },
         certificateSubjectMatches: (ctx: KoaContextLike) => {
           const s = als.getStore();
-          return !!s?.mtls && s.mtls.match.ok && s.mtls.clientId === ctx.oidc.client.clientId;
+          return !!s && preAuthenticated(s, ctx.oidc.client.clientId) !== null;
         },
       },
     },
@@ -845,6 +902,7 @@ async function auditTokenRequest(db: Db, s: RequestState | null, status: number,
       status,
       code: ok ? null : (s?.code ?? (status >= 500 ? "server_error" : "refused")),
       clientId,
+      ...(s?.jwtSvid ? { clientAuth: "spiffe_jwt_svid" } : {}),
       ...(ok ? { grantId: s!.outcome!.grantId, parentGrantId: s!.outcome!.parentGrantId, tokenJti: s!.outcome!.jti, actorIdentityId: s!.outcome!.actorIdentityId } : {}),
       ...(!ok && s?.revokedOnAbort ? { grantId: s.revokedOnAbort, grantRevokedReason: "request_aborted" } : {}),
     },
@@ -899,21 +957,46 @@ async function tokenRoute(db: Db, opts: { dataKey?: string | undefined }, req: F
   const presented = presentedClientCertificate(req);
   if (presented && clientId && !form.has("client_assertion")) {
     const client = await findWorkloadClient(db, clientId, now);
-    s.mtls = { clientId, match: client ? await matchCertificateCredential(client, presented, now) : { ok: false, code: "client_unknown" } };
+    s.mtls = { clientId, match: client ? await matchCertificateCredential(db, client, presented, now) : { ok: false, code: "client_unknown" } };
     if (!s.mtls.match.ok) s.code = s.mtls.match.code;
+    // test only: a rotation and a revocation landing between the certificate match and the issuing transaction
+    await tokenEndpointTestHooks.afterCertificateMatch?.();
+  }
+
+  // ADR-0188 S9 follow-up: a JWT-SVID client assertion (draft-ietf-oauth-spiffe-client-auth §3.1) is verified and
+  // matched here, then taken OUT of the form: the provider knows no `jwt-spiffe` assertion type, and is told the
+  // outcome through the pre-authenticated path instead. One assertion, one type, or nothing authenticates.
+  let body: Buffer = req.body;
+  const assertionTypes = form.getAll("client_assertion_type");
+  if (assertionTypes.includes(CLIENT_ASSERTION_TYPE_JWT_SPIFFE)) {
+    const assertions = form.getAll("client_assertion");
+    const svidClientId = clientId ?? "";
+    let match: JwtSvidMatch;
+    if (assertionTypes.length !== 1 || assertions.length !== 1 || !clientId) match = { ok: false, code: "request_malformed" };
+    else {
+      const client = await findWorkloadClient(db, clientId, now);
+      match = client ? await matchJwtSvidCredential(db, client, assertions[0]!, issuer, now) : { ok: false, code: "client_unknown" };
+    }
+    s.jwtSvid = { clientId: svidClientId, match };
+    if (!match.ok) s.code = match.code;
+    form.delete("client_assertion");
+    form.delete("client_assertion_type");
+    form.set("client_id", svidClientId);
+    body = Buffer.from(form.toString(), "utf8");
+    await tokenEndpointTestHooks.afterCertificateMatch?.();
   }
 
   // hand the bounded, already-parsed body to Koa. Only the headers the provider needs are passed on; the scheme and
   // host are OUR issuer's (provider.proxy = true trusts exactly these two, which we set)
   const issuerUrl = new URL(issuer);
   const basePath = issuerUrl.pathname === "/" ? "" : issuerUrl.pathname;
-  const incoming = Readable.from([req.body]) as Readable & Record<string, unknown>;
+  const incoming = Readable.from([body]) as Readable & Record<string, unknown>;
   const headers: Record<string, string> = {
     host: issuerUrl.host,
     "x-forwarded-proto": issuerUrl.protocol.slice(0, -1),
     "x-forwarded-host": issuerUrl.host,
     "content-type": "application/x-www-form-urlencoded",
-    "content-length": String(req.body.length),
+    "content-length": String(body.length),
     accept: "application/json",
   };
   const dpop = req.headers.dpop;

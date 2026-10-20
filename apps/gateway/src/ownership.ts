@@ -101,6 +101,18 @@ async function ownershipOf(db: Db, ownerUserId: string | null): Promise<Ownershi
 
 const tableFor = (kind: OwnedKind) => (kind === "mcp_server" ? mcpServers : connectors);
 
+export type OwnerChangeGate = (
+  change: { from: string | null; to: string | null },
+  opts?: { db: Db; spend: boolean },
+) => Promise<{ status: number; body: Record<string, unknown> } | null>;
+
+/** the in-transaction claim was refused: thrown so the owner write rolls back */
+class OwnerClaimRefused extends Error {
+  constructor(readonly refused: { status: number; body: Record<string, unknown> }) {
+    super("step-up refused");
+  }
+}
+
 /**
  * Change one server's or connector's owner, audited with `detail.transitions`
  * (refusals audited as `deny`). Used by the two PUT routes, and by
@@ -113,10 +125,12 @@ export async function changeOwner(
     id: string;
     ownerUserId: string | null;
     actorUserId: string | null | undefined;
-    /** ADR-0186 A: asked after the target is validated and before anything is
-     * written, only when the owner really changes (the `owner_change`
-     * step-up); a non-null answer is the refusal, and nothing is written */
-    gate?: (change: { from: string | null; to: string | null }) => Promise<{ status: number; body: Record<string, unknown> } | null>;
+    /** ADR-0186 A: the `owner_change` step-up, asked only when the owner really
+     * changes. Looked at (`spend: false`, on `db`) after the target is validated
+     * and before anything is written; then SPENT (`spend: true`) on the write's
+     * own transaction, after the compare-and-set. A non-null answer is the
+     * refusal, and nothing is written */
+    gate?: OwnerChangeGate;
   },
 ): Promise<
   | { ok: true; body: { id: string; ownerUserId: string | null; ownership: OwnershipState } }
@@ -143,36 +157,88 @@ export async function changeOwner(
     });
     return target;
   }
-  if (args.gate && before.ownerUserId !== target.ownerUserId) {
-    const refused = await args.gate({ from: before.ownerUserId, to: target.ownerUserId });
+  const gate = args.gate && before.ownerUserId !== target.ownerUserId ? args.gate : null;
+  const change = { from: before.ownerUserId, to: target.ownerUserId };
+  // looked at (not spent) here, so a request without a grant is answered at once; SPENT inside the transaction, on
+  // its connection, after the compare-and-set, so losing it to a concurrent change (409) never burns the grant
+  if (gate) {
+    const refused = await gate(change, { db, spend: false });
     if (refused) return { ok: false, ...refused };
   }
   const fromOwnership = await ownershipOf(db, before.ownerUserId);
-  // each table named statically, so rule-write-guard.test.ts can see the writers
-  const [after] =
-    args.kind === "mcp_server"
-      ? await db
-          .update(mcpServers)
-          .set({ ownerUserId: target.ownerUserId })
-          // ADR-0186 A (Class A): compare-and-set on the owner the step-up was decided on
-          .where(and(eq(mcpServers.id, before.id), sql`${mcpServers.ownerUserId} IS NOT DISTINCT FROM ${before.ownerUserId}`))
-          .returning({ id: mcpServers.id, ownerUserId: mcpServers.ownerUserId })
-      : await db
-          .update(connectors)
-          .set({ ownerUserId: target.ownerUserId })
-          .where(and(eq(connectors.id, before.id), sql`${connectors.ownerUserId} IS NOT DISTINCT FROM ${before.ownerUserId}`))
-          .returning({ id: connectors.id, ownerUserId: connectors.ownerUserId });
-  if (!after) return { ok: false, status: CHANGED_CONCURRENTLY.status, body: { ...CHANGED_CONCURRENTLY.body } };
-  const toOwnership: OwnershipState = after!.ownerUserId ? "owned" : "unowned";
+  type Out =
+    | { ok: true; body: { id: string; ownerUserId: string | null; ownership: OwnershipState } }
+    | { ok: false; status: number; body: Record<string, unknown> };
+  return db
+    .transaction(async (tx): Promise<Out> => {
+      // each table named statically, so rule-write-guard.test.ts can see the writers
+      const [after] =
+        args.kind === "mcp_server"
+          ? await tx
+              .update(mcpServers)
+              .set({ ownerUserId: target.ownerUserId })
+              // ADR-0186 A (Class A): compare-and-set on the owner the step-up was decided on
+              .where(and(eq(mcpServers.id, before.id), sql`${mcpServers.ownerUserId} IS NOT DISTINCT FROM ${before.ownerUserId}`))
+              .returning({ id: mcpServers.id, ownerUserId: mcpServers.ownerUserId })
+          : await tx
+              .update(connectors)
+              .set({ ownerUserId: target.ownerUserId })
+              .where(and(eq(connectors.id, before.id), sql`${connectors.ownerUserId} IS NOT DISTINCT FROM ${before.ownerUserId}`))
+              .returning({ id: connectors.id, ownerUserId: connectors.ownerUserId });
+      if (!after) return { ok: false, status: CHANGED_CONCURRENTLY.status, body: { ...CHANGED_CONCURRENTLY.body } };
+      // write first, then spend: the single-use claim is made on THIS transaction's connection once the row is
+      // written, and a refused claim throws to roll the write back
+      if (gate) {
+        const refused = await gate(change, { db: tx as unknown as Db, spend: true });
+        if (refused) throw new OwnerClaimRefused(refused);
+      }
+      const toOwnership = await auditOwnerChanged(tx as unknown as Db, {
+        kind: args.kind,
+        id: before.id,
+        name: before.name,
+        from: before.ownerUserId,
+        to: after.ownerUserId,
+        fromOwnership,
+        actorUserId: args.actorUserId,
+      });
+      return { ok: true, body: { id: after.id, ownerUserId: after.ownerUserId, ownership: toOwnership } };
+    })
+    .catch(async (e: unknown): Promise<Out> => {
+      if (!(e instanceof OwnerClaimRefused) || !gate) throw e;
+      // the claim's own `step-up-grant-refused` row rolled back with the write: a look records it again, spending nothing
+      await gate(change, { db, spend: false });
+      return { ok: false, ...e.refused };
+    });
+}
+
+/**
+ * The `*-owner-changed` audit row of one owner change, written on `db` (a write's own transaction when the owner is
+ * changed together with other columns, as `PATCH /v1/servers/:serverId` does). `fromOwnership` is read before the
+ * write (`ownershipStateOf`). Answers the new ownership state.
+ */
+export async function auditOwnerChanged(
+  db: Db,
+  args: {
+    kind: OwnedKind;
+    id: string;
+    name: string;
+    from: string | null;
+    to: string | null;
+    fromOwnership: OwnershipState;
+    actorUserId: string | null | undefined;
+  },
+): Promise<OwnershipState> {
+  const label = args.kind === "mcp_server" ? "MCP server" : "connector";
+  const toOwnership: OwnershipState = args.to ? "owned" : "unowned";
   await db.insert(auditLog).values({
     userId: args.actorUserId ?? NIL,
     objectType: args.kind,
-    objectId: before.id,
+    objectId: args.id,
     detail: {
       subsystem: "ownership",
       transitions: {
-        ownerUserId: { from: before.ownerUserId, to: after!.ownerUserId },
-        ownership: { from: fromOwnership, to: toOwnership },
+        ownerUserId: { from: args.from, to: args.to },
+        ownership: { from: args.fromOwnership, to: toOwnership },
       },
       receiptClass: "configuration",
     },
@@ -180,16 +246,22 @@ export async function changeOwner(
     ruleId: OWNERSHIP_RULE_IDS.changed[args.kind],
     ruleChain: [],
     reason:
-      `${label} '${before.name}': owner ${before.ownerUserId ? `a user (id ${before.ownerUserId})` : "none"} → ` +
-      `${after!.ownerUserId ? `a user (id ${after!.ownerUserId})` : "none (unowned)"}`,
+      `${label} '${args.name}': owner ${args.from ? `a user (id ${args.from})` : "none"} → ` +
+      `${args.to ? `a user (id ${args.to})` : "none (unowned)"}`,
   });
-  return { ok: true, body: { id: after!.id, ownerUserId: after!.ownerUserId, ownership: toOwnership } };
+  return toOwnership;
 }
 
-/** ADR-0186 A: the `owner_change` step-up, bound to the object and the new owner */
-export function ownerChangeGate(db: Db, req: FastifyRequest, objectType: OwnedKind | "agent", objectId: string) {
-  return (change: { from: string | null; to: string | null }) =>
-    stepUpRefusal(db, req, ownerChangeStepUpArgs(objectType, objectId, change.to));
+/** the ownership state an owner id stands for now (owned, orphaned by a deactivated user, or unowned) */
+export const ownershipStateOf = ownershipOf;
+
+/**
+ * ADR-0186 A: the `owner_change` step-up, bound to the object and the new owner. Without `opts` it spends on the
+ * root handle (POST /v1/agents/:id/owner); `changeOwner` looks on `db` first and spends on its own transaction.
+ */
+export function ownerChangeGate(db: Db, req: FastifyRequest, objectType: OwnedKind | "agent", objectId: string): OwnerChangeGate {
+  return (change, opts = { db, spend: true }) =>
+    stepUpRefusal(opts.db, req, ownerChangeStepUpArgs(objectType, objectId, change.to), { spend: opts.spend });
 }
 
 /**

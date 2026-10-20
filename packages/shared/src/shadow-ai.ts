@@ -60,6 +60,15 @@
  * correctly. A finding is a pointer to a secret, never a copy of one.
  */
 import { z } from "zod";
+import {
+  activeDiscoveryPosture,
+  PRESENCE_BACKING_KINDS,
+  PRESENCE_SIGNATURES_V1,
+  presenceSignatureById,
+  type ActiveDiscoverySource,
+  type DiscoveryEvidenceKind,
+  type PresenceSignature,
+} from "./discovery/index.js";
 
 // ===========================================================================
 // 1. BOUNDS — the untrusted-input envelope
@@ -149,11 +158,30 @@ export function screenEvidencePayload(payload: unknown, basePath = ""): Evidence
 // 3. THE CATALOGUE — data, not code
 // ===========================================================================
 
-export const AI_SIGNATURE_KINDS = ["hostname", "sdk_package", "api_key_prefix", "web_app"] as const;
+/**
+ * ADR-0195 decision 5: the ARTIFACT kinds active discovery observes (a cloud AI
+ * service, an installed desktop app, an IDE or browser extension, a local model
+ * runtime, a coding-assistant config file). Each is matched by `identifier`:
+ * whole-value, case-insensitive equality. Never a regular expression.
+ */
+export const ARTIFACT_SIGNATURE_KINDS = [
+  "cloud_ai_service",
+  "desktop_app",
+  "ide_extension",
+  "browser_extension",
+  "local_runtime",
+  "assistant_config",
+] as const;
+export type ArtifactSignatureKind = (typeof ARTIFACT_SIGNATURE_KINDS)[number];
+
+export const AI_SIGNATURE_KINDS = ["hostname", "sdk_package", "api_key_prefix", "web_app", ...ARTIFACT_SIGNATURE_KINDS] as const;
 export type AiSignatureKind = (typeof AI_SIGNATURE_KINDS)[number];
 
-export const AI_MATCH_TYPES = ["exact_host", "host_suffix", "package", "key_prefix"] as const;
+export const AI_MATCH_TYPES = ["exact_host", "host_suffix", "package", "key_prefix", "identifier"] as const;
 export type AiMatchType = (typeof AI_MATCH_TYPES)[number];
+
+export const isArtifactSignatureKind = (k: string): k is ArtifactSignatureKind =>
+  (ARTIFACT_SIGNATURE_KINDS as readonly string[]).includes(k);
 
 export interface AiSignature {
   provider: string;
@@ -171,7 +199,26 @@ export interface AiSignature {
   provenance: string;
   lastUpdatedAt?: string | Date | null;
   enabled: boolean;
+  /** ADR-0195 SD0: matches only an observation from this OS (null = any) */
+  os?: SignatureOs | null;
+  /** ADR-0195 SD0: matches only an observation from this package ecosystem, e.g. npm, pypi (null = any) */
+  ecosystem?: string | null;
+  /** ADR-0195 SD0: the catalogue's own id for the tool this row detects (provenance, grouping) */
+  toolId?: string | null;
+  /** ADR-0195 SD0: an admin's note about the row */
+  note?: string | null;
+  /** ADR-0195 SD0: how sure the row is (default high); a low-confidence match is shown as such on the finding */
+  confidence?: SignatureConfidence;
 }
+
+export const SIGNATURE_OSES = ["macos", "windows", "linux"] as const;
+export type SignatureOs = (typeof SIGNATURE_OSES)[number];
+export const SIGNATURE_CONFIDENCES = ["high", "medium", "low"] as const;
+export type SignatureConfidence = (typeof SIGNATURE_CONFIDENCES)[number];
+/** a package ecosystem name (npm, pypi, maven…): linear, one bounded class */
+export const SIGNATURE_ECOSYSTEM_PATTERN = /^[a-z0-9][a-z0-9_.-]{0,63}$/;
+/** a catalogue tool id: linear, one bounded class */
+export const SIGNATURE_TOOL_ID_PATTERN = /^[a-z0-9][a-z0-9_.-]{0,127}$/;
 
 export const catalogueSignatureSchema = z
   .object({
@@ -184,6 +231,11 @@ export const catalogueSignatureSchema = z
     replacementNote: z.string().max(500).nullish(),
     provenance: z.string().min(1).max(300).default("admin"),
     enabled: z.boolean().default(true),
+    os: z.enum(SIGNATURE_OSES).nullish(),
+    ecosystem: z.string().regex(SIGNATURE_ECOSYSTEM_PATTERN).nullish(),
+    toolId: z.string().regex(SIGNATURE_TOOL_ID_PATTERN).nullish(),
+    note: z.string().max(500).nullish(),
+    confidence: z.enum(SIGNATURE_CONFIDENCES).default("high"),
   })
   .strict()
   .refine((s) => s.kind !== "api_key_prefix" || typeof s.minLength === "number", {
@@ -193,8 +245,9 @@ export const catalogueSignatureSchema = z
   .refine(
     (s) =>
       (s.kind === "sdk_package") === (s.matchType === "package") &&
-      (s.kind === "api_key_prefix") === (s.matchType === "key_prefix"),
-    { message: "matchType must agree with kind (sdk_package↔package, api_key_prefix↔key_prefix)" },
+      (s.kind === "api_key_prefix") === (s.matchType === "key_prefix") &&
+      isArtifactSignatureKind(s.kind) === (s.matchType === "identifier"),
+    { message: "matchType must agree with kind (sdk_package↔package, api_key_prefix↔key_prefix, artifact kinds↔identifier)" },
   );
 
 export type CatalogueSignatureInput = z.infer<typeof catalogueSignatureSchema>;
@@ -240,6 +293,8 @@ export const DEFAULT_AI_SIGNATURES: ReadonlyArray<Omit<AiSignature, "lastUpdated
 
 export const EVIDENCE_KINDS = ["egress_log", "code_scan", "saas_export", "self_reported"] as const;
 export type EvidenceKind = (typeof EVIDENCE_KINDS)[number];
+/** ADR-0195: a finding's signal comes from an import (`EvidenceKind`) or from a discovery scanner */
+export type FindingSignalSource = EvidenceKind | DiscoveryEvidenceKind;
 
 const isoish = z.string().min(4).max(40);
 
@@ -372,6 +427,17 @@ export function hostMatchesSignature(host: string, sig: AiSignature): boolean {
   return false;
 }
 
+/**
+ * ADR-0195: an artifact identifier (a cloud service name, an extension id, an
+ * app bundle id, a runtime or config file name) is compared whole and
+ * case-insensitively, and only against a signature of the SAME artifact kind.
+ */
+export function artifactMatchesSignature(kind: ArtifactSignatureKind, value: string, sig: AiSignature): boolean {
+  if (sig.kind !== kind || sig.matchType !== "identifier") return false;
+  const v = sig.value.trim().toLowerCase();
+  return v.length > 0 && value.trim().toLowerCase() === v;
+}
+
 /** Package names are compared whole. `openai-mock` is a different package. */
 export function packageMatchesSignature(pkg: string, sig: AiSignature): boolean {
   if (sig.kind !== "sdk_package") return false;
@@ -398,19 +464,38 @@ export function keyMatchesSignature(fragment: string, fullLength: number | null 
 // 6. OBSERVATIONS → CLASSIFICATION
 // ===========================================================================
 
-export type ShadowAiSubjectKind = "host" | "repo" | "saas_app" | "system";
+/** ADR-0195 adds `device`, `cloud_resource` and `cloud_principal` (migration 0202) */
+export const SHADOW_AI_SUBJECT_KINDS = ["host", "repo", "saas_app", "system", "device", "cloud_resource", "cloud_principal"] as const;
+export type ShadowAiSubjectKind = (typeof SHADOW_AI_SUBJECT_KINDS)[number];
 
 export interface Observation {
   subjectKind: ShadowAiSubjectKind;
   /** the thing that would be REMEDIATED — the repo, the calling host, the app */
   subject: string;
-  signalSource: EvidenceKind;
+  signalSource: FindingSignalSource;
   observedAt: string;
   count: number;
   host?: string | null;
   packageName?: string | null;
   keyFragment?: string | null;
   keyLength?: number | null;
+  /** ADR-0195: an artifact a discovery scanner saw (matched only by an `identifier` signature of the same kind) */
+  artifact?: { kind: ArtifactSignatureKind; value: string } | null;
+  /** ADR-0195 decision 6: where it was found (a repo path, line and commit; or a device's config file). Never contents */
+  location?: SightingLocation | null;
+  /**
+   * ADR-0195 decision 6: NAMES only (an MCP command basename), never values. An environment-variable name is never
+   * a name here: it travels as a presence signature id (`presence`, lane A6)
+   */
+  names?: string[] | null;
+  /** ADR-0195 lane A6: the ids of the presence signatures (env-variable or CLI names) the sighting matched; never the names */
+  presence?: string[] | null;
+  /** ADR-0195 decision 20: the person behind the sighting, as a pseudonym (`psn:` + 24 hex), never a name */
+  actorPseudonym?: string | null;
+  /** ADR-0195: the OS the sighting came from (rows scoped to an OS match only it) */
+  os?: SignatureOs | null;
+  /** ADR-0195: the package ecosystem (rows scoped to an ecosystem match only it) */
+  ecosystem?: string | null;
   declaredProvider?: string | null;
   detail?: Record<string, unknown>;
 }
@@ -434,6 +519,8 @@ export interface Classification {
   replacementAgentId: string | null;
   replacementNote: string | null;
   reason: string;
+  /** ADR-0195: the matched row's confidence (absent = high) */
+  signatureConfidence?: SignatureConfidence;
 }
 
 const UNMATCHED: Classification = Object.freeze({
@@ -461,8 +548,56 @@ const UNMATCHED: Classification = Object.freeze({
  *             act. This tier is why the inventory is workable: a wall of
  *             `low` package hits never buries the one `critical`.
  */
+/**
+ * ADR-0195 artifact severities: a deployed cloud AI service, an installed app,
+ * extension or local runtime is real usage outside the gateway (medium, like a
+ * consumer web app); an assistant config file is a capability (low, like an SDK).
+ */
+const ARTIFACT_SEVERITY: Readonly<Record<ArtifactSignatureKind, ShadowAiSeverity>> = {
+  cloud_ai_service: "medium",
+  desktop_app: "medium",
+  ide_extension: "medium",
+  browser_extension: "medium",
+  local_runtime: "medium",
+  assistant_config: "low",
+};
+const ARTIFACT_PHRASE: Readonly<Record<ArtifactSignatureKind, string>> = {
+  cloud_ai_service: "the cloud AI service",
+  desktop_app: "the desktop app",
+  ide_extension: "the IDE extension",
+  browser_extension: "the browser extension",
+  local_runtime: "the local model runtime",
+  assistant_config: "the coding-assistant config",
+};
+
+const CONF_RANK: Readonly<Record<SignatureConfidence, number>> = { low: 0, medium: 1, high: 2 };
+const lowerConfidence = (a: SignatureConfidence, b: SignatureConfidence): SignatureConfidence => (CONF_RANK[a] <= CONF_RANK[b] ? a : b);
+
+/**
+ * ADR-0195 lane A6: the enabled `identifier` row that backs a presence
+ * signature id: same value (case-insensitive) and one of the kinds
+ * `PRESENCE_BACKING_KINDS` allows. Null for an unknown id or no backing row.
+ * The caller has already applied enabled/os/ecosystem scoping.
+ */
+export function presenceBackingSignature(
+  id: string,
+  enabled: readonly AiSignature[],
+  presenceCatalogue: readonly PresenceSignature[] = PRESENCE_SIGNATURES_V1,
+): { presence: PresenceSignature; signature: AiSignature } | null {
+  const p = presenceSignatureById(id, presenceCatalogue);
+  if (!p) return null;
+  const kinds = PRESENCE_BACKING_KINDS[p.kind];
+  const want = p.value.toLowerCase();
+  const sig = enabled.find((s) => s.matchType === "identifier" && kinds.includes(s.kind) && s.value.toLowerCase() === want);
+  return sig ? { presence: p, signature: sig } : null;
+}
+
 export function classifyObservation(obs: Observation, catalogue: readonly AiSignature[]): Classification {
-  const enabled = catalogue.filter((s) => s.enabled);
+  // ADR-0195: a row scoped to an OS or a package ecosystem matches only an observation from it
+  const obsEcosystem = obs.ecosystem ? obs.ecosystem.trim().toLowerCase() : null;
+  const enabled = catalogue.filter(
+    (s) => s.enabled && (s.os == null || s.os === obs.os) && (s.ecosystem == null || s.ecosystem.toLowerCase() === obsEcosystem),
+  );
   const hit = (sig: AiSignature, severity: ShadowAiSeverity, matchedValue: string, reason: string): Classification => ({
     matched: true,
     provider: sig.provider,
@@ -471,6 +606,7 @@ export function classifyObservation(obs: Observation, catalogue: readonly AiSign
     severity,
     replacementAgentId: sig.replacementAgentId ?? null,
     replacementNote: sig.replacementNote ?? null,
+    ...(sig.confidence && sig.confidence !== "high" ? { signatureConfidence: sig.confidence } : {}),
     reason,
   });
 
@@ -528,6 +664,44 @@ export function classifyObservation(obs: Observation, catalogue: readonly AiSign
     }
   }
 
+  // 2b. ADR-0195: an artifact active discovery saw (a deployed cloud AI
+  //     service, an installed app/extension/runtime, an assistant config file).
+  //     Whole-identifier equality against a signature of the same kind only.
+  if (obs.artifact) {
+    const art = obs.artifact;
+    const sig = enabled.find((s) => artifactMatchesSignature(art.kind, art.value, s));
+    if (sig) {
+      return hit(
+        sig,
+        ARTIFACT_SEVERITY[art.kind],
+        sig.value,
+        `${obs.subject} has ${ARTIFACT_PHRASE[art.kind]} '${art.value}', which matches the ${sig.provider} ${art.kind} signature`,
+      );
+    }
+  }
+
+  // 2c. ADR-0195 lane A6: a presence signature (an env-variable or CLI name),
+  //     reported as its id only. It counts when an ENABLED catalogue row backs
+  //     it, so disabling that row turns the detection off. The evidence keeps
+  //     the id, never the name.
+  if (obs.presence && obs.presence.length > 0) {
+    for (const id of obs.presence) {
+      const backed = presenceBackingSignature(id, enabled);
+      if (!backed) continue;
+      const { presence: p, signature: sig } = backed;
+      const c = lowerConfidence(sig.confidence ?? "high", p.confidence);
+      return {
+        ...hit(
+          sig,
+          ARTIFACT_SEVERITY[sig.kind as ArtifactSignatureKind] ?? "low",
+          p.id,
+          `${obs.subject} matches the ${sig.provider} ${p.kind === "cli" ? "CLI" : "environment-variable"} presence signature '${p.id}' (the name itself is not kept)`,
+        ),
+        ...(c !== "high" ? { signatureConfidence: c } : {}),
+      };
+    }
+  }
+
   // 3. a capability, not an act
   if (obs.packageName) {
     for (const sig of enabled) {
@@ -565,11 +739,33 @@ export function classifyObservation(obs: Observation, catalogue: readonly AiSign
 // 7. CORRELATION — one real usage, however many signals saw it
 // ===========================================================================
 
+/** where one sighting was found (ADR-0195 decision 6) */
+export type SightingLocation = {
+  path: string;
+  line?: number;
+  commit?: string;
+};
+
+/** one sighting kept on a finding: a lead, bounded; key fragments redacted, no contents, people as pseudonyms */
+export type FindingEvidence = {
+  source: FindingSignalSource;
+  matchedValue: string;
+  reason: string;
+  observedAt: string;
+  location?: SightingLocation;
+  names?: string[];
+  /** ADR-0195 lane A6: presence signature ids, never the env-variable or CLI names */
+  presence?: string[];
+  actor?: string;
+  /** the matched catalogue row's confidence when it is not high */
+  signatureConfidence?: SignatureConfidence;
+};
+
 export interface CorrelatedFinding {
   subjectKind: ShadowAiSubjectKind;
   subject: string;
   provider: string;
-  signalSources: EvidenceKind[];
+  signalSources: FindingSignalSource[];
   signatureKinds: AiSignatureKind[];
   firstSeenAt: string;
   lastSeenAt: string;
@@ -578,7 +774,7 @@ export interface CorrelatedFinding {
   confidence: ShadowAiConfidence;
   replacementAgentId: string | null;
   replacementNote: string | null;
-  evidence: Array<{ source: EvidenceKind; matchedValue: string; reason: string; observedAt: string }>;
+  evidence: FindingEvidence[];
 }
 
 /**
@@ -607,11 +803,16 @@ export function correlateObservations(
     const key = correlationKey(o.subjectKind, o.subject, c.provider);
     const at = o.observedAt;
     const existing = byKey.get(key);
-    const evidenceItem = {
+    const evidenceItem: FindingEvidence = {
       source: o.signalSource,
       matchedValue: c.matchedValue ?? "",
       reason: c.reason,
       observedAt: at,
+      ...(o.location ? { location: o.location } : {}),
+      ...(o.names && o.names.length > 0 ? { names: o.names } : {}),
+      ...(o.presence && o.presence.length > 0 ? { presence: o.presence } : {}),
+      ...(o.actorPseudonym ? { actor: o.actorPseudonym } : {}),
+      ...(c.signatureConfidence ? { signatureConfidence: c.signatureConfidence } : {}),
     };
     if (!existing) {
       byKey.set(key, {
@@ -801,7 +1002,11 @@ const SOURCE_NOTES: Record<EvidenceKind, { whatItSees: string; whatItMisses: str
   },
 };
 
-export function coverageScorecard(inputs: readonly CoverageInput[]): CoverageScorecard {
+export function coverageScorecard(
+  inputs: readonly CoverageInput[],
+  /** ADR-0195 decision 5b: the active discovery sources enabled now (name and kind); none means nothing is scanned */
+  activeSources: readonly ActiveDiscoverySource[] = [],
+): CoverageScorecard {
   const byKind = new Map(inputs.map((i) => [i.kind, i]));
   const sources = EVIDENCE_KINDS.map((kind) => {
     const i = byKind.get(kind) ?? { kind, imports: 0, rows: 0, lastImportedAt: null };
@@ -814,7 +1019,7 @@ export function coverageScorecard(inputs: readonly CoverageInput[]): CoverageSco
     sourcesPossible: EVIDENCE_KINDS.length,
     statement:
       `Discovery has analyzed ${sourcesOn} of ${EVIDENCE_KINDS.length} evidence classes. ` +
-      `regulAIt ships no collector: every finding below derives from evidence you supplied, so this inventory ` +
-      `reduces shadow AI — it does not prove its absence.`,
+      `${activeDiscoveryPosture(activeSources)} Every finding below derives from evidence you supplied or from a ` +
+      `source an admin enabled, so this inventory reduces shadow AI — it does not prove its absence.`,
   };
 }

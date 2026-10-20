@@ -35,6 +35,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 // an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
 import { relaxStepUpAround } from "./testing/step-up-posture.js";
+import { trackEgressAllowHosts } from "./testing/egress-allow-cleanup.js";
 import http from "node:http";
 import path from "node:path";
 import { Writable } from "node:stream";
@@ -109,7 +110,13 @@ let connectorId = "";
 let bareConnectorId = "";
 let requesterId = "";
 let approverId = "";
-const allowIds: Record<string, string> = {};
+/**
+ * M-068: both allow entries are posted as tracked hosts and removed by host from afterAll, so a test that withdraws
+ * one and re-creates it under a new id is covered. The ids below are only what `disallow` deletes.
+ */
+const allowed = trackEgressAllowHosts();
+let loginAllowId: string | undefined;
+let graphAllowId: string | undefined;
 const approvalIds: string[] = [];
 let alertId = "";
 let restoreOrg: (() => Promise<void>) | undefined;
@@ -140,19 +147,21 @@ function serve(host: string, hits: Hit[], answer: (req: http.IncomingMessage, bo
 
 const allow = async (host: string) => {
   const res = await relaxStepUpAround(db, () => inject("POST", "/v1/egress-allow-hosts", {
-    host,
+    host: allowed.trackHost(host),
     allowPrivateRanges: true,
     allowPlaintextHttp: true,
     note: `adr0183 2.6 ${RUN}: local fake ${host === LOGIN_HOST ? "token endpoint" : "Graph"}`,
   }));
   expect(res.statusCode, res.body).toBe(201);
-  allowIds[host] = res.json().id as string;
+  if (host === LOGIN_HOST) loginAllowId = res.json().id;
+  else graphAllowId = res.json().id;
 };
 const disallow = async (host: string) => {
-  const id = allowIds[host];
+  const id = host === LOGIN_HOST ? loginAllowId : graphAllowId;
   if (!id) return;
   await inject("DELETE", `/v1/egress-allow-hosts/${id}`);
-  delete allowIds[host];
+  if (host === LOGIN_HOST) loginAllowId = undefined;
+  else graphAllowId = undefined;
 };
 
 async function makeApproval(projectId?: string) {
@@ -258,27 +267,32 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  delete process.env.REGULAIT_DEPLOY_MODE;
-  if (priorPublicUrl === undefined) delete process.env.REGULAIT_PUBLIC_URL;
-  else process.env.REGULAIT_PUBLIC_URL = priorPublicUrl;
-  await restoreOrg?.();
-  if (approvalIds.length) {
-    await db.delete(chatopsMessages).where(inArray(chatopsMessages.approvalId, approvalIds));
-    await db.delete(approvals).where(inArray(approvals.id, approvalIds));
+  // M-068: through the shared helper, every row of each tracked host, while the app is still up
+  const entries = await allowed.removeAll(app, AUTH);
+  try {
+    delete process.env.REGULAIT_DEPLOY_MODE;
+    if (priorPublicUrl === undefined) delete process.env.REGULAIT_PUBLIC_URL;
+    else process.env.REGULAIT_PUBLIC_URL = priorPublicUrl;
+    await restoreOrg?.();
+    if (approvalIds.length) {
+      await db.delete(chatopsMessages).where(inArray(chatopsMessages.approvalId, approvalIds));
+      await db.delete(approvals).where(inArray(approvals.id, approvalIds));
+    }
+    if (alertId) await db.delete(governanceAlerts).where(eq(governanceAlerts.id, alertId));
+    await db.delete(chatopsConnections).where(eq(chatopsConnections.name, CONNECTION));
+    const ids = [connectorId, bareConnectorId].filter(Boolean);
+    if (ids.length) {
+      await db.delete(connectorCredentials).where(inArray(connectorCredentials.connectorId, ids));
+      await db.delete(connectors).where(inArray(connectors.id, ids));
+    }
+    clearOutlookTokenCache();
+    app.server.closeAllConnections();
+    await app.close();
+    await new Promise<void>((r) => loginServer.close(() => r()));
+    await new Promise<void>((r) => graphServer.close(() => r()));
+  } finally {
+    entries.assertRemoved();
   }
-  if (alertId) await db.delete(governanceAlerts).where(eq(governanceAlerts.id, alertId));
-  await db.delete(chatopsConnections).where(eq(chatopsConnections.name, CONNECTION));
-  const ids = [connectorId, bareConnectorId].filter(Boolean);
-  if (ids.length) {
-    await db.delete(connectorCredentials).where(inArray(connectorCredentials.connectorId, ids));
-    await db.delete(connectors).where(inArray(connectors.id, ids));
-  }
-  for (const host of Object.keys(allowIds)) await disallow(host);
-  clearOutlookTokenCache();
-  app.server.closeAllConnections();
-  await app.close();
-  await new Promise<void>((r) => loginServer.close(() => r()));
-  await new Promise<void>((r) => graphServer.close(() => r()));
 });
 
 const register = (over: Record<string, unknown> = {}) =>
@@ -442,6 +456,7 @@ describe("5. both hosts go through the egress guard", () => {
       expect(loginHits.length).toBe(before.login);
       expect(graphHits.length).toBe(before.graph);
     } finally {
+      // egress-allow-cleanup: afterAll — the re-created entry is a tracked host, removed by afterAll
       await allow(GRAPH_HOST);
     }
   });
@@ -463,6 +478,7 @@ describe("5. both hosts go through the egress guard", () => {
       expect(added).toHaveLength(1);
       expect((added[0]!.detail as { phase?: string }).phase).toBe("adapter");
     } finally {
+      // egress-allow-cleanup: afterAll — the re-created entry is a tracked host, removed by afterAll
       await allow(LOGIN_HOST);
     }
   });
@@ -477,6 +493,7 @@ describe("5. both hosts go through the egress guard", () => {
       expect(refused.statusCode, refused.body).toBe(403);
       expect(refused.json().error).toBe("egress_blocked");
       expect(graphHits.length).toBe(before);
+      // egress-allow-cleanup: afterAll — the re-created entry is a tracked host, removed by afterAll
       await allow(GRAPH_HOST);
       const sent = await postCard(await makeApproval());
       expect(sent.statusCode, sent.body).toBe(200);

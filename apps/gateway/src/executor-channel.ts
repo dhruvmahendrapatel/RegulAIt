@@ -89,6 +89,7 @@ import { completeExecutorRequest, NO_IDENTITY, sendExecutorRefusal, verifyExecut
 import { databaseNow } from "./delegation.js";
 import { attestationCounts, freshAttestation, type FreshAttestationRow } from "./executor-attestation.js";
 import { endStdioSession, registerExecutorStdioRoutes, setStdioMacRoot, stdioSecretFor } from "./executor-stdio.js";
+import { artifactStoreFromEnv, type ArtifactStore } from "./model-artifacts.js";
 import { loadOrgSettings } from "./org-settings.js";
 
 export interface ExecutorChannelOptions {
@@ -98,6 +99,30 @@ export interface ExecutorChannelOptions {
   streamPollMs?: number;
   /** keepalive interval on the stream (default 10 s) */
   keepaliveMs?: number;
+  /** I5: where an engine task's artifact input is streamed from (default: the artifact store from the environment) */
+  artifactStore?: ArtifactStore | null;
+  /**
+   * I5: the engine task side (engine-tasks.ts), handed in by the app so this module never imports it (no import
+   * cycle). Absent: no engine task input is served and every engine task report is refused `engine_task_unknown`
+   * (fail closed).
+   */
+  engineTasks?: EngineTaskChannelHooks;
+}
+
+/** I5: what the executor channel needs from the engine tasks this process holds (engine-tasks.ts implements it) */
+export interface EngineTaskChannelHooks {
+  /** the input digest of the engine task this process holds for an offer (null: none held here) */
+  inputDigestFor(offerId: string): string | null;
+  /** register the executor's input routes inside the channel scope (behind its one-use proof) */
+  registerChannelRoutes(
+    scope: { get(path: string, handler: (req: FastifyRequest, reply: FastifyReply) => Promise<unknown>): unknown },
+    db: Db,
+    deps: {
+      authed: (req: FastifyRequest, reply: FastifyReply) => Promise<ExecutorRow | null>;
+      refused: (reply: FastifyReply, status: number, code: string, executor: ExecutorRow | null, extra?: Record<string, unknown>) => FastifyReply;
+      artifactStore: () => ArtifactStore | null;
+    },
+  ): void;
 }
 
 /** the bound on a self-test or report body (64 reports of at most 64 KiB each fit well inside) */
@@ -663,7 +688,7 @@ export function pickLinkedReport<R extends LinkedReport>(rows: readonly R[]): R 
   );
   return sorted[0] ?? null;
 }
-async function linkedReportOf(db: Db, placementId: string): Promise<LinkedReport | null> {
+export async function linkedReportOf(db: Db, placementId: string): Promise<LinkedReport | null> {
   const rows = await db
     .select({ id: executionPlacementReports.id, outcome: executionPlacementReports.outcome, appliedClass: executionPlacementReports.appliedClass, reportSha256: executionPlacementReports.reportSha256, refusalCode: executionPlacementReports.refusalCode, endCode: executionPlacementReports.endCode, createdAt: executionPlacementReports.createdAt })
     .from(executionPlacementReports)
@@ -748,6 +773,7 @@ const declineToRefusal: Record<z.infer<typeof executorDeclineSchema>["reason"], 
 
 export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts: ExecutorChannelOptions = {}): void {
   setStdioMacRoot(opts.dataKey);
+  const taskArtifactStore = opts.artifactStore === undefined ? artifactStoreFromEnv() : opts.artifactStore;
   const pollMs = Math.max(20, opts.streamPollMs ?? 500);
   const keepaliveMs = Math.max(pollMs, opts.keepaliveMs ?? 10_000);
 
@@ -1083,6 +1109,9 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
       if (signed.report.kind !== "placement" || signed.report.offerId !== p.data.offerId) return refused(reply, 400, "report_offer_mismatch", row);
       if (signed.report.executor.identifier !== auth.client.identity.identifier) return refused(reply, 400, "report_identifier", row);
       if (!(await verifyReportSignature(auth, signed))) return refused(reply, 401, "report_signature_invalid", row);
+      // ADR-0190 I5: an engine task's report is checked against the input THIS process holds for the offer; a process
+      // that holds none cannot check it, so it refuses (fail closed; never a quarantine: it is our own gap)
+      const expectedInput = opts.engineTasks?.inputDigestFor(p.data.offerId) ?? null;
 
       // the executor as the transaction sees it (the row loaded at authentication is not trusted for class or status);
       // an executor that is not active is refused there, once, and audited below
@@ -1107,6 +1136,10 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
         if (!profile || profile.retiredAt) failures.push({ probe: "report", code: "profile_digest_mismatch" });
         else failures.push(...evaluateExecutorReport(signed.report, { profile: profile.parsed, profileDigest: profile.digest, backend: ex.backend, classesDeclared: ex.classesDeclared, requiredClass: o.requiredClass }).failures);
         if (signed.report.imageDigest !== o.imageDigest) failures.push({ probe: "report", code: "image_digest_mismatch" });
+        if (o.workloadKind === "engine_worker") {
+          if (expectedInput === null) return { status: 409, code: "engine_task_unknown" } as const;
+          if (signed.report.inputSha256 !== expectedInput) failures.push({ probe: "report", code: "input_digest_mismatch" });
+        }
         // the class actually applied must also satisfy the requirement through the customer mapping, if that is what it is.
         // Never below the required class (ADR-0190 decision 7; enforcement is the only mode, OWNER DECISION A).
         const effective = signed.report.class === "customer_declared" ? ex.declaredClass : signed.report.class;
@@ -1169,7 +1202,8 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
         reportSha256: out.reportSha256,
         next: nextFor(current),
         // review M4: the stdio session's MAC secret (derived; every replica the same), in this answer only
-        ...(out.workloadKind === "mcp_stdio" ? { stdioSecret: stdioSecretFor(p.data.offerId) } : {}),
+        // I5: an engine task's session is an I4 stdio session (its MACed `start` carries the task secret)
+        ...(out.workloadKind === "mcp_stdio" || out.workloadKind === "engine_worker" ? { stdioSecret: stdioSecretFor(p.data.offerId) } : {}),
       });
     });
 
@@ -1201,8 +1235,8 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
         return true;
       });
       if (!ended) return refused(reply, 409, "offer_unavailable", row);
-      // I4: a stdio session this process holds ends with its sandbox
-      endStdioSession(p.data.offerId);
+      // I4: a stdio session this process holds ends with its sandbox (another replica's ends when its relay sees this)
+      await endStdioSession(db, p.data.offerId);
       return reply.status(204).send();
     });
 
@@ -1212,6 +1246,13 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
       refused,
       jsonOf,
       keepaliveMs,
+    });
+
+    // ---- I5: an engine task's read-only input (same proof, same scope) ----------------------------------------
+    opts.engineTasks?.registerChannelRoutes(scope, db, {
+      authed: async (req, reply) => (await authed(req, reply, true))?.executor ?? null,
+      refused,
+      artifactStore: () => taskArtifactStore,
     });
   });
 }

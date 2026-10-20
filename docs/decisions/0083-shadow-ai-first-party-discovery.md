@@ -1,6 +1,6 @@
 # ADR-0083: First-party shadow-AI discovery — a compiled classifier over the operator's own files, still no scraper
 
-- **Status**: Accepted
+- **Status**: Accepted; amended by ADR-0195 (2026-10-17)
 - **Date**: 2026-08-20
 - **Migration**: **none.** The classifier writes through ADR-0055's existing tables
   (`shadow_ai_imports`, `shadow_ai_findings`) and its tags ride the existing `summary` jsonb —
@@ -201,3 +201,11 @@ printed verbatim from the API, and the catalogue-gap warning renders with the ho
   `apps/web/src/views/admin/governance/ShadowAiPage.tsx`.
 - **Migration**: none. The next available migration number remains **0088**.
 - Nothing here takes a `prod`/`production` designation.
+
+## Amended by ADR-0195 (2026-10-17)
+
+The owner decided on 2026-10-17 that RegulAIt may actively scan customer systems, read-only: code repos, AWS, GCP and
+Azure accounts, and user machines (through a no-agent osquery pack and importers, or a RegulAIt endpoint agent).
+Where this ADR says discovery uses only customer-supplied evidence, or refuses collectors or endpoint collection,
+[ADR-0195](0195-shadow-ai-active-discovery.md) supersedes it. Everything built under this ADR stays and the new
+scanners write into the same findings model.

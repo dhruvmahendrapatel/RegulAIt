@@ -93,6 +93,7 @@ import { literacyMonitorInput } from "./ai-literacy.js";
 import { afterAlertsRaised, alertOwnershipAtRaise, alertOwnershipViews } from "./alert-ownership.js";
 // ADR-0186 M — the four detection rules' loader (slice M's module)
 import { detectionMonitorInput } from "./monitor-detection-rules.js";
+import { errMessage } from "./err-serializer.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -208,7 +209,7 @@ export async function runGovernanceMonitor(
     try {
       return (await loaders[input](db, now)) as Awaited<ReturnType<MonitorOptionalInputs[K]>>;
     } catch (err) {
-      const error = (err instanceof Error ? err.message : String(err)).slice(0, 500);
+      const error = (errMessage(err)).slice(0, 500);
       for (const ruleId of OPTIONAL_INPUT_RULES[input]) failedInputs.push({ input, ruleId, error });
       return undefined;
     }

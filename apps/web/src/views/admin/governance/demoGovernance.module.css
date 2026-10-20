@@ -59,7 +59,7 @@
 .heatmap {
   display: grid;
   grid-template-columns: auto repeat(3, minmax(70px, 1fr));
-  gap: 4px;
+  gap: var(--s0);
   align-items: stretch;
 }
 
@@ -121,7 +121,7 @@
 .monitorLink {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--s0-5);
 }
 
 .dimensionList {
@@ -326,7 +326,7 @@
 .fact {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--s0);
   min-width: 0;
   padding: 0 var(--s3);
   border-left: 1px solid var(--border);
@@ -346,7 +346,7 @@
 .fact dd {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--s0-5);
   margin: 0;
   font-size: var(--text-md);
 }
@@ -415,13 +415,10 @@
   align-items: start;
 }
 
-/* one list container, divider rows — not a stack of bordered boxes */
+/* divider rows inside one card — not a stack of bordered boxes; the card's X6a
+   contain keeps a long list in its own box beside the sticky detail */
 .alertList {
   display: grid;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--surface-1);
-  overflow: hidden;
 }
 
 /* The detail column stays in view beside a long list: clicking the lowest
@@ -436,12 +433,12 @@
 
 .alertRow {
   display: grid;
-  gap: 4px;
+  gap: var(--s0);
   width: 100%;
   border: 0;
   border-bottom: 1px solid var(--border);
   border-radius: 0;
-  padding: 10px 16px;
+  padding: var(--s1) var(--s2);
   background: transparent;
   color: var(--text);
   font: inherit;
@@ -486,14 +483,27 @@
   list-style: none;
 }
 
+/* G5: the path as chips joined by arrows; the source of the risk (the last node) is tinted */
 .pathList li {
-  color: var(--text-dim);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  color: var(--text);
   font-size: var(--text-sm);
+  border-radius: var(--radius-md);
+  padding: var(--s0) var(--s1);
+  border: 1px solid var(--border-strong);
+  background: var(--rg-raised);
 }
-
+.pathList li:last-child {
+  border-color: var(--rg-high);
+  background: var(--rg-high-tint);
+  color: var(--rg-high-deep);
+}
 .pathList li:not(:last-child)::after {
-  content: " →";
-  color: var(--text-faint);
+  content: "→";
+  margin-inline-start: var(--s1);
+  color: var(--text-dim);
 }
 
 .timeline {
@@ -683,7 +693,7 @@
 }
 
 .statLine strong {
-  margin-right: 4px;
+  margin-right: var(--s0);
   color: var(--text);
   font-size: var(--text-md);
   font-weight: 600;
@@ -746,5 +756,28 @@
 
   .checkboxGrid {
     grid-template-columns: 1fr;
+  }
+}
+
+/* G5 */
+.alertTitle {
+  margin: 0;
+  font-size: var(--rg-body-size);
+  font-weight: 600;
+  color: var(--rg-ink);
+}
+/* the acknowledgement stays reachable at the bottom of the scrolling detail panel */
+.ackFooter {
+  position: sticky;
+  bottom: 0;
+  display: grid;
+  gap: var(--s1);
+  padding: var(--s1-5) 0;
+  border-top: 1px solid var(--border);
+  background: var(--rg-glass);
+}
+@media (max-width: 900px) {
+  .ackFooter {
+    position: static;
   }
 }

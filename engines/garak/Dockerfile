@@ -1,10 +1,10 @@
-# ADR-0187 B5-G — the garak engine image. ONE image, TWO containers (decision 140):
+# ADR-0187 B5-G — the garak engine image. ONE image, two uses (ADR-0190 I5):
 #
-#   engine-garak         the runner: `node /app/dist/main.js`, on the internal `engines` network, holding
-#                        the runner key on its state volume; it never runs garak
-#   engine-garak-worker  the worker: `node /app/dist/worker-main.js`, on `engines` (it must reach the
-#                        gateway's model routes), with NO runner key and no state; it runs one garak
-#                        process per probe with the run's own virtual key
+#   engine-garak  the runner: `node /app/dist/main.js`, on the internal `engines` network, holding the
+#                 runner key on its state volume; it never runs garak
+#   the task      `node /app/dist/task-main.js` (the manifest's taskEntry), started ONLY by the sandbox
+#                 executor in a gVisor sandbox under the run's engine_worker placement: no network but the
+#                 gateway channel, no runner key, no state; one garak process per probe with the run's key
 #
 # Built from the REPOSITORY ROOT (the shim is a workspace package):
 #

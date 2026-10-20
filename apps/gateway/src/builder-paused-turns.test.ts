@@ -23,6 +23,7 @@ import http from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 // an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
 import { relaxStepUpAround } from "./testing/step-up-posture.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
@@ -82,7 +83,8 @@ const posted: Array<{ url: string; body: Record<string, any> }> = [];
 const SECRET = "paused-turns-signing-secret";
 const CHANNEL = "C-PAUSED";
 let slackConn = "";
-let createdEgressEntry = false;
+/** M-068: the loopback allow entry this file created (only if absent), removed by id in afterAll */
+let loopbackAllowHostId: string | undefined;
 const connectionIds: string[] = [];
 const connectorIds: string[] = [];
 let seq = 0;
@@ -228,7 +230,7 @@ beforeAll(async () => {
       note: "builder-paused-turns suite: local fake chat platform",
     }));
     expect([200, 201]).toContain(allow.statusCode);
-    createdEgressEntry = true;
+    loopbackAllowHostId = allow.json().id;
   }
   const conn = await k.req("POST", "/v1/connectors", k.BOOT, { name: `bp-slack-connector-${k.RUN}`, kind: "chat", providerKind: "slack", baseUrl: base });
   expect(conn.statusCode, conn.body).toBe(201);
@@ -248,20 +250,25 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
-  await restoreApprovalSigning?.();
-  await restoreStrictAdmission?.();
-  await restoreSb1Posture?.();
-  await drainBackgroundWork(k.db);
-  if (connectionIds.length) await k.db.delete(chatopsConnections).where(inArray(chatopsConnections.id, connectionIds));
-  if (connectorIds.length) {
-    await k.db.delete(connectorCredentials).where(inArray(connectorCredentials.connectorId, connectorIds));
-    await k.db.delete(connectors).where(inArray(connectors.id, connectorIds));
+  // M-068: remove the loopback allow entry this file created, first, while the app is up; asserted last
+  const loopback = await removeEgressAllowEntry(k.app, k.BOOT, { id: loopbackAllowHostId });
+  try {
+    await restoreApprovalSigning?.();
+    await restoreStrictAdmission?.();
+    await restoreSb1Posture?.();
+    await drainBackgroundWork(k.db);
+    if (connectionIds.length) await k.db.delete(chatopsConnections).where(inArray(chatopsConnections.id, connectionIds));
+    if (connectorIds.length) {
+      await k.db.delete(connectorCredentials).where(inArray(connectorCredentials.connectorId, connectorIds));
+      await k.db.delete(connectors).where(inArray(connectors.id, connectorIds));
+    }
+    upstream.closeAllConnections();
+    await new Promise<void>((r) => upstream.close(() => r()));
+    await restoreSb2Gates();
+    await k.close();
+  } finally {
+    loopback.assertRemoved();
   }
-  if (createdEgressEntry) await k.db.delete(egressAllowHosts).where(eq(egressAllowHosts.host, "127.0.0.1"));
-  upstream.closeAllConnections();
-  await new Promise<void>((r) => upstream.close(() => r()));
-  await restoreSb2Gates();
-  await k.close();
 });
 
 // ---------------------------------------------------------------------------
@@ -459,13 +466,19 @@ describe("2. a paused thread is never stuck", () => {
       await k.db.execute(sql.raw(`DROP TRIGGER IF EXISTS ${fn} ON builder_tool_steps`));
       await k.db.execute(sql.raw(`DROP FUNCTION IF EXISTS ${fn}()`));
     }
-    expect(await stepRow(stepId)).toMatchObject({ status: "error", outcomeCode: "resume_failed", outcomeDetail: "injected failure" });
+    // ADR-0167 N8 R5: a bare driver error's message can quote values, so the
+    // stored detail gives its name and SQLSTATE, never its text
+    const step = await stepRow(stepId);
+    expect(step).toMatchObject({ status: "error", outcomeCode: "resume_failed" });
+    expect(step!.outcomeDetail).toContain("SQLSTATE P0001");
+    expect(step!.outcomeDetail).not.toContain("injected failure");
     // the audit row says what failed on ONE line, without the query text
     const [failed] = await k.db
       .select()
       .from(auditLog)
       .where(and(eq(auditLog.ruleId, "builder-tool-step-resume-failed"), sql`${auditLog.detail}->>'builderStepId' = ${stepId}`));
-    expect(failed!.reason).toContain("injected failure");
+    expect(failed!.reason).toContain("SQLSTATE P0001");
+    expect(failed!.reason).not.toContain("injected failure");
     expect(failed!.reason).not.toMatch(/[\n\r]|update "builder_tool_steps"/);
     expect((await threadRow(body.thread.id)).pendingTurnCiphertext).toBeNull();
     const next = await chat(owner, agentId, "hello", body.thread.id);

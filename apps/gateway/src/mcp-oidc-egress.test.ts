@@ -25,7 +25,7 @@
  * refused", so it starts from an EMPTIED egress_allow_hosts and never inherits
  * a sibling suite's entry.
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
 import http from "node:http";
 import path from "node:path";
@@ -55,7 +55,7 @@ import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
-import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
+import { trackEgressAllowHosts } from "./testing/egress-allow-cleanup.js";
 
 // ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
 // seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
@@ -165,23 +165,24 @@ const allowHost = async (
     method: "POST",
     headers: AUTH,
     url: "/v1/egress-allow-hosts",
-    payload: { host, ...opts, note: "adr43 suite" },
+    payload: { host: perTest.trackHost(host), ...opts, note: "adr43 suite" },
   });
   expect(r.statusCode).toBe(201);
-  const id = r.json().id as string;
-  liveAllowHostIds.add(id);
-  return id;
+  return r.json().id as string;
 };
 
 const dropAllowHost = async (id: string) => {
   const r = await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/egress-allow-hosts/${id}` });
   expect(r.statusCode).toBe(200);
-  liveAllowHostIds.delete(id);
 };
 
 // M-068: each test drops the entry it added at its end, which a failing assertion
-// skips; afterAll removes whatever is still here, so no later file inherits it.
-const liveAllowHostIds = new Set<string>();
+// skips; the afterEach below removes every host a test allow-listed, so neither a
+// later test nor a later file inherits it.
+const perTest = trackEgressAllowHosts();
+afterEach(async () => {
+  (await perTest.removeAll(app, AUTH)).assertRemoved();
+});
 
 const latestAudit = async (ruleId: string) => {
   const [row] = await db
@@ -241,22 +242,15 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
-  // M-068: entries a failed test left behind go first, while the app is open; their
-  // outcome is asserted only after every other restore has run.
-  const leftovers = [];
-  for (const id of liveAllowHostIds) leftovers.push(await removeEgressAllowEntry(app, AUTH, { id }));
-  try {
-    // leave the shared database in the posture it FOUND (ADR-0181 ships private ranges closed)
-    await restoreStrictAdmission?.();
-    await restoreStepUpPolicy?.();
-    app.server.closeAllConnections();
-    await restoreSb2Gates();
-    await app.close();
-    await upstream.close();
-    await new Promise<void>((resolve) => idp.server?.close(() => resolve()) ?? resolve());
-  } finally {
-    for (const removal of leftovers) removal.assertRemoved();
-  }
+  // leave the shared database in the posture it FOUND (ADR-0181 ships private ranges closed);
+  // the entries each test allow-listed were removed by the afterEach above
+  await restoreStrictAdmission?.();
+  await restoreStepUpPolicy?.();
+  app.server.closeAllConnections();
+  await restoreSb2Gates();
+  await app.close();
+  await upstream.close();
+  await new Promise<void>((resolve) => idp.server?.close(() => resolve()) ?? resolve());
 });
 
 // ===========================================================================

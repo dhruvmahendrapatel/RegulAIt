@@ -833,7 +833,8 @@ recorded. A refusal nobody can answer is recorded under the body's own code (`st
 
 PR #378 review follow-ups:
 - **Further relaxations.** `egress_allow_host` (an allow entry's private-range or plaintext opt-in turned on; a plain
-  entry needs nothing, ADR-0034 As built 2026-10-12) and `mcp_registry_import` (an import that inherits a registry's
+  entry needs nothing, ADR-0034 As built 2026-10-12; *superseded 2026-10-16/17: adding any entry needs the step-up,
+  `values.added`, ADR-0034 owner amendment and As built 2026-10-17*) and `mcp_registry_import` (an import that inherits a registry's
   open private ranges, ADR-0101).
 - **A duplicate name never burns a grant.** The relaxing creates (`POST /v1/agents`, `/v1/mcp-registries`,
   `/v1/servers`) check the name before spending the grant and answer 409 `conflict`.
@@ -862,3 +863,93 @@ PR #378 recheck:
   off for that one call and puts the policy back as found. They no longer depend on no admin on the shared database
   having a step-up method.
 
+## Note — 2026-10-17: the #369 review's three relaxations are enforced server side
+
+The #369 review listed three relaxations that only confirmed in the UI: enabling an MCP registry, allowing a
+registry private ranges, and setting an agent's expected served model. All three were rechecked on main on
+2026-10-17 (branch `b7-relax-stepups`), and each needs a server-side `settings_relax` step-up and an audited
+relaxation since PR #378 (As built 2026-10-12 above; ADR-0101 As built 2026-10-12 for registries). Tightening needs
+nothing. `zz-secure-default-stepups.test.ts` covers them. The web views (`McpRegistriesPanel`,
+`ExpectedServedModelCard`) send these writes through `withStepUp`. No demo seeder creates a registry or sets an
+expected served model, so the demo seed needs no change for them. Nothing further was built for this item.
+
+## As built — 2026-10-17: a step-up kind of its own for key management (migration 0203)
+
+Branch `keymgmt-stepup-1017`. Signing-key operations had borrowed other kinds: retiring a receipt key was a
+`settings_relax` step-up (`{op: "receipt_key_retire", keyId}`, As built 2026-10-12 above), and rotating or revoking
+the token issuer's key was an `identity_manage` step-up (ADR-0188 S3). A grant of either kind made for the same
+facts would therefore have been valid for a key operation. Both now ask for the new kind `key_management`:
+
+| Route | Facts the grant is bound to |
+|---|---|
+| `POST /v1/receipts/keys/:keyId/retire` | `{op: "receipt_key_retire", keyId}` |
+| `POST /v1/identity/signing-keys/rotate` | `{op: "signing_key_rotate", keyId}`: the key rotated TO, resolved before the step-up (a body with no `kid` used to bind `kid: null`, which named no key) |
+| `POST /v1/identity/signing-keys/:kid/revoke` | `{op: "signing_key_revoke", keyId}` |
+
+- **The kind.** `STEP_UP_ACTION_KINDS` gains `key_management` (nine kinds, after `pseudonym_reveal` from ADR-0195 SD0, migration 0202). The strict default includes it
+  (ADR-0180); migration 0203 widens the three CHECKs (`step_up_grants`, `webauthn_challenges`,
+  `org_settings.step_up_actions`), sets the column default, and adds the kind to the existing org row (first load, no
+  grandfathering). Removing it from the list is a relaxation, so it needs a `settings_relax` step-up like any other.
+- **Negative controls** (`zz-key-management-step-up.test.ts`): a `settings_relax` or `identity_manage` grant made for
+  the very facts of a key operation is refused and not spent; a `key_management` grant for another key or another op
+  is refused and not spent; each refusal leaves a `step-up-grant-refused` row naming `key_management`. Nothing in
+  `checkStepUp` changed: the grant claim already matches on kind AND digest, so these hold by construction and the
+  tests pin them.
+- **Refused before the step-up.** The rotation target, and a revoke of an unknown or already revoked key, are decided
+  before the step-up is asked for (as the receipt retire already was), so a refused key operation spends no grant.
+  Rotation decides again under its table lock.
+- **Audit.** The allow rows (`receipt-signing-key-retired`, `identity-signing-key-rotate`,
+  `identity-signing-key-revoke`) and the receipt retire's deny row carry `stepUpKind: "key_management"` beside the
+  method.
+- **Web.** The dialog reads "You're changing a signing key"; the org setting lists "Managing signing keys"; the
+  client's cap on step-ups per request was already derived from the copy table, so the new kind raised it.
+- **Not moved:** binding a key to a workload identity stays `identity_manage` (ADR-0188 decision 2 names it). The
+  data-key custody attestation (`POST /v1/security/data-key/attestations`) records where the key is held and changes
+  no key, so it has no step-up today; adding one is a separate decision. No route rotates the data key or an export
+  key: both are deploy-time secrets, rotated by redeploying.
+- **Migration journal:** renumbered 0207 to 0203 when the branch took in `main` after SD0 (#403, migration 0202, which
+  rewrote the same three CHECKs for `pseudonym_reveal`). 0203 is hand-written, journaled as idx 203, and its CHECKs and
+  column default list all nine kinds, `pseudonym_reveal` included, so neither kind is dropped.
+
+Open (not built): an emergency retire of the key in use. Today retiring the key this gateway signs with is refused
+(`receipt_key_in_use`, accepted as the stricter posture in STATE). After a compromise, the operator must configure a
+replacement and restart, and only then retire it. A recommendation is in the builder report on the PR.
+
+## As built — 2026-10-17: the owner-change grant is claimed after the compare-and-set (N12)
+
+`PUT /v1/servers/:serverId/owner` and `PUT /v1/connectors/:connectorId/owner` (`changeOwner` in `ownership.ts`) used
+to spend the `owner_change` grant on the root handle before the Class A compare-and-set. A compare-and-set lost to a
+concurrent owner change answered 409 `changed_concurrently` with the grant already burned. They now follow the
+pattern the egress allow-list writer uses: the grant is looked at (`spend: false`) before the write, so a request
+without one is answered at once; it is spent inside the write's own transaction, on its connection, after the
+compare-and-set, and before the `*-owner-changed` audit row (now written in the same transaction). A lost
+compare-and-set returns 409 and leaves the grant unspent. A refused claim rolls the write back, and a second look
+records the `step-up-grant-refused` row again outside the rolled-back transaction. `ownerChangeGate` takes
+`{ db, spend }`; without it, it spends on the root handle as before.
+
+`zz-owner-change-claim-in-tx.test.ts` covers three cases. A lost compare-and-set leaves the grant unspent, and the same
+grant then completes the change. A success spends the grant once, and a replay is refused. Four concurrent requests
+with one grant make one transition. Not changed here: `POST /v1/agents/:id/owner` (`agents-connectors.ts`) still
+spends on the root handle before its compare-and-set. It is outside this slice's file surface and is listed as a
+follow-up.
+
+## As built — 2026-10-18: recording a data-key custody attestation is a `key_management` step-up (ADR-0197 Q6)
+
+ADR-0197 Q6 (owner, 2026-10-18): "recording a data-key custody attestation requires the `key_management` step-up."
+
+- `POST /v1/security/data-key/attestations` (data-key.ts) now asks for `key_management`, bound to `{op:
+  "data_key_attest", keyId: <the running key's fingerprint>}` (`dataKeyAttestStepUp`), the same `{op, keyId}` shape as
+  every other key operation. The claimed method is not a step-up fact; it is recorded and audited with the claim.
+  (A first draft also bound the method; CodeQL's `js/insufficient-password-hash` read the `password_manager` value as
+  a password reaching the digest's SHA-256, so the method was dropped rather than allow-listed.)
+- The step-up is checked after the body checks: an implied confirmation, no data key, and key material in a field are
+  still refused 400 before any step-up is asked or spent.
+- As for the other `key_management` ops, a grant of another kind (`settings_relax` with the same facts), or for
+  another key or op, is refused and not spent. An API key can never record one. The bootstrap credential can
+  only during first-admin setup.
+- The `data-key-custody-attested` audit row gains `stepUp` and `stepUpKind: "key_management"`.
+- The Data key custody page sends the attestation through `withStepUp`. The step-up dialog's line for the kind reads
+  "changing a signing key or recording a key's custody".
+- No migration: the kind exists since 0203.
+- Tests (`data-key-custody.test.ts`, database): an API key is refused `step_up_required` and nothing is recorded; three
+  wrong grants are refused unspent; the exact grant is spent once and audited with the kind.

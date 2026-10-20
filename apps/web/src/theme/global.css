@@ -177,6 +177,18 @@ pre code {
   border-radius: var(--rg-r-sm);
 }
 
+/* A <select>, checkbox, radio or date/time field shows the ring on :focus, not only :focus-visible: WebKit does not
+   match :focus-visible on them when they are reached with Option+Tab (Safari's key for every control), and it drops
+   box-shadow on controls drawn with their native appearance, so they had no indicator there (ADR-0196 U1). The ring
+   is an outline in the same Signal colour; text fields keep the box-shadow ring above. */
+select:focus,
+input:is([type="checkbox"], [type="radio"], [type="date"], [type="datetime-local"], [type="time"], [type="month"],
+  [type="week"], [type="range"], [type="color"], [type="file"]):focus {
+  outline: 2px solid var(--rg-signal-ring);
+  outline-offset: 2px;
+  box-shadow: none;
+}
+
 ::selection {
   background: rgba(0, 185, 212, 0.25);
   color: var(--rg-ink);
@@ -186,7 +198,12 @@ pre code {
   *,
   *::before,
   *::after {
-    animation-duration: 0.01ms !important;
-    transition-duration: 0.01ms !important;
+    /* no motion at all rather than a 0.01 ms one. A 0.01 ms transition still starts from the old value and reaches
+       the new one only on the next frame, so a style read straight after a change (a theme flip) saw the old
+       colour; and a 0.01 ms INFINITE animation (the pulse, shimmer and caret) flickers and never finishes. No
+       animation here uses a fill mode, so `none` leaves every element in its resting style, and nothing in the
+       app waits for transitionend or animationend. */
+    animation: none !important;
+    transition: none !important;
   }
 }

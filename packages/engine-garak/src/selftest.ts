@@ -17,7 +17,7 @@ import { readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { buildSelfTest, probeEgress, type EgressProbeOptions } from "@regulait/engine-runner";
-import { GARAK_ENGINE_VERSION, GARAK_USAGE_DATA_ENV, GARAK_WORKER_SELF_TEST_SWITCH, isPublicAddress, type RunnerSelfTest } from "@regulait/shared";
+import { GARAK_ENGINE_VERSION, GARAK_USAGE_DATA_ENV, GARAK_WORKER_SELF_TEST_SWITCH, isPublicAddress, sandboxRuntimeObservationSchema, type RunnerSelfTest, type SandboxRuntimeObservation } from "@regulait/shared";
 
 export const WORKER_SELF_TEST_FILE = ".worker-selftest.json";
 /** how old a worker report may be (the worker rewrites it every hour) */
@@ -42,6 +42,8 @@ const reportSchema = z
         addressConnected: z.boolean(),
       })
       .strict(),
+    // ADR-0190 decision 10 (I5): the runtime the worker observed from inside its sandbox (recorded, never decisive)
+    runtime: sandboxRuntimeObservationSchema.optional(),
   })
   .strict();
 export type WorkerSelfTest = z.infer<typeof reportSchema>;
@@ -49,7 +51,7 @@ export type WorkerSelfTest = z.infer<typeof reportSchema>;
 /** the worker writes its report (atomically) */
 export async function writeWorkerSelfTest(
   resultsRoot: string,
-  args: { garakVersion: string; env?: NodeJS.ProcessEnv; egress?: EgressProbeOptions; credentialPaths?: readonly string[]; now?: Date },
+  args: { garakVersion: string; env?: NodeJS.ProcessEnv; egress?: EgressProbeOptions; credentialPaths?: readonly string[]; now?: Date; runtime?: SandboxRuntimeObservation },
 ): Promise<WorkerSelfTest> {
   const env = args.env ?? process.env;
   const usageDataEnv: Record<string, boolean> = {};
@@ -57,7 +59,7 @@ export async function writeWorkerSelfTest(
   const runnerCredentialVisible =
     RUNNER_CREDENTIAL_ENV.some((n) => (env[n] ?? "") !== "") || (args.credentialPaths ?? RUNNER_CREDENTIAL_PATHS).some((p) => existsSync(p));
   const egress = await probeEgress(args.egress);
-  const report: WorkerSelfTest = { at: (args.now ?? new Date()).toISOString(), garakVersion: args.garakVersion, usageDataEnv, runnerCredentialVisible, egress };
+  const report: WorkerSelfTest = { at: (args.now ?? new Date()).toISOString(), garakVersion: args.garakVersion, usageDataEnv, runnerCredentialVisible, egress, ...(args.runtime ? { runtime: args.runtime } : {}) };
   const file = path.join(resultsRoot, WORKER_SELF_TEST_FILE);
   const tmp = `${file}.${randomUUID()}.tmp`;
   await writeFile(tmp, JSON.stringify(report), { mode: 0o640 });

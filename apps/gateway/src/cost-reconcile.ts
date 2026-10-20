@@ -48,6 +48,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { planCostReconciliation, type ReconciliationLineInput } from "@regulait/shared";
+import { errLine } from "./err-serializer.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -221,7 +222,7 @@ export async function runCostReconciliation(
       warnings,
     };
   } catch (err) {
-    const message = (err instanceof Error ? `${err.name}: ${err.message}` : String(err)).slice(0, 2000);
+    const message = (errLine(err)).slice(0, 2000);
     await db
       .update(costReconciliationRuns)
       .set({ finishedAt: new Date(), outcome: "failed", error: message })

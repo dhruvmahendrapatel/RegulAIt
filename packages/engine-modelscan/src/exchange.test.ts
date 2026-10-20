@@ -8,8 +8,10 @@ import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import type { ProcessGroupOptions, ProcessGroupResult } from "@regulait/engine-runner";
-import { ExchangeScanExecutor, scannerTick } from "./exchange.js";
+import type { ProcessGroupOptions, ProcessGroupResult } from "@regulait/engine-runner/worker";
+import { ExchangeScanExecutor } from "./exchange.js";
+import { maliciousPickle, safetensorsFile } from "./fixtures.js";
+import { scannerTick } from "./worker.js";
 import { modelscanArgs, modelscanEnv, runModelscan } from "./scan.js";
 import { judgeScannerSelfTest, SCANNER_SELF_TEST_FILE, writeScannerSelfTest } from "./selftest.js";
 
@@ -46,9 +48,9 @@ describe("B5-M runner/scanner exchange", () => {
     const runner = new ExchangeScanExecutor(jobs, results, { pollMs: 10 });
     const runId = randomUUID();
     const stage = await runner.stage(runId);
-    await writeFile(path.join(stage, "artifact.pkl"), "x");
+    await writeFile(path.join(stage, "artifact.bin"), maliciousPickle());
     const seen: Array<{ args: readonly string[]; opts: ProcessGroupOptions }> = [];
-    const scanning = runner.scan({ runId, format: "pickle", artifactName: "artifact.pkl", timeoutMs: 5000 }, new AbortController().signal);
+    const scanning = runner.scan({ runId, artifactName: "artifact.bin", timeoutMs: 5000 }, new AbortController().signal);
     // until the rename, the scanner sees no job
     for (let i = 0; i < 50 && !existsSync(path.join(jobs, runId)); i++) await new Promise((r) => setTimeout(r, 10));
     expect(await scannerTick({ jobsRoot: jobs, resultsRoot: results, modelscan: { run: fakeRun('{"ok":1}', 0, seen), settingsFile: "/s.toml", modelscanBin: "/bin/ms", path: "/venv/bin" } })).toBe(1);
@@ -56,7 +58,11 @@ describe("B5-M runner/scanner exchange", () => {
     expect(out.exitCode).toBe(0);
     expect(Buffer.from(out.report!).toString()).toBe('{"ok":1}');
     const call = seen[0]!;
-    expect(call.args).toEqual(modelscanArgs(path.join(jobs, runId, "artifact.pkl"), path.join(results, runId, "report.json"), "/s.toml"));
+    // ENG-IMG: modelscan reads the placed artifact through a symlink named for the format the scanner read (a pickle)
+    const named = call.args[call.args.indexOf("-p") + 1]!;
+    expect(path.basename(named)).toBe("artifact.pkl");
+    expect(call.args).toEqual(modelscanArgs(named, path.join(results, runId, "report.json"), "/s.toml"));
+    expect(out.detection).toMatchObject({ format: "pickle" });
     expect(call.args).toContain("--show-skipped");
     expect(call.opts.cwd).toBe(path.join(results, runId, "cwd"));
     expect(call.opts.env).toEqual(modelscanEnv(path.join(results, runId, "cwd"), "/venv/bin"));
@@ -70,9 +76,9 @@ describe("B5-M runner/scanner exchange", () => {
     const { jobs, results } = await roots();
     const runner = new ExchangeScanExecutor(jobs, results, { pollMs: 10 });
     const runId = randomUUID();
-    await runner.stage(runId);
+    await writeFile(path.join(await runner.stage(runId), "artifact.bin"), maliciousPickle());
     const abort = new AbortController();
-    const scanning = runner.scan({ runId, format: "pickle", artifactName: "artifact.pkl", timeoutMs: 60_000 }, abort.signal);
+    const scanning = runner.scan({ runId, artifactName: "artifact.bin", timeoutMs: 60_000 }, abort.signal);
     for (let i = 0; i < 50 && !existsSync(path.join(jobs, runId)); i++) await new Promise((r) => setTimeout(r, 10));
     const tick = scannerTick({ jobsRoot: jobs, resultsRoot: results, pollMs: 10, modelscan: { run: hangs } });
     await new Promise((r) => setTimeout(r, 50));
@@ -89,7 +95,7 @@ describe("B5-M runner/scanner exchange", () => {
     const runner = new ExchangeScanExecutor(jobs, results, { pollMs: 10, graceMs: 50 });
     const runId = randomUUID();
     await runner.stage(runId);
-    const out = await runner.scan({ runId, format: "pickle", artifactName: "artifact.pkl", timeoutMs: 1000 }, new AbortController().signal);
+    const out = await runner.scan({ runId, artifactName: "artifact.bin", timeoutMs: 1000 }, new AbortController().signal);
     expect(out).toMatchObject({ timedOut: true, exitCode: null, report: null });
     expect(existsSync(path.join(jobs, runId, "cancel"))).toBe(true);
   });
@@ -98,8 +104,8 @@ describe("B5-M runner/scanner exchange", () => {
     const { jobs, results } = await roots();
     const runner = new ExchangeScanExecutor(jobs, results, { pollMs: 10 });
     const runId = randomUUID();
-    await runner.stage(runId);
-    const scanning = runner.scan({ runId, format: "pickle", artifactName: "artifact.pkl", timeoutMs: 5000 }, new AbortController().signal);
+    await writeFile(path.join(await runner.stage(runId), "artifact.bin"), maliciousPickle());
+    const scanning = runner.scan({ runId, artifactName: "artifact.bin", timeoutMs: 5000 }, new AbortController().signal);
     for (let i = 0; i < 50 && !existsSync(path.join(jobs, runId)); i++) await new Promise((r) => setTimeout(r, 10));
     // the report is swapped after the scanner hashed it (between its two writes)
     const swapping = async (c: string, a: readonly string[], o: ProcessGroupOptions) => {
@@ -111,6 +117,27 @@ describe("B5-M runner/scanner exchange", () => {
     const out = await scanning;
     expect(out.exitCode).toBeNull();
     expect(out.report).toBeNull();
+  });
+
+  it("ENG-IMG: the scanner decides the format from the placed bytes; a format modelscan does not scan never starts it, and an absent artifact reads no format", async () => {
+    const { jobs, results } = await roots();
+    const runner = new ExchangeScanExecutor(jobs, results, { pollMs: 10 });
+    const seen: Array<{ args: readonly string[]; opts: ProcessGroupOptions }> = [];
+    const st = randomUUID();
+    await writeFile(path.join(await runner.stage(st), "artifact.bin"), safetensorsFile());
+    const scanning = runner.scan({ runId: st, artifactName: "artifact.bin", timeoutMs: 5000 }, new AbortController().signal);
+    for (let i = 0; i < 50 && !existsSync(path.join(jobs, st)); i++) await new Promise((r) => setTimeout(r, 10));
+    await scannerTick({ jobsRoot: jobs, resultsRoot: results, modelscan: { run: fakeRun("{}", 0, seen) } });
+    expect(await scanning).toMatchObject({ detection: { format: "safetensors" }, exitCode: null, report: null });
+    expect(seen).toHaveLength(0);
+    // a job whose artifact never landed (no file at its place): no format, nothing started
+    const gone = randomUUID();
+    await runner.stage(gone);
+    const missing = runner.scan({ runId: gone, artifactName: "artifact.bin", timeoutMs: 5000 }, new AbortController().signal);
+    for (let i = 0; i < 50 && !existsSync(path.join(jobs, gone)); i++) await new Promise((r) => setTimeout(r, 10));
+    await scannerTick({ jobsRoot: jobs, resultsRoot: results, modelscan: { run: fakeRun("{}", 0, seen) } });
+    expect(await missing).toMatchObject({ detection: null, exitCode: null, report: null });
+    expect(seen).toHaveLength(0);
   });
 
   it("a job naming any other file, or a run id that is not a UUID, is never scanned", async () => {
@@ -137,10 +164,10 @@ describe("PR #212 review [4234946104]: a restarted runner leaves nothing of an e
     const b = randomUUID();
     const staged = await first.stage(a);
     await writeFile(path.join(staged, "artifact.pkl"), "x");
-    await writeFile(path.join(staged, "job.json"), JSON.stringify({ runId: a, format: "pickle", artifactName: "artifact.pkl", timeoutMs: 5000 }));
+    await writeFile(path.join(staged, "job.json"), JSON.stringify({ runId: a, artifactName: "artifact.bin", timeoutMs: 5000 }));
     await mkdir(path.join(jobs, b));
     await writeFile(path.join(jobs, b, "artifact.pkl"), "y");
-    await writeFile(path.join(jobs, b, "job.json"), JSON.stringify({ runId: b, format: "pickle", artifactName: "artifact.pkl", timeoutMs: 5000 }));
+    await writeFile(path.join(jobs, b, "job.json"), JSON.stringify({ runId: b, artifactName: "artifact.bin", timeoutMs: 5000 }));
     await mkdir(path.join(results, b));
     await writeFile(path.join(results, b, "done.json"), "{}");
     // the scanner never takes the staging directory as a job
@@ -159,8 +186,8 @@ describe("PR #212 review [4234946104]: a restarted runner leaves nothing of an e
     const c = randomUUID();
     await second.reconcile(c);
     const stage = await second.stage(c);
-    await writeFile(path.join(stage, "artifact.pkl"), "z");
-    const scanning = second.scan({ runId: c, format: "pickle", artifactName: "artifact.pkl", timeoutMs: 5000 }, new AbortController().signal);
+    await writeFile(path.join(stage, "artifact.bin"), maliciousPickle());
+    const scanning = second.scan({ runId: c, artifactName: "artifact.bin", timeoutMs: 5000 }, new AbortController().signal);
     for (let i = 0; i < 50 && !existsSync(path.join(jobs, c)); i++) await new Promise((r) => setTimeout(r, 10));
     await scannerTick({ jobsRoot: jobs, resultsRoot: results, modelscan: { run: fakeRun('{"ok":2}', 0) } });
     expect(Buffer.from((await scanning).report!).toString()).toBe('{"ok":2}');
@@ -187,7 +214,7 @@ describe("PR #212 review sweep [4234946096]: an already-aborted signal starts no
     await ex.stage(runId);
     const aborted = new AbortController();
     aborted.abort();
-    const out = await ex.scan({ runId, format: "pickle", artifactName: "artifact.pkl", timeoutMs: 5000 }, aborted.signal);
+    const out = await ex.scan({ runId, artifactName: "artifact.bin", timeoutMs: 5000 }, aborted.signal);
     expect(out.cancelled).toBe(true);
     expect(existsSync(path.join(jobs, runId))).toBe(false);
     let spawned = 0;

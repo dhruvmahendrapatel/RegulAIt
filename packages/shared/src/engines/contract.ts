@@ -132,8 +132,11 @@ export const ENGINE_RUNNER_ROUTES = [
   // PR #205 review [53]: a runner refreshes its own self-test report (the lease refuses a stale one)
   "POST /v1/engine-runner/self-test",
   "POST /v1/engine-runner/runs/:runId/heartbeat",
-  "GET /v1/engine-runner/artifacts/:artifactId",
   "POST /v1/engine-runner/runs/:runId/result",
+  // ADR-0190 I5: the run's task runs in an executor's sandbox; the runner hands it its input and reads its frames
+  "POST /v1/engine-runner/runs/:runId/task/input",
+  "GET /v1/engine-runner/runs/:runId/task/frames",
+  "POST /v1/engine-runner/runs/:runId/task/frames",
 ] as const;
 export const ENGINE_ENROLLMENT_ROUTES = ["POST /v1/engine-runner/register"] as const;
 
@@ -203,8 +206,6 @@ export const ENGINE_REFUSALS = {
   artifact_store_unavailable: 503,
   /** B5-M: an artifact the caller did not upload (and is not an admin for) */
   artifact_not_accessible: 403,
-  /** B5-M: a runner asking for an artifact its leased run does not target */
-  engine_artifact_not_leased: 409,
 } as const;
 export type EngineRefusalCode = keyof typeof ENGINE_REFUSALS;
 

@@ -123,7 +123,9 @@ import {
   type StdioSession,
 } from "./executor-stdio.js";
 import { checkStdioClosure } from "./mcp-transports.js";
+import { classifyScannedContent, recordContentProvenance } from "./content-provenance.js";
 import { stdioRefusalSentence } from "./mcp-egress.js";
+import { errMessage } from "./err-serializer.js";
 
 /** ADR-0185 G3: the reserved tool-name prefix. Protocol grants live under it
  * (`mcp:resources`, ...), so no upstream TOOL may carry it: a tool so named
@@ -424,7 +426,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs, stdioHold: {
     if (!(await decisionPolicyStillCurrent(tx as unknown as Db, { policyEpoch, killSwitch }, { serverId, toolName: grant }))) return false;
     if (decision.effect === "allow" && stdioClosure?.ok) {
       const placed = await placeGovernedStdio(tx as unknown as Db, decisionAuditId, {
-        ...(await stdioPlacementContext(tx as unknown as Db, { userId, projectId, delegationGrantId: args.delegationGrantId ?? null })),
+        ...(await stdioPlacementContext(tx as unknown as Db, { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, principal: args.principal ?? null })),
         mcpServerId: serverId,
         imageDigest: stdioClosure.image,
       });
@@ -461,10 +463,13 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs, stdioHold: {
       // ADR-0190 I4: the placement this decision made (its row is keyed to this audit row)
       ...(placement
         ? {
-            execution:
-              placement.kind === "offered"
+            execution: {
+              ...(placement.kind === "offered"
                 ? { placementId: placement.placementId, offerId: placement.offerId }
-                : { placementId: placement.placementId, refusal: "execution_profile_unavailable", reason: placement.code },
+                : { placementId: placement.placementId, refusal: "execution_profile_unavailable", reason: placement.code }),
+              // ADR-0190 owner decision C: the subject kind and the relaxation the requirement relied on
+              ...(placement.relaxation ? { relaxation: placement.relaxation } : {}),
+            },
           }
         : {}),
     },
@@ -631,10 +636,10 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs, stdioHold: {
   let upstream: Client | null = null;
   try {
     try {
-      upstream = await connectUpstream(db, serverRow, { outboundIdentity, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, linkedOfferId } });
+      upstream = await connectUpstream(db, serverRow, { outboundIdentity, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, linkedOfferId, principal: args.principal ?? null } });
     } catch (err) {
       if (classifyUpstreamError(err).why !== "our_own_refusal") {
-        await recordUpstreamFailure(db, serverRow, err instanceof Error ? err.message : String(err));
+        await recordUpstreamFailure(db, serverRow, errMessage(err));
       }
       throw err;
     }
@@ -711,7 +716,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs, stdioHold: {
       )) as Record<string, unknown>;
     } catch (err) {
       if (classifyUpstreamError(err).why !== "our_own_refusal") {
-        await recordUpstreamFailure(db, serverRow, err instanceof Error ? err.message : String(err));
+        await recordUpstreamFailure(db, serverRow, errMessage(err));
       }
       throw err;
     }
@@ -789,6 +794,20 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs, stdioHold: {
         };
       }
     }
+    // ADR-0193 P0 — what a protocol method returns is upstream content (a resource body, a prompt, a completion, a
+    // listing's names and descriptions), so it is recorded as a tool result is: the label and both digests, under the
+    // method's name, before anything is delivered. A failure to record throws, so nothing unrecorded leaves. These
+    // calls carry no causal context (only the direct proxy reaches them), so the record is not gated on (P1).
+    await recordContentProvenance(db, args.dataKey, {
+      userId,
+      source: { kind: "mcp_tool", serverId, toolName: methodLabel(method) },
+      upstream: result,
+      delivered: released,
+      classification: classifyScannedContent({ scanned: Boolean(piiMode), piiHits: outputHits.length, piiWithheld: false }),
+      decisionAuditId,
+      contextId: null,
+      projectId,
+    });
     return { kind: "allowed", result: released };
   } finally {
     if (upstream) await upstream.close();

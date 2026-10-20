@@ -30,6 +30,7 @@ import {
   aiUseCases,
   and,
   auditLog,
+  builderAgents,
   complianceProfiles,
   createDb,
   delegationGrants,
@@ -48,6 +49,7 @@ import { EXECUTION_PROFILE_SCHEMA, executionProfileDigest, SHIPPED_EXECUTION_PRO
 import { buildApp } from "./app.js";
 import { admitChildGrant, createRootGrant, DelegationRefusedError, governedActorFor, loadLiveChain } from "./delegation.js";
 import { decidePlacement } from "./execution-placement.js";
+import { offerLinkedPlacement } from "./executor-channel.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxStepUpForTest } from "./testing/step-up-posture.js";
 
@@ -131,6 +133,12 @@ async function newProject(sensitivity: "public" | "internal" | "confidential" | 
     await db.insert(aiUseCases).values({ name: `i2-uc-${RUN}`, description: "d", ownerUserId: adminId, businessContext: "b", dataSensitivity: sensitivity, projectId });
   }
   return projectId;
+}
+
+/** a builder agent (no workload identity), owned by the suite's admin */
+async function newBuilderAgent(name: string): Promise<string> {
+  const [ba] = await db.insert(builderAgents).values({ name: `i2-${name}-${RUN}`, ownerUserId: adminId, connectionFormat: "shared" }).returning({ id: builderAgents.id });
+  return ba!.id;
 }
 
 const offersFor = async (executorId: string) => (await db.select().from(executionOffers).where(eq(executionOffers.executorId, executorId))).length;
@@ -336,6 +344,36 @@ describe("ADR-0190 decision 7: the placement decision from the database", () => 
     }
   });
 
+  it("NULL project classifications mean no tags (no compliance floor), unlike a malformed value", async () => {
+    const ex = await newExecutor("l2-null-tags", "gvisor", [{ digest: RESTRICTED_DIGEST, cls: "user_space_kernel" }]);
+    const { agentId } = await newAgent("null-tags");
+    const projectId = await newProject("public");
+    // M-068: restored to the list shape before the test ends (other suites walk every project's classifications)
+    await db.execute(sql`update projects set classifications = null where id = ${projectId}`);
+    try {
+      const d = await decidePlacement(db, { workloadKind: "mcp_stdio", mcpServerId: stdioId, projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [ex], ttlSeconds: 1 });
+      expect(d).toMatchObject({ kind: "offered", executorId: ex });
+      if (d.kind === "offered") expect(d.requirement).toMatchObject({ requiredClass: "user_space_kernel", requiredBy: "workload_kind", sensitivity: "public" });
+    } finally {
+      await db.execute(sql`update projects set classifications = '[]'::jsonb where id = ${projectId}`);
+    }
+  });
+
+  it("an archived builder agent's autonomy class is not read: the decision does not resolve (autonomyFloor)", async () => {
+    const builderId = await newBuilderAgent("archived-place");
+    const projectId = await newProject("public");
+    const decide = () =>
+      decidePlacement(db, { workloadKind: "mcp_stdio", mcpServerId: stdioId, projectId, agent: { kind: "builder_agent", id: builderId }, imageDigest: IMAGE, onlyExecutorIds: [randomUUID()] });
+    // the control: live, its class is read and the requirement resolves (no executor is offered here)
+    const live = await decide();
+    expect(live).toMatchObject({ kind: "refused", code: "no_executor" });
+    if (live.kind === "refused") expect(live.requirement.kind).toBe("required");
+    await db.update(builderAgents).set({ archivedAt: new Date() }).where(eq(builderAgents.id, builderId));
+    const archived = await decide();
+    expect(archived).toMatchObject({ kind: "refused", code: "policy_unresolved", placementId: null });
+    if (archived.kind === "refused") expect(archived.requirement).toMatchObject({ kind: "unresolved", fact: "autonomyFloor" });
+  });
+
   it("a non-isolable kind is never placed: in_gateway or external", async () => {
     expect(await decidePlacement(db, { workloadKind: "model_call", projectId: null, agent: null, imageDigest: IMAGE })).toEqual({ kind: "not_isolable", execution: "in_gateway" });
     expect(await decidePlacement(db, { workloadKind: "remote_mcp", projectId: null, agent: null, imageDigest: IMAGE })).toEqual({ kind: "not_isolable", execution: "external" });
@@ -522,6 +560,67 @@ describe("ADR-0190 decision 8: delegation-isolation and the live chain", () => {
     expect((await loadLiveChain(db, root.id))!.failure).toEqual({ index: 0, code: "executor_attestation_stale" });
   });
 
+  it("two actors racing for one placement: exactly one root grant is created, the other refused placement_bound_elsewhere", async () => {
+    const { placementId } = await l3Placement("race");
+    const a = await newAgent("race-a");
+    const b = await newAgent("race-b");
+    const settled = await Promise.allSettled([rootOn(a, placementId, "microvm"), rootOn(b, placementId, "microvm")]);
+    expect(settled.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const [lost] = settled.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+    // the gateway check (row lock on the placement) refuses it; the trigger's advisory lock is the backstop
+    const reason: unknown = lost!.reason;
+    const said = reason instanceof DelegationRefusedError ? reason.code : `${String((reason as Error)?.message)} ${String((reason as { cause?: Error })?.cause?.message ?? "")}`;
+    expect(said).toMatch(/placement_bound_elsewhere|another actor's or another chain's/);
+    const owners = await db.select({ actor: delegationGrants.actorIdentityId }).from(delegationGrants).where(eq(delegationGrants.executionPlacementId, placementId));
+    expect(owners).toHaveLength(1);
+    expect([a.identityId, b.identityId]).toContain(owners[0]!.actor);
+  });
+
+  it("review L3: when the refusal's audit write fails, that error propagates (fail closed) and nothing is created", async () => {
+    const { placementId } = await l3Placement("audit-down");
+    const actor = await newAgent("audit-down");
+    // the same database, except that the top-level insert into audit_log (the refusal row) fails
+    const auditDown = new Proxy(db, {
+      get(target, prop) {
+        if (prop === "insert") {
+          return (table: unknown) => {
+            if (table === auditLog) throw new Error("CANARY audit write failed");
+            return target.insert(table as typeof auditLog);
+          };
+        }
+        const v = Reflect.get(target, prop, target) as unknown;
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    }) as Db;
+    const before = rows<{ n: number }>(await db.execute(sql`select count(*)::int as n from audit_log where rule_id = 'delegation-isolation' and detail ->> 'executionPlacementId' = ${placementId}`))[0]!.n;
+    const failed = await createRootGrant(auditDown, {
+      sponsorUserId: adminId,
+      actorIdentityId: actor.identityId!,
+      scope: scopeOf(actor.agentId),
+      capMicros: null,
+      ttlMs: 3_600_000,
+      environment: ENV,
+      projectId: null,
+      binding: { kind: "in_process" },
+      isolation: { requiredClass: "user_space_kernel", placementId },
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    // the audit error, not the refusal: a refusal whose record could not be written is not reported as a clean refusal
+    expect(failed).toBeInstanceOf(Error);
+    expect(failed).not.toBeInstanceOf(DelegationRefusedError);
+    expect((failed as Error).message).toBe("CANARY audit write failed");
+    expect((await db.select().from(delegationGrants).where(eq(delegationGrants.executionPlacementId, placementId))).length).toBe(0);
+    expect(rows<{ n: number }>(await db.execute(sql`select count(*)::int as n from audit_log where rule_id = 'delegation-isolation' and detail ->> 'executionPlacementId' = ${placementId}`))[0]!.n).toBe(before);
+    // the control: the same refusal through the real database is a DelegationRefusedError, audited
+    const refused = await rootOn(actor, placementId, "user_space_kernel").then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(refused).toBeInstanceOf(DelegationRefusedError);
+  });
+
   it("a placement belongs to one actor in one chain: another actor's grant naming it is refused (code and trigger), audited", async () => {
     const { placementId } = await l3Placement("owned");
     const owner = await newAgent("own-a");
@@ -652,6 +751,20 @@ describe("ADR-0190 I2 routes: profiles, assignments, placements", () => {
     expect((await inject("GET", `/v1/execution-profile-assignments/nothing/${randomUUID()}`, adminAuth)).statusCode).toBe(400);
   });
 
+  it("assignments: an archived builder agent is not a target (404), where a live one is found", async () => {
+    const builderId = await newBuilderAgent("archived-assign");
+    // the control: found, and refused only because it has no workload identity
+    const live = await inject("GET", `/v1/execution-profile-assignments/builder_agent/${builderId}`, adminAuth);
+    expect(live.statusCode, live.body).toBe(409);
+    expect(live.json()).toMatchObject({ error: "no_workload_identity" });
+    await db.update(builderAgents).set({ archivedAt: new Date() }).where(eq(builderAgents.id, builderId));
+    for (const method of ["GET", "PUT"] as const) {
+      const r = await inject(method, `/v1/execution-profile-assignments/builder_agent/${builderId}`, adminAuth, method === "PUT" ? { profileId: null } : undefined);
+      expect(r.statusCode, `${method} ${r.body}`).toBe(404);
+      expect(r.json()).toEqual({ error: "target_not_found" });
+    }
+  });
+
   it("placements: listed newest first with filters; one placement with its audit row; 404 and 400", async () => {
     const r = await inject("GET", "/v1/execution-placements?outcome=refused&limit=5", adminAuth);
     expect(r.statusCode, r.body).toBe(200);
@@ -664,5 +777,102 @@ describe("ADR-0190 I2 routes: profiles, assignments, placements", () => {
     expect((await inject("GET", `/v1/execution-placements/${randomUUID()}`, adminAuth)).statusCode).toBe(404);
     expect((await inject("GET", "/v1/execution-placements/not-a-uuid", adminAuth)).statusCode).toBe(400);
     expect((await inject("GET", "/v1/execution-placements?outcome=maybe", adminAuth)).statusCode).toBe(400);
+  });
+
+  it("N11: the (at, id) cursor walks rows that share one instant across a page boundary; `before` still answers", async () => {
+    // five refusals decided in ONE transaction share its `now()`: one created_at for all five
+    const ex = await newExecutor("l2-keyset", "gvisor", [{ digest: RESTRICTED_DIGEST, cls: "user_space_kernel" }]);
+    const { agentId } = await newAgent("keyset");
+    const projectId = await newProject("regulated");
+    const mine = await db.transaction(async (tx) => {
+      const ids: string[] = [];
+      for (let i = 0; i < 5; i++) {
+        const d = await decidePlacement(tx as unknown as Db, { workloadKind: "mcp_stdio", mcpServerId: stdioId, projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [ex] });
+        expect(d.kind).toBe("refused");
+        if (d.kind === "refused") ids.push(d.placementId!);
+      }
+      return ids;
+    });
+    const instants = rows<{ n: number }>(await db.execute(sql`select count(distinct created_at)::int as n from execution_placements where id = any(${`{${mine.join(",")}}`}::uuid[])`));
+    expect(instants[0]!.n).toBe(1);
+
+    // a page of two: some boundary falls inside the five
+    const walk = async (next: (page: { placements: Array<{ id: string; createdAt: string }>; nextCursor: string | null }) => string | null) => {
+      const seen: string[] = [];
+      let query: string | null = "";
+      // the five are the newest refusals: three pages of two reach past them
+      for (let pages = 0; query !== null && pages < 4; pages++) {
+        const r = await inject("GET", `/v1/execution-placements?outcome=refused&limit=2${query}`, adminAuth);
+        expect(r.statusCode, r.body).toBe(200);
+        const page = r.json();
+        seen.push(...page.placements.map((p: { id: string }) => p.id));
+        query = next(page);
+      }
+      return seen;
+    };
+    const keyset = await walk((page) => (page.nextCursor ? `&cursor=${encodeURIComponent(page.nextCursor)}` : null));
+    expect(new Set(keyset).size).toBe(keyset.length);
+    for (const id of mine) expect(keyset).toContain(id);
+    // the legacy instant cursor is still accepted (and is what skipped rows: it cannot name a row within an instant)
+    const legacy = await walk((page) => (page.placements.length === 2 ? `&before=${encodeURIComponent(page.placements[1]!.createdAt)}` : null));
+    expect(mine.some((id) => !legacy.includes(id))).toBe(true);
+
+    // a cursor continues only the list it names; a tampered one is refused rather than restarting the walk
+    const first = (await inject("GET", "/v1/execution-placements?outcome=refused&limit=2", adminAuth)).json();
+    const second = (await inject("GET", `/v1/execution-placements?outcome=refused&limit=2&cursor=${encodeURIComponent(first.nextCursor)}`, adminAuth)).json();
+    expect(second.refusalsWithoutPlacement).toEqual([]);
+    expect(second.refusalsNextCursor).toBeNull();
+    expect((await inject("GET", "/v1/execution-placements?cursor=not-a-cursor", adminAuth)).json()).toEqual({ error: "invalid_cursor" });
+    expect((await inject("GET", "/v1/execution-placements?refusalsCursor=not-a-cursor", adminAuth)).statusCode).toBe(400);
+  });
+
+  it("N11 fix round B2: a placement with several report rows is ONE row; limit=1 walks every placement once, its reports listed", async () => {
+    // two offered placements, each later carrying a `placed` report AND a `cancelled` row (0198 allows both)
+    const ex = await newExecutor("l2-reports", "gvisor", [{ digest: RESTRICTED_DIGEST, cls: "user_space_kernel" }]);
+    const mine: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      // the governed stdio path's linked placement (I4): an `offered` row; a ten-minute offer, so no expiry sweep
+      // writes its own end report while this test runs
+      const d = await db.transaction(async (tx) =>
+        offerLinkedPlacement(tx as unknown as Db, randomUUID(), { workloadKind: "mcp_stdio", requiredClass: "user_space_kernel", requiredBy: "workload_kind", profileDigest: RESTRICTED_DIGEST, imageDigest: IMAGE, onlyExecutorIds: [ex], ttlSeconds: 600 }),
+      );
+      expect(d.kind).toBe("offered");
+      if (d.kind !== "offered") return;
+      await db.execute(sql`INSERT INTO execution_placement_reports (placement_id, offer_id, audit_id, outcome, applied_class, report_sha256)
+        VALUES (${d.placementId}, ${d.offerId}, ${randomUUID()}, 'placed', 'user_space_kernel', ${"a".repeat(64)})`);
+      await db.execute(sql`INSERT INTO execution_placement_reports (placement_id, offer_id, audit_id, outcome, end_code)
+        VALUES (${d.placementId}, ${d.offerId}, ${randomUUID()}, 'cancelled', 'later_gate')`);
+      mine.push(d.placementId);
+    }
+    type Listed = { id: string; outcome: string; reports: Array<{ outcome: string }> };
+    const seen: Listed[] = [];
+    let cursor: string | null = null;
+    for (let pages = 0; pages < 2000; pages++) {
+      const r = await inject("GET", `/v1/execution-placements?limit=1${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, adminAuth);
+      expect(r.statusCode, r.body).toBe(200);
+      const page = r.json() as { placements: Listed[]; nextCursor: string | null };
+      expect(page.placements.length).toBeLessThanOrEqual(1);
+      seen.push(...page.placements);
+      cursor = page.nextCursor;
+      if (cursor === null) break;
+    }
+    expect(cursor).toBeNull();
+    expect(new Set(seen.map((p) => p.id)).size).toBe(seen.length);
+    const total = rows<{ n: number }>(await db.execute(sql`select count(*)::int as n from execution_placements`))[0]!.n;
+    expect(seen).toHaveLength(total);
+    for (const id of mine) {
+      const listed = seen.find((p) => p.id === id)!;
+      // the `placed` report is the effective one (a later cancellation never hides that the call ran); both are listed
+      expect(listed.outcome).toBe("placed");
+      expect(listed.reports.map((x) => x.outcome).sort()).toEqual(["cancelled", "placed"]);
+    }
+    // a filter on either report's outcome finds the placement, once
+    for (const outcome of ["placed", "cancelled"]) {
+      const found = (await inject("GET", `/v1/execution-placements?outcome=${outcome}&limit=200`, adminAuth)).json() as { placements: Listed[] };
+      for (const id of mine) expect(found.placements.filter((p) => p.id === id)).toHaveLength(1);
+    }
+    // the detail route lists them too
+    const one = (await inject("GET", `/v1/execution-placements/${mine[0]}`, adminAuth)).json() as Listed;
+    expect(one.reports).toHaveLength(2);
   });
 });

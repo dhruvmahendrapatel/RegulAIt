@@ -27,7 +27,7 @@ import { seedBuiltinEvalDatasets } from "./eval-builtin-datasets.js";
 import { ensureEphemeralLicense } from "./ephemeral-license.js";
 import { dataKeyFormatError } from "./secrets.js";
 import { demoKeyExpiresAt, revokeScriptKeys, SEED_PERSONA_KEY_TTL_DAYS, seedStrictIdentity } from "./demo-identity.js";
-import { enrolAdminTotp, type AdminTotpEnrolment } from "./demo-identity.js"; // ADR-0181 (FX2): seedAdminMfa
+import { DEMO_SECURITY_LEAD, enrolAdminsTotp, type AdminTotpEnrolment } from "./demo-identity.js"; // ADR-0181 (FX2): seedAdminMfa
 import { ensureDemoModelCards } from "./demo-strict-governance.js";
 import { openAssuranceGuardrailWindow, seedStrictData } from "./seed-strict-data.js";
 import { assuranceAgentNames } from "./demo-intake-seed-lib.js"; // B4S-06: --open-assurance-window
@@ -147,6 +147,8 @@ async function ensureUser(email: string, displayName: string, isAdmin = false): 
 const adminId = await ensureUser("admin@regulait.local", "Ada Admin", true);
 const danaId = await ensureUser("dana@regulait.local", "Dana Developer");
 const averyId = await ensureUser("avery@regulait.local", "Avery Approver");
+// ADR-0197 addendum: the second admin, so a remediation sign-off (owed to an admin other than the initiator) has one
+const morganId = await ensureUser(DEMO_SECURITY_LEAD.email, DEMO_SECURITY_LEAD.displayName, true);
 
 // --- ADR-0030: usernames for the personas (sign in as `admin`, not an email)
 // Set through the REAL audited admin route, so seeding exercises the same
@@ -157,6 +159,7 @@ for (const [username, id] of [
   ["admin", adminId],
   ["dana", danaId],
   ["avery", averyId],
+  [DEMO_SECURITY_LEAD.username, morganId],
 ] as const) {
   await call("PUT", `/v1/users/${id}/username`, { username });
 }
@@ -318,8 +321,8 @@ if (process.argv.includes("--open-assurance-window")) {
 
 // ADR-0181 (FX2): Ada enrols TOTP before any key is minted for her — an
 // un-enrolled admin's key is refused, and none is issued (seedAdminMfa below)
-await seedDemoEgressAllow(); // before Ada enrols: its loopback entries are a stepped-up relaxation (B4S-06)
-const adminMfa = await seedAdminMfa(adminId);
+await seedDemoEgressAllow(); // before Ada enrols: adding an allow entry is a stepped-up relaxation (B4S-06, ADR-0034)
+const [adminMfa, morganMfa] = await seedAdminMfa([adminId, morganId]);
 
 const keys: Record<string, string> = {};
 const keyIds: Record<string, string> = {};
@@ -1511,6 +1514,7 @@ RegulAIt demo data ready.
 
     admin  admin  admin@regulait.local   ${passwords.admin}
 ${adminMfaLine(adminMfa)}
+${morganLines(morganMfa)}
     dana   dana   dana@regulait.local    ${passwords.dana}    (requester — Playground, Runs, Workflows)
     avery  avery  avery@regulait.local   ${passwords.avery}   (approver — Inbox has a sign-off waiting)
 
@@ -1664,13 +1668,40 @@ ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecre
 //    sync and admitted on a clean manifest, like any other server.
 // ===========================================================================
 /**
- * ADR-0181 (SC) + ADR-0186 A: the demo's local MCP hosts are loopback over plaintext http, so their allow entries
- * opt into private ranges and plaintext — a relaxation, which needs a settings_relax step-up. The bootstrap
- * credential passes that only during FIRST-ADMIN SETUP (B4S-06), so this runs before Ada enrols her authenticator
- * (the same pattern as the passwords, grants and stewardship above). Converges on re-seed: a host already on the
- * allow-list is left alone.
+ * ADR-0181 (SC) + ADR-0186 A + ADR-0034 owner amendment 2026-10-16: ADDING any egress allow entry is a relaxation
+ * that needs a settings_relax step-up — the plain Gemini entry as much as the loopback ones, which also opt into
+ * private ranges and plaintext (one step-up covers an addition and its opt-ins). The bootstrap credential passes a
+ * step-up only during FIRST-ADMIN SETUP (B4S-06), so this runs before Ada enrols her authenticator (the same
+ * pattern as the passwords, grants and stewardship above); there is no seed-only bypass. Converges on re-seed: a
+ * host already on the allow-list is left alone. A host that is MISSING on a re-seed after Ada enrolled cannot be
+ * added by the bootstrap credential any more: it is reported, not forced, and an admin adds it in the UI.
  */
 async function seedDemoEgressAllow(): Promise<void> {
+  const skipped: string[] = [];
+  const addEntry = async (payload: Json): Promise<void> => {
+    const res = await app.inject({ method: "POST", url: "/v1/egress-allow-hosts", headers: AUTH, payload });
+    // ONLY the bootstrap credential's own refusal once an admin can step up (step-up.ts, B4S-06) is skipped;
+    // every other refusal — a prompt, an API key's, a validation error — still fails the seed
+    if (res.statusCode === 403) {
+      let body: Json = {};
+      try {
+        body = res.json() as Json;
+      } catch {
+        /* not JSON: not the refusal we expect */
+      }
+      if (
+        body.error === "step_up_required" &&
+        body.actionKind === "settings_relax" &&
+        body.credential === "bootstrap" &&
+        Array.isArray(body.methods) &&
+        body.methods.length === 0
+      ) {
+        skipped.push(String(payload.host));
+        return;
+      }
+    }
+    if (res.statusCode >= 400) throw new Error(`POST /v1/egress-allow-hosts -> ${res.statusCode}: ${res.body}`);
+  };
   const localHosts = [
     ...new Set(
       ["127.0.0.1", "127.0.0.2", process.env.REGULAIT_DEMO_MCP_HOST_REPO, process.env.REGULAIT_DEMO_MCP_HOST_WAREHOUSE].filter(
@@ -1683,7 +1714,7 @@ async function seedDemoEgressAllow(): Promise<void> {
   );
   for (const host of localHosts) {
     if (allowed.has(host)) continue;
-    await call("POST", "/v1/egress-allow-hosts", {
+    await addEntry({
       host,
       allowPrivateRanges: true,
       allowPlaintextHttp: true,
@@ -1691,10 +1722,16 @@ async function seedDemoEgressAllow(): Promise<void> {
     });
   }
   if (!allowed.has("generativelanguage.googleapis.com")) {
-    await call("POST", "/v1/egress-allow-hosts", {
+    await addEntry({
       host: "generativelanguage.googleapis.com",
       note: "demo: the seeded gemini-pro agent's compiled endpoint (strict compiled-egress posture, ADR-0181)",
     });
+  }
+  if (skipped.length > 0) {
+    console.log(
+      `  egress allow entries NOT added (${skipped.join(", ")}): an admin can step up now, so the bootstrap ` +
+        "credential no longer passes the step-up (B4S-06). Add them as an admin under Custom LLM providers > Egress allow-list.",
+    );
   }
 }
 
@@ -1742,13 +1779,27 @@ async function seedStrictAdmission(): Promise<void> {
 // one-time password -> sign-in -> enrol -> activate), never by relaxing
 // mfaRequired. The authenticator secret is printed ONCE, beside her one-time
 // password, for the presenter to add to an authenticator app.
-async function seedAdminMfa(userId: string): Promise<AdminTotpEnrolment> {
-  const result = await enrolAdminTotp(app, BOOT, userId);
+// Morgan (the second admin) is enrolled in the same call: every one-time
+// password is issued before the first activation closes first-admin setup.
+async function seedAdminMfa(userIds: [string, string]): Promise<[AdminTotpEnrolment, AdminTotpEnrolment]> {
+  const [ada, morgan] = await enrolAdminsTotp(app, BOOT, userIds);
   // a re-seed after the presenter set her password (demo:set-passwords, which
   // re-provisions her authenticator): she enrols at her own sign-in, and the
   // seed acts without her key — never by relaxing anything
-  if (result.status === "refused") console.log(`  admin TOTP not enrolled by the seed: ${result.reason}`);
-  return result;
+  if (ada!.status === "refused") console.log(`  admin TOTP not enrolled by the seed: ${ada!.reason}`);
+  if (morgan!.status === "refused") console.log(`  ${DEMO_SECURITY_LEAD.username} TOTP not enrolled by the seed: ${morgan!.reason}`);
+  return [ada!, morgan!];
+}
+
+function morganLines(r: AdminTotpEnrolment): string {
+  const who = `    ${DEMO_SECURITY_LEAD.username}  ${DEMO_SECURITY_LEAD.username}  ${DEMO_SECURITY_LEAD.email}`;
+  if (r.status === "enrolled") {
+    return (
+      `${who}  ${r.password}   (${DEMO_SECURITY_LEAD.role}, second admin — Inbox: the Shadow-AI remediation sign-off)\n` +
+      `           ${DEMO_SECURITY_LEAD.username} TOTP (shown ONCE; add it to an authenticator app): ${r.otpauthUri}`
+    );
+  }
+  return `${who}  ${r.status === "already" ? "(already set — unchanged; TOTP already enrolled)" : "(not issued — see the line above)"}   (${DEMO_SECURITY_LEAD.role}, second admin)`;
 }
 
 function adminMfaLine(r: AdminTotpEnrolment): string {

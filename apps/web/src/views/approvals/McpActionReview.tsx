@@ -3,6 +3,7 @@ import type { Approval } from "../../api/types";
 import { Badge, Button, CodeBlock, Modal, StatusBadge } from "../../ui/kit";
 import { describeBoundTarget, inspectApprovalAction } from "./approvalReview";
 import s from "./actionReview.module.css";
+import { fmtDateTime } from "../../api/format";
 
 export function McpActionReview(props: {
   approval: Approval;
@@ -66,7 +67,7 @@ export function McpActionReview(props: {
           <dt>Project</dt><dd>{approval.projectName ?? approval.projectId ?? "Unattributed"}</dd>
           <dt>Requested by</dt><dd>{approval.requestedByName ?? approval.userId}</dd>
           <dt>Consent scope</dt><dd>{approval.approvalScope === "action" ? "Exact action" : approval.approvalScope === "tool" ? "Other arguments for this tool are permitted" : "Not recorded"}</dd>
-          <dt>Expires</dt><dd>{approval.expiresAt === null ? "Never" : approval.expiresAt && Number.isFinite(Date.parse(approval.expiresAt)) ? new Date(approval.expiresAt).toLocaleString() : "Not recorded"}</dd>
+          <dt>Expires</dt><dd>{approval.expiresAt === null ? "Never" : fmtDateTime(approval.expiresAt, "Not recorded")}</dd>
         </dl>
         {view.blockedReason && <p className={s.warning} role="alert">{view.blockedReason}</p>}
         {view.payload && <section aria-label="Action payload" className={s.payload}>

@@ -34,7 +34,7 @@ import {
   workloadIdentities,
   type Db,
 } from "@regulait/db";
-import { stepUpActionDigest } from "@regulait/shared";
+import { IDENTITY_PICKER_LISTS, IDENTITY_PICKER_MAX, stepUpActionDigest } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { resolveDeployMode } from "./deploy-posture.js";
 import { createRootGrant, loadLiveChain } from "./delegation.js";
@@ -528,7 +528,13 @@ describe("GET /v1/identity/picker-sources", () => {
     expect(v.sponsors.some((p: { id: string }) => p.id === "00000000-0000-0000-0000-000000000000")).toBe(false);
     expect(v.subjects.agent.some((o: { id: string }) => o.id === owned.agentId)).toBe(false);
     expect(v.environments).toEqual(expect.arrayContaining([resolveDeployMode(), ENV, `s6-${RUN}`]));
-    expect(Object.keys(v).sort()).toEqual(["agents", "connectors", "environments", "roles", "servers", "sponsors", "subjects", "truncated", "workerIdentities"]);
+    expect(Object.keys(v).sort()).toEqual(["agents", "connectors", "environments", "roles", "servers", "sponsors", "subjects", "truncated", "truncatedLists", "workerIdentities"]);
+    // per list: the one flag is exactly "some list was cut", and each list named is a picker list at its cap
+    expect(v.truncated).toBe(v.truncatedLists.length > 0);
+    for (const l of v.truncatedLists as string[]) {
+      expect(IDENTITY_PICKER_LISTS as readonly string[]).toContain(l);
+      if (l !== "tools") expect(l.split(".").reduce((o: Record<string, unknown>, k) => o[k] as Record<string, unknown>, v)).toHaveLength(IDENTITY_PICKER_MAX);
+    }
   });
 });
 

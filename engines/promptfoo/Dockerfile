@@ -13,11 +13,12 @@
 # has actually been built and its digest recorded there; until then no runner can pass the
 # self-test and the engine cannot be enabled.
 #
-# ONE image, TWO containers (ADR-0187 B5-P2, decisions 170 on; docker-compose.yml): the RUNNER
-# (`node /app/dist/main.js`, the default CMD) holds the runner key and talks to the gateway, and
-# never runs promptfoo; the WORKER (`node /app/dist/worker-main.js`) runs promptfoo with only each
-# run's virtual key, no state volume and no runner or enrolment token. They exchange jobs and results
-# through two tmpfs-backed volumes.
+# ONE image, two uses (ADR-0187 B5-P2, ADR-0190 I5): the RUNNER (`node /app/dist/main.js`, the default
+# CMD) holds the runner key and talks to the gateway, and never runs promptfoo; the TASK
+# (`node /app/dist/task-main.js`, the manifest's taskEntry) runs promptfoo ONLY in a gVisor sandbox the
+# sandbox executor starts under the run's engine_worker placement, with only the run's key (the task
+# secret), no state volume and no runner or enrolment token; its model calls reach the gateway only
+# through the gateway channel the runner's task bridge carries.
 #
 # What the image is:
 #   - promptfoo exactly as pinned by engines/promptfoo/package-lock.json (npm ci, no optional

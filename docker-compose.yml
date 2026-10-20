@@ -24,6 +24,19 @@
 # reports what the bucket itself says it enforces, so `/v1/audit/verify` can
 # answer `tamperResistant: true` on a laptop for the same reason it can in a
 # customer's cloud: because the medium was asked, not because a flag was set.
+
+# --- the Caddy image, pinned by digest (ADR-0190 I4 follow-ups) ---------------
+#
+# ONE reference for every Caddy service (the public `caddy` front, the
+# executor's `executor-front` and its `executor-front-ca` copier).
+# scripts/build-image-bundle.sh and scripts/install.sh name the same string.
+# The tag is the Caddy release the digest was read from (the `2-alpine` and
+# `2.11.7-alpine` tags named this same OCI index on 2026-10-17, resolved
+# against the Docker Hub registry API); the digest is what is run. An
+# air-gapped install runs the plain tag instead, checked against pinned image
+# ids (scripts/install.sh). Re-pin the three files together.
+x-caddy-image: &caddy-image caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
+
 # --- Sidecar engine runners (profile: engines) — ADR-0187 --------------------
 #
 # Each engine (promptfoo, modelscan, garak) runs as ONE long-running runner
@@ -45,6 +58,19 @@
 # secret is its runner key, which it generates itself and registers (the public half only)
 # once with a one-time enrolment token.
 # Kubernetes: the same as a deny-all NetworkPolicy except egress to the gateway.
+x-engine-image: &engine-image
+  profiles: ["engine-images"]
+  platform: linux/amd64
+  pull_policy: build
+  # never a running service: an `up` with this profile starts an inert one-shot that exits 0
+  entrypoint: ["/usr/local/bin/node", "-e", "process.exit(0)"]
+  restart: "no"
+  network_mode: none
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  user: "10001:10001"
+
 x-engine-runner: &engine-runner
   profiles: ["engines"]
   depends_on:
@@ -485,16 +511,21 @@ services:
   #
   # OFF unless the `engines` profile is up, and the engine stays disabled in the
   # product until an admin enables it after this runner's self-test passes.
-  # Build the image from the repository root (engines/promptfoo/Dockerfile),
-  # then name its digest ONCE (decision 55):
+  # ENG-IMG: the image is published by .github/workflows/engine-images.yml and
+  # recorded in engines/images.lock.json; scripts/engine-images-lock.mjs writes
+  # the lock's repository and digest as the DEFAULTS below, so a stock install
+  # needs no variable once the lock holds a publish. Until then the default is
+  # an all-zero digest that names no image: with pull_policy never nothing
+  # starts, and a runner given it refuses to start. The digest is named ONCE
+  # (decision 55):
   #
-  #   REGULAIT_ENGINE_PROMPTFOO_DIGEST=sha256:<digest>
+  #   REGULAIT_ENGINE_PROMPTFOO_DIGEST=sha256:<digest>   (optional override)
   #
   # The image reference AND the digest the runner reports are both built from
   # that one variable, so they cannot disagree, and the reference is always
-  # pinned by digest (no tag). The default is an all-zero digest that names no
-  # image: with pull_policy never nothing starts, and a runner given it refuses
-  # to start. The reported digest is a CONSISTENCY check, not proof — a
+  # pinned by digest (no tag). An override is admitted only when it equals the
+  # gateway manifest's digest (the lock's): any other is refused at
+  # registration and audited (engine-runner-register-obsolete-build). The reported digest is a CONSISTENCY check, not proof — a
   # container cannot prove which image it runs; admission is the signature
   # verification at deploy time (ADR-0187 decision 55, open item). The digest
   # must also equal the shipped manifest's, or the self-test fails.
@@ -507,206 +538,143 @@ services:
   #     enrolment token (the enrolment token is single-use and ignored once a
   #     stored token works). Deleting the volume means re-enrolling.
   #
-  # ONE image, TWO containers (B5-P2, ADR-0187 decisions 170 on): the runner
-  # credential is out of promptfoo's reach.
+  # ADR-0190 I5: the runner NEVER runs promptfoo, and there is no worker
+  # container. Each run's job runs as an engine TASK in a gVisor sandbox that
+  # the sandbox executor (profile `isolation`) starts under the run's
+  # `engine_worker` placement; the runner's task bridge hands the job over
+  # through the gateway (the run's key as the task secret, never in the input),
+  # carries the sandbox's gateway channel and writes the task's results into
+  # its own result volume. Without an executor attested for the engine-worker
+  # profile, a run ends `not_run` (isolation_unavailable): no fallback.
   #
-  #   engine-promptfoo         the runner: the hardened template, on `engines`,
-  #                            its own state volume (the runner key), the job
-  #                            volume read-write, the result volume READ-ONLY.
-  #                            It leases, heartbeats and posts results, and
-  #                            NEVER runs promptfoo.
-  #   engine-promptfoo-worker  the worker: runs promptfoo. On `engines` (its
-  #                            model calls go to the gateway's compat routes on
-  #                            each run's virtual key, the only credential it
-  #                            ever holds), read-only root, non-root, cap_drop
-  #                            ALL, no-new-privileges; NO state volume, NO
-  #                            runner or enrolment token, its own PID and IPC
-  #                            namespaces (it cannot see the runner process);
-  #                            the job volume READ-ONLY; its one shared
-  #                            writable volume is /out (the result volume).
-  #                            It proves this at run time (its self-test, which
-  #                            the runner reports as
-  #                            REGULAIT_PROMPTFOO_WORKER_ISOLATED).
-  #
-  # Both exchange volumes are tmpfs-backed: a job's run key never reaches a disk.
+  #   engine-promptfoo  the runner: the hardened template, on `engines`, its own
+  #                     state volume (the runner key), the job and result
+  #                     volumes (both its own, tmpfs-backed). It leases,
+  #                     heartbeats and posts results.
   engine-promptfoo:
     <<: *engine-runner
     platform: linux/amd64
-    image: ${REGULAIT_ENGINE_PROMPTFOO_REPOSITORY:-regulait/engine-promptfoo}@${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    image: ${REGULAIT_ENGINE_PROMPTFOO_REPOSITORY:-ghcr.io/dhruvmahendrapatel/regulait-engine-promptfoo}@${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:e973eab40486832b9b3c858acc43fa5f4d732bc47aea24ede2d89c576f36a577}
     volumes:
       - engine-promptfoo-state:/state
       - engine-promptfoo-jobs:/jobs
-      - engine-promptfoo-results:/results:ro
+      - engine-promptfoo-results:/results
     environment:
       REGULAIT_GATEWAY_URL: http://gateway:3000
       REGULAIT_ENGINE_ENROLLMENT_TOKEN: ${REGULAIT_ENGINE_PROMPTFOO_ENROLLMENT_TOKEN:-}
-      REGULAIT_ENGINE_IMAGE_REF: ${REGULAIT_ENGINE_PROMPTFOO_REPOSITORY:-regulait/engine-promptfoo}@${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
-      REGULAIT_ENGINE_IMAGE_DIGEST: ${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+      REGULAIT_ENGINE_IMAGE_REF: ${REGULAIT_ENGINE_PROMPTFOO_REPOSITORY:-ghcr.io/dhruvmahendrapatel/regulait-engine-promptfoo}@${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:e973eab40486832b9b3c858acc43fa5f4d732bc47aea24ede2d89c576f36a577}
+      REGULAIT_ENGINE_IMAGE_DIGEST: ${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:e973eab40486832b9b3c858acc43fa5f4d732bc47aea24ede2d89c576f36a577}
       REGULAIT_PROMPTFOO_JOBS_DIR: /jobs
       REGULAIT_PROMPTFOO_RESULTS_DIR: /results
 
-  engine-promptfoo-worker:
-    profiles: ["engines"]
-    platform: linux/amd64
-    image: ${REGULAIT_ENGINE_PROMPTFOO_REPOSITORY:-regulait/engine-promptfoo}@${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
-    command: ["node", "/app/dist/worker-main.js"]
-    pull_policy: ${REGULAIT_ENGINE_PULL_POLICY:-never}
-    networks: [engines]
-    read_only: true
-    tmpfs:
-      - /work:size=1g,mode=0700,uid=10001,gid=10001
-      - /tmp:size=256m,mode=1777
-    cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
-    user: "10001:10001"
-    mem_limit: 2g
-    cpus: 2
-    pids_limit: 256
-    volumes:
-      - engine-promptfoo-jobs:/jobs:ro
-      - engine-promptfoo-results:/out
-    environment:
-      REGULAIT_PROMPTFOO_JOBS_DIR: /jobs
-      REGULAIT_PROMPTFOO_RESULTS_DIR: /out
-    restart: unless-stopped
-
   # --- modelscan engine: runner + scanner (profile: engines) — ADR-0187 B5-M --
   #
-  # ONE image (engines/modelscan/Dockerfile), TWO containers (decision 104).
-  # Every uploaded model artifact is hostile input, so the process that parses
-  # it has no network at all and never holds the runner credential:
-  #
-  #   engine-modelscan          the runner: the hardened template, on `engines`
-  #                             (reaches only the gateway), its own state volume
-  #                             (the runner key), the job volume read-write,
-  #                             the result volume READ-ONLY. It fetches the
-  #                             artifact (sha256 checked) and never runs
-  #                             modelscan.
-  #   engine-modelscan-scanner  the scanner: network_mode none, read-only root,
-  #                             non-root, cap_drop ALL, no-new-privileges, no
-  #                             token, no state; the job volume (the artifact)
-  #                             READ-ONLY; its one writable place is /out (the
-  #                             result volume, a tmpfs); smaller memory, CPU and
-  #                             pids limits; the wall-clock limit is the run's
-  #                             deadline, enforced per scan by killing
-  #                             modelscan's process group.
-  #
-  # Both exchange volumes are tmpfs-backed, so nothing of an artifact survives
-  # the containers. The job volume must hold the largest artifact the org
-  # setting admits (512 MiB strict default): raise
-  # REGULAIT_ENGINE_MODELSCAN_JOBS_SIZE with that setting.
+  # Every uploaded model artifact is hostile input. ADR-0190 I5: there is no
+  # scanner container; each scan runs as an engine TASK in a gVisor sandbox
+  # with no network at all, started by the sandbox executor under the run's
+  # `engine_worker` placement, with the artifact on a read-only input the
+  # executor wrote and verified (streamed to it by the gateway from the
+  # artifact store, never through this runner). The runner (the hardened
+  # template, on `engines`, its own state volume) leases, bridges the task and
+  # never runs modelscan. Both exchange volumes are the runner's own,
+  # tmpfs-backed. The job volume must hold the largest artifact the org setting
+  # admits (512 MiB strict default): raise REGULAIT_ENGINE_MODELSCAN_JOBS_SIZE
+  # with that setting.
   # Digest pinning as for promptfoo: one variable,
-  # REGULAIT_ENGINE_MODELSCAN_DIGEST=sha256:<digest>, names the image of BOTH
-  # containers and the digest the runner reports; the all-zero default names
-  # no image.
+  # REGULAIT_ENGINE_MODELSCAN_DIGEST=sha256:<digest>, names the image and the
+  # digest the runner reports; its default is the lock's digest (ENG-IMG), or
+  # all-zero (no image) until a publish is recorded. The runner never downloads
+  # the artifact: the gateway streams it to the executor (ENG-IMG).
   engine-modelscan:
     <<: *engine-runner
     platform: linux/amd64
-    image: ${REGULAIT_ENGINE_MODELSCAN_REPOSITORY:-regulait/engine-modelscan}@${REGULAIT_ENGINE_MODELSCAN_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    image: ${REGULAIT_ENGINE_MODELSCAN_REPOSITORY:-ghcr.io/dhruvmahendrapatel/regulait-engine-modelscan}@${REGULAIT_ENGINE_MODELSCAN_DIGEST:-sha256:d9e3bd1e364fec7ce6beec86716548965b4651e065b52570ebbb6ae8647e9413}
     volumes:
       - engine-modelscan-state:/state
       - engine-modelscan-jobs:/jobs
-      - engine-modelscan-results:/results:ro
+      - engine-modelscan-results:/results
     environment:
       REGULAIT_GATEWAY_URL: http://gateway:3000
       REGULAIT_ENGINE_ENROLLMENT_TOKEN: ${REGULAIT_ENGINE_MODELSCAN_ENROLLMENT_TOKEN:-}
-      REGULAIT_ENGINE_IMAGE_REF: ${REGULAIT_ENGINE_MODELSCAN_REPOSITORY:-regulait/engine-modelscan}@${REGULAIT_ENGINE_MODELSCAN_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
-      REGULAIT_ENGINE_IMAGE_DIGEST: ${REGULAIT_ENGINE_MODELSCAN_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+      REGULAIT_ENGINE_IMAGE_REF: ${REGULAIT_ENGINE_MODELSCAN_REPOSITORY:-ghcr.io/dhruvmahendrapatel/regulait-engine-modelscan}@${REGULAIT_ENGINE_MODELSCAN_DIGEST:-sha256:d9e3bd1e364fec7ce6beec86716548965b4651e065b52570ebbb6ae8647e9413}
+      REGULAIT_ENGINE_IMAGE_DIGEST: ${REGULAIT_ENGINE_MODELSCAN_DIGEST:-sha256:d9e3bd1e364fec7ce6beec86716548965b4651e065b52570ebbb6ae8647e9413}
       REGULAIT_MODELSCAN_JOBS_DIR: /jobs
       REGULAIT_MODELSCAN_RESULTS_DIR: /results
 
-  engine-modelscan-scanner:
-    profiles: ["engines"]
-    platform: linux/amd64
-    image: ${REGULAIT_ENGINE_MODELSCAN_REPOSITORY:-regulait/engine-modelscan}@${REGULAIT_ENGINE_MODELSCAN_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
-    command: ["node", "/app/dist/scanner-main.js"]
-    pull_policy: ${REGULAIT_ENGINE_PULL_POLICY:-never}
-    network_mode: none
-    read_only: true
-    tmpfs:
-      - /work:size=64m,mode=0700,uid=10001,gid=10001
-      - /tmp:size=64m,mode=1777
-    cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
-    user: "10001:10001"
-    mem_limit: 1g
-    cpus: 1
-    pids_limit: 64
-    volumes:
-      - engine-modelscan-jobs:/jobs:ro
-      - engine-modelscan-results:/out
-    environment:
-      REGULAIT_MODELSCAN_JOBS_DIR: /jobs
-      REGULAIT_MODELSCAN_RESULTS_DIR: /out
-    restart: unless-stopped
-
   # --- garak engine: runner + worker (profile: engines) — ADR-0187 B5-G -------
   #
-  # ONE image (engines/garak/Dockerfile), TWO containers (decision 140), so the
-  # process that runs garak never holds the runner credential:
-  #
-  #   engine-garak         the runner: the hardened template, on `engines`, its
-  #                        own state volume (the runner key), the job volume
-  #                        read-write, the result volume READ-ONLY. It never
-  #                        runs garak.
-  #   engine-garak-worker  the worker: runs one garak process per probe. It must
-  #                        reach the gateway's model routes, so it is on
-  #                        `engines` (internal: reaches only the gateway) — but
-  #                        it has NO runner key, NO enrolment token and NO
-  #                        state volume: what it holds, for one run at a time, is
-  #                        that run's own virtual key (in the job). Read-only
-  #                        root, non-root, cap_drop ALL, no-new-privileges; the
-  #                        job volume READ-ONLY; its writable places are /work
-  #                        (garak's per-probe directories) and /out (results).
-  #
-  # Both exchange volumes are tmpfs-backed. Digest pinning as for the other
+  # ADR-0190 I5: the runner never runs garak and there is no worker container.
+  # Each run's probes run as an engine TASK in a gVisor sandbox started by the
+  # sandbox executor under the run's `engine_worker` placement; the run's key
+  # reaches it only as the task secret, and its model calls reach the gateway
+  # only through the gateway channel this runner's task bridge carries. Both
+  # exchange volumes are the runner's own, tmpfs-backed. Digest pinning as for the other
   # engines: one variable, REGULAIT_ENGINE_GARAK_DIGEST=sha256:<digest>, names
-  # the image of BOTH containers and the digest the runner reports; the
-  # all-zero default names no image.
+  # the image and the digest the runner reports; its default is the lock's
+  # digest (ENG-IMG), or all-zero (no image) until a publish is recorded.
   engine-garak:
     <<: *engine-runner
     platform: linux/amd64
-    image: ${REGULAIT_ENGINE_GARAK_REPOSITORY:-regulait/engine-garak}@${REGULAIT_ENGINE_GARAK_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    image: ${REGULAIT_ENGINE_GARAK_REPOSITORY:-ghcr.io/dhruvmahendrapatel/regulait-engine-garak}@${REGULAIT_ENGINE_GARAK_DIGEST:-sha256:8fe7d51851bcaff2fdf562c9db1b5f2b0423966e034954ee3976ae8754d6da6c}
     volumes:
       - engine-garak-state:/state
       - engine-garak-jobs:/jobs
-      - engine-garak-results:/results:ro
+      - engine-garak-results:/results
     environment:
       REGULAIT_GATEWAY_URL: http://gateway:3000
       REGULAIT_ENGINE_ENROLLMENT_TOKEN: ${REGULAIT_ENGINE_GARAK_ENROLLMENT_TOKEN:-}
-      REGULAIT_ENGINE_IMAGE_REF: ${REGULAIT_ENGINE_GARAK_REPOSITORY:-regulait/engine-garak}@${REGULAIT_ENGINE_GARAK_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
-      REGULAIT_ENGINE_IMAGE_DIGEST: ${REGULAIT_ENGINE_GARAK_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+      REGULAIT_ENGINE_IMAGE_REF: ${REGULAIT_ENGINE_GARAK_REPOSITORY:-ghcr.io/dhruvmahendrapatel/regulait-engine-garak}@${REGULAIT_ENGINE_GARAK_DIGEST:-sha256:8fe7d51851bcaff2fdf562c9db1b5f2b0423966e034954ee3976ae8754d6da6c}
+      REGULAIT_ENGINE_IMAGE_DIGEST: ${REGULAIT_ENGINE_GARAK_DIGEST:-sha256:8fe7d51851bcaff2fdf562c9db1b5f2b0423966e034954ee3976ae8754d6da6c}
       REGULAIT_GARAK_JOBS_DIR: /jobs
       REGULAIT_GARAK_RESULTS_DIR: /results
 
-  engine-garak-worker:
-    profiles: ["engines"]
-    platform: linux/amd64
-    image: ${REGULAIT_ENGINE_GARAK_REPOSITORY:-regulait/engine-garak}@${REGULAIT_ENGINE_GARAK_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
-    command: ["node", "/app/dist/worker-main.js"]
-    depends_on:
-      gateway:
-        condition: service_healthy
-    pull_policy: ${REGULAIT_ENGINE_PULL_POLICY:-never}
-    networks: [engines]
-    read_only: true
-    tmpfs:
-      - /work:size=1g,mode=0700,uid=10001,gid=10001
-      - /tmp:size=256m,mode=1777
-    cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
-    user: "10001:10001"
-    mem_limit: 3g
-    cpus: 2
-    pids_limit: 256
-    volumes:
-      - engine-garak-jobs:/jobs:ro
-      - engine-garak-results:/out
-    environment:
-      REGULAIT_GARAK_JOBS_DIR: /jobs
-      REGULAIT_GARAK_RESULTS_DIR: /out
-      REGULAIT_WORK_DIR: /work
-    restart: unless-stopped
+  # --- engine task images (profile: engine-images) — ADR-0190 I5 follow-up --
+  #
+  # Each engine has ONE image with two uses (engines/*/Dockerfile): the runner
+  # above (`node /app/dist/main.js`), and the TASK the sandbox executor
+  # (profile `isolation`) starts in a gVisor sandbox under the run's
+  # `engine_worker` placement (`node /app/dist/task-main.js`, the manifest's
+  # `taskEntry`). These three services only BUILD those images on this host's
+  # daemon, from the repository root; every base in the Dockerfiles is pinned
+  # by digest and every image runs as uid 10001:
+  #
+  #   docker compose --profile engine-images build engine-promptfoo-image engine-modelscan-image engine-garak-image
+  #
+  # (pending execution: no session that wrote this had a Docker daemon.)
+  # They are never services: `up` with this profile runs each as an inert
+  # one-shot (no network, no privileges) that exits at once. The sandbox does
+  # NOT run with these settings but with the shipped `engine-worker` execution
+  # profile's, applied by the executor on every task: read-only root, a tmpfs
+  # /work, no network (the gateway channel only), uid 10001, no capabilities,
+  # the task's input read-only at /jobs.
+  #
+  # An executor starts a task only from the engine manifest's `taskImage`, the
+  # image's content digest (`docker image inspect --format '{{.Id}}'`), which
+  # comes from engines/images.lock.json (ENG-IMG). It is null until a publish
+  # is recorded there, so until then a locally built image places nothing
+  # (`policy_unresolved`, the run ends `not_run`): fail closed. A local build is
+  # for checking the Dockerfiles; the runners and tasks run the PUBLISHED image
+  # (pulled by the lock's digest, or loaded from an air-gapped bundle).
+  engine-promptfoo-image:
+    <<: *engine-image
+    build:
+      context: .
+      dockerfile: engines/promptfoo/Dockerfile
+    image: regulait/engine-promptfoo:local
+
+  engine-modelscan-image:
+    <<: *engine-image
+    build:
+      context: .
+      dockerfile: engines/modelscan/Dockerfile
+    image: regulait/engine-modelscan:local
+
+  engine-garak-image:
+    <<: *engine-image
+    build:
+      context: .
+      dockerfile: engines/garak/Dockerfile
+    image: regulait/engine-garak:local
 
   # --- Identity broker (profile: sso) — ADR-0174 ------------------------------
   #
@@ -846,8 +814,10 @@ services:
   # generates on its own volume). Its only network is the internal `engines`
   # network, which reaches the gateway and nothing off the host. The sandboxes it
   # starts have no network at all (`--network none`): the MCP bytes travel over
-  # the executor's channel. Plain http to the gateway on that internal network is
-  # the development flag (amendment V); a deployment uses https.
+  # the executor's channel. It reaches the gateway over https through its own
+  # TLS front (`executor-front`, below), pinning that front's stack-local CA.
+  # Plain http to the gateway on that internal network is the development flag
+  # (amendment V, compose.isolation-insecure-dev.yml).
   sandbox-executor:
     profiles: ["isolation"]
     build:
@@ -857,6 +827,11 @@ services:
     depends_on:
       gateway:
         condition: service_healthy
+      executor-front:
+        condition: service_started
+      # the front's CA root, copied once it exists; the executor pins it at start
+      executor-front-ca:
+        condition: service_completed_successfully
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -875,13 +850,29 @@ services:
       # daemon runs against the pinned release. A directory, never the file: a single-file bind mount pins the inode
       # at container start, so an upgrade in place would leave the executor hashing the old binary.
       - ${REGULAIT_GVISOR_HOST_DIR:-/usr/local/lib/gvisor}:/host-gvisor:ro
+      # the TLS front's CA root certificate only (never its key), READ-ONLY; see executor-front-ca
+      - executor-front-ca:/etc/regulait/executor-front-ca:ro
+      # ADR-0190 I5: the executor's INPUT volume. For each engine task the executor writes the task's input under
+      # <dir>/<sandbox name>/jobs, verifies every file's size and sha256, makes it read-only (files 0444, directories
+      # 0555), and the sandbox mounts only that sub-directory READ-ONLY at /jobs (`volume-subpath`, Docker Engine 26
+      # or later); it is removed with the sandbox. Only this service mounts it, and no host path backs it. A named
+      # volume on disk, not tmpfs: a modelscan input can be as large as the org's artifact limit (512 MiB strict
+      # default), and tmpfs pages would be charged to this container's 512m memory limit.
+      - executor-input:/executor-input
     environment:
-      # review M4: https only. There is no working default: set REGULAIT_EXECUTOR_GATEWAY_URL to an https address of
-      # the gateway reachable from the `engines` network. The placeholder (.invalid never resolves) makes the executor
-      # exit at start with that instruction. Plain http only through compose.isolation-insecure-dev.yml (warned).
-      REGULAIT_GATEWAY_URL: ${REGULAIT_EXECUTOR_GATEWAY_URL:-https://set-regulait-executor-gateway-url.invalid}
+      # review M4: https only. The default is the executor's own TLS front on `engines` (executor-front, below),
+      # whose certificate is checked against the pinned CA in REGULAIT_EXECUTOR_GATEWAY_CA_FILE and nothing else
+      # (not the public roots; there is no skip). Pointing the executor at a different https front: set both
+      # variables (an EMPTY CA file means the image's public roots). Plain http only through
+      # compose.isolation-insecure-dev.yml (warned; the CA file is then ignored).
+      REGULAIT_GATEWAY_URL: ${REGULAIT_EXECUTOR_GATEWAY_URL:-https://executor-front:8443}
+      REGULAIT_EXECUTOR_GATEWAY_CA_FILE: ${REGULAIT_EXECUTOR_GATEWAY_CA_FILE-/etc/regulait/executor-front-ca/ca.pem}
       REGULAIT_EXECUTOR_INIT_VOLUME: regulait-sandbox-init
       REGULAIT_EXECUTOR_INIT_DIR: /regulait-init
+      # ADR-0190 I5: where the input volume is mounted here, and the volume's Docker name, which the executor names in
+      # each sandbox's `docker run --mount` against the host daemon. Without both it refuses every engine task.
+      REGULAIT_EXECUTOR_INPUT_DIR: /executor-input
+      REGULAIT_EXECUTOR_INPUT_VOLUME: regulait-executor-input
       REGULAIT_EXECUTOR_RUNSC_BINARY: /host-gvisor/runsc
       REGULAIT_EXECUTOR_RUNSC_HOST_PATH: ${REGULAIT_GVISOR_HOST_DIR:-/usr/local/lib/gvisor}/runsc
       REGULAIT_PUBLIC_URL: ${REGULAIT_PUBLIC_URL:-}
@@ -894,17 +885,90 @@ services:
     restart: unless-stopped
     networks: [engines]
 
+  # --- the executor's internal TLS front (profile: isolation) — ADR-0190 I4 follow-ups
+  #
+  # A second Caddy, NOT the public one: on `engines` only, no host port, no
+  # admin endpoint, no outbound call. It serves https://executor-front:8443 for
+  # the executor channel (`/v1/executor-channel/*`) and answers 404 to every
+  # other path (infra/caddy/executor-front.Caddyfile). It strips every
+  # forwarding header and is NOT in REGULAIT_TRUSTED_PROXIES: the gateway sees
+  # this container as the peer, and its trust of client addresses is unchanged.
+  # Its certificate comes from its OWN local CA (`tls internal`), created on
+  # this service's first start in executor-front-data (only the front and
+  # the copier below mount the root key; the executor, holding the Docker
+  # socket, is host root anyway). Caddy renews the intermediate and the leaf.
+  # Nothing is committed; `docker compose down -v` destroys the CA, and the
+  # next start makes a new one that executor-front-ca copies again.
+  executor-front:
+    image: *caddy-image
+    profiles: ["isolation"]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    # the image's caddy binary carries the file capability cap_net_bind_service; exec fails without it in the
+    # bounding set. The front binds 8443 and needs nothing else.
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    pids_limit: 64
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    volumes:
+      - ./infra/caddy/executor-front.Caddyfile:/etc/caddy/Caddyfile:ro
+      - executor-front-data:/data
+      - executor-front-config:/config
+    networks: [engines]
+
+  # One-shot: copies the front's CA ROOT CERTIFICATE (public; never root.key)
+  # to the volume the executor mounts read-only. No network. It waits up to
+  # 120 s for the front to create its CA, and re-copies on every `up`, so a
+  # re-created CA is picked up by the executor's next start.
+  executor-front-ca:
+    image: *caddy-image
+    profiles: ["isolation"]
+    depends_on:
+      executor-front:
+        condition: service_started
+    restart: "no"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        src=/front-data/caddy/pki/authorities/local/root.crt
+        i=0
+        # wait for a COMPLETE PEM (its END line), not just a non-empty file
+        until [ -s "$$src" ] && grep -q -- '-----END CERTIFICATE-----' "$$src"; do
+          i=$$((i + 1))
+          if [ "$$i" -gt 120 ]; then echo "executor-front-ca: the front has not created its CA after 120 s ($$src)" >&2; exit 1; fi
+          sleep 1
+        done
+        grep -q -- '-----BEGIN CERTIFICATE-----' "$$src" || { echo "executor-front-ca: $$src is not a PEM certificate" >&2; exit 1; }
+        grep -q -- 'PRIVATE KEY' "$$src" && { echo "executor-front-ca: $$src holds a private key; refusing to copy it" >&2; exit 1; }
+        cp "$$src" /ca/.ca.pem.tmp
+        chmod 0444 /ca/.ca.pem.tmp
+        mv -f /ca/.ca.pem.tmp /ca/ca.pem
+        echo "executor-front-ca: copied the executor front's CA root to the executor's pinned bundle"
+    volumes:
+      - executor-front-data:/front-data:ro
+      - executor-front-ca:/ca
+
   caddy:
-    image: caddy:2-alpine
+    image: *caddy-image
     profiles: ["tls"]
     depends_on:
       - gateway
     restart: unless-stopped
     environment:
-      # Public hostname this stack serves. Default is the sslip.io name derived
-      # from the dev box's public IP (see infra/caddy/Caddyfile). Override when
-      # the IP changes or a real domain arrives.
-      REGULAIT_TLS_HOST: ${REGULAIT_TLS_HOST:-3-229-246-126.sslip.io}
+      # Public hostname this stack serves. Set it (scripts/install.sh writes it
+      # to .env from --domain; compose.tls-local.yml sets localhost). The default
+      # is a placeholder under `.invalid`, which never resolves and can never be
+      # issued a certificate, so a `tls` stack started without it fails visibly
+      # instead of serving somebody else's name.
+      REGULAIT_TLS_HOST: ${REGULAIT_TLS_HOST:-set-regulait-tls-host.invalid}
       # Where Caddy proxies to. Compose-network DNS name of the gateway.
       REGULAIT_TLS_UPSTREAM: ${REGULAIT_TLS_UPSTREAM:-gateway:3000}
       # Empty = real Let's Encrypt. compose.tls-local.yml sets `tls internal`.
@@ -1032,5 +1096,15 @@ volumes:
   # review H2: a FIXED name, because the executor names it on each `docker run --mount` against the host daemon
   sandbox-init:
     name: regulait-sandbox-init
+  # ADR-0190 I5: the executor's engine task inputs. A FIXED name for the same reason as sandbox-init (the executor names
+  # it to the host daemon), so one host runs one isolation stack. The executor image owns its mount point (uid 10001,
+  # 0711), which a fresh named volume copies; no other service mounts it.
+  executor-input:
+    name: regulait-executor-input
+  # ADR-0190 I4 follow-ups: the executor front's Caddy storage (its local CA, root key included, and its
+  # certificates), its autosaved config, and the CA root certificate alone, which the executor mounts read-only
+  executor-front-data:
+  executor-front-config:
+  executor-front-ca:
   caddy_data:
   caddy_config:

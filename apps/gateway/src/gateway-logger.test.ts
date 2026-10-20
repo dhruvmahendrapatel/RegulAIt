@@ -88,7 +88,6 @@ describe("what a refusal leaves behind", () => {
       status: 401,
       method: "GET",
       route: "/v1/audit",
-      path: "/v1/audit",
       ip: "203.0.113.7",
       credential: "bearer-unverified",
     });

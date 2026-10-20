@@ -12,10 +12,13 @@
  *
  * WHAT THIS DEPLOYMENT ACTUALLY DOES — SAY IT BEFORE ANYTHING ELSE
  * ----------------------------------------------------------------
- * ADR-0055 §2 describes three "collectors". THERE IS NO COLLECTOR IN THIS
- * REPOSITORY AND NONE SHIPS. This control plane does not sit on a customer's
- * network, does not hold their DNS resolver, does not run on their laptops, and
- * has no browser extension. Every route below operates on evidence the CUSTOMER
+ * ADR-0055 §2 describes three "collectors". The routes IN THIS FILE collect
+ * nothing: they do not sit on a customer's network, hold their DNS resolver,
+ * run on their laptops, or ship a browser extension. ADR-0195 adds ACTIVE,
+ * read-only discovery in `discovery-*.ts` (admin-enabled sources, off by
+ * default), whose scan runs write findings through `upsertFindings` below; every
+ * posture sentence these routes return names the enabled sources, or says
+ * nothing is scanned. Every route below operates on evidence the CUSTOMER
  * exports and uploads:
  *
  *   egress_log    a forward-proxy / firewall / DNS-resolver / SIEM export
@@ -75,20 +78,26 @@ import {
   desc,
   eq,
   inArray,
+  isNull,
   modelCredentials,
+  notInArray,
   shadowAiFindings,
   shadowAiImports,
   sql,
   userModelCredentials,
   workflowAssignmentRules,
   workflowInstances,
+  workflowTemplates,
   type Db,
   mcpServers,
 } from "@regulait/db";
 import {
   DEFAULT_AI_SIGNATURES,
+  DISCOVERY_PSEUDONYM_PATTERN,
   DiscoveryParseError,
+  PSEUDONYMISED_SUBJECT_KINDS,
   EVIDENCE_ADAPTER_POSTURE,
+  EVIDENCE_KINDS,
   EVIDENCE_MAX_BYTES,
   EVIDENCE_MAX_ROWS,
   EvidenceFormatError,
@@ -111,6 +120,7 @@ import {
   MCP_DISCOVERY_POSTURE,
   rawEvidenceImportRequestSchema,
   screenEvidencePayload,
+  scrubAuditText,
   type AiSignature,
   type CorrelatedFinding,
   type EvidenceImport,
@@ -122,6 +132,41 @@ import {
 import { defaultBaseUrlFor } from "@regulait/model-provider";
 import { ENV_FALLBACK_PROVIDERS, platformEnvKey } from "./agents-connectors.js";
 import { envFallbackAllowed, loadOrgSettings } from "./org-settings.js";
+import { activeDiscoverySources, activeDiscoveryStatement } from "./discovery-posture.js";
+import { CLOUD_AI_SERVICE_SEED } from "@regulait/cloud-discovery";
+import {
+  REMEDIATION_ENVIRONMENT_PATTERN,
+  SHADOW_AI_REMEDIATION_CHANGE_TYPE,
+  SHADOW_AI_REMEDIATION_ENVIRONMENT_UNSTATED,
+  SHADOW_AI_REMEDIATION_TEMPLATE_NAME,
+  UNSUCCESSFUL_TERMINAL_STATUSES,
+  allowedRemediationEnvironments,
+  endedUnsuccessfully,
+  remediationReference,
+  shadowAiRemediationDefaultState,
+} from "./shadow-ai-remediation.js";
+
+/**
+ * Everything the shipped seed installs: the default signatures, plus each discovery slice's own artifact seed rows
+ * (ADR-0195 SD2: `cloud_ai_service`, matched by `identifier`). SD1 and SD3 add theirs here the same way.
+ */
+export const SHIPPED_SIGNATURE_SEED: ReadonlyArray<Omit<AiSignature, "lastUpdatedAt">> = Object.freeze([
+  ...DEFAULT_AI_SIGNATURES,
+  ...CLOUD_AI_SERVICE_SEED.map((r) => ({
+    provider: r.provider,
+    kind: r.kind,
+    value: r.value,
+    matchType: r.matchType,
+    minLength: null,
+    replacementNote: r.replacementNote,
+    // the row's documentation reference (staleness disclosure) is kept in the row's note
+    note: `documented at ${r.reference}`,
+    provenance: r.provenance,
+    enabled: r.enabled,
+  })),
+]);
+
+const isImportKind = (k: string): k is EvidenceKind => (EVIDENCE_KINDS as readonly string[]).includes(k);
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -209,35 +254,73 @@ function toSignature(r: typeof aiEndpointSignatures.$inferSelect): AiSignature {
     replacementAgentId: r.replacementAgentId,
     replacementNote: r.replacementNote,
     provenance: r.provenance,
+    os: r.os,
+    ecosystem: r.ecosystem,
+    toolId: r.toolId,
+    note: r.note,
+    confidence: r.confidence,
     lastUpdatedAt: r.lastUpdatedAt,
     enabled: r.enabled,
   };
 }
 
-/** the change type a shadow-AI remediation workflow is started under (an admin assigns a template to it) */
-export const SHADOW_AI_REMEDIATION_CHANGE_TYPE = "shadow-ai-remediation";
-/** the environment the plan body carries until the person states where the usage runs (`needsInput`) */
-export const SHADOW_AI_REMEDIATION_ENVIRONMENT_UNSTATED = "unstated";
+export { SHADOW_AI_REMEDIATION_CHANGE_TYPE, SHADOW_AI_REMEDIATION_ENVIRONMENT_UNSTATED };
+
+/** at most this many evidence paths ride the plan body (a finding keeps at most 20 sightings) */
+const REMEDIATION_PATHS_MAX = 20;
+
+/** a subject that names a person or a device by pseudonym (ADR-0195 decision 20) never leaves the finding */
+function subjectIsPseudonymised(row: { subject: string; subjectKind: string }): boolean {
+  return (
+    (PSEUDONYMISED_SUBJECT_KINDS as readonly string[]).includes(row.subjectKind) ||
+    DISCOVERY_PSEUDONYM_PATTERN.test(row.subject.trim()) ||
+    row.subject.includes("psn:")
+  );
+}
+
+/** text that may ride a workflow body: no pseudonym, and nothing the audit scrubber would change (a credential) */
+const bodySafe = (v: string): boolean => !v.includes("psn:") && scrubAuditText(v) === v;
+
+/** a repo-relative evidence path: never one that climbs out, nor an absolute, home or drive path (it names a person) */
+export function repoRelativePath(path: string): boolean {
+  return !path.includes("..") && !/^[/\\~]/.test(path) && !/^[A-Za-z]:/.test(path);
+}
 
 /**
  * The `POST /v1/workflows/instances` body for a finding's remediation, shaped to `startInstanceSchema` (pure;
- * pinned by a test that parses it with that schema). The server knows the subject and the provider, not where the
- * ungoverned usage runs, so `environment` is a stated placeholder the screen replaces with what the person types.
- * A repo finding's subject is its path (so a path-scoped assignment rule can match it), as before.
+ * pinned by tests that parse it with that schema and post it to the route). ADR-0195 A4:
+ *  - the description names the subject and provider, or only the subject KIND when the subject is a pseudonym, and
+ *    always carries `remediationReference` (how an unlinked start is found again);
+ *  - `paths` are the repo and the repo-relative locations its sightings were found at (ADR-0195 decision 6: a path,
+ *    never contents). A device's config path is not a repo path and is never copied; nor is a pseudonym or anything
+ *    credential-shaped;
+ *  - `environment` is the stated one, or the explicit `unstated` placeholder the start route refuses.
  */
-export function remediationStartBody(row: {
-  id: string;
-  subject: string;
-  subjectKind: string;
-  provider: string;
-}): { change: { description: string; paths: string[]; changeType: string; environment: string; targetSystem?: string } } {
-  const targetSystem = row.subject.trim().slice(0, 200);
+export function remediationStartBody(
+  row: { id: string; subject: string; subjectKind: string; provider: string; evidence?: ReadonlyArray<Record<string, unknown>> | null },
+  environment?: string,
+): { change: { description: string; paths: string[]; changeType: string; environment: string; targetSystem?: string } } {
+  const pseudonymised = subjectIsPseudonymised(row);
+  const subject = row.subject.trim();
+  const safeSubject = !pseudonymised && subject && bodySafe(subject) ? subject : "";
+  const label = safeSubject || `a ${row.subjectKind.replace(/_/g, " ")} (pseudonymised)`;
+  const paths: string[] = [];
+  if (row.subjectKind === "repo" && safeSubject) {
+    paths.push(safeSubject);
+    for (const e of row.evidence ?? []) {
+      const loc = e.location as { path?: unknown } | undefined;
+      const path = typeof loc?.path === "string" ? loc.path.trim() : "";
+      if (path && path.length <= 500 && repoRelativePath(path) && bodySafe(path) && !paths.includes(path)) paths.push(path);
+      if (paths.length >= REMEDIATION_PATHS_MAX) break;
+    }
+  }
+  const targetSystem = safeSubject.slice(0, 200);
   return {
     change: {
-      description: `Pull ${row.subject} (${row.provider}) into governance — shadow-AI finding ${row.id}`,
-      paths: row.subjectKind === "repo" && row.subject.trim() ? [row.subject] : [],
+      description: `Pull ${label} (${row.provider}) into governance — ${remediationReference(row.id)}`,
+      paths,
       changeType: SHADOW_AI_REMEDIATION_CHANGE_TYPE,
-      environment: SHADOW_AI_REMEDIATION_ENVIRONMENT_UNSTATED,
+      environment: environment ?? SHADOW_AI_REMEDIATION_ENVIRONMENT_UNSTATED,
       ...(targetSystem ? { targetSystem } : {}),
     },
   };
@@ -382,7 +465,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
     const before = await db.select({ n: sql<number>`count(*)::int` }).from(aiEndpointSignatures);
     let inserted = 0;
     let refreshed = 0;
-    for (const s of DEFAULT_AI_SIGNATURES) {
+    for (const s of SHIPPED_SIGNATURE_SEED) {
       const [existing] = await db
         .select()
         .from(aiEndpointSignatures)
@@ -394,8 +477,14 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
           value: s.value,
           matchType: s.matchType,
           minLength: s.minLength ?? null,
+          replacementNote: s.replacementNote ?? null,
           provenance: s.provenance,
           enabled: s.enabled,
+          os: s.os ?? null,
+          ecosystem: s.ecosystem ?? null,
+          toolId: s.toolId ?? null,
+          note: s.note ?? null,
+          confidence: s.confidence ?? "high",
           updatedByUserId: req.authCtx.userId ?? null,
         });
         inserted += 1;
@@ -408,7 +497,15 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
       if (existing.provenance === "regulait-seed") {
         await db
           .update(aiEndpointSignatures)
-          .set({ provider: s.provider, matchType: s.matchType, minLength: s.minLength ?? null, lastUpdatedAt: new Date() })
+          .set({
+            provider: s.provider,
+            matchType: s.matchType,
+            minLength: s.minLength ?? null,
+            // still a seed row, so the shipped note and reference are ours to refresh
+            ...(s.replacementNote !== undefined ? { replacementNote: s.replacementNote } : {}),
+            ...(s.note !== undefined ? { note: s.note } : {}),
+            lastUpdatedAt: new Date(),
+          })
           .where(eq(aiEndpointSignatures.id, existing.id));
         refreshed += 1;
       }
@@ -416,7 +513,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
     await audit(req.authCtx.userId, "ai_endpoint_signature", null, SHADOW_AI_RULE_IDS.catalogueSeeded, "allow",
       `shipped signature seed installed: ${inserted} added, ${refreshed} refreshed (admin-edited rows untouched)`,
       { inserted, refreshed, before: before[0]?.n ?? 0 });
-    return { inserted, refreshed, total: DEFAULT_AI_SIGNATURES.length };
+    return { inserted, refreshed, total: SHIPPED_SIGNATURE_SEED.length };
   });
 
   app.post("/v1/shadow-ai/catalogue", async (req, reply) => {
@@ -440,6 +537,11 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
       // an admin touching a row TAKES OWNERSHIP of it — see the seed above
       provenance: body.provenance === "admin" ? "admin" : body.provenance,
       enabled: body.enabled,
+      os: body.os ?? null,
+      ecosystem: body.ecosystem ?? null,
+      toolId: body.toolId ?? null,
+      note: body.note ?? null,
+      confidence: body.confidence,
       lastUpdatedAt: new Date(),
       updatedByUserId: req.authCtx.userId ?? null,
     };
@@ -572,7 +674,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
 
   app.get("/v1/shadow-ai/adapters", async () => ({
     adapters: describeEvidenceAdapters(),
-    posture: EVIDENCE_ADAPTER_POSTURE,
+    posture: `${EVIDENCE_ADAPTER_POSTURE} ${await activeDiscoveryStatement(db)}`,
     pipeline:
       "An adapter turns a raw file into the same evidence rows the standard import accepts, and hands them to the " +
       "same preview-then-apply pipeline. It is a layer, not a second importer: it cannot reach a code path the " +
@@ -791,7 +893,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
       fieldsUsed: parsed.fieldsUsed,
       limits: adapter.limits,
       verification: adapter.verification,
-      posture: EVIDENCE_ADAPTER_POSTURE,
+      posture: `${EVIDENCE_ADAPTER_POSTURE} ${await activeDiscoveryStatement(db)}`,
     });
   });
 
@@ -862,7 +964,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
       governedHosts: [...governed.entries()]
         .map(([host, reason]) => ({ host, reason }))
         .sort((a, b) => a.host.localeCompare(b.host)),
-      posture: SHADOW_DISCOVERY_POSTURE,
+      posture: `${SHADOW_DISCOVERY_POSTURE} ${await activeDiscoveryStatement(db)}`,
       limits: SHADOW_DISCOVERY_LIMITS,
     };
   });
@@ -956,7 +1058,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
     }
 
     return {
-      posture: MCP_DISCOVERY_POSTURE,
+      posture: `${MCP_DISCOVERY_POSTURE} ${await activeDiscoveryStatement(db)}`,
       observed: results.length,
       unregistered: unregistered.length,
       registryCount: registered.size,
@@ -1086,7 +1188,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
         ingest: null,
         rawContentStored: false,
         retention,
-        posture: SHADOW_DISCOVERY_POSTURE,
+        posture: `${SHADOW_DISCOVERY_POSTURE} ${await activeDiscoveryStatement(db)}`,
       });
     }
 
@@ -1153,7 +1255,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
       ingest: result,
       rawContentStored: false,
       retention,
-      posture: SHADOW_DISCOVERY_POSTURE,
+      posture: `${SHADOW_DISCOVERY_POSTURE} ${await activeDiscoveryStatement(db)}`,
     });
   });
 
@@ -1197,6 +1299,8 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
       .where(eq(shadowAiImports.status, "applied"));
     const byKind = new Map<EvidenceKind, { kind: EvidenceKind; imports: number; rows: number; lastImportedAt: string | null }>();
     for (const r of importRows) {
+      // ADR-0195: the coverage scorecard counts the four IMPORT kinds; scan runs are named in its statement instead
+      if (!isImportKind(r.kind)) continue;
       const cur = byKind.get(r.kind) ?? { kind: r.kind, imports: 0, rows: 0, lastImportedAt: null };
       cur.imports += 1;
       cur.rows += r.rowCount;
@@ -1220,7 +1324,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
         dispositionStale:
           r.disposition !== "open" && r.dispositionAt !== null && r.lastSeenAt > r.dispositionAt,
       })),
-      coverage: coverageScorecard([...byKind.values()]),
+      coverage: coverageScorecard([...byKind.values()], await activeDiscoverySources(db)),
       posture:
         "Detection is a signal, not proof of misuse. An SDK dependency is a capability, not a violation; an endpoint " +
         "hit may be a sanctioned integration. Every row is a lead for human triage — hence the disposition states.",
@@ -1262,18 +1366,68 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
    */
   app.get("/v1/shadow-ai/findings/:findingId/remediation-plan", async (req, reply) => {
     const { findingId } = z.object({ findingId: z.string().uuid() }).parse(req.params);
+    const { environment } = z.object({ environment: z.string().optional() }).parse(req.query ?? {});
     const [row] = await db.select().from(shadowAiFindings).where(eq(shadowAiFindings.id, findingId));
     if (!row) return reply.status(404).send({ error: "unknown_finding" });
+    // ADR-0195 A4: an optional stated environment, only one an admin has given a meaning to. Without it the body
+    // keeps the explicit `unstated` placeholder, which the start route refuses: never a silent default
+    let statedEnvironment: string | undefined;
+    if (environment !== undefined) {
+      const env = environment.trim();
+      const allowed = await allowedRemediationEnvironments(db);
+      if (!REMEDIATION_ENVIRONMENT_PATTERN.test(env) || env === SHADOW_AI_REMEDIATION_ENVIRONMENT_UNSTATED || !allowed.includes(env)) {
+        return reply.status(400).send({
+          error: "environment_not_allowed",
+          allowed,
+          detail:
+            allowed.length > 0
+              ? "name one of the environments a deploy target or workflow assignment rule already uses, or leave it out and state it when starting"
+              : "no deploy target or workflow assignment rule names an environment yet, so none can be stated here; leave it out and state it when starting",
+        });
+      }
+      statedEnvironment = env;
+    }
     const [agent] = row.replacementAgentId
       ? await db.select().from(agents).where(eq(agents.id, row.replacementAgentId))
       : [];
 
+    // a rule counts only while its template is active: a rule on a retired template refuses every start
     const [rule] = await db
       .select({ id: workflowAssignmentRules.id })
       .from(workflowAssignmentRules)
-      .where(eq(workflowAssignmentRules.changeType, SHADOW_AI_REMEDIATION_CHANGE_TYPE))
+      .innerJoin(workflowTemplates, eq(workflowTemplates.id, workflowAssignmentRules.templateId))
+      .where(and(eq(workflowAssignmentRules.changeType, SHADOW_AI_REMEDIATION_CHANGE_TYPE), isNull(workflowTemplates.retiredAt)))
       .limit(1);
     const assignmentRuleExists = rule !== undefined;
+    const defaultTemplate = await shadowAiRemediationDefaultState(db);
+    // the workflow the finding is linked to now, and whether it ended without remediating (then a new one may replace it)
+    const [current] = row.remediationInstanceId
+      ? await db
+          .select({ id: workflowInstances.id, status: workflowInstances.status })
+          .from(workflowInstances)
+          .where(eq(workflowInstances.id, row.remediationInstanceId))
+      : [];
+    const replaceable = current !== undefined && endedUnsuccessfully(current.status);
+    // a workflow THE VIEWER started for this finding whose link never landed (the screen retries the LINK, never a
+    // second start). Never another user's (they control its description), never one that ended denied, aborted or
+    // rolled back. Looked for only while the finding is unlinked, or linked to a workflow that ended that way
+    const viewerId = req.authCtx.userId;
+    const [pendingLink] = (row.remediationInstanceId && !replaceable) || !viewerId
+      ? []
+      : await db
+          .select({ id: workflowInstances.id, createdAt: workflowInstances.createdAt })
+          .from(workflowInstances)
+          .where(
+            and(
+              eq(workflowInstances.initiatorUserId, viewerId),
+              notInArray(workflowInstances.status, [...UNSUCCESSFUL_TERMINAL_STATUSES]),
+              sql`${workflowInstances.change}->>'changeType' = ${SHADOW_AI_REMEDIATION_CHANGE_TYPE}`,
+              sql`strpos(${workflowInstances.change}->>'description', ${remediationReference(row.id)}) > 0`,
+              sql`not exists (select 1 from ${shadowAiFindings} f where f.remediation_instance_id = ${workflowInstances.id})`,
+            ),
+          )
+          .orderBy(desc(workflowInstances.createdAt))
+          .limit(1);
 
     const steps: Array<{ step: string; why: string; blocked?: string }> = [];
     if (row.severity === "critical") {
@@ -1310,26 +1464,36 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
       replacementAgent: agent ? { id: agent.id, name: agent.name, provider: agent.provider, enabled: agent.enabled } : null,
       steps,
       /** post THIS to the existing workflow route — there is no second one. It validates against that route's
-       * `startInstanceSchema`; `needsInput` names what only the person can state (where the usage runs). */
+       * `startInstanceSchema`; `needsInput` names what only the person can state (where the usage runs), unless
+       * `?environment=` stated it. */
       workflowRequest: {
         route: "POST /v1/workflows/instances",
-        body: remediationStartBody(row),
-        needsInput: ["change.environment"],
+        body: remediationStartBody(row, statedEnvironment),
+        needsInput: statedEnvironment ? [] : ["change.environment"],
       },
-      /** no workflow is shipped for this change type (secure by default: nothing is assigned on anyone's behalf);
-       * until an admin assigns one, starting answers 422 `no_workflow_matches_change` */
+      /** ADR-0195 A4: a strict default workflow ships for this change type (plan-only, then a human sign-off). It is
+       * installed the first time a remediation workflow starts; an admin relaxes it by retiring the template */
       assignment: {
         changeType: SHADOW_AI_REMEDIATION_CHANGE_TYPE,
         ruleConfigured: assignmentRuleExists,
-        ...(assignmentRuleExists
+        defaultTemplate: { name: SHADOW_AI_REMEDIATION_TEMPLATE_NAME, state: defaultTemplate },
+        ...(assignmentRuleExists || defaultTemplate === "not_installed"
           ? {}
           : {
               detail:
-                `no workflow assignment rule names the change type '${SHADOW_AI_REMEDIATION_CHANGE_TYPE}': an admin must ` +
-                "assign a workflow template to it (Workflow templates, assignment rules) before a remediation workflow " +
-                "can be started, or link a workflow started another way",
+                `no workflow assignment rule names the change type '${SHADOW_AI_REMEDIATION_CHANGE_TYPE}' and its default ` +
+                `workflow is ${defaultTemplate === "retired" ? "retired" : "unassigned"}: an admin must assign a workflow ` +
+                "template to it (Workflow templates, assignment rules) before a remediation workflow can be started, or " +
+                "link a workflow started another way",
             }),
       },
+      /** a workflow started for this finding but never linked to it; the screen offers to link it, never to start another */
+      pendingLink: pendingLink ? { instanceId: pendingLink.id, startedAt: pendingLink.createdAt } : null,
+      /** the workflow the finding is linked to. `replaceable` when it ended denied, aborted or rolled back: the finding
+       * may then take a new remediation workflow (the link route's audited replace); otherwise the link stands */
+      currentLink: row.remediationInstanceId
+        ? { instanceId: row.remediationInstanceId, status: current?.status ?? null, replaceable }
+        : null,
       note:
         "This module does not start workflows. It composes the plan and hands back the request body for the ONE " +
         "instantiation route, so assignment rules, the compliance cascade and the retired-template refusal all still apply.",
@@ -1342,7 +1506,12 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
     const [row] = await db.select().from(shadowAiFindings).where(eq(shadowAiFindings.id, findingId));
     if (!row) return reply.status(404).send({ error: "unknown_finding" });
     const [instance] = await db
-      .select({ id: workflowInstances.id })
+      .select({
+        id: workflowInstances.id,
+        initiatorUserId: workflowInstances.initiatorUserId,
+        status: workflowInstances.status,
+        change: workflowInstances.change,
+      })
       .from(workflowInstances)
       .where(eq(workflowInstances.id, body.instanceId));
     if (!instance) {
@@ -1351,21 +1520,88 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
         detail: "instanceId names no workflow instance — start one through POST /v1/workflows/instances first",
       });
     }
+    // a link is set once: re-pointing a linked finding would silently swap the workflow that answers for it. The one
+    // exception is a link to a workflow that ended denied, aborted or rolled back: it remediates nothing, so a new
+    // workflow may replace it (audited with the one it replaces). A terminal status never changes, so the check holds
+    let replaced: { id: string; status: string } | null = null;
+    if (row.remediationInstanceId) {
+      const [current] = await db
+        .select({ id: workflowInstances.id, status: workflowInstances.status })
+        .from(workflowInstances)
+        .where(eq(workflowInstances.id, row.remediationInstanceId));
+      if (!current || !endedUnsuccessfully(current.status)) {
+        return reply.status(409).send({
+          error: "already_linked",
+          detail:
+            `this finding is already linked to remediation workflow ${row.remediationInstanceId}; a new one can replace ` +
+            `it only once that workflow ends ${UNSUCCESSFUL_TERMINAL_STATUSES.join(", ")}`,
+        });
+      }
+      replaced = current;
+    }
+    // only the caller's OWN workflow: another user controls that workflow's description and drives its stages. The
+    // bootstrap token has no user, so it starts nothing it could link
+    const callerId = req.authCtx.userId;
+    if (!callerId || instance.initiatorUserId !== callerId) {
+      return reply.status(403).send({
+        error: "not_your_workflow",
+        detail: "only the user who started a remediation workflow can link it to a finding",
+      });
+    }
+    const change = (instance.change ?? {}) as { changeType?: unknown; description?: unknown };
+    const refusal =
+      endedUnsuccessfully(instance.status)
+        ? `the workflow is ${instance.status === "rolled_back" ? "rolled back" : instance.status}`
+        : change.changeType !== SHADOW_AI_REMEDIATION_CHANGE_TYPE
+          ? `the workflow's change type is not '${SHADOW_AI_REMEDIATION_CHANGE_TYPE}'`
+          : typeof change.description !== "string" || !change.description.includes(remediationReference(row.id))
+            ? "the workflow was not started from this finding's remediation plan"
+            : null;
+    if (refusal) {
+      return reply.status(422).send({ error: "workflow_not_linkable", detail: refusal });
+    }
+    // an instance answers for one finding only
+    const [elsewhere] = await db
+      .select({ id: shadowAiFindings.id })
+      .from(shadowAiFindings)
+      .where(eq(shadowAiFindings.remediationInstanceId, body.instanceId))
+      .limit(1);
+    if (elsewhere) {
+      return reply.status(409).send({ error: "instance_already_linked", detail: "that workflow is already linked to another finding" });
+    }
     const [updated] = await db
       .update(shadowAiFindings)
       .set({
         remediationInstanceId: body.instanceId,
         disposition: "confirmed",
-        dispositionReason: `remediation workflow ${body.instanceId} opened`,
+        dispositionReason: replaced
+          ? `remediation workflow ${body.instanceId} opened, replacing ${replaced.id} (${replaced.status})`
+          : `remediation workflow ${body.instanceId} opened`,
         dispositionByUserId: req.authCtx.userId ?? null,
         dispositionAt: new Date(),
         updatedAt: new Date(),
       })
-      .where(eq(shadowAiFindings.id, findingId))
+      // conditional: a concurrent link that landed first wins, and this one is refused rather than overwriting it
+      .where(
+        and(
+          eq(shadowAiFindings.id, findingId),
+          replaced
+            ? eq(shadowAiFindings.remediationInstanceId, replaced.id)
+            : isNull(shadowAiFindings.remediationInstanceId),
+        ),
+      )
       .returning();
+    if (!updated) return reply.status(409).send({ error: "already_linked", detail: "this finding was linked concurrently" });
     await audit(req.authCtx.userId, "shadow_ai_finding", findingId, SHADOW_AI_RULE_IDS.findingRemediationLinked, "allow",
-      `finding for ${row.provider} on ${row.subject} linked to remediation workflow instance ${body.instanceId}`,
-      { instanceId: body.instanceId, provider: row.provider, subject: row.subject });
+      `finding for ${row.provider} on ${row.subject} linked to remediation workflow instance ${body.instanceId}` +
+        (replaced ? `, replacing ${replaced.id}, which ended ${replaced.status}` : ""),
+      {
+        instanceId: body.instanceId,
+        initiatorUserId: instance.initiatorUserId,
+        provider: row.provider,
+        subject: row.subject,
+        ...(replaced ? { replacedInstanceId: replaced.id, replacedInstanceStatus: replaced.status } : {}),
+      });
     return updated;
   });
 }

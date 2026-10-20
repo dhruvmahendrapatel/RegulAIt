@@ -75,6 +75,23 @@ regexes = [
   '''^regulait-test-key-0123456789abcdef$''',
 ]
 
+# --- ADR-0195 SD3 endpoint importer test input (2026-10-17) ---
+# Historic commit 81d7623 carries this SYNTHETIC dashed value as the input of a
+# test that proves an environment variable "name" shaped like a value is
+# refused. The current source assembles it at runtime; the entry exists only
+# because the PR and full-history scans walk that commit. Path AND exact value.
+
+[[allowlists]]
+description = "SD3 endpoint importer: synthetic env-var-name refusal input (historic commit 81d7623)"
+condition = "AND"
+paths = [
+  '''^packages/shared/src/endpoint-discovery/endpoint-discovery\.test\.ts$''',
+]
+regexTarget = "secret"
+regexes = [
+  '''^sk-live-SYNTHETIC123$''',
+]
+
 # --- Header-only PEM test inputs (review B1-08) ---
 # gitleaks' private-key rule matches lazily from a BEGIN header to the next
 # "KEY-----", so these two matches span code, not key material, and a prefix
@@ -199,7 +216,8 @@ description = "B4I-02 scrub-equivalence snapshot: a SHA-256 group digest of scru
 condition = "AND"
 paths = ['''^packages/shared/src/detection-content/scrub-equivalence\.snapshot\.json$''']
 regexTarget = "secret"
-regexes = ['''^283f4705bdec4d97544386f0aad190c9d4a7c09824b2adb8a65a25f6180e0355$''']
+# N4 regenerated the snapshot (dlp.secret.huggingface_token); the earlier digest stays listed because history holds it
+regexes = ['''^283f4705bdec4d97544386f0aad190c9d4a7c09824b2adb8a65a25f6180e0355$''', '''^2cd48187b0185b9ce3151e2ad1649ff4c29f0687780a0828e3790f52a28c714d$''']
 
 [[allowlists]]
 description = "B4I-02 scrub-equivalence corpus: synthetic secret-shaped inputs the scrubber must redact (placeholder token and the public jwt.io example JWT)"
@@ -255,3 +273,11 @@ paths = ['''^packages/sandbox-executor/src/stdio-pump\.test\.ts$''']
 commits = ["b2124861838dcf4b0e2140702ae3a37d86f496a2"]
 regexTarget = "secret"
 regexes = ['''^7b0c1a3e-6a1e-4a4b-9a2c-0f4e5d6c7b8a$''']
+
+[[allowlists]]
+description = "HISTORY ONLY: ADR-0189 B8 commit 90c44ef printed the PUBLIC fingerprint of the published TEST-ONLY CANARY receipt key (B4 vectors) as runbook example output. Not key material; the next commit elides it. This exact value, this one file, this one commit."
+condition = "AND"
+paths = ['''^docs/ops/BOM_VERIFICATION\.md$''']
+commits = ["90c44ef1f3b7079e9f1658e256e5870a24152171"]
+regexTarget = "secret"
+regexes = ['''^505e806bf46aedd490d099490e7e8d69bd2dec822045e37703cfb4749c746deb$''']

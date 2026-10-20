@@ -1,0 +1,4 @@
+# Throwaway probe: never commit the generated lock file (the repo's basename-collision guard refuses
+# Cargo.lock beside Cargo.toml) or build output.
+Cargo.lock
+target/

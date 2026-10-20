@@ -159,7 +159,7 @@ cannot build; it can only run images loaded from a file.** That is why the air-g
 sha256sum regulait-images-0.1.0.tar        # record this; the tar is not self-verifying
 ```
 
-It builds `regulait/gateway:0.1.0` and saves it together with `postgres:16` and `caddy:2-alpine`.
+It builds `regulait/gateway:0.1.0` and saves it together with `postgres:16` and Caddy (`caddy:2.11.7-alpine`, pinned by digest: the `x-caddy-image` reference in `docker-compose.yml`). Caddy is saved under both the digest reference and the plain tag; the air-gapped install runs the tag and refuses it unless its image id is one of the pinned ids in `scripts/install.sh` (the round trip is pending execution, ADR-0190 "I5 follow-up: engines in compose").
 The tag and the `--version` you pass to the installer must be the **same string** — the generated
 override pins `image: regulait/gateway:<version>` with `pull_policy: never`.
 
@@ -172,6 +172,15 @@ override pins `image: regulait/gateway:<version>` with `pull_policy: never`.
                      --version 0.1.0 \
                      --image-bundle /media/usb/regulait-images-0.1.0.tar
 ```
+
+**Engine images (opt-in).** Add `--with-engines` to also save the three engine images that
+`engines/images.lock.json` records (ADR-0190 "As built: engine task images"). The packages are private on GitHub
+Container Registry, so log in to `ghcr.io` first with a token that can read them. The bundle refuses an engine the lock
+has no published image for, pulls each image by its digest, checks its image id against the lock, and saves it under
+the digest reference and the tag `regulait/engine-<engine>:bundled`. The air-gapped install runs those tags (never
+pulled) and checks each loaded tag's id against the lock. The first publish is recorded in the lock (ADR-0190 "As
+built: first engine image publish recorded"). **Pending execution (M-041):** neither the bundle with `--with-engines`
+nor its `docker load` round trip has been run.
 
 If integrity across the gap matters (it should), ship the image tarball **inside a signed update
 bundle** rather than loose:
@@ -252,8 +261,10 @@ shred -u /root/first-admin-password
 
 The file must be a regular file (not a symbolic link) owned by you or root, with mode `0600` or
 stricter, holding one line: no control characters except one trailing newline, and no UTF-8
-byte-order mark. Anything else is refused before anything renders, and checked again just before
-use. `REGULAIT_FIRST_ADMIN_EMAIL` is required with it, and `--check` validates all
+byte-order mark. Its directory must be owned by you or root, and no one else may write to it (so
+the file cannot be swapped between the check and the open). Anything else is refused before
+anything renders, and checked again just before use. The password file works on Linux only; on
+other systems run the installer interactively. `REGULAIT_FIRST_ADMIN_EMAIL` is required with it, and `--check` validates all
 three. Without the file, a non-interactive install skips the step and says so.
 
 **The bootstrap door closes itself.** `REGULAIT_BOOTSTRAP_TOKEN` authenticates as an admin **with
@@ -423,6 +434,12 @@ recoverable: the next boot makes a new key under a new key id, and the receipts 
 one still verify against its recorded public key. Read the key-retirement section there: the
 product has no way yet to retire the old key id.
 
+**Related runbooks.** To check a Decision BOM or AI BOM bundle on a machine with no network (an
+auditor's check, or the operator producing the bundle in a BYOC or air-gapped install), see
+[BOM_VERIFICATION.md](../ops/BOM_VERIFICATION.md). A multi-replica deployment drains its old
+replicas before the receipt v2 cutover: see [RECEIPT_V2_CUTOVER.md](../ops/RECEIPT_V2_CUTOVER.md),
+which is marked not yet executable.
+
 ### The identity issuer key and the public URL (ADR-0188 S7)
 
 Engine runners and PDP clients (the Kong adapter) no longer hold bearer secrets: each holds its own
@@ -468,7 +485,7 @@ route, method, client IP and the **kind** of credential presented (never the cre
 |---|---|
 | `LOG_LEVEL` | `fatal` … `trace`; default `info`. `warn` keeps only refusals and failures. |
 | `REGULAIT_LOG=off` | Silences the process entirely (the boot posture block still says so). |
-| `DEBUG_ERRORS=1` | Additionally prints every unhandled 500 to stderr, even with logging off — a dev convenience, not a log. |
+| `DEBUG_ERRORS=1` | Additionally prints every unhandled 500 to stderr, even with logging off — a dev convenience, not a log. It prints the same fields as the log line plus the stack frames: a failed query's bound values and a parse error's quoted input stay withheld. |
 
 The boot posture block (`proxy / hsts / egress / data key / bootstrap / secrets / database /
 logging / scheduler`) is printed once at startup; `secrets: DEV-GRADE` lines mean the
@@ -564,15 +581,40 @@ refuses until an admin relaxes that requirement or an L3 executor exists (see th
    them on the Docker host (`docker load` in an air-gapped install).
 5. **Start the executor**: register a `worker_runtime` workload identity for it, set `REGULAIT_EXECUTOR_IDENTIFIER`,
    set `REGULAIT_DOCKER_GID` to the group that owns the host's `/var/run/docker.sock`, and run
-   `docker compose --profile isolation up -d sandbox-executor`. The executor reaches the gateway over **https** only,
-   at `REGULAIT_EXECUTOR_GATEWAY_URL`, which has no working default (the placeholder ends in `.invalid`). The executor
-   sits on the internal-only `engines` network, which has no route to the public address, so set it to an https
-   address of the gateway that the `engines` network can reach (a TLS front on that network). At start the executor
-   checks that address over TLS; if it cannot reach it, it exits (code 2) with the reason and this instruction, and
-   compose restarts it, so nothing is placed until the address works. Plain http is for
-   a development box only, through the explicit override `docker compose -f docker-compose.yml -f
-   compose.isolation-insecure-dev.yml --profile isolation up`, and the executor logs a warning when it runs that way.
-   On its first start it prints its public key: register
+   `docker compose --profile isolation up -d sandbox-executor`. The executor reaches the gateway over **https** only.
+   It sits on the internal-only `engines` network, so the same command also starts its own **internal TLS front**
+   (`executor-front`) and a one-shot copy step (`executor-front-ca`); no extra step is needed:
+   - `executor-front` is a second Caddy on `engines` only, with no host port. It serves
+     `https://executor-front:8443`, the executor's default `REGULAIT_EXECUTOR_GATEWAY_URL`, for the executor channel
+     (`/v1/executor-channel/*`) only, and answers 404 to every other path. It removes every forwarding header and is
+     not in `REGULAIT_TRUSTED_PROXIES`, so the gateway's trust of client addresses does not change.
+   - Its certificate comes from its own local CA, which Caddy creates on the front's first start in the
+     `executor-front-data` volume and renews itself (leaf and intermediate). Nothing is committed or shipped. No container
+     mounts the CA's private key except the front and the one-shot copier below (which reads only the
+     certificate). The executor holds the host's Docker socket, so it is host root anyway. **Back the volume up with the others if you want the CA to survive a
+     rebuild**: after `docker compose down -v` the next start creates a new CA, and the copy step picks it up.
+   - `executor-front-ca` copies the CA's root certificate (only the certificate) to the `executor-front-ca` volume. The
+     executor mounts it read-only and **pins** it (`REGULAIT_EXECUTOR_GATEWAY_CA_FILE`): the front's certificate is
+     checked against that CA and nothing else, not the public roots. There is no switch that skips verification, and
+     `NODE_TLS_REJECT_UNAUTHORIZED=0` stops the executor at start. At start the executor logs the pinned CA's SHA-256
+     fingerprint (`docker compose logs sandbox-executor`). The root certificate it came from is
+     `caddy/pki/authorities/local/root.crt` in the `executor-front-data` volume.
+
+   To use a TLS front of your own instead, set `REGULAIT_EXECUTOR_GATEWAY_URL` to its https address on a network the
+   executor can reach, and `REGULAIT_EXECUTOR_GATEWAY_CA_FILE` to the CA that issued its certificate (mounted into the
+   executor), or to an empty value to verify against the image's public roots. At start the executor checks the
+   address over TLS; if it cannot reach it or does not trust it, it exits (code 2) with the reason, and compose restarts
+   it, so nothing is placed until the address works. Plain http is for a development box only, through the explicit
+   override `docker compose -f docker-compose.yml -f compose.isolation-insecure-dev.yml --profile isolation up`, and the
+   executor logs a warning when it runs that way.
+
+   > **Not yet executed end to end (M-041).** The front's Caddyfile was run locally with the Caddy 2.10.2 release
+   > binary: channel paths reached a test upstream with no forwarding header, every other path got 404, and the
+   > executor's own pinning code accepted the front's certificate under the copied root. The compose services
+   > themselves (`executor-front`, `executor-front-ca`) and a real placement through them have **not** been run on
+   > Docker yet. Record what you find against ADR-0190 "I4 follow-ups".
+
+   On its first start the executor prints its public key: register
    the executor with that key on the Engines page (`POST /v1/executors`, backend `gvisor`, class
    `user_space_kernel`). It then announces itself, self-tests every profile it can serve, and takes placements.
 
@@ -585,6 +627,28 @@ own authenticated channel to the gateway. Before you register a stdio server:
   upstream credential is not supported yet (ADR-0190 decision 5).
 - **Pin the image, not a tag.** A tag is refused at registration (`mcp_stdio_image_unpinned`). Changing the image,
   the entry point or the arguments resets the server's admission to `unscanned`.
+
+**Engine tasks on the executor (ADR-0190 slice I5).** The same executor runs the engine workers (promptfoo, garak, the
+modelscan scanner) as engine tasks. Compose gives it the input volume they need (`regulait-executor-input`, mounted
+only on `sandbox-executor`; Docker Engine 26 or later for `volume-subpath`), and the `engine-images` profile builds
+the three engine images on the host (`engine-promptfoo-image`, `engine-modelscan-image`, `engine-garak-image`; see
+the comment above them in `docker-compose.yml`) so you can check the Dockerfiles locally. What runs is the
+**published** image:
+- The `Engine images` workflow (`.github/workflows/engine-images.yml`, on push to `main` and by hand) pushes
+  `ghcr.io/<owner>/regulait-engine-<engine>` as a **private** package. Someone then records the publish with
+  `node scripts/engine-images-lock.mjs --apply engine-images-publish.json` (the workflow's artifact) in a PR.
+- The lock (`engines/images.lock.json`) sets the manifest's `imageDigest` and `taskImage`, and the defaults of
+  `REGULAIT_ENGINE_<ENGINE>_REPOSITORY` and `REGULAIT_ENGINE_<ENGINE>_DIGEST` in `docker-compose.yml`. Once it holds
+  a publish, a stock install needs neither variable: `docker login ghcr.io`, then start the `engines` profile. A
+  digest variable you set is only an override, and the gateway refuses (and audits) a runner whose digest is not the
+  lock's.
+- Until a publish is recorded the lock is null: an engine places nothing (`policy_unresolved`), as before.
+- The images are **not signed** yet (ADR-0190 "As built: engine task images" says why).
+- The modelscan runner no longer downloads the artifact: the gateway streams it to the executor's input volume.
+
+Under real gVisor an engine task still waits on the `runsc` re-pin (ADR-0190 I5). **Pending execution (M-041):**
+the first publish ran on GitHub's runners and is recorded in the lock, but no image has been pulled or run on a Docker
+host yet; record what you find against ADR-0190 "As built: first engine image publish recorded".
 
 Do not set `REGULAIT_OFFLINE_CHECKS` on an install. It is the demo's declaration that a workflow
 check nobody reported may be auto-passed (labelled) where a template opts in; unset — and always

@@ -2,7 +2,7 @@ import { Fragment, useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
-import { plural } from "../../../api/format";
+import { fmtDateTime, plural } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Card, EmptyState, StatusDot } from "../../../ui/kit";
 import { QueryGate, Stat } from "../adminKit";
@@ -150,7 +150,7 @@ function TrustReportView(props: {
         <span aria-hidden>·</span>
         <span>{d.packsEvaluated.length} active pack{d.packsEvaluated.length === 1 ? "" : "s"} evaluated</span>
         <span aria-hidden>·</span>
-        <span>generated {new Date(d.generatedAt).toLocaleString()}</span>
+        <span>generated {fmtDateTime(d.generatedAt)}</span>
         <span className={v.grow} />
         {props.monitor}
       </div>
@@ -338,8 +338,8 @@ export function TrustSnapshotCard() {
   const q = useQuery(trustQuery());
   return (
     <Card title="Trust evidence" actions={<Link to="/admin/governance/trust">Open dashboard</Link>}>
-      {q.isLoading ? <p className={v.faint}>Loading evidence coverage…</p> : q.isError ? (
-        <p className={v.faint}>Trust evidence could not be loaded. Open the dashboard to retry.</p>
+      {q.isLoading ? <p className={v.faint} role="status">Loading evidence coverage…</p> : q.isError ? (
+        <p className={v.errLine} role="alert">Trust evidence could not be loaded. Open the dashboard to retry.</p>
       ) : q.data ? (
         <div className={v.stack}>
           <div className={v.grid3}>

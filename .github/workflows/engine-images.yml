@@ -1,0 +1,267 @@
+name: Engine images
+
+# ENG-IMG (ADR-0190 "As built: engine task images") — builds the three engine
+# images (engines/<engine>/Dockerfile: the runner and the task, one image per
+# engine) and pushes them to GitHub Container Registry under this repository's
+# owner, as `ghcr.io/<owner>/regulait-engine-<engine>:sha-<commit>`.
+#
+# ── Triggers ─────────────────────────────────────────────────────────────────
+# Push to main (only when an engine's own files change, so the Actions budget
+# in ci.yml stays true) and workflow_dispatch (for anything else that lands in
+# an image, such as packages/shared). The publish job runs only when the ref is
+# main (`if: github.ref == 'refs/heads/main'`): a dispatch from any other
+# branch publishes nothing. NEVER pull_request: a PR run cannot hold
+# a token that writes packages. The pull_request check that only BUILDS lives
+# in engine-images-build.yml.
+#
+# ── Permissions ──────────────────────────────────────────────────────────────
+# The workflow grants contents: read. Only the `publish` job gets
+# packages: write and id-token: write (the OIDC token cosign signs with), both
+# through GITHUB_TOKEN; no other secret is used, and no signing key exists.
+# Only the `lock-pr` job gets contents: write and pull-requests: write, to push
+# one branch and open one draft PR. Actions are pinned by commit sha; builds
+# use the Docker CLI and its buildx plugin on the runner (no third-party
+# action holds the token), and cosign is the release binary checked against
+# its pinned SHA-256.
+#
+# ── Visibility ───────────────────────────────────────────────────────────────
+# A container package scoped to a personal account is PRIVATE when first
+# published (GitHub docs, "Configuring a package's access control and
+# visibility", read 2026-10-17). The images carry no
+# `org.opencontainers.image.source` label, so they are not linked to this
+# (public) repository and do not inherit its read access. Making a package
+# public is a disclosure decision for the owner, never automated here.
+#
+# ── Signing (ADR-0197 Q2) ────────────────────────────────────────────────────
+# Owner decision Q2: keyless, with cosign, the job's GitHub OIDC token and the
+# public transparency log. Each pushed manifest digest is signed
+# (`cosign sign`, Fulcio certificate, Rekor entry; the signature is also
+# stored next to the image on GHCR). The signed statement carries the image id
+# and the source commit as annotations, so it covers the whole lock entry.
+# The job runs in the `release` environment, which the owner protects, with
+# the owner as required reviewer (owner decision Q4; an owner action, never
+# set here). The Fulcio certificate names this workflow on refs/heads/main; every
+# verifier pins exactly that identity and the GitHub OIDC issuer
+# (scripts/engine-images-lock-verify.mjs).
+#
+# ── Output ───────────────────────────────────────────────────────────────────
+# The `record` job uploads `engine-images-publish.json` (the artifact
+# `engine-images-publish`): per engine, the digests and the signature record
+# (the Sigstore bundle, the certificate identity, the workflow repository and
+# ref, the Rekor entry). The `lock-pr` job (N10) runs
+# `node scripts/engine-images-lock.mjs --apply` on it and opens a DRAFT PR
+# titled "HOLD ..." with the lock, its derived files and the signatures. It
+# never merges, never marks the PR ready and never enables auto-merge.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - engines/**
+      - packages/engine-garak/**
+      - packages/engine-modelscan/**
+      - packages/engine-promptfoo/**
+      - packages/engine-runner/**
+      - scripts/build-engine-image.sh
+      - .github/workflows/engine-images.yml
+      # the lock-update bot's own PR changes only these: merging it must not publish again (a loop)
+      - '!engines/images.lock.json'
+      - '!engines/signatures/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: engine-images-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish ${{ matrix.engine }}
+    # Only main publishes, whatever the trigger: a manual workflow_dispatch can be started on any branch, and
+    # that run must never push an image (security.yml's sign job uses the same guard). `record` needs this job,
+    # so it is skipped with it.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # owner decision Q4: the owner protects this environment (required reviewer) before it signs anything
+    environment: release
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [promptfoo, modelscan, garak]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Resolve the repository
+        id: ref
+        run: |
+          set -euo pipefail
+          # GHCR requires a lowercase path; the owner login is not guaranteed to be.
+          owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          echo "repository=ghcr.io/${owner}/regulait-engine-${{ matrix.engine }}" >> "$GITHUB_OUTPUT"
+
+      - name: Install cosign (pinned version and SHA-256)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -sSfL --retry 3 -o "$RUNNER_TEMP/bin/cosign" https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-linux-amd64
+          echo "4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71  $RUNNER_TEMP/bin/cosign" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/bin/cosign"
+
+      - name: Log in to GHCR
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+
+      - name: Build and push
+        run: scripts/build-engine-image.sh "${{ matrix.engine }}" push "${{ steps.ref.outputs.repository }}" "${RUNNER_TEMP}/${{ matrix.engine }}.json"
+
+      - name: Sign keylessly (Fulcio and Rekor) and verify
+        env:
+          ENGINE: ${{ matrix.engine }}
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/${ENGINE}.json"
+          ref="$(node -e 'const e = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); console.log(`${e.repository}@${e.manifestDigest}`)' "$out")"
+          image_id="$(node -e 'console.log(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).imageId)' "$out")"
+          bundle="${RUNNER_TEMP}/${ENGINE}.sigstore.json"
+          # the signed statement's subject is the manifest digest; the annotations bind the image id and the commit
+          "$RUNNER_TEMP/bin/cosign" sign --yes -a "imageId=${image_id}" -a "sourceCommit=${GITHUB_SHA}" --bundle "$bundle" "$ref"
+          # the Sigstore trusted root, fetched through cosign's TUF client (verified from the root embedded in cosign)
+          "$RUNNER_TEMP/bin/cosign" initialize
+          # the TUF cache holds exactly one trusted root (cosign's default repository)
+          root="$(find "${HOME}/.sigstore/root" -path '*/targets/trusted_root.json' -type f)"
+          [ "$(printf '%s\n' "$root" | grep -c .)" = "1" ] || { echo "::error::expected one Sigstore trusted root in the TUF cache"; exit 1; }
+          # the same offline check every later use runs, against this workflow's identity on main
+          COSIGN="$RUNNER_TEMP/bin/cosign" node scripts/engine-images-lock-verify.mjs --signed "$out" --bundle "$bundle" --trusted-root "$root" --source-commit "$GITHUB_SHA"
+          # and the copy cosign stored on GHCR
+          "$RUNNER_TEMP/bin/cosign" verify \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/engine-images.yml@refs/heads/main" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-github-workflow-ref refs/heads/main \
+            "$ref" > /dev/null
+          echo "- ${ENGINE}: ${ref} signed keylessly by engine-images.yml@refs/heads/main" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Log out of GHCR
+        if: always()
+        run: docker logout ghcr.io
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: engine-image-${{ matrix.engine }}
+          path: ${{ runner.temp }}/${{ matrix.engine }}.json
+          retention-days: 30
+
+  record:
+    name: record the publish
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: engine-image-*
+          path: images
+          merge-multiple: true
+
+      - name: Write engine-images-publish.json
+        run: |
+          set -euo pipefail
+          node -e '
+            const fs = require("node:fs");
+            const engines = {};
+            for (const f of fs.readdirSync("images").sort()) {
+              const e = JSON.parse(fs.readFileSync(`images/${f}`, "utf8"));
+              if (!e.signature) throw new Error(`${e.engine}: the publish job wrote no signature`);
+              engines[e.engine] = { repository: e.repository, manifestDigest: e.manifestDigest, imageId: e.imageId, signature: e.signature };
+            }
+            const out = { sourceCommit: process.env.GITHUB_SHA, publishedAt: new Date().toISOString(), engines };
+            fs.writeFileSync("engine-images-publish.json", JSON.stringify(out, null, 2) + "\n");
+          '
+          {
+            echo "### Engine images pushed (private on GHCR, signed keylessly)"
+            echo ""
+            echo "The \`lock-pr\` job records them in a draft HOLD PR (\`node scripts/engine-images-lock.mjs --apply\`)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: engine-images-publish
+          path: engine-images-publish.json
+          retention-days: 90
+
+  lock-pr:
+    # N10: record the signed publish in a draft HOLD PR. Never merges, never marks it ready, never enables auto-merge.
+    name: open the lock PR
+    needs: record
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          # --apply checks the published commit is reachable from origin/main
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: engine-images-publish
+          path: ${{ runner.temp }}/publish
+
+      - name: Install cosign (pinned version and SHA-256)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -sSfL --retry 3 -o "$RUNNER_TEMP/bin/cosign" https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-linux-amd64
+          echo "4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71  $RUNNER_TEMP/bin/cosign" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/bin/cosign"
+
+      - name: Apply the publish (verifies every signature first)
+        run: |
+          set -euo pipefail
+          # the trusted root comes from this job's own TUF fetch, never from the publish artifact
+          "$RUNNER_TEMP/bin/cosign" initialize
+          # the TUF cache holds exactly one trusted root (cosign's default repository)
+          root="$(find "${HOME}/.sigstore/root" -path '*/targets/trusted_root.json' -type f)"
+          [ "$(printf '%s\n' "$root" | grep -c .)" = "1" ] || { echo "::error::expected one Sigstore trusted root in the TUF cache"; exit 1; }
+          COSIGN="$RUNNER_TEMP/bin/cosign" node scripts/engine-images-lock.mjs --apply "$RUNNER_TEMP/publish/engine-images-publish.json" --trusted-root "$root"
+          node scripts/engine-images-lock.mjs --check --base origin/main
+          COSIGN="$RUNNER_TEMP/bin/cosign" node scripts/engine-images-lock-verify.mjs
+          node scripts/engine-images-lock-bot.mjs --pr "$RUNNER_TEMP/publish/engine-images-publish.json" "$RUNNER_TEMP/pr"
+
+      - name: Push the branch and open the draft HOLD PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          pr="$RUNNER_TEMP/pr"
+          if [ "$(cat "$pr/changed")" != "true" ]; then
+            echo "No engine image changed; no PR." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          branch="$(cat "$pr/branch")"
+          title="$(cat "$pr/title")"
+          case "$title" in "HOLD "*) ;; *) echo "::error::the lock PR title must start with HOLD"; exit 1 ;; esac
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          # staged by path, never `git add -A`
+          while IFS= read -r f; do [ -n "$f" ] && git add -- "$f"; done < "$pr/paths"
+          git commit -m "$title" -m "Recorded by the lock-pr job of engine-images.yml from run ${GITHUB_RUN_ID}."
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" push origin "HEAD:refs/heads/${branch}"
+          gh pr create --draft --base main --head "$branch" --title "$title" --body-file "$pr/body.md"
+          echo "Opened the draft lock PR from ${branch}. It is not merged by automation." >> "$GITHUB_STEP_SUMMARY"

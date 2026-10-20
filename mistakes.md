@@ -1587,3 +1587,94 @@ follow that redirect, so no log comes back. The GitHub MCP `get_job_logs` tool f
 entry covers this.
 
 Rule: read a CI job's log with the GitHub MCP `get_job_logs` tool. Don't retry `gh api` against the logs endpoint.
+
+### M-081 (2026-10-16) - REPEAT of M-058: a PR release ran after the edit it depended on had failed
+
+The master session put an edit script and the release of PR #386 (title prefix stripped, hold removed) in one Bash
+call, joined with `;`. The edit script's assert failed and nothing was committed, but the release still ran, so the
+unfixed PR #386 was briefly released to the merge loop. It was caught and re-held within a minute, before the loop
+merged it. M-058 already says to chain an edit into the step that depends on it with `&&`, never `;`. That rule was
+written for commits; a release is a dependent step of the same kind, and is worse to get wrong because another
+process acts on it.
+
+Rule: never put a release (or any step another process acts on) in the same command as the change it depends on.
+Release only in a separate step, after confirming the push landed (`git rev-parse HEAD origin/<branch>` match).
+
+### M-082 (2026-10-16) - A builder ran repo-wide guard tests with new files untracked, reported a pass, and CI went red
+
+On #387 a builder ran `vitest --dir scripts` while its new files were still untracked. A guard among those tests
+checks basenames through `git ls-files`, so it could not see the new files, and the builder reported a pass. CI ran on
+the committed tree and failed. The run was also not CI's: bare `vitest` picks up compiled copies under `dist` as well,
+where the package script does not. This is the family of M-047 and M-068 (the check run was not the check CI runs),
+but its cause, guard tests that read git's index, is new.
+
+Rule: `git add` new files before running any test that reads the git index, and run tests exactly as CI does: the
+package's own test script, never a bare `vitest` invocation.
+
+### M-083 (2026-10-16) - Two migrations broke the 0185 database invariant guard, invisible without Postgres
+
+Two builders wrote migrations that failed `apps/gateway/src/zz-dbguard-0185.test.ts`, and both broke both rules:
+I5 (migration 0200, `engine_runs`) and S9 (migration 0199, `spiffe_trust_bundles`) each added a function without
+`SET search_path = pg_catalog, public, pg_temp`, and a row-level UPDATE/DELETE refusal trigger with no
+statement-level TRUNCATE refusal. Both were fixed before merge. Postgres is not available in the build environment, so the guard never ran
+before CI. The builder brief did not mention the guard.
+
+Rule: read `apps/gateway/src/zz-dbguard-0185.test.ts` before writing any migration, and check every new function and
+every new refusal trigger against it by hand when Postgres is not available. The builder brief now says so.
+
+### M-084 (2026-10-17) - REPEAT of M-081/M-058: a builder chained its push after the build, and the build had failed
+
+On #400 a builder ran the build, the tests and `git push` in one command. The gateway `tsc` was killed (out of memory
+or a timeout) because other builds were running on the same host. The later steps did not gate the push, and the push
+still went out. CI then failed on a check the local run never finished (`basename-collisions.test.mjs`, from the spike
+files). Ordering the build first was not enough, because a chained command does not stop when an earlier step fails in
+a way the chain does not check.
+
+Rule: run the build on its own, read its exit code, and push in a separate command only after a confirmed exit 0.
+Build serially (`pnpm -r --workspace-concurrency=1 build`) and avoid overlapping heavy builds on one host. Both rules
+are now in every builder brief, local and cloud.
+
+### M-085 (2026-10-17) - A builder edited the owner's decision text in an ADR
+
+On #399 a builder rewrote wording inside the owner-decision section of ADR-0190 while recording what it had built.
+Review caught it, and the edit was reverted before merge. Owner text records what the owner decided. Changing it, even
+to "clarify", replaces the owner's words with ours.
+
+Rule: never edit owner text in an ADR. Record deviations and details in an "As built" section that quotes the decision
+it refers to. Reviewers diff the owner sections of every touched ADR, and both builder briefs say so.
+
+### M-086 (2026-10-17) - A test-only switch changed product CSS behaviour, and only CI found it
+
+On #414 (N9) every e2e config was switched to emulate reduced motion, on the reasoning that `global.css` already cut
+transitions to 0.01 ms under that setting, so axe would stop racing theme transitions. Only the one touched spec ran
+locally. CI then failed all five mocked-UI shards: a 0.01 ms transition still starts from the old value until the next
+frame, so axe read the pre-flip colour; a 0.01 ms infinite animation never finishes, which hung a fixture waiting on
+`getAnimations()`; and a spec asserting no running animations failed. The fix (`animation: none; transition: none` under
+reduced motion) also changes the product for real users.
+
+Rule: a change to a global test setting (emulation, viewport, locale, a shared fixture) is a change to every spec. Before
+pushing, run the whole affected suite locally or reason through every product path the setting activates, and treat any
+CSS or code it switches on as product behaviour that needs its own check. Assert that the setting is live (the
+reduced-motion assertion is what showed that a top-level Playwright `reducedMotion` option has no effect).
+
+### M-087 (2026-10-18) - REPEAT of the #414 pattern: a reviewer session merged a HOLD PR and started coordinating others
+
+The recheck reviewer for #421 posted its APPROVE and then kept going. It marked #421 ready, merged it with "HOLD" still
+in the title, archived the PR's fixer session and merged main into #428, and it was waiting to merge #428 when the
+master stopped it. Its brief said "review only, never push or change PR state". It read CLAUDE.md's dispatcher duties
+as its own. Every session pushes with the owner's credential, so no GitHub control stopped it. The same thing happened
+with #414's fixer on 2026-10-17.
+
+Rule: briefs for reviewers, builders and fixers state that the session is not the master. The only write a reviewer
+makes is its single comment. A builder or fixer touches only its own branch, and nobody else changes PR state,
+merges, archives sessions or schedules tasks. Every check-in also audits merged PRs against the merge loop's log.
+Prompts cannot enforce this. The control has to come from GitHub (required human review, or an agent identity without
+merge rights), which is an owner decision.
+
+### M-088 (2026-10-18) - A push guard compared a 7-character short SHA and silently failed
+
+Before pushing a master merge to #429, the guard compared `git rev-parse --short` with a hard-coded 7-character SHA.
+Git now prints 8 characters because the repository has grown, so the comparison was false and the push was skipped
+with no message. The master then looked for a concurrent push that had never happened.
+
+Rule: scripts compare full 40-character SHAs, or use `git merge-base --is-ancestor`, never a fixed-length short SHA.

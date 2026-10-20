@@ -85,12 +85,16 @@ import {
   type GrantRow,
   type WorkloadIdentityDetailView,
   type WorkloadIdentityView,
+  pickerTruncationNotice,
 } from "./workloadIdentityModel";
 import { DelegationGrantDetail, IssuerSigningKeysCard } from "./IssuerSigningKeys";
+import { SpiffeTrustBundlesCard } from "./SpiffeTrustBundles";
+import { SpiffeBundleEndpointsCard } from "./SpiffeBundleEndpoints";
 import s from "./workloadIdentities.module.css";
 import { OrgSettingsCard } from "../settings/OrgSettingsCard";
+import { fmtDateTime } from "../../../api/format";
 
-const dateLabel = (value: string | null) => (value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : "Unmeasured");
+const dateLabel = (value: string | null) => fmtDateTime(value, "Unmeasured");
 
 /**
  * A control that exists but cannot act here, with the reason one focusable
@@ -303,6 +307,11 @@ export default function WorkloadIdentitiesPage() {
         />
 
         <IssuerSigningKeysCard busy={write.busy} ask={ask} />
+
+        {/* ADR-0188 S9: the SPIFFE trust bundles, in audited storage */}
+        <SpiffeTrustBundlesCard busy={write.busy} ask={ask} />
+        {/* ADR-0188 S9 follow-up: where a domain's bundle is fetched from (off until set) */}
+        <SpiffeBundleEndpointsCard busy={write.busy} ask={ask} />
 
         <RunDelegationTree busy={write.busy} personLabel={personLabel} identities={rows} ask={ask} />
       </div>
@@ -1254,6 +1263,7 @@ function GrantProposals(props: { identity: WorkloadIdentityDetailView; busy: boo
 
 function CreateIdentityDialog(props: { onClose: () => void; onSave: (body: CreateWorkloadIdentityBody, what: string) => void }) {
   const pickers = useQuery({ queryKey: workloadIdentityKeys.pickers, queryFn: getIdentityPickerSources });
+  const cutNotice = pickers.data ? pickerTruncationNotice(pickers.data) : null;
   const [kind, setKind] = useState<WorkloadIdentityKind>("worker_runtime");
   const [subjectId, setSubjectId] = useState("");
   const [identifier, setIdentifier] = useState("");
@@ -1291,7 +1301,7 @@ function CreateIdentityDialog(props: { onClose: () => void; onSave: (body: Creat
       <div className={s.stack}>
         {error && <p role="alert">{error}</p>}
         {pickers.isError && <ErrorState message="The choices for this form could not be read. Nothing can be created until they load." onRetry={() => void pickers.refetch()} />}
-        {pickers.data?.truncated && <p>Some lists were cut to their first 1,000 entries.</p>}
+        {cutNotice && <p>{cutNotice}</p>}
         <Field label="Kind">
           <Select
             value={kind}
@@ -1302,7 +1312,8 @@ function CreateIdentityDialog(props: { onClose: () => void; onSave: (body: Creat
               setError(null);
             }}
           >
-            {WORKLOAD_IDENTITY_KINDS.map((k) => (
+            {/* an endpoint agent's identity is made by the agent's own registration (ADR-0195 SD4b), never here */}
+            {WORKLOAD_IDENTITY_KINDS.filter((k) => k !== "endpoint_agent").map((k) => (
               <option key={k} value={k}>
                 {workloadKindLabels[k]}
               </option>

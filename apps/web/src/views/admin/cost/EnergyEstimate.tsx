@@ -215,7 +215,7 @@ export function EnergyFactorsCard() {
     <Card title="Energy factors">
       <div className={v.stack}>
         <span className={v.faint}>
-          {q.data?.notes.shipped ?? "RegulAIt ships no energy factors."} {q.data?.notes.unknown ?? ""}
+          {q.data?.notes.shipped ?? "regulAIt ships no energy factors."} {q.data?.notes.unknown ?? ""}
         </span>
         <Table
           rows={q.data?.factors ?? []}
@@ -249,7 +249,7 @@ export function EnergyFactorsCard() {
             },
           ]}
         />
-        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+        <div style={{ display: "flex", gap: "var(--s1-5)", flexWrap: "wrap", alignItems: "flex-end" }}>
           <Field label="Kind">
             <Select value={kind} onChange={(e) => setKind(e.target.value as "model" | "grid")} aria-label="Factor kind">
               <option value="model">Model (Wh per 1k tokens)</option>
@@ -277,7 +277,7 @@ export function EnergyFactorsCard() {
             Save factor
           </Button>
         </div>
-        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+        <div style={{ display: "flex", gap: "var(--s1-5)", flexWrap: "wrap", alignItems: "flex-end" }}>
           <Field label="Deployment region" help="Its grid intensity overrides the org default.">
             <Select
               value={regionValue}

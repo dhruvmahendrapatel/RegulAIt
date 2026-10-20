@@ -45,7 +45,7 @@ let db: Db;
 let app: ReturnType<typeof buildApp>;
 let srv: http.Server;
 let port: number;
-let allowHostId: string;
+let allowHostId: string | undefined;
 let userId: string;
 let userAuth: { authorization: string };
 
@@ -125,10 +125,10 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  // M-068: the lifecycle tests withdraw and re-add the 127.0.0.1 entry, so it is
-  // removed by host. It goes first, while the app is open; its outcome is asserted
-  // only after every other restore has run.
-  const loopback = await removeEgressAllowEntry(app, AUTH, { host: "127.0.0.1" });
+  // M-068: the lifecycle tests withdraw and re-add the 127.0.0.1 entry and record the
+  // new id in allowHostId, so it is removed by that id. It goes first, while the app is
+  // open; its outcome is asserted only after every other restore has run.
+  const loopback = await removeEgressAllowEntry(app, AUTH, { id: allowHostId });
   try {
     await restoreSb1Posture?.();
     await removeLicenseFixture(db);
@@ -163,12 +163,13 @@ describe("egress allow-list: default-deny before anything else", () => {
   });
 
   it("refuses an IMDS baseUrl outright, allow-listed or not", async () => {
-    const listed = await app.inject({
+    // ADR-0034 owner amendment 2026-10-16: adding any entry is a stepped-up relaxation; this suite is about the guard
+    const listed = await relaxStepUpAround(db, () => app.inject({
       method: "POST",
       headers: AUTH,
       url: "/v1/egress-allow-hosts",
       payload: { host: perTest.trackHost("169.254.169.254"), note: "deliberate SSRF attempt for the test" },
-    });
+    }));
     expect(listed.statusCode).toBe(201);
     const res = await app.inject({
       method: "POST",
@@ -208,7 +209,7 @@ describe("egress allow-list: default-deny before anything else", () => {
   });
 
   it("records the allow-list entry — and the private/plaintext opt-ins — in the audit trail", async () => {
-    // egress-allow-cleanup: afterAll — the loopback entry the later lifecycle tests use; afterAll removes it by host
+    // egress-allow-cleanup: afterAll — the loopback entry the later lifecycle tests use; afterAll removes it by its id
     const res = await relaxStepUpAround(db, () => app.inject({
       method: "POST",
       headers: AUTH,
@@ -560,7 +561,7 @@ describe("registration, connection test, and enablement", () => {
       expect(denied.effect).toBe("deny");
 
       // restore for the teardown assertions below
-      // egress-allow-cleanup: afterAll — the file's loopback entry, removed by host
+      // egress-allow-cleanup: afterAll — the file's loopback entry; its new id is removed in afterAll
       const re = await relaxStepUpAround(db, () => app.inject({
         method: "POST",
         headers: AUTH,

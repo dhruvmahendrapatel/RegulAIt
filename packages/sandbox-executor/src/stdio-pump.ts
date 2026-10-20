@@ -46,7 +46,7 @@ export interface StdioPumpOptions {
 export type StdioPumpEnd = "completed" | "gateway_closed" | "refused" | "no_start" | "sequence" | "mac_invalid";
 
 /** the session's refusals that end it (anything else is transient and the window is re-opened) */
-const FINAL = new Set(["offer_unavailable", "stdio_session_unknown", "stdio_sequence", "stdio_unkeyed", "invalid_body"]);
+const FINAL = new Set(["offer_unavailable", "stdio_session_unknown", "session_lost", "stdio_sequence", "stdio_unkeyed", "invalid_body"]);
 
 export async function pumpStdio(opts: StdioPumpOptions): Promise<StdioPumpEnd> {
   const { client, offerId, handle } = opts;
@@ -65,6 +65,7 @@ export async function pumpStdio(opts: StdioPumpOptions): Promise<StdioPumpEnd> {
     // anything but a clean end stops the sandbox now (its stdout then ends, which unblocks the outbound side)
     if (end !== "completed") void handle.kill().catch(() => undefined);
   };
+  let taskSecret: string | undefined;
   let startResolve!: (w: StdioWorkload | null) => void;
   const startGiven = new Promise<StdioWorkload | null>((r) => (startResolve = r));
   const startTimer = setTimeout(() => startResolve(null), opts.startTimeoutMs ?? 30_000);
@@ -93,6 +94,8 @@ export async function pumpStdio(opts: StdioPumpOptions): Promise<StdioPumpEnd> {
               case "start":
                 if (!started) {
                   started = true;
+                  // I5: an engine task's secret travels in this MACed line only; it is handed to the release, never logged
+                  taskSecret = m.secret;
                   startResolve(m.workload);
                 }
                 break;
@@ -145,7 +148,9 @@ export async function pumpStdio(opts: StdioPumpOptions): Promise<StdioPumpEnd> {
     return end ?? "no_start";
   }
   try {
-    await handle.releaseInput(workload);
+    const secret = taskSecret;
+    taskSecret = undefined;
+    await handle.releaseInput(workload, secret);
     releasedResolve(true);
   } catch (e) {
     releasedResolve(false);

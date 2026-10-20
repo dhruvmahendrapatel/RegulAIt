@@ -392,12 +392,13 @@ describe("dispatch time: a row that never went through the endpoint is still ref
     // The literal is never trusted and neither is the name: what matters is
     // what it answers. Resolution is injected so the case is deterministic and
     // needs no network — the allow-list it is checked against is the real one.
-    const allowed = await app.inject({
+    // ADR-0034 owner amendment 2026-10-16: adding any entry is a stepped-up relaxation; this suite is about the guard
+    const allowed = await relaxStepUpAround(db, () => app.inject({
       method: "POST",
       headers: AUTH,
       url: "/v1/egress-allow-hosts",
       payload: { host: perTest.trackHost("models.corp-cdn.example"), note: "looks like an ordinary vendor host" },
-    });
+    }));
     expect(allowed.statusCode).toBe(201);
     const rebound = await checkCredentialBaseUrl(db, "https://models.corp-cdn.example/v1", {
       resolve: async () => [{ address: "169.254.169.254", family: 4 }],
@@ -427,7 +428,7 @@ describe("dispatch time: a row that never went through the endpoint is still ref
 // ---------------------------------------------------------------------------
 
 describe("the allow-listed loopback endpoint an air-gapped operator actually wants", () => {
-  let allowHostId: string;
+  let allowHostId: string | undefined;
 
   beforeAll(async () => {
     await clearCredentials();
@@ -448,8 +449,8 @@ describe("the allow-listed loopback endpoint an air-gapped operator actually wan
   });
 
   afterAll(async () => {
-    // by host: the withdraw test re-creates the row under a new id
-    const loopback = await removeEgressAllowEntry(app, AUTH, { host: "127.0.0.1" });
+    // by id: the withdraw test re-creates the row and records its new id in allowHostId
+    const loopback = await removeEgressAllowEntry(app, AUTH, { id: allowHostId });
     try {
       await clearCredentials();
     } finally {

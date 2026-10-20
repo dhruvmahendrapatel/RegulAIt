@@ -66,6 +66,12 @@ export async function runSelfTests(input: SelfTestInput): Promise<{ fresh: Fresh
       input.log?.(`self-test: ${ref.name} v${ref.version} needs ${ref.minClass}; not declared on this executor, skipped`);
       continue;
     }
+    // I5 (review MEDIUM-2): a profile this backend cannot serve here is not attested (no offer of it ever reaches us)
+    const unsupported = input.backend.unsupported?.(ref.body) ?? null;
+    if (unsupported) {
+      input.log?.(`self-test: ${ref.name} v${ref.version} asks for ${unsupported}, which this executor cannot serve; not attested`);
+      continue;
+    }
     const canary = await input.backend.startCanary(ref.body, cls);
     let probes;
     try {

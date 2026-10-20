@@ -14,7 +14,7 @@ import { useSession } from "../session/SessionContext";
 import { useTheme } from "../ui/useTheme";
 import { Lockup } from "../ui/Brand";
 import { InfoButton } from "../ui/kit";
-import { ADMIN_GROUPS, SUITES, WORKSPACE, SuiteGlyph, suiteHome, suiteOfPath, type NavEntry } from "./suites";
+import { ADMIN_GROUPS, SUITES, WORKSPACE, SuiteGlyph, suiteHome, shadowedByMoreSpecific, suiteOfPath, type NavEntry } from "./suites";
 import { NavGlyph, RailGlyph } from "./navIcons";
 import { CommandPalette } from "./CommandPalette";
 import StepUpDialog from "../stepup/StepUpDialog";
@@ -213,31 +213,35 @@ export default function AppShell(props: { children: ReactNode }) {
       .filter((g) => g.items.length > 0);
   }, [suites, q]);
 
-  const navEntry = (n: NavEntry) => (
-    <NavLink
-      key={n.to}
-      to={n.to}
-      end={n.to === "/"}
-      className={({ isActive }) =>
-        isActive || (n.also ?? []).some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`))
-          ? s.navItemActive!
-          : s.navItem!
-      }
-      onClick={() => {
-        setSideOpen(false);
-        setFilter("");
-        closeRail();
-      }}
-    >
-      <NavGlyph to={n.to} label={n.label} className={s.navIcon} />
-      <span className={s.navLabel}>{n.label}</span>
-      {n.to === "/inbox" && pendingCount > 0 && (
-        <span className={s.navCount} aria-label={`${pendingCount} pending approvals`}>
-          {pendingCount}
-        </span>
-      )}
-    </NavLink>
-  );
+  const navRoutes = useMemo(() => suites.flatMap((su) => su.sections.flatMap((g) => g.items.map((i) => i.to))), [suites]);
+  const navEntry = (n: NavEntry) => {
+    const shadowed = shadowedByMoreSpecific(n.to, pathname, navRoutes);
+    return (
+      <NavLink
+        key={n.to}
+        to={n.to}
+        end={n.to === "/" || shadowed}
+        className={({ isActive }) =>
+          !shadowed && (isActive || (n.also ?? []).some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`)))
+            ? s.navItemActive!
+            : s.navItem!
+        }
+        onClick={() => {
+          setSideOpen(false);
+          setFilter("");
+          closeRail();
+        }}
+      >
+        <NavGlyph to={n.to} label={n.label} className={s.navIcon} />
+        <span className={s.navLabel}>{n.label}</span>
+        {n.to === "/inbox" && pendingCount > 0 && (
+          <span className={s.navCount} aria-label={`${pendingCount} pending approvals`}>
+            {pendingCount}
+          </span>
+        )}
+      </NavLink>
+    );
+  };
 
   const onRailFocus = (e: FocusEvent<HTMLElement>) => {
     if (isKeyboardFocus(e.target)) setFocusOpen(true);

@@ -31,6 +31,8 @@ export const DEMO_SEED_PERSONA_EMAILS = [
   "admin@regulait.local",
   "dana@regulait.local",
   "avery@regulait.local",
+  // ADR-0197 addendum: Morgan Reyes, the demo's second admin (DEMO_SECURITY_LEAD in demo-identity.ts)
+  "morgan@regulait.local",
 ] as const;
 
 export const SEED_DEMO_FLAG = "--seed-demo";

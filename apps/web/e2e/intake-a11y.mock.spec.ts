@@ -226,7 +226,8 @@ test.describe("AER-029: the intake wizard is accessible at every stage, in both 
 
   test("Describe — prefilled from a shadow-AI finding", async ({ page }) => {
     await page.goto("/ui/admin/governance/intake?source=shadow-ai&title=Unregistered%20assistant&description=Observed%20on%20team-17%20egress");
-    await expect(page.getByRole("status")).toContainText("Prefilled from a shadow-AI finding");
+    // the similar-use-cases rail is a status line too, so pick the prefill callout by its text
+    await expect(page.getByRole("status").filter({ hasText: "Prefilled from a shadow-AI finding" })).toBeVisible();
     await expect(page.getByLabel("Use-case name")).toHaveValue("Unregistered assistant");
     await expectNoAxeViolations(page, "Describe (shadow-AI prefill)");
     await expectEveryControlNamed(page, "Describe (shadow-AI prefill)", 5);
@@ -396,8 +397,8 @@ test.describe("AER-029: the intake wizard is accessible at every stage, in both 
       expect(classify).toContain(expected);
     }
 
-    // Escape closes a help panel and hands focus BACK to its trigger, from wherever it went:
-    // open the page's help, Tab away from the trigger, then Escape
+    // X1 (owner-approved 2026-10-19, #453): tabbing away from a help panel closes it, so an
+    // open panel never trails behind focus; Escape closes it and hands focus BACK to its trigger
     const help = page.getByRole("button", { name: "What is the Register AI use case page?" });
     await help.click();
     const note = page.getByRole("note");
@@ -405,8 +406,10 @@ test.describe("AER-029: the intake wizard is accessible at every stage, in both 
     const open = page.getByRole("button", { name: "Hide help for the Register AI use case page" });
     await expect(open).toHaveAttribute("aria-expanded", "true");
     await page.keyboard.press("Tab");
-    await expect(open).not.toBeFocused();
+    await expect(note).toHaveCount(0);
     expect(await page.evaluate(() => document.activeElement === document.body)).toBe(false);
+    await help.click();
+    await expect(note).toContainText("The assistant is suggestion-only.");
     await page.keyboard.press("Escape");
     await expect(note).toHaveCount(0);
     await expect(help).toBeFocused();

@@ -24,10 +24,13 @@ import {
   PROTECTED_RESOURCE_METADATA_PATH,
 } from "./mcp-auth-metadata.js";
 import { WEB_UI_ROUTES } from "./web-serving.js";
+import { ENDPOINT_AGENT_ENROLMENT_PATHS } from "./endpoint-agent.js";
 import {
   ENGINE_ENROLLMENT_ROUTES,
   ENGINE_RUNNER_ROUTES,
   EXECUTOR_CHANNEL_ROUTES,
+  FEDERATION_DISCOVERY_PATH,
+  FEDERATION_JWKS_PATH,
   IDENTITY_JWKS_PATH,
   OAUTH_INTROSPECTION_PATH,
   OAUTH_REVOCATION_PATH,
@@ -117,6 +120,11 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   OAUTH_TOKEN_PATH,
   OAUTH_REVOCATION_PATH,
   OAUTH_INTROSPECTION_PATH,
+  // ADR-0195 SD2b — the cloud FEDERATION issuer's OIDC discovery document and RS256 JWKS: public by definition
+  // (AWS IAM, GCP and Entra fetch them, holding no RegulAIt credential, to verify a federation token). Public keys
+  // and metadata only. Listed in NON_ADMIN_ROUTES too, so `public`.
+  FEDERATION_DISCOVERY_PATH,
+  FEDERATION_JWKS_PATH,
   // ADR-0182 (D4) A13 — a PUBLIC SIGNED FEEDBACK LINK: the one D4 exemption.
   // People outside the organisation, who hold no RegulAIt credential, report a
   // problem or appeal a decision through a link a use-case owner minted. The
@@ -143,6 +151,11 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // (executor-channel-auth.ts), like the token endpoint above. A request
   // without a valid proof is a 401 before any handler runs.
   ...EXECUTOR_CHANNEL_ROUTES.map((r) => r.split(" ")[1]!),
+  // ADR-0195 SD4b — the endpoint agent's ticket redemption and registration hold no RegulAIt session or key: they
+  // authenticate IN-ROUTE on the bulk enrolment token (`rgea_…`) or the device ticket (`rgat_…`), compared by SHA-256,
+  // and refuse everything while the endpoint agent source is disabled (the strict default). Listed in
+  // NON_ADMIN_ROUTES too, so `public`. The agent's other routes take its DPoP-bound self token only.
+  ...ENDPOINT_AGENT_ENROLMENT_PATHS,
 ]);
 
 export const NON_ADMIN_ROUTES = new Set([
@@ -757,6 +770,9 @@ export const NON_ADMIN_ROUTES = new Set([
   // ADR-0188 (batch 6 item 1) — the public identity surface (auth-exempt above
   // too): the JWKS and the token endpoint family.
   `GET ${IDENTITY_JWKS_PATH}`,
+  // ADR-0195 SD2b — the cloud federation issuer's public metadata (auth-exempt above too)
+  `GET ${FEDERATION_DISCOVERY_PATH}`,
+  `GET ${FEDERATION_JWKS_PATH}`,
   `POST ${OAUTH_TOKEN_PATH}`,
   `POST ${OAUTH_REVOCATION_PATH}`,
   `POST ${OAUTH_INTROSPECTION_PATH}`,
@@ -766,6 +782,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/delegations/proofs",
   // ADR-0190 I3 — the executor channel (auth-exempt above too; in-route proof)
   ...EXECUTOR_CHANNEL_ROUTES,
+  // ADR-0195 SD4b — the endpoint agent's enrolment (auth-exempt above too; in-route bulk token or device ticket)
+  ...ENDPOINT_AGENT_ENROLMENT_PATHS.map((p) => `POST ${p}`),
 
   // ADR-0189 slice B4 — the Decision BOM and AI BOM reads, bundles and the
   // online verifier. The gate is `bom_export_roles` (§7, §9), checked IN THE

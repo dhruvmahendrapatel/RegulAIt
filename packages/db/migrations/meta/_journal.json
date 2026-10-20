@@ -1324,6 +1324,83 @@
       "when": 1785133000000,
       "tag": "0198_isolation_stdio_placement_evidence",
       "breakpoints": true
+    },
+    {
+      "idx": 199,
+      "version": "7",
+      "when": 1785134000000,
+      "tag": "0199_identity_s9_spiffe_trust_bundles",
+      "breakpoints": true
+    },
+    {
+      "idx": 200,
+      "version": "7",
+      "when": 1785135000000,
+      "tag": "0200_engine_task_placement",
+      "breakpoints": true
+    },
+    {
+      "idx": 201,
+      "version": "7",
+      "when": 1785136000000,
+      "tag": "0201_isolation_person_stdio_and_project_sensitivity",
+      "breakpoints": true
+    },
+    {
+      "idx": 202,
+      "version": "7",
+      "when": 1785137000000,
+      "tag": "0202_shadow_ai_discovery_sources",
+      "breakpoints": true
+    },
+    {
+      "idx": 203,
+      "version": "7",
+      "when": 1785138000000,
+      "tag": "0203_step_up_key_management",
+      "breakpoints": true
+    },
+    {
+      "idx": 204,
+      "version": "7",
+      "when": 1785139000000,
+      "tag": "0204_isolation_stdio_relay",
+      "breakpoints": true
+    },
+    {
+      "idx": 205,
+      "version": "7",
+      "when": 1785140000000,
+      "tag": "0205_federation_signing_keys",
+      "breakpoints": true
+    },
+    {
+      "idx": 206,
+      "version": "7",
+      "when": 1785141000000,
+      "tag": "0206_content_provenance",
+      "breakpoints": true
+    },
+    {
+      "idx": 207,
+      "version": "7",
+      "when": 1785142000000,
+      "tag": "0207_endpoint_agent_devices",
+      "breakpoints": true
+    },
+    {
+      "idx": 208,
+      "version": "7",
+      "when": 1785143000000,
+      "tag": "0208_owner_decisions_relaxation_expiry_enrolment_cap",
+      "breakpoints": true
+    },
+    {
+      "idx": 209,
+      "version": "7",
+      "when": 1785144000000,
+      "tag": "0209_spiffe_bundle_fetch_jwt_svid",
+      "breakpoints": true
     }
   ]
 }

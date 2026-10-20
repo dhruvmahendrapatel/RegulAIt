@@ -790,8 +790,22 @@ describe("every sweep is registered", () => {
         // driven end-to-end in zz-b5-modelscan-storage.test.ts
         SCHEDULER_JOB_NAMES.modelArtifactRetentionSweep,
         // ===== end ADR-0187 =====
+        // ===== ADR-0195 SD0 =====
+        // queues due discovery sources, runs leased scans, applies endpoint retention; driven end to end in
+        // zz-adr0195-sd0-discovery.test.ts (with no source enabled it scans nothing)
+        SCHEDULER_JOB_NAMES.discoveryScanSweep,
+        // ===== end ADR-0195 SD0 =====
+        // ADR-0195 SD4b: commits accepted endpoint agent reports through SD0's fenced path; driven end to end in
+        // zz-adr0195-sd4b-endpoint-agent.test.ts (with no endpoint agent source enabled it does nothing)
+        SCHEDULER_JOB_NAMES.endpointAgentIngest,
+        // ADR-0188 S9 follow-up: fetches due SPIFFE bundle endpoints; driven end to end in
+        // zz-adr0188-s9b-spiffe-fetch-jwt-svid.test.ts (with no endpoint set it fetches nothing)
+        SCHEDULER_JOB_NAMES.spiffeBundleRefresh,
       ].sort(),
     );
+    const discovery = registry.get(SCHEDULER_JOB_NAMES.discoveryScanSweep)!;
+    expect(discovery.adr).toBe("ADR-0195");
+    expect(discovery.defaultIntervalSeconds).toBe(60);
     for (const def of registry.values()) {
       expect(def.adr).toMatch(/^ADR-\d{4}$/);
       expect(def.defaultIntervalSeconds).toBeGreaterThan(0);

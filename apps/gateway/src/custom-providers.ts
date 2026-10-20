@@ -30,6 +30,7 @@ import {
   customModelProviders,
   egressAllowHosts,
   eq,
+  sql,
   type CustomModelProviderRow,
   type Db,
 } from "@regulait/db";
@@ -54,6 +55,7 @@ import {
   type EgressDecision,
   type EgressResolver,
 } from "./egress-guard.js";
+import { errMessage } from "./err-serializer.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 
@@ -298,14 +300,16 @@ export function registerCustomProviderRoutes(
       note: body.note ?? null,
       createdBy: req.authCtx.userId ?? null,
     };
-    // ADR-0180/0186 A: a plain entry (a named public host, https only) is ordinary configuration of the
-    // default-deny allow-list, audited and with no step-up: the host still passes DNS pinning, the unconditional
-    // ranges and every private-range check. Opting a host INTO private ranges or plaintext http relaxes those
-    // checks, so turning either opt-in on (a new entry, or an upsert that widens an existing one) needs a
-    // settings_relax step-up bound to the host and the opt-ins it turns on. Turning them off needs nothing.
-    /** the opt-ins this write turns on, against a stored row (or none) */
+    // ADR-0180/0186 A, ADR-0034 owner amendment 2026-10-16 (D4): ADDING any entry widens what the gateway may
+    // connect to, so a new host needs a settings_relax step-up even when it is a plain entry (https only, no
+    // opt-in), bound to the host and `values: {added: true, ...opt-ins turned on}` — ONE grant covers a new entry
+    // and its opt-ins. On an existing host, turning an opt-in on (private ranges or plaintext http) needs the
+    // step-up bound to just those opt-ins; an upsert that turns nothing on (a note edit, or turning opt-ins off)
+    // names no new destination and needs nothing. Removing an entry (DELETE) tightens and needs nothing.
+    /** what this write relaxes, against a stored row (or none): `added` for a new host, plus each opt-in it turns on */
     const relaxationsAgainst = (stored: { allowPrivateRanges: boolean; allowPlaintextHttp: boolean } | undefined) => {
       const out: Record<string, true> = {};
+      if (!stored) out.added = true;
       if (values.allowPrivateRanges && !stored?.allowPrivateRanges) out.allowPrivateRanges = true;
       if (values.allowPlaintextHttp && !stored?.allowPlaintextHttp) out.allowPlaintextHttp = true;
       return out;
@@ -314,32 +318,48 @@ export function registerCustomProviderRoutes(
     const relaxed = relaxationsAgainst(existing);
     const relaxation = Object.keys(relaxed).length > 0;
     const stepUpArgs = { kind: "settings_relax" as const, facts: { op: "egress_allow_host", host, values: relaxed } };
-    // looked at (not spent) here, so a request without a grant is answered at once; SPENT inside the transaction,
-    // after the row is locked and the relaxation re-decided, so a concurrent change never burns it
+    // looked at (not spent) here, so a request without a grant is answered at once; SPENT inside the transaction, on
+    // its own connection, after the row is locked, the relaxation re-decided and the row written, so neither a
+    // concurrent change nor the defensive insert-conflict 409 below ever burns it
     if (relaxation) {
       const look = await checkStepUp(db, req, stepUpArgs, { spend: false });
       if (!look.ok) return reply.status(look.status).send(look.body);
     }
     type Out = { row: typeof egressAllowHosts.$inferSelect } | { refused: { status: number; body: Record<string, unknown> } };
+    /** the in-transaction claim was refused: thrown so the written row and its audit row roll back */
+    class ClaimRefused extends Error {
+      constructor(readonly refused: { status: number; body: Record<string, unknown> }) {
+        super("step-up refused");
+      }
+    }
     const out = await db.transaction(async (tx): Promise<Out> => {
       // ALWAYS locked and re-decided, relaxing or not: a write decided as "no relaxation" (a note edit re-sending
       // opt-ins that were on) must not turn an opt-in back on that a concurrent admin just turned off
+      // FOR UPDATE cannot lock a row that does not exist yet: two writers adding the same new host would both
+      // decide "added", and the second would spend its grant and overwrite the first. Every write of this host
+      // first takes a per-host transaction lock, so a concurrent addition commits before this one re-decides
+      // (and is then refused 409 below, its grant unspent).
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`egress_allow_host:${host}`}))`);
       const [now] = await tx.select().from(egressAllowHosts).where(eq(egressAllowHosts.host, host)).for("update");
       if (JSON.stringify(relaxationsAgainst(now)) !== JSON.stringify(relaxed)) {
         return { refused: { status: CHANGED_CONCURRENTLY.status, body: { ...CHANGED_CONCURRENTLY.body } } };
       }
+      // an addition never overwrites: a row that appeared anyway (a writer outside this route) is a 409, not an
+      // upsert the audit row would wrongly call "added"
+      const [written] = now
+        ? await tx.insert(egressAllowHosts).values(values).onConflictDoUpdate({ target: egressAllowHosts.host, set: values }).returning()
+        : await tx.insert(egressAllowHosts).values(values).onConflictDoNothing({ target: egressAllowHosts.host }).returning();
+      if (!written) {
+        return { refused: { status: CHANGED_CONCURRENTLY.status, body: { ...CHANGED_CONCURRENTLY.body } } };
+      }
+      // insert first, then spend: the single-use claim is made on THIS transaction's connection once the row is
+      // written, so the conflict 409 above never burns the grant, and a refused claim throws to roll the row back
       let stepUp: string | null = null;
       if (relaxation) {
-        // the single-use claim is made on the root handle, so a refusal row written by it survives this rollback
-        const su = await checkStepUp(db, req, stepUpArgs);
-        if (!su.ok) return { refused: { status: su.status, body: su.body } };
+        const su = await checkStepUp(tx as unknown as Db, req, stepUpArgs);
+        if (!su.ok) throw new ClaimRefused({ status: su.status, body: su.body });
         stepUp = su.method;
       }
-      const [written] = await tx
-        .insert(egressAllowHosts)
-        .values(values)
-        .onConflictDoUpdate({ target: egressAllowHosts.host, set: values })
-        .returning();
       // AUDITED: widening what the gateway may connect to is a governance act,
       // and opting a host into private ranges or plaintext doubly so.
       await tx.insert(auditLog).values({
@@ -357,12 +377,17 @@ export function registerCustomProviderRoutes(
         ruleId: "egress-allow-host-set",
         ruleChain: [],
         reason:
-          `egress allow-list entry for '${host}'` +
+          (now ? `egress allow-list entry for '${host}' updated` : `egress allow-list entry for '${host}' added`) +
           (values.allowPrivateRanges ? " WITH private-range access" : "") +
           (values.allowPlaintextHttp ? " WITH plaintext http" : "") +
           (relaxation ? " (a relaxation, confirmed with a step-up)" : ""),
       });
       return { row: written! };
+    }).catch(async (e: unknown): Promise<Out> => {
+      if (!(e instanceof ClaimRefused)) throw e;
+      // the claim's own `step-up-grant-refused` row rolled back with the write: a look records it again, spending nothing
+      await checkStepUp(db, req, stepUpArgs, { spend: false });
+      return { refused: e.refused };
     });
     if ("refused" in out) return reply.status(out.refused.status).send(out.refused.body);
     return reply.status(201).send(out.row);
@@ -650,7 +675,7 @@ export function registerCustomProviderRoutes(
       // ADR-0034: an egress refusal raised INSIDE the adapter (a redirect, or
       // the guarded fetch re-checking) is a governance decision. The SDK
       // flattens it to "Connection error."; report the real reason.
-      const message = egressRefusal(err) ?? (err instanceof Error ? err.message : String(err));
+      const message = egressRefusal(err) ?? (errMessage(err));
       await recordTest(providerId, message);
       await audit(
         actor(req),

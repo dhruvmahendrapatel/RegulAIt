@@ -5,7 +5,7 @@ import { auditChainVersionAt, auditContentHashFor, auditRowHash, auditRowVersion
 import { loadOrgSettings } from "./org-settings.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
 import { isReceiptKeyId, ReceiptKeyError, receiptPublicKeyFingerprint, receiptSigningKeyPosture, resolveReceiptSigningKey, type ReceiptKeySource } from "./receipt-signing-key.js";
-import { requireStepUp } from "./step-up.js";
+import { requireStepUp, type StepUpCheckArgs } from "./step-up.js";
 
 /** ADR-0186 R: one-writer, append-only receipts for chained governed decisions. */
 export const DECISION_RECEIPT_SIGN_JOB_NAME = "decision-receipt-sign-sweep";
@@ -28,6 +28,8 @@ function signingKey(): SigningKey | null {
 export const RECEIPT_KEY_REGISTERED_RULE_ID = "receipt-signing-key-registered";
 export const RECEIPT_KEY_RETIRED_RULE_ID = "receipt-signing-key-retired";
 export const RECEIPT_KEY_RETIRE_REFUSED_RULE_ID = "receipt-signing-key-retire-refused";
+/** migration 0203: retiring a receipt key is a `key_management` step-up bound to the op and the exact key */
+export const receiptKeyRetireStepUp = (keyId: string): StepUpCheckArgs => ({ kind: "key_management", facts: { op: "receipt_key_retire", keyId } });
 const SYSTEM_ACTOR = "00000000-0000-0000-0000-000000000000";
 /**
  * ADR-0189 R25 item 12: record a receipt signing key on its first use, and AUDIT it in the same
@@ -232,8 +234,8 @@ export function registerDecisionReceiptRoutes(app: FastifyInstance, db: Db, _opt
   });
   app.get("/v1/receipts/keys", async () => ({ keys: await publicKeys(db) }));
   /**
-   * #353 follow-up: RETIRE a receipt signing key. Admin-only (the default route class), `settings_relax`
-   * step-up, audited. Retiring sets `retired_at` (database clock) and nothing else: the public key stays
+   * #353 follow-up: RETIRE a receipt signing key. Admin-only (the default route class), a `key_management`
+   * step-up bound to the op and this key (migration 0203), audited. Retiring sets `retired_at` (database clock) and nothing else: the public key stays
    * recorded, so receipts it signed keep verifying (packages/shared/src/receipts/README.md), and no writer
    * signs with it again (every signer refuses a retired key). One-way: there is no un-retire.
    *
@@ -270,7 +272,7 @@ export function registerDecisionReceiptRoutes(app: FastifyInstance, db: Db, _opt
         await db.insert(auditLog).values({
           userId: actorUserId, objectType: "decision_receipt", objectId: null, effect: "deny", ruleId: RECEIPT_KEY_RETIRE_REFUSED_RULE_ID, ruleChain: [],
           reason: `Retiring receipt signing key ${keyId} was refused (${r.error}); nothing was changed`,
-          detail: { keyId, code: r.error, activeKeyIds: r.activeKeyIds, stepUp },
+          detail: { keyId, code: r.error, activeKeyIds: r.activeKeyIds, stepUp, stepUpKind: "key_management" },
         });
       }
       return reply.status(r.status).send({ error: r.error, detail: r.detail });
@@ -279,7 +281,7 @@ export function registerDecisionReceiptRoutes(app: FastifyInstance, db: Db, _opt
     // burn the grant; the authoritative decision is made again under the lock below
     const pre = decide(await db.select({ keyId: receiptSigningKeys.keyId, retiredAt: receiptSigningKeys.retiredAt }).from(receiptSigningKeys));
     if (pre) return refuse(pre, null);
-    const su = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { op: "receipt_key_retire", keyId } });
+    const su = await requireStepUp(db, req, reply, receiptKeyRetireStepUp(keyId));
     if (!su.ok) return reply;
     const out = await db.transaction(async (tx): Promise<{ refused: Refusal } | { refused: null; retiredAt: Date; activeKeyIds: string[] }> => {
       await tx.execute(sql`select pg_advisory_xact_lock(${RECEIPT_SIGN_LOCK_KEY})`);
@@ -299,7 +301,7 @@ export function registerDecisionReceiptRoutes(app: FastifyInstance, db: Db, _opt
       await tx.insert(auditLog).values({
         userId: actorUserId, objectType: "decision_receipt", objectId: null, effect: "allow", ruleId: RECEIPT_KEY_RETIRED_RULE_ID, ruleChain: [],
         reason: `Receipt signing key ${keyId} retired: no writer signs with it again; receipts it signed stay verifiable under its recorded public key`,
-        detail: { keyId, publicKeyFingerprint: receiptPublicKeyFingerprint(target.publicJwk), retiredAt: retiredAt.toISOString(), activeKeyIds: others, stepUp: su.method },
+        detail: { keyId, publicKeyFingerprint: receiptPublicKeyFingerprint(target.publicJwk), retiredAt: retiredAt.toISOString(), activeKeyIds: others, stepUp: su.method, stepUpKind: "key_management" },
       });
       return { refused: null, retiredAt, activeKeyIds: others };
     });

@@ -89,7 +89,8 @@ import {
   resolveRateLimitConfig,
   type RateLimitConfig,
 } from "./rate-limit.js";
-import { requestLogFields } from "./gateway-logger.js";
+import { errMessage, errSerializer } from "./err-serializer.js";
+import { parserRefusal, parserRefusalLogFields, redactLogText, requestLogFields, unhandledErrorLogFields } from "./gateway-logger.js";
 import { visibleTools, type ToolRef } from "@regulait/policy-kernel";
 import {
   assignRoleSchema,
@@ -202,7 +203,16 @@ import { registerDeployGateRoutes } from "./deploy-gate.js";
 import { registerPosturePresetRoutes } from "./posture-preset.js";
 import { registerExecutionControlRoutes } from "./execution-control.js";
 import { registerInventoryRoutes } from "./inventory.js";
-import { changeOwner, checkOwnerTarget, ownerChangeGate, registerOwnershipRoutes, resolveRegistrationOwner, withOwnership } from "./ownership.js";
+import {
+  auditOwnerChanged,
+  changeOwner,
+  checkOwnerTarget,
+  ownerChangeGate,
+  ownershipStateOf,
+  registerOwnershipRoutes,
+  resolveRegistrationOwner,
+  withOwnership,
+} from "./ownership.js";
 // ADR-0090 — grant certification campaigns: the decide-path hooks (the ONE
 // queue carries the keep/revoke decisions) and the campaign CRUD routes.
 import {
@@ -342,6 +352,8 @@ export interface BuildAppOptions {
   engines?: Pick<EngineOptions, "manifest" | "taxonomy" | "gatewayBaseUrl">;
   /** ADR-0187 B5-M TEST SEAM: the model-artifact store (default: from the environment; none = uploads refused) */
   artifactStore?: ArtifactStore | null;
+  /** ADR-0195 SD0 TEST SEAM: the discovery scanner registry (default: `DISCOVERY_SCANNERS`, empty in SD0). Code-only. */
+  discoveryScanners?: ScannerRegistry;
 }
 import { z } from "zod";
 import { boundTargetsForApprovals, registerMcpProxy } from "./mcp-proxy.js";
@@ -458,7 +470,7 @@ import { registerSchedulerRoutes } from "./scheduler-api.js";
 // ADR-0186 (batch 4) — the foundation registers every §4.9 route; each module
 // answers 501 not_built until its slice lands (A/B Claude, R/S/V Codex)
 import { registerPasskeyRoutes } from "./passkeys.js";
-import { approvalRuleStepUp, CHANGED_CONCURRENTLY, checkStepUp, ownerChangeStepUpArgs, registerStepUpRoutes, requireStepUp, revocationLiftStepUp } from "./step-up.js";
+import { approvalRuleStepUp, CHANGED_CONCURRENTLY, checkStepUp, ownerChangeStepUpArgs, registerStepUpRoutes, requireStepUp, revocationLiftStepUp, type StepUpCheckArgs } from "./step-up.js";
 import { ApprovalRuleWriteRefusedError, isApproverRole, lockApproverRoles, namedApproverSeatExists } from "./approval-pool.js";
 import {
   decisionView,
@@ -480,8 +492,10 @@ import { registerBomRoutes } from "./bom-routes.js";
 import { registerAiBomSpdxFieldRoutes } from "./ai-bom-spdx-fields.js";
 // ADR-0190 (batch 6 item 3) I1 — every isolation route, a 501 stub until its slice lands
 import { registerIsolationRoutes } from "./isolation-routes.js";
+import { clearServerRelaxationOnProgramChange } from "./isolation-subject-routes.js";
 // ADR-0190 I3 — the executor channel (in-route ADR-0188 proof) and the placement broker
 import { registerExecutorChannelRoutes, type ExecutorChannelOptions } from "./executor-channel.js";
+import { engineTaskChannelHooks } from "./engine-tasks.js";
 // ADR-0187 (batch 5): the sidecar engines (foundation + runner core)
 import { registerEngineRoutes, type EngineOptions } from "./engines.js";
 import { applyEngineRunApprovalDecision, lockEngineRunOfApprovalTx, registerEngineRunRoutes } from "./engine-runs.js";
@@ -498,6 +512,12 @@ import { AUTH_EXEMPT_ROUTES, NON_ADMIN_ROUTES } from "./route-classes.js";
 import { registerOpenApiRoutes, type RouteInventoryEntry } from "./openapi.js";
 import { registerOnboardingRoutes } from "./onboarding.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
+import { registerDiscoveryRoutes } from "./discovery-routes.js";
+import { registerContentTrustRoutes } from "./content-trust-routes.js";
+import { registerFederationRoutes } from "./federation-routes.js";
+import { registerEndpointImportRoutes } from "./endpoint-import-routes.js";
+import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
+import type { ScannerRegistry } from "./discovery-scanners.js";
 import { registerCostImportRoutes } from "./cost-import.js";
 import { registerCostReconciliationRoutes } from "./cost-reconcile.js";
 import { registerTracingRoutes } from "./tracing.js";
@@ -528,7 +548,8 @@ import {
   exportBundleMaxCsvRows,
   resolveExportSigningKey,
 } from "./export-bundle.js";
-import { MergeConflictError, WorkflowStateError } from "@regulait/workflow-kernel";
+import { MergeConflictError, WorkflowStateError, type WorkflowDefinition } from "@regulait/workflow-kernel";
+import { stageExcludesInitiator } from "./workflow-approvers.js";
 
 const uuidParam = z.object({ serverId: z.string().uuid() });
 const visibleToolsParams = z.object({
@@ -594,6 +615,8 @@ const auditFilterQuery = z.object({
   effect: z.enum(["allow", "deny", "require_approval"]).optional(),
   from: z.coerce.date().optional(),
   to: z.coerce.date().optional(),
+  /** ADR-0190 owner decision C (A1): one row by id, the target of an evidence link (the Decision BOM's relaxation) */
+  id: z.string().uuid().optional(),
 });
 type AuditFilterInput = z.infer<typeof auditFilterQuery>;
 
@@ -645,6 +668,7 @@ const auditLogColumns = {
  */
 function auditFilters(q: AuditFilterInput, from: Date | null, to: Date | null): SQL[] {
   const out: SQL[] = [];
+  if (q.id) out.push(eq(auditLog.id, q.id));
   if (q.userId) out.push(eq(auditLog.userId, q.userId));
   if (q.deployMode) {
     // 'unknown' is deploy_mode IS NULL — an explicit, equal bucket, never an
@@ -670,7 +694,12 @@ function auditWhere(q: AuditFilterInput, from: Date | null, to: Date | null): SQ
 
 /** a step-up refused inside a write's transaction: thrown so the write rolls back, answered after it */
 class StepUpRefusedInTx extends Error {
-  constructor(readonly status: number, readonly body: Record<string, unknown>) {
+  constructor(
+    readonly status: number,
+    readonly body: Record<string, unknown>,
+    /** the refused check, when it was claimed on the transaction's connection (its refusal row is re-recorded) */
+    readonly args?: StepUpCheckArgs,
+  ) {
     super("step_up_refused_in_transaction");
   }
 }
@@ -869,72 +898,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // guarded `/metrics` route when REGULAIT_METRICS_ON_MAIN_LISTENER is set
   registerMetricsHooks(app);
 
-  app.setErrorHandler((err, req, reply) => {
-    if (err instanceof z.ZodError) {
-      return reply.status(400).send({ error: "validation", issues: err.issues });
-    }
-    // Postgres constraint violations surface as DrizzleQueryError wrapping the
-    // pg error; map them to client errors instead of a generic 500.
-    if (err instanceof WorkflowStateError) {
-      return reply.status(409).send({ error: "invalid_workflow_state", detail: err.message });
-    }
-    if (err instanceof RunStateError) {
-      return reply.status(409).send({ error: "invalid_run_state", detail: err.message });
-    }
-    if (err instanceof MergeConflictError) {
-      return reply.status(422).send({ error: "template_merge_conflict", detail: err.message });
-    }
-    // ADR-0073: a governance artifact has stored versions but none is active.
-    // A real refusal with the reason stated, never a call that proceeds with the
-    // rule/profile silently absent.
-    if (err instanceof ConfigVersionUnresolvableError) {
-      return reply.status(409).send({ error: "config_version_unresolvable", detail: err.message });
-    }
-    // ADR-0186 A: an approval-rule write whose pool can never reach its quorum
-    if (err instanceof ApprovalRuleWriteRefusedError) {
-      return reply.status(err.status).send(err.body);
-    }
-    if (err instanceof ExternalEffectBlockedError) {
-      return reply.status(err.statusCode).send({ error: err.code, detail: err.message });
-    }
-    // ADR-0189 R25 item 6: a sign-off refused because its AI BOM snapshot cannot be
-    // signed (409 bom_signing_unavailable); its transaction has already rolled back
-    if (err instanceof AiBomError) {
-      return reply.status(err.status).send({ ...(err.extra ?? {}), error: err.code, detail: err.message });
-    }
-    const pgCode = (err as { cause?: { code?: string } }).cause?.code;
-    if (pgCode === "23505") return reply.status(409).send({ error: "conflict" });
-    if (pgCode === "23503") return reply.status(400).send({ error: "invalid_reference" });
-    // ADR-0167 (SEC-03): Fastify's OWN client-side refusals — a body over the
-    // limit (413), a malformed JSON body (400), an unknown content type (415)
-    // — are FastifyErrors carrying `code: FST_ERR_*` and a 4xx statusCode.
-    // They used to fall through to the 500 below, which reported a client
-    // fault as a server fault, discarded the reason, and made the two import
-    // routes' honest "payloads are bounded at N bytes" messages unreachable.
-    // Scoped to the FST_ERR_ prefix on purpose: a third-party error that
-    // happens to carry a statusCode (an undici or provider error) must not
-    // have its message echoed to the caller by this branch.
-    const fastifyErr = err as { code?: unknown; statusCode?: unknown };
-    if (
-      typeof fastifyErr.code === "string" &&
-      fastifyErr.code.startsWith("FST_ERR_") &&
-      typeof fastifyErr.statusCode === "number" &&
-      fastifyErr.statusCode >= 400 &&
-      fastifyErr.statusCode < 500
-    ) {
-      const detail = err instanceof Error ? err.message : String(err);
-      req.log.warn({ code: fastifyErr.code, status: fastifyErr.statusCode }, detail);
-      return reply.status(fastifyErr.statusCode).send({
-        error: fastifyErr.code.replace(/^FST_ERR_(CTP_)?/, "").toLowerCase(),
-        detail,
-      });
-    }
-    req.log.error({ err, method: req.method, url: req.url }, "unhandled error");
-    // DEBUG_ERRORS=1 additionally prints the stack to stderr even when the
-    // logger is off — documented in docs/deployment/INSTALL.md.
-    if (process.env.DEBUG_ERRORS) console.error("GATEWAY ERR:", err);
-    return reply.status(500).send({ error: "internal" });
-  });
+  app.setErrorHandler(handleGatewayError);
 
   // ADR-0031 item 5 — security headers on every response. The gateway serves
   // the SPA itself and is directly reachable (the compose port, and every dev
@@ -2186,14 +2150,22 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const shared = await refuseSharedIdentityAudience(db, serverId, nextUrl);
       if (shared) return reply.status(shared.status).send(shared.body);
     }
-    // ADR-0185 I9 — an owner named on PATCH goes through the same audited change as PUT …/owner. A refused
-    // request changes NOTHING: the owner target is validated (its refusal audited by the one owner writer) and
-    // both step-ups are looked at (not spent) before anything is written; then the ranges grant is spent, the
-    // columns are written (a compare-and-set), and the owner change runs last, spending its own grant.
-    const ownerChanges = body.ownerUserId !== undefined && body.ownerUserId !== before.ownerUserId;
-    if (ownerChanges) {
+    // ADR-0185 I9 — an owner named on PATCH is the same audited change as PUT …/owner (the same step-up and audit
+    // row). A refused request changes NOTHING: the owner target is validated (its refusal audited by the one owner
+    // writer) and both step-ups are looked at (not spent) before anything is written; then the columns AND the owner
+    // are written in ONE conditional update (a compare-and-set on the posture and the owner the step-ups were decided
+    // on), and both grants are spent in that transaction, on its connection, after the write.
+    // The comparison, the step-up look and the claim all use the owner id as the database returns it (`ownerTarget`,
+    // lowercased by Postgres): an uppercase spelling of the current owner is no change, and the look's facts match
+    // the claim's.
+    let ownerChanges = false;
+    let ownerTarget: string | null = null;
+    if (body.ownerUserId !== undefined && body.ownerUserId !== before.ownerUserId) {
       const target = await checkOwnerTarget(db, body.ownerUserId ?? null);
-      if (!target.ok) {
+      if (target.ok) {
+        ownerTarget = target.ownerUserId;
+        ownerChanges = ownerTarget !== before.ownerUserId;
+      } else {
         const refused = await changeOwner(db, {
           kind: "mcp_server",
           id: serverId,
@@ -2210,9 +2182,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       if (!look.ok) return reply.status(look.status).send(look.body);
     }
     if (ownerChanges) {
-      const look = await checkStepUp(db, req, ownerChangeStepUpArgs("mcp_server", serverId, body.ownerUserId ?? null), { spend: false });
+      const look = await checkStepUp(db, req, ownerChangeStepUpArgs("mcp_server", serverId, ownerTarget), { spend: false });
       if (!look.ok) return reply.status(look.status).send(look.body);
     }
+    const ownerStepUpArgs = ownerChanges ? ownerChangeStepUpArgs("mcp_server", serverId, ownerTarget) : null;
+    const fromOwnership = ownerChanges ? await ownershipStateOf(db, before.ownerUserId) : null;
     const patch: Partial<typeof mcpServers.$inferInsert> = {
       ...(body.name !== undefined ? { name: body.name } : {}),
       // a stdio row's url IS its name (`stdio:<name>`, a DB CHECK): a rename
@@ -2225,6 +2199,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       ...(identity.write !== null ? { identityPropagation: identity.write } : {}),
       ...(disclosure.write !== null ? { discloseAgentWorkloadIds: disclosure.write } : {}),
       ...stdioPatch,
+      ...(ownerChanges ? { ownerUserId: ownerTarget } : {}),
     };
     let row: typeof mcpServers.$inferSelect = before;
     // ADR-0185: a body that only restates the transport (or only changes the
@@ -2233,8 +2208,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       let rangesStepUp: string | null = null;
       // Class A, for EVERY write that touches the egress posture (relaxing or not): it applies only if the private
       // ranges AND the url it was decided on are unchanged, so a concurrent change (another admin closing the ranges,
-      // or moving the url) is never overwritten by a write decided against the old values. The ranges grant is
-      // spent inside the same transaction AFTER that compare-and-set, so a 409 never burns it.
+      // or moving the url) is never overwritten by a write decided against the old values; an owner change applies
+      // only if the owner is still the one its step-up was decided on, in the SAME statement, so a concurrent change
+      // can never leave these columns written without the owner change (or the reverse). The grants are spent inside
+      // the same transaction, on its connection, AFTER that compare-and-set, so a 409 never burns them; a refused
+      // claim throws and rolls the write back.
       const touchesPosture =
         body.allowPrivateRanges !== undefined || body.url !== undefined || identity.write !== null || disclosure.write !== null;
       type Patched = { row: typeof mcpServers.$inferSelect } | { refused: { status: number; body: Record<string, unknown> } };
@@ -2248,32 +2226,50 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           .update(mcpServers)
           .set(patch)
           .where(
-            touchesPosture
-              ? and(
-                  eq(mcpServers.id, serverId),
-                  before.allowPrivateRanges === null
-                    ? isNull(mcpServers.allowPrivateRanges)
-                    : eq(mcpServers.allowPrivateRanges, before.allowPrivateRanges),
-                  eq(mcpServers.url, before.url),
-                  eq(mcpServers.identityPropagation, before.identityPropagation),
-                  eq(mcpServers.discloseAgentWorkloadIds, before.discloseAgentWorkloadIds),
-                )
-              : eq(mcpServers.id, serverId),
+            and(
+              eq(mcpServers.id, serverId),
+              ...(touchesPosture
+                ? [
+                    before.allowPrivateRanges === null
+                      ? isNull(mcpServers.allowPrivateRanges)
+                      : eq(mcpServers.allowPrivateRanges, before.allowPrivateRanges),
+                    eq(mcpServers.url, before.url),
+                    eq(mcpServers.identityPropagation, before.identityPropagation),
+                    eq(mcpServers.discloseAgentWorkloadIds, before.discloseAgentWorkloadIds),
+                  ]
+                : []),
+              ...(ownerChanges ? [sql`${mcpServers.ownerUserId} IS NOT DISTINCT FROM ${before.ownerUserId}`] : []),
+            ),
           )
           .returning();
         if (!written) {
-          return touchesPosture
+          return touchesPosture || ownerChanges
             ? { refused: { status: CHANGED_CONCURRENTLY.status, body: { ...CHANGED_CONCURRENTLY.body } } }
             : { refused: { status: 404, body: { error: "unknown_server" } } };
         }
+        // claimed on THIS transaction's connection (never a second pooled one while the row lock is held); a
+        // refusal throws, rolling back the write and every claim made before it
+        const t = tx as unknown as Db;
         if (rangesStepUpArgs) {
-          // claimed on the root handle: single use, and its refusal row survives this transaction's rollback
-          const su = await checkStepUp(db, req, rangesStepUpArgs);
-          if (!su.ok) throw new StepUpRefusedInTx(su.status, su.body);
+          const su = await checkStepUp(t, req, rangesStepUpArgs);
+          if (!su.ok) throw new StepUpRefusedInTx(su.status, su.body, rangesStepUpArgs);
           rangesStepUp = su.method;
         }
+        if (ownerStepUpArgs) {
+          const su = await checkStepUp(t, req, ownerStepUpArgs);
+          if (!su.ok) throw new StepUpRefusedInTx(su.status, su.body, ownerStepUpArgs);
+          await auditOwnerChanged(t, {
+            kind: "mcp_server",
+            id: serverId,
+            name: before.name,
+            from: before.ownerUserId,
+            to: written.ownerUserId,
+            fromOwnership: fromOwnership!,
+            actorUserId: req.authCtx.userId,
+          });
+        }
         // every change is on the trail IN the write's transaction: an audit row that cannot be written rolls the
-        // change back, so no posture change is ever left unaudited (a step-up grant spent above stays spent)
+        // change back with the grants claimed above, so no posture change is ever left unaudited
         // the private-range posture decides which network space this server's url may reach: every change of it is
         // on the trail with both values, and an opening one as a relaxation with its step-up
         if (body.allowPrivateRanges !== undefined && (body.allowPrivateRanges ?? null) !== before.allowPrivateRanges) {
@@ -2338,20 +2334,27 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
               `${label}: stdio command changed to ${written.stdioCommand} in closure image ${written.stdioCommandDigest} (pinned); ` +
               `admission reset to 'unscanned' — the next manifest is adjudicated from scratch`,
           });
+          // ADR-0190 owner decision C: an L2 relaxation for a person's own calls was about the old program; it does not
+          // follow the change (cleared and audited in this transaction, like an S8 opt-in on a url move)
+          await clearServerRelaxationOnProgramChange(tx as unknown as Db, { serverId, actorUserId: req.authCtx.userId ?? null, label });
         }
         return { row: written };
-      }).catch((err: unknown) => {
-        if (err instanceof StepUpRefusedInTx) return { refused: { status: err.status, body: err.body } } as Patched;
-        throw err;
+      }).catch(async (err: unknown) => {
+        if (!(err instanceof StepUpRefusedInTx)) throw err;
+        // the claim's own `step-up-grant-refused` row rolled back with the write: a look records it again, spending nothing
+        if (err.args) await checkStepUp(db, req, err.args, { spend: false });
+        return { refused: { status: err.status, body: err.body } } as Patched;
       });
       if ("refused" in out) return reply.status(out.refused.status).send(out.refused.body);
       row = out.row;
     }
-    if (body.ownerUserId !== undefined) {
+    // an owner named but unchanged: the one owner writer records the re-statement, as PUT …/owner does
+    if (body.ownerUserId !== undefined && !ownerChanges) {
       const owned = await changeOwner(db, {
         kind: "mcp_server",
         id: serverId,
-        ownerUserId: body.ownerUserId,
+        // the current owner, as stored (the body may spell it in another case)
+        ownerUserId: before.ownerUserId,
         actorUserId: req.authCtx.userId,
         gate: ownerChangeGate(db, req, "mcp_server", serverId), // ADR-0186 A: owner_change step-up
       });
@@ -4191,7 +4194,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           ruleId: "builder-tool-step-resume-failed",
           ruleChain: [],
           reason: `the builder turn waiting on approval ${updated.id} could not resume: ${
-            err instanceof Error ? (err.cause instanceof Error ? err.cause.message : err.message) : String(err)
+            errMessage(err instanceof Error && err.cause instanceof Error ? err.cause : err)
           }`
             .replace(/\s+/g, " ")
             .slice(0, 1000),
@@ -4334,6 +4337,24 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         pmMirror = await mirrorApprovalDecision(db, opts.dataKey, decided.finalized, deciderUserId);
       }
       return { ok: true as const, body: { ...decided.body, ...(pmMirror ? { pmMirror } : {}) } };
+    }
+    // ADR-0195 A4: a stage owed to an admin OTHER than the initiator (`admin_not_initiator`) is never decided by
+    // the initiator, by any route: as a named approver, a delegate or an admin override. Keyed on the DECIDER.
+    if (row.objectType === "workflow" && row.instanceId) {
+      const [owner] = await db
+        .select({ initiatorUserId: workflowInstances.initiatorUserId, definition: workflowInstances.definition })
+        .from(workflowInstances)
+        .where(eq(workflowInstances.id, row.instanceId));
+      if (
+        owner &&
+        stageExcludesInitiator(owner.definition as WorkflowDefinition, row.stageId) &&
+        (deciderUserId === owner.initiatorUserId || deciderUserId === row.userId)
+      ) {
+        return fail(403, {
+          error: "initiator_cannot_sign_off",
+          detail: "this sign-off must be decided by an admin other than the person who started the workflow",
+        });
+      }
     }
     // Only the rule's named approver may decide (§3) — with two sanctioned
     // widenings: (a) ADR-0022 delegation — an ACTIVE delegation window from
@@ -4914,7 +4935,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         const w = extra && typeof extra === "object" ? (extra as { executionWarning?: Record<string, unknown> }).executionWarning : undefined;
         if (w) executionWarning = { ...(executionWarning ?? {}), ...w };
       } catch (err) {
-        executionError ??= err instanceof Error ? err.message : String(err);
+        executionError ??= errMessage(err);
       }
     }
     // ADR-0189 R25 items 5 and 7: the owed AI BOM snapshots, after commit; a failure
@@ -5417,6 +5438,32 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // The subsystem makes NO outbound request and can write only its own three
   // tables — an evidence file cannot mint a user, role, grant or approval.
   registerShadowAiRoutes(app, db);
+  // ADR-0195 SD0 — shadow-AI ACTIVE discovery: sources (off until enabled with a step-up), scanner credentials
+  // (never returned), scan runs and settings. Admin-only by default (none of these routes is in NON_ADMIN_ROUTES).
+  registerDiscoveryRoutes(app, db, {
+    dataKey: opts.dataKey,
+    ...(opts.discoveryScanners === undefined ? {} : { registry: opts.discoveryScanners }),
+  });
+  // ADR-0193 (I4) P1 — content source trust tiers, the write floor (both step-up, audited) and the P0 provenance
+  // evidence view. Admin-only by default (none of these routes is in NON_ADMIN_ROUTES).
+  registerContentTrustRoutes(app, db);
+  // ADR-0195 SD2b — the cloud federation issuer: its public OIDC discovery document and RS256 JWKS (the clouds
+  // fetch them), and the admin key lifecycle (off by default; on is a `settings_relax` step-up, rotate and revoke
+  // are `key_management` step-ups). The admin routes are admin-only by default (none is in NON_ADMIN_ROUTES).
+  registerFederationRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0195 SD3 — no-agent endpoint evidence (osquery results, MDM/EDR inventory) imported into an endpoint source,
+  // and the endpoint signature seed. Admin-only by default.
+  registerEndpointImportRoutes(app, db, {
+    dataKey: opts.dataKey,
+    ...(opts.discoveryScanners === undefined ? {} : { registry: opts.discoveryScanners }),
+  });
+  // ADR-0195 SD4b — the RegulAIt endpoint agent: ticket redemption and registration (authenticated in-route by the
+  // bulk token or the device ticket), the agent's own routes (its DPoP-bound self token only), and the admin's
+  // enrolment-token and device routes (admin-only by default). Nothing works until an endpoint agent source is enabled.
+  registerEndpointAgentRoutes(app, db, {
+    dataKey: opts.dataKey,
+    ...(opts.discoveryScanners === undefined ? {} : { registry: opts.discoveryScanners }),
+  });
   // ADR-0069 — CROSS-VENDOR COST CONSOLIDATION. Admin-only by default: the ONLY
   // route here in NON_ADMIN_ROUTES is `GET /v1/users/:userId/cost-consolidated`,
   // which refuses in-handler unless the caller IS that user. Uploading a file
@@ -5559,12 +5606,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0189 B9 (R51): supplier-declared SPDX properties of models and datasets (admin-only, audited)
   registerAiBomSpdxFieldRoutes(app, db);
   registerIsolationRoutes(app, db);
-  registerExecutorChannelRoutes(app, db, { ...(opts.executorChannel ?? {}), ...(opts.dataKey ? { dataKey: opts.dataKey } : {}) });
+  // ADR-0190 I5: an engine task's artifact input is streamed from the same artifact store the upload route writes
+  const engineTaskStore = opts.artifactStore === undefined ? {} : { artifactStore: opts.artifactStore };
+  registerExecutorChannelRoutes(app, db, { ...(opts.executorChannel ?? {}), ...(opts.dataKey ? { dataKey: opts.dataKey } : {}), ...engineTaskStore, engineTasks: engineTaskChannelHooks });
   // ADR-0187 (batch 5, AgentCoordination §4.10): the engines (admin; GET is any
   // user), engine runs and schedules (any user, own runs), and the runner routes
   // (the runner's self token only: registerEngineRunnerScopeHook).
   registerEngineRoutes(app, db, { dataKey: opts.dataKey, ...opts.engines });
-  registerEngineRunRoutes(app, db, { dataKey: opts.dataKey, ...opts.engines });
+  registerEngineRunRoutes(app, db, { dataKey: opts.dataKey, ...engineTaskStore, ...opts.engines });
   // ADR-0187 B5-M: model-artifact upload, list and view (own uploads; an admin sees all), and the
   // runner's artifact stream (the runner's self token, live lease only)
   registerModelArtifactRoutes(app, db, opts.artifactStore === undefined ? {} : { artifactStore: opts.artifactStore });
@@ -5862,4 +5911,72 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   });
 
   return app;
+}
+
+/**
+ * The gateway's global error handler (registered by `buildApp`). Exported so
+ * `log-leak.test.ts` drives the real mapping offline (N8 F5): what reaches
+ * the caller and what reaches the log for every error shape.
+ */
+export function handleGatewayError(err: unknown, req: FastifyRequest, reply: FastifyReply): FastifyReply {
+  if (err instanceof z.ZodError) {
+    return reply.status(400).send({ error: "validation", issues: err.issues });
+  }
+  // Postgres constraint violations surface as DrizzleQueryError wrapping the
+  // pg error; map them to client errors instead of a generic 500.
+  if (err instanceof WorkflowStateError) {
+    return reply.status(409).send({ error: "invalid_workflow_state", detail: err.message });
+  }
+  if (err instanceof RunStateError) {
+    return reply.status(409).send({ error: "invalid_run_state", detail: err.message });
+  }
+  if (err instanceof MergeConflictError) {
+    return reply.status(422).send({ error: "template_merge_conflict", detail: err.message });
+  }
+  // ADR-0073: a governance artifact has stored versions but none is active.
+  // A real refusal with the reason stated, never a call that proceeds with the
+  // rule/profile silently absent.
+  if (err instanceof ConfigVersionUnresolvableError) {
+    return reply.status(409).send({ error: "config_version_unresolvable", detail: err.message });
+  }
+  // ADR-0186 A: an approval-rule write whose pool can never reach its quorum
+  if (err instanceof ApprovalRuleWriteRefusedError) {
+    return reply.status(err.status).send(err.body);
+  }
+  if (err instanceof ExternalEffectBlockedError) {
+    return reply.status(err.statusCode).send({ error: err.code, detail: err.message });
+  }
+  // ADR-0189 R25 item 6: a sign-off refused because its AI BOM snapshot cannot be
+  // signed (409 bom_signing_unavailable); its transaction has already rolled back
+  if (err instanceof AiBomError) {
+    return reply.status(err.status).send({ ...(err.extra ?? {}), error: err.code, detail: err.message });
+  }
+  const pgCode = (err as { cause?: { code?: string } }).cause?.code;
+  if (pgCode === "23505") return reply.status(409).send({ error: "conflict" });
+  if (pgCode === "23503") return reply.status(400).send({ error: "invalid_reference" });
+  // ADR-0167 (SEC-03): Fastify's OWN client-side refusals — a body over the
+  // limit (413), a malformed JSON body (400), an unknown content type (415)
+  // — are FastifyErrors carrying `code: FST_ERR_*` and a 4xx statusCode.
+  // They used to fall through to the 500 below, which reported a client
+  // fault as a server fault, discarded the reason, and made the two import
+  // routes' honest "payloads are bounded at N bytes" messages unreachable.
+  // N8 (2026-10-17): neither the line nor the response carries the parser's
+  // message, which can quote the uploaded body — a fixed sentence per code
+  // to the caller, the code, route and status (and pino's reqId) to the log.
+  const refusal = parserRefusal(err);
+  if (refusal) {
+    req.log.warn(parserRefusalLogFields(req, refusal), "request body refused");
+    return reply.status(refusal.status).send(refusal.body);
+  }
+  const fields = unhandledErrorLogFields(req, err);
+  req.log.error(fields, "unhandled error");
+  // DEBUG_ERRORS=1 additionally prints the line and the stack to stderr even
+  // when the logger is off — documented in docs/deployment/INSTALL.md. N8 F1:
+  // the same withheld fields as the log line, never the raw error (a failed
+  // query's bound values, a SyntaxError's quoted body): turning a debug knob
+  // on must not relax what reaches a collector (ADR-0180).
+  if (process.env.DEBUG_ERRORS) {
+    console.error("GATEWAY ERR:", redactLogText(JSON.stringify({ ...fields, err: errSerializer(err) })));
+  }
+  return reply.status(500).send({ error: "internal" });
 }

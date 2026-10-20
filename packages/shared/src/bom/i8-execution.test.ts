@@ -186,8 +186,10 @@ describe("ADR-0190 I8: capture (buildExecutionFacts)", () => {
       expect(buildExecutionFacts(row(), reads({ mcpServerTransports: new Map([[U(2), transport]]) }))).toEqual(EXTERNAL);
     }
   });
-  it("review M1: an engine run's entitlement decision records no location (an engine worker, placed from I5), never in_gateway", () => {
-    const entitlement = row({ objectType: "agent", objectId: U(7), serverId: null, detail: { receiptClass: "decision", phase: ENGINE_RUN_ENTITLEMENT_PHASE, role: "target" } });
+  it("review M1 (ADR-0190 I5): an engine run's entitlement REFUSAL placed nothing and records no location, never in_gateway", () => {
+    // I5: a refusal before any task start (run creation, the lease) placed nothing; an ALLOWED one is the task start
+    // and always has its engine_worker placement (pinned in i5-engine-task.test.ts)
+    const entitlement = row({ objectType: "agent", objectId: U(7), serverId: null, effect: "deny", detail: { receiptClass: "decision", phase: ENGINE_RUN_ENTITLEMENT_PHASE, role: "target" } });
     expect(buildExecutionFacts(entitlement, reads())).toBeNull();
     expect(ENGINE_RUN_ENTITLEMENT_PHASE).toBe("engine-run-entitlement");
     // its Decision BOM says not_recorded, no_placement (a v2 null that is not an approval)
@@ -252,6 +254,31 @@ describe("ADR-0190 I8: capture (buildExecutionFacts)", () => {
     expect(() => buildDecisionFacts(row(), broken)).toThrow(DecisionFactsCaptureError);
     const unknownFloor = reads({ placements: new Map([[U(100), placedRead({}, { requiredBy: "a_floor_nobody_named" })]]) });
     expect(() => buildDecisionFacts(row(), unknownFloor)).toThrow(/regulait\.decision-facts\.v2/);
+  });
+
+  // ADR-0190 owner decision C: each use of "a person's own stdio call" is recorded in the decision's facts
+  const RELAXATION = { kind: "person_stdio_l2", subjectKind: "interactive_person", relaxationId: U(950), scopeKind: "mcp_server", scopeId: U(2) } as const;
+  const relaxedRow = (relaxation: unknown) => row({ detail: { receiptClass: "decision", execution: { placementId: PLACEMENT, offerId: U(906), relaxation } } });
+  const offeredPlacement = () => reads({ placements: new Map([[U(100), placedRead({}, { outcome: "offered", reportSha256: null, offerId: U(906), attestationId: ATTESTATION, imageDigest: `sha256:${D("e")}`, runtimeFlagsSha256: D("f") })]]) });
+  it("owner decision C: the relaxation on the decision row is captured (subject kind and relaxation id), and the v2 facts parse", () => {
+    const f = buildDecisionFacts(relaxedRow(RELAXATION), offeredPlacement());
+    expect(f.v === "regulait.decision-facts.v2" && f.execution).toEqual({ ...OFFERED, relaxation: RELAXATION });
+    // none used: the key is absent, so such facts stay byte-identical to a capture before 0201
+    const plain = buildExecutionFacts(row(), offeredPlacement());
+    expect(plain).toEqual(OFFERED);
+    expect(plain && "relaxation" in plain).toBe(false);
+  });
+  it("owner decision C: a malformed relaxation fails the capture (never dropped); the contract confines it to a resolved stdio requirement", () => {
+    for (const bad of [{ ...RELAXATION, kind: "person_stdio_l1" }, { ...RELAXATION, subjectKind: "api_key" }, { ...RELAXATION, scopeKind: "org" }, { ...RELAXATION, relaxationId: "r1" }, { ...RELAXATION, extra: 1 }, "yes"]) {
+      expect(() => buildDecisionFacts(relaxedRow(bad), offeredPlacement()), JSON.stringify(bad)).toThrow(DecisionFactsCaptureError);
+    }
+    expect(decisionExecutionFactsSchema.safeParse({ ...PLACED, relaxation: RELAXATION }).success).toBe(true);
+    expect(decisionExecutionFactsSchema.safeParse({ ...PLACED, relaxation: null }).success).toBe(true);
+    expect(decisionExecutionFactsSchema.safeParse({ ...PLACED, workloadKind: "code_exec", relaxation: RELAXATION }).success).toBe(false);
+    expect(decisionExecutionFactsSchema.safeParse({ ...EXTERNAL, relaxation: RELAXATION }).success).toBe(false);
+    expect(
+      decisionExecutionFactsSchema.safeParse({ ...PLACED, placement: "refused", executor: null, appliedClass: null, attestation: null, refusalCode: "policy_unresolved", requiredClass: null, requiredBy: null, profile: null, relaxation: RELAXATION }).success,
+    ).toBe(false);
   });
 });
 

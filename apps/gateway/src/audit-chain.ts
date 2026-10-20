@@ -78,6 +78,7 @@ import {
 } from "@regulait/shared";
 
 import { anchorTimestampSummary, anchorRecordFromRow, anchorTimestamper as defaultAnchorTimestamper } from "./audit-timestamp.js";
+import { errMessage } from "./err-serializer.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -415,7 +416,7 @@ export class S3ObjectLockSink implements AnchorSink {
       this.observed = { at: Date.now(), observation };
       return observation;
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = errMessage(err);
       // A bucket with no Object Lock does not answer with an empty
       // configuration — it ERRORS, with this code, on both AWS S3 and MinIO
       // (measured). That is a definite answer, not a failure to get one, and
@@ -732,7 +733,7 @@ async function timestampAfterFlush(
   try {
     await timestamper.afterFlush(db, anchor);
   } catch (err) {
-    const message = (err instanceof Error ? err.message : String(err)).slice(0, 500);
+    const message = (errMessage(err)).slice(0, 500);
     await db
       .update(auditAnchors)
       .set({ tsaLastError: message })
@@ -856,7 +857,7 @@ async function flushAnchorRow(
       .where(eq(auditAnchors.id, anchor.id));
     return { status: "flushed", externalRef: ref, error: null };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errMessage(err);
     // FAILED, not silently retried. An anchor that did not reach WORM must not
     // look like one that did.
     await db.update(auditAnchors).set({ status: "failed", lastError: message }).where(eq(auditAnchors.id, anchor.id));

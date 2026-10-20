@@ -24,6 +24,7 @@ import type { FastifyReply } from "fastify";
 import type { ServerResponse } from "node:http";
 import { securityHeaders } from "./security-headers.js";
 import type { KeysetCursor } from "./pagination.js";
+import { errMessage } from "./err-serializer.js";
 
 // --- tunables ---------------------------------------------------------------
 // Read from the environment on every call (not captured at module load) so a
@@ -222,7 +223,7 @@ async function emitCsv<R>(spec: CsvStreamSpec<R>, sink: CsvSink): Promise<CsvStr
     // The status line is already on the wire, so the only honest thing left is
     // to say so IN the file rather than hand back a silently short export.
     disclosed = true;
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errMessage(err);
     try {
       await sink.write(noticeRow(`${ERROR_PREFIX} export aborted after ${rows} row(s): ${msg}`) + spec.eol);
     } catch {

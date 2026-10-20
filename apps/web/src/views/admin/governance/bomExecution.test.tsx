@@ -4,9 +4,10 @@
  * reader is only tested on what the live contract accepts; then it is shown, from the signed body only.
  */
 import { renderToStaticMarkup } from "react-dom/server";
+import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it } from "vitest";
 import * as m from "./bomModel";
-import { ExecutionFacts, PlacementReports } from "./DecisionBomPanel";
+import { ExecutionFacts, PlacementReports, RelaxationRecord } from "./DecisionBomPanel";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Any = any;
@@ -29,7 +30,7 @@ const PLACED = {
 const IN_GATEWAY = { workloadKind: "model_call", placement: "in_gateway", placementId: null, requiredClass: null, requiredBy: null, appliedClass: "in_gateway", refusalCode: null, profile: null, executor: null, attestation: null };
 
 /** a v2 read response for one decision, assembled by the shared assembler from v2 facts carrying `execution` */
-async function v2Response(execution: Any, objectType = "mcp_tool", placementReports?: Any[]): Promise<Any> {
+async function v2Response(execution: Any, objectType = "mcp_tool", placementReports?: Any[], extra: Record<string, unknown> = {}): Promise<Any> {
   const s = await sharedBom();
   const { canonicalJson } = await sharedFile("audit-chain.ts");
   const { RECEIPT_PAYLOAD_VERSION } = await sharedFile("batch4.ts");
@@ -58,6 +59,7 @@ async function v2Response(execution: Any, objectType = "mcp_tool", placementRepo
     bundle: { schema: "regulait.export-bundle/3", subject: "decision-bom", href: `/v1/decisions/${auditId}/bom/bundle?version=1` },
     capabilities: caps,
     ...(placementReports ? { placementReports } : {}),
+    ...extra,
   };
   expect(s.decisionBomReadResponseSchema.safeParse(r).success).toBe(true);
   return JSON.parse(JSON.stringify(r));
@@ -68,7 +70,7 @@ describe("ADR-0190 I8: a v2 Decision BOM's execution facts in the browser", () =
   it("reads the execution section from the signed body, with its thirteen sections", async () => {
     const view = m.readDecisionBom(await v2Response(PLACED), U(1));
     expect(view.bodyVersion).toBe("regulait.decision-bom.v2");
-    expect(view.execution).toEqual({ ...PLACED, offerId: null, imageDigest: null, runtimeFlagsSha256: null });
+    expect(view.execution).toEqual({ ...PLACED, offerId: null, imageDigest: null, runtimeFlagsSha256: null, relaxation: null });
     expect(view.placementReports).toEqual([]);
     expect(view.completeness.map((c) => c.section)).toEqual([...m.DECISION_BOM_SECTIONS_V2]);
     expect(view.completeness.find((c) => c.section === "execution")).toEqual({ section: "execution", status: "recorded", reason: null });
@@ -99,6 +101,23 @@ describe("ADR-0190 I8: a v2 Decision BOM's execution facts in the browser", () =
       ["a v2 body without its execution key", (() => { const { execution: _e, ...doc } = r.document; return { ...r, document: doc, bom: { ...r.bom, body: JSON.stringify(doc) } }; })()],
     ] as const) {
       expect(() => m.readDecisionBom(bad, U(1)), what).toThrow(m.BomEvidenceError);
+    }
+  });
+  it("ADR-0190 owner decision C: a relaxed requirement names the relaxation (subject kind and id), from the signed body", async () => {
+    const relaxation = { kind: "person_stdio_l2", subjectKind: "interactive_person", relaxationId: U(950), scopeKind: "mcp_server", scopeId: U(951) };
+    const view = m.readDecisionBom(await v2Response({ ...PLACED, relaxation }), U(1));
+    expect(view.execution!.relaxation).toEqual({ relaxationId: U(950), scopeKind: "mcp_server", scopeId: U(951) });
+    const out = html(<ExecutionFacts execution={view.execution!} />);
+    expect(out).toContain("Isolation relaxation");
+    expect(out).toContain("L3 lowered to L2 by an admin for this MCP server");
+    expect(out).toContain(U(950));
+    // NEGATIVE CONTROL: no relaxation, no row
+    expect(html(<ExecutionFacts execution={m.readDecisionBom(await v2Response(PLACED), U(1)).execution!} />)).not.toContain("Isolation relaxation");
+    // a malformed one makes the whole BOM unreadable, never shown in part
+    const r = await v2Response({ ...PLACED, relaxation });
+    for (const bad of [{ ...relaxation, subjectKind: "api_key" }, { ...relaxation, scopeKind: "org" }, { ...relaxation, extra: 1 }]) {
+      const doc = { ...r.document, execution: { ...r.document.execution, relaxation: bad } };
+      expect(() => m.readDecisionBom({ ...r, document: doc, bom: { ...r.bom, body: JSON.stringify(doc) } }, U(1)), JSON.stringify(bad)).toThrow(m.BomEvidenceError);
     }
   });
   it("shows where it ran, the class it required and why, the profile, the executor and the attestation references", () => {
@@ -136,7 +155,7 @@ describe("ADR-0190 I8: a v2 Decision BOM's execution facts in the browser", () =
       { id: U(909), placementId: U(901), offerId: U(906), auditId: U(910), outcome: "cancelled", appliedClass: null, reportSha256: null, refusalCode: null, endCode: "later_gate", createdAt: T },
     ];
     const view = m.readDecisionBom(await v2Response(OFFERED, "mcp_tool", reports), U(1));
-    expect(view.execution).toEqual(OFFERED);
+    expect(view.execution).toEqual({ ...OFFERED, relaxation: null });
     expect(view.placementReports.map((r) => r.outcome)).toEqual(["placed", "cancelled"]);
     const facts = html(<ExecutionFacts execution={view.execution!} />);
     expect(facts).toContain("Offered to an executor");
@@ -163,5 +182,102 @@ describe("ADR-0190 I8: a v2 Decision BOM's execution facts in the browser", () =
     expect(out).toContain("Ran in the gateway (L0, not isolated)");
     expect(out.toLowerCase()).not.toContain("sandbox");
     expect(out).not.toContain("Software-attested");
+  });
+});
+
+describe("ADR-0190 owner decision C (A1): the relaxation's record beside the signed facts", () => {
+  const relaxation = { kind: "person_stdio_l2", subjectKind: "interactive_person", relaxationId: U(950), scopeKind: "project", scopeId: U(951) };
+  const RELAXED = { ...PLACED, relaxation };
+  const record = { id: U(950), scopeKind: "project", scopeId: U(951), setBy: U(952), setAt: "2026-10-09T08:30:00.000Z", clearedBy: null, clearedAt: null, setAuditId: U(953) };
+  const shown = (r: m.RelaxationRecordView | undefined) =>
+    html(
+      <MemoryRouter>
+        <RelaxationRecord record={r} names={new Map([[U(952), "Avery Admin"], [U(954), "Drew Reviewer"]])} />
+      </MemoryRouter>,
+    );
+
+  it("shows its id, who set it, its scope, when, and a link to the audit row that set it", async () => {
+    // the fixture passed the shared read-response schema first (v2Response), so this is the live contract
+    const view = m.readDecisionBom(await v2Response(RELAXED, "mcp_tool", undefined, { executionRelaxation: record }), U(1));
+    expect(view.relaxationRecord).toEqual(record);
+    const out = shown(view.relaxationRecord!);
+    expect(out).toContain(U(950));
+    expect(out).toContain("Avery Admin");
+    expect(out).toContain(U(952));
+    expect(out).toContain(`Project <code`);
+    expect(out).toContain(U(951));
+    expect(out).toContain(m.shownTime("2026-10-09T08:30:00.000Z"));
+    expect(out).toContain(`href="/admin/audit?id=${U(953)}"`);
+    expect(out).toContain("Still in force");
+    expect(out).toContain("not part of the signed Decision BOM");
+  });
+  it("says when the audit row is gone and when the relaxation was cleared since", () => {
+    const out = shown({ ...record, setAuditId: null, clearedBy: U(954), clearedAt: "2026-10-12T09:00:00.000Z" } as m.RelaxationRecordView);
+    expect(out).toContain("Not found: the audit row may have been pruned");
+    expect(out).not.toContain("href=");
+    expect(out).toContain("by Drew Reviewer; L3 applies again");
+  });
+  it("a gateway before A1 reports nothing: the screen says so, and no record is invented", async () => {
+    const view = m.readDecisionBom(await v2Response(RELAXED), U(1));
+    expect(view.relaxationRecord).toBeUndefined();
+    expect(shown(undefined)).toContain("Not reported");
+    // NEGATIVE CONTROL: with no relaxation in the facts the record is null, not undefined
+    expect(m.readDecisionBom(await v2Response(PLACED, "mcp_tool", undefined, { executionRelaxation: null }), U(1)).relaxationRecord).toBeNull();
+  });
+  it("a record that is not the row the signed facts name makes the whole BOM unreadable", async () => {
+    const s = await sharedBom();
+    const r = await v2Response(RELAXED, "mcp_tool", undefined, { executionRelaxation: record });
+    for (const [what, bad] of [
+      ["another relaxation", { ...record, id: U(960) }],
+      ["another scope kind", { ...record, scopeKind: "mcp_server" }],
+      ["another scope", { ...record, scopeId: U(961) }],
+      ["cleared with no one", { ...record, clearedAt: "2026-10-12T09:00:00.000Z" }],
+      ["cleared before it was set", { ...record, clearedBy: U(963), clearedAt: "2000-01-01T00:00:00.000Z" }],
+      ["an extra field", { ...record, apiKeyId: U(962) }],
+      ["null while the facts name one", null],
+    ] as const) {
+      expect(() => m.readDecisionBom({ ...r, executionRelaxation: bad }, U(1)), what).toThrow(m.BomEvidenceError);
+      // the shared contract refuses the same response (the gateway could not send it)
+      expect(s.decisionBomReadResponseSchema.safeParse({ ...r, executionRelaxation: bad }).success, what).toBe(false);
+    }
+    // a record when the facts name no relaxation
+    const plain = await v2Response(PLACED);
+    expect(() => m.readDecisionBom({ ...plain, executionRelaxation: record }, U(1))).toThrow(m.BomEvidenceError);
+    expect(s.decisionBomReadResponseSchema.safeParse({ ...plain, executionRelaxation: record }).success).toBe(false);
+  });
+
+  // ADR-0197 Q3: a relaxation expires; the record shows the expiry in force today and the latest renewal
+  const withExpiry = { ...record, expiresAt: "2026-11-08T08:30:00.000Z", renewedBy: null, renewedAt: null };
+  const R = (r: object) => r as m.RelaxationRecordView;
+  it("ADR-0197 Q3: shows the expiry, and says when it has expired that L3 applies again", async () => {
+    const view = m.readDecisionBom(await v2Response(RELAXED, "mcp_tool", undefined, { executionRelaxation: withExpiry }), U(1));
+    expect(view.relaxationRecord).toEqual(withExpiry);
+    const future = { ...withExpiry, expiresAt: new Date(Date.now() + 86_400_000).toISOString() };
+    const live = shown(R(future));
+    expect(live).toContain(m.shownTime(future.expiresAt));
+    expect(live).toContain("Still in force");
+    const past = shown(R({ ...withExpiry, expiresAt: "2026-10-09T09:30:00.000Z" }));
+    expect(past).toContain(`Expired ${m.shownTime("2026-10-09T09:30:00.000Z")}; L3 applies again until an admin renews it`);
+    expect(past).not.toContain("Still in force");
+    const renewed = shown(R({ ...future, renewedBy: U(954), renewedAt: "2026-10-11T10:00:00.000Z" }));
+    expect(renewed).toContain(`renewed ${m.shownTime("2026-10-11T10:00:00.000Z")} by Drew Reviewer`);
+    // a gateway before Q3 does not report the expiry: the screen says so
+    expect(shown(R(record))).toContain("Not reported: this gateway does not say when the relaxation expires");
+  });
+  it("ADR-0197 Q3: a record whose expiry or renewal cannot be true is unreadable, as the shared contract says", async () => {
+    const s = await sharedBom();
+    const r = await v2Response(RELAXED, "mcp_tool", undefined, { executionRelaxation: withExpiry });
+    for (const [what, bad] of [
+      ["expires before it was set", { ...withExpiry, expiresAt: "2026-10-01T00:00:00.000Z" }],
+      ["expires when it was set", { ...withExpiry, expiresAt: withExpiry.setAt }],
+      ["renewed by no one", { ...withExpiry, renewedAt: "2026-10-11T10:00:00.000Z" }],
+      ["renewed at no time", { ...withExpiry, renewedBy: U(954) }],
+      ["renewed before it was set", { ...withExpiry, renewedBy: U(954), renewedAt: "2000-01-01T00:00:00.000Z" }],
+      ["an expiry without the renewal fields", { ...record, expiresAt: withExpiry.expiresAt }],
+      ["the renewal fields without an expiry", { ...record, renewedBy: null, renewedAt: null }],
+    ] as const) {
+      expect(() => m.readDecisionBom({ ...r, executionRelaxation: bad }, U(1)), what).toThrow(m.BomEvidenceError);
+      expect(s.decisionBomReadResponseSchema.safeParse({ ...r, executionRelaxation: bad }).success, what).toBe(false);
+    }
   });
 });

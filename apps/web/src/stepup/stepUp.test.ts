@@ -5,7 +5,8 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError, STEP_UP_HEADER, setUnauthorizedHandler } from "../api/client";
-import { api, promptStepUp, stepUpRefusalOf, subscribeStepUpPrompt, withStepUp, type StepUpAction } from "./stepUp";
+import { STEP_UP_ACTION_KINDS } from "../views/admin/settings/orgSettingSpecs";
+import { api, promptStepUp, STEP_UP_ACTION_COPY, stepUpRefusalOf, subscribeStepUpPrompt, withStepUp, type StepUpAction } from "./stepUp";
 
 const refusal = (action: StepUpAction, methods = ["passkey"]) =>
   new ApiError(403, { error: "step_up_required", actionKind: action.kind, methods, action });
@@ -202,5 +203,13 @@ describe("every step-up-protected write in the app goes through withStepUp (ADR-
       }
     }
     expect(offenders).toEqual([]);
+  });
+});
+
+describe("STEP_UP_ACTION_COPY", () => {
+  // the dialog's copy and the client's per-request cap are keyed by it (#415 review): it names exactly the kinds the
+  // org setting offers (orgSettingSpecs.test holds those to the gateway's)
+  it("names exactly the step-up action kinds", () => {
+    expect(Object.keys(STEP_UP_ACTION_COPY)).toEqual(STEP_UP_ACTION_KINDS.map((k) => k.value));
   });
 });

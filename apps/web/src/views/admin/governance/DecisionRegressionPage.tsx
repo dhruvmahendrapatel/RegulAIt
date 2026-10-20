@@ -109,7 +109,7 @@ function fieldValue(field: OutcomeField, o: DecisionOutcome | null): ReactNode {
   if (Array.isArray(val)) {
     if (val.length === 0) return <span className={v.faint}>none</span>;
     return (
-      <ul style={{ margin: 0, paddingLeft: "1.1em" }}>
+      <ul style={{ margin: "0", paddingLeft: "var(--s2)" }}>
         {val.map((x) => (
           <li key={x} className={v.mono} style={{ fontSize: "var(--text-sm)" }}>
             {x}
@@ -126,14 +126,14 @@ function ReasonsDiff(props: { parts: RegressionEntry["reasonsDiff"] }) {
   const changed = props.parts.filter((p) => p.added || p.removed);
   if (changed.length === 0) return null;
   return (
-    <ul aria-label="Changed screening reasons" style={{ margin: "var(--s1) 0 0", padding: 0, listStyle: "none", display: "grid", gap: 2 }}>
+    <ul aria-label="Changed screening reasons" style={{ margin: "var(--s1) 0 0", padding: "0", listStyle: "none", display: "grid", gap: "var(--s-half)" }}>
       {changed.map((p, i) => (
         <li
           key={`${i}-${p.value}`}
           className={v.mono}
           style={{
             fontSize: "var(--text-sm)",
-            padding: "2px 8px",
+            padding: "var(--s-half) var(--s1)",
             borderRadius: "var(--rg-r-sm)",
             background: p.added ? "var(--ok-soft)" : "var(--danger-soft)",
             color: p.added ? "var(--ok-soft-text)" : "var(--danger-soft-text)",
@@ -150,10 +150,10 @@ function ReasonsDiff(props: { parts: RegressionEntry["reasonsDiff"] }) {
 /** every case whose outcome the change alters: before and after, side by side */
 export function RegressionDiff(props: { entries: RegressionEntry[] }) {
   if (props.entries.length === 0) {
-    return <p className={v.dim} style={{ margin: 0 }}>No golden case changes its outcome.</p>;
+    return <p className={`${v.dim} ${v.flush}`}>No golden case changes its outcome.</p>;
   }
   return (
-    <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "grid", gap: "var(--s2)" }}>
+    <ul style={{ margin: "0", padding: "0", listStyle: "none", display: "grid", gap: "var(--s2)" }}>
       {props.entries.map((e) => (
         <li
           key={e.caseId}
@@ -165,22 +165,22 @@ export function RegressionDiff(props: { entries: RegressionEntry[] }) {
             <Badge tone={e.source === "override" ? "info" : "neutral"}>{e.source === "override" ? "Reviewer case" : "Shipped case"}</Badge>
           </div>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "var(--text-sm)" }}>
-            <caption className={v.dim} style={{ textAlign: "left", paddingBottom: 4 }}>
+            <caption className={v.dim} style={{ textAlign: "left", paddingBottom: "var(--s0)" }}>
               {e.changed.length} field{e.changed.length === 1 ? "" : "s"} change
             </caption>
             <thead>
               <tr>
-                <th scope="col" style={{ textAlign: "left", width: "22%", padding: "4px 8px 4px 0" }}>Field</th>
-                <th scope="col" style={{ textAlign: "left", padding: "4px 8px" }}>Before (live)</th>
-                <th scope="col" style={{ textAlign: "left", padding: "4px 8px" }}>After (this change)</th>
+                <th scope="col" style={{ textAlign: "left", width: "22%", padding: "var(--s0) var(--s1) var(--s0) 0" }}>Field</th>
+                <th scope="col" style={{ textAlign: "left", padding: "var(--s0) var(--s1)" }}>Before (live)</th>
+                <th scope="col" style={{ textAlign: "left", padding: "var(--s0) var(--s1)" }}>After (this change)</th>
               </tr>
             </thead>
             <tbody>
               {e.changed.map((f) => (
                 <tr key={f} style={{ borderTop: "1px solid var(--rg-line)", verticalAlign: "top" }}>
-                  <th scope="row" style={{ textAlign: "left", fontWeight: 600, padding: "6px 8px 6px 0" }}>{FIELD_LABEL[f]}</th>
-                  <td style={{ padding: "6px 8px" }}>{fieldValue(f, e.before)}</td>
-                  <td style={{ padding: "6px 8px" }}>{fieldValue(f, e.after)}</td>
+                  <th scope="row" style={{ textAlign: "left", fontWeight: 600, padding: "var(--s0-5) var(--s1) var(--s0-5) 0" }}>{FIELD_LABEL[f]}</th>
+                  <td style={{ padding: "var(--s0-5) var(--s1)" }}>{fieldValue(f, e.before)}</td>
+                  <td style={{ padding: "var(--s0-5) var(--s1)" }}>{fieldValue(f, e.after)}</td>
                 </tr>
               ))}
             </tbody>
@@ -292,20 +292,20 @@ export function PreviewImpactModal(props: {
       }
     >
       <div className={v.stack}>
-        <p className={v.dim} style={{ margin: 0 }}>
+        <p className={`${v.dim} ${v.flush}`}>
           regulAIt replays every golden case (the shipped set and the reviewer cases) under the configuration live now
           and under this change. A case is listed when anything it decides changes: the tier, the suggestions, the
           required reviews or tests, or who signs off.
         </p>
-        {loading ? <p role="status" style={{ margin: 0 }}>Running the golden cases…</p> : null}
+        {loading ? <p role="status" className={v.flush}>Running the golden cases…</p> : null}
         {error ? (
-          <p role="alert" style={{ margin: 0, color: "var(--danger-soft-text)" }}>
+          <p role="alert" className={`${v.errLine} ${v.flush}`}>
             The preview did not run: {error}
           </p>
         ) : null}
         {run ? (
           <>
-            <p role="status" style={{ margin: 0 }}>
+            <p role="status" className={v.flush}>
               <strong>
                 {run.changed} of {run.cases} golden case{run.cases === 1 ? "" : "s"} change{run.changed === 1 ? "s" : ""}
               </strong>{" "}
@@ -314,7 +314,7 @@ export function PreviewImpactModal(props: {
             <RegressionDiff entries={run.entries} />
             {needsAcceptance ? (
               <div className={v.stackTight}>
-                <label style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                <label style={{ display: "flex", gap: "var(--s1)", alignItems: "flex-start" }}>
                   <input type="checkbox" checked={accept} onChange={(e) => setAccept(e.target.checked)} />
                   <span>I have reviewed these changed outcomes and accept them for {props.what}.</span>
                 </label>
@@ -324,7 +324,7 @@ export function PreviewImpactModal(props: {
                 >
                   <Textarea value={reason} rows={3} maxLength={2000} onChange={(e) => setReason(e.target.value)} />
                 </Field>
-                <p className={v.dim} style={{ margin: 0 }}>
+                <p className={`${v.dim} ${v.flush}`}>
                   At least {MIN_REASON} characters. Recorded in the audit log with the run.
                 </p>
               </div>
@@ -332,7 +332,7 @@ export function PreviewImpactModal(props: {
           </>
         ) : null}
         {saveError ? (
-          <p role="alert" style={{ margin: 0, color: "var(--danger-soft-text)" }}>
+          <p role="alert" className={`${v.errLine} ${v.flush}`}>
             {saveError}
           </p>
         ) : null}
@@ -386,7 +386,7 @@ function RunsSection() {
   });
   return (
     <>
-      <Card title="Regression runs">
+      <Card title="Regression runs" contain>
         <Table
           rows={runs.data?.runs}
           loading={runs.isLoading}
@@ -422,7 +422,7 @@ function RunsSection() {
           <QueryGate loading={detail.isLoading} error={detail.error} onRetry={() => void detail.refetch()}>
             {detail.data ? (
               <div className={v.stack}>
-                <p className={v.dim} style={{ margin: 0 }}>
+                <p className={`${v.dim} ${v.flush}`}>
                   {detail.data.changed} of {detail.data.cases} golden cases change. Body digest{" "}
                   <code>{detail.data.candidateDigest.slice(0, 12)}</code>
                   {detail.data.baselineDigest ? (
@@ -505,7 +505,7 @@ function CasesSection() {
   return (
     <>
       <Card title="Golden cases">
-        <p className={v.dim} style={{ marginTop: 0 }}>
+        <p className={`${v.dim} ${v.flushTop}`}>
           Shipped cases come with regulAIt and change only with its code. A reviewer case replays the answers of a real use
           case and pins the outcome a reviewer decided it must keep.
         </p>
@@ -552,7 +552,7 @@ function CasesSection() {
             void add();
           }}
         >
-          <p className={v.dim} style={{ margin: 0 }}>
+          <p className={`${v.dim} ${v.flush}`}>
             When a reviewer overrides an outcome, keep it: the use case&apos;s stored answers become a case, and every later
             preview shows whether a change would decide it differently.
           </p>
@@ -580,7 +580,7 @@ function CasesSection() {
             </Select>
           </Field>
           {addError ? (
-            <p role="alert" style={{ margin: 0, color: "var(--danger-soft-text)" }}>
+            <p role="alert" className={`${v.errLine} ${v.flush}`}>
               {addError}
             </p>
           ) : null}
@@ -594,7 +594,7 @@ function CasesSection() {
       <ConfirmModal
         open={!!retiring}
         title="Retire this case?"
-        body={retiring ? <p style={{ margin: 0 }}>Previews will no longer replay “{retiring.label}”. The record of the case and the runs that included it are kept.</p> : null}
+        body={retiring ? <p className={v.flush}>Previews will no longer replay “{retiring.label}”. The record of the case and the runs that included it are kept.</p> : null}
         confirmLabel="Retire case"
         danger
         onConfirm={() => retiring && void retire(retiring)}
@@ -682,22 +682,22 @@ function SettingsSection() {
               <option value="off">Off</option>
             </Select>
           </Field>
-          <p className={v.dim} style={{ margin: 0 }}>{GATE_COPY.strict}</p>
+          <p className={`${v.dim} ${v.flush}`}>{GATE_COPY.strict}</p>
           <Field label={AGE_COPY.label} error={!ageValid ? "From 1 to 1440 minutes." : null}>
             <Input inputMode="numeric" value={curAge} onChange={(e) => setAge(e.target.value)} aria-invalid={!ageValid ? true : undefined} />
           </Field>
-          <p className={v.dim} style={{ margin: 0 }}>{AGE_COPY.strict}</p>
+          <p className={`${v.dim} ${v.flush}`}>{AGE_COPY.strict}</p>
           <div className={v.row} style={{ flexWrap: "wrap" }}>
             {relaxed ? <Badge tone="warn">Relaxed</Badge> : <Badge tone="ok">Strict default</Badge>}
             <span className={v.dim}>A change to either setting is audited, with its old and new value.</span>
           </div>
           {relaxed ? (
-            <p style={{ margin: 0 }} className={v.dim}>
+            <p className={`${v.dim} ${v.flush}`}>
               {curMode !== STRICT_GATE ? GATE_COPY.relaxed : AGE_COPY.relaxed}
             </p>
           ) : null}
           {error ? (
-            <p role="alert" style={{ margin: 0, color: "var(--danger-soft-text)" }}>
+            <p role="alert" className={`${v.errLine} ${v.flush}`}>
               {error}
             </p>
           ) : null}

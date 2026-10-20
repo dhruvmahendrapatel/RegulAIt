@@ -44,6 +44,7 @@ import { buildApp } from "./app.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -61,7 +62,7 @@ let admin: { id: string; auth: { authorization: string } };
 let agentId: string | null = null;
 let traceId: string;
 let priorEndpoint: string | null = null;
-let createdEgressRow: string | null = null;
+let createdEgressRow: string | undefined;
 let restoreIdentity: (() => Promise<void>) | undefined;
 let restorePosture: (() => Promise<void>) | undefined;
 let restoreGates: (() => Promise<void>) | undefined;
@@ -133,25 +134,30 @@ beforeAll(async () => {
     .values({ host: HOST, allowPrivateRanges: true, allowPlaintextHttp: true, note: "b4t wire test" })
     .onConflictDoNothing()
     .returning({ id: egressAllowHosts.id });
-  createdEgressRow = eg?.id ?? null;
+  createdEgressRow = eg?.id;
   await db.update(orgSettings).set({ tracingOtlpEndpoint: endpoint }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
 }, 120_000);
 
 afterAll(async () => {
-  await db.update(orgSettings).set({ tracingOtlpEndpoint: priorEndpoint }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
-  if (createdEgressRow) await db.delete(egressAllowHosts).where(eq(egressAllowHosts.id, createdEgressRow));
-  await restorePosture?.();
-  await restoreIdentity?.();
-  if (admin) await db.delete(traces).where(inArray(traces.userId, [admin.id]));
-  if (agentId) await db.delete(agents).where(eq(agents.id, agentId));
-  if (admin) await db.delete(users).where(eq(users.id, admin.id));
-  await new Promise<void>((resolve) => {
-    collector.closeAllConnections();
-    collector.close(() => resolve());
-  });
-  app.server.closeAllConnections();
-  await restoreGates?.();
-  await app.close();
+  // M-068: through the shared helper, by the id the insert returned (none if the row already existed)
+  const egress = await removeEgressAllowEntry(app, AUTH, { id: createdEgressRow });
+  try {
+    await db.update(orgSettings).set({ tracingOtlpEndpoint: priorEndpoint }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    await restorePosture?.();
+    await restoreIdentity?.();
+    if (admin) await db.delete(traces).where(inArray(traces.userId, [admin.id]));
+    if (agentId) await db.delete(agents).where(eq(agents.id, agentId));
+    if (admin) await db.delete(users).where(eq(users.id, admin.id));
+    await new Promise<void>((resolve) => {
+      collector.closeAllConnections();
+      collector.close(() => resolve());
+    });
+    app.server.closeAllConnections();
+    await restoreGates?.();
+    await app.close();
+  } finally {
+    egress.assertRemoved();
+  }
 });
 
 type WireBody = {

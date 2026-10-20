@@ -1,0 +1,97 @@
+import { describe, expect, it } from "vitest";
+import {
+  couldNotRead,
+  describeGap,
+  describeSchedule,
+  describeScope,
+  editablePublicConfig,
+  formatKeyValues,
+  parseIncludeList,
+  parseKeyValueLines,
+  scopeWidens,
+  sightingLines,
+} from "./discoverySourcesModel";
+
+describe("discovery sources model (ADR-0195 SD0)", () => {
+  it("parses key=value lines and refuses malformed ones", () => {
+    expect(parseKeyValueLines("org = acme\n\nhost=git.example.test")).toEqual({ value: { org: "acme", host: "git.example.test" } });
+    expect(parseKeyValueLines("org")).toEqual({ error: '"org" is not key=value' });
+    expect(parseKeyValueLines("1org=x")).toHaveProperty("error");
+    expect(parseKeyValueLines("org=a\norg=b")).toEqual({ error: "org is given twice" });
+    expect(parseKeyValueLines("org=")).toEqual({ error: "org has no value" });
+    expect(formatKeyValues({ org: "acme", host: "h" })).toBe("org=acme\nhost=h");
+  });
+
+  it("parses the include list, de-duplicated case-insensitively", () => {
+    expect(parseIncludeList("a, b\nA\n\n c ")).toEqual(["a", "b", "c"]);
+  });
+
+  it("widening mirrors the gateway rule: org-level and new names widen, removals narrow", () => {
+    const list = { orgLevel: false, include: ["a", "b"] };
+    expect(scopeWidens(list, { orgLevel: false, include: ["a"] })).toBe(false);
+    expect(scopeWidens(list, { orgLevel: false, include: ["a", "c"] })).toBe(true);
+    expect(scopeWidens(list, { orgLevel: true, include: [] })).toBe(true);
+    expect(scopeWidens({ orgLevel: true, include: [] }, list)).toBe(false);
+    expect(scopeWidens(list, { orgLevel: false, include: ["B", "a"] })).toBe(false);
+  });
+
+  it("leaves server-generated keys out of a replacement's pre-fill", () => {
+    expect(editablePublicConfig({ roleArn: "arn:aws:iam::000000000000:role/r", externalId: "regulait-x" })).toEqual({ roleArn: "arn:aws:iam::000000000000:role/r" });
+  });
+
+  it("says what could not be read, or nothing when everything was", () => {
+    expect(couldNotRead([{ read: "repos", status: "read" }])).toBeNull();
+    expect(couldNotRead([{ read: "trail", status: "not_enabled" }, { read: "logs", status: "denied", detail: "403" }])).toBe(
+      "could not read: trail (not enabled); logs (denied: 403)",
+    );
+  });
+
+  it("renders sightings: location, names, actor; skips bare ones", () => {
+    const psn = `psn:${"ab".repeat(12)}`;
+    expect(sightingLines([{ source: "egress_log" }])).toEqual([]);
+    expect(
+      sightingLines([{ source: "repo_scan", location: { path: ".mcp.json", commit: "0123456789abcdef" }, names: ["npx"], actor: psn }]),
+    ).toEqual([{ text: ".mcp.json @01234567 · names: npx", actor: psn }]);
+  });
+
+  it("renders ADR-0195 A6 presence signature ids, never an env-variable name", () => {
+    expect(sightingLines([{ source: "repo_scan", location: { path: ".env.example" }, presence: ["env.openai.api-key"] }])).toEqual([
+      { text: ".env.example · presence signatures: env.openai.api-key", actor: null },
+    ]);
+    expect(sightingLines([{ source: "endpoint_osquery", presence: ["cli.openai.codex"] }])).toEqual([
+      { text: "presence signatures: cli.openai.codex", actor: null },
+    ]);
+  });
+
+  it("describes scope and schedule", () => {
+    expect(describeScope({ orgLevel: true, include: [] })).toMatch(/organisation-level/);
+    expect(describeScope({ orgLevel: false, include: ["a", "b", "c", "d", "e"] })).toBe("a, b, c and 2 more");
+    expect(describeSchedule(86400)).toBe("daily");
+    expect(describeSchedule(3600)).toBe("hourly");
+    expect(describeSchedule(7200)).toBe("every 2 hours");
+    expect(describeSchedule(172800)).toBe("every 2 days");
+  });
+});
+
+describe("catalogue gaps and evidence kinds in words (the codes stay available)", () => {
+  it("names an IDE extension id by its publisher and name, with its kind, and keeps the raw code", () => {
+    const gap = { kind: "ide_extension", value: "github.copilot" };
+    expect(describeGap(gap)).toEqual({
+      kind: "IDE extension",
+      name: "GitHub Copilot",
+      code: "ide_extension:github.copilot",
+    });
+  });
+  it("names a presence signature id by its provider and binary", () => {
+    expect(describeGap({ kind: "desktop_app", value: "cli.anthropic.claude" })).toEqual({
+      kind: "Desktop app",
+      name: "Anthropic Claude",
+      code: "desktop_app:cli.anthropic.claude",
+    });
+  });
+  it("shows an identifier the catalogue cannot name as itself", () => {
+    const d = describeGap({ kind: "browser_extension", value: "abcdefghijklmnop" });
+    expect(d.name).toBe("abcdefghijklmnop");
+    expect(d.kind).toBe("Browser extension");
+  });
+});

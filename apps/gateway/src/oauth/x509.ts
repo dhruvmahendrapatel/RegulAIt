@@ -22,9 +22,10 @@
  * and checks its signatures and the validity of every certificate on it at
  * `now`, against LOCAL trust anchors only — the mTLS CA set
  * (`REGULAIT_MTLS_CA_BUNDLE`) or the SPIFFE bundle of the ID's trust domain
- * (`REGULAIT_SPIFFE_TRUST_BUNDLES`). Both default to EMPTY: with no anchors
- * every chain is refused (secure by default, ADR-0180; S9 moves bundles into
- * managed, audited storage). Nothing is fetched: no AIA, no CRL, no OCSP.
+ * (ADR-0188 S9: the `spiffe_trust_bundles` table, uploaded through the audited
+ * admin route in `spiffe-bundles.ts`; the S5 environment variable is ignored).
+ * Both default to EMPTY: with no anchors every chain is refused (secure by
+ * default, ADR-0180). Nothing is fetched: no AIA, no CRL, no OCSP.
  * The engine does NOT enforce the issuer rules (S5 security review, ADR-0188
  * amendments item 3), and it takes the LAST certificate of `certs` as the
  * end entity, so OUR code passes the leaf last, requires the built path to
@@ -48,7 +49,7 @@ import { createHash, X509Certificate } from "node:crypto";
 import type { TLSSocket } from "node:tls";
 import * as asn1js from "asn1js";
 import { BitString } from "asn1js";
-import { Certificate, CertificateChainValidationEngine, GeneralNames } from "pkijs";
+import { AltName, AuthorityKeyIdentifier, BasicConstraints, Certificate, CertificateChainValidationEngine, ExtKeyUsage, GeneralNames } from "pkijs";
 import { constantTimeEqual, SPIFFE_TRUST_DOMAIN_PATTERN } from "@regulait/shared";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { resolveTrustProxy, type TrustProxySetting } from "../trusted-proxy.js";
@@ -59,7 +60,6 @@ export const CLIENT_CERT_PROXY_SECRET_ENV = "REGULAIT_CLIENT_CERT_PROXY_SECRET";
 /** the header a proxy proves itself with when it cannot use mTLS to the gateway */
 export const CLIENT_CERT_PROXY_SECRET_HEADER = "x-regulait-proxy-auth";
 export const MTLS_CA_BUNDLE_ENV = "REGULAIT_MTLS_CA_BUNDLE";
-export const SPIFFE_TRUST_BUNDLES_ENV = "REGULAIT_SPIFFE_TRUST_BUNDLES";
 
 const MAX_CERT_BYTES = 16 * 1024;
 const MAX_BUNDLE_CERTS = 64;
@@ -70,8 +70,28 @@ const MAX_BUNDLE_CERTS = 64;
 
 const PEM_END = "-----END CERTIFICATE-----";
 
-/** every certificate of a PEM bundle, as DER. Splitting on the END marker is a plain string scan. */
+/** #389 review L4: a PEM block that is not a certificate (a key, a CRL, a CSR, …) in what must be certificates only */
+export class PemNotCertificateError extends Error {
+  constructor(readonly label: string) {
+    super(`PEM bundle: a "${label}" block where only CERTIFICATE blocks are allowed`);
+    this.name = "PemNotCertificateError";
+  }
+}
+
+const PEM_BEGIN_PREFIX = "-----BEGIN ";
+const PEM_BEGIN_CERT = "-----BEGIN CERTIFICATE-----";
+
+/**
+ * every certificate of a PEM bundle, as DER. Splitting on the END marker is a plain string scan. Any `-----BEGIN`
+ * block other than CERTIFICATE is refused (`PemNotCertificateError`), never silently skipped (#389 review L4).
+ */
 export function pemBundleToDer(pem: string): Buffer[] {
+  for (let at = pem.indexOf(PEM_BEGIN_PREFIX); at !== -1; at = pem.indexOf(PEM_BEGIN_PREFIX, at + PEM_BEGIN_PREFIX.length)) {
+    if (!pem.startsWith(PEM_BEGIN_CERT, at)) {
+      const end = pem.indexOf("-----", at + PEM_BEGIN_PREFIX.length);
+      throw new PemNotCertificateError(end === -1 ? "unterminated" : pem.slice(at + PEM_BEGIN_PREFIX.length, Math.min(end, at + PEM_BEGIN_PREFIX.length + 40)));
+    }
+  }
   const out: Buffer[] = [];
   for (const piece of pem.split(PEM_END)) {
     if (!piece.includes("-----BEGIN CERTIFICATE-----")) continue;
@@ -96,28 +116,20 @@ function parsePkijs(der: Uint8Array): Certificate {
 export interface TrustConfig {
   /** anchors (and intermediates) for plain `tls_client_auth` */
   mtlsCa: Buffer[];
-  /** SPIFFE trust domain → its bundle (anchors and intermediates) */
-  spiffe: Map<string, Buffer[]>;
+  /** SPIFFE trust domain → its ACTIVE bundle's authorities (ADR-0188 S9: `spiffe_trust_bundles`) */
+  spiffe: Map<string, { bundleId: string; authorities: Buffer[] }>;
 }
 
 /**
- * Read the anchors from the environment, at the point of use (like the deploy
+ * The mTLS CA set from the environment, at the point of use (like the deploy
  * mode). A bundle that is set but unparsable throws: fail closed, the caller
- * refuses the request.
+ * refuses the request. SPIFFE bundles are NOT read from the environment any
+ * more (ADR-0188 S9): `loadSpiffeTrustAnchors` in `spiffe-bundles.ts` reads
+ * the active rows of `spiffe_trust_bundles`.
  */
-export function loadTrustConfig(env: NodeJS.ProcessEnv = process.env): TrustConfig {
+export function loadMtlsCaBundle(env: NodeJS.ProcessEnv = process.env): Buffer[] {
   const mtls = env[MTLS_CA_BUNDLE_ENV];
-  const spiffeRaw = env[SPIFFE_TRUST_BUNDLES_ENV];
-  const spiffe = new Map<string, Buffer[]>();
-  if (spiffeRaw && spiffeRaw.trim() !== "") {
-    const parsed: unknown = JSON.parse(spiffeRaw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`${SPIFFE_TRUST_BUNDLES_ENV}: a JSON object of trust domain → PEM`);
-    for (const [domain, pem] of Object.entries(parsed as Record<string, unknown>)) {
-      if (!SPIFFE_TRUST_DOMAIN_PATTERN.test(domain) || typeof pem !== "string") throw new Error(`${SPIFFE_TRUST_BUNDLES_ENV}: bad entry`);
-      spiffe.set(domain, pemBundleToDer(pem));
-    }
-  }
-  return { mtlsCa: mtls && mtls.trim() !== "" ? pemBundleToDer(mtls) : [], spiffe };
+  return mtls && mtls.trim() !== "" ? pemBundleToDer(mtls) : [];
 }
 
 // ---------------------------------------------------------------------------
@@ -129,6 +141,7 @@ export type CertificateFailure =
   | "certificate_no_anchor"
   | "certificate_path"
   | "certificate_issuer"
+  | "certificate_extension"
   | "certificate_time"
   | "certificate_leaf_ca"
   | "certificate_key_usage"
@@ -164,6 +177,19 @@ export function certificateUriSans(der: Uint8Array): string[] {
   return uriSansOf(parsePkijs(der));
 }
 
+/**
+ * ADR-0188 S9 (bundle upload): may this certificate be a trust anchor? It must
+ * be a CA (`basicConstraints.cA`) carrying `keyCertSign`: the rule
+ * `issuerRulesFailure` applies to every anchor at validation, checked at upload
+ * too so a bundle that could never validate anything is refused. Throws on bad DER.
+ */
+export function certificateIsAuthority(der: Uint8Array): boolean {
+  const cert = parsePkijs(der);
+  const bc = cert.extensions?.find((e) => e.extnID === "2.5.29.19")?.parsedValue as { cA?: boolean } | undefined;
+  const ku = keyUsageByte(cert);
+  return bc?.cA === true && ku !== null && (ku & KU_KEY_CERT_SIGN) !== 0;
+}
+
 const sameCertificate = (a: Certificate, b: Certificate) => Buffer.from(a.tbsView).equals(Buffer.from(b.tbsView));
 
 /**
@@ -188,6 +214,64 @@ export function issuerRulesFailure(path: readonly Certificate[]): string | null 
     }
   }
   return null;
+}
+
+/**
+ * The critical extensions a client certificate (the leaf) may carry: the ones this validator, or the TLS profile it
+ * stands on, processes. Anything else marked critical is refused (RFC 5280 §4.2), and so is an allowed one that pkijs
+ * could not parse.
+ */
+export const LEAF_CRITICAL_EXTENSIONS_ALLOWED: ReadonlySet<string> = new Set([
+  "2.5.29.19", // basicConstraints
+  "2.5.29.15", // keyUsage
+  "2.5.29.37", // extKeyUsage
+  "2.5.29.17", // subjectAltName
+  "2.5.29.14", // subjectKeyIdentifier
+  "2.5.29.35", // authorityKeyIdentifier
+]);
+
+/**
+ * Does this allowed extension's value parse as its own ASN.1 type, consuming every byte? pkijs's lazy `parsedValue`
+ * swallows a schema mismatch and hands back an empty default object, so it cannot answer this; the type constructors
+ * called directly with `{ schema }` throw on a mismatch.
+ */
+function allowedExtensionParses(oid: string, value: Uint8Array): boolean {
+  const asn = asn1js.fromBER(value);
+  if (asn.offset === -1 || asn.offset !== value.byteLength) return false;
+  try {
+    switch (oid) {
+      case "2.5.29.19":
+        new BasicConstraints({ schema: asn.result });
+        return true;
+      case "2.5.29.37":
+        new ExtKeyUsage({ schema: asn.result });
+        return true;
+      case "2.5.29.17":
+        new AltName({ schema: asn.result });
+        return true;
+      case "2.5.29.35":
+        new AuthorityKeyIdentifier({ schema: asn.result });
+        return true;
+      case "2.5.29.15":
+        return asn.result instanceof BitString;
+      case "2.5.29.14":
+        return asn.result instanceof asn1js.OctetString;
+      default:
+        return false;
+    }
+  } catch {
+    return false;
+  }
+}
+
+/** true when the leaf carries a critical extension outside the allow-list, or an allowed one that does not parse */
+export function leafCriticalExtensionFailure(leaf: Certificate): boolean {
+  for (const e of leaf.extensions ?? []) {
+    if (e.critical !== true) continue;
+    if (!LEAF_CRITICAL_EXTENSIONS_ALLOWED.has(e.extnID)) return true;
+    if (!allowedExtensionParses(e.extnID, e.extnValue.valueBlock.valueHexView)) return true;
+  }
+  return false;
 }
 
 /** a SPIFFE ID, by the X.509-SVID rules, parsed with `URL` */
@@ -238,6 +322,9 @@ export async function validateClientCertificate(
   // the path the engine judged must be THIS leaf's, and every issuer on it must be a CA (pkijs does not enforce it)
   if (!sameCertificate(path[0]!, leaf)) return { ok: false, code: "certificate_path" };
   if (issuerRulesFailure(path) !== null) return { ok: false, code: "certificate_issuer" };
+  // #389 review M2: pkijs does not judge the end entity's critical extensions (it skips path index 0). RFC 5280
+  // §4.2: a certificate with a critical extension the relying party does not process must be rejected
+  if (leafCriticalExtensionFailure(leaf)) return { ok: false, code: "certificate_extension" };
   if (leaf.notBefore.value.getTime() > opts.now.getTime() || leaf.notAfter.value.getTime() < opts.now.getTime()) return { ok: false, code: "certificate_time" };
   const basic = leaf.extensions?.find((e) => e.extnID === "2.5.29.19")?.parsedValue as { cA?: boolean } | undefined;
   if (basic?.cA) return { ok: false, code: "certificate_leaf_ca" };

@@ -44,6 +44,8 @@ async function mockApi(page: Page, opts: { noWorkflowMatch?: boolean; failLinkOn
   const me = { userId: "u-admin", isAdmin: true, user: { id: "u-admin", email: "avery@example.test", displayName: "Avery Admin" } };
   let libFrozen = true;
   let linkFailures = opts.failLinkOnce ? 1 : 0;
+  // ADR-0195 A4: the server, not the browser, remembers a workflow started for the finding but never linked
+  let startedNotLinked: string | null = null;
   await page.route("**/*", async (route) => {
     const req = route.request();
     const url = new URL(req.url());
@@ -170,21 +172,36 @@ async function mockApi(page: Page, opts: { noWorkflowMatch?: boolean; failLinkOn
           needsInput: ["change.environment"],
         },
         assignment: opts.noWorkflowMatch
-          ? { changeType: "shadow-ai-remediation", ruleConfigured: false, detail: "an admin must assign a workflow template to it" }
-          : { changeType: "shadow-ai-remediation", ruleConfigured: true },
+          ? {
+              changeType: "shadow-ai-remediation",
+              ruleConfigured: false,
+              defaultTemplate: { name: "shadow-ai-remediation", state: "retired" },
+              detail: "an admin must assign a workflow template to it",
+            }
+          : { changeType: "shadow-ai-remediation", ruleConfigured: true, defaultTemplate: { name: "shadow-ai-remediation", state: "active" } },
+        pendingLink: startedNotLinked ? { instanceId: startedNotLinked, startedAt: ISO } : null,
         note: "This module does not start workflows.",
       });
     }
     if (p === "/v1/workflows/instances" && method === "POST") {
       if (opts.noWorkflowMatch) return json(route, { error: "no_workflow_matches_change" }, 422);
+      startedNotLinked = INSTANCE;
       return json(route, { id: INSTANCE, status: "running" }, 201);
     }
-    if (p === "/v1/workflows/instances") return json(route, { instances: [{ id: INSTANCE, status: "running", createdAt: ISO, change: { description: "Existing remediation" } }] });
+    if (p === "/v1/workflows/instances") return json(route, {
+      // the link list offers only live remediation workflows started from this finding's plan
+      instances: [
+        { id: INSTANCE, status: "running", createdAt: ISO, change: { changeType: "shadow-ai-remediation", description: `Existing remediation — shadow-AI finding ${FINDING}` } },
+        { id: "99999999-9999-4999-8999-9999999999f1", status: "running", createdAt: ISO, change: { changeType: "feature", description: `Unrelated — shadow-AI finding ${FINDING}` } },
+        { id: "99999999-9999-4999-8999-9999999999f2", status: "aborted", createdAt: ISO, change: { changeType: "shadow-ai-remediation", description: `Abandoned — shadow-AI finding ${FINDING}` } },
+      ],
+    });
     if (p === `/v1/shadow-ai/findings/${FINDING}/remediate` && method === "POST") {
       if (linkFailures > 0) {
         linkFailures -= 1;
         return json(route, { error: "internal" }, 500);
       }
+      startedNotLinked = null;
       return json(route, { id: FINDING, disposition: "confirmed" });
     }
     // --- red team
@@ -343,15 +360,15 @@ test.describe("U2: governance records", () => {
   test("a shadow-AI plan starts a workflow through the one route and links it, after confirming", async ({ page }) => {
     const calls = await mockApi(page);
     await page.goto("/ui/admin/shadow-ai");
-    await page.getByRole("button", { name: "Remediation plan for acme/billing" }).click();
+    await page.getByRole("button", { name: "Plan remediation for acme/billing" }).click();
     const plan = page.getByTestId("shadow-remediation");
     await expect(plan).toContainText("no governed replacement is registered for this provider");
-    await expect(plan.getByLabel("Environment")).toHaveValue("");
+    await expect(plan.getByLabel("Environment", { exact: true })).toHaveValue("");
     // an assigned workflow: no "admin must assign" note
     await expect(plan.getByTestId("shadow-no-assignment-rule")).toHaveCount(0);
     await plan.getByRole("button", { name: "Start remediation workflow…" }).click();
     await expect(page.getByRole("dialog", { name: "Start a remediation workflow?" })).toHaveCount(0);
-    await plan.getByLabel("Environment").fill("production");
+    await plan.getByLabel("Environment", { exact: true }).fill("production");
     await plan.getByRole("button", { name: "Start remediation workflow…" }).click();
     const dialog = page.getByRole("dialog", { name: "Start a remediation workflow?" });
     await expect(dialog).toContainText("its disposition becomes confirmed");
@@ -375,9 +392,9 @@ test.describe("U2: governance records", () => {
   test("with no assignment rule, the shadow-AI start says so and links nothing; an existing workflow can be linked", async ({ page }) => {
     const calls = await mockApi(page, { noWorkflowMatch: true });
     await page.goto("/ui/admin/shadow-ai");
-    await page.getByRole("button", { name: "Remediation plan for acme/billing" }).click();
+    await page.getByRole("button", { name: "Plan remediation for acme/billing" }).click();
     const plan = page.getByTestId("shadow-remediation");
-    await plan.getByLabel("Environment").fill("staging");
+    await plan.getByLabel("Environment", { exact: true }).fill("staging");
     await plan.getByRole("button", { name: "Start remediation workflow…" }).click();
     await page.getByRole("dialog", { name: "Start a remediation workflow?" }).getByRole("button", { name: "Start and link" }).click();
     await expect(plan.getByRole("alert")).toContainText("No workflow assignment rule covers the change type 'shadow-ai-remediation'");
@@ -385,6 +402,8 @@ test.describe("U2: governance records", () => {
     await expect(plan.getByTestId("shadow-no-assignment-rule")).toContainText("An admin must add an assignment rule");
     expect(posted(calls, "POST", `/v1/shadow-ai/findings/${FINDING}/remediate`)).toHaveLength(0);
 
+    // a workflow of another change type, or an aborted one, is never offered
+    await expect(plan.getByLabel("Or link an existing workflow").locator("option")).toHaveCount(2);
     await plan.getByLabel("Or link an existing workflow").selectOption(INSTANCE);
     await plan.getByRole("button", { name: "Link workflow…" }).click();
     await page.getByRole("dialog", { name: "Link this workflow?" }).getByRole("button", { name: "Link" }).click();
@@ -394,9 +413,9 @@ test.describe("U2: governance records", () => {
   test("a workflow that started but failed to link is retried as a link only, never a second start", async ({ page }) => {
     const calls = await mockApi(page, { failLinkOnce: true });
     await page.goto("/ui/admin/shadow-ai");
-    await page.getByRole("button", { name: "Remediation plan for acme/billing" }).click();
+    await page.getByRole("button", { name: "Plan remediation for acme/billing" }).click();
     const plan = page.getByTestId("shadow-remediation");
-    await plan.getByLabel("Environment").fill("production");
+    await plan.getByLabel("Environment", { exact: true }).fill("production");
     await plan.getByRole("button", { name: "Start remediation workflow…" }).click();
     await page.getByRole("dialog", { name: "Start a remediation workflow?" }).getByRole("button", { name: "Start and link" }).click();
     const unlinked = plan.getByTestId("shadow-started-unlinked");
@@ -405,6 +424,35 @@ test.describe("U2: governance records", () => {
     await unlinked.getByRole("button", { name: "Retry linking this workflow" }).click();
     await expect(unlinked).toHaveCount(0);
     await expect(plan.getByRole("status")).toContainText(INSTANCE);
+    expect(posted(calls, "POST", "/v1/workflows/instances")).toHaveLength(1);
+    expect(posted(calls, "POST", `/v1/shadow-ai/findings/${FINDING}/remediate`)).toEqual([{ instanceId: INSTANCE }, { instanceId: INSTANCE }]);
+  });
+
+  test("a started-but-unlinked workflow survives a reload: only its link can be retried", async ({ page }) => {
+    const calls = await mockApi(page, { failLinkOnce: true });
+    await page.goto("/ui/admin/shadow-ai");
+    await page.getByRole("button", { name: "Plan remediation for acme/billing" }).click();
+    let plan = page.getByTestId("shadow-remediation");
+    await plan.getByLabel("Environment", { exact: true }).fill("production");
+    await plan.getByRole("button", { name: "Start remediation workflow…" }).click();
+    await page.getByRole("dialog", { name: "Start a remediation workflow?" }).getByRole("button", { name: "Start and link" }).click();
+    await expect(plan.getByTestId("shadow-started-unlinked")).toBeVisible();
+    // while it is unlinked, linking a DIFFERENT workflow is not offered either
+    await expect(plan.getByRole("button", { name: "Link workflow…" })).toBeDisabled();
+    await expect(plan.getByLabel("Or link an existing workflow")).toBeDisabled();
+
+    await page.reload();
+    await page.getByRole("button", { name: "Plan remediation for acme/billing" }).click();
+    plan = page.getByTestId("shadow-remediation");
+    const unlinked = plan.getByTestId("shadow-started-unlinked");
+    await expect(unlinked).toContainText(`Workflow ${INSTANCE} was started but is not linked`);
+    await expect(plan.getByRole("button", { name: "Start remediation workflow…" })).toBeDisabled();
+    await expect(plan.getByRole("button", { name: "Link workflow…" })).toBeDisabled();
+    await expect(plan.getByLabel("Or link an existing workflow")).toBeDisabled();
+    await expectAxeClean(page, "shadow-AI unlinked workflow after reload", "[data-testid='shadow-remediation']");
+    await unlinked.getByRole("button", { name: "Retry linking this workflow" }).click();
+    await expect(unlinked).toHaveCount(0);
+    await expect(plan.getByRole("button", { name: "Link workflow…" })).toBeEnabled();
     expect(posted(calls, "POST", "/v1/workflows/instances")).toHaveLength(1);
     expect(posted(calls, "POST", `/v1/shadow-ai/findings/${FINDING}/remediate`)).toEqual([{ instanceId: INSTANCE }, { instanceId: INSTANCE }]);
   });

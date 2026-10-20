@@ -34,8 +34,9 @@
 
 import { BlockList, isIP, SocketAddress } from "node:net";
 import { lookup as dnsLookup } from "node:dns/promises";
-import { pinnedFetch } from "./pinned-fetch.js";
+import { pinnedFetch, type PinnedTls } from "./pinned-fetch.js";
 import { timeouts } from "./timeouts.js";
+import { errMessage } from "./err-serializer.js";
 
 // ---------------------------------------------------------------------------
 // types
@@ -488,7 +489,7 @@ export async function checkEgress(
       return {
         ok: false,
         code: "dns_resolution_failed",
-        reason: `could not resolve '${host}': ${err instanceof Error ? err.message : String(err)}`,
+        reason: `could not resolve '${host}': ${errMessage(err)}`,
         host,
       };
     }
@@ -565,7 +566,7 @@ async function checkPrivateLanAware(
       return {
         ok: false,
         code: "dns_resolution_failed",
-        reason: `could not resolve '${host}': ${err instanceof Error ? err.message : String(err)}`,
+        reason: `could not resolve '${host}': ${errMessage(err)}`,
         host,
       };
     }
@@ -721,6 +722,8 @@ export interface GuardedFetchOptions extends EgressCheckOptions {
    * later reader must not have to rediscover.
    */
   fetchImpl?: typeof fetch;
+  /** ADR-0188 S9 follow-up: the caller's own server authentication for https (see `PinnedTarget.tls`); absent = Web PKI */
+  tls?: PinnedTls;
 }
 
 /**
@@ -801,6 +804,7 @@ export function createGuardedFetch(opts: GuardedFetchOptions): typeof fetch {
           host: decision.host,
           port: decision.port,
           addresses: decision.addresses,
+          ...(opts.tls ? { tls: opts.tls } : {}),
         },
         { ...init, headers, signal, redirect: "manual" },
       );

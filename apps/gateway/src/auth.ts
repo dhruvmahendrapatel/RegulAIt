@@ -125,7 +125,7 @@ export interface AuthContext {
    * to a real user (`userId` is the OWNER, whose entitlements are its ceiling)
    * but is NEVER admin, whatever the owner is, and reaches only the routes in
    * `VIRTUAL_KEY_ALLOWED_ROUTES`. */
-  via: "bootstrap" | "api-key" | "session" | "virtual-key" | "engine-runner" | "engine-enrollment" | "workload" | "pdp";
+  via: "bootstrap" | "api-key" | "session" | "virtual-key" | "engine-runner" | "engine-enrollment" | "workload" | "pdp" | "endpoint-agent";
   /** AER-027: which allow-list this virtual key is bound to. 'dispatch' is
    *  ADR-0066's model surfaces; ADR-0187 'engine' is the compat model routes,
    *  pinned to one project. 'pdp' is retired (ADR-0188 S7, migration 0195: no
@@ -137,7 +137,9 @@ export interface AuthContext {
    * (`via === "engine-enrollment"`) a sidecar runner presented, and its engine.
    * Neither is a user: `userId` is null and `isAdmin` false, and each reaches
    * only its own route allow-list (`ENGINE_RUNNER_ROUTES`). ADR-0188 S7: a PDP
-   * client (`via === "pdp"`) likewise reaches `POST /v1/authz/check` only. */
+   * client (`via === "pdp"`) likewise reaches `POST /v1/authz/check` only.
+   * ADR-0195 SD4b: an endpoint agent (`via === "endpoint-agent"`) reaches only
+   * `ENDPOINT_AGENT_TOKEN_ROUTES`. */
   engineRunnerId?: string;
   engineEnrollmentTokenId?: string;
   /** PR #205 review [54]: the enrolment token was already spent (it can only replay its registration) */
@@ -862,6 +864,7 @@ export {
   verifyTotp,
 } from "./totp.js";
 import { generateTotpSecret, otpauthUri, verifyTotp } from "./totp.js";
+import { errMessage } from "./err-serializer.js";
 
 // --- audit helper -----------------------------------------------------------
 
@@ -2275,7 +2278,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     } catch (err) {
       await auditAuth(db, null, row.userId, "oidc-reauth-failed", "deny",
         `OIDC step-up token exchange/validation failed for provider '${provider.name}'`,
-        { phase: "oidc-reauth-callback", provider: provider.name, stepUpId: row.stepUpId, error: err instanceof Error ? err.message : String(err) });
+        { phase: "oidc-reauth-callback", provider: provider.name, stepUpId: row.stepUpId, error: errMessage(err) });
       return reply.status(401).send({ error: "oidc_validation_failed" });
     }
     const anchor: FederatedAnchor = {
@@ -2367,7 +2370,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     } catch (err) {
       await auditAuth(db, null, null, "oidc-login-failed", "deny",
         `OIDC token exchange/validation failed for provider '${provider.name}'`,
-        { phase: "oidc-callback", provider: provider.name, error: err instanceof Error ? err.message : String(err) });
+        { phase: "oidc-callback", provider: provider.name, error: errMessage(err) });
       return reply.status(401).send({ error: "oidc_validation_failed" });
     }
 

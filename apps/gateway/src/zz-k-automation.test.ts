@@ -37,8 +37,9 @@ import crypto from "node:crypto";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 import { Webhook } from "standardwebhooks";
 import {
   and,
@@ -106,7 +107,7 @@ const createdSubscriptionIds: string[] = [];
 const createdQueueIds: string[] = [];
 const createdDatasetIds: string[] = [];
 const createdEvaluationTraceIds: string[] = [];
-let allowId: string | null = null;
+let allowId: string | undefined;
 let receiver: http.Server | null = null;
 let priorRetentionDays: number | null = null;
 let priorProfileRetention: Array<{ id: string; d: number }> = [];
@@ -241,24 +242,30 @@ afterAll(async () => {
   if (createdQueueIds.length) await db.delete(annotationQueues).where(inArray(annotationQueues.id, createdQueueIds));
   if (createdDatasetIds.length) await db.delete(evalDatasets).where(inArray(evalDatasets.id, createdDatasetIds));
   if (createdEvaluationTraceIds.length) await db.delete(traceEvaluations).where(inArray(traceEvaluations.traceId, createdEvaluationTraceIds));
-  if (allowId) await db.delete(egressAllowHosts).where(eq(egressAllowHosts.id, allowId));
-  if (receiver) {
-    receiver.closeAllConnections();
-    await new Promise<void>((r) => receiver!.close(() => r()));
+  // M-068: removed through the audited route while the app is up (after the drain, so no delivery is cut short);
+  // asserted only after the rest of the teardown has run
+  const loopback = await removeEgressAllowEntry(app, AUTH, { id: allowId });
+  try {
+    if (receiver) {
+      receiver.closeAllConnections();
+      await new Promise<void>((r) => receiver!.close(() => r()));
+    }
+    await db.update(orgSettings).set({ defaultAuditRetentionDays: priorRetentionDays }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    for (const p of priorProfileRetention) {
+      await db.update(complianceProfiles).set({ auditRetentionDays: p.d }).where(eq(complianceProfiles.id, p.id));
+    }
+    if (createdRuleIds.length) await db.delete(automationRules).where(inArray(automationRules.id, createdRuleIds));
+    if (createdSubscriptionIds.length) await db.delete(webhookSubscriptions).where(inArray(webhookSubscriptions.id, createdSubscriptionIds));
+    if (createdUserIds.length) {
+      await db.delete(traces).where(inArray(traces.userId, createdUserIds));
+      await db.delete(automationRules).where(inArray(automationRules.authorUserId, createdUserIds));
+      await db.delete(users).where(inArray(users.id, createdUserIds));
+    }
+    app.server.closeAllConnections();
+    await app.close();
+  } finally {
+    loopback.assertRemoved();
   }
-  await db.update(orgSettings).set({ defaultAuditRetentionDays: priorRetentionDays }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
-  for (const p of priorProfileRetention) {
-    await db.update(complianceProfiles).set({ auditRetentionDays: p.d }).where(eq(complianceProfiles.id, p.id));
-  }
-  if (createdRuleIds.length) await db.delete(automationRules).where(inArray(automationRules.id, createdRuleIds));
-  if (createdSubscriptionIds.length) await db.delete(webhookSubscriptions).where(inArray(webhookSubscriptions.id, createdSubscriptionIds));
-  if (createdUserIds.length) {
-    await db.delete(traces).where(inArray(traces.userId, createdUserIds));
-    await db.delete(automationRules).where(inArray(automationRules.authorUserId, createdUserIds));
-    await db.delete(users).where(inArray(users.id, createdUserIds));
-  }
-  app.server.closeAllConnections();
-  await app.close();
 });
 
 const queueRule = (value: string, extra: Record<string, unknown> = {}) => ({
@@ -534,6 +541,26 @@ describe("A8: retention holds", () => {
     });
     await runAuditPruneOnce(db, admin.id, false);
     expect(await left()).toEqual([]);
+  });
+
+  it("a hold expiring seconds from now (by the database clock) survives a prune on a gateway whose clock runs fast", async () => {
+    const old = new Date(Date.now() - (floorDays + 30) * DAY);
+    const held = await makeTrace("i", old, { startedAt: old });
+    await db.insert(traceRetentionHolds).values({ traceId: held, holdUntil: sql`now() + interval '30 seconds'`, createdByUserId: admin.id });
+    // the process clock an hour ahead: a hold compared against it would read expired and its trace be deleted
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.now() + 3_600_000);
+      await runAuditPruneOnce(db, admin.id, false);
+    } finally {
+      vi.useRealTimers();
+    }
+    const [still] = await db.select({ id: traces.id }).from(traces).where(eq(traces.id, held));
+    expect(still?.id).toBe(held);
+    // positive control: once the hold has expired by the database clock, the next prune deletes the trace
+    await db.update(traceRetentionHolds).set({ holdUntil: sql`now() - interval '1 second'` }).where(eq(traceRetentionHolds.traceId, held));
+    await runAuditPruneOnce(db, admin.id, false);
+    expect(await db.select({ id: traces.id }).from(traces).where(eq(traces.id, held))).toEqual([]);
   });
 });
 

@@ -67,12 +67,9 @@ async function mockApi(page: Page, routes: Array<[string, RegExp, Handler]>): Pr
   return calls;
 }
 /**
- * Axe in light and dark on the MCP servers tab, excluding the server table's
- * Proxy id chips: a PRE-EXISTING target-size finding on that table (the
- * IdChip is 20px tall inside a clickable row), not part of this batch (a logged
- * follow-up). The exclusion names the chip itself (`data-id-chip`), not a column
- * position: ADR-0188 S8 added a column before it and a positional selector
- * silently moved onto another cell.
+ * Axe in light and dark on the MCP servers tab, the server table's Proxy id
+ * chips included: the kit IdChip is a 24px target (WCAG 2.2 SC 2.5.8), so the
+ * earlier target-size exclusion for it inside a clickable row is gone.
  */
 async function axeMcpServers(page: Page, label: string) {
   for (const theme of ["light", "dark"] as const) {
@@ -81,7 +78,6 @@ async function axeMcpServers(page: Page, label: string) {
     }, theme);
     const results = await new AxeBuilder({ page })
       .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
-      .exclude('tr[aria-label^="Show tools on"] [data-id-chip]')
       .analyze();
     expect(results.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(", ")}`), `axe on "${label}" (${theme})`).toEqual([]);
   }
@@ -821,18 +817,20 @@ test.describe("Workload identities — signing keys and grant detail (ADR-0188)"
     return calls;
   }
 
-  test("rotate and revoke are confirmed and resent once through the identity_manage step-up", async ({ page }) => {
+  test("rotate and revoke are confirmed and resent once through the key_management step-up", async ({ page }) => {
     await open(page);
     await expect(page.getByRole("row").filter({ hasText: "kid-old-0" })).toContainText("retired");
     await expectAxeClean(page, "signing keys");
-    const rotate = await requireStepUpOn(page, { method: "POST", path: "/v1/identity/signing-keys/rotate", kind: "identity_manage" });
+    // the gateway binds the grant to the key rotated TO (resolved before it asks), not to the request body
+    const rotate = await requireStepUpOn(page, { method: "POST", path: "/v1/identity/signing-keys/rotate", kind: "key_management", facts: () => ({ op: "signing_key_rotate", keyId: "kid-new-2" }) });
     await page.getByRole("button", { name: "Rotate key" }).click();
     await page.getByRole("dialog", { name: "Rotate the issuer signing key?" }).getByRole("button", { name: "Rotate key" }).click();
+    await expect(page.getByRole("dialog", { name: "Confirm it's you" })).toContainText("changing a signing key");
     await confirmStepUp(page);
     await rotate.expectResentOnce();
     expect(rotate.attempts[1]!.body).toEqual({});
 
-    const revoke = await requireStepUpOn(page, { method: "POST", path: "/v1/identity/signing-keys/kid-active-1/revoke", kind: "identity_manage" });
+    const revoke = await requireStepUpOn(page, { method: "POST", path: "/v1/identity/signing-keys/kid-active-1/revoke", kind: "key_management", facts: () => ({ op: "signing_key_revoke", keyId: "kid-active-1" }) });
     await page.getByRole("button", { name: "Revoke signing key kid-active-1" }).click();
     const dialog = page.getByRole("dialog", { name: "Revoke this signing key?" });
     await expect(dialog).toContainText("It is the active signer");

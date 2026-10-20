@@ -13,9 +13,17 @@
  * ADR-0190 I8: a v2 body's execution facts (where the call ran, the class it
  * required and why, the profile, the executor and the attestation references)
  * are shown from the signed body itself. L0 and L1 are never called a sandbox.
+ *
+ * ADR-0190 owner decision C (slice A1): when the signed facts name a person's own stdio relaxation, its record (who
+ * set it, its scope, when, and a link to the audit row that set it) is shown beside them, marked as not signed.
  */
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import { api } from "../../../api/client";
+import type { AdminUser } from "../../../api/adminTypes";
+import { actorLabel } from "../../../api/format";
+import { adminKeys } from "../adminKit";
 import { Badge, Button, Card, Field, Select, Table } from "../../../ui/kit";
 import { bomB4Api, type BomEvidencePort } from "./bomB4Api";
 import { BomVerifyPanel, Digest, OfflineVerifyNote, VerifyResult, exportUnavailableText } from "./BomEvidencePanel";
@@ -34,8 +42,10 @@ import {
   saveBlob,
   sectionLabel,
   shownTime,
+  auditRowHref,
   type ExecutionView,
   type PlacementReportView,
+  type RelaxationRecordView,
   type VerifyView,
 } from "./bomModel";
 import v from "../../views.module.css";
@@ -49,6 +59,19 @@ export function ExecutionFacts({ execution: e }: { execution: ExecutionView }) {
   if (e.requiredClass) rows.push({ key: "required", label: "Required isolation", value: `${isolationClassLabel(e.requiredClass)}${e.requiredBy ? `, set by ${requiredByLabel(e.requiredBy)}` : ""}` });
   // a mismatch's class is what the placement report claimed, which the gateway refused: the call never ran under it (decision 6)
   if (e.placement !== "refused") rows.push({ key: "applied", label: e.placement === "mismatch" ? "Reported class (disputed)" : "Applied isolation", value: isolationClassLabel(e.appliedClass) });
+  // ADR-0190 owner decision C: the unknown-agent floor was lowered to L2 for an interactive person's own call
+  if (e.relaxation) {
+    rows.push({
+      key: "relaxation",
+      label: "Isolation relaxation",
+      value: (
+        <>
+          A person&apos;s own call, L3 lowered to L2 by an admin for this {e.relaxation.scopeKind === "mcp_server" ? "MCP server" : "project"} · relaxation{" "}
+          <code className={v.mono}>{e.relaxation.relaxationId}</code>
+        </>
+      ),
+    });
+  }
   if (e.refusalCode) rows.push({ key: "refusal", label: "Refusal", value: <code className={v.mono}>{e.refusalCode}</code> });
   if (e.profile) rows.push({ key: "profile", label: "Execution profile", value: <>{e.profile.name} version {e.profile.version} · <Digest value={e.profile.digest} /></> });
   if (e.executor) {
@@ -108,6 +131,66 @@ export function PlacementReports({ reports }: { reports: PlacementReportView[] }
   );
 }
 
+/**
+ * ADR-0190 owner decision C (A1): the record of the relaxation the signed facts name: its id, who set it, its scope,
+ * when, and the audit row that set it (live, unsigned). `record` undefined = the gateway did not report it.
+ */
+export function RelaxationRecord({ record, names }: { record: RelaxationRecordView | undefined; names: Map<string, string> }) {
+  if (record === undefined) {
+    return (
+      <div className={v.stack} data-testid="decision-bom-relaxation-record">
+        <div className={v.sectionTitle}>The isolation relaxation</div>
+        <p role="status">Not reported: this gateway does not say who set the relaxation or when.</p>
+      </div>
+    );
+  }
+  const scope = record.scopeKind === "mcp_server" ? "MCP server" : "Project";
+  const rows: Array<{ key: string; label: string; value: React.ReactNode }> = [
+    { key: "id", label: "Relaxation", value: <code className={v.mono}>{record.id}</code> },
+    { key: "scope", label: "Scope", value: <>{scope} <code className={v.mono}>{record.scopeId}</code></> },
+    { key: "setBy", label: "Set by", value: <>{actorLabel(record.setBy, names)} (<code className={v.mono}>{record.setBy}</code>)</> },
+    { key: "setAt", label: "Set at", value: shownTime(record.setAt) },
+    {
+      key: "audit",
+      label: "Audit row",
+      value: record.setAuditId ? (
+        <Link to={auditRowHref(record.setAuditId)} aria-label={`Open the audit row that set relaxation ${record.id}`}>
+          {record.setAuditId}
+        </Link>
+      ) : (
+        "Not found: the audit row may have been pruned by the retention policy"
+      ),
+    },
+    // ADR-0197 Q3: a relaxation expires; the expiry shown is the one in force today (a renewal moves it)
+    {
+      key: "expires",
+      label: "Expires",
+      value:
+        record.expiresAt === undefined
+          ? "Not reported: this gateway does not say when the relaxation expires"
+          : record.renewedAt && record.renewedBy
+            ? `${shownTime(record.expiresAt)} (renewed ${shownTime(record.renewedAt)} by ${actorLabel(record.renewedBy, names)})`
+            : shownTime(record.expiresAt),
+    },
+    {
+      key: "state",
+      label: "Today",
+      value: record.clearedAt
+        ? `Cleared ${shownTime(record.clearedAt)} by ${actorLabel(record.clearedBy, names)}; L3 applies again`
+        : record.expiresAt !== undefined && Date.parse(record.expiresAt) <= Date.now()
+          ? `Expired ${shownTime(record.expiresAt)}; L3 applies again until an admin renews it`
+          : "Still in force",
+    },
+  ];
+  return (
+    <div className={v.stack} data-testid="decision-bom-relaxation-record">
+      <div className={v.sectionTitle}>The isolation relaxation</div>
+      <p className={v.faint}>From the relaxation&apos;s own record, not part of the signed Decision BOM. The signed facts name its id and scope.</p>
+      <Table rows={rows} rowKey={(r) => r.key} columns={[{ key: "label", header: "Field", render: (r) => r.label }, { key: "value", header: "Value", render: (r) => r.value }]} />
+    </div>
+  );
+}
+
 export function DecisionBomPanel({ auditId, evidencePort = bomB4Api, onClose }: { auditId: string; evidencePort?: BomEvidencePort; onClose?: () => void }) {
   let id: string | null = null;
   try {
@@ -142,6 +225,13 @@ export function DecisionBomPanel({ auditId, evidencePort = bomB4Api, onClose }: 
   };
 
   const view = read.data;
+  // A1: names for who set a relaxation (an administrator's user list; an auditor sees ids)
+  const users = useQuery({
+    queryKey: adminKeys.users,
+    queryFn: () => api.get<{ users: AdminUser[] }>("/v1/users"),
+    enabled: Boolean(view?.execution?.relaxation) && view?.capabilities.access === "admin",
+  });
+  const names = new Map((users.data?.users ?? []).map((u) => [u.id, u.displayName || u.email]));
   const blocked = exportUnavailableText(view?.capabilities);
   return (
     <div className={v.stack} data-testid="decision-bom-panel">
@@ -233,6 +323,7 @@ export function DecisionBomPanel({ auditId, evidencePort = bomB4Api, onClose }: 
               />
               {view.execution && <ExecutionFacts execution={view.execution} />}
               {view.execution?.placement === "offered" && view.placementReports.length > 0 && <PlacementReports reports={view.placementReports} />}
+              {view.execution?.relaxation && view.relaxationRecord !== null && <RelaxationRecord record={view.relaxationRecord} names={names} />}
               <div className={v.row}>
                 <Button
                   size="sm"

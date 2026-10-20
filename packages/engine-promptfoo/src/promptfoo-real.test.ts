@@ -22,10 +22,10 @@ import { mkdir, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { runProcessGroup } from "@regulait/engine-runner";
+import { runProcessGroup } from "@regulait/engine-runner/worker";
 import { PROMPTFOO_ENGINE_VERSION, type EngineLease } from "@regulait/shared";
-import { promptfooAdapter } from "./adapter.js";
-import { ExchangePromptfooExecutor, promptfooWorkerTick } from "./exchange.js";
+import { ExchangePromptfooExecutor } from "./exchange.js";
+import { promptfooAdapter, promptfooWorkerTick } from "./worker.js";
 
 const HOME = process.env.REGULAIT_PROMPTFOO_HOME;
 const here = path.dirname(fileURLToPath(import.meta.url));

@@ -1,7 +1,9 @@
 /**
  * ADR-0187 B5-G — the garak RUNNER's entrypoint (`node dist/main.js`), in the runner container: on the
  * internal `engines` network, holding the runner key on its state volume, never running garak
- * itself. Probes go to the worker container through the exchange volumes (exchange.ts).
+ * itself. ADR-0190 I5: each run's probes run in an executor's sandbox under the run's engine_worker placement; the
+ * task bridge hands it the job (the run's key as the task secret), carries its gateway channel and writes its results
+ * back into the exchange directories, so the exchange (exchange.ts) reads them as before. No worker container.
  *
  * Its life comes from the shared core (`runRunnerLoop`): token persistence, enrolment, the self-test
  * refresh, result retention, the `next` state machine. Its self-test adds the worker's own report
@@ -9,7 +11,7 @@
  * port. The token is never logged.
  */
 import path from "node:path";
-import { FileRunnerKeyStore, pinnedImageDigest, runRunnerLoop, RunnerClient, RunnerObsoleteBuildError, runnerIssuerFromEnv } from "@regulait/engine-runner";
+import { ExecutorTaskBridge, FileRunnerKeyStore, pinnedImageDigest, runRunnerLoop, RunnerClient, RunnerObsoleteBuildError, runnerIssuerFromEnv } from "@regulait/engine-runner";
 import { ENGINE_MANIFEST } from "@regulait/shared";
 import { garakAdapter } from "./adapter.js";
 import { ExchangeGarakExecutor } from "./exchange.js";
@@ -37,6 +39,15 @@ async function main(): Promise<void> {
   // at start this runner holds no run, so no job of any run may remain (each holds a run's key)
   const stale = await executor.reconcile(null);
   if (stale.length) console.log(`garak runner: removed ${stale.length} job(s) left by an earlier process`);
+  // ADR-0190 I5: the only place garak runs is an executor's sandbox; its model calls come back through this bridge
+  const bridge = new ExecutorTaskBridge({
+    client,
+    jobsRoot,
+    resultsRoot,
+    gatewayBaseUrl: process.env.REGULAIT_ENGINE_GATEWAY_URL ?? `${gatewayUrl.replace(/\/$/, "")}/v1`,
+    log: (m) => console.log(`garak runner: ${m}`),
+  });
+  void bridge.run(new AbortController().signal);
   await runRunnerLoop(client, garakAdapter({ executor }), {
     engineId: "garak",
     engineVersion,

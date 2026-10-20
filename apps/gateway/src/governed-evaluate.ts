@@ -56,6 +56,7 @@ import {
   recordCanaryObservations,
   type CandidateNote,
 } from "./rule-versions.js";
+import { errLine } from "./err-serializer.js";
 
 /**
  * PILLAR 1 rule scoping: the SQL pre-filter that widens a rule load from the
@@ -1066,7 +1067,7 @@ export async function governedEvaluate(
         await recordCanaryFailure(
           db,
           notes,
-          err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+          errLine(err),
           ctx,
           { effect: decision.effect, ruleId: decision.ruleId, reason: decision.reason },
         );

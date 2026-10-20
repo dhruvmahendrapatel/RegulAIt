@@ -111,7 +111,7 @@
 }
 .typeTag {
   display: inline-block;
-  padding: 1px 6px;
+  padding: var(--s-hair) var(--s0-5);
   border-radius: var(--rg-r-xs);
   background: var(--rg-dark-surface);
   color: var(--rg-dark-ink);
@@ -150,7 +150,7 @@
   display: grid;
   grid-template-columns: 9.5rem 1fr;
   gap: var(--s2);
-  padding: 12px var(--s2);
+  padding: var(--s1-5) var(--s2);
   border-bottom: 1px solid var(--rg-line);
   font-size: var(--text-md);
 }
@@ -167,10 +167,10 @@
 }
 .evidenceValue ul {
   margin: var(--s0) 0 0;
-  padding-left: 1.1em;
+  padding-left: var(--s2);
 }
 .evidenceValue li + li {
-  margin-top: 2px;
+  margin-top: var(--s-half);
 }
 .muted {
   color: var(--rg-ink-muted);
@@ -223,7 +223,7 @@
   display: flex;
   gap: var(--s1);
   align-items: flex-start;
-  padding: 10px 12px;
+  padding: var(--s1-5) var(--s1-5);
   border: 1px solid var(--rg-line-strong);
   border-radius: var(--rg-r-md);
   background: var(--rg-surface);
@@ -238,12 +238,12 @@
   box-shadow: inset 0 0 0 1px var(--rg-signal-700);
   background: var(--rg-signal-tint);
 }
-.outcome:has(input:focus-visible) {
+.outcome:has(input:focus) {
   outline: 2px solid var(--rg-signal-ring);
   outline-offset: 2px;
 }
 .outcome input {
-  margin-top: 3px;
+  margin-top: var(--s-half);
   accent-color: var(--rg-signal-700);
 }
 .outcome strong {
@@ -253,7 +253,7 @@
 }
 .outcome span {
   display: block;
-  margin-top: 2px;
+  margin-top: var(--s-half);
   color: var(--rg-ink-label);
   font-size: var(--text-sm);
 }
@@ -292,7 +292,7 @@
 }
 .blocked {
   margin: 0;
-  padding: 12px var(--s2);
+  padding: var(--s1-5) var(--s2);
   border-radius: var(--rg-r-md);
   background: var(--rg-high-tint);
   color: var(--rg-ink);

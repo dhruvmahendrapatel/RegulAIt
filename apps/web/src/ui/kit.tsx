@@ -11,15 +11,18 @@ import {
   isValidElement,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type ButtonHTMLAttributes,
+  type FocusEvent as ReactFocusEvent,
   type InputHTMLAttributes,
   type ReactNode,
   type SelectHTMLAttributes,
   type TextareaHTMLAttributes,
 } from "react";
+import { createPortal } from "react-dom";
 import s from "./kit.module.css";
 
 // ---- Button ---------------------------------------------------------------
@@ -219,34 +222,76 @@ export function InfoButton(props: {
   children: ReactNode;
   /** nudges the panel left when the trigger sits near the right edge */
   align?: "start" | "end";
+  /** optional bold first line naming the term the panel explains */
+  term?: string;
 }) {
   const [open, setOpen] = useState(false);
   const wrap = useRef<HTMLSpanElement>(null);
+  const panel = useRef<HTMLSpanElement>(null);
   const panelId = useId();
 
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        // the tip is the innermost layer: this Escape is spent, so a drawer or dialog around it stays open
+        e.preventDefault();
         setOpen(false);
         // Return focus to the trigger: closing must not dump a keyboard user
         // back at the top of the document.
         wrap.current?.querySelector("button")?.focus();
       }
     };
-    const onDown = (e: MouseEvent) => {
+    // pointerdown, not mousedown: a pen or a finger dismisses it the same way
+    const onDown = (e: PointerEvent) => {
       if (!wrap.current?.contains(e.target as Node)) setOpen(false);
     };
     document.addEventListener("keydown", onKey);
-    document.addEventListener("mousedown", onDown);
+    document.addEventListener("pointerdown", onDown);
     return () => {
       document.removeEventListener("keydown", onKey);
-      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("pointerdown", onDown);
     };
   }, [open]);
 
+  // ADR-0196 A4: in the top layer the panel can no longer be clipped by a
+  // table's scroll box or a card's overflow. Where the Popover API is missing
+  // (older engines, jsdom) it stays absolutely positioned under the trigger.
+  useLayoutEffect(() => {
+    const el = panel.current;
+    const trigger = wrap.current;
+    if (!open || !el || !trigger || typeof el.showPopover !== "function") return;
+    el.setAttribute("popover", "manual");
+    el.showPopover();
+    const place = () => {
+      const r = trigger.getBoundingClientRect();
+      const w = el.offsetWidth;
+      const h = el.offsetHeight;
+      const below = r.bottom + 6 + h <= window.innerHeight - 8;
+      const left = props.align === "end" ? r.right - w : r.left;
+      el.style.top = `${below ? r.bottom + 6 : Math.max(8, r.top - 6 - h)}px`;
+      el.style.left = `${Math.min(Math.max(8, left), window.innerWidth - w - 8)}px`;
+    };
+    place();
+    window.addEventListener("scroll", place, true);
+    window.addEventListener("resize", place);
+    return () => {
+      window.removeEventListener("scroll", place, true);
+      window.removeEventListener("resize", place);
+    };
+  }, [open, props.align]);
+
   return (
-    <span className={s.infoWrap} ref={wrap}>
+    <span
+      className={s.infoWrap}
+      ref={wrap}
+      // tabbing away closes it, so an open panel never trails behind focus
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setOpen(false);
+      }}
+      // inside a sortable header the click must not also sort the column
+      onClick={(e) => e.stopPropagation()}
+    >
       <button
         type="button"
         className={s.infoBtn}
@@ -264,7 +309,13 @@ export function InfoButton(props: {
         </svg>
       </button>
       {open && (
-        <span id={panelId} role="note" className={`${s.infoPanel} ${props.align === "end" ? s.infoPanelEnd : ""}`}>
+        <span id={panelId} ref={panel} role="note" className={`${s.infoPanel} ${props.align === "end" ? s.infoPanelEnd : ""}`}>
+          {props.term != null && (
+            <>
+              <b>{props.term}</b>
+              <br />
+            </>
+          )}
           {props.children}
         </span>
       )}
@@ -383,23 +434,199 @@ export function Card(props: {
   flush?: boolean;
   className?: string;
   style?: React.CSSProperties;
+  /** (i) beside the title; `infoLabel` names it when the title is not plain text */
+  info?: ReactNode;
+  infoLabel?: string;
+  /**
+   * X6: a long, read-only body scrolls inside the card instead of stretching
+   * the page, with an Expand button that opens the same body near full
+   * screen. Never for forms, warnings, decisions or step-ups: a body holding
+   * one (KEEP_VISIBLE) is refused at runtime and stays fully visible. X6b:
+   * "Show all" lets the section flow at full length instead, remembered per
+   * page and section in this browser only.
+   */
+  contain?: boolean;
+  /** X6 cue beside the title: how many rows the body holds */
+  count?: number;
+  /** singular and plural noun for `count`; row / rows by default */
+  countNoun?: [string, string];
 }) {
+  const name = props.infoLabel ?? (typeof props.title === "string" ? props.title : "this section");
+  const box = useRef<HTMLDivElement>(null);
+  const slot = useRef<HTMLDivElement>(null);
+  // The body renders once, through a portal into a host node that moves between
+  // the box and the expanded dialog: ids and test ids are never doubled, and its
+  // state survives Expand and close. The host is made, and attached to the box,
+  // before the portal first renders, so a child's layout effects already see it
+  // in the document; `contain` may also switch on after mount. On the server
+  // there is no host, so the body renders inline.
+  const [fit, setFit] = useState({ scrolls: false, long: false, refused: false });
+  const [expanded, setExpanded] = useState(false);
+  const memoryKey = `regulait.contain:${typeof location === "undefined" ? "" : location.pathname}:${name}`;
+  const [showAll, setShowAll] = useState(() => {
+    try {
+      return props.contain === true && localStorage.getItem(memoryKey) === "all";
+    } catch {
+      return false;
+    }
+  });
+  const toggleShowAll = () => {
+    const next = !showAll;
+    setShowAll(next);
+    try {
+      if (next) localStorage.setItem(memoryKey, "all");
+      else localStorage.removeItem(memoryKey);
+    } catch {
+      // storage unavailable: the choice lasts for this visit only
+    }
+  };
+  const [host, setHost] = useState<HTMLDivElement | null>(null);
+  useLayoutEffect(() => {
+    if (!props.contain || !box.current) return;
+    const el = document.createElement("div");
+    box.current.appendChild(el);
+    setHost(el);
+    return () => {
+      el.remove();
+      setHost(null);
+      setExpanded(false);
+    };
+  }, [props.contain]);
+  useLayoutEffect(() => {
+    if (host) (expanded ? slot.current : box.current)?.appendChild(host);
+  }, [host, expanded]);
+  useLayoutEffect(() => {
+    const el = box.current;
+    if (!host || !el || typeof ResizeObserver === "undefined") return;
+    let warned = false;
+    const check = () => {
+      // expanded: keep the Expand trigger until the dialog hands focus back to it
+      if (host.parentElement !== el) return;
+      const refused = host.querySelector(KEEP_VISIBLE) != null;
+      if (refused && !warned && import.meta.env.DEV) {
+        warned = true;
+        console.warn(`Card "${name}": contain refused, the body holds a form, warning, decision or step-up control`);
+      }
+      const next = {
+        refused,
+        // the region is a tab stop and a landmark only while it really scrolls
+        scrolls: !refused && el.scrollHeight > el.clientHeight + 1,
+        // measured against the desktop limit (.contain), so phones, where the
+        // body flows, still get Expand
+        long: !refused && host.offsetHeight > Math.min(window.innerHeight * 0.6, 560) + 1,
+      };
+      setFit((f) => (f.refused === next.refused && f.scrolls === next.scrolls && f.long === next.long ? f : next));
+    };
+    // the host wraps every child, so rows added after mount are seen too
+    const ro = new ResizeObserver(check);
+    ro.observe(el);
+    ro.observe(host);
+    window.addEventListener("resize", check);
+    check();
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", check);
+    };
+  }, [host, name]);
+  const containable = props.contain && !fit.refused;
+  const contained = containable && !showAll;
+  const expand = containable && fit.long && (
+    <>
+      <Button size="sm" variant="ghost" aria-pressed={showAll} onClick={toggleShowAll}>
+        Show all
+      </Button>
+      <Button size="sm" onClick={() => setExpanded(true)} aria-haspopup="dialog">
+        Expand
+      </Button>
+    </>
+  );
+  const [one, many] = props.countNoun ?? ["row", "rows"];
   return (
     <section
       className={[props.flush ? s.cardFlush : s.card, props.className ?? ""].join(" ")}
       style={props.style}
-      // lets layout primitives give cards a 24px gutter (views .stack / grids,
+      // data hook so page-level layout rules can address cards (e.g. the
       // shell .content) without a cross-module class reference
       data-rg-card=""
     >
-      {props.title != null && (
+      {(props.title != null || expand) && (
         <div className={s.cardTitle} style={props.flush ? { padding: "var(--s2) var(--s2) 0" } : undefined}>
-          <span style={{ flex: 1 }}>{props.title}</span>
+          <span style={{ flex: 1 }}>
+            {props.title}
+            {props.info != null && <InfoButton label={name}>{props.info}</InfoButton>}
+          </span>
+          {props.count != null && (
+            <span style={{ color: "var(--text-faint)", fontSize: "var(--text-sm)", fontWeight: 400 }}>
+              {props.count} {props.count === 1 ? one : many}
+            </span>
+          )}
           {props.actions}
+          {expand}
         </div>
       )}
-      {props.children}
+      {props.contain ? (
+        <div
+          ref={box}
+          className={contained ? s.contain : undefined}
+          onFocus={contained ? revealInBox : undefined}
+          {...(contained && fit.scrolls ? { tabIndex: 0, role: "region", "aria-label": `${name}, scrollable` } : {})}
+        >
+          {host ? createPortal(props.children, host) : typeof document === "undefined" ? props.children : null}
+        </div>
+      ) : (
+        props.children
+      )}
+      {host && (
+        <Modal open={expanded} full title={typeof props.title === "string" ? props.title : name} onClose={() => setExpanded(false)}>
+          <div ref={slot} />
+        </Modal>
+      )}
     </section>
+  );
+}
+
+/**
+ * WCAG 2.4.11: a control focused inside a contained card is scrolled fully into the box. The browser leaves a control
+ * that is only partly clipped where it is, e.g. an (i) at the clipped edge of a wide table's header.
+ */
+function revealInBox(event: ReactFocusEvent<HTMLDivElement>) {
+  const box = event.currentTarget;
+  const r = event.target.getBoundingClientRect();
+  const b = box.getBoundingClientRect();
+  const left = b.left + box.clientLeft;
+  const top = b.top + box.clientTop;
+  if (r.left < left || r.right > left + box.clientWidth || r.top < top || r.bottom > top + box.clientHeight) {
+    event.target.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
+}
+
+/**
+ * What a contained card must never hide (X6, ADR-0180): forms and their fields,
+ * warnings and alerts, decisions and step-up prompts. Selection checkboxes in a
+ * read-only list are not a decision, so they do not count.
+ */
+const KEEP_VISIBLE =
+  'form, fieldset, textarea, select, input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]), ' +
+  '[role="alert"], [role="alertdialog"], dialog';
+
+/**
+ * X7 (owner rule, 2026-10-19): a row's actions sit in fixed slots so the
+ * primary button of every row starts at the same x — primary, then secondary,
+ * then the rest. A row without a primary keeps the empty slot rather than
+ * shifting its other actions left. `slot` is the primary slot's minimum width;
+ * give one table one value.
+ */
+export function RowActions(props: { primary?: ReactNode; secondary?: ReactNode; rest?: ReactNode; slot?: string; stacked?: boolean }) {
+  return (
+    <div
+      className={s.rowActions}
+      // stacked: one column (primary, then secondary, then the rest) for a wide table, so nothing is cut off at the edge
+      style={{ gridTemplateColumns: props.stacked ? `minmax(${props.slot ?? "10rem"}, max-content)` : `minmax(${props.slot ?? "10rem"}, max-content) auto auto` }}
+    >
+      <span>{props.primary}</span>
+      <span>{props.secondary}</span>
+      <span>{props.rest}</span>
+    </div>
   );
 }
 
@@ -414,11 +641,27 @@ const badgeTone: Record<Tone, string> = {
   info: `${s.badge} ${s.badgeInfo}`,
   primary: `${s.badge} ${s.badgePrimary}`,
 };
-export function Badge(props: { tone?: Tone; title?: string; children: ReactNode }) {
-  return (
+export function Badge(props: {
+  tone?: Tone;
+  title?: string;
+  children: ReactNode;
+  /** (i) after the badge — the accessible replacement for an explanatory `title` */
+  info?: ReactNode;
+  infoLabel?: string;
+}) {
+  const badge = (
     <span className={badgeTone[props.tone ?? "neutral"]} title={props.title}>
       {props.children}
     </span>
+  );
+  if (props.info == null) return badge;
+  return (
+    <>
+      {badge}
+      <InfoButton label={props.infoLabel ?? (typeof props.children === "string" ? props.children : "this status")}>
+        {props.info}
+      </InfoButton>
+    </>
   );
 }
 
@@ -499,10 +742,12 @@ const sevClass: Record<string, string> = {
 };
 export function SeverityBadge(props: { severity: string; title?: string }) {
   const cls = sevClass[props.severity];
-  if (!cls) return <Badge title={props.title}>{props.severity}</Badge>;
+  // a word, not a code: "Critical", never "critical"
+  const word = props.severity.charAt(0).toUpperCase() + props.severity.slice(1);
+  if (!cls) return <Badge title={props.title}>{word}</Badge>;
   return (
     <span className={`${s.badge} ${cls}`} title={props.title}>
-      {props.severity}
+      {word}
     </span>
   );
 }
@@ -516,6 +761,9 @@ export interface Column<T> {
   sort?: (row: T) => string | number;
   align?: "left" | "right";
   width?: string;
+  /** (i) beside the header text; `infoLabel` names it when the header is not plain text */
+  info?: ReactNode;
+  infoLabel?: string;
 }
 
 export function Table<T>(props: {
@@ -552,7 +800,8 @@ export function Table<T>(props: {
 
   return (
     <div className={s.tableWrap}>
-      <table className={s.table}>
+      {/* aria-busy while the skeleton rows stand in for data, so the wait is announced like SkeletonBlock's */}
+      <table className={s.table} aria-busy={props.loading || undefined}>
         <thead>
           <tr>
             {props.columns.map((c) => {
@@ -577,6 +826,9 @@ export function Table<T>(props: {
                   }
                 >
                   {c.header}
+                  {c.info != null && (
+                    <InfoButton label={c.infoLabel ?? (typeof c.header === "string" ? c.header : c.key)}>{c.info}</InfoButton>
+                  )}
                   {active && <span className={s.sortArrow}>{sortDir === 1 ? "▲" : "▼"}</span>}
                 </th>
               );
@@ -667,6 +919,80 @@ export function Table<T>(props: {
 
 // ---- Modal ----------------------------------------------------------------
 
+/**
+ * A focus hand-back still waiting for its trigger. A dialog's confirm button
+ * usually starts work that disables the control which opened the dialog (a
+ * page's `busy`), and a disabled control cannot take focus: focus would fall
+ * to <body>. Instead it is parked on the trigger's <main> (a skip-link target,
+ * so tabindex -1) and handed back once the trigger is enabled again, unless
+ * the person has moved focus in the meantime. A dialog opened from the parked
+ * spot (the step-up dialog, opened by that same work) hands back to the
+ * original trigger too.
+ */
+let parked: { trigger: HTMLElement; holder: HTMLElement | null; stop: () => void } | null = null;
+
+const focusIsLost = (holder: HTMLElement | null) =>
+  document.activeElement === null || document.activeElement === document.body || document.activeElement === holder;
+
+function returnFocus(trigger: HTMLElement | null) {
+  parked?.stop();
+  if (!trigger?.isConnected || trigger === document.body) return;
+  if (!trigger.matches(":disabled")) {
+    trigger.focus();
+    return;
+  }
+  const holder = trigger.closest<HTMLElement>("main[tabindex]");
+  holder?.focus({ preventScroll: true });
+  const observer = new MutationObserver(() => {
+    if (!trigger.isConnected) return stop();
+    if (trigger.matches(":disabled")) return;
+    const lost = focusIsLost(holder);
+    stop();
+    if (lost) trigger.focus();
+  });
+  const onFocus = (event: FocusEvent) => {
+    if (event.target !== holder) stop();
+  };
+  const timer = window.setTimeout(() => stop(), 60_000);
+  function stop() {
+    observer.disconnect();
+    document.removeEventListener("focusin", onFocus, true);
+    window.clearTimeout(timer);
+    if (parked?.trigger === trigger) parked = null;
+  }
+  // the trigger can be disabled through an ancestor <fieldset disabled>, so watch the subtree, not the trigger alone
+  observer.observe(holder ?? document.body, {
+    attributes: true,
+    attributeFilter: ["disabled"],
+    subtree: true,
+  });
+  document.addEventListener("focusin", onFocus, true);
+  parked = { trigger, holder, stop };
+}
+
+/**
+ * Keeps Tab inside a modal dialog: a boundary Tab press wraps to the other end rather than leaving for the
+ * browser chrome. Only events from the dialog's own content count, so a Modal nested in it handles its own keys.
+ */
+export function tabTrap(dialog: HTMLElement) {
+  return (event: KeyboardEvent) => {
+    if (event.key !== "Tab" || event.defaultPrevented || !dialog.contains(event.target as Node)) return;
+    if ((event.target as Element).closest("dialog") !== dialog) return;
+    const controls = Array.from(dialog.querySelectorAll<HTMLElement>(
+      'a[href], button, input, select, textarea, [tabindex], [contenteditable="true"]',
+    )).filter((element) => element.tabIndex >= 0 && !element.matches(":disabled") &&
+      element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden");
+    const first = controls[0];
+    const last = controls.at(-1);
+    // Keep boundary Tab presses in the page rather than browser chrome.
+    if (!first || (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) ||
+      (!event.shiftKey && document.activeElement === last)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first)?.focus();
+    }
+  };
+}
+
 export function Modal(props: {
   open: boolean;
   title: string;
@@ -676,47 +1002,44 @@ export function Modal(props: {
   actions?: ReactNode;
   /** roomier dialog — for side-by-side content, not for more prose */
   wide?: boolean;
+  /** near full screen — the expanded view of a contained card (X6) */
+  full?: boolean;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     if (!props.open) return;
     const dialog = ref.current;
     if (!dialog) return;
-    const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    // opened while focus was parked for an earlier dialog's trigger: hand back to that trigger
+    const trigger = parked && focusIsLost(parked.holder) ? parked.trigger : active;
     // Native modality makes the background inert and owns the focus cycle.
     // Open only on a visibility change: editing must not reset focus.
     dialog.showModal();
+    // A native listener, not React's onKeyDown: a contained card's body is
+    // portaled in (X6), so its key events bubble through the dialog in the DOM
+    // but never reach a React handler on it.
+    // On the document, not the dialog: a dialog's own content (a review with its own Tab order) registers its
+    // trap on the dialog after this effect has run, so listening here lets that inner trap decide first.
+    const trap = tabTrap(dialog);
+    document.addEventListener("keydown", trap);
     return () => {
+      document.removeEventListener("keydown", trap);
+      const inside = dialog.contains(document.activeElement);
       dialog.close();
-      if (trigger?.isConnected && (document.activeElement === document.body || dialog.contains(document.activeElement))) {
-        trigger.focus();
-      }
+      const holder = trigger?.closest<HTMLElement>("main[tabindex]") ?? null;
+      if (inside || focusIsLost(holder)) returnFocus(trigger);
     };
   }, [props.open]);
   if (!props.open) return null;
   return (
     <dialog
-      className={[s.modal, props.wide ? s.modalWide : "", props.className ?? ""].join(" ")}
+      className={[s.modal, props.wide ? s.modalWide : "", props.full ? s.modalFull : "", props.className ?? ""].join(" ")}
       role="dialog"
       aria-modal="true"
       aria-label={props.title}
       tabIndex={-1}
       ref={ref}
-      onKeyDown={(event) => {
-        if (event.key !== "Tab" || event.defaultPrevented) return;
-        const controls = Array.from(event.currentTarget.querySelectorAll<HTMLElement>(
-          'a[href], button, input, select, textarea, [tabindex], [contenteditable="true"]',
-        )).filter((element) => element.tabIndex >= 0 && !element.matches(":disabled") &&
-          element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden");
-        const first = controls[0];
-        const last = controls.at(-1);
-        // Keep boundary Tab presses in the page rather than browser chrome.
-        if (!first || (event.shiftKey && (document.activeElement === first || document.activeElement === event.currentTarget)) ||
-          (!event.shiftKey && document.activeElement === last)) {
-          event.preventDefault();
-          (event.shiftKey ? last : first)?.focus();
-        }
-      }}
       onCancel={(event) => {
         event.preventDefault();
         props.onClose();
@@ -729,7 +1052,20 @@ export function Modal(props: {
         }
       }}
     >
-      <div className={s.modalTitle}>{props.title}</div>
+      {props.full ? (
+        // near full screen the body scrolls, so Close stays pinned beside the title
+        <div
+          className={s.modalTitle}
+          style={{ position: "sticky", top: 0, zIndex: 1, display: "flex", background: "var(--surface-1)" }}
+        >
+          <span style={{ flex: 1 }}>{props.title}</span>
+          <Button size="sm" onClick={props.onClose}>
+            Close
+          </Button>
+        </div>
+      ) : (
+        <div className={s.modalTitle}>{props.title}</div>
+      )}
       {props.children != null && <div className={s.modalBody}>{props.children}</div>}
       {props.actions != null && <div className={s.modalActions}>{props.actions}</div>}
     </dialog>
@@ -949,7 +1285,7 @@ export function IdChip(props: { id: string | null | undefined }) {
   return (
     <button
       className={s.idChip}
-      // a stable hook for tests (a CSS-module class name is hashed); e.g. the logged target-size axe exclusion
+      // a stable hook for tests (a CSS-module class name is hashed)
       data-id-chip=""
       title={`${id} — click to copy`}
       onClick={async (e) => {

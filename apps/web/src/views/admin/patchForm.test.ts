@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { draftFromRecord, patchBody, type PatchDraft } from "./patchForm";
+import { draftFromRecord, multiChoices, patchBody, type PatchDraft, type PatchField } from "./patchForm";
 import {
   EXTERNAL_SCORER_FIELDS,
   INITIATIVE_FIELDS,
@@ -77,6 +77,21 @@ describe("report schedules", () => {
       ok: true,
       body: { recipientUserIds: ["u1", "u2", "u9"] },
     });
+  });
+  it("a stored recipient the options do not list gets its own box: it counts toward the max and unticking it removes it", () => {
+    const stored = { ...schedule, recipientUserIds: ["u1", "u9"] };
+    const choices = multiChoices(fields.find((f) => f.key === "recipientUserIds") as Extract<PatchField, { kind: "multi" }>, stored);
+    expect(choices.map((c) => [c.value, c.unlisted])).toEqual([["u1", false], ["u2", false], ["u9", true]]);
+    expect(choices.at(-1)?.label).toBe("u9 (not in this list)");
+    // unticking the unlisted one sends the list without it
+    expect(patchBody(fields, stored, edit(draftFromRecord(fields, stored), { set: { recipientUserIds: ["u1"] } }))).toEqual({ ok: true, body: { recipientUserIds: ["u1"] } });
+    // and the unlisted one counts toward a max
+    const capped = { key: "ids", label: "Ids", kind: "multi", options: [{ value: "a", label: "A" }, { value: "b", label: "B" }], max: 2 } as const;
+    const rec = { ids: ["a", "zz"] };
+    expect(patchBody([capped], rec, { text: {}, clear: {}, set: { ids: ["a", "zz", "b"] } })).toEqual({ ok: false, problem: "Choose at most 2 for Ids." });
+    expect(patchBody([capped], rec, { text: {}, clear: {}, set: { ids: ["a", "b"] } })).toEqual({ ok: true, body: { ids: ["a", "b"] } });
+    // a stored id is listed once, however often the record repeats it
+    expect(multiChoices(capped, { ids: ["zz", "zz"] }).filter((c) => c.unlisted)).toHaveLength(1);
   });
   it("while the options are loading, nothing can be saved", () => {
     const loading = reportScheduleFields([], true);

@@ -90,7 +90,7 @@ export async function authenticateWorkloadClient(db: Db, req: FastifyRequest, fo
   if (!clientId || !presented) return { ok: false, code: "client_authentication_required" };
   const client = await findWorkloadClient(db, clientId, now);
   if (!client) return { ok: false, code: "client_unknown" };
-  const m = await matchCertificateCredential(client, presented, now);
+  const m = await matchCertificateCredential(db, client, presented, now);
   return m.ok ? { ok: true, client, credentialId: m.credentialId } : { ok: false, code: m.code };
 }
 

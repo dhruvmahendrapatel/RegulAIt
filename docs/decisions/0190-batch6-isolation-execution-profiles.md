@@ -315,6 +315,7 @@ Then:
 | `isolation_enforcement` | `enforce` | none: `enforce` is the only value (owner decision A, 2026-10-11). To run where a class is unavailable, an admin lowers the requirement itself through the floor relaxations below | not relaxable; a request to set any other value is refused 400 |
 | Sensitivity floors | public/internal/confidential L2, regulated L3 | down to L1 per sensitivity, never below | audited, step-up |
 | `mcp_stdio` floor | L2 | L1 | audited, step-up |
+| Unknown-agent floor for `mcp_stdio`, "a person's own call" (owner decision C) | L3 | L2, only for a call with no agent from a person in an interactive session, per stdio server or project, never org-wide | audited, step-up (`settings_relax`) |
 | `engine_worker` floor | L2 | L1 (OWNER DECISION 4) | audited, step-up |
 | `executor_attestation_max_age` | 2 h | up to 24 h | audited |
 | Profile `network` | `gateway_only` | `allow_list` entries, each exact host:port and on the egress allow-list | each entry audited |
@@ -403,6 +404,8 @@ strict default: each makes a default stricter or a definition more exact (ADR-01
   interceptors are used, because supervisor middleware is https-only and outside owner decision 7. Decision 7's
   mitigations gain an `SO_PEERCRED` check and a `0600` socket. OpenShell reuses tokens until rotation, so `jti` replay
   detection is not available; this is recorded as a residual.
+  *These conditions still bind I7 whenever it is built. On 2026-10-16 the owner deferred I7 (owner decision E):
+  the I0 GO above is not an owner go.*
 - **H. Survey corrections.** The survey table is corrected as in R13 §4: Kata 4.2.0 and 3.32.0, the nsjail date, the
   OpenShell PyPI scope, and `go-landlock` (MIT). Open question 8 drops the items R13 verified.
 - **I. Open question 6.** Rootless `runsc` works on Linux without root. The macOS and Windows path is still untested
@@ -657,6 +660,68 @@ The owner accepted both recommendations ("go with your recommendations", master 
   slice I2, and they must call `unresolvedPlacementFact` before computing the MAX. Until I2 no route answers the HTTP
   409 envelope.
 
+## Owner decision C: a person's own stdio call (accepted 2026-10-15)
+
+The owner chose the third of three options put to them (keep L3; L2 for every authenticated person; L3 by default with an
+admin relaxation to L2 for interactive persons), master session, 2026-10-15, answering I4 open question 1.
+
+- **The default does not change.** A call with no agent identity (`agent: null`) is still placed as decision 7 item
+  5's unknown agent and requires the most restrictive shipped profile (L3). A gVisor-only host keeps refusing it out of
+  the box (ADR-0180). Decision 7 item 5 is amended by this section.
+- **An admin may lower it to L2, and only for an interactive person.** A new relaxation, "a person's own stdio call",
+  lowers the unknown-agent floor for `mcp_stdio` from L3 to L2 only for a call with no agent identity (`agent: null`)
+  whose caller is a person in an interactive session. A low-assurance agent (decision 7 item 5's other case) stays at
+  L3:
+  - **Interactive session only.** It applies to a browser session or a passkey sign-in, never to an API key, a service
+    token, or anything an agent or script can hold. A request carrying a person's API key with no agent identity stays
+    an unknown agent at L3. This closes the gap where an unregistered agent uses a person's credentials.
+  - **Scoped.** It is set per MCP server or per project, never org-wide.
+  - **Audited, with step-up.** Decision 11's table gains a row: the unknown-agent floor for `mcp_stdio`, default L3,
+    relaxable to L2 for interactive persons only, scoped per server or project, audited, step-up (`settings_relax`).
+    Owner decision A's list of relaxations includes it. Each use is recorded in the decision's facts (the subject
+    kind and the relaxation id).
+  - **It never overrides another floor.** The required class is still the MAX of decision 7. A `regulated` project
+    (L3), a compliance tag's `min_isolation_class`, a parent grant or a server's own `minClass` still win.
+  - It can never place below L2: the `mcp_stdio` floor's own L1 relaxation is a separate, existing setting.
+- **Engines are not unknown agents.** An `engine_worker` placement has no agent by design. I5 places it at the
+  `engine_worker` floor (L2, OWNER DECISION 4) and never maps it to the unknown-agent rule, so a gVisor-only host runs
+  engines. The other floors (sensitivity, compliance tags) still apply.
+- **Build:** a slice after I5 (it touches the same placement code). The Decision BOM panel and the settings UI show the
+  relaxation; vectors pin the API-key case as L3.
+
+## Owner decision D: the source of a project's sensitivity (accepted 2026-10-16)
+
+The owner chose "use cases + admin field" from the options the master session presented, 2026-10-16, answering the
+open question in the I2 as-built section, item 1.
+
+- **The rule.** A project's sensitivity is the strictest sensitivity among its AI use cases, MAX'd with an optional
+  project sensitivity set by an admin. Decision 7's data-sensitivity floor uses this value.
+- **The admin field can only raise.** It can never bring the project's sensitivity below what its use cases give. A
+  field value lower than the use cases' strictest has no effect on the MAX.
+- **Audited, with step-up.** Setting or changing the field is audited and needs a fresh step-up. The owner did not name a step-up
+  kind; the master session's choice is the existing `settings_relax` kind, as decision 11's rows and the I2 as-built
+  assignment and profile rules use, so no new step-up kind is added.
+- **Fail closed, unchanged.** A project with no use case and no field set cannot resolve the fact and is refused
+  `policy_unresolved` (owner decision B), exactly as today.
+- **Left open, build-time choices:** where the field is stored and its column name, the route and UI that set it, the
+  audit action name, and the exact facts the step-up is bound to. The build slice records these in an as-built
+  section.
+- **Build:** a slice adding the admin project-sensitivity field (queued in `STATE.md`).
+
+## Owner decision E: the I7 OpenShell backend is deferred (accepted 2026-10-16)
+
+The owner chose "defer until L2/L3 proven" from the options the master session presented, 2026-10-16, answering the
+I7 go/no-go ("if I0 says go" in the slice table).
+
+- **No-go for now.** I7 is not built. Amendment G's admission conditions stay recorded and still bind I7 when it is
+  built.
+- **When it is revisited.** Only after both of these hold:
+  1. gVisor L2 is verified in CI (PR #385, waiting on the runsc re-pin);
+  2. a Kata L3 backend exists.
+- **Never the only path.** OpenShell may only ever be an additional backend. It is never the sole path to a required
+  class (owner decision 1 and the second friction above).
+- **Build:** none.
+
 ## Rollout: slices (one PR each)
 
 Hot files as in earlier batches (`schema.ts`, migrations, `app.ts`, `route-classes.ts`, `openapi-registry.ts`, the
@@ -674,7 +739,7 @@ checked against the specification rather than against themselves.
 | **I4 gVisor backend and stdio move** | Claude | `runsc` backend (compose and Kubernetes), stdio closure images pinned by digest, MCP over the executor stream, **removal of the in-gateway stdio spawn**, ISACA item 5 collector | I2, I3 | serial |
 | **I5 engines under profiles** | Claude | ADR-0187 workers and scanner placed as `engine_worker`, runtime probes in their self-tests | I4 | **Yes**, with I6 |
 | **I6 Kubernetes and Kata** | Claude | RuntimeClass `gvisor`/`kata` manifests, PSS `restricted` namespace, deny-all NetworkPolicy, BYOC and air-gapped runbooks (every command executed first, M-041) | I4 | **Yes**, with I5 |
-| **I7 OpenShell backend** (if I0 says go) | Claude | Compute via OpenShell's drivers, our interceptor on `unix://`, prover findings to the approvals queue as a new kind `isolation_policy_change`, `injected_at_egress` secrets | I4; owner go after I0 | **Yes**, with I5/I6 |
+| **I7 OpenShell backend** (if I0 says go) | Claude | Compute via OpenShell's drivers, our interceptor on `unix://`, prover findings to the approvals queue as a new kind `isolation_policy_change`, `injected_at_egress` secrets. **Deferred, no-go for now (owner decision E, 2026-10-16):** revisited only once gVisor L2 is verified in CI and a Kata L3 backend exists | I4; owner go after I0; **owner decision E's two conditions** | **Yes**, with I5/I6 |
 | **I8 evidence** | Claude | `decision_facts.execution`, the Decision BOM section, AI BOM executor and profile components | I2; ADR-0189 B2/B3 merged | **Yes**, with I5–I7 |
 | **I9 web UI** | Codex | Execution profile option on the agent builder and the MCP server page (ADR-0177 §3: no new navigation group); profiles and executors under the existing Engines page (Integrations); placement refusals with their reason; attestation chips; posture rows | I1 stubs | **Yes** (web only); merges after I2–I4's real routes |
 
@@ -703,6 +768,8 @@ decisions above leave open:
    fact and is refused `policy_unresolved` (fail closed, ADR-0180). Once I4/I5 route calls through placement, a
    stdio call in a project without a use case is refused until one is registered. Whether projects should get
    their own sensitivity field is an open question for the owner. Until it is settled, the fail-closed rule stands.
+   **Answered 2026-10-16 by owner decision D below:** use cases plus an optional admin field that can only raise the
+   sensitivity. The fail-closed rule for a project with neither stays.
 2. **Agents with no autonomy class.** Registry agents and RegulAIt's own workers get a defined L1 autonomy floor.
    A floor that is genuinely null stays unresolved and is refused, as the `unknown-autonomyFloor` vector requires.
 3. **Assurance vocabulary.** It adds `unknown`, for a workload kind that acts for an agent but names none. That
@@ -899,8 +966,11 @@ Open questions I4 leaves (for the owner or the master):
 1. **Calls without an agent are placed as unknown agents (L3).** I2 maps `agent: null` on `mcp_stdio` to decision 7
    item 5's unknown agent, so a person's own stdio call requires `restricted-microvm` (L3) and refuses on a
    gVisor-only (L2) host. Should a person's own authenticated call count as a known subject (L2 floor), or stay L3?
+   **Answered 2026-10-15: Owner decision C** (L3 by default; an admin may lower it to L2 for interactive sessions).
 2. **Multi-replica stdio sessions** (item 9): sticky routing of `/v1/executor-channel/offers/*/stdio`, or a frames
    table (a migration).
+   **Built 2026-10-17 as a frames table** (migration 0204): see "I4 follow-up: stdio sessions on a multi-replica
+   gateway" below.
 3. **A gVisor CI job**: GitHub-hosted runners have Docker and sudo, so a job could install the pinned tarball,
    register `runsc` and run the integration suite. It was not added because it has never been run (M-041).
 4. **Engines (I5)** inherit the runsc backend for `engine_worker`; they need the input volume and task-scoped
@@ -939,6 +1009,162 @@ The fix is a security decision, so it is left open for the owner or the master. 
   by seccomp, so this loosens the namespace restriction that `seccomp_enforced` stands for;
 - a newer gVisor that honours `errnoRet`;
 - a base image whose libc does not use `clone3`.
+
+## I4 follow-ups: the executor's TLS front and repo hygiene (2026-10-16)
+
+This closes I4 open question 5 (an https gateway address on `engines`). No migration.
+
+1. **The executor's internal TLS front is a dedicated Caddy instance on `engines`, issuing from its own local CA.**
+   - Options weighed:
+     - **(a) A second Caddy on `engines` only (chosen).** It needs no gateway change. It reuses the image the stack
+       and the air-gapped bundle already carry (`caddy:2-alpine`). Caddy's `tls internal` creates the CA, issues the
+       leaf and renews both, so no certificate tooling or rotation job is added.
+     - **(b) A second TLS listener on the gateway, bound on `engines` only.** Rejected for now. Container interfaces
+       are not named, so the listener would have to bind a pinned `engines` address. The gateway would then hold the
+       front's key, and it would need its own route filter for that listener. That is gateway code for a property
+       compose and a proxy already give.
+     - **(c) The public Caddy on `engines`.** Rejected in I4 (trust): it is `REGULAIT_TRUSTED_PROXIES`' one address,
+       so anything on `engines` would gain the right to speak for a client.
+     - **Install-time openssl, mkcert, step-ca.** Searched (ADR-0176) and not used:
+       - `scripts/install.sh` does not start the `isolation` profile, and a plain `docker compose up` has no image
+         with an openssl CLI;
+       - mkcert is a developer tool that installs into trust stores;
+       - step-ca would add an image, a service and a provisioner for what Caddy's internal CA already does.
+   - **What it serves** (`infra/caddy/executor-front.Caddyfile`):
+     - It listens on `https://executor-front:8443` only. It has no plain-http listener (redirects off), no admin
+       endpoint (`admin off`), no trust-store install and no OCSP stapling.
+     - It forwards a request only when the ORIGINAL request URI matches
+       `^/v1/executor-channel(/[A-Za-z0-9_-]+)+([?][A-Za-z0-9_=&-]*)?$` (a CEL `matches`, RE2, linear). Every other
+       path gets 404 from the front itself. It matches the original URI rather than Caddy's cleaned path because the
+       proxy forwards the original: a match on the cleaned path could pass a URI the gateway reads differently. Dot
+       segments, percent-encoding and doubled slashes never match.
+   - **Trust is not widened:**
+     - The front removes `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host`, `X-Real-IP` and `Forwarded`.
+     - It has a dynamic `engines` address that is not in `REGULAIT_TRUSTED_PROXIES` (unchanged: the public Caddy's
+       /32 on `regulait`), so the gateway reads its socket peer as the client and honours no forwarded value from it.
+     - The channel's proof is unaffected. Its `htu` is built from `REGULAIT_PUBLIC_URL` (the issuer), not from the
+       address dialled.
+     - Nothing on `engines` gains a route it lacked: the engine runners already reach `gateway:3000` directly, and
+       through the front only the channel is reachable.
+   - **The CA and certificates are made at the front's first start, never committed.**
+     - Caddy creates the root and intermediate in the `executor-front-data` volume. No container mounts the
+       root key except the front and the one-shot copier below (which reads only the certificate). The executor
+       holds the host's Docker socket, so it is host root anyway and the volume does not keep the key from it.
+     - Lifetimes are Caddy's defaults: about 10 years for the root, 7 days for the intermediate, 12 hours for the
+       leaf. Caddy renews the intermediate and the leaf itself.
+     - The one-shot `executor-front-ca` service copies the root CERTIFICATE alone to the `executor-front-ca` volume,
+       0444, atomically. It runs on the same image with no network, a read-only root and no capabilities, and refuses a
+       file that is not a PEM certificate or that holds a private key. It runs on every `up`, so a re-created CA is
+       picked up.
+     - This is the bootstrap ADR-0194 refers to for this profile. The installer does not start `isolation`, so
+       `docker compose --profile isolation up -d sandbox-executor` (INSTALL.md step 5) is the install step.
+       `scripts/build-image-bundle.sh` already saves `caddy:2-alpine`, so the front works air-gapped.
+   - **The executor pins the CA** (`packages/sandbox-executor/src/main.ts`, `pinGatewayCa`):
+     - With `REGULAIT_EXECUTOR_GATEWAY_CA_FILE` set and an https gateway URL, the file's certificates replace the
+       process's default CA list (`tls.setDefaultCACertificates`, Node 22.19 or later) before the first request.
+       Global `fetch` then trusts that CA and not the public roots. This is no new dependency: the executor keeps
+       Node's own `fetch`.
+     - The file must be a regular file of at most 256 KiB, holding only CA certificates (`basicConstraints CA:TRUE`)
+       that are valid now.
+     - A Node without that API, an unreadable or empty file, or `NODE_TLS_REJECT_UNAUTHORIZED=0` stops the executor
+       at start (exit 2). There is no skip.
+     - With an http URL (the development override) the file is ignored with a warning. With an https URL and no CA
+       file, the executor warns that it verifies against the image's public roots.
+     - The copy step waits for a COMPLETE PEM (its `END CERTIFICATE` line). A truncated or empty bundle stops the
+       executor with a message to run `executor-front-ca` again.
+     - Compose defaults: `REGULAIT_EXECUTOR_GATEWAY_URL=https://executor-front:8443` and
+       `REGULAIT_EXECUTOR_GATEWAY_CA_FILE=/etc/regulait/executor-front-ca/ca.pem` (the volume, mounted read-only).
+       An explicitly EMPTY CA file means the image's public roots, for a front with a publicly issued certificate.
+     - `compose.isolation-insecure-dev.yml` is unchanged.
+   - **The front's container** is read-only, with `cap_drop: ALL` plus `NET_BIND_SERVICE`, `no-new-privileges`, a
+     memory and pid limit, and no host port.
+     - `NET_BIND_SERVICE` is needed because the image's `caddy` binary carries that file capability: exec fails when
+       the capability is outside the bounding set. It is not used to bind a low port.
+     - It runs as the image's root user, because the image's `/data` and `/config` are root-owned.
+2. **The public Caddy's `REGULAIT_TLS_HOST` default no longer names a real host.**
+   - The default in `docker-compose.yml` and `infra/caddy/Caddyfile` is now `set-regulait-tls-host.invalid`, which
+     never resolves and can never be issued a certificate.
+   - The installer writes the host from `--domain`, `compose.tls-local.yml` sets `localhost`, and the dev box's
+     user-data sets its own value, so none of them depended on the default.
+   - The Caddyfile header no longer lists the dev box's addresses.
+   - The host name still appears outside the session records and `project-state/`, in places outside this slice's
+     file surface and left unedited:
+     - `apps/gateway/src/hsts.ts` (a comment);
+     - ADR-0029 and ADR-0032;
+     - `docs/ops/TLS.md`;
+     - `docs/product/ROADMAP.md` (the bare IP).
+3. **CI: no new import cycle in the gateway, and every gateway module loads alone** (`.github/workflows/import-cycles.yml`,
+   its own workflow so the build-and-test job keeps its time cap). Both checks run on the compiled `apps/gateway/dist`,
+   the graph Node loads: type-only imports are erased, and lazy `await import()` edges are left out.
+   - `scripts/preflight-import-cycles.mjs` is a ratchet against `scripts/import-cycles-gateway.baseline.txt`:
+     - the baseline is sorted, one `from -> to` edge per line, 74 edges at this commit;
+     - the unit is an edge that dependency-cruiser marks `circular`, not a cycle path, so the file does not depend on
+       search order;
+     - CI fails on an edge that is not listed, and on a listed edge that is no longer on a cycle;
+     - to shrink the baseline, break a cycle, rebuild, run the script with `--update` and commit the shorter file;
+     - the baseline can only shrink: on a PR, the workflow fails when the file gains an edge line against the base
+       branch (a base without the file, as for this PR, is skipped; scheduled and manual runs have no base and run
+       only the ratchet);
+     - what escapes it: a top-level `await import()` (a dynamic edge, left out with the lazy ones, although it runs
+       during initialisation) and a `createRequire` require (not followed). Only the smoke check below covers them.
+   - Tool: `dependency-cruiser` 18.6.0 (MIT, pinned, root devDependency; `scripts/THIRD_PARTY.md` has the search
+     record).
+     - dpdm was rejected: its `glob` dependency is BlueOak-1.0.0.
+     - madge was rejected: no release since 2024-08.
+   - `scripts/preflight-import-smoke.mjs` imports each non-test module ALONE, as the first module of a child process,
+     and fails on any error at init. It found the #383 TDZ class by hand; now it is a check. Each child gets:
+     - an empty temporary HOME, TMPDIR and working directory, removed afterwards;
+     - an environment of only PATH, `NODE_ENV=test` and a marker (no database URL, no data key);
+     - no `process.argv[1]`;
+     - Node's permission model (`--permission`, in Node 22): read the repository and its sandbox, write only its
+       sandbox, no child process, no worker, no native addon;
+     - no network, through `unshare -rn` (Node 22's permission model has no network control). ubuntu-latest blocks
+       unprivileged user namespaces through AppArmor, so the workflow first sets
+       `kernel.apparmor_restrict_unprivileged_userns=0` on its ephemeral runner (skipped where the sysctl does not
+       exist). Under `CI=true` the check refuses to run without `unshare -rn` (exit 2, `::error::`). A local run without
+       it warns and runs with network;
+     - SIGINT and SIGTERM handlers that kill every live child group and exit 130 or 143, so an interrupted run leaves no
+       orphan;
+     - its own process group, killed whole on timeout, after the child exits, and when the script exits;
+     - after the import, a check that no listening server or UDP socket was left open (that fails: such a module is
+       an entry point); then an exit, under a 30-second timeout.
+   - Entry points that act at top level are never imported. They are listed by name in `ENTRY_POINTS` in the script,
+     each with what it would do: `main`, `seed`, `reencrypt`, `first-admin`, the key-init tools, the `demo-*` tools,
+     `openapi-client-gen` and a test helper. A name that no longer exists fails the check, and so does a module that
+     does not finish loading.
+   - Locally, 283 modules loaded alone under that containment (18 skipped by name), in about 1 minute 20 seconds. The
+     real home directory was unchanged before and after the run.
+   - The front's Caddyfile is `infra/caddy/executor-front.Caddyfile`, not `Caddyfile.executor-front`: the repository's
+     filename guard (`scripts/basename-collisions.test.mjs`) treats two files that differ only by extension as a
+     collision.
+4. **What was and was not run (M-041).**
+   - Run:
+     - the front's Caddyfile, locally, with the Caddy 2.10.2 release binary (sha512 checked against the release's
+       checksum file) and a test upstream:
+       - the channel's announce, stream and stdio URIs were forwarded, with no forwarding header arriving;
+       - `/health`, `/v1/users`, the bare prefix, `..`, `%2e%2e`, `%2f`, `//`, an upper-case `/V1` and a `%` in the
+         query all got 404 at the front;
+       - plain http to 8443 got 400, nothing listened on 80, and a client without the CA could not connect;
+     - the executor's own `pinGatewayCa` accepted the front's leaf under the copied root;
+     - the copy step's shell script, against that storage;
+     - `docker compose config` with the `isolation` and `tls` profiles, and with the insecure-dev override;
+     - the executor's suite (now with real-TLS pinning tests), the scripts suite as CI runs it, and the two new
+       checks;
+     - the baseline-only-shrinks shell step, against a base with and without the file, with a line added and removed.
+   - NOT run:
+     - `docker compose up` itself: no session had a Docker daemon;
+     - a placement through the front;
+     - the `caddy:2-alpine` tag's actual Caddy version, and whether the front starts under `cap_drop: ALL` +
+       `NET_BIND_SERVICE` + `no-new-privileges`;
+     - the Node version inside the pinned `node:22-trixie-slim` digest (the executor fails closed below 22.19).
+5. **Follow-ups this leaves:**
+   - ~~Pin `caddy:2-alpine` by digest, for both Caddy services and the image bundle together (left out of this slice on
+     purpose: the bundle and both services must move in one change).~~ **Done** in "I5 follow-up: engines in compose"
+     below.
+   - Re-check the smoke check's containment when CI moves to a Node with a network permission (`--allow-net`), which
+     would replace the `unshare` dependency.
+   - A front per executor host when there are several executors (one front serves one compose stack today).
+   - Run the stack once on Docker and record the result here.
 
 ## Test strategy
 
@@ -1213,3 +1439,1186 @@ records its own changes separately.
 
 **Open for the owner or a later slice.** Should the facts also record the image digest and the runtime flags
 directly, rather than through the report hash? Doing so needs new `execution_placements` columns, which I4 owns.
+
+## As built: slice I5 engines under profiles (2026-10-16)
+
+I5 moves the ADR-0187 engine workers (the garak and promptfoo workers, the modelscan scanner) under decision 3's
+`engine_worker` kind. A worker now runs **only** as an engine TASK in a sandbox an executor starts under the run's
+placement. There is no long-lived worker container and no other place a worker can run. Migration **0200**
+(`0200_engine_task_placement.sql`, hand-written; journal idx 200, after 0199 (ADR-0188 S9)) adds `engine_runs.task_placement_id`, its set-once guard (search_path pinned) and a TRUNCATE refusal on `engine_runs` (migration 0185's invariants). These points
+settle what the decisions above leave open:
+
+1. **The task start is the decision.** The placement is decided when the runner holding a live lease asks to start
+   the run's task (`POST /v1/engine-runner/runs/:runId/task/input`), not at the lease. In ONE transaction the
+   gateway:
+   - re-checks the run (leased to this runner, live on the database clock, no task yet);
+   - for an agent run, re-checks the run-as person's entitlement to the target and judge agents;
+   - resolves decision 7 through I2's `resolveRequirement` (workload kind `engine_worker`, no agent, the run's
+     project, no parent grant), then I4's linked offer (`offerLinkedPlacement`) or a refused row
+     (`refusedLinkedPlacement`), keyed to the decision's audit id;
+   - writes the decision: for an agent run, an `agent` row with `detail.phase` = `engine-run-entitlement`
+     (receipt-eligible, so its facts capture the placement); for an artifact scan, an `engine_run` row (not
+     receipt-eligible). Allowed: rule `engine-run-task-started`. Refused: rule `execution-profile`, effect `deny`;
+   - names the placement on the run (`task_placement_id`, set once by a trigger, unique).
+   A refusal ends the run `not_run` with `isolation_unavailable` in the same transaction and answers
+   `409 execution_profile_unavailable` with the decision 7 code. A `policy_unresolved` refusal still writes a
+   refused placement row (I4 review M2). Placing at the task start rather than the lease keeps the lease's
+   contract (ADR-0187 decisions 67 to 98) unchanged; the lease's own refusals write no placement.
+2. **OWNER DECISION C** (see "Owner decision C" above). `resolveRequirement` already treats `agent: null` on
+   `engine_worker` as a known subject: an engine task is placed at the `engine_worker` floor (L2, OWNER DECISION 4),
+   MAX the sensitivity floor, the compliance tags and the parent grant, never the unknown-agent rule. Pinned by
+   `zz-adr0190-i5-engines.test.ts` (an `internal` project requires L2; the negative control, `code_exec` with no
+   agent, requires L3).
+3. **The task image** is the manifest's new `taskImage` (the Docker content digest the executor runs by,
+   `docker image inspect --format '{{.Id}}'`) with its `taskEntry` (`/usr/local/bin/node /app/dist/task-main.js`).
+   Every shipped `taskImage` is null until the engine images are built: such an engine places nothing
+   (`policy_unresolved`), so the secure default holds by construction, as `imageDigest` already did.
+4. **I8.** `buildExecutionFacts` records an engine run entitlement decision's placement like any other. An ALLOWED
+   one with no `engine_worker` placement in its transaction fails the capture, and the decision with it: the I5
+   contract is broken, and nothing is recorded as if it ran. A refusal written before any task start (run
+   creation) placed nothing and stays `not_recorded, no_placement`.
+5. **The two channels the runsc backend gains** (I4 open question 4):
+   - **Input volume.** After accepting the offer and BEFORE starting the sandbox, the executor fetches the task's
+     manifest and each file (`GET /v1/executor-channel/offers/:offerId/input[/:n]`, only while the offer is
+     `accepted`). It writes them under its input volume (`REGULAIT_EXECUTOR_INPUT_DIR`, the Docker volume
+     `REGULAIT_EXECUTOR_INPUT_VOLUME`) and checks each file's size and sha256 as it writes (`task-input.ts`). A
+     mismatch removes everything and starts nothing. Files are 0444 and directories 0555. The sub-directory is
+     mounted READ-ONLY at the profile's one `jobs` input (`--mount type=volume,…,readonly,volume-subpath=`, Docker
+     Engine 26 or later) and removed with the sandbox. The run's artifact is streamed to the executor by the gateway
+     from its artifact store (audited `engine-run-artifact-streamed`, phase `task_input`), never through the runner.
+     The per-placement report gains `inputSha256`, computed from the bytes WRITTEN (`engineTaskInputDigest`). A
+     profile with inputs fails `placement_fields_missing` without it. The gateway compares it with the input it
+     holds: a difference fails `input_digest_mismatch`, so the sandbox is killed before any input is released and
+     the executor is quarantined.
+   - **Task-scoped secret** (decision 5). The run's key leaves the runner only as the task secret. The gateway
+     holds it in the task's session, in memory, and sends it only in the MACed `start` line: the MAC covers it, and
+     a `start` with no secret is MACed exactly as in I4. The gateway forgets it once the sandbox has spoken (its
+     first stdout POST) or the session ends. The executor writes it once, on the release line, to the hash-pinned
+     init's stdin (the pin moves with this change). The init hands it to the workload on fd 3, a pipe. It is never
+     in the sandbox's environment, argv or labels (nothing `docker inspect` shows), never logged and never on a
+     disk the executor owns. A profile with `secrets: none` refuses one. The run's key is revoked when the run
+     ends (ADR-0187).
+   - The class is still decided only from outside (review H2). The session caps are I4's (the live-session cap,
+     the output and wall-clock limits). `injected_at_egress`, a scoped volume and an allow-list network are still
+     refused.
+6. **The gateway channel** (decision 4, `gateway_only`). The sandbox has no network (runsc `--network=none`). A
+   worker that calls models (garak, promptfoo) reaches the gateway through a loopback proxy inside the sandbox
+   (`runSandboxTask`): each request becomes an `http` stdout frame. The RUNNER, the trusted side on the engines
+   network, sends it to the gateway with exactly the headers the sandbox gave (the run's key, never the runner's
+   credentials). It forwards only `POST` to exactly the model routes (`<base path>chat/completions`,
+   `<base path>messages`), matched on the normalised `URL.pathname`, which must equal the raw path; any `%`, dot
+   segment, query or other route is answered `not_gateway` (403 inside). The request must carry
+   `authorization: Bearer <the run's key>` (`unauthorized`, 401 inside, otherwise). At most 8 requests of one task
+   are in flight (`busy`, 429 inside). Each request body is at most 512 KiB, and each answer is read as a stream and
+   abandoned past 512 KiB. Streaming answers are not carried.
+7. **The runner side.** Each runner keeps its ADR-0187 exchange (a job directory written whole, results read once
+   `done.json` exists). The new `ExecutorTaskBridge` (`@regulait/engine-runner`) plays the worker's half over the
+   gateway:
+   - it uploads a published job (inline files, the artifact only placed, `apiKey` moved out of `job.json` into
+     the task secret);
+   - it long-polls the task's frames (`GET`/`POST /v1/engine-runner/runs/:runId/task/frames`), writes each result
+     file in verified chunks, renamed into place so `done.json` appears whole and last, and carries the gateway
+     channel;
+   - it closes the task on a cancel.
+   The task in the sandbox (`task-main.ts` per engine) runs the engine's existing one-job code (the worker tick,
+   moved to `worker.ts`) on the read-only input. The run's key goes back into a copy of the job only on the
+   sandbox's tmpfs, which is removed when the engine is done.
+8. **No fallback, proven statically** (`adr0190-i5-engine-runner-no-spawn.test.ts`). The process-group runner and
+   the in-sandbox helper move to `@regulait/engine-runner/worker`. The guard walks every runner entry point's import
+   closure (static, side-effect and dynamic imports, re-exports and `require`, through relative modules and into the
+   engine-runner package). It shows that no runner can reach a process spawn or the worker side, and that the task
+   entries do (the guard fires). The only engine source that names `child_process` is the process-group runner.
+   The long-lived `worker-main.ts`/`scanner-main.ts` entries and their compose services are gone. Each runner owns
+   both exchange volumes, and its result volume is no longer read-only.
+9. **Runtime probes in the engines' self-tests** (decision 10). Each worker self-test (garak, promptfoo, the
+   scanner) gains `runtime`: the kernel release, whether `/proc/version` names gVisor, uid, `CapEff`,
+   `NoNewPrivs` and `Seccomp` as seen from inside. It is recorded, never decisive (review H2). The task writes it
+   at the start of every task, and the bridge stores it where the runner's self-test reads it. A sandbox that
+   reaches the network or sees a runner credential runs nothing (fail closed).
+10. **Where a task lives.** Like an I4 stdio session, a task lives in the gateway process that decided it. A request
+    for a task this process does not hold is refused `engine_task_unknown`, and a report for one is refused (not
+    quarantined: it is our own gap). Sticky routing on the run and offer ids is the same follow-up as I4's. The
+    gateway holds at most 32 MiB of unacknowledged task output; past that the task is stopped
+    (`output_overflow`). The task is held BEFORE the start transaction commits (a rollback forgets it), so an
+    executor that sees the offer always finds its input. Any refusal after the offer (declined or expired offer,
+    start failure, `input_digest_mismatch`, `session_lost`, `output_overflow`, a mismatch) ends the run `not_run`
+    (`isolation_unavailable`, cause `engine_task_<refusal>`) in the gateway, from the runner's frames read or a 2 s
+    watchdog. The bridge then signals the runner's run loop, which heartbeats at once and is cancelled.
+12. **A result needs a placed task** (review HIGH-1). In the result transaction, on the locked run, any status but
+    `not_run` is accepted only when `task_placement_id` is set and that placement's linked report is `placed`.
+    Otherwise the run ends `not_run` (`isolation_unavailable`, cause `engine_task_not_placed`) and the route answers
+    `409 engine_task_not_placed`. A result that no placed sandbox produced is never ingested. A `not_run` envelope
+    of an unplaced task is accepted as the run's end but its content is dropped too (no items, raw report or scan
+    record; recheck L1, `engine-runs.ts`).
+13. **First enable** (review; was open question 1). The manifest names each engine's `workerAttestedSwitches`
+    (promptfoo `REGULAIT_PROMPTFOO_WORKER_ISOLATED`, modelscan `REGULAIT_MODELSCAN_SCANNER_ISOLATED`, garak its
+    worker switches and `REGULAIT_GARAK_WORKER_SELFTEST`). The runner's report meets them, or a fresh, passing
+    attestation by an ACTIVE executor of the shipped `engine-worker` profile at or above the engine_worker floor
+    (the org floor raised to the profile's `minClass`; a customer plane through the admin's mapping), found by
+    `engine-worker-attestation.ts`. Without one they fail `executor_attestation_missing:<switch>` (fail closed). The
+    basis is recorded whole in the self-test verdict and its audit row (`executorAttestation`), on the admin
+    self-test, the registration and the runner's report. The lease reads it ONCE per poll, before its transaction
+    (recheck L4), records it on the lease's audit row and names it on every refusal; the admission inside the
+    transaction uses that one reading, it does not read the basis again.
+    An executor never self-tests, so never attests, a profile its backend cannot serve on this host (runsc without
+    an input volume for `engine-worker`); no offer of it ever reaches that executor.
+14. **The engine-worker floor setting** (review LOW-1). For an agent-null engine run whose configured profile is the
+    shipped default, `resolveRequirement` caps that profile's class as a configured floor at the org's
+    `isolationFloorEngineWorker`, so relaxing the setting (a `settings_relax` step-up, audited, never below L1) is
+    honoured in the requirement. **For placement it is a no-op today:** the shipped `engine-worker` profile's own
+    `minClass` (L2) still binds (the broker raises the requirement to it), and there is no L1 backend. Follow-up: a
+    versionable engine-worker profile and a runc L1 backend.
+15. **Executor input hygiene** (review LOW-2). A refused input removes the sandbox's whole input directory; the
+    first preflight removes inputs a previous run of the executor left (`regulait-sbx-<uuid>` entries only); the
+    whole input fetch has one deadline (`ENGINE_TASK_INPUT_WAIT_MS`, 90 s, inside the report deadline); the digest
+    is computed from the bytes each write actually wrote. `ENGINE_TASK_INPUT_PENDING` (never used) is removed.
+16. **The run needs a project with an AI use case.** An engine run with no project, or whose project has no linked
+    AI use case, has no sensitivity, so its placement does not resolve: the task start refuses it
+    `policy_unresolved` and the run ends `not_run` (`isolation_unavailable`). The B5 test rig adds a project and a
+    use case to such runs for that reason.
+17. **garak's environment switches** (the usage-data switches among its `workerAttestedSwitches`) are met by the
+    executor's attestation of the profile, which does not read the task's environment. The real control is the
+    sandbox's network denial (`--network=none`, the gateway channel only), as decision 19 of ADR-0187 already says.
+18. **Review round 1, the rest.** The task start re-runs the lease's own checks (the run-as person; an agent run's
+    entitlement to the target and judge, a judge that is gone, the manifest's required judge (`judge_required`),
+    an agent with no provider model (`agent_not_dispatchable`) and project attribution; an artifact scan's artifact
+    access) and ends the run `not_run` with the lease's code. (The two dispatch checks were added on 2026-10-17;
+    until then this point overstated them.) A lease retry for a run whose task started ends it `not_run` (`engine_task_lease_reissued`) rather
+    than rotating the key the sandbox holds. One gateway process holds at most 512 MiB of unacknowledged task output
+    across every task (`output_overflow` past it). A `not_run` envelope of an unplaced task is dropped too (no items,
+    raw report or scan record). The result route also refuses on a task refusal held in memory before the watchdog
+    ends the run, and a refused task is marked ended only after the run's end commits. The lease records the
+    attestation basis on its audit row and names it on its refusals, read once per poll. The executor channel no
+    longer imports `engine-tasks.ts`: the app hands it the task hooks (no import cycle; fail closed when absent).
+11. **Tests.**
+    - **Shared:** `i5-engine-task.test.ts`.
+    - **Executor:** `engine-task.test.ts`. The real init runs on the host in place of `docker run`; its fd 3
+      workload proves the secret reaches only fd 3. It also covers the input refusals and `handleOffer`'s order.
+    - **Engine runner:** `task-bridge.test.ts`, the bridge and the sandbox task end to end over a relay, including
+      the gateway channel's path rule.
+    - **Gateway, on a real database:** `zz-adr0190-i5-engines.test.ts`, driven by the real executor package with
+      its fake backend. It covers the refusals with their rows, an end-to-end scan, input digest mismatch, and
+      the I8 facts of an agent run's entitlement decision.
+    - The B5 suites that post results (`zz-b5-modelscan`, `zz-b5-garak`, `zz-b5-promptfoo`, `zz-b5-engines`,
+      `zz-adr0188-s7-retire-bearer`) place each leased run first through `testing/engine-task-rig.ts`: a real
+      executor (fake backend) and the gateway's own task start, so their results meet the HIGH-1 rule.
+      `zz-b5-compose.test.ts` (the worker containers are gone) and the decision-writer list also change.
+
+**Not verified (M-041).**
+- **Real gVisor.** Nothing here has run under gVisor: no session that built I5 had a Docker daemon. The PR #385
+  gVisor CI job found that `runsc` release-20261005.0 maps every OCI seccomp `ERRNO` rule to `EPERM` and ignores
+  `errnoRet`. Docker's default profile answers `clone3` with `ENOSYS`, so under that release glibc 2.34 or later gets
+  `EPERM`, does not fall back, `pthread_create` fails and Node aborts. Every engine task image is glibc-based (the
+  Node and Python bases in `engines/*/Dockerfile`), so **I5 under real gVisor depends on the same re-pin of
+  `RUNSC_RELEASES`** to a release with gVisor commit 7be4160. Until then nothing is worked around: no unconfined
+  seccomp and no custom profile.
+- **Docker's `volume-subpath`** (Engine 26 or later) and the executor's input volume in compose are not set up.
+  `REGULAIT_EXECUTOR_INPUT_DIR`/`REGULAIT_EXECUTOR_INPUT_VOLUME` and a volume on the `sandbox-executor` service are
+  pending execution on a test host. Until then an executor refuses every engine task (no input volume), fail
+  closed. The compose service is left to the executor TLS slice that owns it.
+- **The review round's database tests** (HIGH-1, the refusal ending the run, first enable, LOW-1) and the B5 suites
+  with the rig have not run in the session that wrote them (no database there); CI's database shards run them.
+- **No engine image is built.** `imageDigest` and `taskImage` are null in the shipped manifest, so the image builds,
+  the in-image task entries and the gateway channel with the real garak and promptfoo are unexercised.
+
+**Open questions I5 leaves (for the owner or the master).**
+1. *(Resolved in review round 1: point 13.)* How an engine is first enabled.
+2. **The runner's artifact copy.** The modelscan runner still downloads the artifact to stage its job (ADR-0187)
+   although the sandbox receives it from the gateway. Should the stage skip the download? It is harmless but
+   wasteful for large artifacts.
+3. **Streaming model answers** through the gateway channel are not supported. If an engine needs them, the channel
+   needs chunked answer frames.
+
+## I5 follow-up: engines in compose (2026-10-17)
+
+What the stock compose stack now holds for engine tasks, and what is still unverified. No migration; nothing in the
+gateway, the executor's runtime backends or the engine code changed.
+
+1. **Engine images, built by compose.** A new `engine-images` profile has three build-only services,
+   `engine-promptfoo-image`, `engine-modelscan-image` and `engine-garak-image`. Each builds its existing
+   `engines/<engine>/Dockerfile` from the repository root and tags it `regulait/engine-<engine>:local`
+   (`platform: linux/amd64`, `pull_policy: build`). Each image has one use per entry point: the runner
+   (`/app/dist/main.js`) and the task (`/app/dist/task-main.js`, the manifest's `taskEntry`).
+   - **Already true of the Dockerfiles, checked and unchanged:** every `FROM` is pinned by digest (the garak
+     `preseed` stage builds on its own pinned `closure` stage). The runtime stage runs as uid 10001. `/work` and
+     `/jobs` exist, owned by 10001. `HOME` is `/work`. No package installer is left at run time.
+   - **The services never run.** An `up` with the profile runs each as an inert one-shot that exits 0. It has
+     `node -e "process.exit(0)"` as its entry point, `network_mode: none`, `read_only`, `cap_drop: [ALL]`,
+     `no-new-privileges` and uid 10001.
+   - **The task's real hardening is the executor's, not compose's.** The executor applies the shipped
+     `engine-worker` profile on every `docker run`: read-only root, a 1 GiB tmpfs `/work`, `--network none` (the
+     gateway channel only), uid 10001, every capability dropped, the input read-only at `/jobs`, and the task secret
+     on fd 3. Compose settings cannot widen that.
+   - **What still blocks an end-to-end run:**
+     - **Every shipped `taskImage` is still null.** An executor starts a task only from the manifest's `taskImage`,
+       the image's content digest. Until a release records a built image's digest there, a built image places nothing
+       (`policy_unresolved`, the run ends `not_run`). This slice does not change the manifest, which is code.
+     - **The runners still name their image by registry digest only** (`REGULAIT_ENGINE_<ENGINE>_DIGEST`, ADR-0187
+       decision 55). A local build has no registry digest, so a runner needs the published image or a local registry.
+       Neither exists yet: the image publish and signing pipeline is still ADR-0187's open item.
+2. **The executor's input volume.** `sandbox-executor` mounts the named volume `executor-input` (Docker name
+   `regulait-executor-input`) at `/executor-input` and sets `REGULAIT_EXECUTOR_INPUT_DIR=/executor-input` and
+   `REGULAIT_EXECUTOR_INPUT_VOLUME=regulait-executor-input`, the two variables `runsc-backend.ts` reads. Without both
+   it refuses every engine task.
+   - **Least privilege.** Only `sandbox-executor` mounts the volume, no host path backs it, and each sandbox mounts
+     only its own sub-directory, read-only, through the host daemon (`volume-subpath`).
+   - **The name is fixed**, like `regulait-sandbox-init`, because the executor names it to the host daemon. So one
+     host runs one isolation stack.
+   - **On disk, not tmpfs.** A modelscan input can be as large as the org's artifact limit (512 MiB strict default),
+     and tmpfs pages would count against the executor's 512m memory limit. Inputs never hold the run's key (that is
+     the task secret), and each one is removed with its sandbox. A crash leaves an input behind until the executor's
+     first preflight removes it (I5 point 15).
+   - **Ownership.** The executor image (`packages/sandbox-executor/Dockerfile`, one added line) creates
+     `/executor-input` owned by 10001, mode 0711, which a fresh named volume copies. The executor can write there, and
+     no other uid can list what is in it.
+3. **Caddy pinned by digest.** All three Caddy services (`caddy`, `executor-front`, `executor-front-ca`) name one YAML
+   anchor, `x-caddy-image`:
+   `caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f`.
+   `scripts/build-image-bundle.sh` (`CADDY_IMAGE`) and `scripts/install.sh` (the air-gapped image check) name the same
+   string. The digest is the OCI index that both `2-alpine` and `2.11.7-alpine` named on 2026-10-17:
+   - the Docker Hub registry manifest API answered 200 for `library/caddy:2-alpine` with this
+     `docker-content-digest`;
+   - the Hub tags API lists `2.11.7-alpine` with the same digest.
+
+   This also answers the I4 follow-ups' question about the Caddy version: it is 2.11.7, no longer an unknown tag.
+
+   **Air-gapped (review of #396).** On Docker's classic image store, `docker save` of a digest reference writes the
+   image untagged, so after `docker load` neither the tag nor the repository digest exists. The installer would then
+   report Caddy missing, and compose (`pull_policy: never`, digest reference) would find nothing. So:
+   - The online path keeps the digest reference (`x-caddy-image`).
+   - The bundle pulls by digest, tags that image `caddy:2.11.7-alpine` (`CADDY_TAG`) and saves both references. Before
+     saving, it checks the tagged image's id against `CADDY_IMAGE_IDS`.
+   - The air-gapped install looks for the tag, and runs the tag for all three Caddy services in its generated override
+     (`pull_policy: never`).
+   - The installer refuses an image whose id is not pinned. It checks in the preflight when the images are already
+     loaded, and again right after `docker load` of a bundle.
+   - **The pinned ids** were read from the Docker Hub registry API on 2026-10-17 for this index:
+     - On the classic store, an image's id is its platform's config digest: linux/amd64
+       `sha256:f77f856a30f0004200b36b322d61da17fade31e24875699d77fb968399b9eb77` (manifest `sha256:173b2630…`) and
+       linux/arm64 `sha256:f6a2207268b0f0914df9d3569e1824d6adcfa7b59fbffe0f3cbc5d2d60423f71` (manifest
+       `sha256:84058f1a…`).
+     - On the containerd image store, the id is expected to be the index digest
+       `sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f`. It may instead be the platform
+       manifest digest when only one platform was pulled: linux/amd64
+       `sha256:173b26306d711395accaeba8b67afcaad2a085ccb1e6bf26010bfe8c095a5229`, linux/arm64
+       `sha256:84058f1a0e5beb97664a9b79dcfd267b594c033d5bb88d8463cdfb59c0779197`. Both were read from the same index.
+     - Both scripts carry the same five ids, and the compose test pins them.
+   - Checked here: `install.sh --check --mode air_gapped` rendered the override, and `docker compose config` with it
+     shows `caddy:2.11.7-alpine` on all three Caddy services.
+4. **Repository hygiene.** The owner's development host names and addresses are replaced by neutral placeholders in
+   these files: the `apps/gateway/src/hsts.ts` comment, ADR-0029, ADR-0032 (and its index row), `docs/ops/TLS.md`,
+   `docs/ops/POWER_SCHEDULE.md` and `docs/product/ROADMAP.md`. The Caddy `REGULAIT_TLS_HOST` default was already the
+   neutral `set-regulait-tls-host.invalid` (#387).
+   - The dev instance id in `docs/ops/DB_BACKUP.md` and ADR-0035 is replaced too. A repo-wide grep (excluding
+     `project-state/` and `node_modules`) finds none of the host names, addresses or the instance id left.
+   - The air-gapped bundle does not carry the engine images (master, 2026-10-17); an opt-in flag is a logged follow-up.
+   - `project-state/` was not touched, because the master owns it and the session records are immutable.
+5. **Checked here:**
+   - `docker compose config --quiet` with no profile; with `--profile engine-images --profile isolation --profile
+     tls --profile engines`; with `-f compose.tls-local.yml --profile tls`; and with `-f
+     compose.isolation-insecure-dev.yml --profile isolation`. All exit 0. The CLI renders the config without a daemon.
+   - The rendered config shows:
+     - the three image services;
+     - the pinned Caddy reference on all three Caddy services;
+     - the executor's two input variables and its `executor-input` mount;
+     - the volume's fixed name.
+   - `bash -n` on both scripts.
+   - The compose test `zz-b7-compose-engine-images.test.ts`, which pins items 1 to 3.
+6. **Not verified (pending execution, M-041).** No session had a Docker daemon.
+   - **Not run on a Docker host:**
+     - building any engine image;
+     - `up` with these profiles;
+     - a fresh `regulait-executor-input` volume copying the image's owner and mode;
+     - `volume-subpath` on the target Engine (26 or later);
+     - a sandbox reading its input under gVisor's gofer through a 0711 parent;
+     - an engine task end to end.
+   - **The air-gapped Caddy round trip.** Building the bundle, then `docker load` and the installer's image-id check,
+     have not run on either image store.
+     - Still to confirm: the tag survives the round trip, and the loaded image's `.Id` is one of the pinned ids.
+     - The id values were read from registry metadata, not from a Docker daemon. The containerd store's id being the
+       index digest is an expectation, not an observation.
+     - Run the round trip once on each store, on amd64 and arm64, and record the result here.
+     - **The cross-store case is unverified too:** a bundle built on the classic store and loaded on a containerd
+       target, or the other way round. Until it has run, build the bundle on a host with the same image store type
+       as the target (`docker info` on each host reports which store it uses). The installer still refuses any loaded
+       Caddy image whose id is not pinned.
+   - **Real gVisor** still waits on the `runsc` re-pin (I5 "Not verified").
+
+
+## As built: engine task images (ENG-IMG, 2026-10-17)
+
+What makes an engine runnable end to end in a stock install, apart from the gVisor re-pin (PR #385, untouched here). No
+migration; the gateway's only change is that its manifest reads the lock (below).
+
+1. **The images.** The three `engines/<engine>/Dockerfile`s are the task images (one image per engine: the runner
+   at `/app/dist/main.js`, the task at the manifest's `taskEntry`). Checked again and unchanged: every `FROM` is
+   pinned by digest, the runtime stage runs as uid 10001 with `HOME=/work`, nothing writes outside `/work` and
+   `/jobs` (read-only root friendly), garak's Hugging Face switches are offline and its assets are pre-seeded in a
+   `--network=none` stage, and no package installer runs at task time.
+2. **The modelscan artifact arrives through the executor's input volume** (resolves I5 open question 2). The runner
+   no longer downloads it:
+   - the job places the artifact at the fixed name `artifact.bin`, written empty in the runner's job directory. The
+     task bridge only PLACES it, the gateway streams it from its store to the executor, and the executor writes and
+     checks it (size and sha256) in the sandbox's read-only input (I5 point 5);
+   - so the format is now decided IN THE SANDBOX, from the bytes (G19 2). `scanPlacedArtifact`
+     (`packages/engine-modelscan/src/worker.ts`) detects it. A format modelscan does not scan is answered with its
+     detection alone, and modelscan never starts. A scannable one is handed to modelscan through a symlink named
+     for its extension, in the task's scratch space (the input is read-only, and a copy would double a large
+     artifact). modelscan 0.8.8 uses `Path.absolute()`, never `resolve()`, on the path (`modelscan/modelscan.py`
+     at tag v0.8.8, read 2026-10-17), so the report still names `artifact.<ext>`;
+   - `done.json` gains `detection` (`{format, evidence}` or null). The adapter maps a null detection to `failed`:
+     `artifact_unread`, or `engine_timeout` past the limit. It is never clean;
+   - the runner makes no request for a scan. **The runner artifact route (`GET /v1/engine-runner/artifacts/:id`) is
+     removed** (review fix, secure by default): nothing called it any more, so it is gone rather than kept behind a
+     setting. It is out of `ENGINE_RUNNER_ROUTES`, the OpenAPI registry and the runner client, and
+     `RunnerClient.artifact` with `downloadArtifact` (`packages/engine-runner/src/artifact.ts`) are deleted with it,
+     as is the refusal code `engine_artifact_not_leased`. `zz-b5-modelscan` now places the bytes from the gateway's
+     store and asserts the route is gone (no route registered; a human key gets 404, the runner's token its scope
+     refusal). The gateway's only artifact stream is the executor input (`engine-tasks.ts`, audited phase
+     `task_input`, proven in `zz-adr0190-i5-engines`).
+3. **The publish workflow** (`.github/workflows/engine-images.yml`):
+   - it runs on push to `main` (only when an engine's own files change) and on `workflow_dispatch`, never on
+     `pull_request`. The `publish` job carries `if: github.ref == 'refs/heads/main'` (as `security.yml`'s sign
+     job does), so a manual dispatch started on any other branch publishes nothing, and `record` is skipped with it;
+   - the workflow grants `contents: read`, and only the `publish` job gets `packages: write`, through `GITHUB_TOKEN`;
+   - every action is pinned by commit sha, and the build is the runner's Docker CLI with its buildx plugin
+     (`scripts/build-engine-image.sh`). It builds linux/amd64 with provenance and SBOM attestations off, so each
+     push is one single-platform image manifest, and it reads both digests from buildx's metadata file, not the
+     local store: `containerimage.digest` is the manifest digest and `containerimage.config.digest` is the image id;
+   - it pushes `ghcr.io/<owner>/regulait-engine-<engine>:sha-<commit>`, and the `record` job uploads
+     `engine-images-publish.json`. The workflow commits nothing.
+   - **Visibility.** A package scoped to a personal account is **private** when first published. A package linked to
+     a repository inherits the repository's access permissions but not its visibility (GitHub docs, "Configuring a
+     package's access control and visibility", read 2026-10-17). This repository is public, so the images carry no
+     `org.opencontainers.image.source` label: they are not linked and do not inherit the repository's read access.
+     Making them public is the owner's decision.
+   - **The pull_request check** is a separate workflow (`engine-images-build.yml`): it builds each image and pushes
+     nothing, with `contents: read` only and no registry login.
+4. **Signing: PENDING (skipped with its reason logged).** Two GitHub docs pages ("Artifact attestations" and "Using
+   artifact attestations", read 2026-10-17) settle it:
+   - Attestations from a **public** repository use the Sigstore public-good instance and are written to its
+     publicly readable transparency log.
+   - **Private** repositories use GitHub's own instance, which has no transparency log, but only on GitHub
+     Enterprise Cloud. On Free, Pro and Team plans, attestations work for public repositories only.
+   - This repository is **public** and owned by a personal account (checked 2026-10-17 through the GitHub API). So an
+     attestation would go to the public log, which the task forbids (public-good keyless signing is not approved).
+   - The `sign` step therefore signs nothing. It logs a `::notice` with the reason and writes it to the step summary.
+   - The existing gateway image workflow (`publish-image.yml`, ADR-0184) does sign keylessly through public-good
+     Sigstore. That workflow is unchanged here and is an open question for the owner (below).
+5. **Digest plumbing: the lock.** `engines/images.lock.json` (schema `regulait.engine-images-lock.v1`) holds, per
+   engine: `repository`, `manifestDigest`, `imageId`, `publishGeneration`, `sourceCommit` and `publishedAt`. Every
+   value is null (and the generation 0) until the first publish. `scripts/engine-images-lock.mjs`:
+   - `--apply <publish.json>` validates the workflow's output. The repository must be
+     `ghcr.io/<owner>/regulait-engine-<engine>` where `<owner>` is **pinned to this repository's owner**, read from
+     the root `package.json` `repository` URL and lowercased (`GHCR_OWNER`; `validateLock` applies it, so `--check`
+     refuses another namespace too). Both digests must be `sha256:<64 hex>` and not the zero digest.
+     It bumps an engine's `publishGeneration` only when the build changes, then regenerates the derived files;
+   - `--apply` also refuses a publish file whose `sourceCommit` is not reachable from `origin/main`
+     (`git merge-base --is-ancestor`, against the local clone, so `origin/main` must be fetched first; a commit the
+     clone does not have is refused too). **Limit:** the publish file is unsigned workflow output, so this proves the
+     named commit is on main, not that the digests were built from it. The workflow's main-only guard is what ties
+     the two; whoever runs `--apply` must take the file from a run on `main`;
+   - `--write` regenerates them, and `--check` fails when they are stale. `scripts/engine-images-lock.test.mjs`
+     runs in CI's `vitest --dir scripts` step and does the same check.
+   - The derived files are `packages/shared/src/engines/images-lock.ts` (generated), which the manifest reads, and
+     the compose defaults.
+   - **In the manifest,** `imageDigest` is the lock's `manifestDigest` (what a runner reports and the gateway
+     admits), `taskImage` is its `imageId`, and `generation` is the base plus `publishGeneration`, so it moves with
+     every recorded build (ADR-0187 decision 95). Pinned by `images-lock.test.ts`.
+   - **Deviation from the task text:** the task asked for `taskImage` as a digest-pinned reference. It stays the
+     bare content digest (`sha256:<hex>`), because the executor channel (`channel.ts`) and `dockerRunArgs` accept
+     only that and changing them is out of scope. The pull reference `repository@manifestDigest` is in the lock and
+     the compose defaults.
+   - **Compose.** The script writes the lock's repository and digest as the defaults of
+     `REGULAIT_ENGINE_<ENGINE>_REPOSITORY` and `REGULAIT_ENGINE_<ENGINE>_DIGEST`. With a publish recorded, a stock
+     install needs neither variable. The variable stays as an override (it existed already), and the gateway
+     refuses and audits a runner whose digest is not the manifest's (`engine-runner-register-obsolete-build`).
+     Without a publish the default stays the zero digest and placement keeps refusing (`policy_unresolved`).
+6. **Compose and the bundle.**
+   - The executor input volume (owner 10001, mode 0711) and the Caddy digest pins were already on main (I5
+     follow-up items 2 and 3), so nothing changed for them.
+   - `scripts/build-image-bundle.sh --with-engines` (opt-in) adds the three locked engine images. It refuses an
+     unpublished engine and pulls each image by `repository@manifestDigest` (the packages are private, so
+     `docker login ghcr.io` comes first). It checks the image id against the lock (`imageId` on the classic store,
+     `manifestDigest` on the containerd store) and saves the digest reference plus the fixed tag
+     `regulait/engine-<engine>:bundled`.
+   - `docker load` keeps the image id, which is the `taskImage` the executor runs by. The air-gapped install's
+     override runs the three runner services from the `:bundled` tags (`pull_policy: never`), because a digest
+     reference does not survive save/load on the classic store (as with Caddy). After loading a bundle, the installer
+     checks each present `:bundled` tag's id against that engine's lock entry, read as JSON with `node` (as
+     `build-image-bundle.sh` does, review fix replacing a `grep -A8` line read). Without `node` on the target the
+     check fails closed and the install stops; it applies only when the bundle carries engine images.
+7. **ADR-0176 (search first).** The digests come from BuildKit's own metadata file, and the pushes use the Docker CLI
+   with no new dependency. For the lock, the digest-update bots and pinning tools that were considered track
+   UPSTREAM images by tag. None records our own build's output and writes it into a TypeScript manifest and compose
+   defaults, so the about-150-line script is ours: it is a RegulAIt evidence format. Nothing is added to any
+   `THIRD_PARTY.md`.
+8. **Checked here:**
+   - the engine-modelscan unit tests: 88 passed, 7 skipped (the opt-in real-engine suite);
+   - the shared engine tests;
+   - `scripts/engine-images-lock.test.mjs`;
+   - the gateway file guards `zz-eng-img-engine-images.test.ts`, `zz-b7-compose-engine-images.test.ts` and
+     `zz-b5-compose.test.ts`;
+   - `node scripts/engine-images-lock.mjs --check`;
+   - `bash -n` on the three scripts;
+   - the full workspace build.
+   The installer's lock-block check was run against a lock generated by `--apply` from a synthetic publish: each
+   engine matched only its own ids.
+9. **Not verified (pending execution, M-041).** No Docker daemon or registry was available here.
+   - **Not run anywhere:** building any engine image (the PR's build-only workflow is the first real build, and its
+     result is in the PR); the publish workflow; a GHCR push and the package's actual visibility; buildx metadata
+     keys on GitHub's runners; `--apply` with a real publish; the bundle with `--with-engines` and its load round trip
+     on each image store; an engine task end to end.
+   - The DB suites changed here (`zz-b5-modelscan`, `zz-adr0190-i5-engines`) were typechecked only; CI runs them.
+   - On Docker's containerd image store, a pulled image's `.Id` is the manifest digest, not the config digest the
+     manifest's `taskImage` names. Whether `docker run sha256:<config digest>` resolves there is unverified, so run
+     executors on the classic store until it is checked.
+
+**Open questions for the owner.**
+1. **Signing.** Should the engine images be signed with a key the owner holds (cosign key pair, no transparency log
+   upload)? Or should the repository move to a plan with private attestations? Until then they are unsigned, and
+   ADR-0187 decision 55's "admission is the signature verification at deploy time" stays open.
+2. **The gateway image.** `publish-image.yml` signs keylessly through public-good Sigstore (ADR-0184), which is the
+   opposite of the rule given for the engine images. Should it change to match?
+3. **Who records a publish.** The workflow leaves `--apply` and its PR to a person, so it never holds
+   `contents: write`. Should a bot open that PR instead? That needs `pull-requests: write` in a separate job.
+
+## As built: owner decisions C and D (2026-10-17)
+
+Migration **0201** (`0201_isolation_person_stdio_and_project_sensitivity.sql`, hand-written; journal idx 201, after
+0200) adds the relaxation table and the project column. Its one new function pins
+`search_path = pg_catalog, public, pg_temp`, and the table it guards refuses TRUNCATE (migration 0185's invariants).
+These points settle the build-time choices both decisions left open.
+
+**Decision 11, as built.** Owner decision C added the "person's own call" row to decision 11's table. As built,
+setting the relaxation is audited and needs the `settings_relax` step-up; clearing it is audited and needs none,
+because it tightens. Owner decision D's project sensitivity is not a decision 11 row; it works like one:
+- default: the strictest use case; with neither the use case nor the field, `policy_unresolved`;
+- relaxation: none, because an admin field can only raise it;
+- every change is audited and needs a step-up.
+Both were built 2026-10-17 in migration 0201.
+
+**Owner decision C: a person's own stdio call.**
+1. **Storage.** An `execution_person_stdio_relaxations` row, with `scope_kind` (`mcp_server` or `project`, no org
+   scope), `scope_id`, who set it and when, and who cleared it and when. A partial unique index allows one active row
+   per scope. A guard trigger refuses DELETE and lets an UPDATE only set the clearing, once. A cleared row keeps its
+   id, so a decision that relied on it still names it. `scope_id` has no foreign key: the row is evidence and must
+   not block, or vanish with, its server or project. No row exists by default.
+2. **Enforced in the resolution.** `resolveRequirement` (execution-placement.ts) reads the active row for the call's
+   server, then its project. It reads one only for an `mcp_stdio` call with `agent: null`, no parent grant and
+   `interactivePerson: true`. The unknown-agent floor is then L2 (`unknownAgentFloor`, shared), and the call is
+   placed under its configured profile (the server's, else the shipped `restricted`) instead of
+   `restricted-microvm`. The pure function checks the kind and the `unknown` assurance again. A low-assurance agent
+   (`no_identity`, `observed_autonomy_above_declared`), an engine and any other kind stay at L3. The floor is still
+   one term of the MAX, so a regulated project, a compliance tag, the server's own `minClass` and a parent grant
+   still win. It never goes below L2, even when the `mcp_stdio` and sensitivity floors are relaxed to L1.
+3. **Who is an interactive person.** `interactivePersonCaller` is the one predicate. It needs a session whose origin
+   is a person's sign-in (`password`, `oidc`, `saml`; the shared `INTERACTIVE_SESSION_ORIGINS`, held equal to the
+   gateway's `HUMAN_SESSION_ORIGINS` by a test) and no delegation grant. The origin comes from the session row, through
+   `abacPrincipalFromRequest`. An API key, a session exchanged from one (`api_key`), the bootstrap identity, a workload
+   token and a worker loop that supplies no principal are never interactive. The MCP proxy route, the governed tool
+   call and the governed protocol call pass the request's principal to `stdioPlacementContext`. The builder runtime,
+   orchestration and the node tool manifest pass none, so they stay at L3.
+4. **Recorded.** The requirement carries `relaxation` (`kind: person_stdio_l2`, `subjectKind: interactive_person`,
+   `relaxationId`, `scopeKind`, `scopeId`). A governed stdio decision writes it in its audit row's
+   `detail.execution.relaxation`, beside the placement it keys. An unlinked placement's refusal row carries it in its
+   audit detail too.
+   - **In the decision's facts** (review fix): `regulait.decision-facts.v2`'s `execution` section gains an optional
+     `relaxation` with the same five fields, as I4 added `offerId`, `imageDigest` and `runtimeFlagsSha256`. The
+     capture writes it only when a relaxation was used, so facts without one stay byte-identical and every stored v2
+     document still parses and verifies. The contract allows it only on a resolved `mcp_stdio` requirement, never on
+     `in_gateway` or `external`. A malformed one on the decision row fails the capture (fail closed), never dropped.
+   - The Decision BOM panel shows it as "Isolation relaxation" with the relaxation id. A malformed one makes the
+     whole BOM unreadable.
+   - **Vectors** (review fix): the placement corpus gains four `person-stdio-*` vectors. The request gains `caller`
+     and `personStdioRelaxation`. They pin the API-key case at L3 even where the server is relaxed, the relaxed
+     interactive case at L2, the default at L3, and a low-assurance agent at L3. The checker computes the floor and
+     rejects four new corruptions. The product test runs the vectors through `computeRequiredClass`. These vectors
+     were written by the builder, not independently (the corpus README says so).
+5. **Routes** (admin, in `ISOLATION_ROUTES`):
+   - `GET /v1/execution-person-stdio-relaxations` lists the active rows.
+   - `PUT /v1/execution-person-stdio-relaxations/:scopeKind/:scopeId` takes `{relaxed}`. Setting needs a
+     `settings_relax` step-up bound to the scope, and is audited `execution-person-stdio-relaxed`. Clearing needs no
+     step-up and is audited `execution-person-stdio-relaxation-cleared`. Both are compare-and-set: a racing set
+     fails on the unique index, and a clear updates only the row it read. Either answers `409 changed_concurrently`.
+   - A remote server answers 409 `not_a_stdio_server`, a scope kind other than the two answers 400, and a missing
+     scope answers 404.
+   - Review fix: an active relaxation whose server or project was deleted can still be cleared. The active row is
+     looked up by scope kind and id without the scope existing. Setting needs a live scope.
+   - **A program change clears it** (review fix). When a stdio server's command, args or closure digest changes
+     (`PATCH /v1/servers/:id`), its active server-scope relaxation is cleared in the same transaction, with
+     `cleared_by` = the actor. It is audited `execution-person-stdio-relaxation-cleared` with
+     `cause: stdio_program_changed`. This follows ADR-0188 S8, where an identity opt-in does not follow a url move.
+     A rename or an unchanged program keeps it. A project-scope relaxation is untouched.
+   - **A set is bound to the program** (review fix). For server scope, the set's step-up facts include the server's
+     `stdioCommandDigest`, and the audit row records it. The insert transaction re-reads that digest under the
+     server row's lock (`FOR UPDATE`, the row a program-change PATCH also locks). A digest that moved answers
+     `409 changed_concurrently` and writes nothing. In either order, no relaxation survives on a new program. The
+     test holds the server row in a second connection, moves the digest while the set waits, and expects the 409.
+   - **The vector runner** (review fix) maps each vector's `caller` to the credential it stands for and passes it
+     through `abacPrincipalFromRequest` and `interactivePersonCaller`. The API-key vector therefore pins the product
+     predicate, not a test-side rule.
+
+**Owner decision D: the project's sensitivity.**
+6. **Storage and rule.** The column is `projects.isolation_sensitivity` (nullable, CHECKed to the four values).
+   `projectSensitivity` returns MAX(the use cases' strictest, the field), through the shared
+   `projectIsolationSensitivity`. Having neither, a missing project, or any value outside the vocabulary does not
+   resolve: `policy_unresolved`, as before. A field below the use cases has no effect on the MAX.
+7. **Routes.**
+   - `GET /v1/execution-project-sensitivities` lists every project with its use-case sensitivity, the field, the
+     result and its project-scope relaxation.
+   - `PUT /v1/execution-project-sensitivities/:projectId` takes `{sensitivity}` (null clears). Every change, a
+     clear included, needs a `settings_relax` step-up bound to the project, the old value and the new one. It is
+     audited `execution-project-sensitivity-set` with the old and new field and the result before and after. It is
+     compare-and-set on the value read. An unchanged value is a no-op with no step-up.
+
+**Console** (apps/web isolation views).
+8. The Engines page gains a "Project isolation" card. It lists each project's sensitivity from its use cases, the
+   admin field and the one in force; a project with neither shows "Unresolved · calls refused". A Manage panel sets
+   the field through `withStepUp`. It says when a value has no effect, and when a use case is unreadable it says that
+   the field cannot resolve the project (review fix). Each stdio server's execution card on the MCP
+   servers page, and each project's Manage panel, has the person's own call control: "L3 (strict default)" or "L2
+   allowed · audited". Allowing is confirmed in a dialog, then stepped up; restoring L3 asks for none. An unreadable
+   answer shows "Not reported" and offers no control. `KNOWN_UI_GAPS` stays 0.
+
+**Tests.**
+- Pure: `adr0190-owner-cd.test.ts` (gateway). It shows `unknownAgentFloor` must fail when the kind and assurance
+  checks are removed.
+- On a database: `zz-adr0190-owner-cd.test.ts`. It covers the migration's guard, the resolution with and without
+  each scope, the API-key negative control, a low-assurance agent, a regulated project, an L2 offer, the refusal
+  audit, both routes' step-up, and D's resolve, raise and no-lower cases.
+- Web: `ownerDecisionsCD.test.ts`, `bomExecution.test.tsx` (the BOM row) and the mocked
+  `isolation-owner-cd.mock.spec.ts`.
+- Review fixes:
+  - `i8-execution.test.ts` covers the facts capture and the contract.
+  - In `zz-adr0190-i4-stdio-move.test.ts`, a governed tool call with a person's session facts records the
+    relaxation on its decision row and in its facts; the API-key control does not.
+  - In `zz-adr0190-owner-cd.test.ts`, the program-change clear and the orphan clear.
+  - The `person-stdio-*` vectors.
+
+**Not verified.**
+- The database tests typecheck, but have not run in the session that wrote them (no Postgres there). CI's database
+  shards run them.
+- No test drives a real browser session through the HTTP MCP proxy route to an L2 placement. The governed tool call
+  is tested with the session facts the route derives; the route's own `abacPrincipalFromRequest` is tested in pure
+  tests.
+- Owner decision C asked that the Decision BOM panel and the settings UI show the relaxation, and that vectors pin the
+  API-key case. Both are now built; the vectors are builder-written rather than independent (a deviation recorded
+  here, not in the owner's section).
+- L2 itself (gVisor) stays unverified, as recorded above.
+
+## I4 follow-up: stdio sessions on a multi-replica gateway (2026-10-17)
+
+This closes I4 open question 2 and the item 9 caveat ("a multi-replica gateway needs the stdio routes to reach the
+placing replica, or a frames table"). Migration **0204** (`0204_isolation_stdio_relay.sql`) is hand-written; its
+journal entry (idx 204) follows 0203. The number was 0206 as first written; the master assigned 0204.
+
+1. **The choice: (b) a frames table, not (a) ownership plus forwarding.**
+   - **(a) An ownership table plus forwarding to the owning replica over the internal TLS front: rejected.**
+     - A replica that received the executor's request would have to call the holder. That is a new replica-to-replica
+       endpoint, which needs its own authentication: the executor's proof is one-use and bound to its own request
+       (`htu`, `bh`, `jti`), so it cannot be passed on.
+     - The front (`executor-front`) knows one upstream, `gateway:3000`. Compose replicas have no per-replica address,
+       so forwarding would also need replica addressing (a registry of replica URLs and their certificates).
+   - **(b) A frames table any replica appends to and reads: chosen.** The database already connects every replica.
+     The executor's routes stay exactly as they were, behind the same proof, so there is **no new endpoint of any
+     kind**. The holder is found by a row, not by an address.
+   - **Searched (ADR-0176), not used:**
+     - Caddy's sticky load balancing (`lb_policy` `uri_hash`, `header`, `cookie`) on the front. The holder is the
+       replica the CALL reached through the public front, not the one a hash of the offer id picks, and a hash moves
+       whenever the replica set changes. Stickiness would route to the wrong replica.
+     - Redis Streams and NATS JetStream (BSD-3-Clause and Apache-2.0). Both fit the shape, but each adds a stateful
+       service to every deploy mode, the image bundle and the backup plan (pillar 3), for traffic that Postgres
+       carries at this size.
+     - Job queues on Postgres (pg-boss, graphile-worker). They carry jobs, not ordered byte streams with
+       acknowledgement, so the sequencing below would still be ours.
+     - Postgres `LISTEN`/`NOTIFY` (no new dependency) to replace polling. Deferred: it needs one dedicated
+       connection per replica outside the pool. Polling at 100 ms bounds the added latency; see follow-ups.
+2. **What is stored** (`stdio_relay_sessions`, `stdio_relay_frames`):
+   - One session row per placed stdio session (engine task sessions too: they use the same routes). It holds:
+     - the holder (`owner_replica`, a random id per process, so a restarted replica holds nothing) and its lease;
+     - the sealed `start` line;
+     - the counters (`in_next_seq`, `in_acked_to`, `out_next_seq`, `out_buffered_bytes`);
+     - one window token at a time, with an expiry if its replica dies;
+     - `closed_at`, `eof_at`, `ended_at` and an `end_code` limited by a CHECK to `ended`, `sequence`, `lease_expired`,
+       `buffer_full` or (point 9) `unsealed`. There is no free-text column, so the ADR-0102 prose-scrub registry is unaffected.
+   - A frame row is one stdin or stdout line (at most 768 KiB). Stdin frames are deleted once the executor's `from`
+     acknowledges them. Stdout frames are deleted once the holder takes them. All of a session's frames go when it
+     ends.
+   - The `start` line can carry an engine task's secret (I5). It is sealed with AES-256-GCM under a key derived from
+     the same root as the session MAC key (HKDF of the data key, label `regulait/adr0190/stdio-start-seal/v1`), with
+     the offer id as associated data. So a replica with the shared data key opens it, and one without cannot: that
+     replica refuses the window `stdio_unkeyed`, as it would fail the MAC. A sealed line copied into another row
+     does not open there. The row drops the line as soon as the sandbox posts its first stdout, as the in-process
+     session already dropped the secret.
+3. **Who reads what.**
+   - Every route query names both the offer in the path AND the executor that the request's proof names. So an
+     executor sees only its own offers' rows and frames (another executor's request is `offer_unavailable`), and no
+     request reads a session other than its own.
+   - Holder calls name `owner_replica`, so a replica never takes, ends or renews another replica's session.
+   - A trigger refuses any change to a row's offer, executor or holder, and any change to an ended row's end. There is
+     no takeover. A second trigger refuses any UPDATE of a frame. Both functions pin `search_path`, and both tables
+     refuse TRUNCATE (the migration 0185 rules).
+   - Offers carry no tenant column: a deployment is one organisation's control plane. The executor that owns the
+     offer is the boundary, as on one replica.
+4. **The holder's relay** (`executor-stdio.ts`, `relayOnce`) runs every `STDIO_RELAY_POLL_MS` (100 ms), and at once
+   when this process has news (a pushed frame, a close, an end, a posted stdout). It:
+   - writes each new session's row with its lease. The row is written only for a committed offer of that executor,
+     so an engine task held before its transaction commits is written on the first tick after the commit;
+   - appends pushed stdin frames, and marks a local close;
+   - applies the executor's acknowledgements and takes stdout frames, in order and once (one step at a time per
+     session), handing them to the MCP transport;
+   - ends the session on eof once its output is delivered;
+   - renews every lease it holds every 5 s (the lease is 15 s, so one missed beat is not a loss);
+   - deletes ended rows after 5 minutes, and any row whose lease lapsed an hour ago (its frames go with it).
+   - Once the placement is accepted, the relay also watches the offer, as the I4 watchdog did:
+     - the offer `ended` (the executor's `/end`, on any replica) ends the call normally once the output is in;
+     - an offer withdrawn, expired or gone under a live call is a loss (`lose`, recorded `where: holder`).
+   - The `/end` route on the holding replica takes the remaining output first and then ends the session there.
+5. **Fail closed when the holder is gone** (`stdioRouteDecision`, one rule for both routes):
+   - an offer that is not this executor's, or not placed: `offer_unavailable`;
+   - an ended row: `offer_unavailable`;
+   - a lapsed lease: the row is ended `lease_expired` by one conditional UPDATE (of two replicas, only one moves it).
+     The loss is recorded as before (one `execution-session-lost` audit row and, for a governed placement, one
+     `session_lost` report row), and the route answers **409 `session_lost`**;
+   - no row for an offer older than one lease: its holder never wrote it, so the session is lost the same way;
+   - no row for a younger offer: a window gets 409 `stdio_session_pending` (the holder writes the row within a tick).
+     That code is not final, so the executor re-opens with back-off. A stdout POST never waits, because it can only
+     follow a `start`;
+   - an open window whose lease lapses under it ends the row the same way and closes. The executor's next window is
+     `offer_unavailable`.
+   - `session_lost` joins the executor's final refusals (`stdio-pump.ts`), so the sandbox is stopped. A holder that
+     comes back finds its row ended and fails its call as lost: each pending request gets the gateway's own refusal,
+     never the server's failure (review M3).
+   - `stdio_session_unknown` is no longer answered. It stays in the vocabulary and in the executor's final set, so an
+     older peer still reads it.
+6. **Bounds.**
+   - Stdin: 4 MiB unacknowledged per session (the holder's existing bound).
+   - Stdout: 4 MiB buffered per session (`out_buffered_bytes`, a CHECK). A POST past it ends the session
+     `buffer_full`, a loss: the holder is not draining it. On one replica this output was delivered at once and had
+     no bound.
+   - So one live session holds at most 8 MiB of frames, and one replica holds at most 256 live sessions (unchanged).
+   - The routes and the holder poll at 100 ms, so a call on another replica waits up to about that per hop.
+     Same-replica traffic is woken in process and does not wait for the poll.
+7. **What was and was not run (M-041).**
+   - Run here: the gateway and executor builds; the routing-rule and sealing unit tests
+     (`adr0190-i4-stdio-relay.test.ts`); the executor's stdio pump tests with `session_lost` final and
+     `stdio_session_pending` retried; the gateway typecheck of the database suite.
+   - Not run here (no Postgres in the build environment): the database suite `zz-adr0190-i4-stdio-relay.test.ts`
+     (ownership, isolation, the lease, loss, bounds, retention, the 0185 guards) and the existing I4 and I5 suites
+     against the relay. They run in CI with the journal entry for 0204 (idx 204).
+   - **Pending execution:** a real multi-replica deployment (two or more gateway processes behind the front, a placed
+     stdio call whose window and stdout reach a replica other than the holder, and a holder stopped mid-call). The
+     database suite plays the second replica with rows written under another holder id.
+8. **Follow-ups this leaves:**
+   - `LISTEN`/`NOTIFY` to wake windows and holders on other replicas, instead of polling.
+   - An engine run's runner routes (`/v1/engine-runner/...`) still find their task in the process that started it
+     (`tasksByRun`). Only the executor side of an engine task's session is multi-replica now.
+   - No take-over: a session whose holder dies is lost, never resumed elsewhere. Resuming would need the MCP client's
+     state, which lives only in the holder.
+9. **Review fixes (the independent review of PR #417, findings 1 to 4).** These supersede the points above where they
+   differ; migration 0204 was still unmerged, so it was edited in place.
+   - **Finding 1 (Medium): one session's fault no longer stalls the replica's leases.** `relayOnce` now renews the
+     leases FIRST, in its own catch. The work for each session (its row, stdin and close; then what the routes did)
+     runs in its own catch. A session whose work fails on every tick for one lease length (15 s, so a database outage
+     loses no session earlier than its lease would) is lost on its own, and the loss is recorded (`where: holder`).
+     The replica's other sessions keep their leases. Ending rows and the sweep also each have their own catch. Test:
+     a session whose every statement throws is held next to a healthy one; the healthy lease is renewed while the
+     poisoned session fails, and then only the poisoned one is lost.
+   - **Finding 2 (Low): a raw NUL in a frame is refused.** The frame schema (`packages/shared`, `frameData`) refuses
+     U+0000, so a stdout POST carrying one is a clean 400 `invalid_body`, never a 500 from the insert. JSON-RPC
+     never needs one, because JSON escapes it. Test in `adr0190-i4-stdio-relay.test.ts`.
+   - **Finding 3 (Low; the master decided to seal, ADR-0180): frames are sealed at rest.** This supersedes point 2's
+     plain frame row. Each frame is stored as AES-256-GCM (`data_sealed`, `iv.tag.ciphertext` in base64url) under a
+     key derived from the same root as the `start` seal (HKDF label `regulait/adr0190/stdio-frame-seal/v1`). The
+     associated data is the offer id, the direction and the sequence number. So a frame moved to another session,
+     turned around, or swapped with another frame in the order does not open.
+     - `bytes` is the plaintext size. A CHECK holds `data_sealed` to the sealed shape, with a length that follows
+       exactly from `bytes`, so the table refuses a frame in the clear. The old `octet_length(data) = bytes` CHECK
+       is gone with the `data` column.
+     - Fail closed: a frame that does not open (another root, so no shared data key; or altered at rest) is never
+       delivered. The session ends with the new end code **`unsealed`**, which is a loss, recorded once by whoever
+       moved the row: the route that finds it in a window, or the holder that finds it in stdout. `end_code`'s CHECK
+       gains `unsealed`, and `STDIO_RELAY_LOST_CODES` is now `lease_expired`, `buffer_full` and `unsealed`.
+     - Without a data key, each process seals under its own random root, as for the `start` line. One replica works;
+       a second cannot open the first one's frames, and the session is lost rather than served.
+     - Tests: unit tests for seal and open (another offer, the other direction, swapped seqs, an altered iv, tag or
+       ciphertext, another root), and DB tests (no plaintext stored and a plaintext insert refused; stdin swapped at
+       rest ends the session `unsealed` on the route side exactly once; stdout swapped at rest is never delivered;
+       stdout under another root fails the holder's call as lost `unsealed`).
+   - **Finding 4 (Low, tests): the filters the review could remove are now pinned.** In the foreign-holder test,
+     `markStdioClosed` leaves `closed_at` NULL, `stdioHolderView` returns nothing, and the holder's
+     `endUnsealedStdioSession` moves nothing. On a lapsed row, `endLapsedStdioSession` for executor B returns
+     `false` and the row stays live until executor A's call ends it.
+   - Run here: the build; the gateway non-database tests for I4 and I5; `packages/shared`; `packages/sandbox-executor`;
+     the gateway typecheck of the database suite. The database suite runs in CI (no Postgres here).
+
+## As built: slice A1, the relaxation in the Decision BOM (2026-10-17)
+
+Owner decision C asked that the Decision BOM panel show the relaxation and that vectors pin the API-key case. A1
+finishes that: the panel shows the relaxation's id, who set it, its scope, when, and a link to the audit row. No
+migration and no change to the placement code.
+
+1. **The signed facts are unchanged; no v3.** `regulait.decision-facts.v2`'s `execution.relaxation` already signs
+   which relaxation the requirement relied on (id, scope kind, scope id, subject kind). Who set it and when are
+   facts about the relaxation row, not about the decision. That row is never deleted, and its set fields never change
+   (migration 0201's guard). Adding them to v2 would have needed the placement resolution to read them, and two copies
+   of the same fact. They are therefore read live from the row and shown beside the signed body, as the I4 placement
+   reports are.
+2. **The read response** (`decisionBomReadResponseSchema`, contract-b4) gains an optional `executionRelaxation`
+   (`decisionExecutionRelaxationRecordSchema`):
+   - the fields are `id`, `scopeKind`, `scopeId`, `setBy`, `setAt`, `clearedBy`, `clearedAt` and `setAuditId`;
+   - it is present exactly when the signed facts name a relaxation, and it must be the row they name (id and scope);
+   - the schema refuses a mismatch, a clear without its actor, and a clear before the set;
+   - it is null when the facts name none, and absent from a gateway before A1.
+3. **The gateway** (`decisionExecutionRelaxationRecord`, bom-routes.ts) reads the row by the signed id.
+   - `setAuditId` is the `execution-person-stdio-relaxed` row that the set wrote in its own transaction (same actor,
+     `detail.relaxationId`). It is found through the `(user_id, at)` index within a minute of `created_at`. It is
+     null when that row is no longer there (audit retention) or is not exactly one row.
+   - A named row that does not exist refuses the read rather than show the facts without it.
+4. **The audit link.** `GET /v1/audit` takes `id` (one row by id), and the audit log page reads `?id=`. It shows "one
+   audit row" and a control to show every row. The panel links `/admin/audit?id=<setAuditId>`.
+5. **The panel.** Under the signed execution facts, "The isolation relaxation" shows:
+   - the relaxation id, the scope (MCP server or project, and its id), who set it (name and id), and when;
+   - the audit row link, or "Not found" when the row was pruned;
+   - "Today": still in force, or cleared when and by whom.
+   It says that this record is not part of the signed Decision BOM. A gateway that does not report it shows "Not
+   reported". A record that is not the row the facts name makes the whole BOM unreadable.
+6. **Vectors.**
+   - The request gains `personStdioRelaxationState` (`active` or `cleared`).
+   - Five new vectors: an API key on a relaxed project and a workload token stay at L3; the server scope relaxes an
+     interactive person; a cleared row at either scope stays at L3.
+   - Seven new corruption controls (149 vectors, 36 controls).
+   - The gateway runner treats only an `active` row as in scope, as the resolution reads `cleared_at IS NULL`.
+   - **There is no expiry:** a relaxation stops applying only when it is cleared, by an admin or by a program change.
+     So the checker refuses an `expired` state rather than pin one the model does not have.
+7. **Tests.**
+   - Shared: `contract-b4.test.ts`, the record's binding to the facts and its negative controls.
+   - Web: `bomExecution.test.tsx`. Each fixture passes the shared schema first. The tests cover the record, a pruned
+     audit row, a cleared relaxation, "not reported", and six mismatches that the shared schema also refuses.
+   - Gateway, on a database: `zz-adr0190-owner-cd.test.ts`, which covers the record after a real set and clear, the
+     `?id=` read, and the missing-row refusal.
+   - Mocked end to end: `decision-bom-person-stdio.mock.spec.ts`.
+     - The browser calls `POST /mcp/:serverId` with its session cookie and no `authorization` header. The mocked
+       gateway records an L2 placement naming the relaxation.
+     - The audit log opens that decision's BOM, which shows the record. Its link opens exactly the audit row that set
+       the relaxation.
+     - The same call with a bearer key is refused at L3, and its BOM names no relaxation. Axe runs on the panel.
+
+**Not verified.**
+- The database test typechecks but has not run in the session that wrote it (no Postgres there); CI's database
+  shards run it.
+- The end-to-end spec mocks the gateway. It pins what the console sends and shows, not the placement. A real run
+  (gateway, MCP proxy, executor, gVisor L2) is pending execution: it needs Docker and an L2 executor.
+- The new vectors were written by the builder, not independently.
+
+**A1 review fixes (2026-10-17).** The independent review of A1's PR asked for five changes:
+1. `contract-b4.test.ts` now builds a v2 body whose facts name a relaxation. It shows that the named row is accepted,
+   that null is refused, and that another id, scope kind or scope id is refused. The earlier case had a v1 body, so it
+   proved only "a record with no relaxation".
+2. The "invented expiry state" corruption control now edits `person-stdio-cleared-relaxation-stays-L3`. On the active
+   vector, the class check also rejected `expired`. On the cleared vector, only the `RELAXATION_STATES` check can, so
+   the control fails if that check is removed (tried during the fix).
+3. The web reader (`readRelaxationRecord`) refuses a record cleared before it was set, as the shared schema does. A
+   negative case was added to `bomExecution.test.tsx`.
+4. A named relaxation row that is missing is a `BomRouteError` 500 `{ error: "bom_relaxation_missing" }`, which the
+   read route sends as such, rather than an unhandled error.
+5. The mocked end-to-end spec registered the `/v1/users` route twice; the duplicate is gone.
+
+## As built: I5 follow-up, the runc L1 backend and the versioned engine-worker profile (2026-10-17)
+
+This closes I5 point 14's follow-up ("a versionable engine-worker profile and a runc L1 backend"). No migration
+(the revert first proposed with migration 0202 was withdrawn: see the Revert bullet in point 5). It
+supersedes I5 point 14's "for placement it is a no-op today", and I2 point 5's "cannot be versioned" for
+`engine-worker` only. These points settle what the sections above leave open:
+
+1. **The runc backend** (`packages/sandbox-executor/src/runc-backend.ts`, `REGULAIT_EXECUTOR_BACKEND=runc`). The
+   Docker container core moved unchanged from the I4 backend into `docker-backend.ts`, and both backends extend it, so
+   an L1 hardened container has exactly the L2 hardening minus `runsc`. The `docker run` line differs only in
+   `--runtime` and in `--cgroupns private`, which the runc backend asks for explicitly (tested). The gVisor line does
+   not ask for it yet: adding it there is a #385 follow-up, so the I4 backend is unchanged until L2 is verified. Open source first (ADR-0176): Docker's own CLI and Engine API, as for gVisor; runc is the Docker
+   Engine's default runtime (Apache-2.0), installed with the host's Docker, so nothing joins the executor image. No
+   container client library was added: the I4 backend already drives the documented CLI and Engine API, and a
+   second client would duplicate it.
+2. **It reports L1 honestly.** `describe()` names `runc` and `hardened_container` only. Starting one at any other
+   class is refused before `docker run`, and every report says `runc`, whatever the init prints. The gateway's existing
+   rules then refuse anything more:
+   - `runc` cannot attest L2 or L3 (`class_not_attestable_by_backend`). The `executors_classes_declared_check`
+     backstop from 0183 also refuses a runc row that declares them.
+   - A runc runtime caps the claim at L1 (`class_above_observed_runtime`).
+   - An L1 attestation never meets an L2 or L3 requirement (`class_below_required`: in the broker, at accept and at
+     report).
+   An executor that declares only L1 self-tests no L2 or L3 profile (`topClassFor`), so every shipped profile stays
+   unattested on it.
+3. **What proves the L1 hardening** (decision 6, and review H2's rule that the outside decides).
+   - Before any container starts, the daemon's `/info` must show the runtime, seccomp support whose default is not
+     `unconfined`, and user-namespace remapping or rootless mode, so the container's uid is never a host uid. There is
+     no opt-out in this release, because the gateway could not audit an executor-side switch (ADR-0180).
+   - After the container starts, its own `HostConfig` (`docker inspect`) must show: the runtime it was asked for;
+     not privileged; `CapDrop: [ALL]` and no `CapAdd`; `no-new-privileges`; no `seccomp=unconfined` and no
+     `apparmor=unconfined`, `systempaths=unconfined` or `label=disable`; a read-only root; network `none`; IPC
+     `none`; `CgroupnsMode: private`; no shared PID or UTS namespace and no host user namespace; no device, device
+     request or device cgroup rule; no bind mount; and only read-only volume mounts.
+   - Each contradiction makes its probe `not run` with a `host_*` code (or `container_runtime_mismatch`), so the
+     report fails whatever the init printed.
+4. **A read-side backstop for every placement path.** `freshAttestation` is the one predicate behind the broker,
+   accept, the live delegation chain and the engine first-enable basis. It now ignores an attestation row whose class
+   the executor's backend cannot attest, or that its registration does not declare (`attestableBy`). A forged L2
+   pass on a runc executor therefore never counts: the broker refuses `attestation_stale` and offers nothing.
+5. **The engine-worker profile is versioned** (owner decision 4's floor is unchanged).
+   - `restricted` and `restricted-microvm` stay the strict references, never versioned or retired.
+   - `engine-worker` is versioned through the ordinary flow (`POST /v1/execution-profiles/engine-worker/versions`).
+     The Isolation panel offers "New version" on it and never "Retire".
+   - Its shipped body is version 1 and its own strict reference (`executionProfileReference`). Its shipped posture
+     (the jobs input, the task-scoped secret, the larger resources) is not re-judged against `restricted`. Anything
+     looser than that body, or than the version it replaces, is a `settings_relax` step-up and an
+     `execution-profile-relaxed` audit row, whose detail now names the `reference`. A lower `minClass` is such a
+     relaxation.
+   - A version must keep the engine shape (`engineWorkerProfileProblem`: engine_worker only, the one `jobs` input at
+     `/jobs`). Otherwise it is refused 400 `engine_worker_profile_shape`.
+   - It is never retired. Engines always run under its version in force, which is how `resolveRequirement`, the
+     broker and the first-enable basis read it. A new version is written with `shipped: false`.
+   - **Revert (review of #397), always a NEW version.** A version whose controls equal an EARLIER version of the
+     same profile is written as the next version, with that earlier body plus a `revertOf` marker
+     (`{version, digest, replacing}`). The gateway sets the marker and strips any value a client sends; no control
+     reads it. Its only job is to make the new row's digest differ: the digest is the SHA-256 of the body and unique
+     (`execution_profiles_digest_uq`), and placements and attestations reference it. Nothing is retired, un-retired or
+     changed, so retirement stays terminal and migration 0183's guard is unchanged.
+     - A revert is judged like any version, against the strict reference and the version in force (the newest
+       version). Going back to a stricter body (an L1 engine-worker back to its exact shipped controls) needs no
+       step-up. Going back to a looser one needs the `settings_relax` step-up and is audited
+       `execution-profile-relaxed`.
+     - It is audited `execution-profile-reverted` (a new `ISOLATION_AUDIT_ACTIONS` entry). Controls equal to the
+       version in force, with or without a marker, are refused `execution_profile_unchanged`.
+     - Executors attest the new digest at their next self-test before it places, so placement fails closed until
+       then.
+     - A revert changes only the profile's newest version. An agent or stdio server assigned to an older version
+       (for a custom profile, perhaps an older, looser one) keeps that assignment: an admin moves it with the
+       assignment route. The dialog says so.
+     - The panel numbers a new version after the newest version and says "reverted to the controls of vN" when the
+       route wrote a revert.
+     - A first build reverted by retiring the versions above the target and changed the guard (migration 0202) so a
+       profile could be versioned again after that. CI's I1 invariant test showed this let a new version follow a
+       retired newest version. It was withdrawn: 0202 and its journal entry are removed, and the number is free.
+   - **A new version is a compare-and-set too** (review of #397). Its insert and audit rows run in one transaction
+     holding the same per-name advisory lock, and re-check that the newest version and the version in force are
+     still the one it was judged against (and not retired). Another version in between, a revert included, refuses
+     409 `changed_concurrently`.
+6. **L1 for engines stays off by default and needs every relaxation.** Decision 11 lets an admin relax the
+   engine_worker floor to L1 (owner decision 4: audited, step-up), so the L1 path exists, and it is strict by
+   default. An engine task places at L1 only when all of these hold:
+   - the org's engine_worker floor, the project's sensitivity floor and the engine-worker profile (a new version)
+     are all at L1, each a step-up;
+   - an active executor holds a fresh L1 attestation of that version.
+   With the shipped version 1 (L2), nothing places at L1 even when both org floors are relaxed: the broker raises
+   the requirement to the profile's floor (`requiredBy: configured_profile`).
+7. **Tests.**
+   - **Executor:** `runc-backend.test.ts`. It covers the argument parity with runsc, the daemon posture, the honest
+     class (an L1 pass, an L2 or L3 claim failing, an L1 placement report refused against L2 and L3, a forged
+     gVisor init still `runc`), each `HostConfig` property made untrue one at a time, self-test selection, refusal
+     before `docker run`, and the handshake with the real init on the host (refused there: `uid_mismatch`). The I4
+     and I5 backend suites pass unchanged on the shared core.
+   - **Shared:** `engine-worker-profile.test.ts`, the versioning rules and the L2 defaults.
+   - **Gateway, on the shared database:** `zz-adr0190-runc-l1.test.ts`. It covers the 0183 backstop, the broker at
+     L1, L2 and L3, the forged-row backstop, engine placement under strict and under relaxed org floors, the
+     first-enable basis, and the version routes' refusals. It writes no engine-worker version. In `afterAll` it
+     revokes every executor it registered (its open offers withdrawn) and puts the org floors back to the values it
+     read in `beforeAll`.
+   - **Gateway, on a scratch database** (created and dropped by the file): `zz-adr0190-engine-worker-l1.test.ts`.
+     An engine task is offered at L1 only once all three relaxations and a fresh L1 attestation exist. A version
+     equal to the shipped body then becomes v3 (the marker, a new digest) without a step-up, nothing is retired, and
+     engines require L2 again. A looser revert needs the step-up and emits `execution-profile-relaxed`. A reverted
+     profile, once retired, is never un-retired, re-stamped or versioned again (the guard and the route both refuse).
+     A new version blocked on the per-name lock while another version lands refuses `changed_concurrently`.
+   - **Web:** the panel's actions (`profileActions`, mirrored from the shared list) and one mocked e2e assertion.
+
+**Not verified (M-041).**
+- **A real runc run is pending execution.** The session that built this had no Docker daemon, so the runc backend has
+  never started a container. Its arguments, its outside checks and its handshake with the real init are tested
+  without one. The `HostConfig` and `/info` field shapes it checks are taken from the Docker Engine API
+  documentation, not observed on a daemon. Until it has run on a Docker host with user-namespace remapping, L1 is
+  unverified, as L2 is.
+- No compose service, runbook or INSTALL.md step for a runc executor was written: none has been executed, and another
+  slice owns the compose stack. The environment variables are in `main.ts` (`REGULAIT_EXECUTOR_RUNC_RUNTIME`,
+  `REGULAIT_EXECUTOR_RUNC_VERSION`, and the canary, init and socket variables both backends share).
+- The gateway database suites (`zz-adr0190-runc-l1.test.ts` and the scratch-database
+  `zz-adr0190-engine-worker-l1.test.ts`) have not run in the session that wrote them (no database there); CI's
+  database shards run them. The mocked e2e assertion has not run locally (no browsers there).
+
+**Recorded (review of #397).**
+- **L1 requires user namespaces, with no opt-out.** This is kept strict. A relaxation (audited, gateway-side, never an
+  executor switch) is added only if a customer needs it.
+- **Follow-ups after #385 verifies L2:** apply the outside `HostConfig` check to the gVisor backend too, and pass
+  `--cgroupns private` on the gVisor line.
+
+## I5 follow-up: refusal ordering (2026-10-17)
+
+No migration. CI gateway shard 4 (run 38991262736) saw "an executor that reports another input digest" read the
+task's refusal as `session_lost` instead of `execution_profile_mismatch`. The mismatch, the offer's `mismatch`
+status and its report row commit in one transaction, before the quarantine. The stdio watchdog then sees the offer
+ended and calls `lose()` on the session, and the task's end hook stamped `session_lost` in memory before any read of
+the committed report.
+
+1. **A lost session is no longer a refusal by itself.** The task records only that its session was lost
+   (`sessionLost`). Reading the task's state resolves the refusal in order: a refusal already held, then the
+   placement's linked report (`mismatch` reads `execution_profile_mismatch`; a `session_lost` row reads
+   `session_lost`), then the offer's own end (`offer_<status>`), and only then the lost session. The result route's
+   in-memory check (`engineTaskRefusalOf`) still refuses a lost session before it is resolved (fail closed).
+2. **Point 18's dispatch checks** (`judge_required`, `agent_not_dispatchable`, a judge that is gone) now run at the
+   task start, as at the lease (pinned in `zz-adr0190-i5-engines.test.ts`).
+3. **Points 12 and 13** were corrected above: the dropped `not_run` envelope of an unplaced task, and the attestation
+   basis read once per poll, outside the lease transaction.
+4. The "a refusal holds no task of its own" test now asks about its own run (`engineTaskHeldFor(runId)`) rather than
+   comparing the process-wide task count, which other tests' tasks could change.
+
+**Not verified here:** the gateway database suite has not run in the session that wrote this (no database); CI's
+database shards run it.
+
+## As built: N11, keyset pages for the placements list (2026-10-17, PR #416)
+
+`GET /v1/execution-placements` pages each of its two lists with an `(at, id)` keyset cursor. The placements list
+uses `nextCursor` and the list of refusals that never got a placement row uses `refusalsNextCursor`. The older
+`before` parameter is still accepted.
+
+- **One row per placement.** Under 0198 a placement can have up to three report rows: one end report, one
+  `cancelled` and one `session_lost`. The list used to join reports, which gave one result row per report. Several
+  rows then shared one `(created_at, id)`, so a page boundary between them hid the rest. The list now selects
+  placements only and reads the reports of each page in a second query.
+- **Which report counts.** The effective outcome is the report `pickLinkedReport` chooses, the same choice as
+  `executor-channel.ts`. A `placed` report always wins, so a later `cancelled` or `session_lost` row never hides
+  that the call ran. Every report row is still listed, oldest first, in a new `reports` field of the list and the
+  detail route, so no evidence is hidden.
+- **Filters.** `outcome` and `reason` match a placement when any of its report rows matches. A placement with no
+  report row matches on its own decision. The filters therefore find the same placements as before, each once.
+- **Caveat: transaction start time.** `created_at` is the inserting transaction's start time (`now()`). Suppose a
+  transaction starts before a page is read but commits after it. Its rows then land behind the cursor, and that
+  walk never shows them; a new walk from the top does. Every timestamp keyset has this gap; the ordering is
+  otherwise total. A complete export has to order by a commit-ordered key instead. The keyset is not one.
+
+## As built: first engine image publish recorded (ENG-IMG follow-up, 2026-10-17)
+
+The merge of PR #405 (`5bb229e`) was a push to `main` that touched engine paths, so it ran the `Engine images`
+workflow (run 39025547605, attempt 1):
+- all three `publish` jobs and the `record` job succeeded;
+- each publish job's `Sign (skipped, with the reason)` step ran, so nothing was signed.
+
+The `engine-images-publish` artifact was recorded with `node scripts/engine-images-lock.mjs --apply` and checked with
+`--check`. `--apply` accepted it: the repositories are this repository's owner namespace, and the source commit is on
+`main`. The lock now names, per engine (repository, manifest digest, image id):
+
+| Engine | Repository | Manifest digest (pull, runner report) | Image id (`taskImage`) |
+|---|---|---|---|
+| promptfoo | `ghcr.io/dhruvmahendrapatel/regulait-engine-promptfoo` | `sha256:e973eab40486832b9b3c858acc43fa5f4d732bc47aea24ede2d89c576f36a577` | `sha256:f6592409f684252fe36952deb42b9369dbeeb9ac85f33ac8093d1505a94a454f` |
+| modelscan | `ghcr.io/dhruvmahendrapatel/regulait-engine-modelscan` | `sha256:d9e3bd1e364fec7ce6beec86716548965b4651e065b52570ebbb6ae8647e9413` | `sha256:a3057ca433c3fcf4f226cebcb12e876521c1e543ca359a4eef3b4dc93e9990bd` |
+| garak | `ghcr.io/dhruvmahendrapatel/regulait-engine-garak` | `sha256:8fe7d51851bcaff2fdf562c9db1b5f2b0423966e034954ee3976ae8754d6da6c` | `sha256:c0749c4f4c6707a011767cef76d9105b6dc002ed687986f4b6dca5217893bfde` |
+
+Each entry's `publishGeneration` is 1, so each manifest generation moves up by one (ADR-0187 decision 95). The compose
+defaults now name these references, so a stock install no longer needs `REGULAIT_ENGINE_<ENGINE>_DIGEST`.
+
+**What this changes, and what it does not.**
+- An engine can now pass the runner self-test's image check, and its task can now be placed. Every other gate stays:
+  - an engine is disabled until an admin enables it after a passing self-test;
+  - the worker switches need a fresh executor attestation;
+  - placement needs an attested executor at the engine-worker floor.
+- **The images are unsigned.** ADR-0187 decision 55's "admission is the signature verification at deploy time" is
+  still open (signing, open question 1 above). Recording the digests pins exactly which build runs. It does not
+  attest who built it beyond this repository's `main` and the run named here.
+- Tests that meant "an engine with no image" now say so explicitly (`imageDigest: null` overrides) instead of relying
+  on the shipped lock being null:
+  - `zz-b5-engines` (modelscan) and `engines.test.ts`;
+  - the promptfoo and garak manifest tests, which now compare with the lock;
+  - the lock script's apply tests, which start from a blank lock;
+  - `zz-b5-compose`, which derives each runner's reference defaults from the lock.
+
+**Not verified (pending execution, M-041).**
+- No image has been pulled from GHCR or run on a Docker host.
+- The packages' visibility is unconfirmed: GitHub's docs say it is private on first publish.
+- The pulled image's `.Id` has not been compared with the recorded image id.
+- No engine has been enabled, and no engine task has run end to end. Real gVisor still waits on the `runsc` re-pin.
+
+## As built: ADR-0197 Q3, a person's own stdio call relaxation expires (2026-10-18, migration 0208)
+
+ADR-0197 Q3 (owner, 2026-10-18): "stdio relaxations for a person (ADR-0190 A1) expire by default, renewable through an
+audited step-up." This supersedes A1 item 6's "There is no expiry" and owner decision C's as-built "a relaxation stops
+applying only when it is cleared".
+
+1. **The expiry.** Migration 0208 adds `expires_at` (NOT NULL), `renewed_at` and `renewed_by_user_id` to
+   `execution_person_stdio_relaxations`. A set writes `now() + 30 days` (`PERSON_STDIO_RELAXATION_DAYS`, also the
+   column default). A CHECK holds `expires_at` after `created_at` and at most 30 days after the set or the latest
+   renewal. There is no setting to lengthen it.
+2. **No grandfathering (ADR-0180).** The backfill sets an existing row's expiry to 30 days after it was set, so a row
+   older than that stops applying when 0208 runs. 0201's guard is disabled for that one UPDATE and enabled again in
+   the same migration.
+3. **Fail closed.** `personStdioRelaxation` (execution-placement.ts) reads `cleared_at IS NULL AND expires_at > now()`
+   on the database clock. An expired, uncleared row lowers nothing: the call is back at L3 and the decision names no
+   relaxation. The project view's `personStdioRelaxationId` reads the same way.
+4. **Renewal.** `PUT /v1/execution-person-stdio-relaxations/:scopeKind/:scopeId` with `{relaxed: true, renew: true}`
+   renews the uncleared row, whether in force or expired, for 30 days from now.
+   - It is a `settings_relax` step-up bound to `{op: "person_stdio_renew", relaxationId, scopeKind, scopeId}`, plus
+     the stdio program digest for a server. A server renewal takes the same program lock as a set.
+   - It is audited `execution-person-stdio-relaxation-renewed`, with the expiry before and after and the step-up
+     method.
+   - The row keeps its id, so decisions that relied on it still name it.
+   - Renewing where there is no uncleared row is 404 `no_relaxation`.
+   - `{relaxed: true}` on a scope whose row has expired is refused 409 `relaxation_expired`, so a renewal is never
+     an implied side effect of a set.
+5. **The guard** (0201's function, replaced by 0208, search_path still pinned, TRUNCATE still refused) admits two
+   UPDATEs of an uncleared row, and nothing on a cleared row:
+   - a clearing, which changes nothing else (the expiry and the renewal included);
+   - a renewal: a later `renewed_at`, its actor and a later `expires_at`.
+6. **The Decision BOM record** (`decisionExecutionRelaxationRecordSchema`) gains `expiresAt`, `renewedBy` and
+   `renewedAt`. They are optional, but a gateway reports all three or none; a gateway before Q3 reports none.
+   - The schema and the web reader refuse an expiry at or before the set, a renewal without its actor or time, and a
+     renewal before the set.
+   - The panel shows "Expires" (with the latest renewal), and "Today: Expired …; L3 applies again until an admin
+     renews it" once it has passed.
+   - The signed facts are unchanged, as in A1.
+7. **The Isolation panel** shows the expiry, an expired allowance as L3, and "Renew L2 for 30 days" (step-up).
+8. **Vectors.** `personStdioRelaxationState` gains `expired`, which never relaxes. There is one new vector
+   (`person-stdio-expired-relaxation-stays-L3`), making 150. A1's invented-state control now uses `lapsed`, and two
+   new controls bring the total to 38.
+9. **Tests.** `zz-adr0197-q3-relaxation-expiry.test.ts` (database) covers:
+   - the 0208 CHECKs and guard;
+   - fail closed on an expired row;
+   - renewal refused with no grant or another act's grant (not spent), then renewed with the exact grant;
+   - the BOM record.
+   Also `ownerDecisionsCD.test.ts`, `bomExecution.test.tsx` and the vector checker.
+
+**Not verified.** The database test typechecks but did not run in the building session (no Postgres there). Migration
+0208 has no journal entry on this branch (the master adds it), so CI's database shards cannot apply it until then.
+
+## As built: engine image signing and the lock-update bot (ADR-0197 Q2 and N10, 2026-10-18)
+
+This answers open question 1 of "As built: engine task images" (signing) and open question 3 (who records a publish),
+as owner decision Q2 settled them (ADR-0197): keyless, with cosign, the CI identity token and the public transparency
+log; air-gapped installs verify with a bundled trust root. The task-images section's point 4 ("Signing: PENDING") is
+superseded; its text is left as it was. No migration.
+
+1. **Signing (the `publish` job of `engine-images.yml`).**
+   - The job runs in the GitHub `release` environment (`environment: release`) and gains `id-token: write`; it keeps
+     `contents: read` and `packages: write`. No key, password or secret exists for signing.
+   - cosign v3.1.3 is downloaded and checked against its pinned SHA-256 (the same pin as `publish-image.yml`).
+   - After the push, `cosign sign --yes -a imageId=<config digest> -a sourceCommit=<commit> --bundle <file>
+     <repository>@<manifest digest>` signs the digest: a Fulcio certificate for the job's OIDC identity and a Rekor
+     entry. cosign also stores the signature next to the image on GHCR.
+   - The signed in-toto statement has one subject (the manifest digest) and the two annotations. So the signature
+     covers the whole lock entry an executor relies on, including the image id that `docker load` keeps. This was
+     checked with cosign v3.1.3 against a throwaway local registry (a key-signed stand-in, see point 6).
+   - The job then verifies its own signature twice: offline, with the check every later use runs (below), and online,
+     with `cosign verify` of the GHCR copy against the same identity.
+   - It adds a `signature` record to the engine's output:
+     - the Sigstore bundle;
+     - `certificateIdentity` (read from the certificate), `certificateOidcIssuer`, `workflowRepository` and
+       `workflowRef`;
+     - the Rekor entry (`logIndex`, `logId`, `integratedTime`).
+     `record` copies these records into `engine-images-publish.json` and refuses an engine without one.
+   - The `Sign (skipped, with the reason)` step is gone.
+2. **Verification (`scripts/engine-images-lock-verify.mjs`, one code path for every use).** A signature is accepted
+   only when all of these hold:
+   - the bundle exists. An unsigned image is refused, never warned about (ADR-0180);
+   - the statement signs exactly the lock entry: the subject is the manifest digest, and the annotations are the image
+     id and source commit;
+   - the certificate's one URI identity is `https://github.com/<owner>/<repo>/.github/workflows/engine-images.yml@refs/heads/main`.
+     `<owner>/<repo>` is read from `package.json` `repository` with its case kept, because the certificate names the
+     repository as GitHub does;
+   - cosign, refused unless its SHA-256 is the pinned release's for the platform, runs
+     `verify-blob-attestation --bundle <file> --trusted-root <file>` with these pins:
+     - `--certificate-identity <that identity>` and `--certificate-oidc-issuer https://token.actions.githubusercontent.com`;
+     - `--certificate-github-workflow-repository <owner>/<repo>` and `--certificate-github-workflow-ref refs/heads/main`;
+     - `--type https://sigstore.dev/cosign/sign/v1` and `--digest <manifest digest hex> --digestAlg sha256`.
+     It checks the Fulcio chain, the Rekor inclusion, the identity and the digest. Because the trust root is a file,
+     the check needs no network and runs the same way air-gapped.
+   The first three checks read the bundle without cryptography, so that a refusal says why. cosign is the proof.
+3. **Where it runs, before use.**
+   - **`engine-images-lock.mjs --apply <publish.json> --trusted-root <file>`** (now required). Every engine the
+     publish names must carry a signature that verifies for the publish's own digest, image id and source commit, or
+     nothing is written. Signatures kept from earlier publishes are re-verified against the new root before anything
+     is written. Then it writes:
+     - each new image's bundle to `engines/signatures/<engine>.sigstore.json`;
+     - the root to `engines/signatures/trusted_root.json`.
+   - **`--check --base origin/main`** (CI). A new image must come with its committed bundle, signing exactly the new
+     entry by that identity (structural; CI has no cosign). Plain `--check` refuses a committed bundle that does not
+     match its entry, and reports an entry with no bundle.
+   - **`scripts/build-image-bundle.sh --with-engines`** verifies each pulled engine image before saving it.
+   - **`scripts/install.sh`** (air-gapped, a bundle that carries engine images) verifies each loaded `:bundled` engine
+     image (`engine_signature_ok`) after the id check. With no node, no cosign, no bundle or any refusal, the install
+     stops (fail closed).
+   - **A connected deploy** runs `node scripts/engine-images-lock-verify.mjs` (every published engine) before
+     `docker compose --profile engines up`. The installer does not start that profile, so this stays the operator's
+     step.
+   - `build-update-bundle.sh` now includes `engines/` by default. Without it, an install from an unpacked update
+     bundle had neither the lock nor the signatures. That gap existed before this change for the lock's id check.
+4. **Air-gapped trust root.**
+   - The root the bot commits is the one `cosign initialize` fetched in the bot's own job, through Sigstore's TUF
+     repository, verified from the root embedded in the pinned cosign. It is never taken from the publish artifact.
+   - It travels with the checkout or the update bundle (`engines/signatures/trusted_root.json`). The install verifies
+     against it with no network.
+   - The root and the lock ship in the same update bundle, so anyone able to replace both could substitute a CA. The
+     air-gapped guarantee therefore rests on the update bundle's own release-key signature (#437 review).
+   - The operator puts cosign v3.1.3 on the air-gapped host (on PATH, or `COSIGN=<path>`). The installer refuses any
+     other binary.
+   - A Sigstore key rotation reaches air-gapped hosts with the next recorded publish. A trusted root keeps retired keys
+     with their validity windows, so earlier bundles still verify.
+   - To refresh the root by hand on a connected host: `cosign initialize`, then copy
+     the one `targets/trusted_root.json` under `~/.sigstore/root/`. The bot does exactly this.
+5. **The lock-update bot (N10, the `lock-pr` job).**
+   - It runs after `record`, so only after a successful publish on `main`.
+   - Its permissions are `contents: write` and `pull-requests: write`, through `GITHUB_TOKEN` only.
+   - It installs the pinned cosign, fetches the trusted root, and runs `--apply` (which verifies), `--check --base
+     origin/main` and the full verify. Then `scripts/engine-images-lock-bot.mjs --pr` compares the lock at the
+     published commit with the one `--apply` wrote. The transition must pass `checkLockTransition`, the rule CI
+     applies to the PR.
+   - When an image changed, the job pushes `engine-images-lock/<commit12>`, staging only the files `--apply` writes,
+     by path. It opens the PR with `gh pr create --draft` and the title
+     `HOLD chore(engines): record the signed engine image publish of <commit12>`. The job refuses a title without the
+     `HOLD ` prefix.
+   - It never merges, marks a PR ready or enables auto-merge.
+   - The publish trigger now excludes `engines/images.lock.json` and `engines/signatures/**`, and so does the
+     build-only check. Without that, merging the bot's PR would publish again: a loop.
+6. **Checked here.**
+   - The unit tests: `scripts/engine-images-lock-verify.test.mjs` covers valid, wrong identity, missing signature,
+     tampered digest, image id and commit, and the cosign checksum pin; `scripts/engine-images-lock-bot.test.mjs`
+     covers the signed apply, the bot's lock transitions, the PR shape and the job's permissions. The existing lock
+     tests and `zz-eng-img-engine-images.test.ts` were updated. The whole `vitest --dir scripts` suite passed (273
+     tests), and the three gateway file guards passed.
+   - The signing mechanics, with cosign v3.1.3 against a throwaway local registry (crane's `registry serve`, used in a
+     scratch directory and not added to the repository), with a KEY standing in for the keyless certificate:
+     - `cosign sign --use-signing-config=false --tlog-upload=false --bundle` wrote a v0.3 bundle whose DSSE statement
+       has the digest as its one subject and the `-a` annotations;
+     - `cosign verify` listed the annotations;
+     - `verify-blob-attestation --digest` accepted the right digest and refused another ("provided artifact digest does
+       not match any digest in statement").
+   - Red proof with the real pinned cosign: the exact argument list from `cosignVerifyArgs`, run against a synthetic
+     keyless bundle (a self-signed certificate naming the expected identity) and the real trusted root, was refused.
+   - `cosign initialize` wrote the trusted root at the path the workflow reads.
+   - `--check` and `--check --base origin/main` on the current lock, `bash -n` on the changed scripts, and the full
+     workspace build.
+7. **Not verified (pending execution, M-041).**
+   - Keyless signing itself: no GitHub OIDC token here. That covers the Fulcio certificate's actual SAN, the
+     workflow-repository and workflow-ref extensions, the Rekor entry in the bundle, and the online `cosign verify` of
+     the GHCR copy.
+   - The `lock-pr` job: the push with `GITHUB_TOKEN`, `gh pr create`, and whether the repository allows Actions to
+     create pull requests.
+   - The installer's and the bundle's verify against a real signed image.
+   - Whether the `release` environment's required review gates all three matrix jobs with one approval.
+8. **Limits, stated.**
+   - The three images recorded at generation 1 (#425) are unsigned. Every use above refuses them until a signed
+     publish is recorded. They are not grandfathered.
+   - A PR opened with `GITHUB_TOKEN` starts no workflow run (GitHub docs, "Triggering a workflow from a workflow"), so
+     CI does not start on the bot's PR by itself. Starting it (for example a `workflow_dispatch` of `ci.yml` on the
+     branch) needs a person or `actions: write`, which this job does not hold.
+   - The engine runner still cannot prove which image it runs (ADR-0187 decision 55). Admission is the deploy-time
+     verification above, not the runner's report.
+   - `publish-image.yml` (the gateway image) is unchanged.
+9. **ADR-0176.** cosign does the signing and verification. The bundle and statement reader is about 40 lines of
+   RegulAIt's own code, which turns a refusal into the reason a reviewer needs (identity, digest, image id or commit),
+   and it is never the proof. The bot is a few lines around `--apply`, `git` and `gh`. The dependency-update bots
+   track upstream versions and do not record our own signed builds. Listed in `security/THIRD_PARTY.md`.
+
+**Owner actions.**
+1. Protect the `release` environment, with the owner as required reviewer, **before this PR merges** (Q4). Merging
+   changes `engine-images.yml`, which starts a publish. If the environment does not exist, GitHub creates it
+   unprotected on first use, and the run would sign without review.
+2. If the bot is to open PRs, allow GitHub Actions to create pull requests (repository settings, Actions, Workflow
+   permissions). Without it, `gh pr create` fails and the publish artifact stays recorded only in the run.
+3. Start CI on each bot PR (it is opened with `GITHUB_TOKEN`), review it, and release it through the master as usual.

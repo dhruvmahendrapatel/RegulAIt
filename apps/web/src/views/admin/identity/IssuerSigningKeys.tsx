@@ -2,7 +2,8 @@
  * ADR-0188 — two workload-identity surfaces:
  *  - the gateway issuer's signing keys (`/v1/identity/signing-keys`): list
  *    the public halves, rotate to a configured key, revoke a compromised one.
- *    Both writes are an `identity_manage` step-up behind a confirmation, and
+ *    Both writes are a `key_management` step-up (bound to the exact key)
+ *    behind a confirmation, and
  *    audited by the gateway;
  *  - one delegation grant's detail (`GET /v1/delegation-grants/:grantId`),
  *    with its incoming allocation and every outgoing one.
@@ -15,8 +16,9 @@ import { getDelegationGrant, listSigningKeys, revokeSigningKey, rotateSigningKey
 import { SIGNING_KEY_SOURCE_TEXT, SIGNING_KEY_STATE_TEXT, kidOk, signingKeyRefusal, signingKeyState, type IdentitySigningKeyView } from "./signingKeyModel";
 import { formatMicros, type DelegationAllocationView } from "./workloadIdentityModel";
 import s from "./workloadIdentities.module.css";
+import { fmtDateTime } from "../../../api/format";
 
-const dateLabel = (value: string | null) => (value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : "—");
+const dateLabel = (value: string | null) => fmtDateTime(value);
 
 /** the page's confirmation (WorkloadIdentitiesPage `ask`) */
 export interface AskConfirmation {

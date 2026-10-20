@@ -55,6 +55,12 @@ export const STEP_UP_ACTION_KINDS = [
   // ADR-0188 (migration 0180): creating, binding a key to, suspending or revoking a workload identity,
   // and every other identity administration write
   "identity_manage",
+  // ADR-0195 SD0 (migration 0202): revealing the name behind a discovery pseudonym (a device user, a commit author,
+  // a cloud principal). Not a settings relaxation: its own kind, so it can be required or audited on its own
+  "pseudonym_reveal",
+  // migration 0203: rotating, revoking or retiring a signing key (the receipt key, the issuer key); a grant of any
+  // other kind never authorises one, and a key_management grant authorises nothing else
+  "key_management",
 ] as const;
 export type StepUpActionKind = (typeof STEP_UP_ACTION_KINDS)[number];
 
@@ -385,8 +391,8 @@ export const BATCH4_SETTING_COPY: Readonly<Record<Batch4SettingKey, { label: str
   stepUpActions: {
     label: "Actions that need a step-up",
     strict:
-      "All seven: deciding an approval, relaxing a setting, overriding an evidence hold, break-glass, managing passkeys, " +
-      "changing an owner and managing agent identities.",
+      "All nine: deciding an approval, relaxing a setting, overriding an evidence hold, break-glass, managing passkeys, " +
+      "changing an owner, managing agent identities, revealing a person's name and managing signing keys.",
     relaxed: "Each action removed from the list can be done with the session alone.",
   },
   toolApprovalSensitiveQuorum: {
@@ -505,7 +511,7 @@ export const batch4OrgSettingsFields = {
   stepUpMode: z.enum(STEP_UP_MODES).optional(),
   /** strict 120; longer, up to 900, relaxes it */
   stepUpMaxAgeSeconds: boundedInt(BATCH4_SETTING_LIMITS.stepUpMaxAgeSeconds).optional(),
-  /** strict: all seven; removing one relaxes it */
+  /** strict: all nine; removing one relaxes it */
   stepUpActions: uniqueSubset(STEP_UP_ACTION_KINDS).optional(),
   /** strict 2; 1 relaxes it */
   toolApprovalSensitiveQuorum: boundedInt(BATCH4_SETTING_LIMITS.toolApprovalSensitiveQuorum).optional(),

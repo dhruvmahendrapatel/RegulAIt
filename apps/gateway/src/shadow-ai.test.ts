@@ -51,7 +51,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { changeDescriptorSchema, DEFAULT_AI_SIGNATURES, EVIDENCE_MAX_ROWS, startInstanceSchema } from "@regulait/shared";
-import { SHADOW_AI_RULE_IDS } from "./shadow-ai.js";
+import { SHADOW_AI_RULE_IDS, SHIPPED_SIGNATURE_SEED } from "./shadow-ai.js";
 
 const { buildApp } = await import("./app.js");
 
@@ -123,7 +123,13 @@ describe("the signature catalogue is data, not code", () => {
     const list = await get("/v1/shadow-ai/catalogue");
     expect(list.statusCode).toBe(200);
     const body = list.json();
-    expect(body.total).toBe(DEFAULT_AI_SIGNATURES.length);
+    // the default signatures plus the discovery slices' artifact seed rows (ADR-0195 SD2: cloud_ai_service)
+    expect(body.total).toBe(SHIPPED_SIGNATURE_SEED.length);
+    expect(SHIPPED_SIGNATURE_SEED.length).toBeGreaterThan(DEFAULT_AI_SIGNATURES.length);
+    const cloudRows = body.signatures.filter((s: { kind: string }) => s.kind === "cloud_ai_service") as Array<{ replacementNote: string | null; note: string | null }>;
+    expect(cloudRows.length).toBe(SHIPPED_SIGNATURE_SEED.length - DEFAULT_AI_SIGNATURES.length);
+    // the seed's replacement note and documentation reference are carried into the row
+    expect(cloudRows.every((r) => !!r.replacementNote && (r.note ?? "").startsWith("documented at https://"))).toBe(true);
     expect(body.oldestEntryAt).toBeTruthy();
     expect(body.posture).toMatch(/never a release/);
   });
@@ -470,7 +476,7 @@ describe("the inventory is actionable and states its own coverage", () => {
   it("reports severity-ordered findings and never claims completeness", async () => {
     const res = await get("/v1/shadow-ai/findings");
     const body = res.json();
-    expect(body.coverage.statement).toMatch(/ships no collector/);
+    expect(body.coverage.statement).toMatch(/No active discovery source is enabled, so nothing is scanned/);
     expect(body.coverage.statement).toMatch(/does not prove its absence/);
     expect(body.coverage.sourcesPossible).toBe(4);
     expect(body.posture).toMatch(/signal, not proof of misuse/);

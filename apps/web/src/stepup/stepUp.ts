@@ -99,8 +99,9 @@ export function stepUpRefusalOf(err: unknown): { action: StepUpAction; methods: 
   return { action, methods };
 }
 
-/** at most one step-up per action kind rides one request (the gateway reads at most one per kind, seven today) */
-const MAX_STEP_UPS = 7;
+/** at most one step-up per action kind rides one request (the gateway reads at most one per kind, nine today) */
+/** one per action kind the copy table knows (it names every kind; stepUp.test pins that), read at call time */
+const maxStepUps = (): number => Object.keys(STEP_UP_ACTION_COPY).length;
 
 /**
  * Run `call`, stepping up when it is refused for that, and retrying it with
@@ -121,7 +122,7 @@ export async function withStepUp<T>(
         const refusal = stepUpRefusalOf(err);
         if (!refusal) throw err;
         const key = JSON.stringify(refusal.action);
-        if (asked.has(key) || asked.size >= MAX_STEP_UPS) throw err;
+        if (asked.has(key) || asked.size >= maxStepUps()) throw err;
         asked.add(key);
         const token = await ask(refusal.action, refusal.methods);
         if (!token) throw err;
@@ -193,6 +194,8 @@ export const STEP_UP_ACTION_COPY: Readonly<Record<string, string>> = {
   passkey_manage: "changing your passkeys",
   owner_change: "changing who owns this",
   identity_manage: "changing an agent identity",
+  pseudonym_reveal: "revealing a person's name",
+  key_management: "changing a signing key or recording a key's custody",
 };
 
 export const STEP_UP_METHOD_COPY: Readonly<Record<string, string>> = {

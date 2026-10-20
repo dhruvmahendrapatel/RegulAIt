@@ -6,8 +6,9 @@ and its review. Written from ADR text only; no shared source, product test, cont
 These are semantic requests and expected decision projections, not HTTP DTOs. `placement_eligible` means only that the
 isolation constraint can be met; it never authorizes a sponsor, actor, grant or upstream call.
 
-Counts: 140 vectors = 82 from X50 (13 of them re-pinned by owner decisions A and B, and 6 pinned by slice I2, see
-below), 7 revised, 51 new (9 of them added by slice I2).
+Counts: 150 vectors = 82 from X50 (13 of them re-pinned by owner decisions A and B, and 6 pinned by slice I2, see
+below), 7 revised, 61 new (9 of them added by slice I2, 4 by the owner decision C build, 5 by slice A1, 1 by ADR-0197
+Q3: `person-stdio-expired-relaxation-stays-L3`, an expired relaxation stays at L3).
 48 carry `"pendingBranch": "b6-isolation-i3@cee8a67c…"`: every vector that cites an
 amendment from K to W, whose text is not yet on `main` (the checker enforces this marker both ways). Find them with
 `grep -n pendingBranch placement-semantic-corpus.json`.
@@ -109,6 +110,45 @@ product's own functions (that file, not this checker, is the I2 conformance clai
   the stricter of the grant's class and the placement's own requirement; the checker recomputes it from the three
   classes each vector states.
 
+## Added by the owner decision C build (2026-10-17)
+
+ADR-0190 owner decision C: a call with no agent is the unknown agent at L3. An admin may lower that floor to L2 for an
+`mcp_stdio` call from a person in an interactive session, per server or project. The request gains `caller`
+(`interactive_person`, `api_key`, `workload_token`) and `personStdioRelaxation` (`mcp_server`, `project` or null).
+The four `person-stdio-*` vectors pin: the API-key case at L3 even where the server is relaxed; the relaxed
+interactive case at L2; the unrelaxed default at L3; and a low-assurance agent at L3. **Unlike the corpus above, these
+were written by the builder of the feature, who had read the implementation.** They are not an independent
+specification. Four corruption controls cover them.
+
+## Added by slice A1 (2026-10-17)
+
+The request gains `personStdioRelaxationState` (`active` or `cleared`), present exactly when `personStdioRelaxation`
+names a scope; the four vectors above now say `active`. A cleared (revoked) relaxation never relaxes. The as-built
+relaxation has no expiry: a row stops applying only when an admin clears it or a program change clears it (ADR-0190,
+"As built: owner decisions C and D", item 5), so `expired` is not a state and the checker refuses it. Five vectors:
+- `person-stdio-api-key-relaxed-project-stays-L3`: an API key stays at L3 where the project is relaxed (the earlier
+  vector covers the server scope);
+- `person-stdio-workload-token-stays-L3`: a workload token is never an interactive person;
+- `person-stdio-interactive-relaxed-server-L2`: the server scope relaxes an interactive person (the earlier vector
+  covers the project scope);
+- `person-stdio-cleared-relaxation-stays-L3` and `person-stdio-cleared-server-relaxation-stays-L3`: a cleared row, at
+  either scope, leaves the call at L3.
+
+Seven corruption controls cover them: an API key or a workload token relaxed, a cleared row relaxing or read as
+active, an invented `expired` state, a state with no relaxation and a relaxation with no state. The gateway's vector
+runner (`adr0190-i2-placement-decision.test.ts`) treats only an `active` row as in scope, as the resolution reads only
+rows with `cleared_at IS NULL`; the database test covers that read. Like the four above, these were written by the
+builder, who had read the implementation.
+
+## Added by ADR-0197 Q3 (2026-10-18)
+
+This supersedes slice A1's "no expiry". A relaxation now expires 30 days after it is set or renewed (migration 0208),
+and the resolution reads only rows with `cleared_at IS NULL AND expires_at > now()`. `personStdioRelaxationState`
+gains `expired`, which never relaxes. One vector, `person-stdio-expired-relaxation-stays-L3`: an expired, uncleared
+server-scope relaxation leaves an interactive person's call at L3. A1's "invented `expired` state" control now
+invents `lapsed` on the same cleared vector, and two new controls (an expired row relaxing, an expired row read as
+active) make 38. Written by the builder, who had read the implementation.
+
 ## Checks
 
 `node packages/shared/test-vectors/placement/check-placement-corpus.mjs` (also run by
@@ -116,7 +156,7 @@ product's own functions (that file, not this checker, is the I2 conformance clai
 every refusal reason and selection with amendment P's precedence, checks the T predicate, the V URL rule, the K window,
 the U probe rule, the pending markers, the unresolved fact behind each `policy_unresolved` (owner decision B) and
 that no vector uses a retired enforcement mode (owner decision A) and the shapes slice I2 pinned (items 11 and 12),
-then proves it rejects 25 deliberate corruptions.
+then proves it rejects 29 deliberate corruptions.
 Self-consistency only;
 not I2 conformance or runtime attestation.
 
@@ -264,6 +304,16 @@ not I2 conformance or runtime attestation.
 | `middle-actor-attested-below-placement` | main | Decision 8 third bullet; Test strategy: Delegation | claude-new (I2, review M1) |
 | `middle-actor-attested-below-grant` | main | Decision 8 third bullet; Test strategy: Delegation | claude-new (I2, review M1) |
 | `live-placement-attested-at-both` | main | Decision 8 third bullet; Test strategy: Delegation | claude-new (I2, review M1) |
+| `person-stdio-api-key-stays-L3` | main | Decision 7 items 1–2; Owner decision C | claude-new (owner decision C build) |
+| `person-stdio-interactive-relaxed-L2` | main | Decision 7 items 1–2; Owner decision C | claude-new (owner decision C build) |
+| `person-stdio-interactive-unrelaxed-L3` | main | Decision 7 items 1–2; Owner decision C | claude-new (owner decision C build) |
+| `person-stdio-low-assurance-stays-L3` | main | Decision 7 items 1–2; Owner decision C | claude-new (owner decision C build) |
+| `person-stdio-api-key-relaxed-project-stays-L3` | main | Decision 7 items 1–2; Owner decision C | claude-new (slice A1) |
+| `person-stdio-workload-token-stays-L3` | main | Decision 7 items 1–2; Owner decision C | claude-new (slice A1) |
+| `person-stdio-interactive-relaxed-server-L2` | main | Decision 7 items 1–2; Owner decision C | claude-new (slice A1) |
+| `person-stdio-cleared-relaxation-stays-L3` | main | Decision 7 items 1–2; Owner decision C | claude-new (slice A1) |
+| `person-stdio-expired-relaxation-stays-L3` | main | Decision 7 items 1–2; Owner decision C | claude-new (ADR-0197 Q3) |
+| `person-stdio-cleared-server-relaxation-stays-L3` | main | Decision 7 items 1–2; Owner decision C | claude-new (slice A1) |
 
 ## History
 

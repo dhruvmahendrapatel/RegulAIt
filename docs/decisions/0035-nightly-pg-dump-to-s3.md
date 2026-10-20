@@ -6,7 +6,7 @@
 ## Context
 
 The `regulait-dev-app` stack's **entire database is a Docker named volume
-(`pgdata`) on the root EBS volume of one EC2 instance**, `i-013c62adc887c76bb`.
+(`pgdata`) on the root EBS volume of one EC2 instance**, `<instance-id>`.
 There is no RDS, no replica, no EBS snapshot schedule, and — until this ADR — no
 backup of any kind. Every user record, credential ciphertext, audit row,
 project, workflow instance and spend record lives there and nowhere else.

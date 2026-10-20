@@ -1,10 +1,10 @@
 ---
-phase: batch-6-s7-s8-i4-i8-merged-s9-b8-next
-last_updated: 2026-10-15
+phase: batch-7-shadow-ai-sd2b-sd4a-a4-a6-i4-u1-u2-u4-merged-sd4b-in-review
+last_updated: 2026-10-18
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-10-15-session-01.md
+last_session: sessions/2026-10-18-session-01.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,184 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-18 (late morning) - demo plan for 2026-11-01 (ADR-0197).** The owner answered questions 1-15 and chose
+real-account Shadow AI discovery: GitLab, a new AWS sandbox account and Azure, all through keyless federation, with
+the demo on the hosted dev instance. A seeded discovery dataset is the fallback. Code freeze is 2026-10-29, and the
+story opens with Shadow AI. All open PRs except #385 are merged, and main is at migration 0207. P0, P1 and P2 lanes
+start in parallel; see ADR-0197 for the work plan and the owner actions.
+
+**2026-10-18 (night) - ADR-0195 SD2b, SD4a, A4 and A6, ADR-0193 I4 (content provenance P0 and trust tiers P1),
+ADR-0196 U1/U2/U4, the N2/N4/N8/N11/N12/N13 tail and engine image digests are merged.** Full record:
+[sessions/2026-10-18-session-01.md](sessions/2026-10-18-session-01.md). This paragraph supersedes the "Last
+migration", "Released" and "Open" lists of the 2026-10-17 (evening) paragraph below; its owner decisions stand.
+- **Merged (UTC)**, after #414: #411 (SD4a Go endpoint agent), #422 (STATE), #424 (expiring fixtures that had turned
+  main red), #425 (first engine image digests), #417 (N2 multi-replica stdio, **0204**), #419 (A6 env-name and CLI
+  presence signatures; environment-variable names and values are never stored), #418 (N12/N13), #426 (U2), #416
+  (N4/N11), #420 (SD2b federation signer, **0205**), #413 (N8/N1), #423 (U1), #430 (U4), #421 (A4) and #428 (I4,
+  **0206**).
+- **Last migration on main: 0206.** 0207 (#429) has its journal entry on its branch.
+- **Open, HOLD:** #427 (review-tail sweep, fix round 3 in recheck), #429 (SD4b gateway side, migration 0207, fix round
+  in recheck), #385 (gVisor CI job; upstream runsc check on 2026-10-20).
+- **Incidents:** two HOLD PRs were merged by sessions without a master release. #414 was merged by its fixer, and the
+  builder-written session 02 says the owner instructed it; the owner has not confirmed. #421 was merged by its recheck
+  reviewer, which then merged main into #428 before the master stopped it (M-087). The approved heads were what merged,
+  so no unreviewed code reached main. Prompt rules are tightened; a real control needs an owner decision (question 15).
+- **Owner questions open:** 15, listed in the session record. The most urgent is 15 (merge enforcement): required
+  human review on `main`, or a separate agent identity without merge rights.
+- **Next:** U3 visual consistency (U1 and U2 are merged), A5 federated git credentials (after SD2b), N10 lock-update
+  bot, SPIFFE bundle fetch and JWT-SVID, and the follow-ups from tonight's reviews (#413 L1/L2/N1, #420 test gaps and
+  wording, #428 R1 key race and R2 wording).
+
+**2026-10-17 (evening) - the first ADR-0195 slices, the server secure-by-default and reliability batches, engine task
+images, the enterprise UI harness (ADR-0196) and the N5-N9 ops tail are merged.** Full record:
+[sessions/2026-10-17-session-02.md](sessions/2026-10-17-session-02.md). This paragraph supersedes the "Last migration"
+and "in review" lists of the 2026-10-17 paragraph below; its owner decisions stand.
+- **Merged (UTC 2026-10-17)**, after #409 (the morning STATE PR):
+  - 07:26 #406, UI review lows;
+  - 07:32 #397, runc L1 backend and a versioned engine-worker profile. **No migration**: it withdrew its 0202 (a revert
+    is a new profile version, and retirement stays terminal);
+  - 08:14 #403, ADR-0195 SD0 discovery foundation, **migration 0202**;
+  - 08:43 #408, server secure-by-default gaps (SEC-DEFAULTS); it used no migration;
+  - 08:48 #407, reliability: I5 refusal ordering, the M-075 clock sweep, the TOTP window, e2e races, census CI;
+  - 10:21 #404, ADR-0195 SD2 cloud scanners (AWS, GCP, Azure) over guarded transports;
+  - 10:23 #415, the `key_management` step-up kind for signing-key operations (N3), **migration 0203**;
+  - 10:36 #405, the engine task image pipeline and image lock (ENG-IMG);
+  - 11:15 #402, ADR-0195 SD1 repo scanners, read-only repo readers, catalogue v2;
+  - 11:47 #401, ADR-0195 SD3 endpoint discovery without an agent;
+  - 12:06 #412, ADR-0190 A1: the person-stdio relaxation is recorded in the Decision BOM;
+  - 12:55 #410, the enterprise UI harness, **ADR-0196** (four bars as ratchets);
+  - 19:54 #414, N5-N9 ops tail (B8 tail, installer lows, isolation test gaps, e2e reduced motion), merged by the owner's
+    instruction.
+- **Last migration on main: 0203.** The ADR index ends at 0196 (191 files, 191 rows).
+- **Released to the merge loop (reviewed; merge on green CI):**
+  - #411, ADR-0195 SD4a Go endpoint agent (recheck APPROVE; the no-TPM fallback verified on the real Windows runner);
+  - #416, N4 Hugging Face DLP rule + N11 lease DB clock and placements keyset cursor;
+  - #424, cloud-discovery fixtures: credential expiries relative to now (they were hard-coded to 2026-10-17T13:00Z and
+    turned `build-and-test` red on main and every PR after that time).
+- **Open, all HOLD:**
+  - #413, N8 request-body log leak + N1 SPIFFE follow-ups (fix round 2: remaining raw error text, a source-scan guard);
+  - #417, N2 multi-replica stdio sessions, migration **0204** (journal entry present, after 0203); review APPROVE, fix
+    round for the relay lease blast radius, NUL bytes and sealing frames at rest (master decision, ADR-0180);
+  - #418, N12 owner-change grant claimed after the compare-and-set + N13(b) builder runtime on the DB clock;
+  - #419, ADR-0195 A6 env-name and CLI presence signatures: env-var names are never stored as evidence (master
+    decision); its fix round also stops SD1 on main storing `.env.example` names; recheck running;
+  - #420, ADR-0195 SD2b federation signer, migration **0205** (journal entry added once 0204 merges);
+  - #421, ADR-0195 A4 remediation plan body starts a workflow (first review running);
+  - #423, U1 accessibility and keyboard defects (ADR-0196 baselines shrink); U2 responsive is building;
+  - #385, the gVisor CI job (waits on an upstream runsc release; check on 2026-10-20).
+- **Migration order (master):** 0204 #417, then 0205 #420; #419's catalogue rows take the next free number when it
+  needs one. Journal entries are added only in that order, so `idx` stays contiguous.
+- **Owner items from #414:**
+  - confirm that under reduced motion real users now get no transitions or animations at all (`global.css`);
+  - two builders were dispatched on the same #414 review round; both sets of fixes were merged together, but the
+    dispatch should be checked on the coordinating side;
+  - `zz-secure-default-stepups.test.ts` (around line 578) carries an `afterAll` egress marker on a POST that expects
+    403; it probably should say `refused` (left to that file's owner).
+
+**2026-10-17 - shadow-AI active discovery designed and building, the egress step-up, compose engines, and a parallel
+cloud-builder wave.** Full record: [sessions/2026-10-17-session-01.md](sessions/2026-10-17-session-01.md). This
+paragraph supersedes the 2026-10-16 one below.
+- **Merged (UTC 2026-10-17):**
+  - #392: engine dependency advisories with no patch the pins allow, risk-accepted by the owner until 2026-11-16;
+  - #394: batch 7 hygiene (test timing, IdChip target size, CycloneDX specVersion);
+  - #395: adding any egress allow entry now needs a `settings_relax` step-up (ADR-0034 D4);
+  - #396: compose engines (engine task images, executor input volume, Caddy digest pin);
+  - #398: **ADR-0195 shadow-AI active discovery**, amending ADR-0055, 0071, 0083 and 0122:
+    - read-only scanning of code repos, AWS, GCP, Azure and user machines;
+    - detection is data;
+    - federated credentials are the default, and static keys are an audited relaxation;
+    - pseudonymity for people and devices;
+  - #400: the R15 endpoint-agent design spike (SD4);
+  - #399: ADR-0190 owner decisions C and D (migration 0201), merged at 05:21Z.
+- **Last migration on main:** 0201. Queued, in order:
+  - 0202: #397, runc L1 backend and a versioned engine-worker profile (reviewed; journal entry added at b52ed33 after
+    #399 merged; back on HOLD for a CI failure in the 0183 retirement invariant, fix in progress);
+  - 0203: #403, SD0 discovery foundation (approved with conditions; final fixes in).
+- **ADR-0195 slices in review, all HOLD:**
+  - SD0 #403;
+  - SD1 repo scanners #402 (approved, final head e44523f);
+  - SD2 cloud scanners #404 (third recheck running at 0f66701);
+  - SD3 endpoint discovery without an agent #401 (approved).
+
+  SD1 to SD3 merge after SD0. Federated cloud credentials fail with an explicit reason until the RS256 signer slice lands
+  (Entra accepts RS256 only).
+- **Owner decisions 2026-10-17:**
+  - AI products, competitors included, may appear as detection-catalogue data and in findings, never in prose or UI copy;
+  - the SD4 answers are recorded in ADR-0195;
+  - extra builders run as separate cloud sessions;
+  - the enterprise UI bar is WCAG 2.2 AA plus keyboard, three browsers at five viewports, a visual-consistency audit, and
+    performance budgets;
+  - engine images go to private GHCR, without public transparency-log signing unless approved;
+  - the google-auth-library STS transporter bug (still present in 11.3.1 and on its main branch) is not reported
+    upstream; our workaround stays, and it is re-checked on every upgrade.
+- **Cloud builder wave (HOLD, held by branch until reviewed):**
+  - engine image publishing (#405);
+  - the SD4a endpoint agent (#411);
+  - UI lows (#406, reviewed and released);
+  - server secure-by-default gaps (#408, 0204 reserved);
+  - reliability and test hygiene (#407, 0205 reserved);
+  - the enterprise UI test harness (#410, with a new ADR);
+  - decision-facts relaxation evidence (0208 reserved);
+  - the gateway log-leak fix with SPIFFE follow-ups.
+- **Still open:**
+  - #385, the gVisor CI job, which waits on an upstream runsc release (check on 2026-10-20). L2 stays UNVERIFIED.
+- **Dev-host scrub:** concrete developer host names, addresses and instance ids in this file are replaced with
+  `<dev-host>`, `<dev-host-ip>`, `<dev-instance>`
+  and `<dev-volume>`, and the AWS account ids with `<mgmt-account>` and `<workload-account>`.
+
+**2026-10-16 - SPIFFE trust bundles audited, engines under execution profiles, an internal TLS front for the
+executor, and the B8 runbooks.** Full record: [sessions/2026-10-16-session-01.md](sessions/2026-10-16-session-01.md).
+Superseded by the 2026-10-17 paragraph above; it supersedes the 2026-10-15 queue below.
+- **Merged (UTC 2026-10-16)**, after #384 (the 2026-10-15 docs PR):
+  - #386 ADR-0190 owner decision C (docs only). A person's own stdio call (no agent) stays L3 by default. An admin
+    may lower it to L2 for interactive sessions only (never an API key), per server or project, audited with
+    step-up. Engines are never treated as unknown agents;
+  - #387 I4 follow-ups (no migration):
+    - the executor gets an internal TLS front, a Caddy `executor-front` on `engines` using a stack-local CA that
+      the executor pins;
+    - the compose `REGULAIT_TLS_HOST` default is now the neutral `set-regulait-tls-host.invalid`;
+    - a new import-cycle CI job: a dependency-cruiser ratchet (baseline 74 edges, which may only shrink) plus a
+      contained load-alone smoke check of each module under `unshare -rn`;
+  - #388 ADR-0189 B8 runbooks, `docs/ops/BOM_VERIFICATION.md` and `docs/ops/RECEIPT_V2_CUTOVER.md`. The verifier's
+    fail-open, where an absent receipt v2 boundary passed verification, is fixed: an absent boundary is refused.
+    Steps are marked executed or pending execution (M-041);
+  - #389 ADR-0188 S9, **migration 0199**. SPIFFE trust bundles move into audited, never-deleted storage (the
+    `REGULAIT_SPIFFE_TRUST_BUNDLES` variable is now ignored). X.509-SVID client authentication works end to end.
+    Revocation is final: the issuing transaction locks the domain's bundle rows, and the live-chain rule is the
+    backstop;
+  - #390 ADR-0190 I5 engines under execution profiles, **migration 0200**. Engine tasks run only through executor
+    placement, and a result is refused without a placed task. The sandbox's gateway channel allows only the model
+    routes. First-enable works from an executor attestation.
+- **Last migration:** 0200.
+- **Still open: PR #385, the gVisor CI job (HOLD).** The pinned runsc `release-20261005.0` maps every seccomp
+  ERRNO rule to EPERM. Docker's profile answers `clone3` with ENOSYS so that glibc falls back to `clone`; under
+  gVisor that becomes EPERM, glibc does not fall back, and Node aborts. The upstream fix (gVisor commit 7be4160, PR
+  #14721, merged 2026-10-12) is not yet in a release. The decision is to wait for the release and re-pin, not to
+  loosen seccomp. A scheduled check runs on 2026-10-20. **L2 (gVisor) stays UNVERIFIED.**
+- **Caveats:**
+  - Engines cannot run end to end in a stock install. They need engine task images (every shipped `taskImage` is
+    null, so such an engine places nothing), the executor input volume in compose, and the gVisor re-pin.
+  - There is no L1 (runc) backend, so relaxing the engine_worker floor is a no-op for placement today: the shipped
+    `engine-worker` profile's L2 `minClass` still binds.
+  - The executor TLS front has never been run on a real Docker host.
+- **Owner decisions 2026-10-16** (recorded in the ADRs):
+  - project sensitivity = the strictest use case MAX'd with an admin field that can only raise it (ADR-0190 owner
+    decision D);
+  - Art. 50: the owner gets counsel, and nothing claims Art. 50 compliance meanwhile (ADR-0193 Open);
+  - I7 OpenShell deferred until L2 is verified in CI and a Kata L3 backend exists (ADR-0190 owner decision E);
+  - adding any egress allow entry needs a step-up (ADR-0034 owner amendment 2026-10-16).
+- **Open owner questions:**
+  1. The demo-prep warn line (the owner will paste it).
+  2. Confirmation of the Dependabot risk acceptance to 2026-11-16 (PR #392).
+- **Next, in order:**
+  1. Engine task images and the compose wiring (the executor input volume).
+  2. The owner decision C admin relaxation build.
+  3. A runc L1 backend plus a versionable engine-worker profile.
+  4. The gVisor re-pin (#385), once a release carries the fix.
+  5. The admin project-sensitivity field (ADR-0190 owner decision D).
+  6. The step-up for plain egress allow entries (ADR-0034 owner amendment 2026-10-16).
+  7. Smaller follow-ups, condensed under "Batch 6 follow-ups (2026-10-16)" in Known follow-ups.
 
 **2026-10-15 - bearer workload secrets retired, outbound MCP identity live, stdio servers moved off the gateway onto
 gVisor sandboxes, and execution facts in the evidence.** Full record:
@@ -52,8 +230,9 @@ queue below.
 - **CI:** the mocked UI suite runs in 5 shards (was 3), recorded on 2026-10-12.
 - **Last migration:** 0198.
 - **Open owner questions:**
-  1. Should a person's own authenticated stdio call (no agent) count as a known subject at L2, rather than as the
-     unknown agent at L3? Today a gVisor-only host always refuses it (ADR-0190 I4 open question 1).
+  1. ~~A person's own stdio call at L2?~~ **Decided 2026-10-15 (ADR-0190 owner decision C):** L3 by default; an
+     admin may lower it to L2 for interactive sessions only (never an API key), scoped, audited with step-up. Engines
+     keep their L2 floor and are never unknown agents. Build slice queued after I5.
   2. The source of project sensitivity for I2 (today the strictest use case, failing closed with none).
   3. The EU AI Act Art. 50 legal review.
   4. The I7 OpenShell go/no-go.
@@ -63,7 +242,7 @@ queue below.
      private-range and plaintext-http opt-ins take `settings_relax`.
   7. The demo-prep warn line the owner has not yet shared.
 - **Still queued from 2026-10-12:** ADR-0188 S9 (SPIFFE backend and runbooks) and ADR-0189 B8 runbooks. New from I4:
-  a TLS front for the executor, a gVisor CI job, and I5 (engines under profiles). Condensed open items are under "Batch 6 follow-ups (2026-10-15)" in Known
+  a TLS front for the executor, a gVisor CI job, I5 (engines under profiles), and the owner decision C relaxation (after I5). Condensed open items are under "Batch 6 follow-ups (2026-10-15)" in Known
   follow-ups.
 
 **2026-10-12 - every built API route has UI or a stated reason; the installer sets the first admin.** Full record:
@@ -3452,7 +3631,7 @@ default-deny JIT provisioning (ADR-0025); API keys remain the programmatic/IDE c
 **IDE interception** ships as provider-shaped translation shims (`/v1/messages`,
 `/v1/chat/completions`) over the one governed dispatch core, admin-gated and off by default
 (ADR-0020/0024). Everything runs on the dev EC2 box, now over **real HTTPS** at
-**`https://3-229-246-126.sslip.io`** — a browser-trusted Let's Encrypt certificate terminated by
+**`https://<dev-host>`** — a browser-trusted Let's Encrypt certificate terminated by
 Caddy on-box, at zero AWS cost (ADR-0029). Still **dev-grade, explicitly NOT production**. The
 box **powers itself off outside 08:00–20:00 Mon–Fri America/New_York** (ADR-0032) on an Elastic
 IP, so the address — and therefore the URL and its certificate — survives the cycle. **CI is
@@ -3467,8 +3646,8 @@ row and leaves every credential undecryptable). Both are tracked in
 
 The infrastructure bootstrap phase (EPIC-01) is **complete**. The private GitHub repo
 [dhruvmahendrapatel/RegulAIt](https://github.com/dhruvmahendrapatel/RegulAIt) is live with the
-full scaffold. AWS is a two-account Organization (Management `913436627353` / Workload
-`regulait-dev` `517506432475`), IAM Identity Center only (no long-lived keys), and the full
+full scaffold. AWS is a two-account Organization (Management `<mgmt-account>` / Workload
+`regulait-dev` `<workload-account>`), IAM Identity Center only (no long-lived keys), and the full
 security baseline — org-wide CloudTrail, GuardDuty, Security Hub (FSBP + CIS standards), AWS
 Config with a cross-account aggregator, account-level S3 Block Public Access, a $5/month Budget,
 3 SCPs, and all three permission sets (`Admin-BreakGlass`, `Deploy-Builder`, `ReadOnly-Audit`) —
@@ -3699,7 +3878,7 @@ IMDSv2-only, SSM Session Manager access with NO ssh keypair, pulls a source tarb
 module-owned private S3 bucket, `docker compose up -d --build` with per-deploy random
 runtime config) composed into `infra/environments/regulait-dev-app` — its own state key
 (`regulait-dev-app/terraform.tfstate`) so app deploys can never re-plan the org/security
-baseline. Applied: instance `i-013c62adc887c76bb`, `http://3.237.199.248:3000` (/app +
+baseline. Applied: instance `<dev-instance>`, `http://<dev-host-ip>:3000` (/app +
 /admin verified 200 through the public IP; seed keys handed to the user in-chat, never
 committed). Dev-grade by declaration: HTTP only, port open to the world but everything
 key-gated, demo data, ~$15–30/mo (will trip the $5 foundation budget alert — expected).
@@ -4152,9 +4331,9 @@ triggers kept commented for a one-line revert once minutes top up); local verifi
 (`pnpm -r build` + `check-ui-syntax` + `pnpm -r test`) is the gate meanwhile. PR #38 carries both
 and is MERGED — `main` builds again. The dev stack was redeployed from the branch HEAD (= `main` +
 those two commits, byte-identical app to post-merge main) because `main` itself didn't build until
-#38 merged: `docker compose up -d --build` on `i-013c62adc887c76bb`, gateway container recreated,
+#38 merged: `docker compose up -d --build` on `<dev-instance>`, gateway container recreated,
 the Postgres volume (pgdata) + per-boot secrets override preserved, migrations 0030–0033 applied
-(`deploy_targets` present), `/app` + `/admin` 200 on-box at `http://3.237.199.248:3000`. Still
+(`deploy_targets` present), `/app` + `/admin` 200 on-box at `http://<dev-host-ip>:3000`. Still
 dev-grade, NOT production. The user then directed the four remaining open-item areas in parallel:
 pillar-3 infra-ops AUTOMATION (drift/CVE/cert/backup — the operational half beyond the §8.2
 governed-ops layer), clearing the ADR-0015/0016 + pillar-2 deferrals, and a deeper UX/a11y pass.
@@ -4226,7 +4405,7 @@ depth, Azure/GCP infra, A4.
 **Waves 7–8 addendum, 2026-08-01 — TLS, hardening, true SPA parity, username login, and a
 terraform landmine (PRs #76–#84).** Written the same day, per the lesson recorded above.
 
-- **#77 / ADR-0029 — zero-cost TLS.** Caddy in the compose stack, `3-237-199-248.sslip.io`
+- **#77 / ADR-0029 — zero-cost TLS.** Caddy in the compose stack, `<dev-host>`
   (free wildcard DNS, no domain purchase), real Let's Encrypt certs. ALB+ACM declined on cost;
   self-signed rejected as not honestly "TLS". Cert volume is named (without it every redeploy
   re-issues and burns the rate limit); HSTS deliberately OFF on an IP-derived hostname; :80 must
@@ -4720,11 +4899,11 @@ the legacy UI, and get HTTPS live. All are done or in flight, and the route ther
 real defects that had been latent precisely because nothing was exercising them.
 
 **Infra applied (#84's plan, verified `0 add / 2 change / 0 destroy`).** Ports 80/443 opened, the
-`:3000` ingress removed. No instance replacement, so the Postgres volume (`vol-0573958930d696417`)
+`:3000` ingress removed. No instance replacement, so the Postgres volume (`<dev-volume>`)
 survived — that was the whole point of the #84 landmine fix. **But the apply changed `user_data`,
 which the EC2 provider applies by STOPPING AND STARTING the instance**, which released the
-auto-assigned public IPv4. The address moved `3.237.199.248` → `98.86.163.252`, and later again to
-`3.229.246.126` on Elastic-IP attachment. Worth internalising: *any* `user_data` edit is an
+auto-assigned public IPv4. The address moved `<dev-host-ip-1>` → `<dev-host-ip-2>`, and later again to
+`<dev-host-ip-3>` on Elastic-IP attachment. Worth internalising: *any* `user_data` edit is an
 address change on a box whose hostname is derived from its address.
 
 **Defect 1 — the `tls` profile had never once started.** It shipped in #77 and was never exercised
@@ -4737,7 +4916,7 @@ listening on 80 or 443. Since the gateway is loopback-only since ADR-0029, this 
 **no route in at all**. Fixed in #88 with an explicit `ip_range: 172.28.1.0/24` confining dynamic
 allocation clear of the pinned address.
 
-**HTTPS is live and verified** (#88 + deploy): Let's Encrypt `CN=3-229-246-126.sslip.io`, `/`→302,
+**HTTPS is live and verified** (#88 + deploy): Let's Encrypt `CN=<dev-host>`, `/`→302,
 `/ui`→200, `/health`→200, port 80→308 redirect, chain validates. Deploys preserve
 `REGULAIT_DATA_KEY` — regenerating it would make every stored credential permanently undecryptable.
 
@@ -4924,7 +5103,7 @@ first).
 | COMPONENT-04 | RegulAIt GitHub repo | **live and private**: https://github.com/dhruvmahendrapatel/RegulAIt | EPIC-01 |
 | COMPONENT-05 | Admin portal | **MVP shipped** — single-file API-client portal at /admin (ADR-0012), §6's eight panels + §10.4 cost surface | EPIC-02, ADR-0012 |
 | COMPONENT-06 | Policy/allow-list engine (`packages/policy-kernel`) | **shipped** — default-deny kernel over MCP tools, agents, connectors; role grants (UNION-MAX, ADR-0014), per-user revocations, scoped rules, lead ceilings; pure, no I/O | EPIC-02, ADR-0009, ADR-0014 |
-| COMPONENT-07 | Dev demo stack on AWS (`regulait-dev-app`) | **live** — EC2 `i-013c62adc887c76bb`, http://3.237.199.248:3000, dev-grade only; teardown = `terraform destroy` | ADR-0013 |
+| COMPONENT-07 | Dev demo stack on AWS (`regulait-dev-app`) | **live** — EC2 `<dev-instance>`, http://<dev-host-ip>:3000, dev-grade only; teardown = `terraform destroy` | ADR-0013 |
 | COMPONENT-10 | Workflow orchestrator (`packages/workflow-kernel` + gateway) | **shipped** — declarative templates, stage state machine, executable git/build/check/deploy/rollback stages, assignment matching | EPIC-03 |
 | COMPONENT-11 | Orchestration engine (`packages/orchestration-kernel` + gateway) | **shipped** — task-graph DAG, PM/Team-Lead/Worker delegation, transitive entitlement + budget ceilings | EPIC-05, ADR-0016 |
 | COMPONENT-12 | Optimizer (`packages/optimizer-kernel`) | **shipped** — all seven pillar-6 techniques (routing, compaction, lazy tools, prompt caching, edit-vs-rewrite, file preprocessing, semantic caching + batching estimator) | EPIC-04 |
@@ -4952,6 +5131,22 @@ opt-in (#381, 0196) merged. S9 is next. ADR-0190 has I2, I8 (#382, 0197) and I4 
 as-built section in the ADR. L2 (gVisor) stays unverified until it has run on a real host. No new ADR was written in
 this window: the ADR index still ends at 0194, with 189 files and 189 rows.
 
+Batch 6 status (2026-10-16): ADR-0188 is built through S9 (#389, 0199), the last slice of its rollout. ADR-0189 B8
+(the verification and receipt v2 drain runbooks, #388) is merged. ADR-0190 records owner decision C (#386) and has
+as-built sections for the I4 follow-ups (#387) and I5 (#390, 0200); L2 (gVisor) stays unverified while #385 waits
+for a gVisor release. No new ADR was written: the index still ends at 0194, with 189 files and 189 rows.
+
+Owner decision (2026-10-17): ADR-0195 (shadow AI active discovery) is accepted. It amends ADR-0055, ADR-0071, ADR-0083 and ADR-0122 so
+RegulAIt may actively scan, read-only, code repos (GitHub, GitLab, Bitbucket, Azure DevOps), AWS, GCP and Azure
+accounts, and user machines (both a no-agent osquery pack with importers and a RegulAIt endpoint agent). Federated
+cloud credentials are the default and static keys are an audited step-up relaxation. Slices SD0 (foundation,
+migration 0202) then SD1-SD4; SD4 starts with a spike. The index now ends at 0195, with 190 files and 190 rows.
+
+Owner decision (2026-10-17): ADR-0196 (the enterprise UI harness) is accepted and built (#410): WCAG 2.2 AA via axe on
+every SPA screen in both themes plus keyboard journeys, three browsers at five viewports, a visual-consistency audit, and
+performance budgets, each a committed baseline that may only shrink. ADR-0195 has SD0 (#403, 0202), SD1 (#402), SD2
+(#404) and SD3 (#401) merged. The index now ends at 0196, with 191 files and 191 rows.
+
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
 (b) standing policy for future scaffolds recorded (ADR-0006, no implementation yet — nothing to
@@ -4966,15 +5161,62 @@ region-allowlist SCP; OQ-002 (budget cap) resolved to $5/month; OQ-003 (GitHub a
 to personal `dhruvmahendrapatel`.
 
 ## Known follow-ups (not urgent, not blocking)
+- **Batch 6 follow-ups (2026-10-16)**, from the #386-#390 builder reports and reviews. Items already in the
+  2026-10-15 list below are not repeated. Unless a line says it was checked on main, these are taken from those
+  reports and were not re-verified one by one.
+  - **Next queue, in order:**
+    1. Engine task images and the compose wiring. Every shipped `taskImage` is null and compose has no executor
+       input volume (both checked on main), so engines cannot run end to end in a stock install.
+    2. The owner decision C admin relaxation build (ADR-0190, #386).
+    3. A runc L1 backend plus a versionable engine-worker profile. Until then, relaxing the engine_worker floor is a
+       no-op for placement.
+    4. The gVisor re-pin on #385 once a release carries upstream commit 7be4160, covering the `gvisor-bin/`
+       sidecars too. A scheduled check runs on 2026-10-20 (checked). Do not loosen seccomp.
+    5. The smaller follow-ups below.
+  - **I5 (ADR-0190, #390):**
+    - The task start does not re-check `judge_required` or `agent_not_dispatchable`, so I5 point 18 overstates.
+      Fix the code or the ADR.
+    - One gateway process caps unacknowledged task output at 512 MiB across every task: a noisy-neighbour risk.
+      Document it or share it fairly.
+    - ADR drift: point 13 (the attestation basis is now read outside the lease transaction) and point 12 (a
+      `not_run` from an unplaced task is also dropped) are stale.
+    - Tighten the d288081 test assertion to per-`runId`.
+    - The modelscan runner still downloads the artifact itself.
+    - Streaming over the gateway channel is not built.
+  - **I4 follow-ups (#387):**
+    - Digest-pin `caddy:2-alpine` in every Caddy service and in the image bundle.
+    - Multi-executor needs one TLS front per executor host.
+    - Run `docker compose --profile isolation up` once on a Docker host and record it in ADR-0190. The front has
+      never run on a real Docker host.
+    - The dev host name is still in an `apps/gateway/src/hsts.ts` comment, ADR-0029, ADR-0032, `docs/ops/TLS.md`
+      and `docs/product/ROADMAP.md` (a bare IP).
+  - **B8 (ADR-0189, #388):**
+    - Link `docs/ops/BOM_VERIFICATION.md` and `docs/ops/RECEIPT_V2_CUTOVER.md` from `docs/deployment/INSTALL.md`
+      (not linked, checked on main).
+    - `validateCycloneDx('1.6')` accepts a 1.7 document. Harden it in the product.
+    - Pin a prebuilt halo wheel to drop `--no-build-isolation` and the Python 3.11 dependency.
+    - The pending runbook steps need a running stack and an RFC 3161 TSA.
+    - Watch the `release-ai-bom.test.mjs` timeout under the parallel sweep.
+  - **S9 (ADR-0188, #389):**
+    - Fetch bundles through the egress guard (its own slice).
+    - Per-bundle-version attribution, so a revocation can be narrower than the whole trust domain. Whole-domain
+      revocation is the stricter default; keep it until then.
+    - JWT-SVID client authentication is not built.
+    - SPIFFE runbook steps 5-9 are pending a real deployment.
+    - Lows: a step-up is spent on a racing first-upload 409 (fails safe); pkijs is lenient about inner extension
+      fields (no authorization impact); the step-up spend takes a second pooled connection while the row lock is
+      held (a deadlock risk with small pools); add a test for the revoke-commits-first refusal path.
 - **Batch 6 follow-ups (2026-10-15)**, from the #377-#383 builder reports and reviews. Unless a line says it was
   checked on main, these are taken from those reports and were not re-verified one by one.
   - **I4 (ADR-0190, #383):**
-    - The executor needs an internal TLS front on `engines` that does not trust proxy addresses. Today it fails
-      closed without one.
-    - The `runsc` pin does not cover the release's `gvisor-bin/` sidecars.
+    - ~~The executor needs an internal TLS front on `engines` that does not trust proxy addresses.~~ **Done** (#387,
+      the Caddy `executor-front`, checked on main 2026-10-16).
+    - The `runsc` pin does not cover the release's `gvisor-bin/` sidecars. (Carry into the gVisor re-pin.)
     - Multi-replica stdio needs sticky routing or a frames table.
-    - Add a gVisor CI job. None exists, checked on main.
-    - I5 needs the input-volume and task-secret channels.
+    - ~~Add a gVisor CI job.~~ Built as PR #385, still open and held for the gVisor re-pin (see the 2026-10-16
+      paragraph).
+    - ~~I5 needs the input-volume and task-secret channels.~~ **Built in the executor** (#390). The compose input
+      volume is still missing (2026-10-16 queue item 1).
     - Bind-mount a pinned Node for the sandbox init.
     - MAC the close, keepalive and bye lines.
     - Lows: `awaitPlacement` maps a later-gate-withdrawn offer to `no_executor`; a null profile is allowed on any
@@ -5002,10 +5244,12 @@ to personal `dhruvmahendrapatel`.
     - The shadow-AI plan could take an optional `?environment=`.
     - Narrow race: a concurrent change between the check and the owner write on `PATCH /v1/servers/:id`.
   - **Repo hygiene:**
-    - The compose Caddy `REGULAIT_TLS_HOST` default still names the owner's dev host. Replace it with a neutral
-      placeholder (checked on main).
-    - An import cycle from `mcp-proxy` to `compat-core` remains (#383 moved only the constant). Consider a cycle
-      check in CI.
+    - ~~The compose Caddy `REGULAIT_TLS_HOST` default still names the owner's dev host.~~ **Done** (#387; the
+      default is `set-regulait-tls-host.invalid`, checked on main 2026-10-16). Other files still name it: see the
+      2026-10-16 list.
+    - ~~An import cycle from `mcp-proxy` to `compat-core` remains. Consider a cycle check in CI.~~ **Done** (#387): a
+      CI ratchet now refuses any new cycle edge. The existing edges stay in the 74-edge baseline, which may only
+      shrink.
     - Flaky candidate: the `zz-b4c-review-fixes.test.ts` TOTP-activate test got a 401 once on #381.
     - Sweep the mocked e2e specs for forms filled right after a POST that don't wait for the post-success reset
       (seen on #377).
@@ -5117,7 +5361,7 @@ restore it, because adding any new test file reshuffles the order and can surfac
 **The wave completed and deployed, 2026-08-02→03 (session-06, PR #105 `27205e7`).** All 26 ADRs
 (0036–0061) built across migrations 0049–0073; suite **1,004 → 1,611** across 100 files with no
 regression. Merged to `main` and **deployed to the dev box** — 73 migrations applied, live at
-`https://3-229-246-126.sslip.io/ui` on a valid Let's Encrypt certificate, login verified
+`https://<dev-host>/ui` on a valid Let's Encrypt certificate, login verified
 end-to-end over the public URL.
 
 Three things from the back half worth carrying forward:

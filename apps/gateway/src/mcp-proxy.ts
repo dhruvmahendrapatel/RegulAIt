@@ -47,7 +47,11 @@ import {
   type PreparedPiiApproval,
   type ScannableTool,
   type McpUpstreamTransport,
+  CONTENT_TRUST_REFUSAL_CODE,
+  CONTENT_TRUST_RULE_ID,
+  contentTrustRefusalReason,
 } from "@regulait/shared";
+import { classifyScannedContent, contentTrustGate, recordContentProvenance } from "./content-provenance.js";
 // ADR-0070 — the tool span. A governed tool call is the other half of what a
 // trace tree must show: which tool the model asked for, with which arguments,
 // what came back, and — the row that matters — the ones governance refused.
@@ -132,6 +136,7 @@ import {
   type PiiMode,
 } from "./projects.js";
 import { z } from "zod";
+import { errMessage } from "./err-serializer.js";
 
 const proxyParams = z.object({ serverId: z.string().uuid() });
 /**
@@ -273,7 +278,14 @@ export async function connectUpstream(
      * ADR-0190 I4: the call a stdio connect serves (person, project, delegation grant), the inputs of the
      * isolation placement. Absent = no project: a stdio connect is refused `policy_unresolved` (fail closed).
      */
-    placement?: { userId: string; projectId: string | null; delegationGrantId?: string | null; linkedOfferId?: string | null } | null;
+    placement?: {
+      userId: string;
+      projectId: string | null;
+      delegationGrantId?: string | null;
+      linkedOfferId?: string | null;
+      /** ADR-0190 owner decision C: the request's server-derived session facts (absent = not an interactive person) */
+      principal?: AbacPrincipalContext | null;
+    } | null;
   } = {},
 ): Promise<Client> {
   // ADR-0128 — THE RETRY SEQUENCE WRAPS BOTH GATES, and that is the point of
@@ -630,6 +642,13 @@ export async function executeGovernedToolCall(
      * person's own call (`actor: null`), byte-identical.
      */
     delegationGrantId?: string | undefined;
+    /**
+     * ADR-0193 P1 — the causal context this call runs in (`run:<id>` for an orchestration run,
+     * `builder_thread:<id>` for a builder thread). The tool's result is recorded under it, and a WRITE is refused
+     * when the context already holds content from a source below the write floor. Absent = a call whose context
+     * the gateway cannot see (the direct proxy route): its result is still recorded (P0), and nothing is gated.
+     */
+    contextId?: string | null | undefined;
   },
 ): Promise<GovernedToolCallOutcome> {
   // ADR-0070 — the tool span. Wrapped exactly like the dispatch core's: the
@@ -852,7 +871,7 @@ async function executeGovernedToolCallInner(
     if (classifyUpstreamError(err).why === "our_own_refusal") return;
     await recordUpstreamFailure(db, serverRow, redactActive
       ? "MCP upstream failed during PII-redacted dispatch"
-      : err instanceof Error ? err.message : String(err));
+      : errMessage(err));
   };
 
   try {
@@ -872,7 +891,7 @@ async function executeGovernedToolCallInner(
       try {
         // ADR-0190 I4 (review M1): for stdio this is an UNLINKED placement (`placeStdioSession`): there is no tool
         // decision yet, so its placement row is keyed to its own audit row and is outside the I4/I8 decision contract
-        upstream = await connectUpstream(db, serverRow, { outboundIdentity, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null } });
+        upstream = await connectUpstream(db, serverRow, { outboundIdentity, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, principal: args.principal ?? null } });
         upstreamTools = await syncUpstreamTools(db, serverId, upstream, "sync", serverRow.transport);
       } catch (err) {
         await operationFailed(err);
@@ -1017,7 +1036,7 @@ async function executeGovernedToolCallInner(
       if (!(await decisionPolicyStillCurrent(tx as unknown as Db, { policyEpoch, killSwitch }, { serverId, toolName }))) return false;
       if (decision.effect === "allow" && stdioClosure?.ok) {
         stdioPlacement = await placeGovernedStdio(tx as unknown as Db, decisionAuditId, {
-          ...(await stdioPlacementContext(tx as unknown as Db, { userId, projectId, delegationGrantId: args.delegationGrantId ?? null })),
+          ...(await stdioPlacementContext(tx as unknown as Db, { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, principal: args.principal ?? null })),
           mcpServerId: serverId,
           imageDigest: stdioClosure.image,
         });
@@ -1065,9 +1084,13 @@ async function executeGovernedToolCallInner(
         // ADR-0190 I4: the placement this decision made (its row is keyed to this audit row)
         ...(stdioPlacement
           ? {
-              execution: (stdioPlacement as GovernedStdioPlacement).kind === "offered"
-                ? { placementId: (stdioPlacement as Extract<GovernedStdioPlacement, { kind: "offered" }>).placementId, offerId: (stdioPlacement as Extract<GovernedStdioPlacement, { kind: "offered" }>).offerId }
-                : { placementId: (stdioPlacement as Extract<GovernedStdioPlacement, { kind: "refused" }>).placementId, refusal: "execution_profile_unavailable", reason: (stdioPlacement as Extract<GovernedStdioPlacement, { kind: "refused" }>).code },
+              execution: {
+                ...((stdioPlacement as GovernedStdioPlacement).kind === "offered"
+                  ? { placementId: (stdioPlacement as Extract<GovernedStdioPlacement, { kind: "offered" }>).placementId, offerId: (stdioPlacement as Extract<GovernedStdioPlacement, { kind: "offered" }>).offerId }
+                  : { placementId: (stdioPlacement as Extract<GovernedStdioPlacement, { kind: "refused" }>).placementId, refusal: "execution_profile_unavailable", reason: (stdioPlacement as Extract<GovernedStdioPlacement, { kind: "refused" }>).code }),
+                // ADR-0190 owner decision C: the subject kind and the relaxation the requirement relied on
+                ...((stdioPlacement as GovernedStdioPlacement).relaxation ? { relaxation: (stdioPlacement as GovernedStdioPlacement).relaxation } : {}),
+              },
             }
           : {}),
       },
@@ -1139,6 +1162,38 @@ async function executeGovernedToolCallInner(
           kind: "denied",
           decision: { effect: "deny", ruleId: "mcp-default-mode", ruleChain: [], reason },
         };
+      }
+    }
+
+    // ADR-0193 P1 — CONTENT TRUST. A write whose causal context already holds content from a source below the
+    // write floor is refused: low-trust content cannot carry high action authority. Like the read_only posture
+    // above it is categorical, so it beats approval (no approver can sign away where the instruction came from)
+    // and comes before the budget gate, the queue and the upstream: a refused write executes and bills nothing.
+    if (kind === "write" && args.contextId) {
+      const trust = await contentTrustGate(db, "write", args.contextId);
+      if (!trust.ok) {
+        const reason = contentTrustRefusalReason(trust.lowest, trust.floor, `${serverRow.name}.${toolName}`);
+        await db.insert(auditLog).values({
+          userId,
+          serverId,
+          toolName,
+          detail: {
+            ...(args.detail ?? {}),
+            phase: "content-trust",
+            code: CONTENT_TRUST_REFUSAL_CODE,
+            contextId: args.contextId,
+            lowestTier: trust.lowest,
+            writeFloor: trust.floor,
+            toolKind: kind,
+            projectId,
+            receiptClass: "decision",
+          },
+          effect: "deny",
+          ruleId: CONTENT_TRUST_RULE_ID,
+          ruleChain: [],
+          reason,
+        });
+        return { kind: "denied", decision: { effect: "deny", ruleId: CONTENT_TRUST_RULE_ID, ruleChain: [], reason } };
       }
     }
 
@@ -1321,7 +1376,7 @@ async function executeGovernedToolCallInner(
       const refused = await breakerRefusesUpstream();
       if (refused) return refused;
       try {
-        upstream = await connectUpstream(db, serverRow, { outboundIdentity, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, linkedOfferId } });
+        upstream = await connectUpstream(db, serverRow, { outboundIdentity, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, linkedOfferId, principal: args.principal ?? null } });
       } catch (err) {
         await operationFailed(err);
         if (redactActive) throw new Error("MCP upstream connection failed under PII redaction");
@@ -1573,6 +1628,23 @@ async function executeGovernedToolCallInner(
         reason: `PII detected (${piiCategoryList([...inputHits, ...outputHits])}) — warned, tool call proceeded`,
       });
     }
+
+    // ADR-0193 P0 — the provenance label and both digests (what upstream returned, what is delivered), written as
+    // evidence before anything is delivered; a failure to record throws, so nothing unrecorded leaves.
+    await recordContentProvenance(db, dataKey, {
+      userId,
+      source: { kind: "mcp_tool", serverId, toolName },
+      upstream: content,
+      delivered: resultContent,
+      classification: classifyScannedContent({
+        scanned: Boolean(preparedPii || piiMode) && !blobWithheld,
+        piiHits: outputHits.length,
+        piiWithheld: withheld && !blobWithheld,
+      }),
+      decisionAuditId,
+      contextId: args.contextId ?? null,
+      projectId,
+    });
 
     return {
       kind: "allowed",
@@ -1989,7 +2061,7 @@ export async function resolveNodeToolContext(
         upstreamTools = await syncUpstreamTools(db, serverId, upstream, "sync", serverRow.transport);
       } catch (err) {
         if (classifyUpstreamError(err).why !== "our_own_refusal") {
-          await recordUpstreamFailure(db, serverRow, err instanceof Error ? err.message : String(err));
+          await recordUpstreamFailure(db, serverRow, errMessage(err));
         }
         throw err;
       }
@@ -2259,7 +2331,7 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
       if (needsManifest && !storedManifest) {
         // ADR-0190 I4 (review M1): for stdio, an UNLINKED placement for the manifest (no decision exists yet): its
         // own audit row, outside the I4/I8 decision contract (`placeStdioSession`)
-        upstream = await connectUpstream(db, serverRow, { retry: connectRetry, placement: { userId, projectId } });
+        upstream = await connectUpstream(db, serverRow, { retry: connectRetry, placement: { userId, projectId, principal: abacPrincipalFromRequest(req) } });
       }
       // B3S-02: the client left while we were connecting — close it now
       if (clientGone || reply.raw.destroyed || req.raw.socket?.destroyed) {
@@ -2396,7 +2468,7 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
             throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${err.detail}`);
           }
           if (classifyUpstreamError(err).why !== "our_own_refusal") {
-            await recordUpstreamFailure(db, serverRow, err instanceof Error ? err.message : String(err));
+            await recordUpstreamFailure(db, serverRow, errMessage(err));
           }
           throw err;
         });

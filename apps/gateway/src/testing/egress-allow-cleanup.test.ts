@@ -4,7 +4,7 @@
  * so the static cleanup check does not read this file as creating an entry.
  */
 import { describe, expect, it } from "vitest";
-import { trackEgressAllowHosts, type EgressAllowInjector } from "./egress-allow-cleanup.js";
+import { removeEgressAllowEntry, trackEgressAllowHosts, type EgressAllowInjector } from "./egress-allow-cleanup.js";
 
 const ROUTE = ["", "v1", "egress-allow-hosts"].join("/");
 
@@ -72,6 +72,42 @@ describe("trackEgressAllowHosts: every host a test allow-lists is removed after 
     );
     const removal = await perTest.removeAll(f.app, {});
     expect(f.calls.filter((c) => c.startsWith("DELETE"))).toHaveLength(2);
-    expect(() => removal.assertRemoved()).toThrow(/M-068: the egress allow entry this suite created was not removed: DELETE returned 500/);
+    expect(() => removal.assertRemoved()).toThrow(/M-068: the egress allow entry this suite created was not removed: DELETE a returned 500/);
+  });
+});
+
+describe("#427 review N1: the helper removes exactly the created row", () => {
+  it("removeEgressAllowEntry deletes by the saved id, and nothing else", async () => {
+    const f = fakeApp([
+      { id: "a", host: "169.254.169.254" },
+      { id: "b", host: "127.0.0.1" },
+    ]);
+    (await removeEgressAllowEntry(f.app, {}, { id: "a" })).assertRemoved();
+    expect(f.rows.map((r) => r.id)).toEqual(["b"]);
+    expect(f.calls).toEqual([`DELETE ${ROUTE}/a`]);
+  });
+
+  it("an undefined id (nothing was created) does nothing; an id that names no row is reported", async () => {
+    const f = fakeApp([{ id: "b", host: "127.0.0.1" }], 404);
+    (await removeEgressAllowEntry(f.app, {}, { id: undefined })).assertRemoved();
+    expect(f.calls).toEqual([]);
+    const gone = await removeEgressAllowEntry(f.app, {}, { id: "re-created" });
+    expect(() => gone.assertRemoved()).toThrow(/DELETE re-created returned 404/);
+  });
+
+  it("the tracker matches the host the route stores (normalizeHost): case, whitespace, trailing dots and brackets", async () => {
+    const perTest = trackEgressAllowHosts();
+    perTest.trackHost(" Metadata.Example. ");
+    perTest.trackHost("[::1]");
+    const f = fakeApp([
+      { id: "m", host: "metadata.example" },
+      { id: "v6", host: "::1" },
+      // a row inserted directly with an unnormalised spelling is matched too (#427 round 3 L3)
+      { id: "raw", host: "Metadata.Example." },
+      { id: "raw6", host: "[::1]" },
+      { id: "keep", host: "metadata.example.other" },
+    ]);
+    (await perTest.removeAll(f.app, {})).assertRemoved();
+    expect(f.rows.map((r) => r.id)).toEqual(["keep"]);
   });
 });

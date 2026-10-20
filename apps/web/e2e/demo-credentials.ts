@@ -28,16 +28,20 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const PASSWORD_STORE = path.join(here, ".e2e-passwords.json");
 export const DEMO_PREPARE_LOG_ENV = "E2E_DEMO_PREPARE_LOG";
 
-export type Persona = "admin" | "dana" | "avery";
+export type Persona = "admin" | "dana" | "avery" | "morgan";
 export const PERSONA_EMAIL: Record<Persona, string> = {
   admin: "admin@regulait.local",
   dana: "dana@regulait.local",
   avery: "avery@regulait.local",
+  // ADR-0197 addendum: the second admin, enrolled by the seed beside Ada
+  morgan: "morgan@regulait.local",
 };
 
 interface PreparedCredentials {
   oneTime: Partial<Record<string, string>>;
   adminTotpSecret: string | null;
+  /** every authenticator secret the seed printed (Ada's and Morgan's), by email */
+  totpSecrets: Partial<Record<string, string>>;
 }
 
 /** the one-time passwords and Ada's authenticator secret `demo:prepare` printed, or null */
@@ -55,7 +59,14 @@ export function preparedCredentials(): PreparedCredentials | null {
     if (value && !value.startsWith("(")) oneTime[email] = value;
   }
   const uri = /admin TOTP \(shown ONCE[^)]*\): (otpauth:\/\/totp\/\S+)/.exec(out)?.[1];
-  return { oneTime, adminTotpSecret: uri ? new URL(uri).searchParams.get("secret") : null };
+  // the seed prints `<username> TOTP (shown ONCE; …): otpauth://…` per enrolled admin; the usernames are the persona keys
+  const totpSecrets: Partial<Record<string, string>> = {};
+  for (const m of out.matchAll(/(\S+) TOTP \(shown ONCE[^)]*\): (otpauth:\/\/totp\/\S+)/g)) {
+    const email = PERSONA_EMAIL[m[1] as Persona];
+    const secret = new URL(m[2]!).searchParams.get("secret");
+    if (email && secret) totpSecrets[email] = secret;
+  }
+  return { oneTime, adminTotpSecret: uri ? new URL(uri).searchParams.get("secret") : null, totpSecrets };
 }
 
 /**
@@ -101,6 +112,8 @@ export async function signInPrepared(page: Page, email: string, newPassword: str
   const oneTime = creds?.oneTime[email];
   if (!creds || !oneTime) return null;
   if (creds.adminTotpSecret) recordTotpSecret(PERSONA_EMAIL.admin, creds.adminTotpSecret);
+  const own = creds.totpSecrets[email];
+  if (own && email !== PERSONA_EMAIL.admin) recordTotpSecret(email, own);
   const known = loadPasswords()[email.toLowerCase()];
   const password = known && known.replaced === oneTime ? known.password : oneTime;
   await page.goto("/ui");

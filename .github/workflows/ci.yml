@@ -249,12 +249,14 @@ jobs:
       # only go down. A list entry that no longer matches fails the step, so
       # the lists cannot rot.
       #
-      # Two steps, and the census runs even when the affordance step failed
-      # (`success() || failure()`), so both reports always show in one run.
+      # Two steps, and the census runs whenever the affordance step RAN (passed
+      # or failed), so both reports always show in one run. Neither runs after a
+      # setup or earlier-step failure: their output would be noise.
       - name: Pre-flight — every governed object the UI lists can be added and removed from it (B9c)
+        id: affordances
         run: node scripts/preflight-ui-affordances.mjs
       - name: Pre-flight — every gateway route has UI or a reason (route census)
-        if: success() || failure()
+        if: ${{ !cancelled() && (steps.affordances.outcome == 'success' || steps.affordances.outcome == 'failure') }}
         run: node scripts/preflight-ui-route-census.mjs
 
       # AgentCoordination.md stays a CURRENT-STATE file: one Live-status row per
@@ -268,10 +270,26 @@ jobs:
       # directory may differ only by case or extension, because an
       # extensionless import of either one breaks the build on a Windows
       # (case-insensitive) checkout while every Linux gate stays green.
+      # Runs whenever the pre-flight steps ran, whatever they found: a census
+      # failure must not hide the scripts' own tests (they include the census's).
       - name: Coordination file lint (structure only — never agent staleness) + repo filename guard
+        if: ${{ !cancelled() && (steps.affordances.outcome == 'success' || steps.affordances.outcome == 'failure') }}
         run: |
           node scripts/coordination.mjs lint
           pnpm exec vitest run --dir scripts
+
+      # The engine image lock may only change as `--apply` changes it (#425
+      # review): every published sourceCommit is on main, and an engine whose
+      # image changed moved its publishGeneration to exactly main's + 1. A
+      # hand edit passes the derived-file check, so it is checked against
+      # main's copy here. The checkout is shallow, so main's history is fetched.
+      # This proves the shape of a lock change, not who made it: provenance
+      # rests on the signed publish (cosign), not on this check.
+      - name: Engine image lock — every published build is of main, one generation per new image
+        if: ${{ !cancelled() && (steps.affordances.outcome == 'success' || steps.affordances.outcome == 'failure') }}
+        run: |
+          git fetch --no-tags --unshallow origin +refs/heads/main:refs/remotes/origin/main
+          node scripts/engine-images-lock.mjs --check --base origin/main
 
   gateway-tests:
     name: gateway shard ${{ matrix.shard }}

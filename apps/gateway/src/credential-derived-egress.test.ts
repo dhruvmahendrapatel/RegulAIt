@@ -31,6 +31,7 @@ import http from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 // an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
 import { relaxStepUpAround } from "./testing/step-up-posture.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 import { auditLog, createDb, desc, eq, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
@@ -66,7 +67,7 @@ let loginBase: string;
 const loginHits: Array<{ url: string; body: string }> = [];
 /** what the fake answers next */
 let loginReply: { status: number; body: string } = { status: 500, body: "INTERNAL-SECRET-PAGE" };
-let allowEntryId: string | null = null;
+let allowEntryId: string | undefined;
 
 const post = async (url: string, payload: Record<string, unknown>, headers: Record<string, string> = AUTH) =>
   app.inject({ method: "POST", url, headers, payload });
@@ -141,13 +142,16 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await restoreStrictAdmission?.();
-  await restoreSb1Posture?.();
-  if (allowEntryId) {
-    await app.inject({ method: "DELETE", url: `/v1/egress-allow-hosts/${allowEntryId}`, headers: AUTH });
+  // M-068: remove the allow entry the test created, first, while the app is up; asserted last
+  const allowEntry = await removeEgressAllowEntry(app, AUTH, { id: allowEntryId });
+  try {
+    await restoreStrictAdmission?.();
+    await restoreSb1Posture?.();
+    await new Promise<void>((r) => loginServer.close(() => r()));
+    await app.close();
+  } finally {
+    allowEntry.assertRemoved();
   }
-  await new Promise<void>((r) => loginServer.close(() => r()));
-  await app.close();
 });
 
 describe("a typed login host is adjudicated like a typed baseUrl", () => {
@@ -218,7 +222,7 @@ describe("once the host is allow-listed the gate opens — and the upstream body
       note: "cde suite: local fake Entra login host",
     }));
     expect([200, 201]).toContain(allow.statusCode);
-    allowEntryId = allow.json().id ?? allow.json().host?.id ?? null;
+    allowEntryId = allow.json().id;
 
     const conn = await makeConnector(
       "teams",

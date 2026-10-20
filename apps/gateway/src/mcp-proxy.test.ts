@@ -110,6 +110,11 @@ async function startUpstream(): Promise<{ url: string; close: () => Promise<void
 
 // --- test setup ---
 
+/** ADR-0193 P0: a delivered tool result also writes a provenance audit row; these assertions are about the decisions */
+const notProvenance = (e: { objectType?: string | null }) => e.objectType !== "content_provenance";
+const decisionRows = (entries: Array<{ objectType?: string | null; effect: string; ruleChain: Array<{ rule: string; outcome: string }> }>) =>
+  entries.filter(notProvenance);
+
 const BOOT = "test-bootstrap-token";
 const AUTH = { authorization: `Bearer ${BOOT}` };
 
@@ -311,7 +316,7 @@ describe("MCP proxy path", () => {
     await client.close();
 
     const audit = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit?userId=${aliceId}` });
-    const allowRow = audit.json().entries.find((e: { effect: string }) => e.effect === "allow");
+    const allowRow = decisionRows(audit.json().entries).find((e: { effect: string }) => e.effect === "allow");
     expect(allowRow).toMatchObject({ toolName: "get_time", ruleId: grantId });
   });
 
@@ -476,7 +481,7 @@ describe("approvals through the proxy (§3 + §6 queue)", () => {
     const audit = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit?userId=${daveId}` });
     const effects = audit
       .json()
-      .entries.map((e: { effect: string }) => e.effect)
+      .entries.filter(notProvenance).map((e: { effect: string }) => e.effect)
       .reverse();
     // one MORE require_approval than before: the tampered attempt. The shape is
     // otherwise unchanged — pause, pause, [pause], allow, pause.
@@ -542,7 +547,7 @@ describe("rate limits through the proxy (§3)", () => {
     const audit = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit?userId=${erinId}` });
     const effects = audit
       .json()
-      .entries.map((e: { effect: string }) => e.effect)
+      .entries.filter(notProvenance).map((e: { effect: string }) => e.effect)
       .reverse();
     expect(effects).toEqual(["allow", "allow", "deny"]);
   });
@@ -593,7 +598,7 @@ describe("data-scope rules through the proxy (§3)", () => {
     const audit = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit?userId=${frankId}` });
     const effects = audit
       .json()
-      .entries.map((e: { effect: string }) => e.effect)
+      .entries.filter(notProvenance).map((e: { effect: string }) => e.effect)
       .reverse();
     expect(effects).toEqual(["allow", "deny", "deny"]);
   });
@@ -669,7 +674,7 @@ describe("rule scoping through the proxy (pillar 1): fleet / role / team restric
     await client.close();
 
     const audit = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit?userId=${hana}` });
-    const effects = audit.json().entries.map((e: { effect: string }) => e.effect).reverse();
+    const effects = decisionRows(audit.json().entries).map((e: { effect: string }) => e.effect).reverse();
     expect(effects).toEqual(["allow", "require_approval"]);
   });
 
@@ -807,9 +812,9 @@ describe("roles + per-user overrides through the proxy (§5)", () => {
       headers: AUTH,
       url: `/v1/audit?userId=${graceId}`,
     });
-    const allowRow = audit.json().entries.find((e: { effect: string }) => e.effect === "allow");
+    const allowRow = decisionRows(audit.json().entries).find((e: { effect: string }) => e.effect === "allow");
     expect(
-      allowRow.ruleChain.some(
+      allowRow!.ruleChain.some(
         (t: { rule: string; outcome: string }) =>
           t.rule === "role-tool-allow-list" && t.outcome === "allow",
       ),
