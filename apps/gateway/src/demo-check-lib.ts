@@ -21,7 +21,7 @@
  */
 import type { FastifyInstance } from "fastify";
 import { DEMO_SCRIPT_KEY_TTL_DAYS, DEMO_SECURITY_LEAD, demoKeyExpiresAt, revokeScriptKeys } from "./demo-identity.js";
-import { DEMO_SHADOW_DISCOVERY, type DemoIntakeFixtures, type DemoShadowDiscoveryDataset } from "@regulait/shared";
+import { DEMO_INTAKE_FIXTURES, DEMO_SHADOW_DISCOVERY, type DemoIntakeFixtures, type DemoShadowDiscoveryDataset } from "@regulait/shared";
 import { DEMO_AUP_KEY, DEMO_INCIDENT_TITLE, DEMO_OPEN_INCIDENT_TITLE } from "./demo-intake-seed-lib.js";
 import { SHADOW_AI_REMEDIATION_TEMPLATE_NAME } from "./shadow-ai-remediation.js";
 import { APPROVER_ADMIN_NOT_INITIATOR } from "./workflow-approvers.js";
@@ -39,6 +39,9 @@ type Json = Record<string, any>;
 /** the G9 beat (owner, 2026-10-19): governance seed, so it runs unchanged on the live database (not discovery data) */
 export const G9_BEAT = "3 Incidents and feedback";
 
+/** the use case the G3 beat runs `demo:gate` on (Real-Time Fraud Detection Engine); the G9 records stay off it */
+export const DEMO_GATE_SUBJECT_USE_CASE = "uc-6";
+
 /**
  * The G9 screens open on unfinished work: Incidents lists the `active` ones, and Feedback and appeals lists the
  * `open` items in the signed-in person's queue (an admin's queue is every item). Ada signs in for them, so PASS needs
@@ -48,6 +51,7 @@ export const G9_BEAT = "3 Incidents and feedback";
 export async function checkG9Records(
   get: (url: string) => Promise<{ status: number; body: Json }>,
   adaId: string | undefined,
+  gateSubject?: { id: string; name: string },
 ): Promise<DemoCheck[]> {
   const problems: string[] = [];
   const facts: string[] = [];
@@ -76,9 +80,35 @@ export async function checkG9Records(
     problems.push("a feedback item routed to Ada is not acknowledged");
   }
   else facts.push(`${routed.length} open feedback items routed to Ada (${[...states].sort().join(", ")}; an appeal among them)`);
-  return problems.length
+  // PR #461 recheck L1: an item past its resolution SLA (seeded more than `feedbackResolveSlaDays` ago, or the setting
+  // was shortened) raises `feedback_sla_breached` on the Monitor. The seed keeps an open item, so a re-run alone does
+  // not replace it: the breached one is resolved first, and the re-run then files a fresh one.
+  const lapsed = routed.filter((f) => ((f.sla?.breached ?? []) as string[]).includes("resolve"));
+  const out: DemoCheck[] = problems.length
     ? [{ beat: G9_BEAT, level: "FAIL", detail: problems.join("; "), fix: "re-run `demo:intake` on this database (it seeds the G9 records; `demo:intake --live` on the live one)" }]
-    : [{ beat: G9_BEAT, level: "PASS", detail: facts.join("; ") }];
+    : lapsed.length
+      ? [{
+          beat: G9_BEAT,
+          level: "FAIL",
+          detail: `${lapsed.length} feedback item(s) routed to Ada are past their resolution SLA (a \`feedback_sla_breached\` alert shows on the Monitor)`,
+          fix: "resolve the lapsed item(s) on the Feedback and appeals screen, then re-run `demo:intake` (it files fresh open ones; `demo:intake --live` on the live one)",
+        }]
+      : [{ beat: G9_BEAT, level: "PASS", detail: facts.join("; ") }];
+  // PR #461 recheck (info): heads of #461 before e1adab1 seeded the G9 records on the G3 `demo:gate` subject. Open work
+  // there can raise alerts the gate prints, and the current seed never visits that use case, so it is reported.
+  if (gateSubject) {
+    const incs = active.filter((i) => i.useCaseId === gateSubject.id).length;
+    const items = queue.filter((f) => f.useCaseId === gateSubject.id).length;
+    if (incs + items > 0) {
+      out.push({
+        beat: G9_BEAT,
+        level: "WARN",
+        detail: `${incs} open incident(s) and ${items} open feedback item(s) on "${gateSubject.name}", the \`demo:gate\` subject; their alerts can add lines to the G3 gate output`,
+        fix: "close them on the Incidents and Feedback and appeals screens before the rehearsal, or re-prepare this database from main",
+      });
+    }
+  }
+  return out;
 }
 
 /**
@@ -350,7 +380,13 @@ async function runDemoCheckRun(
   }
 
   // --- 3 Incidents and feedback (G9): the open work the two screens show by default -------------
-  out.push(...(await checkG9Records((url) => call("GET", url, auth), ada?.id as string | undefined)));
+  const gateSubjectName = DEMO_INTAKE_FIXTURES.useCases.find((u) => u.key === DEMO_GATE_SUBJECT_USE_CASE)?.name;
+  const gateSubject = ucs.find((u) => u.name === gateSubjectName);
+  out.push(...(await checkG9Records(
+    (url) => call("GET", url, auth),
+    ada?.id as string | undefined,
+    gateSubject ? { id: gateSubject.id as string, name: gateSubject.name as string } : undefined,
+  )));
 
   // --- 3 Evidence (ADR-0116): the closing beat downloads a SIGNED bundle, which needs the
   // deployment's export key — without it the button answers 409 in front of the audience
