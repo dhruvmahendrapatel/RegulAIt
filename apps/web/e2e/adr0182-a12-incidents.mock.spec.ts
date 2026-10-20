@@ -270,6 +270,17 @@ test.describe("ADR-0182 A12: the AI incident register", () => {
     expect(cap.sent[0]).toMatchObject({ stage: "initial", recipient: "the market surveillance authorities", reference: "MSA-2026-118" });
   });
 
+  test("L3 (#459): Linked records holds the add-link form for an editor, so it is not a contained section", async ({ page }) => {
+    await mockApi(page);
+    const refused: string[] = [];
+    page.on("console", (m) => { if (m.text().includes("contain refused")) refused.push(m.text()); });
+    await page.goto(`/ui/incidents/${INC}`);
+    const links = page.locator("section[data-rg-card]").filter({ hasText: "Linked records" }).first();
+    await expect(links).toBeVisible();
+    await expect(page.getByRole("region", { name: /^Linked records, scrollable/ })).toHaveCount(0);
+    expect(refused).toEqual([]);
+  });
+
   test("an owner who is not an admin cannot close a high, serious incident: the dialog says an admin closes it", async ({ page }) => {
     await mockApi(page, { asOwner: true });
     await page.goto(`/ui/incidents/${INC}`);

@@ -386,7 +386,7 @@ function RunsSection() {
   });
   return (
     <>
-      <Card title="Regression runs">
+      <Card title="Regression runs" contain>
         <Table
           rows={runs.data?.runs}
           loading={runs.isLoading}

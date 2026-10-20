@@ -151,7 +151,7 @@ export default function ModelCredentialsPage() {
           />
         </Card>
 
-        <Card title="Env keys present on this server">
+        <Card title="Env keys present on this server" contain>
           <Table
             columns={[
               { key: "provider", header: "Provider", render: (k: NonNullable<OrgSettingsResponse["envKeys"]>[number]) => <ProviderMark provider={k.provider} label={providerLabel(k.provider)} /> },
