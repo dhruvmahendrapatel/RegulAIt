@@ -5,9 +5,9 @@
 # release's published .sha512 object. Either mismatch aborts and deletes the download.
 set -euo pipefail
 DEST=$1
-RELEASE=20261005.0
+RELEASE=20261012.0
 BASE="https://storage.googleapis.com/gvisor/releases/release/$RELEASE/x86_64"
-PINNED_SHA512=79869ae9a589355a46d46fdac068d9a954e741741ffe77c64e38c56ea955498c1cb04e9bce44e1cce5155333e6b76bee72347c6661bb7c78fd2fe3aad198c8fe
+PINNED_SHA512=9606445eed5aedfcf05310e7ccef61d994089914c6622fc82624c24d2b18db1b2210f40e40a7be27b8b7772859de7d95c501b4eba66423053c960bf671377c5e
 mkdir -p "$DEST"
 cd "$DEST"
 curl -fsS -o gvisor.tar.bz2 "$BASE/gvisor.tar.bz2"

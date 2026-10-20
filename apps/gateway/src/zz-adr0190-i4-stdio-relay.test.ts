@@ -94,7 +94,7 @@ async function newExecutor(name: string): Promise<string> {
   return (
     await one<{ id: string }>(
       sql`insert into executors (workload_identity_id, name, backend, runtime_version, classes_declared)
-          values (${identity.id}, ${`relay-${name}-${RUN}`}, 'gvisor', 'release-20261005.0', '["hardened_container", "user_space_kernel"]'::jsonb) returning id`,
+          values (${identity.id}, ${`relay-${name}-${RUN}`}, 'gvisor', 'release-20261012.0', '["hardened_container", "user_space_kernel"]'::jsonb) returning id`,
     )
   ).id;
 }
