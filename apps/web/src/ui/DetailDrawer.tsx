@@ -108,12 +108,24 @@ export function DetailDrawer(props: {
     else dialog.show();
     had?.focus();
   }, [modal]);
-  // N1: beside the page, the page reflows into the space left of the drawer (detailDrawer.module.css)
+  // N1: beside the page, the page reflows into the space left of the drawer (detailDrawer.module.css). Tab from the
+  // drawer into the page scrolls each control clear of the sticky top bar, whatever height that bar wraps to.
   useLayoutEffect(() => {
     if (modal) return;
     const root = document.documentElement;
     root.setAttribute("data-detail-drawer", "side");
-    return () => root.removeAttribute("data-detail-drawer");
+    const bar = document.querySelector("header");
+    const fit = bar && typeof ResizeObserver !== "undefined"
+      ? new ResizeObserver(() => {
+          root.style.scrollPaddingBlockStart = `${Math.ceil(bar.getBoundingClientRect().height) + 8}px`;
+        })
+      : null;
+    if (bar) fit?.observe(bar);
+    return () => {
+      fit?.disconnect();
+      root.style.scrollPaddingBlockStart = "";
+      root.removeAttribute("data-detail-drawer");
+    };
   }, [modal]);
   useLayoutEffect(() => {
     heading.current?.focus();
