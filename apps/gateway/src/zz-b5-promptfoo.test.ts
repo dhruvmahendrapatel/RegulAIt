@@ -27,6 +27,8 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import {
+  and,
+  auditLog,
   authSessions,
   createDb,
   engineRunItems,
@@ -204,7 +206,7 @@ interface Call {
  * env it was given. `hooks.afterCall` runs after each call (to spend a budget or cancel a run);
  * the stand-in stops when the run's signal aborts, like a killed process group.
  */
-function promptfooStandIn(hooks: { afterCall?: (c: Call, n: number) => Promise<void>; evalExit?: number; errorFor?: (plugin: string) => string | null } = {}) {
+function promptfooStandIn(hooks: { afterCall?: (c: Call, n: number, signal?: AbortSignal) => Promise<void>; evalExit?: number; errorFor?: (plugin: string) => string | null } = {}) {
   const calls: Call[] = [];
   const run = async (_cmd: string, args: readonly string[], opts: { cwd?: string; env: Record<string, string>; signal?: AbortSignal }) => {
     const killed = { exitCode: null, signal: "SIGKILL" as NodeJS.Signals, killed: true, stdout: "", stderr: "" };
@@ -223,7 +225,7 @@ function promptfooStandIn(hooks: { afterCall?: (c: Call, n: number) => Promise<v
       });
       const c = { role, status: r.statusCode, body: r.body };
       calls.push(c);
-      await hooks.afterCall?.(c, calls.length);
+      await hooks.afterCall?.(c, calls.length, opts.signal);
       return c;
     };
     if (args[1] === "redteam") {
@@ -281,10 +283,17 @@ async function keyOf(runId: string) {
   const [k] = await db.select().from(virtualKeys).where(eq(virtualKeys.id, (await runRow(runId)).virtualKeyId!));
   return k!;
 }
-async function once(standIn: ReturnType<typeof promptfooStandIn>) {
+async function once(standIn: ReturnType<typeof promptfooStandIn>, heartbeatMs = 25) {
   const adapter = promptfooAdapter({ entrypoint: "/opt/promptfoo/node_modules/promptfoo/dist/src/entrypoint.js", run: standIn.run });
-  return runOnce(client, adapter, { engineId: "promptfoo", imageDigest: PF_DIGEST, engineVersion: MANIFEST.promptfoo.version, workRoot: await mkdtemp(path.join(tmpdir(), "b5p-")), heartbeatMs: 25, retryBaseMs: 10 });
+  return runOnce(client, adapter, { engineId: "promptfoo", imageDigest: PF_DIGEST, engineVersion: MANIFEST.promptfoo.version, workRoot: await mkdtemp(path.join(tmpdir(), "b5p-")), heartbeatMs, retryBaseMs: 10 });
 }
+/** resolves once the run's signal aborts (the runner killed the engine), never on a timer */
+function abortedOf(signal: AbortSignal | undefined) {
+  expect(signal).toBeDefined();
+  return new Promise<void>((resolve) => (signal!.aborted ? resolve() : signal!.addEventListener("abort", () => resolve(), { once: true })));
+}
+/** a heartbeat interval no test outlives: the runner never hears of a cancel before it posts */
+const NO_RUNNING_HEARTBEAT_MS = 3_600_000;
 
 beforeAll(async () => {
   process.env.REGULAIT_PUBLIC_URL = ORIGIN;
@@ -426,26 +435,78 @@ describe("B5-P promptfoo through the real gateway", () => {
     const runId = await startRun();
     let cancelledAt = -1;
     const s = promptfooStandIn({
-      afterCall: async (_c, n) => {
+      afterCall: async (_c, n, signal) => {
         if (n === 3) {
           const c = await inject("POST", `/v1/engine-runs/${runId}/cancel`, alice.key, { reason: "stop" });
           expect(c.statusCode, c.body).toBe(200);
           cancelledAt = n;
         }
-        // the stand-in keeps calling until the heartbeat delivers the cancel (like a real process)
-        await new Promise((r) => setTimeout(r, 15));
+        // the engine's next call is made after the cancel committed; then the stand-in waits (no timer)
+        // until the runner's heartbeat delivers the cancel and aborts it, like a killed process group
+        if (n === 4) await abortedOf(signal);
       },
     });
     const out = await once(s);
     expect(out).toMatchObject({ outcome: "cancelled", runId });
     expect(cancelledAt).toBe(3);
     const after = s.calls.slice(3);
-    expect(after.length).toBeGreaterThan(0);
+    expect(after).toHaveLength(1);
     expect(after.every((c) => c.status === 401 && /virtual_key_revoked/.test(c.body))).toBe(true);
     expect((await keyOf(runId)).revokedAt).not.toBeNull();
     const run = await runRow(runId);
     expect(run).toMatchObject({ status: "cancelled", redteamRunId: null, evalRunId: null });
     expect(await db.select().from(engineRunItems).where(eq(engineRunItems.runId, runId))).toEqual([]);
+  });
+
+  // CI run 39323406311: a cancel that reaches the gateway before the runner hears of it — the engine
+  // finishes and its result is posted after the cancel. The gateway's cancel wins (row lock, CAS on
+  // `leased`); the late result is refused and audited, and the runner reports the run cancelled
+  const expectCancelWon = async (runId: string, out: Awaited<ReturnType<typeof once>>) => {
+    expect(out).toMatchObject({ outcome: "cancelled", runId, status: 409 });
+    expect((await keyOf(runId)).revokedAt).not.toBeNull();
+    const run = await runRow(runId);
+    expect(run).toMatchObject({ status: "cancelled", errorCode: "cancelled", redteamRunId: null, evalRunId: null });
+    expect(await db.select().from(engineRunItems).where(eq(engineRunItems.runId, runId))).toEqual([]);
+    const late = await db.select().from(auditLog).where(and(eq(auditLog.objectId, runId), eq(auditLog.ruleId, "engine-run-result-late")));
+    expect(late).toHaveLength(1);
+    expect(late[0]).toMatchObject({ effect: "deny", detail: expect.objectContaining({ status: "cancelled" }) });
+    // nothing was ingested: the run's only end is the cancel
+    const ended = await db.select().from(auditLog).where(and(eq(auditLog.objectId, runId), eq(auditLog.ruleId, "engine-run-result-ingested")));
+    expect(ended).toEqual([]);
+  };
+
+  it("RED PROOF cancel before the result post: the late result is refused and audited, the run stays cancelled", async () => {
+    const runId = await startRun();
+    const s = promptfooStandIn({
+      afterCall: async (_c, n) => {
+        if (n === 3) expect((await inject("POST", `/v1/engine-runs/${runId}/cancel`, alice.key, { reason: "stop" })).statusCode).toBe(200);
+      },
+    });
+    // the runner hears nothing between its starting heartbeat and its post: the engine runs to its end
+    const out = await once(s, NO_RUNNING_HEARTBEAT_MS);
+    expect(s.calls.slice(3).length).toBeGreaterThan(0);
+    expect(s.calls.slice(3).every((c) => c.status === 401 && /virtual_key_revoked/.test(c.body))).toBe(true);
+    await expectCancelWon(runId, out);
+  });
+
+  it("RED PROOF cancel inside the result post (after its unlocked read): the locked end refuses the result and audits it", async () => {
+    const runId = await startRun();
+    let hooked = 0;
+    engineRunTestHooks.beforeResultTx = async (id) => {
+      if (id !== runId) return;
+      hooked++;
+      const c = await inject("POST", `/v1/engine-runs/${runId}/cancel`, alice.key, { reason: "stop" });
+      expect(c.statusCode, c.body).toBe(200);
+    };
+    try {
+      const s = promptfooStandIn();
+      const out = await once(s, NO_RUNNING_HEARTBEAT_MS);
+      expect(hooked).toBe(1);
+      expect(s.calls.every((c) => c.status === 200)).toBe(true);
+      await expectCancelWon(runId, out);
+    } finally {
+      delete engineRunTestHooks.beforeResultTx;
+    }
   });
 
   it("RED PROOF engine error → unknown: promptfoo exits 1, nothing is clean, nothing reaches the ledgers", async () => {
