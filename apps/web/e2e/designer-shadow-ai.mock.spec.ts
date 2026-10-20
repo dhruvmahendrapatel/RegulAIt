@@ -502,6 +502,58 @@ test("T1 (390 px): with the Start confirm open over the modal drawer, Tab and Sh
   }
 });
 
+// PR #459 round-2 recheck L1: the spec above passes without the `closest("dialog") !== dialog` guard, because the
+// drawer's own trap never sees a confirm control at its edge. Here the drawer's controls after the confirm are hidden
+// (a test fixture, display:none), so the confirm's last button is the drawer's last tabbable control too. Without the
+// guard the drawer's trap, registered first, takes that Tab and sends focus to the drawer's first control, behind the
+// modal confirm, so focus leaves the confirm or does not move.
+test("T1 (390 px): Tab from the confirm's last button stays in the confirm when it is also the drawer's last control", async ({ page }) => {
+  await page.setViewportSize(PHONE);
+  await page.goto("/ui/admin/shadow-ai");
+  await page.getByRole("button", { name: "Plan remediation for team-17/payments-api" }).click();
+  const drawer = page.getByTestId("shadow-remediation");
+  await drawer.getByRole("textbox", { name: "Environment" }).fill("staging");
+  await drawer.getByRole("button", { name: "Start remediation workflow…" }).click();
+  const confirm = page.getByRole("dialog", { name: "Start a remediation workflow?" });
+  await expect(confirm).toBeVisible();
+  const hidden = await page.evaluate(() => {
+    const confirmEl = Array.from(document.querySelectorAll("dialog")).find((d) => d.textContent?.includes("Start a remediation workflow?") && d.open && d.querySelector("dialog") === null)!;
+    const drawerEl = document.querySelector<HTMLElement>('[data-testid="shadow-remediation"]')!;
+    const style = document.createElement("style");
+    style.textContent = "[data-t1-hidden] { display: none !important; }";
+    document.head.append(style);
+    let n = 0;
+    for (const el of drawerEl.querySelectorAll<HTMLElement>('a[href], button, input, select, textarea, [tabindex], [contenteditable="true"]')) {
+      if (confirmEl.contains(el)) continue;
+      if (confirmEl.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) {
+        el.setAttribute("data-t1-hidden", "");
+        n++;
+      }
+    }
+    return n;
+  });
+  // non-vacuous: the drawer had controls after the confirm (its pinned footer), and one before it still shows
+  expect(hidden).toBeGreaterThan(0);
+  const where = () =>
+    confirm.evaluate((el) => {
+      const a = document.activeElement as HTMLElement | null;
+      return el.contains(a) ? (a?.getAttribute("aria-label") ?? a?.textContent ?? a?.tagName ?? "").trim() : null;
+    });
+  const buttons = await confirm.getByRole("button").all();
+  expect(buttons.length).toBeGreaterThan(1);
+  await buttons.at(-1)!.focus();
+  for (const key of ["Tab", "Shift+Tab"]) {
+    let previous = await where();
+    for (let i = 0; i < 6; i++) {
+      await page.keyboard.press(key);
+      const now = await where();
+      expect(now, `${key} ${i + 1} left the confirm`).not.toBeNull();
+      expect(now, `${key} ${i + 1} did not move focus`).not.toBe(previous);
+      previous = now;
+    }
+  }
+});
+
 // On the drawer path the confirm sits in the drawer body, between the drawer's Close and its pinned footer, so the
 // drawer's own trap never sees a confirm control at its edge. This pins the guard for the case where it does: a nested
 // dialog holding the outer dialog's last control, with the outer trap registered first, as the drawer's is.
