@@ -304,3 +304,171 @@ test("L3: the link buttons and status chips are at least 24 px high", async ({ p
     expect((await b.boundingBox())!.height).toBeGreaterThanOrEqual(24);
   }
 });
+
+// ---- #459 review round: the drawer's layers, its modality by width, focus return and the pinned actions ----
+
+const PHONE = { width: 390, height: 700 };
+const DESKTOP = { width: 1440, height: 1000 };
+const findingRow = (page: Page, subject: string) => page.locator("tbody tr", { hasText: subject });
+/** true while focus is inside the open drawer (the one dialog that is not the confirm dialog) */
+const focusInDrawer = (page: Page) =>
+  page.evaluate(() => {
+    const drawer = document.querySelector('[data-testid="shadow-remediation"]');
+    return !!drawer && drawer.contains(document.activeElement);
+  });
+
+for (const [label, size] of [["390 px", PHONE], ["desktop", DESKTOP]] as const) {
+  test(`M1 (${label}): Escape in the confirm dialog closes only that dialog; the drawer and the typed environment stay`, async ({ page }) => {
+    await page.setViewportSize(size);
+    await page.goto("/ui/admin/shadow-ai");
+    await page.getByRole("button", { name: "Plan remediation for team-17/payments-api" }).click();
+    const drawer = page.getByTestId("shadow-remediation");
+    await drawer.getByRole("textbox", { name: "Environment" }).fill("staging");
+    await drawer.getByRole("button", { name: "Start remediation workflow…" }).click();
+    const confirm = page.getByRole("dialog", { name: "Start a remediation workflow?" });
+    await expect(confirm).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(confirm).toHaveCount(0);
+    await expect(drawer).toHaveCount(1);
+    await expect(drawer.getByRole("textbox", { name: "Environment" })).toHaveValue("staging");
+    // the next Escape is the drawer's own
+    await drawer.getByRole("heading", { name: "team-17/payments-api" }).focus();
+    await page.keyboard.press("Escape");
+    await expect(drawer).toHaveCount(0);
+  });
+
+  test(`M1 (${label}): Escape on an open (i) tip in the drawer closes only the tip`, async ({ page }) => {
+    await page.setViewportSize(size);
+    await page.goto("/ui/admin/shadow-ai");
+    await page.getByRole("button", { name: "Plan remediation for team-17/payments-api" }).click();
+    const drawer = page.getByTestId("shadow-remediation");
+    const tipButton = drawer.getByRole("button", { name: "What is a remediation plan?" });
+    await tipButton.click();
+    await expect(drawer.getByRole("button", { name: "Hide help for a remediation plan" })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(drawer.getByRole("button", { name: "What is a remediation plan?" })).toBeFocused();
+    await expect(drawer).toHaveCount(1);
+    await page.keyboard.press("Escape");
+    await expect(drawer).toHaveCount(0);
+  });
+}
+
+test("M2 (390 px): the drawer covers the page, so it is modal: Tab stays inside and the page behind is inert", async ({ page }) => {
+  await page.setViewportSize(PHONE);
+  await page.goto("/ui/admin/shadow-ai");
+  const opener = page.getByRole("button", { name: "Plan remediation for team-17/payments-api" });
+  await opener.click();
+  const drawer = page.getByTestId("shadow-remediation");
+  await expect(drawer).toHaveAttribute("aria-modal", "true");
+  expect(await drawer.evaluate((el) => el.matches(":modal"))).toBe(true);
+  for (let i = 0; i < 40; i++) {
+    await page.keyboard.press("Tab");
+    expect(await focusInDrawer(page), `Tab ${i + 1} left the drawer`).toBe(true);
+  }
+  for (let i = 0; i < 10; i++) {
+    await page.keyboard.press("Shift+Tab");
+    expect(await focusInDrawer(page), `Shift+Tab ${i + 1} left the drawer`).toBe(true);
+  }
+  // the page behind cannot take focus, even programmatically, while the drawer is open
+  const other = page.getByRole("button", { name: "Plan remediation for team-08/marketing-site", includeHidden: true });
+  await other.evaluate((el) => (el as HTMLElement).focus());
+  expect(await focusInDrawer(page)).toBe(true);
+  await page.keyboard.press("Escape");
+  await expect(drawer).toHaveCount(0);
+  await expect(opener).toBeFocused();
+});
+
+test("M2 (desktop): the drawer is a side panel; the list stays reachable and Tab leaves the drawer into the page", async ({ page }) => {
+  await page.setViewportSize(DESKTOP);
+  await page.goto("/ui/admin/shadow-ai");
+  await page.getByRole("button", { name: "Plan remediation for team-17/payments-api" }).click();
+  const drawer = page.getByTestId("shadow-remediation");
+  await expect(drawer).toHaveAttribute("aria-modal", "false");
+  expect(await drawer.evaluate((el) => el.matches(":modal"))).toBe(false);
+  let left = false;
+  for (let i = 0; i < 60 && !left; i++) {
+    await page.keyboard.press("Tab");
+    left = !(await focusInDrawer(page));
+  }
+  expect(left).toBe(true);
+  // narrowing the window past the overlay width turns the open drawer modal in place
+  await page.setViewportSize(PHONE);
+  await expect.poll(() => drawer.evaluate((el) => el.matches(":modal"))).toBe(true);
+  await expect(drawer).toHaveAttribute("aria-modal", "true");
+});
+
+test("L1: after the drawer switches subject, focus returns to the control that opened the current one", async ({ page }) => {
+  await page.setViewportSize(DESKTOP);
+  await page.goto("/ui/admin/shadow-ai");
+  await page.getByRole("button", { name: "Plan remediation for team-17/payments-api" }).click();
+  // same drawer type, another row: the drawer stays mounted and re-captures its opener
+  const otherPlan = page.getByRole("button", { name: "Plan remediation for team-08/marketing-site" });
+  await otherPlan.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("dialog", { name: "team-08/marketing-site" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "team-08/marketing-site" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(otherPlan).toBeFocused();
+
+  // another drawer type: the plan drawer unmounts, and focus still ends on the triage opener
+  await page.getByRole("button", { name: "Plan remediation for team-17/payments-api" }).click();
+  const triage = findingRow(page, "team-08/marketing-site").getByRole("button", { name: /^(Triage|Review again)$/ });
+  await triage.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("dialog")).toContainText("Triage");
+  await page.getByRole("button", { name: "Close triage" }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(triage).toBeFocused();
+});
+
+for (const [label, size] of [["390 px", { width: 390, height: 520 }], ["desktop", { width: 1440, height: 520 }]] as const) {
+  test(`L2 (${label}): the decision and step-up actions sit in a pinned footer, never inside the scrolling body`, async ({ page }) => {
+    await page.setViewportSize(size);
+    await page.goto("/ui/admin/shadow-ai");
+    /** the action is in view, and no scroll box inside the drawer holds it */
+    const pinned = (name: string) =>
+      page.getByRole("dialog").getByRole("button", { name, exact: true }).evaluate((btn) => {
+        const r = btn.getBoundingClientRect();
+        const drawer = btn.closest("dialog")!;
+        for (let el = btn.parentElement; el && el !== drawer; el = el.parentElement) {
+          if (/(auto|scroll)/.test(getComputedStyle(el).overflowY)) return "inside a scroll box";
+        }
+        return r.top >= 0 && r.bottom <= window.innerHeight ? "pinned" : "out of view";
+      });
+    await page.getByRole("button", { name: "Plan remediation for team-17/payments-api" }).click();
+    await expect(page.getByRole("dialog").getByRole("button", { name: "Start remediation workflow…" })).toBeVisible();
+    expect(await pinned("Start remediation workflow…")).toBe("pinned");
+    expect(await pinned("Link workflow…")).toBe("pinned");
+    // the pinned submit still belongs to its form: the required Environment is checked before any confirm
+    await page.getByRole("dialog").getByRole("button", { name: "Start remediation workflow…" }).click();
+    await expect(page.getByRole("dialog", { name: "Start a remediation workflow?" })).toHaveCount(0);
+    await page.getByRole("button", { name: "Close plan" }).click();
+
+    await findingRow(page, "team-17/payments-api").getByRole("button", { name: /^(Triage|Review again)$/ }).dispatchEvent("click");
+    await expect(page.getByRole("dialog")).toContainText("Triage");
+    expect(await pinned("Record")).toBe("pinned");
+    expect(await pinned("Cancel")).toBe("pinned");
+  });
+}
+
+test("L5: Show all still works when this browser refuses storage, and nothing is remembered", async ({ page }) => {
+  await page.addInitScript(() => {
+    const refuse = () => { throw new DOMException("storage refused", "SecurityError"); };
+    Storage.prototype.getItem = refuse;
+    Storage.prototype.setItem = refuse;
+    Storage.prototype.removeItem = refuse;
+  });
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  await page.setViewportSize({ width: 1280, height: 520 });
+  await page.goto("/ui/admin/shadow-ai");
+  const showAll = page.getByRole("button", { name: "Show all" }).first();
+  await expect(showAll).toHaveAttribute("aria-pressed", "false");
+  await showAll.click();
+  await expect(showAll).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("region", { name: "Inventory, scrollable" })).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Show all" }).first()).toHaveAttribute("aria-pressed", "false");
+  expect(errors).toEqual([]);
+});

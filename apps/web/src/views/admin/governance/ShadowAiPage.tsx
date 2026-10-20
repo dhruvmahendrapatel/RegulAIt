@@ -52,7 +52,7 @@ import {
 } from "../adminKit";
 import a from "../admin.module.css";
 import { ShadowRemediationPanel } from "./ShadowRemediationPanel";
-import { DetailDrawer } from "../../../ui/DetailDrawer";
+import { DetailDrawer, DrawerActions } from "../../../ui/DetailDrawer";
 import { DiscoverySightings } from "./DiscoverySightings";
 import type { SightingView } from "./discoverySourcesModel";
 import { IMPORT_EXAMPLE } from "./shadowAiExample";
@@ -636,6 +636,7 @@ export default function ShadowAiPage() {
             title={subjectOf(remediationFor)}
             subjectKey={remediationFor}
             closeLabel="Close plan"
+            data-testid="shadow-remediation"
             meta={
               <InfoButton label="a remediation plan">
                 A remediation plan turns a finding into tracked work: a governed workflow with a separate approver. The
@@ -671,7 +672,7 @@ export default function ShadowAiPage() {
             <Field label="Reason">
               <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="why this judgement" />
             </Field>
-            <div className={v.row}>
+            <DrawerActions className={v.row}>
               <Button
                 variant="primary"
                 disabled={act.busy}
@@ -696,7 +697,7 @@ export default function ShadowAiPage() {
                 Record
               </Button>
               <Button onClick={() => setDispositionFor(null)}>Cancel</Button>
-            </div>
+            </DrawerActions>
           </section>
           </DetailDrawer>
         ) : null}

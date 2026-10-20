@@ -233,6 +233,8 @@ export function InfoButton(props: {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        // the tip is the innermost layer: this Escape is spent, so a drawer or dialog around it stays open
+        e.preventDefault();
         setOpen(false);
         // Return focus to the trigger: closing must not dump a keyboard user
         // back at the top of the document.
@@ -951,6 +953,29 @@ function returnFocus(trigger: HTMLElement | null) {
   parked = { trigger, holder, stop };
 }
 
+/**
+ * Keeps Tab inside a modal dialog: a boundary Tab press wraps to the other end rather than leaving for the
+ * browser chrome. Only events from the dialog's own content count, so a Modal nested in it handles its own keys.
+ */
+export function tabTrap(dialog: HTMLElement) {
+  return (event: KeyboardEvent) => {
+    if (event.key !== "Tab" || event.defaultPrevented || !dialog.contains(event.target as Node)) return;
+    if ((event.target as Element).closest("dialog") !== dialog) return;
+    const controls = Array.from(dialog.querySelectorAll<HTMLElement>(
+      'a[href], button, input, select, textarea, [tabindex], [contenteditable="true"]',
+    )).filter((element) => element.tabIndex >= 0 && !element.matches(":disabled") &&
+      element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden");
+    const first = controls[0];
+    const last = controls.at(-1);
+    // Keep boundary Tab presses in the page rather than browser chrome.
+    if (!first || (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) ||
+      (!event.shiftKey && document.activeElement === last)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first)?.focus();
+    }
+  };
+}
+
 export function Modal(props: {
   open: boolean;
   title: string;
@@ -979,23 +1004,7 @@ export function Modal(props: {
     // but never reach a React handler on it.
     // On the document, not the dialog: a dialog's own content (a review with its own Tab order) registers its
     // trap on the dialog after this effect has run, so listening here lets that inner trap decide first.
-    const trap = (event: KeyboardEvent) => {
-      if (event.key !== "Tab" || event.defaultPrevented || !dialog.contains(event.target as Node)) return;
-      // a Modal nested in this one handles its own keys: each trap owns only the events from its own dialog
-      if ((event.target as Element).closest("dialog") !== dialog) return;
-      const controls = Array.from(dialog.querySelectorAll<HTMLElement>(
-        'a[href], button, input, select, textarea, [tabindex], [contenteditable="true"]',
-      )).filter((element) => element.tabIndex >= 0 && !element.matches(":disabled") &&
-        element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden");
-      const first = controls[0];
-      const last = controls.at(-1);
-      // Keep boundary Tab presses in the page rather than browser chrome.
-      if (!first || (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) ||
-        (!event.shiftKey && document.activeElement === last)) {
-        event.preventDefault();
-        (event.shiftKey ? last : first)?.focus();
-      }
-    };
+    const trap = tabTrap(dialog);
     document.addEventListener("keydown", trap);
     return () => {
       document.removeEventListener("keydown", trap);
