@@ -13,8 +13,8 @@
 export const SANDBOX_INIT_SHA256 = "bbd95cb65c56e3a384373d31133fb41867941aef0d154cd4b3d8f9a8d3defdc3";
 
 export const RUNSC_RELEASES: Readonly<Record<string, string>> = {
-  "release-20261005.0":
-    "0e0a278f73a3017c45d6fa790ca06a3f62c272c873b504c514efafb3ddacc9ea0f372376128bff8ffe3d766d7cd5f22ceda8bab8075ea10e1064e065d21d8266",
+  "release-20261012.0":
+    "e2616f197143bb00472a835c77f6696ccda441f2af0fbcc2b952617f3ec64e8de877878cf01c68a52b83993be25428ce5bea6024a4154b247583ad1b52fbcd91",
 };
 
 /**
@@ -26,16 +26,16 @@ export const RUNSC_RELEASES: Readonly<Record<string, string>> = {
  * hashes. The executor itself does not yet hash the sidecars at placement time (it hashes `runsc` only).
  */
 export const RUNSC_RELEASE_SIDECARS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
-  "release-20261005.0": {
+  "release-20261012.0": {
     "gvisor-bin/checkpointgofer":
-      "42240362e2f4f6bf6f418f24d0ccdba5aab5a88a51a99ab4c296a3ee0929321f92c27368b0e6702426d1a8ed58c053ee1d1ad7657e65ec32cdc690d2eca1e18c",
+      "b0500b26aa310cfcaebf2c3dd4a01599a169c7b249d11e38e5f0fdd7cee3ff123afc90200c86b89cf820890822fb538c37d83edc38927a92876f542710aab1b1",
     "gvisor-bin/gvisor-sentry-prewarmer":
-      "f0c131766303ca4733a4e42bd171d8ddf42a0a0087564605b3207b0f4c148d9ff355bad25e27d388c7c9cf06265160b3a02047ec195c035d9e8f428d8f608ce6",
+      "75b760b02d13fa6bfbaac119625f5264c4446d52184fc8d1613806a5f9d0d2303d5b84a73441d0fef1e4e80ba399453768dab4c6d1462ff677db6bda37f82e04",
     "gvisor-bin/gvisor_sentry":
-      "b09da3479cbfdbd989b448568d1b8305fdf1789ae05cd864f15ac4b3df2d14a9cc83d5ccd62fa0dfad5c54fe7012e249aab123d306146770a1c8b7418932a193",
+      "d31a001185b1b5a956571364850b342bc74f1f5b877d68d6e60f6d832ab67f8b94c90f0dd78b1e356747f743e600ab6110e68ade398bd6ac8c1a2706606836d0",
     "gvisor-bin/runsc-fd-parking":
       "bdcb8034e31250379e24e40399b62c66be88318d969c462fe065a8a785c83d3a638214685ae04d7ee09f7a66695f6381635f989271ad8f0a23ee6e08040b3454",
     "gvisor-bin/runsc-metric-server":
-      "2e1494bfdb4aaece286bf687aa2f950884b1b5eea991c0fb9ae30109c759dbe2476398344729a97d1d3f3407b99dff84f64777ca4c2cf768e27c4b023eea6d63",
+      "48f61a25a84dff87f4b10a34acdc6cb1ba11a1573538c0ef79890e9d74f06c1308d92f8949b1bd56cb0f8e06e12798b213301fbb143576e2cf9557e15aefd906",
   },
 };

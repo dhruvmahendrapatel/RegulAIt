@@ -191,15 +191,58 @@ jobs:
           sudo install -d -m 0755 -o "$(id -u)" -g "$(id -g)" "$INIT_DIR"
           docker volume create --driver local --opt type=none --opt o=bind --opt device="$INIT_DIR" "$INIT_VOLUME"
 
-      # Diagnostic only (the integration tests below decide the job): Node under runsc with Docker's default seccomp
-      # profile, which is what the restricted profile's `RuntimeDefault` gives a sandbox. Its result is shown
-      # whichever way it goes, and the integration tests still run after it.
-      - name: Smoke test - Node starts under runsc with the default seccomp profile (diagnostic)
-        continue-on-error: true
+      # Required: Node starts and creates a thread under runsc with Docker's default seccomp profile, which is what
+      # the restricted profile's `RuntimeDefault` gives a sandbox. That profile answers `clone3` with `errnoRet: 38`
+      # (ENOSYS) so glibc falls back to `clone`; a runsc that ignores `errnoRet` answers EPERM and Node aborts at start
+      # (the blocker recorded in ADR-0190 for release-20261005.0).
+      - name: Node starts and creates a thread under runsc with the default seccomp profile (clone3 -> ENOSYS)
         run: |
           set -euo pipefail
-          docker run --rm --runtime runsc --network none --pull never --entrypoint /usr/local/bin/node "$STDIO_BASE_IMAGE" \
-            -e 'console.log("runsc smoke: kernel", require("node:os").release())'
+          out=$(docker run --rm --runtime runsc --network none --pull never --user 10001:10001 --entrypoint /usr/local/bin/node "$STDIO_BASE_IMAGE" \
+            -e 'const { Worker } = require("node:worker_threads"); new Worker("process.exit(0)", { eval: true }).on("exit", (c) => console.log("runsc smoke: thread exit " + c + ", kernel " + require("node:os").release()));')
+          echo "$out" | tee "$EVIDENCE_DIR/smoke-default-seccomp.txt"
+          if ! printf '%s\n' "$out" | grep -q '^runsc smoke: thread exit 0, kernel '; then
+            echo "::error::Node did not start and create a thread under runsc with the default seccomp profile"
+            exit 1
+          fi
+
+      # Required: runsc honours an OCI seccomp rule's `errnoRet` (upstream 7be4160a). Three profiles that allow
+      # everything except mkdir/mkdirat: with `errnoRet: 38` the workload must see ENOSYS (and runc, the reference,
+      # the same); with no `errnoRet` it must see EPERM (the default); with `errnoRet: 65536`, which does not fit in
+      # SECCOMP_RET_DATA, the container must not run at all (fail closed, never a truncated errno of 0).
+      - name: runsc honours seccomp errnoRet (ENOSYS when set, EPERM by default, out of range refused)
+        run: |
+          set -euo pipefail
+          d="$RUNNER_TEMP/errno-profiles"
+          mkdir -p "$d"
+          rule() { jq -n --argjson ret "$1" '{defaultAction: "SCMP_ACT_ALLOW", syscalls: [({names: ["mkdir", "mkdirat"], action: "SCMP_ACT_ERRNO"} + (if $ret == null then {} else {errnoRet: $ret} end))]}'; }
+          rule 38 > "$d/enosys.json"
+          rule null > "$d/default.json"
+          rule 65536 > "$d/out-of-range.json"
+          # shellcheck disable=SC2016 # the single-quoted text is JavaScript
+          probe='try { require("node:fs").mkdirSync("/tmp/errno-probe"); console.log("errno-probe: none"); } catch (e) { console.log("errno-probe: " + e.code); }'
+          run() { docker run --rm --runtime "$1" --network none --pull never --user 10001:10001 --security-opt "seccomp=$d/$2.json" --entrypoint /usr/local/bin/node "$STDIO_BASE_IMAGE" -e "$probe"; }
+          expect() {
+            local got
+            got=$(run "$1" "$2")
+            echo "$1 $2: $got" | tee -a "$EVIDENCE_DIR/errno-ret.txt"
+            if [ "$got" != "errno-probe: $3" ]; then
+              echo "::error::under $1 with the $2 profile the workload saw '$got', not $3"
+              exit 1
+            fi
+          }
+          expect runc enosys ENOSYS
+          expect runsc enosys ENOSYS
+          expect runsc default EPERM
+          if out=$(run runsc out-of-range 2>&1); then
+            echo "::error::a profile with errnoRet 65536 ran under runsc: $out"
+            exit 1
+          fi
+          printf 'runsc out-of-range: refused to run: %s\n' "$out" | tee -a "$EVIDENCE_DIR/errno-ret.txt"
+          if printf '%s\n' "$out" | grep -q '^errno-probe:'; then
+            echo "::error::the workload ran under runsc with an out-of-range errnoRet"
+            exit 1
+          fi
 
       - name: Run the runsc integration tests (unskipped; positive and negative controls)
         working-directory: packages/sandbox-executor
@@ -246,7 +289,7 @@ jobs:
           sudo journalctl -u docker --no-pager -n 300 2>&1 | tee "$EVIDENCE_DIR/dockerd.log" > /dev/null || true
 
       - name: Upload the probe report and evidence
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: gvisor-probe-report

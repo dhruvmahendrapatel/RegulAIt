@@ -28,9 +28,9 @@ describe("the runsc release pins", () => {
     }
   });
 
-  it("runsc and each sidecar of release-20261005.0 match the I0 spike's verified record", () => {
-    expect(recorded("runsc")).toBe(RUNSC_RELEASES["release-20261005.0"]);
-    const sidecars = RUNSC_RELEASE_SIDECARS["release-20261005.0"]!;
+  it("runsc and each sidecar of release-20261012.0 match the I0 spike's verified record", () => {
+    expect(recorded("runsc")).toBe(RUNSC_RELEASES["release-20261012.0"]);
+    const sidecars = RUNSC_RELEASE_SIDECARS["release-20261012.0"]!;
     for (const [file, sum] of Object.entries(sidecars)) expect(recorded(file), file).toBe(sum);
     // the record lists exactly these sidecars (no gvisor-bin/ file in the release is left unpinned)
     const listed = record.split("\n").flatMap((l) => /^\| `(gvisor-bin\/[^`]+)` \|/.exec(l)?.[1] ?? []);

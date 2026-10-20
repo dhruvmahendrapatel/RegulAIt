@@ -311,7 +311,7 @@ describe("ADR-0190 migration 0183's invariants refuse their bad rows", () => {
     const executor = await one<{ id: string }>(
       tx,
       sql`insert into executors (workload_identity_id, name, backend, runtime_version, classes_declared)
-          values (${identity.id}, ${`a190-gv-${RUN}`}, 'gvisor', 'release-20261005.0', '["hardened_container", "user_space_kernel"]'::jsonb) returning id`,
+          values (${identity.id}, ${`a190-gv-${RUN}`}, 'gvisor', 'release-20261012.0', '["hardened_container", "user_space_kernel"]'::jsonb) returning id`,
     );
     return { identity, identity2, pdp, executor, digest: executionProfileDigest(restricted) };
   }

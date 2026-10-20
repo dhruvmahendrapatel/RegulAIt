@@ -53,7 +53,7 @@ async function canary(runtimeName: string, runscHostPath = process.env.REGULAIT_
   const backend = new RunscDockerBackend({
     runtimeName,
     canaryImage: IMAGE,
-    runtimeVersion: process.env.REGULAIT_TEST_RUNSC_VERSION ?? "release-20261005.0",
+    runtimeVersion: process.env.REGULAIT_TEST_RUNSC_VERSION ?? "release-20261012.0",
     initSource: fileURLToPath(new URL("../sandbox-init/sandbox-init.mjs", import.meta.url)),
     initDir: process.env.REGULAIT_TEST_INIT_DIR ?? "",
     initVolume: process.env.REGULAIT_TEST_INIT_VOLUME ?? "",
