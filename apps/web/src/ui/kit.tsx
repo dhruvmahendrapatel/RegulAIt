@@ -445,7 +445,7 @@ export function Card(props: {
   count?: number;
   /** singular and plural noun for `count`; row / rows by default */
   countNoun?: [string, string];
-  /** under the body and outside the X6 scroll box: paging and partial-data notices stay in view of the reader */
+  /** under the body and outside the X6 scroll box: paging and partial-data notices stay in view of the reader, and move into the Expand dialog with the body */
   footer?: ReactNode;
 }) {
   const name = props.infoLabel ?? (typeof props.title === "string" ? props.title : "this section");
@@ -548,10 +548,17 @@ export function Card(props: {
       ) : (
         props.children
       )}
-      {props.footer}
+      {/* M2b: the footer follows the body into the Expand dialog, so it renders in one place at a time */}
+      {!expanded && props.footer}
       {host && (
-        <Modal open={expanded} full title={typeof props.title === "string" ? props.title : name} onClose={() => setExpanded(false)}>
+        <Modal
+          open={expanded}
+          full
+          title={`${typeof props.title === "string" ? props.title : name}${props.count != null ? ` · ${props.count} ${props.count === 1 ? one : many}` : ""}`}
+          onClose={() => setExpanded(false)}
+        >
           <div ref={slot} />
+          {expanded && props.footer}
         </Modal>
       )}
     </section>

@@ -24,7 +24,7 @@ export function receiptsStatus(q: { data?: { state?: string } | undefined; isErr
 }
 
 export function anchorsStatus(q: {
-  data?: { anchors?: Array<{ timestamp?: { status?: string; verified?: boolean } }> } | undefined;
+  data?: { anchors?: Array<{ status?: string; timestamp?: { status?: string; verified?: boolean } }> } | undefined;
   isError: boolean;
   isLoading: boolean;
 }): EvidenceStatus {
@@ -32,9 +32,14 @@ export function anchorsStatus(q: {
   const rows = q.data?.anchors;
   if (q.isError || !Array.isArray(rows)) return NOT_REPORTED;
   if (rows.length === 0) return { label: "No anchors yet", tone: "neutral" };
-  const failed = rows.filter((r) => r.timestamp?.status === "failed").length;
+  // L5: an anchor whose write-out failed is a failure, not merely "not timestamped"
+  const writeFailed = rows.filter((r) => r.status === "failed").length;
+  const failed = rows.filter((r) => r.status !== "failed" && r.timestamp?.status === "failed").length;
   const unverified = rows.filter((r) => !(r.timestamp?.status === "granted" && r.timestamp.verified)).length;
-  if (failed) return { label: `${plural(failed, "timestamp")} failed`, tone: "danger" };
+  if (writeFailed || failed) {
+    const parts = [writeFailed && `${plural(writeFailed, "anchor")} failed to write out`, failed && `${plural(failed, "timestamp")} failed`];
+    return { label: parts.filter(Boolean).join(" · "), tone: "danger" };
+  }
   if (unverified) return { label: `${unverified} of ${rows.length} not timestamped`, tone: "warn" };
   return { label: `All ${plural(rows.length, "anchor")} timestamped`, tone: "ok" };
 }

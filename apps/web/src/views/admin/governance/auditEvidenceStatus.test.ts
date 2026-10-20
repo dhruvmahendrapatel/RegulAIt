@@ -18,6 +18,13 @@ describe("folded audit evidence never hides a warning (G8 f)", () => {
     expect(anchorsStatus(q({ anchors: [{ timestamp: { status: "granted", verified: false } }] })).tone).toBe("warn");
     expect(anchorsStatus(q({ anchors: [{ timestamp: { status: "failed", verified: false } }] })).tone).toBe("danger");
     expect(anchorsStatus(q({ anchors: [{ timestamp: { status: "granted", verified: true } }] })).tone).toBe("ok");
+    // L5: a failed write-out is danger with its own wording, alongside any timestamp failure
+    expect(anchorsStatus(q({ anchors: [{ status: "failed", timestamp: { status: "pending", verified: false } }] }))).toEqual({ label: "1 anchor failed to write out", tone: "danger" });
+    expect(anchorsStatus(q({ anchors: [
+      { status: "failed", timestamp: { status: "pending", verified: false } },
+      { status: "failed", timestamp: { status: "pending", verified: false } },
+      { status: "flushed", timestamp: { status: "failed", verified: false } },
+    ] }))).toEqual({ label: "2 anchors failed to write out · 1 timestamp failed", tone: "danger" });
     expect(anchorsStatus(q({} as { anchors?: [] })).label).toBe("State not reported");
   });
   it("retention says when nothing is set and how many rows a prune would remove", () => {

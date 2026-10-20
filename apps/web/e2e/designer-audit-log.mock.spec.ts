@@ -93,6 +93,33 @@ test("Audit log at 1440×900 with a full page: rows above the fold, the partial 
   await expect(paging).toContainText("Showing all 103 rows");
 });
 
+test("Audit log at 1440×900, Expand: the dialog keeps the partial-trail notice, the count and Load older (M2b)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  auditPage = (cursor) => cursor
+    ? { entries: many(100, 3), pageSize: 100, hasMore: false, nextCursor: null }
+    : { entries: many(0, 100), pageSize: 100, hasMore: true, nextCursor: "c1" };
+  await page.goto("/ui/admin/audit");
+  const card = page.locator("section[data-rg-card]").filter({ hasText: "Entries" });
+  await expect(card.locator("tbody tr")).toHaveCount(100);
+  await card.getByRole("button", { name: "Expand" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.locator("tbody tr")).toHaveCount(100);
+  // the count cue rides in the dialog title, and the paging line follows the body in, rendered once
+  await expect(dialog).toContainText("100 newest rows loaded, older rows exist");
+  await expect(page.getByTestId("audit-paging")).toHaveCount(1);
+  const paging = dialog.getByTestId("audit-paging");
+  await expect(paging).toContainText("older rows exist");
+  await paging.getByRole("button", { name: "Load older" }).click();
+  await expect(dialog.locator("tbody tr")).toHaveCount(103);
+  await expect(paging).toContainText("Showing all 103 rows");
+  await expect(dialog.getByRole("button", { name: "Load older" })).toHaveCount(0);
+  // closing hands the footer back to the card, still once
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(page.getByTestId("audit-paging")).toHaveCount(1);
+  await expect(card.getByTestId("audit-paging")).toContainText("Showing all 103 rows");
+});
+
 test("Audit log folds keep each warning in the closed summary (G8 f)", async ({ page }) => {
   extra = {
     "/v1/receipts/status": { state: "no_key" },
