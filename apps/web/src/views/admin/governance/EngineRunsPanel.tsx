@@ -250,7 +250,7 @@ export function EngineRunsPanel(props: { surface: EngineSurface }) {
         agentName={(id) => agentName.get(id) ?? id.slice(0, 8)}
       />
 
-      <Card title="Engine runs">
+      <Card title="Engine runs" contain>
         <Table
           rows={agentRuns}
           loading={runs.isLoading}

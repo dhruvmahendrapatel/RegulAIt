@@ -16,6 +16,7 @@ import {
   useRef,
   useState,
   type ButtonHTMLAttributes,
+  type FocusEvent as ReactFocusEvent,
   type InputHTMLAttributes,
   type ReactNode,
   type SelectHTMLAttributes,
@@ -233,6 +234,8 @@ export function InfoButton(props: {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        // the tip is the innermost layer: this Escape is spent, so a drawer or dialog around it stays open
+        e.preventDefault();
         setOpen(false);
         // Return focus to the trigger: closing must not dump a keyboard user
         // back at the top of the document.
@@ -438,7 +441,9 @@ export function Card(props: {
    * X6: a long, read-only body scrolls inside the card instead of stretching
    * the page, with an Expand button that opens the same body near full
    * screen. Never for forms, warnings, decisions or step-ups: a body holding
-   * one (KEEP_VISIBLE) is refused at runtime and stays fully visible.
+   * one (KEEP_VISIBLE) is refused at runtime and stays fully visible. X6b:
+   * "Show all" lets the section flow at full length instead, remembered per
+   * page and section in this browser only.
    */
   contain?: boolean;
   /** X6 cue beside the title: how many rows the body holds */
@@ -457,6 +462,24 @@ export function Card(props: {
   // there is no host, so the body renders inline.
   const [fit, setFit] = useState({ scrolls: false, long: false, refused: false });
   const [expanded, setExpanded] = useState(false);
+  const memoryKey = `regulait.contain:${typeof location === "undefined" ? "" : location.pathname}:${name}`;
+  const [showAll, setShowAll] = useState(() => {
+    try {
+      return props.contain === true && localStorage.getItem(memoryKey) === "all";
+    } catch {
+      return false;
+    }
+  });
+  const toggleShowAll = () => {
+    const next = !showAll;
+    setShowAll(next);
+    try {
+      if (next) localStorage.setItem(memoryKey, "all");
+      else localStorage.removeItem(memoryKey);
+    } catch {
+      // storage unavailable: the choice lasts for this visit only
+    }
+  };
   const [host, setHost] = useState<HTMLDivElement | null>(null);
   useLayoutEffect(() => {
     if (!props.contain || !box.current) return;
@@ -505,11 +528,17 @@ export function Card(props: {
       window.removeEventListener("resize", check);
     };
   }, [host, name]);
-  const contained = props.contain && !fit.refused;
-  const expand = contained && fit.long && (
-    <Button size="sm" onClick={() => setExpanded(true)} aria-haspopup="dialog">
-      Expand
-    </Button>
+  const containable = props.contain && !fit.refused;
+  const contained = containable && !showAll;
+  const expand = containable && fit.long && (
+    <>
+      <Button size="sm" variant="ghost" aria-pressed={showAll} onClick={toggleShowAll}>
+        Show all
+      </Button>
+      <Button size="sm" onClick={() => setExpanded(true)} aria-haspopup="dialog">
+        Expand
+      </Button>
+    </>
   );
   const [one, many] = props.countNoun ?? ["row", "rows"];
   return (
@@ -539,6 +568,7 @@ export function Card(props: {
         <div
           ref={box}
           className={contained ? s.contain : undefined}
+          onFocus={contained ? revealInBox : undefined}
           {...(contained && fit.scrolls ? { tabIndex: 0, role: "region", "aria-label": `${name}, scrollable` } : {})}
         >
           {host ? createPortal(props.children, host) : typeof document === "undefined" ? props.children : null}
@@ -553,6 +583,21 @@ export function Card(props: {
       )}
     </section>
   );
+}
+
+/**
+ * WCAG 2.4.11: a control focused inside a contained card is scrolled fully into the box. The browser leaves a control
+ * that is only partly clipped where it is, e.g. an (i) at the clipped edge of a wide table's header.
+ */
+function revealInBox(event: ReactFocusEvent<HTMLDivElement>) {
+  const box = event.currentTarget;
+  const r = event.target.getBoundingClientRect();
+  const b = box.getBoundingClientRect();
+  const left = b.left + box.clientLeft;
+  const top = b.top + box.clientTop;
+  if (r.left < left || r.right > left + box.clientWidth || r.top < top || r.bottom > top + box.clientHeight) {
+    event.target.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
 }
 
 /**
@@ -925,6 +970,29 @@ function returnFocus(trigger: HTMLElement | null) {
   parked = { trigger, holder, stop };
 }
 
+/**
+ * Keeps Tab inside a modal dialog: a boundary Tab press wraps to the other end rather than leaving for the
+ * browser chrome. Only events from the dialog's own content count, so a Modal nested in it handles its own keys.
+ */
+export function tabTrap(dialog: HTMLElement) {
+  return (event: KeyboardEvent) => {
+    if (event.key !== "Tab" || event.defaultPrevented || !dialog.contains(event.target as Node)) return;
+    if ((event.target as Element).closest("dialog") !== dialog) return;
+    const controls = Array.from(dialog.querySelectorAll<HTMLElement>(
+      'a[href], button, input, select, textarea, [tabindex], [contenteditable="true"]',
+    )).filter((element) => element.tabIndex >= 0 && !element.matches(":disabled") &&
+      element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden");
+    const first = controls[0];
+    const last = controls.at(-1);
+    // Keep boundary Tab presses in the page rather than browser chrome.
+    if (!first || (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) ||
+      (!event.shiftKey && document.activeElement === last)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first)?.focus();
+    }
+  };
+}
+
 export function Modal(props: {
   open: boolean;
   title: string;
@@ -953,23 +1021,7 @@ export function Modal(props: {
     // but never reach a React handler on it.
     // On the document, not the dialog: a dialog's own content (a review with its own Tab order) registers its
     // trap on the dialog after this effect has run, so listening here lets that inner trap decide first.
-    const trap = (event: KeyboardEvent) => {
-      if (event.key !== "Tab" || event.defaultPrevented || !dialog.contains(event.target as Node)) return;
-      // a Modal nested in this one handles its own keys: each trap owns only the events from its own dialog
-      if ((event.target as Element).closest("dialog") !== dialog) return;
-      const controls = Array.from(dialog.querySelectorAll<HTMLElement>(
-        'a[href], button, input, select, textarea, [tabindex], [contenteditable="true"]',
-      )).filter((element) => element.tabIndex >= 0 && !element.matches(":disabled") &&
-        element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden");
-      const first = controls[0];
-      const last = controls.at(-1);
-      // Keep boundary Tab presses in the page rather than browser chrome.
-      if (!first || (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) ||
-        (!event.shiftKey && document.activeElement === last)) {
-        event.preventDefault();
-        (event.shiftKey ? last : first)?.focus();
-      }
-    };
+    const trap = tabTrap(dialog);
     document.addEventListener("keydown", trap);
     return () => {
       document.removeEventListener("keydown", trap);

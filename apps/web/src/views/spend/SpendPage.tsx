@@ -367,7 +367,7 @@ export default function SpendPage() {
             {/* ADR-0055 / ADR-0076: the self-scoped consolidated view (metered and imported, never summed) */}
             {userId ? <MyConsolidatedSpendCard userId={userId} /> : null}
 
-            <Card title="Recent invocations" flush>
+            <Card title="Recent invocations" contain flush>
               <Table<Row>
                 columns={[
                   {
