@@ -182,6 +182,16 @@ describe("checkLiveDiscovery: real findings only, fail closed", () => {
     expect(c.detail).toBe("could not read devices of 'Pilot laptops' (500): absence not proven");
   });
 
+  // PR #462 recheck L1: the catalogue is one of the lists the marker sweep reads
+  it("an unreadable signature catalogue FAILs the fictional-dataset beat too: absence not proven", async () => {
+    const w = world();
+    w.failing.add("/v1/shadow-ai/catalogue");
+    const c = (await live(w))["1 Fictional dataset"]!;
+    expect(c.level).toBe("FAIL");
+    expect(c.detail).toContain("could not read catalogue (500)");
+    expect(c.detail).toContain("absence not proven");
+  });
+
   it("unreadable templates FAIL the routing: a retired default or a fixed approver would go unseen", async () => {
     const w = world();
     w.failing.add("/v1/workflows/templates");
