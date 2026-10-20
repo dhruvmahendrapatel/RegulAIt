@@ -1,5 +1,5 @@
 import { batch4SettingRelaxed, BATCH4_SETTING_COPY, BATCH4_STRICT_DEFAULTS } from "./monitorThresholds";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
@@ -7,7 +7,7 @@ import { ago, humanize } from "../../../api/format";
 import { useSession } from "../../../session/SessionContext";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Select, SeverityBadge, Tabs, Textarea, type Tone } from "../../../ui/kit";
-import { DetailDrawer } from "../../../ui/DetailDrawer";
+import { DetailDrawer, DrawerActions } from "../../../ui/DetailDrawer";
 import { QueryGate, useAction, useUsers } from "../adminKit";
 import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
@@ -110,6 +110,19 @@ export default function GovernanceAlertsPage() {
   const selected = alerts.data?.alerts.find((alert) => alert.id === selectedId) ?? null;
   const refresh = async () => { await alerts.refetch(); };
   const closeDetail = useCallback(() => setSelectedId(null), []);
+  // L1 (WCAG 2.4.3): an alert that leaves the list (acknowledged under the Open filter) takes its drawer and the
+  // row that opened it with it, so focus moves to the alert now in its place, or to the page heading
+  const list = useRef<HTMLDivElement>(null);
+  const ackedAt = useRef(0);
+  useEffect(() => {
+    if (!selectedId || !alerts.data || selected) return;
+    setSelectedId(null);
+    const active = document.activeElement;
+    if (active && active !== document.body && active.isConnected) return;
+    const rows = list.current?.querySelectorAll<HTMLElement>(":scope > button");
+    const at = Math.min(ackedAt.current, (rows?.length ?? 0) - 1);
+    (rows?.[at] ?? document.querySelector<HTMLElement>("h1"))?.focus();
+  }, [selectedId, selected, alerts.data]);
 
   return (
     <>
@@ -155,7 +168,7 @@ export default function GovernanceAlertsPage() {
             />
           ) : (
             <Card flush contain title="Alerts" count={alerts.data?.alerts.length ?? 0} countNoun={["alert", "alerts"]}>
-            <div className={s.alertList}>
+            <div ref={list} className={s.alertList}>
               {alerts.data?.alerts.map((alert) => (
                 <button key={alert.id} className={`${s.alertRow} ${selectedId === alert.id ? s.alertRowActive : ""}`} aria-current={selectedId === alert.id ? "true" : undefined} onClick={() => setSelectedId(alert.id)}>
                   <span className={s.alertRowHead}><SeverityBadge severity={alert.severity} />{alert.status === "open" ? null : <span className={v.faint}>{alert.status}</span>}<SlaChip alert={alert} /></span>
@@ -210,23 +223,26 @@ export default function GovernanceAlertsPage() {
             ) : null}
             <RemediationPanel alertId={selected.id} />
             {selected.status === "open" ? (
-              <div className={s.ackFooter}>
-                <Field
-                  label="Acknowledgement note — required and audited"
-                  helpLabel="acknowledging an alert"
-                  help="Acknowledging records that someone is handling the alert. It stays active, and resolves on its own when the next evaluation no longer finds the condition."
-                >
-                  <Textarea rows={2} maxLength={500} value={ackNote} onChange={(event) => setAckNote(event.target.value)} />
-                </Field>
-                <div className={v.row}>
-                  <span className={v.faint}>{ackNote.length}/500 characters</span>
-                  <Button variant="primary" disabled={action.busy || !ackNote.trim()} onClick={() => void action.run(async () => {
-                    await api.post(`/v1/governance/alerts/${selected.id}/acknowledge`, { note: ackNote.trim() });
-                    setAckNote("");
-                    await refresh();
-                  }, "Alert acknowledged")}>Acknowledge</Button>
+              <DrawerActions>
+                <div className={s.ackBar} data-testid="alert-ack">
+                  <Field
+                    label="Acknowledgement note — required and audited"
+                    helpLabel="acknowledging an alert"
+                    help="Acknowledging records that someone is handling the alert. It stays active, and resolves on its own when the next evaluation no longer finds the condition."
+                  >
+                    <Textarea rows={2} maxLength={500} value={ackNote} onChange={(event) => setAckNote(event.target.value)} />
+                  </Field>
+                  <div className={v.row}>
+                    <span className={v.faint}>{ackNote.length}/500 characters</span>
+                    <Button variant="primary" disabled={action.busy || !ackNote.trim()} onClick={() => void action.run(async () => {
+                      await api.post(`/v1/governance/alerts/${selected.id}/acknowledge`, { note: ackNote.trim() });
+                      setAckNote("");
+                      ackedAt.current = Math.max(0, alerts.data?.alerts.findIndex((alert) => alert.id === selected.id) ?? 0);
+                      await refresh();
+                    }, "Alert acknowledged")}>Acknowledge</Button>
+                  </div>
                 </div>
-              </div>
+              </DrawerActions>
             ) : null}
           </DetailDrawer>
         ) : null}

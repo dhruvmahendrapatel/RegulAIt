@@ -5,7 +5,7 @@
  * conflicts (both texts side by side), and delegated items. Approve/deny with
  * reasons; admin overrides and self-reviews require one.
  */
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api/client";
@@ -26,7 +26,7 @@ import {
   SkeletonBlock,
   StatusBadge,
 } from "../../ui/kit";
-import { DetailDrawer } from "../../ui/DetailDrawer";
+import { DetailDrawer, DrawerActions } from "../../ui/DetailDrawer";
 import { useToast } from "../../ui/toast";
 import { McpActionReview } from "../approvals/McpActionReview";
 import { inspectApprovalAction, isBoundAction } from "../approvals/approvalReview";
@@ -69,6 +69,9 @@ export default function InboxPage() {
   const [deciding, setDeciding] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
   const closeItem = useCallback(() => setOpenId(null), []);
+  // L1 (WCAG 2.4.3): the item just decided, and where it sat in the list
+  const decidedFrom = useRef<{ id: string; index: number } | null>(null);
+  const list = useRef<HTMLDivElement>(null);
 
   const q = useQuery({
     queryKey: ["approvals"],
@@ -85,6 +88,18 @@ export default function InboxPage() {
   const approvals = q.data?.approvals ?? [];
   const pending = approvals.filter((a) => a.status === "pending");
   const decided = approvals.filter((a) => a.status !== "pending").slice(0, 12);
+  // L1: a decided item leaves the list, taking its drawer and the Review button that opened it, so focus moves to
+  // the next item's Review button (the one before it when it was last), or to the page heading when none is left
+  useEffect(() => {
+    const from = decidedFrom.current;
+    if (!from || pending.some((a) => a.id === from.id)) return;
+    decidedFrom.current = null;
+    const active = document.activeElement;
+    if (active && active !== document.body && active.isConnected) return;
+    const reviews = [...(list.current?.querySelectorAll<HTMLElement>("[data-inbox-row]") ?? [])].map((row) => row.querySelector<HTMLElement>("[data-inbox-review]"));
+    const next = reviews.slice(from.index).find(Boolean) ?? reviews.slice(0, from.index).reverse().find(Boolean);
+    (next ?? document.querySelector<HTMLElement>("h1"))?.focus();
+  });
 
   // merge-gate evidence: fetch each governed workflow instance once (the read
   // endpoint admits the named approver)
@@ -126,6 +141,7 @@ export default function InboxPage() {
       setDeciding(a.id);
       try {
         const out = await decideApproval<{ status?: string; approvals?: number; quorum?: number }>(a, decision, reason || undefined);
+        if (out?.status !== "pending") decidedFrom.current = { id: a.id, index: pending.indexOf(a) };
         toast(
           out?.status === "pending"
             ? `Recorded — ${out.approvals ?? 1} of ${out.quorum ?? 2} approvals, waiting for another approver`
@@ -160,6 +176,7 @@ export default function InboxPage() {
         decision,
         ...(reason ? { reason } : {}),
       });
+      decidedFrom.current = { id: a.id, index: pending.indexOf(a) };
       toast(decision === "approved" ? "Approved" : "Denied", "success");
       void queryClient.invalidateQueries({ queryKey: ["approvals"] });
     } catch (e) {
@@ -251,6 +268,7 @@ export default function InboxPage() {
       />
       <div className={v.stack}>
         <Card>
+          <div ref={list}>
           {pending.length === 0 ? (
             <EmptyState
               title={annotationItems.length > 0 ? "No sign-offs waiting on you" : "Nothing waiting on you"}
@@ -260,7 +278,7 @@ export default function InboxPage() {
             pending.map((a) => {
               const it = itemView(a);
               return (
-                <div key={a.id} className={v.listRow} style={{ flexDirection: "column", alignItems: "stretch", gap: "var(--s1)" }}>
+                <div key={a.id} data-inbox-row className={v.listRow} style={{ flexDirection: "column", alignItems: "stretch", gap: "var(--s1)" }}>
                   {/* G2: the same order on every item: what kind, what, who asked and when, then any warning */}
                   <ItemBadges a={a} it={it} />
                   {(a.objectLabel || it.target) && <strong className={ib.title}><ItemTitle a={a} it={it} /></strong>}
@@ -284,7 +302,7 @@ export default function InboxPage() {
                     </>}
                   </> : (
                     <div className={v.row}>
-                      <Button size="sm" aria-current={openId === a.id ? "true" : undefined} aria-label={`Review ${it.name}`} onClick={() => setOpenId(a.id)}>
+                      <Button size="sm" data-inbox-review aria-current={openId === a.id ? "true" : undefined} aria-label={`Review ${it.name}`} onClick={() => setOpenId(a.id)}>
                         Review
                       </Button>
                       {!it.canDecide && <span className={v.faint}>{it.awaiting}</span>}
@@ -294,6 +312,7 @@ export default function InboxPage() {
               );
             })
           )}
+          </div>
         </Card>
 
         {open && openView ? (
@@ -309,11 +328,18 @@ export default function InboxPage() {
             <p className={v.faint}>
               {humanize(open.objectType)} · requested by {open.requestedByName ?? "unknown"} · {ago(open.requestedAt)}
             </p>
-            <ReasonWarning it={openView} />
             {openView.toolCall && <QuorumProgress approval={open} />}
             {openView.inst && <MergeGateEvidence inst={openView.inst} />}
             {open.contextConflict && <ConflictPreview conflict={open.contextConflict} />}
-            {openView.canDecide ? openView.controls(null) : <span className={v.faint}>{openView.awaiting}</span>}
+            {/* L2 (ADR-0180): the reason warning, the reason and the decision stay together in the pinned footer */}
+            {openView.canDecide ? (
+              <DrawerActions>
+                <div className={ib.pinned} data-testid="inbox-decision">
+                  <ReasonWarning it={openView} />
+                  {openView.controls(null)}
+                </div>
+              </DrawerActions>
+            ) : <span className={v.faint}>{openView.awaiting}</span>}
           </DetailDrawer>
         ) : null}
 

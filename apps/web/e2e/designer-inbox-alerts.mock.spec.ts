@@ -1,4 +1,4 @@
-import { expect, test, type Route } from "@playwright/test";
+import { expect, test, type Locator, type Page, type Route } from "@playwright/test";
 
 // Governed - Designer batch 3 (owner-approved one item at a time on #453, 2026-10-19):
 // G2 Inbox approval and G5 governance alert detail, with the (i) inventory rows for both.
@@ -42,10 +42,16 @@ const remediation = {
   proposals: [], note: "Executable changes are proposed into the one approvals queue.",
 };
 
+let alertsShown: unknown[] = [alert];
+
 async function mock(route: Route) {
   const p = new URL(route.request().url()).pathname;
   let body: unknown = {};
-  if (p === "/auth/me") body = { userId: ME, isAdmin: true, via: "session", user: { id: ME, email: "avery@example.test", displayName: "Avery Approver" }, mustChangePassword: false, totpEnabled: true, passwordSet: true, mfaSetupRequired: false };
+  const decided = route.request().method() === "POST" ? /^\/v1\/approvals\/([^/]+)\/decide$/.exec(p) : null;
+  const acked = route.request().method() === "POST" ? /^\/v1\/governance\/alerts\/([^/]+)\/acknowledge$/.exec(p) : null;
+  if (decided) shown = shown.filter((a) => (a as { id: string }).id !== decided[1]);
+  else if (acked) alertsShown = alertsShown.filter((a) => (a as { id: string }).id !== acked[1]);
+  else if (p === "/auth/me") body = { userId: ME, isAdmin: true, via: "session", user: { id: ME, email: "avery@example.test", displayName: "Avery Approver" }, mustChangePassword: false, totpEnabled: true, passwordSet: true, mfaSetupRequired: false };
   else if (p === "/v1/me") body = { userId: ME, isAdmin: true, user: { id: ME, email: "avery@example.test", displayName: "Avery Approver" } };
   else if (p === "/v1/approvals") body = { approvals: shown };
   else if (p === "/v1/use-cases/uc1/overview") body = overview;
@@ -56,8 +62,8 @@ async function mock(route: Route) {
   else if (p.startsWith("/v1/workflows/instances/")) body = { instance: { id: "W", context: {} }, artifacts: [] };
   else if (p === "/v1/annotations/inbox") body = { items: [] };
   else if (p === "/v1/users") body = { users: [{ id: ME, email: "avery@example.test", displayName: "Avery Approver" }, { id: "morgan", email: "morgan@example.test", displayName: "Morgan Reyes" }] };
-  else if (p === "/v1/governance/alerts") body = { alerts: [alert], counts: { open: 1, acknowledged: 0, resolved: 0 }, lastEvaluatedAt: ago(1), rules: [] };
-  else if (p === "/v1/governance/alerts/al/remediation") body = remediation;
+  else if (p === "/v1/governance/alerts") body = { alerts: alertsShown, counts: { open: alertsShown.length, acknowledged: 0, resolved: 0 }, lastEvaluatedAt: ago(1), rules: [] };
+  else if (/^\/v1\/governance\/alerts\/[^/]+\/remediation$/.test(p)) body = remediation;
   else if (p === "/v1/governance/remediations") body = { proposals: [] };
   else if (p === "/v1/org/settings") body = { settings: {} };
   else if (p === "/v1/pm/connections") body = { connections: [] };
@@ -66,6 +72,7 @@ async function mock(route: Route) {
 
 test.beforeEach(async ({ page }) => {
   shown = approvals;
+  alertsShown = [alert];
   await page.route("**/*", async (route) => {
     const p = new URL(route.request().url()).pathname;
     return route.request().resourceType() === "document" || (!p.startsWith("/v1") && !p.startsWith("/auth")) ? route.continue() : mock(route);
@@ -163,4 +170,124 @@ test("Alerts: the list is a contained card with a count, and the acknowledgement
   await detail.evaluate((el) => { el.scrollTop = 0; });
   // the sticky footer keeps the audited acknowledgement on screen while the options scroll beneath it
   await expect(detail.getByRole("button", { name: "Acknowledge" })).toBeInViewport();
+});
+
+// ---- #460 review round: M1 (L2 / ADR-0180 pinned decision row), L1 (focus after a decision), L2 (passkey line) ----
+
+const own = (id: string, label: string, over: Record<string, unknown> = {}) => ({ id, status: "pending", objectType: "governance_remediation", stageId: "__remediation__link_control", requestedAt: ago(2), userId: "jordan", approverUserId: ME, objectLabel: label, requestedByName: "Jordan Owner", approverName: "Avery Approver", ...over });
+const longText = Array.from({ length: 40 }, (_, i) => `line ${i + 1}: retention window for synthetic records`).join("\n");
+const conflicted = own("C1", "Context: retention policy wording", {
+  selfReview: true,
+  contextConflict: { key: "retention", current: { revision: 3, content: longText, byName: "Ada Admin" }, conflicting: { revision: 4, baseRevision: 3, content: longText, byName: "Jordan Owner" } },
+});
+
+/**
+ * The drawer's scroll body is scrolled to its end; then the control must sit outside every scroll box inside the
+ * drawer, inside the viewport, and be the top hit at its own centre. A row moved back into the body fails the first.
+ */
+async function pinnedAfterScroll(drawer: Locator, control: Locator) {
+  await drawer.evaluate((dialog) => {
+    for (const el of dialog.querySelectorAll<HTMLElement>("*")) {
+      if (/(auto|scroll)/.test(getComputedStyle(el).overflowY)) el.scrollTop = el.scrollHeight;
+    }
+  });
+  return control.evaluate((el) => {
+    const dialog = el.closest("dialog")!;
+    for (let n = el.parentElement; n && n !== dialog; n = n.parentElement) {
+      if (/(auto|scroll)/.test(getComputedStyle(n).overflowY)) return "inside a scroll box";
+    }
+    const r = el.getBoundingClientRect();
+    if (r.top < 0 || r.bottom > window.innerHeight || r.left < 0 || r.right > window.innerWidth) return "out of view";
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return hit && el.contains(hit) ? "pinned" : `covered by ${hit?.tagName ?? "nothing"}`;
+  });
+}
+
+for (const [label, size] of [["390 px", { width: 390, height: 640 }], ["1440 px", { width: 1440, height: 600 }]] as const) {
+  test(`M1 (${label}): the Inbox decision row stays pinned and on top when the drawer body is scrolled to its end`, async ({ page }) => {
+    shown = [conflicted];
+    await page.setViewportSize(size);
+    await page.goto("/ui/inbox");
+    await page.getByRole("button", { name: "Review Context: retention policy wording" }).click();
+    const drawer = page.getByTestId("inbox-item");
+    await expect(drawer.getByRole("button", { name: "Approve" })).toBeVisible();
+    for (const control of [
+      drawer.getByRole("textbox", { name: "Decision reason" }),
+      drawer.getByRole("button", { name: "Deny" }),
+      drawer.getByRole("button", { name: "Approve" }),
+      drawer.getByText("Deciding this approves your own request, so a reason is required."),
+      drawer.getByText("Approve unlocks once a reason is entered"),
+    ]) expect(await pinnedAfterScroll(drawer, control)).toBe("pinned");
+    // the gate is unchanged: Approve waits for the required reason
+    await expect(drawer.getByRole("button", { name: "Approve" })).toBeDisabled();
+    await drawer.getByRole("textbox", { name: "Decision reason" }).fill("Checked the wording with the owner.");
+    await expect(drawer.getByRole("button", { name: "Approve" })).toBeEnabled();
+  });
+
+  test(`M1 (${label}): the alert's required note and Acknowledge stay pinned and on top when the drawer body is scrolled to its end`, async ({ page }) => {
+    const many = Array.from({ length: 12 }, (_, i) => ({ kind: "assess_vendor", executable: false, title: `Manual option ${i + 1}`, rationale: "Operator-led.", params: {}, steps: ["Open the record.", "Record the evidence."] }));
+    await page.route("**/v1/governance/alerts/al/remediation", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...remediation, candidates: [...remediation.candidates, ...many] }) }));
+    await page.setViewportSize(size);
+    await page.goto("/ui/admin/governance/alerts");
+    await page.getByRole("button", { name: /Credit-limit assistant inherits/ }).click();
+    const drawer = page.getByTestId("alert-detail");
+    await expect(drawer.getByText("Manual option 12")).toBeAttached();
+    const note = drawer.getByLabel("Acknowledgement note — required and audited");
+    for (const control of [note, drawer.getByRole("button", { name: "Acknowledge" })]) expect(await pinnedAfterScroll(drawer, control)).toBe("pinned");
+    await expect(drawer.getByRole("button", { name: "Acknowledge" })).toBeDisabled();
+    await note.fill("Avery owns the response.");
+    await expect(drawer.getByRole("button", { name: "Acknowledge" })).toBeEnabled();
+  });
+}
+
+const focusIsOnBody = (page: Page) => page.evaluate(() => document.activeElement === document.body);
+
+test("L1: after an Inbox decision, focus moves to the next item's Review button, then to the page heading", async ({ page }) => {
+  shown = [own("X1", "Link the oversight control"), own("X2", "Retire the old vendor link")];
+  await page.goto("/ui/inbox");
+  await page.getByRole("button", { name: "Review Link the oversight control" }).click();
+  await page.getByTestId("inbox-item").getByRole("button", { name: "Approve" }).click();
+  await expect(page.getByTestId("inbox-item")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Review Retire the old vendor link" })).toBeFocused();
+
+  await page.getByRole("button", { name: "Review Retire the old vendor link" }).click();
+  await page.getByTestId("inbox-item").getByRole("button", { name: "Deny" }).click();
+  await expect(page.getByText("Nothing waiting on you")).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1, name: "Inbox" })).toBeFocused();
+  expect(await focusIsOnBody(page)).toBe(false);
+});
+
+test("L1: after an acknowledgement removes the alert, focus moves to the alert in its place, then to the page heading", async ({ page }) => {
+  alertsShown = [alert, { ...alert, id: "al2", title: "Support assistant inherits a medium rating" }];
+  await page.goto("/ui/admin/governance/alerts");
+  await page.getByRole("button", { name: /Credit-limit assistant inherits/ }).click();
+  await page.getByTestId("alert-detail").getByLabel("Acknowledgement note — required and audited").fill("Avery owns the response.");
+  await page.getByTestId("alert-detail").getByRole("button", { name: "Acknowledge" }).click();
+  await expect(page.getByRole("button", { name: /Credit-limit assistant inherits/ })).toHaveCount(0);
+  await expect(page.getByTestId("alert-detail")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Support assistant inherits/ })).toBeFocused();
+
+  await page.getByRole("button", { name: /Support assistant inherits/ }).click();
+  await page.getByTestId("alert-detail").getByLabel("Acknowledgement note — required and audited").fill("Avery owns this one too.");
+  await page.getByTestId("alert-detail").getByRole("button", { name: "Acknowledge" }).click();
+  await expect(page.getByTestId("alert-detail")).toHaveCount(0);
+  await expect(page.getByRole("heading", { level: 1, name: "Governance alerts" })).toBeFocused();
+  expect(await focusIsOnBody(page)).toBe(false);
+});
+
+test("L2: a tool-call decision row says it signs with your passkey, next to the reason and Approve", async ({ page }) => {
+  // a tool call is always a bound action, so its decision row renders in its own review dialog, not the drawer
+  shown = [{
+    id: "T1", status: "pending", objectType: "mcp_tool", stageId: null, requestedAt: ago(1), userId: "dana", approverUserId: ME,
+    toolName: "write_file", serverId: "s-repo", serverName: "repo", requestedByName: "Dana Developer", approverName: "Avery Approver",
+    argumentsDigest: "a".repeat(64), argumentsPreview: { path: "README.md", content: "hello" }, argumentsPreviewKind: "arguments_v1",
+    approvalScope: "action", contextDigest: "b".repeat(64), expiresAt: new Date(NOW + 3 * 3600_000).toISOString(),
+    boundTarget: { host: "repo.example.test", allowPrivateRanges: false, admissionManifestDigest: null },
+    quorum: 2, signatureMode: "passkey", approvalsCount: 0, myDecision: null, decisions: [],
+  }];
+  await page.goto("/ui/inbox");
+  await page.getByRole("button", { name: "Review action write_file" }).click();
+  const dialog = page.getByRole("dialog", { name: "Review MCP action" });
+  const row = dialog.locator("div").filter({ has: page.getByRole("textbox", { name: "Decision reason" }) }).filter({ has: page.getByRole("button", { name: "Approve" }) }).last();
+  await expect(row.getByText("Signs with your passkey")).toBeVisible();
 });

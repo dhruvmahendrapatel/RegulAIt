@@ -736,19 +736,9 @@
   }
 }
 
-/* the acknowledgement stays reachable at the bottom of the scrolling detail panel */
-.ackFooter {
-  position: sticky;
-  bottom: 0;
+/* L2 (ADR-0180): the required note, its counter and Acknowledge, pinned together in the drawer's footer */
+.ackBar {
+  flex: 1 1 100%;
   display: grid;
   gap: var(--s1);
-  padding: var(--s1-5) 0;
-  border-top: 1px solid var(--border);
-  /* opaque: the alert detail scrolls beneath this bar inside the drawer */
-  background: var(--surface-1);
-}
-@media (max-width: 900px) {
-  .ackFooter {
-    position: static;
-  }
 }
