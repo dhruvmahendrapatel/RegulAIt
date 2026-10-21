@@ -510,7 +510,26 @@ test("use-case Audit tab shows the true total and deep-links to that use case's 
   await link.click();
   await expect(page.getByTestId("audit-only-object")).toContainText(`Showing the audit trail of one AI use case, ${ID}.`);
   await expect.poll(() => asked.some((q) => q.includes("objectType=ai_use_case") && q.includes(`objectId=${ID}`))).toBe(true);
+  // #465 review L4: the CSV export carries the same object filter as the table, and is named for that object (L5)
+  const exported: string[] = [];
+  await page.route("**/v1/audit.csv**", (route) => {
+    exported.push(new URL(route.request().url()).search);
+    return route.fulfill({ status: 200, contentType: "text/csv", body: "at,ruleId\n" });
+  });
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download CSV" }).click();
+  expect((await download).suggestedFilename()).toBe(`audit-log-${ID.slice(0, 8)}.csv`);
+  expect(exported).toHaveLength(1);
+  expect(new URLSearchParams(exported[0]).get("objectType")).toBe("ai_use_case");
+  expect(new URLSearchParams(exported[0]).get("objectId")).toBe(ID);
   await page.getByTestId("audit-only-object").getByRole("button", { name: "Show every row" }).click();
+  await expect(page.getByTestId("audit-only-object")).toHaveCount(0);
+  await expect(page).not.toHaveURL(/objectId=/);
+  // #465 review L4: Back restores the filter, Forward clears it again
+  await page.goBack();
+  await expect(page).toHaveURL(new RegExp(`objectType=ai_use_case&objectId=${ID}`));
+  await expect(page.getByTestId("audit-only-object")).toContainText(`Showing the audit trail of one AI use case, ${ID}.`);
+  await page.goForward();
   await expect(page.getByTestId("audit-only-object")).toHaveCount(0);
   await expect(page).not.toHaveURL(/objectId=/);
 });

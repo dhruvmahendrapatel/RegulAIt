@@ -95,6 +95,8 @@ export default function AuditLogPage() {
     const s = p.toString();
     return s ? `?${s}` : "";
   }, [onlyRow, onlyObject?.type, onlyObject?.id, userId, deployMode]);
+  // #465 review L5: one object's trail downloads under its own name, as the gateway's filename does
+  const fileStem = `audit-log${onlyObject ? `-${onlyObject.id.slice(0, 8)}` : ""}`;
 
   const retention = useQuery({
     queryKey: ["admin", "audit-retention"],
@@ -139,7 +141,7 @@ export default function AuditLogPage() {
             <Button
               variant="ghost"
               onClick={() =>
-                void downloadCsv(`/v1/audit.csv${qs}`, "audit-log.csv", (msg) => toast(msg, "error"))
+                void downloadCsv(`/v1/audit.csv${qs}`, `${fileStem}.csv`, (msg) => toast(msg, "error"))
               }
             >
               Download CSV
@@ -151,7 +153,7 @@ export default function AuditLogPage() {
               variant="primary"
               onClick={() => {
                 const join = qs ? "&" : "?";
-                void downloadCsv(`/v1/audit.csv${qs}${join}signed=1`, "audit-log.signed.tar.gz", (msg) => toast(msg, "error"));
+                void downloadCsv(`/v1/audit.csv${qs}${join}signed=1`, `${fileStem}.signed.tar.gz`, (msg) => toast(msg, "error"));
               }}
             >
               Download signed bundle

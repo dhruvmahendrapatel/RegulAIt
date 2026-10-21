@@ -10,8 +10,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createDb, runMigrations, type Db } from "@regulait/db";
+import { and, auditLog, count, createDb, eq, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { backdated } from "./testing/backdated-audit.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -127,5 +128,47 @@ describe("the use-case 360", () => {
     expect((await call("GET", `/v1/use-cases/${useCaseId}/overview`, stranger.auth)).statusCode).toBe(403);
     expect((await call("GET", `/v1/use-cases/${useCaseId}/overview`, AUTH)).statusCode).toBe(200); // admin bootstrap
     expect((await call("GET", "/v1/use-cases/00000000-0000-0000-0000-000000000000/overview", owner.auth)).statusCode).toBe(404);
+  });
+  it("reports the trail's true size beside the 20 newest rows, counted per use case (#465 review M1)", async () => {
+    // owner decision on #453 (2026-10-20): auditTotal is the whole trail, not the 20-row page. Two use cases, so a
+    // count that lost its object_id term (or fell back to audit.length) answers wrongly for at least one of them.
+    const make = async (tag: string) => {
+      const res = await call("POST", "/v1/use-cases", owner.auth, {
+        name: `c3-total-${tag}-${RUN}`, description: "synthetic", businessContext: "demo", dataSensitivity: "internal",
+      });
+      expect(res.statusCode, res.body).toBe(201);
+      return (res.json().useCase?.id ?? res.json().id) as string;
+    };
+    const a = await make("a");
+    const b = await make("b");
+    // creating a use case writes its own audit rows; top each trail up to an exact size with backdated fixtures
+    const topUp = async (objectId: string, want: number) => {
+      const [row] = await db
+        .select({ n: count() })
+        .from(auditLog)
+        .where(and(eq(auditLog.objectType, "ai_use_case"), eq(auditLog.objectId, objectId)));
+      const n = row?.n ?? 0;
+      expect(n).toBeLessThan(want);
+      await backdated(db).insert(auditLog).values(
+        Array.from({ length: want - n }, (_, i) => ({
+          userId: owner.id, objectType: "ai_use_case" as const, objectId, effect: "allow" as const,
+          ruleId: `c3-total-fixture-${i}`, ruleChain: [], reason: `fixture ${i}`, at: new Date(Date.UTC(2001, 0, 1, 0, 0, i)),
+        })),
+      );
+    };
+    await topUp(a, 25);
+    await topUp(b, 3);
+
+    const ra = await call("GET", `/v1/use-cases/${a}/overview`, owner.auth);
+    expect(ra.statusCode, ra.body).toBe(200);
+    expect(ra.json().audit).toHaveLength(20);
+    expect(ra.json().auditTotal).toBe(25);
+    // the window count is internal; it never leaks into the rows
+    for (const row of ra.json().audit) expect(row).not.toHaveProperty("total");
+
+    const rb = await call("GET", `/v1/use-cases/${b}/overview`, owner.auth);
+    expect(rb.statusCode, rb.body).toBe(200);
+    expect(rb.json().audit).toHaveLength(3);
+    expect(rb.json().auditTotal).toBe(3);
   });
 });
