@@ -3,6 +3,8 @@
 # on x86_64-manylinux_2_28), then each pin's exact distribution chosen from PyPI's JSON API for CPython
 # 3.12 on linux/amd64 (the base image python:3.12-slim-trixie, pinned by digest in the Dockerfile). One
 # sha256 per package: the exact file pip installs there.
+# Bumped 2026-10-21 without a re-resolve, for new image advisories: certifi 2026.10.19 (GHSA-6q48-6c7w-9gw2) and
+# pillow 13.0.0 (seven CVEs); each hash read from PyPI's JSON API, each dependent's bounds checked (THIRD_PARTY.md).
 # Installed with: pip install --require-hashes --no-deps --only-binary :all: -r requirements.txt
 # torch is the CPU-only build, by direct URL from the CPU wheel index (the ONLY package from that index,
 # R10 consequence 1): the default PyPI resolution pulls proprietary CUDA runtime packages.
@@ -36,8 +38,8 @@ boto3==1.43.111 \
     --hash=sha256:c79994619c8d89e45f6fd0edc5c5b5a70c9358f00423f4c99cb64931f89ecf37
 botocore==1.43.111 \
     --hash=sha256:f1f4c28cb2a096bf246d0bb24cbb1a01c5cb696ef499fa71b155adda7b94c90b
-certifi==2026.7.22 \
-    --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775
+certifi==2026.10.19 \
+    --hash=sha256:42d35340cc5b9ba78e818ddbff0c5b1c2b779de448a340fd1b989f5fa8670e1b
 cffi==2.1.1 \
     --hash=sha256:c1453022f490d2459a11819d83ad1d586e9ff65a12ac3e705ffebd46d3685dcf
 charset-normalizer==3.5.2 \
@@ -222,8 +224,8 @@ packaging==26.3 \
     --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
 pandas==3.0.6 \
     --hash=sha256:0704044b676496b8350e023b09f174a26772456c974a2b11c36bebb558c9490d
-pillow==12.3.0 \
-    --hash=sha256:78cb2c6865a35ab8ff8b75fd122f6033b92a62c82801110e48ddd6c936a45d91
+pillow==13.0.0 \
+    --hash=sha256:42d63be3af4f9b951b199b0a9d23365d37ab14687e6d77b74940432c8515c4ca
 pip==26.2.1 \
     --hash=sha256:71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e
 pluggy==1.6.0 \
