@@ -556,7 +556,8 @@ export function Card(props: {
     >
       {(props.title != null || expand) && (
         <div className={s.cardTitle} style={props.flush ? { padding: "var(--s2) var(--s2) 0" } : undefined}>
-          <span style={{ flex: 1 }}>
+          {/* the same width as `flex: 1` wherever the header fits; on a phone it makes the header wrap (#453) */}
+          <span style={{ flex: "1 1 max-content" }}>
             {props.title}
             {props.info != null && <InfoButton label={name}>{props.info}</InfoButton>}
           </span>
@@ -569,7 +570,9 @@ export function Card(props: {
           {expand}
         </div>
       )}
-      {props.caption != null && <p className={s.cardCaption}>{props.caption}</p>}
+      {props.caption != null && (
+        <p style={{ margin: "0 0 var(--s1)", color: "var(--text-faint)", fontSize: "var(--text-sm)" }}>{props.caption}</p>
+      )}
       {props.contain ? (
         <div
           ref={box}
@@ -792,11 +795,9 @@ export interface Column<T> {
 }
 
 export type FoldStep = "lg" | "md" | "sm";
-const foldStep = (width: number): FoldStep => (width < 600 ? "sm" : width < 1000 ? "md" : "lg");
 
 /** the column each column renders in at this step: its own key, or the key of the column that hosts it (exported for its test) */
 export function foldHosts<T>(columns: Array<Column<T>>, step: FoldStep): Map<string, string> {
-  const keys = new Set(columns.map((c) => c.key));
   const next = (c: Column<T>) => (step === "sm" ? c.fold?.sm ?? c.fold?.md : step === "md" ? c.fold?.md : undefined);
   const byKey = new Map(columns.map((c) => [c.key, c]));
   const hosts = new Map<string, string>();
@@ -805,7 +806,7 @@ export function foldHosts<T>(columns: Array<Column<T>>, step: FoldStep): Map<str
     const seen = new Set([c.key]);
     let at = c;
     let to = next(at);
-    while (to != null && keys.has(to) && !seen.has(to)) {
+    while (to != null && byKey.has(to) && !seen.has(to)) {
       seen.add(to);
       at = byKey.get(to)!;
       to = next(at);
@@ -824,7 +825,7 @@ function useFoldStep(wrap: React.RefObject<HTMLDivElement | null>, enabled: bool
   useLayoutEffect(() => {
     const el = wrap.current;
     if (!enabled || !el) return;
-    const check = () => setStep(foldStep(el.clientWidth));
+    const check = () => setStep(el.clientWidth < 600 ? "sm" : el.clientWidth < 1000 ? "md" : "lg");
     check();
     if (typeof ResizeObserver === "undefined") return;
     const ro = new ResizeObserver(check);
@@ -891,8 +892,9 @@ export function Table<T>(props: {
               return (
                 <th
                   key={c.key}
-                  style={{ textAlign: c.align ?? "left", width: c.width }}
-                  className={[sortable ? s.thSortable : "", folded.has(c.key) ? s.thFolds : ""].join(" ").trim() || undefined}
+                  // the folded columns' names wrap between, never within, one another
+                  style={{ textAlign: c.align ?? "left", width: c.width, whiteSpace: folded.has(c.key) ? "normal" : undefined }}
+                  className={sortable ? s.thSortable : undefined}
                   aria-sort={active ? (sortDir === 1 ? "ascending" : "descending") : undefined}
                   onClick={
                     sortable
@@ -913,7 +915,7 @@ export function Table<T>(props: {
                   {folded.get(c.key)?.map((f) => (
                     <Fragment key={f.key}>
                       {" "}
-                      <span className={s.foldHead}>
+                      <span style={{ whiteSpace: "nowrap" }}>
                         · {f.header}
                         {info(f)}
                       </span>
@@ -962,9 +964,13 @@ export function Table<T>(props: {
                         {folded.get(c.key)?.map((f) => {
                           const value = f.render(row);
                           return isEmpty(value) ? null : (
-                            <div key={f.key} className={s.foldLine} data-fold={f.key}>
-                              <span className={s.foldLabel}>{foldLabel(f)}</span>
-                              <span>{value}</span>
+                            // inline, as the entry CSS has no headroom (size-limit); the label is a .fieldLabel
+                            <div key={f.key} data-fold={f.key} style={{ display: "flex", flexWrap: "wrap", gap: "0 var(--s1)", marginTop: "var(--s0)" }}>
+                              <span className={s.fieldLabel} style={{ minWidth: "6rem" }}>
+                                {foldLabel(f)}
+                              </span>
+                              {/* a long code wraps rather than widening the narrow table it was folded to fit */}
+                              <span style={{ overflowWrap: "anywhere" }}>{value}</span>
                             </div>
                           );
                         })}

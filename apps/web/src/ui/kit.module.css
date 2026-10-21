@@ -193,20 +193,6 @@
   gap: var(--s1);
   color: var(--text);
 }
-.cardCaption {
-  margin: 0 0 var(--s1);
-  color: var(--text-faint);
-  font-size: var(--text-sm);
-}
-/* a phone wraps the header rather than squeezing the title to one word per line */
-@media (max-width: 600px) {
-  .cardTitle {
-    flex-wrap: wrap;
-  }
-  .cardTitle > span:first-child {
-    flex: 1 0 auto;
-  }
-}
 .cardFlush {
   composes: card;
   padding: 0;
@@ -239,6 +225,10 @@
   .contain {
     max-block-size: none;
   }
+  /* a phone wraps the card header rather than squeezing the title (its basis is its width) to a word per line */
+  .cardTitle {
+    flex-wrap: wrap;
+  }
 }
 .rowActions {
   display: grid;
@@ -269,31 +259,6 @@
   background: transparent;
   border-bottom: 1px solid var(--border-strong);
   white-space: nowrap;
-}
-/* Column.fold: a folded column's name in its host's header, and its value as a labelled line in the host cell */
-.table th.thFolds {
-  white-space: normal;
-}
-.foldHead {
-  font-weight: 400;
-  white-space: nowrap;
-}
-.foldLine {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  column-gap: var(--s1);
-  margin-top: var(--s0);
-}
-/* a long code or name in a folded value wraps rather than widening the narrow table it was folded to fit */
-.foldLine > :last-child {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.foldLabel {
-  min-width: 6rem;
-  color: var(--text-dim);
-  font-weight: 600;
 }
 .thSortable {
   cursor: pointer;
