@@ -26,6 +26,7 @@ import {
   SkeletonBlock,
   StatusBadge,
 } from "../../ui/kit";
+import { focusFirst, foldButtonOf } from "../../ui/focus";
 import { DetailDrawer, DrawerActions } from "../../ui/DetailDrawer";
 import { useToast } from "../../ui/toast";
 import { McpActionReview } from "../approvals/McpActionReview";
@@ -98,7 +99,7 @@ export default function InboxPage() {
     if (active && active !== document.body && active.isConnected) return;
     const reviews = [...(list.current?.querySelectorAll<HTMLElement>("[data-inbox-row]") ?? [])].map((row) => row.querySelector<HTMLElement>("[data-inbox-review]"));
     const next = reviews.slice(from.index).find(Boolean) ?? reviews.slice(0, from.index).reverse().find(Boolean);
-    (next ?? document.querySelector<HTMLElement>("h1"))?.focus();
+    focusFirst(next, foldButtonOf(list.current), document.querySelector<HTMLElement>("h1"));
   });
 
   // merge-gate evidence: fetch each governed workflow instance once (the read
@@ -351,7 +352,7 @@ export default function InboxPage() {
         {annotationItems.length > 0 && <AnnotationsCard items={annotationItems} />}
 
         {decided.length > 0 && (
-          <Card title="Recently decided" contain startCollapsed count={decided.length} countNoun={["decision", "decisions"]}>
+          <Card title="Recently decided" contain foldable startCollapsed count={decided.length} countNoun={["decision", "decisions"]}>
             {decided.map((a) => (
               <div key={a.id} className={v.listRow} style={{ alignItems: "center" }}>
                 <div className={v.grow}>

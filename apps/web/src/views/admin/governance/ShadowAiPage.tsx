@@ -528,7 +528,10 @@ export default function ShadowAiPage() {
       <Card
         title="Inventory"
         contain
-        count={findings.data?.findings.length}
+        foldable
+        // L2: the header counts what the filtered body shows, out of every finding
+        count={findingRows.length}
+        total={findings.data?.findings.length}
         countNoun={["finding", "findings"]}
         attention={criticalOpen > 0 ? <Badge tone="danger">{criticalOpen} critical</Badge> : undefined}
         actions={

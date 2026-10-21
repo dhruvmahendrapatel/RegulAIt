@@ -205,7 +205,7 @@ test("X6b: a contained section folds from its header, keeps its count and worst 
   const fold = page.getByRole("button", { name: /^Inventory \d+ findings/ });
   await expect(fold).toHaveAttribute("aria-expanded", "true");
   await expect(page.getByRole("region", { name: "Inventory, scrollable" })).toBeVisible();
-  await expect(cardOf(page, "Inventory").getByText(/in all · Scroll the list for the rest/)).toBeVisible();
+  await expect(cardOf(page, "Inventory").getByText(/^Showing \d+ of \d+ · scroll the list for the rest, or Expand$/)).toBeVisible();
   await fold.click();
   await expect(fold).toHaveAttribute("aria-expanded", "false");
   await expect(page.getByRole("region", { name: "Inventory, scrollable" })).toHaveCount(0);
@@ -218,7 +218,18 @@ test("X6b: a contained section folds from its header, keeps its count and worst 
   await expect(page.getByRole("region", { name: "Inventory, scrollable" })).toBeVisible();
 });
 
-test("X6b: a secondary section starts folded, and a section holding a form never folds", async ({ page }) => {
+test("X6b (L2): a status filter makes the Inventory header count what the list shows, out of every finding", async ({ page }) => {
+  await page.goto("/ui/admin/shadow-ai");
+  await expect(cardOf(page, "Inventory").locator("tbody tr").first()).toBeVisible();
+  const all = await cardOf(page, "Inventory").locator("tbody tr").count();
+  await page.getByRole("group", { name: "Filter by status" }).getByRole("button", { name: /^Open/ }).click();
+  await expect.poll(() => cardOf(page, "Inventory").locator("tbody tr").count()).toBeLessThan(all);
+  const shown = await cardOf(page, "Inventory").locator("tbody tr").count();
+  await expect(page.getByRole("button", { name: new RegExp(`^Inventory ?${shown} of ${all} findings`) })).toBeVisible();
+});
+
+// the KEEP_VISIBLE refusal (a form or warning never folds) is probed in kit-contain.mock.spec.ts
+test("X6b: a secondary section starts folded, and the viewer's choice is remembered", async ({ page }) => {
   await page.goto("/ui/admin/shadow-ai/discovery-sources");
   const runs = page.getByRole("button", { name: /^Recent runs/ });
   await expect(runs).toHaveAttribute("aria-expanded", "false");

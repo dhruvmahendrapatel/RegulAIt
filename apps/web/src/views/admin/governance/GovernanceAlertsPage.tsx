@@ -7,6 +7,7 @@ import { ago, humanize } from "../../../api/format";
 import { useSession } from "../../../session/SessionContext";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Select, SeverityBadge, Tabs, Textarea, type Tone } from "../../../ui/kit";
+import { focusFirst, foldButtonOf } from "../../../ui/focus";
 import { DetailDrawer, DrawerActions } from "../../../ui/DetailDrawer";
 import { QueryGate, useAction, useUsers } from "../adminKit";
 import v from "../../views.module.css";
@@ -122,7 +123,8 @@ export default function GovernanceAlertsPage() {
     if (active && active !== document.body && active.isConnected) return;
     const rows = list.current?.querySelectorAll<HTMLElement>(":scope > button");
     const at = Math.min(ackedAt.current, (rows?.length ?? 0) - 1);
-    (rows?.[at] ?? document.querySelector<HTMLElement>("h1"))?.focus();
+    // M2: a row in a folded section cannot take focus, so the section's fold button, then the heading, follow it
+    focusFirst(rows?.[at], foldButtonOf(list.current), document.querySelector<HTMLElement>("h1"));
   }, [selectedId, selected, alerts.data]);
   // M2 (WCAG 2.4.3): under Active the server keeps an acknowledged alert listed, so the drawer stays open while its
   // Acknowledge footer unmounts with focus inside it; focus moves to the drawer heading instead of falling to <body>
@@ -182,6 +184,7 @@ export default function GovernanceAlertsPage() {
             <Card
               flush
               contain
+              foldable
               title="Alerts"
               count={alerts.data?.alerts.length ?? 0}
               countNoun={["alert", "alerts"]}

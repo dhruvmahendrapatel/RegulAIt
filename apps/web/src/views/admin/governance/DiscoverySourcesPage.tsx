@@ -46,6 +46,8 @@ import {
 } from "./discoverySourcesModel";
 
 const nowrap = { whiteSpace: "nowrap" } as const;
+/** the page size the Recent runs query asks for (`limit=50`, kept inline in the path) */
+const RUNS_LIMIT = 50;
 const RUN_TONE = { queued: "neutral", running: "info", succeeded: "ok", failed: "danger" } as const;
 
 interface SourceForm {
@@ -444,8 +446,11 @@ export default function DiscoverySourcesPage() {
           <Card
             title="Recent runs"
             contain
+            foldable
             startCollapsed
-            count={runs.data?.runs.length}
+            count={runs.data?.runs.length ?? 0}
+            // L4: the list is the latest RUNS_LIMIT runs; a full page means older runs exist
+            countIsLimit={(runs.data?.runs.length ?? 0) >= RUNS_LIMIT}
             countNoun={["run", "runs"]}
             attention={failedRuns > 0 ? <Badge tone="danger">{failedRuns} failed</Badge> : undefined}
           >
