@@ -3216,7 +3216,7 @@
     "/v1/audit": {
       "get": {
         "operationId": "getV1Audit",
-        "summary": "The audit log — every governed decision, paged, filterable by user, object type, one object (`objectId`), effect and time window.",
+        "summary": "The audit log — every governed decision, paged, filterable by user, object type, one object (`objectId`), effect and time window. An `objectType` the audit log does not record is refused with 400 `unknown_object_type` (owner decision of 2026-10-21; it used to answer 200 with no rows).",
         "tags": [
           "audit"
         ],
@@ -3230,7 +3230,35 @@
         "x-regulait-guarantee": "breaking changes require a new major path (/v2) served alongside /v1; a deprecated route or field emits RFC-8594 Deprecation and Sunset headers for at least 12 months before removal",
         "responses": {
           "400": {
-            "description": "Request body failed schema validation."
+            "description": "Request body failed schema validation. Refused: `validation`, `invalid_cursor`, `unknown_object_type`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "issues": {
+                      "type": "array",
+                      "items": {}
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "x-regulait-error-codes": [
+              "validation",
+              "invalid_cursor",
+              "unknown_object_type"
+            ]
           },
           "401": {
             "description": "Missing, invalid, or revoked credential."
@@ -3250,7 +3278,7 @@
     "/v1/audit.csv": {
       "get": {
         "operationId": "getV1AuditCsv",
-        "summary": "The audit log as a streamed CSV export, with an explicit disclosure when rows fall outside the exported window. Takes the same filters as `GET /v1/audit`, including `objectId`.",
+        "summary": "The audit log as a streamed CSV export, with an explicit disclosure when rows fall outside the exported window. Takes the same filters as `GET /v1/audit`, including `objectId`. An unknown `objectType` is refused with 400 `unknown_object_type` before any of the file is written, signed or not (owner decision of 2026-10-21).",
         "tags": [
           "audit"
         ],
@@ -3264,7 +3292,34 @@
         "x-regulait-guarantee": "breaking changes require a new major path (/v2) served alongside /v1; a deprecated route or field emits RFC-8594 Deprecation and Sunset headers for at least 12 months before removal",
         "responses": {
           "400": {
-            "description": "Request body failed schema validation."
+            "description": "Request body failed schema validation. Refused: `validation`, `unknown_object_type`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "issues": {
+                      "type": "array",
+                      "items": {}
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "x-regulait-error-codes": [
+              "validation",
+              "unknown_object_type"
+            ]
           },
           "401": {
             "description": "Missing, invalid, or revoked credential."
