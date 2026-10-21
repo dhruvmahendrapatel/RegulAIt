@@ -51,7 +51,8 @@ function DecisionBomOpener() {
 interface ReceiptStatus { state: "signing" | "no_key" | "off" | "stalled"; lastSeq: number; lagRows: number }
 interface Verification { results: Array<{ receiptSeq: number | null; status: "valid" | "invalid" | "unverifiable"; reason: string }>; cannotProve: string[] }
 
-export function DecisionReceiptsPanel() {
+/** `bare` (G8 f): folded on the audit log, whose disclosure summary carries the title and the signing state */
+export function DecisionReceiptsPanel(props: { bare?: boolean } = {}) {
   const status = useQuery({ queryKey: ["admin", "decision-receipts-status"], retry: false, queryFn: () => api.get<ReceiptStatus>("/v1/receipts/status") });
   const act = useAction();
   const readVersion = useRef(0);
@@ -59,7 +60,7 @@ export function DecisionReceiptsPanel() {
   const [from, setFrom] = useState("1"); const [to, setTo] = useState("");
   const [bundle, setBundle] = useState<unknown>(null); const [result, setResult] = useState<Verification | null>(null);
   const measured = status.data && ["signing", "no_key", "off", "stalled"].includes(status.data.state) && Number.isSafeInteger(status.data.lastSeq) && Number.isSafeInteger(status.data.lagRows) && status.data.lastSeq >= 0 && status.data.lagRows >= 0;
-  return <Card title="Signed decision receipts">
+  return <Card title={props.bare ? undefined : "Signed decision receipts"}>
     <p>Receipts sign governed-call and approval decisions without their reason or detail text. Admin configuration stays on the audit hash chain. Oversized tool names and rule IDs are represented by SHA-256 hashes.</p>
     <QueryGate loading={status.isLoading} error={status.error} onRetry={() => void status.refetch()}>
       {measured ? <>

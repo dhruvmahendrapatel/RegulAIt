@@ -15,6 +15,8 @@
  * different real things and cannot be resolved into a mode retroactively.
  */
 import { DecisionReceiptsPanel } from "./DecisionReceiptsPanel";
+import { anchorsStatus, receiptsStatus, retentionStatus, type EvidenceStatus } from "./auditEvidenceStatus";
+import ev from "./auditLog.module.css";
 import { AnchorTimestampsPanel } from "./AnchorTimestampsPanel";
 import { lazy, Suspense, useMemo, useState } from "react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
@@ -24,10 +26,9 @@ import type { AuditEntry } from "../../../api/types";
 import { UUID_RE, actorLabel, fmtAt, frameworkLabel, humanize, plural, shortId } from "../../../api/format";
 import type { AuditRetention } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Select, Table, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, Field, InfoButton, Select, Table, type Tone } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
 import { downloadCsv, optionEls, useAction, useUsers, userOpts } from "../adminKit";
-import k from "../../../ui/kit.module.css";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -112,6 +113,9 @@ export default function AuditLogPage() {
     [audit.data],
   );
   const ret = retention.data;
+  // the same reads the folded panels make (same query keys, so one request each), for the summaries' state
+  const receipts = useQuery({ queryKey: ["admin", "decision-receipts-status"], retry: false, queryFn: () => api.get<{ state?: string }>("/v1/receipts/status") });
+  const anchors = useQuery({ queryKey: ["admin", "anchor-timestamps"], retry: false, queryFn: () => api.get<{ anchors?: Array<{ timestamp?: { status?: string; verified?: boolean } }> }>("/v1/audit/anchors") });
 
   return (
     <>
@@ -123,16 +127,17 @@ export default function AuditLogPage() {
           <>
             <Button
               variant="ghost"
-              title="Download the FULL filtered trail, not only the rows loaded in the table"
               onClick={() =>
                 void downloadCsv(`/v1/audit.csv${qs}`, "audit-log.csv", (msg) => toast(msg, "error"))
               }
             >
               Download CSV
             </Button>
+            <InfoButton label="the CSV export" align="end">
+              <p>Downloads the full filtered trail, not only the rows loaded in the table.</p>
+            </InfoButton>
             <Button
               variant="primary"
-              title="Download an offline-verifiable bundle containing the full filtered audit CSV, manifest, and signature"
               onClick={() => {
                 const join = qs ? "&" : "?";
                 void downloadCsv(`/v1/audit.csv${qs}${join}signed=1`, "audit-log.signed.tar.gz", (msg) => toast(msg, "error"));
@@ -140,11 +145,60 @@ export default function AuditLogPage() {
             >
               Download signed bundle
             </Button>
+            <InfoButton label="the signed bundle" align="end">
+              <p>A signed package of the full filtered trail with a manifest, which an auditor can verify offline.</p>
+            </InfoButton>
           </>
         }
       />
       <div className={v.stack}>
-        <Card>
+        {/* G8: the chain's state is the first thing an auditor asks, so it leads; it is never green until a check runs */}
+        <ChainIntegrityCard />
+        <Card
+          title="Entries"
+          contain
+          // M2: the header says how much of the trail is loaded, and the paging line sits outside the scroll box
+          count={rows.length > 0 ? rows.length : undefined}
+          countNoun={audit.hasNextPage ? ["newest row loaded, older rows exist", "newest rows loaded, older rows exist"] : ["row", "rows"]}
+          footer={rows.length > 0 && (
+            <div className={v.row} data-testid="audit-paging">
+              <span className={v.dim}>
+                {audit.hasNextPage
+                  ? `Showing the newest ${plural(rows.length, "row")} — older rows exist`
+                  : `Showing all ${plural(rows.length, "row")}`}
+              </span>
+              {audit.hasNextPage && (
+                <Button size="sm" disabled={audit.isFetchingNextPage} onClick={() => void audit.fetchNextPage()}>
+                  {audit.isFetchingNextPage ? "Loading…" : "Load older"}
+                </Button>
+              )}
+            </div>
+          )}
+          actions={
+            <div className={a.formRow}>
+              <Field label="Filter by user">
+                <Select value={userId} onChange={(e) => setUserId(e.target.value)}>
+                  {optionEls(userOpts(users.data?.users), "— all users —")}
+                </Select>
+              </Field>
+              <Field
+                label="Filter by deploy mode"
+                helpLabel="a recorded deploy mode"
+                help={
+                  <p>
+                    Only deploy-scoped actions — workflow deploys and rollbacks, governed infrastructure changes —
+                    carry a deploy mode. Other rows (tool calls, membership, settings) show <strong>not recorded</strong>, and
+                    older rows recorded before deploy modes existed are never back-filled or guessed.
+                  </p>
+                }
+              >
+                <Select value={deployMode} onChange={(e) => setDeployMode(e.target.value)}>
+                  {optionEls(MODE_OPTS, "— any mode —")}
+                </Select>
+              </Field>
+            </div>
+          }
+        >
           {onlyRow && (
             <p role="status" data-testid="audit-only-row">
               Showing one audit row, <code className={v.mono}>{onlyRow}</code>.{" "}
@@ -153,28 +207,6 @@ export default function AuditLogPage() {
               </Button>
             </p>
           )}
-          <div className={a.formRow}>
-            <Field label="Filter by user">
-              <Select value={userId} onChange={(e) => setUserId(e.target.value)}>
-                {optionEls(userOpts(users.data?.users), "— all users —")}
-              </Select>
-            </Field>
-            <Field
-              label="Filter by deploy mode"
-              helpLabel="a recorded deploy mode"
-              help={
-                <p>
-                  Only deploy-scoped actions — workflow deploys and rollbacks, governed infrastructure changes —
-                  carry a deploy mode. Other rows (tool calls, membership, settings) show <strong>none</strong>, and
-                  older rows recorded before deploy modes existed are never back-filled or guessed.
-                </p>
-              }
-            >
-              <Select value={deployMode} onChange={(e) => setDeployMode(e.target.value)}>
-                {optionEls(MODE_OPTS, "— any mode —")}
-              </Select>
-            </Field>
-          </div>
           <Table<AuditEntry & { rowKey: string }>
             columns={[
               {
@@ -212,20 +244,16 @@ export default function AuditLogPage() {
               {
                 key: "deployMode",
                 header: "Deploy mode",
+                info: <p>&ldquo;Not recorded&rdquo; means no deploy mode was recorded, because the action is not deploy-scoped or predates deploy modes. It is never back-filled.</p>,
                 sort: (e) => e.deployMode ?? "unknown",
                 render: (e) =>
                   e.deployMode ? (
                     <span>{modeLabel(e.deployMode)}</span>
                   ) : (
-                    <span
-                      className={v.dim}
-                      title="No deploy mode was recorded: the action is not deploy-scoped, or it predates deploy modes. Never back-filled."
-                    >
-                      none
-                    </span>
+                    <span className={v.dim} style={{ whiteSpace: "nowrap" }}>Not recorded</span>
                   ),
               },
-              { key: "reason", header: "Reason", render: (e) => <span className={`${v.dim} ${k.clamp2}`} title={e.reason ?? undefined}>{e.reason ?? "—"}</span> },
+              { key: "reason", header: "Reason", render: (e) => <ReasonCell reason={e.reason} /> },
               {
                 key: "bom",
                 header: "Evidence",
@@ -253,30 +281,22 @@ export default function AuditLogPage() {
               />
             }
           />
-          {rows.length > 0 && (
-            <div className={v.row} data-testid="audit-paging">
-              <span className={v.dim}>
-                {audit.hasNextPage
-                  ? `Showing the newest ${plural(rows.length, "row")} — older rows exist`
-                  : `Showing all ${plural(rows.length, "row")}`}
-              </span>
-              {audit.hasNextPage && (
-                <Button size="sm" disabled={audit.isFetchingNextPage} onClick={() => void audit.fetchNextPage()}>
-                  {audit.isFetchingNextPage ? "Loading…" : "Load older"}
-                </Button>
-              )}
-            </div>
-          )}
         </Card>
         {bomAuditId && (
           <Suspense fallback={<p role="status">Loading the Decision BOM…</p>}>
             <DecisionBomPanel key={bomAuditId} auditId={bomAuditId} onClose={() => setBomAuditId(null)} />
           </Suspense>
         )}
-        {/* the trail first, so the newest decisions are on screen without scrolling; the evidence tools follow it */}
-        <DecisionReceiptsPanel />
-        <AnchorTimestampsPanel />
-        <Card title="Retention">
+        {/* the trail first, so the newest decisions are on screen without scrolling; the evidence tools follow it,
+            folded, each summary carrying its live state so a warning is never behind the fold (G8 f, #453) */}
+        <EvidenceFold title="Signed decision receipts" status={receiptsStatus(receipts)}>
+          <DecisionReceiptsPanel bare />
+        </EvidenceFold>
+        <EvidenceFold title="Anchor timestamps" status={anchorsStatus(anchors)}>
+          <AnchorTimestampsPanel bare />
+        </EvidenceFold>
+        <EvidenceFold title="Retention" status={retentionStatus(ret, retention.isError)}>
+        <Card>
           {ret == null ? (
             <span className={v.dim}>Loading retention…</span>
           ) : ret.retainedDays == null ? (
@@ -304,8 +324,7 @@ export default function AuditLogPage() {
             trail. Pruning is itself audited.
           </p>
         </Card>
-
-        <ChainIntegrityCard />
+        </EvidenceFold>
       </div>
 
       <ConfirmModal
@@ -330,6 +349,34 @@ export default function AuditLogPage() {
         }}
       />
     </>
+  );
+}
+
+/** G8 (f): a folded evidence panel; the summary names it and shows its state, so the fold never hides a warning */
+function EvidenceFold(props: { title: string; status: EvidenceStatus; children: React.ReactNode }) {
+  return (
+    <details className={ev.fold}>
+      <summary className={ev.summary}>
+        <span className={ev.title}>{props.title}</span>
+        <Badge tone={props.status.tone}>{props.status.label}</Badge>
+      </summary>
+      <div className={ev.body}>{props.children}</div>
+    </details>
+  );
+}
+
+/** G8: a long reason opens in place (Show more) instead of hiding behind a hover-only title */
+function ReasonCell({ reason }: { reason?: string | null }) {
+  const [open, setOpen] = useState(false);
+  if (!reason) return <span className={v.dim}>—</span>;
+  if (reason.length <= 90) return <span className={v.dim}>{reason}</span>;
+  return (
+    <span className={v.dim}>
+      {open ? reason : `${reason.slice(0, 80).trimEnd()}…`}{" "}
+      <Button size="sm" variant="ghost" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+        {open ? "Show less" : "Show more"}
+      </Button>
+    </span>
   );
 }
 
@@ -398,12 +445,18 @@ function ChainIntegrityCard() {
     : "neutral";
 
   return (
-    <Card title="Chain integrity — tamper-evident hash chain with a write-once anchor">
+    <Card
+      title="Chain integrity"
+      info={
+        <p>
+          A tamper-evident hash chain with a write-once anchor. Every chained row commits to the one before it; the
+          head is anchored to write-once storage. Verification recomputes the whole chain against the anchor.
+        </p>
+      }
+    >
       <div className={v.row}>
-        <span className={v.dim}>
-          Every chained row commits to the one before it; the head is anchored to write-once storage.
-          Verification recomputes the whole chain against the anchor.
-        </span>
+        {!report && !busy && <Badge tone="neutral">Not verified yet</Badge>}
+        <span className={v.dim}>Recomputes the whole chain against its anchor when you ask.</span>
         <span className={v.grow} />
         <Button onClick={() => void run()} disabled={busy}>
           {busy ? "Verifying…" : report ? "Re-verify" : "Verify chain"}

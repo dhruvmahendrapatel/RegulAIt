@@ -91,7 +91,7 @@ export const NATIVE_LIBRARIES = {
   libhdf5_hl: "LicenseRef-HDF5",
   libaec: "BSD-2-Clause", // h5py.libs
   libsz: "BSD-2-Clause", // libaec's szip compatibility library (h5py.libs)
-  // pillow.libs: each by its section of pillow's dist-info/licenses/LICENSE (pillow 12.3.0)
+  // pillow.libs: each by its section of pillow's dist-info/licenses/LICENSE (pillow 12.3.0; the same set and sections in 13.0.0)
   libXau: "MIT", // libxcb's companion (X.Org MIT)
   libxcb: "MIT", // X.Org MIT
   libavif: "BSD-2-Clause", // LIBAVIF section
