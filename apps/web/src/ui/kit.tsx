@@ -7,6 +7,7 @@
 import {
   Children,
   cloneElement,
+  Fragment,
   forwardRef,
   isValidElement,
   useEffect,
@@ -450,6 +451,8 @@ export function Card(props: {
   count?: number;
   /** singular and plural noun for `count`; row / rows by default */
   countNoun?: [string, string];
+  /** F21: a line under the title and outside the X6 scroll box, so it is never scrolled sideways or clipped */
+  caption?: ReactNode;
   /** under the body and outside the X6 scroll box: paging and partial-data notices stay in view of the reader, and move into the Expand dialog with the body */
   footer?: ReactNode;
 }) {
@@ -566,6 +569,7 @@ export function Card(props: {
           {expand}
         </div>
       )}
+      {props.caption != null && <p className={s.cardCaption}>{props.caption}</p>}
       {props.contain ? (
         <div
           ref={box}
@@ -774,6 +778,57 @@ export interface Column<T> {
   /** (i) beside the header text; `infoLabel` names it when the header is not plain text */
   info?: ReactNode;
   infoLabel?: string;
+  /**
+   * F6/F20/F21/F25 (owner-approved on #453, 2026-10-21): below a width step of the table's own width (`md` under
+   * 1000 px, `sm` under 600 px), this column's value moves into the cell of the column named here, as a line labelled
+   * with this column's name, and its header and (i) join that column's header. The width is the table's, not the
+   * window's, so a table beside the open drawer folds too. `sm` falls back to `md`; a host that is folded itself
+   * passes the value on. Values are moved, never removed; an empty value moves without its label.
+   */
+  fold?: { md?: string; sm?: string };
+}
+
+type FoldStep = "lg" | "md" | "sm";
+const foldStep = (width: number): FoldStep => (width < 600 ? "sm" : width < 1000 ? "md" : "lg");
+
+/** the column each column renders in at this step: its own key, or the key of the column that hosts it */
+function foldHosts<T>(columns: Array<Column<T>>, step: FoldStep): Map<string, string> {
+  const keys = new Set(columns.map((c) => c.key));
+  const next = (c: Column<T>) => (step === "sm" ? c.fold?.sm ?? c.fold?.md : step === "md" ? c.fold?.md : undefined);
+  const byKey = new Map(columns.map((c) => [c.key, c]));
+  const hosts = new Map<string, string>();
+  for (const c of columns) {
+    // a chain is followed to its end; a loop (or a key that names no column) leaves the column where it is
+    const seen = new Set([c.key]);
+    let at = c;
+    let to = next(at);
+    while (to != null && keys.has(to) && !seen.has(to)) {
+      seen.add(to);
+      at = byKey.get(to)!;
+      to = next(at);
+    }
+    hosts.set(c.key, to != null && seen.has(to) ? c.key : at.key);
+  }
+  return hosts;
+}
+
+const foldLabel = <T,>(c: Column<T>) => (typeof c.header === "string" ? c.header : c.infoLabel ?? c.key);
+const isEmpty = (value: ReactNode) => value == null || value === false || value === "";
+
+/** the table's own width, so a page narrowed by the drawer folds its table on a wide window */
+function useFoldStep(wrap: React.RefObject<HTMLDivElement | null>, enabled: boolean): FoldStep {
+  const [step, setStep] = useState<FoldStep>("lg");
+  useLayoutEffect(() => {
+    const el = wrap.current;
+    if (!enabled || !el) return;
+    const check = () => setStep(foldStep(el.clientWidth));
+    check();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(check);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [wrap, enabled]);
+  return enabled ? step : "lg";
 }
 
 export function Table<T>(props: {
@@ -807,21 +862,34 @@ export function Table<T>(props: {
       return (av < bv ? -1 : av > bv ? 1 : 0) * sortDir;
     });
   }, [props.rows, props.columns, sortKey, sortDir]);
+  const wrap = useRef<HTMLDivElement>(null);
+  const step = useFoldStep(wrap, props.columns.some((c) => c.fold != null));
+  const { shown, folded } = useMemo(() => {
+    const hosts = foldHosts(props.columns, step);
+    const folded = new Map<string, Array<Column<T>>>();
+    for (const c of props.columns) {
+      const host = hosts.get(c.key)!;
+      if (host !== c.key) folded.set(host, [...(folded.get(host) ?? []), c]);
+    }
+    return { shown: props.columns.filter((c) => hosts.get(c.key) === c.key), folded };
+  }, [props.columns, step]);
+  const info = (c: Column<T>) =>
+    c.info != null && <InfoButton label={c.infoLabel ?? (typeof c.header === "string" ? c.header : c.key)}>{c.info}</InfoButton>;
 
   return (
-    <div className={s.tableWrap}>
+    <div className={s.tableWrap} ref={wrap} data-fold-step={step}>
       {/* aria-busy while the skeleton rows stand in for data, so the wait is announced like SkeletonBlock's */}
       <table className={s.table} aria-busy={props.loading || undefined}>
         <thead>
           <tr>
-            {props.columns.map((c) => {
+            {shown.map((c) => {
               const sortable = Boolean(c.sort);
               const active = sortKey === c.key;
               return (
                 <th
                   key={c.key}
                   style={{ textAlign: c.align ?? "left", width: c.width }}
-                  className={sortable ? s.thSortable : undefined}
+                  className={[sortable ? s.thSortable : "", folded.has(c.key) ? s.thFolds : ""].join(" ").trim() || undefined}
                   aria-sort={active ? (sortDir === 1 ? "ascending" : "descending") : undefined}
                   onClick={
                     sortable
@@ -836,10 +904,18 @@ export function Table<T>(props: {
                   }
                 >
                   {c.header}
-                  {c.info != null && (
-                    <InfoButton label={c.infoLabel ?? (typeof c.header === "string" ? c.header : c.key)}>{c.info}</InfoButton>
-                  )}
+                  {info(c)}
                   {active && <span className={s.sortArrow}>{sortDir === 1 ? "▲" : "▼"}</span>}
+                  {/* the folded columns' names and (i), once, in the header of the column that now shows them */}
+                  {folded.get(c.key)?.map((f) => (
+                    <Fragment key={f.key}>
+                      {" "}
+                      <span className={s.foldHead}>
+                        · {f.header}
+                        {info(f)}
+                      </span>
+                    </Fragment>
+                  ))}
                 </th>
               );
             })}
@@ -849,7 +925,7 @@ export function Table<T>(props: {
           {props.loading
             ? [0, 1, 2].map((i) => (
                 <tr key={`sk-${i}`}>
-                  {props.columns.map((c) => (
+                  {shown.map((c) => (
                     <td key={c.key}>
                       <Skeleton width={`${55 + ((i * 17) % 35)}%`} />
                     </td>
@@ -877,9 +953,18 @@ export function Table<T>(props: {
                         : undefined
                     }
                   >
-                    {props.columns.map((c) => (
+                    {shown.map((c) => (
                       <td key={c.key} style={{ textAlign: c.align ?? "left" }}>
                         {c.render(row)}
+                        {folded.get(c.key)?.map((f) => {
+                          const value = f.render(row);
+                          return isEmpty(value) ? null : (
+                            <div key={f.key} className={s.foldLine} data-fold={f.key}>
+                              <span className={s.foldLabel}>{foldLabel(f)}</span>
+                              <span>{value}</span>
+                            </div>
+                          );
+                        })}
                       </td>
                     ))}
                   </tr>
@@ -890,7 +975,7 @@ export function Table<T>(props: {
             // transient 500 would be worse — but a failed REFETCH must not be
             // silent either: the list is stale and the reader has to know.
             <tr>
-              <td colSpan={props.columns.length} className={s.tableStale} role="alert">
+              <td colSpan={shown.length} className={s.tableStale} role="alert">
                 <StatusDot tone="danger" />
                 <span>
                   Couldn't refresh this list — {props.error instanceof Error ? props.error.message : String(props.error)}.
@@ -906,7 +991,7 @@ export function Table<T>(props: {
           )}
           {!props.loading && sorted.length === 0 && props.error != null && (
             <tr>
-              <td colSpan={props.columns.length}>
+              <td colSpan={shown.length}>
                 <ErrorState
                   title="Couldn't load this list"
                   message={props.error instanceof Error ? props.error.message : String(props.error)}
@@ -918,7 +1003,7 @@ export function Table<T>(props: {
           )}
           {!props.loading && sorted.length === 0 && props.error == null && (
             <tr>
-              <td colSpan={props.columns.length}>{props.empty ?? <EmptyState title="Nothing here yet" />}</td>
+              <td colSpan={shown.length}>{props.empty ?? <EmptyState title="Nothing here yet" />}</td>
             </tr>
           )}
         </tbody>
