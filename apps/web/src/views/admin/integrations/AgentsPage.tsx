@@ -314,7 +314,7 @@ function RegisterAgentCard() {
             <Input required type="number" min={0} value={f.tier} onChange={(e) => set("tier", e.target.value)} />
           </Field>
           <Field label="Model id (blank = not dispatchable)">
-            <Input value={f.model} onChange={(e) => set("model", e.target.value)} placeholder="the provider's model id, e.g. model-name-v1" />
+            <Input value={f.model} onChange={(e) => set("model", e.target.value)} placeholder="e.g. model-name-v1" />
           </Field>
           {isCustom && (
             <Field label="Pricing for this custom model">

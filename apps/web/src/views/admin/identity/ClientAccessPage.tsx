@@ -708,7 +708,7 @@ function ConfigGeneratorCard() {
           </Select>
         </Field>
         <Field label="Model id">
-          <Input value={model} onChange={(e) => setModel(e.target.value)} placeholder="the provider's model id, e.g. model-name-v1" />
+          <Input value={model} onChange={(e) => setModel(e.target.value)} placeholder="e.g. model-name-v1" />
         </Field>
         <Button type="submit" size="sm" variant="primary">
           Generate

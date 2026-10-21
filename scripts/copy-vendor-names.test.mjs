@@ -148,7 +148,7 @@ describe("no AI vendor or competitor name in product UI copy (F31)", () => {
       const file = "apps/web/src/views/admin/integrations/AgentsPage.tsx";
       const real = readFileSync(path.join(root, file), "utf8");
       expect(findVendorNames(root, [file], () => real).hits).toEqual([]);
-      const neutral = `placeholder="the provider's model id, e.g. model-name-v1"`;
+      const neutral = `placeholder="e.g. model-name-v1"`;
       expect(real).toContain(neutral);
       const reverted = real.replace(neutral, `placeholder="e.g. gemini-0-test"`);
       expect(findVendorNames(root, [file], () => reverted).hits.map((h) => `${h.line}: ${h.name}`)).toEqual([
