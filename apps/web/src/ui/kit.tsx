@@ -649,6 +649,7 @@ export function Card(props: CardProps) {
             {count}
             {props.attention}
             {props.actions}
+            {/* a contained card that does not fold keeps the X6 Expand */}
             {expand}
           </div>
         ))}
