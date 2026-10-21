@@ -16,7 +16,7 @@
  * Section 1's lifecycle runs on its OWN scratch database (prefix `aoi210_`), dropped in afterAll. The EXPLAIN checks
  * run on the shared suite database, which holds the rows earlier files wrote, so the planner has a real table.
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -173,6 +173,7 @@ describe("migration 0210: the object index, built concurrently outside the migra
       const got = await holder.query(`select pg_try_advisory_lock($1::int, hashtext($2)) as "ok"`, [CONCURRENT_INDEX_LOCK_NAMESPACE, CONCURRENT_INDEX_LOCK_KEY]);
       expect((got.rows[0] as { ok: boolean }).ok).toBe(true);
       holderLocked = true;
+      const holderPid = (await holder.query(`select pg_backend_pid() as "pid"`)).rows[0] as { pid: number };
       const holderBuild = holder.query(CONCURRENT_INDEXES.find((i) => i.name === INDEX)!.create);
       let during: { oid: string; valid: boolean } | undefined;
       for (let i = 0; i < 100 && !during; i++) {
@@ -185,11 +186,17 @@ describe("migration 0210: the object index, built concurrently outside the migra
       expect(during?.valid).toBe(false);
 
       let settled = false;
+      const log = vi.spyOn(console, "log");
       const second = buildConcurrentIndexes(scratch, migrationsFolder, { pollMs: 50 }).finally(() => {
         settled = true;
       });
       await new Promise((r) => setTimeout(r, 1_000));
       expect(settled).toBe(false);
+      // #476: the wait names the session holding the lock, read from the real pg_locks row
+      const waits = log.mock.calls.map((c) => String(c[0])).filter((m) => m.includes("waiting for it"));
+      log.mockRestore();
+      expect(waits).toHaveLength(1);
+      expect(waits[0]).toContain(`pid ${holderPid.pid}, application "`);
       const still = await scratch.execute<{ oid: string }>(sql`select oid::text as "oid" from pg_class where relname = ${INDEX}`);
       expect(still.rows[0]?.oid).toBe(during!.oid);
 
