@@ -130,6 +130,8 @@ test("the sidebar gives Discovery its own section, between Overview and the AI G
 });
 
 test("Shadow AI: tabs, figures with (i), aligned next steps and the coverage tiles", async ({ page }) => {
+  // a shorter window, so four findings overflow the box now that Where seen no longer adds a column (#453 F6)
+  await page.setViewportSize({ width: 1440, height: 700 });
   await page.goto("/ui/admin/shadow-ai");
   await expect(page.getByRole("heading", { name: "Shadow-AI discovery", exact: true })).toBeVisible();
   await expect(page.getByRole("tab", { name: /^Findings/ })).toHaveAttribute("aria-selected", "true");
@@ -264,12 +266,14 @@ test("X6b: a secondary section starts folded, and the viewer's choice is remembe
 async function actionOffsets(page: Page) {
   return cardOf(page, "Inventory").locator("tbody tr").evaluateAll((rows) =>
     rows.map((row) => {
-      const box = row.querySelector("td:last-child > div")!.getBoundingClientRect();
+      // the action stack itself, wherever it sits: on a phone Next step folds into the Subject cell (#453 F6)
+      const stack = row.querySelector('[class*="rowActions"]')!;
+      const box = stack.getBoundingClientRect();
       const at = (b: Element | undefined) => {
         const r = b!.getBoundingClientRect();
         return `${Math.round(r.left - box.left)},${Math.round(r.top - box.top)}`;
       };
-      const buttons = [...row.querySelectorAll("td:last-child button")];
+      const buttons = [...stack.querySelectorAll("button")];
       return {
         plan: at(buttons.find((b) => b.getAttribute("aria-label")?.startsWith("Plan remediation for "))),
         triage: at(buttons.find((b) => /^(Triage|Review again)$/.test(b.textContent ?? ""))),

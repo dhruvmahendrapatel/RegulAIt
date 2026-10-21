@@ -13,7 +13,7 @@ export function focusFirst(...candidates: (HTMLElement | null | undefined)[]): v
   }
 }
 
-/** the fold button of the contained card that holds `el`, if it has one */
+/** the fold button of the contained card that holds `el`, if it has one (in the header's title span, #477 M2) */
 export function foldButtonOf(el: Element | null | undefined): HTMLElement | null {
-  return el?.closest("section[data-rg-card]")?.querySelector<HTMLElement>(":scope > div > button[aria-expanded]") ?? null;
+  return el?.closest("section[data-rg-card]")?.querySelector<HTMLElement>(":scope > div > span > button[aria-expanded]") ?? null;
 }

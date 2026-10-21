@@ -40,6 +40,7 @@ import { api } from "../../../api/client";
 import { ago, evidenceLabel, humanize, plural, providerLabel } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, CodeBlock, EmptyState, Field, InfoButton, Input, RowActions, Select, SeverityBadge, Table, Tabs, tabIds, Textarea } from "../../../ui/kit";
+import { FoldTable } from "../../../ui/fold";
 import {
   OutcomePanel,
   QueryGate,
@@ -54,7 +55,7 @@ import a from "../admin.module.css";
 import { ShadowRemediationPanel } from "./ShadowRemediationPanel";
 import { DetailDrawer, DrawerActions } from "../../../ui/DetailDrawer";
 import { DiscoverySightings } from "./DiscoverySightings";
-import type { SightingView } from "./discoverySourcesModel";
+import { sightingLines, type SightingView } from "./discoverySourcesModel";
 import { IMPORT_EXAMPLE } from "./shadowAiExample";
 import v from "../../views.module.css";
 import sh from "./shadowAi.module.css";
@@ -528,6 +529,7 @@ export default function ShadowAiPage() {
       <Card
         title="Inventory"
         contain
+        caption="Every row is a lead for triage, not a verdict."
         foldable
         // L2: the header counts what the filtered body shows, out of every finding
         count={findingRows.length}
@@ -544,47 +546,53 @@ export default function ShadowAiPage() {
           </div>
         }
       >
-        <p className={v.faint}>Every row is a lead for triage, not a verdict.</p>
         <QueryGate loading={findings.isLoading} error={findings.error} onRetry={refresh}>
           {(findings.data?.findings.length ?? 0) === 0 ? (
             <EmptyState title="No findings yet" body="Import an egress-log, code-scan, SaaS or self-reported evidence file under Import evidence." />
           ) : findingRows.length === 0 ? (
             <EmptyState title="No finding has this status" body="Choose another status above." />
           ) : (
-            <Table<Finding>
+            <FoldTable<Finding>
               rows={findingRows}
               rowKey={(r) => r.id}
               columns={[
-                { key: "severity", header: "Severity", render: (r) => <SeverityBadge severity={r.severity} /> },
+                // F6/F21 (#453): below 1000 px of table width, Evidence and Seen fold into Subject and Confidence under
+                // Severity; on a phone every column folds into Subject, one labelled line each
+                { key: "severity", header: "Severity", fold: { sm: "subject" }, render: (r) => <SeverityBadge severity={r.severity} /> },
                 { key: "subject", header: "Subject", // a floor so a name never wraps to one word per line
                   render: (r) => (
                     <span title={r.subjectKind} style={{ display: "inline-block", minWidth: "14ch" }}>
-                      <strong>{r.subject}</strong>
+                      {/* a long resource path breaks rather than widening the table (F6) */}
+                      <strong style={{ overflowWrap: "anywhere" }}>{r.subject}</strong>
                       <span className={v.dim} style={{ display: "block" }}>
                         {providerLabel(r.provider)}
                         {r.replacementAgent ? <> · alternative: {r.replacementAgent.name}</> : r.replacementNote ? <> · {r.replacementNote}</> : null}
                       </span>
                     </span>
                   ) },
-                { key: "sources", header: "Evidence", render: (r) => (
-                  <span className={v.row}>{r.signalSources.map((src) => <Badge key={src}>{evidenceLabel(src)}</Badge>)}</span>
-                ) },
-                { key: "confidence", header: "Confidence", info: CONFIDENCE_HELP,
+                // ADR-0195 SD0: where scanners saw it (path, line, commit), names seen, and who (as a pseudonym), under
+                // the evidence badges (F6: Where seen joined Evidence)
+                { key: "sources", header: "Evidence", fold: { md: "subject" },
+                  info: "The kinds of evidence behind the finding, then where it was seen: file and line, commit, or log source, and the pseudonymised person involved.",
+                  render: (r) => (
+                    <span className={v.stackTight} style={{ alignItems: "flex-start" }}>
+                      <span className={v.row}>{r.signalSources.map((src) => <Badge key={src}>{evidenceLabel(src)}</Badge>)}</span>
+                      {sightingLines(r.evidence).length > 0 ? <DiscoverySightings evidence={r.evidence} collapsed /> : null}
+                    </span>
+                  ) },
+                { key: "confidence", header: "Confidence", info: CONFIDENCE_HELP, fold: { md: "severity" },
                   render: (r) => <Badge tone={r.confidence === "high" ? "ok" : r.confidence === "medium" ? "warn" : "info"}>{humanize(r.confidence)}</Badge> },
-                { key: "observations", header: "Seen", render: (r) => (
+                { key: "observations", header: "Seen", fold: { md: "subject" }, render: (r) => (
                   <span style={{ whiteSpace: "nowrap" }}>
                     {plural(r.observationCount, "time")}
                     <span className={v.dim} style={{ display: "block" }}>{ago(r.lastSeenAt)}</span>
                   </span>
                 ) },
-                // ADR-0195 SD0: where scanners saw it (path, line, commit), names seen, and who (as a pseudonym)
-                { key: "sightings", header: "Where seen",
-                  info: "Where the evidence was seen: file and line, commit, or log source, and the pseudonymised person involved.",
-                  render: (r) => <DiscoverySightings evidence={r.evidence} collapsed /> },
                 {
                   key: "disposition",
                   header: "Status",
                   info: DISPOSITION_HELP,
+                  fold: { sm: "subject" },
                   render: (r) => (
                     <span className={v.row}>
                       <Badge tone={r.disposition === "remediated" ? "ok" : r.disposition === "confirmed" ? "info" : "neutral"}>{DISPOSITION_LABEL[r.disposition] ?? humanize(r.disposition)}</Badge>
@@ -597,6 +605,7 @@ export default function ShadowAiPage() {
                 {
                   key: "triage",
                   header: "Next step",
+                  fold: { sm: "subject" },
                   render: (r) => {
                     const plan = (
                       <Button

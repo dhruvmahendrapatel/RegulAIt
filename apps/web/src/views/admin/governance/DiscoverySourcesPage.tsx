@@ -23,6 +23,7 @@ import ds from "./discoverySources.module.css";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, RowActions, Select, Table, Textarea } from "../../../ui/kit";
+import { FoldTable } from "../../../ui/fold";
 import { QueryGate, Stat, useAction } from "../adminKit";
 import v from "../../views.module.css";
 import FederationCard from "./FederationCard";
@@ -442,7 +443,7 @@ export default function DiscoverySourcesPage() {
 
           <EndpointAgentCard sources={list} />
 
-          <div className={v.grid2}>
+          {/* F20 (#453): Recent runs takes the full width, and Reveal a pseudonym its own row below it */}
           <Card
             title="Recent runs"
             contain
@@ -454,19 +455,22 @@ export default function DiscoverySourcesPage() {
             countNoun={["run", "runs"]}
             attention={failedRuns > 0 ? <Badge tone="danger">{failedRuns} failed</Badge> : undefined}
           >
-            <Table<DiscoveryRunView>
+            <FoldTable<DiscoveryRunView>
               rows={runs.data?.runs ?? []}
               rowKey={(r) => r.id}
               empty={<EmptyState title="No scan has run" body="Runs appear here once an enabled source is scanned." />}
               columns={[
+                // below 1000 px of table width, Queued folds under Source, Observed / matched under Findings and Reads
+                // under Status; on a phone Findings and Catalogue gaps fold under Source too
                 { key: "source", header: "Source", render: (r) => list.find((s) => s.id === r.sourceId)?.name ?? r.sourceId },
                 { key: "status", header: "Status", render: (r) => <><Badge tone={RUN_TONE[r.status]}>{r.status}</Badge>{r.errorCode && <div className={v.faint}>{r.errorCode}</div>}</> },
-                { key: "when", header: "Queued", render: (r) => <><span style={nowrap}>{fmtDateTime(r.createdAt)}</span><div className={v.faint}>{r.trigger}, attempt {r.attempt}</div></> },
-                { key: "counts", header: "Observed / matched", render: (r) => `${r.observed} / ${r.matched}` },
-                { key: "findings", header: "Findings", render: (r) => `${r.findingsCreated} new, ${r.findingsUpdated} updated` },
+                { key: "when", header: "Queued", fold: { md: "source" }, render: (r) => <><span style={nowrap}>{fmtDateTime(r.createdAt)}</span><div className={v.faint}>{r.trigger}, attempt {r.attempt}</div></> },
+                { key: "counts", header: "Observed / matched", fold: { md: "findings" }, render: (r) => `${r.observed} / ${r.matched}` },
+                { key: "findings", header: "Findings", fold: { sm: "source" }, render: (r) => `${r.findingsCreated} new, ${r.findingsUpdated} updated` },
                 {
                   key: "gaps",
                   header: "Catalogue gaps",
+                  fold: { sm: "source" },
                   render: (r) =>
                     r.catalogueGaps.length ? (
                       <div className={v.stackTight}>
@@ -484,7 +488,7 @@ export default function DiscoverySourcesPage() {
                       "none"
                     ),
                 },
-                { key: "reads", header: "Reads", render: (r) => couldNotRead(r.readOutcomes) ?? <span className={v.faint} style={nowrap}>all read</span> },
+                { key: "reads", header: "Reads", fold: { md: "status" }, render: (r) => couldNotRead(r.readOutcomes) ?? <span className={v.faint} style={nowrap}>all read</span> },
               ]}
             />
           </Card>
@@ -508,7 +512,6 @@ export default function DiscoverySourcesPage() {
               )}
             </div>
           </Card>
-          </div>
 
           <FederationCard />
 
