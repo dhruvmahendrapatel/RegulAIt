@@ -174,7 +174,9 @@ function readScript(file) {
   let current = null;
   let section = "";
   for (let i = 0; i < lines.length; i++) {
-    const h = /^### (\d[A-Z]|[SG]\d+)\. (.+?)(?: — .+)?$/.exec(lines[i]);
+    const h = /^### (\d[A-Z]|[SG]\d+)(?: \([^)]*\))?\. (.+?)(?: — .+)?$/.exec(lines[i]);
+    // any other "### " heading (the 11-01 "Close") ends the beat above it
+    if (!h && /^### /.test(lines[i])) current = null;
     if (h) {
       const reuses = /\(10-05 beat (\d[A-Z])\)/.exec(lines[i]);
       current = beats[h[1]] = { title: h[2].trim(), say: "", section, reuses: reuses?.[1] };

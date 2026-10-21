@@ -16,9 +16,17 @@ this file replaces it for the 2026-11-01 demo.
 right-hand column of the timing table.
 
 **Rules for this script**
-- Every URL, button and screen label below was read from the UI code on `main` on 2026-10-18 (file named per beat).
-  Labels that depend on data (finding subjects, counts, alert text) are marked **to confirm** and are checked at
-  rehearsal.
+- Every URL, button and screen label below was read from the UI code on `main` on 2026-10-18 (file named per beat),
+  and checked again on 2026-10-21 against `main` after #457-#460, #465 and #469 and against the screenshot pack of
+  `Demo journey` run `39544572823` (`DEMO_SCREENS_QA_2026-11-01.md`). Labels that depend on data (finding subjects,
+  counts, alert text) are marked **to confirm** and are checked at rehearsal.
+- **Navigation:** the two Shadow AI pages have their own **Discovery** section in the **AI Governance** sidebar, above
+  the registers: **Shadow-AI discovery** and **Discovery sources**. Their breadcrumb reads *Discovery / …* (#469).
+- **Detail drawer:** an alert, an Inbox item, a finding's remediation plan and the use-case sign-off review open in a
+  panel on the right. Above 900 px wide it sits beside the page, which stays usable; at 900 px and below it is a
+  modal over the page. The decision row (**Approve**, **Acknowledge**, **Start remediation workflow…**) is pinned at
+  the panel's foot and never scrolls away; the panel's body scrolls on its own. Close it with **Close** (or **×** on
+  the sign-off review). Present at 1440 px or wider so the page stays visible beside it.
 - Every Shadow AI beat has two paths:
   - **LIVE**: real accounts, through the hosted dev instance. The scans have already run before the demo
     (checklist item T-24h). Nothing in the LIVE path waits on a scan in front of the audience. The live database
@@ -101,22 +109,33 @@ The full checklist, with what is still pending execution, is in `DEMO_RUNBOOK.md
 ### S1. Discovery sources — Ada — 3 minutes
 UI: `apps/web/src/views/admin/governance/DiscoverySourcesPage.tsx`, `FederationCard.tsx`, `EndpointAgentCard.tsx`.
 
-- **URL:** `/ui/admin/shadow-ai/discovery-sources` (navigation: **Discovery sources**).
-- **Screen, top to bottom:**
-  - Page header **Discovery sources**: *"Where RegulAIt may scan, read-only, for shadow AI. Every source is off until
-    you enable it."*
+- **URL:** `/ui/admin/shadow-ai/discovery-sources` (sidebar: **Discovery** → **Discovery sources**; breadcrumb
+  *Discovery / Discovery sources*).
+- **Screen, top to bottom** (`ds-s1-discovery-sources`):
+  - Page header **Discovery sources**: *"Where regulAIt may scan, read-only, for shadow-AI use. Every source is off
+    until you enable it."*
+  - A three-step strip: **Connect read-only** (*n of n sources enabled*), **Scan on a schedule** (*n recent runs*),
+    **Findings land in Shadow AI** (**Open the findings**).
   - **Active discovery** card: the posture sentence, which names each enabled source, for example *"Active discovery
     scans n enabled source(s), read-only: … Nothing outside those sources is scanned."* (the count and names are the
     live data).
-  - Four figures: **sources enabled**, **static credentials in use**, **static credentials older than 90 days**,
-    **credentials with write scope unverified**.
-  - **Scanner kinds** table: GitLab repositories, AWS, Azure and RegulAIt endpoint agent read **built**.
-  - **Sources** table, one row per source: name and kind, **State** (*enabled*), **Scope**, **Credential**, **Last
-    run** (*succeeded*), and the actions **Disable · Run now · Edit · Replace credential · Revoke credential · Delete**.
-  - **Recent runs** table: **Observed / matched**, **Findings** (*n new, n updated*), **Catalogue gaps**, **Reads**
-    (*all read*, or *could not read: …* per read).
+  - Five figures: **Sources enabled** (*n of n*), **Static credentials in use**, **Static credentials older than 90
+    days**, **Write scope unverified**, **Credentials refused (write access)**.
+  - **Scanner kinds** table (**Kind · State · Evidence kinds**): every kind reads **built**, each with its code under
+    the name (`repo_gitlab`, `cloud_aws`, …).
+  - **Add a source** form, then the **Sources** table, one row per source: **Source** (name and kind), **State**
+    (*enabled*), **Scope**, **Credential** (a **Federated** or **Static key** badge, and **Write scope unverified**
+    where the scanner has not proved the credential read-only), **Last run** (*succeeded*), and **Actions**: **Run
+    now**, **Edit**, and **More**, which folds **Disable**, **Replace credential**, **Revoke credential** and
+    **Delete**.
+  - **Import endpoint evidence** and **Endpoint agent enrolment** cards.
+  - **Recent runs** (left) beside **Reveal a pseudonym** (right). Recent runs is a half-width card: only **Source**,
+    **Status**, **Queued** and **Observed / matched** fit, and the **Findings**, **Catalogue gaps** and **Reads**
+    columns are cut off at its right edge. Press **Expand** on the card, which opens the same table near full screen, to read them: **Findings** (*n new, n
+    updated*), **Reads** (*all read*, or *could not read: …* per read).
   - **Cloud federation** card: *on*, and *"Federated AWS, GCP and Entra credentials present a 300-second RS256 token
-    from this issuer."*, then the issuer, its key set, the subject format and the audiences. The issuer is
+    from this issuer. Turning it on asks you to confirm it's you."*, then the issuer, its key set, the subject format
+    and the audiences. The issuer is
     `<REGULAIT_PUBLIC_URL>/federation`, separate from the workload-identity issuer (`packages/shared/src/discovery/
     federation.ts`).
   - **Endpoint agent enrolment** card: the device table shows the enrolled device as a pseudonym (`psn:…`), its
@@ -124,9 +143,10 @@ UI: `apps/web/src/views/admin/governance/DiscoverySourcesPage.tsx`, `FederationC
 - **Action:**
   1. Point at the **Sources** table, row by row: the GitLab group, the AWS sandbox account, the Azure subscription and
      the endpoint agent source.
-  2. On the AWS row, point at the **Credential** column: **federated**. Then scroll to **Cloud federation**.
-  3. On the GitLab row, point at the **Credential** column: **static**. Say why (below).
-  4. In **Recent runs**, point at the latest run of each source: *succeeded*, observed / matched, findings.
+  2. On the AWS row, point at the **Credential** column: **Federated**. Then scroll to **Cloud federation**.
+  3. On the GitLab row, point at the **Credential** column: **Static key**. Say why (below).
+  4. On **Recent runs**, press **Expand** and point at the latest run of each source: *succeeded*, observed / matched,
+     findings. Close the expanded view.
   5. Do **not** press **Run now** live. A scan takes longer than the beat, and the LIVE path never waits on one.
 - **Say:** "Every source starts off. Turning one on, or widening what it scans, asks the admin to confirm it's them,
   and is audited. The cloud accounts are read with no stored secret: AWS and Azure trust RegulAIt's own token issuer
@@ -144,7 +164,9 @@ UI: `apps/web/src/views/admin/governance/DiscoverySourcesPage.tsx`, `FederationC
   - *Acme Bank MDM inventory (demo dataset)*, an MDM export imported through the endpoint-inventory import route;
   - *Acme Bank laptops (endpoint agent) (demo dataset)*, the endpoint agent, upload-fed.
 
-  So the posture sentence reads *"Active discovery scans 5 enabled source(s), read-only: …"*. The GitLab, AWS and
+  So the first figure reads **5 of 5** and the posture sentence *"Active discovery scans 5 enabled source(s), read-only:
+  …"*. The AWS and Azure rows also show **Write scope unverified** beside **Federated**, and the same two sources are
+  listed above the Sources table with *write scope unverified* (seen in the 2026-10-21 pack). The GitLab, AWS and
   Azure runs are **recorded runs**, replayed through the real discovery worker with no call to the provider. The
   screen does not say so: **Reads** shows *all read*, as for a live run, and the only marker is the *(demo dataset)*
   suffix on each source name. So say it: "on this prepared copy the three network scans are recorded replays through
@@ -160,42 +182,51 @@ UI: `apps/web/src/views/admin/governance/DiscoverySourcesPage.tsx`, `FederationC
 ### S2. Findings, sightings and coverage — Ada — 3 minutes
 UI: `ShadowAiPage.tsx`, `DiscoverySightings.tsx`, `discoverySourcesModel.ts` (`sightingLines`).
 
-- **URL:** `/ui/admin/shadow-ai` (navigation: **Shadow-AI discovery**; or the **Shadow-AI discovery** link in the
-  Active discovery card).
-- **Screen:**
-  - Header **Shadow-AI discovery**: *"Inventory ungoverned LLM usage from evidence you already have — and pull it into
-    governance."*
-  - The coverage sentence under it, verbatim from the product: *"Discovery has analyzed n of 4 evidence classes.
-    Active discovery scans n enabled source(s), read-only: … Every finding below derives from evidence you supplied or
-    from a source an admin enabled, so this inventory reduces shadow AI — it does not prove its absence."*
-  - Figures: **Critical (leaked credential)**, **High (observed model traffic)**, **Medium / low**, **Evidence classes
-    supplied**.
-  - **Inventory** table, *"Every row is a lead for triage, not a verdict."* Columns: **Severity · Subject · Provider ·
-    Sources · Confidence · Observations · Sightings · Last seen · Governed replacement · Disposition**, and per row
-    **Register as use case · Triage · Remediation plan**.
-  - **Coverage scorecard**, *"Gaps are shown, never papered over."*: **Evidence class · Supplied · Imports · Rows ·
-    What it sees · What it misses**.
+- **URL:** `/ui/admin/shadow-ai` (sidebar: **Discovery** → **Shadow-AI discovery**; or **Open the findings** in
+  the three-step strip, or the **Shadow-AI discovery** link in the Active discovery card).
+- **Screen** (`ds-s2-findings`, `ds-s2d-coverage`):
+  - Header **Shadow-AI discovery**: *"AI use that nobody registered, found in evidence you already hold. Triage each
+    lead and bring it into governance."* On the right, **Discovery sources** and **Import evidence**.
+  - Tabs: **Findings · n** (open by default), **Coverage**, **Import evidence**, **Detection catalogue**, **Import
+    history**.
+  - On **Findings**, the callout **What this can see.**, verbatim from the product: *"Discovery has analyzed n of 4
+    evidence classes. Active discovery scans n enabled source(s), read-only: … Every finding below derives from
+    evidence you supplied or from a source an admin enabled, so this inventory reduces shadow AI — it does not prove
+    its absence. …"*, ending with the link **See coverage**.
+  - Figures: **Critical** (*Leaked credential*), **High** (*Observed model traffic*), **Medium or low** (*Looser
+    signals to check*), **Evidence classes supplied** (*n / 4*).
+  - **Inventory** card, *"Every row is a lead for triage, not a verdict."*, with the status chips **All · Open ·
+    Confirmed · Closed** (each with its count), **Show all** and **Expand**. Columns: **Severity · Subject (the
+    provider under it) · Evidence · Confidence · Seen · Where seen · Status · Next step**. **Next step** holds **Plan
+    remediation**, **Triage** and **Register as use case**.
+  - The card shows about four rows and scrolls inside itself, and at 1440 px the **Next step** column is cut off at
+    its right edge (finding F6). Press **Expand** to see every row and column at once; close it before the next step.
+  - **Coverage** tab: one card per import class (**Egress logs**, **Code scan**, **SaaS export**, **Self-reported**),
+    each **Supplied** or **Missing**, with *n imports · n rows*, **Sees:** and **Misses:**, and **Import this
+    evidence** on a missing one. Caption: *"Gaps are shown, never papered over."*
 - **Action:**
   1. Read the coverage sentence aloud, last clause included.
-  2. Walk three rows, one per family, using the **Sources** and **Sightings** columns:
-     - **a repository finding** (Sources *Repo scan*): its sighting line reads `path:line @commit` and, where the
+  2. Press **Expand** on the Inventory card. Walk three rows, one per family, using the **Evidence** and **Where
+     seen** columns. **Where seen** is folded behind a count (*▸ n places*): open it to show the sighting lines.
+     - **a repository finding** (Evidence *Repo scan*): its sighting line reads `path:line @commit` and, where the
        repository's templates name AI keys, *presence signatures: …*, then *by psn:…* (the commit author's
        pseudonym);
-     - **a cloud finding** (Sources *Cloud inventory* or *Cloud audit log*): the AI service the account runs, and the
+     - **a cloud finding** (Evidence *Cloud inventory* or *Cloud audit log*): the AI service the account runs, and the
        calling principal as a pseudonym;
-     - **the device finding** (Sources *Endpoint agent*, or *Endpoint inventory* for an MDM row): the AI tool on the
+     - **the device finding** (Evidence *Endpoint agent*, or *Endpoint inventory* for an MDM row): the AI tool on the
        laptop, the device user as a pseudonym.
-  3. Click one `psn:…` link. It opens **Discovery sources** with the pseudonym prefilled in **Reveal a pseudonym**. Do
-     **not** press **Reveal** (it asks for a step-up and is audited). Go back.
-  4. Point at the **Coverage scorecard**: the import classes that are *off*, with what each would see and what it
-     misses.
+  3. Click one `psn:…` link in an open **Where seen**. It opens **Discovery sources** with the pseudonym prefilled in
+     **Reveal a pseudonym** (half-way down the page, beside **Recent runs**). Do **not** press **Reveal** (it asks for
+     a step-up and is audited). Go back.
+  4. Click **See coverage** (or the **Coverage** tab): the import classes that read **Missing**, with what each would
+     see and what it misses.
 - **Say:** "Detection is a signal, not proof. Each row says what each scanner saw and where: a path and a line in a
   repository, a service in an account, a tool on a laptop. People are pseudonyms by default; revealing a name is a
   step-up and lands in the audit log. And the page tells you what it could not see. An inventory that hides its gaps
   is worse than none."
-- **Note for the presenter:** the scorecard rows are the four *import* classes (egress logs, code scan, SaaS export,
+- **Note for the presenter:** the coverage cards are the four *import* classes (egress logs, code scan, SaaS export,
   self-reported). The scanned sources are named in the coverage sentence, not as scorecard rows, so **Evidence classes
-  supplied** can read low while four sources are scanned. If asked, say exactly that.
+  supplied** can read low (*1 / 4* on FALLBACK) while five sources are scanned. If asked, say exactly that.
 - **LIVE:** real findings only, from the T-24h scans of what the infrastructure lane planted (repositories that use
   AI SDKs, Bedrock usage with CloudTrail, one Azure OpenAI deployment, the endpoint device). No subject, provider or
   count is promised here: choose the three rows to walk at the T-24h check, from what is on screen.
@@ -214,9 +245,10 @@ UI: `ShadowAiPage.tsx`, `DiscoverySightings.tsx`, `discoverySourcesModel.ts` (`s
     environment-variable fact are dropped by the gateway and only counted: nothing names them on screen.
   - The four imported *Saas export* rows of the 10-05 demo (*Credit Team LLM Prototype*, *ChatGPT Web*, *Claude
     Web*, *OpenAI API Testing*) are still seeded by `demo:intake` and appear in the same table.
-- **Source labels:** **Repo scan**, **Cloud inventory**, **Cloud audit log**, **Endpoint inventory**, **Endpoint
-  agent** and **Saas export** are what the generic label formatter produces for those evidence kinds (`humanize` in
-  `apps/web/src/api/format.ts`); check on screen at rehearsal.
+- **Evidence labels:** the 2026-10-21 pack shows **Repo scan** and **SaaS export** in the **Evidence** column. The
+  other families' labels (*Cloud inventory*, *Cloud audit log*, *Endpoint inventory*, *Endpoint agent*) are the
+  Scanner kinds table's wording and are **to confirm** in the expanded Inventory at rehearsal (the pack's Inventory
+  shot shows its first four rows only).
 
 ### S3. Remediation plan → workflow → second approver — Ada, then Morgan — 3.5 minutes
 UI: `ShadowRemediationPanel.tsx`, `apps/web/src/views/workflows/WorkflowDetailPage.tsx`,
@@ -228,32 +260,43 @@ UI: `ShadowRemediationPanel.tsx`, `apps/web/src/views/workflows/WorkflowDetailPa
   - **FALLBACK:** `gitlab:acme-bank-demo/credit-memo-assistant`. `demo:prepare` has **already** started its
     remediation workflow as Ada (environment `staging`), finished planning and submitted the plan, so it waits on
     Morgan's sign-off when the demo starts (`ensureRemediation`; `demo:check` asserts Morgan is the one approver and
-    not the initiator). On the fallback, skip Ada's steps below: open the row's **Remediation plan** (it shows the
-    link), say "this one was started and submitted during preparation", open the workflow at **waiting for
-    sign-off**, and go straight to Morgan.
+    not the initiator). On the fallback, skip Ada's steps below: press the row's **Plan remediation** (the panel
+    shows the link; scroll the panel's body to it), say "this one was started and submitted during preparation",
+    open the workflow at **waiting for sign-off**, and go straight to Morgan.
 - **Action — Ada, the plan** (`/ui/admin/shadow-ai`):
-  1. On the chosen row, click **Remediation plan**. The **Remediation plan** section opens under the table: the
-     subject, provider and severity badges, and **governed replacement: …** or **no governed replacement
-     registered**.
-  2. Read the numbered steps. Each has a reason; a step that cannot run yet shows **blocked** with why.
+  1. On the chosen row, in **Next step**, click **Plan remediation**. The **Remediation plan** panel opens on the
+     right (`ds-s3a`, `ds-s3b`): the subject as its title, the provider and confidence badges, and **no governed
+     replacement registered** (or the governed replacement).
+  2. Read the numbered steps. Each has a reason; a step that cannot run yet shows **Blocked** with why. Then **Who
+     acts next** with the **Separate approver** badge: *"By default, a plan-only stage runs first and changes nothing.
+     Then a human sign-off."*
   3. Point at *"The default remediation workflow (a plan-only stage, then a human sign-off) is set up when the first
-     one starts."* (shown until the first one starts).
-  4. Fill **Change description** (prefilled from the plan) and **Environment**: type `staging` **before** drawing
-     attention to the field, because its placeholder reads *"for example production"* (`ShadowRemediationPanel.tsx`).
+     one starts."* if it shows (only until the first one starts).
+  4. Scroll the panel's body to the form. Fill **Change description** (prefilled from the plan) and **Environment**:
+     type `staging` **before** drawing attention to the field, because its placeholder reads *"for example
+     production"* (`ShadowRemediationPanel.tsx`).
      The environment must be one an admin already gave a meaning to on a deploy target or assignment rule
      (`shadow-ai-remediation.ts`); a `demo:prepare`d database has `staging`. Never type `production`: nothing in this
      demo is production. (Which environment the live instance has configured: check at T-24h.)
-  5. **Start remediation workflow…** → the dialog **Start a remediation workflow?** → **Start and link**.
-  6. The status line: *"Workflow xxxxxxxx started and linked; the finding is now confirmed"*, then *"Linked to
-     workflow …. The loop closes when the next call from … appears in the audit log and usage ledger."* The row's
-     **Disposition** now reads **confirmed**.
+  5. **Start remediation workflow…**, pinned at the panel's foot → the dialog **Start a remediation workflow?** →
+     **Start and link**.
+  6. The status line, in the panel's body: *"Workflow xxxxxxxx started and linked; the finding is now confirmed"*, then
+     *"Linked to workflow …. The loop closes when the next call from … appears in the audit log and usage ledger."*
+     Scroll the panel's body to it: the panel stays scrolled at the form, so the line is below it (the 2026-10-21 pack
+     shows the form, not the line, finding F22). The **Confirmed** chip's count goes up by one and the row's
+     **Status** reads **Confirmed**. **Close** the panel.
 - **Action — Ada, the workflow** (`/ui/workflows`, open the new workflow):
-  1. The **Plan only** card: *"this change is in forced planning — nothing builds from it yet."* Click **Finish
-     planning**.
+  1. The workflow's title is the full change description (finding F8). The **Plan only** card, badge **planning**:
+     *"this change is in forced planning — nothing builds from it yet."* Click **Finish planning**.
   2. The **Submit shadow_ai_remediation_plan** card: paste the plan's steps into the box, **Submit for sign-off**.
   3. The card now reads **waiting for sign-off** — *"awaiting … — it is in their inbox"*.
-- **Action — Morgan** (Profile C, `/ui/inbox`): the row labelled **Sign-off** (the stage id `signoff`, as the inbox
-  words it). **Approve**. Back in Profile A, reload the workflow: the sign-off stage is complete.
+- **Action — Morgan** (Profile C, `/ui/inbox`): the row with the **Sign-off** chip and the workflow's title (the
+  long *"Pull … into governance — shadow-AI finding …"* text, finding F8). Click its **Review**: the item opens in
+  the panel on the right, with *"Workflow · requested by Ada Admin"* and the submitted plan folded under
+  *Submitted: Shadow AI remediation plan (v1)* (open it to show the plan). The pinned foot has **Reason (optional)**,
+  **Deny** and **Approve**. Press **Approve** (her authenticator code if asked). The item leaves the list and the
+  count drops by one (*n waiting on you*). Back in Profile A, reload the workflow: status **completed**, all four
+  pipeline stages done.
 - **Say:** "Nothing changed governed state yet; it was a plan. The plan runs through the same workflow engine as every
   other change, so its assignment rules and compliance stages apply. It sits in plan-only until a person says planning
   is done, and the sign-off is structurally someone else's: our security lead signs it, and the person who started it
@@ -276,7 +319,7 @@ UI: `IntakeWizardPage.tsx` (the 10-05 beat 1B, unchanged).
 
 - **Action:** back on `/ui/admin/shadow-ai`, on the same row, click **Register as use case**.
 - **URL:** `/ui/admin/governance/intake?source=shadow-ai&findingId=…&title=…&description=…` (the link builds it).
-- **Screen:** **Register AI use case**, the stepper **Describe → Classify → Suggestions → Questionnaire → Link stack →
+- **Screen** (`ds-s4`): breadcrumb *AI Governance / Register AI use case*, **Register AI use case**, the stepper **Describe → Classify → Suggestions → Questionnaire → Link stack →
   Review**, **Similar use cases** on the right, and the banner *"Prefilled from a shadow-AI finding — its name and
   observed use only. Answer the classification questions yourself; the finding does not establish them."* The name
   is *Govern <subject>* (on FALLBACK, *Govern gitlab:acme-bank-demo/credit-memo-assistant*); every screening answer
@@ -302,19 +345,33 @@ the day.
 
 ### G1. The use-case record and risks — Ada — 2 minutes (10-05 beat 2A)
 - **URL:** **Open the use-case workspace** after submit → `/ui/admin/governance/use-cases/<id>`.
-- **Screen:** status **under review**, the tier, the lifecycle tracker; the tabs include Overview, Frameworks, Risks,
-  Stack, Dependencies, Approvals, Audit, Decision path, Decision records, Incidents and Feedback.
+- **Screen** (`ds-g1b`): the dark header band with *AI use cases / <name>*, the **AI USE CASE** label, and the chips
+  **Status**, **EU AI Act** tier, **Approval valid until** (once approved) and **Owner**; **Open intake** on the
+  right. Status **under review** right after submit. The **Overview** tab holds the **Lifecycle tracker** (*Proposed
+  → Under review → Approved → Monitoring*, then the activity table) and, once approved, **Conditions of approval**
+  with **Mark met** and **Waive**.
+- **Tabs**, in four captioned groups: **Overview**; *Assessment*: **Frameworks**, **Risks**, **Stack**,
+  **Dependencies**; *Evidence*: **Decision records**, **AI BOM**, **Audit**; *Activity*: **Approvals**, **Decision
+  path**, **Incidents**, **Feedback**. Counts sit under some tab names (**Risks**, **Audit**, **Approvals**).
 - **Action:** **Stack** (the agent card, its model card **Not signed off**, the steward line). **Risks** → **Add risk
   from library**, choose likelihood and impact, **Assess and add**.
+- **Audit tab** (`ds-g1c`, #465): **Recent use-case audit evidence** (**When · Event · Effect · Reason**). The count
+  under **Audit** is the use case's true total; when there are more rows than shown, the card says *"Showing the
+  newest n of N rows."* An admin sees **Open this use case's full audit trail**, which opens **Audit log** filtered to
+  this use case (`ds-g1d`): *"Showing the audit trail of one AI use case, <id>. The CSV export covers the same rows."*
+  and **Show every row**. A non-admin (Avery) sees a note that the full trail is open to administrators instead of
+  the link.
 - **Change from 10-05:** the use case is now the one discovered in Act 1. Whether its record or **Audit** tab shows
-  the link back to the finding is **to confirm at rehearsal**; if it does, point at it in one sentence: "the record
-  remembers where it was found".
+  the link back to the finding is **to confirm at rehearsal** (the pack's record is the 10-05 use case, not the one
+  S4 registers); if it does, point at it in one sentence: "the record remembers where it was found".
 
 ### G2. Independent review — Avery — 2 minutes (10-05 beat 2B)
 - **URL:** `/ui/inbox` (Profile B): *AI use case sign-off · Govern <subject> — requested by Ada Admin* → **Review**.
-- **Action:** **Approve with conditions**, one condition with **Before go-live (holds deployment)**, then **Approve
-  with conditions**. Back in Profile A: **approved**, **Approval valid until**, **Conditions of approval** with **Mark
-  met**.
+- **Action:** the row's **Review** opens **Review use case sign-off** (caption *Open task*) as a panel on the right
+  (`ds-g2b`); the evidence scrolls in its body. Under **Decision**, choose the **Approve with conditions** card. Scroll
+  the body to **Conditions**: one condition, **Applies** → **Before go-live (holds deployment)**. Press **Approve with
+  conditions** in the pinned foot (beside **Cancel**). Back in Profile A, on the record: the **Approval valid until**
+  chip in the header, and **Conditions of approval** with **Mark met** on the **Overview** tab.
 
 ### G3. Deploy gate — 1.5 minutes (10-05 beat 2C)
 - **Expected:** `DENY` with two **BLOCK open_high_alert** lines for *Real-Time Fraud Detection Engine*, then `ALLOW`
@@ -330,13 +387,25 @@ the day.
   from a real run.
 
 ### G4. Trust dashboard — Ada — 1.5 minutes (10-05 beat 3A)
-- **URL:** `/ui/admin/governance/trust`. Point at the weakest axes, open the **security** drill-down.
+- **URL:** `/ui/admin/governance/trust` (breadcrumb *Overview / Trust & evidence*). The page has no tabs: point at
+  the weakest bars in **Evidence coverage by dimension** (on FALLBACK, **Safety 0%** and **Reliability 60%**), then
+  click the **Security** tile in **Dimension drilldown** (it opens on **Bias**): its badge (*measured* or
+  *unmeasured*) and the **Open · Mitigating · Accepted · Closed** counts.
 
 ### G5. Alerts and remediation — Ada, then Avery — 2 minutes (10-05 beat 3B)
-- **URL:** `/ui/admin/governance/alerts` → **Evaluate now**.
-- **Action:** the unowned-agent alert → **Acknowledge**; under **Remediation**, *"Make Dana Developer the owner of
-  …"*, choose **Avery** → **Propose…**; Avery approves in `/ui/inbox` (*Governance remediation · …*); Ada reloads: the
-  alert is **resolved**. Then one guidance-only remediation.
+- **URL:** `/ui/admin/governance/alerts` → **Evaluate now**. The tabs **Active · Acknowledged · Resolved** sit
+  above the **Alerts** card.
+- **Action:** click the unowned-agent alert's row: it opens in the panel on the right (`ds-g5b`; at 900 px and
+  below, a modal over the page, `ds-g5c`). Type the **Acknowledgement note — required and audited** in the pinned
+  foot, then **Acknowledge** (it stays disabled until the note is typed). In the panel's body, under **Remediation**,
+  *"Make Dana Developer the owner of …"*: choose **Avery** in **Independent approver** → **Propose…**. Avery opens
+  the item in `/ui/inbox` (*Governance remediation · …*) with **Review**; the panel should read *"No evidence attached
+  to this request."* (the evidence is the alert itself; **to confirm at rehearsal**, not in the pack) and Avery
+  presses **Approve** in its pinned foot. Ada reloads:
+  the alert is on the **Resolved** tab. Then one guidance-only remediation (its badge reads **Manual steps**).
+- **On the FALLBACK pack:** the CI pack runs after the 10-05 journeys, which already resolved the unowned-agent alert
+  (*Make Dana Developer the owner of …*, **Applied** in Remediation proposals). A database straight from `demo:prepare` still has it on
+  **Active**: check at rehearsal.
 - **Say (added for v3):** "Same rule as the shadow-AI plan: the platform runs only the approved action, and the
   approver is someone else."
 
@@ -347,11 +416,16 @@ the day.
 - **URL:** `/ui/admin/governance/regulatory`. One entry: the Digital Omnibus date move.
 
 ### G8. Evidence — Ada — 1 minute (10-05 beat 3E)
-- **URL:** `/ui/admin/audit` → **Download signed bundle**.
+- **URL:** `/ui/admin/audit` → **Download signed bundle** (top right, beside **Download CSV**). The page (`ds-g8`):
+  **Chain integrity** (*Not verified yet*, **Verify chain**), then **Entries**, newest first, then three folded
+  panels, each closed and showing its status: **Signed decision receipts**, **Anchor timestamps**, **Retention**. Open
+  one only if asked.
 - **Change from 10-05:** the audit trail now also holds the discovery acts: each source's creation and enabling
   (`discovery-source-created`, `discovery-source-enabled`, written by `apps/gateway/src/discovery-routes.ts`), the
-  remediation workflow and its sign-off. Say it in one sentence; do not open the bundle live. Filter the audit page so
-  those rows are in the bundle: **to confirm at rehearsal**.
+  remediation workflow and its sign-off. Say it in one sentence; do not open the bundle live. In the pack, Morgan's
+  sign-off (*Workflow:approval granted*) and her policy acknowledgement are the first rows. The page can now be
+  filtered to one object (`?objectType=…&objectId=…`, the G1 audit-tab link), and both downloads follow the filter;
+  which filter puts the discovery rows in the bundle is **to confirm at rehearsal**.
 
 ### Close — 0.5 minutes
 - **Say:** "We found it, we brought it in with a second person's sign-off, and we governed it, and every step is in one
@@ -370,9 +444,12 @@ re-run `demo:intake`), and WARNs when open incidents or feedback sit on the Real
   Knowledge Base Bot (owner Dana Developer, two timeline notes, one open corrective action due after the demo day).
   Medium and not serious, so it starts no clock and holds no deploy gate. For the 10-05 story, set **Status** to
   **All** and open the closed Customer Sentiment Analyzer incident.
-- **URL:** `/ui/feedback`. Ada's queue opens on **Open** and shows two items on the IT knowledge bot, both
+- **URL:** `/ui/feedback`. As an admin, Ada sees the tab **All feedback** (beside **Sent by me**); **Show** opens on
+  **Open** and lists two items on the IT knowledge bot, both
   acknowledged by its owner, Dana, and routed to Ada: a problem report (acknowledged) and an appeal against a refused
-  request (in review). The appeal was handed to Ada for an independent answer.
+  request (in review). The appeal was handed to Ada for an independent answer. A row's **Open** shows the item in a
+  dialog (*Appeal on Internal IT Knowledge Base Bot*); an incident opens on its own page from its reference
+  (*INC-…*).
 - **Why not the fraud engine:** G3 runs `demo:gate` on the Real-Time Fraud Detection Engine, and the gate counts every
   open alert on its use case. These records sit on another approved use case, and both items are acknowledged, so no
   lapsed feedback SLA or overdue action can add a line to the G3 printout (PR #461 review M1).
@@ -424,9 +501,12 @@ UI: `apps/web/src/views/admin/governance/ContentTrustPage.tsx`.
    already waiting on Morgan (see S3).
 2. **The hosted instance is unreachable:** play the scan recording for S1-S2, then continue on the laptop's local
    stack, which needs no network, or on the screenshot deck.
-3. **Everything is unreachable:** the screenshot deck (`apps/web/e2e/fallback-deck.mjs`, as in the 10-05 script).
-   The deck today covers the 10-05 beats only; the Shadow AI screens join it when the populated-state screenshot pack
-   lands (ADR-0197 work plan, P0). Say plainly these are screenshots from a real run.
+3. **Everything is unreachable:** the screenshot deck. Build it from the `demo-screens` artifact of the latest green
+   `Demo journey` run, unzipped into `apps/web/e2e/artifacts/demo-screens/`:
+   `node apps/web/e2e/fallback-deck.mjs --pack 2026-11-01 --dark --no-gate` (executed 2026-10-21). With the T-24h gate
+   capture, `--gate <path to real-gate.txt>` in place of `--no-gate` adds the G3 slide: **pending execution**. It writes one self-contained `fallback-deck-2026-11-01.html` with 30 slides in this script's order, S1-G10.
+   Keys: → / ← to move, **S** shows the Say line, **T** switches S1, S2 and S3a to dark. Built from run `39544572823` on
+   2026-10-21 with `--no-gate` (no captured gate output yet). Say plainly these are screenshots from a real run.
 
 A failed live call never leaves an empty screen (ADR-0197 decision 7): move to the next path at once rather than
 retrying in front of the audience.
