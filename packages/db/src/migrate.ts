@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { getTableColumns, sql } from "drizzle-orm";
 import type { Db } from "./index.js";
@@ -8,7 +10,74 @@ export const MIGRATION_AUDIT_ACTOR = "00000000-0000-0000-0000-000000000000";
 
 export async function runMigrations(db: Db, migrationsFolder: string) {
   await migrate(db, { migrationsFolder });
+  await buildConcurrentIndexes(db, migrationsFolder);
   await drainMigrationAuditOutbox(db);
+}
+
+/**
+ * Indexes built with CREATE INDEX CONCURRENTLY, so a build never blocks writes to the table (migration 0210, owner
+ * decision of 2026-10-21 on #453). The drizzle migrator runs every pending file in ONE transaction and CONCURRENTLY
+ * cannot run inside a transaction, so the statement cannot live in a migration file. Each entry's migration file is
+ * the journalled marker; once that file is in the folder's journal (and so applied by `migrate`), `runMigrations`
+ * builds the index here, outside any transaction, on a pool connection in autocommit.
+ *
+ * Add to this list only an index; anything else belongs in a migration file.
+ */
+export const CONCURRENT_INDEXES: ReadonlyArray<{ migration: string; name: string; create: string }> = [
+  {
+    // `GET /v1/audit?objectType=&objectId=` (and the CSV export) and the use-case overview's trail and count
+    migration: "0210_audit_log_object_at_idx",
+    name: "audit_log_object_at_idx",
+    create: `CREATE INDEX CONCURRENTLY IF NOT EXISTS "audit_log_object_at_idx" ON "audit_log" ("object_type", "object_id", "at" DESC)`,
+  },
+];
+
+/** the tags of the folder's journal: the migrations `migrate` has applied from this folder */
+function journalTags(migrationsFolder: string): Set<string> {
+  const journal = JSON.parse(readFileSync(path.join(migrationsFolder, "meta", "_journal.json"), "utf8")) as {
+    entries: Array<{ tag: string }>;
+  };
+  return new Set(journal.entries.map((e) => e.tag));
+}
+
+/** "valid", "invalid" (a CONCURRENTLY build that failed part way leaves one) or "missing" */
+async function indexState(db: Db, name: string): Promise<"valid" | "invalid" | "missing"> {
+  const res = await db.execute(sql`
+    select i.indisvalid as "valid" from pg_index i
+      join pg_class c on c.oid = i.indexrelid
+      join pg_namespace n on n.oid = c.relnamespace
+     where c.relname = ${name} and n.nspname = current_schema()`);
+  const row = (res as unknown as { rows: Array<{ valid: boolean }> }).rows[0];
+  return row === undefined ? "missing" : row.valid ? "valid" : "invalid";
+}
+
+/**
+ * Build each `CONCURRENT_INDEXES` entry whose migration is journalled and that is not already a VALID index. A valid
+ * index costs one catalogue read and no DDL. An INVALID one (a build that was interrupted) is dropped concurrently and
+ * built again, since `IF NOT EXISTS` alone would accept it. A folder whose journal stops before the entry's migration
+ * builds nothing. Never falls back to a plain CREATE INDEX: an error propagates and fails the run.
+ */
+export async function buildConcurrentIndexes(db: Db, migrationsFolder: string): Promise<string[]> {
+  const applied = journalTags(migrationsFolder);
+  const built: string[] = [];
+  for (const ix of CONCURRENT_INDEXES) {
+    if (!applied.has(ix.migration)) continue;
+    const state = await indexState(db, ix.name);
+    if (state === "valid") continue;
+    if (state === "invalid") await db.execute(sql.raw(`DROP INDEX CONCURRENTLY IF EXISTS "${ix.name}"`));
+    try {
+      await db.execute(sql.raw(ix.create));
+    } catch (err) {
+      // a second process booting at the same moment may win the build; its valid index is the outcome wanted
+      if ((await indexState(db, ix.name)) !== "valid") throw err;
+    }
+    // IF NOT EXISTS also skips an index another session is still building, so "returned" must mean "usable"
+    if ((await indexState(db, ix.name)) !== "valid") {
+      throw new Error(`index ${ix.name} is not valid after CREATE INDEX CONCURRENTLY (another session may still be building it); run the migrations again`);
+    }
+    built.push(ix.name);
+  }
+  return built;
 }
 
 type OutboxRow = {
