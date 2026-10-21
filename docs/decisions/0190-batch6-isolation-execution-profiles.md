@@ -982,6 +982,34 @@ Open questions I4 leaves (for the owner or the master):
 6. **gVisor's sidecar binaries.** The pin covers the `runsc` binary the daemon names; the release's `gvisor-bin/`
    sidecars (for example `gvisor_sentry`) are not hashed by the executor yet.
 
+**gVisor CI job (2026-10-16, follow-up to open questions 3 and 6).** `.github/workflows/gvisor.yml` installs the pinned
+release on a GitHub-hosted `ubuntu-24.04` runner and runs the integration suite there. It fails if any test is skipped.
+The tarball is checked by the I0 fetch script. `runsc` and exactly the pinned `gvisor-bin/` sidecars are checked
+against `init-pin.ts`, which now also pins the sidecars (`RUNSC_RELEASE_SIDECARS`; the executor still hashes only
+`runsc` at placement time). The files are installed at the default `REGULAIT_GVISOR_HOST_DIR` layout and registered in
+`daemon.json` with the restricted profile's flags. Negative controls: plain `runc`, and a `runsc` that is not the
+pinned release. Run 38827598419 passed both negative controls for real (each was refused before any sandbox
+started). The positive control failed: the backend refused, failing closed, because the init printed nothing. The
+first runs found the blocker behind that failure, so **L2 is still not verified**:
+
+- At `release-20261005.0`, gVisor's OCI seccomp conversion maps every `SCMP_ACT_ERRNO` rule to `EPERM` and ignores
+  `errnoRet` (`runsc/specutils/seccomp/seccomp.go`: "runc always returns EPERM").
+- Docker's default profile, which `RuntimeDefault` gives the sandbox under `--oci-seccomp`, answers `clone3` with
+  `errnoRet: 38` (`ENOSYS`) so that glibc falls back to `clone`. Under gVisor it gets `EPERM` instead, glibc (2.34 and
+  later; the trixie base has 2.41) does not fall back, and `pthread_create` fails. Node aborts at start
+  (`uv_thread_create` assertion), so the canary never prints its probes.
+- Evidence, CI runs 38826700988 and 38827133036:
+  - the runsc debug log shows `Syscall 435: denied by seccomp`;
+  - with `--security-opt seccomp=unconfined` and every other restricted argument unchanged, the canary ran under
+    gVisor (`4.19.0-gvisor`). Each observation except seccomp was what the profile requires: uid 10001, no
+    capabilities, `no_new_privs`, read-only root, no egress or DNS, only `lo`, and the memory, nproc and nofile limits.
+
+The fix is a security decision, so it is left open for the owner or the master. Options include:
+- an executor-shipped `Localhost` profile for gVisor that lets `clone3` reach the Sentry. Its flags cannot be filtered
+  by seccomp, so this loosens the namespace restriction that `seccomp_enforced` stands for;
+- a newer gVisor that honours `errnoRet`;
+- a base image whose libc does not use `clone3`.
+
 ## I4 follow-ups: the executor's TLS front and repo hygiene (2026-10-16)
 
 This closes I4 open question 5 (an https gateway address on `engines`). No migration.
@@ -2594,3 +2622,61 @@ superseded; its text is left as it was. No migration.
 2. If the bot is to open PRs, allow GitHub Actions to create pull requests (repository settings, Actions, Workflow
    permissions). Without it, `gh pr create` fails and the publish artifact stays recorded only in the run.
 3. Start CI on each bot PR (it is opened with `GITHUB_TOKEN`), review it, and release it through the master as usual.
+
+## As built: gVisor re-pinned to release-20261012.0, L2 verified in CI (2026-10-20, PR #385)
+
+This resolves the clone3 blocker recorded under "gVisor CI job (2026-10-16)" by the second option listed there: a newer
+gVisor that honours `errnoRet`. No migration, no new dependency, no profile change.
+
+1. **The pin (I0 process, amendment E).** `release-20261012.0`, Apache-2.0, from the official release bucket
+   (`storage.googleapis.com/gvisor/releases/release/20261012.0/x86_64/`); upstream tag object `2fda77ca`, commit
+   `60faa657ca99f3398e04c8dbc580a848df20f2f2`. The tarball was checked against the published `.sha512`, extracted, and
+   every file hashed. `runsc --version` prints `release-20261012.0`. `init-pin.ts` pins `runsc` and the same five
+   `gvisor-bin/` sidecars; `fetch-gvisor.sh` pins the new tarball sha512; `spikes/isolation-i0/THIRD_PARTY.md` holds
+   the full record and marks `release-20261005.0` retired. The tarball is about 40% smaller than the old one
+   (100743091 bytes against 166822039): upstream deleted the embedded-binary fallback in this window (commit
+   `dad1591f`, PR #15360).
+2. **Seccomp review of the release (read at the tag, source and diffs).**
+   - **`7be4160a`, "Honor errnoRet in OCI seccomp profiles" (in this release, not in `release-20261005.0`).**
+     `convertAction` now takes the rule's `errnoRet` (and the profile's `defaultErrnoRet` for the default action)
+     for `SCMP_ACT_ERRNO` and `SCMP_ACT_TRACE`, ignores it for every other action as runc does, and keeps EPERM where
+     none is set. A value above 65535 is REJECTED when the program is built (the sandbox does not start), never
+     truncated, so an `errnoRet` can no longer turn a deny into an allow by wrapping to 0. Effect on our assumptions:
+     - `RuntimeDefault` under `--oci-seccomp` now behaves as under runc: `clone3` gets `ENOSYS` and glibc falls back to
+       `clone`, so Node starts. The deny set is unchanged; only the errno a denied call sees changes. `seccomp_enforced`
+       still holds (the filter is still compiled into the Sentry; the out-of-range case fails closed).
+     - Docker's default profile sets `defaultErrnoRet: 1` (EPERM), so the default action's errno is unchanged.
+   - **`1b22783b`, "specutils: stop importing the OCI seccomp compiler" (in this release).** A move of the static
+     lists `runsc features` reports (actions, operators, architectures, flags) from `runsc/specutils/seccomp` into
+     `runsc/specutils/seccomp.go`. `BuildProgram` and `convertAction` are untouched and stay in the package `runsc/boot`
+     uses. **No effect** on how a profile is compiled or enforced; it only stops the shim and the checkpoint gofer from
+     linking the Sentry's syscall tables.
+   - **`176f861b`, "Handle SECCOMP_RET_LOG in the sentry" (already in `release-20261005.0`, so not new to us).**
+     `SCMP_ACT_LOG` now maps to a Log action that the Sentry logs at debug level and then EXECUTES, as Linux does.
+     Before it, a `SECCOMP_RET_LOG` result killed the thread with SIGSYS. Effect: none on the shipped profiles. Neither
+     Docker's default profile nor any shipped execution profile uses `SCMP_ACT_LOG` (no `SCMP_ACT_LOG` appears in
+     `packages/` or `apps/`). A `Localhost` profile (`docker-backend.ts`) that used `SCMP_ACT_LOG` would now ALLOW that syscall
+     under gVisor, as it does under runc. A log rule was never a denial, so `seccomp_enforced` does not change, but
+     whoever writes such a profile should not count it as one. The log goes to runsc's debug log only, which the
+     restricted flags do not turn on.
+3. **What CI proves (run 39399349958, head `b3f522f6`, `ubuntu-24.04`, kernel 6.17.0-1022-azure, Docker 28.0.4,
+   cgroup v2).** All of the following are required steps; none is diagnostic:
+   - the runsc binary and exactly the five pinned sidecars matched the pin before and after install;
+   - Node under runsc with Docker's default profile created a worker thread (`thread exit 0, kernel 4.19.0-gvisor`):
+     the clone3 → ENOSYS fallback works;
+   - `errnoRet` on a `mkdir`/`mkdirat` ERRNO rule: `38` gave `ENOSYS` under runc (the reference) and under runsc; no
+     `errnoRet` gave `EPERM` under runsc; `65536` was refused by runsc itself before the container ran
+     (`building seccomp program: invalid seccomp rules: errnoRet 65536 does not fit in 16 bits`);
+   - the runsc integration suite: 3 of 3 passed, 0 skipped. The positive control (the canary under the restricted
+     profile) passed the gateway's evaluator at `user_space_kernel`; both negative controls (plain runc, and an
+     unpinned runsc) were refused before any sandbox started. **L2 is verified on this CI runner.** It is not verified
+     on a customer host, on Kubernetes (`RuntimeClass`, I6), or on arm64.
+   - The probe report and the step outputs are now uploaded as the `gvisor-probe-report` artifact on every run, not
+     only on failure.
+4. **Found in passing, left open (not this slice's change).** runsc prints that `--sidecar-usage-policy`, one of the
+   restricted profile's runsc flags (`runscFlags`, INSTALL.md `daemon.json`), is deprecated, has no effect, and is
+   expected to be removed by 2027-01 (`runsc/config/flags_graveyard.go` at the tag). Sidecars must now always be
+   installed in `gvisor-bin/`, which is what `STRICT` asked for, so nothing is lost today. Once a release removes the
+   flag, every placement under a profile that passes it fails at sandbox start (fails closed), and the gateway's
+   `runtime_flags_missing` check would also need the flag dropped from the profile. Dropping it is a profile change
+   (a new profile digest), so it is left for the owner or the master, before the next re-pin.

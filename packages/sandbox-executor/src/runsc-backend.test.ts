@@ -170,7 +170,7 @@ const runscSide = (): ExecutorSideObservation => ({
 
 function verdict(init: InitObservation, side: ExecutorSideObservation, profile: ExecutionProfileBody = restricted) {
   const probes = probesFrom(init, side, { runtimeName: "runsc" }, requiredReportProbes(profile, "gvisor", "user_space_kernel"));
-  const report = buildReport({ kind: "self_test", identifier: ID, backend: { backend: "gvisor", runtimeVersion: "release-20261005.0", classes: ["user_space_kernel"] }, profileDigest: executionProfileDigest(profile), cls: "user_space_kernel", probes });
+  const report = buildReport({ kind: "self_test", identifier: ID, backend: { backend: "gvisor", runtimeVersion: "release-20261012.0", classes: ["user_space_kernel"] }, profileDigest: executionProfileDigest(profile), cls: "user_space_kernel", probes });
   return evaluateExecutorReport(report, { profile, profileDigest: executionProfileDigest(profile), backend: "gvisor", classesDeclared: ["user_space_kernel"] });
 }
 
@@ -253,7 +253,7 @@ function hostInit(calls: string[][]) {
   };
 }
 const RUNSC_HOST = "/usr/local/lib/gvisor/runsc";
-const PINNED = RUNSC_RELEASES["release-20261005.0"]!;
+const PINNED = RUNSC_RELEASES["release-20261012.0"]!;
 const dockerApi = async (p: string) => {
   if (p === "/info") return { Runtimes: { runsc: { path: RUNSC_HOST, runtimeArgs: runscFlags(restricted) } } };
   if (p.endsWith("/json")) return { Image: IMAGE, HostConfig: { Runtime: "runsc", NanoCpus: 1e9, Memory: 1024 ** 3, PidsLimit: 512 }, State: { OOMKilled: false } };
@@ -278,7 +278,7 @@ function hostOptions(over: Partial<ConstructorParameters<typeof RunscDockerBacke
   return {
     runtimeName: "runsc",
     canaryImage: IMAGE,
-    runtimeVersion: "release-20261005.0",
+    runtimeVersion: "release-20261012.0",
     initSource: INIT,
     initDir: path.join(dir, "volume"),
     initVolume: "regulait-init",
@@ -384,7 +384,7 @@ describe("the handshake with the real sandbox init (run on this host in place of
   it("attests user_space_kernel only, and refuses a sandbox at any other class before starting one", async () => {
     const calls: string[][] = [];
     const b = backend(calls);
-    expect(b.describe()).toEqual({ backend: "gvisor", runtimeVersion: "release-20261005.0", classes: ["user_space_kernel"] });
+    expect(b.describe()).toEqual({ backend: "gvisor", runtimeVersion: "release-20261012.0", classes: ["user_space_kernel"] });
     await expect(b.startCanary(restricted, "hardened_container")).rejects.toThrow(/user_space_kernel only/);
     await expect(b.start({ ...offer, workloadKind: "code_exec" }, restricted, "user_space_kernel")).rejects.toThrow(/mcp_stdio and engine_worker/);
     // I5: an engine task needs its input; a profile that declares none cannot run one

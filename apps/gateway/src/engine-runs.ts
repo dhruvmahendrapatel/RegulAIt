@@ -903,6 +903,8 @@ export const engineRunTestHooks: {
   beforeSweepEnd?: (runId: string) => Promise<void> | void;
   /** round 11: inside the cancel transaction, after the marker is written [86] (a throw here is a crash mid-cancel) */
   afterCancelMarked?: (runId: string) => Promise<void> | void;
+  /** a result's unlocked read found the run leased, before any locked end (the cancel-vs-result race) */
+  beforeResultTx?: (runId: string) => Promise<void> | void;
 } = {};
 
 /**
@@ -1976,30 +1978,38 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
       const runnerId = req.authCtx.engineRunnerId!;
       const [run] = await db.select().from(engineRuns).where(eq(engineRuns.id, runId));
       if (!run || run.runnerId !== runnerId) return reply.status(409).send({ error: "engine_run_not_leased" });
-      if (run.status !== "leased") {
-        // LATE: the run already ended (cancelled, timed out). A late envelope never upgrades it.
+      // LATE: the run already ended (cancelled, timed out). A late envelope never upgrades it; the
+      // refusal is audited and names how the run ended
+      const refuseLate = async () => {
+        const [ended] = await db.select({ status: engineRuns.status }).from(engineRuns).where(eq(engineRuns.id, runId));
+        const status = ended?.status ?? "unknown";
         await auditEngine(db, {
           userId: run.runAsUserId ?? NO_IDENTITY,
           objectType: "engine_run",
           objectId: run.id,
           ruleId: "engine-run-result-late",
           effect: "deny",
-          detail: { engineId: run.engineId, status: run.status, runnerId },
-          reason: `a result for ${run.engineId} run ${run.id} arrived after it ended ${run.status}; it was not ingested`,
+          detail: { engineId: run.engineId, status, runnerId },
+          reason: `a result for ${run.engineId} run ${run.id} arrived after it ended ${status}; it was not ingested`,
         });
-        return reply.status(409).send({ error: "engine_run_finished", status: run.status });
-      }
+        return reply.status(409).send({ error: "engine_run_finished", status });
+      };
+      if (run.status !== "leased") return refuseLate();
+      // the read above held no lock: a cancel (or a sweep) may end the run from here on. Every end below
+      // is decided under the run's row lock, and losing it is the same audited late refusal
+      await engineRunTestHooks.beforeResultTx?.(runId);
       // ADR-0190 I5 (recheck L3): a refusal this process holds for the run's task (not yet ended by the watchdog)
       // refuses the result now: the run ends not_run, nothing is ingested
       const heldRefusal = engineTaskRefusalOf(run.id);
       if (heldRefusal !== null) {
-        await finishEngineRun(db, run.id, ["leased"], {
+        const refused = await finishEngineRun(db, run.id, ["leased"], {
           status: "not_run",
           errorCode: ENGINE_TASK_ISOLATION_UNAVAILABLE,
           normalised: noResult("not_run"),
           cause: `engine_task_${heldRefusal}`.slice(0, 120),
           actorUserId: run.runAsUserId ?? NO_IDENTITY,
         });
+        if (!refused) return refuseLate();
         return reply.status(409).send({ error: "engine_task_refused", refusal: heldRefusal, status: "not_run" });
       }
       const parsed = engineResultEnvelopeSchema.safeParse(req.body);
@@ -2041,8 +2051,9 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
           requireLive: true,
           requirePlacedTask: true,
         });
-        if (failed?.status === "timeout") return reply.status(409).send({ error: "engine_run_timed_out", status: "timeout" });
-        if (failed && isUnplacedEnd(failed)) return unplacedReply(reply);
+        if (!failed) return refuseLate();
+        if (failed.status === "timeout") return reply.status(409).send({ error: "engine_run_timed_out", status: "timeout" });
+        if (isUnplacedEnd(failed)) return unplacedReply(reply);
         return reply.status(422).send({
           error: "engine_result_invalid",
           detail: problem,
@@ -2064,7 +2075,7 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
         requireLive: true,
         requirePlacedTask: true,
       });
-      if (!done) return reply.status(409).send({ error: "engine_run_finished" });
+      if (!done) return refuseLate();
       if (isUnplacedEnd(done)) return unplacedReply(reply);
       if (done.status === "timeout" && envelope!.status !== "timeout") {
         return reply.status(409).send({ error: "engine_run_timed_out", status: "timeout", detail: "the result arrived after the run's deadline or lease; it was not ingested" });

@@ -120,7 +120,7 @@ describe("migration 0191: warn retired (OWNER DECISION A), policy_unresolved (OW
     );
     const executor = await one<{ id: string }>(
       sql`insert into executors (workload_identity_id, name, backend, runtime_version, classes_declared)
-          values (${identity.id}, ${`iab-${randomUUID().slice(0, 8)}`}, 'gvisor', 'release-20261005.0', '["hardened_container", "user_space_kernel"]'::jsonb) returning id`,
+          values (${identity.id}, ${`iab-${randomUUID().slice(0, 8)}`}, 'gvisor', 'release-20261012.0', '["hardened_container", "user_space_kernel"]'::jsonb) returning id`,
     );
     const offer = await one<{ id: string }>(
       sql`insert into execution_offers (executor_id, workload_kind, required_class, required_by, enforcement, profile_digest, image_digest, expires_at)

@@ -477,11 +477,21 @@ export class RunnerClient {
   }
 
   async result(runId: string, envelope: EngineResultEnvelope, deadlineAt?: string): Promise<number> {
+    return (await this.resultAnswer(runId, envelope, deadlineAt)).status;
+  }
+
+  /**
+   * The result POST with how a refused run ended. PR #205 follow-up [101]: the STATUS is the answer (a
+   * 2xx body is never read): a 2xx means the gateway stored the result, whatever followed it on the
+   * wire, and a retry is safe either way (after a stored result it gets a definitive 409
+   * `engine_run_finished`). Only a 409 `engine_run_finished` refusal is read, for the status the run
+   * ended with: a cancel the gateway accepted first wins over the late result (`endedAs: "cancelled"`).
+   */
+  async resultAnswer(runId: string, envelope: EngineResultEnvelope, deadlineAt?: string): Promise<{ status: number; endedAs: string | null }> {
     const res = await this.authorized("lease", "POST", `/v1/engine-runner/runs/${runId}/result`, envelope, deadlineAt);
-    // PR #205 follow-up [101]: the STATUS is the whole answer here (the body is never read): a 2xx means
-    // the gateway stored the result, whatever followed it on the wire. A retry is safe either way: after
-    // a stored result it gets a definitive 409 `engine_run_finished`
-    return res.status;
+    if (res.status !== 409) return { status: res.status, endedAs: null };
+    const j = refusalOf(res) as { error?: unknown; status?: unknown };
+    return { status: res.status, endedAs: j.error === "engine_run_finished" && typeof j.status === "string" ? j.status : null };
   }
 
   /**
@@ -591,14 +601,16 @@ export async function postResultWithRetry(
   client: RunnerClient,
   runId: string,
   envelope: EngineResultEnvelope,
-  opts: { deadlineAt: string; retryBaseMs?: number; maxAttempts?: number },
+  opts: { deadlineAt: string; retryBaseMs?: number; maxAttempts?: number; onEnded?: (endedAs: string) => void },
 ): Promise<number | null> {
   const base = opts.retryBaseMs ?? 1000;
   const max = opts.maxAttempts ?? 8;
   for (let attempt = 1; attempt <= max; attempt++) {
     let status: number | null = null;
     try {
-      status = await client.result(runId, envelope, opts.deadlineAt);
+      const answer = await client.resultAnswer(runId, envelope, opts.deadlineAt);
+      status = answer.status;
+      if (answer.endedAs !== null) opts.onEnded?.(answer.endedAs);
     } catch {
       status = null;
     }
@@ -853,8 +865,11 @@ async function runLeased(
     // the heartbeat keeps running through the retries so the lease stays live
     // across a brief gateway outage; the work dir is kept until the gateway
     // gave a definitive answer
+    // the run's end as the gateway's refusal names it: a cancel it accepted before the result is the end
+    let endedAs = null as string | null;
     const status = await postResultWithRetry(client, lease.runId, envelope, {
       deadlineAt: lease.deadlineAt,
+      onEnded: (s) => (endedAs = s),
       ...(opts.retryBaseMs !== undefined ? { retryBaseMs: opts.retryBaseMs } : {}),
       ...(opts.maxResultAttempts !== undefined ? { maxAttempts: opts.maxResultAttempts } : {}),
     });
@@ -873,6 +888,8 @@ async function runLeased(
       keepWorkDir = retainDir === workDir;
       return { outcome: "undelivered", runId: lease.runId };
     }
+    // a cancel that won the race with this result: the run was cancelled, nothing was posted
+    if (status === 409 && endedAs === "cancelled") return { outcome: "cancelled", runId: lease.runId, status };
     return { outcome: envelope.status === "failed" ? "failed" : "posted", runId: lease.runId, status };
   } finally {
     clearInterval(interval);

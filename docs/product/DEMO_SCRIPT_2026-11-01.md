@@ -363,7 +363,9 @@ the day.
 
 ### G9. Accountability records — 1.5 minutes (10-05 beat 3F)
 The 10-05 beat, with work in progress on both screens (`demo:intake` seeds it; `demo:check` beat
-"3 Incidents and feedback").
+"3 Incidents and feedback"). The beat FAILs when an item routed to Ada is past its resolution SLA (resolve it, then
+re-run `demo:intake`), and WARNs when open incidents or feedback sit on the Real-Time Fraud Detection Engine, the G3
+`demo:gate` subject (records left by early #461 heads: close them, or re-prepare the database from main).
 - **URL:** `/ui/incidents`. The list opens on **Not closed** and shows the open, medium incident on the Internal IT
   Knowledge Base Bot (owner Dana Developer, two timeline notes, one open corrective action due after the demo day).
   Medium and not serious, so it starts no clock and holds no deploy gate. For the 10-05 story, set **Status** to

@@ -217,7 +217,7 @@ describe("PR #203 review round 2", () => {
     deadlineAt: new Date(Date.now() + 60_000).toISOString(),
     budgetUsd: null,
   };
-  function gateway(resultReplies: Array<number | "throw">) {
+  function gateway(resultReplies: Array<number | "throw">, refusal: unknown = {}) {
     const calls: string[] = [];
     let workDirSeenDuringRetry: boolean | null = null;
     let dir = "";
@@ -229,7 +229,7 @@ describe("PR #203 review round 2", () => {
       if (calls.length > 1 && dir) workDirSeenDuringRetry = existsSync(dir);
       const r = resultReplies.shift() ?? 200;
       if (r === "throw") throw new Error("ECONNRESET");
-      return { status: r, json: async () => ({}) };
+      return { status: r, json: async () => (r === 409 ? refusal : {}) };
     };
     const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http: withTokenEndpoint(http) });
     client.useKey(TEST_KEY);
@@ -255,6 +255,16 @@ describe("PR #203 review round 2", () => {
     const out = await runOnce(g.client, adapter(g), { engineId: "promptfoo", engineVersion: "0.123.1", imageDigest: `sha256:${"a".repeat(64)}`, workRoot: root, retryBaseMs: 1 });
     expect(out).toMatchObject({ status: 409 });
     expect(g.calls).toHaveLength(1);
+  });
+
+  it("a result refused because a cancel won the race is reported cancelled, never posted; a late result after a timeout is not", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "b5-retry-"));
+    const opts = { engineId: "promptfoo" as const, engineVersion: "0.123.1", imageDigest: `sha256:${"a".repeat(64)}`, workRoot: root, retryBaseMs: 1 };
+    const cancelled = gateway([409], { error: "engine_run_finished", status: "cancelled" });
+    expect(await runOnce(cancelled.client, adapter(cancelled), opts)).toMatchObject({ outcome: "cancelled", runId: lease2.runId, status: 409 });
+    expect(cancelled.calls).toHaveLength(1);
+    const timedOut = gateway([409], { error: "engine_run_finished", status: "timeout" });
+    expect(await runOnce(timedOut.client, adapter(timedOut), opts)).toMatchObject({ outcome: "posted", status: 409 });
   });
 
   /** a gateway whose starting heartbeat answers in order (then 200), with everything else accepted */
@@ -461,6 +471,14 @@ describe("PR #205 follow-up [101]: the sweep of every runner route for a swallow
 
   it("result: the status is the whole answer; a 2xx with a truncated body is still definitive (a retry would get 409 engine_run_finished)", async () => {
     expect(await clientAnswering(200, truncated).result("r", {} as EngineResultEnvelope)).toBe(200);
+  });
+
+  it("result: only a 409 engine_run_finished is read, for how the run ended (a cancel that won); anything else names nothing", async () => {
+    const env = {} as EngineResultEnvelope;
+    await expect(clientAnswering(409, async () => ({ error: "engine_run_finished", status: "cancelled" })).resultAnswer("r", env)).resolves.toEqual({ status: 409, endedAs: "cancelled" });
+    await expect(clientAnswering(409, truncated).resultAnswer("r", env)).resolves.toEqual({ status: 409, endedAs: null });
+    await expect(clientAnswering(409, async () => ({ error: "engine_run_timed_out", status: "timeout" })).resultAnswer("r", env)).resolves.toEqual({ status: 409, endedAs: null });
+    await expect(clientAnswering(200, async () => ({ error: "engine_run_finished", status: "cancelled" })).resultAnswer("r", env)).resolves.toEqual({ status: 200, endedAs: null });
   });
 });
 

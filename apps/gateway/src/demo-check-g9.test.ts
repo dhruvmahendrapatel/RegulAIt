@@ -5,7 +5,7 @@
  * pinned against a database by zz-c6-demo-intake-seed.test.ts and zz-c11-demo-check.test.ts.
  */
 import { describe, expect, it } from "vitest";
-import { checkG9Records, G9_BEAT } from "./demo-check-lib.js";
+import { checkG9Records, DEMO_GATE_SUBJECT_USE_CASE, G9_BEAT } from "./demo-check-lib.js";
 import { DEMO_OPEN_ACCOUNTABILITY_USE_CASE, DEMO_OPEN_ACTION_NOT_DUE_BEFORE, DEMO_OPEN_INCIDENT_TITLE } from "./demo-intake-seed-lib.js";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -19,7 +19,11 @@ const DANA = "00000000-0000-4000-8000-00000000000d";
 const incident = (over: Json = {}): Json => ({
   id: "inc-1", ref: "INC-0002", title: DEMO_OPEN_INCIDENT_TITLE, status: "open", severity: "medium", ownerUserId: DANA, ownerName: "Dana Developer", ...over,
 });
-const item = (kind: string, status: string, ownerUserId: string = ADA): Json => ({ id: `${kind}-${status}`, kind, status, ownerUserId });
+const UC4 = "00000000-0000-4000-8000-0000000000c4";
+const UC6 = "00000000-0000-4000-8000-0000000000c6";
+const item = (kind: string, status: string, ownerUserId: string = ADA, over: Json = {}): Json => ({
+  id: `${kind}-${status}`, kind, status, ownerUserId, useCaseId: UC4, sla: { breached: [] }, ...over,
+});
 
 function api(w: { incidents?: Json[]; events?: number; actions?: string[]; items?: Json[] }) {
   const urls: string[] = [];
@@ -72,6 +76,41 @@ describe("checkG9Records", () => {
     expect(c!.fix).toContain("`demo:intake --live`");
   });
 
+  // PR #461 recheck L1: an item past its resolution SLA raises `feedback_sla_breached` on the Monitor (G5)
+  it("FAILs when an item routed to Ada is past its resolution SLA, and says to resolve it before re-running", async () => {
+    const items = [item("problem", "acknowledged", ADA, { sla: { breached: ["resolve"] } }), item("appeal", "in_review")];
+    const res = await checkG9Records(api({ items }).get, ADA);
+    expect(res).toHaveLength(1);
+    expect(res[0]).toMatchObject({ beat: G9_BEAT, level: "FAIL" });
+    expect(res[0]!.detail).toBe("1 feedback item(s) routed to Ada are past their resolution SLA (a `feedback_sla_breached` alert shows on the Monitor)");
+    expect(res[0]!.fix).toContain("resolve the lapsed item(s)");
+    expect(res[0]!.fix).toContain("re-run `demo:intake`");
+  });
+
+  it("still PASSes when an item has no `sla` view or a lapsed acknowledgement phase only", async () => {
+    // the acknowledgement phase is covered by the `received` guard above; an acknowledged item cannot lapse it
+    const items = [item("problem", "acknowledged", ADA, { sla: undefined }), item("appeal", "in_review")];
+    expect((await checkG9Records(api({ items }).get, ADA))[0]!.level).toBe("PASS");
+  });
+
+  // PR #461 recheck (info): heads before e1adab1 seeded the G9 records on the G3 gate subject (uc-6)
+  it("WARNs when open incidents or feedback items sit on the `demo:gate` subject", async () => {
+    const gate = { id: UC6, name: "Real-Time Fraud Detection Engine" };
+    const legacy = {
+      incidents: [incident({ useCaseId: UC4 }), incident({ id: "inc-old", title: "an earlier G9 incident", useCaseId: UC6 })],
+      items: [item("problem", "acknowledged"), item("appeal", "in_review"), item("problem", "received", ADA, { id: "old", useCaseId: UC6 })],
+    };
+    const res = await checkG9Records(api(legacy).get, ADA, gate);
+    expect(res.map((c) => c.level)).toEqual(["FAIL", "WARN"]); // the uc-6 `received` item is routed to Ada too
+    expect(res[1]).toMatchObject({ beat: G9_BEAT, level: "WARN" });
+    expect(res[1]!.detail).toBe(
+      '1 open incident(s) and 1 open feedback item(s) on "Real-Time Fraud Detection Engine", the `demo:gate` subject; their alerts can add lines to the G3 gate output',
+    );
+    expect(res[1]!.fix).toContain("re-prepare this database from main");
+    // a clean database: nothing on the gate subject, no WARN
+    expect((await checkG9Records(api({}).get, ADA, gate)).map((c) => c.level)).toEqual(["PASS"]);
+  });
+
   it("FAILs when Ada is not a user (nothing can be routed to her)", async () => {
     const [c] = await checkG9Records(api({}).get, undefined);
     expect(c!.level).toBe("FAIL");
@@ -105,6 +144,12 @@ describe("the G9 use case", () => {
     // non-vacuous: the scripted subject is found
     expect([...subjects]).toContain("Real-Time Fraud Detection Engine");
     expect([...subjects]).not.toContain(g9!.name);
+  });
+
+  it("is not the use case `demo:check` treats as the gate subject", () => {
+    const gate = DEMO_INTAKE_FIXTURES.useCases.find((u) => u.key === DEMO_GATE_SUBJECT_USE_CASE);
+    expect(gate?.name).toBe("Real-Time Fraud Detection Engine");
+    expect(DEMO_GATE_SUBJECT_USE_CASE).not.toBe(DEMO_OPEN_ACCOUNTABILITY_USE_CASE);
   });
 
   it("keeps its open action due after the demo day", () => {

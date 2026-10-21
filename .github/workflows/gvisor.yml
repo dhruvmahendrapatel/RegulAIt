@@ -1,0 +1,298 @@
+# ADR-0190 slice I4 follow-up: L2 (gVisor) verified on a real gVisor host.
+#
+# The runsc backend (`packages/sandbox-executor/src/runsc-backend.ts`) decides that a sandbox ran under gVisor from
+# outside it: the container's runtime and the sha512 of the runsc binary the daemon runs, checked against the pinned
+# release in `src/init-pin.ts`. Its integration test is skipped wherever there is no gVisor, so before this job L2
+# was recorded as UNVERIFIED. A GitHub-hosted Ubuntu runner has Docker and sudo, so this job makes it that host:
+#
+#   1. fetch the pinned gVisor release from gVisor's official release storage over https. The I0 script
+#      (`spikes/isolation-i0/fetch-gvisor.sh`) checks the tarball against its pinned sha512 AND the published one;
+#   2. check the extracted `runsc` and EXACTLY the pinned `gvisor-bin/` sidecars against `init-pin.ts` (the built
+#      module, so the pin the executor enforces is the pin checked here) before anything is installed;
+#   3. install them at the default `REGULAIT_GVISOR_HOST_DIR` layout (`/usr/local/lib/gvisor/runsc` plus
+#      `gvisor-bin/`), register `runsc` in /etc/docker/daemon.json with the restricted profile's runsc flags (read
+#      from `@regulait/shared`), and restart Docker. A second runtime, `runsc-unpinned`, points at a copy of runsc
+#      with one byte appended: the unpinned-binary negative control;
+#   4. build the stdio base image and the executor's init volume, then run the integration test with every
+#      variable it needs. The job FAILS unless all of its tests ran and passed: none may be skipped.
+#
+# Positive control: the canary under the restricted profile is classified gVisor and passes the gateway's
+# evaluator at user_space_kernel. Negative controls: plain `runc`, and a runsc that is not the pinned release, are
+# each refused before any sandbox starts.
+#
+# This is CI-runner verification: one GitHub-hosted runner kernel and Docker version, not a customer host.
+name: gVisor
+
+on:
+  pull_request:
+    paths:
+      - "packages/sandbox-executor/**"
+      - "packages/shared/src/isolation/**"
+      - "apps/gateway/src/executor-*"
+      - "docker-compose.yml"
+      - "spikes/isolation-i0/fetch-gvisor.sh"
+      - "spikes/isolation-i0/THIRD_PARTY.md"
+      - ".github/workflows/gvisor.yml"
+  push:
+    branches: [main]
+    paths:
+      - "packages/sandbox-executor/**"
+      - "packages/shared/src/isolation/**"
+      - "apps/gateway/src/executor-*"
+      - "docker-compose.yml"
+      - "spikes/isolation-i0/fetch-gvisor.sh"
+      - "spikes/isolation-i0/THIRD_PARTY.md"
+      - ".github/workflows/gvisor.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: gvisor-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+# Least privilege for GITHUB_TOKEN: the job checks out code and uploads an artifact; it writes nothing to GitHub.
+permissions:
+  contents: read
+
+jobs:
+  runsc-l2:
+    name: gVisor L2 (runsc integration, positive and negative controls)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GVISOR_DIR: /usr/local/lib/gvisor
+      GVISOR_UNPINNED_DIR: /usr/local/lib/gvisor-unpinned
+      INIT_DIR: /opt/regulait-ci-init
+      INIT_VOLUME: regulait-ci-init
+    steps:
+      - name: Evidence directory
+        run: echo "EVIDENCE_DIR=$RUNNER_TEMP/gvisor-evidence" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build the executor and what it imports
+        run: pnpm --filter "@regulait/sandbox-executor..." build
+
+      - name: Read the pin (init-pin.ts, as built) and the restricted profile's runsc flags
+        working-directory: packages/sandbox-executor
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE_DIR"
+          # shellcheck disable=SC2016 # the single-quoted text is JavaScript; its ${} are template literals
+          node --input-type=module -e '
+            import { writeFileSync } from "node:fs";
+            import { RUNSC_RELEASES, RUNSC_RELEASE_SIDECARS } from "./dist/init-pin.js";
+            import { runscFlags, SHIPPED_EXECUTION_PROFILES } from "@regulait/shared";
+            const releases = Object.keys(RUNSC_RELEASES);
+            if (releases.length !== 1) throw new Error(`expected one pinned release, found ${releases.length}`);
+            const release = releases[0];
+            const sidecars = RUNSC_RELEASE_SIDECARS[release];
+            if (!sidecars || Object.keys(sidecars).length === 0) throw new Error(`no sidecar pin for ${release}`);
+            const pin = { release, runsc: RUNSC_RELEASES[release], sidecars, flags: runscFlags(SHIPPED_EXECUTION_PROFILES.restricted) };
+            writeFileSync(process.env.EVIDENCE_DIR + "/pin.json", JSON.stringify(pin, null, 2) + "\n");
+          '
+          cat "$EVIDENCE_DIR/pin.json"
+          release=$(jq -r .release "$EVIDENCE_DIR/pin.json")
+          # the I0 fetch script pins one release; it must be the one init-pin.ts pins
+          fetch_release=$(sed -n 's/^RELEASE=//p' "$GITHUB_WORKSPACE/spikes/isolation-i0/fetch-gvisor.sh")
+          if [ "release-$fetch_release" != "$release" ]; then
+            echo "::error::init-pin.ts pins $release but fetch-gvisor.sh fetches release-$fetch_release"
+            exit 1
+          fi
+          echo "RUNSC_RELEASE=$release" >> "$GITHUB_ENV"
+          echo "RUNSC_RELEASE_DIR=${release#release-}" >> "$GITHUB_ENV"
+
+      - name: Check the runner can reach gVisor's release storage
+        run: |
+          set -euo pipefail
+          url="https://storage.googleapis.com/gvisor/releases/release/$RUNSC_RELEASE_DIR/x86_64/gvisor.tar.bz2.sha512"
+          if ! curl -fsS --max-time 30 -o /dev/null "$url"; then
+            echo "::error::this runner cannot reach $url; gVisor cannot be installed from its official release storage"
+            exit 1
+          fi
+
+      - name: Fetch the release and verify the tarball (pinned and published sha512)
+        run: bash "$GITHUB_WORKSPACE/spikes/isolation-i0/fetch-gvisor.sh" "$RUNNER_TEMP/gvisor"
+
+      - name: Verify runsc and the gvisor-bin/ sidecars against the pin, before installing
+        run: |
+          set -euo pipefail
+          x="$RUNNER_TEMP/gvisor/x"
+          pin="$EVIDENCE_DIR/pin.json"
+          got=$(sha512sum "$x/runsc" | cut -d' ' -f1)
+          want=$(jq -r .runsc "$pin")
+          if [ "$got" != "$want" ]; then
+            echo "::error::runsc sha512 $got is not the pinned $want"
+            exit 1
+          fi
+          # exactly the pinned sidecars: an unpinned file in gvisor-bin/ fails as surely as a changed one
+          (cd "$x" && find gvisor-bin -type f | LC_ALL=C sort) > "$RUNNER_TEMP/sidecars-found.txt"
+          jq -r '.sidecars | keys[]' "$pin" | LC_ALL=C sort > "$RUNNER_TEMP/sidecars-pinned.txt"
+          if ! diff -u "$RUNNER_TEMP/sidecars-pinned.txt" "$RUNNER_TEMP/sidecars-found.txt"; then
+            echo "::error::the release's gvisor-bin/ is not exactly the pinned sidecar set"
+            exit 1
+          fi
+          jq -r '.sidecars | to_entries[] | "\(.value)  \(.key)"' "$pin" > "$RUNNER_TEMP/sidecars.sha512"
+          (cd "$x" && sha512sum -c "$RUNNER_TEMP/sidecars.sha512")
+
+      - name: Install gVisor at the REGULAIT_GVISOR_HOST_DIR layout and register it with Docker
+        run: |
+          set -euo pipefail
+          x="$RUNNER_TEMP/gvisor/x"
+          pin="$EVIDENCE_DIR/pin.json"
+          # amendment E: every directory on the path is traversable (0755); runsc and its sidecars stay together
+          sudo install -d -m 0755 -o root -g root "$GVISOR_DIR" "$GVISOR_DIR/gvisor-bin"
+          sudo install -m 0755 -o root -g root "$x/runsc" "$GVISOR_DIR/runsc"
+          while IFS= read -r f; do
+            sudo install -m "$(stat -c %a "$x/$f")" -o root -g root "$x/$f" "$GVISOR_DIR/$f"
+          done < "$RUNNER_TEMP/sidecars-pinned.txt"
+          # what was installed is what was verified
+          echo "$(jq -r .runsc "$pin")  $GVISOR_DIR/runsc" | sha512sum -c
+          (cd "$GVISOR_DIR" && sha512sum -c "$RUNNER_TEMP/sidecars.sha512")
+          "$GVISOR_DIR/runsc" --version
+          # the unpinned-binary negative control: the same runsc with one byte appended (never run; refused first)
+          sudo install -d -m 0755 -o root -g root "$GVISOR_UNPINNED_DIR"
+          sudo cp "$GVISOR_DIR/runsc" "$GVISOR_UNPINNED_DIR/runsc"
+          printf '\n' | sudo tee -a "$GVISOR_UNPINNED_DIR/runsc" > /dev/null
+          if [ "$(sha512sum "$GVISOR_UNPINNED_DIR/runsc" | cut -d' ' -f1)" = "$(jq -r .runsc "$pin")" ]; then
+            echo "::error::the unpinned copy still hashes to the pin"
+            exit 1
+          fi
+          # daemon.json: keep what the runner image configured, add the two runtimes
+          sudo install -d -m 0755 /etc/docker
+          if sudo test -s /etc/docker/daemon.json; then sudo cat /etc/docker/daemon.json | tee "$RUNNER_TEMP/daemon.before.json" > /dev/null; else echo '{}' > "$RUNNER_TEMP/daemon.before.json"; fi
+          jq --arg path "$GVISOR_DIR/runsc" --arg unpinned "$GVISOR_UNPINNED_DIR/runsc" --argjson flags "$(jq -c .flags "$pin")" \
+            '.runtimes.runsc = {path: $path, runtimeArgs: $flags} | .runtimes["runsc-unpinned"] = {path: $unpinned, runtimeArgs: $flags}' \
+            "$RUNNER_TEMP/daemon.before.json" > "$RUNNER_TEMP/daemon.json"
+          sudo install -m 0644 -o root -g root "$RUNNER_TEMP/daemon.json" /etc/docker/daemon.json
+          cat /etc/docker/daemon.json
+          sudo systemctl restart docker
+          docker info --format '{{json .Runtimes}}' | tee "$EVIDENCE_DIR/docker-runtimes.json"
+          docker info --format 'cgroup driver {{.CgroupDriver}}, cgroup v{{.CgroupVersion}}, kernel {{.KernelVersion}}, docker {{.ServerVersion}}'
+
+      - name: Build the stdio base image and the executor's init volume
+        run: |
+          set -euo pipefail
+          docker build -f packages/sandbox-executor/stdio-base/Dockerfile -t regulait/stdio-base:ci packages/sandbox-executor
+          image=$(docker image inspect --format '{{.Id}}' regulait/stdio-base:ci)
+          echo "stdio base image: $image"
+          echo "STDIO_BASE_IMAGE=$image" >> "$GITHUB_ENV"
+          # the executor copies its pinned init into INIT_DIR; every sandbox mounts this volume (a bind of it) read-only
+          sudo install -d -m 0755 -o "$(id -u)" -g "$(id -g)" "$INIT_DIR"
+          docker volume create --driver local --opt type=none --opt o=bind --opt device="$INIT_DIR" "$INIT_VOLUME"
+
+      # Required: Node starts and creates a thread under runsc with Docker's default seccomp profile, which is what
+      # the restricted profile's `RuntimeDefault` gives a sandbox. That profile answers `clone3` with `errnoRet: 38`
+      # (ENOSYS) so glibc falls back to `clone`; a runsc that ignores `errnoRet` answers EPERM and Node aborts at start
+      # (the blocker recorded in ADR-0190 for release-20261005.0).
+      - name: Node starts and creates a thread under runsc with the default seccomp profile (clone3 -> ENOSYS)
+        run: |
+          set -euo pipefail
+          out=$(docker run --rm --runtime runsc --network none --pull never --user 10001:10001 --entrypoint /usr/local/bin/node "$STDIO_BASE_IMAGE" \
+            -e 'const { Worker } = require("node:worker_threads"); new Worker("process.exit(0)", { eval: true }).on("exit", (c) => console.log("runsc smoke: thread exit " + c + ", kernel " + require("node:os").release()));')
+          echo "$out" | tee "$EVIDENCE_DIR/smoke-default-seccomp.txt"
+          if ! printf '%s\n' "$out" | grep -q '^runsc smoke: thread exit 0, kernel '; then
+            echo "::error::Node did not start and create a thread under runsc with the default seccomp profile"
+            exit 1
+          fi
+
+      # Required: runsc honours an OCI seccomp rule's `errnoRet` (upstream 7be4160a). Three profiles that allow
+      # everything except mkdir/mkdirat: with `errnoRet: 38` the workload must see ENOSYS (and runc, the reference,
+      # the same); with no `errnoRet` it must see EPERM (the default); with `errnoRet: 65536`, which does not fit in
+      # SECCOMP_RET_DATA, the container must not run at all (fail closed, never a truncated errno of 0).
+      - name: runsc honours seccomp errnoRet (ENOSYS when set, EPERM by default, out of range refused)
+        run: |
+          set -euo pipefail
+          d="$RUNNER_TEMP/errno-profiles"
+          mkdir -p "$d"
+          rule() { jq -n --argjson ret "$1" '{defaultAction: "SCMP_ACT_ALLOW", syscalls: [({names: ["mkdir", "mkdirat"], action: "SCMP_ACT_ERRNO"} + (if $ret == null then {} else {errnoRet: $ret} end))]}'; }
+          rule 38 > "$d/enosys.json"
+          rule null > "$d/default.json"
+          rule 65536 > "$d/out-of-range.json"
+          # shellcheck disable=SC2016 # the single-quoted text is JavaScript
+          probe='try { require("node:fs").mkdirSync("/tmp/errno-probe"); console.log("errno-probe: none"); } catch (e) { console.log("errno-probe: " + e.code); }'
+          run() { docker run --rm --runtime "$1" --network none --pull never --user 10001:10001 --security-opt "seccomp=$d/$2.json" --entrypoint /usr/local/bin/node "$STDIO_BASE_IMAGE" -e "$probe"; }
+          expect() {
+            local got
+            got=$(run "$1" "$2")
+            echo "$1 $2: $got" | tee -a "$EVIDENCE_DIR/errno-ret.txt"
+            if [ "$got" != "errno-probe: $3" ]; then
+              echo "::error::under $1 with the $2 profile the workload saw '$got', not $3"
+              exit 1
+            fi
+          }
+          expect runc enosys ENOSYS
+          expect runsc enosys ENOSYS
+          expect runsc default EPERM
+          if out=$(run runsc out-of-range 2>&1); then
+            echo "::error::a profile with errnoRet 65536 ran under runsc: $out"
+            exit 1
+          fi
+          printf 'runsc out-of-range: refused to run: %s\n' "$out" | tee -a "$EVIDENCE_DIR/errno-ret.txt"
+          if printf '%s\n' "$out" | grep -q '^errno-probe:'; then
+            echo "::error::the workload ran under runsc with an out-of-range errnoRet"
+            exit 1
+          fi
+
+      - name: Run the runsc integration tests (unskipped; positive and negative controls)
+        working-directory: packages/sandbox-executor
+        env:
+          REGULAIT_TEST_RUNSC_RUNTIME: runsc
+          REGULAIT_TEST_RUNC_RUNTIME: runc
+          REGULAIT_TEST_UNPINNED_RUNTIME: runsc-unpinned
+        run: |
+          set -euo pipefail
+          export REGULAIT_TEST_RUNSC_VERSION="$RUNSC_RELEASE"
+          export REGULAIT_TEST_STDIO_BASE_IMAGE="$STDIO_BASE_IMAGE"
+          export REGULAIT_TEST_RUNSC_HOST_PATH="$GVISOR_DIR/runsc"
+          export REGULAIT_TEST_UNPINNED_HOST_PATH="$GVISOR_UNPINNED_DIR/runsc"
+          export REGULAIT_TEST_INIT_VOLUME="$INIT_VOLUME"
+          export REGULAIT_TEST_INIT_DIR="$INIT_DIR"
+          export REGULAIT_TEST_PROBE_REPORT_DIR="$EVIDENCE_DIR"
+          pnpm exec vitest run src/runsc-backend.integration.test.ts \
+            --reporter=default --reporter=json --outputFile.json="$EVIDENCE_DIR/vitest-runsc.json"
+
+      - name: Fail unless every integration test ran and passed (none skipped)
+        run: |
+          set -euo pipefail
+          r="$EVIDENCE_DIR/vitest-runsc.json"
+          jq '{numTotalTests, numPassedTests, numFailedTests, numPendingTests, numTodoTests}' "$r"
+          total=$(jq .numTotalTests "$r")
+          passed=$(jq .numPassedTests "$r")
+          skipped=$(( $(jq .numPendingTests "$r") + $(jq .numTodoTests "$r") ))
+          if [ "$passed" -le 0 ] || [ "$skipped" -ne 0 ] || [ "$passed" -ne "$total" ]; then
+            echo "::error::the runsc integration tests did not all run: $passed passed of $total, $skipped skipped"
+            exit 1
+          fi
+          verdict=$(jq -r .verdict.verdict "$EVIDENCE_DIR/canary-runsc.json")
+          if [ "$verdict" != "pass" ]; then
+            echo "::error::the canary's probe report verdict is $verdict"
+            exit 1
+          fi
+          echo "L2 verified on this runner: $passed of $total runsc integration tests passed under gVisor $RUNSC_RELEASE"
+
+      - name: Collect diagnostics
+        if: failure()
+        run: |
+          mkdir -p "$EVIDENCE_DIR"
+          { docker info; docker ps -a; } > "$EVIDENCE_DIR/docker.txt" 2>&1 || true
+          sudo journalctl -u docker --no-pager -n 300 2>&1 | tee "$EVIDENCE_DIR/dockerd.log" > /dev/null || true
+
+      - name: Upload the probe report and evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gvisor-probe-report
+          path: ${{ env.EVIDENCE_DIR }}
+          retention-days: 14
+          if-no-files-found: warn
