@@ -1,10 +1,10 @@
 ---
-phase: batch-7-shadow-ai-sd2b-sd4a-a4-a6-i4-u1-u2-u4-merged-sd4b-in-review
-last_updated: 2026-10-18
+phase: demo-prep-458-460-465-drawer-audit-ui-garak-pins-refresh-and-garak-0171-in-flight
+last_updated: 2026-10-21
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-10-18-session-01.md
+last_session: sessions/2026-10-21-session-01.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,31 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-21 (03:10 UTC) - demo prep: the ADR-0197 lanes, the designer UI batches (drawer, Inbox, alerts, trust and
+audit screens) and the vite and garak advisory fixes are merged.** Full record:
+[sessions/2026-10-21-session-01.md](sessions/2026-10-21-session-01.md). This paragraph supersedes the "Last
+migration", "Open" and "Next" lists of the 2026-10-18 paragraphs below; their owner decisions stand.
+- **Merged (UTC, 2026-10-18 07:33 to 2026-10-21 03:05):** #429 (SD4b, **0207**), #427, #432 (ADR-0197), #433, #434,
+  #435, #436, #443 (U3), #444, #437 (keyless image signing, N10), #446, #439 (Q3/Q6/Q13/Q14, **0208**), #440 (pino),
+  #438 (demo real-account infra), #441 (seeded fallback), #445 (A5), #442 (SPIFFE bundle and JWT-SVID, **0209**), #450,
+  #447, #448, #452, #451 (`demo:prepare --live`), #454 (owner-merged bundle ceiling), #455, #449 (screenshot pack),
+  #456, #462, #461 (G9 seed), #457, #459 (shared drawer), #385 (gVisor L2 verified), #464, #463 (promptfoo race), #466
+  (vite), #460, #470 (garak certifi and pillow) and #458.
+- **Last migration on main: 0209.** 0210 is reserved for the audit index (built `CONCURRENTLY`).
+- **Open:** #465 (per-use-case audit filter; approved and released, merges on green) and #469 (HOLD, Discovery
+  sidebar section; delta recheck running).
+- **In-flight builders, all pre-held:** lows sweep 2, audit index plus `objectType` 400 (migration 0210, after #465),
+  garak 0.17.1, and the demo refresh (after #465 and #469).
+- **Owner actions:** the real-account round trips in
+  [docs/deployment/DEMO_REAL_ACCOUNTS.md](../docs/deployment/DEMO_REAL_ACCOUNTS.md); approve the designer's
+  "Show all" collapsible-sections mock.
+- **Owner decisions this window** (detail in the session record): the drawer is a modal at 900px and below and a side
+  panel above; #458's tab counts stay; the audit index is a separate PR before freeze; an unknown `objectType` is a
+  400; Retry stays next to the error; #470 now, #468 closed, garak 0.17.1 before the demo; owner questions are always
+  asked interactively with options explained.
+- **Process:** `dhruv/active` had drifted 741 commits behind main; it is now fast-forwarded after every merge.
+- **Dates:** code freeze 2026-10-29, demo 2026-11-01.
 
 **2026-10-18 (late morning) - demo plan for 2026-11-01 (ADR-0197).** The owner answered questions 1-15 and chose
 real-account Shadow AI discovery: GitLab, a new AWS sandbox account and Azure, all through keyless federation, with
@@ -5147,6 +5172,12 @@ every SPA screen in both themes plus keyboard journeys, three browsers at five v
 performance budgets, each a committed baseline that may only shrink. ADR-0195 has SD0 (#403, 0202), SD1 (#402), SD2
 (#404) and SD3 (#401) merged. The index now ends at 0196, with 191 files and 191 rows.
 
+Owner decision (2026-10-18): ADR-0197 (the demo of 2026-11-01 and the owner decisions Q1-Q15) is accepted (#432), with
+addenda #446 (demo approver, gate, live DB, fallback host, GitLab wording) and #450 (`demo:prepare --live`). The demo
+runs on the hosted dev instance with real-account Shadow AI discovery (GitLab, a new AWS sandbox account, Azure) over
+keyless federation; code freeze is 2026-10-29. All of its work-plan P0, P1 and P2 items were merged by 2026-10-19. The
+index now ends at 0197, with 192 files and 192 rows.
+
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
 (b) standing policy for future scaffolds recorded (ADR-0006, no implementation yet — nothing to
@@ -5161,6 +5192,14 @@ region-allowlist SCP; OQ-002 (budget cap) resolved to $5/month; OQ-003 (GitHub a
 to personal `dhruvmahendrapatel`.
 
 ## Known follow-ups (not urgent, not blocking)
+- **Demo-prep follow-ups (2026-10-21)**, from the #458, #460 and #465 reviews and the owner's decisions. Taken from
+  review reports; not re-verified one by one.
+  - #458 lows: a tab count of 0 is hidden; the tab grouping is announced as a description.
+  - #460 lows: a workflow item opens with a blank body; the pinned footer was checked only at 390px.
+  - #465 low: no test that the admin flag is passed to the Audit tab.
+  - garak 0.17.1 upgrade before the demo (owner decision; builder in flight).
+  - After the demo: tear down the demo sandbox accounts; ADR-0183 batches 3-6; a separate agent identity without
+    merge rights (ADR-0197).
 - **Batch 6 follow-ups (2026-10-16)**, from the #386-#390 builder reports and reviews. Items already in the
   2026-10-15 list below are not repeated. Unless a line says it was checked on main, these are taken from those
   reports and were not re-verified one by one.
