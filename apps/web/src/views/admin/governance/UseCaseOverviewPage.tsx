@@ -4,7 +4,7 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
 import type { DirectoryUser, UseCaseCondition, UseCaseLifecycleDetail, UseCaseResubmission, UseCaseReview, UseCaseRiskAcceptance } from "../../../api/types";
 import { ago, frameworkLabel, humanize, plural, providerLabel } from "../../../api/format";
-import { Badge, Button, Card, EmptyState, Field, Input, Modal, Select, Table, Tabs, Textarea, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Modal, Select, Table, Tabs, Textarea, type Tone } from "../../../ui/kit";
 import { QueryGate, RemoveButton, useAction } from "../adminKit";
 import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
@@ -69,22 +69,38 @@ interface AgentCardResponse {
   oversight: { modelCards: number; modelCardApproved: boolean; note: string };
 }
 
+// A5: twelve tabs in four captioned groups, every one still a single click and its own ?tab= link
 const TABS = [
-  ...["overview", "frameworks", "risks", "stack", "dependencies", "approvals", "audit"].map((id) => ({ id, label: id[0]!.toUpperCase() + id.slice(1) })),
-  // ADR-0173 batch 2b: the use case's path from registration to its decision, as a graph
-  { id: "path", label: "Decision path" },
+  { id: "overview", label: "Overview", group: "Overview" },
+  { id: "frameworks", label: "Frameworks", group: "Assessment" },
+  { id: "risks", label: "Risks", group: "Assessment" },
+  { id: "stack", label: "Stack", group: "Assessment" },
+  { id: "dependencies", label: "Dependencies", group: "Assessment" },
   // ADR-0182 (D4): A11 the decision records, A12 incidents, A13 feedback and appeals
-  { id: "decisions", label: "Decision records" },
-  { id: "incidents", label: "Incidents" },
-  { id: "feedback", label: "Feedback" },
+  { id: "decisions", label: "Decision records", group: "Evidence" },
   // ADR-0189 B6: the use case's signed AI BOM snapshots, drift and gaps
-  { id: "ai-bom", label: "AI BOM" },
+  { id: "ai-bom", label: "AI BOM", group: "Evidence" },
+  { id: "audit", label: "Audit", group: "Evidence" },
+  { id: "approvals", label: "Approvals", group: "Activity" },
+  // ADR-0173 batch 2b: the use case's path from registration to its decision, as a graph
+  { id: "path", label: "Decision path", group: "Activity" },
+  { id: "incidents", label: "Incidents", group: "Activity" },
+  { id: "feedback", label: "Feedback", group: "Activity" },
 ];
+// the overview returns only the newest audit rows (use-case-overview.ts, .limit(20)); a full page may have more behind it
+const AUDIT_ROW_LIMIT = 20;
+const TAB_COUNT: Partial<Record<string, (d: OverviewResponse) => number | string>> = {
+  risks: (d) => d.risks.length,
+  approvals: (d) => d.approvals.length,
+  // M1: never a capped number that reads as the total. The gateway's true total wins; without it, "20+" at the cap
+  audit: (d) => d.auditTotal ?? (d.audit.length >= AUDIT_ROW_LIMIT ? `${AUDIT_ROW_LIMIT}+` : d.audit.length),
+};
 
 const AiBomPanel = lazy(() => import("./BomEvidencePanel").then((m) => ({ default: m.AiBomPanel })));
 
 export default function UseCaseOverviewPage() {
   const { id = "" } = useParams();
+  const { auth } = useSession();
   const [params, setParams] = useSearchParams();
   const tab = TABS.some((item) => item.id === params.get("tab")) ? params.get("tab")! : "overview";
   const overview = useQuery({ queryKey: ["governance", "use-case-overview", id], queryFn: () => api.get<OverviewResponse>(`/v1/use-cases/${id}/overview`), enabled: Boolean(id) });
@@ -132,6 +148,9 @@ export default function UseCaseOverviewPage() {
                 <li className={`${rec.chip} ${rec[`tone-${STATUS_TONE[status] ?? "neutral"}`] ?? ""}`}><span className={rec.chipLabel}>Status</span> {statusLabel(status)}</li>
                 <li className={`${rec.chip} ${data.screening.tier === "prohibited" ? rec["tone-danger"] : data.screening.tier === "high" ? rec["tone-warn"] : ""}`}>
                   <span className={rec.chipLabel}>EU AI Act</span> {data.screening.screened ? `${humanize(data.screening.tier)} tier` : "Not screened"}
+                  <InfoButton label="the EU AI Act tier">
+                    <p>The tier from the EU AI Act screening rules. High tier brings obligations such as human oversight and logging. This is screening, not legal advice.</p>
+                  </InfoButton>
                 </li>
                 {recertification ? (
                   <li className={`${rec.chip} ${rec["tone-warn"]}`}>{reReviewText(recertification.dueAt)}</li>
@@ -151,7 +170,16 @@ export default function UseCaseOverviewPage() {
             ) : null}
           </header>
           <div className={v.stack}>
-            <Tabs tabs={TABS} active={tab} onChange={(next) => setParams({ tab: next })} />
+            <div className={rec.groupedTabs}>
+              <Tabs
+                tabs={TABS.map((t) => {
+                  const n = TAB_COUNT[t.id]?.(data);
+                  return n ? { ...t, label: <>{t.label} <span className={rec.tabCount}>{n}</span></> } : t;
+                })}
+                active={tab}
+                onChange={(next) => setParams({ tab: next })}
+              />
+            </div>
             {tab === "overview" ? (
               <OverviewTab
                 data={data}
@@ -178,7 +206,7 @@ export default function UseCaseOverviewPage() {
             {tab === "stack" ? <StackTab useCaseId={id} data={data.stack} /> : null}
             {tab === "dependencies" ? <Card title="Dependencies and inherited risk"><DependencyGraphPanel useCaseId={id} /></Card> : null}
             {tab === "approvals" ? <ApprovalsTab approvals={data.approvals} userName={userName} /> : null}
-            {tab === "audit" ? <AuditTab rows={data.audit} /> : null}
+            {tab === "audit" ? <AuditTab rows={data.audit} total={data.auditTotal} useCaseId={data.useCase.id} isAdmin={Boolean(auth?.isAdmin)} /> : null}
             {tab === "path" ? (
               <Card title="Decision path">
                 <RunGraph source={{ kind: "use_case", useCaseId: id }} label={`Decision path of ${data.useCase.name}`} refreshKey={status} />
@@ -277,7 +305,7 @@ function OverviewTab(props: {
           The approval expired on {shortDate(props.approvedUntil)}. The use case needs a new review before it can be deployed again.
         </p>
       ) : null}
-      <Card title="Lifecycle tracker">
+      <Card title="Lifecycle tracker" info={<p>Proposed, then Under review, Approved and Monitoring. Each activity comes from the record itself. Complete them to move to the next stage.</p>}>
         {props.detailState !== "ok" ? (
           <DetailUnknown state={props.detailState} what="lifecycle details" onRetry={props.onRetryDetail} alert />
         ) : <>
@@ -486,7 +514,7 @@ function ConditionsCard(props: {
     if (ok) closeWaive();
   };
   return (
-    <Card title="Conditions of approval" actions={props.detailState === "ok" && conditions.length ? <span className={v.faint}>{open ? `${open} open` : conditions.some((c) => c.status === "waived") ? "None open" : "All met"}</span> : undefined}>
+    <Card title="Conditions of approval" info={<p>Conditions a reviewer attaches when approving. Before-go-live conditions block the deploy gate. After-go-live conditions are tracked and never block.</p>} actions={props.detailState === "ok" && conditions.length ? <span className={v.faint}>{open ? `${open} open` : conditions.some((c) => c.status === "waived") ? "None open" : "All met"}</span> : undefined}>
       {props.detailState !== "ok" ? (
         <DetailUnknown state={props.detailState} what="conditions" onRetry={props.onRetryDetail} />
       ) : conditions.length === 0 ? (
@@ -679,7 +707,7 @@ function RisksTab({ useCaseId, risks, acceptance, onRefresh }: { useCaseId: stri
         const draft = residuals[risk.id] ?? { likelihood: risk.residual?.likelihood ?? "", impact: risk.residual?.impact ?? "" };
         return <Card key={risk.id} title={risk.title} actions={<div className={v.row}><span className={v.faint}>{risk.dimension}</span><Badge tone={RISK_STATUS_TONE[risk.status] ?? "neutral"}>{risk.status}</Badge></div>}><div className={v.stack}>
           {acceptance.has(risk.id) ? (() => { const a = acceptance.get(risk.id)!; return <p className={rr.acceptedBy}>Accepted by {a.acceptedByName ?? "a risk acceptor"}{a.acceptedAt ? ` on ${shortDate(a.acceptedAt)}` : ""}{a.acceptanceRationale ? ` · ${a.acceptanceRationale}` : ""}</p>; })() : null}
-          <p className={s.riskFlow}><span className={v.dim}>Inherent</span> <strong>{risk.inherent.likelihood} × {risk.inherent.impact}</strong> <span aria-hidden>→</span> <span className={v.dim}>Residual</span> <strong>{risk.residual ? `${risk.residual.likelihood} × ${risk.residual.impact}` : "unmeasured"}</strong></p>
+          <p className={s.riskFlow}><span className={v.dim}>Inherent</span> <strong>{risk.inherent.likelihood} × {risk.inherent.impact}</strong> <span aria-hidden>→</span> <span className={v.dim}>Residual</span> <InfoButton label="residual risk"><p>The risk left after linked controls take effect. The registrant rates it and the reviewer checks it.</p></InfoButton> <strong>{risk.residual ? `${risk.residual.likelihood} × ${risk.residual.impact}` : "unmeasured"}</strong></p>
           <div><strong>Linked controls</strong>{risk.controls.length === 0 ? <p className={v.dim}>No controls linked.</p> : risk.controls.map((control) => <div key={control.controlRef} className={v.listRow}><span className={v.grow}><code>{control.controlRef}</code><br /><span className={v.faint}>{control.title}</span></span><RemoveButton what={`control ${control.controlRef}`} consequence={<>The control link is removed from this risk. The risk and its audit history remain.</>} onRemove={() => api.del(`/v1/risks/${risk.id}/controls/${encodeURIComponent(control.controlRef)}`)} onDone={() => void onRefresh()} /></div>)}</div>
           <div className={s.libraryFilters}><Field label="Control reference" helpLabel="the mitigation link created here" help={<p>Enter the canonical reference of an existing control. Linking it records that this control mitigates the selected use-case risk; it does not by itself prove the control is implemented or evidenced.</p>}><Input value={controlRefs[risk.id] ?? ""} onChange={(event) => setControlRefs((current) => ({ ...current, [risk.id]: event.target.value }))} placeholder="Control reference" /></Field><Field label=" "><Button disabled={action.busy || !(controlRefs[risk.id] ?? "").trim()} onClick={() => void action.run(async () => { await api.post(`/v1/risks/${risk.id}/controls`, { controlRef: controlRefs[risk.id]!.trim() }); setControlRefs((current) => ({ ...current, [risk.id]: "" })); await onRefresh(); }, "Control linked")}>Link control</Button></Field></div>
           <div className={s.libraryFilters}><Field label="Residual likelihood"><Select value={draft.likelihood} onChange={(event) => setResiduals((current) => ({ ...current, [risk.id]: { ...draft, likelihood: event.target.value } }))}><option value="">Choose likelihood</option><option>low</option><option>medium</option><option>high</option></Select></Field><Field label="Residual impact"><Select value={draft.impact} onChange={(event) => setResiduals((current) => ({ ...current, [risk.id]: { ...draft, impact: event.target.value } }))}><option value="">Choose impact</option><option>low</option><option>medium</option><option>high</option></Select></Field><Field label=" "><Button disabled={action.busy || !draft.likelihood || !draft.impact} onClick={() => void action.run(async () => { await api.put(`/v1/risks/${risk.id}/residual`, draft); await onRefresh(); }, "Residual position updated")}>Save residual</Button></Field></div>
@@ -762,7 +790,27 @@ function ApprovalsTab({ approvals, userName }: { approvals: OverviewResponse["ap
   ]} />}</Card>;
 }
 
-function AuditTab({ rows }: { rows: OverviewResponse["audit"] }) {
-  return <Card title="Recent use-case audit evidence">{rows.length === 0 ? <EmptyState title="No audit rows returned" /> : <Table rows={rows} rowKey={(row) => String(row.id)} columns={[{ key: "at", header: "When", render: (row) => <span style={{ whiteSpace: "nowrap" }}>{ago(row.at)}</span> }, { key: "rule", header: "Event", render: (row) => <span style={{ whiteSpace: "nowrap" }}>{humanize(row.ruleId)}</span> }, { key: "effect", header: "Effect", render: (row) => <Badge tone={row.effect === "allow" ? "ok" : row.effect === "deny" ? "danger" : "warn"}>{row.effect}</Badge> }, { key: "reason", header: "Reason", render: (row) => row.reason }]} />}<p><Link to="/admin/audit">Open the full audit log</Link></p></Card>;
+export function AuditTab({ rows, total, useCaseId, isAdmin }: { rows: OverviewResponse["audit"]; total: number | undefined; useCaseId: string; isAdmin: boolean }) {
+  // owner decision on #453 (2026-10-20): the full trail of this one use case, deep-linked into the audit log's filter
+  const trail = `/admin/audit?objectType=ai_use_case&objectId=${encodeURIComponent(useCaseId)}`;
+  const more = total !== undefined ? total > rows.length : rows.length >= AUDIT_ROW_LIMIT;
+  return (
+    <Card title="Recent use-case audit evidence">
+      {rows.length === 0 ? <EmptyState title="No audit rows returned" body="Every registration, review and lifecycle change on this use case writes an audit row. None has been recorded yet." /> : <Table rows={rows} rowKey={(row) => String(row.id)} columns={[{ key: "at", header: "When", render: (row) => <span style={{ whiteSpace: "nowrap" }}>{ago(row.at)}</span> }, { key: "rule", header: "Event", render: (row) => <span style={{ whiteSpace: "nowrap" }}>{humanize(row.ruleId)}</span> }, { key: "effect", header: "Effect", render: (row) => <Badge tone={row.effect === "allow" ? "ok" : row.effect === "deny" ? "danger" : "warn"}>{row.effect}</Badge> }, { key: "reason", header: "Reason", render: (row) => row.reason }]} />}
+      {more ? (
+        <p className={v.dim} data-testid="use-case-audit-partial">
+          {total !== undefined
+            ? `Showing the newest ${rows.length} of ${total} rows. This use case's full audit trail, and its CSV export, hold every row.`
+            : `Showing the newest ${AUDIT_ROW_LIMIT} rows; older rows may exist. The full audit log and its CSV export hold every row.`}
+        </p>
+      ) : null}
+      {/* #465 review L2: the audit log is an admin surface, so only an admin is offered a link into it */}
+      {isAdmin ? (
+        <p><Link to={trail}>Open this use case&apos;s full audit trail</Link></p>
+      ) : (
+        <p className={v.dim} data-testid="use-case-audit-admin-only">The full audit trail and its CSV export are open to administrators. Ask an administrator for this use case&apos;s full trail.</p>
+      )}
+    </Card>
+  );
 }
 

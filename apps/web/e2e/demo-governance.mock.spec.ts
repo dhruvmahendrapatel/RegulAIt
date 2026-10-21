@@ -167,12 +167,24 @@ test("enterprise governance demo surfaces render and complete their core actions
 
   await page.goto("/ui/admin/governance/trust");
   await expect(page.getByRole("heading", { name: "Trust & evidence" })).toBeVisible();
+  // G4: Bars is the default view; the radar is one click away and keeps its unmeasured label
+  await expect(page.getByRole("button", { name: "Bars" })).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("button", { name: "Radar" }).click();
   await expect(page.locator('svg[aria-label^="Evidence coverage radar"]').getByText("unmeasured", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Bars" }).click();
   await shotBoth(page, "03-trust-dashboard");
 
   await page.goto(`/ui/admin/governance/use-cases/${ID}`);
   await expect(page.getByRole("heading", { name: "Credit-limit-increase assistant" })).toBeVisible();
   await shotBoth(page, "04-use-case-overview");
+  // A5: grouped tabs keep their plain names (the group caption is not part of the name) and show counts
+  await expect(page.getByRole("tab", { name: "Risks 1" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /^Frameworks$/ })).toBeVisible();
+  // owner decision on #453 (2026-10-20): a screen reader also hears each tab's group, as its description
+  await expect(page.getByRole("tab", { name: /^Frameworks$/ })).toHaveAccessibleDescription("Assessment group");
+  await expect(page.getByRole("tab", { name: "Risks 1" })).toHaveAccessibleDescription("Assessment group");
+  await expect(page.getByRole("tab", { name: /^Audit/ })).toHaveAccessibleDescription("Evidence group");
+  await expect(page.getByRole("tab", { name: /^Overview$/ })).toHaveAccessibleDescription("Overview group");
   await page.getByRole("tab", { name: "Frameworks" }).click();
   await expect(page.getByText("EU AI Act · v2")).toBeVisible();
   await page.getByRole("tab", { name: "Risks" }).click();
@@ -467,4 +479,100 @@ test("discovery sources highlights only its own nav entry and keeps Add source o
   await expect(add).toHaveAttribute("title", "Choose a kind first");
   await page.getByLabel("Kind").selectOption("repo_github");
   await expect(add).toBeEnabled();
+});
+
+test("use-case Audit tab never shows the capped row count as the total (M1)", async ({ page }) => {
+  // the overview returns at most the newest 20 audit rows
+  const full = Array.from({ length: 20 }, (_, i) => ({ ...overview.audit[0]!, id: i + 1 }));
+  await page.route(`**/v1/use-cases/${ID}/overview`, (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...overview, audit: full }) }));
+  await page.goto(`/ui/admin/governance/use-cases/${ID}`);
+  const tab = page.getByRole("tab", { name: /^Audit/ });
+  await expect(tab).toHaveText("Audit 20+");
+  await tab.click();
+  await expect(page.getByTestId("use-case-audit-partial")).toContainText("older rows may exist");
+  await expect(page.getByRole("link", { name: "Open this use case's full audit trail" })).toBeVisible();
+});
+
+test("use-case Audit tab shows the true total and deep-links to that use case's own trail (owner decision 2026-10-20)", async ({ page }) => {
+  const full = Array.from({ length: 20 }, (_, i) => ({ ...overview.audit[0]!, id: i + 1 }));
+  await page.route(`**/v1/use-cases/${ID}/overview`, (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...overview, audit: full, auditTotal: 57 }) }));
+  const asked: string[] = [];
+  await page.route("**/v1/audit?**", (route) => {
+    asked.push(new URL(route.request().url()).search);
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ entries: [], pageSize: 0, maxPageSize: 500, hasMore: false, nextCursor: null }) });
+  });
+  await page.goto(`/ui/admin/governance/use-cases/${ID}`);
+  const tab = page.getByRole("tab", { name: /^Audit/ });
+  await expect(tab).toHaveText("Audit 57");
+  await tab.click();
+  await expect(page.getByTestId("use-case-audit-partial")).toHaveText("Showing the newest 20 of 57 rows. This use case's full audit trail, and its CSV export, hold every row.");
+  const link = page.getByRole("link", { name: "Open this use case's full audit trail" });
+  await expect(link).toHaveAttribute("href", `/ui/admin/audit?objectType=ai_use_case&objectId=${ID}`);
+  await link.click();
+  await expect(page.getByTestId("audit-only-object")).toContainText(`Showing the audit trail of one AI use case, ${ID}.`);
+  await expect.poll(() => asked.some((q) => q.includes("objectType=ai_use_case") && q.includes(`objectId=${ID}`))).toBe(true);
+  // #465 review L4: the CSV export carries the same object filter as the table, and is named for that object (L5)
+  const exported: string[] = [];
+  await page.route("**/v1/audit.csv**", (route) => {
+    exported.push(new URL(route.request().url()).search);
+    return route.fulfill({ status: 200, contentType: "text/csv", body: "at,ruleId\n" });
+  });
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download CSV" }).click();
+  expect((await download).suggestedFilename()).toBe(`audit-log-${ID.slice(0, 8)}.csv`);
+  expect(exported).toHaveLength(1);
+  expect(new URLSearchParams(exported[0]).get("objectType")).toBe("ai_use_case");
+  expect(new URLSearchParams(exported[0]).get("objectId")).toBe(ID);
+  await page.getByTestId("audit-only-object").getByRole("button", { name: "Show every row" }).click();
+  await expect(page.getByTestId("audit-only-object")).toHaveCount(0);
+  await expect(page).not.toHaveURL(/objectId=/);
+  // #465 review L4: Back restores the filter, Forward clears it again
+  await page.goBack();
+  await expect(page).toHaveURL(new RegExp(`objectType=ai_use_case&objectId=${ID}`));
+  await expect(page.getByTestId("audit-only-object")).toContainText(`Showing the audit trail of one AI use case, ${ID}.`);
+  await page.goForward();
+  await expect(page.getByTestId("audit-only-object")).toHaveCount(0);
+  await expect(page).not.toHaveURL(/objectId=/);
+});
+
+test("use-case Audit tab under the cap shows the exact count and no partial notice (M1)", async ({ page }) => {
+  await page.goto(`/ui/admin/governance/use-cases/${ID}`);
+  const tab = page.getByRole("tab", { name: /^Audit/ });
+  await expect(tab).toHaveText("Audit 1");
+  await tab.click();
+  await expect(page.getByTestId("use-case-audit-partial")).toHaveCount(0);
+});
+
+test("trust coverage view is remembered across a reload (L3)", async ({ page }) => {
+  await page.goto("/ui/admin/governance/trust");
+  await page.getByRole("button", { name: "Radar" }).click();
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Radar" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("button", { name: "Bars" })).toHaveAttribute("aria-pressed", "false");
+});
+
+test("trust coverage falls back to Bars when storage throws (L3)", async ({ page }) => {
+  await page.addInitScript(() => {
+    const boom = () => { throw new Error("storage blocked"); };
+    Object.defineProperty(window, "localStorage", { configurable: true, get: () => ({ getItem: boom, setItem: boom, removeItem: boom, clear: boom, key: boom, length: 0 }) });
+  });
+  await page.goto("/ui/admin/governance/trust");
+  await expect(page.getByRole("button", { name: "Bars" })).toHaveAttribute("aria-pressed", "true");
+  // choosing Radar still works for this visit; only remembering it is skipped
+  await page.getByRole("button", { name: "Radar" }).click();
+  await expect(page.getByRole("button", { name: "Radar" })).toHaveAttribute("aria-pressed", "true");
+});
+
+test("each heatmap names every cell's count and zone in its accessible name (L2)", async ({ page }) => {
+  await page.goto("/ui/admin/governance/trust");
+  // L1: the Mitigated hint matches the gateway definition (closed, or a control AND a residual position)
+  await expect(page.getByText("Closed, or a linked control and a residual rating", { exact: true })).toBeVisible();
+  // fixture: inherent count = likelihood rank + impact rank, so high/high is 4
+  const inherent = page.getByRole("img", { name: /^Inherent risk matrix by likelihood and impact\./ });
+  await expect(inherent).toHaveAttribute("aria-label", /high likelihood, high impact: 4 \(high zone\)/);
+  await expect(inherent).toHaveAttribute("aria-label", /low likelihood, low impact: 0 \(low zone\)/);
+  const residual = page.getByRole("img", { name: /^Residual risk matrix by likelihood and impact\./ });
+  await expect(residual).toHaveAttribute("aria-label", /low likelihood, low impact: 3 \(low zone\)/);
 });

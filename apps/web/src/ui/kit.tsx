@@ -450,6 +450,8 @@ export function Card(props: {
   count?: number;
   /** singular and plural noun for `count`; row / rows by default */
   countNoun?: [string, string];
+  /** under the body and outside the X6 scroll box: paging and partial-data notices stay in view of the reader, and move into the Expand dialog with the body */
+  footer?: ReactNode;
 }) {
   const name = props.infoLabel ?? (typeof props.title === "string" ? props.title : "this section");
   const box = useRef<HTMLDivElement>(null);
@@ -576,9 +578,17 @@ export function Card(props: {
       ) : (
         props.children
       )}
+      {/* M2b: the footer follows the body into the Expand dialog, so it renders in one place at a time */}
+      {!expanded && props.footer}
       {host && (
-        <Modal open={expanded} full title={typeof props.title === "string" ? props.title : name} onClose={() => setExpanded(false)}>
+        <Modal
+          open={expanded}
+          full
+          title={`${typeof props.title === "string" ? props.title : name}${props.count != null ? ` · ${props.count} ${props.count === 1 ? one : many}` : ""}`}
+          onClose={() => setExpanded(false)}
+        >
           <div ref={slot} />
+          {expanded && props.footer}
         </Modal>
       )}
     </section>
@@ -1107,7 +1117,12 @@ export function ConfirmModal(props: {
 export const tabIds = (prefix: string, id: string) => ({ tab: `${prefix}-tab-${id}`, panel: `${prefix}-panel-${id}` });
 
 export function Tabs(props: {
-  tabs: Array<{ id: string; label: ReactNode }>;
+  /**
+   * `group` (A5): the first tab of each group carries `data-group`, which a page's own CSS can caption. Every tab in a
+   * group is also described by the group name (`aria-describedby`), so a screen reader announces the grouping that the
+   * visual caption shows, while each tab keeps its own name
+   */
+  tabs: Array<{ id: string; label: ReactNode; group?: string }>;
   active: string;
   onChange: (id: string) => void;
   /**
@@ -1118,12 +1133,18 @@ export function Tabs(props: {
   idPrefix?: string;
 }) {
   const tabStop = props.tabs.find((tab) => tab.id === props.active)?.id ?? props.tabs[0]?.id;
+  const groupPrefix = useId();
+  const groups = [...new Set(props.tabs.map((t) => t.group).filter((g): g is string => Boolean(g)))];
+  const groupId = (group: string) => `${groupPrefix}-group-${groups.indexOf(group)}`;
   return (
+    <>
     <div className={s.tabs} role="tablist">
-      {props.tabs.map((t) => (
+      {props.tabs.map((t, i) => (
         <button
           key={t.id}
           role="tab"
+          data-group={t.group && t.group !== props.tabs[i - 1]?.group ? t.group : undefined}
+          aria-describedby={t.group ? groupId(t.group) : undefined}
           id={props.idPrefix ? tabIds(props.idPrefix, t.id).tab : undefined}
           // only the selected tab names its panel: an unselected panel is not rendered, and a dangling reference is invalid
           aria-controls={props.idPrefix && t.id === props.active ? tabIds(props.idPrefix, t.id).panel : undefined}
@@ -1146,6 +1167,13 @@ export function Tabs(props: {
         </button>
       ))}
     </div>
+    {groups.length > 0 && (
+      // the group names the tabs' aria-describedby points at; hidden, as the page shows them as captions already
+      <div hidden>
+        {groups.map((g) => <span key={g} id={groupId(g)}>{`${g} group`}</span>)}
+      </div>
+    )}
+    </>
   );
 }
 

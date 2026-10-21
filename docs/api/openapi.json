@@ -3216,7 +3216,7 @@
     "/v1/audit": {
       "get": {
         "operationId": "getV1Audit",
-        "summary": "The audit log — every governed decision, paged, filterable by user, object type, effect and time window.",
+        "summary": "The audit log — every governed decision, paged, filterable by user, object type, one object (`objectId`), effect and time window.",
         "tags": [
           "audit"
         ],
@@ -3250,7 +3250,7 @@
     "/v1/audit.csv": {
       "get": {
         "operationId": "getV1AuditCsv",
-        "summary": "The audit log as a streamed CSV export, with an explicit disclosure when rows fall outside the exported window.",
+        "summary": "The audit log as a streamed CSV export, with an explicit disclosure when rows fall outside the exported window. Takes the same filters as `GET /v1/audit`, including `objectId`.",
         "tags": [
           "audit"
         ],

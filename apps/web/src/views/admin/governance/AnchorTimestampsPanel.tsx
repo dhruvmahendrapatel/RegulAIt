@@ -22,13 +22,14 @@ export function flushSentence(r: FlushResult): string {
   if (r.attempted === 0) return "No anchors were waiting to be written out.";
   return `${r.flushed} of ${r.attempted} waiting ${r.attempted === 1 ? "anchor" : "anchors"} written out${r.failed ? `; ${r.failed} failed and stay pending` : ""}.`;
 }
-export function AnchorTimestampsPanel() {
+/** `bare` (G8 f): folded on the audit log, whose disclosure summary carries the title and the timestamp state */
+export function AnchorTimestampsPanel(props: { bare?: boolean } = {}) {
   const anchors = useQuery({ queryKey: ["admin", "anchor-timestamps"], retry: false, queryFn: () => api.get<AnchorsResponse>("/v1/audit/anchors") });
   const act = useAction();
   const [said, setSaid] = useState<string | null>(null);
   const rows = anchors.data?.anchors;
   const pending = Array.isArray(rows) ? rows.filter((row) => row.status === "pending" || row.status === "failed").length : 0;
-  return <Card title="Anchor timestamps">
+  return <Card title={props.bare ? undefined : "Anchor timestamps"}>
     <p>A configured time-stamping authority can sign the canonical anchor bytes. Without a verified token, an anchor has no trusted timestamp.</p>
     {anchors.data?.disclosure ? <p className={v.faint}>{anchors.data.disclosure}</p> : null}
     <div className={v.row}>

@@ -736,6 +736,107 @@
   }
 }
 
+/* ---- G4 trust dashboard (Governed - Designer batch 4, owner-approved on #453) ---- */
+.trustTiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
+  gap: var(--s2);
+}
+.trustTiles > * {
+  position: relative;
+  padding: var(--s2) var(--s2) var(--s2) var(--s2-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--rg-glass);
+}
+.tileOk::before,
+.tileAttention::before,
+.tileInfo::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  inline-size: 4px;
+  border-start-start-radius: var(--radius-md);
+  border-end-start-radius: var(--radius-md);
+}
+.tileOk::before { background: var(--rg-positive); }
+.tileAttention::before { background: var(--rg-high); }
+.tileInfo::before { background: var(--rg-low); }
+.heatPair {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+  gap: var(--s2);
+}
+.zone_low { background: var(--rg-low-tint); color: var(--rg-low-deep); }
+.zone_medium { background: var(--rg-medium-tint); color: var(--rg-medium-deep); }
+.zone_high { background: var(--rg-high-tint); color: var(--rg-high-deep); }
+.zoneEmpty { opacity: 0.55; }
+.heatCell {
+  flex-direction: column;
+}
+.zoneWord {
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+.segmented {
+  display: inline-flex;
+  gap: var(--s0);
+  padding: var(--s0);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--rg-raised);
+}
+.segmented button {
+  padding: var(--s0) var(--s1-5);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+.segmented button[aria-pressed="true"] {
+  background: var(--surface-1);
+  color: var(--rg-ink);
+  box-shadow: var(--rg-shadow-xs);
+}
+.coverageBars {
+  display: grid;
+  gap: var(--s1-5);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.coverageBars li {
+  display: grid;
+  grid-template-columns: 7rem minmax(0, 1fr) 7rem;
+  gap: var(--s1-5);
+  align-items: center;
+}
+.coverageTrack,
+.coverageGap {
+  block-size: 10px;
+  border-radius: var(--rg-r-pill);
+  background: var(--rg-line);
+  overflow: hidden;
+}
+.coverageTrack > span {
+  display: block;
+  block-size: 100%;
+  border-radius: var(--rg-r-pill);
+  background: var(--rg-signal-700);
+}
+.coverageGap {
+  background: transparent;
+  border: 1px dashed var(--border-strong);
+}
+.coverageValue {
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+}
 /* L2 (ADR-0180): the required note, its counter and Acknowledge, pinned together in the drawer's footer */
 .ackBar {
   flex: 1 1 100%;

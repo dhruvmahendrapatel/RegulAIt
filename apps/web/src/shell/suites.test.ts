@@ -1,6 +1,6 @@
 /** UIW-03 — the active suite is the person's suite, never an admin rail shown to a non-admin. */
 import { describe, expect, it } from "vitest";
-import { shadowedByMoreSpecific, suiteOfPath } from "./suites";
+import { SUITES, shadowedByMoreSpecific, suiteOfPath } from "./suites";
 
 describe("suiteOfPath", () => {
   it("resolves an admin path to its admin suite for an admin", () => {
@@ -31,5 +31,22 @@ describe("shadowedByMoreSpecific — only the active route is highlighted", () =
   });
   it("is not fooled by a shared prefix that is not a path segment", () => {
     expect(shadowedByMoreSpecific("/admin/shadow-ai", "/admin/shadow-ai-x", [...routes, "/admin/shadow-ai-x"])).toBe(false);
+  });
+});
+
+describe("AI Governance suite sections (owner decision on #453, 2026-10-21)", () => {
+  const suite = SUITES.find((x) => x.id === "ai-governance")!;
+  it("puts Discovery between Overview and the AI Governance registers", () => {
+    expect(suite.sections.map((sec) => sec.group)).toEqual(["Overview", "Discovery", "AI Governance"]);
+  });
+  it("holds Shadow-AI discovery and Discovery sources, which the registers no longer repeat", () => {
+    const discovery = suite.sections.find((sec) => sec.group === "Discovery")!;
+    expect(discovery.items.map((i) => i.to)).toEqual(["/admin/shadow-ai", "/admin/shadow-ai/discovery-sources"]);
+    const registers = suite.sections.find((sec) => sec.group === "AI Governance")!;
+    expect(registers.items.some((i) => i.to.startsWith("/admin/shadow-ai"))).toBe(false);
+  });
+  it("still resolves both Discovery pages to the AI Governance suite", () => {
+    expect(suiteOfPath("/admin/shadow-ai", true).id).toBe("ai-governance");
+    expect(suiteOfPath("/admin/shadow-ai/discovery-sources", true).id).toBe("ai-governance");
   });
 });
