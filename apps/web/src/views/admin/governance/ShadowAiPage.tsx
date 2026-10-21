@@ -952,7 +952,7 @@ export default function ShadowAiPage() {
                   No vendor-named preset ships, deliberately. A CASB or SSO export has no published format
                   at all, and the vendor&apos;s name is the part a buyer trusts — so{" "}
                   <code>generic_mapped</code> is the honest answer there instead of a{" "}
-                  <code>zscaler</code> adapter nobody has tested against Zscaler.
+                  vendor-named adapter nobody has tested against that vendor&apos;s export.
                 </p>
               </>
             )}

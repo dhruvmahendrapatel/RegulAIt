@@ -46,7 +46,7 @@ export const MODEL_POLICY_FEATURE_HINTS: Record<ModelPolicyFeature, string> = {
   intake_assist: "Drafting a use-case intake with a model.",
   evals: "Evaluation and red-team runs — the agent under test and the judge.",
   orchestration: "Runs: plan envelopes, workers and goal decomposition.",
-  compat: "The OpenAI- and Anthropic-compatible endpoints and their model list.",
+  compat: "The provider-compatible endpoints and their model list.",
   playground: "The Agent Builder's prompt playground: single runs and evaluate-mode rows.",
 };
 

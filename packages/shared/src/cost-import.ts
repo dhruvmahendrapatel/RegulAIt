@@ -886,7 +886,7 @@ export const anthropicConsoleAdapter = presetAdapter({
     PRESET_LIMIT_PREAMBLE +
     "Expects `usage_start`, `usage_end`, `workspace_member`, `model`, `input_tokens`, `cost_usd`; amounts are " +
     "assumed USD. `input_tokens` is carried as the quantity, so a row's quantity is INPUT tokens only and is not a " +
-    "total token count. Per-SEAT charges (Claude Code seats) are not in this export at all — use `seat_roster`.",
+    "total token count. Per-SEAT charges (per-seat licences from your AI assistant provider) are not in this export at all — use `seat_roster`.",
 });
 
 export const awsCurAdapter = presetAdapter({

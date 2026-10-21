@@ -68,8 +68,8 @@ import c from "./customProviders.module.css";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 
 const WIRE_PROTOCOLS: Array<{ v: CustomWireProtocol; l: string }> = [
-  { v: "openai_chat", l: "openai_chat — /chat/completions (Ollama, vLLM, LM Studio, LocalAI, Azure OpenAI)" },
-  { v: "anthropic_messages", l: "anthropic_messages — /v1/messages (an Anthropic-compatible gateway)" },
+  { v: "openai_chat", l: "openai_chat — /chat/completions" },
+  { v: "anthropic_messages", l: "anthropic_messages — /v1/messages" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -445,8 +445,8 @@ export default function CustomProvidersPage() {
     <>
       <PageHeader
         title="Custom LLM providers"
-        sub="Any OpenAI- or Anthropic-compatible endpoint, governed like the rest."
-        info={<p>Any OpenAI-compatible or Anthropic-Messages-compatible endpoint — Ollama, vLLM, LM Studio, LocalAI, Azure OpenAI, a Bedrock proxy, an internal gateway. An admin-typed URL is an SSRF primitive, so every destination is default-deny: allow-list the host, register (disabled), pass a connection test, then enable. This page explains the rules; the gateway enforces them and its refusals are shown here word for word.</p>}
+        sub="Any provider-compatible endpoint, governed like the rest."
+        info={<p>Any endpoint that speaks one of the supported provider API shapes — a local model server, a cloud-hosted model service, a model proxy, an internal gateway. An admin-typed URL is an SSRF primitive, so every destination is default-deny: allow-list the host, register (disabled), pass a connection test, then enable. This page explains the rules; the gateway enforces them and its refusals are shown here word for word.</p>}
       />
       <div className={v.stack}>
         {capabilityOff && (
@@ -609,7 +609,7 @@ function EgressAllowListCard(props: {
             <Input
               value={note}
               onChange={(e) => setNote(e.target.value)}
-              placeholder="e.g. on-prem vLLM box, approved by security 2026-07-14 (TICKET-4412)"
+              placeholder="e.g. on-prem model server, approved by security 2026-07-14 (TICKET-4412)"
               data-testid="allow-host-note"
             />
           </Field>
@@ -872,7 +872,7 @@ function ProvidersCard(props: {
                   a key is set
                 </Badge>
               ) : (
-                <Badge title="No credential header is sent at all. Normal for a local Ollama / LocalAI / network-authenticated gateway.">
+                <Badge title="No credential header is sent at all. Normal for a local model server or a network-authenticated gateway.">
                   no key (unauthenticated endpoint)
                 </Badge>
               ),
@@ -1259,7 +1259,7 @@ function EditProviderModal(props: {
         </div>
         <p className={v.faint}>
           The stored key is never returned by any endpoint, so it cannot be shown here — only replaced or
-          removed. Removing it is legitimate: a local Ollama or LocalAI endpoint has no key, and a keyless
+          removed. Removing it is legitimate: a local model server has no key, and a keyless
           provider sends no credential header at all.
         </p>
 
