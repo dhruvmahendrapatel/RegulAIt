@@ -376,8 +376,6 @@ jobs:
       REGULAIT_EPHEMERAL_LICENSE: '1'
       # ADR-0181: the CI Postgres service has no TLS (see demo-journey)
       REGULAIT_DATABASE_SSL: disable
-      REGULAIT_LICENSE_KEYRING: ${{ runner.temp }}/license-keys
-      REGULAIT_INSTALL_SECRETS_DIR: ${{ runner.temp }}/install-secrets
       REGULAIT_PUBLIC_URL: http://127.0.0.1:3105
 
     steps:
@@ -400,6 +398,13 @@ jobs:
         run: pnpm -s --filter @regulait/gateway demo:export-key -- --env | sed -e "s/^export //" -e "s/'//g" >> "$GITHUB_ENV"
         env:
           REGULAIT_DEMO_KEY_DIR: ${{ runner.temp }}/demo-keys
+
+      # the runner context is not available in job-level env, so the two runner-temp paths are set here for every
+      # later step
+      - name: Runner-temp paths
+        run: |
+          echo "REGULAIT_LICENSE_KEYRING=$RUNNER_TEMP/license-keys" >> "$GITHUB_ENV"
+          echo "REGULAIT_INSTALL_SECRETS_DIR=$RUNNER_TEMP/install-secrets" >> "$GITHUB_ENV"
 
       - name: Identity issuer key (installer step)
         run: pnpm --filter @regulait/gateway identity-key:init
