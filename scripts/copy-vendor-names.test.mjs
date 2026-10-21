@@ -113,4 +113,55 @@ describe("no AI vendor or competitor name in product UI copy (F31)", () => {
     expect(findVendorNames(root, [file], () => before).hits.map((h) => h.name)).toEqual(["ChatGPT"]);
     expect(findVendorNames(root, [file], () => after).hits).toEqual([]);
   });
+
+  describe("F34: input placeholders and help text are held to more (owner decision 2026-10-21 on #453)", () => {
+    const f = "apps/web/src/x.tsx";
+
+    it("a model id or model family in a placeholder is a hit, whatever its case", () => {
+      expect(scanText(f, `<Input placeholder="e.g. gemini-0-test" />`).map((h) => h.name)).toEqual(["gemini-0-test"]);
+      expect(scanText(f, `<Input placeholder={"e.g. LLAMA-0-test"} />`).map((h) => h.name)).toEqual(["LLAMA-0-test"]);
+      expect(scanText(f, "<Input placeholder={`e.g. gpt-0-test for ${x}`} />").map((h) => h.name)).toEqual(["gpt-0-test"]);
+      expect(scanText(f, `<Input placeholder="e.g. large-general" />`)).toEqual([]);
+    });
+
+    it("help and hint attributes and JSX text are help surfaces; a vendor behind a model is a hit there", () => {
+      expect(scanText(f, `<Field hint="the seeded mistral-0-test id" />`).map((h) => h.name)).toEqual(["mistral-0-test"]);
+      expect(scanText(f, `<span title="a qwen-0-test id" />`).map((h) => h.name)).toEqual(["qwen-0-test"]);
+      expect(scanText(f, `<p>\n  Provider model ids age out (the seeded Google id already did once)\n</p>`).map((h) => h.name)).toEqual(["Google"]);
+      expect(scanText(f, `<p>Provider model ids age out (a seeded id already did once)</p>`)).toEqual([]);
+    });
+
+    it("outside the help surfaces those words are left alone: identifiers, slugs, values, other attributes", () => {
+      expect(scanText(f, `const model = opts.model || "gemini-0-test";`)).toEqual([]);
+      expect(scanText(f, `<Option value="google_vertex" data-k="gemini-0-test">x</Option>`)).toEqual([]);
+      expect(scanText(f, `const id = "google"; const label = "Google Workspace";`)).toEqual([]);
+      expect(scanText("apps/gateway/src/x.ts", `const hint = "gemini-0-test";`)).toEqual([]);
+      // a comment in JSX is still not copy
+      expect(scanText(f, `<p>{/* gemini-0-test */}ok</p>`)).toEqual([]);
+    });
+
+    it("a proper noun already on the vendor list is reported once, not twice", () => {
+      expect(scanText(f, `<p>Works with Gemini</p>`).map((h) => h.name)).toEqual(["Gemini"]);
+    });
+
+    it("guard proof: the F34 placeholder put back into the real Agents page fails the guard, and the shipped copy passes", () => {
+      const file = "apps/web/src/views/admin/integrations/AgentsPage.tsx";
+      const real = readFileSync(path.join(root, file), "utf8");
+      expect(findVendorNames(root, [file], () => real).hits).toEqual([]);
+      const neutral = `placeholder="the provider's model id, e.g. model-name-v1"`;
+      expect(real).toContain(neutral);
+      const reverted = real.replace(neutral, `placeholder="e.g. gemini-0-test"`);
+      expect(findVendorNames(root, [file], () => reverted).hits.map((h) => `${h.line}: ${h.name}`)).toEqual([
+        `${real.split("\n").findIndex((l) => l.includes(neutral)) + 1}: gemini-0-test`,
+      ]);
+    });
+
+    it("the reviewed exceptions still hold on a help surface: an excepted line excuses only its listed names", () => {
+      const file = "apps/web/src/views/admin/identity/SsoPage.tsx";
+      const line = `        buttons (the bundled Keycloak) shows “Continue with Microsoft / Google / GitHub” on the sign-in page;`;
+      expect(scanText(file, `<p>\n${line}\n</p>`).map((h) => h.name)).toEqual(["Microsoft", "Google"]);
+      expect(findVendorNames(root, [file], () => `<p>\n${line}\n</p>`).hits).toEqual([]);
+      expect(findVendorNames(root, [file], () => `<p>\n${line} Meta too\n</p>`).hits.map((h) => h.name)).toEqual(["Meta"]);
+    });
+  });
 });

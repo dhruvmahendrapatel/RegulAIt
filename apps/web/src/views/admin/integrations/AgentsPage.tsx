@@ -272,7 +272,7 @@ function RegisterAgentCard() {
       >
         <div className={a.formRow}>
           <Field label="Name">
-            <Input required value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="e.g. claude-opus" />
+            <Input required value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="e.g. large-general" />
           </Field>
           <ProviderTiles
             legend="Provider"
@@ -314,7 +314,7 @@ function RegisterAgentCard() {
             <Input required type="number" min={0} value={f.tier} onChange={(e) => set("tier", e.target.value)} />
           </Field>
           <Field label="Model id (blank = not dispatchable)">
-            <Input value={f.model} onChange={(e) => set("model", e.target.value)} placeholder="e.g. claude-opus-5" />
+            <Input value={f.model} onChange={(e) => set("model", e.target.value)} placeholder="the provider's model id, e.g. model-name-v1" />
           </Field>
           {isCustom && (
             <Field label="Pricing for this custom model">
@@ -442,7 +442,7 @@ function ModelPricingCard(props: { agents: AdminAgent[] }) {
         )}
       </form>
       <p className={v.faint}>
-        Provider model ids age out (the seeded Google id already did once) — this is where a stale id is
+        Provider model ids age out (a seeded id already did once) — this is where a stale id is
         refreshed. The save is versioned where versions exist: an agent with agent_config versions gets a
         new version minted and activated (one click rolls back under Config versions); an unversioned
         agent is updated in place. Provider, tier, enablement and lifecycle are deliberately not editable
