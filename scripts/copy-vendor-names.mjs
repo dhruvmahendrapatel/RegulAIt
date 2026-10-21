@@ -208,9 +208,16 @@ function helpRanges(file, text) {
 /** every vendor name in one file's copy, one hit per occurrence: [{ file, line, name, text }] */
 export function scanText(file, text) {
   const hits = [];
-  const help = helpRanges(file, text);
-  if (!VENDOR_RE.test(text) && help.length === 0) return hits;
-  VENDOR_RE.lastIndex = 0;
+  // only a file that could hold a hit is parsed (the whole tree is scanned on every test run)
+  const has = (re) => {
+    re.lastIndex = 0;
+    const found = re.test(text);
+    re.lastIndex = 0;
+    return found;
+  };
+  const maybeHelp = file.endsWith(".tsx") && (has(HELP_VENDOR_RE) || has(MODEL_RE));
+  if (!has(VENDOR_RE) && !maybeHelp) return hits;
+  const help = maybeHelp ? helpRanges(file, text) : [];
   const code = stripComments(file, text);
   const lines = text.split("\n");
   const starts = [0];
