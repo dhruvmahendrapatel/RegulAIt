@@ -18,8 +18,8 @@ name: Engine images
 # The workflow grants contents: read. Only the `publish` job gets
 # packages: write and id-token: write (the OIDC token cosign signs with), both
 # through GITHUB_TOKEN; no other secret is used, and no signing key exists.
-# Only the `lock-pr` job gets contents: write and pull-requests: write, to push
-# one branch and open one draft PR. Actions are pinned by commit sha; builds
+# Only the `lock-pr` job gets contents: write, to push one branch. It holds no
+# pull-requests permission: it opens no PR (owner decision, 2026-10-21). Actions are pinned by commit sha; builds
 # use the Docker CLI and its buildx plugin on the runner (no third-party
 # action holds the token), and cosign is the release binary checked against
 # its pinned SHA-256.
@@ -49,9 +49,14 @@ name: Engine images
 # `engine-images-publish`): per engine, the digests and the signature record
 # (the Sigstore bundle, the certificate identity, the workflow repository and
 # ref, the Rekor entry). The `lock-pr` job (N10) runs
-# `node scripts/engine-images-lock.mjs --apply` on it and opens a DRAFT PR
-# titled "HOLD ..." with the lock, its derived files and the signatures. It
-# never merges, never marks the PR ready and never enables auto-merge.
+# `node scripts/engine-images-lock.mjs --apply` on it and pushes one branch,
+# `engine-images-lock/<commit12>`, with the lock, its derived files and the
+# signatures. It is push-only (owner decision on #453, 2026-10-21): it writes the
+# compare URL, the PR title and the PR body to the step summary (the body file
+# is also the `engine-images-lock-pr` artifact), and the master session opens
+# the draft HOLD PR from it. "Allow GitHub Actions to create and approve pull
+# requests" stays off, and a PR opened with GITHUB_TOKEN would start no CI. The
+# job never opens, merges, approves or readies a PR.
 
 on:
   push:
@@ -191,7 +196,7 @@ jobs:
           {
             echo "### Engine images pushed (private on GHCR, signed keylessly)"
             echo ""
-            echo "The \`lock-pr\` job records them in a draft HOLD PR (\`node scripts/engine-images-lock.mjs --apply\`)."
+            echo "The \`lock-pr\` job records them on an \`engine-images-lock/\` branch (\`node scripts/engine-images-lock.mjs --apply\`); the master opens the draft HOLD PR."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -201,14 +206,14 @@ jobs:
           retention-days: 90
 
   lock-pr:
-    # N10: record the signed publish in a draft HOLD PR. Never merges, never marks it ready, never enables auto-merge.
-    name: open the lock PR
+    # N10: record the signed publish on one branch per source commit. Push-only (owner decision, 2026-10-21): it opens
+    # no PR, and never merges, approves, marks ready or enables auto-merge. The master opens the draft HOLD PR.
+    name: push the lock branch
     needs: record
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: write
-      pull-requests: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -242,26 +247,54 @@ jobs:
           COSIGN="$RUNNER_TEMP/bin/cosign" node scripts/engine-images-lock-verify.mjs
           node scripts/engine-images-lock-bot.mjs --pr "$RUNNER_TEMP/publish/engine-images-publish.json" "$RUNNER_TEMP/pr"
 
-      - name: Push the branch and open the draft HOLD PR
+      - name: Push the lock branch (the master opens the draft HOLD PR)
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
           pr="$RUNNER_TEMP/pr"
           if [ "$(cat "$pr/changed")" != "true" ]; then
-            echo "No engine image changed; no PR." >> "$GITHUB_STEP_SUMMARY"
+            echo "No engine image changed; no branch." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           branch="$(cat "$pr/branch")"
           title="$(cat "$pr/title")"
           case "$title" in "HOLD "*) ;; *) echo "::error::the lock PR title must start with HOLD"; exit 1 ;; esac
+          # exactly one branch per source commit, and only under engine-images-lock/
+          [ "$branch" = "engine-images-lock/${GITHUB_SHA:0:12}" ] || { echo "::error::the lock branch must be engine-images-lock/${GITHUB_SHA:0:12}, not ${branch}"; exit 1; }
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$branch"
           # staged by path, never `git add -A`
           while IFS= read -r f; do [ -n "$f" ] && git add -- "$f"; done < "$pr/paths"
           git commit -m "$title" -m "Recorded by the lock-pr job of engine-images.yml from run ${GITHUB_RUN_ID}."
-          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          auth="$(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+          # no force: an existing branch for this commit is refused, never overwritten
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" push origin "HEAD:refs/heads/${branch}"
-          gh pr create --draft --base main --head "$branch" --title "$title" --body-file "$pr/body.md"
-          echo "Opened the draft lock PR from ${branch}. It is not merged by automation." >> "$GITHUB_STEP_SUMMARY"
+          # push-only (owner decision, 2026-10-21): no PR is opened here; the master opens the draft HOLD PR
+          {
+            echo "### Lock branch pushed: \`${branch}\`"
+            echo ""
+            echo "The master session opens the draft PR against \`main\` from it. This job opens, merges and approves nothing."
+            echo ""
+            echo "- Compare URL: https://github.com/${REPOSITORY}/compare/main...${branch}?expand=1"
+            echo "- PR title: \`${title}\`"
+            echo "- PR body file: \`body.md\` in the \`engine-images-lock-pr\` artifact (also shown below)"
+            echo ""
+            echo "<details><summary>PR body</summary>"
+            echo ""
+            cat "$pr/body.md"
+            echo ""
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: engine-images-lock-pr
+          # no image changed: no title or body was written, and no artifact is uploaded
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/pr/title
+            ${{ runner.temp }}/pr/body.md
+          retention-days: 90

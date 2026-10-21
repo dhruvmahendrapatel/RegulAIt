@@ -223,7 +223,7 @@ export const SCENARIO_LIBRARY: ScenarioLibraryEntry[] = [
   },
   {
     key: "finance-uses-personal-chatgpt",
-    title: "Finance employee uses personal ChatGPT account for spreadsheet analysis",
+    title: "An employee pasting work data into a personal consumer AI chat account",
     description: "A financial analyst uploads raw transaction logs to their personal generative AI account to create pivot tables. PII and financial records are exposed to the AI provider.",
     category: "shadow_ai",
     dimension: "compliance",

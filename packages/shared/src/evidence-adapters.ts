@@ -581,8 +581,8 @@ export const cefAdapter: EvidenceAdapter = {
   verification:
     "Implements the PUBLISHED CEF grammar — the 7-field header, '\\|' and '\\\\' header escaping, and extension " +
     "key/value pairs with '\\=' escaping and space-bearing values. It has NOT been run against a real export from " +
-    "any vendor's product by this project: 'conforms to the specification' and 'verified against a live Zscaler / " +
-    "Netskope / ArcSight feed' are different claims and this is only the first one.",
+    "any vendor's product by this project: 'conforms to the specification' and 'verified against a live feed " +
+    "from a real security product' are different claims and this is only the first one.",
   limits:
     "Reads the destination from the first present of dhost, destinationDnsDomain, request (URL) or dst, the actor " +
     "from suser, sourceUserName, shost or src, the time from rt/end/start and the count from cnt — EVERY OTHER " +
