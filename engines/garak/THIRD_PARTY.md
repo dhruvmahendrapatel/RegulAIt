@@ -103,16 +103,19 @@ and the two garak wheels on 2026-10-21:
 - **Fixed:** datasets 3.6.0 to 5.1.0 (GHSA-379c-qx7v-6h59, fixed in 5.0.1) and fsspec 2025.3.0 to 2026.7.0
   (GHSA-27vj-qcqg-25rc, fixed in 2026.6.0; datasets 5.1.0 allows `fsspec<=2026.7.0`). OSV over the new closure reports
   only nltk 3.10.3 GHSA-8mgp-746c-j5xp, which still has no patched release (unchanged, as described above).
-- **huggingface-hub stays at 2.2.0.** datasets 5.0.1 caps it below 2.0, but datasets 5.1.0 and transformers 5.19.0
-  allow `<3.0`. Left alone, the resolver takes litellm 1.106.1, which newly declares `huggingface-hub<2.0` and
-  `filelock<4.0`, and so downgrades the hub client to 1.33.0. The input therefore carries `huggingface-hub>=2.2.0`,
-  which resolves litellm to 1.103.6 (up from 1.103.4; garak needs `litellm>=1.84.0`, and the gateway route never
-  calls it) and filelock to 4.2.4. That keeps the hub client, cache layout and offline paths the pre-seed was proven
-  on. Both closures were OSV-clean apart from nltk.
-- **Changed pins (41):** aiohttp 3.14.5, boto3 and botocore 1.43.116, datasets 5.1.0, dill 0.4.1, filelock 4.2.4,
-  fsspec 2026.7.0, garak 0.17.1, google-auth 2.62.0, httpcore2 and httpx2 2.15.1, jsonpatch 1.36, jsonpath-ng 1.12.0,
+- **huggingface-hub drops to 1.33.0 (owner decision 2026-10-21).** litellm 1.106.1, the newest release and the one
+  the resolver takes (garak needs `litellm>=1.84.0`, and the gateway route never calls it), newly declares
+  `huggingface-hub<2.0` and `filelock<4.0`. The owner chose to take it and let the hub client follow, rather than hold
+  it at 2.2.0 with an input floor (which held litellm at 1.103.6). So the hub client goes from 2.2.0 to 1.33.0 and
+  filelock from 4.1.0 to 3.32.7. Both are Apache-2.0 and MIT as before. The two clients' cache code is identical
+  (`file_download.py` differs only in using httpx instead of httpx2, and `utils/_shared_blobs.py` is byte-identical),
+  so the Hub cache layout, including the shared `hub/blobs/<xx>/<xet hash>` store, is unchanged. OSV is clean apart
+  from nltk.
+- **Changed pins (42):** aiohttp 3.14.5, boto3 and botocore 1.43.116, datasets 5.1.0, dill 0.4.1, filelock 3.32.7,
+  fsspec 2026.7.0, garak 0.17.1, google-auth 2.62.0, httpcore2 and httpx2 2.16.0 (released 2026-10-21),
+  huggingface-hub 1.33.0, jsonpatch 1.36, jsonpath-ng 1.12.0,
   jsonpointer 3.4, langchain 1.4.6, langchain-core 1.6.12, langchain-protocol 0.0.20, langgraph 1.2.16,
-  langgraph-checkpoint 4.3.0, langgraph-prebuilt 1.1.1, langgraph-sdk 0.4.8, langsmith 0.14.11, litellm 1.103.6,
+  langgraph-checkpoint 4.3.0, langgraph-prebuilt 1.1.1, langgraph-sdk 0.4.8, langsmith 0.14.11, litellm 1.106.1,
   markdown 3.11.2, multidict 7.1.0, multiprocess 0.70.19, numpy 2.5.4, ormsgpack 1.13.0, pip 26.2.2 (removed from the
   image), pluggy 1.7.0, py-markdown-table 2.0.0, pydantic 2.14.1, pydantic-core 2.50.1, pydantic-settings 2.16.1,
   s3transfer 0.19.3, setuptools 84.2.1, truststore 0.10.5, uuid-utils 0.18.0, wcwidth 0.9.3, xxhash 4.0.2,
@@ -130,9 +133,10 @@ and the two garak wheels on 2026-10-21:
   The data the image keeps (badchars, `ldnoobw-en.txt` and the rest) is byte-identical, so the notices are unchanged
   apart from the version. The wheel's `LICENSE` is unchanged. The wheel also ships two stray `.orig` files
   (`detectors/apikey.py.orig`, `probes/base.py.orig`), which nothing imports.
-- **Pre-seed:** with datasets 5.1.0 and hub 2.2.0, `preseed-hf.py fetch`, `materialise` and an offline `verify`
-  passed on all nine assets, the NLI model included. The verify ran in a fresh network namespace with the tree
-  read-only, and the cache layout is unchanged.
+- **Pre-seed:** with datasets 5.1.0 and hub 1.33.0, `preseed-hf.py fetch`, `materialise` and an offline `verify`
+  passed on all nine assets, the NLI model included. The verify ran in a fresh network namespace with only loopback
+  up, the tree read-only and every offline switch set. The cache layout is unchanged, so `preseed-hf.py` and
+  `prune-data.py` needed no change. (It was first proven the same way on hub 2.2.0.)
 
 | Component | Version | Licence | Used for, and why |
 |---|---|---|---|

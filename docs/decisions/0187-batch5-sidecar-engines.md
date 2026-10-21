@@ -2789,24 +2789,29 @@ unchanged from 0.17.0. No migration. The engine's database row follows the manif
 `syncEngineManifest`.
 
 - **Closure.** It was re-resolved with `uv pip compile` for CPython 3.12 on x86_64-manylinux_2_28, the method in the
-  header of `requirements.txt`. The input was garak 0.17.1, the CPU torch wheel by URL, `certifi>=2026.10.19`,
-  `pillow>=13.0.0` and `huggingface-hub>=2.2.0`. Each wheel was picked from PyPI's JSON API using the tag order of
-  the base image (cp312, glibc 2.41). That rule reproduces all 134 unchanged hashes, and every downloaded wheel
-  matches its pinned sha256. The result has 41 changed pins and the same 178 distributions. It includes datasets
+  header of `requirements.txt`. The input was garak 0.17.1, the CPU torch wheel by URL, `certifi>=2026.10.19` and
+  `pillow>=13.0.0`. Each wheel was picked from PyPI's JSON API using the tag order of the base image (cp312, glibc
+  2.41). That rule reproduces every unchanged hash, and every downloaded wheel matches its pinned sha256 (`pip
+  install --require-hashes`). The result has 42 changed pins against `main` and the same 178 distributions. It includes datasets
   5.1.0 and fsspec 2026.7.0, so GHSA-379c-qx7v-6h59 and GHSA-27vj-qcqg-25rc are fixed. torch stays 2.14.1+cpu, the
   newest CPU wheel, and `requirements-sdist.txt` is unchanged (ecoji 0.1.1 and langdetect 1.0.9, same sdist hashes).
   OSV over the new closure reports only nltk GHSA-8mgp-746c-j5xp, which still has no patched release.
-- **huggingface-hub: why the floor.** datasets 5.0.1 caps the hub client below 2.0. datasets 5.1.0 and transformers
-  5.19.0 allow `<3.0`. Without a floor, uv takes litellm 1.106.1, a release that newly declares
-  `huggingface-hub<2.0` and `filelock<4.0`, and so downgrades the hub client from 2.2.0 to 1.33.0 and filelock to
-  3.32.7. The floor `huggingface-hub>=2.2.0` gives litellm 1.103.6 (garak needs `>=1.84.0`, and nothing on the
-  gateway route calls it) and filelock 4.2.4. This keeps the hub client, the cache layout and the offline behaviour
-  that decisions 198-200 proved. Both candidate closures were OSV-clean apart from nltk.
+- **huggingface-hub: no floor (owner decision 2026-10-21, answering this PR's question 1).** The first resolve held
+  the hub client at 2.2.0 with an input floor `huggingface-hub>=2.2.0`, which held litellm at 1.103.6. The owner
+  chose instead to "take litellm 1.106.1 and let huggingface-hub drop to what it requires". litellm 1.106.1 is the
+  newest release (garak needs `>=1.84.0`, and nothing on the gateway route calls it) and newly declares
+  `huggingface-hub<2.0` and `filelock<4.0`. So the closure now has huggingface-hub 1.33.0 (2.2.0 on `main`),
+  filelock 3.32.7 (4.1.0 on `main`) and litellm 1.106.1 (1.103.4 on `main`). The same re-resolve also took httpx2
+  and httpcore2 2.16.0, released on 2026-10-21. Against the first resolve of this PR, only those five pins changed.
+  Their licences are unchanged (Apache-2.0, MIT, MIT, BSD-3-Clause, BSD-3-Clause), and OSV is clean apart from nltk.
+  The cache code of hub 1.33.0 and 2.2.0 is the same: `file_download.py` differs only in importing httpx instead of
+  httpx2, and `utils/_shared_blobs.py` (the cache-wide `hub/blobs/<xx>/<xet hash>` store) is byte-identical.
 - **Pre-seed re-verified (decisions 198-200).** `preseed-hf.py fetch`, then `materialise` (datasets 5.1.0, the same
-  `<cache>/garak-llm___<name>/default/0.0.0/<commit>` layout), then `verify` all passed. The verify ran in a fresh
-  network namespace with only loopback, the tree read-only and every offline switch set. All nine assets loaded,
-  including the NLI model that decision 198 could only prove in the image build. `preseed-hf.py`, `hf-preseed.json`,
-  `prune-data.py` and `excluded-data.txt` needed no change.
+  `<cache>/garak-llm___<name>/default/0.0.0/<commit>` layout), then `verify` all passed, first on hub 2.2.0 and
+  again on hub 1.33.0 from a fresh fetch. The verify ran in a fresh network namespace with only loopback up, the
+  tree read-only and every offline switch set. All nine assets loaded, including the NLI model that decision 198
+  could only prove in the image build. `preseed-hf.py`, `hf-preseed.json`, `prune-data.py` and `excluded-data.txt`
+  needed no change.
 - **The image allow-list is empty.** Decision 160's fsspec entry was removed, and so was the manifest's matching
   `unverified` line. No entry was added.
 - **Catalogue (decision 142).** The new `plugin_cache.json` sha256 is `6ba9cca2…230209`. It is in the Dockerfile's
@@ -2853,6 +2858,9 @@ notes were not read; the PyPI wheels are the primary source.
 The opt-in real-engine suite also passed against a venv built from the exact lockfiles (`--require-hashes`,
 `pip check` clean), pruned, with pip removed and the pre-seeded tree mounted. It ran in its own network namespace
 with `REGULAIT_GARAK_EXPECT_OFFLINE=1`, and 20 of 20 tests passed (`garak-real.test.ts` 11, `judge.test.ts` 9).
+All of this was run twice: on the first resolve (hub 2.2.0) and again on the closure without the floor (hub 1.33.0,
+litellm 1.106.1). The second run also had `pip check` clean, the prune removing 23 paths and the licence gate at 197
+allowed, 23 admitted and 0 denied.
 
 **Not done here.** There is no Docker daemon, so CI first builds the image and runs its licence gate, Trivy scan and
 signing. The image lock (`engines/images.lock.json`) still names the 0.17.0 image. Until the lock-update bot records
