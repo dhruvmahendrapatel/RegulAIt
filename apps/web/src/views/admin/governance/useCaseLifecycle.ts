@@ -298,4 +298,6 @@ export interface OverviewResponse {
   summary: { risks: number; liveRisks: number; liveWithoutControls: number; agentsWithoutApprovedModelCard: number; pendingApprovals: number };
   approvals: Array<{ id: string; status: string; stageId: string; approverUserId: string | null; requestedAt: string; decidedAt: string | null; decisionReason: string | null; dueAt?: string | null }>;
   audit: Array<{ id: string | number; at: string; userId: string | null; ruleId: string; effect: string; reason: string }>;
+  /** the whole trail's size (the `audit` list stops at 20); absent from an older gateway */
+  auditTotal?: number;
 }

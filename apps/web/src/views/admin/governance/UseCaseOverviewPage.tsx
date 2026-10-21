@@ -92,14 +92,15 @@ const AUDIT_ROW_LIMIT = 20;
 const TAB_COUNT: Partial<Record<string, (d: OverviewResponse) => number | string>> = {
   risks: (d) => d.risks.length,
   approvals: (d) => d.approvals.length,
-  // M1: never a capped number that reads as the total
-  audit: (d) => (d.audit.length >= AUDIT_ROW_LIMIT ? `${AUDIT_ROW_LIMIT}+` : d.audit.length),
+  // M1: never a capped number that reads as the total. The gateway's true total wins; without it, "20+" at the cap
+  audit: (d) => d.auditTotal ?? (d.audit.length >= AUDIT_ROW_LIMIT ? `${AUDIT_ROW_LIMIT}+` : d.audit.length),
 };
 
 const AiBomPanel = lazy(() => import("./BomEvidencePanel").then((m) => ({ default: m.AiBomPanel })));
 
 export default function UseCaseOverviewPage() {
   const { id = "" } = useParams();
+  const { auth } = useSession();
   const [params, setParams] = useSearchParams();
   const tab = TABS.some((item) => item.id === params.get("tab")) ? params.get("tab")! : "overview";
   const overview = useQuery({ queryKey: ["governance", "use-case-overview", id], queryFn: () => api.get<OverviewResponse>(`/v1/use-cases/${id}/overview`), enabled: Boolean(id) });
@@ -205,7 +206,7 @@ export default function UseCaseOverviewPage() {
             {tab === "stack" ? <StackTab useCaseId={id} data={data.stack} /> : null}
             {tab === "dependencies" ? <Card title="Dependencies and inherited risk"><DependencyGraphPanel useCaseId={id} /></Card> : null}
             {tab === "approvals" ? <ApprovalsTab approvals={data.approvals} userName={userName} /> : null}
-            {tab === "audit" ? <AuditTab rows={data.audit} /> : null}
+            {tab === "audit" ? <AuditTab rows={data.audit} total={data.auditTotal} useCaseId={data.useCase.id} isAdmin={Boolean(auth?.isAdmin)} /> : null}
             {tab === "path" ? (
               <Card title="Decision path">
                 <RunGraph source={{ kind: "use_case", useCaseId: id }} label={`Decision path of ${data.useCase.name}`} refreshKey={status} />
@@ -789,7 +790,27 @@ function ApprovalsTab({ approvals, userName }: { approvals: OverviewResponse["ap
   ]} />}</Card>;
 }
 
-function AuditTab({ rows }: { rows: OverviewResponse["audit"] }) {
-  return <Card title="Recent use-case audit evidence">{rows.length === 0 ? <EmptyState title="No audit rows returned" body="Every registration, review and lifecycle change on this use case writes an audit row. None has been recorded yet." /> : <Table rows={rows} rowKey={(row) => String(row.id)} columns={[{ key: "at", header: "When", render: (row) => <span style={{ whiteSpace: "nowrap" }}>{ago(row.at)}</span> }, { key: "rule", header: "Event", render: (row) => <span style={{ whiteSpace: "nowrap" }}>{humanize(row.ruleId)}</span> }, { key: "effect", header: "Effect", render: (row) => <Badge tone={row.effect === "allow" ? "ok" : row.effect === "deny" ? "danger" : "warn"}>{row.effect}</Badge> }, { key: "reason", header: "Reason", render: (row) => row.reason }]} />}{rows.length >= AUDIT_ROW_LIMIT ? <p className={v.dim} data-testid="use-case-audit-partial">Showing the newest {AUDIT_ROW_LIMIT} rows; older rows may exist. The full audit log and its CSV export hold every row.</p> : null}<p><Link to="/admin/audit">Open the full audit log</Link></p></Card>;
+export function AuditTab({ rows, total, useCaseId, isAdmin }: { rows: OverviewResponse["audit"]; total: number | undefined; useCaseId: string; isAdmin: boolean }) {
+  // owner decision on #453 (2026-10-20): the full trail of this one use case, deep-linked into the audit log's filter
+  const trail = `/admin/audit?objectType=ai_use_case&objectId=${encodeURIComponent(useCaseId)}`;
+  const more = total !== undefined ? total > rows.length : rows.length >= AUDIT_ROW_LIMIT;
+  return (
+    <Card title="Recent use-case audit evidence">
+      {rows.length === 0 ? <EmptyState title="No audit rows returned" body="Every registration, review and lifecycle change on this use case writes an audit row. None has been recorded yet." /> : <Table rows={rows} rowKey={(row) => String(row.id)} columns={[{ key: "at", header: "When", render: (row) => <span style={{ whiteSpace: "nowrap" }}>{ago(row.at)}</span> }, { key: "rule", header: "Event", render: (row) => <span style={{ whiteSpace: "nowrap" }}>{humanize(row.ruleId)}</span> }, { key: "effect", header: "Effect", render: (row) => <Badge tone={row.effect === "allow" ? "ok" : row.effect === "deny" ? "danger" : "warn"}>{row.effect}</Badge> }, { key: "reason", header: "Reason", render: (row) => row.reason }]} />}
+      {more ? (
+        <p className={v.dim} data-testid="use-case-audit-partial">
+          {total !== undefined
+            ? `Showing the newest ${rows.length} of ${total} rows. This use case's full audit trail, and its CSV export, hold every row.`
+            : `Showing the newest ${AUDIT_ROW_LIMIT} rows; older rows may exist. The full audit log and its CSV export hold every row.`}
+        </p>
+      ) : null}
+      {/* #465 review L2: the audit log is an admin surface, so only an admin is offered a link into it */}
+      {isAdmin ? (
+        <p><Link to={trail}>Open this use case&apos;s full audit trail</Link></p>
+      ) : (
+        <p className={v.dim} data-testid="use-case-audit-admin-only">The full audit trail and its CSV export are open to administrators. Ask an administrator for this use case&apos;s full trail.</p>
+      )}
+    </Card>
+  );
 }
 

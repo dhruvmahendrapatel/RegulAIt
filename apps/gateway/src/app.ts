@@ -612,6 +612,8 @@ const auditFilterQuery = z.object({
   userId: z.string().uuid().optional(),
   deployMode: z.enum(["hosted", "byoc", "air_gapped", "unknown"]).optional(),
   objectType: z.string().min(1).max(64).optional(),
+  /** owner decision on #453 (2026-10-20): one object's trail, e.g. a use case's (`objectType=ai_use_case&objectId=…`) */
+  objectId: z.string().uuid().optional(),
   effect: z.enum(["allow", "deny", "require_approval"]).optional(),
   from: z.coerce.date().optional(),
   to: z.coerce.date().optional(),
@@ -680,6 +682,7 @@ function auditFilters(q: AuditFilterInput, from: Date | null, to: Date | null): 
     );
   }
   if (q.objectType) out.push(eq(auditLog.objectType, q.objectType as "mcp_tool"));
+  if (q.objectId) out.push(eq(auditLog.objectId, q.objectId));
   if (q.effect) out.push(eq(auditLog.effect, q.effect));
   if (from) out.push(gte(auditLog.at, from));
   if (to) out.push(lte(auditLog.at, to));
@@ -5622,7 +5625,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // with a userId filter (plus PR #79's deployMode) and nothing else — for a
   // compliance product that means no admin could ever see row 101. It now pages
   // with an opaque keyset cursor on the stable (at DESC, id DESC) sort, and
-  // filters on from/to/objectType/effect as well as userId and deployMode —
+  // filters on from/to/objectType/objectId/effect as well as userId and deployMode —
   // all through the SAME auditFilters() the CSV export uses. Callers that pass
   // nothing get EXACTLY the old behaviour: the newest 100 rows under `entries`.
   app.get("/v1/audit", async (req, reply) => {
@@ -5721,7 +5724,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
     // filename names every filter that shaped the file, so two downloads taken
     // with different filters never collide in a downloads folder
-    const suffix = `${q.userId ? `-${q.userId.slice(0, 8)}` : ""}${q.deployMode ? `-${q.deployMode}` : ""}`;
+    const suffix = `${q.userId ? `-${q.userId.slice(0, 8)}` : ""}${q.objectId ? `-${q.objectId.slice(0, 8)}` : ""}${q.deployMode ? `-${q.deployMode}` : ""}`;
     type Row = typeof auditLog.$inferSelect & { atText: string };
     // A bundle is held in memory to be hashed and signed, so it takes its own
     // (lower, and DISCLOSED) ceiling rather than the streaming one. The

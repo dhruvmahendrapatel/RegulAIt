@@ -195,7 +195,7 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * The audit log — every governed decision, paged, filterable by user, object type, effect and time window.
+ * The audit log — every governed decision, paged, filterable by user, object type, one object (`objectId`), effect and time window.
  * @stability public-stable — auth: admin
    */
   getV1Audit<T = unknown>(options?: RequestOptions): Promise<T> {
@@ -203,7 +203,7 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * The audit log as a streamed CSV export, with an explicit disclosure when rows fall outside the exported window.
+ * The audit log as a streamed CSV export, with an explicit disclosure when rows fall outside the exported window. Takes the same filters as `GET /v1/audit`, including `objectId`.
  * @stability public-stable — auth: admin
    */
   getV1AuditCsv<T = unknown>(options?: RequestOptions): Promise<T> {
