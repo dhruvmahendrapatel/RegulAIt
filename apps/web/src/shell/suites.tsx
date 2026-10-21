@@ -114,6 +114,18 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
     ],
   },
   {
+    // "what AI are we NOT governing?" — discovery, the front door to the registers below. Its own section so the
+    // demo's first stop is not the last two of thirteen entries (owner decision on #453, 2026-10-21)
+    group: "Discovery",
+    items: [
+      // ADR-0055 — the land-and-expand wedge: what AI are we NOT governing?
+      // A discovered row is a governance gap, not a connection to configure.
+      { label: "Shadow-AI discovery", to: "/admin/shadow-ai" },
+      // ADR-0195 SD0 — where RegulAIt may scan, read-only, for shadow AI; every source off until enabled
+      { label: "Discovery sources", to: "/admin/shadow-ai/discovery-sources" },
+    ],
+  },
+  {
     // "is each USE of AI proposed, owned, risk-accepted?" — the registers
     group: "AI Governance",
     items: [
@@ -148,11 +160,6 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // and an audited residual-risk acceptance. Evidence is computed live
       // from the same ledgers those pages render — never hand-ticked.
       { label: "Risks", to: "/admin/risks" },
-      // ADR-0055 — the land-and-expand wedge: what AI are we NOT governing?
-      // A discovered row is a governance gap, not a connection to configure.
-      { label: "Shadow-AI discovery", to: "/admin/shadow-ai" },
-      // ADR-0195 SD0 — where RegulAIt may scan, read-only, for shadow AI; every source off until enabled
-      { label: "Discovery sources", to: "/admin/shadow-ai/discovery-sources" },
     ],
   },
   {
@@ -452,7 +459,7 @@ export const SUITES: Suite[] = [
     name: "AI Governance",
     purpose: "Is each use of AI proposed, owned and risk-accepted — and where do we stand?",
     admin: true,
-    sections: sectionsOf("Overview", "AI Governance"),
+    sections: sectionsOf("Overview", "Discovery", "AI Governance"),
   },
   {
     id: "access-reviews",
