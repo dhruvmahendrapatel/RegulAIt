@@ -3,17 +3,18 @@
  * pinned release's `garak/resources/plugin_cache.json` by engines/garak/extract-probe-metadata.mjs
  * (read as data, nothing executed).
  *
- * Package:  PyPI `garak==0.17.0` (wheel sha256 9a67e6298e4d7025358fecafa9d473c77ff70acdae103aa5251ad60fca3db145)
+ * Package:  PyPI `garak==0.17.1` (wheel sha256 cef78a79291e73e90e7f89522f363ec9344bfb1e0ede68362d7a2379ba5cfda8)
  * Source:   garak/resources/plugin_cache.json
- * sha256:   25484e2467c84b1a59e27ae7ebf433a305b00c859aa1904c315f916661134a52
+ * sha256:   6ba9cca2c36f8045463911783cb4869ae69da6c514d81330a27e29b0de230209
  *
  * `detector` is the probe's primary detector: the only one garak runs with `extended_detectors: false`,
  * which the runner always sets. `owasp` are garak's own tags, in the 2023 OWASP LLM Top 10 numbering
- * (R10); the crosswalk to the 2025 list is in garak.ts. To update: pin a new release, re-run the
- * extractor, re-read R10.
+ * (R10): upstream data only, never read to map a probe. The 2025 mapping is our own per-probe table,
+ * garak-owasp-2025.ts (ADR-0187 decision 213). To update: pin a new release, re-run the extractor,
+ * re-read R10, and re-review every row of that table (its test fails until you do).
  */
-export const GARAK_UPSTREAM_VERSION = "0.17.0";
-export const GARAK_UPSTREAM_SOURCE_SHA256 = "25484e2467c84b1a59e27ae7ebf433a305b00c859aa1904c315f916661134a52";
+export const GARAK_UPSTREAM_VERSION = "0.17.1";
+export const GARAK_UPSTREAM_SOURCE_SHA256 = "6ba9cca2c36f8045463911783cb4869ae69da6c514d81330a27e29b0de230209";
 
 export interface GarakUpstreamProbe {
   /** `module.Class`, as garak names it in its report */

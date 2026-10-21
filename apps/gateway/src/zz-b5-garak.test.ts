@@ -127,7 +127,7 @@ async function grantFor(action: { kind: string; body: Record<string, unknown> })
 /** a garak-shaped report line set (R10 schema) for one probe */
 function reportOf(probe: string, detector: string, scores: number[], completed: boolean): Buffer {
   const run = "r-" + probe;
-  const lines: unknown[] = [{ entry_type: "init", garak_version: "0.17.0", run }];
+  const lines: unknown[] = [{ entry_type: "init", garak_version: "0.17.1", run }];
   // garak writes each attempt twice: generated (status 1), then scored (status 2), with the same uuid (decision 161)
   scores.forEach((_, i) => lines.push({ entry_type: "attempt", uuid: `u${i}`, seq: i, status: 1, probe_classname: probe, outputs: [{ text: "t" }], detector_results: {} }));
   scores.forEach((s, i) => lines.push({ entry_type: "attempt", uuid: `u${i}`, seq: i, status: 2, probe_classname: probe, outputs: [{ text: "t" }], detector_results: { [detector]: [s] } }));
@@ -321,7 +321,7 @@ describe("B5-G garak registration", () => {
   });
 
   it("registers with the worker's report, passes, and is enabled with a step-up but no credential-isolation acceptance", async () => {
-    await writeWorkerSelfTest(workerResults, { garakVersion: "0.17.0", env: { ...GARAK_USAGE_DATA_ENV }, egress: EGRESS, credentialPaths: [] });
+    await writeWorkerSelfTest(workerResults, { garakVersion: "0.17.1", env: { ...GARAK_USAGE_DATA_ENV }, egress: EGRESS, credentialPaths: [] });
     const t = await inject("POST", "/v1/engines/garak/enrollment-tokens", admin.key, { label: "b5g" });
     expect(t.statusCode, t.body).toBe(201);
     const selfTest = await garakRunnerSelfTest({ imageDigest: GK_DIGEST, engineVersion: MANIFEST.garak.version, resultsRoot: workerResults, egress: EGRESS });

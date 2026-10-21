@@ -38,7 +38,7 @@ import type { EngineNotRunReason } from "./contract.js";
 import { GARAK_UPSTREAM_PROBES } from "./garak-upstream.js";
 
 /** the release the image is built from (engines/garak/requirements.txt pins the same) */
-export const GARAK_ENGINE_VERSION = "0.17.0";
+export const GARAK_ENGINE_VERSION = "0.17.1";
 
 /** the vocabulary name in `sourceTaxonomy.system` for every garak item */
 export const GARAK_TAXONOMY_SYSTEM = "garak";
@@ -96,7 +96,7 @@ export interface GarakProbeEntry {
 
 /**
  * Decision 203: the garak modules whose detectors (and, for `agent_breaker`, whose probe's attacker and
- * parser) call a model. In garak 0.17.0 those default to a hosted endpoint (R10); this build re-points
+ * parser) call a model. In garak 0.17.0 and 0.17.1 those default to a hosted endpoint (R10); this build re-points
  * every one of them at the run's judge agent through the gateway's compat route (engine-garak config.ts).
  */
 export const GARAK_JUDGE_MODULES: readonly string[] = Object.freeze(["judge", "agent_breaker"]);

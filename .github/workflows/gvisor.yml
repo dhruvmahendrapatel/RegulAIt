@@ -33,6 +33,7 @@ on:
       - "spikes/isolation-i0/fetch-gvisor.sh"
       - "spikes/isolation-i0/THIRD_PARTY.md"
       - ".github/workflows/gvisor.yml"
+      - "scripts/gvisor-l2-gate.mjs"
   push:
     branches: [main]
     paths:
@@ -43,6 +44,7 @@ on:
       - "spikes/isolation-i0/fetch-gvisor.sh"
       - "spikes/isolation-i0/THIRD_PARTY.md"
       - ".github/workflows/gvisor.yml"
+      - "scripts/gvisor-l2-gate.mjs"
   workflow_dispatch:
 
 concurrency:
@@ -243,6 +245,9 @@ jobs:
             echo "::error::the workload ran under runsc with an out-of-range errnoRet"
             exit 1
           fi
+          # #385 review L2: any failure (a daemon error, a bad flag, an image problem) is not proof; the refusal
+          # must be runsc's own 16-bit range check
+          printf '%s\n' "$out" | grep -q 'errnoRet 65536 does not fit in 16 bits' || { echo "::error::runsc did not refuse for the errnoRet range"; exit 1; }
 
       - name: Run the runsc integration tests (unskipped; positive and negative controls)
         working-directory: packages/sandbox-executor
@@ -269,11 +274,9 @@ jobs:
           jq '{numTotalTests, numPassedTests, numFailedTests, numPendingTests, numTodoTests}' "$r"
           total=$(jq .numTotalTests "$r")
           passed=$(jq .numPassedTests "$r")
-          skipped=$(( $(jq .numPendingTests "$r") + $(jq .numTodoTests "$r") ))
-          if [ "$passed" -le 0 ] || [ "$skipped" -ne 0 ] || [ "$passed" -ne "$total" ]; then
-            echo "::error::the runsc integration tests did not all run: $passed passed of $total, $skipped skipped"
-            exit 1
-          fi
+          # #385 review L1: each required control by title (a deleted negative control still reads "2 of 2 passed"),
+          # plus none skipped and passed == total
+          node scripts/gvisor-l2-gate.mjs "$r"
           verdict=$(jq -r .verdict.verdict "$EVIDENCE_DIR/canary-runsc.json")
           if [ "$verdict" != "pass" ]; then
             echo "::error::the canary's probe report verdict is $verdict"

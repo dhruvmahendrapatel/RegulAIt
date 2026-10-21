@@ -72,7 +72,7 @@ describe("the garak image's inputs", () => {
     expect(pins(sdists).map((p) => p[1])).toEqual(["ecoji", "langdetect"]);
     expect(entries(sdists).length).toBe(2);
     expect(pins(requirements).find((r) => r[1] === "garak")?.[2]).toBe(GARAK_ENGINE_VERSION);
-    expect(pins(requirements).find((r) => r[1] === "garak")?.[3]).toBe("9a67e6298e4d7025358fecafa9d473c77ff70acdae103aa5251ad60fca3db145");
+    expect(pins(requirements).find((r) => r[1] === "garak")?.[3]).toBe("cef78a79291e73e90e7f89522f363ec9344bfb1e0ede68362d7a2379ba5cfda8");
     // nothing proprietary or GPU-only (R10 consequence 1); setuptools pinned (it builds the two sdists)
     expect(requirements).not.toMatch(/^(nvidia-(?!riva)|cuda|triton)/m);
     expect(pins(requirements).some((r) => r[1] === "setuptools")).toBe(true);
