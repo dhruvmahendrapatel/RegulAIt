@@ -46,6 +46,8 @@ import {
 } from "./discoverySourcesModel";
 
 const nowrap = { whiteSpace: "nowrap" } as const;
+/** the page size the Recent runs query asks for (`limit=50`, kept inline in the path) */
+const RUNS_LIMIT = 50;
 const RUN_TONE = { queued: "neutral", running: "info", succeeded: "ok", failed: "danger" } as const;
 
 interface SourceForm {
@@ -74,6 +76,8 @@ export default function DiscoverySourcesPage() {
     queryFn: () => api.get<{ sources: DiscoverySourceView[]; posture: DiscoveryPostureView }>("/v1/discovery/sources"),
   });
   const runs = useQuery({ queryKey: ["admin", "discovery", "runs"], queryFn: () => api.get<{ runs: DiscoveryRunView[] }>("/v1/discovery/runs?limit=50") });
+  // X6b: a collapsed "Recent runs" still says when a scan failed
+  const failedRuns = (runs.data?.runs ?? []).filter((r) => r.status === "failed").length;
   const settings = useQuery({ queryKey: ["admin", "discovery", "settings"], queryFn: () => api.get<DiscoverySettingsView>("/v1/discovery/settings") });
 
   const [form, setForm] = useState<SourceForm>(EMPTY_FORM);
@@ -439,7 +443,17 @@ export default function DiscoverySourcesPage() {
           <EndpointAgentCard sources={list} />
 
           <div className={v.grid2}>
-          <Card title="Recent runs" contain>
+          <Card
+            title="Recent runs"
+            contain
+            foldable
+            startCollapsed
+            count={runs.data?.runs.length ?? 0}
+            // L4: the list is the latest RUNS_LIMIT runs; a full page means older runs exist
+            countIsLimit={(runs.data?.runs.length ?? 0) >= RUNS_LIMIT}
+            countNoun={["run", "runs"]}
+            attention={failedRuns > 0 ? <Badge tone="danger">{failedRuns} failed</Badge> : undefined}
+          >
             <Table<DiscoveryRunView>
               rows={runs.data?.runs ?? []}
               rowKey={(r) => r.id}

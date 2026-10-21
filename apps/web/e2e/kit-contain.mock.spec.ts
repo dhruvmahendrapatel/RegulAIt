@@ -84,6 +84,45 @@ test("a warning that appears under a long, already-clipped body releases it", as
   await expect(page.getByRole("region")).toHaveCount(0);
 });
 
+// X6b (M3): a remembered "closed" never folds a body the KEEP_VISIBLE refusal keeps open. The harness has no session,
+// so the key's person segment is "-".
+const FOLD_KEY = "regulait.contain:-:/ui/e2e/harness/kit-contain.html:Findings";
+const rememberClosed = (page: Page) => page.addInitScript((key) => localStorage.setItem(key, "closed"), FOLD_KEY);
+
+test("X6b: a remembered fold closes a plain long body, so the probes below are not vacuous", async ({ page }) => {
+  await rememberClosed(page);
+  await open(page, "rows=60");
+  await expect(page.getByRole("button", { name: /^Findings 60 rows/ })).toHaveAttribute("aria-expanded", "false");
+  await expect(page.getByText("Finding 1", { exact: true })).toBeHidden();
+});
+
+test("X6b: a body holding a form is never folded, even when the section was remembered closed", async ({ page }) => {
+  await rememberClosed(page);
+  await open(page, "rows=60&variant=form");
+  await expect(page.getByRole("textbox", { name: "Reason" })).toBeVisible();
+  await expect(page.locator("[aria-expanded]")).toHaveCount(0);
+});
+
+test("X6b: a warning that appears under a folded body opens it and takes the fold away", async ({ page }) => {
+  await rememberClosed(page);
+  await open(page, "rows=60");
+  await expect(page.getByRole("button", { name: /^Findings 60 rows/ })).toHaveAttribute("aria-expanded", "false");
+  await page.getByRole("button", { name: "Fail refresh" }).click();
+  await expect(page.getByRole("alert")).toBeVisible();
+  await expect(page.locator("[aria-expanded]")).toHaveCount(0);
+});
+
+test("X6b: a contained card with no fold still offers Expand", async ({ page }) => {
+  await open(page, "rows=60&fold=0");
+  await expect(page.locator("[aria-expanded]")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Expand" })).toBeVisible();
+});
+
+test("X6b (L3): the open hint says how many rows show of how many, in the approved words", async ({ page }) => {
+  await open(page, "rows=60");
+  await expect(page.getByText(/^Showing \d+ of 60 · scroll the list for the rest, or Expand$/)).toBeVisible();
+});
+
 test("Tab and Shift+Tab stay inside the expanded view, through the portaled body", async ({ page }) => {
   await open(page, "rows=60");
   await page.getByRole("button", { name: "Expand" }).click();

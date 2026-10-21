@@ -111,7 +111,11 @@ test("Inbox: one item layout, visible reasons, and Approve waits for a required 
   // the admin override names itself and explains why a reason is needed
   await expect(page.getByText("You are not the named approver, so a reason is required.")).toBeVisible();
   // one decided item fits, so the contained card is no scroll stop (the region role appears only while it scrolls)
-  await expect(page.locator("section[data-rg-card]").filter({ hasText: "Recently decided" })).toContainText("Retire a vendor link");
+  // X6b: "Recently decided" is a secondary section, so it starts folded
+  const decided = page.getByRole("button", { name: /^Recently decided/ });
+  await expect(decided).toHaveAttribute("aria-expanded", "false");
+  await decided.click();
+  await expect(page.locator("section[data-rg-card]").filter({ hasText: "Recently decided" }).getByText("Retire a vendor link")).toBeVisible();
   await expect(page.getByRole("region", { name: "Recently decided, scrollable" })).toHaveCount(0);
 });
 
@@ -330,6 +334,26 @@ test("L1: after an acknowledgement removes the alert, focus moves to the alert i
   await page.getByTestId("alert-detail").getByRole("button", { name: "Acknowledge" }).click();
   await expect(page.getByTestId("alert-detail")).toHaveCount(0);
   await expect(page.getByRole("heading", { level: 1, name: "Governance alerts" })).toBeFocused();
+  expect(await focusIsOnBody(page)).toBe(false);
+});
+
+test("X6b M2: fold Alerts with the drawer open, then acknowledge: focus moves to the fold button, never to <body>", async ({ page }) => {
+  alertsShown = [alert, { ...alert, id: "al2", title: "Support assistant inherits a medium rating" }];
+  ackRemoves = true;
+  await page.goto("/ui/admin/governance/alerts");
+  await page.getByRole("button", { name: /Credit-limit assistant inherits/ }).click();
+  const fold = page.getByRole("button", { name: /^Alerts 2 alerts/ });
+  await fold.click();
+  await expect(fold).toHaveAttribute("aria-expanded", "false");
+  // L1: the choice is stored for this person and this route, not for anyone using the browser
+  expect(await page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith("regulait.contain:")))).toEqual([
+    `regulait.contain:${ME}:/ui/admin/governance/alerts:Alerts`,
+  ]);
+  await page.getByTestId("alert-detail").getByLabel("Acknowledgement note — required and audited").fill("Avery owns the response.");
+  await page.getByTestId("alert-detail").getByRole("button", { name: "Acknowledge" }).click();
+  await expect(page.getByTestId("alert-detail")).toHaveCount(0);
+  // the alert in its place sits in the folded (hidden) body, so it cannot take focus
+  await expect(page.getByRole("button", { name: /^Alerts 1 alert/ })).toBeFocused();
   expect(await focusIsOnBody(page)).toBe(false);
 });
 
