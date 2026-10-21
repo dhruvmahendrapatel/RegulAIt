@@ -122,6 +122,11 @@ test("the sidebar gives Discovery its own section, between Overview and the AI G
   expect(at("Shadow-AI discovery")).toBeLessThan(at("Discovery sources"));
   expect(at("Discovery sources")).toBeLessThan(at("AI Governance"));
   expect(at("AI Governance")).toBeLessThan(at("Use cases"));
+  // the breadcrumb follows the section: "Discovery / …", no longer "AI Governance / …"
+  const crumbs = page.locator('nav[aria-label="Breadcrumb"] li > span:not([aria-hidden])');
+  await expect(crumbs).toHaveText(["Discovery", "Shadow-AI discovery"]);
+  await page.goto("/ui/admin/shadow-ai/discovery-sources");
+  await expect(crumbs).toHaveText(["Discovery", "Discovery sources"]);
 });
 
 test("Shadow AI: tabs, figures with (i), aligned next steps and the coverage tiles", async ({ page }) => {
