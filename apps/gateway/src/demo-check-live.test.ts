@@ -7,8 +7,8 @@
  */
 import { describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { DEMO_SHADOW_DISCOVERY as D } from "@regulait/shared";
-import { checkLiveDiscovery, fictionalDatasetMarkers, G9_BEAT, LIVE_DISCOVERY_BEATS, LIVE_LIST_CAP, runDemoCheck, SHADOW_DISCOVERY_BEATS } from "./demo-check-lib.js";
+import { DEMO_INTAKE_FIXTURES, DEMO_SHADOW_DISCOVERY as D } from "@regulait/shared";
+import { checkLiveDiscovery, DEMO_GATE_SUBJECT_USE_CASE, fictionalDatasetMarkers, G9_BEAT, LIVE_DISCOVERY_BEATS, LIVE_LIST_CAP, runDemoCheck, SHADOW_DISCOVERY_BEATS } from "./demo-check-lib.js";
 import { DEMO_SECURITY_LEAD } from "./demo-identity.js";
 import { SHADOW_AI_REMEDIATION_TEMPLATE_NAME, shadowAiRemediationDefinition } from "./shadow-ai-remediation.js";
 
@@ -42,6 +42,9 @@ function world() {
       { id: MORGAN, email: DEMO_SECURITY_LEAD.email, isAdmin: true, totpEnabled: true, disabledAt: null },
     ] as Json[],
     templates: [] as Json[],
+    useCases: [] as Json[],
+    activeIncidents: [] as Json[],
+    feedbackQueue: [] as Json[],
     failing: new Set<string>(),
   };
 }
@@ -64,6 +67,9 @@ function api(w: World) {
     if (u.pathname === "/v1/users") return ok({ users: w.users });
     if (u.pathname === "/v1/workflows/templates") return ok({ templates: w.templates });
     if (u.pathname === "/v1/inventory/graph") return ok({ nodes: [], summary: { nodes: 0 } });
+    if (u.pathname === "/v1/use-cases") return ok({ useCases: w.useCases });
+    if (u.pathname === "/v1/incidents" && u.searchParams.get("status") === "active") return ok({ incidents: w.activeIncidents });
+    if (u.pathname === "/v1/feedback" && u.searchParams.get("scope") === "queue" && u.searchParams.get("status") === "open") return ok({ items: w.feedbackQueue });
     return null as never;
   };
 }
@@ -314,5 +320,29 @@ describe("runDemoCheck: the two modes", () => {
     w.sources.push(...(["gitlab", "aws", "azure", "inventory", "agent"] as const).map((k) => ({ id: `s-${k}`, name: D[k].name, kind: "x", enabled: true, target: {} })));
     const checks = await runDemoCheck(fakeApp(w), { bootstrapToken: "t", fixtures: null, live: true });
     expect(checks.find((c) => c.beat === "1 Fictional dataset")?.level).toBe("FAIL");
+  });
+});
+
+// PR #464 review (Low): runDemoCheck resolves the `demo:gate` subject from /v1/use-cases by its fixture name and hands
+// it to checkG9Records. Passing `undefined` there instead left every test green; these drive the wiring end to end.
+describe("runDemoCheck: the G9 gate-subject WARN is wired", () => {
+  const gateName = DEMO_INTAKE_FIXTURES.useCases.find((u) => u.key === DEMO_GATE_SUBJECT_USE_CASE)!.name;
+  const g9 = async (w: World) => (await runDemoCheck(fakeApp(w), { bootstrapToken: "t", fixtures: null, live: true })).filter((c) => c.beat === G9_BEAT);
+  const withOpenWork = (useCaseId: string) => {
+    const w = world();
+    w.useCases = [{ id: "uc-gate", name: gateName, status: "approved", euAiActTier: "high" }, { id: "uc-other", name: "Support drafting assistant", status: "approved" }];
+    w.activeIncidents = [{ id: "i1", ref: "INC-1", title: "stray incident", useCaseId, status: "open" }];
+    w.feedbackQueue = [{ id: "fb1", kind: "complaint", status: "acknowledged", ownerUserId: ADA, useCaseId }];
+    return w;
+  };
+
+  it("open work on the gate subject, found by its name in /v1/use-cases, WARNs", async () => {
+    expect(gateName).toBe("Real-Time Fraud Detection Engine");
+    const warn = (await g9(withOpenWork("uc-gate"))).find((c) => c.level === "WARN");
+    expect(warn?.detail).toBe(`1 open incident(s) and 1 open feedback item(s) on "${gateName}", the \`demo:gate\` subject; their alerts can add lines to the G3 gate output`);
+  });
+
+  it("the same open work on another use case does not WARN", async () => {
+    expect((await g9(withOpenWork("uc-other"))).filter((c) => c.level === "WARN")).toEqual([]);
   });
 });
