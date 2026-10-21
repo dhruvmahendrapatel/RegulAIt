@@ -568,9 +568,10 @@ every check (`3 Monitor` lists active alerts); it is not a failure.
 What the re-run changes. The second `demo:prepare` is accepted (exit 0, 0 FAIL), but it is not a no-op: it adds
 traffic and the records derived from it. Between the first and the second check: sightings 617 → 807, active monitor
 alerts 16 → 17, trace evaluations 70 → 78 (flagged 1 → 2), trust-dashboard compliance 79% → 83%. The service container's
-log shows `duplicate key` errors on the seed's grant, role, team and project-member inserts during the re-run; the
-steps still exit 0. So for the demo, prepare the fallback database **once, from empty**, as §7.1 says; a re-run is
-safe as a repair, but its numbers differ from the screenshot pack's.
+log shows handled `duplicate key` errors in both prepares: 9 on agent grants during the first run on the empty
+database, and 50 on the seed's grant, role, team and project-member inserts during the re-run. Every step still exits
+0. So for the demo, prepare the fallback database **once, from empty**, as §7.1 says; a re-run is safe as a repair,
+but its numbers differ from the screenshot pack's.
 
 The `demo-rehearsal` job runs only on a manual dispatch, so pull requests are unaffected. Re-run it after any change to
 the seed, the dataset or the gate: Actions → `Demo journey` → Run workflow.

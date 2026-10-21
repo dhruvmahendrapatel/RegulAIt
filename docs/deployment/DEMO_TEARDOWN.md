@@ -132,8 +132,10 @@ terraform apply destroy.tfplan
 ```
 
 Read the destroy plan before applying: it must list the federated credential, the app registration, the service
-principal, both role assignments, the custom role definition, and everything in the resource group, and nothing
-outside them.
+principal, all three role assignments (the discovery reader's Reader and activity-log assignments, and the
+generator's Cognitive Services OpenAI User assignment on the account), the custom role definition, the resource-group
+budget `module.openai_activity.azurerm_consumption_budget_resource_group.this`, and everything else in the resource
+group, and nothing outside them.
 
 Soft-deleted leftovers. Azure keeps some deleted objects recoverable for a while. Check each, and purge where it is
 listed (pending execution):
@@ -161,13 +163,12 @@ Verify (pending execution):
 
 ```bash
 # pending execution — post-demo, owner
-az group exists --name rg-<slug>-ai-demo                                   # looking for: false
+az group exists --name rg-<slug>-ai-demo                                   # looking for: false (also covers the demo budget, which is scoped to the group)
 az ad app list --display-name regulait-ai-discovery-demo --query "[].appId" # looking for: empty
 az ad sp list --display-name regulait-ai-discovery-demo --query "[].id"    # looking for: empty
 az role assignment list --assignee <client-id> --all                       # looking for: empty, or an error that the principal does not exist
 az role definition list --custom-role-only true --scope /subscriptions/<subscription-id> \
   --query "[?contains(roleName,'activity log reader')].roleName"          # looking for: empty
-az consumption budget list --query "[].name"                               # looking for: no demo budget
 ```
 
 Then, in the portal, check **Cost Management** for the subscription a few days later: no further charges from the
@@ -205,7 +206,8 @@ cases; this is one, and the account closure in T7 removes the rest.
 This targeted destroy is an addition to the setup runbook's teardown, which goes straight to closure. It needs the
 owner's agreement (T11 item 8); without it, skip T6 and rely on T7.
 
-Verify (pending execution), with a session in the sandbox account:
+Verify (pending execution), with a session in the sandbox account. Get it the way `demo-sandbox/aws/providers.tf`
+does: from the management SSO profile, assume `arn:aws:iam::<sandbox-account-id>:role/<sandbox_access_role_name>`.
 
 ```bash
 # pending execution — post-demo, owner
