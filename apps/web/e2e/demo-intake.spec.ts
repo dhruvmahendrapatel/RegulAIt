@@ -207,9 +207,11 @@ test("seeded credit-assistant journey: discover, register, assess, approve, moni
 
   await avery.goto("/ui/inbox");
   // the innermost row whose text STARTS with the label (outer wrappers also contain it)
-  const remediation = avery.locator("div").filter({ hasText: /^Governance remediation/ }).filter({ has: avery.getByRole("button", { name: "Approve" }) }).last();
+  const remediation = avery.locator("div").filter({ hasText: /^Governance remediation/ }).filter({ has: avery.getByRole("button", { name: /^Review / }) }).last();
   await expect(remediation).toBeVisible();
-  await remediation.getByRole("button", { name: "Approve" }).click();
+  // the item's evidence and decision open in the shared detail drawer (owner decision on #453)
+  await remediation.getByRole("button", { name: /^Review / }).click();
+  await avery.getByTestId("inbox-item").getByRole("button", { name: "Approve" }).click();
   await expect(avery.getByText("Approved", { exact: true })).toBeVisible();
   await shotBoth(avery, "real-08-remediation-approved");
   await avery.close();

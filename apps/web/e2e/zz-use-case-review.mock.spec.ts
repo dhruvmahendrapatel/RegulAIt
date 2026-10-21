@@ -357,9 +357,11 @@ test.describe("the review task", () => {
   test("the proposer cannot decide their own use case; other approval kinds keep approve and deny", async ({ page }) => {
     const state = await mockGateway(page, { persona: PROPOSER, approvals: [intakeApproval("ada", "ada"), deployApproval("ada")] });
     await page.goto("/ui/inbox");
-    const deploy = page.locator("div").filter({ hasText: "Deploy the billing service" }).filter({ has: page.getByRole("button", { name: "Approve" }) }).last();
+    await page.getByRole("button", { name: /^Review .*Deploy the billing service/ }).click();
+    const deploy = page.getByTestId("inbox-item");
     await expect(deploy.getByRole("button", { name: "Approve" })).toBeVisible();
     await expect(deploy.getByRole("button", { name: "Deny" })).toBeVisible();
+    await deploy.getByRole("button", { name: "Close review" }).click();
     const drawer = await (async () => {
       await page.getByRole("button", { name: "Review sign-off for Credit-limit-increase assistant" }).click();
       return page.getByRole("dialog", { name: "Review use case sign-off" });
