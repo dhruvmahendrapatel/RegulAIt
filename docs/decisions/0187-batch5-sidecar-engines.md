@@ -2849,7 +2849,9 @@ notes were not read; the PyPI wheels are the primary source.
 5. **Detectors.** The apikey detector no longer clears a whole output when one safe example key appears in it. This
    means more hits; those probes are reported and never counted (decision 147). `mitigation.Prefixes` now matches
    only at the start of a response; it is used only by the phrasing probes, which stay excluded. A file detector
-   that cannot examine a file now scores `None` instead of 0.0, and the mapper never reads `None` as a pass.
+   that cannot examine a file now scores `None` instead of 0.0, and the mapper never reads `None` as a pass. Judge detectors that cannot
+   score now return one `None` per output (`outputs`, not `all_outputs`), so the mapper reads them as unscored rather
+   than as broken coverage; the verdict stays `unknown`.
 6. **Datasets 5 call sites.** sysprompt_extraction still passes `trust_remote_code=False` to `load_dataset`, and
    datasets 5.1.0 accepts it. Verified by the system-prompt case.
 
@@ -2867,3 +2869,146 @@ signing. The image lock (`engines/images.lock.json`) still names the 0.17.0 imag
 a 0.17.1 publish, a runner reports 0.17.0 against a 0.17.1 manifest. `isCurrentBuild` then refuses it, which keeps
 the engine closed (decision 95). The gateway suite fixtures (`apps/gateway/src/zz-b5-garak.test.ts`, two version
 strings) need Postgres and run only in CI.
+
+## Addendum (2026-10-21): publish gate and reproducible engine image builds (branch `ci-engine-gate-repro-1021`)
+
+**Owner decisions (issue #453, 2026-10-21, from the #483 lock review; quoted, not edited):**
+
+1. **Publish gate: skip the publish when image inputs are unchanged.**
+   - `engine-images.yml` keeps its own path as a trigger.
+   - A first job compares the image inputs (`engines/` excluding the lock and signatures, `packages/engine-*`,
+     `scripts/build-engine-image.sh`) against the lock's recorded `sourceCommit`. If nothing changed, the build,
+     sign, publish and lock jobs are skipped.
+   - A `workflow_dispatch` input can force a publish.
+2. **Reproducible engine image builds: do it now, before the freeze.**
+   - Pin the build timestamps (`SOURCE_DATE_EPOCH`) to the last commit that touched image inputs.
+   - Rewrite layer timestamps, and set the revision label to that same commit, so that a no-op rebuild reproduces
+     the digest.
+   - Record it as an addendum to ADR-0187, with an independent rebuild-and-compare check.
+
+### The gate (`scripts/engine-images-gate.mjs`, the `gate` job of `engine-images.yml`)
+
+- **Inputs, per engine** (`--pathspecs <engine>` prints them as git pathspecs). The owner's list, plus what the build
+  was found to read:
+  - `engines/<engine>/` and any file directly in `engines/`. Another engine's directory, `engines/images.lock.json`
+    and `engines/signatures/` are not inputs.
+  - The engine's workspace package and its workspace dependency closure, whole. Today that is
+    `packages/engine-<engine>`, `packages/engine-runner` and **`packages/shared`**. The shim stage builds them, and
+    `pnpm deploy` ships them.
+  - Every workspace `package.json` (`apps/*`, `packages/*`). The shim stage copies all of `packages/` and `apps/`
+    and runs `pnpm install` over the whole workspace, so a lifecycle script in any of them would run there.
+  - The root files the Dockerfiles copy: `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml` and
+    `tsconfig.base.json`. Also `.dockerignore`, which decides what the context holds.
+  - The build's own scripts: `scripts/build-engine-image.sh`, `scripts/engine-images-gate.mjs` (it builds the
+    context) and `scripts/engine-images-normalise.mjs` (the image build runs it).
+- **Never inputs:**
+  - `packages/shared/src/engines/images-lock.ts`, the module generated from the lock (see "The generated lock
+    module" below).
+  - `**/*.test.ts` and `**/*.spec.ts`. `.dockerignore` keeps them out of every context.
+  - `.github/workflows/engine-images.yml`. A workflow edit that should reach the images is published with
+    `force_publish`.
+- **Decision.** An engine is published when any of these holds:
+  - its inputs differ between the lock entry's `sourceCommit` and HEAD (`git diff --name-only`);
+  - its entry was never published;
+  - the dispatch input `force_publish` is true.
+
+  The `publish` matrix is exactly those engines. When none qualifies, `publish`, `record` and `lock-pr` are
+  skipped. A `sourceCommit` missing from the history fails the job (it never publishes or skips on a guess), and the
+  job checks out with `fetch-depth: 0`.
+- **Guards kept as they were:**
+  - `publish` still requires `github.ref == 'refs/heads/main'`; the gate is ANDed onto it.
+  - The `gate` job holds `contents: read` only.
+  - Permissions, keyless signing, the lock verification and the push-only `lock-pr` job are unchanged.
+- **Tests** (`scripts/engine-images-gate.test.mjs`). Against the real repository:
+  - every `COPY` source of every engine Dockerfile is covered by the inputs;
+  - no engine's inputs include another engine, the lock, the signatures, the generated module, a test file or the
+    workflow;
+  - `.dockerignore` still excludes what the gate excludes.
+
+  On a throwaway repository: #480's case (a workflow-only edit) and the lock PR's own files publish nothing; shared
+  code publishes all three engines; an engine's own files publish only that engine; a new workspace dependency joins
+  the closure; force and never-published both publish; a missing commit fails closed; and the input commit is right
+  through a merge. Eight deliberate breaks of the gate were each caught by these tests (the builder report on the PR
+  lists them).
+
+### The generated lock module
+
+The engine images ship `packages/shared`, and with it `images-lock.ts`, the digests of the images published before
+them. No engine reads those values. The runner reports the digest compose gives it (`REGULAIT_ENGINE_IMAGE_DIGEST`),
+and only the gateway admits by the lock. The engines use `ENGINE_MANIFEST` for usage-data switches and reduced sets
+only.
+
+Left in, every lock merge would change the next build's input, then its digest, then the next lock, without end. The
+gate would also never skip, since each lock PR changes `packages/shared`.
+
+So the build context carries the module's all-null form, exactly what `renderTs` writes before the first publish
+(`engine-images-normalise.mjs lock`). The rewrite is strict: anything but the generated shape fails the build. A test
+pins it to `renderTs` of the null lock.
+
+### Reproducible builds (`scripts/build-engine-image.sh` `repro` and `push`)
+
+1. **Input commit.** The input commit is `git log -1 -- <inputs>`, the last commit at or before HEAD that touched the
+   engine's inputs. History simplification follows only parents with identical inputs, so the inputs at that commit
+   equal HEAD's. The script checks this and fails otherwise.
+2. **Context.** The context is a `git archive` of exactly that commit, never the working tree, with the generated
+   lock module neutralised.
+3. **Timestamps.** `SOURCE_DATE_EPOCH` is the input commit's committer time. It is passed as a build arg, which sets
+   the config `created` time and the history and feeds the in-build normalising. Buildx `--output
+   type=image,...,rewrite-timestamp=true` clamps every file time the build writes to it.
+4. **Revision label.** `org.opencontainers.image.revision` is the input commit, not HEAD.
+5. **Builder.** Each build runs in a fresh `docker-container` builder on a pinned BuildKit,
+   `moby/buildkit:v0.25.1@sha256:79cc6476ab1a3371c9afd8b44e7c55610057c43e18d9b39b68e2b0c2475cc1b6`. The builder has
+   no cache and is removed afterwards. The output names `oci-mediatypes=true,compression=gzip`, so neither runner
+   drift nor a later BuildKit's defaults move the digest. Provenance and SBOM attestations stay off.
+6. **Other sources of variation, found and removed:**
+   - **pnpm's `/out/node_modules/.modules.yaml`.** pnpm writes the install time (`prunedAt`) and lists the hoisted
+     packages in the order a concurrent install finished them; this varied between two local deploys. The
+     normaliser sorts the keys and sets the time from the epoch.
+   - **promptfoo's `npm sbom`.** It writes a random `serialNumber` and the current timestamp. The timestamp now comes
+     from the epoch, and the serial number is derived from the document's content. Two local `npm sbom` runs became
+     byte-identical after this.
+   - **Already pinned or clean:**
+     - every base image is pinned by digest;
+     - no Dockerfile uses apt;
+     - pip runs with `--no-cache-dir` and `--require-hashes`;
+     - `__pycache__` is removed;
+     - npm's cache is removed;
+     - the pnpm `.bin` shims differ only by their install path, and that path is constant (`/out`).
+   - The Dockerfiles changed only to run the normaliser.
+7. **CI check.** `engine-images-build.yml`, on pull_request and workflow_dispatch, builds each engine twice
+   (`build` and `rebuild`, on two runners, each in a fresh builder). `compare`
+   (`scripts/engine-images-repro.mjs`) fails unless both builds name the same input commit and epoch and the same
+   manifest digest and image id, and it reports every engine in the step summary. The per-engine result is recorded
+   in the builder report on the PR, not here.
+
+### `sourceCommit` and the revision label
+
+- **`sourceCommit`** is the commit the publish ran on (`GITHUB_SHA`). It is unchanged in meaning. It goes in the
+  lock and in the signed annotation `sourceCommit`, and the lock checks require it to be on main. The gate compares
+  against it.
+- **The revision label** (`org.opencontainers.image.revision`, inside the image config, and so covered by the
+  signed manifest digest) is the input commit. It is the same as `sourceCommit`, or an ancestor of it whose image
+  inputs are identical.
+- **The lock schema is unchanged.** The publish job's step summary and its per-engine artifact also carry
+  `inputCommit` and `sourceDateEpoch`.
+- **Tags.** Images are still tagged `sha-<sourceCommit>`.
+
+### Independent rebuild-and-compare (for an auditor or a BYOC customer) — pending execution
+
+No one has run this yet outside CI's double build.
+
+1. Read the signed entry from the lock. Verify it offline:
+   `COSIGN=<cosign v3.1.3> node scripts/engine-images-lock-verify.mjs`.
+2. Pull the image by its manifest digest and read its revision label:
+   `docker buildx imagetools inspect <repository>@<manifestDigest> --format '{{json .Image.Config.Labels}}'`.
+   That label is the input commit.
+3. In a full clone at that commit, check the commit is on main and is the input commit:
+   `node scripts/engine-images-gate.mjs --input <engine> <commit>` must print the same commit.
+4. Run `scripts/build-engine-image.sh <engine> repro out.json` on linux/amd64 with Docker and buildx. It uses the
+   pinned BuildKit above.
+5. Compare `manifestDigest` and `imageId` in `out.json` with the lock entry. Equal digests mean the published image
+   is exactly what that source builds.
+
+Two parts of the build fetch pinned artefacts at build time: pip wheels and npm packages by hash, and garak's
+Hugging Face assets by commit and sha256. An air-gapped rebuild therefore needs those artefacts mirrored. Their
+content is pinned, so the digest does not depend on where they come from.

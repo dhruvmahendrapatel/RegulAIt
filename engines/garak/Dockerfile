@@ -69,9 +69,14 @@ WORKDIR /src
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./
 COPY packages ./packages
 COPY apps ./apps
+# reproducible builds (ADR-0187 addendum 2026-10-21): pnpm records the install time and the order the concurrent
+# install finished in /out/node_modules/.modules.yaml; the normaliser sorts it and takes the time from SOURCE_DATE_EPOCH
+COPY scripts/engine-images-normalise.mjs ./scripts/engine-images-normalise.mjs
+ARG SOURCE_DATE_EPOCH
 RUN NODE_OPTIONS=--max-old-space-size=3072 pnpm install --frozen-lockfile \
  && pnpm --filter "@regulait/engine-garak..." build \
- && pnpm --filter @regulait/engine-garak deploy --prod --legacy /out
+ && pnpm --filter @regulait/engine-garak deploy --prod --legacy /out \
+ && node scripts/engine-images-normalise.mjs modules-yaml /out/node_modules/.modules.yaml
 
 # ---- stage 3: runtime ---------------------------------------------------------------------------
 FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS runtime

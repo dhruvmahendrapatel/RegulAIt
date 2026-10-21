@@ -20,11 +20,11 @@ describe("no AI vendor or competitor name in product UI copy (F31)", () => {
     const file = "apps/gateway/src/shadow-ai.ts";
     const before = `      why: "the drop-in OpenAI/Anthropic-shaped endpoints mean the application changes a base URL, not its code",`;
     const after = `      why: "the gateway's drop-in, provider-compatible endpoints mean the application changes a base URL, not its code",`;
-    expect(scanText(file, before).map((h) => h.name)).toEqual(["OpenAI"]);
+    expect(scanText(file, before).map((h) => h.name)).toEqual(["OpenAI", "Anthropic"]);
     expect(scanText(file, after)).toEqual([]);
     // a vendor name added to a real copy file is a hit, not an exception
     const read = (f) => (f === file ? before : "");
-    expect(findVendorNames(root, [file], read).hits).toHaveLength(1);
+    expect(findVendorNames(root, [file], read).hits).toHaveLength(2);
   });
 
   it("never flags identifiers, slugs, adapter ids, our own Copilot, or comments", () => {
@@ -34,7 +34,7 @@ describe("no AI vendor or competitor name in product UI copy (F31)", () => {
     expect(scanText(f, ` * a local Ollama endpoint has no key`)).toEqual([]);
     expect(scanText(f, `const x = 1; // matches OpenAI's shape`)).toEqual([]);
     expect(codeOf(`url: "https://example.test/Claude"`)).toContain("Claude");
-    expect(scanText(f, `<p>Seats from GitHub Copilot and Cursor</p>`).map((h) => h.name)).toEqual(["GitHub Copilot"]);
+    expect(scanText(f, `<p>Seats from GitHub Copilot and Cursor</p>`).map((h) => h.name)).toEqual(["GitHub Copilot", "Cursor"]);
   });
 
   it("an exception that covers nothing is reported as stale", () => {
@@ -50,6 +50,36 @@ describe("no AI vendor or competitor name in product UI copy (F31)", () => {
     expect(hits.map((h) => `${h.name}: ${h.text}`)).toEqual(['Gemini: const tip = "Works with Gemini too";']);
     // the file's reviewed lines are still each covered exactly once
     expect(stale.filter((s) => s.startsWith(file))).toEqual([]);
+  });
+
+  it("a second vendor name on an excepted line is a hit; the exception excuses only the names it lists", () => {
+    const file = "apps/web/src/views/admin/settings/GettingStartedPage.tsx";
+    const line = `  if (s.anthropic) on.push("Anthropic compat on"); x("Gemini")`;
+    expect(scanText(file, line).map((h) => h.name)).toEqual(["Anthropic", "Gemini"]);
+    const { hits } = findVendorNames(root, [file], () => line);
+    expect(hits.map((h) => h.name)).toEqual(["Gemini"]);
+  });
+
+  it("every exception's names are in its own line text, so the list says exactly what it excuses", () => {
+    for (const a of ALLOWED_LINES) {
+      expect(a.names.length).toBeGreaterThan(0);
+      for (const n of a.names) expect(a.contains ?? a.equals).toContain(n);
+    }
+  });
+
+  it("a `//` inside a string literal, a template or JSX text is copy, not a comment", () => {
+    const f = "apps/web/src/x.tsx";
+    expect(scanText(f, `const tip = "see docs // OpenAI-shaped";`).map((h) => h.name)).toEqual(["OpenAI"]);
+    expect(scanText(f, "const tip = `a // ${b} Gemini`;").map((h) => h.name)).toEqual(["Gemini"]);
+    expect(scanText(f, `const el = <p>see // Claude</p>;`).map((h) => h.name)).toEqual(["Claude"]);
+    expect(scanText(f, `const el = <p>{/* Claude */}ok</p>; // Gemini`)).toEqual([]);
+    expect(scanText(f, `const a = 1; /* Gemini */ const b = "c"; // Claude`)).toEqual([]);
+    expect(scanText(f, `/**\n * Gemini in a doc block\n */\nconst a = 1;`)).toEqual([]);
+  });
+
+  it("the setup guide's other clients are guarded too", () => {
+    const f = "apps/web/src/x.tsx";
+    expect(scanText(f, `<p>Works with Cline and Roo Code</p>`).map((h) => h.name)).toEqual(["Cline", "Roo Code"]);
   });
 
   it("an exception that matches more than one line is reported as ambiguous", () => {

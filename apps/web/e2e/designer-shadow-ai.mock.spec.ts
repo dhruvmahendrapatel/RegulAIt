@@ -486,6 +486,21 @@ for (const width of [1440, 1000]) {
   });
 }
 
+// #458 review Low: the overlay width is "900 px and below" (DRAWER_OVERLAY_QUERY); a spec sits on each side of the edge
+for (const [width, modal] of [[900, true], [901, false]] as const) {
+  test(`A1 edge (${width} px): the drawer is ${modal ? "a modal over the page" : "a side panel beside it"}`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/ui/admin/shadow-ai");
+    await page.getByRole("button", { name: "Plan remediation for team-17/payments-api" }).click();
+    const drawer = page.getByTestId("shadow-remediation");
+    await expect(drawer).toHaveAttribute("aria-modal", String(modal));
+    // a side panel takes its width from the page; a modal leaves the page as it is
+    const padding = () => page.evaluate(() => getComputedStyle(document.body).paddingInlineEnd);
+    if (modal) expect(await padding()).toBe("0px");
+    else await expect.poll(padding).not.toBe("0px");
+  });
+}
+
 for (const [from, to] of [[DESKTOP, PHONE], [PHONE, DESKTOP]] as const) {
   test(`N2 (${from.width} → ${to.width} px): crossing the overlay width with the Start confirm open keeps the confirm on top`, async ({ page }) => {
     await page.setViewportSize(from);

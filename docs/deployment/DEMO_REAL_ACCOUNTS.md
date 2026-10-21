@@ -274,7 +274,9 @@ Record the first successful scan of each source on screen (ADR-0197 decision 7).
 
 ## Teardown after the demo (pending execution)
 
-Tracked follow-up (ADR-0197). In this order:
+Tracked follow-up (ADR-0197). The full post-demo runbook, which mirrors every setup step above in reverse with
+verification checks, is [DEMO_TEARDOWN.md](DEMO_TEARDOWN.md) (pending execution — post-demo, owner). The summary below
+is kept for reference. In this order:
 
 1. In RegulAIt: disable the three sources and delete their credentials. Turn federation off if nothing else uses it.
 2. GitLab: `terraform destroy` in `demo-sandbox/gitlab` (revokes the group token and deletes the projects), then delete

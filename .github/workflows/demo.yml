@@ -339,6 +339,134 @@ jobs:
             test "$n" -eq 0
           done
 
+  # ADR-0197 fallback rehearsal, on a manual dispatch only: the two steps no other job runs. `demo:prepare` twice on
+  # the SAME database (re-run safety; demo-journey runs it once, on an empty one), a separate `demo:check`, and
+  # `demo:gate` on the seeded database (G3), whose expected decision on a freshly prepared database is DENY with
+  # BLOCK open_high_alert lines. The gate runs after each prepare. The ALLOW half of G3 (after the alerts are
+  # acknowledged) is not here: it is an owner rehearsal step (DEMO_RUNBOOK §7.5). No browser, no gateway process.
+  demo-rehearsal:
+    needs: changes
+    if: github.event_name == 'workflow_dispatch'
+    concurrency:
+      group: demo-rehearsal-${{ github.ref }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
+        env:
+          POSTGRES_USER: regulait
+          POSTGRES_PASSWORD: regulait
+          POSTGRES_DB: regulait_rehearsal
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U regulait -d regulait_rehearsal"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://regulait:regulait@localhost:5432/regulait_rehearsal
+      REGULAIT_BOOTSTRAP_TOKEN: e2e-bootstrap-token
+      # 64-hex test-fixture key, same shape secrets.ts asserts. Not a secret.
+      REGULAIT_DATA_KEY: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+      REGULAIT_EPHEMERAL_LICENSE: '1'
+      # ADR-0181: the CI Postgres service has no TLS (see demo-journey)
+      REGULAIT_DATABASE_SSL: disable
+      REGULAIT_PUBLIC_URL: http://127.0.0.1:3105
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm -r build
+
+      - name: Demo export-signing key
+        run: pnpm -s --filter @regulait/gateway demo:export-key -- --env | sed -e "s/^export //" -e "s/'//g" >> "$GITHUB_ENV"
+        env:
+          REGULAIT_DEMO_KEY_DIR: ${{ runner.temp }}/demo-keys
+
+      # the runner context is not available in job-level env, so the two runner-temp paths are set here for every
+      # later step
+      - name: Runner-temp paths
+        run: |
+          echo "REGULAIT_LICENSE_KEYRING=$RUNNER_TEMP/license-keys" >> "$GITHUB_ENV"
+          echo "REGULAIT_INSTALL_SECRETS_DIR=$RUNNER_TEMP/install-secrets" >> "$GITHUB_ENV"
+
+      - name: Identity issuer key (installer step)
+        run: pnpm --filter @regulait/gateway identity-key:init
+
+      - name: demo:prepare, first run (empty database)
+        run: |
+          set +e
+          pnpm --filter @regulait/gateway demo:prepare > "$RUNNER_TEMP/prepare-1.log" 2>&1
+          code=$?
+          set -e
+          # the step names and the check lines only: the log also holds the personas' one-time passwords
+          grep -E "^(PASS|WARN|FAIL)  |^=== |complete in|stopped:" "$RUNNER_TEMP/prepare-1.log" || true
+          exit $code
+
+      # the deploy gate exits 1 on DENY, 0 on ALLOW and 2 on a setup error; DENY is the expected decision here
+      - name: demo:gate after the first run (expected DENY)
+        run: |
+          set +e
+          pnpm -s --filter @regulait/gateway demo:gate -- "Real-Time Fraud Detection Engine" production ci-rehearsal-1 > "$RUNNER_TEMP/gate-1.txt" 2>&1
+          code=$?
+          set -e
+          cat "$RUNNER_TEMP/gate-1.txt"
+          echo "exit $code; BLOCK open_high_alert lines: $(grep -cE '^  BLOCK open_high_alert' "$RUNNER_TEMP/gate-1.txt" || true)"
+          test "$code" -eq 1 || { echo "::error::demo:gate exited $code, expected 1 (DENY)"; exit 1; }
+          grep -qE '^DENY  "Real-Time Fraud Detection Engine"' "$RUNNER_TEMP/gate-1.txt" || { echo "::error::no DENY line"; exit 1; }
+          grep -qE '^  BLOCK open_high_alert' "$RUNNER_TEMP/gate-1.txt" || { echo "::error::no BLOCK open_high_alert line"; exit 1; }
+
+      - name: demo:prepare, second run on the same database (re-run safety)
+        run: |
+          set +e
+          pnpm --filter @regulait/gateway demo:prepare > "$RUNNER_TEMP/prepare-2.log" 2>&1
+          code=$?
+          set -e
+          # the step names and the check lines only: the log also holds the personas' one-time passwords
+          grep -E "^(PASS|WARN|FAIL)  |^=== |complete in|stopped:" "$RUNNER_TEMP/prepare-2.log" || true
+          exit $code
+
+      - name: demo:check after the second run (0 fail)
+        run: pnpm --filter @regulait/gateway demo:check
+
+      - name: demo:gate after the second run (expected DENY)
+        run: |
+          set +e
+          pnpm -s --filter @regulait/gateway demo:gate -- "Real-Time Fraud Detection Engine" production ci-rehearsal-2 > "$RUNNER_TEMP/gate-2.txt" 2>&1
+          code=$?
+          set -e
+          cat "$RUNNER_TEMP/gate-2.txt"
+          echo "exit $code; BLOCK open_high_alert lines: $(grep -cE '^  BLOCK open_high_alert' "$RUNNER_TEMP/gate-2.txt" || true)"
+          test "$code" -eq 1 || { echo "::error::demo:gate exited $code, expected 1 (DENY)"; exit 1; }
+          grep -qE '^DENY  "Real-Time Fraud Detection Engine"' "$RUNNER_TEMP/gate-2.txt" || { echo "::error::no DENY line"; exit 1; }
+          grep -qE '^  BLOCK open_high_alert' "$RUNNER_TEMP/gate-2.txt" || { echo "::error::no BLOCK open_high_alert line"; exit 1; }
+
+      # the gate output only (no persona credentials in it)
+      - name: Keep the gate output (every run)
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: demo-rehearsal-gate
+          path: ${{ runner.temp }}/gate-*.txt
+          if-no-files-found: warn
+          retention-days: 7
+
   # The mocked UI suite (ADR-0183 2.4), sharded, shared with ci.yml in
   # mock-ui-shards.yml — but here ONLY on a manual dispatch.
   #
