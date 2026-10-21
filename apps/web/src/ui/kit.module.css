@@ -225,6 +225,10 @@
   .contain {
     max-block-size: none;
   }
+  /* a phone wraps the card header rather than squeezing the title (its basis is its width) to a word per line */
+  .cardTitle {
+    flex-wrap: wrap;
+  }
 }
 .rowActions {
   display: grid;

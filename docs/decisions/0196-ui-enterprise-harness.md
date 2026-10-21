@@ -374,3 +374,34 @@ ADR-recorded exception that the `--guard` rule above requires before a ceiling m
   unchanged, and the work must fit them. Batch 1 measured entry JS 135.6 kB and entry CSS 10,575 B of 10,600 B.
   Kit CSS is therefore near its limit, so new screen styles go in each view's lazy CSS module, not in `kit.module.css`.
 - **Landing.** `ui-enterprise-baseline.mjs --guard` fails on this diff by design. Per this ADR the owner lands it.
+
+## Addendum / As built (2026-10-21) — entry JS 137.5 → 137.9 kB and all JS 1,035 → 1,036 kB
+
+The owner decided this raise on 2026-10-21 in the master session:
+<https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6320179102>. It is the ADR-recorded exception
+that the `--guard` rule above requires.
+
+- **What moves.** In `apps/web/.size-limit.json`, `entry JS (index)` goes from `137.5 kB` to `137.9 kB` (+0.4 kB) and
+  `all JS` from `1035 kB` to `1036 kB` (+1 kB). Entry CSS and the two lazy chunks are unchanged.
+- **Why.** #477 (wide tables fit their cards) merged with #474 (X6b foldable cards) is over both ceilings. Gzip bytes,
+  size-limit 14.2.0:
+
+  | | entry JS | all JS |
+  |---|---|---|
+  | main with #474 (`3ab5f6c`) | 137,441 | 1,034,224 |
+  | #477 + #474, fold code still in the entry | 138,224 | 1,035,113 |
+  | #477 + #474 as built, fold code in its own lazy chunk (`FoldTable`, `ui/fold.tsx`) | 137,628 | 1,035,606 |
+  | old ceiling | 137,500 | 1,035,000 |
+  | new ceiling | 137,900 | 1,036,000 |
+
+  The fold code stays in its lazy chunk, as the owner decided. A separate chunk saves 603 B of entry JS but costs
+  all-JS bytes (it compresses alone, and the entry lists its file name), which is why both ceilings move.
+- **How the guard accepts it.** `ui-enterprise-baseline.mjs` has a `CEILING_EXCEPTIONS` list. A row allows exactly one
+  raise: that entry, from that limit, to that limit (compared in bytes). It must carry a date and a link to the owner's
+  decision comment, and `--guard` fails when this ADR does not contain that link. Any other raise (no row, another
+  target, another entry, another starting value) still fails; the tests in `ui-enterprise-harness.test.mjs` prove each
+  case. Once the raise is on main a row matches nothing, so it may be deleted.
+- **Follow-up commitment.** A separate held PR switches react-router to its production build (the entry ships its
+  development build today, about 32.8 kB gzip). Once that PR merges, both ceilings are lowered back **below** the
+  pre-raise values (entry JS under 137.5 kB, all JS under 1,035 kB), so the ratchet ends up stricter than before
+  this exception.
