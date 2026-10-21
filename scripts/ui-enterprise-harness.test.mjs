@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import { spaRoutes, routeSlug, PARAM_FIXTURE } from "./ui-spa-routes.mjs";
-import { growth, merge, parseBytes, readFindings, SIZE_SCRIPT_PIN, sizeLimitBypass, sizeLimitLoosened, stale } from "./ui-enterprise-baseline.mjs";
+import { CEILING_EXCEPTIONS, ceilingExceptionProblems, growth, merge, parseBytes, readFindings, SIZE_SCRIPT_PIN, sizeLimitBypass, sizeLimitLoosened, stale } from "./ui-enterprise-baseline.mjs";
 import { recordMode } from "../apps/web/e2e/enterprise/record-mode.ts";
 import { compare, cssDeclFindings, currentFindings, readBaseline, scanTs } from "./preflight-ui-tokens.mjs";
 import { readPack, renderIndex } from "./ui-screenshot-index.mjs";
@@ -157,6 +157,35 @@ describe("bundle-size ceilings guard (ADR-0196)", () => {
     expect(sizeLimitLoosened(base, edit("entry JS", { limit: "817001 B" }))).toEqual(['"entry JS": limit raised 817 kB -> 817001 B']);
     expect(sizeLimitLoosened(base, edit("entry JS", { limit: "0.817 MB" }))).toEqual([]);
     expect(sizeLimitLoosened(base, edit("entry JS", { limit: "800 kB" }))).toEqual([]);
+  });
+
+  it("allows a raise only when an exception names that entry, that from and that to", () => {
+    const ex = [{ name: "entry JS", from: "817 kB", to: "818 kB", date: "2026-10-21", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-1" }];
+    expect(sizeLimitLoosened(base, edit("entry JS", { limit: "818 kB" }), ex)).toEqual([]);
+    expect(sizeLimitLoosened(base, edit("entry JS", { limit: "818000 B" }), ex)).toEqual([]);
+    // unreferenced: no exception, a different target, a different entry, or a base that is not `from`
+    expect(sizeLimitLoosened(base, edit("entry JS", { limit: "818 kB" }))).toEqual(['"entry JS": limit raised 817 kB -> 818 kB']);
+    expect(sizeLimitLoosened(base, edit("entry JS", { limit: "819 kB" }), ex)).toEqual(['"entry JS": limit raised 817 kB -> 819 kB']);
+    expect(sizeLimitLoosened(base, edit("lazy", { limit: "80 kB" }), ex)).toEqual(['"lazy": limit raised 79 kB -> 80 kB']);
+    expect(sizeLimitLoosened(edit("entry JS", { limit: "810 kB" }), edit("entry JS", { limit: "818 kB" }), ex)).toEqual(['"entry JS": limit raised 810 kB -> 818 kB']);
+    // an exception does not excuse a changed path
+    expect(sizeLimitLoosened(base, edit("entry JS", { limit: "818 kB", path: "dist/*.js" }), ex)).toEqual(['"entry JS": path, gzip or another option changed']);
+  });
+
+  it("requires every exception to carry a dated owner decision that ADR-0196 records", () => {
+    const link = "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-1";
+    const ok = { name: "x", from: "1 kB", to: "2 kB", date: "2026-10-21", decision: link };
+    expect(ceilingExceptionProblems([ok], `owner decision ${link}`)).toEqual([]);
+    expect(ceilingExceptionProblems([ok], "no link here")[0]).toMatch(/does not record/);
+    expect(ceilingExceptionProblems([{ ...ok, date: undefined }], link)[0]).toMatch(/no dated owner decision/);
+    expect(ceilingExceptionProblems([{ ...ok, decision: "agreed in chat" }], link)[0]).toMatch(/must link an owner comment/);
+    expect(ceilingExceptionProblems([{ ...ok, decision: "https://example.com/x" }], link)[0]).toMatch(/must link an owner comment/);
+  });
+
+  it("records every real exception in ADR-0196", async () => {
+    const { readFileSync } = await import("node:fs");
+    const adr = readFileSync(new URL("../docs/decisions/0196-ui-enterprise-harness.md", import.meta.url), "utf8");
+    expect(ceilingExceptionProblems(CEILING_EXCEPTIONS, adr)).toEqual([]);
   });
 
   it("fails a removed entry; a new entry is allowed", () => {
