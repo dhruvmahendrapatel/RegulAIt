@@ -141,7 +141,7 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     lastVerified: "2026-10-10",
     reCheckBy: "2027-01-08",
     unverified: [
-      "image digest and signature (the image is not built yet)",
+      "image signature at run time: the digest is the keylessly signed publish recorded in engines/images.lock.json, verified at deploy time outside the container; the runner's reported digest is a consistency check only (ADR-0187 decision 55)",
       "maintainer count",
       "transitive licences: 11 npm packages carry permissive licences outside the ADR-0176 list (Artistic-2.0, BlueOak-1.0.0, Python-2.0) and await an owner decision; the base image OS layer is not yet scanned",
       "runtime behaviour inside the built image (egress test, air-gapped run, and the runner/worker two-container layout of B5-P2 with the worker's own self-test)",
@@ -187,7 +187,7 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     // maintenance only: the 12-month release rule lapses on 2027-02-18 (R10; ADR-0187 open question 3)
     reCheckBy: "2027-02-18",
     unverified: [
-      "image digest and signature (the image is not built yet)",
+      "image signature at run time: the digest is the keylessly signed publish recorded in engines/images.lock.json, verified at deploy time outside the container; the runner's reported digest is a consistency check only (ADR-0187 decision 55)",
       "maintainer count (the repository's merge rights could not be read)",
       "transitive licences: numpy's bundled runtime code (Zlib, libgfortran under the GCC runtime exception, libquadmath under LGPL-2.1) was accepted by the owner on 2026-10-09 (ADR-0187 decision 106); h5py's bundled HDF5 (BSD-style, not on the ADR-0176 list) and the Python runtime (PSF-2.0) still await an owner decision; the base image OS layer is not yet scanned",
       "advisories of the Python closure (pip-audit or OSV at the first image build)",
@@ -236,11 +236,11 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     lastVerified: "2026-10-10",
     reCheckBy: "2027-01-10",
     unverified: [
-      "image digest and signature (the image is not built yet)",
+      "image signature at run time: the digest is the keylessly signed publish recorded in engines/images.lock.json, verified at deploy time outside the container; the runner's reported digest is a consistency check only (ADR-0187 decision 55)",
       "maintainer count (the repository's merge rights could not be read)",
       "transitive licences: the 20 outside the ADR-0176 list (PSF-2.0, MPL-2.0 while unmodified, ZPL-2.1, MIT-0, CNRI-Python, MIT-CMU, pillow's bundled image libraries, torch's BSL-1.0 and LLVM-exception terms) were accepted by the owner on 2026-10-10 (ADR-0187 decision 193); the native libraries inside the CPU torch wheel and the base image OS layer are not yet scanned (CI's image scan)",
       "runtime behaviour inside the built image (the worker's egress test, an air-gapped run)",
-      "the pre-seeded Hugging Face assets (ADR-0187 decisions 198-200) are proven to load offline by the image build; the image itself has not been built yet",
+      "the pre-seeded Hugging Face assets (ADR-0187 decisions 198-200) are proven to load offline by the image build, which the signed publish ran; no run inside the published image is recorded yet",
       "the judge path (agent_breaker's attacker, parser and judge re-pointed at the run's judge through the gateway) was measured with the pinned garak outside the image only (ADR-0187 decision 204)",
     ],
   },

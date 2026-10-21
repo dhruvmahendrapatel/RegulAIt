@@ -307,23 +307,30 @@ test("X16: a late literacy response preserves an account key until its custody r
     await held;
     await json(route, { required: false, current: true, documents: [], gateMode: "enforce", exempt: null, noticeDays: 14 });
   });
-  let saves = 0;
+  // the handler only records: an expect thrown in here leaves the request unanswered and the failure surfaces
+  // later as a timeout on whatever waits for the refusal
+  const saved: unknown[] = [];
   await page.route("**/v1/users/*/model-credentials", async (route) => {
     if (route.request().method() !== "POST") return json(route, { credentials: [] });
-    saves += 1;
-    expect(route.request().postDataJSON().apiKey).toBe("synthetic-late-literacy-key");
+    saved.push(route.request().postDataJSON());
     return json(route, { error: "key_custody_enforced" }, 409);
   });
   await page.goto("/ui/account?section=keys");
+  // the key list has answered, so the form typed into below is the one the page keeps
+  await expect(page.getByText("No keys of your own", { exact: true })).toBeVisible();
   const key = page.getByLabel("API key", { exact: true });
   await key.fill("synthetic-late-literacy-key");
   await expect(key).toHaveValue("synthetic-late-literacy-key");
+  const literacy = page.waitForResponse((r) => new URL(r.url()).pathname === "/v1/me/ai-literacy");
   release();
+  await literacy;
   await expect(page.getByText("Nothing to acknowledge", { exact: true })).toBeVisible();
   await expect(key, "receiving literacy posture must not remount the Account form").toHaveValue("synthetic-late-literacy-key");
+  const refusal = page.waitForResponse((r) => r.request().method() === "POST" && /\/model-credentials$/.test(new URL(r.url()).pathname));
   await page.getByRole("button", { name: "Save key", exact: true }).click();
+  expect((await refusal).status()).toBe(409);
+  expect(saved).toEqual([expect.objectContaining({ apiKey: "synthetic-late-literacy-key" })]);
   await expect(page.getByText("This deployment enforces key custody.", { exact: true })).toBeVisible();
-  expect(saves).toBe(1);
   await expect(key).toHaveCount(0);
   expect(await page.content()).not.toContain("synthetic-late-literacy-key");
   await page.screenshot({ path: testInfo.outputPath("x16-late-literacy-custody.png") });

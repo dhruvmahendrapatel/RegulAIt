@@ -16,7 +16,9 @@ The image allow-list (`security/image-allowlist.engine-garak.json`) is empty sin
 pins. The 20 licence entries outside the ADR-0176 list were **accepted by the
 owner on 2026-10-10** (open question 21; decision 193), MPL-2.0 only while unmodified, which the gate checks (decision
 194). The owner's acceptance makes the image admissible once CI's scans of the OS layer and the native libraries are
-clean. The shipped manifest carries no digest, so the engine cannot be enabled (ADR-0187 decision 3).
+clean. The shipped manifest takes its digest from the signed publish recorded in `engines/images.lock.json` (since
+2026-10-17); only a runner that reports that digest and the manifest's version can pass the self-test that enabling
+needs (ADR-0187 decisions 3 and 55).
 
 The licence gate was run on the exact installed closure (the pinned cp312 wheels in a Python 3.12 venv, pruned and
 with pip removed as the Dockerfile does; first 2026-10-10, again for garak 0.17.1 on 2026-10-21): **197 allowed, 23 admitted by the allow file (all accepted by the
@@ -24,12 +26,12 @@ owner: 3 by decision 106, 20 by decision 193), 0 denied.** The gate prints the w
 build log.
 
 **Open advisories on the pinned closure (OSV, 2026-10-10). None can be fixed without breaking garak's own pins:**
-- fsspec 2025.3.0, GHSA-27vj-qcqg-25rc (high, fixed in 2026.6.0): allow-listed with an expiry, as described above.
+- fsspec 2025.3.0, GHSA-27vj-qcqg-25rc (high, fixed in 2026.6.0): allow-listed with an expiry, as described above. (cleared 2026-10-21 by the garak 0.17.1 upgrade; see that section)
 - datasets 3.6.0, GHSA-379c-qx7v-6h59 (moderate, path traversal through `file_name` metadata in folder-based
   builders, fixed only in 5.0.1). garak 0.17.0, its latest release, requires `datasets<4.0`, and the last 3.x release
   is 3.6.0, so the fix is a major upgrade that garak forbids. Moderate is below the image gate (HIGH and CRITICAL), and
   datasets is reached only on the same read-only, pre-seeded cache path as fsspec. Take 5.x when a garak release
-  allows it: datasets 5.0.1 also lifts the fsspec cap to `<=2026.6.0`, which clears the fsspec advisory too.
+  allows it: datasets 5.0.1 also lifts the fsspec cap to `<=2026.6.0`, which clears the fsspec advisory too. (cleared 2026-10-21 by the garak 0.17.1 upgrade; see that section)
 - nltk 3.10.3, GHSA-8mgp-746c-j5xp (high, model-artifact APIs bypass the path checks): no patched release exists
   (3.10.3 is both the latest release and the last affected one), so the image gate does not count it. garak requires
   `nltk>=3.10.3`, so a fixed release can be taken by bumping the pin and its hash here, with no change to garak.

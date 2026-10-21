@@ -5,7 +5,8 @@ import react from "@vitejs/plugin-react";
 // switched on), under every condition. It ships the production build beside it (dist/production, the same code with
 // the warnings switched off), so `vite build` resolves the same entries and swaps the folder. The dev server, unit
 // tests and the mocked suite keep the development build and its warnings. If an upgrade moves the files, the build
-// fails here instead of silently shipping the development build again (guard: src/build/prod-bundle.test.ts).
+// fails here instead of silently shipping the development build again (guard: scripts/preflight-ui-prod-bundle.mjs
+// and scripts/preflight-ui-prod-bundle.test.mjs).
 const routerProductionBuild: Plugin = {
   name: "routing-library-production-build",
   apply: "build",

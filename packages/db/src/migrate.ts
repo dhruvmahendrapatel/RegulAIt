@@ -49,6 +49,8 @@ export const CONCURRENT_INDEX_LOCK_NAMESPACE = 210_001;
 export const CONCURRENT_INDEX_LOCK_KEY = "regulait:concurrent-indexes";
 /** how often a waiting process retries the build lock */
 export const CONCURRENT_INDEX_LOCK_POLL_MS = 500;
+/** #476: how often a waiting process says again who holds the build lock */
+export const CONCURRENT_INDEX_LOCK_LOG_MS = 30_000;
 /**
  * #476 L1: the longest the build session waits for any one lock. CONCURRENTLY waits for every transaction in the
  * database that holds an older snapshot (its virtualxid waits are lock waits, so `lock_timeout` bounds them); without a
@@ -99,6 +101,18 @@ async function oldestTransactions(c: PinnedClient): Promise<ConcurrentIndexBlock
   return res.rows as unknown as ConcurrentIndexBlockedError["blockers"];
 }
 
+/** the session holding the build lock (pid and application name, no query text), or undefined if it was just released */
+async function buildLockHolder(c: PinnedClient, lockArgs: unknown[]): Promise<{ pid: number; applicationName: string } | undefined> {
+  // the two-key advisory form is recorded as (classid, objid, objsubid = 2)
+  const res = await c.query(
+    `select l.pid, a.application_name as "applicationName" from pg_locks l join pg_stat_activity a on a.pid = l.pid
+      where l.locktype = 'advisory' and l.granted and l.objsubid = 2
+        and l.classid = $1::int::oid and l.objid = hashtext($2)::oid and l.database = (select oid from pg_database where datname = current_database())`,
+    lockArgs,
+  );
+  return res.rows[0] as { pid: number; applicationName: string } | undefined;
+}
+
 /**
  * Build each `CONCURRENT_INDEXES` entry whose migration is journalled and that is not already a VALID index. A valid
  * index costs one catalogue read and no DDL. An INVALID one (a build that was interrupted) is dropped concurrently and
@@ -108,13 +122,14 @@ async function oldestTransactions(c: PinnedClient): Promise<ConcurrentIndexBlock
  * Everything runs on one pinned connection in autocommit, under the build lock (#476 M1), so a second process waits
  * for the first, then reads VALID and skips. The lock is taken by polling `pg_try_advisory_lock`, never by a blocking
  * `pg_advisory_lock`: a waiter parked inside one statement holds a snapshot, and the holder's CONCURRENTLY build would
- * then wait for the waiter while the waiter waits for the holder. The session runs with `statement_timeout = 0` (a
+ * then wait for the waiter while the waiter waits for the holder. While it waits it logs the holder's pid and application
+ * name, at once and then every `logEveryMs` (#476), so an operator can see which session to end. The session runs with `statement_timeout = 0` (a
  * build on a large trail may take long) and a bounded `lock_timeout` (#476 L1), and both are reset before release.
  */
 export async function buildConcurrentIndexes(
   db: Db,
   migrationsFolder: string,
-  opts: { lockTimeoutMs?: number; pollMs?: number } = {},
+  opts: { lockTimeoutMs?: number; pollMs?: number; logEveryMs?: number } = {},
 ): Promise<string[]> {
   const applied = journalTags(migrationsFolder);
   const due = CONCURRENT_INDEXES.filter((ix) => applied.has(ix.migration));
@@ -122,16 +137,21 @@ export async function buildConcurrentIndexes(
   const lockTimeoutMs = Math.trunc(opts.lockTimeoutMs ?? CONCURRENT_INDEX_LOCK_TIMEOUT_MS);
   if (!(lockTimeoutMs > 0)) throw new Error("buildConcurrentIndexes: lockTimeoutMs must be a positive number of milliseconds");
   const pollMs = opts.pollMs ?? CONCURRENT_INDEX_LOCK_POLL_MS;
+  const logEveryMs = opts.logEveryMs ?? CONCURRENT_INDEX_LOCK_LOG_MS;
   const c = await (db.$client as unknown as { connect: () => Promise<PinnedClient> }).connect();
   const lockArgs = [CONCURRENT_INDEX_LOCK_NAMESPACE, CONCURRENT_INDEX_LOCK_KEY];
   let locked = false;
   let broken: Error | undefined;
   try {
-    for (let said = false; ; ) {
+    for (let nextLog = 0; ; ) {
       const res = await c.query(`select pg_try_advisory_lock($1::int, hashtext($2)) as "ok"`, lockArgs);
       if ((res.rows[0] as { ok: boolean }).ok) break;
-      if (!said) console.log("[regulait] migrations: another process is building the concurrent indexes; waiting for it");
-      said = true;
+      if (Date.now() >= nextLog) {
+        const h = await buildLockHolder(c, lockArgs);
+        const who = h ? `pid ${h.pid}, application "${h.applicationName}"` : "holder not visible";
+        console.log(`[regulait] migrations: another process is building the concurrent indexes (${who}); waiting for it`);
+        nextLog = Date.now() + logEveryMs;
+      }
       await new Promise((r) => setTimeout(r, pollMs));
     }
     locked = true;

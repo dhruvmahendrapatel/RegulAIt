@@ -28,6 +28,7 @@ import { UUID_RE, actorLabel, fmtAt, frameworkLabel, humanize, plural, shortId }
 import type { AuditRetention } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, ConfirmModal, EmptyState, Field, InfoButton, Select, Table, type Tone } from "../../../ui/kit";
+import { FoldTable } from "../../../ui/fold";
 import { useToast } from "../../../ui/toast";
 import { downloadCsv, optionEls, useAction, useUsers, userOpts } from "../adminKit";
 import a from "../admin.module.css";
@@ -240,27 +241,31 @@ export default function AuditLogPage() {
               </Button>
             </p>
           )}
-          <Table<AuditEntry & { rowKey: string }>
+          <FoldTable<AuditEntry & { rowKey: string }>
             columns={[
+              // F25 (#453): below 1000 px of table width, User folds under At and Deploy mode under Effect; on a phone
+              // every value is a labelled line under Event
               {
                 key: "at",
                 header: "At",
+                fold: { sm: "event" },
                 sort: (e) => e.at,
                 render: (e) => <span className={v.mono} style={{ whiteSpace: "nowrap" }} title={String(e.at)}>{fmtAt(e.at)}</span>,
               },
               {
                 key: "user",
                 header: "User",
+                fold: { md: "at", sm: "event" },
                 render: (e) => <span style={{ whiteSpace: "nowrap" }}>{actorLabel(e.userId, nameOf)}</span>,
               },
               {
-                // the event: the rule, with the object it touched as a faint prefix
+                // the event: the rule, with the object it touched as a faint line above it, so the event can wrap
                 key: "event",
                 header: "Event",
                 sort: (e) => `${e.objectType ?? ""} ${e.ruleId}`,
                 render: (e) => (
-                  <span style={{ whiteSpace: "nowrap" }} title={e.ruleId}>
-                    {e.objectType ? <span className={v.faint}>{humanize(e.objectType)} · </span> : null}
+                  <span title={e.ruleId}>
+                    {e.objectType ? <span className={v.faint} style={{ display: "block" }}>{humanize(e.objectType)}</span> : null}
                     {UUID_RE.test(e.ruleId) ? `Policy rule ${shortId(e.ruleId)}` : humanize(e.ruleId)}
                   </span>
                 ),
@@ -268,6 +273,7 @@ export default function AuditLogPage() {
               {
                 key: "effect",
                 header: "Effect",
+                fold: { sm: "event" },
                 sort: (e) => e.effect,
                 // the expected outcome is plain text; only a deny or a held action is tagged
                 render: (e) => e.effect === "allow"
@@ -277,6 +283,7 @@ export default function AuditLogPage() {
               {
                 key: "deployMode",
                 header: "Deploy mode",
+                fold: { md: "effect", sm: "event" },
                 info: <p>&ldquo;Not recorded&rdquo; means no deploy mode was recorded, because the action is not deploy-scoped or predates deploy modes. It is never back-filled.</p>,
                 sort: (e) => e.deployMode ?? "unknown",
                 render: (e) =>
@@ -286,10 +293,11 @@ export default function AuditLogPage() {
                     <span className={v.dim} style={{ whiteSpace: "nowrap" }}>Not recorded</span>
                   ),
               },
-              { key: "reason", header: "Reason", render: (e) => <ReasonCell reason={e.reason} /> },
+              { key: "reason", header: "Reason", fold: { sm: "event" }, render: (e) => <ReasonCell reason={e.reason} /> },
               {
                 key: "bom",
                 header: "Evidence",
+                fold: { sm: "event" },
                 render: (e) =>
                   e.id && e.objectType && RECEIPT_OBJECT_TYPES.has(e.objectType) ? (
                     <Button size="sm" variant="ghost" aria-label={`Decision BOM for audit row ${e.id}`} onClick={() => setBomAuditId(e.id!)}>

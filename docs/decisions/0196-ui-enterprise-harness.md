@@ -375,7 +375,38 @@ ADR-recorded exception that the `--guard` rule above requires before a ceiling m
   Kit CSS is therefore near its limit, so new screen styles go in each view's lazy CSS module, not in `kit.module.css`.
 - **Landing.** `ui-enterprise-baseline.mjs --guard` fails on this diff by design. Per this ADR the owner lands it.
 
-## Addendum — the routing library's production build; entry and all-JS ceilings lowered (2026-10-21)
+## Addendum / As built (2026-10-21) — entry JS 137.5 → 137.9 kB and all JS 1,035 → 1,036 kB
+
+The owner decided this raise on 2026-10-21 in the master session:
+<https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6320179102>. It is the ADR-recorded exception
+that the `--guard` rule above requires.
+
+- **What moves.** In `apps/web/.size-limit.json`, `entry JS (index)` goes from `137.5 kB` to `137.9 kB` (+0.4 kB) and
+  `all JS` from `1035 kB` to `1036 kB` (+1 kB). Entry CSS and the two lazy chunks are unchanged.
+- **Why.** #477 (wide tables fit their cards) merged with #474 (X6b foldable cards) is over both ceilings. Gzip bytes,
+  size-limit 14.2.0:
+
+  | | entry JS | all JS |
+  |---|---|---|
+  | main with #474 (`3ab5f6c`) | 137,441 | 1,034,224 |
+  | #477 + #474, fold code still in the entry | 138,224 | 1,035,113 |
+  | #477 + #474 as built, fold code in its own lazy chunk (`FoldTable`, `ui/fold.tsx`) | 137,628 | 1,035,606 |
+  | old ceiling | 137,500 | 1,035,000 |
+  | new ceiling | 137,900 | 1,036,000 |
+
+  The fold code stays in its lazy chunk, as the owner decided. A separate chunk saves 603 B of entry JS but costs
+  all-JS bytes (it compresses alone, and the entry lists its file name), which is why both ceilings move.
+- **How the guard accepts it.** `ui-enterprise-baseline.mjs` has a `CEILING_EXCEPTIONS` list. A row allows exactly one
+  raise: that entry, from that limit, to that limit (compared in bytes). It must carry a date and a link to the owner's
+  decision comment, and `--guard` fails when this ADR does not contain that link. Any other raise (no row, another
+  target, another entry, another starting value) still fails; the tests in `ui-enterprise-harness.test.mjs` prove each
+  case. Once the raise is on main a row matches nothing, so it may be deleted.
+- **Follow-up commitment.** A separate held PR switches react-router to its production build (the entry ships its
+  development build today, about 32.8 kB gzip). Once that PR merges, both ceilings are lowered back **below** the
+  pre-raise values (entry JS under 137.5 kB, all JS under 1,035 kB), so the ratchet ends up stricter than before
+  this exception.
+
+## Addendum — the routing library's production build; entry JS ceiling lowered (2026-10-21)
 
 The owner decided on 2026-10-21 (issue #453, comment 6320179102) that a separate held PR switches the routing
 library to its production build, and that once it merges the ceilings are lowered below their values that day, so
@@ -402,10 +433,15 @@ unchanged.
 - **Size.** The development build was not 32.8 kB of extra code: that figure is the whole routing library in the
   entry. The dev warnings were about 0.6 kB gzip. Measured locally, main at 44c55fd and then this change: entry JS
   137,448 → 136,848 B, all JS 1,034,202 → 1,033,635 B, entry CSS 10,587 B unchanged.
-- **New ceilings.** Each is lowered by what the change saved, keeping the headroom it had that day:
-  - entry JS 137.5 kB → **136.9 kB**;
-  - all JS 1035 kB → **1034.4 kB**;
+- **Final ceilings, after #477 and this PR (owner decision 2026-10-21,
+  <https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6323236553>).** #477 merged first and raised
+  entry JS to 137.9 kB and all JS to 1036 kB. Measured on this branch with main (#477 included) merged in, gzip bytes,
+  size-limit 14.2.0: entry JS 137,031, entry CSS 10,594, all JS 1,035,090; the prod-bundle guard finds no development
+  build. The owner set:
+  - entry JS `137.9 kB` → **`137.3 kB`**, below the pre-raise 137.5 kB (269 B headroom). Its #477 exception row is
+    removed: the ceiling is now below the value it was raised from, so no raise needs excusing;
+  - `all JS` stays at `1036 kB`: the owner keeps #477's raise from `1035 kB` to `1036 kB` as a recorded exception
+    (about 0.9 kB headroom for freeze-week fixes). Its `CEILING_EXCEPTIONS` row stays and now cites this decision;
   - entry CSS (10.6 kB) and the two lazy chunks are unchanged.
-  The brief's "measured value plus about 1 %, never above the previous ceiling" could not lower anything, because
-  1 % of the entry (about 1.4 kB) is more than the change saved. PR #477 had not merged; its owner-approved raise
-  (+0.4 kB entry, +1 kB all JS) applies on top of these values when it lands.
+  This decision supersedes item 2 of the earlier decision ("lowered back below today's values") for all JS only. The
+  values in "Size" above, measured before #477 merged, are kept as the record of what this change alone saved.

@@ -473,6 +473,8 @@ export type CardProps = CardFold & {
   countIsLimit?: boolean;
   /** singular and plural noun for `count`; row / rows by default */
   countNoun?: [string, string];
+  /** F21: a line under the title and outside the X6 scroll box, so it is never scrolled sideways or clipped */
+  caption?: ReactNode;
   /** under the body and outside the X6 scroll box: paging and partial-data notices stay in view of the reader, and move into the Expand dialog with the body */
   footer?: ReactNode;
 };
@@ -624,35 +626,34 @@ export function Card(props: CardProps) {
       // shell .content) without a cross-module class reference
       data-rg-card=""
     >
-      {(props.title != null || expand) &&
-        (foldable ? (
-          <div className={s.cardTitle} style={props.flush ? { padding: "var(--s2) var(--s2) 0" } : undefined}>
-            <button type="button" style={FOLD} aria-expanded={open} aria-controls={bodyId} onClick={toggleCollapsed}>
-              <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={open ? { rotate: "90deg" } : undefined}>
-                <path d="M9 6l6 6-6 6" />
-              </svg>
-              {props.title}
-              {count}
-              {props.attention}
-            </button>
+      {(props.title != null || expand) && (
+        <div className={s.cardTitle} style={props.flush ? { padding: "var(--s2) var(--s2) 0" } : undefined}>
+          {/* the same width as `flex: 1` wherever the header fits; on a phone it makes the header wrap (#453) */}
+          <span style={foldable ? FOLD_TITLE : { flex: "1 1 max-content" }}>
+            {foldable ? (
+              <button type="button" style={FOLD} aria-expanded={open} aria-controls={bodyId} onClick={toggleCollapsed}>
+                <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={open ? { rotate: "90deg" } : undefined}>
+                  <path d="M9 6l6 6-6 6" />
+                </svg>
+                {props.title}
+                {count}
+                {props.attention}
+              </button>
+            ) : (
+              props.title
+            )}
             {props.info != null && <InfoButton label={name}>{props.info}</InfoButton>}
-            <span style={{ flex: 1 }} />
-            {open && props.actions}
-            {expand}
-          </div>
-        ) : (
-          <div className={s.cardTitle} style={props.flush ? { padding: "var(--s2) var(--s2) 0" } : undefined}>
-            <span style={{ flex: 1 }}>
-              {props.title}
-              {props.info != null && <InfoButton label={name}>{props.info}</InfoButton>}
-            </span>
-            {count}
-            {props.attention}
-            {props.actions}
-            {/* a contained card that does not fold keeps the X6 Expand */}
-            {expand}
-          </div>
-        ))}
+          </span>
+          {!foldable && count}
+          {!foldable && props.attention}
+          {open && props.actions}
+          {/* a contained card that does not fold keeps the X6 Expand */}
+          {expand}
+        </div>
+      )}
+      {props.caption != null && (
+        <p style={{ margin: "0 0 var(--s1)", color: "var(--text-faint)", fontSize: "var(--text-sm)" }}>{props.caption}</p>
+      )}
       {props.contain ? (
         <div
           ref={box}
@@ -697,6 +698,8 @@ export function Card(props: CardProps) {
  * X6b: the whole card title is the fold button, a 44 px target that keeps the
  * global focus ring. Inline, as the entry CSS has no headroom left.
  */
+// the foldable header's title: the fold button and its (i) share the `1 1 max-content` basis (#453)
+const FOLD_TITLE: React.CSSProperties = { display: "flex", alignItems: "center", gap: "var(--s1)", flex: "1 1 max-content" };
 const FOLD: React.CSSProperties = {
   display: "flex",
   flexWrap: "wrap",
@@ -722,7 +725,10 @@ function revealInBox(event: ReactFocusEvent<HTMLDivElement>) {
   const b = box.getBoundingClientRect();
   const left = b.left + box.clientLeft;
   const top = b.top + box.clientTop;
-  if (r.left < left || r.right > left + box.clientWidth || r.top < top || r.bottom > top + box.clientHeight) {
+  // a control in a row clears the sticky table header, which grows when it names folded columns (Column.fold)
+  const head = event.target.closest("thead") ? 0 : box.querySelector("thead")?.getBoundingClientRect().height ?? 0;
+  box.style.scrollPaddingBlockStart = `${Math.ceil(head)}px`;
+  if (r.left < left || r.right > left + box.clientWidth || r.top < top + head || r.bottom > top + box.clientHeight) {
     event.target.scrollIntoView({ block: "nearest", inline: "nearest" });
   }
 }
@@ -891,9 +897,26 @@ export interface Column<T> {
   /** (i) beside the header text; `infoLabel` names it when the header is not plain text */
   info?: ReactNode;
   infoLabel?: string;
+  /**
+   * F6/F20/F21/F25 (owner-approved on #453, 2026-10-21): below a width step of the table's own width (`md` under
+   * 1000 px, `sm` under 600 px), this column's value moves into the cell of the column named here, as a line labelled
+   * with this column's name, and its header and (i) join that column's header. The width is the table's, not the
+   * window's, so a table beside the open drawer folds too. `sm` falls back to `md`; a host that is folded itself
+   * passes the value on. Values are moved, never removed; an empty value moves without its label. FoldTable
+   * (ui/fold.tsx) does the folding; Table renders every column.
+   */
+  fold?: { md?: string; sm?: string };
+  /** set by FoldTable: a column folded into another has no cell of its own, but keeps its sort */
+  hidden?: boolean;
+  /** set by FoldTable: after the header, the names of the columns folded into this one; `sortKeys` are its sorts */
+  head?: (sort: TableSort) => ReactNode;
+  sortKeys?: string[];
 }
 
-export function Table<T>(props: {
+/** the sort a Table hands to a column's `head`, so a column folded into another keeps its own sort (ui/fold.tsx) */
+export type TableSort = { key: string | null; dir: 1 | -1; by: (key: string) => void };
+
+export type TableProps<T> = {
   columns: Array<Column<T>>;
   rows: T[] | undefined;
   rowKey: (row: T) => string;
@@ -909,7 +932,9 @@ export function Table<T>(props: {
   onRetry?: () => void;
   onRowClick?: (row: T) => void;
   rowLabel?: (row: T) => string;
-}) {
+};
+
+export function Table<T>(props: TableProps<T>) {
   const [sortKey, setSortKey] = useState<string | null>(null);
   const [sortDir, setSortDir] = useState<1 | -1>(1);
   const sorted = useMemo(() => {
@@ -924,6 +949,14 @@ export function Table<T>(props: {
       return (av < bv ? -1 : av > bv ? 1 : 0) * sortDir;
     });
   }, [props.rows, props.columns, sortKey, sortDir]);
+  const by = (key: string) => {
+    if (sortKey === key) setSortDir((d) => (d === 1 ? -1 : 1));
+    else {
+      setSortKey(key);
+      setSortDir(1);
+    }
+  };
+  const shown = props.columns.filter((c) => !c.hidden);
 
   return (
     <div className={s.tableWrap}>
@@ -931,7 +964,7 @@ export function Table<T>(props: {
       <table className={s.table} aria-busy={props.loading || undefined}>
         <thead>
           <tr>
-            {props.columns.map((c) => {
+            {shown.map((c) => {
               const sortable = Boolean(c.sort);
               const active = sortKey === c.key;
               return (
@@ -939,24 +972,16 @@ export function Table<T>(props: {
                   key={c.key}
                   style={{ textAlign: c.align ?? "left", width: c.width }}
                   className={sortable ? s.thSortable : undefined}
-                  aria-sort={active ? (sortDir === 1 ? "ascending" : "descending") : undefined}
-                  onClick={
-                    sortable
-                      ? () => {
-                          if (active) setSortDir((d) => (d === 1 ? -1 : 1));
-                          else {
-                            setSortKey(c.key);
-                            setSortDir(1);
-                          }
-                        }
-                      : undefined
-                  }
+                  // a folded column's sort is announced on the header that now shows it
+                  aria-sort={sortKey != null && (c.sortKeys ?? [c.key]).includes(sortKey) ? (sortDir === 1 ? "ascending" : "descending") : undefined}
+                  onClick={sortable ? () => by(c.key) : undefined}
                 >
                   {c.header}
                   {c.info != null && (
                     <InfoButton label={c.infoLabel ?? (typeof c.header === "string" ? c.header : c.key)}>{c.info}</InfoButton>
                   )}
                   {active && <span className={s.sortArrow}>{sortDir === 1 ? "▲" : "▼"}</span>}
+                  {c.head?.({ key: sortKey, dir: sortDir, by })}
                 </th>
               );
             })}
@@ -966,7 +991,7 @@ export function Table<T>(props: {
           {props.loading
             ? [0, 1, 2].map((i) => (
                 <tr key={`sk-${i}`}>
-                  {props.columns.map((c) => (
+                  {shown.map((c) => (
                     <td key={c.key}>
                       <Skeleton width={`${55 + ((i * 17) % 35)}%`} />
                     </td>
@@ -994,7 +1019,7 @@ export function Table<T>(props: {
                         : undefined
                     }
                   >
-                    {props.columns.map((c) => (
+                    {shown.map((c) => (
                       <td key={c.key} style={{ textAlign: c.align ?? "left" }}>
                         {c.render(row)}
                       </td>
@@ -1007,7 +1032,7 @@ export function Table<T>(props: {
             // transient 500 would be worse — but a failed REFETCH must not be
             // silent either: the list is stale and the reader has to know.
             <tr>
-              <td colSpan={props.columns.length} className={s.tableStale} role="alert">
+              <td colSpan={shown.length} className={s.tableStale} role="alert">
                 <StatusDot tone="danger" />
                 <span>
                   Couldn't refresh this list — {props.error instanceof Error ? props.error.message : String(props.error)}.
@@ -1023,7 +1048,7 @@ export function Table<T>(props: {
           )}
           {!props.loading && sorted.length === 0 && props.error != null && (
             <tr>
-              <td colSpan={props.columns.length}>
+              <td colSpan={shown.length}>
                 <ErrorState
                   title="Couldn't load this list"
                   message={props.error instanceof Error ? props.error.message : String(props.error)}
@@ -1035,7 +1060,7 @@ export function Table<T>(props: {
           )}
           {!props.loading && sorted.length === 0 && props.error == null && (
             <tr>
-              <td colSpan={props.columns.length}>{props.empty ?? <EmptyState title="Nothing here yet" />}</td>
+              <td colSpan={shown.length}>{props.empty ?? <EmptyState title="Nothing here yet" />}</td>
             </tr>
           )}
         </tbody>

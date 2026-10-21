@@ -6,11 +6,29 @@ name: Engine images
 # owner, as `ghcr.io/<owner>/regulait-engine-<engine>:sha-<commit>`.
 #
 # ── Triggers ─────────────────────────────────────────────────────────────────
-# Push to main (only when an engine's own files change, so the Actions budget
-# in ci.yml stays true) and workflow_dispatch (for anything else that lands in
-# an image, such as packages/shared). The publish job runs only when the ref is
+# Push to main (only when an engine's own files or this workflow change, so
+# the Actions budget in ci.yml stays true) and workflow_dispatch (for anything
+# else that lands in an image, such as packages/shared). The publish job runs
+# only when the ref is
 # main (`if: github.ref == 'refs/heads/main'`): a dispatch from any other
-# branch publishes nothing. NEVER pull_request: a PR run cannot hold
+# branch publishes nothing.
+#
+# ── Publish gate (owner decision on #453, 2026-10-21; ADR-0187 addendum) ─────
+# The first job, `gate`, compares each engine's image inputs between the
+# lock's recorded `sourceCommit` and this commit
+# (scripts/engine-images-gate.mjs, which lists the inputs). An engine whose
+# inputs did not change is not built, signed or published, and when no engine
+# changed the record and lock jobs are skipped too, so editing this file alone
+# republishes nothing. The dispatch input `force_publish` publishes every
+# engine anyway (a workflow change that should reach the images).
+#
+# ── Reproducible builds (ADR-0187 addendum 2026-10-21) ───────────────────────
+# scripts/build-engine-image.sh builds the input commit (the last commit that
+# touched the engine's inputs) from a clean `git archive`, with
+# SOURCE_DATE_EPOCH and the revision label from that commit, buildx
+# `rewrite-timestamp=true` and a fresh builder on a pinned BuildKit, so a
+# rebuild of unchanged inputs yields the same digest. The pull_request check
+# in engine-images-build.yml builds each image twice and compares. NEVER pull_request: a PR run cannot hold
 # a token that writes packages. The pull_request check that only BUILDS lives
 # in engine-images-build.yml.
 #
@@ -68,11 +86,18 @@ on:
       - packages/engine-promptfoo/**
       - packages/engine-runner/**
       - scripts/build-engine-image.sh
+      - scripts/engine-images-gate.mjs
+      - scripts/engine-images-normalise.mjs
       - .github/workflows/engine-images.yml
       # the lock-update bot's own PR changes only these: merging it must not publish again (a loop)
       - '!engines/images.lock.json'
       - '!engines/signatures/**'
   workflow_dispatch:
+    inputs:
+      force_publish:
+        description: Publish every engine even when its image inputs are unchanged since the lock's sourceCommit
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -82,12 +107,41 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  gate:
+    # Read-only: it decides which engines publish, and nothing else. `publish`, `record` and `lock-pr` all need it.
+    name: compare the image inputs with the lock
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      engines: ${{ steps.plan.outputs.engines }}
+      any: ${{ steps.plan.outputs.any }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          # the lock's sourceCommit must be in the local history to diff against
+          fetch-depth: 0
+
+      - name: Plan the publish
+        id: plan
+        env:
+          # a boolean input, never interpolated into the script; a push has no inputs and never forces
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force_publish == true }}
+        run: |
+          set -euo pipefail
+          force=()
+          if [ "$FORCE" = "true" ]; then force=(--force); fi
+          node scripts/engine-images-gate.mjs --plan "${force[@]}" --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+
   publish:
     name: publish ${{ matrix.engine }}
+    needs: gate
     # Only main publishes, whatever the trigger: a manual workflow_dispatch can be started on any branch, and
-    # that run must never push an image (security.yml's sign job uses the same guard). `record` needs this job,
-    # so it is skipped with it.
-    if: github.ref == 'refs/heads/main'
+    # that run must never push an image (security.yml's sign job uses the same guard). And only an engine the gate
+    # names: unchanged inputs publish nothing. `record` needs this job, so it is skipped with it.
+    if: github.ref == 'refs/heads/main' && needs.gate.outputs.any == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     # owner decision Q4: the owner protects this environment (required reviewer) before it signs anything
@@ -99,11 +153,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        engine: [promptfoo, modelscan, garak]
+        engine: ${{ fromJSON(needs.gate.outputs.engines) }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
+          # the build finds the engine's input commit in the history and archives it
+          fetch-depth: 0
 
       - name: Resolve the repository
         id: ref
@@ -126,8 +182,12 @@ jobs:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: printf '%s' "$TOKEN" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
 
-      - name: Build and push
-        run: scripts/build-engine-image.sh "${{ matrix.engine }}" push "${{ steps.ref.outputs.repository }}" "${RUNNER_TEMP}/${{ matrix.engine }}.json"
+      - name: Build reproducibly and push
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/${{ matrix.engine }}.json"
+          scripts/build-engine-image.sh "${{ matrix.engine }}" push "${{ steps.ref.outputs.repository }}" "$out"
+          node -e 'const e = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); console.log(`- ${e.engine}: ${e.manifestDigest}, built from input commit ${e.inputCommit} (SOURCE_DATE_EPOCH ${e.sourceDateEpoch}, the image revision label)`)' "$out" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Sign keylessly (Fulcio and Rekor) and verify
         env:

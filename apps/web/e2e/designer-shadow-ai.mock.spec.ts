@@ -130,6 +130,8 @@ test("the sidebar gives Discovery its own section, between Overview and the AI G
 });
 
 test("Shadow AI: tabs, figures with (i), aligned next steps and the coverage tiles", async ({ page }) => {
+  // a shorter window, so four findings overflow the box now that Where seen no longer adds a column (#453 F6)
+  await page.setViewportSize({ width: 1440, height: 700 });
   await page.goto("/ui/admin/shadow-ai");
   await expect(page.getByRole("heading", { name: "Shadow-AI discovery", exact: true })).toBeVisible();
   await expect(page.getByRole("tab", { name: /^Findings/ })).toHaveAttribute("aria-selected", "true");
@@ -264,12 +266,14 @@ test("X6b: a secondary section starts folded, and the viewer's choice is remembe
 async function actionOffsets(page: Page) {
   return cardOf(page, "Inventory").locator("tbody tr").evaluateAll((rows) =>
     rows.map((row) => {
-      const box = row.querySelector("td:last-child > div")!.getBoundingClientRect();
+      // the action stack itself, wherever it sits: on a phone Next step folds into the Subject cell (#453 F6)
+      const stack = row.querySelector('[class*="rowActions"]')!;
+      const box = stack.getBoundingClientRect();
       const at = (b: Element | undefined) => {
         const r = b!.getBoundingClientRect();
         return `${Math.round(r.left - box.left)},${Math.round(r.top - box.top)}`;
       };
-      const buttons = [...row.querySelectorAll("td:last-child button")];
+      const buttons = [...stack.querySelectorAll("button")];
       return {
         plan: at(buttons.find((b) => b.getAttribute("aria-label")?.startsWith("Plan remediation for "))),
         triage: at(buttons.find((b) => /^(Triage|Review again)$/.test(b.textContent ?? ""))),
@@ -479,6 +483,21 @@ for (const width of [1440, 1000]) {
     await drawer.getByRole("button", { name: "Close plan" }).click();
     await expect(drawer).toHaveCount(0);
     expect(await page.evaluate(() => getComputedStyle(document.body).paddingInlineEnd)).toBe("0px");
+  });
+}
+
+// #458 review Low: the overlay width is "900 px and below" (DRAWER_OVERLAY_QUERY); a spec sits on each side of the edge
+for (const [width, modal] of [[900, true], [901, false]] as const) {
+  test(`A1 edge (${width} px): the drawer is ${modal ? "a modal over the page" : "a side panel beside it"}`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/ui/admin/shadow-ai");
+    await page.getByRole("button", { name: "Plan remediation for team-17/payments-api" }).click();
+    const drawer = page.getByTestId("shadow-remediation");
+    await expect(drawer).toHaveAttribute("aria-modal", String(modal));
+    // a side panel takes its width from the page; a modal leaves the page as it is
+    const padding = () => page.evaluate(() => getComputedStyle(document.body).paddingInlineEnd);
+    if (modal) expect(await padding()).toBe("0px");
+    else await expect.poll(padding).not.toBe("0px");
   });
 }
 

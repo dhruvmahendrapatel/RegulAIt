@@ -173,3 +173,16 @@ live database holds the governance seed but only real Shadow-AI findings. Built 
   source, §6). The console's audit page sends `objectType` only for the types a console link opens
   (`auditObjectLinks.ts`, today `ai_use_case`), checked against the schema by a gateway test, and says when a link's
   object filter was not applied.
+
+## As built: fallback rehearsal record and post-demo teardown runbook (2026-10-21)
+- **Fallback rehearsal (decision 7).** `demo.yml` gained a `demo-rehearsal` job that runs only on a manual dispatch:
+  `demo:prepare` twice on the same database, a separate `demo:check`, and `demo:gate` after each prepare. Dispatch run
+  `39622055370` (main `2722e439` plus that job only) passed: 0 FAIL in every check, and both gate runs DENY with
+  exactly two `BLOCK open_high_alert` lines; `demo-journey` and `demo-live` passed in the same run. The ALLOW half of
+  G3, the laptop compose stack and the dev-host gate stay pending execution. Record, observations and owner steps:
+  [DEMO_RUNBOOK §7.5](../product/DEMO_RUNBOOK.md#75-fallback-rehearsal-record-adr-0197-decision-7).
+- **Teardown (consequences, "tracked follow-up").** [DEMO_TEARDOWN.md](../deployment/DEMO_TEARDOWN.md) mirrors every
+  setup step of DEMO_REAL_ACCOUNTS.md in reverse, with verification checks and a coverage table naming where each item
+  was created. Every step is pending execution, post-demo, by the owner. It adds one step the setup runbook's teardown
+  did not have (removing the AWS discovery role and its OIDC provider before the account closure), which needs the
+  owner's agreement, and lists the owner actions above that have no runbook step.

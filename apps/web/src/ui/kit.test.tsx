@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../api/client";
 import { Badge, Card, EmptyState, Field, Fieldset, InfoButton, Input, RecordError, RowActions, Table, Tabs, tabIds } from "./kit";
+import { FoldTable, foldHosts } from "./fold";
 // Digest lives with the BOM evidence panel; it is tested here with the other shared primitives
 import { Digest } from "../views/admin/governance/BomEvidencePanel";
 
@@ -289,5 +290,50 @@ describe("RowActions — fixed slots keep every row's primary button in one colu
   it("uses one minimum width for the primary slot", () => {
     const html = renderToStaticMarkup(<RowActions primary={<button>Plan remediation</button>} slot="11rem" />);
     expect(html).toContain("grid-template-columns:minmax(11rem, max-content) auto auto");
+  });
+});
+
+describe("Column.fold — a narrow table moves values into another column, never drops them (F6/F20/F21/F25)", () => {
+  type R = { id: string };
+  const col = (key: string, fold?: { md?: string; sm?: string }) => ({ key, header: key, render: (r: R) => r.id, fold });
+  const cols = [col("a"), col("b", { md: "a" }), col("c", { md: "b", sm: "a" }), col("d", { sm: "c" })];
+  const hostsAt = (step: "lg" | "md" | "sm") => Object.fromEntries(foldHosts(cols, step));
+
+  it("leaves every column in place on a wide table", () => {
+    expect(hostsAt("lg")).toEqual({ a: "a", b: "b", c: "c", d: "d" });
+  });
+
+  it("follows a chain to a column that is still shown", () => {
+    // md: c names b, which itself folds into a, so c lands in a too; d only folds on a phone
+    expect(hostsAt("md")).toEqual({ a: "a", b: "a", c: "a", d: "d" });
+  });
+
+  it("falls back to md on a phone, and sm wins where it is set", () => {
+    expect(hostsAt("sm")).toEqual({ a: "a", b: "a", c: "a", d: "a" });
+  });
+
+  it("keeps a column in place when its fold names no column or loops", () => {
+    const loop = [col("x", { md: "y" }), col("y", { md: "x" }), col("z", { md: "nope" })];
+    expect(Object.fromEntries(foldHosts(loop, "md"))).toEqual({ x: "x", y: "y", z: "z" });
+  });
+
+  it("renders every column, unfolded, where layout is not measured", () => {
+    const html = renderToStaticMarkup(<FoldTable<R> columns={cols} rows={[{ id: "r1" }]} rowKey={(r) => r.id} />);
+    expect(html.match(/<th[ >]/g)).toHaveLength(4);
+    expect(html).not.toContain("data-fold=");
+  });
+});
+
+describe("Card caption — sits under the title, outside the contained scroll box (F21)", () => {
+  it("renders before the contained body, not inside it", () => {
+    const html = renderToStaticMarkup(
+      <Card title="Inventory" contain caption="Every row is a lead for triage, not a verdict.">
+        <p>body</p>
+      </Card>,
+    );
+    const caption = html.indexOf("Every row is a lead");
+    expect(caption).toBeGreaterThan(html.indexOf("Inventory"));
+    // the caption's paragraph closes before the body's box opens
+    expect(html.indexOf("</p>", caption)).toBeLessThan(html.indexOf("<p>body</p>"));
   });
 });
