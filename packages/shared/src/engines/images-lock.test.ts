@@ -18,3 +18,12 @@ describe("ENG-IMG: the manifest's image fields are the lock's", () => {
     }
   });
 });
+
+describe("ENG-IMG: the manifest's caveats match the lock", () => {
+  it("an engine with a recorded publish does not still list its image as not built", () => {
+    for (const id of ["promptfoo", "modelscan", "garak"] as const) {
+      if (ENGINE_IMAGES_LOCK[id].manifestDigest === null) continue;
+      for (const line of ENGINE_MANIFEST[id].unverified) expect(line).not.toMatch(/not (been )?built yet/);
+    }
+  });
+});

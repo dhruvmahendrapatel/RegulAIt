@@ -2849,7 +2849,9 @@ notes were not read; the PyPI wheels are the primary source.
 5. **Detectors.** The apikey detector no longer clears a whole output when one safe example key appears in it. This
    means more hits; those probes are reported and never counted (decision 147). `mitigation.Prefixes` now matches
    only at the start of a response; it is used only by the phrasing probes, which stay excluded. A file detector
-   that cannot examine a file now scores `None` instead of 0.0, and the mapper never reads `None` as a pass.
+   that cannot examine a file now scores `None` instead of 0.0, and the mapper never reads `None` as a pass. Judge detectors that cannot
+   score now return one `None` per output (`outputs`, not `all_outputs`), so the mapper reads them as unscored rather
+   than as broken coverage; the verdict stays `unknown`.
 6. **Datasets 5 call sites.** sysprompt_extraction still passes `trust_remote_code=False` to `load_dataset`, and
    datasets 5.1.0 accepts it. Verified by the system-prompt case.
 
