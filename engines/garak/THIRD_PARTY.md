@@ -82,6 +82,18 @@ re-check. Read from PyPI's JSON API, OSV and garak's repository on 2026-10-16:
   `wordnet` corpora, `jaro_winkler_similarity`, and `nltk.download`; no path comes from a run. When a fixed nltk is
   released, bump its pin and hash here (garak's `nltk>=3.10.3` allows it).
 
+**Bumped 2026-10-21 for new advisories the image scan reported on unchanged code: certifi 2026.7.22 to 2026.10.19
+(GHSA-6q48-6c7w-9gw2, critical) and pillow 12.3.0 to 13.0.0, the lowest fixed release (CVE-2026-112403, critical;
+CVE-2026-112397, -112400, -112404, -112895, -112896 and -112897, high).** Only these two pins changed; the closure was not
+re-resolved, and datasets and fsspec stay as above. Each sha256 is the cp312 manylinux x86_64 wheel (certifi: the
+py3-none-any wheel) from PyPI's JSON API, and the downloaded wheels hash to it. Read from the pinned closure's PyPI
+metadata: garak 0.17.0 declares `pillow>=12.3.0`; transformers 5.19.0 `Pillow<=15.0,>=10.0.1` and datasets 3.6.0
+`Pillow>=9.4.0` (extras only); requests 2.34.2 `certifi>=2023.5.7`, httpx and httpcore `certifi` unbounded. No pin
+excludes either release. pillow 13.0.0 requires Python >=3.11 and adds no dependency outside its extras. The licence
+readings stay as they were: pillow's METADATA is still `License-Expression: MIT-CMU`, its wheel bundles the same 18
+`pillow.libs` libraries with the same LICENSE sections, and certifi's METADATA is still `License: MPL-2.0` with the
+same file list (admitted only while unmodified, decision 194).
+
 | Component | Version | Licence | Used for, and why |
 |---|---|---|---|
 | `garak` (PyPI, github.com/NVIDIA/garak) | `0.17.0` (released 2026-09-09; wheel sha256 `9a67e629…db145`, the hash R10 checked independently) | Apache-2.0 (`LICENSE`, SPDX headers; its METADATA names no licence) | The engine (ADR-0187 B5-G). Only the probes in the shared catalogue run (`packages/shared/src/engines/garak.ts`); 23 data paths whose licence or provenance is excluded are DELETED from the image (`excluded-data.txt`, decisions 145 and 197). Its probe metadata (`plugin_cache.json`, sha256 `25484e24…134a52`) is what the catalogue's detector and OWASP columns are generated from; the build refuses another. |
