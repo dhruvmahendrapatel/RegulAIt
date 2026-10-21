@@ -178,18 +178,33 @@ describe("N10: the workflow job", () => {
   const wf = readFileSync(path.join(import.meta.dirname, "..", ".github", "workflows", "engine-images.yml"), "utf8");
   const job = wf.slice(wf.indexOf("\n  lock-pr:"));
 
-  it("holds only contents and pull-requests write, through GITHUB_TOKEN; opens a draft; never merges, readies or auto-merges", () => {
-    expect(job).toMatch(/\n {4}permissions:\n {6}contents: write\n {6}pull-requests: write\n {4}steps:/);
+  it("holds only contents write, through GITHUB_TOKEN; never merges, approves, readies or auto-merges", () => {
+    expect(job).toMatch(/\n {4}permissions:\n {6}contents: write\n {4}steps:/);
+    expect(job).not.toContain("pull-requests:");
     expect(job).toMatch(/\n {4}needs: record\n/);
     expect(job.match(/secrets\.[A-Z_]+/g)).toEqual(["secrets.GITHUB_TOKEN"]);
-    expect(job).toContain("gh pr create --draft");
-    expect(job).not.toMatch(/gh pr (merge|ready)|--auto|enable_pr_auto_merge|auto-merge:/);
+    expect(job).not.toMatch(/gh pr (merge|ready|review)|--auto|enable_pr_auto_merge|auto-merge:|--approve/);
     expect(job).toMatch(/case "\$title" in "HOLD "\*\) ;;/);
     const code = job.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
     expect(code).not.toMatch(/git add (-A|\.|--all)/);
     // the trusted root is fetched by the job itself, not taken from the artifact
     expect(job).toMatch(/cosign" initialize/);
     expect(job).toContain('--trusted-root "$root"');
+  });
+
+  it("is push-only (owner decision, 2026-10-21): no `gh pr create`; the summary names the compare URL, title and body", () => {
+    const code = job.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
+    expect(wf).not.toContain("gh pr create");
+    expect(code).not.toMatch(/\bgh (pr|api)\b/);
+    expect(job).toContain("https://github.com/${REPOSITORY}/compare/main...${branch}?expand=1");
+    expect(job).toContain("REPOSITORY: ${{ github.repository }}");
+    expect(job).toMatch(/PR title: \\`\$\{title\}\\`/);
+    expect(job).toContain('cat "$pr/body.md"');
+    expect(job).toContain(">> \"$GITHUB_STEP_SUMMARY\"");
+    // one branch per source commit, only under engine-images-lock/, pushed without force
+    expect(job).toContain('[ "$branch" = "engine-images-lock/${GITHUB_SHA:0:12}" ]');
+    expect(job).toContain('push origin "HEAD:refs/heads/${branch}"');
+    expect(code).not.toMatch(/push[^\n]*(--force|-f\b|\+HEAD|\+refs)/);
   });
 
   it("merging the bot's PR does not publish again (the lock and signatures are excluded from the push trigger)", () => {

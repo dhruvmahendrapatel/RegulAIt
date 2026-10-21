@@ -554,7 +554,7 @@ services:
   engine-promptfoo:
     <<: *engine-runner
     platform: linux/amd64
-    image: ${REGULAIT_ENGINE_PROMPTFOO_REPOSITORY:-ghcr.io/dhruvmahendrapatel/regulait-engine-promptfoo}@${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:e56106a42c5079d2acc1aaae08512a90085122755b73b4f53d76f397360c7117}
+    image: ${REGULAIT_ENGINE_PROMPTFOO_REPOSITORY:-ghcr.io/dhruvmahendrapatel/regulait-engine-promptfoo}@${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:a99c38fff201f1bcac881d4bba424e2218644e182896d1003d3e9cdb2c86fd47}
     volumes:
       - engine-promptfoo-state:/state
       - engine-promptfoo-jobs:/jobs
@@ -562,8 +562,8 @@ services:
     environment:
       REGULAIT_GATEWAY_URL: http://gateway:3000
       REGULAIT_ENGINE_ENROLLMENT_TOKEN: ${REGULAIT_ENGINE_PROMPTFOO_ENROLLMENT_TOKEN:-}
-      REGULAIT_ENGINE_IMAGE_REF: ${REGULAIT_ENGINE_PROMPTFOO_REPOSITORY:-ghcr.io/dhruvmahendrapatel/regulait-engine-promptfoo}@${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:e56106a42c5079d2acc1aaae08512a90085122755b73b4f53d76f397360c7117}
-      REGULAIT_ENGINE_IMAGE_DIGEST: ${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:e56106a42c5079d2acc1aaae08512a90085122755b73b4f53d76f397360c7117}
+      REGULAIT_ENGINE_IMAGE_REF: ${REGULAIT_ENGINE_PROMPTFOO_REPOSITORY:-ghcr.io/dhruvmahendrapatel/regulait-engine-promptfoo}@${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:a99c38fff201f1bcac881d4bba424e2218644e182896d1003d3e9cdb2c86fd47}
+      REGULAIT_ENGINE_IMAGE_DIGEST: ${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:a99c38fff201f1bcac881d4bba424e2218644e182896d1003d3e9cdb2c86fd47}
       REGULAIT_PROMPTFOO_JOBS_DIR: /jobs
       REGULAIT_PROMPTFOO_RESULTS_DIR: /results
 
@@ -588,7 +588,7 @@ services:
   engine-modelscan:
     <<: *engine-runner
     platform: linux/amd64
-    image: ${REGULAIT_ENGINE_MODELSCAN_REPOSITORY:-ghcr.io/dhruvmahendrapatel/regulait-engine-modelscan}@${REGULAIT_ENGINE_MODELSCAN_DIGEST:-sha256:780bfb0dd2953b78dfae79d9e66d4861baec7d35bdd03b4fe4b23b6e7d85a39d}
+    image: ${REGULAIT_ENGINE_MODELSCAN_REPOSITORY:-ghcr.io/dhruvmahendrapatel/regulait-engine-modelscan}@${REGULAIT_ENGINE_MODELSCAN_DIGEST:-sha256:2fbe63f7bfee3db3d40f5a8ca63c6682bca31cf4c7ab502e5f3a2df844edd27d}
     volumes:
       - engine-modelscan-state:/state
       - engine-modelscan-jobs:/jobs
@@ -596,8 +596,8 @@ services:
     environment:
       REGULAIT_GATEWAY_URL: http://gateway:3000
       REGULAIT_ENGINE_ENROLLMENT_TOKEN: ${REGULAIT_ENGINE_MODELSCAN_ENROLLMENT_TOKEN:-}
-      REGULAIT_ENGINE_IMAGE_REF: ${REGULAIT_ENGINE_MODELSCAN_REPOSITORY:-ghcr.io/dhruvmahendrapatel/regulait-engine-modelscan}@${REGULAIT_ENGINE_MODELSCAN_DIGEST:-sha256:780bfb0dd2953b78dfae79d9e66d4861baec7d35bdd03b4fe4b23b6e7d85a39d}
-      REGULAIT_ENGINE_IMAGE_DIGEST: ${REGULAIT_ENGINE_MODELSCAN_DIGEST:-sha256:780bfb0dd2953b78dfae79d9e66d4861baec7d35bdd03b4fe4b23b6e7d85a39d}
+      REGULAIT_ENGINE_IMAGE_REF: ${REGULAIT_ENGINE_MODELSCAN_REPOSITORY:-ghcr.io/dhruvmahendrapatel/regulait-engine-modelscan}@${REGULAIT_ENGINE_MODELSCAN_DIGEST:-sha256:2fbe63f7bfee3db3d40f5a8ca63c6682bca31cf4c7ab502e5f3a2df844edd27d}
+      REGULAIT_ENGINE_IMAGE_DIGEST: ${REGULAIT_ENGINE_MODELSCAN_DIGEST:-sha256:2fbe63f7bfee3db3d40f5a8ca63c6682bca31cf4c7ab502e5f3a2df844edd27d}
       REGULAIT_MODELSCAN_JOBS_DIR: /jobs
       REGULAIT_MODELSCAN_RESULTS_DIR: /results
 
@@ -615,7 +615,7 @@ services:
   engine-garak:
     <<: *engine-runner
     platform: linux/amd64
-    image: ${REGULAIT_ENGINE_GARAK_REPOSITORY:-ghcr.io/dhruvmahendrapatel/regulait-engine-garak}@${REGULAIT_ENGINE_GARAK_DIGEST:-sha256:0c7a4f2ecb79e6d171ddeb38566f97ee76c76938c394d048ac618b0e77c82e85}
+    image: ${REGULAIT_ENGINE_GARAK_REPOSITORY:-ghcr.io/dhruvmahendrapatel/regulait-engine-garak}@${REGULAIT_ENGINE_GARAK_DIGEST:-sha256:6357d8dcf89e9dd9f65396574badacb77e9ee12264306979e5594e9aa4e37b57}
     volumes:
       - engine-garak-state:/state
       - engine-garak-jobs:/jobs
@@ -623,8 +623,8 @@ services:
     environment:
       REGULAIT_GATEWAY_URL: http://gateway:3000
       REGULAIT_ENGINE_ENROLLMENT_TOKEN: ${REGULAIT_ENGINE_GARAK_ENROLLMENT_TOKEN:-}
-      REGULAIT_ENGINE_IMAGE_REF: ${REGULAIT_ENGINE_GARAK_REPOSITORY:-ghcr.io/dhruvmahendrapatel/regulait-engine-garak}@${REGULAIT_ENGINE_GARAK_DIGEST:-sha256:0c7a4f2ecb79e6d171ddeb38566f97ee76c76938c394d048ac618b0e77c82e85}
-      REGULAIT_ENGINE_IMAGE_DIGEST: ${REGULAIT_ENGINE_GARAK_DIGEST:-sha256:0c7a4f2ecb79e6d171ddeb38566f97ee76c76938c394d048ac618b0e77c82e85}
+      REGULAIT_ENGINE_IMAGE_REF: ${REGULAIT_ENGINE_GARAK_REPOSITORY:-ghcr.io/dhruvmahendrapatel/regulait-engine-garak}@${REGULAIT_ENGINE_GARAK_DIGEST:-sha256:6357d8dcf89e9dd9f65396574badacb77e9ee12264306979e5594e9aa4e37b57}
+      REGULAIT_ENGINE_IMAGE_DIGEST: ${REGULAIT_ENGINE_GARAK_DIGEST:-sha256:6357d8dcf89e9dd9f65396574badacb77e9ee12264306979e5594e9aa4e37b57}
       REGULAIT_GARAK_JOBS_DIR: /jobs
       REGULAIT_GARAK_RESULTS_DIR: /results
 
