@@ -59,9 +59,9 @@ const LLM09: OwaspLlm2025Id = "owasp:llm:09";
  * garak-upstream.ts, and the test fails until a person re-reviews every row and moves these.
  */
 export const GARAK_OWASP_2025_REVIEW = Object.freeze({
-  garakVersion: "0.17.0",
-  pluginCacheSha256: "25484e2467c84b1a59e27ae7ebf433a305b00c859aa1904c315f916661134a52",
-  reviewedOn: "2026-10-10",
+  garakVersion: "0.17.1",
+  pluginCacheSha256: "6ba9cca2c36f8045463911783cb4869ae69da6c514d81330a27e29b0de230209",
+  reviewedOn: "2026-10-21",
 });
 
 export interface GarakOwasp2025Row {

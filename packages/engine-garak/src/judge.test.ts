@@ -170,7 +170,7 @@ afterEach(async () => {
 const lease = (sets: string[], judge: EngineLease["judge"]): EngineLease => ({
   runId: randomUUID(),
   engineId: "garak",
-  engineVersion: "0.17.0",
+  engineVersion: "0.17.1",
   spec: { config: { sets, params: {} }, trials: 2 },
   target: { baseUrl: BASE, model: TARGET.model, apiKey: "rglv_run_key", headers: TARGET.headers },
   judge,

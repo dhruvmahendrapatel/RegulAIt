@@ -2779,3 +2779,83 @@ lock-update bot".
 - What decision 55 says of the runner stands. Its reported digest is a consistency check, and the verification
   happens at deploy time, outside the container.
 
+
+## As built: garak 0.17.1, datasets 5 and fsspec (2026-10-21, branch `deps-garak-0-17-1`)
+
+This section records the fix path that decisions 160 and 225 named: "the first garak release that allows datasets
+4.x". garak 0.17.1 was released on PyPI on 2026-10-16 and declares `datasets>=5.0.1,<6.0`,
+`transformers>=5.14.1,<5.20.0`, `huggingface_hub>=1.0` and `pillow>=12.3.0`. Every other dependency line is
+unchanged from 0.17.0. No migration. The engine's database row follows the manifest through
+`syncEngineManifest`.
+
+- **Closure.** It was re-resolved with `uv pip compile` for CPython 3.12 on x86_64-manylinux_2_28, the method in the
+  header of `requirements.txt`. The input was garak 0.17.1, the CPU torch wheel by URL, `certifi>=2026.10.19`,
+  `pillow>=13.0.0` and `huggingface-hub>=2.2.0`. Each wheel was picked from PyPI's JSON API using the tag order of
+  the base image (cp312, glibc 2.41). That rule reproduces all 134 unchanged hashes, and every downloaded wheel
+  matches its pinned sha256. The result has 41 changed pins and the same 178 distributions. It includes datasets
+  5.1.0 and fsspec 2026.7.0, so GHSA-379c-qx7v-6h59 and GHSA-27vj-qcqg-25rc are fixed. torch stays 2.14.1+cpu, the
+  newest CPU wheel, and `requirements-sdist.txt` is unchanged (ecoji 0.1.1 and langdetect 1.0.9, same sdist hashes).
+  OSV over the new closure reports only nltk GHSA-8mgp-746c-j5xp, which still has no patched release.
+- **huggingface-hub: why the floor.** datasets 5.0.1 caps the hub client below 2.0. datasets 5.1.0 and transformers
+  5.19.0 allow `<3.0`. Without a floor, uv takes litellm 1.106.1, a release that newly declares
+  `huggingface-hub<2.0` and `filelock<4.0`, and so downgrades the hub client from 2.2.0 to 1.33.0 and filelock to
+  3.32.7. The floor `huggingface-hub>=2.2.0` gives litellm 1.103.6 (garak needs `>=1.84.0`, and nothing on the
+  gateway route calls it) and filelock 4.2.4. This keeps the hub client, the cache layout and the offline behaviour
+  that decisions 198-200 proved. Both candidate closures were OSV-clean apart from nltk.
+- **Pre-seed re-verified (decisions 198-200).** `preseed-hf.py fetch`, then `materialise` (datasets 5.1.0, the same
+  `<cache>/garak-llm___<name>/default/0.0.0/<commit>` layout), then `verify` all passed. The verify ran in a fresh
+  network namespace with only loopback, the tree read-only and every offline switch set. All nine assets loaded,
+  including the NLI model that decision 198 could only prove in the image build. `preseed-hf.py`, `hf-preseed.json`,
+  `prune-data.py` and `excluded-data.txt` needed no change.
+- **The image allow-list is empty.** Decision 160's fsspec entry was removed, and so was the manifest's matching
+  `unverified` line. No entry was added.
+- **Catalogue (decision 142).** The new `plugin_cache.json` sha256 is `6ba9cca2…230209`. It is in the Dockerfile's
+  prune step and in the regenerated `garak-upstream.ts`. The extractor now takes the wheel hash from
+  `GARAK_WHEEL_SHA256`, with 0.17.1's hash as the default; before, it printed 0.17.0's hash for any version. Probe
+  diff from 0.17.0 to 0.17.1: still 191 probes, none added or removed. No probe changed its `active` flag, primary
+  detector or `owasp:llmNN` tags. The detectors (122), generators (45), buffs (7) and harnesses (3) are the same
+  sets. So the catalogue, the dispositions and the demo catalogue are unchanged, and no new probe needs an owner
+  decision. The OWASP 2025 table (decision 216) was re-read against that diff and against the code diff of the
+  admitted probes. No row changed, and `GARAK_OWASP_2025_REVIEW` moved to 0.17.1.
+- **Data (decisions 145, 197).** No file under `garak/data` was added, removed or renamed. Four `dan/*.json` files
+  changed, and the prune already deletes them. The kept data is byte-identical, and so is the wheel's `LICENSE`. The
+  prune still removes the same 23 paths. `IMAGE-NOTICES.txt` changed only in its version references.
+- **Licences (decisions 157, 193, 194).** Every changed package declares the licence it declared before. fsspec,
+  jsonpatch and multidict now carry an SPDX `License-Expression`, so their readings were removed; a stale reading
+  fails the gate. jsonpointer's reading moved to 3.4, because the licence file is identical (same sha256). The gate
+  on the installed closure, pruned and with pip removed, reads 197 allowed, 23 admitted and 0 denied, and the MPL-2.0
+  files are unmodified.
+
+**Behaviour changes in 0.17.1 that the product depends on, read from the two wheels' code.** garak's GitHub release
+notes were not read; the PyPI wheels are the primary source.
+1. **Report format.** The `eval` line gains a `hit_at_k` object, because `reporting.hit_at_k` defaults to `[1]`.
+   `attempt.py`, the harnesses and the init and completion records are unchanged. The mapper reads only the fields
+   decision 152 names, so the new key is ignored. Verified by the real-engine suite (below): its reports from 0.17.1
+   read `fail`, `pass` and `unknown` as before.
+2. **CLI.** `cli.py` only adds a check on `hit_at_k`. Nothing the worker passes is affected, and `_config.py` is
+   unchanged.
+3. **Generator config.** `generators/openai.py` is unchanged. `generators/base.py` now runs requests in parallel only
+   for generators marked `parallel_capable`; the worker sets no parallel requests. The judge path still works (the
+   agent_breaker cases below).
+4. **Prompt cap.** `follow_prompt_cap` is now on in the base `Probe`, and the probes that pruned on their own now
+   call one `_prune_data()`. The cap is still the run's trials, and no probe that ignored the cap starts following
+   it. promptinject now samples its prompt list and its triggers together, a fix that keeps each trigger with its
+   prompt.
+5. **Detectors.** The apikey detector no longer clears a whole output when one safe example key appears in it. This
+   means more hits; those probes are reported and never counted (decision 147). `mitigation.Prefixes` now matches
+   only at the start of a response; it is used only by the phrasing probes, which stay excluded. A file detector
+   that cannot examine a file now scores `None` instead of 0.0, and the mapper never reads `None` as a pass.
+6. **Datasets 5 call sites.** sysprompt_extraction still passes `trust_remote_code=False` to `load_dataset`, and
+   datasets 5.1.0 accepts it. Verified by the system-prompt case.
+
+**Proofs.** The `pnpm -r --workspace-concurrency=1 build` exits 0, and so do `@regulait/shared` (2958 tests) and
+`@regulait/engine-garak` (46 tests, 11 opt-in skipped), each run as CI runs it, and both `scripts/preflight-ui-*.mjs`.
+The opt-in real-engine suite also passed against a venv built from the exact lockfiles (`--require-hashes`,
+`pip check` clean), pruned, with pip removed and the pre-seeded tree mounted. It ran in its own network namespace
+with `REGULAIT_GARAK_EXPECT_OFFLINE=1`, and 20 of 20 tests passed (`garak-real.test.ts` 11, `judge.test.ts` 9).
+
+**Not done here.** There is no Docker daemon, so CI first builds the image and runs its licence gate, Trivy scan and
+signing. The image lock (`engines/images.lock.json`) still names the 0.17.0 image. Until the lock-update bot records
+a 0.17.1 publish, a runner reports 0.17.0 against a 0.17.1 manifest. `isCurrentBuild` then refuses it, which keeps
+the engine closed (decision 95). The gateway suite fixtures (`apps/gateway/src/zz-b5-garak.test.ts`, two version
+strings) need Postgres and run only in CI.
