@@ -516,7 +516,7 @@ export default function CostConsolidationPage() {
       <PageHeader
         title="Cross-vendor cost consolidation"
         sub={
-          "One human's Claude Code seat, Copilot seat, raw API key and cloud AI spend, on one line — because per-seat " +
+          "One human's coding-assistant seats, raw API key and cloud AI spend, on one line — because per-seat " +
           "SaaS spend is invoice-side, not call-side, and no gateway can meter a bill it never saw."
         }
       />
@@ -1187,7 +1187,7 @@ export default function CostConsolidationPage() {
 
               <div className={v.sectionTitle}>Cost centre for a person</div>
               <p className={v.faint}>
-                <code>projects.cost_center</code> covers governed work. A Copilot seat is not a project, so
+                <code>projects.cost_center</code> covers governed work. A coding-assistant seat is not a project, so
                 a human needs one too — this is the key the &ldquo;by cost centre&rdquo; view groups on.
               </p>
               <div className={a.formRow}>

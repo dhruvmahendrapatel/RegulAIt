@@ -431,7 +431,7 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               "Custom-provider switch saved (audited)",
             )
           }
-          help="The 'remove the capability entirely' switch for admin-registered endpoints (Ollama, vLLM, LM Studio, an internal gateway). It is NOT the thing standing between this org and an open proxy — the capability is already default-deny four separate ways beneath it: registration is admin-only, the egress allow-list starts empty, a provider stays disabled until a connection test passes, and a user still needs the ordinary per-agent grant. Off refuses registration and enablement and stops every custom dispatch with a 409 before any request leaves the box; the Integrations → Custom LLM providers page then says so plainly instead of appearing broken."
+          help="The 'remove the capability entirely' switch for admin-registered endpoints (a local model server, an internal gateway). It is NOT the thing standing between this org and an open proxy — the capability is already default-deny four separate ways beneath it: registration is admin-only, the egress allow-list starts empty, a provider stays disabled until a connection test passes, and a user still needs the ordinary per-agent grant. Off refuses registration and enablement and stops every custom dispatch with a 409 before any request leaves the box; the Integrations → Custom LLM providers page then says so plainly instead of appearing broken."
         >
           <Field label="Custom LLM providers">
             <Select

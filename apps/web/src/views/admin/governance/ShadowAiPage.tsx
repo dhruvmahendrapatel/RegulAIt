@@ -429,6 +429,7 @@ export default function ShadowAiPage() {
     if (ok) refresh();
   };
 
+  const criticalOpen = (findings.data?.findings ?? []).filter((f) => f.severity === "critical" && statusGroup(f.disposition) !== "closed").length;
   const findingRows = (findings.data?.findings ?? []).filter((f) => statusFilter === "all" || statusGroup(f.disposition) === statusFilter);
   const statusCounts = useMemo(() => {
     const out: Record<string, number> = { all: 0, open: 0, confirmed: 0, closed: 0 };
@@ -527,6 +528,12 @@ export default function ShadowAiPage() {
       <Card
         title="Inventory"
         contain
+        foldable
+        // L2: the header counts what the filtered body shows, out of every finding
+        count={findingRows.length}
+        total={findings.data?.findings.length}
+        countNoun={["finding", "findings"]}
+        attention={criticalOpen > 0 ? <Badge tone="danger">{criticalOpen} critical</Badge> : undefined}
         actions={
           <div className={v.row} role="group" aria-label="Filter by status">
             {(["all", "open", "confirmed", "closed"] as const).map((g) => (
@@ -945,7 +952,7 @@ export default function ShadowAiPage() {
                   No vendor-named preset ships, deliberately. A CASB or SSO export has no published format
                   at all, and the vendor&apos;s name is the part a buyer trusts — so{" "}
                   <code>generic_mapped</code> is the honest answer there instead of a{" "}
-                  <code>zscaler</code> adapter nobody has tested against Zscaler.
+                  vendor-named adapter nobody has tested against that vendor&apos;s export.
                 </p>
               </>
             )}

@@ -23,6 +23,8 @@ import {
   type TextareaHTMLAttributes,
 } from "react";
 import { createPortal } from "react-dom";
+import { useParams } from "react-router-dom";
+import { useSession } from "../session/SessionContext";
 import s from "./kit.module.css";
 
 // ---- Button ---------------------------------------------------------------
@@ -427,7 +429,22 @@ export function TagPicker(props: {
   );
 }
 
-export function Card(props: {
+/**
+ * X6b: the fold is offered only where the caller says how many rows the body holds, so a folded header always keeps
+ * its count (and the caller's worst-status badge): a section with no count cannot hide that something needs attention.
+ */
+type CardFold =
+  | { foldable?: false; startCollapsed?: never }
+  | {
+      /** X6b: the title is a fold button that collapses or opens the whole section */
+      foldable: true;
+      contain: true;
+      count: number;
+      /** X6b: a secondary section starts collapsed until the viewer opens it */
+      startCollapsed?: boolean;
+    };
+
+export type CardProps = CardFold & {
   title?: ReactNode;
   actions?: ReactNode;
   children: ReactNode;
@@ -441,18 +458,50 @@ export function Card(props: {
    * X6: a long, read-only body scrolls inside the card instead of stretching
    * the page, with an Expand button that opens the same body near full
    * screen. Never for forms, warnings, decisions or step-ups: a body holding
-   * one (KEEP_VISIBLE) is refused at runtime and stays fully visible. X6b:
-   * "Show all" lets the section flow at full length instead, remembered per
-   * page and section in this browser only.
+   * one (KEEP_VISIBLE) is refused at runtime and stays fully visible. X6b
+   * (`foldable`): the fold is remembered per person, page and section in this
+   * browser only; a refused body has no fold and is always open.
    */
   contain?: boolean;
+  /** X6b: the worst status, shown in the header even while collapsed (e.g. a "1 critical" badge) */
+  attention?: ReactNode;
   /** X6 cue beside the title: how many rows the body holds */
   count?: number;
+  /** the body is filtered: `count` of `total` rows are shown */
+  total?: number;
+  /** `count` is a fetch limit that was reached, so more rows exist ("50+ runs") */
+  countIsLimit?: boolean;
   /** singular and plural noun for `count`; row / rows by default */
   countNoun?: [string, string];
   /** under the body and outside the X6 scroll box: paging and partial-data notices stay in view of the reader, and move into the Expand dialog with the body */
   footer?: ReactNode;
-}) {
+};
+
+/**
+ * X6b (L1): the stored fold choice is keyed per signed-in person and per route pattern, so a second account on a
+ * shared browser does not inherit the first one's folds, and record pages share one key instead of one per record.
+ * The tenant is the origin: each deployment serves one tenant (ADR-0041) and localStorage is per origin.
+ */
+function useFoldKey(name: string): string {
+  const user = useSession().auth?.user?.id ?? "-";
+  const params = useParams();
+  const path = typeof location === "undefined" ? "" : location.pathname;
+  const values = new Map(Object.entries(params).map(([k, v]) => [v, `:${k}`]));
+  values.delete(params["*"]);
+  const pattern = path
+    .split("/")
+    .map((seg) => values.get(seg) ?? seg)
+    .join("/");
+  return `regulait.contain:${user}:${pattern}:${name}`;
+}
+
+/** the body's rows: the children of the first element (a tbody, a list) that holds `count` of them */
+function bodyRows(host: HTMLElement, count: number | undefined): Element[] {
+  const list = [host, ...host.querySelectorAll("*")].find((el) => el.childElementCount === count);
+  return list ? [...list.children] : [];
+}
+
+export function Card(props: CardProps) {
   const name = props.infoLabel ?? (typeof props.title === "string" ? props.title : "this section");
   const box = useRef<HTMLDivElement>(null);
   const slot = useRef<HTMLDivElement>(null);
@@ -462,26 +511,31 @@ export function Card(props: {
   // before the portal first renders, so a child's layout effects already see it
   // in the document; `contain` may also switch on after mount. On the server
   // there is no host, so the body renders inline.
-  const [fit, setFit] = useState({ scrolls: false, long: false, refused: false });
+  const [fit, setFit] = useState({ scrolls: false, long: false, refused: false, shown: -1 });
+  const countRef = useRef(props.count);
+  countRef.current = props.count;
   const [expanded, setExpanded] = useState(false);
-  const memoryKey = `regulait.contain:${typeof location === "undefined" ? "" : location.pathname}:${name}`;
-  const [showAll, setShowAll] = useState(() => {
+  const memoryKey = useFoldKey(name);
+  const [collapsed, setCollapsed] = useState(() => {
+    if (!props.foldable) return false;
+    let saved: string | null = null;
     try {
-      return props.contain === true && localStorage.getItem(memoryKey) === "all";
+      saved = localStorage.getItem(memoryKey);
     } catch {
-      return false;
+      // storage unavailable: the section opens as its page sets it
     }
+    return saved === "closed" || (saved == null && props.startCollapsed === true);
   });
-  const toggleShowAll = () => {
-    const next = !showAll;
-    setShowAll(next);
+  const toggleCollapsed = () => {
+    const next = !collapsed;
+    setCollapsed(next);
     try {
-      if (next) localStorage.setItem(memoryKey, "all");
-      else localStorage.removeItem(memoryKey);
+      localStorage.setItem(memoryKey, next ? "closed" : "open");
     } catch {
       // storage unavailable: the choice lasts for this visit only
     }
   };
+  const bodyId = useId();
   const [host, setHost] = useState<HTMLDivElement | null>(null);
   useLayoutEffect(() => {
     if (!props.contain || !box.current) return;
@@ -516,33 +570,52 @@ export function Card(props: {
         // measured against the desktop limit (.contain), so phones, where the
         // body flows, still get Expand
         long: !refused && host.offsetHeight > Math.min(window.innerHeight * 0.6, 560) + 1,
+        shown: -1,
       };
-      setFit((f) => (f.refused === next.refused && f.scrolls === next.scrolls && f.long === next.long ? f : next));
+      if (next.scrolls) {
+        // L3: how many rows fit in the box before the reader scrolls ("Showing N of M")
+        const top = el.getBoundingClientRect().top - el.scrollTop;
+        const rows = bodyRows(host, countRef.current);
+        if (rows.length > 0) next.shown = rows.filter((r) => r.getBoundingClientRect().bottom - top <= el.clientHeight + 1).length;
+      }
+      setFit((f) =>
+        f.refused === next.refused && f.scrolls === next.scrolls && f.long === next.long && f.shown === next.shown ? f : next,
+      );
     };
     // the host wraps every child, so rows added after mount are seen too
     const ro = new ResizeObserver(check);
     ro.observe(el);
     ro.observe(host);
+    // a collapsed body has no size to change: a form or warning added to it must still open it
+    const mo = new MutationObserver(check);
+    mo.observe(host, { childList: true, subtree: true });
     window.addEventListener("resize", check);
     check();
     return () => {
       ro.disconnect();
+      mo.disconnect();
       window.removeEventListener("resize", check);
     };
   }, [host, name]);
   const containable = props.contain && !fit.refused;
-  const contained = containable && !showAll;
-  const expand = containable && fit.long && (
-    <>
-      <Button size="sm" variant="ghost" aria-pressed={showAll} onClick={toggleShowAll}>
-        Show all
-      </Button>
-      <Button size="sm" onClick={() => setExpanded(true)} aria-haspopup="dialog">
-        Expand
-      </Button>
-    </>
+  const foldable = containable && props.foldable === true;
+  const open = !foldable || !collapsed;
+  const contained = containable && open;
+  const expand = contained && fit.long && (
+    <Button size="sm" onClick={() => setExpanded(true)} aria-haspopup="dialog">
+      Expand
+    </Button>
   );
   const [one, many] = props.countNoun ?? ["row", "rows"];
+  const countText =
+    props.count == null
+      ? null
+      : props.total != null && props.total !== props.count
+        ? `${props.count} of ${props.total} ${props.total === 1 ? one : many}`
+        : `${props.count}${props.countIsLimit ? "+" : ""} ${props.count === 1 && !props.countIsLimit ? one : many}`;
+  const count = countText != null && (
+    <span style={{ color: "var(--text-faint)", fontSize: "var(--text-sm)", fontWeight: 400 }}>{countText}</span>
+  );
   return (
     <section
       className={[props.flush ? s.cardFlush : s.card, props.className ?? ""].join(" ")}
@@ -551,24 +624,40 @@ export function Card(props: {
       // shell .content) without a cross-module class reference
       data-rg-card=""
     >
-      {(props.title != null || expand) && (
-        <div className={s.cardTitle} style={props.flush ? { padding: "var(--s2) var(--s2) 0" } : undefined}>
-          <span style={{ flex: 1 }}>
-            {props.title}
+      {(props.title != null || expand) &&
+        (foldable ? (
+          <div className={s.cardTitle} style={props.flush ? { padding: "var(--s2) var(--s2) 0" } : undefined}>
+            <button type="button" style={FOLD} aria-expanded={open} aria-controls={bodyId} onClick={toggleCollapsed}>
+              <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={open ? { rotate: "90deg" } : undefined}>
+                <path d="M9 6l6 6-6 6" />
+              </svg>
+              {props.title}
+              {count}
+              {props.attention}
+            </button>
             {props.info != null && <InfoButton label={name}>{props.info}</InfoButton>}
-          </span>
-          {props.count != null && (
-            <span style={{ color: "var(--text-faint)", fontSize: "var(--text-sm)", fontWeight: 400 }}>
-              {props.count} {props.count === 1 ? one : many}
+            <span style={{ flex: 1 }} />
+            {open && props.actions}
+            {expand}
+          </div>
+        ) : (
+          <div className={s.cardTitle} style={props.flush ? { padding: "var(--s2) var(--s2) 0" } : undefined}>
+            <span style={{ flex: 1 }}>
+              {props.title}
+              {props.info != null && <InfoButton label={name}>{props.info}</InfoButton>}
             </span>
-          )}
-          {props.actions}
-          {expand}
-        </div>
-      )}
+            {count}
+            {props.attention}
+            {props.actions}
+            {/* a contained card that does not fold keeps the X6 Expand */}
+            {expand}
+          </div>
+        ))}
       {props.contain ? (
         <div
           ref={box}
+          id={bodyId}
+          hidden={!open}
           className={contained ? s.contain : undefined}
           onFocus={contained ? revealInBox : undefined}
           {...(contained && fit.scrolls ? { tabIndex: 0, role: "region", "aria-label": `${name}, scrollable` } : {})}
@@ -578,13 +667,22 @@ export function Card(props: {
       ) : (
         props.children
       )}
-      {/* M2b: the footer follows the body into the Expand dialog, so it renders in one place at a time */}
+      {contained && fit.scrolls && (
+        <p style={{ margin: "var(--s1) 0 0", fontSize: "var(--text-sm)", color: "var(--text-faint)" }}>
+          {/* the owner-approved wording (#453); "N of M" needs a count and rows the box can measure */}
+          {props.count != null && fit.shown >= 0 && fit.shown < props.count
+            ? `Showing ${fit.shown} of ${props.count}${props.countIsLimit ? "+" : ""} · scroll the list for the rest, or Expand`
+            : "Scroll the list for the rest, or Expand"}
+        </p>
+      )}
+      {/* M2b: the footer follows the body into the Expand dialog, so it renders in one place at a time; it stays
+          in view while the section is folded, as it can carry a partial-data notice */}
       {!expanded && props.footer}
       {host && (
         <Modal
           open={expanded}
           full
-          title={`${typeof props.title === "string" ? props.title : name}${props.count != null ? ` · ${props.count} ${props.count === 1 ? one : many}` : ""}`}
+          title={`${typeof props.title === "string" ? props.title : name}${countText != null ? ` · ${countText}` : ""}`}
           onClose={() => setExpanded(false)}
         >
           <div ref={slot} />
@@ -594,6 +692,25 @@ export function Card(props: {
     </section>
   );
 }
+
+/**
+ * X6b: the whole card title is the fold button, a 44 px target that keeps the
+ * global focus ring. Inline, as the entry CSS has no headroom left.
+ */
+const FOLD: React.CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  alignItems: "center",
+  gap: "var(--s1)",
+  minBlockSize: 44,
+  padding: "unset",
+  border: "none",
+  background: "none",
+  font: "inherit",
+  color: "inherit",
+  textAlign: "start",
+  cursor: "pointer",
+};
 
 /**
  * WCAG 2.4.11: a control focused inside a contained card is scrolled fully into the box. The browser leaves a control
