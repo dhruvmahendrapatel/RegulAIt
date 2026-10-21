@@ -481,7 +481,7 @@ point there rather than repeating commands nobody has run.
 ### 7.2 Discovery sources on the live instance (pending execution)
 
 Each source is added on `/ui/admin/shadow-ai/discovery-sources` (**Add a source** form → **Add source**; a new source is added turned off), given
-a credential (**Add credential** → **Save credential**), then **Enable**d with a step-up. The scanner's API host is
+a credential (**More** → **Add credential** → **Save credential**), then **Enable**d with a step-up. The scanner's API host is
 added to the egress allow list first (ADR-0195 decision 8; adding an allow entry is a `settings_relax` step-up).
 Target and credential fields, from the code on `main`:
 

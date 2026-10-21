@@ -129,6 +129,8 @@ UI: `apps/web/src/views/admin/governance/DiscoverySourcesPage.tsx`, `FederationC
     now**, **Edit**, and **More**, which folds **Disable**, **Replace credential**, **Revoke credential** and
     **Delete**.
   - **Import endpoint evidence** and **Endpoint agent enrolment** cards.
+    The **Endpoint agent enrolment** card's device table shows the enrolled device as a pseudonym (`psn:…`), its
+    platform and agent version, and its user as a pseudonym with a **hardware key** or **software key** badge.
   - **Recent runs** (left) beside **Reveal a pseudonym** (right). Recent runs is a half-width card: only **Source**,
     **Status**, **Queued** and **Observed / matched** fit, and the **Findings**, **Catalogue gaps** and **Reads**
     columns are cut off at its right edge. Press **Expand** on the card, which opens the same table near full screen, to read them: **Findings** (*n new, n
@@ -138,8 +140,6 @@ UI: `apps/web/src/views/admin/governance/DiscoverySourcesPage.tsx`, `FederationC
     and the audiences. The issuer is
     `<REGULAIT_PUBLIC_URL>/federation`, separate from the workload-identity issuer (`packages/shared/src/discovery/
     federation.ts`).
-  - **Endpoint agent enrolment** card: the device table shows the enrolled device as a pseudonym (`psn:…`), its
-    platform and agent version, and its user as a pseudonym with a **hardware key** or **software key** badge.
 - **Action:**
   1. Point at the **Sources** table, row by row: the GitLab group, the AWS sandbox account, the Azure subscription and
      the endpoint agent source.
@@ -423,7 +423,7 @@ the day.
 - **Change from 10-05:** the audit trail now also holds the discovery acts: each source's creation and enabling
   (`discovery-source-created`, `discovery-source-enabled`, written by `apps/gateway/src/discovery-routes.ts`), the
   remediation workflow and its sign-off. Say it in one sentence; do not open the bundle live. In the pack, Morgan's
-  sign-off (*Workflow:approval granted*) and her policy acknowledgement are the first rows. The page can now be
+  sign-off (*Workflow:approval granted*) and her policy acknowledgement are among the first rows. The page can now be
   filtered to one object (`?objectType=…&objectId=…`, the G1 audit-tab link), and both downloads follow the filter;
   which filter puts the discovery rows in the bundle is **to confirm at rehearsal**.
 
