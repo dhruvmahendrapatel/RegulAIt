@@ -212,6 +212,8 @@ test("Audit entries on a phone: every value is a labelled line under Event, and 
     await expect(row.locator(`[data-fold="${key}"]`).locator("span").first()).toHaveText(label);
   }
   await expect(row.locator('[data-fold="effect"]')).toContainText("deny");
+  // a row with no Decision BOM moves no empty "Evidence" label
+  await expect(row.locator('[data-fold="bom"]')).toHaveCount(0);
 });
 
 test("Recent runs takes the full width, with Reveal a pseudonym in its own row below", async ({ page }) => {

@@ -609,7 +609,10 @@ function revealInBox(event: ReactFocusEvent<HTMLDivElement>) {
   const b = box.getBoundingClientRect();
   const left = b.left + box.clientLeft;
   const top = b.top + box.clientTop;
-  if (r.left < left || r.right > left + box.clientWidth || r.top < top || r.bottom > top + box.clientHeight) {
+  // a control in a row clears the sticky table header, which grows when it names folded columns (Column.fold)
+  const head = event.target.closest("thead") ? 0 : box.querySelector("thead")?.getBoundingClientRect().height ?? 0;
+  box.style.scrollPaddingBlockStart = `${Math.ceil(head)}px`;
+  if (r.left < left || r.right > left + box.clientWidth || r.top < top + head || r.bottom > top + box.clientHeight) {
     event.target.scrollIntoView({ block: "nearest", inline: "nearest" });
   }
 }
