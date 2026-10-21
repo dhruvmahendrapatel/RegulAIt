@@ -17,8 +17,9 @@ right-hand column of the timing table.
 
 **Rules for this script**
 - Every URL, button and screen label below was read from the UI code on `main` on 2026-10-18 (file named per beat),
-  and checked again on 2026-10-21 against `main` after #457-#460, #465 and #469 and against the screenshot pack of
-  `Demo journey` run `39544572823` (`DEMO_SCREENS_QA_2026-11-01.md`). Labels that depend on data (finding subjects,
+  and checked again on 2026-10-21 against `main` after #457-#460, #465 and #469, then after #474 (folded sections),
+  #477 (wide tables) and #478 (vendor names in UI copy), against the screenshot pack of `Demo journey` run
+  `39666220670` (`DEMO_SCREENS_QA_2026-11-01.md`). Labels that depend on data (finding subjects,
   counts, alert text) are marked **to confirm** and are checked at rehearsal.
 - **Navigation:** the two Shadow AI pages have their own **Discovery** section in the **AI Governance** sidebar, above
   the registers: **Shadow-AI discovery** and **Discovery sources**. Their breadcrumb reads *Discovery / …* (#469).
@@ -27,6 +28,13 @@ right-hand column of the timing table.
   modal over the page. The decision row (**Approve**, **Acknowledge**, **Start remediation workflow…**) is pinned at
   the panel's foot and never scrolls away; the panel's body scrolls on its own. Close it with **Close** (or **×** on
   the sign-off review). Present at 1440 px or wider so the page stays visible beside it.
+- **Folded sections (X6b, #474):** a long list's card title is a fold button: a chevron, the title and its count (for
+  example *▾ Recent runs · 5 runs*). Pressing the title folds or opens the whole section. A folded section keeps its
+  count and any warning badge (*1 failed*, *1 critical*) in view. On a first visit **Recent runs** (Discovery sources),
+  **Recently decided** (Inbox) and **Usage events** (Optimization) start **folded**; **Inventory** (Shadow-AI
+  discovery) and **Alerts** start open. The choice is remembered per person, page and section in that browser only, so
+  open what the beat needs in each presenting profile at T-1h (`DEMO_RUNBOOK.md` §7.3). Careful: a click on the title
+  of an open Inventory or Alerts card folds it. Cards holding a form or a decision have no fold.
 - Every Shadow AI beat has two paths:
   - **LIVE**: real accounts, through the hosted dev instance. The scans have already run before the demo
     (checklist item T-24h). Nothing in the LIVE path waits on a scan in front of the audience. The live database
@@ -131,10 +139,11 @@ UI: `apps/web/src/views/admin/governance/DiscoverySourcesPage.tsx`, `FederationC
   - **Import endpoint evidence** and **Endpoint agent enrolment** cards.
     The **Endpoint agent enrolment** card's device table shows the enrolled device as a pseudonym (`psn:…`), its
     platform and agent version, and its user as a pseudonym with a **hardware key** or **software key** badge.
-  - **Recent runs** (left) beside **Reveal a pseudonym** (right). Recent runs is a half-width card: only **Source**,
-    **Status**, **Queued** and **Observed / matched** fit, and the **Findings**, **Catalogue gaps** and **Reads**
-    columns are cut off at its right edge. Press **Expand** on the card, which opens the same table near full screen, to read them: **Findings** (*n new, n
-    updated*), **Reads** (*all read*, or *could not read: …* per read).
+  - **Recent runs**, a full-width card that starts **folded** on a first visit: its header reads *▸ Recent runs · n
+    runs* (and *n failed* if any run failed). Press the header to open it. Open, every column fits at 1440 px:
+    **Source**, **Status**, **Queued**, **Observed / matched**, **Findings** (*n new, n updated*), **Catalogue gaps**
+    and **Reads** (*all read*, or *could not read: …* per read). No Expand is needed (#477).
+  - **Reveal a pseudonym**, its own card below Recent runs.
   - **Cloud federation** card: *on*, and *"Federated AWS, GCP and Entra credentials present a 300-second RS256 token
     from this issuer. Turning it on asks you to confirm it's you."*, then the issuer, its key set, the subject format
     and the audiences. The issuer is
@@ -145,8 +154,8 @@ UI: `apps/web/src/views/admin/governance/DiscoverySourcesPage.tsx`, `FederationC
      the endpoint agent source.
   2. On the AWS row, point at the **Credential** column: **Federated**. Then scroll to **Cloud federation**.
   3. On the GitLab row, point at the **Credential** column: **Static key**. Say why (below).
-  4. On **Recent runs**, press **Expand** and point at the latest run of each source: *succeeded*, observed / matched,
-     findings. Close the expanded view.
+  4. Scroll to **Recent runs**. If it is folded, press its header to open it. Point at the latest run of each source:
+     *succeeded*, observed / matched, findings.
   5. Do **not** press **Run now** live. A scan takes longer than the beat, and the LIVE path never waits on one.
 - **Say:** "Every source starts off. Turning one on, or widening what it scans, asks the admin to confirm it's them,
   and is audited. The cloud accounts are read with no stored secret: AWS and Azure trust RegulAIt's own token issuer
@@ -196,18 +205,21 @@ UI: `ShadowAiPage.tsx`, `DiscoverySightings.tsx`, `discoverySourcesModel.ts` (`s
   - Figures: **Critical** (*Leaked credential*), **High** (*Observed model traffic*), **Medium or low** (*Looser
     signals to check*), **Evidence classes supplied** (*n / 4*).
   - **Inventory** card, *"Every row is a lead for triage, not a verdict."*, with the status chips **All · Open ·
-    Confirmed · Closed** (each with its count), **Show all** and **Expand**. Columns: **Severity · Subject (the
-    provider under it) · Evidence · Confidence · Seen · Where seen · Status · Next step**. **Next step** holds **Plan
-    remediation**, **Triage** and **Register as use case**.
-  - The card shows about four rows and scrolls inside itself, and at 1440 px the **Next step** column is cut off at
-    its right edge (finding F6). Press **Expand** to see every row and column at once; close it before the next step.
+    Confirmed · Closed** (each with its count) and **Expand**. Its title is a fold header (*▾ Inventory · n
+    findings*), open by default. Columns: **Severity · Subject (the provider under it) · Evidence · Confidence · Seen
+    · Status · Next step**. **Evidence** holds the evidence badges and, under them, the sightings folded behind a count
+    (*▶ n places*). **Next step** holds **Plan remediation**, **Triage** and **Register as use case**.
+  - The card shows three to four rows and scrolls inside itself, with the line *"Showing 3 of n · scroll the list for
+    the rest, or Expand"*. At 1440 px every column fits (#477). With the remediation panel open, the table folds
+    **Confidence** under **Severity** and **Evidence** and **Seen** under **Subject**, so nothing scrolls sideways.
   - **Coverage** tab: one card per import class (**Egress logs**, **Code scan**, **SaaS export**, **Self-reported**),
     each **Supplied** or **Missing**, with *n imports · n rows*, **Sees:** and **Misses:**, and **Import this
     evidence** on a missing one. Caption: *"Gaps are shown, never papered over."*
 - **Action:**
   1. Read the coverage sentence aloud, last clause included.
-  2. Press **Expand** on the Inventory card. Walk three rows, one per family, using the **Evidence** and **Where
-     seen** columns. **Where seen** is folded behind a count (*▸ n places*): open it to show the sighting lines.
+  2. Scroll the Inventory's list inside the card (or press **Expand** to see every row at once, and close it before
+     the next step). Walk three rows, one per family, using the **Evidence** column: open the sightings under its
+     badge (*▶ n places*) to show the sighting lines.
      - **a repository finding** (Evidence *Repo scan*): its sighting line reads `path:line @commit` and, where the
        repository's templates name AI keys, *presence signatures: …*, then *by psn:…* (the commit author's
        pseudonym);
@@ -215,8 +227,8 @@ UI: `ShadowAiPage.tsx`, `DiscoverySightings.tsx`, `discoverySourcesModel.ts` (`s
        calling principal as a pseudonym;
      - **the device finding** (Evidence *Endpoint agent*, or *Endpoint inventory* for an MDM row): the AI tool on the
        laptop, the device user as a pseudonym.
-  3. Click one `psn:…` link in an open **Where seen**. It opens **Discovery sources** with the pseudonym prefilled in
-     **Reveal a pseudonym** (half-way down the page, beside **Recent runs**). Do **not** press **Reveal** (it asks for
+  3. Click one `psn:…` link in an open sighting list. It opens **Discovery sources** with the pseudonym prefilled in
+     **Reveal a pseudonym** (its own card, below **Recent runs**). Do **not** press **Reveal** (it asks for
      a step-up and is audited). Go back.
   4. Click **See coverage** (or the **Coverage** tab): the import classes that read **Missing**, with what each would
      see and what it misses.
@@ -228,27 +240,28 @@ UI: `ShadowAiPage.tsx`, `DiscoverySightings.tsx`, `discoverySourcesModel.ts` (`s
   self-reported). The scanned sources are named in the coverage sentence, not as scorecard rows, so **Evidence classes
   supplied** can read low (*1 / 4* on FALLBACK) while five sources are scanned. If asked, say exactly that.
 - **LIVE:** real findings only, from the T-24h scans of what the infrastructure lane planted (repositories that use
-  AI SDKs, Bedrock usage with CloudTrail, one Azure OpenAI deployment, the endpoint device). No subject, provider or
+  AI SDKs, managed-model usage with its audit trail in AWS, one hosted model deployment in Azure, the endpoint
+  device). No subject, provider or
   count is promised here: choose the three rows to walk at the T-24h check, from what is on screen.
 - **FALLBACK** (from `DEMO_SHADOW_DISCOVERY`; `demo:check` asserts each family):
-  - **repositories** (*Repo scan*): `gitlab:acme-bank-demo/credit-memo-assistant` (the Anthropic SDK, with the
-    presence signature `env.anthropic.api-key` from its `.env.example`) and `gitlab:acme-bank-demo/support-ticket-
-    triage` (the OpenAI SDK). The commit author is a team label, shown as a pseudonym;
-  - **AWS** (*Cloud inventory*): a Bedrock custom model `acme-complaints-summariser` (`eu-west-1`) and a SageMaker
-    endpoint `fraud-score-llm` (`us-east-1`); (*Cloud audit log*): one calling principal, a pseudonym, 412 Bedrock
-    calls (`InvokeModel`, `Converse`);
-  - **Azure** (*Cloud inventory*): the Azure OpenAI account `acme-openai-eu` and its deployment `branch-faq-bot`
-    (`westeurope`);
-  - **MDM export** (*Endpoint inventory*): three laptops' AI desktop apps (ChatGPT, Claude, Cursor), devices and users
-    as pseudonyms;
-  - **endpoint agent** (*Endpoint agent*): the Claude desktop app on one enrolled laptop. The agent's CLI fact and its
+  - **repositories** (*Repo scan*): `gitlab:acme-bank-demo/credit-memo-assistant` (one AI vendor's SDK, with a
+    presence signature for that vendor's API key from its `.env.example`) and `gitlab:acme-bank-demo/support-ticket-
+    triage` (a second vendor's SDK). The commit author is a team label, shown as a pseudonym;
+  - **AWS** (*Cloud inventory*): a managed custom model `acme-complaints-summariser` (`eu-west-1`) and a model-serving
+    endpoint `fraud-score-llm` (`us-east-1`); (*Cloud audit log*): one calling principal, a pseudonym, 412 model
+    invocation calls;
+  - **Azure** (*Cloud inventory*): one hosted AI account and its deployment `branch-faq-bot` (`westeurope`);
+  - **MDM export** (*Endpoint inventory*): three laptops' AI desktop apps (three seeded tool records), devices and
+    users as pseudonyms;
+  - **endpoint agent** (*Endpoint agent*): one AI desktop app on one enrolled laptop. The agent's CLI fact and its
     environment-variable fact are dropped by the gateway and only counted: nothing names them on screen.
-  - The four imported *Saas export* rows of the 10-05 demo (*Credit Team LLM Prototype*, *ChatGPT Web*, *Claude
-    Web*, *OpenAI API Testing*) are still seeded by `demo:intake` and appear in the same table.
+  - The four imported *Saas export* rows of the 10-05 demo (the seeded prototype record and three seeded AI tool
+    records) are still seeded by `demo:intake` and appear in the same table. The records keep their seeded names on
+    screen (owner decision 2026-10-21, F30).
 - **Evidence labels:** the 2026-10-21 pack shows **Repo scan** and **SaaS export** in the **Evidence** column. The
   other families' labels (*Cloud inventory*, *Cloud audit log*, *Endpoint inventory*, *Endpoint agent*) are the
-  Scanner kinds table's wording and are **to confirm** in the expanded Inventory at rehearsal (the pack's Inventory
-  shot shows its first four rows only).
+  Scanner kinds table's wording and are **to confirm** in the Inventory at rehearsal (the pack's Inventory shot shows
+  its first rows only).
 
 ### S3. Remediation plan → workflow → second approver — Ada, then Morgan — 3.5 minutes
 UI: `ShadowRemediationPanel.tsx`, `apps/web/src/views/workflows/WorkflowDetailPage.tsx`,
@@ -295,7 +308,8 @@ UI: `ShadowRemediationPanel.tsx`, `apps/web/src/views/workflows/WorkflowDetailPa
   the panel on the right, with *"Workflow · requested by Ada Admin"* and the submitted plan folded under
   *Submitted: Shadow AI remediation plan (v1)* (open it to show the plan). The pinned foot has **Reason (optional)**,
   **Deny** and **Approve**. Press **Approve** (her authenticator code if asked). The item leaves the list and the
-  count drops by one (*n waiting on you*). Back in Profile A, reload the workflow: status **completed**, all four
+  count drops by one (*n waiting on you*). **Recently decided**, at the foot of the Inbox, starts folded
+  (*▸ Recently decided · n decisions*); the beat does not need it, so leave it folded. Back in Profile A, reload the workflow: status **completed**, all four
   pipeline stages done.
 - **Say:** "Nothing changed governed state yet; it was a plan. The plan runs through the same workflow engine as every
   other change, so its assignment rules and compliance stages apply. It sits in plan-only until a person says planning
@@ -394,7 +408,8 @@ the day.
 
 ### G5. Alerts and remediation — Ada, then Avery — 2 minutes (10-05 beat 3B)
 - **URL:** `/ui/admin/governance/alerts` → **Evaluate now**. The tabs **Active · Acknowledged · Resolved** sit
-  above the **Alerts** card.
+  above the **Alerts** card, whose title is a fold header (*▾ Alerts · n alerts*, open by default). Click the alert
+  rows, not the card title: a click on the title folds the list.
 - **Action:** click the unowned-agent alert's row: it opens in the panel on the right (`ds-g5b`; at 900 px and
   below, a modal over the page, `ds-g5c`). Type the **Acknowledgement note — required and audited** in the pinned
   foot, then **Acknowledge** (it stays disabled until the note is typed). In the panel's body, under **Remediation**,
@@ -414,10 +429,14 @@ the day.
 
 ### G7. Regulatory intelligence — 0.5 minutes (10-05 beat 3D)
 - **URL:** `/ui/admin/governance/regulatory`. One entry: the Digital Omnibus date move.
+- **Dates:** this page still writes its dates in US format (*Oct 21, 2026, 8:08 PM*, *Jul 27, 2026*), unlike the
+  rest of the product (finding F32, open). Say the date move in words, as the entry's own text gives it (the Annex III
+  high-risk obligations now apply from 2 December 2027), and do not read the date badges aloud.
 
 ### G8. Evidence — Ada — 1 minute (10-05 beat 3E)
 - **URL:** `/ui/admin/audit` → **Download signed bundle** (top right, beside **Download CSV**). The page (`ds-g8`):
-  **Chain integrity** (*Not verified yet*, **Verify chain**), then **Entries**, newest first, then three folded
+  **Chain integrity** (*Not verified yet*, **Verify chain**), then **Entries**, newest first (every column, the
+  **Evidence** link included, fits the card since #477; the object type is a faint line above each event), then three folded
   panels, each closed and showing its status: **Signed decision receipts**, **Anchor timestamps**, **Retention**. Open
   one only if asked.
 - **Change from 10-05:** the audit trail now also holds the discovery acts: each source's creation and enabling
@@ -442,7 +461,8 @@ re-run `demo:intake`), and WARNs when open incidents or feedback sit on the Real
 `demo:gate` subject (records left by early #461 heads: close them, or re-prepare the database from main).
 - **URL:** `/ui/incidents`. The list opens on **Not closed** and shows the open, medium incident on the Internal IT
   Knowledge Base Bot (owner Dana Developer, two timeline notes, one open corrective action due after the demo day).
-  Medium and not serious, so it starts no clock and holds no deploy gate. For the 10-05 story, set **Status** to
+  Medium and not serious, so it starts no clock and holds no deploy gate. Its **Aware** column shows an ISO date with
+  *UTC* (finding F32, open): do not read it aloud. For the 10-05 story, set **Status** to
   **All** and open the closed Customer Sentiment Analyzer incident.
 - **URL:** `/ui/feedback`. As an admin, Ada sees the tab **All feedback** (beside **Sent by me**); **Show** opens on
   **Open** and lists two items on the IT knowledge bot, both
@@ -477,7 +497,8 @@ UI: `apps/web/src/views/admin/governance/ContentTrustPage.tsx`.
 
 - **Live, real accounts (LIVE path only):** the GitLab demo group, the AWS sandbox account, the Azure subscription and
   the endpoint device, scanned read-only by the product's scanners at T-24h. The AI activity in them is planted by us
-  for the demo (small Bedrock usage, one small Azure OpenAI deployment, repositories that use AI SDKs), under
+  for the demo (small managed-model usage in AWS, one small hosted model deployment in Azure, repositories that use
+  AI SDKs), under
   fictional demo-company names, with no personal data (ADR-0197 decisions 2-5 and 8). Say so: "we planted this
   usage; the scan is real".
 - **Seeded (FALLBACK path only):** the discovery dataset `demo:prepare` creates through the real API paths, with the
