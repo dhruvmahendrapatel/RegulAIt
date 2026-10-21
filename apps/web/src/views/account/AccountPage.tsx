@@ -1,7 +1,7 @@
 /**
  * Account — identity, password change and TOTP MFA self-service (ADR-0025),
  * plus per-user BYO model keys (ModelKeysCard). Reached from the topbar user
- * menu; ?section= deep-links (password | mfa | passkeys | keys | ai-policies). ADR-0182 A14 adds the AI policies section;
+ * menu; ?section= deep-links (appearance | password | mfa | passkeys | keys | ai-policies). ADR-0182 A14 adds the AI policies section;
  * ADR-0186 A adds Passkeys.
  */
 import { useEffect, useRef, useState, type FormEvent } from "react";
@@ -19,6 +19,7 @@ import { useToast } from "../../ui/toast";
 import ModelKeysCard from "./ModelKeysCard";
 import { UsernameForm } from "./UsernameForm";
 import PasskeysCard from "./PasskeysCard";
+import AppearanceCard from "./AppearanceCard";
 import { LiteracyDocumentList, useMyLiteracy } from "./AcknowledgeGate";
 import v from "../views.module.css";
 import s from "../auth/auth.module.css";
@@ -27,6 +28,7 @@ export default function AccountPage() {
   const { auth, refresh } = useSession();
   const [params] = useSearchParams();
   const section = params.get("section");
+  const appearanceRef = useRef<HTMLDivElement>(null);
   const pwRef = useRef<HTMLDivElement>(null);
   const mfaRef = useRef<HTMLDivElement>(null);
   const passkeysRef = useRef<HTMLDivElement>(null);
@@ -35,6 +37,7 @@ export default function AccountPage() {
   const policiesRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    if (section === "appearance") appearanceRef.current?.scrollIntoView({ block: "start" });
     if (section === "password") pwRef.current?.scrollIntoView({ block: "start" });
     if (section === "mfa") mfaRef.current?.scrollIntoView({ block: "start" });
     if (section === "passkeys") passkeysRef.current?.scrollIntoView({ block: "start" });
@@ -100,6 +103,9 @@ export default function AccountPage() {
           ) : null}
         </Card>
 
+        <div ref={appearanceRef}>
+          <AppearanceCard />
+        </div>
         <div ref={pwRef}>
           <PasswordCard passwordSet={Boolean(auth?.passwordSet)} />
         </div>

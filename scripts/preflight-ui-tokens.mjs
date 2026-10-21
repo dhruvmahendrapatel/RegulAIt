@@ -21,7 +21,8 @@
  *     ts-color-literal                      a hex or colour-function literal inside a string
  *     ts-spacing-literal                    padding / margin / gap given a number or a px / rem / em string
  *
- * Left out: src/theme/tokens.css and src/theme/fonts.css (the token source), and test files.
+ * Left out: src/theme/tokens.css, src/theme/fonts.css and src/theme/palettes.css (the token sources: palettes.css
+ * re-defines tokens per T1 palette, AA-checked by src/theme/palette.test.ts), and test files.
  *
  * Usage (from the repository root, after `pnpm install`):
  *   node scripts/preflight-ui-tokens.mjs            # check; exit 1 on a regression or a stale entry, 2 if it cannot run
@@ -36,7 +37,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const WEB = path.join(root, "apps", "web");
 const SRC = path.join(WEB, "src");
 export const BASELINE_FILE = path.join(root, "scripts", "ui-tokens.baseline.json");
-const TOKEN_SOURCES = new Set(["apps/web/src/theme/tokens.css", "apps/web/src/theme/fonts.css"]);
+const TOKEN_SOURCES = new Set(["apps/web/src/theme/tokens.css", "apps/web/src/theme/fonts.css", "apps/web/src/theme/palettes.css"]);
 
 /** CSS Color 4 named colours (`transparent` and `currentcolor` are keywords, not colours, and are allowed) */
 const NAMED_COLORS = new Set(("aliceblue antiquewhite aqua aquamarine azure beige bisque black blanchedalmond blue blueviolet brown " +

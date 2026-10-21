@@ -405,3 +405,23 @@ that the `--guard` rule above requires.
   development build today, about 32.8 kB gzip). Once that PR merges, both ceilings are lowered back **below** the
   pre-raise values (entry JS under 137.5 kB, all JS under 1,035 kB), so the ratchet ends up stricter than before
   this exception.
+
+## Addendum / As built (2026-10-21) — all JS 1,036 → 1,038 kB (T1 themes, Phase 1)
+
+The owner decided this raise on 2026-10-21 in the Governed - Designer session:
+<https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6328260537>. It is the ADR-recorded exception
+that the `--guard` rule above requires, and it has one `CEILING_EXCEPTIONS` row.
+
+- **What moves.** In `apps/web/.size-limit.json`, only `all JS` goes from `1036 kB` to `1038 kB` (+2 kB). Entry JS
+  (137.9 kB), entry CSS (10.6 kB) and the two lazy chunks are unchanged.
+- **Why.** T1 Phase 1 (user-selectable palettes) adds lazy JavaScript only: the palette module (`theme/palette.ts`,
+  its own chunk) and the Appearance card on the Account page. The palette tokens are a lazy stylesheet
+  (`theme/palettes.css`), loaded only once a palette other than Aurora is chosen. Gzip bytes, size-limit 14.2.0:
+
+  | | entry JS | entry CSS | all JS |
+  |---|---|---|---|
+  | main (`f8ea023`) | 137,613 | 10,594 | 1,035,614 |
+  | with T1 Phase 1 | 137,753 | 10,594 | 1,037,336 |
+  | old ceiling | 137,900 | 10,600 | 1,036,000 |
+  | new ceiling | 137,900 | 10,600 | 1,038,000 |
+

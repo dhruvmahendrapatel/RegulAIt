@@ -5,8 +5,17 @@ import "./theme/tokens.css";
 import "./theme/global.css";
 import App from "./App";
 
-createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
+// T1: a chosen palette's sheet is in before the first paint of the app; Aurora (nothing stored) loads nothing more
+let palette: string | null = null;
+try {
+  palette = localStorage.getItem("regulait.palette");
+} catch {
+  // storage unavailable: Aurora
+}
+void (palette ? import("./theme/palette").then((m) => m.startPalette()) : Promise.resolve()).then(() =>
+  createRoot(document.getElementById("root")!).render(
+    <React.StrictMode>
+      <App />
+    </React.StrictMode>,
+  ),
 );
