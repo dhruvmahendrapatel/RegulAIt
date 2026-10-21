@@ -255,6 +255,25 @@ describe("Card contain — a long body scrolls in a contained box (X6)", () => {
     );
   });
 
+  it("offers the fold only where the caller supplies a count (X6b, M1)", () => {
+    // @ts-expect-error a foldable card must say how many rows it holds, so its folded header keeps the count
+    void (<Card title="Findings" contain foldable>rows</Card>);
+    // @ts-expect-error a secondary section can start collapsed only when it can fold
+    void (<Card title="Findings" contain startCollapsed count={3}>rows</Card>);
+    const plain = renderToStaticMarkup(<Card title="Findings" contain count={3}>rows</Card>);
+    expect(plain).not.toContain("aria-expanded");
+    const fold = renderToStaticMarkup(<Card title="Findings" contain foldable count={3}>rows</Card>);
+    expect(fold).toContain('aria-expanded="true"');
+    expect(fold).toContain(">3 rows<");
+  });
+
+  it("says when the body is filtered or the count is a fetch limit", () => {
+    expect(renderToStaticMarkup(<Card title="Inventory" contain count={2} total={5} countNoun={["finding", "findings"]}>rows</Card>)).toContain(
+      ">2 of 5 findings<",
+    );
+    expect(renderToStaticMarkup(<Card title="Runs" contain count={50} countIsLimit countNoun={["run", "runs"]}>rows</Card>)).toContain(">50+ runs<");
+  });
+
   it("leaves a card without contain exactly as before", () => {
     const html = renderToStaticMarkup(<Card title="Findings">rows</Card>);
     expect(html).not.toContain('role="region"');

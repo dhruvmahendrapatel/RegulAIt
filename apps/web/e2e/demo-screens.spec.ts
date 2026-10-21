@@ -5,7 +5,8 @@
  * 10-05 journeys in the same CI job, which leave it populated): Shadow AI first (discovery sources, findings and
  * sightings, agents, the remediation plan, the workflow and Morgan's sign-off in the Inbox, the intake prefill),
  * then the governance beats (the use-case record, trust, alerts, graph, regulatory, evidence, posture, content
- * trust). Full-page shots at 1440x900, light theme; the opening Shadow-AI screens in dark as well. The pack is
+ * trust). Full-page shots at 1440x900, light theme; the opening Shadow-AI screens in dark as well, and one alert in
+ * the shared detail drawer at 900 px, where it is a modal. The pack is
  * uploaded as the `demo-screens` artifact on every run (`.github/workflows/demo.yml`).
  *
  * The QA pass is machine-checkable only: every screen's text, and every input and textarea value, is scanned for
@@ -163,6 +164,12 @@ async function capture(page: Page, persona: { key: string; displayName: string }
   };
   report.push(check);
   expect.soft(leaks, `${name}: text leaks on screen`).toEqual([]);
+  // the shell and page width are asserted at the pack's 1440 px; a narrower shot (the drawer as a modal) records them
+  if ((page.viewportSize()?.width ?? VIEWPORT.width) < VIEWPORT.width) {
+    if (!check.personaShown) check.notes.push(`narrow shot: ${persona.displayName} not in the visible text`);
+    if (seen.overflowX > 0) check.notes.push(`narrow shot: ${seen.overflowX}px of horizontal page scroll`);
+    return;
+  }
   expect.soft(check.personaShown, `${name}: the shell names ${persona.displayName}`).toBe(true);
   expect.soft(seen.overflowX, `${name}: no horizontal page scroll at 1440px`).toBeLessThanOrEqual(0);
 }
@@ -244,6 +251,12 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
     await link.click();
     await expect(ada.getByRole("heading", { name: "Discovery sources" })).toBeVisible();
     await capture(ada, ADA, "ds-s2b-pseudonym-reveal-prefilled", { notes: ["Reveal not pressed (step-up, audited)"] });
+  });
+
+  await test.step("S2 the Coverage tab (the scorecard sits on its own tab)", async () => {
+    await ada.goto("/ui/admin/shadow-ai?tab=coverage");
+    await expect(ada.getByRole("tab", { name: "Coverage", selected: true })).toBeVisible();
+    await capture(ada, ADA, "ds-s2d-coverage");
   });
 
   await test.step("S1/S2 agents (the governed registry the findings map onto)", async () => {
@@ -371,6 +384,13 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
     await ada.goto(`/ui/admin/governance/use-cases/${recordId}`);
     await expect(ada.getByText("Lifecycle tracker")).toBeVisible();
     await capture(ada, ADA, "ds-g1b-use-case-record");
+    // #465: the use case's own audit trail, its true total, and (admin only) the link into the audit log's filter
+    await ada.getByRole("tab", { name: /^Audit\b/ }).click();
+    await expect(ada.getByText("Recent use-case audit evidence")).toBeVisible();
+    await capture(ada, ADA, "ds-g1c-use-case-audit");
+    await ada.getByRole("link", { name: "Open this use case's full audit trail" }).click();
+    await expect(ada.getByTestId("audit-only-object")).toBeVisible();
+    await capture(ada, ADA, "ds-g1d-use-case-audit-trail");
   });
 
   await test.step("G2 Avery's independent review: Approve with conditions (captured, not submitted)", async () => {
@@ -418,6 +438,23 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
     });
   };
   for (const p of pages) await shoot(p);
+  await test.step("G5 an alert in the shared detail drawer: a side panel above 900 px, a modal at 900 px and below", async () => {
+    await ada.goto("/ui/admin/governance/alerts");
+    await expect(ada.getByRole("heading", { name: "Governance alerts", exact: true })).toBeVisible();
+    const rows = ada.getByRole("button").filter({ has: ada.locator("strong") }).filter({ hasText: / · seen / });
+    if ((await rows.count()) === 0) {
+      report.at(-1)?.notes.push("no active alert to open: the drawer was not captured");
+      return;
+    }
+    await rows.first().click();
+    const drawer = ada.getByTestId("alert-detail");
+    await expect(drawer).toBeVisible();
+    await capture(ada, ADA, "ds-g5b-alert-drawer", { notes: ["side panel at 1440 px; Acknowledge is in the pinned footer"] });
+    await ada.setViewportSize({ width: 900, height: 900 });
+    await expect(drawer).toBeVisible();
+    await capture(ada, ADA, "ds-g5c-alert-drawer-narrow", { notes: ["900 px: the drawer is a modal over the page"] });
+    await ada.setViewportSize(VIEWPORT);
+  });
   await test.step("G9 the use case's Decision records tab", async () => {
     expect(recordId, "G1 opened a use-case record").toBeTruthy();
     await ada.goto(`/ui/admin/governance/use-cases/${recordId}`);

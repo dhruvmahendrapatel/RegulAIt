@@ -1,0 +1,18 @@
+-- Owner decision of 2026-10-21 (issue #453, row 1): index one object's audit trail. Hand-authored (never drizzle-kit
+-- generate). This file runs nothing that changes the schema, and no row is read or written.
+--
+-- The index is
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS "audit_log_object_at_idx" ON "audit_log" ("object_type", "object_id", "at" DESC)
+-- and it serves `GET /v1/audit?objectType=&objectId=` (and `GET /v1/audit.csv` with the same filters) and the use-case
+-- overview's trail and its count (`apps/gateway/src/use-case-overview.ts`).
+--
+-- It is built CONCURRENTLY so a build never blocks audit writes. CONCURRENTLY cannot run inside a transaction, and the
+-- drizzle migrator applies every pending file in ONE transaction (migrations 0154, 0155, 0167 and 0192 indexed
+-- `audit_log` without CONCURRENTLY for that reason). So the statement is not here: it lives in `CONCURRENT_INDEXES`
+-- in `packages/db/src/migrate.ts`, and `runMigrations` runs it after `migrate`, outside any transaction, once this
+-- file's tag is in the journal. It rebuilds an INVALID index left by an interrupted build, and fails the run rather
+-- than return with no valid index. It never falls back to a plain CREATE INDEX.
+--
+-- `drizzle-kit migrate` applies this file but NOT the index. Apply migrations through `runMigrations` (the gateway,
+-- the seed and every demo script do).
+SELECT 1;

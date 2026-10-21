@@ -429,6 +429,7 @@ export default function ShadowAiPage() {
     if (ok) refresh();
   };
 
+  const criticalOpen = (findings.data?.findings ?? []).filter((f) => f.severity === "critical" && statusGroup(f.disposition) !== "closed").length;
   const findingRows = (findings.data?.findings ?? []).filter((f) => statusFilter === "all" || statusGroup(f.disposition) === statusFilter);
   const statusCounts = useMemo(() => {
     const out: Record<string, number> = { all: 0, open: 0, confirmed: 0, closed: 0 };
@@ -528,6 +529,12 @@ export default function ShadowAiPage() {
         title="Inventory"
         contain
         caption="Every row is a lead for triage, not a verdict."
+        foldable
+        // L2: the header counts what the filtered body shows, out of every finding
+        count={findingRows.length}
+        total={findings.data?.findings.length}
+        countNoun={["finding", "findings"]}
+        attention={criticalOpen > 0 ? <Badge tone="danger">{criticalOpen} critical</Badge> : undefined}
         actions={
           <div className={v.row} role="group" aria-label="Filter by status">
             {(["all", "open", "confirmed", "closed"] as const).map((g) => (

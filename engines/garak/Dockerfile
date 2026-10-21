@@ -8,10 +8,10 @@
 #
 # Built from the REPOSITORY ROOT (the shim is a workspace package):
 #
-#   docker build -f engines/garak/Dockerfile -t regulait/engine-garak:0.17.0 .
+#   docker build -f engines/garak/Dockerfile -t regulait/engine-garak:0.17.1 .
 #
 # Every base is pinned by digest. What the build does offline after the pinned download:
-#   - garak 0.17.0 and its closure from OUR lockfile (requirements.txt: every wheel by sha256,
+#   - garak 0.17.1 and its closure from OUR lockfile (requirements.txt: every wheel by sha256,
 #     `--require-hashes --no-deps --only-binary :all:`), into a venv; torch is the CPU-only wheel by
 #     direct URL (the default resolution pulls proprietary CUDA runtime packages, R10); the two
 #     packages with no Python 3 wheel (requirements-sdist.txt) are built from their hashed sdists with
@@ -47,8 +47,8 @@ RUN python -m venv /opt/garak/venv \
  && /opt/garak/venv/bin/pip install --no-cache-dir --disable-pip-version-check --require-hashes --no-deps --only-binary :all: -r requirements.txt \
  && /opt/garak/venv/bin/pip install --no-cache-dir --disable-pip-version-check --require-hashes --no-deps --no-build-isolation --no-binary :all: -r requirements-sdist.txt \
  && /opt/garak/venv/bin/pip check --disable-pip-version-check \
- && /opt/garak/venv/bin/python -I -c "import importlib.metadata as m, sys; v = m.version('garak'); sys.exit(0 if v == '0.17.0' else f'expected garak 0.17.0, got {v}')" \
- && /opt/garak/venv/bin/python -I prune-data.py /opt/garak/venv/lib/python3.12/site-packages excluded-data.txt 25484e2467c84b1a59e27ae7ebf433a305b00c859aa1904c315f916661134a52 \
+ && /opt/garak/venv/bin/python -I -c "import importlib.metadata as m, sys; v = m.version('garak'); sys.exit(0 if v == '0.17.1' else f'expected garak 0.17.1, got {v}')" \
+ && /opt/garak/venv/bin/python -I prune-data.py /opt/garak/venv/lib/python3.12/site-packages excluded-data.txt 6ba9cca2c36f8045463911783cb4869ae69da6c514d81330a27e29b0de230209 \
  && /opt/garak/venv/bin/pip uninstall -y --disable-pip-version-check pip \
  && node licence-gate.mjs /opt/garak/venv/lib/python3.12/site-packages licence-allow.json --readings licence-readings.json --runtime python=PSF-2.0 \
  && find /opt/garak/venv -name '__pycache__' -prune -exec rm -rf {} +
@@ -77,7 +77,7 @@ RUN NODE_OPTIONS=--max-old-space-size=3072 pnpm install --frozen-lockfile \
 FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS runtime
 LABEL org.opencontainers.image.title="regulait-engine-garak" \
       org.regulait.engine="garak" \
-      org.regulait.engine-version="0.17.0" \
+      org.regulait.engine-version="0.17.1" \
       org.regulait.data-pruned="excluded-data.txt"
 # no package installer at run time: the base image's pip goes too
 RUN rm -rf /usr/local/lib/python3.12/site-packages/pip /usr/local/lib/python3.12/site-packages/pip-* \

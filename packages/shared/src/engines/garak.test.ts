@@ -172,7 +172,7 @@ describe("B5-G manifest entry", () => {
   });
 
   it("isolates the runner credential (two containers), needs model access and no judge, and names every worker switch", () => {
-    expect(m).toMatchObject({ credentialIsolation: true, needsModelAccess: true, requiresJudge: false, imageDigest: ENGINE_IMAGES_LOCK.garak.manifestDigest, version: "0.17.0" });
+    expect(m).toMatchObject({ credentialIsolation: true, needsModelAccess: true, requiresJudge: false, imageDigest: ENGINE_IMAGES_LOCK.garak.manifestDigest, version: "0.17.1" });
     expect(m.usageDataEnv).toEqual({ ...GARAK_USAGE_DATA_ENV, [GARAK_WORKER_SELF_TEST_SWITCH]: "1" });
     expect(m.usageDataEnv).toMatchObject({ HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1", HF_DATASETS_OFFLINE: "1" });
   });

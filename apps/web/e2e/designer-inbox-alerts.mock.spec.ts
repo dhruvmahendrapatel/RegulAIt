@@ -111,7 +111,11 @@ test("Inbox: one item layout, visible reasons, and Approve waits for a required 
   // the admin override names itself and explains why a reason is needed
   await expect(page.getByText("You are not the named approver, so a reason is required.")).toBeVisible();
   // one decided item fits, so the contained card is no scroll stop (the region role appears only while it scrolls)
-  await expect(page.locator("section[data-rg-card]").filter({ hasText: "Recently decided" })).toContainText("Retire a vendor link");
+  // X6b: "Recently decided" is a secondary section, so it starts folded
+  const decided = page.getByRole("button", { name: /^Recently decided/ });
+  await expect(decided).toHaveAttribute("aria-expanded", "false");
+  await decided.click();
+  await expect(page.locator("section[data-rg-card]").filter({ hasText: "Recently decided" }).getByText("Retire a vendor link")).toBeVisible();
   await expect(page.getByRole("region", { name: "Recently decided, scrollable" })).toHaveCount(0);
 });
 
@@ -163,22 +167,55 @@ test("Inbox: the dry-run deploy badge explains itself with an (i), not a hover t
   await expect(page.getByRole("note")).toContainText("The recorded deploy was a dry run. Nothing was actually changed.");
 });
 
-test("Inbox: a request with no evidence says so in the drawer; one with evidence does not", async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/ui/inbox");
-  // the governance remediation carries no workflow, quorum or context conflict
-  await page.locator("div").filter({ hasText: /^Governance remediation/ }).getByRole("button", { name: /^Review / }).last().click();
-  const item = page.getByTestId("inbox-item");
-  await expect(item.getByTestId("inbox-no-evidence")).toHaveText("No evidence attached to this request.");
-  // the decision row stays pinned in the footer (ADR-0180)
-  await expect(item.getByTestId("inbox-decision").getByRole("button", { name: "Approve" })).toBeInViewport();
-  await item.getByRole("button", { name: "Close review" }).click();
+// #460 delta review (Low): pinned and the top hit at both widths, not just in the viewport at 390 px
+for (const [label, size] of [["390 px", { width: 390, height: 844 }], ["1440 px", { width: 1440, height: 900 }]] as const) {
+  test(`Inbox (${label}): a request with no evidence says so in the drawer, its decision row is pinned on top; one with evidence does not say so`, async ({ page }) => {
+    await page.setViewportSize(size);
+    await page.goto("/ui/inbox");
+    // the governance remediation carries no workflow, quorum or context conflict
+    await page.locator("div").filter({ hasText: /^Governance remediation/ }).getByRole("button", { name: /^Review / }).last().click();
+    const item = page.getByTestId("inbox-item");
+    await expect(item.getByTestId("inbox-no-evidence")).toHaveText("No evidence attached to this request.");
+    // the decision row stays pinned in the footer (ADR-0180) and nothing covers Approve
+    const approve = item.getByTestId("inbox-decision").getByRole("button", { name: "Approve" });
+    await expect(approve).toBeVisible();
+    expect(await pinnedAfterScroll(item, approve)).toBe("pinned");
+    await item.getByRole("button", { name: "Close review" }).click();
 
-  shown = [dryRun];
+    shown = [dryRun];
+    await page.goto("/ui/inbox");
+    await page.getByRole("button", { name: /^Review / }).first().click();
+    await expect(page.getByTestId("inbox-item").getByText("deploy was a dry-run")).toBeVisible();
+    await expect(page.getByTestId("inbox-no-evidence")).toHaveCount(0);
+  });
+}
+
+// #460 delta review (Low): the drawer body was blank whenever an item carried an instanceId but nothing rendered
+const wfItem = (id: string, instanceId: string, objectLabel: string, objectType = "workflow") => ({ ...dryRun, id, instanceId, objectLabel, objectType });
+
+test("Inbox: a workflow item whose instance has nothing to show says it has no evidence", async ({ page }) => {
+  // the default instance mock has no artifacts, PR, branch, checks or deploys
+  shown = [wfItem("E1", "W9", "Merge the empty change")];
   await page.goto("/ui/inbox");
-  await page.getByRole("button", { name: /^Review / }).first().click();
-  await expect(page.getByTestId("inbox-item").getByText("deploy was a dry-run")).toBeVisible();
-  await expect(page.getByTestId("inbox-no-evidence")).toHaveCount(0);
+  await page.getByRole("button", { name: "Review Merge the empty change" }).click();
+  await expect(page.getByTestId("inbox-item").getByTestId("inbox-no-evidence")).toHaveText("No evidence attached to this request.");
+});
+
+test("Inbox: an item with an instanceId the Inbox never fetches says it has no evidence", async ({ page }) => {
+  shown = [wfItem("E2", "W3", "Budget overage on a workflow project", "project")];
+  await page.goto("/ui/inbox");
+  await page.getByRole("button", { name: "Review Budget overage on a workflow project" }).click();
+  await expect(page.getByTestId("inbox-item").getByTestId("inbox-no-evidence")).toHaveText("No evidence attached to this request.");
+});
+
+test("Inbox: a failed instance read says the evidence could not be loaded, never that there is none", async ({ page }) => {
+  shown = [wfItem("E3", "W8", "Merge with unreadable evidence")];
+  await page.route("**/v1/workflows/instances/W8", (route) => route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "internal" }) }));
+  await page.goto("/ui/inbox");
+  await page.getByRole("button", { name: "Review Merge with unreadable evidence" }).click();
+  const item = page.getByTestId("inbox-item");
+  await expect(item.getByTestId("inbox-evidence-failed")).toHaveText("Evidence could not be loaded.");
+  await expect(item.getByTestId("inbox-no-evidence")).toHaveCount(0);
 });
 
 test("Alerts: the list is a contained card with a count, and the acknowledgement stays in view beside long remediation", async ({ page }) => {
@@ -297,6 +334,26 @@ test("L1: after an acknowledgement removes the alert, focus moves to the alert i
   await page.getByTestId("alert-detail").getByRole("button", { name: "Acknowledge" }).click();
   await expect(page.getByTestId("alert-detail")).toHaveCount(0);
   await expect(page.getByRole("heading", { level: 1, name: "Governance alerts" })).toBeFocused();
+  expect(await focusIsOnBody(page)).toBe(false);
+});
+
+test("X6b M2: fold Alerts with the drawer open, then acknowledge: focus moves to the fold button, never to <body>", async ({ page }) => {
+  alertsShown = [alert, { ...alert, id: "al2", title: "Support assistant inherits a medium rating" }];
+  ackRemoves = true;
+  await page.goto("/ui/admin/governance/alerts");
+  await page.getByRole("button", { name: /Credit-limit assistant inherits/ }).click();
+  const fold = page.getByRole("button", { name: /^Alerts 2 alerts/ });
+  await fold.click();
+  await expect(fold).toHaveAttribute("aria-expanded", "false");
+  // L1: the choice is stored for this person and this route, not for anyone using the browser
+  expect(await page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith("regulait.contain:")))).toEqual([
+    `regulait.contain:${ME}:/ui/admin/governance/alerts:Alerts`,
+  ]);
+  await page.getByTestId("alert-detail").getByLabel("Acknowledgement note — required and audited").fill("Avery owns the response.");
+  await page.getByTestId("alert-detail").getByRole("button", { name: "Acknowledge" }).click();
+  await expect(page.getByTestId("alert-detail")).toHaveCount(0);
+  // the alert in its place sits in the folded (hidden) body, so it cannot take focus
+  await expect(page.getByRole("button", { name: /^Alerts 1 alert/ })).toBeFocused();
   expect(await focusIsOnBody(page)).toBe(false);
 });
 

@@ -18,6 +18,7 @@ import { DecisionReceiptsPanel } from "./DecisionReceiptsPanel";
 import { anchorsStatus, receiptsStatus, retentionStatus, type EvidenceStatus } from "./auditEvidenceStatus";
 import ev from "./auditLog.module.css";
 import { AnchorTimestampsPanel } from "./AnchorTimestampsPanel";
+import { AUDIT_OBJECT_LINK_TYPES } from "./auditObjectLinks";
 import { lazy, Suspense, useMemo, useState } from "react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
@@ -76,12 +77,14 @@ export default function AuditLogPage() {
   const rowParam = search.get("id");
   const onlyRow = rowParam !== null && UUID_RE.test(rowParam) ? rowParam.toLowerCase() : null;
   // owner decision on #453 (2026-10-20): `?objectType=…&objectId=…` shows one object's trail, e.g. a use case's,
-  // linked from its Audit tab. Both are needed; a malformed id is ignored rather than sent
+  // linked from its Audit tab. Both are needed; a malformed id or a type no console link opens is ignored rather than
+  // sent (the gateway refuses an unknown type with 400), and the page says so
   const objectParam = search.get("objectId");
   const objectTypeParam = search.get("objectType");
-  const onlyObject = objectParam !== null && UUID_RE.test(objectParam) && objectTypeParam && /^[a-z_]{1,64}$/.test(objectTypeParam)
+  const onlyObject = objectParam !== null && UUID_RE.test(objectParam) && objectTypeParam !== null && AUDIT_OBJECT_LINK_TYPES.has(objectTypeParam)
     ? { type: objectTypeParam, id: objectParam.toLowerCase() }
     : null;
+  const objectLinkIgnored = !onlyObject && (objectParam !== null || objectTypeParam !== null);
 
   const qs = useMemo(() => {
     const p = new URLSearchParams();
@@ -217,6 +220,14 @@ export default function AuditLogPage() {
               Showing one audit row, <code className={v.mono}>{onlyRow}</code>.{" "}
               <Button size="sm" variant="ghost" onClick={() => setSearch((p) => { const n = new URLSearchParams(p); n.delete("id"); return n; })}>
                 Show every row
+              </Button>
+            </p>
+          )}
+          {objectLinkIgnored && (
+            <p role="status" data-testid="audit-object-link-ignored">
+              This link&apos;s object filter was not applied: it needs a known object type and an object id. Showing every row.{" "}
+              <Button size="sm" variant="ghost" onClick={() => setSearch((p) => { const n = new URLSearchParams(p); n.delete("objectType"); n.delete("objectId"); return n; })}>
+                Clear the link
               </Button>
             </p>
           )}

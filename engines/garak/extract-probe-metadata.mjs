@@ -48,7 +48,8 @@ for (const [key, meta] of Object.entries(cache.probes)) {
 }
 probes.sort((a, b) => (a.probe < b.probe ? -1 : a.probe > b.probe ? 1 : 0));
 
-const version = process.env.GARAK_VERSION ?? "0.17.0";
+const version = process.env.GARAK_VERSION ?? "0.17.1";
+const wheelSha256 = process.env.GARAK_WHEEL_SHA256 ?? "cef78a79291e73e90e7f89522f363ec9344bfb1e0ede68362d7a2379ba5cfda8";
 if (mode === "--json") {
   process.stdout.write(JSON.stringify({ version, sha256, probes }, null, 2) + "\n");
 } else {
@@ -58,7 +59,7 @@ if (mode === "--json") {
   lines.push(" * pinned release's `garak/resources/plugin_cache.json` by engines/garak/extract-probe-metadata.mjs");
   lines.push(" * (read as data, nothing executed).");
   lines.push(" *");
-  lines.push(` * Package:  PyPI \`garak==${version}\` (wheel sha256 9a67e6298e4d7025358fecafa9d473c77ff70acdae103aa5251ad60fca3db145)`);
+  lines.push(` * Package:  PyPI \`garak==${version}\` (wheel sha256 ${wheelSha256})`);
   lines.push(" * Source:   garak/resources/plugin_cache.json");
   lines.push(` * sha256:   ${sha256}`);
   lines.push(" *");

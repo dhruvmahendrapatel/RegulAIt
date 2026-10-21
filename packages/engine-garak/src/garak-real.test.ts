@@ -1,5 +1,5 @@
 /**
- * ADR-0187 B5-G — the REAL pinned garak (0.17.0, the image's closure) against a fake gateway, through the
+ * ADR-0187 B5-G — the REAL pinned garak (0.17.1, the image's closure) against a fake gateway, through the
  * worker's own code path (`LocalGarakExecutor` → `runGarakProbe`) and the mapper. Opt-in: set
  * REGULAIT_GARAK_PYTHON to the python of a venv built from engines/garak/requirements.txt (and
  * requirements-sdist.txt). Skipped otherwise (CI has no such venv; the image build is its proof).
