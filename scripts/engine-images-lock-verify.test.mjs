@@ -6,7 +6,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { bundleFor, scratch } from "./engine-images-lock-fixtures.mjs";
 import { COSIGN_SHA256, cosignVerifyArgs, expectedIdentity, inspectBundle, OIDC_ISSUER, REPO_SLUG, repositorySlug, resolveCosign, SIGN_PREDICATE, verifyEntrySignature, VerifyError } from "./engine-images-lock-verify.mjs";
 
@@ -120,11 +120,13 @@ describe("ADR-0197 Q2: verifying an engine image signature", () => {
       const sha = createHash("sha256").update("not cosign").digest("hex");
       expect(resolveCosign({ bin, pins: { "linux-amd64": sha }, plat: "linux-amd64" })).toBe(bin);
       expect(() => resolveCosign({ bin, plat: "linux-amd64" })).toThrow(/is not cosign v3\.1\.3/);
-      // found on PATH by name, and refused when absent
+      // found on PATH by name, and refused when absent; an empty COSIGN stands in for "unset", whatever the shell has
+      vi.stubEnv("COSIGN", "");
       expect(resolveCosign({ bin: undefined, pathEnv: s.dir, pins: { "linux-amd64": sha }, plat: "linux-amd64" })).toBe(bin);
       expect(() => resolveCosign({ bin: undefined, pathEnv: path.join(s.dir, "none"), plat: "linux-amd64" })).toThrow(/not installed/);
       expect(() => resolveCosign({ bin, plat: "plan9-mips" })).toThrow(/no pinned cosign checksum/);
     } finally {
+      vi.unstubAllEnvs();
       s.done();
     }
   });
