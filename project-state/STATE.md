@@ -1,10 +1,10 @@
 ---
-phase: demo-prep-458-460-465-drawer-audit-ui-garak-pins-refresh-and-garak-0171-in-flight
+phase: demo-prep-wide-tables-and-x6b-merged-reproducible-engine-images-final-refresh-in-flight
 last_updated: 2026-10-21
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-10-21-session-01.md
+last_session: sessions/2026-10-21-session-02.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,31 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-21 (21:00 UTC) - demo prep: wide tables, X6b folded sections, garak 0.17.1, the audit index (0210) and
+gated, reproducible engine image publishes are merged.** Full record:
+[sessions/2026-10-21-session-02.md](sessions/2026-10-21-session-02.md). This paragraph supersedes the "Last
+migration", "Open", "In-flight" and "Owner actions" lists of the 2026-10-21 (03:10) paragraph below; its owner
+decisions stand.
+- **Merged (UTC, 2026-10-21 04:07 to 19:52):** #472 (STATE), #469 (Discovery section), #465 (use-case audit filter),
+  #473 (lows sweep 2), #475 (demo refresh), #471 (garak 0.17.1), #476 (audit index and `objectType` 400, **0210**),
+  #479 and #483 (engine lock records), #474 (X6b), #478 (no vendor names in UI copy), #480 (push-only lock job), #481
+  (lows sweep 3), #482 (rehearsal record and teardown runbook), #485 (publish gate, reproducible builds) and #477
+  (wide tables).
+- **Last migration on main: 0210.**
+- **Open, HOLD:** #484 (routing library production build; sets entry JS 137.3 kB, fix round in progress) and #486
+  (final screenshot pack and deck; review pending). #487 (lock record for the first reproducible publish) is approved
+  and released, CI running.
+- **Owner actions:** the real-account round trips in
+  [docs/deployment/DEMO_REAL_ACCOUNTS.md](../docs/deployment/DEMO_REAL_ACCOUNTS.md), and deleting the stale
+  `engine-images-lock/*` branches listed in the session record.
+- **Owner decisions this window** (on #453 unless noted; detail in the session record): litellm 1.106.1 with its hub
+  client at 1.33, httpx2/httpcore2 kept at 2.16.0 (chat); wide tables fixed before the freeze, mockup approved; seed
+  model and vendor names kept (F30); the #478 copy exceptions and rewordings; lock PRs are push-only and the master
+  opens them; publish gate and reproducible builds now, #485's choices accepted; bundle ceilings at entry JS 137.3 kB
+  and all JS 1036 kB (a recorded exception), after the router production build.
+- **Process:** check the engine image run after every merge and open a held lock PR from its branch.
+- **Dates:** code freeze 2026-10-29, demo 2026-11-01.
 
 **2026-10-21 (03:10 UTC) - demo prep: the ADR-0197 lanes, the designer UI batches (drawer, Inbox, alerts, trust and
 audit screens) and the vite and garak advisory fixes are merged.** Full record:
@@ -5180,6 +5205,16 @@ runs on the hosted dev instance with real-account Shadow AI discovery (GitLab, a
 keyless federation; code freeze is 2026-10-29. All of its work-plan P0, P1 and P2 items were merged by 2026-10-19. The
 index now ends at 0197, with 192 files and 192 rows.
 
+Addendum (2026-10-21): ADR-0187 gained an addendum for the engine publish gate and reproducible engine image builds
+(#485), plus an As-built for garak 0.17.1 (#471). The owner's decision text is quoted unedited.
+
+Addendum (2026-10-21): ADR-0196 gained an addendum recording the owner's ceiling raise (entry JS 137.9 kB, all JS
+1036 kB) and the guard's one-row exception rule (#477). The later 137.3 kB entry value arrives with #484. The owner's
+text is unedited.
+
+As built (2026-10-21): ADR-0197 gained As-built notes for the fallback rehearsal record and the post-demo teardown
+runbook (#482), and for the audit object index and `objectType` validation (#476). The owner's text is unedited.
+
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
 (b) standing policy for future scaffolds recorded (ADR-0006, no implementation yet — nothing to
@@ -5194,6 +5229,21 @@ region-allowlist SCP; OQ-002 (budget cap) resolved to $5/month; OQ-003 (GitHub a
 to personal `dhruvmahendrapatel`.
 
 ## Known follow-ups (not urgent, not blocking)
+- **Demo-prep follow-ups (2026-10-21, evening)**, from the reviews of #474 and #477-#487. Taken from review reports;
+  not re-verified one by one. From the block below, the #458 and #460 lows and the garak 0.17.1 upgrade are done
+  (#473, #481, #471).
+  - #485 lows: the `force_publish` wording (it cannot carry a workflow change into the images); the auditor step
+    "commit is on main" needs a command (`merge-base --is-ancestor`). Also: the `inputCommit` check is untested,
+    `.gitattributes` is not an input, and the trigger paths are narrower than the gate's inputs.
+  - #480 low: the lock-bot body and header still say the PR is opened by the Actions token.
+  - #481 lows (copy guard): whole lines starting with a comment marker are skipped even inside templates; JSX text
+    starting with `//` is read as a comment.
+  - #474 N1 (`bodyRows` measurement) and N2 (route-pattern encoding).
+  - The lock file has no `inputCommit` annotation (#487 info).
+  - X16 literacy flake: hardened in #481, root cause not found.
+  - Narrow the `pnpm-lock.yaml` image input per engine (owner: after the demo).
+  - Stale `engine-images-lock/*` branches for the owner to delete.
+  - After the demo: T1 user-selectable themes; sandbox teardown per DEMO_TEARDOWN.md.
 - **Demo-prep follow-ups (2026-10-21)**, from the #458, #460 and #465 reviews and the owner's decisions. Taken from
   review reports; not re-verified one by one.
   - #458 lows: a tab count of 0 is hidden; the tab grouping is announced as a description.
