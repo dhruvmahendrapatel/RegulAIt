@@ -138,3 +138,27 @@ live database holds the governance seed but only real Shadow-AI findings. Built 
 - On a fresh live database `demo:prepare --live` therefore ends with one FAIL, "1 Real discovery sources", until the
   sources of DEMO_RUNBOOK §7.2 are added. CI (`demo.yml`, `demo-live`) pins that, and a 0-fail run with one real source
   enabled, on empty databases. On the dev instance host it is pending execution.
+
+## As built: the audit object index and `objectType` validation, owner decisions of 2026-10-21 (#453 rows 1 and 2)
+- **Index (migration 0210).** `audit_log_object_at_idx ON audit_log (object_type, object_id, at DESC)` serves
+  `GET /v1/audit?objectType=&objectId=`, the same filters on `GET /v1/audit.csv`, and the use-case overview's trail and
+  count. It is built with `CREATE INDEX CONCURRENTLY IF NOT EXISTS`, so audit writes are never blocked. The drizzle
+  migrator applies every pending file in one transaction, and CONCURRENTLY cannot run inside one, so the statement is
+  not in the migration file. It is an entry of `CONCURRENT_INDEXES` (`packages/db/src/migrate.ts`), and `runMigrations`
+  runs it after `migrate`, outside any transaction, once `0210_audit_log_object_at_idx` is in the folder's journal.
+  The 0210 file is that journalled marker and runs `SELECT 1`. A valid index costs one catalogue read on later runs; an
+  INVALID index left by an interrupted build is dropped concurrently and rebuilt; the run fails rather than return
+  without a valid index, and there is no fallback to a plain CREATE INDEX. `drizzle-kit migrate` applies the marker but
+  not the index, so migrations go through `runMigrations` (the gateway, the seed and the demo scripts already do).
+  Limits: the first build on a large trail takes as long as a concurrent build takes, during boot; two processes
+  migrating at the same moment can race as the migrator itself already can, and the loser fails its run and succeeds on
+  retry.
+- **`objectType` (public API contract change).** `GET /v1/audit` and `GET /v1/audit.csv` refuse an `objectType` that
+  `audit_log.object_type` cannot hold with 400 `unknown_object_type` and a `detail` that names the parameter, where they
+  answered 200 with no rows. The column is plain `text`; the allowed list is the Drizzle enum every audit insert is
+  typed against (`auditLog.objectType.enumValues`), not a second list. The refusal comes before the signed-bundle path,
+  so no export is recorded for it. Both routes are `public-stable`; this narrows a parameter (docs/api/VERSIONING.md
+  §3) by the owner's decision, inside `/v1`, and the published spec says so (`docs/api/openapi.json` is the changelog
+  source, §6). The console's audit page sends `objectType` only for the types a console link opens
+  (`auditObjectLinks.ts`, today `ai_use_case`), checked against the schema by a gateway test, and says when a link's
+  object filter was not applied.

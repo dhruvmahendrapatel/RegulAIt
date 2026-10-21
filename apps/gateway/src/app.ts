@@ -622,6 +622,22 @@ const auditFilterQuery = z.object({
 });
 type AuditFilterInput = z.infer<typeof auditFilterQuery>;
 
+/**
+ * Owner decision of 2026-10-21 (#453 row 2): the object types `audit_log.object_type` can hold. The column is plain
+ * `text`; its single source of truth is the Drizzle enum every audit insert is typed against, so a type the writers
+ * cannot write is refused rather than answered with an empty 200 (a public API contract change, ADR-0197 as built).
+ */
+const AUDIT_OBJECT_TYPES: ReadonlySet<string> = new Set(auditLog.objectType.enumValues);
+
+/** the 400 for an `objectType` no audit row can carry; it names the parameter, never the value list */
+function unknownAuditObjectType(q: AuditFilterInput): { error: string; detail: string } | null {
+  if (q.objectType === undefined || AUDIT_OBJECT_TYPES.has(q.objectType)) return null;
+  return {
+    error: "unknown_object_type",
+    detail: "objectType is not an object type the audit log records; omit it to read every object type",
+  };
+}
+
 /** the screen read adds paging on top of the shared filter set */
 const auditQuery = auditFilterQuery.extend({
   limit: z.coerce
@@ -681,7 +697,8 @@ function auditFilters(q: AuditFilterInput, from: Date | null, to: Date | null): 
         : eq(auditLog.deployMode, q.deployMode),
     );
   }
-  if (q.objectType) out.push(eq(auditLog.objectType, q.objectType as "mcp_tool"));
+  // validated against AUDIT_OBJECT_TYPES by both routes before this runs
+  if (q.objectType) out.push(eq(auditLog.objectType, q.objectType as (typeof auditLog.objectType.enumValues)[number]));
   if (q.objectId) out.push(eq(auditLog.objectId, q.objectId));
   if (q.effect) out.push(eq(auditLog.effect, q.effect));
   if (from) out.push(gte(auditLog.at, from));
@@ -5630,6 +5647,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // nothing get EXACTLY the old behaviour: the newest 100 rows under `entries`.
   app.get("/v1/audit", async (req, reply) => {
     const q = auditQuery.parse(req.query);
+    const unknownType = unknownAuditObjectType(q);
+    if (unknownType) return reply.status(400).send(unknownType);
     const cursor = q.cursor ? decodeCursor(q.cursor) : null;
     if (q.cursor && !cursor) return reply.status(400).send({ error: "invalid_cursor" });
 
@@ -5692,6 +5711,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   app.get("/v1/audit.csv", async (req, reply) => {
     const q = auditCsvQuery.parse(req.query);
+    const unknownType = unknownAuditObjectType(q);
+    if (unknownType) return reply.status(400).send(unknownType);
     // ADR-0116. `signed=1` wraps THE SAME bytes in an offline-verifiable
     // bundle. It is a separate parse because auditFilterQuery is shared with
     // the JSON list route, which has no bundle form.
