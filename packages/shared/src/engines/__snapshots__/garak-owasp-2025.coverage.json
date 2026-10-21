@@ -1,5 +1,5 @@
 {
-  "garakVersion": "0.17.0",
+  "garakVersion": "0.17.1",
   "risks": [
     {
       "id": "owasp:llm:01",

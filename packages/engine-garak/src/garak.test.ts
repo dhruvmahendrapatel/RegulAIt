@@ -59,8 +59,8 @@ function report(o: ReportShape = {}): Buffer {
   const scores = o.scores ?? [0, 0, 0];
   const run = "11111111-2222-4333-8444-555555555555";
   const lines: unknown[] = [
-    { entry_type: "start_run setup", "_config.version": "0.17.0", "plugins.target_name": "model-x" },
-    { entry_type: "init", garak_version: o.version ?? "0.17.0", start_time: "2026-10-10T00:00:00", run },
+    { entry_type: "start_run setup", "_config.version": "0.17.1", "plugins.target_name": "model-x" },
+    { entry_type: "init", garak_version: o.version ?? "0.17.1", start_time: "2026-10-10T00:00:00", run },
   ];
   scores.forEach((_, i) => lines.push({ entry_type: "attempt", uuid: `a${i}`, seq: i, status: 1, probe_classname: probe, prompt: { turns: [] }, outputs: [{ text: "model text" }], detector_results: {} }));
   scores.forEach((s, i) => lines.push({ entry_type: "attempt", uuid: `a${i}`, seq: i, status: 2, probe_classname: probe, prompt: { turns: [] }, outputs: [{ text: "model text" }], detector_results: { [detector]: [s] } }));
@@ -137,7 +137,7 @@ describe("B5-G mapper: garak's exit code decides nothing; the report does", () =
       ["attempt for another probe", report({ extra: [JSON.stringify({ entry_type: "attempt", status: 2, probe_classname: ENC, detector_results: { [ENC_DET]: [0] } })] })],
       ["attempt scored by an extra detector", report({ extra: [JSON.stringify({ entry_type: "attempt", status: 2, probe_classname: PI, detector_results: { [PI_DET]: [0], "always.Pass": [0] } })] })],
       ["score out of range", report({ scores: [0, 0, 7] })],
-      ["two init lines", report({ extra: [JSON.stringify({ entry_type: "init", garak_version: "0.17.0", run: "x" })] })],
+      ["two init lines", report({ extra: [JSON.stringify({ entry_type: "init", garak_version: "0.17.1", run: "x" })] })],
       ["prototype keys", report({ extra: ['{"entry_type":"attempt","status":2,"probe_classname":"promptinject.HijackHateHumans","detector_results":{"__proto__":[0]}}'] })],
     ];
     for (const [name, r] of cases) {
@@ -156,7 +156,7 @@ describe("B5-G mapper: garak's exit code decides nothing; the report does", () =
     const ev = (passed: number, fails = 0, nones = 0) =>
       L({ entry_type: "eval", probe: PI, detector: PI_DET, passed, fails, nones, total_evaluated: passed + fails, total_processed: passed + fails + nones });
     const rep = (...body: string[]) =>
-      Buffer.from([L({ entry_type: "init", garak_version: "0.17.0", run }), ...body, L({ entry_type: "completion", run })].join("\n"));
+      Buffer.from([L({ entry_type: "init", garak_version: "0.17.1", run }), ...body, L({ entry_type: "completion", run })].join("\n"));
     const read = (...body: string[]) => readGarakProbeReport(pi(), outcome(rep(...body)));
     // control: one generation, its one completed record, one output, one score
     expect(read(gen("a"), done("a", [0]), ev(1))).toMatchObject({ verdict: "pass", problem: null });
@@ -194,7 +194,7 @@ describe("B5-G mapper: garak's exit code decides nothing; the report does", () =
   it("garak completing without ever loading the probe is a run-time not-run (engine_error), never pass", () => {
     const r = Buffer.from(
       [
-        { entry_type: "init", garak_version: "0.17.0", run: "r1" },
+        { entry_type: "init", garak_version: "0.17.1", run: "r1" },
         { entry_type: "completion", run: "r1" },
       ]
         .map((l) => JSON.stringify(l))
@@ -229,7 +229,7 @@ describe("B5-G plan: unknown and licence-excluded probes never reach garak", () 
     const norm = (sets: string[]) => {
       const plan = planGarakRun(sets);
       const body = mapGarakRun(plan, plan.probes.map((p) => ({ probe: p.probe, ...outcome(report({ probe: p.probe, detector: p.detector, scores: [0, 0] })) })));
-      const envelope = engineResultEnvelopeSchema.parse({ version: ENGINE_RESULT_VERSION, runId: randomUUID(), engineId: "garak", engineVersion: "0.17.0", ...body });
+      const envelope = engineResultEnvelopeSchema.parse({ version: ENGINE_RESULT_VERSION, runId: randomUUID(), engineId: "garak", engineVersion: "0.17.1", ...body });
       return normaliseEngineResult({
         envelope,
         status: envelope.status,
@@ -478,7 +478,7 @@ describe("B5-G adapter", () => {
   const lease = (sets: string[], target: EngineLease["target"] | null = { baseUrl: "http://gateway:3000/v1", model: "model-x", apiKey: "rglv_k", headers: { "x-regulait-agent-id": "a1", "x-regulait-project-id": "p1" } }): EngineLease => ({
     runId: randomUUID(),
     engineId: "garak",
-    engineVersion: "0.17.0",
+    engineVersion: "0.17.1",
     spec: { config: { sets, params: {} }, trials: 2 },
     target,
     judge: null,
@@ -535,30 +535,30 @@ describe("B5-G worker self-test", () => {
   const okEnv = { ...GARAK_USAGE_DATA_ENV };
 
   it("a fresh, isolated worker report sets every switch; the runner reports them", async () => {
-    await writeWorkerSelfTest(root, { garakVersion: "0.17.0", env: okEnv, egress, credentialPaths: [path.join(root, "nope")] });
+    await writeWorkerSelfTest(root, { garakVersion: "0.17.1", env: okEnv, egress, credentialPaths: [path.join(root, "nope")] });
     expect(await judgeWorkerSelfTest(root)).toMatchObject({ passed: true, failures: [] });
-    const st = await garakRunnerSelfTest({ imageDigest: `sha256:${"a".repeat(64)}`, engineVersion: "0.17.0", resultsRoot: root, egress });
+    const st = await garakRunnerSelfTest({ imageDigest: `sha256:${"a".repeat(64)}`, engineVersion: "0.17.1", resultsRoot: root, egress });
     for (const k of Object.keys(ENGINE_MANIFEST.garak.usageDataEnv)) expect(st.usageDataEnv[k], k).toBe(true);
   });
 
   it("fails closed: missing, stale, a switch unset, a runner credential visible, egress reachable", async () => {
     expect(await judgeWorkerSelfTest(root)).toMatchObject({ passed: false, failures: ["worker_report_missing"] });
-    await writeWorkerSelfTest(root, { garakVersion: "0.17.0", env: okEnv, egress, credentialPaths: [], now: new Date(Date.now() - 3 * 3600 * 1000) });
+    await writeWorkerSelfTest(root, { garakVersion: "0.17.1", env: okEnv, egress, credentialPaths: [], now: new Date(Date.now() - 3 * 3600 * 1000) });
     expect((await judgeWorkerSelfTest(root)).failures).toContain("worker_report_stale");
-    await writeWorkerSelfTest(root, { garakVersion: "0.17.0", env: { ...okEnv, HF_HUB_OFFLINE: "0" }, egress, credentialPaths: [] });
+    await writeWorkerSelfTest(root, { garakVersion: "0.17.1", env: { ...okEnv, HF_HUB_OFFLINE: "0" }, egress, credentialPaths: [] });
     const j = await judgeWorkerSelfTest(root);
     expect(j.failures).toContain("worker_switch_missing:HF_HUB_OFFLINE");
     expect(j.usageDataEnv["HF_HUB_OFFLINE"]).toBe(false);
-    await writeWorkerSelfTest(root, { garakVersion: "0.17.0", env: { ...okEnv, REGULAIT_ENGINE_ENROLLMENT_TOKEN: "rgee_synthetic" }, egress, credentialPaths: [] });
+    await writeWorkerSelfTest(root, { garakVersion: "0.17.1", env: { ...okEnv, REGULAIT_ENGINE_ENROLLMENT_TOKEN: "rgee_synthetic" }, egress, credentialPaths: [] });
     expect((await judgeWorkerSelfTest(root)).failures).toContain("worker_sees_runner_credential");
     const tokenFile = path.join(root, "runner-key");
     await writeFile(tokenFile, "rgek_synthetic");
-    await writeWorkerSelfTest(root, { garakVersion: "0.17.0", env: okEnv, egress, credentialPaths: [tokenFile] });
+    await writeWorkerSelfTest(root, { garakVersion: "0.17.1", env: okEnv, egress, credentialPaths: [tokenFile] });
     expect((await judgeWorkerSelfTest(root)).failures).toContain("worker_sees_runner_credential");
-    await writeWorkerSelfTest(root, { garakVersion: "0.17.0", env: okEnv, egress: { ...egress, connect: async () => "connected" as const }, credentialPaths: [] });
+    await writeWorkerSelfTest(root, { garakVersion: "0.17.1", env: okEnv, egress: { ...egress, connect: async () => "connected" as const }, credentialPaths: [] });
     expect((await judgeWorkerSelfTest(root)).failures).toEqual(expect.arrayContaining(["worker_connected", "worker_address_connected"]));
     // the runner then reports the worker switch false, so the gateway's self-test fails
-    const st = await garakRunnerSelfTest({ imageDigest: `sha256:${"a".repeat(64)}`, engineVersion: "0.17.0", resultsRoot: root, egress });
+    const st = await garakRunnerSelfTest({ imageDigest: `sha256:${"a".repeat(64)}`, engineVersion: "0.17.1", resultsRoot: root, egress });
     expect(st.usageDataEnv[GARAK_WORKER_SELF_TEST_SWITCH]).toBe(false);
   });
 });

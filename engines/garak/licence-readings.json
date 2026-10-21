@@ -56,14 +56,6 @@
     "read": "a three-clause BSD text; METADATA has only the ambiguous BSD classifier"
   },
   {
-    "subject": "fsspec",
-    "version": "2025.3.0",
-    "file": "licenses/LICENSE",
-    "sha256": "2dc35496ce53a7307915c008a844aad53e772b49b34cdd00445067691407ec94",
-    "licence": "BSD-3-Clause",
-    "read": "the BSD 3-Clause License text; METADATA says \"BSD 3-Clause License\""
-  },
-  {
     "subject": "jinja2",
     "version": "3.1.6",
     "file": "licenses/LICENSE.txt",
@@ -72,16 +64,8 @@
     "read": "a three-clause BSD text; METADATA has only the ambiguous BSD classifier"
   },
   {
-    "subject": "jsonpatch",
-    "version": "1.34",
-    "file": "licenses/LICENSE",
-    "sha256": "4393eb6733fa1e367f41769b382f4f1be7bf0daeb1e243ed92b3f5d8bafd236f",
-    "licence": "BSD-3-Clause",
-    "read": "a three-clause BSD text; METADATA says \"Modified BSD License\""
-  },
-  {
     "subject": "jsonpointer",
-    "version": "3.2.0",
+    "version": "3.4",
     "file": "licenses/LICENSE.txt",
     "sha256": "d8b24f15d472885f788a2d6e985850f264627b86012a17bb242c83f310d907e5",
     "licence": "BSD-3-Clause",
@@ -102,14 +86,6 @@
     "sha256": "c26cae81da4508e5e249985777a33821f183223ebb74d7f8cfbf90fe7eef2fb7",
     "licence": "BSD-3-Clause",
     "read": "a three-clause BSD text; METADATA says \"BSD\""
-  },
-  {
-    "subject": "multidict",
-    "version": "6.9.1",
-    "file": "licenses/LICENSE",
-    "sha256": "2e4be5fc6c4c72a466fcb665d726e049a6891981fe536c4f04b6366749461d23",
-    "licence": "Apache-2.0",
-    "read": "the Apache License 2.0 text; METADATA says \"Apache License 2.0\""
   },
   {
     "subject": "orjson",

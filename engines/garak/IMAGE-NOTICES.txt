@@ -7,7 +7,7 @@ carries the attribution, permission and use-restriction notices for the DATA the
 engine is admitted to use, as the owner required on 2026-10-10 (ADR-0187 open questions 20 and 22).
 
 
-1. Data bundled in garak 0.17.0 (PyPI wheel, Apache-2.0), shipped unmodified
+1. Data bundled in garak 0.17.1 (PyPI wheel, Apache-2.0), shipped unmodified
 ---------------------------------------------------------------------------
 
 1a. garak/data/badchars/intentional.txt — Unicode Security Mechanisms (UTS #39) data, version 17.0.0,
@@ -89,7 +89,7 @@ pinned by sha256 (engines/garak/hf-preseed.json). They are shipped unmodified.
       (garak credits its source as danielrosehill/System-Prompt-Library-030825)
 
 The Apache License 2.0 text is at https://www.apache.org/licenses/LICENSE-2.0 and in garak's own
-dist-info (garak-0.17.0.dist-info/licenses/LICENSE). The MIT licence: Permission is hereby granted, free
+dist-info (garak-0.17.1.dist-info/licenses/LICENSE). The MIT licence: Permission is hereby granted, free
 of charge, to any person obtaining a copy of this software and associated documentation files, to deal
 in the Software without restriction, subject to the condition that the copyright notice and this
 permission notice be included in all copies or substantial portions of the Software; THE SOFTWARE IS

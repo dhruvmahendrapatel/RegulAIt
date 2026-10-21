@@ -239,7 +239,6 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
       "image digest and signature (the image is not built yet)",
       "maintainer count (the repository's merge rights could not be read)",
       "transitive licences: the 20 outside the ADR-0176 list (PSF-2.0, MPL-2.0 while unmodified, ZPL-2.1, MIT-0, CNRI-Python, MIT-CMU, pillow's bundled image libraries, torch's BSL-1.0 and LLVM-exception terms) were accepted by the owner on 2026-10-10 (ADR-0187 decision 193); the native libraries inside the CPU torch wheel and the base image OS layer are not yet scanned (CI's image scan)",
-      "one fixable HIGH advisory is allow-listed until 2026-12-09: fsspec CVE-2026-104851, held at 2025.3.0 by garak 0.17.0's datasets<4.0 pin; reached only on the image's own read-only, hash-pinned Hub cache (ADR-0187 decisions 160 and 201)",
       "runtime behaviour inside the built image (the worker's egress test, an air-gapped run)",
       "the pre-seeded Hugging Face assets (ADR-0187 decisions 198-200) are proven to load offline by the image build; the image itself has not been built yet",
       "the judge path (agent_breaker's attacker, parser and judge re-pointed at the run's judge through the gateway) was measured with the pinned garak outside the image only (ADR-0187 decision 204)",
