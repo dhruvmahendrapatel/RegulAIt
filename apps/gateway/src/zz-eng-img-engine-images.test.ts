@@ -52,7 +52,9 @@ describe("ENG-IMG: the engine image workflows", () => {
 
   it("publish: only main publishes, whatever the trigger (a manual dispatch can start on any branch)", () => {
     const jobPublish = publish.slice(publish.indexOf("\n  publish:"), publish.indexOf("\n  record:"));
-    expect(jobPublish).toMatch(/\n {4}if: github\.ref == 'refs\/heads\/main'\n/);
+    // the publish gate (ADR-0187 addendum 2026-10-21) is ANDed onto the main-only guard, never in its place
+    expect(jobPublish).toMatch(/\n {4}if: github\.ref == 'refs\/heads\/main' && needs\.gate\.outputs\.any == 'true'\n/);
+    expect(jobPublish).toMatch(/\n {4}needs: gate\n/);
     // the record and lock-pr jobs run only after publish, so they are skipped with it
     const jobRecord = publish.slice(publish.indexOf("\n  record:"), publish.indexOf("\n  lock-pr:"));
     expect(jobRecord).toMatch(/\n {4}needs: publish\n/);
@@ -96,7 +98,18 @@ describe("ENG-IMG: the engine image workflows", () => {
     expect(build).toMatch(/\non:\n {2}pull_request:\n/);
     expect(build).toMatch(/\npermissions:\n {2}contents: read\n/);
     expect(build).not.toMatch(/packages:|docker login|secrets\.|--push| push /);
-    expect(build).toMatch(/scripts\/build-engine-image\.sh "\$\{\{ matrix\.engine \}\}" build/);
+    // two reproducible builds per engine, compared (ADR-0187 addendum 2026-10-21)
+    expect(build).toMatch(/scripts\/build-engine-image\.sh "\$\{\{ matrix\.engine \}\}" repro /);
+    expect(build).toContain("node scripts/engine-images-repro.mjs");
+  });
+
+  it("publish gate: a read-only first job decides which engines publish; force_publish is a dispatch input only", () => {
+    const jobGate = publish.slice(publish.indexOf("\n  gate:"), publish.indexOf("\n  publish:"));
+    expect(jobGate).toMatch(/\n {4}permissions:\n {6}contents: read\n {4}outputs:/);
+    expect(jobGate).toContain("node scripts/engine-images-gate.mjs --plan");
+    expect(jobGate).toContain("FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force_publish == true }}");
+    expect(publish).toMatch(/\n {2}workflow_dispatch:\n {4}inputs:\n {6}force_publish:\n/);
+    expect(publish.slice(publish.indexOf("\n  publish:"))).toContain("engine: ${{ fromJSON(needs.gate.outputs.engines) }}");
   });
 
   it("the build script pushes only to ghcr.io/<owner>/regulait-engine-<engine>, with no attestations, and records both digests", () => {
