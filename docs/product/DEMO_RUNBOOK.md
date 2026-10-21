@@ -523,7 +523,7 @@ owner's notes and the infrastructure lane's state.
 | T-1h | Themes: the same theme in every profile (user menu, **Switch to dark theme** / **Switch to light theme**), chosen for the room's projector | pending execution |
 | T-1h | Ada's and Morgan's authenticators on the presenting phone; the phone charged and silenced | pending execution |
 | T-1h | The live instance answers over HTTPS from the venue network (open `/ui` in each profile) | pending execution |
-| After | Teardown of the sandbox resources and the Azure deployment, tracked as a follow-up (ADR-0197 consequences) | pending execution |
+| After | Teardown of the sandbox resources and the Azure deployment, tracked as a follow-up (ADR-0197 consequences): [DEMO_TEARDOWN.md](../deployment/DEMO_TEARDOWN.md) | pending execution — post-demo, owner |
 
 ### 7.4 If something breaks on the day
 
@@ -537,3 +537,53 @@ owner's notes and the infrastructure lane's state.
 | The remediation panel says **no workflow assigned** | an admin rule replaced the default assignment | link a workflow started another way, or switch to the fallback stack |
 | An alert, Inbox item or plan opens over a dimmed page that cannot be clicked | the window is 900 px wide or less, so the detail drawer is a modal | **Close** the panel, widen the window (or zoom out) and open it again |
 | The live instance does not load | network or instance failure | play the recording for S1-S2, then the fallback stack on the laptop or the screenshot deck |
+
+### 7.5 Fallback rehearsal record (ADR-0197 decision 7)
+
+The seeded fallback path, rehearsed in CI on 2026-10-21. **What was executed:** one manual dispatch of the `Demo
+journey` workflow (`.github/workflows/demo.yml`), run [`39622055370`](https://github.com/dhruvmahendrapatel/RegulAIt/actions/runs/39622055370),
+on branch `adr0197-rehearsal-teardown` at `4800bec88cd8917319581c0ca25fce397bfa31ed`. That head is main at
+`2722e439fb81e31d553b04b0a4284e11c99fc51d` plus one change to `demo.yml` (the `demo-rehearsal` job below); no product
+code differs from main. Every database is an empty CI Postgres; nothing ran on the dev instance host, the presenting
+laptop or any real cloud account.
+
+Why a dispatch: `demo.yml` has no `push` trigger, and the API lists **no run of it on `main`** (none on a `main` ref, by
+`push` or `workflow_dispatch`). Its pull-request runs test a PR's merge ref, not main's commit; the latest before this
+record, run `39613721998` for #478 (head `b586d88`, all jobs green), was not on main's tree.
+
+| Step | Where | Job (id) | Result |
+|---|---|---|---|
+| `demo:prepare` on an empty database | `demo-rehearsal`, step "demo:prepare, first run" | `119297961420` | pass: every phase ran, `demo:check` 26 PASS, 1 WARN, 0 FAIL |
+| `demo:gate` on the fresh database | `demo-rehearsal`, "demo:gate after the first run" | `119297961420` | pass: `DENY "Real-Time Fraud Detection Engine" (approved, EU AI Act tier high) → production`, exactly two `BLOCK open_high_alert` lines (the inherited HIGH rating from *Acme Internal AI Platform*; the call served by fast-mock outside the approved stack), `assurance: enforced (mode enforce)`, exit 1 |
+| `demo:prepare` again on the **same** database (re-run safety) | `demo-rehearsal`, "demo:prepare, second run" | `119297961420` | pass: exit 0, `demo:check` 26 PASS, 1 WARN, 0 FAIL |
+| `demo:check` on its own after the re-run | `demo-rehearsal`, "demo:check after the second run" | `119297961420` | pass: 26 PASS, 1 WARN (`3 Monitor`, 17 active alerts), 0 FAIL |
+| `demo:gate` after the re-run | `demo-rehearsal`, "demo:gate after the second run" | `119297961420` | pass: the same DENY and the same two BLOCK lines, exit 1 |
+| `demo:gate` **ALLOW** after the two alerts are acknowledged | not in CI | none | **pending execution** (owner rehearsal step 1 below) |
+| The real journey (`demo:prepare` → gateway → the seeded-database browser journey and the 2026-11-01 screen pack) | `demo-journey` | `119297961429` | pass |
+| `demo:prepare --live` / `demo:check --live` on empty databases | `demo-live` | `119297961561` | pass |
+
+The gate output of both gate steps is the run's `demo-rehearsal-gate` artifact (kept 7 days). The WARN is the same in
+every check (`3 Monitor` lists active alerts); it is not a failure.
+
+What the re-run changes. The second `demo:prepare` is accepted (exit 0, 0 FAIL), but it is not a no-op: it adds
+traffic and the records derived from it. Between the first and the second check: sightings 617 → 807, active monitor
+alerts 16 → 17, trace evaluations 70 → 78 (flagged 1 → 2), trust-dashboard compliance 79% → 83%. The service container's
+log shows `duplicate key` errors on the seed's grant, role, team and project-member inserts during the re-run; the
+steps still exit 0. So for the demo, prepare the fallback database **once, from empty**, as §7.1 says; a re-run is
+safe as a repair, but its numbers differ from the screenshot pack's.
+
+The `demo-rehearsal` job runs only on a manual dispatch, so pull requests are unaffected. Re-run it after any change to
+the seed, the dataset or the gate: Actions → `Demo journey` → Run workflow.
+
+**Owner rehearsal steps not covered by CI** (pending execution):
+
+1. **G3 ALLOW.** On the prepared fallback database, as Ada, acknowledge both open high alerts on *Real-Time Fraud
+   Detection Engine* (the inherited rating and the served-outside-stack call), then run
+   `pnpm -s --filter @regulait/gateway demo:gate -- "Real-Time Fraud Detection Engine" production <ref>` and expect
+   `ALLOW` with `WARN acknowledged_high_alert` lines (DEMO_SCRIPT_2026-11-01 G3). CI covers the decision rule only in a
+   gateway unit test (`apps/gateway/src/zz-adr0161-deploy-gate.test.ts`, "an open high alert on the use case blocks;
+   acknowledging it leaves a warning"), not on the demo database. Pending execution.
+2. **The laptop stack.** All of the above on the docker compose stack on the presenting laptop (§1.3), the night
+   before, with `REGULAIT_PUBLIC_URL` and the identity signing key set (§7.1). CI used a Postgres service and node
+   directly, not compose. Pending execution.
+3. **`demo:gate` on the dev instance host** (G3 live, and the T-24h `real-gate.txt` capture, §7.3). Pending execution.
