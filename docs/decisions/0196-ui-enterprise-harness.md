@@ -405,3 +405,43 @@ that the `--guard` rule above requires.
   development build today, about 32.8 kB gzip). Once that PR merges, both ceilings are lowered back **below** the
   pre-raise values (entry JS under 137.5 kB, all JS under 1,035 kB), so the ratchet ends up stricter than before
   this exception.
+
+## Addendum — the routing library's production build; entry JS ceiling lowered (2026-10-21)
+
+The owner decided on 2026-10-21 (issue #453, comment 6320179102) that a separate held PR switches the routing
+library to its production build, and that once it merges the ceilings are lowered below their values that day, so
+the "only shrink" rule ends up stricter than before. This addendum records that PR. The decision text above is
+unchanged.
+
+- **Root cause.** `react-router` 7.18.4 names only `dist/development` in its package exports, under every condition
+  (`node`, `module`, `import`, `default`, and `react-server`), so `vite build` bundled the development build. The
+  production build ships beside it in `dist/production`. The two differ by one line, `ENABLE_DEV_WARNINGS = true`
+  against `false`; with `false` the minifier drops the dev warnings (for example "No routes matched location"). React,
+  React DOM and the other libraries branch on `process.env.NODE_ENV`, which `vite build` already sets to
+  `production`; their bundles carried no development code.
+- **Fix (configuration only; no dependency, version, lockfile or patch change).** A build-only resolver in
+  `apps/web/vite.config.ts` (`routerProductionBuild`) resolves `react-router` and `react-router/dom` as before and
+  swaps `dist/development` for `dist/production`. It fails the build if the resolved path is not under
+  `dist/development`, so an upgrade that moves the files cannot silently ship the development build again. The dev
+  server, the unit tests and the mocked suite keep the development build and its warnings. No open-source plugin
+  does this one swap; Vite's own resolver hook is used.
+- **Guard.** `scripts/preflight-ui-prod-bundle.mjs` scans `apps/web/dist/assets/*.js` for text only a development
+  build leaves behind (the routing library's "No routes matched location"; React's "Download the React DevTools"
+  and the list-key warning), and runs in the static job after size-limit. Its test pins each marker against the
+  installed libraries' own two builds, and fails when the routing library starts naming a production build in its
+  exports (the swap can then go).
+- **Size.** The development build was not 32.8 kB of extra code: that figure is the whole routing library in the
+  entry. The dev warnings were about 0.6 kB gzip. Measured locally, main at 44c55fd and then this change: entry JS
+  137,448 → 136,848 B, all JS 1,034,202 → 1,033,635 B, entry CSS 10,587 B unchanged.
+- **Final ceilings, after #477 and this PR (owner decision 2026-10-21,
+  <https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6323236553>).** #477 merged first and raised
+  entry JS to 137.9 kB and all JS to 1036 kB. Measured on this branch with main (#477 included) merged in, gzip bytes,
+  size-limit 14.2.0: entry JS 137,031, entry CSS 10,594, all JS 1,035,090; the prod-bundle guard finds no development
+  build. The owner set:
+  - entry JS `137.9 kB` → **`137.3 kB`**, below the pre-raise 137.5 kB (269 B headroom). Its #477 exception row is
+    removed: the ceiling is now below the value it was raised from, so no raise needs excusing;
+  - `all JS` stays at `1036 kB`: the owner keeps #477's raise from `1035 kB` to `1036 kB` as a recorded exception
+    (about 0.9 kB headroom for freeze-week fixes). Its `CEILING_EXCEPTIONS` row stays and now cites this decision;
+  - entry CSS (10.6 kB) and the two lazy chunks are unchanged.
+  This decision supersedes item 2 of the earlier decision ("lowered back below today's values") for all JS only. The
+  values in "Size" above, measured before #477 merged, are kept as the record of what this change alone saved.

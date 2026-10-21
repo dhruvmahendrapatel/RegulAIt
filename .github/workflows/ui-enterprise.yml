@@ -7,7 +7,8 @@ name: UI enterprise harness
 #                baseline guard (no baseline file may grow against the base branch, and no bundle ceiling in
 #                apps/web/.size-limit.json may rise, go or change its files), and the JS/CSS bundle ceilings
 #                themselves (size-limit, pinned to `--config .size-limit.json`) on the production build; the guard
-#                also refuses any other place size-limit could read ceilings from (a package.json key, a second file).
+#                also refuses any other place size-limit could read ceilings from (a package.json key, a second file);
+#                and no library's development build in the bundle (scripts/preflight-ui-prod-bundle.mjs).
 #   browsers     apps/web/playwright.enterprise.config.ts, one job per browser. Chromium runs every check (axe on
 #                every screen in both themes, keyboard journeys, the five viewports, loading/error states, table
 #                density, LCP/INP); Firefox and WebKit run the keyboard journeys and the viewports. The browsers
@@ -76,6 +77,12 @@ jobs:
       - name: Bundle-size ceilings (size-limit)
         if: success() || failure()
         run: pnpm --filter @regulait/web exec size-limit --config .size-limit.json
+
+      # ADR-0196 addendum 2026-10-21: the build ships each library's production build, never a development one
+      # (apps/web/vite.config.ts swaps the routing library's; React follows NODE_ENV).
+      - name: No development build in the bundle
+        if: success() || failure()
+        run: node scripts/preflight-ui-prod-bundle.mjs
 
   browsers:
     name: ui enterprise / ${{ matrix.browser }}
