@@ -5,7 +5,9 @@
  *     INDEX CONCURRENTLY by `runMigrations` outside the migrator's transaction (`CONCURRENT_INDEXES`). Pinned here:
  *     a journal that stops before 0210 builds nothing; the head builds a VALID index with that exact definition; a
  *     second run issues no DDL; an INVALID index left by an interrupted build is rebuilt (the negative control shows
- *     `IF NOT EXISTS` alone would have kept it); and the planner uses the index for the `/v1/audit` and CSV reads the
+ *     `IF NOT EXISTS` alone would have kept it); a process that starts while another holds the build lock and is mid-build
+ *     waits, never drops the in-progress index, and returns with it valid (#476 M1); a build held up by an old snapshot
+ *     fails after `lock_timeout` naming the blocking session, and the next run rebuilds (#476 L1); and the planner uses the index for the `/v1/audit` and CSV reads the
  *     routes actually issue and for the use-case overview's trail.
  *  2. `GET /v1/audit` and `GET /v1/audit.csv` refuse an `objectType` the audit log cannot record with 400
  *     `unknown_object_type` (it used to be an empty 200), a known type still answers 200, and the two routes agree.
@@ -20,7 +22,21 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { and, auditLog, buildConcurrentIndexes, CONCURRENT_INDEXES, createDb, desc, eq, runMigrations, sql, type Db } from "@regulait/db";
+import {
+  and,
+  auditLog,
+  buildConcurrentIndexes,
+  CONCURRENT_INDEXES,
+  CONCURRENT_INDEX_LOCK_KEY,
+  CONCURRENT_INDEX_LOCK_NAMESPACE,
+  ConcurrentIndexBlockedError,
+  createDb,
+  desc,
+  eq,
+  runMigrations,
+  sql,
+  type Db,
+} from "@regulait/db";
 import { buildApp } from "./app.js";
 import { backdated } from "./testing/backdated-audit.js";
 import { dropScratchDatabase } from "./testing/scratch-db.js";
@@ -140,6 +156,93 @@ describe("migration 0210: the object index, built concurrently outside the migra
     expect(ix?.valid).toBe(true);
     expect(ix?.def).toMatch(/^CREATE INDEX audit_log_object_at_idx ON public\.audit_log USING btree \(object_type, object_id, at DESC\)$/);
   });
+
+  it("#476 M1: a second process waits for a build in progress under the lock, never drops it, and both end valid", async () => {
+    await scratch.execute(sql.raw(`DROP INDEX IF EXISTS "${INDEX}"`));
+    const side = createDb(urlFor(SCRATCH_DB), { max: 3 });
+    const pool = side.$client as unknown as PoolLike;
+    const holder = await pool.connect();
+    const blocker = await pool.connect();
+    let blockerOpen = false;
+    let holderLocked = false;
+    try {
+      // an older snapshot holds the holder's CONCURRENTLY build in its final wait, so the index stays in progress
+      await blocker.query("BEGIN ISOLATION LEVEL REPEATABLE READ");
+      blockerOpen = true;
+      await blocker.query("SELECT 1");
+      const got = await holder.query(`select pg_try_advisory_lock($1::int, hashtext($2)) as "ok"`, [CONCURRENT_INDEX_LOCK_NAMESPACE, CONCURRENT_INDEX_LOCK_KEY]);
+      expect((got.rows[0] as { ok: boolean }).ok).toBe(true);
+      holderLocked = true;
+      const holderBuild = holder.query(CONCURRENT_INDEXES.find((i) => i.name === INDEX)!.create);
+      let during: { oid: string; valid: boolean } | undefined;
+      for (let i = 0; i < 100 && !during; i++) {
+        during = (await scratch.execute<{ oid: string; valid: boolean }>(sql`
+          select c.oid::text as "oid", i.indisvalid as "valid" from pg_class c join pg_index i on i.indexrelid = c.oid
+           where c.relname = ${INDEX}`)).rows[0];
+        if (!during) await new Promise((r) => setTimeout(r, 50));
+      }
+      // the ambiguity M1 is about: a build in progress reads exactly like a failed one
+      expect(during?.valid).toBe(false);
+
+      let settled = false;
+      const second = buildConcurrentIndexes(scratch, migrationsFolder, { pollMs: 50 }).finally(() => {
+        settled = true;
+      });
+      await new Promise((r) => setTimeout(r, 1_000));
+      expect(settled).toBe(false);
+      const still = await scratch.execute<{ oid: string }>(sql`select oid::text as "oid" from pg_class where relname = ${INDEX}`);
+      expect(still.rows[0]?.oid).toBe(during!.oid);
+
+      await blocker.query("COMMIT");
+      blockerOpen = false;
+      await holderBuild;
+      await holder.query(`select pg_advisory_unlock($1::int, hashtext($2))`, [CONCURRENT_INDEX_LOCK_NAMESPACE, CONCURRENT_INDEX_LOCK_KEY]);
+      holderLocked = false;
+      // the second process saw it valid and issued no DDL: the same index, never dropped and rebuilt
+      expect(await second).toEqual([]);
+      const after = await scratch.execute<{ oid: string; valid: boolean }>(sql`
+        select c.oid::text as "oid", i.indisvalid as "valid" from pg_class c join pg_index i on i.indexrelid = c.oid where c.relname = ${INDEX}`);
+      expect(after.rows[0]).toEqual({ oid: during!.oid, valid: true });
+    } finally {
+      if (blockerOpen) await blocker.query("ROLLBACK");
+      if (holderLocked) await holder.query(`select pg_advisory_unlock_all()`);
+      blocker.release();
+      holder.release();
+      await pool.end();
+    }
+  }, 60_000);
+
+  it("#476 L1: a build held up by an old snapshot fails after lock_timeout naming the blocker, and the next run rebuilds", async () => {
+    await scratch.execute(sql.raw(`DROP INDEX IF EXISTS "${INDEX}"`));
+    const side = createDb(urlFor(SCRATCH_DB), { max: 1 });
+    const pool = side.$client as unknown as PoolLike;
+    const blocker = await pool.connect();
+    let open = false;
+    try {
+      await blocker.query("SET application_name = 'aoi210-blocker'");
+      await blocker.query("BEGIN ISOLATION LEVEL REPEATABLE READ");
+      open = true;
+      await blocker.query("SELECT 1");
+      const pid = ((await blocker.query("select pg_backend_pid() as pid")).rows[0] as { pid: number }).pid;
+      const err = await buildConcurrentIndexes(scratch, migrationsFolder, { lockTimeoutMs: 500 }).then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(ConcurrentIndexBlockedError);
+      expect((err as Error).message).toContain(`pid ${pid} `);
+      expect((err as Error).message).toContain("aoi210-blocker");
+      expect((err as Error).message).toContain("lock_timeout (500 ms)");
+      await blocker.query("ROLLBACK");
+      open = false;
+    } finally {
+      if (open) await blocker.query("ROLLBACK");
+      blocker.release();
+      await pool.end();
+    }
+    // the build lock was released: the next run proceeds and rebuilds the INVALID index the timed-out build left
+    expect(await buildConcurrentIndexes(scratch, migrationsFolder)).toEqual([INDEX]);
+    expect((await indexDef(scratch))?.valid).toBe(true);
+  }, 60_000);
 });
 
 /** EXPLAIN a statement with sequential scans priced as the last resort; the plan's JSON text */

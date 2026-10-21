@@ -150,9 +150,20 @@ live database holds the governance seed but only real Shadow-AI findings. Built 
   INVALID index left by an interrupted build is dropped concurrently and rebuilt; the run fails rather than return
   without a valid index, and there is no fallback to a plain CREATE INDEX. `drizzle-kit migrate` applies the marker but
   not the index, so migrations go through `runMigrations` (the gateway, the seed and the demo scripts already do).
-  Limits: the first build on a large trail takes as long as a concurrent build takes, during boot; two processes
-  migrating at the same moment can race as the migrator itself already can, and the loser fails its run and succeeds on
-  retry.
+  **One builder at a time (#476 M1).** A build in progress is registered INVALID from its first step, so it reads
+  exactly like a failed one. The state check, any DROP and the CREATE therefore run on one pinned connection in
+  autocommit, under a session-level advisory lock (`CONCURRENT_INDEX_LOCK_NAMESPACE` and
+  `CONCURRENT_INDEX_LOCK_KEY`), released in `finally`. A second process booting during a build waits for the lock, then reads VALID and
+  issues no DDL; it never drops an index another process is building. The lock is taken by polling
+  `pg_try_advisory_lock`, not a blocking `pg_advisory_lock`, because a waiter parked inside one statement holds a
+  snapshot that the holder's build would then wait for (reasoned from how CONCURRENTLY waits; not reproduced).
+  **Bounded waits (#476 L1).** CONCURRENTLY waits for every transaction in the database that holds an older snapshot,
+  not only writers to `audit_log`. The build session sets `statement_timeout = 0` (a large build is allowed to take
+  its time) and `lock_timeout = 60 s` (`CONCURRENT_INDEX_LOCK_TIMEOUT_MS`), which bounds each of those waits. Past it,
+  boot fails with `ConcurrentIndexBlockedError`, whose message names the oldest open transactions in the database
+  (pid, state, start time, application name; never query text). The INVALID index it leaves is rebuilt on the next
+  run. Waiting for another process's build lock is not bounded; that process's own waits are.
+  Limits: the first build on a large trail takes as long as a concurrent build takes, during boot.
 - **`objectType` (public API contract change).** `GET /v1/audit` and `GET /v1/audit.csv` refuse an `objectType` that
   `audit_log.object_type` cannot hold with 400 `unknown_object_type` and a `detail` that names the parameter, where they
   answered 200 with no rows. The column is plain `text`; the allowed list is the Drizzle enum every audit insert is

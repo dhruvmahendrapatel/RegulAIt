@@ -6,7 +6,16 @@ import { withProseScrub } from "./prose-scrub.js";
 
 export * from "./schema.js";
 export { schema };
-export { runMigrations, buildConcurrentIndexes, CONCURRENT_INDEXES } from "./migrate.js";
+export {
+  runMigrations,
+  buildConcurrentIndexes,
+  CONCURRENT_INDEXES,
+  CONCURRENT_INDEX_LOCK_KEY,
+  CONCURRENT_INDEX_LOCK_NAMESPACE,
+  CONCURRENT_INDEX_LOCK_POLL_MS,
+  CONCURRENT_INDEX_LOCK_TIMEOUT_MS,
+  ConcurrentIndexBlockedError,
+} from "./migrate.js";
 export { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, lt, lte, ne, notInArray, or, sql } from "drizzle-orm";
 // Types consumers need to build reusable predicates without taking a direct
 // dependency on drizzle-orm (PILLAR 1 rule-scoping SQL pre-filter, etc.).
