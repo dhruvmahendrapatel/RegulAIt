@@ -537,6 +537,26 @@ test("use-case Audit tab shows the true total and deep-links to that use case's 
   await expect(page).not.toHaveURL(/objectId=/);
 });
 
+test("the audit page never sends an object type no console link opens (owner decision 2026-10-21)", async ({ page }) => {
+  const asked: string[] = [];
+  await page.route("**/v1/audit?**", (route) => {
+    asked.push(new URL(route.request().url()).search);
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ entries: [], pageSize: 0, maxPageSize: 500, hasMore: false, nextCursor: null }) });
+  });
+  await page.route("**/v1/audit", (route) => {
+    asked.push("");
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ entries: [], pageSize: 0, maxPageSize: 500, hasMore: false, nextCursor: null }) });
+  });
+  await page.goto(`/ui/admin/audit?objectType=not_a_type&objectId=${ID}`);
+  await expect(page.getByTestId("audit-object-link-ignored")).toContainText("This link's object filter was not applied");
+  await expect(page.getByTestId("audit-only-object")).toHaveCount(0);
+  await expect.poll(() => asked.length).toBeGreaterThan(0);
+  expect(asked.some((q) => q.includes("objectType") || q.includes("objectId"))).toBe(false);
+  await page.getByTestId("audit-object-link-ignored").getByRole("button", { name: "Clear the link" }).click();
+  await expect(page.getByTestId("audit-object-link-ignored")).toHaveCount(0);
+  await expect(page).not.toHaveURL(/objectType=/);
+});
+
 test("use-case Audit tab under the cap shows the exact count and no partial notice (M1)", async ({ page }) => {
   await page.goto(`/ui/admin/governance/use-cases/${ID}`);
   const tab = page.getByRole("tab", { name: /^Audit/ });
