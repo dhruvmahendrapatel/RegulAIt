@@ -152,6 +152,22 @@ multi-replica BYOC topology have not been run. No command is given here for that
 be added once executed). For the single-gateway path, applying an update as above is all that is
 needed.
 
+### Indexes built concurrently at boot (migration 0210 onward)
+
+From migration 0210 (`audit_log_object_at_idx`), some `audit_log` indexes are built with `CREATE INDEX CONCURRENTLY`
+by the gateway at boot, after the migrator, so audit writes are not blocked. Two things differ from a plain build:
+
+- **Several replicas booting together:** one builds and the others wait for it, then start without building. A
+  replica that logs `another process is building the concurrent indexes; waiting for it` is doing this.
+- **Long-running transactions delay the build.** A concurrent build waits for every transaction in the database that
+  started before it, for example a long CSV export or a session left `idle in transaction`. Each such wait is limited
+  to 60 seconds. Past that, the gateway does not start, and the error names the oldest open transactions by process
+  id, state, start time and application name. End or wait out those sessions, then start the gateway again. The
+  half-built index left behind is dropped and rebuilt on that start.
+
+**Pending execution:** neither case has been run against a deployment, and no build time has been measured on a
+large trail. Both are covered by database tests in CI only.
+
 ### Rolling back
 
 ```sh

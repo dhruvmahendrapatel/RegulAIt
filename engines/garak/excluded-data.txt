@@ -1,4 +1,4 @@
-# ADR-0187 B5-G (decision 145) — garak 0.17.0 data files REMOVED from the image, relative to
+# ADR-0187 B5-G (decision 145) — garak 0.17.1 data files REMOVED from the image, relative to
 # site-packages/garak/data. Each is data whose licence or provenance G19 could not establish, that is
 # copyrighted or personal, that waits for an owner decision, or that no admitted probe reads (R10
 # §garak bundled data). prune-data.py removes every path listed and FAILS the build if one is missing

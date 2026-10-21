@@ -188,6 +188,13 @@ const BOM_B4_DOCS: Record<string, RouteDoc> = Object.fromEntries(
   }),
 );
 
+/** the audit read routes' 400 body: `validation` carries zod's `issues`, the others a `detail` */
+const auditRefusalSchema = z.object({
+  error: z.string(),
+  detail: z.string().optional(),
+  issues: z.array(z.unknown()).optional(),
+});
+
 /**
  * Bodies are bound to the ACTUAL shared schema the handler calls `.parse()`
  * with. Binding the wrong one is caught by review, not by the type system — but
@@ -298,8 +305,20 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
     body: putOverrideSchema,
   },
 
-  "GET /v1/audit": { summary: "The audit log — every governed decision, paged, filterable by user, object type, effect and time window." },
-  "GET /v1/audit.csv": { summary: "The audit log as a streamed CSV export, with an explicit disclosure when rows fall outside the exported window." },
+  "GET /v1/audit": {
+    summary:
+      "The audit log — every governed decision, paged, filterable by user, object type, one object (`objectId`), effect and time window. " +
+      "An `objectType` the audit log does not record is refused with 400 `unknown_object_type` (owner decision of 2026-10-21; it used to answer 200 with no rows).",
+    errors: { 400: ["validation", "invalid_cursor", "unknown_object_type"] },
+    errorBody: auditRefusalSchema,
+  },
+  "GET /v1/audit.csv": {
+    summary:
+      "The audit log as a streamed CSV export, with an explicit disclosure when rows fall outside the exported window. Takes the same filters as `GET /v1/audit`, including `objectId`. " +
+      "An unknown `objectType` is refused with 400 `unknown_object_type` before any of the file is written, signed or not (owner decision of 2026-10-21).",
+    errors: { 400: ["validation", "unknown_object_type"] },
+    errorBody: auditRefusalSchema,
+  },
 
   "POST /v1/agents/:agentId/invoke": { summary: "Dispatch an agent. Governed, metered and audited like every other gateway call.", body: invokeAgentSchema },
   "POST /v1/connectors/:connectorId/invoke": { summary: "Invoke a connector.", body: invokeConnectorSchema },

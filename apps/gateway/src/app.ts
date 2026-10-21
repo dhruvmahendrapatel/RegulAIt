@@ -612,6 +612,8 @@ const auditFilterQuery = z.object({
   userId: z.string().uuid().optional(),
   deployMode: z.enum(["hosted", "byoc", "air_gapped", "unknown"]).optional(),
   objectType: z.string().min(1).max(64).optional(),
+  /** owner decision on #453 (2026-10-20): one object's trail, e.g. a use case's (`objectType=ai_use_case&objectId=…`) */
+  objectId: z.string().uuid().optional(),
   effect: z.enum(["allow", "deny", "require_approval"]).optional(),
   from: z.coerce.date().optional(),
   to: z.coerce.date().optional(),
@@ -619,6 +621,22 @@ const auditFilterQuery = z.object({
   id: z.string().uuid().optional(),
 });
 type AuditFilterInput = z.infer<typeof auditFilterQuery>;
+
+/**
+ * Owner decision of 2026-10-21 (#453 row 2): the object types `audit_log.object_type` can hold. The column is plain
+ * `text`; its single source of truth is the Drizzle enum every audit insert is typed against, so a type the writers
+ * cannot write is refused rather than answered with an empty 200 (a public API contract change, ADR-0197 as built).
+ */
+const AUDIT_OBJECT_TYPES: ReadonlySet<string> = new Set(auditLog.objectType.enumValues);
+
+/** the 400 for an `objectType` no audit row can carry; it names the parameter, never the value list */
+function unknownAuditObjectType(q: AuditFilterInput): { error: string; detail: string } | null {
+  if (q.objectType === undefined || AUDIT_OBJECT_TYPES.has(q.objectType)) return null;
+  return {
+    error: "unknown_object_type",
+    detail: "objectType is not an object type the audit log records; omit it to read every object type",
+  };
+}
 
 /** the screen read adds paging on top of the shared filter set */
 const auditQuery = auditFilterQuery.extend({
@@ -679,7 +697,9 @@ function auditFilters(q: AuditFilterInput, from: Date | null, to: Date | null): 
         : eq(auditLog.deployMode, q.deployMode),
     );
   }
-  if (q.objectType) out.push(eq(auditLog.objectType, q.objectType as "mcp_tool"));
+  // validated against AUDIT_OBJECT_TYPES by both routes before this runs
+  if (q.objectType) out.push(eq(auditLog.objectType, q.objectType as (typeof auditLog.objectType.enumValues)[number]));
+  if (q.objectId) out.push(eq(auditLog.objectId, q.objectId));
   if (q.effect) out.push(eq(auditLog.effect, q.effect));
   if (from) out.push(gte(auditLog.at, from));
   if (to) out.push(lte(auditLog.at, to));
@@ -5622,11 +5642,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // with a userId filter (plus PR #79's deployMode) and nothing else — for a
   // compliance product that means no admin could ever see row 101. It now pages
   // with an opaque keyset cursor on the stable (at DESC, id DESC) sort, and
-  // filters on from/to/objectType/effect as well as userId and deployMode —
+  // filters on from/to/objectType/objectId/effect as well as userId and deployMode —
   // all through the SAME auditFilters() the CSV export uses. Callers that pass
   // nothing get EXACTLY the old behaviour: the newest 100 rows under `entries`.
   app.get("/v1/audit", async (req, reply) => {
     const q = auditQuery.parse(req.query);
+    const unknownType = unknownAuditObjectType(q);
+    if (unknownType) return reply.status(400).send(unknownType);
     const cursor = q.cursor ? decodeCursor(q.cursor) : null;
     if (q.cursor && !cursor) return reply.status(400).send({ error: "invalid_cursor" });
 
@@ -5689,6 +5711,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   app.get("/v1/audit.csv", async (req, reply) => {
     const q = auditCsvQuery.parse(req.query);
+    const unknownType = unknownAuditObjectType(q);
+    if (unknownType) return reply.status(400).send(unknownType);
     // ADR-0116. `signed=1` wraps THE SAME bytes in an offline-verifiable
     // bundle. It is a separate parse because auditFilterQuery is shared with
     // the JSON list route, which has no bundle form.
@@ -5721,7 +5745,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
     // filename names every filter that shaped the file, so two downloads taken
     // with different filters never collide in a downloads folder
-    const suffix = `${q.userId ? `-${q.userId.slice(0, 8)}` : ""}${q.deployMode ? `-${q.deployMode}` : ""}`;
+    const suffix = `${q.userId ? `-${q.userId.slice(0, 8)}` : ""}${q.objectId ? `-${q.objectId.slice(0, 8)}` : ""}${q.deployMode ? `-${q.deployMode}` : ""}`;
     type Row = typeof auditLog.$inferSelect & { atText: string };
     // A bundle is held in memory to be hashed and signed, so it takes its own
     // (lower, and DISCLOSED) ceiling rather than the streaming one. The

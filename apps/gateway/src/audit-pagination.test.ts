@@ -156,6 +156,26 @@ describe("ADR-0031: /v1/audit cursor pagination", () => {
     for (const e of agents.entries) expect(e.objectType).toBe("agent");
   });
 
+  it("filters to one object's trail with objectId, on the screen and the export alike", async () => {
+    // owner decision on #453 (2026-10-20): a use case's own trail, deep-linked from its Audit tab
+    const mine = "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b";
+    const other = "0a1b2c3d-4e5f-4a6b-8c7d-8e9f0a1b2c3d";
+    await backdated(db).insert(auditLog).values([
+      ...Array.from({ length: 3 }, (_, i) => ({ userId, objectType: "agent" as const, objectId: mine, effect: "allow" as const, ruleId: `object-fixture-${i}`, ruleChain: [], reason: `mine ${i}`, at: SHARED_AT })),
+      { userId, objectType: "agent" as const, objectId: other, effect: "allow" as const, ruleId: "object-fixture-other", ruleChain: [], reason: "other", at: SHARED_AT },
+    ]);
+    const one = await get(`/v1/audit?objectType=agent&objectId=${mine}&limit=1000`);
+    expect(one.entries).toHaveLength(3);
+    for (const e of one.entries) expect(e.objectId).toBe(mine);
+    const csv = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit.csv?objectType=agent&objectId=${mine}&from=${new Date(Date.UTC(2000, 0, 1)).toISOString()}` });
+    expect(csv.statusCode).toBe(200);
+    // the filename names the object filter, so two objects' trails never collide in a downloads folder (#465 L5)
+    expect(csv.headers["content-disposition"]).toContain(`audit-log-${mine.slice(0, 8)}.csv`);
+    expect(csv.body.trimEnd().split("\n").filter((line) => line.includes(mine))).toHaveLength(3);
+    const bad = await app.inject({ method: "GET", headers: AUTH, url: "/v1/audit?objectId=not-a-uuid" });
+    expect(bad.statusCode).toBe(400);
+  });
+
   it("400s on a tampered cursor instead of silently restarting the walk", async () => {
     for (const bad of ["not-base64!!", Buffer.from("nope").toString("base64url")]) {
       const res = await app.inject({

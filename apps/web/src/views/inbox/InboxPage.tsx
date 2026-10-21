@@ -9,9 +9,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api/client";
-import type { Approval, CheckResult, WorkflowDetailResponse } from "../../api/types";
+import type { Approval, WorkflowDetailResponse } from "../../api/types";
 import { ago, approvalStageLabel, humanize } from "../../api/format";
 import { QuestionnaireView } from "../admin/governance/UseCaseQuestionnaire";
+import { drawerEvidenceState, mergeGateParts } from "./inboxEvidence";
 import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
 import {
@@ -122,9 +123,11 @@ export default function InboxPage() {
     })),
   });
   const instances: Record<string, WorkflowDetailResponse> = {};
+  const instanceFailed = new Set<string>();
   instanceIds.forEach((id, i) => {
     const data = instanceQueries[i]?.data;
     if (data) instances[id] = data;
+    else if (instanceQueries[i]?.isError) instanceFailed.add(id);
   });
 
   const decide = async (a: Approval, decision: "approved" | "denied") => {
@@ -238,6 +241,15 @@ export default function InboxPage() {
   // list, so its drawer closes with it
   const open = pending.find((a) => a.id === openId && !isIntakeSignoff(a) && !isBoundAction(a)) ?? null;
   const openView = open ? itemView(open) : null;
+  const openEvidence = open && openView
+    ? drawerEvidenceState({
+        toolCall: openView.toolCall,
+        contextConflict: Boolean(open.contextConflict),
+        fetched: open.objectType === "workflow" && Boolean(open.instanceId),
+        inst: openView.inst,
+        failed: Boolean(open.instanceId && instanceFailed.has(open.instanceId)),
+      })
+    : null;
 
   if (q.isLoading) {
     return (
@@ -334,8 +346,12 @@ export default function InboxPage() {
             {open.contextConflict && <ConflictPreview conflict={open.contextConflict} />}
             {/* owner decision on #453: say so when the request carries no evidence, rather than leave the body blank.
                 A workflow item whose evidence is still loading is not "no evidence", so it waits for the load */}
-            {!openView.toolCall && !open.instanceId && !open.contextConflict ? (
+            {/* the #460 delta review: key on what actually renders, so a fetched instance with nothing to show,
+                or an instanceId the Inbox never fetches, says so too. A failed read is not "no evidence" */}
+            {openEvidence === "none" ? (
               <p className={v.faint} data-testid="inbox-no-evidence">No evidence attached to this request.</p>
+            ) : openEvidence === "failed" ? (
+              <p className={v.faint} role="status" data-testid="inbox-evidence-failed">Evidence could not be loaded.</p>
             ) : null}
             {/* L2 (ADR-0180): the reason warning, the reason and the decision stay together in the pinned footer */}
             {openView.canDecide ? (
@@ -501,18 +517,7 @@ function AnnotationsCard(props: { items: AnnotationInboxItem[] }) {
 
 /** the merge-gate context: latest artifacts, PR/branch, recorded checks, dry-run honesty */
 function MergeGateEvidence(props: { inst: WorkflowDetailResponse }) {
-  const { inst } = props;
-  const ctx = inst.instance.context ?? {};
-  const latest: Record<string, { id: string; output: string; version: number; content: string }> = {};
-  for (const art of inst.artifacts ?? []) {
-    if (!latest[art.output] || art.version > latest[art.output]!.version) latest[art.output] = art;
-  }
-  const checkRows: CheckResult[] = Object.keys(ctx)
-    .filter((k) => k.startsWith("checks:"))
-    .flatMap((k) => (Array.isArray(ctx[k]) ? (ctx[k] as CheckResult[]) : []));
-  const deploys = Object.keys(ctx)
-    .filter((k) => k.startsWith("deploy:"))
-    .map((k) => ctx[k] as { dryRun?: boolean });
+  const { ctx, latest, checkRows, deploys, hasPrRow } = mergeGateParts(props.inst);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--s0)" }}>
       {Object.values(latest).map((art) => (
@@ -529,7 +534,7 @@ function MergeGateEvidence(props: { inst: WorkflowDetailResponse }) {
           </div>
         </details>
       ))}
-      {(typeof ctx.prUrl === "string" || typeof ctx.branch === "string") && (
+      {hasPrRow && (
         <div className={v.rowTight}>
           {typeof ctx.prUrl === "string" && ctx.prUrl && (
             <a className={v.mono} href={ctx.prUrl} target="_blank" rel="noopener noreferrer">

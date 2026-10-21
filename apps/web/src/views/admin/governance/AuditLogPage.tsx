@@ -18,6 +18,7 @@ import { DecisionReceiptsPanel } from "./DecisionReceiptsPanel";
 import { anchorsStatus, receiptsStatus, retentionStatus, type EvidenceStatus } from "./auditEvidenceStatus";
 import ev from "./auditLog.module.css";
 import { AnchorTimestampsPanel } from "./AnchorTimestampsPanel";
+import { AUDIT_OBJECT_LINK_TYPES } from "./auditObjectLinks";
 import { lazy, Suspense, useMemo, useState } from "react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
@@ -75,15 +76,30 @@ export default function AuditLogPage() {
   const [search, setSearch] = useSearchParams();
   const rowParam = search.get("id");
   const onlyRow = rowParam !== null && UUID_RE.test(rowParam) ? rowParam.toLowerCase() : null;
+  // owner decision on #453 (2026-10-20): `?objectType=…&objectId=…` shows one object's trail, e.g. a use case's,
+  // linked from its Audit tab. Both are needed; a malformed id or a type no console link opens is ignored rather than
+  // sent (the gateway refuses an unknown type with 400), and the page says so
+  const objectParam = search.get("objectId");
+  const objectTypeParam = search.get("objectType");
+  const onlyObject = objectParam !== null && UUID_RE.test(objectParam) && objectTypeParam !== null && AUDIT_OBJECT_LINK_TYPES.has(objectTypeParam)
+    ? { type: objectTypeParam, id: objectParam.toLowerCase() }
+    : null;
+  const objectLinkIgnored = !onlyObject && (objectParam !== null || objectTypeParam !== null);
 
   const qs = useMemo(() => {
     const p = new URLSearchParams();
     if (onlyRow) p.set("id", onlyRow);
+    if (onlyObject) {
+      p.set("objectType", onlyObject.type);
+      p.set("objectId", onlyObject.id);
+    }
     if (userId) p.set("userId", userId);
     if (deployMode) p.set("deployMode", deployMode);
     const s = p.toString();
     return s ? `?${s}` : "";
-  }, [onlyRow, userId, deployMode]);
+  }, [onlyRow, onlyObject?.type, onlyObject?.id, userId, deployMode]);
+  // #465 review L5: one object's trail downloads under its own name, as the gateway's filename does
+  const fileStem = `audit-log${onlyObject ? `-${onlyObject.id.slice(0, 8)}` : ""}`;
 
   const retention = useQuery({
     queryKey: ["admin", "audit-retention"],
@@ -94,7 +110,7 @@ export default function AuditLogPage() {
   // older rows existed (UIA-02); now it says how many are shown and loads
   // older pages on request.
   const audit = useInfiniteQuery({
-    queryKey: ["admin", "audit", onlyRow, userId, deployMode],
+    queryKey: ["admin", "audit", onlyRow, onlyObject?.type ?? null, onlyObject?.id ?? null, userId, deployMode],
     queryFn: ({ pageParam }) =>
       api.get<AuditPage>(`/v1/audit${qs}${pageParam ? `${qs ? "&" : "?"}cursor=${encodeURIComponent(pageParam)}` : ""}`),
     initialPageParam: null as string | null,
@@ -128,7 +144,7 @@ export default function AuditLogPage() {
             <Button
               variant="ghost"
               onClick={() =>
-                void downloadCsv(`/v1/audit.csv${qs}`, "audit-log.csv", (msg) => toast(msg, "error"))
+                void downloadCsv(`/v1/audit.csv${qs}`, `${fileStem}.csv`, (msg) => toast(msg, "error"))
               }
             >
               Download CSV
@@ -140,7 +156,7 @@ export default function AuditLogPage() {
               variant="primary"
               onClick={() => {
                 const join = qs ? "&" : "?";
-                void downloadCsv(`/v1/audit.csv${qs}${join}signed=1`, "audit-log.signed.tar.gz", (msg) => toast(msg, "error"));
+                void downloadCsv(`/v1/audit.csv${qs}${join}signed=1`, `${fileStem}.signed.tar.gz`, (msg) => toast(msg, "error"));
               }}
             >
               Download signed bundle
@@ -203,6 +219,23 @@ export default function AuditLogPage() {
             <p role="status" data-testid="audit-only-row">
               Showing one audit row, <code className={v.mono}>{onlyRow}</code>.{" "}
               <Button size="sm" variant="ghost" onClick={() => setSearch((p) => { const n = new URLSearchParams(p); n.delete("id"); return n; })}>
+                Show every row
+              </Button>
+            </p>
+          )}
+          {objectLinkIgnored && (
+            <p role="status" data-testid="audit-object-link-ignored">
+              This link&apos;s object filter was not applied: it needs a known object type and an object id. Showing every row.{" "}
+              <Button size="sm" variant="ghost" onClick={() => setSearch((p) => { const n = new URLSearchParams(p); n.delete("objectType"); n.delete("objectId"); return n; })}>
+                Clear the link
+              </Button>
+            </p>
+          )}
+          {onlyObject && (
+            <p role="status" data-testid="audit-only-object">
+              Showing the audit trail of one {onlyObject.type === "ai_use_case" ? "AI use case" : humanize(onlyObject.type).toLowerCase()},{" "}
+              <code className={v.mono}>{onlyObject.id}</code>. The CSV export covers the same rows.{" "}
+              <Button size="sm" variant="ghost" onClick={() => setSearch((p) => { const n = new URLSearchParams(p); n.delete("objectType"); n.delete("objectId"); return n; })}>
                 Show every row
               </Button>
             </p>

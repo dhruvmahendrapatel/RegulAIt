@@ -491,7 +491,70 @@ test("use-case Audit tab never shows the capped row count as the total (M1)", as
   await expect(tab).toHaveText("Audit 20+");
   await tab.click();
   await expect(page.getByTestId("use-case-audit-partial")).toContainText("older rows may exist");
-  await expect(page.getByRole("link", { name: "Open the full audit log" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Open this use case's full audit trail" })).toBeVisible();
+});
+
+test("use-case Audit tab shows the true total and deep-links to that use case's own trail (owner decision 2026-10-20)", async ({ page }) => {
+  const full = Array.from({ length: 20 }, (_, i) => ({ ...overview.audit[0]!, id: i + 1 }));
+  await page.route(`**/v1/use-cases/${ID}/overview`, (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...overview, audit: full, auditTotal: 57 }) }));
+  const asked: string[] = [];
+  await page.route("**/v1/audit?**", (route) => {
+    asked.push(new URL(route.request().url()).search);
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ entries: [], pageSize: 0, maxPageSize: 500, hasMore: false, nextCursor: null }) });
+  });
+  await page.goto(`/ui/admin/governance/use-cases/${ID}`);
+  const tab = page.getByRole("tab", { name: /^Audit/ });
+  await expect(tab).toHaveText("Audit 57");
+  await tab.click();
+  await expect(page.getByTestId("use-case-audit-partial")).toHaveText("Showing the newest 20 of 57 rows. This use case's full audit trail, and its CSV export, hold every row.");
+  const link = page.getByRole("link", { name: "Open this use case's full audit trail" });
+  await expect(link).toHaveAttribute("href", `/ui/admin/audit?objectType=ai_use_case&objectId=${ID}`);
+  await link.click();
+  await expect(page.getByTestId("audit-only-object")).toContainText(`Showing the audit trail of one AI use case, ${ID}.`);
+  await expect.poll(() => asked.some((q) => q.includes("objectType=ai_use_case") && q.includes(`objectId=${ID}`))).toBe(true);
+  // #465 review L4: the CSV export carries the same object filter as the table, and is named for that object (L5)
+  const exported: string[] = [];
+  await page.route("**/v1/audit.csv**", (route) => {
+    exported.push(new URL(route.request().url()).search);
+    return route.fulfill({ status: 200, contentType: "text/csv", body: "at,ruleId\n" });
+  });
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download CSV" }).click();
+  expect((await download).suggestedFilename()).toBe(`audit-log-${ID.slice(0, 8)}.csv`);
+  expect(exported).toHaveLength(1);
+  expect(new URLSearchParams(exported[0]).get("objectType")).toBe("ai_use_case");
+  expect(new URLSearchParams(exported[0]).get("objectId")).toBe(ID);
+  await page.getByTestId("audit-only-object").getByRole("button", { name: "Show every row" }).click();
+  await expect(page.getByTestId("audit-only-object")).toHaveCount(0);
+  await expect(page).not.toHaveURL(/objectId=/);
+  // #465 review L4: Back restores the filter, Forward clears it again
+  await page.goBack();
+  await expect(page).toHaveURL(new RegExp(`objectType=ai_use_case&objectId=${ID}`));
+  await expect(page.getByTestId("audit-only-object")).toContainText(`Showing the audit trail of one AI use case, ${ID}.`);
+  await page.goForward();
+  await expect(page.getByTestId("audit-only-object")).toHaveCount(0);
+  await expect(page).not.toHaveURL(/objectId=/);
+});
+
+test("the audit page never sends an object type no console link opens (owner decision 2026-10-21)", async ({ page }) => {
+  const asked: string[] = [];
+  await page.route("**/v1/audit?**", (route) => {
+    asked.push(new URL(route.request().url()).search);
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ entries: [], pageSize: 0, maxPageSize: 500, hasMore: false, nextCursor: null }) });
+  });
+  await page.route("**/v1/audit", (route) => {
+    asked.push("");
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ entries: [], pageSize: 0, maxPageSize: 500, hasMore: false, nextCursor: null }) });
+  });
+  await page.goto(`/ui/admin/audit?objectType=not_a_type&objectId=${ID}`);
+  await expect(page.getByTestId("audit-object-link-ignored")).toContainText("This link's object filter was not applied");
+  await expect(page.getByTestId("audit-only-object")).toHaveCount(0);
+  await expect.poll(() => asked.length).toBeGreaterThan(0);
+  expect(asked.some((q) => q.includes("objectType") || q.includes("objectId"))).toBe(false);
+  await page.getByTestId("audit-object-link-ignored").getByRole("button", { name: "Clear the link" }).click();
+  await expect(page.getByTestId("audit-object-link-ignored")).toHaveCount(0);
+  await expect(page).not.toHaveURL(/objectType=/);
 });
 
 test("use-case Audit tab under the cap shows the exact count and no partial notice (M1)", async ({ page }) => {

@@ -195,7 +195,7 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * The audit log — every governed decision, paged, filterable by user, object type, effect and time window.
+ * The audit log — every governed decision, paged, filterable by user, object type, one object (`objectId`), effect and time window. An `objectType` the audit log does not record is refused with 400 `unknown_object_type` (owner decision of 2026-10-21; it used to answer 200 with no rows).
  * @stability public-stable — auth: admin
    */
   getV1Audit<T = unknown>(options?: RequestOptions): Promise<T> {
@@ -203,7 +203,7 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * The audit log as a streamed CSV export, with an explicit disclosure when rows fall outside the exported window.
+ * The audit log as a streamed CSV export, with an explicit disclosure when rows fall outside the exported window. Takes the same filters as `GET /v1/audit`, including `objectId`. An unknown `objectType` is refused with 400 `unknown_object_type` before any of the file is written, signed or not (owner decision of 2026-10-21).
  * @stability public-stable — auth: admin
    */
   getV1AuditCsv<T = unknown>(options?: RequestOptions): Promise<T> {
