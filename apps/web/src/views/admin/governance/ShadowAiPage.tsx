@@ -554,7 +554,8 @@ export default function ShadowAiPage() {
                 { key: "subject", header: "Subject", // a floor so a name never wraps to one word per line
                   render: (r) => (
                     <span title={r.subjectKind} style={{ display: "inline-block", minWidth: "14ch" }}>
-                      <strong>{r.subject}</strong>
+                      {/* a long resource path breaks rather than widening the table (F6) */}
+                      <strong style={{ overflowWrap: "anywhere" }}>{r.subject}</strong>
                       <span className={v.dim} style={{ display: "block" }}>
                         {providerLabel(r.provider)}
                         {r.replacementAgent ? <> · alternative: {r.replacementAgent.name}</> : r.replacementNote ? <> · {r.replacementNote}</> : null}

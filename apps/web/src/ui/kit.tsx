@@ -788,11 +788,11 @@ export interface Column<T> {
   fold?: { md?: string; sm?: string };
 }
 
-type FoldStep = "lg" | "md" | "sm";
+export type FoldStep = "lg" | "md" | "sm";
 const foldStep = (width: number): FoldStep => (width < 600 ? "sm" : width < 1000 ? "md" : "lg");
 
-/** the column each column renders in at this step: its own key, or the key of the column that hosts it */
-function foldHosts<T>(columns: Array<Column<T>>, step: FoldStep): Map<string, string> {
+/** the column each column renders in at this step: its own key, or the key of the column that hosts it (exported for its test) */
+export function foldHosts<T>(columns: Array<Column<T>>, step: FoldStep): Map<string, string> {
   const keys = new Set(columns.map((c) => c.key));
   const next = (c: Column<T>) => (step === "sm" ? c.fold?.sm ?? c.fold?.md : step === "md" ? c.fold?.md : undefined);
   const byKey = new Map(columns.map((c) => [c.key, c]));

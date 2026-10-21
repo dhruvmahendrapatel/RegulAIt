@@ -285,6 +285,11 @@
   column-gap: var(--s1);
   margin-top: var(--s0);
 }
+/* a long code or name in a folded value wraps rather than widening the narrow table it was folded to fit */
+.foldLine > :last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .foldLabel {
   min-width: 6rem;
   color: var(--text-dim);
