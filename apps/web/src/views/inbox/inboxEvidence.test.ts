@@ -18,6 +18,12 @@ describe("mergeGateParts().hasEvidence: true only when MergeGateEvidence renders
     expect(mergeGateParts(inst({ "checks:ci": [{ check: "unit", status: "passed" }] })).hasEvidence).toBe(true);
     expect(mergeGateParts(inst({ "deploy:prod": { dryRun: true } })).hasEvidence).toBe(true);
   });
+  it("#473 L2: an empty PR URL with a PR id keeps the PR row, so the #prId badge renders", () => {
+    expect(mergeGateParts(inst({ prUrl: "", prId: 7 })).hasPrRow).toBe(true);
+    expect(mergeGateParts(inst({ branch: "", prId: 7 })).hasPrRow).toBe(true);
+    // a PR id with neither field set at all has nowhere to render
+    expect(mergeGateParts(inst({ prId: 7 })).hasPrRow).toBe(false);
+  });
 });
 
 describe("drawerEvidenceState", () => {
