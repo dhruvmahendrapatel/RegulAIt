@@ -100,6 +100,7 @@ const AiBomPanel = lazy(() => import("./BomEvidencePanel").then((m) => ({ defaul
 
 export default function UseCaseOverviewPage() {
   const { id = "" } = useParams();
+  const { auth } = useSession();
   const [params, setParams] = useSearchParams();
   const tab = TABS.some((item) => item.id === params.get("tab")) ? params.get("tab")! : "overview";
   const overview = useQuery({ queryKey: ["governance", "use-case-overview", id], queryFn: () => api.get<OverviewResponse>(`/v1/use-cases/${id}/overview`), enabled: Boolean(id) });
@@ -205,7 +206,7 @@ export default function UseCaseOverviewPage() {
             {tab === "stack" ? <StackTab useCaseId={id} data={data.stack} /> : null}
             {tab === "dependencies" ? <Card title="Dependencies and inherited risk"><DependencyGraphPanel useCaseId={id} /></Card> : null}
             {tab === "approvals" ? <ApprovalsTab approvals={data.approvals} userName={userName} /> : null}
-            {tab === "audit" ? <AuditTab rows={data.audit} total={data.auditTotal} useCaseId={data.useCase.id} /> : null}
+            {tab === "audit" ? <AuditTab rows={data.audit} total={data.auditTotal} useCaseId={data.useCase.id} isAdmin={Boolean(auth?.isAdmin)} /> : null}
             {tab === "path" ? (
               <Card title="Decision path">
                 <RunGraph source={{ kind: "use_case", useCaseId: id }} label={`Decision path of ${data.useCase.name}`} refreshKey={status} />
@@ -789,7 +790,7 @@ function ApprovalsTab({ approvals, userName }: { approvals: OverviewResponse["ap
   ]} />}</Card>;
 }
 
-function AuditTab({ rows, total, useCaseId }: { rows: OverviewResponse["audit"]; total: number | undefined; useCaseId: string }) {
+export function AuditTab({ rows, total, useCaseId, isAdmin }: { rows: OverviewResponse["audit"]; total: number | undefined; useCaseId: string; isAdmin: boolean }) {
   // owner decision on #453 (2026-10-20): the full trail of this one use case, deep-linked into the audit log's filter
   const trail = `/admin/audit?objectType=ai_use_case&objectId=${encodeURIComponent(useCaseId)}`;
   const more = total !== undefined ? total > rows.length : rows.length >= AUDIT_ROW_LIMIT;
@@ -803,7 +804,12 @@ function AuditTab({ rows, total, useCaseId }: { rows: OverviewResponse["audit"];
             : `Showing the newest ${AUDIT_ROW_LIMIT} rows; older rows may exist. The full audit log and its CSV export hold every row.`}
         </p>
       ) : null}
-      <p><Link to={trail}>Open this use case&apos;s full audit trail</Link></p>
+      {/* #465 review L2: the audit log is an admin surface, so only an admin is offered a link into it */}
+      {isAdmin ? (
+        <p><Link to={trail}>Open this use case&apos;s full audit trail</Link></p>
+      ) : (
+        <p className={v.dim} data-testid="use-case-audit-admin-only">The full audit trail and its CSV export are open to administrators. Ask an administrator for this use case&apos;s full trail.</p>
+      )}
     </Card>
   );
 }

@@ -169,6 +169,8 @@ describe("ADR-0031: /v1/audit cursor pagination", () => {
     for (const e of one.entries) expect(e.objectId).toBe(mine);
     const csv = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit.csv?objectType=agent&objectId=${mine}&from=${new Date(Date.UTC(2000, 0, 1)).toISOString()}` });
     expect(csv.statusCode).toBe(200);
+    // the filename names the object filter, so two objects' trails never collide in a downloads folder (#465 L5)
+    expect(csv.headers["content-disposition"]).toContain(`audit-log-${mine.slice(0, 8)}.csv`);
     expect(csv.body.trimEnd().split("\n").filter((line) => line.includes(mine))).toHaveLength(3);
     const bad = await app.inject({ method: "GET", headers: AUTH, url: "/v1/audit?objectId=not-a-uuid" });
     expect(bad.statusCode).toBe(400);

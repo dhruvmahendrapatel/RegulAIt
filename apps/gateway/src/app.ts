@@ -5724,7 +5724,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
     // filename names every filter that shaped the file, so two downloads taken
     // with different filters never collide in a downloads folder
-    const suffix = `${q.userId ? `-${q.userId.slice(0, 8)}` : ""}${q.deployMode ? `-${q.deployMode}` : ""}`;
+    const suffix = `${q.userId ? `-${q.userId.slice(0, 8)}` : ""}${q.objectId ? `-${q.objectId.slice(0, 8)}` : ""}${q.deployMode ? `-${q.deployMode}` : ""}`;
     type Row = typeof auditLog.$inferSelect & { atText: string };
     // A bundle is held in memory to be hashed and signed, so it takes its own
     // (lower, and DISCLOSED) ceiling rather than the streaming one. The
