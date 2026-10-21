@@ -131,6 +131,7 @@ test.describe("U4: decision receipts", () => {
       [`GET /v1/receipts/${U(9)}`]: { receipts: [] },
     });
     await page.goto("/ui/admin/audit");
+    await page.locator("summary", { hasText: "Signed decision receipts" }).click();
     await expect(page.getByText("Signed decision receipts", { exact: true })).toBeVisible();
     // audited reads: nothing listed until asked
     expect(calls(m, "GET", "/v1/receipts")).toHaveLength(0);
@@ -168,6 +169,7 @@ test.describe("U4: decision receipts", () => {
       "GET /v1/receipts": { status: 400, body: { error: "invalid_receipt_range" } },
     });
     await page.goto("/ui/admin/audit");
+    await page.locator("summary", { hasText: "Signed decision receipts" }).click();
     await page.getByRole("button", { name: "Show receipts" }).click();
     await expect(page.getByText("Choose a first receipt sequence of 1 or more and a page of at most 500 receipts.")).toBeVisible();
   });

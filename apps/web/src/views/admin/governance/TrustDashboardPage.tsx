@@ -4,7 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { fmtDateTime, plural } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Card, EmptyState, StatusDot } from "../../../ui/kit";
+import { Badge, Card, EmptyState, InfoButton, StatusDot } from "../../../ui/kit";
 import { QueryGate, Stat } from "../adminKit";
 import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
@@ -155,31 +155,52 @@ function TrustReportView(props: {
         {props.monitor}
       </div>
 
-      <Card>
-        <div className={v.stack}>
-          <div className={v.kpiStrip}>
-            <div className={v.stat}>
-              <span className={v.statValue}>{d.totals.risksFound.toLocaleString()}</span>
-              <span className={v.statLabel}>Risks found</span>
-              {d.totals.risksAccepted > 0 ? <span className={v.faint}>{d.totals.risksAccepted.toLocaleString()} accepted</span> : null}
-            </div>
-            <div className={v.stat}><span className={v.statValue}>{d.totals.risksMitigated.toLocaleString()}</span><span className={v.statLabel}>Mitigated</span></div>
-            <div className={v.stat}><span className={v.statValue}>{d.totals.risksUnmitigated.toLocaleString()}</span><span className={v.statLabel}>Not yet mitigated</span></div>
-            <div className={v.stat}><span className={v.statValue}>{formatCoverage(d.totals.evidenceCoveragePct)}</span><span className={v.statLabel}>Evidence coverage</span></div>
-          </div>
-          <p className={v.faint}>Evidence coverage is not a compliance or trust score; unmeasured is a gap, not zero.</p>
+      {/* G4: the tile that needs attention reads first: a stripe and a next step, never a score */}
+      <div className={s.trustTiles}>
+        <div className={v.stat}>
+          <span className={v.statValue}>{d.totals.risksFound.toLocaleString()}</span>
+          <span className={v.statLabel}>Risks found</span>
+          {d.totals.risksAccepted > 0 ? <span className={v.faint}>{d.totals.risksAccepted.toLocaleString()} accepted</span> : null}
         </div>
-      </Card>
+        <div className={`${v.stat} ${s.tileOk}`}>
+          <span className={v.statValue}>{d.totals.risksMitigated.toLocaleString()}</span>
+          <span className={v.statLabel}>Mitigated</span>
+          <span className={v.faint}>Closed, or a linked control and a residual rating</span>
+        </div>
+        <div className={`${v.stat} ${d.totals.risksUnmitigated > 0 ? s.tileAttention : ""}`}>
+          <span className={v.statValue}>{d.totals.risksUnmitigated.toLocaleString()}</span>
+          <span className={v.statLabel}>Not yet mitigated</span>
+          {d.totals.risksUnmitigated > 0 ? <Link to="/admin/risks">{`Review the ${plural(d.totals.risksUnmitigated, "risk")}`}</Link> : null}
+        </div>
+        <div className={`${v.stat} ${s.tileInfo}`}>
+          <span className={v.statValue}>{formatCoverage(d.totals.evidenceCoveragePct)}</span>
+          <span className={v.statLabel}>
+            Evidence coverage
+            <InfoButton label="Evidence coverage" align="end">
+              The share of applicable controls with current evidence. It is not a compliance score. An unmeasured dimension is a gap, not zero.
+            </InfoButton>
+          </span>
+          <span className={v.faint}>{d.totals.controlsEvidenced} of {d.totals.controlsApplicable} controls</span>
+        </div>
+      </div>
 
       <div className={s.dashboardGrid}>
-        <Card title="Evidence coverage by dimension">
-          <Radar dimensions={d.dimensions} />
-        </Card>
-        <Card title="Inherent risk heatmap">
-          <div className={v.stack}>
-            <p className={v.faint}>Open, mitigating, and accepted risks. Closed risks are excluded.</p>
-            <Heatmap cells={d.heatmap} label="Inherent risk" />
+        <CoverageCard dimensions={d.dimensions} />
+        <Card
+          title="Risk position"
+          info="Inherent is before controls, residual is after. Each cell counts open, mitigating and accepted risks. Closed risks are left out."
+        >
+          <div className={s.heatPair}>
+            <div className={v.stack}>
+              <strong>Inherent (before controls)</strong>
+              <Heatmap cells={d.heatmap} label="Inherent risk" />
+            </div>
+            <div className={v.stack}>
+              <strong>Residual (after controls)</strong>
+              <Heatmap cells={d.residualHeatmap} label="Residual risk" />
+            </div>
           </div>
+          <p className={v.faint}>Cell colour shows the zone of that likelihood and impact pair on the severity scale. The number is the count of risks; empty cells fade.</p>
         </Card>
       </div>
 
@@ -219,11 +240,66 @@ function TrustReportView(props: {
         ) : null}
       </Card>
 
-      <Card title="Residual risk after controls">
-        <Heatmap cells={d.residualHeatmap} label="Residual risk" />
-      </Card>
-
     </div>
+  );
+}
+
+const VIEW_KEY = "regulait.trust.coverageView";
+const readView = (): "bars" | "radar" => {
+  try {
+    return localStorage.getItem(VIEW_KEY) === "radar" ? "radar" : "bars";
+  } catch {
+    return "bars";
+  }
+};
+
+/** G4 (owner change b): the same coverage as a sorted bar list (default) or the radar, remembered in this browser */
+function CoverageCard({ dimensions }: { dimensions: TrustDimension[] }) {
+  const [view, setView] = useState<"bars" | "radar">(readView);
+  const choose = (next: "bars" | "radar") => {
+    setView(next);
+    try {
+      localStorage.setItem(VIEW_KEY, next);
+    } catch {
+      /* storage blocked: the choice lasts for this visit only */
+    }
+  };
+  const sorted = [...dimensions].sort((a, b) => (b.evidenceCoveragePct ?? -1) - (a.evidenceCoveragePct ?? -1));
+  return (
+    <Card
+      title="Evidence coverage by dimension"
+      actions={
+        <div className={s.segmented} role="group" aria-label="Chart view">
+          <button type="button" aria-pressed={view === "bars"} onClick={() => choose("bars")}>Bars</button>
+          <button type="button" aria-pressed={view === "radar"} onClick={() => choose("radar")}>Radar</button>
+        </div>
+      }
+    >
+      {view === "radar" ? (
+        <Radar dimensions={dimensions} />
+      ) : (
+        <ul className={s.coverageBars} aria-label="Evidence coverage by dimension">
+          {sorted.map((dimension) => (
+            <li key={dimension.key}>
+              <span>{dimension.label}</span>
+              <span className={dimension.measured ? s.coverageTrack : s.coverageGap} aria-hidden="true">
+                {dimension.measured ? <span style={{ inlineSize: `${Math.max(0, Math.min(100, dimension.evidenceCoveragePct ?? 0))}%` }} /> : null}
+              </span>
+              <span className={s.coverageValue}>
+                {dimension.measured ? `${dimension.evidenceCoveragePct ?? 0}%` : (
+                  <>
+                    Unmeasured
+                    <InfoButton label="Unmeasured" align="end">
+                      No active pack has a measurable control for this dimension, so no number is shown rather than a guess.
+                    </InfoButton>
+                  </>
+                )}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
   );
 }
 
@@ -302,14 +378,21 @@ function Radar({ dimensions }: { dimensions: TrustDimension[] }) {
   );
 }
 
+const RANK = { low: 0, medium: 1, high: 2 } as const;
+const ZONE = ["low", "low", "medium", "high", "high"] as const;
+
 function Heatmap({ cells, label }: { cells: HeatCell[]; label: string }) {
   const levels: HeatCell["likelihood"][] = ["high", "medium", "low"];
   const impacts: HeatCell["impact"][] = ["low", "medium", "high"];
-  const max = Math.max(1, ...cells.map((cell) => cell.count));
   const count = (likelihood: HeatCell["likelihood"], impact: HeatCell["impact"]) =>
     cells.find((cell) => cell.likelihood === likelihood && cell.impact === impact)?.count ?? 0;
+  // the cells inside role="img" are presentational, so every cell's count and zone is in the image's own name
+  const cellNames = levels.flatMap((likelihood) => impacts.map((impact) => {
+    const zone = ZONE[RANK[likelihood] + RANK[impact]]!;
+    return `${likelihood} likelihood, ${impact} impact: ${count(likelihood, impact)} (${zone} zone)`;
+  }));
   return (
-    <div className={s.heatmap} role="img" aria-label={`${label} matrix by likelihood and impact`}>
+    <div className={s.heatmap} role="img" aria-label={`${label} matrix by likelihood and impact. ${cellNames.join("; ")}`}>
       <span />
       {impacts.map((impact) => <span key={impact} className={s.heatLabel}>{impact} impact</span>)}
       {levels.map((likelihood) => (
@@ -317,14 +400,16 @@ function Heatmap({ cells, label }: { cells: HeatCell[]; label: string }) {
           <span key={`${likelihood}-label`} className={s.heatLabel}>{likelihood}<br />likelihood</span>
           {impacts.map((impact) => {
             const value = count(likelihood, impact);
-            const heat = value === 0 ? 0 : Math.max(1, Math.ceil((value / max) * 4));
+            // G4: the cell's colour is its ZONE (likelihood + impact on the severity scale), not a computed score;
+            // the zone is written in the cell, so colour never carries the meaning alone
+            const zone = ZONE[RANK[likelihood] + RANK[impact]]!;
             return (
               <div
                 key={`${likelihood}-${impact}`}
-                className={`${s.heatCell} ${heat ? s[`heat${heat}`] : ""}`}
-                title={`${value} ${label.toLowerCase()} item(s): ${likelihood} likelihood, ${impact} impact`}
+                className={`${s.heatCell} ${s[`zone_${zone}`]} ${value === 0 ? s.zoneEmpty : ""}`}
               >
                 <strong>{value}</strong>
+                <span className={s.zoneWord}>{zone.charAt(0).toUpperCase() + zone.slice(1)}</span>
               </div>
             );
           })}
@@ -355,7 +440,7 @@ export function TrustSnapshotCard() {
             ))}
           </div>
         </div>
-      ) : <EmptyState title="No trust report" body="No evidence report is available yet." />}
+      ) : <EmptyState title="No trust report yet" body="The trust report summarises evidence coverage per dimension. It appears once an active compliance pack has controls with recorded evidence; enable a pack on Compliance packs to start." />}
     </Card>
   );
 }

@@ -281,3 +281,39 @@
   white-space: nowrap;
   border: 0;
 }
+
+/* A5: captioned tab groups. The caption is CSS text with empty alternative text, so tab names stay "Risks", not "Assessment Risks";
+   screen readers get the group from each tab's aria-describedby (kit Tabs) instead */
+.groupedTabs [role="tablist"] {
+  overflow-x: auto;
+  align-items: flex-end;
+}
+.groupedTabs [data-group] {
+  position: relative;
+  margin-inline-start: var(--s3);
+  padding-block-start: var(--s3);
+}
+.groupedTabs [data-group]:first-child {
+  margin-inline-start: 0;
+}
+.groupedTabs [data-group]::before {
+  content: attr(data-group) / "";
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline-start: var(--s2);
+  font-size: var(--text-xs, 0.75rem);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--rg-ink-muted);
+}
+.tabCount {
+  display: inline-block;
+  min-inline-size: 1.4em;
+  padding-inline: var(--s1);
+  border-radius: 999px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  font-size: var(--text-xs, 0.75rem);
+  text-align: center;
+}
