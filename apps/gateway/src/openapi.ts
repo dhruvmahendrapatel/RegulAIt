@@ -298,8 +298,8 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
     body: putOverrideSchema,
   },
 
-  "GET /v1/audit": { summary: "The audit log — every governed decision, paged, filterable by user, object type, effect and time window." },
-  "GET /v1/audit.csv": { summary: "The audit log as a streamed CSV export, with an explicit disclosure when rows fall outside the exported window." },
+  "GET /v1/audit": { summary: "The audit log — every governed decision, paged, filterable by user, object type, one object (`objectId`), effect and time window." },
+  "GET /v1/audit.csv": { summary: "The audit log as a streamed CSV export, with an explicit disclosure when rows fall outside the exported window. Takes the same filters as `GET /v1/audit`, including `objectId`." },
 
   "POST /v1/agents/:agentId/invoke": { summary: "Dispatch an agent. Governed, metered and audited like every other gateway call.", body: invokeAgentSchema },
   "POST /v1/connectors/:connectorId/invoke": { summary: "Invoke a connector.", body: invokeConnectorSchema },

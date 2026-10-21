@@ -34,6 +34,7 @@ import {
   desc,
   eq,
   inArray,
+  sql,
   users,
   workflowArtifacts,
   type Db,
@@ -151,7 +152,10 @@ export function registerUseCaseOverviewRoutes(app: FastifyInstance, db: Db): voi
           .where(eq(approvals.instanceId, useCase.workflowInstanceId))
           .orderBy(desc(approvals.requestedAt))
       : [];
-    const audit = await db
+    // owner decision on #453 (2026-10-20): the true size of this use case's trail, so the Audit tab shows an exact
+    // count instead of "20+"; the full trail is GET /v1/audit?objectType=ai_use_case&objectId=<id>. The window count
+    // is taken before LIMIT, so one scan returns both the 20 newest rows and the total (#465 review M2).
+    const auditPage = await db
       .select({
         id: auditLog.id,
         at: auditLog.at,
@@ -159,11 +163,13 @@ export function registerUseCaseOverviewRoutes(app: FastifyInstance, db: Db): voi
         ruleId: auditLog.ruleId,
         effect: auditLog.effect,
         reason: auditLog.reason,
+        total: sql<number>`count(*) over ()::int`,
       })
       .from(auditLog)
       .where(and(eq(auditLog.objectType, "ai_use_case"), eq(auditLog.objectId, useCaseId)))
       .orderBy(desc(auditLog.at))
       .limit(20);
+    const audit = auditPage.map(({ total: _total, ...row }) => row);
 
     const live = risks.filter((r) => r.status === "open" || r.status === "mitigating");
     return {
@@ -204,6 +210,7 @@ export function registerUseCaseOverviewRoutes(app: FastifyInstance, db: Db): voi
       },
       approvals: approvalRows,
       audit,
+      auditTotal: Number(auditPage[0]?.total ?? 0),
       links: { frameworks: `/v1/use-cases/${useCaseId}/frameworks` },
     };
   });
