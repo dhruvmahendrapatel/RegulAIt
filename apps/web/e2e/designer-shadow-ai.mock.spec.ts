@@ -108,6 +108,27 @@ async function slotLefts(page: Page, card: string) {
     }).filter((x): x is number => x !== null));
 }
 
+test("the sidebar gives Discovery its own section, between Overview and the AI Governance registers (owner decision on #453)", async ({ page }) => {
+  await page.addInitScript(() => { try { localStorage.setItem("regulait.rail.pinned", "1"); } catch { /* storage refused: the rail still renders */ } });
+  await page.goto("/ui/admin/shadow-ai");
+  const nav = page.locator('aside[aria-label="Primary navigation"]');
+  await expect(nav.getByRole("link", { name: "Shadow-AI discovery", exact: true })).toHaveAttribute("aria-current", "page");
+  const labels = (await nav.locator('[class*="sectionLabel"]').allTextContents()).map((t) => t.trim());
+  expect(labels.slice(0, 3)).toEqual(["Overview", "Discovery", "AI Governance"]);
+  // both discovery pages sit under the Discovery heading, ahead of the registers
+  const order = (await nav.locator('[class*="sectionLabel"], a').allTextContents()).map((t) => t.trim());
+  const at = (text: string) => order.indexOf(text);
+  expect(at("Discovery")).toBeLessThan(at("Shadow-AI discovery"));
+  expect(at("Shadow-AI discovery")).toBeLessThan(at("Discovery sources"));
+  expect(at("Discovery sources")).toBeLessThan(at("AI Governance"));
+  expect(at("AI Governance")).toBeLessThan(at("Use cases"));
+  // the breadcrumb follows the section: "Discovery / …", no longer "AI Governance / …"
+  const crumbs = page.locator('nav[aria-label="Breadcrumb"] li > span:not([aria-hidden])');
+  await expect(crumbs).toHaveText(["Discovery", "Shadow-AI discovery"]);
+  await page.goto("/ui/admin/shadow-ai/discovery-sources");
+  await expect(crumbs).toHaveText(["Discovery", "Discovery sources"]);
+});
+
 test("Shadow AI: tabs, figures with (i), aligned next steps and the coverage tiles", async ({ page }) => {
   await page.goto("/ui/admin/shadow-ai");
   await expect(page.getByRole("heading", { name: "Shadow-AI discovery", exact: true })).toBeVisible();
