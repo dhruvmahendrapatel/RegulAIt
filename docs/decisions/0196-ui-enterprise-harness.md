@@ -374,3 +374,38 @@ ADR-recorded exception that the `--guard` rule above requires before a ceiling m
   unchanged, and the work must fit them. Batch 1 measured entry JS 135.6 kB and entry CSS 10,575 B of 10,600 B.
   Kit CSS is therefore near its limit, so new screen styles go in each view's lazy CSS module, not in `kit.module.css`.
 - **Landing.** `ui-enterprise-baseline.mjs --guard` fails on this diff by design. Per this ADR the owner lands it.
+
+## Addendum — the routing library's production build; entry and all-JS ceilings lowered (2026-10-21)
+
+The owner decided on 2026-10-21 (issue #453, comment 6320179102) that a separate held PR switches the routing
+library to its production build, and that once it merges the ceilings are lowered below their values that day, so
+the "only shrink" rule ends up stricter than before. This addendum records that PR. The decision text above is
+unchanged.
+
+- **Root cause.** `react-router` 7.18.4 names only `dist/development` in its package exports, under every condition
+  (`node`, `module`, `import`, `default`, and `react-server`), so `vite build` bundled the development build. The
+  production build ships beside it in `dist/production`. The two differ by one line, `ENABLE_DEV_WARNINGS = true`
+  against `false`; with `false` the minifier drops the dev warnings (for example "No routes matched location"). React,
+  React DOM and the other libraries branch on `process.env.NODE_ENV`, which `vite build` already sets to
+  `production`; their bundles carried no development code.
+- **Fix (configuration only; no dependency, version, lockfile or patch change).** A build-only resolver in
+  `apps/web/vite.config.ts` (`routerProductionBuild`) resolves `react-router` and `react-router/dom` as before and
+  swaps `dist/development` for `dist/production`. It fails the build if the resolved path is not under
+  `dist/development`, so an upgrade that moves the files cannot silently ship the development build again. The dev
+  server, the unit tests and the mocked suite keep the development build and its warnings. No open-source plugin
+  does this one swap; Vite's own resolver hook is used.
+- **Guard.** `scripts/preflight-ui-prod-bundle.mjs` scans `apps/web/dist/assets/*.js` for text only a development
+  build leaves behind (the routing library's "No routes matched location"; React's "Download the React DevTools"
+  and the list-key warning), and runs in the static job after size-limit. Its test pins each marker against the
+  installed libraries' own two builds, and fails when the routing library starts naming a production build in its
+  exports (the swap can then go).
+- **Size.** The development build was not 32.8 kB of extra code: that figure is the whole routing library in the
+  entry. The dev warnings were about 0.6 kB gzip. Measured locally, main at 44c55fd and then this change: entry JS
+  137,448 → 136,848 B, all JS 1,034,202 → 1,033,635 B, entry CSS 10,587 B unchanged.
+- **New ceilings.** Each is lowered by what the change saved, keeping the headroom it had that day:
+  - entry JS 137.5 kB → **136.9 kB**;
+  - all JS 1035 kB → **1034.4 kB**;
+  - entry CSS (10.6 kB) and the two lazy chunks are unchanged.
+  The brief's "measured value plus about 1 %, never above the previous ceiling" could not lower anything, because
+  1 % of the entry (about 1.4 kB) is more than the change saved. PR #477 had not merged; its owner-approved raise
+  (+0.4 kB entry, +1 kB all JS) applies on top of these values when it lands.
