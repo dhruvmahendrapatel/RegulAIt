@@ -1,9 +1,17 @@
 name: Engine images (build only)
 
 # ENG-IMG — the pull_request check for the engine images: it BUILDS each image
-# (scripts/build-engine-image.sh <engine> build) and pushes nothing. It holds
-# no packages permission and logs in to no registry. Publishing is
-# engine-images.yml (push to main and workflow_dispatch only).
+# and pushes nothing. It holds no packages permission and logs in to no
+# registry. Publishing is engine-images.yml (push to main and
+# workflow_dispatch only).
+#
+# Reproducible builds (ADR-0187 addendum 2026-10-21): each image is built
+# TWICE, by `build` and `rebuild`, on two runners, each in a fresh builder on
+# the pinned BuildKit (scripts/build-engine-image.sh <engine> repro), the same
+# way the publish job builds it. `compare` (scripts/engine-images-repro.mjs)
+# fails unless both builds of every engine name the same input commit and the
+# same manifest digest and image id, and reports them per engine in the step
+# summary. workflow_dispatch runs the same check on any branch.
 # Runs only when an engine's own files change, so the Actions budget in ci.yml
 # stays true.
 
@@ -16,11 +24,15 @@ on:
       - packages/engine-promptfoo/**
       - packages/engine-runner/**
       - scripts/build-engine-image.sh
+      - scripts/engine-images-gate.mjs
+      - scripts/engine-images-normalise.mjs
+      - scripts/engine-images-repro.mjs
       - .github/workflows/engine-images.yml
       - .github/workflows/engine-images-build.yml
       # a lock or signature change (the lock-update bot's PR) builds nothing new
       - '!engines/images.lock.json'
       - '!engines/signatures/**'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -42,5 +54,53 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - name: Build (no push)
-        run: scripts/build-engine-image.sh "${{ matrix.engine }}" build
+          # the build finds the engine's input commit in the history and archives it
+          fetch-depth: 0
+      - name: Build reproducibly (no push; a fresh builder on the pinned BuildKit)
+        run: scripts/build-engine-image.sh "${{ matrix.engine }}" repro "${RUNNER_TEMP}/${{ matrix.engine }}-a.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: engine-repro-${{ matrix.engine }}-a
+          path: ${{ runner.temp }}/${{ matrix.engine }}-a.json
+          retention-days: 30
+
+  rebuild:
+    name: rebuild ${{ matrix.engine }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [promptfoo, modelscan, garak]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          # the build finds the engine's input commit in the history and archives it
+          fetch-depth: 0
+      - name: Build reproducibly (no push; a fresh builder on the pinned BuildKit)
+        run: scripts/build-engine-image.sh "${{ matrix.engine }}" repro "${RUNNER_TEMP}/${{ matrix.engine }}-b.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: engine-repro-${{ matrix.engine }}-b
+          path: ${{ runner.temp }}/${{ matrix.engine }}-b.json
+          retention-days: 30
+
+  compare:
+    name: compare the two builds of each image
+    needs: [build, rebuild]
+    # report every engine, also when one of its builds failed
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: engine-repro-*
+          path: ${{ runner.temp }}/repro
+          merge-multiple: true
+      - name: Same input commit, same digests
+        run: node scripts/engine-images-repro.mjs "${RUNNER_TEMP}/repro" --summary "$GITHUB_STEP_SUMMARY"

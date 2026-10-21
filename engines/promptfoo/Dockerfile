@@ -44,13 +44,17 @@
 FROM --platform=linux/amd64 node:22-trixie-slim@sha256:154ba2f4d6fec323d28e4f4bb86bba4677f1223391a1979cf521304e03a98dfa AS promptfoo
 WORKDIR /opt/promptfoo
 COPY engines/promptfoo/package.json engines/promptfoo/package-lock.json engines/promptfoo/licence-gate.mjs ./
+COPY scripts/engine-images-normalise.mjs /tmp/engine-images-normalise.mjs
 # the licence gate runs on the lockfile BEFORE anything is installed (no GPL family, no unknown);
-# the CycloneDX SBOM of exactly what was installed ships inside the image (npm's own `npm sbom`)
+# the CycloneDX SBOM of exactly what was installed ships inside the image (npm's own `npm sbom`), with its
+# timestamp from SOURCE_DATE_EPOCH and a content-derived serial number (npm writes the clock and a random one)
+ARG SOURCE_DATE_EPOCH
 RUN node licence-gate.mjs package-lock.json \
  && npm ci --omit=optional --ignore-scripts --no-audit --no-fund \
  && node -e "const v=require('./node_modules/promptfoo/package.json').version; if (v !== '0.124.1') { console.error('expected promptfoo 0.124.1, got ' + v); process.exit(1); }" \
  && npm sbom --omit=optional --sbom-format cyclonedx --sbom-type application > sbom.cdx.json \
- && rm -rf /root/.npm licence-gate.mjs
+ && node /tmp/engine-images-normalise.mjs cyclonedx sbom.cdx.json \
+ && rm -rf /root/.npm licence-gate.mjs /tmp/engine-images-normalise.mjs
 COPY engines/promptfoo/patches/telemetry-disabled-sends-nothing.mjs /tmp/telemetry-patch.mjs
 RUN node /tmp/telemetry-patch.mjs /opt/promptfoo/node_modules/promptfoo && rm /tmp/telemetry-patch.mjs
 
@@ -61,9 +65,14 @@ WORKDIR /src
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./
 COPY packages ./packages
 COPY apps ./apps
+# reproducible builds (ADR-0187 addendum 2026-10-21): pnpm records the install time and the order the concurrent
+# install finished in /out/node_modules/.modules.yaml; the normaliser sorts it and takes the time from SOURCE_DATE_EPOCH
+COPY scripts/engine-images-normalise.mjs ./scripts/engine-images-normalise.mjs
+ARG SOURCE_DATE_EPOCH
 RUN NODE_OPTIONS=--max-old-space-size=3072 pnpm install --frozen-lockfile \
  && pnpm --filter "@regulait/engine-promptfoo..." build \
- && pnpm --filter @regulait/engine-promptfoo deploy --prod --legacy /out
+ && pnpm --filter @regulait/engine-promptfoo deploy --prod --legacy /out \
+ && node scripts/engine-images-normalise.mjs modules-yaml /out/node_modules/.modules.yaml
 
 # ---- stage 3: runtime -------------------------------------------------------------------------
 FROM --platform=linux/amd64 node:22-trixie-slim@sha256:154ba2f4d6fec323d28e4f4bb86bba4677f1223391a1979cf521304e03a98dfa AS runtime
