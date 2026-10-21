@@ -484,7 +484,7 @@ test.describe("the review panel in a review round", () => {
     await drawer.getByRole("checkbox", { name: "Accept residual risk" }).check();
     await drawer.getByRole("checkbox", { name: /Disparate credit recommendation outcomes/ }).check();
     await drawer.getByLabel("Why the residual risk is acceptable (required)").fill("Residual bias is tolerable with human review of every recommendation.");
-    await checkScreen(page, "review panel with risk acceptance", "review-panel-acceptance", '[role="dialog"]');
+    await checkScreen(page, "review panel with risk acceptance", "review-panel-acceptance", '[data-testid="review-drawer"]');
     await drawer.getByRole("button", { name: "Approve", exact: true }).click();
     await expect.poll(() => state.decides.length).toBe(1);
     expect(state.decides[0]).toEqual({
@@ -506,7 +506,7 @@ test.describe("the review panel in a review round", () => {
     const others = drawer.getByRole("list", { name: "Other reviews" });
     await expect(others.getByRole("listitem").filter({ hasText: "Security" })).toContainText("Closed — another review ended the round");
     await expect(others.getByRole("listitem").filter({ hasText: "Model risk" })).toContainText("Rejected");
-    await checkScreen(page, "review panel with a closed review", undefined, '[role="dialog"]');
+    await checkScreen(page, "review panel with a closed review", undefined, '[data-testid="review-drawer"]');
   });
 
   test("a role member who is not a risk acceptor decides without the acceptance (control)", async ({ page }) => {
@@ -535,7 +535,7 @@ test.describe("the review panel in a review round", () => {
     // focus lands on the first problem
     await expect(drawer.getByText("Choose at least one risk to accept.")).toBeFocused();
     expect(state.decides).toEqual([]);
-    await checkScreen(page, "review panel acceptance errors", undefined, '[role="dialog"]');
+    await checkScreen(page, "review panel acceptance errors", undefined, '[data-testid="review-drawer"]');
 
     await drawer.getByRole("checkbox", { name: /Stale income data/ }).check();
     await drawer.getByLabel("Why the residual risk is acceptable (required)").fill("Income data refreshes monthly; the gap is tolerable.");
@@ -569,7 +569,7 @@ test.describe("the review panel in a review round", () => {
     await tabTo(page, /Disparate credit recommendation outcomes/);
     await page.keyboard.press("Space");
     await expect(drawer.getByRole("checkbox", { name: /Disparate credit recommendation outcomes/ })).toBeChecked();
-    expect(await page.evaluate(() => Boolean(document.activeElement?.closest('[role="dialog"]')))).toBe(true);
+    expect(await page.evaluate(() => Boolean(document.activeElement?.closest('[data-testid="review-drawer"]')))).toBe(true);
     await page.keyboard.press("Escape");
     await expect(drawer).toBeHidden();
     await expect(trigger).toBeFocused();

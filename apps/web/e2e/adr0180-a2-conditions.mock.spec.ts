@@ -175,7 +175,7 @@ test.describe("ADR-0180 A2: measured conditions", () => {
     await group.getByLabel("Checked").selectOption("weekly");
     await group.getByLabel("On a breach").selectOption("reopen_review");
     await expect(group).toContainText("Recorded as: Red-team attack success rate below 5 % over 30 days (at least 30 samples)");
-    await expectAxeClean(page, "review drawer with a measured condition", '[role="dialog"]');
+    await expectAxeClean(page, "review drawer with a measured condition", '[data-testid="review-drawer"]');
 
     await drawer.getByRole("button", { name: "Approve with conditions" }).click();
     await expect.poll(() => state.decides.length).toBe(1);
