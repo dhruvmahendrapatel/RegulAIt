@@ -2680,3 +2680,42 @@ gVisor that honours `errnoRet`. No migration, no new dependency, no profile chan
    flag, every placement under a profile that passes it fails at sandbox start (fails closed), and the gateway's
    `runtime_flags_missing` check would also need the flag dropped from the profile. Dropping it is a profile change
    (a new profile digest), so it is left for the owner or the master, before the next re-pin.
+
+## As built: the lock-pr job is push-only (owner decision on #453, 2026-10-21)
+
+This changes item 5 and owner actions 2 and 3 of "As built: engine image signing and the lock-update bot" above. That
+text stays as the record of what was built on 2026-10-18.
+
+1. **The owner decision (2026-10-21, asked in the master session, recorded on #453).** The `lock-pr` job of
+   `engine-images.yml` is push-only. It pushes the `engine-images-lock/<commit12>` branch, writes the compare link to
+   the step summary and exits green. It no longer calls `gh pr create`. The master session opens the held draft PR from
+   the branch after each publish, and that PR gets the normal independent review. #479 was the first one opened this
+   way.
+2. **Why.**
+   - On run 39589886236, `gh pr create` failed with "GitHub Actions is not permitted to create or approve pull requests"
+     after the branch push succeeded, so a correct sign and push ended red (the #479 review, option (c)).
+   - The setting "Allow GitHub Actions to create and approve pull requests" stays off. Turning it on would also let
+     Actions approve PRs.
+   - A PR opened with `GITHUB_TOKEN` starts no workflow run, so CI would not start on a bot-opened PR anyway. A PR the
+     master opens from the branch runs CI normally.
+   - No GitHub App and no new secret is needed.
+3. **As built.**
+   - The job's permissions are `contents: write` only, through `GITHUB_TOKEN`. `pull-requests: write` was needed only
+     by `gh pr create`, so it is dropped. No job in the workflow writes pull requests.
+   - Kept: the HOLD title refusal before any commit, staging by path, the push without force (a branch that already
+     exists is refused, never overwritten), and never merging, approving, readying or enabling auto-merge.
+   - New guard: the branch must equal `engine-images-lock/${GITHUB_SHA:0:12}`, so the job pushes only under
+     `engine-images-lock/` and exactly one branch per source commit.
+   - The step summary names the branch, the compare URL
+     `https://github.com/<owner>/<repo>/compare/main...engine-images-lock/<commit12>?expand=1`, the exact PR title,
+     and the PR body (inline). The title and `body.md` are also uploaded as the `engine-images-lock-pr` artifact
+     (90 days), so the master can open the PR with exactly that title and body.
+   - Tests: `scripts/engine-images-lock-bot.test.mjs` and `apps/gateway/src/zz-eng-img-engine-images.test.ts` now pin
+     contents-only permissions and assert that no `gh pr create` (or other `gh pr`/`gh api` call) remains and that the
+     summary carries the compare URL. `scripts/engine-images-lock-verify.test.mjs` no longer depends on a `COSIGN`
+     variable in the shell (the #479 review's Low).
+4. **Not verified (pending execution, M-041).** The job has not run since this change: the summary's rendering, the
+   artifact upload and the green exit are checked on the next publish on `main`.
+5. **Not changed here.** The body text that `scripts/engine-images-lock-bot.mjs` writes still says the PR is "opened as
+   a draft with HOLD by GITHUB_TOKEN". Under this decision the master opens it, so that sentence is now inaccurate; it
+   is left for a follow-up.
