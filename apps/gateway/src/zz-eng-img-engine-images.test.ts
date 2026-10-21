@@ -41,10 +41,11 @@ describe("ENG-IMG: the engine image workflows", () => {
     const jobPublish = publish.slice(publish.indexOf("\n  publish:"), publish.indexOf("\n  record:"));
     expect(jobPublish).toMatch(/permissions:\n {6}contents: read\n {6}packages: write\n {6}id-token: write\n/);
     expect(publish).not.toMatch(/attestations: write/);
-    // the only write to contents and pull requests is the lock-pr job's
+    // the only write to contents is the lock-pr job's, and no job writes pull requests (push-only, 2026-10-21)
     const jobLockPr = publish.slice(publish.indexOf("\n  lock-pr:"));
-    expect(publish.match(/contents: write|pull-requests: write/g)).toHaveLength(2);
-    expect(jobLockPr).toMatch(/permissions:\n {6}contents: write\n {6}pull-requests: write\n/);
+    expect(publish.match(/contents: write/g)).toHaveLength(1);
+    expect(publish).not.toMatch(/pull-requests:/);
+    expect(jobLockPr).toMatch(/permissions:\n {6}contents: write\n {4}steps:/);
     // the token is GITHUB_TOKEN, nothing else
     for (const s of publish.match(/secrets\.[A-Z_]+/g) ?? []) expect(s).toBe("secrets.GITHUB_TOKEN");
   });
@@ -70,10 +71,11 @@ describe("ENG-IMG: the engine image workflows", () => {
     expect(publish).not.toMatch(/name: Sign \(skipped/);
   });
 
-  it("N10: lock-pr opens one draft PR whose title must start with HOLD, and nothing merges it or marks it ready", () => {
+  it("N10: lock-pr only pushes one branch (the PR title must start with HOLD); it opens, merges and readies nothing", () => {
     const jobLockPr = publish.slice(publish.indexOf("\n  lock-pr:"));
-    expect(jobLockPr).toContain('gh pr create --draft --base main --head "$branch" --title "$title"');
-    expect(jobLockPr.match(/gh pr create/g)).toHaveLength(1);
+    // owner decision on #453 (2026-10-21): push-only; the master opens the draft HOLD PR from the compare URL
+    expect(jobLockPr).not.toMatch(/\bgh (pr|api)\b/);
+    expect(jobLockPr).toContain("https://github.com/${REPOSITORY}/compare/main...${branch}?expand=1");
     // the HOLD refusal runs before anything is committed or pushed
     const refusal = jobLockPr.indexOf('case "$title" in "HOLD "*) ;; *) echo "::error::the lock PR title must start with HOLD"; exit 1 ;; esac');
     expect(refusal).toBeGreaterThan(-1);
