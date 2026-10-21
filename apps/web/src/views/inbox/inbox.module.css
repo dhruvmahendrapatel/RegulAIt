@@ -10,6 +10,12 @@
   align-items: flex-start;
   gap: var(--s1);
 }
+/* L2 (ADR-0180): the reason warning and the decision row, pinned together in the drawer's footer */
+.pinned {
+  flex: 1 1 100%;
+  display: grid;
+  gap: var(--s1);
+}
 .warning {
   margin: 0;
   color: var(--rg-high-deep);

@@ -5,7 +5,7 @@
  * conflicts (both texts side by side), and delegated items. Approve/deny with
  * reasons; admin overrides and self-reviews require one.
  */
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api/client";
@@ -26,6 +26,7 @@ import {
   SkeletonBlock,
   StatusBadge,
 } from "../../ui/kit";
+import { DetailDrawer, DrawerActions } from "../../ui/DetailDrawer";
 import { useToast } from "../../ui/toast";
 import { McpActionReview } from "../approvals/McpActionReview";
 import { inspectApprovalAction, isBoundAction } from "../approvals/approvalReview";
@@ -66,6 +67,11 @@ export default function InboxPage() {
   const [reasons, setReasons] = useState<Record<string, string>>({});
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
   const [deciding, setDeciding] = useState<string | null>(null);
+  const [openId, setOpenId] = useState<string | null>(null);
+  const closeItem = useCallback(() => setOpenId(null), []);
+  // L1 (WCAG 2.4.3): the item just decided, and where it sat in the list
+  const decidedFrom = useRef<{ id: string; index: number } | null>(null);
+  const list = useRef<HTMLDivElement>(null);
 
   const q = useQuery({
     queryKey: ["approvals"],
@@ -82,6 +88,18 @@ export default function InboxPage() {
   const approvals = q.data?.approvals ?? [];
   const pending = approvals.filter((a) => a.status === "pending");
   const decided = approvals.filter((a) => a.status !== "pending").slice(0, 12);
+  // L1: a decided item leaves the list, taking its drawer and the Review button that opened it, so focus moves to
+  // the next item's Review button (the one before it when it was last), or to the page heading when none is left
+  useEffect(() => {
+    const from = decidedFrom.current;
+    if (!from || pending.some((a) => a.id === from.id)) return;
+    decidedFrom.current = null;
+    const active = document.activeElement;
+    if (active && active !== document.body && active.isConnected) return;
+    const reviews = [...(list.current?.querySelectorAll<HTMLElement>("[data-inbox-row]") ?? [])].map((row) => row.querySelector<HTMLElement>("[data-inbox-review]"));
+    const next = reviews.slice(from.index).find(Boolean) ?? reviews.slice(0, from.index).reverse().find(Boolean);
+    (next ?? document.querySelector<HTMLElement>("h1"))?.focus();
+  });
 
   // merge-gate evidence: fetch each governed workflow instance once (the read
   // endpoint admits the named approver)
@@ -123,6 +141,7 @@ export default function InboxPage() {
       setDeciding(a.id);
       try {
         const out = await decideApproval<{ status?: string; approvals?: number; quorum?: number }>(a, decision, reason || undefined);
+        if (out?.status !== "pending") decidedFrom.current = { id: a.id, index: pending.indexOf(a) };
         toast(
           out?.status === "pending"
             ? `Recorded — ${out.approvals ?? 1} of ${out.quorum ?? 2} approvals, waiting for another approver`
@@ -157,6 +176,7 @@ export default function InboxPage() {
         decision,
         ...(reason ? { reason } : {}),
       });
+      decidedFrom.current = { id: a.id, index: pending.indexOf(a) };
       toast(decision === "approved" ? "Approved" : "Denied", "success");
       void queryClient.invalidateQueries({ queryKey: ["approvals"] });
     } catch (e) {
@@ -165,6 +185,58 @@ export default function InboxPage() {
       setDeciding(null);
     }
   };
+
+  const itemView = (a: Approval): ItemView => {
+    const named = me === a.approverUserId;
+    const delegated = Boolean(a.delegatedFrom);
+    const toolCall = isToolCallApproval(a);
+    // a tool-call row reaches this inbox only for its approver pool; the
+    // caller never decides it, and nobody decides it twice
+    const canDecide = toolCall
+      ? a.userId !== me && !a.myDecision
+      : named || delegated || Boolean(auth?.isAdmin);
+    const target = approvalTarget(a);
+    const inst = a.instanceId ? instances[a.instanceId] : undefined;
+    const intake = isIntakeSignoff(a);
+    // an intake sign-off is decided in ReviewPanel, which owns its rules and copy (a proposer never decides
+    // their own use case; a role member is a named reviewer), so none of the override or own-request text here
+    const ownRules = !toolCall && !intake;
+    const override = ownRules && !named && !delegated && Boolean(auth?.isAdmin);
+    // G2: where the server requires a reason (an override, or approving your own request), the field says so
+    // and Approve waits for one. Stricter than before, never looser: the server still checks it
+    const reasonRequired = override || (ownRules && Boolean(a.selfReview));
+    const missingReason = reasonRequired && !(reasons[a.id] ?? "").trim();
+    const controls = (blockedReason: string | null) => <div className={ib.decide}>
+      <Input style={{ maxWidth: 260 }}
+        placeholder={reasonRequired ? "Reason (required)" : "Reason (optional)"}
+        aria-label="Decision reason" aria-required={reasonRequired || undefined} value={reasons[a.id] ?? ""}
+        onChange={(e) => setReasons((r) => ({ ...r, [a.id]: e.target.value }))} />
+      <div className={v.row}>
+        <Button size="sm" disabled={deciding === a.id} onClick={() => void decide(a, "denied")}>Deny</Button>
+        <Button size="sm" variant="primary" disabled={deciding === a.id || !!blockedReason || missingReason} onClick={() => void decide(a, "approved")}>Approve</Button>
+      </div>
+      {missingReason && <span className={v.faint}>Approve unlocks once a reason is entered</span>}
+      {toolCall && signatureModeOf(a) === "passkey" && (
+        <span className={v.faint}>
+          Signs with your passkey
+          <InfoButton label="passkey signing" align="end">Your browser asks for your passkey. The signature covers this exact call.</InfoButton>
+        </span>
+      )}
+      {rowErrors[a.id] && <div className={v.errLine} role="alert">{rowErrors[a.id]}</div>}
+    </div>;
+    const awaiting = toolCall && a.myDecision
+      ? `you ${a.myDecision} this — waiting for another approver`
+      : toolCall && a.userId === me
+        ? "your own call — someone else in the approver pool decides it"
+        : `awaiting ${a.approverName ?? "the named approver"}`;
+    const name = a.objectLabel ? (intake ? intakeUseCaseName(a) : a.objectLabel) : approvalLabel(a);
+    return { delegated, toolCall, canDecide, target, inst, intake, ownRules, override, reasonRequired, controls, awaiting, name, bound: isBoundAction(a) };
+  };
+  // owner decision on #453 (A1): a pending item's evidence and decision open in the shared detail drawer.
+  // An intake sign-off and an MCP action keep their own review dialogs. A decided item leaves the pending
+  // list, so its drawer closes with it
+  const open = pending.find((a) => a.id === openId && !isIntakeSignoff(a) && !isBoundAction(a)) ?? null;
+  const openView = open ? itemView(open) : null;
 
   if (q.isLoading) {
     return (
@@ -196,6 +268,7 @@ export default function InboxPage() {
       />
       <div className={v.stack}>
         <Card>
+          <div ref={list}>
           {pending.length === 0 ? (
             <EmptyState
               title={annotationItems.length > 0 ? "No sign-offs waiting on you" : "Nothing waiting on you"}
@@ -203,110 +276,77 @@ export default function InboxPage() {
             />
           ) : (
             pending.map((a) => {
-              const named = me === a.approverUserId;
-              const delegated = Boolean(a.delegatedFrom);
-              const toolCall = isToolCallApproval(a);
-              // a tool-call row reaches this inbox only for its approver pool; the
-              // caller never decides it, and nobody decides it twice
-              const canDecide = toolCall
-                ? a.userId !== me && !a.myDecision
-                : named || delegated || Boolean(auth?.isAdmin);
-              const target = approvalTarget(a);
-              const inst = a.instanceId ? instances[a.instanceId] : undefined;
-              const intake = isIntakeSignoff(a);
-              // an intake sign-off is decided in ReviewPanel, which owns its rules and copy (a proposer never decides
-              // their own use case; a role member is a named reviewer), so none of the override or own-request text here
-              const ownRules = !toolCall && !intake;
-              const override = ownRules && !named && !delegated && Boolean(auth?.isAdmin);
-              // G2: where the server requires a reason (an override, or approving your own request), the field says so
-              // and Approve waits for one. Stricter than before, never looser: the server still checks it
-              const reasonRequired = override || (ownRules && Boolean(a.selfReview));
-              const missingReason = reasonRequired && !(reasons[a.id] ?? "").trim();
-              const controls = (blockedReason: string | null) => <div className={ib.decide}>
-                <Input style={{ maxWidth: 260 }}
-                  placeholder={reasonRequired ? "Reason (required)" : "Reason (optional)"}
-                  aria-label="Decision reason" aria-required={reasonRequired || undefined} value={reasons[a.id] ?? ""}
-                  onChange={(e) => setReasons((r) => ({ ...r, [a.id]: e.target.value }))} />
-                <div className={v.row}>
-                  <Button size="sm" disabled={deciding === a.id} onClick={() => void decide(a, "denied")}>Deny</Button>
-                  <Button size="sm" variant="primary" disabled={deciding === a.id || !!blockedReason || missingReason} onClick={() => void decide(a, "approved")}>Approve</Button>
-                </div>
-                {missingReason && <span className={v.faint}>Approve unlocks once a reason is entered</span>}
-                {toolCall && signatureModeOf(a) === "passkey" && (
-                  <span className={v.faint}>
-                    Signs with your passkey
-                    <InfoButton label="passkey signing" align="end">Your browser asks for your passkey. The signature covers this exact call.</InfoButton>
-                  </span>
-                )}
-                {rowErrors[a.id] && <div className={v.errLine} role="alert">{rowErrors[a.id]}</div>}
-              </div>;
+              const it = itemView(a);
               return (
-                <div key={a.id} className={v.listRow} style={{ flexDirection: "column", alignItems: "stretch", gap: "var(--s1)" }}>
+                <div key={a.id} data-inbox-row className={v.listRow} style={{ flexDirection: "column", alignItems: "stretch", gap: "var(--s1)" }}>
                   {/* G2: the same order on every item: what kind, what, who asked and when, then any warning */}
-                  <div className={v.row}>
-                    <Badge>{approvalLabel(a)}</Badge>
-                    {intake && <IntakeTier approval={a} />}
-                    {ownRules && a.selfReview && (
-                      <Badge tone="warn" infoLabel="Your own request" info="Deciding this would approve your own request, whether you are the named approver or received it through a delegation. A recorded reason is required.">
-                        Your own request
-                      </Badge>
-                    )}
-                    {delegated && (
-                      <Badge tone="info" infoLabel="a delegated decision" info={`Delegated to you: your decision is recorded on behalf of ${a.delegatedFrom}.`}>
-                        for {a.delegatedFrom}
-                      </Badge>
-                    )}
-                    {override && (
-                      <Badge tone="warn" infoLabel="Admin override" info="You are not the named approver, so a reason is required.">
-                        Admin override
-                      </Badge>
-                    )}
-                    {a.assignment?.dueAt ? <Badge tone="warn">{`Due ${shortDate(a.assignment.dueAt)}`}</Badge> : null}
-                  </div>
-                  {(a.objectLabel || target) && (
-                    <strong className={ib.title}>
-                      {a.objectLabel
-                        ? intake ? intakeUseCaseName(a) : target ? <Link to={target}>{a.objectLabel}</Link> : a.objectLabel
-                        : <Link to={target!}>{`View ${humanize(a.objectType)}`}</Link>}
-                    </strong>
-                  )}
+                  <ItemBadges a={a} it={it} />
+                  {(a.objectLabel || it.target) && <strong className={ib.title}><ItemTitle a={a} it={it} /></strong>}
                   <div className={v.faint}>
-                    {intake ? "Use case" : humanize(a.objectType)} · requested by {a.requestedByName ?? "unknown"} · {ago(a.requestedAt)}
+                    {it.intake ? "Use case" : humanize(a.objectType)} · requested by {a.requestedByName ?? "unknown"} · {ago(a.requestedAt)}
                   </div>
-                  {reasonRequired && (
-                    <p className={ib.warning}>
-                      {override ? "You are not the named approver, so a reason is required." : "Deciding this approves your own request, so a reason is required."}
-                    </p>
-                  )}
-                  {intake ? (
+                  <ReasonWarning it={it} />
+                  {it.intake ? (
                     <div className={v.row}>
                       <ReviewPanel approval={a} />
-                      {!canDecide && <span className={v.faint}>awaiting {a.approverName ?? "the named approver"}</span>}
+                      {!it.canDecide && <span className={v.faint}>awaiting {a.approverName ?? "the named approver"}</span>}
                     </div>
-                  ) : <>
-                  {toolCall && <QuorumProgress approval={a} />}
-                  {inst && <MergeGateEvidence inst={inst} />}
-                  {a.contextConflict && <ConflictPreview conflict={a.contextConflict} />}
-                  {canDecide ? (
-                    isBoundAction(a) ? <McpActionReview approval={a} controls={controls} /> : controls(null)
-                  ) : (
-                    <>
-                      {isBoundAction(a) && <McpActionReview approval={a} />}
-                      <span className={v.faint}>
-                        {toolCall && a.myDecision
-                          ? `you ${a.myDecision} this — waiting for another approver`
-                          : toolCall && a.userId === me
-                            ? "your own call — someone else in the approver pool decides it"
-                            : `awaiting ${a.approverName ?? "the named approver"}`}
-                      </span>
-                    </>
+                  ) : it.bound ? <>
+                    {/* an MCP action keeps its own review dialog, which already opens from the row */}
+                    {it.toolCall && <QuorumProgress approval={a} />}
+                    {it.inst && <MergeGateEvidence inst={it.inst} />}
+                    {a.contextConflict && <ConflictPreview conflict={a.contextConflict} />}
+                    {it.canDecide ? <McpActionReview approval={a} controls={it.controls} /> : <>
+                      <McpActionReview approval={a} />
+                      <span className={v.faint}>{it.awaiting}</span>
+                    </>}
+                  </> : (
+                    <div className={v.row}>
+                      <Button size="sm" data-inbox-review aria-current={openId === a.id ? "true" : undefined} aria-label={`Review ${it.name}`} onClick={() => setOpenId(a.id)}>
+                        Review
+                      </Button>
+                      {!it.canDecide && <span className={v.faint}>{it.awaiting}</span>}
+                    </div>
                   )}
-                  </>}
                 </div>
               );
             })
           )}
+          </div>
         </Card>
+
+        {open && openView ? (
+          <DetailDrawer
+            type={approvalLabel(open)}
+            title={<ItemTitle a={open} it={openView} />}
+            subjectKey={open.id}
+            closeLabel="Close review"
+            data-testid="inbox-item"
+            meta={<ItemBadges a={open} it={openView} withKind={false} />}
+            onClose={closeItem}
+          >
+            <p className={v.faint}>
+              {humanize(open.objectType)} · requested by {open.requestedByName ?? "unknown"} · {ago(open.requestedAt)}
+            </p>
+            {openView.toolCall && <QuorumProgress approval={open} />}
+            {openView.inst && <MergeGateEvidence inst={openView.inst} />}
+            {open.contextConflict && <ConflictPreview conflict={open.contextConflict} />}
+            {/* owner decision on #453: say so when the request carries no evidence, rather than leave the body blank.
+                A workflow item whose evidence is still loading is not "no evidence", so it waits for the load */}
+            {!openView.toolCall && !open.instanceId && !open.contextConflict ? (
+              <p className={v.faint} data-testid="inbox-no-evidence">No evidence attached to this request.</p>
+            ) : null}
+            {/* L2 (ADR-0180): the reason warning, the reason and the decision stay together in the pinned footer */}
+            {openView.canDecide ? (
+              <DrawerActions>
+                <div className={ib.pinned} data-testid="inbox-decision">
+                  <ReasonWarning it={openView} />
+                  {openView.controls(null)}
+                </div>
+              </DrawerActions>
+            ) : <span className={v.faint}>{openView.awaiting}</span>}
+          </DetailDrawer>
+        ) : null}
 
         {annotationItems.length > 0 && <AnnotationsCard items={annotationItems} />}
 
@@ -333,6 +373,65 @@ export default function InboxPage() {
         )}
       </div>
     </>
+  );
+}
+
+interface ItemView {
+  delegated: boolean;
+  toolCall: boolean;
+  canDecide: boolean;
+  target: string | null;
+  inst: WorkflowDetailResponse | undefined;
+  intake: boolean;
+  /** the Inbox's own reason rules apply (not a tool call, not an intake sign-off, which ReviewPanel decides) */
+  ownRules: boolean;
+  override: boolean;
+  reasonRequired: boolean;
+  controls: (blockedReason: string | null) => JSX.Element;
+  awaiting: string;
+  name: string;
+  bound: boolean;
+}
+
+/** what kind of item, then the warnings that change how it is decided */
+function ItemBadges(props: { a: Approval; it: ItemView; withKind?: boolean }) {
+  const { a, it } = props;
+  return (
+    <div className={v.row}>
+      {props.withKind === false ? null : <Badge>{approvalLabel(a)}</Badge>}
+      {it.intake && <IntakeTier approval={a} />}
+      {it.ownRules && a.selfReview && (
+        <Badge tone="warn" infoLabel="Your own request" info="Deciding this would approve your own request, whether you are the named approver or received it through a delegation. A recorded reason is required.">
+          Your own request
+        </Badge>
+      )}
+      {it.delegated && (
+        <Badge tone="info" infoLabel="a delegated decision" info={`Delegated to you: your decision is recorded on behalf of ${a.delegatedFrom}.`}>
+          for {a.delegatedFrom}
+        </Badge>
+      )}
+      {it.override && (
+        <Badge tone="warn" infoLabel="Admin override" info="You are not the named approver, so a reason is required.">
+          Admin override
+        </Badge>
+      )}
+      {a.assignment?.dueAt ? <Badge tone="warn">{`Due ${shortDate(a.assignment.dueAt)}`}</Badge> : null}
+    </div>
+  );
+}
+
+function ItemTitle(props: { a: Approval; it: ItemView }) {
+  const { a, it } = props;
+  if (a.objectLabel) return <>{it.intake ? intakeUseCaseName(a) : it.target ? <Link to={it.target}>{a.objectLabel}</Link> : a.objectLabel}</>;
+  return it.target ? <Link to={it.target}>{`View ${humanize(a.objectType)}`}</Link> : <>{approvalLabel(a)}</>;
+}
+
+function ReasonWarning(props: { it: ItemView }) {
+  if (!props.it.reasonRequired) return null;
+  return (
+    <p className={ib.warning}>
+      {props.it.override ? "You are not the named approver, so a reason is required." : "Deciding this approves your own request, so a reason is required."}
+    </p>
   );
 }
 

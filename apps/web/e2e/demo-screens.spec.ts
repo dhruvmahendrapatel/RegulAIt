@@ -331,11 +331,15 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
     const row = morgan
       .locator("div")
       .filter({ has: morgan.locator(`a[href$="/workflows/${liveInstance}"]`) })
-      .filter({ has: morgan.getByRole("button", { name: "Approve" }) })
+      .filter({ has: morgan.getByRole("button", { name: /^Review / }) })
       .last();
     await expect(row).toBeVisible();
+    // the item's evidence and decision open in the shared detail drawer (owner decision on #453)
+    await row.getByRole("button", { name: /^Review / }).click();
+    const item = morgan.getByTestId("inbox-item");
+    await expect(item.getByRole("button", { name: "Approve" })).toBeVisible();
     await capture(morgan, MORGAN, "ds-s3h-morgan-inbox");
-    await row.getByRole("button", { name: "Approve" }).click();
+    await item.getByRole("button", { name: "Approve" }).click();
     await settleWithStepUp(morgan, morgan.getByText("Approved", { exact: true }).first(), PERSONA_EMAIL.morgan);
     await expect(morgan.getByText("Approved", { exact: true }).first()).toBeVisible();
     await capture(morgan, MORGAN, "ds-s3i-morgan-approved");

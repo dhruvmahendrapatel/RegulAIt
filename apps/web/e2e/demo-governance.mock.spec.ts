@@ -217,8 +217,11 @@ test("enterprise governance demo surfaces render and complete their core actions
   await page.getByRole("button", { name: /inherits a HIGH rating/ }).click();
   await page.getByRole("button", { name: "Post to chat" }).click();
   await expect(page.getByRole("status")).toContainText("Posted to security-slack · C-GOVERNANCE");
+  // the alert's detail is a drawer over the page: close it to reach Evaluate now, then reopen it
+  await page.getByRole("button", { name: "Close alert" }).click();
   await page.getByRole("button", { name: "Evaluate now" }).click();
   await expect(page.getByText(/Evaluation raised 0, refreshed 1/)).toBeVisible();
+  await page.getByRole("button", { name: /inherits a HIGH rating/ }).click();
   const acknowledgement = page.getByLabel("Acknowledgement note — required and audited");
   await acknowledgement.fill("x".repeat(501));
   await expect(acknowledgement).toHaveValue("x".repeat(500));
