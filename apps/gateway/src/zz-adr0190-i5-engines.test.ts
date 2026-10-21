@@ -470,7 +470,9 @@ describe("ADR-0190 I5: the first-enable basis is a fresh executor attestation of
   it("an active executor's fresh L2 pass for the shipped engine-worker profile is the basis, recorded whole", async () => {
     const ex = await rig("basis", new FakeSandboxBackend({ backend: "gvisor", classes: ["user_space_kernel"] }));
     await ex.run(1);
-    const basis = await engineWorkerAttestationBasis(db);
+    // scoped to this rig's executor: the shared test database holds other suites' active executors (a
+    // customer_declared one would otherwise be read first, and its class reported)
+    const basis = await engineWorkerAttestationBasis(db, { onlyExecutorIds: [ex.executorId] });
     expect(basis).toMatchObject({ attested: true, reason: "attested", requiredClass: "user_space_kernel", attestationClass: "user_space_kernel" });
     expect(basis.profileDigest).toMatch(/^[0-9a-f]{64}$/);
     // and the verdict a runner without its worker's own report gets rests on it

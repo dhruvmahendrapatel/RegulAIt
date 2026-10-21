@@ -15,6 +15,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { auditLog, createDb, discoveryRuns, discoverySources, endpointDevices, eq, runMigrations, shadowAiFindings, sql, workflowInstances, type Db } from "@regulait/db";
+import { SHADOW_AI_RULE_IDS } from "./shadow-ai.js";
 import { DEMO_SHADOW_DISCOVERY as D } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { checkShadowDiscovery, demoShadowNeverStored, leakedShadowNames, SHADOW_DISCOVERY_BEATS } from "./demo-check-lib.js";
@@ -70,6 +71,18 @@ const TABLES = {
   federationKeys: sql`SELECT count(*)::int AS n FROM federation_signing_keys`,
   signatures: sql`SELECT count(*)::int AS n FROM ai_endpoint_signatures`,
 };
+/** the import example's fictional catalogue row: its catalogue-write audit rows and its `last_updated_at` */
+async function exampleSignature(): Promise<{ audits: number; updatedAt: string | null }> {
+  const a = (await db.execute(
+    sql`SELECT count(*)::int AS n FROM audit_log WHERE rule_id = ${SHADOW_AI_RULE_IDS.catalogueUpserted}
+          AND object_id IN (SELECT id FROM ai_endpoint_signatures WHERE lower(value) = lower(${D.importExample.host}))`,
+  )) as unknown as { rows: Array<{ n: number }> };
+  const u = (await db.execute(
+    sql`SELECT max(last_updated_at)::text AS t FROM ai_endpoint_signatures WHERE lower(value) = lower(${D.importExample.host})`,
+  )) as unknown as { rows: Array<{ t: string | null }> };
+  return { audits: Number(a.rows[0]!.n), updatedAt: u.rows[0]!.t };
+}
+
 async function counts(): Promise<Record<string, number>> {
   const out: Record<string, number> = {};
   for (const [k, q] of Object.entries(TABLES)) {
@@ -204,11 +217,18 @@ describe("ADR-0197 decision 7: the fallback Shadow-AI discovery dataset", () => 
   }, 180_000);
 
   it("is idempotent: both phases again create nothing and leave every count as it was", async () => {
+    const before = await exampleSignature();
+    // non-vacuous: the first run did write the fictional catalogue row, through the audited route
+    expect(before.audits).toBeGreaterThanOrEqual(1);
+    expect(before.updatedAt).not.toBeNull();
     const s = await seedShadowSetup(app, db, D, OPTS);
     const t = await seedShadowStory(app, db, D, OPTS);
     expect([...s.failed, ...t.failed]).toEqual([]);
     expect([...s.created, ...t.created]).toEqual([]);
     expect(await counts()).toEqual(first);
+    // PR #462 recheck L2: the rerun does not rewrite the fictional catalogue row (no POST, so no audit row and no
+    // `lastUpdatedAt` bump), not merely "reports nothing created"
+    expect(await exampleSignature()).toEqual(before);
   }, 180_000);
 });
 

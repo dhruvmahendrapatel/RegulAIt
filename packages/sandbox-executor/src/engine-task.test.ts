@@ -134,13 +134,13 @@ function hostBackend(calls: string[][], inputDir: string | null) {
   return new RunscDockerBackend({
     runtimeName: "runsc",
     canaryImage: IMAGE,
-    runtimeVersion: "release-20261005.0",
+    runtimeVersion: "release-20261012.0",
     initSource: INIT,
     initDir: path.join(dir, "volume"),
     initVolume: "regulait-init",
     runscBinary: fakeRunsc,
     runscHostPath: RUNSC_HOST,
-    sha512File: async () => RUNSC_RELEASES["release-20261005.0"]!,
+    sha512File: async () => RUNSC_RELEASES["release-20261012.0"]!,
     inputDir,
     inputVolume: inputDir ? "regulait-input" : null,
     dockerApi: async (p: string) => {
