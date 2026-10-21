@@ -23,6 +23,7 @@ import ds from "./discoverySources.module.css";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, RowActions, Select, Table, Textarea } from "../../../ui/kit";
+import { FoldTable } from "../../../ui/fold";
 import { QueryGate, Stat, useAction } from "../adminKit";
 import v from "../../views.module.css";
 import FederationCard from "./FederationCard";
@@ -454,7 +455,7 @@ export default function DiscoverySourcesPage() {
             countNoun={["run", "runs"]}
             attention={failedRuns > 0 ? <Badge tone="danger">{failedRuns} failed</Badge> : undefined}
           >
-            <Table<DiscoveryRunView>
+            <FoldTable<DiscoveryRunView>
               rows={runs.data?.runs ?? []}
               rowKey={(r) => r.id}
               empty={<EmptyState title="No scan has run" body="Runs appear here once an enabled source is scanned." />}

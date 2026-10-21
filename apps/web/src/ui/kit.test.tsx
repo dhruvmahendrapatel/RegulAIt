@@ -5,7 +5,8 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../api/client";
-import { Badge, Card, EmptyState, Field, Fieldset, foldHosts, InfoButton, Input, RecordError, RowActions, Table, Tabs, tabIds } from "./kit";
+import { Badge, Card, EmptyState, Field, Fieldset, InfoButton, Input, RecordError, RowActions, Table, Tabs, tabIds } from "./kit";
+import { FoldTable, foldHosts } from "./fold";
 // Digest lives with the BOM evidence panel; it is tested here with the other shared primitives
 import { Digest } from "../views/admin/governance/BomEvidencePanel";
 
@@ -317,7 +318,7 @@ describe("Column.fold — a narrow table moves values into another column, never
   });
 
   it("renders every column, unfolded, where layout is not measured", () => {
-    const html = renderToStaticMarkup(<Table<R> columns={cols} rows={[{ id: "r1" }]} rowKey={(r) => r.id} />);
+    const html = renderToStaticMarkup(<FoldTable<R> columns={cols} rows={[{ id: "r1" }]} rowKey={(r) => r.id} />);
     expect(html.match(/<th[ >]/g)).toHaveLength(4);
     expect(html).not.toContain("data-fold=");
   });

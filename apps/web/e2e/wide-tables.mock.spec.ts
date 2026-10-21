@@ -94,8 +94,23 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
+// a foldable card's title is inside its fold button, with its count ("Inventory 4 findings"); a plain card's is text
 const cardOf = (page: Page, title: string) =>
-  page.locator("section[data-rg-card]").filter({ has: page.getByText(title, { exact: true }) }).filter({ has: page.locator("tbody tr") }).first();
+  page
+    .locator("section[data-rg-card]")
+    .filter({ has: page.locator("button[aria-expanded][aria-controls]", { hasText: new RegExp(`^${title}`) }).or(page.getByText(title, { exact: true })) })
+    .filter({ has: page.locator("tbody tr") })
+    .first();
+
+/** the card, opened if it starts collapsed (X6b: Recent runs does), so its table has a width to fold on */
+async function openCard(page: Page, title: string): Promise<Locator> {
+  const card = cardOf(page, title);
+  await card.waitFor();
+  const fold = card.locator(":scope > div").first().locator('button[aria-expanded="false"]');
+  if (await fold.count()) await fold.click();
+  await expect(card.locator("tbody tr").first()).toBeVisible();
+  return card;
+}
 
 /**
  * How far the card's table reaches past the card: the widest of the table past its wrapper, any box between the table
@@ -131,7 +146,7 @@ for (const width of [1440, 1024, 390]) {
     test(`${t.name} fits its card at ${width} px`, async ({ page }) => {
       await page.setViewportSize({ width, height: 1000 });
       await page.goto(t.url);
-      expect(await overflow(cardOf(page, t.card))).toBe(0);
+      expect(await overflow(await openCard(page, t.card))).toBe(0);
     });
   }
 }
@@ -207,6 +222,7 @@ test("Audit entries on a phone: every value is a labelled line under Event, and 
   await page.goto("/ui/admin/audit");
   const card = cardOf(page, "Entries");
   await expect(card.locator("thead th")).toHaveCount(1);
+  await expect(card.locator("thead th")).toHaveText("Event · At · User · Effect · Deploy mode · Reason · Evidence");
   const row = card.locator("tbody tr").filter({ hasText: "not on the caller's allow-list" });
   for (const [key, label] of [["at", "At"], ["user", "User"], ["effect", "Effect"], ["reason", "Reason"]] as const) {
     await expect(row.locator(`[data-fold="${key}"]`).locator("span").first()).toHaveText(label);
@@ -218,7 +234,7 @@ test("Audit entries on a phone: every value is a labelled line under Event, and 
 
 test("Recent runs takes the full width, with Reveal a pseudonym in its own row below", async ({ page }) => {
   await page.goto("/ui/admin/shadow-ai/discovery-sources");
-  const runsCard = cardOf(page, "Recent runs");
+  const runsCard = await openCard(page, "Recent runs");
   const reveal = page.locator("section[data-rg-card]").filter({ has: page.getByText("Reveal a pseudonym", { exact: true }) });
   const [a, b] = [(await runsCard.boundingBox())!, (await reveal.boundingBox())!];
   expect(Math.abs(a.width - b.width)).toBeLessThanOrEqual(1);
@@ -227,4 +243,100 @@ test("Recent runs takes the full width, with Reveal a pseudonym in its own row b
   await expect(runsCard.locator("thead th")).toHaveText(["Source", "Status", "Queued", "Observed / matched", "Findings", "Catalogue gaps", "Reads"]);
   // a read the scanner could not make is still said in the row
   await expect(runsCard.locator("tbody tr").nth(2)).toContainText(/could not read/i);
+});
+
+/** the header texts and each row's folded lines (data-fold key → its label) */
+const heads = (card: Locator) => card.locator("thead th").allInnerTexts().then((all) => all.map((h) => h.replace(/\s+/g, " ").trim()));
+async function foldLabels(row: Locator, labels: Record<string, string>) {
+  for (const [key, label] of Object.entries(labels)) await expect(row.locator(`[data-fold="${key}"]`).locator("span").first()).toHaveText(label);
+}
+
+test("Inventory at 1024 px folds at md: Evidence and Seen under Subject, Confidence under Severity, each labelled", async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 1000 });
+  await page.goto("/ui/admin/shadow-ai");
+  const card = await openCard(page, "Inventory");
+  await expect(card.locator("[data-fold-step]")).toHaveAttribute("data-fold-step", "md");
+  expect(await heads(card)).toEqual(["Severity · Confidence", "Subject · Evidence · Seen", "Status", "Next step"]);
+  const row = card.locator("tbody tr", { hasText: findings[2]!.subject });
+  await foldLabels(row, { sources: "Evidence", observations: "Seen", confidence: "Confidence" });
+  // L1: a short value stays on its label's line ("Confidence [High]"), as in the mockup
+  const [label, value] = await row.locator('[data-fold="confidence"] > span').evaluateAll((spans) => spans.map((s) => s.getBoundingClientRect().top));
+  expect(Math.abs(label! - value!)).toBeLessThanOrEqual(4);
+});
+
+test("Recent runs at 1024 px, opened from collapsed, folds at md with every value labelled and no overflow", async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 1000 });
+  await page.goto("/ui/admin/shadow-ai/discovery-sources");
+  const card = cardOf(page, "Recent runs");
+  // X6b: the card starts collapsed, so its table measures nothing until it opens
+  await expect(card.locator("tbody tr").first()).toBeHidden();
+  await openCard(page, "Recent runs");
+  await expect(card.locator("[data-fold-step]")).toHaveAttribute("data-fold-step", "md");
+  expect(await overflow(card)).toBe(0);
+  expect(await heads(card)).toEqual(["Source · Queued", "Status · Reads", "Findings · Observed / matched", "Catalogue gaps"]);
+  await foldLabels(card.locator("tbody tr").nth(2), { when: "Queued", counts: "Observed / matched", reads: "Reads" });
+  await expect(card.locator("tbody tr").nth(2).locator('[data-fold="reads"]')).toContainText(/could not read/i);
+});
+
+test("Recent runs on a phone: Findings, Catalogue gaps and the md folds sit under Source, each labelled", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 1000 });
+  await page.goto("/ui/admin/shadow-ai/discovery-sources");
+  const card = await openCard(page, "Recent runs");
+  await expect(card.locator("[data-fold-step]")).toHaveAttribute("data-fold-step", "sm");
+  expect(await heads(card)).toEqual(["Source · Queued · Observed / matched · Findings · Catalogue gaps", "Status · Reads"]);
+  await foldLabels(card.locator("tbody tr").first(), { when: "Queued", counts: "Observed / matched", findings: "Findings", gaps: "Catalogue gaps" });
+  await expect(card.locator("tbody tr").first().locator('[data-fold="gaps"]').getByTestId("catalogue-gap")).toHaveCount(2);
+  await expect(card.locator("tbody tr").nth(3)).toContainText("credential_refused");
+});
+
+test("the use-case audit trail on a phone: every value is a labelled line under Event", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 1000 });
+  await page.goto(`/ui/admin/audit?objectType=ai_use_case&objectId=${USE_CASE}`);
+  const card = cardOf(page, "Entries");
+  await expect(card.locator("[data-fold-step]")).toHaveAttribute("data-fold-step", "sm");
+  await expect(card.locator("thead th")).toHaveCount(1);
+  const row = card.locator("tbody tr").filter({ hasText: "Credit memo assistant" }).first();
+  await foldLabels(row, { at: "At", user: "User", effect: "Effect", deployMode: "Deploy mode", reason: "Reason" });
+});
+
+test("Audit entries at 1024 px: a folded column keeps its own sort, from its name in the host header (M1)", async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 1000 });
+  await page.goto("/ui/admin/audit");
+  const card = cardOf(page, "Entries");
+  await expect(card.locator("[data-fold-step]")).toHaveAttribute("data-fold-step", "md");
+  expect(await heads(card)).toEqual(["At · User", "Event", "Effect · Deploy mode", "Reason", "Evidence"]);
+  await foldLabels(card.locator("tbody tr").first(), { user: "User", deployMode: "Deploy mode" });
+  const effect = card.locator("thead th", { hasText: "Effect" });
+  const rows = card.locator("tbody tr");
+  // the only recorded deploy mode ("byoc") sorts before "not recorded", and after it when reversed
+  await effect.getByRole("button", { name: "Deploy mode", exact: true }).click();
+  await expect(effect).toHaveAttribute("aria-sort", "ascending");
+  await expect(rows.first()).toContainText("held for a separate approver");
+  await effect.getByRole("button", { name: "Deploy mode", exact: true }).click();
+  await expect(effect).toHaveAttribute("aria-sort", "descending");
+  await expect(rows.last()).toContainText("held for a separate approver");
+  // the host's own header text still sorts the host: by Effect, allow < deny < require approval
+  await effect.click({ position: { x: 12, y: 12 } });
+  await expect(effect).toHaveAttribute("aria-sort", "ascending");
+  await expect(rows.nth(4)).toContainText("not on the caller's allow-list");
+  await expect(rows.nth(5)).toContainText("held for a separate approver");
+  // one arrow, beside the column that sorts
+  await expect(effect.locator("span", { hasText: /^[▲▼]$/ })).toHaveCount(1);
+  // a column that is not folded still announces only its own sort
+  await expect(card.locator("thead th", { hasText: "Event" })).not.toHaveAttribute("aria-sort", /.+/);
+});
+
+test("on a phone a foldable card's header wraps: the title keeps one line and the filters move below it (M2)", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 1000 });
+  await page.goto("/ui/admin/shadow-ai");
+  const header = (await openCard(page, "Inventory")).locator(":scope > div").first();
+  const fold = header.locator("button[aria-expanded]");
+  const filters = header.getByRole("button", { name: /^All/ });
+  const [f, a] = [(await fold.boundingBox())!, (await filters.boundingBox())!];
+  // one 44 px line: "Inventory 4 findings" is not squeezed onto two
+  expect(f.height).toBeLessThanOrEqual(44);
+  expect(a.y).toBeGreaterThanOrEqual(f.y + f.height);
+  // the same rule as a plain card's title (#453): it is as wide as its content before anything shrinks it, so a
+  // header that does not fit wraps its actions instead of squeezing the title
+  await expect(header.locator(":scope > span").first()).toHaveCSS("flex-basis", "max-content");
 });

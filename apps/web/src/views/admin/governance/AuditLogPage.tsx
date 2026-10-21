@@ -28,6 +28,7 @@ import { UUID_RE, actorLabel, fmtAt, frameworkLabel, humanize, plural, shortId }
 import type { AuditRetention } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, ConfirmModal, EmptyState, Field, InfoButton, Select, Table, type Tone } from "../../../ui/kit";
+import { FoldTable } from "../../../ui/fold";
 import { useToast } from "../../../ui/toast";
 import { downloadCsv, optionEls, useAction, useUsers, userOpts } from "../adminKit";
 import a from "../admin.module.css";
@@ -240,7 +241,7 @@ export default function AuditLogPage() {
               </Button>
             </p>
           )}
-          <Table<AuditEntry & { rowKey: string }>
+          <FoldTable<AuditEntry & { rowKey: string }>
             columns={[
               // F25 (#453): below 1000 px of table width, User folds under At and Deploy mode under Effect; on a phone
               // every value is a labelled line under Event

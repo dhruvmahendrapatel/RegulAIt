@@ -7,7 +7,6 @@
 import {
   Children,
   cloneElement,
-  Fragment,
   forwardRef,
   isValidElement,
   useEffect,
@@ -903,53 +902,21 @@ export interface Column<T> {
    * 1000 px, `sm` under 600 px), this column's value moves into the cell of the column named here, as a line labelled
    * with this column's name, and its header and (i) join that column's header. The width is the table's, not the
    * window's, so a table beside the open drawer folds too. `sm` falls back to `md`; a host that is folded itself
-   * passes the value on. Values are moved, never removed; an empty value moves without its label.
+   * passes the value on. Values are moved, never removed; an empty value moves without its label. FoldTable
+   * (ui/fold.tsx) does the folding; Table renders every column.
    */
   fold?: { md?: string; sm?: string };
+  /** set by FoldTable: a column folded into another has no cell of its own, but keeps its sort */
+  hidden?: boolean;
+  /** set by FoldTable: after the header, the names of the columns folded into this one; `sortKeys` are its sorts */
+  head?: (sort: TableSort) => ReactNode;
+  sortKeys?: string[];
 }
 
-export type FoldStep = "lg" | "md" | "sm";
+/** the sort a Table hands to a column's `head`, so a column folded into another keeps its own sort (ui/fold.tsx) */
+export type TableSort = { key: string | null; dir: 1 | -1; by: (key: string) => void };
 
-/** the column each column renders in at this step: its own key, or the key of the column that hosts it (exported for its test) */
-export function foldHosts<T>(columns: Array<Column<T>>, step: FoldStep): Map<string, string> {
-  const next = (c: Column<T>) => (step === "sm" ? c.fold?.sm ?? c.fold?.md : step === "md" ? c.fold?.md : undefined);
-  const byKey = new Map(columns.map((c) => [c.key, c]));
-  const hosts = new Map<string, string>();
-  for (const c of columns) {
-    // a chain is followed to its end; a loop (or a key that names no column) leaves the column where it is
-    const seen = new Set([c.key]);
-    let at = c;
-    let to = next(at);
-    while (to != null && byKey.has(to) && !seen.has(to)) {
-      seen.add(to);
-      at = byKey.get(to)!;
-      to = next(at);
-    }
-    hosts.set(c.key, to != null && seen.has(to) ? c.key : at.key);
-  }
-  return hosts;
-}
-
-const foldLabel = <T,>(c: Column<T>) => (typeof c.header === "string" ? c.header : c.infoLabel ?? c.key);
-const isEmpty = (value: ReactNode) => value == null || value === false || value === "";
-
-/** the table's own width, so a page narrowed by the drawer folds its table on a wide window */
-function useFoldStep(wrap: React.RefObject<HTMLDivElement | null>, enabled: boolean): FoldStep {
-  const [step, setStep] = useState<FoldStep>("lg");
-  useLayoutEffect(() => {
-    const el = wrap.current;
-    if (!enabled || !el) return;
-    const check = () => setStep(el.clientWidth < 600 ? "sm" : el.clientWidth < 1000 ? "md" : "lg");
-    check();
-    if (typeof ResizeObserver === "undefined") return;
-    const ro = new ResizeObserver(check);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [wrap, enabled]);
-  return enabled ? step : "lg";
-}
-
-export function Table<T>(props: {
+export type TableProps<T> = {
   columns: Array<Column<T>>;
   rows: T[] | undefined;
   rowKey: (row: T) => string;
@@ -965,7 +932,9 @@ export function Table<T>(props: {
   onRetry?: () => void;
   onRowClick?: (row: T) => void;
   rowLabel?: (row: T) => string;
-}) {
+};
+
+export function Table<T>(props: TableProps<T>) {
   const [sortKey, setSortKey] = useState<string | null>(null);
   const [sortDir, setSortDir] = useState<1 | -1>(1);
   const sorted = useMemo(() => {
@@ -980,22 +949,17 @@ export function Table<T>(props: {
       return (av < bv ? -1 : av > bv ? 1 : 0) * sortDir;
     });
   }, [props.rows, props.columns, sortKey, sortDir]);
-  const wrap = useRef<HTMLDivElement>(null);
-  const step = useFoldStep(wrap, props.columns.some((c) => c.fold != null));
-  const { shown, folded } = useMemo(() => {
-    const hosts = foldHosts(props.columns, step);
-    const folded = new Map<string, Array<Column<T>>>();
-    for (const c of props.columns) {
-      const host = hosts.get(c.key)!;
-      if (host !== c.key) folded.set(host, [...(folded.get(host) ?? []), c]);
+  const by = (key: string) => {
+    if (sortKey === key) setSortDir((d) => (d === 1 ? -1 : 1));
+    else {
+      setSortKey(key);
+      setSortDir(1);
     }
-    return { shown: props.columns.filter((c) => hosts.get(c.key) === c.key), folded };
-  }, [props.columns, step]);
-  const info = (c: Column<T>) =>
-    c.info != null && <InfoButton label={c.infoLabel ?? (typeof c.header === "string" ? c.header : c.key)}>{c.info}</InfoButton>;
+  };
+  const shown = props.columns.filter((c) => !c.hidden);
 
   return (
-    <div className={s.tableWrap} ref={wrap} data-fold-step={step}>
+    <div className={s.tableWrap}>
       {/* aria-busy while the skeleton rows stand in for data, so the wait is announced like SkeletonBlock's */}
       <table className={s.table} aria-busy={props.loading || undefined}>
         <thead>
@@ -1006,35 +970,18 @@ export function Table<T>(props: {
               return (
                 <th
                   key={c.key}
-                  // the folded columns' names wrap between, never within, one another
-                  style={{ textAlign: c.align ?? "left", width: c.width, whiteSpace: folded.has(c.key) ? "normal" : undefined }}
+                  style={{ textAlign: c.align ?? "left", width: c.width }}
                   className={sortable ? s.thSortable : undefined}
-                  aria-sort={active ? (sortDir === 1 ? "ascending" : "descending") : undefined}
-                  onClick={
-                    sortable
-                      ? () => {
-                          if (active) setSortDir((d) => (d === 1 ? -1 : 1));
-                          else {
-                            setSortKey(c.key);
-                            setSortDir(1);
-                          }
-                        }
-                      : undefined
-                  }
+                  // a folded column's sort is announced on the header that now shows it
+                  aria-sort={sortKey != null && (c.sortKeys ?? [c.key]).includes(sortKey) ? (sortDir === 1 ? "ascending" : "descending") : undefined}
+                  onClick={sortable ? () => by(c.key) : undefined}
                 >
                   {c.header}
-                  {info(c)}
+                  {c.info != null && (
+                    <InfoButton label={c.infoLabel ?? (typeof c.header === "string" ? c.header : c.key)}>{c.info}</InfoButton>
+                  )}
                   {active && <span className={s.sortArrow}>{sortDir === 1 ? "▲" : "▼"}</span>}
-                  {/* the folded columns' names and (i), once, in the header of the column that now shows them */}
-                  {folded.get(c.key)?.map((f) => (
-                    <Fragment key={f.key}>
-                      {" "}
-                      <span style={{ whiteSpace: "nowrap" }}>
-                        · {f.header}
-                        {info(f)}
-                      </span>
-                    </Fragment>
-                  ))}
+                  {c.head?.({ key: sortKey, dir: sortDir, by })}
                 </th>
               );
             })}
@@ -1075,19 +1022,6 @@ export function Table<T>(props: {
                     {shown.map((c) => (
                       <td key={c.key} style={{ textAlign: c.align ?? "left" }}>
                         {c.render(row)}
-                        {folded.get(c.key)?.map((f) => {
-                          const value = f.render(row);
-                          return isEmpty(value) ? null : (
-                            // inline, as the entry CSS has no headroom (size-limit); the label is a .fieldLabel
-                            <div key={f.key} data-fold={f.key} style={{ display: "flex", flexWrap: "wrap", gap: "0 var(--s1)", marginTop: "var(--s0)" }}>
-                              <span className={s.fieldLabel} style={{ minWidth: "6rem" }}>
-                                {foldLabel(f)}
-                              </span>
-                              {/* a long code wraps rather than widening the narrow table it was folded to fit */}
-                              <span style={{ overflowWrap: "anywhere" }}>{value}</span>
-                            </div>
-                          );
-                        })}
                       </td>
                     ))}
                   </tr>

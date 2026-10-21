@@ -40,6 +40,7 @@ import { api } from "../../../api/client";
 import { ago, evidenceLabel, humanize, plural, providerLabel } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, CodeBlock, EmptyState, Field, InfoButton, Input, RowActions, Select, SeverityBadge, Table, Tabs, tabIds, Textarea } from "../../../ui/kit";
+import { FoldTable } from "../../../ui/fold";
 import {
   OutcomePanel,
   QueryGate,
@@ -551,7 +552,7 @@ export default function ShadowAiPage() {
           ) : findingRows.length === 0 ? (
             <EmptyState title="No finding has this status" body="Choose another status above." />
           ) : (
-            <Table<Finding>
+            <FoldTable<Finding>
               rows={findingRows}
               rowKey={(r) => r.id}
               columns={[
