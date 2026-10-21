@@ -56,7 +56,23 @@ export const CEILING_EXCEPTIONS = [
 const DECISION_LINK = /^https:\/\/github\.com\/dhruvmahendrapatel\/RegulAIt\/issues\/\d+#issuecomment-\d+$/;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
-/** problems with the exception rows themselves, as lines: a missing date or decision link, or a link `adrText` lacks */
+/**
+ * whether one line of `adrText` names this row's raise: `` `name` ``, then `` `from` ``, then `` `to` ``, each in
+ * backticks. The decision link alone is not enough: the ADR keeps it after the row goes, so a later row could cite it.
+ */
+function adrNamesRaise(e, adrText) {
+  const tick = (v) => `\`${v}\``;
+  return adrText.split("\n").some((line) => {
+    const n = line.indexOf(tick(e.name));
+    const f = n < 0 ? -1 : line.indexOf(tick(e.from), n + tick(e.name).length);
+    return f >= 0 && line.indexOf(tick(e.to), f + tick(e.from).length) >= 0;
+  });
+}
+
+/**
+ * problems with the exception rows themselves, as lines: a missing date or decision link, a link `adrText` lacks, or a
+ * raise (entry, from, to) that no line of `adrText` names
+ */
 export function ceilingExceptionProblems(exceptions, adrText) {
   const out = [];
   for (const e of exceptions) {
@@ -64,6 +80,7 @@ export function ceilingExceptionProblems(exceptions, adrText) {
     if (!ISO_DATE.test(e.date ?? "")) out.push(`${label}: no dated owner decision (date "${e.date}")`);
     if (!DECISION_LINK.test(e.decision ?? "")) out.push(`${label}: decision must link an owner comment (it is "${e.decision}")`);
     else if (!adrText.includes(e.decision)) out.push(`${label}: ${SIZE_LIMIT_ADR} does not record ${e.decision}`);
+    if (!adrNamesRaise(e, adrText)) out.push(`${label}: no line of ${SIZE_LIMIT_ADR} names \`${e.name}\` from \`${e.from}\` to \`${e.to}\``);
   }
   return out;
 }
@@ -156,9 +173,10 @@ export function parseBytes(value) {
 
 /**
  * what loosened from the `before` .size-limit.json to `after`, as lines: raised limits, removed or changed entries.
- * A raise that matches one of `exceptions` exactly (entry name, from and to in bytes) is not a line.
+ * A raise that matches one of `exceptions` exactly (entry name, from and to in bytes), and that `adrText` records (see
+ * ceilingExceptionProblems), is not a line.
  */
-export function sizeLimitLoosened(before, after, exceptions = []) {
+export function sizeLimitLoosened(before, after, exceptions = [], adrText = "") {
   const byName = (checks, side) => {
     const out = new Map();
     for (const c of checks) {
@@ -181,7 +199,9 @@ export function sizeLimitLoosened(before, after, exceptions = []) {
     const la = parseBytes(a.limit);
     if (la === null) out.push(`"${name}": limit "${a.limit}" is not a size`);
     else if (lb !== null && la > lb) {
-      const allowed = exceptions.some((e) => e.name === name && parseBytes(e.from) === lb && parseBytes(e.to) === la);
+      const allowed = exceptions.some(
+        (e) => e.name === name && parseBytes(e.from) === lb && parseBytes(e.to) === la && ceilingExceptionProblems([e], adrText).length === 0,
+      );
       if (!allowed) out.push(`"${name}": limit raised ${b.limit} -> ${a.limit}`);
     }
     if (options(a) !== options(b)) out.push(`"${name}": path, gzip or another option changed`);
@@ -243,6 +263,8 @@ function main(argv) {
   if (mode === "--guard" && arg) {
     const files = [...CATEGORIES.map((c) => relPath(path.join(BASELINE_DIR, `${c}.json`))), TOKENS_BASELINE];
     let failed = 0;
+    const adr = path.join(root, SIZE_LIMIT_ADR);
+    const adrText = existsSync(adr) ? readFileSync(adr, "utf8") : "";
     for (const file of files) {
       const before = atRef(arg, file)?.entries ?? null;
       if (before === null) {
@@ -259,14 +281,13 @@ function main(argv) {
     else {
       const file = path.join(root, SIZE_LIMIT_FILE);
       const limitsAfter = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : [];
-      const loosened = sizeLimitLoosened(limitsBefore, limitsAfter, CEILING_EXCEPTIONS);
+      const loosened = sizeLimitLoosened(limitsBefore, limitsAfter, CEILING_EXCEPTIONS, adrText);
       for (const line of loosened) {
         console.log(`::error file=${SIZE_LIMIT_FILE}::a bundle ceiling loosened (a ceiling rises only through an ADR-recorded exception): ${line}`);
       }
       failed += loosened.length;
     }
-    const adr = path.join(root, SIZE_LIMIT_ADR);
-    const unrecorded = ceilingExceptionProblems(CEILING_EXCEPTIONS, existsSync(adr) ? readFileSync(adr, "utf8") : "");
+    const unrecorded = ceilingExceptionProblems(CEILING_EXCEPTIONS, adrText);
     for (const line of unrecorded) console.log(`::error file=scripts/ui-enterprise-baseline.mjs::a ceiling exception is not an owner decision recorded in ADR-0196: ${line}`);
     failed += unrecorded.length;
     const bypass = sizeLimitBypass(JSON.parse(readFileSync(path.join(WEB_DIR, "package.json"), "utf8")), readdirSync(WEB_DIR));

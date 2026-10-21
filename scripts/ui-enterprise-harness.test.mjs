@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -160,30 +160,52 @@ describe("bundle-size ceilings guard (ADR-0196)", () => {
   });
 
   it("allows a raise only when an exception names that entry, that from and that to", () => {
-    const ex = [{ name: "entry JS", from: "817 kB", to: "818 kB", date: "2026-10-21", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-1" }];
-    expect(sizeLimitLoosened(base, edit("entry JS", { limit: "818 kB" }), ex)).toEqual([]);
-    expect(sizeLimitLoosened(base, edit("entry JS", { limit: "818000 B" }), ex)).toEqual([]);
+    const link = "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-1";
+    const ex = [{ name: "entry JS", from: "817 kB", to: "818 kB", date: "2026-10-21", decision: link }];
+    const adr = `owner decision ${link}: \`entry JS\` goes from \`817 kB\` to \`818 kB\`.`;
+    expect(sizeLimitLoosened(base, edit("entry JS", { limit: "818 kB" }), ex, adr)).toEqual([]);
+    expect(sizeLimitLoosened(base, edit("entry JS", { limit: "818000 B" }), ex, adr)).toEqual([]);
     // unreferenced: no exception, a different target, a different entry, or a base that is not `from`
     expect(sizeLimitLoosened(base, edit("entry JS", { limit: "818 kB" }))).toEqual(['"entry JS": limit raised 817 kB -> 818 kB']);
-    expect(sizeLimitLoosened(base, edit("entry JS", { limit: "819 kB" }), ex)).toEqual(['"entry JS": limit raised 817 kB -> 819 kB']);
-    expect(sizeLimitLoosened(base, edit("lazy", { limit: "80 kB" }), ex)).toEqual(['"lazy": limit raised 79 kB -> 80 kB']);
-    expect(sizeLimitLoosened(edit("entry JS", { limit: "810 kB" }), edit("entry JS", { limit: "818 kB" }), ex)).toEqual(['"entry JS": limit raised 810 kB -> 818 kB']);
+    expect(sizeLimitLoosened(base, edit("entry JS", { limit: "819 kB" }), ex, adr)).toEqual(['"entry JS": limit raised 817 kB -> 819 kB']);
+    expect(sizeLimitLoosened(base, edit("lazy", { limit: "80 kB" }), ex, adr)).toEqual(['"lazy": limit raised 79 kB -> 80 kB']);
+    expect(sizeLimitLoosened(edit("entry JS", { limit: "810 kB" }), edit("entry JS", { limit: "818 kB" }), ex, adr)).toEqual(['"entry JS": limit raised 810 kB -> 818 kB']);
     // an exception does not excuse a changed path
-    expect(sizeLimitLoosened(base, edit("entry JS", { limit: "818 kB", path: "dist/*.js" }), ex)).toEqual(['"entry JS": path, gzip or another option changed']);
+    expect(sizeLimitLoosened(base, edit("entry JS", { limit: "818 kB", path: "dist/*.js" }), ex, adr)).toEqual(['"entry JS": path, gzip or another option changed']);
+    // a matching row the ADR does not record allows nothing: no ADR text, or an ADR that cites the link for another raise
+    expect(sizeLimitLoosened(base, edit("entry JS", { limit: "818 kB" }), ex)).toEqual(['"entry JS": limit raised 817 kB -> 818 kB']);
+    expect(sizeLimitLoosened(base, edit("entry JS", { limit: "818 kB" }), ex, `${link}: \`lazy\` from \`79 kB\` to \`80 kB\``)).toEqual(['"entry JS": limit raised 817 kB -> 818 kB']);
   });
 
   it("requires every exception to carry a dated owner decision that ADR-0196 records", () => {
     const link = "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-1";
     const ok = { name: "x", from: "1 kB", to: "2 kB", date: "2026-10-21", decision: link };
-    expect(ceilingExceptionProblems([ok], `owner decision ${link}`)).toEqual([]);
-    expect(ceilingExceptionProblems([ok], "no link here")[0]).toMatch(/does not record/);
-    expect(ceilingExceptionProblems([{ ...ok, date: undefined }], link)[0]).toMatch(/no dated owner decision/);
-    expect(ceilingExceptionProblems([{ ...ok, decision: "agreed in chat" }], link)[0]).toMatch(/must link an owner comment/);
-    expect(ceilingExceptionProblems([{ ...ok, decision: "https://example.com/x" }], link)[0]).toMatch(/must link an owner comment/);
+    const adr = `owner decision ${link}\n- \`x\` goes from \`1 kB\` to \`2 kB\`.`;
+    expect(ceilingExceptionProblems([ok], adr)).toEqual([]);
+    expect(ceilingExceptionProblems([ok], "no link here\n- `x` goes from `1 kB` to `2 kB`.")).toEqual([expect.stringMatching(/does not record/)]);
+    expect(ceilingExceptionProblems([{ ...ok, date: undefined }], adr)[0]).toMatch(/no dated owner decision/);
+    expect(ceilingExceptionProblems([{ ...ok, decision: "agreed in chat" }], adr)[0]).toMatch(/must link an owner comment/);
+    expect(ceilingExceptionProblems([{ ...ok, decision: "https://example.com/x" }], adr)[0]).toMatch(/must link an owner comment/);
   });
 
-  it("records every real exception in ADR-0196", async () => {
-    const { readFileSync } = await import("node:fs");
+  it("reports a row that cites a recorded link for an entry or value the ADR does not name", () => {
+    const link = "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-1";
+    const adr = `owner decision ${link}\n- \`x\` goes from \`1 kB\` to \`2 kB\`, and \`y\` stays at \`5 kB\`.\n\`3 kB\``;
+    const row = (over) => ({ name: "x", from: "1 kB", to: "2 kB", date: "2026-10-21", decision: link, ...over });
+    const names = /no line of .* names/;
+    expect(ceilingExceptionProblems([row({ name: "y" })], adr)).toEqual([expect.stringMatching(names)]);
+    expect(ceilingExceptionProblems([row({ to: "3 kB" })], adr)).toEqual([expect.stringMatching(names)]);
+    expect(ceilingExceptionProblems([row({ from: "5 kB" })], adr)).toEqual([expect.stringMatching(names)]);
+    // the three names must sit on one line, in order: from and to swapped, or split over two lines, do not count
+    expect(ceilingExceptionProblems([row({ from: "2 kB", to: "1 kB" })], adr)).toEqual([expect.stringMatching(names)]);
+    expect(ceilingExceptionProblems([row()], `${link}\n\`x\` goes from \`1 kB\`\nto \`2 kB\``)).toEqual([expect.stringMatching(names)]);
+    // the real decision link, reused for a raise ADR-0196 does not name (review M3: SeriesLineChart 109 -> 110 kB)
+    const reuse = { ...CEILING_EXCEPTIONS[0], name: "lazy: SeriesLineChart", from: "109 kB", to: "110 kB" };
+    const real = readFileSync(new URL("../docs/decisions/0196-ui-enterprise-harness.md", import.meta.url), "utf8");
+    expect(ceilingExceptionProblems([reuse], real)).toEqual([expect.stringMatching(names)]);
+  });
+
+  it("records every real exception in ADR-0196", () => {
     const adr = readFileSync(new URL("../docs/decisions/0196-ui-enterprise-harness.md", import.meta.url), "utf8");
     expect(ceilingExceptionProblems(CEILING_EXCEPTIONS, adr)).toEqual([]);
   });

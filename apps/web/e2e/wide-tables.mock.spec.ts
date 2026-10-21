@@ -326,6 +326,22 @@ test("Audit entries at 1024 px: a folded column keeps its own sort, from its nam
   await expect(card.locator("thead th", { hasText: "Event" })).not.toHaveAttribute("aria-sort", /.+/);
 });
 
+test("Audit entries at 1024 px: the folded Deploy mode sort works from the keyboard (L4)", async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 1000 });
+  await page.goto("/ui/admin/audit");
+  const card = cardOf(page, "Entries");
+  await expect(card.locator("[data-fold-step]")).toHaveAttribute("data-fold-step", "md");
+  const effect = card.locator("thead th", { hasText: "Effect" });
+  const deployMode = effect.getByRole("button", { name: "Deploy mode", exact: true });
+  await expect(effect).not.toHaveAttribute("aria-sort", /.+/);
+  await deployMode.focus();
+  await expect(deployMode).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(effect).toHaveAttribute("aria-sort", "ascending");
+  await expect(card.locator("tbody tr").first()).toContainText("held for a separate approver");
+  await expect(deployMode).toBeFocused();
+});
+
 test("on a phone a foldable card's header wraps: the title keeps one line and the filters move below it (M2)", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 1000 });
   await page.goto("/ui/admin/shadow-ai");
