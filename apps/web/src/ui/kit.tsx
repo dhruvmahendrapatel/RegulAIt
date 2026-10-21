@@ -649,6 +649,7 @@ export function Card(props: CardProps) {
             {count}
             {props.attention}
             {props.actions}
+            {expand}
           </div>
         ))}
       {props.contain ? (

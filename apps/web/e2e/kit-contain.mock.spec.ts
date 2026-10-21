@@ -112,6 +112,12 @@ test("X6b: a warning that appears under a folded body opens it and takes the fol
   await expect(page.locator("[aria-expanded]")).toHaveCount(0);
 });
 
+test("X6b: a contained card with no fold still offers Expand", async ({ page }) => {
+  await open(page, "rows=60&fold=0");
+  await expect(page.locator("[aria-expanded]")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Expand" })).toBeVisible();
+});
+
 test("X6b (L3): the open hint says how many rows show of how many, in the approved words", async ({ page }) => {
   await open(page, "rows=60");
   await expect(page.getByText(/^Showing \d+ of 60 · scroll the list for the rest, or Expand$/)).toBeVisible();

@@ -83,7 +83,7 @@ function Harness() {
         Fail refresh
       </button>
       {/* X6b: the contained card is foldable, so the probes can show a refused body never folds */}
-      <Card title="Findings" {...(contain ? ({ contain: true, foldable: true } as const) : {})} count={rows}>
+      <Card title="Findings" {...(contain ? ({ contain: true, foldable: params.get("fold") !== "0" } as const) : {})} count={rows}>
         <Probe />
         <Toggle />
         <table>
