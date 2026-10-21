@@ -1,4 +1,4 @@
-import { lazy, Suspense, useRef, useState } from "react";
+import { lazy, Suspense, useRef, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
@@ -96,6 +96,12 @@ const TAB_COUNT: Partial<Record<string, (d: OverviewResponse) => number | string
   audit: (d) => d.auditTotal ?? (d.audit.length >= AUDIT_ROW_LIMIT ? `${AUDIT_ROW_LIMIT}+` : d.audit.length),
 };
 
+/** the tab with its count, when it has one; a count of 0 is shown, since "Risks 0" says something "Risks" does not (#458) */
+export function withTabCount<T extends { id: string; label: ReactNode }>(t: T, d: OverviewResponse): Omit<T, "label"> & { label: ReactNode } {
+  const n = TAB_COUNT[t.id]?.(d);
+  return n !== undefined ? { ...t, label: <>{t.label} <span className={rec.tabCount}>{n}</span></> } : t;
+}
+
 const AiBomPanel = lazy(() => import("./BomEvidencePanel").then((m) => ({ default: m.AiBomPanel })));
 
 export default function UseCaseOverviewPage() {
@@ -172,10 +178,7 @@ export default function UseCaseOverviewPage() {
           <div className={v.stack}>
             <div className={rec.groupedTabs}>
               <Tabs
-                tabs={TABS.map((t) => {
-                  const n = TAB_COUNT[t.id]?.(data);
-                  return n ? { ...t, label: <>{t.label} <span className={rec.tabCount}>{n}</span></> } : t;
-                })}
+                tabs={TABS.map((t) => withTabCount(t, data))}
                 active={tab}
                 onChange={(next) => setParams({ tab: next })}
               />
