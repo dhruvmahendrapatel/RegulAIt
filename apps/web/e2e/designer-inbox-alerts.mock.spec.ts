@@ -111,7 +111,11 @@ test("Inbox: one item layout, visible reasons, and Approve waits for a required 
   // the admin override names itself and explains why a reason is needed
   await expect(page.getByText("You are not the named approver, so a reason is required.")).toBeVisible();
   // one decided item fits, so the contained card is no scroll stop (the region role appears only while it scrolls)
-  await expect(page.locator("section[data-rg-card]").filter({ hasText: "Recently decided" })).toContainText("Retire a vendor link");
+  // X6b: "Recently decided" is a secondary section, so it starts folded
+  const decided = page.getByRole("button", { name: /^Recently decided/ });
+  await expect(decided).toHaveAttribute("aria-expanded", "false");
+  await decided.click();
+  await expect(page.locator("section[data-rg-card]").filter({ hasText: "Recently decided" }).getByText("Retire a vendor link")).toBeVisible();
   await expect(page.getByRole("region", { name: "Recently decided, scrollable" })).toHaveCount(0);
 });
 

@@ -442,10 +442,15 @@ export function Card(props: {
    * the page, with an Expand button that opens the same body near full
    * screen. Never for forms, warnings, decisions or step-ups: a body holding
    * one (KEEP_VISIBLE) is refused at runtime and stays fully visible. X6b:
-   * "Show all" lets the section flow at full length instead, remembered per
-   * page and section in this browser only.
+   * the title is a fold button that collapses or opens the whole section,
+   * remembered per page and section in this browser only; a refused body has
+   * no fold and is always open.
    */
   contain?: boolean;
+  /** X6b: a secondary section starts collapsed until the viewer opens it */
+  startCollapsed?: boolean;
+  /** X6b: the worst status, shown in the header even while collapsed (e.g. a "1 critical" badge) */
+  attention?: ReactNode;
   /** X6 cue beside the title: how many rows the body holds */
   count?: number;
   /** singular and plural noun for `count`; row / rows by default */
@@ -463,23 +468,25 @@ export function Card(props: {
   const [fit, setFit] = useState({ scrolls: false, long: false, refused: false });
   const [expanded, setExpanded] = useState(false);
   const memoryKey = `regulait.contain:${typeof location === "undefined" ? "" : location.pathname}:${name}`;
-  const [showAll, setShowAll] = useState(() => {
+  const [collapsed, setCollapsed] = useState(() => {
+    let saved: string | null = null;
     try {
-      return props.contain === true && localStorage.getItem(memoryKey) === "all";
+      saved = localStorage.getItem(memoryKey);
     } catch {
-      return false;
+      // storage unavailable: the section opens as its page sets it
     }
+    return saved === "closed" || (saved == null && props.startCollapsed === true);
   });
-  const toggleShowAll = () => {
-    const next = !showAll;
-    setShowAll(next);
+  const toggleCollapsed = () => {
+    const next = !collapsed;
+    setCollapsed(next);
     try {
-      if (next) localStorage.setItem(memoryKey, "all");
-      else localStorage.removeItem(memoryKey);
+      localStorage.setItem(memoryKey, next ? "closed" : "open");
     } catch {
       // storage unavailable: the choice lasts for this visit only
     }
   };
+  const bodyId = useId();
   const [host, setHost] = useState<HTMLDivElement | null>(null);
   useLayoutEffect(() => {
     if (!props.contain || !box.current) return;
@@ -521,26 +528,31 @@ export function Card(props: {
     const ro = new ResizeObserver(check);
     ro.observe(el);
     ro.observe(host);
+    // a collapsed body has no size to change: a form or warning added to it must still open it
+    const mo = new MutationObserver(check);
+    mo.observe(host, { childList: true, subtree: true });
     window.addEventListener("resize", check);
     check();
     return () => {
       ro.disconnect();
+      mo.disconnect();
       window.removeEventListener("resize", check);
     };
   }, [host, name]);
   const containable = props.contain && !fit.refused;
-  const contained = containable && !showAll;
-  const expand = containable && fit.long && (
-    <>
-      <Button size="sm" variant="ghost" aria-pressed={showAll} onClick={toggleShowAll}>
-        Show all
-      </Button>
-      <Button size="sm" onClick={() => setExpanded(true)} aria-haspopup="dialog">
-        Expand
-      </Button>
-    </>
+  const open = !containable || !collapsed;
+  const contained = containable && open;
+  const expand = contained && fit.long && (
+    <Button size="sm" onClick={() => setExpanded(true)} aria-haspopup="dialog">
+      Expand
+    </Button>
   );
   const [one, many] = props.countNoun ?? ["row", "rows"];
+  const count = props.count != null && (
+    <span style={{ color: "var(--text-faint)", fontSize: "var(--text-sm)", fontWeight: 400 }}>
+      {props.count} {props.count === 1 ? one : many}
+    </span>
+  );
   return (
     <section
       className={[props.flush ? s.cardFlush : s.card, props.className ?? ""].join(" ")}
@@ -549,24 +561,38 @@ export function Card(props: {
       // shell .content) without a cross-module class reference
       data-rg-card=""
     >
-      {(props.title != null || expand) && (
-        <div className={s.cardTitle} style={props.flush ? { padding: "var(--s2) var(--s2) 0" } : undefined}>
-          <span style={{ flex: 1 }}>
-            {props.title}
+      {(props.title != null || expand) &&
+        (containable ? (
+          <div className={s.cardTitle} style={props.flush ? { padding: "var(--s2) var(--s2) 0" } : undefined}>
+            <button type="button" style={FOLD} aria-expanded={open} aria-controls={bodyId} onClick={toggleCollapsed}>
+              <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={open ? { rotate: "90deg" } : undefined}>
+                <path d="M9 6l6 6-6 6" />
+              </svg>
+              {props.title}
+              {count}
+              {props.attention}
+            </button>
             {props.info != null && <InfoButton label={name}>{props.info}</InfoButton>}
-          </span>
-          {props.count != null && (
-            <span style={{ color: "var(--text-faint)", fontSize: "var(--text-sm)", fontWeight: 400 }}>
-              {props.count} {props.count === 1 ? one : many}
+            <span style={{ flex: 1 }} />
+            {open && props.actions}
+            {expand}
+          </div>
+        ) : (
+          <div className={s.cardTitle} style={props.flush ? { padding: "var(--s2) var(--s2) 0" } : undefined}>
+            <span style={{ flex: 1 }}>
+              {props.title}
+              {props.info != null && <InfoButton label={name}>{props.info}</InfoButton>}
             </span>
-          )}
-          {props.actions}
-          {expand}
-        </div>
-      )}
+            {count}
+            {props.attention}
+            {props.actions}
+          </div>
+        ))}
       {props.contain ? (
         <div
           ref={box}
+          id={bodyId}
+          hidden={!open}
           className={contained ? s.contain : undefined}
           onFocus={contained ? revealInBox : undefined}
           {...(contained && fit.scrolls ? { tabIndex: 0, role: "region", "aria-label": `${name}, scrollable` } : {})}
@@ -576,6 +602,11 @@ export function Card(props: {
       ) : (
         props.children
       )}
+      {contained && fit.scrolls && (
+        <p style={{ margin: "var(--s1) 0 0", fontSize: "var(--text-sm)", color: "var(--text-faint)" }}>
+          {props.count != null && `${props.count} ${props.count === 1 ? one : many} in all · `}Scroll the list for the rest, or Expand to see it near full screen
+        </p>
+      )}
       {host && (
         <Modal open={expanded} full title={typeof props.title === "string" ? props.title : name} onClose={() => setExpanded(false)}>
           <div ref={slot} />
@@ -584,6 +615,25 @@ export function Card(props: {
     </section>
   );
 }
+
+/**
+ * X6b: the whole card title is the fold button, a 44 px target that keeps the
+ * global focus ring. Inline, as the entry CSS has no headroom left.
+ */
+const FOLD: React.CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  alignItems: "center",
+  gap: "var(--s1)",
+  minBlockSize: 44,
+  padding: "unset",
+  border: "none",
+  background: "none",
+  font: "inherit",
+  color: "inherit",
+  textAlign: "start",
+  cursor: "pointer",
+};
 
 /**
  * WCAG 2.4.11: a control focused inside a contained card is scrolled fully into the box. The browser leaves a control

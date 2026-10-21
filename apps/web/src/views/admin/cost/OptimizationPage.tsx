@@ -159,7 +159,7 @@ export default function OptimizationPage() {
           />
         </Card>
 
-        <Card title="Usage events — measured actuals" contain>
+        <Card title="Usage events — measured actuals" contain startCollapsed>
           <Table
             columns={[
               {

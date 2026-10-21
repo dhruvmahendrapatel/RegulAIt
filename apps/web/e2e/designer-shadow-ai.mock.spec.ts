@@ -199,19 +199,33 @@ test("Discovery sources: how it works, labelled figures, aligned row actions and
   await expect(sourcesRegion.locator("tbody tr", { hasText: "Azure demo subscription" }).getByRole("button", { name: "Enable" })).toBeVisible();
 });
 
-test("X6b: Show all lets a contained section flow at full length, remembered for that section", async ({ page }) => {
+test("X6b: a contained section folds from its header, keeps its count and worst status, and is remembered", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 520 });
   await page.goto("/ui/admin/shadow-ai");
-  const inventory = page.locator("section[data-rg-card]").filter({ has: page.getByRole("region", { name: "Inventory, scrollable" }) });
-  const showAll = inventory.getByRole("button", { name: "Show all" });
-  await expect(showAll).toHaveAttribute("aria-pressed", "false");
-  await showAll.click();
-  await expect(page.getByRole("region", { name: "Inventory, scrollable" })).toHaveCount(0);
-  await page.reload();
-  await expect(page.getByRole("button", { name: "Show all" }).first()).toHaveAttribute("aria-pressed", "true");
-  await expect(page.getByRole("region", { name: "Inventory, scrollable" })).toHaveCount(0);
-  await page.getByRole("button", { name: "Show all" }).first().click();
+  const fold = page.getByRole("button", { name: /^Inventory \d+ findings/ });
+  await expect(fold).toHaveAttribute("aria-expanded", "true");
   await expect(page.getByRole("region", { name: "Inventory, scrollable" })).toBeVisible();
+  await expect(cardOf(page, "Inventory").getByText(/in all · Scroll the list for the rest/)).toBeVisible();
+  await fold.click();
+  await expect(fold).toHaveAttribute("aria-expanded", "false");
+  await expect(page.getByRole("region", { name: "Inventory, scrollable" })).toHaveCount(0);
+  // folded, the header still says how many and how bad, and the filters leave with the list
+  await expect(fold).toContainText("1 critical");
+  await expect(page.getByRole("group", { name: "Filter by status" })).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByRole("button", { name: /^Inventory \d+ findings/ })).toHaveAttribute("aria-expanded", "false");
+  await page.getByRole("button", { name: /^Inventory \d+ findings/ }).click();
+  await expect(page.getByRole("region", { name: "Inventory, scrollable" })).toBeVisible();
+});
+
+test("X6b: a secondary section starts folded, and a section holding a form never folds", async ({ page }) => {
+  await page.goto("/ui/admin/shadow-ai/discovery-sources");
+  const runs = page.getByRole("button", { name: /^Recent runs/ });
+  await expect(runs).toHaveAttribute("aria-expanded", "false");
+  await runs.click();
+  await expect(runs).toHaveAttribute("aria-expanded", "true");
+  await page.reload();
+  await expect(page.getByRole("button", { name: /^Recent runs/ })).toHaveAttribute("aria-expanded", "true");
 });
 
 /** the plan and triage buttons' offsets inside each row's action stack: one left and one top per button, on every row */
@@ -633,7 +647,7 @@ for (const [label, size] of [["390 px", { width: 390, height: 520 }], ["desktop"
   });
 }
 
-test("L5: Show all still works when this browser refuses storage, and nothing is remembered", async ({ page }) => {
+test("L5: folding still works when this browser refuses storage, and nothing is remembered", async ({ page }) => {
   await page.addInitScript(() => {
     const refuse = () => { throw new DOMException("storage refused", "SecurityError"); };
     Storage.prototype.getItem = refuse;
@@ -644,12 +658,11 @@ test("L5: Show all still works when this browser refuses storage, and nothing is
   page.on("pageerror", (e) => errors.push(e.message));
   await page.setViewportSize({ width: 1280, height: 520 });
   await page.goto("/ui/admin/shadow-ai");
-  const showAll = page.getByRole("button", { name: "Show all" }).first();
-  await expect(showAll).toHaveAttribute("aria-pressed", "false");
-  await showAll.click();
-  await expect(showAll).toHaveAttribute("aria-pressed", "true");
-  await expect(page.getByRole("region", { name: "Inventory, scrollable" })).toHaveCount(0);
+  const fold = page.getByRole("button", { name: /^Inventory \d+ findings/ });
+  await expect(fold).toHaveAttribute("aria-expanded", "true");
+  await fold.click();
+  await expect(fold).toHaveAttribute("aria-expanded", "false");
   await page.reload();
-  await expect(page.getByRole("button", { name: "Show all" }).first()).toHaveAttribute("aria-pressed", "false");
+  await expect(page.getByRole("button", { name: /^Inventory \d+ findings/ })).toHaveAttribute("aria-expanded", "true");
   expect(errors).toEqual([]);
 });

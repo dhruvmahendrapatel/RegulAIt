@@ -351,7 +351,7 @@ export default function InboxPage() {
         {annotationItems.length > 0 && <AnnotationsCard items={annotationItems} />}
 
         {decided.length > 0 && (
-          <Card title="Recently decided" contain>
+          <Card title="Recently decided" contain startCollapsed count={decided.length} countNoun={["decision", "decisions"]}>
             {decided.map((a) => (
               <div key={a.id} className={v.listRow} style={{ alignItems: "center" }}>
                 <div className={v.grow}>

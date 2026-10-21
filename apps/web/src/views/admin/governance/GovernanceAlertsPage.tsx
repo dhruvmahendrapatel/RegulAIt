@@ -108,6 +108,7 @@ export default function GovernanceAlertsPage() {
     queryFn: () => api.get<AlertsResponse>(`/v1/governance/alerts?status=${status}`),
   });
   const selected = alerts.data?.alerts.find((alert) => alert.id === selectedId) ?? null;
+  const criticalAlerts = (alerts.data?.alerts ?? []).filter((alert) => alert.severity === "critical").length;
   const refresh = async () => { await alerts.refetch(); };
   const closeDetail = useCallback(() => setSelectedId(null), []);
   // L1 (WCAG 2.4.3): an alert that leaves the list (acknowledged under the Open filter) takes its drawer and the
@@ -178,7 +179,14 @@ export default function GovernanceAlertsPage() {
                 : "Alerts appear here when their lifecycle reaches this state."}
             />
           ) : (
-            <Card flush contain title="Alerts" count={alerts.data?.alerts.length ?? 0} countNoun={["alert", "alerts"]}>
+            <Card
+              flush
+              contain
+              title="Alerts"
+              count={alerts.data?.alerts.length ?? 0}
+              countNoun={["alert", "alerts"]}
+              attention={criticalAlerts > 0 ? <Badge tone="danger">{criticalAlerts} critical</Badge> : undefined}
+            >
             <div ref={list} className={s.alertList}>
               {alerts.data?.alerts.map((alert) => (
                 <button key={alert.id} className={`${s.alertRow} ${selectedId === alert.id ? s.alertRowActive : ""}`} aria-current={selectedId === alert.id ? "true" : undefined} onClick={() => setSelectedId(alert.id)}>
