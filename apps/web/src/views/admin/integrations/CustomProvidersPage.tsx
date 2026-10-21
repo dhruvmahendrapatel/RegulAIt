@@ -68,8 +68,8 @@ import c from "./customProviders.module.css";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 
 const WIRE_PROTOCOLS: Array<{ v: CustomWireProtocol; l: string }> = [
-  { v: "openai_chat", l: "openai_chat — /chat/completions (Ollama, vLLM, LM Studio, LocalAI, Azure OpenAI)" },
-  { v: "anthropic_messages", l: "anthropic_messages — /v1/messages (an Anthropic-compatible gateway)" },
+  { v: "openai_chat", l: "openai_chat — /chat/completions" },
+  { v: "anthropic_messages", l: "anthropic_messages — /v1/messages" },
 ];
 
 // ---------------------------------------------------------------------------

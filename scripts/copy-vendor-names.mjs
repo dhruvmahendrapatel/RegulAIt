@@ -12,8 +12,8 @@
  * (`openai_chat`) or an identifier (`anthropicCompatEnabled`) is never a hit. "Copilot" alone is our own feature's
  * name, so only the vendor-qualified forms are listed.
  *
- * ALLOWED_FILES and ALLOWED_LINES are the reviewed exceptions, each with its reason. A stale entry (one that no
- * longer matches anything) is itself reported, so the list cannot quietly outlive what it excuses.
+ * ALLOWED_LINES are the reviewed exceptions, one line each, each with its reason. An entry that matches no line (stale)
+ * or more than one (ambiguous) is itself reported, so the list cannot quietly outlive or outgrow what it excuses.
  */
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
@@ -27,28 +27,93 @@ export const VENDOR_NAMES = [
 ];
 
 /** the copy surfaces: directories walked, plus single shared modules whose text the UI prints verbatim */
-export const COPY_ROOTS = ["apps/web/src", "apps/gateway/src", "packages/shared/src/evidence-adapters.ts"];
+export const COPY_ROOTS = [
+  "apps/web/src",
+  "apps/gateway/src",
+  "packages/shared/src/evidence-adapters.ts",
+  "packages/shared/src/cost-import.ts",
+  "packages/shared/src/demo-intake/scenario-library.ts",
+];
 
 const EXCLUDED = /(\.test\.|\.spec\.|\/fixtures?\/|\/e2e\/|\.generated\.|\.d\.ts$)/;
 const SOURCE = /\.(ts|tsx)$/;
 
-/** reviewed exceptions — a whole file */
-export const ALLOWED_FILES = {
-  "apps/web/src/api/format.ts": "provider slug -> display name map (provider identifiers, not prose)",
-  "apps/web/src/views/models/snippets.ts": "SDK code samples: the package and class names are code",
-  "apps/web/src/views/admin/identity/ClientAccessPage.tsx": "OWNER QUESTION (F31): per-client setup guide names the client it configures",
-  "apps/gateway/src/builder-catalog.ts": "OWNER QUESTION (F31): connector catalogue data (a connector picker names what it connects to)",
-  "apps/gateway/src/openapi.ts": "OWNER QUESTION (F31): compat-surface summaries name the wire protocol",
-  "apps/gateway/src/compat-anthropic.ts": "wire-protocol errors returned to API clients of that protocol",
-  "apps/gateway/src/compat-openai.ts": "wire-protocol errors returned to API clients of that protocol",
-};
+const OWNER = "owner decision 2026-10-21";
+const COMPAT = `${OWNER}: compat labels keep vendor-style names`;
+const GUIDE = `${OWNER}: the per-client setup guide names the client it configures`;
+const WIRE = `${OWNER}: wire-protocol error message returned to clients of that protocol`;
+const CATALOGUE = `${OWNER}: connector catalogue entry names what it connects to`;
+const COST = `${OWNER}: display name of a vendor-specific cost-import adapter`;
+const SLUGS = "provider slug -> display name map (provider identifiers, not prose)";
+const SDK = "SDK code sample: the package and class names are code";
 
-/** reviewed exceptions — one line, by a substring of it */
+const CLIENT_ACCESS = "apps/web/src/views/admin/identity/ClientAccessPage.tsx";
+const FORMAT = "apps/web/src/api/format.ts";
+const SNIPPETS = "apps/web/src/views/models/snippets.ts";
+
+/**
+ * The reviewed exceptions. Each one names a file and a substring of exactly ONE line of it (or that line's whole
+ * trimmed text, where a substring would also match a neighbour), and must match exactly one flagged line: zero is
+ * stale, more than one is ambiguous, and both are reported. There is no whole-file skip, so a vendor name added on any
+ * other line of an excepted file is still a hit.
+ */
 export const ALLOWED_LINES = [
-  { file: "apps/web/src/views/admin/settings/GettingStartedPage.tsx", contains: '"Anthropic compat on"', why: "OWNER QUESTION (F31): status chip names the compat toggle" },
-  { file: "apps/web/src/views/admin/settings/GettingStartedPage.tsx", contains: '"OpenAI compat on"', why: "OWNER QUESTION (F31): status chip names the compat toggle" },
-  { file: "apps/web/src/views/admin/integrations/CustomProvidersPage.tsx", contains: '{ v: "openai_chat", l: "openai_chat', why: "OWNER QUESTION (F31): adapter picker option" },
-  { file: "apps/web/src/views/admin/integrations/CustomProvidersPage.tsx", contains: '{ v: "anthropic_messages", l: "anthropic_messages', why: "OWNER QUESTION (F31): adapter picker option" },
+  { file: CLIENT_ACCESS, contains: '<Field label="POST /v1/messages (Anthropic-shaped)">', why: COMPAT },
+  { file: CLIENT_ACCESS, contains: '<Field label="POST /v1/chat/completions (OpenAI-shaped)">', why: COMPAT },
+  { file: "apps/web/src/views/admin/settings/GettingStartedPage.tsx", contains: 'on.push("Anthropic compat on")', why: COMPAT },
+  { file: "apps/web/src/views/admin/settings/GettingStartedPage.tsx", contains: 'on.push("OpenAI compat on")', why: COMPAT },
+  { file: "apps/gateway/src/openapi.ts", contains: '"POST /v1/messages": { summary: "Anthropic-shaped compatibility surface', why: COMPAT },
+  { file: "apps/gateway/src/openapi.ts", contains: '"POST /v1/chat/completions": { summary: "OpenAI-shaped compatibility surface', why: COMPAT },
+
+  { file: CLIENT_ACCESS, contains: '{ client: "Claude Code", model: "ANTHROPIC_BASE_URL', why: GUIDE },
+  { file: CLIENT_ACCESS, contains: '{ client: "Cursor", model: "OpenAI-compatible base URL', why: GUIDE },
+  { file: CLIENT_ACCESS, contains: '{ client: "Cline", model: "OpenAI- or Anthropic-compatible base URL"', why: GUIDE },
+  { file: CLIENT_ACCESS, contains: '{ client: "Roo Code", model: "OpenAI- or Anthropic-compatible base URL"', why: GUIDE },
+  { file: CLIENT_ACCESS, contains: '{ client: "GitHub Copilot", model: "NOT SUPPORTED', why: GUIDE },
+  { file: CLIENT_ACCESS, contains: "Anthropic- or OpenAI-compatible base URL can have its model calls governed here", why: GUIDE },
+  { file: CLIENT_ACCESS, contains: '{ v: "claude-code", l: "Claude Code" }', why: GUIDE },
+  { file: CLIENT_ACCESS, contains: '{ v: "cursor", l: "Cursor" }', why: GUIDE },
+  { file: CLIENT_ACCESS, contains: '{ v: "generic-anthropic", l: "Generic Anthropic-compatible" }', why: GUIDE },
+  { file: CLIENT_ACCESS, contains: '{ v: "generic-openai", l: "Generic OpenAI-compatible" }', why: GUIDE },
+  { file: CLIENT_ACCESS, contains: "`# Model calls -> regulAIt (Anthropic-shaped)", why: GUIDE },
+  { file: CLIENT_ACCESS, contains: '"Claude Code sends the key as x-api-key;', why: GUIDE },
+  { file: CLIENT_ACCESS, contains: "`# Cursor -> Settings -> Models -> OpenAI API Key -> Override base URL", why: GUIDE },
+  { file: CLIENT_ACCESS, contains: '"Cursor takes an OpenAI-compatible endpoint,', why: GUIDE },
+  { file: CLIENT_ACCESS, contains: '"Cursor sends no custom headers on MODEL calls', why: GUIDE },
+  { file: CLIENT_ACCESS, contains: "-> Settings -> API Provider: OpenAI Compatible", why: GUIDE },
+  { file: CLIENT_ACCESS, contains: "# or API Provider: Anthropic, with a custom base URL", why: GUIDE },
+  { file: CLIENT_ACCESS, contains: "`For the Anthropic shape instead, use provider: anthropic", why: GUIDE },
+  { file: CLIENT_ACCESS, contains: "# base URL for any Anthropic SDK: ${base}", why: GUIDE },
+  { file: CLIENT_ACCESS, contains: "x-api-key is the alias Anthropic clients send.", why: GUIDE },
+  { file: CLIENT_ACCESS, contains: "# base URL for any OpenAI SDK: ${base}/v1", why: GUIDE },
+
+  { file: "apps/gateway/src/compat-anthropic.ts", contains: "roles are valid in the Anthropic Messages shape;", why: WIRE },
+  { file: "apps/gateway/src/compat-anthropic.ts", contains: 'rejectUnsupportedFields(raw, ANTHROPIC_SUPPORTED_FIELDS, "Anthropic")', why: WIRE },
+  { file: "apps/gateway/src/compat-openai.ts", contains: 'rejectUnsupportedFields(raw, OPENAI_SUPPORTED_FIELDS, "OpenAI")', why: WIRE },
+
+  { file: "apps/gateway/src/builder-catalog.ts", contains: 'C("huggingface", "Hugging Face",', why: CATALOGUE },
+  { file: "apps/gateway/src/builder-catalog.ts", contains: 'C("perplexity", "Perplexity",', why: CATALOGUE },
+
+  { file: "packages/shared/src/cost-import.ts", contains: 'displayName: "OpenAI console usage export"', why: COST },
+  { file: "packages/shared/src/cost-import.ts", contains: 'displayName: "Anthropic console usage export"', why: COST },
+
+  { file: FORMAT, contains: 'mcp: "MCP", mrm: "MRM", nist: "NIST", openai: "OpenAI",', why: SLUGS },
+  { file: FORMAT, contains: 'anthropic: "Anthropic",', why: SLUGS },
+  { file: FORMAT, equals: 'openai: "OpenAI",', why: SLUGS },
+  { file: FORMAT, contains: 'mistral: "Mistral",', why: SLUGS },
+  { file: FORMAT, contains: 'cohere: "Cohere",', why: SLUGS },
+  { file: FORMAT, contains: 'aws_bedrock: "AWS Bedrock",', why: SLUGS },
+  { file: FORMAT, contains: 'azure_openai: "Azure OpenAI",', why: SLUGS },
+  { file: FORMAT, contains: 'google_vertex: "Google Vertex AI",', why: SLUGS },
+
+  { file: SNIPPETS, contains: '{ id: "anthropic", label: "Anthropic SDK" }', why: SDK },
+  { file: SNIPPETS, contains: "`\\n# Anthropic-shaped instead:\\n`", why: SDK },
+  { file: SNIPPETS, contains: '`import OpenAI from "openai";', why: SDK },
+  { file: SNIPPETS, contains: "`const client = new OpenAI({", why: SDK },
+  { file: SNIPPETS, contains: "`from openai import OpenAI", why: SDK },
+  { file: SNIPPETS, contains: "`client = OpenAI(", why: SDK },
+  { file: SNIPPETS, contains: '`import Anthropic from "@anthropic-ai/sdk";', why: SDK },
+  { file: SNIPPETS, contains: "`const client = new Anthropic({", why: SDK },
 ];
 
 const escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -85,23 +150,23 @@ export function copyFiles(root) {
   return COPY_ROOTS.flatMap((r) => walk(root, r)).filter((f) => !EXCLUDED.test(f));
 }
 
-/** { hits, stale }: hits not covered by an exception, and exceptions that cover nothing */
+/** an exception covers a flagged line by a substring of it (`contains`) or by its whole trimmed text (`equals`) */
+const covers = (a, text) => (a.equals !== undefined ? text === a.equals : text.includes(a.contains));
+
+/** { hits, stale }: hits not covered by an exception, and exceptions that do not cover exactly one line */
 export function findVendorNames(root, files = copyFiles(root), read = (f) => readFileSync(path.join(root, f), "utf8")) {
-  const usedFiles = new Set();
-  const usedLines = new Set();
+  const used = new Map(ALLOWED_LINES.map((a) => [a, 0]));
   const hits = [];
   for (const file of files) {
     for (const hit of scanText(file, read(file))) {
-      if (ALLOWED_FILES[file]) { usedFiles.add(file); continue; }
-      const allow = ALLOWED_LINES.find((a) => a.file === file && hit.text.includes(a.contains));
-      if (allow) { usedLines.add(allow); continue; }
-      hits.push(hit);
+      const allow = ALLOWED_LINES.filter((a) => a.file === file && covers(a, hit.text));
+      for (const a of allow) used.set(a, used.get(a) + 1);
+      if (allow.length === 0) hits.push(hit);
     }
   }
-  const stale = [
-    ...Object.keys(ALLOWED_FILES).filter((f) => !usedFiles.has(f)),
-    ...ALLOWED_LINES.filter((a) => !usedLines.has(a)).map((a) => `${a.file}: ${a.contains}`),
-  ];
+  const stale = ALLOWED_LINES.filter((a) => used.get(a) !== 1).map(
+    (a) => `${a.file}: ${a.contains ?? a.equals} (covers ${used.get(a)} lines, must cover exactly 1)`,
+  );
   return { hits, stale };
 }
 
