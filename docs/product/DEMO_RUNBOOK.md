@@ -480,8 +480,8 @@ point there rather than repeating commands nobody has run.
 
 ### 7.2 Discovery sources on the live instance (pending execution)
 
-Each source is added on `/ui/admin/shadow-ai/discovery-sources` (**Add a source** → **Add source (disabled)**), given
-a credential (**Add credential** → **Save credential**), then **Enable**d with a step-up. The scanner's API host is
+Each source is added on `/ui/admin/shadow-ai/discovery-sources` (**Add a source** form → **Add source**; a new source is added turned off), given
+a credential (**More** → **Add credential** → **Save credential**), then **Enable**d with a step-up. The scanner's API host is
 added to the egress allow list first (ADR-0195 decision 8; adding an allow entry is a `settings_relax` step-up).
 Target and credential fields, from the code on `main`:
 
@@ -505,7 +505,7 @@ owner's notes and the infrastructure lane's state.
 |---|---|---|
 | T-7d | First real-account round trip done for each source: a run **succeeded**, **Reads** says *all read* or names what it could not read, findings appear | pending execution |
 | T-7d | The endpoint agent has reported at least once since enrolment (the `endpoint_agent` source is upload-fed: **Run now** only commits reports the device already uploaded) | pending execution |
-| T-7d | The remediation workflow walked once on a rehearsal database as Ada: start → **Finish planning** → **Submit for sign-off** → Morgan's **Approve** in `/ui/inbox` | pending execution |
+| T-7d | The remediation workflow walked once on a rehearsal database as Ada: start → **Finish planning** → **Submit for sign-off** → Morgan's **Review** and **Approve** in `/ui/inbox` (the item opens in the panel on the right; **Approve** is in its pinned foot) | pending execution |
 | T-7d | Morgan Reyes (security lead) is an active admin, Ada is the only other admin, and Morgan has enrolled her authenticator (after `demo:set-passwords`, at her next sign-in) | pending execution |
 | T-3d | Code freeze held (2026-10-29: only demo-blocker fixes merge, ADR-0197 decision 9); the live instance runs the frozen build | pending execution |
 | T-24h | **Run now** on every live source (the endpoint agent's only if the device has reported since); each run **succeeded**; choose the rows S2-S4 walk from the real findings on `/ui/admin/shadow-ai` | pending execution |
@@ -519,6 +519,7 @@ owner's notes and the infrastructure lane's state.
 | T-1h | Browsers: Profile A (Ada), Profile B (Avery) and Profile C (Morgan) on the live instance, all signed in; the fallback browser signed in to the laptop stack; one spare browser installed | pending execution |
 | T-1h | A terminal open on the dev instance host for G3 | pending execution |
 | T-1h | Navigation pinned in every profile (**Pin navigation**) | pending execution |
+| T-1h | Every browser window at 1440 px wide or more, so the detail drawer (alerts, Inbox items, the remediation plan, the sign-off review) opens beside the page; at 900 px or less it is a modal that hides the page (DEMO_SCRIPT, "Detail drawer") | pending execution |
 | T-1h | Themes: the same theme in every profile (user menu, **Switch to dark theme** / **Switch to light theme**), chosen for the room's projector | pending execution |
 | T-1h | Ada's and Morgan's authenticators on the presenting phone; the phone charged and silenced | pending execution |
 | T-1h | The live instance answers over HTTPS from the venue network (open `/ui` in each profile) | pending execution |
@@ -534,4 +535,5 @@ owner's notes and the infrastructure lane's state.
 | Starting the remediation workflow answers *second_approver_unavailable* | no other active admin exists (Morgan missing or deactivated) | switch to the fallback stack; fix the personas after the demo |
 | Morgan's **Approve** asks for a code she cannot give | her authenticator was not enrolled after `demo:set-passwords` | switch to the fallback stack; never relax MFA live |
 | The remediation panel says **no workflow assigned** | an admin rule replaced the default assignment | link a workflow started another way, or switch to the fallback stack |
+| An alert, Inbox item or plan opens over a dimmed page that cannot be clicked | the window is 900 px wide or less, so the detail drawer is a modal | **Close** the panel, widen the window (or zoom out) and open it again |
 | The live instance does not load | network or instance failure | play the recording for S1-S2, then the fallback stack on the laptop or the screenshot deck |
