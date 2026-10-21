@@ -1444,7 +1444,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
       step: agent
         ? `route ${row.subject} through the governed agent '${agent.name}' via the compat surface`
         : `route ${row.subject} through the compat surface (ADR-0020)`,
-      why: "the drop-in OpenAI/Anthropic-shaped endpoints mean the application changes a base URL, not its code",
+      why: "the gateway's drop-in, provider-compatible endpoints mean the application changes a base URL, not its code",
       ...(agent ? {} : { blocked: "no governed replacement is registered for this provider — set replacementAgentId on the catalogue row" }),
     });
     steps.push({
