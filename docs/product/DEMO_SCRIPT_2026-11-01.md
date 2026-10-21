@@ -228,23 +228,24 @@ UI: `ShadowAiPage.tsx`, `DiscoverySightings.tsx`, `discoverySourcesModel.ts` (`s
   self-reported). The scanned sources are named in the coverage sentence, not as scorecard rows, so **Evidence classes
   supplied** can read low (*1 / 4* on FALLBACK) while five sources are scanned. If asked, say exactly that.
 - **LIVE:** real findings only, from the T-24h scans of what the infrastructure lane planted (repositories that use
-  AI SDKs, Bedrock usage with CloudTrail, one Azure OpenAI deployment, the endpoint device). No subject, provider or
+  AI SDKs, managed-model usage with its audit trail in AWS, one hosted model deployment in Azure, the endpoint
+  device). No subject, provider or
   count is promised here: choose the three rows to walk at the T-24h check, from what is on screen.
 - **FALLBACK** (from `DEMO_SHADOW_DISCOVERY`; `demo:check` asserts each family):
-  - **repositories** (*Repo scan*): `gitlab:acme-bank-demo/credit-memo-assistant` (the Anthropic SDK, with the
-    presence signature `env.anthropic.api-key` from its `.env.example`) and `gitlab:acme-bank-demo/support-ticket-
-    triage` (the OpenAI SDK). The commit author is a team label, shown as a pseudonym;
-  - **AWS** (*Cloud inventory*): a Bedrock custom model `acme-complaints-summariser` (`eu-west-1`) and a SageMaker
-    endpoint `fraud-score-llm` (`us-east-1`); (*Cloud audit log*): one calling principal, a pseudonym, 412 Bedrock
-    calls (`InvokeModel`, `Converse`);
-  - **Azure** (*Cloud inventory*): the Azure OpenAI account `acme-openai-eu` and its deployment `branch-faq-bot`
-    (`westeurope`);
-  - **MDM export** (*Endpoint inventory*): three laptops' AI desktop apps (ChatGPT, Claude, Cursor), devices and users
-    as pseudonyms;
-  - **endpoint agent** (*Endpoint agent*): the Claude desktop app on one enrolled laptop. The agent's CLI fact and its
+  - **repositories** (*Repo scan*): `gitlab:acme-bank-demo/credit-memo-assistant` (one AI vendor's SDK, with a
+    presence signature for that vendor's API key from its `.env.example`) and `gitlab:acme-bank-demo/support-ticket-
+    triage` (a second vendor's SDK). The commit author is a team label, shown as a pseudonym;
+  - **AWS** (*Cloud inventory*): a managed custom model `acme-complaints-summariser` (`eu-west-1`) and a model-serving
+    endpoint `fraud-score-llm` (`us-east-1`); (*Cloud audit log*): one calling principal, a pseudonym, 412 model
+    invocation calls;
+  - **Azure** (*Cloud inventory*): one hosted AI account and its deployment `branch-faq-bot` (`westeurope`);
+  - **MDM export** (*Endpoint inventory*): three laptops' AI desktop apps (three seeded tool records), devices and
+    users as pseudonyms;
+  - **endpoint agent** (*Endpoint agent*): one AI desktop app on one enrolled laptop. The agent's CLI fact and its
     environment-variable fact are dropped by the gateway and only counted: nothing names them on screen.
-  - The four imported *Saas export* rows of the 10-05 demo (*Credit Team LLM Prototype*, *ChatGPT Web*, *Claude
-    Web*, *OpenAI API Testing*) are still seeded by `demo:intake` and appear in the same table.
+  - The four imported *Saas export* rows of the 10-05 demo (the seeded prototype record and three seeded AI tool
+    records) are still seeded by `demo:intake` and appear in the same table. The records keep their seeded names on
+    screen (owner decision 2026-10-21, F30).
 - **Evidence labels:** the 2026-10-21 pack shows **Repo scan** and **SaaS export** in the **Evidence** column. The
   other families' labels (*Cloud inventory*, *Cloud audit log*, *Endpoint inventory*, *Endpoint agent*) are the
   Scanner kinds table's wording and are **to confirm** in the expanded Inventory at rehearsal (the pack's Inventory
@@ -477,7 +478,8 @@ UI: `apps/web/src/views/admin/governance/ContentTrustPage.tsx`.
 
 - **Live, real accounts (LIVE path only):** the GitLab demo group, the AWS sandbox account, the Azure subscription and
   the endpoint device, scanned read-only by the product's scanners at T-24h. The AI activity in them is planted by us
-  for the demo (small Bedrock usage, one small Azure OpenAI deployment, repositories that use AI SDKs), under
+  for the demo (small managed-model usage in AWS, one small hosted model deployment in Azure, repositories that use
+  AI SDKs), under
   fictional demo-company names, with no personal data (ADR-0197 decisions 2-5 and 8). Say so: "we planted this
   usage; the scan is real".
 - **Seeded (FALLBACK path only):** the discovery dataset `demo:prepare` creates through the real API paths, with the
