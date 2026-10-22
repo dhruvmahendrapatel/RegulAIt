@@ -15,12 +15,16 @@ a high-severity issue (`security-severity` of 7.0 or more) that is not in `secur
 
 **Does not prove:**
 - absence of bugs CodeQL has no query for, such as authorization logic (who may approve what) or business rules;
-- anything below 7.0. Medium findings still appear in the Security tab through GitHub's default setup;
+- anything below 7.0. Medium findings still appear in the Security tab, from this job's upload;
 - anything about code paths the extractor cannot see (generated code at run time, `eval` input).
 
-**How it runs:** CodeQL default setup is also on for this repository and owns the Security tab. GitHub refuses an
-advanced-setup upload while default setup is on, so this job runs with `upload: never`, gates on the SARIF file itself,
-and keeps the SARIF as the `codeql-sarif` artifact. The CodeQL bundle is the one pinned by the `github/codeql-action`
+**How it runs:** this job owns the Security tab, and CodeQL default setup is off (owner decision on issue #453; GitHub
+refuses an advanced-setup upload while default setup is on, so turning it back on would break this job's upload). The
+analyze step uploads the SARIF under the category `/security-gate` on pushes to `main`, on the weekly schedule, on
+manual runs and on pull requests from this repository (a fork's pull request token cannot write security events, so
+those run with `upload: never`). The job has `security-events: write` for that and nothing wider. The upload does not
+replace the gate: the next step gates on the SARIF file itself and fails the job on any non-allowlisted high finding,
+and the SARIF is also kept as the `codeql-sarif` artifact. The CodeQL bundle is the one pinned by the `github/codeql-action`
 commit (CLI 2.27.1 at v4.38.2). The job sets `CODEQL_ACTION_DIFF_INFORMED_QUERIES=false`: otherwise, on a pull request,
 the taint-tracking queries report only results on changed lines, and the baseline's entries for them read as stale.
 

@@ -23,6 +23,7 @@ import {
   SHADOW_AI_CATALOG_V1,
   SHADOW_AI_CATALOG_VERSION,
   classifyDiscoveryContent,
+  endpointPatternLiteralLength,
   extractHostCandidatesFromLine,
   matchCatalogEndpoint,
   matchCatalogPackage,
@@ -368,5 +369,23 @@ describe("classifyDiscoveryContent", () => {
     expect(r.shadow).toHaveLength(1);
     expect(r.shadow[0]!.occurrences).toBe(7);
     expect(r.candidateCount).toBe(1);
+  });
+});
+
+describe("endpointPatternLiteralLength — tie-break specificity, the wildcard excluded", () => {
+  // The old form, pattern.replace("*", ""), removed the first `*` only. The
+  // new form must agree with it on every pattern, so ranking does not change.
+  const old = (pattern: string): number => pattern.replace("*", "").length;
+  it.each(["openai.com", "*.openai.com", "api.openai.*", "api.*.com", "*", "", "a*b*c"])(
+    "%j matches the old single-replace length",
+    (pattern) => {
+      expect(endpointPatternLiteralLength(pattern)).toBe(old(pattern));
+    },
+  );
+  it("counts literal characters only", () => {
+    expect(endpointPatternLiteralLength("openai.com")).toBe(10);
+    expect(endpointPatternLiteralLength("*.openai.com")).toBe(11);
+    expect(endpointPatternLiteralLength("api.openai.*")).toBe(11);
+    expect(endpointPatternLiteralLength("*")).toBe(0);
   });
 });
