@@ -555,7 +555,7 @@ function EffectivePreviewCard() {
 
 // ---- per-client config generator ------------------------------------------
 
-const CLIENTS = [
+export const CLIENTS = [
   { v: "claude-code", l: "Claude Code" },
   { v: "cursor", l: "Cursor" },
   { v: "cline", l: "Cline" },
@@ -566,7 +566,7 @@ const CLIENTS = [
   { v: "generic-openai", l: "Generic OpenAI-compatible" },
 ];
 
-function buildSnippet(opts: {
+export function buildSnippet(opts: {
   client: string;
   base: string;
   serverId: string;
@@ -576,7 +576,7 @@ function buildSnippet(opts: {
   const KEYPH = "<REGULAIT_API_KEY>";
   const { base, projectId: pid } = opts;
   const sid = opts.serverId || "<MCP_SERVER_ID>";
-  const model = opts.model || "claude-opus-5";
+  const model = opts.model || "<MODEL_ID>";
   const mcpUrl = `${base}/mcp/${sid}`;
   const hdrJson =
     `"Authorization": "Bearer ${KEYPH}"` +
@@ -708,7 +708,7 @@ function ConfigGeneratorCard() {
           </Select>
         </Field>
         <Field label="Model id">
-          <Input value={model} onChange={(e) => setModel(e.target.value)} placeholder="claude-opus-5" />
+          <Input value={model} onChange={(e) => setModel(e.target.value)} placeholder="e.g. model-name-v1" />
         </Field>
         <Button type="submit" size="sm" variant="primary">
           Generate

@@ -229,7 +229,12 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
     await expect(ada.getByText(/^1 device, 0 revoked, /)).toBeVisible();
     await expect(ada.getByText("Users (self-reported)", { exact: true })).toBeVisible();
     await expect(ada.getByText(/^psn:[0-9a-f]+$/).first()).toBeVisible();
-    await capture(ada, ADA, "ds-s1-discovery-sources", { dark: true });
+    // X6b (#474): Recent runs is a secondary section, folded on a first visit; the script has the presenter open it
+    const recentRuns = ada.getByRole("button", { name: /^Recent runs/ });
+    await expect(recentRuns).toHaveAttribute("aria-expanded", "false");
+    await recentRuns.click();
+    await expect(recentRuns).toHaveAttribute("aria-expanded", "true");
+    await capture(ada, ADA, "ds-s1-discovery-sources", { dark: true, notes: ["Recent runs opened from its fold header (X6b; folded on a first visit)"] });
   });
 
   let pseudonymHref: string | null = null;

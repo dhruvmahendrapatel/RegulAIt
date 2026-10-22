@@ -475,8 +475,8 @@ point there rather than repeating commands nobody has run.
 - **Deploy gate:** `demo:gate` runs live from a terminal on the dev instance host (SSH or Session Manager; addendum,
   decision 2), with the T-24h captured output as the fallback. The command and environment on that host are
   **pending execution** and are written here only once run there.
-- **Recording:** a screen recording of one real scan, Discovery sources → Run now → Recent runs → Shadow-AI
-  discovery, captured from the live instance. Kept as a local file on the presenting laptop.
+- **Recording:** a screen recording of one real scan, Discovery sources → Run now → Recent runs (open its folded
+  header first: it starts folded on a first visit) → Shadow-AI discovery, captured from the live instance. Kept as a local file on the presenting laptop.
 
 ### 7.2 Discovery sources on the live instance (pending execution)
 
@@ -514,11 +514,13 @@ owner's notes and the infrastructure lane's state.
 | T-24h | `demo:check --live` on the live instance: 0 fail (no fictional-dataset trace, every real source listed with its last run) | pending execution |
 | T-24h | Screen recording of one real scan captured and played back once | pending execution |
 | T-24h | Fallback stack on the laptop prepared with `demo:prepare` (the night before); `demo:check` 0 fail; Ada, Avery and Morgan signed in there too, in a separate browser | pending execution |
+| T-24h | F28: the laptop stack's **running gateway** has `REGULAIT_PUBLIC_URL` set, not only the `demo:prepare` step (the Cloud federation card then does not say the public URL is not configured; CI sets it only on the prepare step, so the screenshot pack shows that line) | pending execution |
 | T-24h | `demo:gate` run once from the dev instance host terminal; its output captured to `real-gate.txt` as the fallback (the 10-05 fallback step 1) | pending execution |
 | T-24h | Neither demo budget alert has fired (AWS USD 40 and Azure USD 10, USD 50 in total; each alerts at 80%, USD 32 and USD 8, `docs/deployment/DEMO_REAL_ACCOUNTS.md`); planted usage still within budget (ADR-0197 decision 4) | pending execution |
 | T-1h | Browsers: Profile A (Ada), Profile B (Avery) and Profile C (Morgan) on the live instance, all signed in; the fallback browser signed in to the laptop stack; one spare browser installed | pending execution |
 | T-1h | A terminal open on the dev instance host for G3 | pending execution |
 | T-1h | Navigation pinned in every profile (**Pin navigation**) | pending execution |
+| T-1h | In each presenting profile, and in the fallback browser on the laptop stack, open the folded sections the script uses once, so they are open on the day: **Recent runs** on Discovery sources (Ada). The fold is remembered per person, page and section in that browser and origin only, so a fresh profile starts with Recent runs, the Inbox's **Recently decided** and Usage events folded | pending execution |
 | T-1h | Every browser window at 1440 px wide or more, so the detail drawer (alerts, Inbox items, the remediation plan, the sign-off review) opens beside the page; at 900 px or less it is a modal that hides the page (DEMO_SCRIPT, "Detail drawer") | pending execution |
 | T-1h | Themes: the same theme in every profile (user menu, **Switch to dark theme** / **Switch to light theme**), chosen for the room's projector | pending execution |
 | T-1h | Ada's and Morgan's authenticators on the presenting phone; the phone charged and silenced | pending execution |
@@ -529,7 +531,7 @@ owner's notes and the infrastructure lane's state.
 
 | Symptom | Cause | Do |
 |---|---|---|
-| A source's last run reads **failed** with an error code | a credential, trust or egress problem since T-24h | do not debug live: show the previous succeeded run in **Recent runs**, or switch to the fallback stack |
+| A source's last run reads **failed** with an error code | a credential, trust or egress problem since T-24h | do not debug live: open **Recent runs** from its header if it is folded and show the previous succeeded run, or switch to the fallback stack |
 | **Run now** stays *queued* | the worker has not leased the run yet | do not wait on it: the script never runs a scan live |
 | The **Cloud federation** card reads *off* | federation was turned off, or the issuer URL is not set | federated cloud runs cannot run; switch to the fallback stack for S1 (its runs are recorded replays; its own card reads *off* by design) |
 | Starting the remediation workflow answers *second_approver_unavailable* | no other active admin exists (Morgan missing or deactivated) | switch to the fallback stack; fix the personas after the demo |

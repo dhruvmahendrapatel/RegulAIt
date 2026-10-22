@@ -70,7 +70,7 @@ defaults; respond with a human in the loop; the deploy gate; regulatory intellig
 ## Lines to use in the demo
 
 1. "Every source starts off. Turning one on is a deliberate, audited act." (Discovery sources)
-2. "Detection is a signal, not proof — each row says what each scanner saw, and where." (Where seen)
+2. "Detection is a signal, not proof — each row says what each scanner saw, and where." (the sightings under **Evidence**)
 3. "This inventory reduces shadow AI; it does not prove its absence." (Coverage sentence, read verbatim)
 4. "We keep where it was and what it was called, never what it said." (Data minimisation)
 5. "No stored cloud key: the account trusts our issuer for five minutes at a time." (Federation)
