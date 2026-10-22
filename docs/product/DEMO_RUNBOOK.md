@@ -520,7 +520,7 @@ owner's notes and the infrastructure lane's state.
 | T-1h | Browsers: Profile A (Ada), Profile B (Avery) and Profile C (Morgan) on the live instance, all signed in; the fallback browser signed in to the laptop stack; one spare browser installed | pending execution |
 | T-1h | A terminal open on the dev instance host for G3 | pending execution |
 | T-1h | Navigation pinned in every profile (**Pin navigation**) | pending execution |
-| T-1h | In each presenting profile, open the folded sections the script uses once, so they are open on the day: **Recent runs** on Discovery sources (Ada). The fold is remembered per person, page and section in that browser only, so a fresh profile starts with Recent runs, the Inbox's **Recently decided** and Usage events folded | pending execution |
+| T-1h | In each presenting profile, and in the fallback browser on the laptop stack, open the folded sections the script uses once, so they are open on the day: **Recent runs** on Discovery sources (Ada). The fold is remembered per person, page and section in that browser and origin only, so a fresh profile starts with Recent runs, the Inbox's **Recently decided** and Usage events folded | pending execution |
 | T-1h | Every browser window at 1440 px wide or more, so the detail drawer (alerts, Inbox items, the remediation plan, the sign-off review) opens beside the page; at 900 px or less it is a modal that hides the page (DEMO_SCRIPT, "Detail drawer") | pending execution |
 | T-1h | Themes: the same theme in every profile (user menu, **Switch to dark theme** / **Switch to light theme**), chosen for the room's projector | pending execution |
 | T-1h | Ada's and Morgan's authenticators on the presenting phone; the phone charged and silenced | pending execution |

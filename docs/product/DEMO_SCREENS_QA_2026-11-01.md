@@ -49,8 +49,8 @@ acknowledged or resolved. A database straight from `demo:prepare` does not have 
 
 | Beat | Screenshot | Result | Notes |
 |---|---|---|---|
-| S1 Discovery sources | `ds-s1-discovery-sources-light.png`, `-dark.png` | pass with findings | Breadcrumb *Discovery / Discovery sources*. **5 of 5** sources enabled, five succeeded runs, device table populated (software key). **Recent runs** is now a full-width card, opened from its fold header (*▾ Recent runs · 5 runs*); every column is in view at 1440 px: Source, Status, Queued, Observed / matched, Findings, Catalogue gaps, Reads (F20 closed). No Expand on it. **Reveal a pseudonym** is its own card below it. Cloud federation **off** (F5); public URL line (F28). |
-| S2 Findings | `ds-s2-findings-light.png`, `-dark.png` | pass | **Inventory · 15 findings** is a fold header (open). Chips All 15, Open 14, Confirmed 1, Closed 0, then **Expand**; no Show all. Columns Severity, Subject, Evidence (with *▶ n places*), Confidence, Seen, Status, Next step, all inside the card (F6 closed). Caption above the table. Line under it: *"Showing 3 of 15 · scroll the list for the rest, or Expand"* (F33). |
+| S1 Discovery sources | `ds-s1-discovery-sources-light.png`, `-dark.png` | pass with findings | Breadcrumb *Discovery / Discovery sources*. **5 of 5** sources enabled, five succeeded runs, device table populated (software key). **Recent runs** is now a full-width card, opened from its fold header (the **Recent runs** title and count, 5 runs); every column is in view at 1440 px: Source, Status, Queued, Observed / matched, Findings, Catalogue gaps, Reads (F20 closed). No Expand on it. **Reveal a pseudonym** is its own card below it. Cloud federation **off** (F5); public URL line (F28). |
+| S2 Findings | `ds-s2-findings-light.png`, `-dark.png` | pass | The **Inventory** header (title and count, 15 findings) is a fold header (open). Chips All 15, Open 14, Confirmed 1, Closed 0, then **Expand**; no Show all. Columns Severity, Subject, Evidence (with *▶ n places*), Confidence, Seen, Status, Next step, all inside the card (F6 closed). Caption above the table. Line under it: *"Showing 3 of 15 · scroll the list for the rest, or Expand"* (F33). |
 | S2 Coverage tab | `ds-s2d-coverage-light.png` | pass | Egress logs, Code scan and Self-reported **Missing**; SaaS export **Supplied** (1 import, 4 rows). |
 | S2 Pseudonym link | `ds-s2b-pseudonym-reveal-prefilled-light.png` | pass | Reveal prefilled with a `psn:` value, below Recent runs; not pressed. The narrow field shows the value cut at its edge (it is all there). |
 | S1/S2 Agents | `ds-s2c-agents-light.png` | pass with findings | 7 agents. Not a script beat. Records by seeded name (F30, kept). Two form placeholders and one help line name a vendor model (F34). |
@@ -62,7 +62,7 @@ acknowledged or resolved. A database straight from `demo:prepare` does not have 
 | S3 Workflow, artifact | `ds-s3f-workflow-artifact-light.png` | pass | **Submit shadow_ai_remediation_plan** with the plan typed, **Submit for sign-off**. |
 | S3 Waiting for sign-off | `ds-s3g-workflow-waiting-signoff-light.png` | pass | "waiting for sign-off — awaiting Morgan Reyes — it is in their inbox". |
 | S3 Morgan's first sign-in | `ds-s3g2-morgan-policy-gate-light.png` | pass | AI-policy acknowledgement gate (F2); intro at the card edge. |
-| S3 Morgan's Inbox | `ds-s3h-morgan-inbox-light.png` | pass with findings | **9 waiting on you**; the item in the side panel, **Reason (optional) · Deny · Approve** pinned. **Recently decided · 12 decisions** sits folded at the foot of the page (X6b). Long title (F8); busy admin Inbox (F13). |
+| S3 Morgan's Inbox | `ds-s3h-morgan-inbox-light.png` | pass with findings | **9 waiting on you**; the item in the side panel, **Reason (optional) · Deny · Approve** pinned. The **Recently decided** header (title and count, 12 decisions) sits folded at the foot of the page (X6b). Long title (F8); busy admin Inbox (F13). |
 | S3 Morgan approved | `ds-s3i-morgan-approved-light.png` | pass | Panel closed, the item gone, **8 waiting on you**; Recently decided still folded. |
 | S3 Workflow signed off | `ds-s3j-workflow-signed-off-light.png` | pass | Status **completed**, all four stages done. |
 | S4 Intake prefilled | `ds-s4-intake-prefilled-light.png` | pass | Breadcrumb *AI Governance / Register AI use case*. Banner, prefilled name, two similar use cases. Not submitted. |
@@ -70,10 +70,10 @@ acknowledged or resolved. A database straight from `demo:prepare` does not have 
 | G1 Use-case record | `ds-g1b-use-case-record-light.png` | pass with findings | Approved, High tier, **Approval valid until** 21 Apr 2027. One before-go-live condition, **Mark met** / **Waive** (it names a seeded agent record, F30). Tab-group captions still at two heights (F24). |
 | G1 Use case's audit tab | `ds-g1c-use-case-audit-light.png` | pass | **Audit 6**, six rows, **Open this use case's full audit trail**. |
 | G1 Use case's full trail | `ds-g1d-use-case-audit-trail-light.png` | pass | All six rows in view with *"Showing all 6 rows"*; the **Evidence** header in full; object type as a faint line above each event (F25 closed for this view). |
-| G2 Avery's Inbox | `ds-g2a-avery-inbox-light.png` | pass | **5 waiting on you**; **Recently decided · 12 decisions** folded below the list (X6b). |
+| G2 Avery's Inbox | `ds-g2a-avery-inbox-light.png` | pass | **5 waiting on you**; the **Recently decided** header (title and count, 12 decisions) folded below the list (X6b). |
 | G2 Review, Approve with conditions | `ds-g2b-avery-review-conditions-light.png` | pass with findings | **Open task · Review use case sign-off** on the right, **Cancel** and **Approve with conditions** pinned. The page behind it is dimmed at 1440 px (F35). Stack shows the seeded records (F30). Captured, not submitted. |
 | G4 Trust & evidence | `ds-g4-trust-light.png` | pass | 40 risks, 17 mitigated, 19 not yet, 80 % coverage. Safety 0 % (0/2). |
-| G5 Alerts | `ds-g5-alerts-light.png` | pass with findings | 24 open, 0 acknowledged, 2 resolved. **Alerts · 24 alerts** is a fold header (open) with **Expand**. The *"Showing 5 of 24"* line sits flush with the card edge (F36). Remediation kind raw code (F26). |
+| G5 Alerts | `ds-g5-alerts-light.png` | pass with findings | 24 open, 0 acknowledged, 2 resolved. The **Alerts** header (title and count, 24 alerts) is a fold header (open) with **Expand**. The *"Showing 5 of 24"* line sits flush with the card edge (F36). Remediation kind raw code (F26). |
 | G5 Alert in the drawer | `ds-g5b-alert-drawer-light.png` | pass with findings | Side panel at 1440 px; note and **Acknowledge** pinned. Due date format (F26). |
 | G5 Alert drawer, narrow | `ds-g5c-alert-drawer-narrow-light.png` | pass | At 900 px a modal over a dimmed page; footer pinned. |
 | G6 Graph | `ds-g6-graph-light.png` | pass | 32 nodes, 12 inherited exposure, 19 propagated high. Seeded records by name (F30, kept). |
@@ -106,8 +106,8 @@ stay open. **F33-F36** are new in this pack. No product code changes in this PR.
 
 The two other owner decisions of 2026-10-21 that this pack checks:
 - **X6b folded sections (#474):** built as approved. The fold header is the card title with a chevron and the count:
-  *Recent runs · 5 runs* (`ds-s1`), *Inventory · 15 findings* (`ds-s2`, `ds-s3a`), *Alerts · 24 alerts* (`ds-g5`) and
-  *Recently decided · 12 decisions* (`ds-s3h`, `ds-s3i`, `ds-g2a`). Recent runs and Recently decided start folded; the
+  *Recent runs* with 5 runs (`ds-s1`), *Inventory* with 15 findings (`ds-s2`, `ds-s3a`), *Alerts* with 24 alerts (`ds-g5`) and
+  *Recently decided* with 12 decisions (`ds-s3h`, `ds-s3i`, `ds-g2a`). Recent runs and Recently decided start folded; the
   spec asserts Recent runs' `aria-expanded="false"` before opening it. Inventory and Alerts start open. Sections with a
   form (Add a source, Endpoint agent enrolment, the alert drawer's acknowledgement) have no fold. Usage events is not on
   a demo screen.

@@ -566,7 +566,7 @@ const CLIENTS = [
   { v: "generic-openai", l: "Generic OpenAI-compatible" },
 ];
 
-function buildSnippet(opts: {
+export function buildSnippet(opts: {
   client: string;
   base: string;
   serverId: string;
@@ -576,7 +576,7 @@ function buildSnippet(opts: {
   const KEYPH = "<REGULAIT_API_KEY>";
   const { base, projectId: pid } = opts;
   const sid = opts.serverId || "<MCP_SERVER_ID>";
-  const model = opts.model || "claude-opus-5";
+  const model = opts.model || "<MODEL_ID>";
   const mcpUrl = `${base}/mcp/${sid}`;
   const hdrJson =
     `"Authorization": "Bearer ${KEYPH}"` +
