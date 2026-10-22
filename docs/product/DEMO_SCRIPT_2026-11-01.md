@@ -26,8 +26,8 @@ right-hand column of the timing table.
 - **Detail drawer:** an alert, an Inbox item, a finding's remediation plan and the use-case sign-off review open in a
   panel on the right. Above 900 px wide it sits beside the page, which stays usable; at 900 px and below it is a
   modal over the page. The decision row (**Approve**, **Acknowledge**, **Start remediation workflow…**) is pinned at
-  the panel's foot and never scrolls away; the panel's body scrolls on its own. Close it with **Close** (or **×** on
-  the sign-off review). Present at 1440 px or wider so the page stays visible beside it.
+  the panel's foot and never scrolls away; the panel's body scrolls on its own. Close it with **Close**.
+  Present at 1440 px or wider so the page stays visible beside it.
 - **Folded sections (X6b, #474):** a long list's card title is a fold button: a chevron, the title and its count (for
   example the **Recent runs** header: the chevron, the title, then its count). Pressing the title folds or opens the whole section. A folded section keeps its
   count and any warning badge (*1 failed*, *1 critical*) in view. On a first visit **Recent runs** (Discovery sources),
