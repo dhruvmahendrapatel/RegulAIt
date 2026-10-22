@@ -4,6 +4,7 @@
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { contrast as ratio } from "../test-utils/contrast";
 import { PALETTES } from "./palette";
 
 const css = readFileSync(new URL("./palettes.css", import.meta.url), "utf8");
@@ -15,17 +16,6 @@ function block(selector: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const m of body.matchAll(/(--[\w-]+):\s*([^;]+);/g)) out[m[1]!] = m[2]!.replace(/\s+/g, " ").trim();
   return out;
-}
-
-function luminance(hex: string): number {
-  const n = hex.replace("#", "");
-  const [r, g, b] = [0, 2, 4].map((i) => parseInt(n.slice(i, i + 2), 16) / 255);
-  const lin = (c: number) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
-  return 0.2126 * lin(r!) + 0.7152 * lin(g!) + 0.0722 * lin(b!);
-}
-function ratio(a: string, b: string): number {
-  const [x, y] = [luminance(a), luminance(b)].sort((p, q) => q - p);
-  return (x! + 0.05) / (y! + 0.05);
 }
 
 const DARK_SURFACE = "#111626"; // tokens.css dark --rg-surface, unless a palette overrides it
@@ -64,4 +54,9 @@ describe.each(PALETTES.filter((p) => p.id !== "aurora"))("palette $id", (p) => {
   it("the picker's swatch accent is the palette's light link colour", () => {
     expect(block(`[data-swatch="${p.id}"]`)["--swatch-accent"]).toBe(light["--rg-signal-700"]);
   });
+});
+
+it("no rule anywhere in palettes.css declares a risk or product-green token", () => {
+  const declared = [...css.matchAll(/(--rg-[\w-]+)\s*:/g)].map((m) => m[1]!).filter((name) => RISK.test(name));
+  expect(declared).toEqual([]);
 });
