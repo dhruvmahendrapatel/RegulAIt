@@ -84,6 +84,10 @@ test("Appearance: dark values apply both for an explicit Dark and for a dark dev
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   expect(await token(page, "--rg-signal-700")).toBe("#d8b4fe");
 
+  // the swatches preview each palette's dark look in dark mode: Harbor's dot is its dark link colour
+  const harborDot = page.locator('[data-swatch="harbor"] > span');
+  await expect.poll(() => harborDot.evaluate((el) => getComputedStyle(el).backgroundColor)).toBe("rgb(147, 197, 253)");
+
   // Match my device clears the stored mode
   await modes.getByRole("radio", { name: "Match my device" }).check();
   await expect(page.locator("html")).not.toHaveAttribute("data-theme", /./);
@@ -102,3 +106,21 @@ test("Appearance: the card passes axe in every palette, light and dark", async (
     }
   }
 });
+
+test("Account ?section= links land with the section title below the sticky topbar", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 600 });
+  for (const section of ["appearance", "password", "keys"]) {
+    await page.goto(`/ui/account?section=${section}`);
+    await page.waitForTimeout(400);
+    const topbar = await page.locator("header").first().boundingBox();
+    const title = await page.evaluate((s) => {
+      const heading = s === "appearance" ? "Appearance" : s === "password" ? "Password" : null;
+      const cards = [...document.querySelectorAll("section[data-rg-card]")];
+      const card = heading ? cards.find((c) => c.textContent?.trimStart().startsWith(heading)) : cards.find((c) => /model keys/i.test(c.textContent ?? ""));
+      return card?.getBoundingClientRect().top ?? null;
+    }, section);
+    expect(title, section).not.toBeNull();
+    expect(title!, section).toBeGreaterThanOrEqual(topbar!.y + topbar!.height);
+  }
+});
+

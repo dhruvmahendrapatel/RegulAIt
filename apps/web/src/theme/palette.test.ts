@@ -61,7 +61,9 @@ describe.each(PALETTES.filter((p) => p.id !== "aurora"))("palette $id", (p) => {
     for (const name of [...Object.keys(light), ...Object.keys(dark)]) expect(name).not.toMatch(RISK);
   });
 
-  it("the picker's swatch accent is the palette's light link colour", () => {
+  it("the picker's swatch accent is the palette's link colour in each mode", () => {
     expect(block(`[data-swatch="${p.id}"]`)["--swatch-accent"]).toBe(light["--rg-signal-700"]);
+    expect(block(`:root[data-theme="dark"] [data-swatch="${p.id}"]`)["--swatch-accent"]).toBe(dark["--rg-signal-700"]);
+    expect(block(`:root:not([data-theme="light"]) [data-swatch="${p.id}"]`)).toEqual(block(`:root[data-theme="dark"] [data-swatch="${p.id}"]`));
   });
 });

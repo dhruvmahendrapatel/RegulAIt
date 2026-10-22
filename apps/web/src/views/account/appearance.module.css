@@ -77,3 +77,8 @@
   font-size: var(--text-sm);
   color: var(--text-faint);
 }
+
+/* Account ?section= links land with the section's title below the sticky topbar (min-height 52px plus its padding) */
+.anchor {
+  scroll-margin-top: calc(52px + var(--s3));
+}
