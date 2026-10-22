@@ -26,10 +26,10 @@ right-hand column of the timing table.
 - **Detail drawer:** an alert, an Inbox item, a finding's remediation plan and the use-case sign-off review open in a
   panel on the right. Above 900 px wide it sits beside the page, which stays usable; at 900 px and below it is a
   modal over the page. The decision row (**Approve**, **Acknowledge**, **Start remediation workflow…**) is pinned at
-  the panel's foot and never scrolls away; the panel's body scrolls on its own. Close it with **Close** (or **×** on
-  the sign-off review). Present at 1440 px or wider so the page stays visible beside it.
+  the panel's foot and never scrolls away; the panel's body scrolls on its own. Close it with **Close**.
+  Present at 1440 px or wider so the page stays visible beside it.
 - **Folded sections (X6b, #474):** a long list's card title is a fold button: a chevron, the title and its count (for
-  example *▾ Recent runs · 5 runs*). Pressing the title folds or opens the whole section. A folded section keeps its
+  example the **Recent runs** header: the chevron, the title, then its count). Pressing the title folds or opens the whole section. A folded section keeps its
   count and any warning badge (*1 failed*, *1 critical*) in view. On a first visit **Recent runs** (Discovery sources),
   **Recently decided** (Inbox) and **Usage events** (Optimization) start **folded**; **Inventory** (Shadow-AI
   discovery) and **Alerts** start open. The choice is remembered per person, page and section in that browser only, so
@@ -139,8 +139,8 @@ UI: `apps/web/src/views/admin/governance/DiscoverySourcesPage.tsx`, `FederationC
   - **Import endpoint evidence** and **Endpoint agent enrolment** cards.
     The **Endpoint agent enrolment** card's device table shows the enrolled device as a pseudonym (`psn:…`), its
     platform and agent version, and its user as a pseudonym with a **hardware key** or **software key** badge.
-  - **Recent runs**, a full-width card that starts **folded** on a first visit: its header reads *▸ Recent runs · n
-    runs* (and *n failed* if any run failed). Press the header to open it. Open, every column fits at 1440 px:
+  - **Recent runs**, a full-width card that starts **folded** on a first visit: its header shows the chevron, the title
+    **Recent runs** and its count (and *n failed* if any run failed). Press the header to open it. Open, every column fits at 1440 px:
     **Source**, **Status**, **Queued**, **Observed / matched**, **Findings** (*n new, n updated*), **Catalogue gaps**
     and **Reads** (*all read*, or *could not read: …* per read). No Expand is needed (#477).
   - **Reveal a pseudonym**, its own card below Recent runs.
@@ -205,8 +205,8 @@ UI: `ShadowAiPage.tsx`, `DiscoverySightings.tsx`, `discoverySourcesModel.ts` (`s
   - Figures: **Critical** (*Leaked credential*), **High** (*Observed model traffic*), **Medium or low** (*Looser
     signals to check*), **Evidence classes supplied** (*n / 4*).
   - **Inventory** card, *"Every row is a lead for triage, not a verdict."*, with the status chips **All · Open ·
-    Confirmed · Closed** (each with its count) and **Expand**. Its title is a fold header (*▾ Inventory · n
-    findings*), open by default. Columns: **Severity · Subject (the provider under it) · Evidence · Confidence · Seen
+    Confirmed · Closed** (each with its count) and **Expand**. Its title is a fold header (the **Inventory** title and
+    its count), open by default. Columns: **Severity · Subject (the provider under it) · Evidence · Confidence · Seen
     · Status · Next step**. **Evidence** holds the evidence badges and, under them, the sightings folded behind a count
     (*▶ n places*). **Next step** holds **Plan remediation**, **Triage** and **Register as use case**.
   - The card shows three to four rows and scrolls inside itself, with the line *"Showing 3 of n · scroll the list for
@@ -309,7 +309,7 @@ UI: `ShadowRemediationPanel.tsx`, `apps/web/src/views/workflows/WorkflowDetailPa
   *Submitted: Shadow AI remediation plan (v1)* (open it to show the plan). The pinned foot has **Reason (optional)**,
   **Deny** and **Approve**. Press **Approve** (her authenticator code if asked). The item leaves the list and the
   count drops by one (*n waiting on you*). **Recently decided**, at the foot of the Inbox, starts folded
-  (*▸ Recently decided · n decisions*); the beat does not need it, so leave it folded. Back in Profile A, reload the workflow: status **completed**, all four
+  (the **Recently decided** header, title and count); the beat does not need it, so leave it folded. Back in Profile A, reload the workflow: status **completed**, all four
   pipeline stages done.
 - **Say:** "Nothing changed governed state yet; it was a plan. The plan runs through the same workflow engine as every
   other change, so its assignment rules and compliance stages apply. It sits in plan-only until a person says planning
@@ -408,7 +408,7 @@ the day.
 
 ### G5. Alerts and remediation — Ada, then Avery — 2 minutes (10-05 beat 3B)
 - **URL:** `/ui/admin/governance/alerts` → **Evaluate now**. The tabs **Active · Acknowledged · Resolved** sit
-  above the **Alerts** card, whose title is a fold header (*▾ Alerts · n alerts*, open by default). Click the alert
+  above the **Alerts** card, whose title is a fold header (the **Alerts** title and its count, open by default). Click the alert
   rows, not the card title: a click on the title folds the list.
 - **Action:** click the unowned-agent alert's row: it opens in the panel on the right (`ds-g5b`; at 900 px and
   below, a modal over the page, `ds-g5c`). Type the **Acknowledgement note — required and audited** in the pinned
