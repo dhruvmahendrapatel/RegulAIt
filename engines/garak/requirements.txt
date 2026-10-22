@@ -10,6 +10,8 @@
 # Installed with: pip install --require-hashes --no-deps --only-binary :all: -r requirements.txt
 # torch is the CPU-only build, by direct URL from the CPU wheel index (the ONLY package from that index,
 # R10 consequence 1): the default PyPI resolution pulls proprietary CUDA runtime packages.
+# 2026-10-22: nltk 3.10.3 to 3.10.4 (GHSA-8mgp-746c-j5xp). `uv pip compile --upgrade-package nltk` over this
+# file, with the inputs above, moves no other pin; the hash is the py3-none-any wheel from PyPI's JSON API.
 # Two packages publish no Python 3 wheel; they are in requirements-sdist.txt, built from their hashed
 # sdists with the setuptools pinned here (no build isolation, so no unhashed build dependency).
 # packages/engine-garak/src/image.test.ts keeps this file, the Dockerfile and the manifest in lockstep;
@@ -204,8 +206,8 @@ mypy-extensions==1.1.0 \
     --hash=sha256:1be4cccdb0f2482337c4743e60421de3a356cd97508abadd57d47403e94f5505
 networkx==3.7 \
     --hash=sha256:e3fd2c13a7814cee3746340d8d7f8598a67f16a58bf47fb7f8793fab6efca1b0
-nltk==3.10.3 \
-    --hash=sha256:ff9598a8e20518ee0d557745890cc4435b9578489e2dcbc69c4f81fa060caf7c
+nltk==3.10.4 \
+    --hash=sha256:769ba5413f265b7d3e87cd163cc28efa01e29eeef8bb6080bc907949d9fcfb51
 numpy==2.5.4 \
     --hash=sha256:fbde6962867ee75b48b0ee29b2b9372ec5d617799dbaf38e82dc0596f2f7738a
 nvdlib==0.9.0 \
