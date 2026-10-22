@@ -114,6 +114,10 @@ jobs:
           v="$(pnpm --filter @regulait/web exec playwright --version | sed -n 's/^Version \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p')"
           test -n "$v" || { echo "::error::could not read the Playwright version"; exit 1; }
           echo "version=$v" >> "$GITHUB_OUTPUT"
+          # Runner image for the apt package cache key; a new image carries new package versions.
+          img="${ImageOS:-unknown}-${ImageVersion:-unknown}"
+          [[ "$img" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::unexpected runner image id"; exit 1; }
+          echo "image=$img" >> "$GITHUB_OUTPUT"
 
       - name: Restore Playwright browsers
         id: playwright-cache
@@ -121,6 +125,23 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.version }}-${{ matrix.browser }}
+
+      # The .deb files `install-deps` downloads are cached too (#453): a slow apt mirror stalled them for 9-13 min
+      # even on a browser hit. apt still checks every cached file against the signed package index.
+      - name: Restore Playwright apt packages
+        id: playwright-apt
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/playwright-apt
+          key: playwright-apt-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.image }}-${{ steps.playwright.outputs.version }}-${{ matrix.browser }}
+
+      - name: Seed apt with the cached packages
+        env:
+          DEBS: ${{ runner.temp }}/playwright-apt
+        run: |
+          echo 'APT::Keep-Downloaded-Packages "true"; Binary::apt::APT::Keep-Downloaded-Packages "true";' | sudo tee /etc/apt/apt.conf.d/99playwright-keep-debs >/dev/null
+          if [ -d "$DEBS" ]; then find "$DEBS" -maxdepth 1 -name '*.deb' -exec sudo cp -t /var/cache/apt/archives/ {} +; fi
+          echo "apt archive holds $(find /var/cache/apt/archives -maxdepth 1 -name '*.deb' | wc -l) packages"
 
       - name: Install Playwright browsers (cache miss)
         if: steps.playwright-cache.outputs.cache-hit != 'true'
@@ -137,6 +158,26 @@ jobs:
       - name: Install Playwright system dependencies (cache hit)
         if: steps.playwright-cache.outputs.cache-hit == 'true'
         run: pnpm --filter @regulait/web exec playwright install-deps ${{ matrix.browser }}
+
+      # Saved on a miss straight after the install, like the browsers. Nothing collected means nothing to save.
+      - name: Collect Playwright apt packages (cache miss)
+        id: playwright-apt-collect
+        if: steps.playwright-apt.outputs.cache-hit != 'true'
+        env:
+          DEBS: ${{ runner.temp }}/playwright-apt
+        run: |
+          mkdir -p "$DEBS"
+          find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp -t "$DEBS" {} +
+          n="$(find "$DEBS" -maxdepth 1 -name '*.deb' | wc -l)"
+          echo "collected $n packages, $(du -sh "$DEBS" | cut -f1)"
+          echo "count=$n" >> "$GITHUB_OUTPUT"
+
+      - name: Save Playwright apt packages (cache miss)
+        if: steps.playwright-apt.outputs.cache-hit != 'true' && steps.playwright-apt-collect.outputs.count != '0'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/playwright-apt
+          key: ${{ steps.playwright-apt.outputs.cache-primary-key }}
 
       - name: Enterprise harness on ${{ matrix.browser }}
         run: pnpm --filter @regulait/web exec playwright test -c playwright.enterprise.config.ts --project=${{ matrix.browser }} --reporter=list,github
@@ -188,6 +229,10 @@ jobs:
           v="$(pnpm --filter @regulait/web exec playwright --version | sed -n 's/^Version \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p')"
           test -n "$v" || { echo "::error::could not read the Playwright version"; exit 1; }
           echo "version=$v" >> "$GITHUB_OUTPUT"
+          # Runner image for the apt package cache key; a new image carries new package versions.
+          img="${ImageOS:-unknown}-${ImageVersion:-unknown}"
+          [[ "$img" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::unexpected runner image id"; exit 1; }
+          echo "image=$img" >> "$GITHUB_OUTPUT"
 
       - name: Restore Playwright browsers
         id: playwright-cache
@@ -195,6 +240,23 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.version }}-chromium
+
+      # The .deb files `install-deps` downloads are cached too (#453): a slow apt mirror stalled them for 9-13 min
+      # even on a browser hit. apt still checks every cached file against the signed package index.
+      - name: Restore Playwright apt packages
+        id: playwright-apt
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/playwright-apt
+          key: playwright-apt-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.image }}-${{ steps.playwright.outputs.version }}-chromium
+
+      - name: Seed apt with the cached packages
+        env:
+          DEBS: ${{ runner.temp }}/playwright-apt
+        run: |
+          echo 'APT::Keep-Downloaded-Packages "true"; Binary::apt::APT::Keep-Downloaded-Packages "true";' | sudo tee /etc/apt/apt.conf.d/99playwright-keep-debs >/dev/null
+          if [ -d "$DEBS" ]; then find "$DEBS" -maxdepth 1 -name '*.deb' -exec sudo cp -t /var/cache/apt/archives/ {} +; fi
+          echo "apt archive holds $(find /var/cache/apt/archives -maxdepth 1 -name '*.deb' | wc -l) packages"
 
       - name: Install Playwright browsers (cache miss)
         if: steps.playwright-cache.outputs.cache-hit != 'true'
@@ -211,6 +273,26 @@ jobs:
       - name: Install Playwright system dependencies (cache hit)
         if: steps.playwright-cache.outputs.cache-hit == 'true'
         run: pnpm --filter @regulait/web exec playwright install-deps chromium
+
+      # Saved on a miss straight after the install, like the browsers. Nothing collected means nothing to save.
+      - name: Collect Playwright apt packages (cache miss)
+        id: playwright-apt-collect
+        if: steps.playwright-apt.outputs.cache-hit != 'true'
+        env:
+          DEBS: ${{ runner.temp }}/playwright-apt
+        run: |
+          mkdir -p "$DEBS"
+          find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp -t "$DEBS" {} +
+          n="$(find "$DEBS" -maxdepth 1 -name '*.deb' | wc -l)"
+          echo "collected $n packages, $(du -sh "$DEBS" | cut -f1)"
+          echo "count=$n" >> "$GITHUB_OUTPUT"
+
+      - name: Save Playwright apt packages (cache miss)
+        if: steps.playwright-apt.outputs.cache-hit != 'true' && steps.playwright-apt-collect.outputs.count != '0'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/playwright-apt
+          key: ${{ steps.playwright-apt.outputs.cache-primary-key }}
 
       - name: Screenshot pack (every screen x viewport x theme)
         run: pnpm --filter @regulait/web exec playwright test -c playwright.enterprise.config.ts --project=screenshots --reporter=list
