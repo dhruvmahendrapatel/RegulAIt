@@ -80,7 +80,37 @@ jobs:
       - name: Build the gateway and its workspace dependencies
         run: pnpm --filter "@regulait/gateway..." build
 
-      - run: pnpm --filter @regulait/web exec playwright install --with-deps chromium
+      # Playwright browsers cached per OS/arch + the exact installed Playwright version
+      # (#453; see ci.yml header item 6). Hit: only the apt system packages install.
+      - name: Playwright version
+        id: playwright
+        run: |
+          v="$(pnpm --filter @regulait/web exec playwright --version | sed -n 's/^Version \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p')"
+          test -n "$v" || { echo "::error::could not read the Playwright version"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Playwright browsers
+        id: playwright-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.version }}-chromium
+
+      - name: Install Playwright browsers (cache miss)
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: pnpm --filter @regulait/web exec playwright install --with-deps chromium
+
+      # Saved straight after the install, not in a post step, so a later test failure or a timeout still keeps it.
+      - name: Save Playwright browsers (cache miss)
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ steps.playwright-cache.outputs.cache-primary-key }}
+
+      - name: Install Playwright system dependencies (cache hit)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: pnpm --filter @regulait/web exec playwright install-deps chromium
 
       - name: Mocked UI suite, shard ${{ matrix.shard }} of ${{ strategy.job-total }}
         run: pnpm --filter @regulait/web exec playwright test -c playwright.demo-mock.config.ts --shard=${{ matrix.shard }}/${{ strategy.job-total }} --reporter=list,github,json
