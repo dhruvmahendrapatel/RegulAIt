@@ -1,0 +1,79 @@
+/* T1: the Appearance card. Lazy with the Account page, so outside the entry CSS budget. */
+.lead {
+  margin: 0 0 var(--s2);
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+.group {
+  margin: 0 0 var(--s2);
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.legend {
+  padding: 0;
+  margin-bottom: var(--s1);
+  font-weight: 600;
+}
+.themes {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr));
+  gap: var(--s1);
+}
+.modes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1);
+}
+/* the whole card is the radio's label: a 44 px target with the radio kept visible */
+.option {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  min-block-size: 44px;
+  padding: var(--s0) var(--s1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  cursor: pointer;
+}
+.option[data-checked] {
+  border-color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--text);
+}
+.option:has(input:focus-visible) {
+  box-shadow: var(--focus-ring);
+}
+.option input {
+  margin: 0;
+  accent-color: var(--text);
+}
+.swatch {
+  position: relative;
+  flex: none;
+  inline-size: 34px;
+  block-size: 34px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--swatch-ground, var(--surface-2));
+}
+.dot {
+  position: absolute;
+  inset-inline-start: 6px;
+  inset-block-end: 6px;
+  inline-size: 12px;
+  block-size: 12px;
+  border-radius: 50%;
+  background: var(--swatch-accent, var(--primary));
+}
+.text {
+  display: flex;
+  flex-direction: column;
+}
+.name {
+  font-weight: 600;
+}
+.tag {
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+}

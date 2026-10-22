@@ -1,0 +1,277 @@
+/* ------------------------------------------------------------------ *
+ * T1 (owner decision on #453, 2026-10-21): user-selectable palettes.
+ *
+ * Aurora is tokens.css itself; every other palette re-defines only the
+ * Signal (interactive) family, the field and the canvas worst point —
+ * never ink, severity or the product green, so a red tile means critical
+ * in every palette. High contrast also firms up muted ink, hairlines and
+ * the content surface.
+ *
+ * Loaded on demand (theme/palette.ts) and only when a palette other than
+ * Aurora is chosen, so the entry CSS budget is untouched.
+ *
+ * Specificity: a light block is :root[data-palette] (0,2,0) and outranks
+ * tokens.css's bare :root; each dark block adds a data-theme or
+ * :not([data-theme]) test (0,3,0), so it outranks both the light block
+ * and tokens.css's dark blocks. palette.test.ts checks every pair below
+ * against the AA floors tokens.css documents.
+ * ------------------------------------------------------------------ */
+
+/* The Appearance picker's swatches: each palette's light ground and link colour. */
+[data-swatch="aurora"] { --swatch-ground: #eef6fd; --swatch-accent: #005c70; }
+[data-swatch="harbor"] { --swatch-ground: #f3f6fb; --swatch-accent: #1a46c2; }
+[data-swatch="evergreen"] { --swatch-ground: #f2f8f6; --swatch-accent: #0b6262; }
+[data-swatch="graphite"] { --swatch-ground: #f5f5f6; --swatch-accent: #4338ca; }
+[data-swatch="orchid"] { --swatch-ground: #f8f5fd; --swatch-accent: #7e22ce; }
+[data-swatch="contrast"] { --swatch-ground: #ffffff; --swatch-accent: #003a8c; }
+
+/* ---- Harbor: blue over slate ------------------------------------- */
+:root[data-palette="harbor"] {
+  --rg-signal: #3b82f6;
+  --rg-signal-400: #60a5fa;
+  --rg-signal-700: #1a46c2;
+  --rg-signal-800: #1e3a8a;
+  --rg-signal-tint: #dbeafe;
+  --rg-signal-ring: #1d4ed8;
+  --rg-canvas: #c3d5f7;
+  --rg-field-base: linear-gradient(160deg, #f3f6fb 0%, #eef2f9 55%, #f1f4f8 100%);
+  --rg-field:
+    radial-gradient(55vw 55vh at 0% 0%, rgba(147, 197, 253, 0.6), transparent 72%),
+    radial-gradient(50vw 60vh at 100% 100%, rgba(186, 200, 222, 0.6), transparent 72%),
+    var(--rg-field-base);
+  --rg-rail-raised: rgba(29, 78, 216, 0.09);
+}
+:root[data-palette="harbor"][data-theme="dark"] {
+  --rg-signal: #60a5fa;
+  --rg-signal-400: #60a5fa;
+  --rg-signal-700: #93c5fd;
+  --rg-signal-800: #bfdbfe;
+  --rg-signal-tint: #13284d;
+  --rg-signal-ring: #60a5fa;
+  --rg-canvas: #121a33;
+  --rg-field-base: linear-gradient(155deg, #080d1c 0%, #0b1226 55%, #0a0f1e 100%);
+  --rg-field:
+    radial-gradient(70vw 65vh at 0% 0%, rgba(59, 130, 246, 0.16), transparent 72%),
+    radial-gradient(60vw 70vh at 100% 100%, rgba(100, 116, 139, 0.18), transparent 72%),
+    var(--rg-field-base);
+  --rg-rail-raised: rgba(96, 165, 250, 0.1);
+}
+
+/* ---- Evergreen: teal over sage (kept off the "OK" green) --------- */
+:root[data-palette="evergreen"] {
+  --rg-signal: #14b8a6;
+  --rg-signal-400: #2dd4bf;
+  --rg-signal-700: #0b6262;
+  --rg-signal-800: #0a5050;
+  --rg-signal-tint: #d3f3ee;
+  --rg-signal-ring: #0f766e;
+  --rg-canvas: #bfe9df;
+  --rg-field-base: linear-gradient(160deg, #f2f8f6 0%, #eef6f3 55%, #f1f7f5 100%);
+  --rg-field:
+    radial-gradient(55vw 55vh at 0% 0%, rgba(153, 233, 222, 0.6), transparent 72%),
+    radial-gradient(50vw 60vh at 100% 100%, rgba(196, 222, 208, 0.6), transparent 72%),
+    var(--rg-field-base);
+  --rg-rail-raised: rgba(15, 118, 110, 0.09);
+}
+:root[data-palette="evergreen"][data-theme="dark"] {
+  --rg-signal: #2dd4bf;
+  --rg-signal-400: #2dd4bf;
+  --rg-signal-700: #5eead4;
+  --rg-signal-800: #99f6e4;
+  --rg-signal-tint: #0b3b37;
+  --rg-signal-ring: #2dd4bf;
+  --rg-canvas: #0f1f22;
+  --rg-field-base: linear-gradient(155deg, #061214 0%, #08181a 55%, #071315 100%);
+  --rg-field:
+    radial-gradient(70vw 65vh at 0% 0%, rgba(45, 212, 191, 0.14), transparent 72%),
+    radial-gradient(60vw 70vh at 100% 100%, rgba(94, 140, 120, 0.16), transparent 72%),
+    var(--rg-field-base);
+  --rg-rail-raised: rgba(45, 212, 191, 0.1);
+}
+
+/* ---- Graphite: neutral grey, indigo accent ------------------------ */
+:root[data-palette="graphite"] {
+  --rg-signal: #6366f1;
+  --rg-signal-400: #818cf8;
+  --rg-signal-700: #4338ca;
+  --rg-signal-800: #3730a3;
+  --rg-signal-tint: #e0e7ff;
+  --rg-signal-ring: #4338ca;
+  --rg-canvas: #d6d6dc;
+  --rg-field-base: linear-gradient(160deg, #f5f5f6 0%, #ececef 55%, #e7e7ea 100%);
+  --rg-field: var(--rg-field-base);
+  --rg-rail-raised: rgba(67, 56, 202, 0.08);
+}
+:root[data-palette="graphite"][data-theme="dark"] {
+  --rg-signal: #818cf8;
+  --rg-signal-400: #818cf8;
+  --rg-signal-700: #a5b4fc;
+  --rg-signal-800: #c7d2fe;
+  --rg-signal-tint: #23264d;
+  --rg-signal-ring: #818cf8;
+  --rg-canvas: #18191e;
+  --rg-field-base: linear-gradient(155deg, #0d0e11 0%, #121317 55%, #0f1013 100%);
+  --rg-field: var(--rg-field-base);
+  --rg-rail-raised: rgba(129, 140, 248, 0.1);
+}
+
+/* ---- Orchid: plum over blush -------------------------------------- */
+:root[data-palette="orchid"] {
+  --rg-signal: #a855f7;
+  --rg-signal-400: #c084fc;
+  --rg-signal-700: #7e22ce;
+  --rg-signal-800: #6b21a8;
+  --rg-signal-tint: #f3e8ff;
+  --rg-signal-ring: #7e22ce;
+  --rg-canvas: #e4d0f7;
+  --rg-field-base: linear-gradient(160deg, #f8f5fd 0%, #f6f1fb 55%, #fbf4f6 100%);
+  --rg-field:
+    radial-gradient(50vw 55vh at 100% 0%, rgba(216, 180, 254, 0.6), transparent 72%),
+    radial-gradient(55vw 55vh at 0% 100%, rgba(251, 207, 232, 0.5), transparent 72%),
+    var(--rg-field-base);
+  --rg-rail-raised: rgba(126, 34, 206, 0.08);
+}
+:root[data-palette="orchid"][data-theme="dark"] {
+  --rg-signal: #c084fc;
+  --rg-signal-400: #c084fc;
+  --rg-signal-700: #d8b4fe;
+  --rg-signal-800: #e9d5ff;
+  --rg-signal-tint: #35184f;
+  --rg-signal-ring: #c084fc;
+  --rg-canvas: #1d1430;
+  --rg-field-base: linear-gradient(155deg, #0e0a1a 0%, #130d22 55%, #100b1c 100%);
+  --rg-field:
+    radial-gradient(65vw 70vh at 100% 0%, rgba(168, 85, 247, 0.18), transparent 72%),
+    radial-gradient(60vw 60vh at 0% 100%, rgba(236, 72, 153, 0.1), transparent 72%),
+    var(--rg-field-base);
+  --rg-rail-raised: rgba(192, 132, 252, 0.1);
+}
+
+/* ---- High contrast: flat ground, firmer ink and rules -------------- */
+:root[data-palette="contrast"] {
+  --rg-signal: #1f5fd1;
+  --rg-signal-400: #4d8bff;
+  --rg-signal-700: #003a8c;
+  --rg-signal-800: #002a66;
+  --rg-signal-tint: #dbe7ff;
+  --rg-signal-ring: #003a8c;
+  --rg-canvas: #ffffff;
+  --rg-ink-muted: #2c3035;
+  --rg-line: #6b7078;
+  --rg-line-strong: #3d4248;
+  --rg-field-base: #ffffff;
+  --rg-field: #ffffff;
+  --rg-glass: #ffffff;
+  --rg-glass-line: #3d4248;
+  --rg-topbar-bg: #ffffff;
+  --rg-rail-bg: #ffffff;
+  --rg-rail-muted: #2c3035;
+  --rg-rail-line: #6b7078;
+  --rg-rail-raised: rgba(0, 58, 140, 0.1);
+}
+:root[data-palette="contrast"][data-theme="dark"] {
+  --rg-signal: #6fb0ff;
+  --rg-signal-400: #6fb0ff;
+  --rg-signal-700: #9ecbff;
+  --rg-signal-800: #cfe4ff;
+  --rg-signal-tint: #0b2547;
+  --rg-signal-ring: #9ecbff;
+  --rg-canvas: #000000;
+  --rg-surface: #0b0b0c;
+  --rg-ink-muted: #c8ccd4;
+  --rg-line: #5b6270;
+  --rg-line-strong: #8a91a0;
+  --rg-field-base: #000000;
+  --rg-field: #000000;
+  --rg-glass: #0b0b0c;
+  --rg-glass-line: #8a91a0;
+  --rg-topbar-bg: #000000;
+  --rg-rail-bg: #000000;
+  --rg-rail-muted: #c8ccd4;
+  --rg-rail-line: #5b6270;
+  --rg-rail-raised: rgba(158, 203, 255, 0.12);
+}
+
+/* System dark (no explicit choice): the same dark values. Kept identical to the
+   [data-theme="dark"] blocks above; palette.test.ts checks that they match. */
+@media (prefers-color-scheme: dark) {
+  :root[data-palette="harbor"]:not([data-theme="light"]) {
+    --rg-signal: #60a5fa;
+    --rg-signal-400: #60a5fa;
+    --rg-signal-700: #93c5fd;
+    --rg-signal-800: #bfdbfe;
+    --rg-signal-tint: #13284d;
+    --rg-signal-ring: #60a5fa;
+    --rg-canvas: #121a33;
+    --rg-field-base: linear-gradient(155deg, #080d1c 0%, #0b1226 55%, #0a0f1e 100%);
+    --rg-field:
+      radial-gradient(70vw 65vh at 0% 0%, rgba(59, 130, 246, 0.16), transparent 72%),
+      radial-gradient(60vw 70vh at 100% 100%, rgba(100, 116, 139, 0.18), transparent 72%),
+      var(--rg-field-base);
+    --rg-rail-raised: rgba(96, 165, 250, 0.1);
+  }
+  :root[data-palette="evergreen"]:not([data-theme="light"]) {
+    --rg-signal: #2dd4bf;
+    --rg-signal-400: #2dd4bf;
+    --rg-signal-700: #5eead4;
+    --rg-signal-800: #99f6e4;
+    --rg-signal-tint: #0b3b37;
+    --rg-signal-ring: #2dd4bf;
+    --rg-canvas: #0f1f22;
+    --rg-field-base: linear-gradient(155deg, #061214 0%, #08181a 55%, #071315 100%);
+    --rg-field:
+      radial-gradient(70vw 65vh at 0% 0%, rgba(45, 212, 191, 0.14), transparent 72%),
+      radial-gradient(60vw 70vh at 100% 100%, rgba(94, 140, 120, 0.16), transparent 72%),
+      var(--rg-field-base);
+    --rg-rail-raised: rgba(45, 212, 191, 0.1);
+  }
+  :root[data-palette="graphite"]:not([data-theme="light"]) {
+    --rg-signal: #818cf8;
+    --rg-signal-400: #818cf8;
+    --rg-signal-700: #a5b4fc;
+    --rg-signal-800: #c7d2fe;
+    --rg-signal-tint: #23264d;
+    --rg-signal-ring: #818cf8;
+    --rg-canvas: #18191e;
+    --rg-field-base: linear-gradient(155deg, #0d0e11 0%, #121317 55%, #0f1013 100%);
+    --rg-field: var(--rg-field-base);
+    --rg-rail-raised: rgba(129, 140, 248, 0.1);
+  }
+  :root[data-palette="orchid"]:not([data-theme="light"]) {
+    --rg-signal: #c084fc;
+    --rg-signal-400: #c084fc;
+    --rg-signal-700: #d8b4fe;
+    --rg-signal-800: #e9d5ff;
+    --rg-signal-tint: #35184f;
+    --rg-signal-ring: #c084fc;
+    --rg-canvas: #1d1430;
+    --rg-field-base: linear-gradient(155deg, #0e0a1a 0%, #130d22 55%, #100b1c 100%);
+    --rg-field:
+      radial-gradient(65vw 70vh at 100% 0%, rgba(168, 85, 247, 0.18), transparent 72%),
+      radial-gradient(60vw 60vh at 0% 100%, rgba(236, 72, 153, 0.1), transparent 72%),
+      var(--rg-field-base);
+    --rg-rail-raised: rgba(192, 132, 252, 0.1);
+  }
+  :root[data-palette="contrast"]:not([data-theme="light"]) {
+    --rg-signal: #6fb0ff;
+    --rg-signal-400: #6fb0ff;
+    --rg-signal-700: #9ecbff;
+    --rg-signal-800: #cfe4ff;
+    --rg-signal-tint: #0b2547;
+    --rg-signal-ring: #9ecbff;
+    --rg-canvas: #000000;
+    --rg-surface: #0b0b0c;
+    --rg-ink-muted: #c8ccd4;
+    --rg-line: #5b6270;
+    --rg-line-strong: #8a91a0;
+    --rg-field-base: #000000;
+    --rg-field: #000000;
+    --rg-glass: #0b0b0c;
+    --rg-glass-line: #8a91a0;
+    --rg-topbar-bg: #000000;
+    --rg-rail-bg: #000000;
+    --rg-rail-muted: #c8ccd4;
+    --rg-rail-line: #5b6270;
+    --rg-rail-raised: rgba(158, 203, 255, 0.12);
+  }
+}

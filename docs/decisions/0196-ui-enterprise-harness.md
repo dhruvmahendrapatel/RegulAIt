@@ -445,3 +445,35 @@ unchanged.
   - entry CSS (10.6 kB) and the two lazy chunks are unchanged.
   This decision supersedes item 2 of the earlier decision ("lowered back below today's values") for all JS only. The
   values in "Size" above, measured before #477 merged, are kept as the record of what this change alone saved.
+
+## Addendum / As built (2026-10-21) — all JS 1,036 → 1,038 kB (T1 themes, Phase 1)
+
+The owner decided this raise on 2026-10-21 in the Governed - Designer session:
+<https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6328260537>. It is the ADR-recorded exception
+that the `--guard` rule above requires, and it has one `CEILING_EXCEPTIONS` row.
+
+- **What moves.** In `apps/web/.size-limit.json`, only `all JS` goes from `1036 kB` to `1038 kB` (+2 kB). Entry JS
+  stays at main's 137.3 kB (set by the routing-library addendum above; it is not raised), and entry CSS (10.6 kB) and
+  the two lazy chunks are unchanged.
+- **Why.** T1 Phase 1 (user-selectable palettes) adds lazy JavaScript only: the palette module (`theme/palette.ts`,
+  its own chunk) and the Appearance card on the Account page. The palette tokens are a lazy stylesheet
+  (`theme/palettes.css`), loaded only once a palette other than Aurora is chosen. Gzip bytes, size-limit 14.2.0:
+
+  | | entry JS | entry CSS | all JS |
+  |---|---|---|---|
+  | main (`f8ea023`) | 137,613 | 10,594 | 1,035,614 |
+  | with T1 Phase 1 | 137,753 | 10,594 | 1,037,336 |
+  | old ceiling | 137,900 | 10,600 | 1,036,000 |
+  | new ceiling | 137,900 | 10,600 | 1,038,000 |
+
+  The table above was measured before the routing-library production build merged, when the entry JS ceiling was
+  still 137.9 kB. With main (that change included) merged into this branch, gzip bytes, size-limit 14.2.0: entry JS
+  137,176 against the 137.3 kB ceiling (124 B headroom), entry CSS 10,594, all JS 1,036,518 against `1038 kB`
+  (1,482 B headroom). The `all JS` row from `1035 kB` to `1036 kB` stays; this addendum adds its own row.
+
+
+  Fix round 2 (review of #490): `theme/palettes.css` now loads through a `<link>` (`palettes.css?url`) rather than
+  `import()`, so a failed load can be retried in the same visit; the stylesheet stays lazy and its tiny JS wrapper
+  chunk is gone. Gzip bytes, size-limit 14.2.0, after the change: entry JS 137,179 against 137.3 kB, all JS 1,036,507
+  against `1038 kB`. The `1035 kB` to `1036 kB` row named in the sentence above was dropped after all: main already
+  carries `1036 kB`, so it matched nothing, and `--guard origin/main` still exits 0 without it.
