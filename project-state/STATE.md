@@ -1,10 +1,10 @@
 ---
-phase: demo-prep-wide-tables-and-x6b-merged-reproducible-engine-images-final-refresh-in-flight
-last_updated: 2026-10-21
+phase: demo-prep-final-refresh-and-t1-phase-1-merged-followups-in-review
+last_updated: 2026-10-22
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-10-21-session-02.md
+last_session: sessions/2026-10-22-session-01.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,33 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-22 (14:30 UTC) - demo prep: the routing library's production build, the final screenshot pack, the F34/F35
+copy and drawer fixes and T1 Phase 1 (six colour themes, kept in the browser) are merged.** Full record:
+[sessions/2026-10-22-session-01.md](sessions/2026-10-22-session-01.md). This paragraph supersedes the "Open", "Owner
+actions" and "Process" lists of the 2026-10-21 (21:00) paragraph below; its owner decisions stand.
+- **Merged (UTC, 2026-10-21 21:09 to 2026-10-22 13:06):** #488 (STATE), #484 (routing library production build,
+  entry JS 137.3 kB), #486 (final screenshot pack, deck and click paths), #489 (F34 neutral placeholders and a wider
+  copy guard, F35 Inbox review drawer, runbook copy exceptions), #491 (neutral `<MODEL_ID>` snippet token, #486 doc
+  lows) and #490 (T1 Phase 1 themes, all JS 1038 kB).
+- **Last migration on main: 0210.** No migration in this window.
+- **Bundle ceilings now:** entry JS 137.3 kB, all JS 1038 kB, entry CSS 10.6 kB (ADR-0196 addenda).
+- **T1 themes:** Phase 1 shipped browser-only (six palettes in light and dark, an Account Appearance card, the choice
+  kept in this browser). Phase 2 (saved to the account, an org default and lock, one migration) is after the demo.
+- **Open, HOLD:** #492 (one review drawer at a time, wider copy guard, palette link cleanup; the #489 and #490 review
+  tails), under review.
+- **Owner actions:** delete the seven stale `engine-images-lock/*` branches (still on the remote on 2026-10-22), and
+  the real-account round trips in
+  [docs/deployment/DEMO_REAL_ACCOUNTS.md](../docs/deployment/DEMO_REAL_ACCOUNTS.md).
+- **Owner decisions this window** (on #453; detail in the session record): F34 neutral copy plus a guard rule, F35
+  fixed before the freeze, runbook service names kept as functional exceptions; the SSO identity-provider line kept,
+  the snippet fallback becomes `<MODEL_ID>`; T1 Phase 1 now, before the freeze; all JS 1036 to 1038 kB; a palette
+  that fails to load keeps the stored choice and shows Aurora for that visit; T1 Phase 2 after the demo.
+- **Process:** check the engine image run after every merge (none ran this window). Fetch main with the explicit
+  refspec `+refs/heads/main:refs/remotes/origin/main`; a plain `git fetch origin main` once left it stale. spa-mock
+  shard 3 and spa-journeys timed out on #490 and #492 with no failing test; if it recurs, ask the owner (rebalance or
+  cache setup vs raise the caps).
+- **Dates:** code freeze 2026-10-29, demo 2026-11-01.
 
 **2026-10-21 (21:00 UTC) - demo prep: wide tables, X6b folded sections, garak 0.17.1, the audit index (0210) and
 gated, reproducible engine image publishes are merged.** Full record:
@@ -5212,6 +5239,10 @@ Addendum (2026-10-21): ADR-0196 gained an addendum recording the owner's ceiling
 1036 kB) and the guard's one-row exception rule (#477). The later 137.3 kB entry value arrives with #484. The owner's
 text is unedited.
 
+Addendum (2026-10-22): ADR-0196 gained two more addenda: the routing library's production build, which lowers entry
+JS to 137.3 kB (#484), and the owner's all JS raise from 1036 kB to 1038 kB for T1 Phase 1 (#490). Entry JS stays at
+137.3 kB. The owner's text is unedited.
+
 As built (2026-10-21): ADR-0197 gained As-built notes for the fallback rehearsal record and the post-demo teardown
 runbook (#482), and for the audit object index and `objectType` validation (#476). The owner's text is unedited.
 
@@ -5229,6 +5260,14 @@ region-allowlist SCP; OQ-002 (budget cap) resolved to $5/month; OQ-003 (GitHub a
 to personal `dhruvmahendrapatel`.
 
 ## Known follow-ups (not urgent, not blocking)
+- **Demo-prep follow-ups (2026-10-22)**, from the reviews of #484-#491. Taken from review reports; not re-verified
+  one by one.
+  - In #492 (held, under review): the #489 Medium (no test that only one review drawer opens at a time, approvals and
+    workbench), the #489 copy guard Lows (JSX expression strings, `label`/`aria-label`, constant placeholders) and
+    the #490 nit (`link.remove()` untested).
+  - CI: spa-mock shard 3 and spa-journeys ran into their timeouts on #490 and #492 (no failing test). If it recurs,
+    owner question: rebalance shard 3 or cache its setup vs raise the caps (no raise without the owner).
+  - After the demo: T1 Phase 2 (theme saved to the account, org default and lock, one migration; owner 2026-10-22).
 - **Demo-prep follow-ups (2026-10-21, evening)**, from the reviews of #474 and #477-#487. Taken from review reports;
   not re-verified one by one. From the block below, the #458 and #460 lows and the garak 0.17.1 upgrade are done
   (#473, #481, #471).
@@ -5243,7 +5282,7 @@ to personal `dhruvmahendrapatel`.
   - X16 literacy flake: hardened in #481, root cause not found.
   - Narrow the `pnpm-lock.yaml` image input per engine (owner: after the demo).
   - Stale `engine-images-lock/*` branches for the owner to delete.
-  - After the demo: T1 user-selectable themes; sandbox teardown per DEMO_TEARDOWN.md.
+  - After the demo: T1 Phase 2 (Phase 1 merged in #490); sandbox teardown per DEMO_TEARDOWN.md.
 - **Demo-prep follow-ups (2026-10-21)**, from the #458, #460 and #465 reviews and the owner's decisions. Taken from
   review reports; not re-verified one by one.
   - #458 lows: a tab count of 0 is hidden; the tab grouping is announced as a description.
