@@ -555,7 +555,7 @@ function EffectivePreviewCard() {
 
 // ---- per-client config generator ------------------------------------------
 
-const CLIENTS = [
+export const CLIENTS = [
   { v: "claude-code", l: "Claude Code" },
   { v: "cursor", l: "Cursor" },
   { v: "cline", l: "Cline" },
