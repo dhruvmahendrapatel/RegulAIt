@@ -373,19 +373,17 @@ describe("classifyDiscoveryContent", () => {
 });
 
 describe("endpointPatternLiteralLength — tie-break specificity, the wildcard excluded", () => {
-  // The old form, pattern.replace("*", ""), removed the first `*` only. The
-  // new form must agree with it on every pattern, so ranking does not change.
-  const old = (pattern: string): number => pattern.replace("*", "").length;
-  it.each(["openai.com", "*.openai.com", "api.openai.*", "api.*.com", "*", "", "a*b*c"])(
-    "%j matches the old single-replace length",
-    (pattern) => {
-      expect(endpointPatternLiteralLength(pattern)).toBe(old(pattern));
-    },
-  );
-  it("counts literal characters only", () => {
-    expect(endpointPatternLiteralLength("openai.com")).toBe(10);
-    expect(endpointPatternLiteralLength("*.openai.com")).toBe(11);
-    expect(endpointPatternLiteralLength("api.openai.*")).toBe(11);
-    expect(endpointPatternLiteralLength("*")).toBe(0);
+  // Expected values are what the old form, which removed the first `*` only,
+  // returned for each pattern, so the ranking does not change.
+  it.each([
+    ["openai.com", 10], // no wildcard
+    ["*.openai.com", 11], // leading
+    ["api.openai.*", 11], // trailing
+    ["api.*.com", 8], // middle
+    ["*", 0],
+    ["", 0],
+    ["a*b*c", 4], // only one `*` is ever discounted
+  ] as const)("%j has %i literal characters", (pattern, expected) => {
+    expect(endpointPatternLiteralLength(pattern)).toBe(expected);
   });
 });
