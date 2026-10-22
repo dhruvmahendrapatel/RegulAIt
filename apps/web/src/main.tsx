@@ -12,10 +12,13 @@ try {
 } catch {
   // storage unavailable: Aurora
 }
-void (palette ? import("./theme/palette").then((m) => m.startPalette()) : Promise.resolve()).then(() =>
-  createRoot(document.getElementById("root")!).render(
-    <React.StrictMode>
-      <App />
-    </React.StrictMode>,
-  ),
-);
+// the app renders whatever happens: a palette module that fails to load means Aurora (data-palette is never set)
+void (palette ? import("./theme/palette").then((m) => m.startPalette()) : Promise.resolve())
+  .catch(() => undefined)
+  .then(() =>
+    createRoot(document.getElementById("root")!).render(
+      <React.StrictMode>
+        <App />
+      </React.StrictMode>,
+    ),
+  );

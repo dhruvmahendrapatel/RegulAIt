@@ -102,3 +102,42 @@ test("Appearance: the card passes axe in every palette, light and dark", async (
     }
   }
 });
+
+test("Appearance: a stored palette whose module fails to load still renders the app, in Aurora", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "light" });
+  await page.addInitScript(() => localStorage.setItem("regulait.palette", "harbor"));
+  // the palette module fails on the first visit only. Chrome keeps that failure for the whole document, so the Account
+  // chunk (which shares the module) shows the reload notice; the shell around it renders, in Aurora.
+  let fetches = 0;
+  await page.route("**/src/theme/palette.ts*", (route) => (fetches++ === 0 ? route.abort() : route.continue()));
+  await page.goto("/ui/account?section=appearance");
+  await expect(page.getByRole("complementary", { name: "Primary navigation" })).toBeVisible();
+  await expect(page.locator("html")).not.toHaveAttribute("data-palette", /./);
+  expect(await token(page, "--rg-signal-700")).toBe("#005c70");
+  expect(fetches).toBe(1);
+
+  // the module is back: a reload applies the stored palette, and the picker shows it
+  await page.getByRole("button", { name: "Reload" }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-palette", "harbor");
+  await expect(page.getByRole("group", { name: "Theme" }).getByRole("radio", { name: /^Harbor/ })).toBeChecked();
+});
+
+test("Appearance: a palette sheet that fails to load leaves Aurora picked, and the next pick retries", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "light" });
+  // the sheet itself, not the dev server's `palettes.css?url` module that names it
+  const block = (route: Route) => (route.request().resourceType() === "stylesheet" ? route.abort() : route.continue());
+  await page.route("**/src/theme/palettes.css*", block);
+  await page.goto("/ui/account?section=appearance");
+  const themes = page.getByRole("group", { name: "Theme" });
+  // click, not check(): the radio is meant to fall back unchecked
+  await themes.locator("label").filter({ hasText: "Harbor" }).click();
+  await expect(themes.getByRole("radio", { name: /^Aurora/ })).toBeChecked();
+  await expect(themes.getByRole("radio", { name: /^Harbor/ })).not.toBeChecked();
+  await expect(page.locator("html")).not.toHaveAttribute("data-palette", /./);
+  expect(await token(page, "--rg-signal-700")).toBe("#005c70");
+
+  await page.unroute("**/src/theme/palettes.css*", block);
+  await themes.getByRole("radio", { name: /^Harbor/ }).check();
+  await expect(page.locator("html")).toHaveAttribute("data-palette", "harbor");
+  expect(await token(page, "--rg-signal-700")).toBe("#1a46c2");
+});

@@ -5,6 +5,7 @@
  * Phase 2 moves the choice to the account, with an organisation default and lock (needs a migration).
  */
 import { useSyncExternalStore } from "react";
+import sheetUrl from "./palettes.css?url";
 
 export type PaletteId = "aurora" | "harbor" | "evergreen" | "graphite" | "orchid" | "contrast";
 
@@ -20,11 +21,24 @@ export const PALETTES: ReadonlyArray<{ id: PaletteId; name: string; tag: string 
 
 const KEY = "regulait.palette";
 const listeners = new Set<() => void>();
-let sheet: Promise<unknown> | null = null;
+let sheet: Promise<void> | null = null;
 
-/** palettes.css: the palette tokens and the picker's swatches; the Appearance card loads it to draw them */
-export function loadPaletteSheet(): Promise<unknown> {
-  sheet ??= import("./palettes.css");
+/** palettes.css: the palette tokens and the picker's swatches; the Appearance card loads it to draw them.
+ * A `<link>`, not `import()`: the browser keeps a failed module import for the rest of the visit, while a failed
+ * link is dropped here, so the next pick fetches the sheet again. */
+export function loadPaletteSheet(): Promise<void> {
+  sheet ??= new Promise<void>((resolve, reject) => {
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = sheetUrl;
+    link.onload = () => resolve();
+    link.onerror = () => {
+      link.remove();
+      sheet = null;
+      reject(new Error("palettes.css did not load"));
+    };
+    document.head.append(link);
+  });
   return sheet;
 }
 
@@ -43,6 +57,8 @@ function stored(): PaletteId {
 
 /** the latest choice: the picker shows it at once, while its sheet may still be loading */
 let latest: PaletteId = "aurora";
+/** the palette on <html> now */
+let applied: PaletteId = "aurora";
 
 function current(): PaletteId {
   return latest;
@@ -52,10 +68,20 @@ async function apply(id: PaletteId): Promise<void> {
   latest = id;
   listeners.forEach((l) => l());
   if (id !== "aurora") {
-    await loadPaletteSheet();
+    try {
+      await loadPaletteSheet();
+    } catch {
+      // the sheet failed: the picker goes back to the palette actually on the page (Aurora, unless one was in)
+      if (latest === id) {
+        latest = applied;
+        listeners.forEach((l) => l());
+      }
+      return;
+    }
   }
   // a later choice landed while the sheet loaded: that one wins
   if (latest !== id) return;
+  applied = id;
   if (id === "aurora") delete document.documentElement.dataset.palette;
   else document.documentElement.dataset.palette = id;
   listeners.forEach((l) => l());
@@ -64,7 +90,7 @@ async function apply(id: PaletteId): Promise<void> {
 /** before the first render: the stored palette, so the app paints in it (Aurora needs nothing) */
 export function startPalette(): Promise<void> {
   const id = stored();
-  return id === "aurora" ? Promise.resolve() : apply(id).catch(() => undefined);
+  return id === "aurora" ? Promise.resolve() : apply(id);
 }
 
 export function setPalette(id: PaletteId): Promise<void> {
