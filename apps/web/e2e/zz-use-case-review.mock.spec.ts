@@ -478,6 +478,25 @@ test.describe("the review task", () => {
       await expect(drawer).toBeHidden();
     }
   });
+
+  // #489 finding 1: the Approvals queue and the Review workbench have no page-level drawer state, so only the
+  // panel's own "close the open review" keeps a second Review from stacking a second side panel on the first.
+  const secondIntake = { ...intakeApproval("ada", "riley"), id: "99999999-0000-4000-8000-000000000001", objectLabel: "AI use-case intake: Claims triage helper" };
+  for (const route of ["/ui/admin/approvals", "/ui/admin/review-workbench"]) {
+    test(`F35: one review drawer at a time on ${route}: a second Review replaces the first and takes focus`, async ({ page }) => {
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await mockGateway(page, { approvals: [intakeApproval("ada", "riley"), secondIntake] });
+      await page.goto(route);
+      await page.getByRole("button", { name: "Review sign-off for Credit-limit-increase assistant" }).click();
+      const open = page.locator("dialog[open]");
+      await expect(open).toHaveCount(1);
+      await expect(open.getByText("Credit-limit-increase assistant").first()).toBeVisible();
+      await page.getByRole("button", { name: "Review sign-off for Claims triage helper" }).click();
+      await expect(open).toHaveCount(1);
+      await expect(open.getByText("Claims triage helper").first()).toBeVisible();
+      await expect(open.getByRole("heading", { name: "Review use case sign-off" })).toBeFocused();
+    });
+  }
 });
 
 // ---------------------------------------------------------------------------
