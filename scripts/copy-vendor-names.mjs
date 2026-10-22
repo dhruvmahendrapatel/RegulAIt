@@ -16,7 +16,8 @@
  * compiler, so a `//` inside a string literal or JSX text is copy, not a comment.
  *
  * Input placeholders and help text are held to more (F34, owner decision 2026-10-21 on #453): a model id is copy there
- * too, so the JSX `placeholder`, `title` and help/hint/description/tip attributes and all JSX text are also checked,
+ * too, so the JSX `placeholder`, `title`, `label`, `aria-label` and help/hint/description/tip attributes, all JSX text,
+ * the strings a `{...}` child prints and the same-file `const` strings either of them names are also checked,
  * case-insensitively, for AI model ids and model-family names (`claude-opus-5`, `gpt-4o`, `gemini`) and for the
  * vendors behind them (`Google`, `Meta`, ...). Everywhere else those words are left alone, where they are identifiers,
  * provider slugs or functional names (a Google Workspace connector).
@@ -51,7 +52,7 @@ export const MODEL_PATTERNS = [
 /** the vendors behind those models, matched as proper nouns, again only on the help surfaces */
 export const HELP_VENDOR_NAMES = ["Google", "Meta", "Microsoft", "Amazon", "xAI", "Alibaba", "IBM", "Nvidia", "NVIDIA"];
 /** JSX attributes that carry hint or help copy */
-export const HELP_ATTRS = /^(placeholder|title|hint|help|helpText|description|tip|info|caption|aria-description)$/;
+export const HELP_ATTRS = /^(placeholder|title|label|aria-label|hint|help|helpText|description|tip|info|caption|aria-description)$/;
 
 /** the copy surfaces: directories walked, plus single shared modules whose text the UI prints verbatim */
 export const COPY_ROOTS = [
@@ -186,19 +187,72 @@ export function codeOf(line) {
   return wholeLineComment(line) ? "" : stripComments("line.ts", line);
 }
 
-/** the [start, end) ranges of a file's help surfaces: help attributes' string text and every JSX text node */
+/**
+ * the [start, end) ranges of a file's help surfaces: help attributes' string text, every JSX text node, the strings
+ * an element prints from a `{...}` child (`<p>{"..."}</p>`, a template literal, either branch of `a ? "x" : "y"`, a
+ * `+` / `||` / `??` operand), and the initialiser of a same-file `const` that either of those names (`placeholder={PH}`)
+ */
 function helpRanges(file, text) {
   if (!file.endsWith(".tsx")) return [];
   const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   const ranges = [];
-  const strings = (node) => {
+  // every same-file `const NAME = <string or template>`; a name declared twice resolves to both
+  const consts = new Map();
+  const collect = (node) => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer
+      && ts.isVariableDeclarationList(node.parent) && node.parent.flags & ts.NodeFlags.Const) {
+      consts.set(node.name.text, [...(consts.get(node.name.text) ?? []), node.initializer]);
+    }
+    node.forEachChild(collect);
+  };
+  collect(sf);
+  const resolving = new Set();
+  const constant = (node) => {
+    const name = node.text;
+    if (resolving.has(name)) return;
+    resolving.add(name);
+    for (const init of consts.get(name) ?? []) printed(init);
+    resolving.delete(name);
+  };
+  const isReference = (node) => ts.isIdentifier(node) && !(ts.isPropertyAccessExpression(node.parent) && node.parent.name === node)
+    && !(ts.isPropertyAssignment(node.parent) && node.parent.name === node);
+  const literal = (node) => {
     if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || ts.isTemplateHead(node)
-      || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) ranges.push([node.getStart(sf), node.end]);
-    else node.forEachChild(strings);
+      || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) {
+      ranges.push([node.getStart(sf), node.end]);
+      return true;
+    }
+    return false;
+  };
+  // an attribute's value: every string in it, and every const it names
+  const strings = (node) => {
+    if (literal(node)) return;
+    if (isReference(node)) constant(node);
+    node.forEachChild(strings);
+  };
+  // what an expression prints: its own strings, not those of a call, comparison or nested element inside it
+  const printed = (node) => {
+    if (!node || literal(node)) return;
+    if (ts.isTemplateExpression(node)) {
+      literal(node.head);
+      node.templateSpans.forEach((span) => {
+        printed(span.expression);
+        literal(span.literal);
+      });
+    } else if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isSatisfiesExpression(node)) printed(node.expression);
+    else if (ts.isConditionalExpression(node)) {
+      printed(node.whenTrue);
+      printed(node.whenFalse);
+    } else if (ts.isBinaryExpression(node) && [ts.SyntaxKind.PlusToken, ts.SyntaxKind.BarBarToken,
+      ts.SyntaxKind.QuestionQuestionToken, ts.SyntaxKind.AmpersandAmpersandToken].includes(node.operatorToken.kind)) {
+      if (node.operatorToken.kind !== ts.SyntaxKind.AmpersandAmpersandToken) printed(node.left);
+      printed(node.right);
+    } else if (isReference(node)) constant(node);
   };
   const visit = (node) => {
     if (node.kind === ts.SyntaxKind.JsxText) ranges.push([node.pos, node.end]);
     else if (ts.isJsxAttribute(node) && HELP_ATTRS.test(node.name.getText(sf)) && node.initializer) strings(node.initializer);
+    else if (ts.isJsxExpression(node) && (ts.isJsxElement(node.parent) || ts.isJsxFragment(node.parent))) printed(node.expression);
     node.forEachChild(visit);
   };
   visit(sf);

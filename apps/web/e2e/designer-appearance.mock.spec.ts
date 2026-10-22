@@ -135,6 +135,8 @@ test("Appearance: a palette sheet that fails to load leaves Aurora picked, and t
   await expect(themes.getByRole("radio", { name: /^Harbor/ })).not.toBeChecked();
   await expect(page.locator("html")).not.toHaveAttribute("data-palette", /./);
   expect(await token(page, "--rg-signal-700")).toBe("#005c70");
+  // the failed <link> is removed, so the retry below adds a fresh one rather than reusing a dead element
+  expect(await page.locator('head link[href*="palettes"]').count()).toBe(0);
 
   await page.unroute("**/src/theme/palettes.css*", block);
   await themes.getByRole("radio", { name: /^Harbor/ }).check();
