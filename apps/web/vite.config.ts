@@ -1,12 +1,32 @@
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
+
+// The routing library's package exports name only its development build (dist/development, with its dev warnings
+// switched on), under every condition. It ships the production build beside it (dist/production, the same code with
+// the warnings switched off), so `vite build` resolves the same entries and swaps the folder. The dev server, unit
+// tests and the mocked suite keep the development build and its warnings. If an upgrade moves the files, the build
+// fails here instead of silently shipping the development build again (guard: scripts/preflight-ui-prod-bundle.mjs
+// and scripts/preflight-ui-prod-bundle.test.mjs).
+const routerProductionBuild: Plugin = {
+  name: "routing-library-production-build",
+  apply: "build",
+  enforce: "pre",
+  async resolveId(source, importer, options) {
+    if (source !== "react-router" && source !== "react-router/dom") return null;
+    const resolved = await this.resolve(source, importer, { ...options, skipSelf: true });
+    if (!resolved) return null;
+    const id = resolved.id.replace(/([\\/]dist[\\/])development([\\/])/, "$1production$2");
+    if (id === resolved.id) this.error(`${source} resolved to ${resolved.id}, which is not under dist/development`);
+    return { ...resolved, id };
+  },
+};
 
 // The SPA is served by the gateway at /ui (apps/gateway/src/web-serving.ts):
 // `base` makes every built asset URL /ui/-relative, so index.html works both
 // from the gateway and from `vite preview`. The dev server proxies the API to
 // a locally running gateway so cookies stay same-origin.
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), routerProductionBuild],
   base: "/ui/",
   build: {
     outDir: "dist",

@@ -301,7 +301,7 @@ export default function InboxPage() {
                   <ReasonWarning it={it} />
                   {it.intake ? (
                     <div className={v.row}>
-                      <ReviewPanel approval={a} />
+                      <ReviewPanel approval={a} open={openId === a.id} onOpenChange={(o) => setOpenId(o ? a.id : null)} />
                       {!it.canDecide && <span className={v.faint}>awaiting {a.approverName ?? "the named approver"}</span>}
                     </div>
                   ) : it.bound ? <>

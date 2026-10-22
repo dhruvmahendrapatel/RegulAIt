@@ -15,6 +15,16 @@
  * Every name on a line is checked, not just the first. Comments are found by parsing the file with the TypeScript
  * compiler, so a `//` inside a string literal or JSX text is copy, not a comment.
  *
+ * Input placeholders and help text are held to more (F34, owner decision 2026-10-21 on #453): a model id is copy there
+ * too, so the JSX `placeholder`, `title` and help/hint/description/tip attributes and all JSX text are also checked,
+ * case-insensitively, for AI model ids and model-family names (`claude-opus-5`, `gpt-4o`, `gemini`) and for the
+ * vendors behind them (`Google`, `Meta`, ...). Everywhere else those words are left alone, where they are identifiers,
+ * provider slugs or functional names (a Google Workspace connector).
+ *
+ * Docs are not copy surfaces and are not scanned. The operational commands in docs/deployment/DEMO_REAL_ACCOUNTS.md
+ * and docs/deployment/DEMO_TEARDOWN.md name cloud AI services and their API hosts; they are kept as functional
+ * exceptions (owner decision 2026-10-21, https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6327272521).
+ *
  * ALLOWED_LINES are the reviewed exceptions, one line each, each with its reason and the names it excuses. An entry
  * that matches no line (stale) or more than one (ambiguous) is itself reported, so the list cannot quietly outlive or
  * outgrow what it excuses.
@@ -30,6 +40,18 @@ export const VENDOR_NAMES = [
   "LM Studio", "vLLM", "Llama", "Hugging Face", "Langfuse", "Helicone", "LangSmith", "Zscaler", "Netskope",
   "Witness AI", "Windsurf", "Codeium", "Replit", "Tabnine", "Cline", "Roo Code",
 ];
+
+/** model ids and families, matched case-insensitively and only on the help surfaces (HELP_ATTRS and JSX text) */
+export const MODEL_PATTERNS = [
+  "claude(?:-[a-z0-9.]+)*", "gpt-?[0-9][a-z0-9.-]*", "chatgpt", "gemini(?:-[a-z0-9.]+)*", "gemma(?:-?[0-9][a-z0-9.-]*)?",
+  "llama(?:-?[0-9][a-z0-9.-]*)?", "mistral(?:-[a-z0-9.]+)*", "mixtral(?:-[a-z0-9.]+)*", "codestral", "grok(?:-[a-z0-9.]+)*",
+  "deepseek(?:-[a-z0-9.]+)*", "qwen[0-9.]*(?:-[a-z0-9.]+)*", "phi-[0-9][a-z0-9.-]*", "command-r[a-z0-9+-]*",
+  "o[134]-(?:mini|preview|pro)", "dall-?e(?:-[0-9])?",
+];
+/** the vendors behind those models, matched as proper nouns, again only on the help surfaces */
+export const HELP_VENDOR_NAMES = ["Google", "Meta", "Microsoft", "Amazon", "xAI", "Alibaba", "IBM", "Nvidia", "NVIDIA"];
+/** JSX attributes that carry hint or help copy */
+export const HELP_ATTRS = /^(placeholder|title|hint|help|helpText|description|tip|info|caption|aria-description)$/;
 
 /** the copy surfaces: directories walked, plus single shared modules whose text the UI prints verbatim */
 export const COPY_ROOTS = [
@@ -51,6 +73,7 @@ const CATALOGUE = `${OWNER}: connector catalogue entry names what it connects to
 const COST = `${OWNER}: display name of a vendor-specific cost-import adapter`;
 const SLUGS = "provider slug -> display name map (provider identifiers, not prose)";
 const SDK = "SDK code sample: the package and class names are code";
+const IDP = "sign-in button labels of the identity providers an SSO broker offers (functional names, not AI products)";
 
 const CLIENT_ACCESS = "apps/web/src/views/admin/identity/ClientAccessPage.tsx";
 const FORMAT = "apps/web/src/api/format.ts";
@@ -115,6 +138,8 @@ export const ALLOWED_LINES = [
   { file: FORMAT, contains: 'azure_openai: "Azure OpenAI",', names: ["OpenAI"], why: SLUGS },
   { file: FORMAT, contains: 'google_vertex: "Google Vertex AI",', names: ["Vertex AI"], why: SLUGS },
 
+  { file: "apps/web/src/views/admin/identity/SsoPage.tsx", contains: "shows “Continue with Microsoft / Google / GitHub” on the sign-in page", names: ["Microsoft", "Google"], why: IDP },
+
   { file: SNIPPETS, contains: '{ id: "anthropic", label: "Anthropic SDK" }', names: ["Anthropic"], why: SDK },
   { file: SNIPPETS, contains: "`\\n# Anthropic-shaped instead:\\n`", names: ["Anthropic"], why: SDK },
   { file: SNIPPETS, contains: '`import OpenAI from "openai";', names: ["OpenAI"], why: SDK },
@@ -127,6 +152,8 @@ export const ALLOWED_LINES = [
 
 const escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const VENDOR_RE = new RegExp(`(?<![A-Za-z0-9_])(${VENDOR_NAMES.map(escape).join("|")})(?![A-Za-z0-9_])`, "g");
+const HELP_VENDOR_RE = new RegExp(`(?<![A-Za-z0-9_])(${HELP_VENDOR_NAMES.map(escape).join("|")})(?![A-Za-z0-9_])`, "g");
+const MODEL_RE = new RegExp(`(?<![A-Za-z0-9_])(${MODEL_PATTERNS.join("|")})(?![A-Za-z0-9_])`, "gi");
 
 /** the comment ranges of a source text, from the TypeScript parser (so `//` inside a string or JSX text is not one) */
 function commentRanges(file, text) {
@@ -159,16 +186,67 @@ export function codeOf(line) {
   return wholeLineComment(line) ? "" : stripComments("line.ts", line);
 }
 
+/** the [start, end) ranges of a file's help surfaces: help attributes' string text and every JSX text node */
+function helpRanges(file, text) {
+  if (!file.endsWith(".tsx")) return [];
+  const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const ranges = [];
+  const strings = (node) => {
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || ts.isTemplateHead(node)
+      || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) ranges.push([node.getStart(sf), node.end]);
+    else node.forEachChild(strings);
+  };
+  const visit = (node) => {
+    if (node.kind === ts.SyntaxKind.JsxText) ranges.push([node.pos, node.end]);
+    else if (ts.isJsxAttribute(node) && HELP_ATTRS.test(node.name.getText(sf)) && node.initializer) strings(node.initializer);
+    node.forEachChild(visit);
+  };
+  visit(sf);
+  return ranges;
+}
+
 /** every vendor name in one file's copy, one hit per occurrence: [{ file, line, name, text }] */
 export function scanText(file, text) {
   const hits = [];
-  if (!VENDOR_RE.test(text)) return hits;
-  VENDOR_RE.lastIndex = 0;
-  const code = stripComments(file, text).split("\n");
-  text.split("\n").forEach((raw, i) => {
-    if (wholeLineComment(raw)) return;
-    for (const m of code[i].matchAll(VENDOR_RE)) hits.push({ file, line: i + 1, name: m[1], text: raw.trim() });
-  });
+  // only a file that could hold a hit is parsed (the whole tree is scanned on every test run)
+  const has = (re) => {
+    re.lastIndex = 0;
+    const found = re.test(text);
+    re.lastIndex = 0;
+    return found;
+  };
+  const maybeHelp = file.endsWith(".tsx") && (has(HELP_VENDOR_RE) || has(MODEL_RE));
+  if (!has(VENDOR_RE) && !maybeHelp) return hits;
+  const help = maybeHelp ? helpRanges(file, text) : [];
+  const code = stripComments(file, text);
+  const lines = text.split("\n");
+  const starts = [0];
+  for (let i = 0; i < text.length; i++) if (text[i] === "\n") starts.push(i + 1);
+  const lineOf = (pos) => {
+    let lo = 0;
+    let hi = starts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (starts[mid] <= pos) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo;
+  };
+  const found = [];
+  for (const m of code.matchAll(VENDOR_RE)) found.push({ pos: m.index, name: m[1] });
+  for (const [start, end] of help) {
+    const part = code.slice(start, end);
+    for (const m of [...part.matchAll(HELP_VENDOR_RE), ...part.matchAll(MODEL_RE)]) {
+      // a VENDOR_NAMES hit on the same text ("Claude", "Gemini") is already reported
+      if (!found.some((f) => f.pos === start + m.index)) found.push({ pos: start + m.index, name: m[1] });
+    }
+  }
+  found.sort((x, y) => x.pos - y.pos);
+  for (const { pos, name } of found) {
+    const i = lineOf(pos);
+    if (wholeLineComment(lines[i])) continue;
+    hits.push({ file, line: i + 1, name, text: lines[i].trim() });
+  }
   return hits;
 }
 

@@ -350,7 +350,7 @@ test.describe("the review task", () => {
     await drawer.getByRole("button", { name: "Approve with conditions", exact: true }).click();
     await expect(one.getByText("Describe the condition.")).toBeHidden();
     await expect(one.getByText("Choose a due date.")).toBeVisible();
-    await expectNoAxeViolations(page, "review drawer with validation errors", '[role="dialog"]');
+    await expectNoAxeViolations(page, "review drawer with validation errors", '[data-testid="review-drawer"]');
     expect(state.decides).toEqual([]);
   });
 
@@ -385,7 +385,12 @@ test.describe("the review task", () => {
     expect(state.decides[0]!.body).toEqual({ decision: "approved" });
   });
 
-  test("keyboard: focus lands in the drawer, Tab stays inside, Escape returns focus to the trigger; axe-clean in both themes", async ({ page }) => {
+  // F35: the review task is the shared detail drawer (#459). Above 900 px it is a side panel beside an undimmed page;
+  // a regression to the old dimmed modal (a scrim, aria-modal, :modal, Tab trapped) fails here.
+  const inDrawer = (page: Page) => page.evaluate(() => Boolean(document.activeElement?.closest('[data-testid="review-drawer"]')));
+
+  test("F35 (1440 px): the review is a side panel, the page is not dimmed or inert, Tab leaves into the page, Escape returns focus to the trigger; axe-clean", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
     await mockGateway(page);
     await page.goto("/ui/inbox");
     const trigger = page.getByRole("button", { name: "Review sign-off for Credit-limit-increase assistant" });
@@ -393,17 +398,73 @@ test.describe("the review task", () => {
     await page.keyboard.press("Enter");
     const drawer = page.getByRole("dialog", { name: "Review use case sign-off" });
     await expect(drawer.getByRole("heading", { name: "Review use case sign-off" })).toBeFocused();
-    for (let i = 0; i < 40; i += 1) {
+    await expect(drawer).toHaveAttribute("aria-modal", "false");
+    expect(await drawer.evaluate((el) => el.matches(":modal"))).toBe(false);
+    // the page gives up the drawer's width, and nothing covers or dims what is left of it
+    await expect.poll(() => page.evaluate(() => getComputedStyle(document.body).paddingInlineEnd)).not.toBe("0px");
+    const heading = page.getByRole("heading", { level: 1, name: "Inbox" });
+    expect(await heading.evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return Boolean(hit && el.contains(hit));
+    })).toBe(true);
+    expect(await page.evaluate(() => [...document.body.querySelectorAll("*")].some((el) => {
+      const s = getComputedStyle(el);
+      const r = el.getBoundingClientRect();
+      return s.position === "fixed" && r.width >= window.innerWidth && r.height >= window.innerHeight && s.backgroundColor !== "rgba(0, 0, 0, 0)";
+    }))).toBe(false);
+    let left = false;
+    for (let i = 0; i < 80 && !left; i += 1) {
       await page.keyboard.press("Tab");
-      expect(await page.evaluate(() => Boolean(document.activeElement?.closest('[role="dialog"]'))), `Tab ${i + 1} left the drawer`).toBe(true);
+      left = !(await inDrawer(page));
     }
-    await page.keyboard.press("Shift+Tab");
-    expect(await page.evaluate(() => Boolean(document.activeElement?.closest('[role="dialog"]')))).toBe(true);
+    expect(left, "Tab reaches the page beside the side panel").toBe(true);
+    await drawer.getByRole("heading", { name: "Review use case sign-off" }).focus();
     await drawer.getByRole("radio", { name: "Approve with conditions", exact: true }).check();
-    await expectNoAxeViolations(page, "review drawer (approve with conditions)", '[role="dialog"]');
+    await expectNoAxeViolations(page, "review drawer (approve with conditions)", '[data-testid="review-drawer"]');
     await page.keyboard.press("Escape");
     await expect(drawer).toBeHidden();
     await expect(trigger).toBeFocused();
+    expect(await page.evaluate(() => getComputedStyle(document.body).paddingInlineEnd)).toBe("0px");
+  });
+
+  test("F35 (390 px): below the overlay width the review covers the page and is modal: Tab stays inside", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockGateway(page);
+    await page.goto("/ui/inbox");
+    const trigger = page.getByRole("button", { name: "Review sign-off for Credit-limit-increase assistant" });
+    await trigger.focus();
+    await page.keyboard.press("Enter");
+    const drawer = page.getByRole("dialog", { name: "Review use case sign-off" });
+    await expect(drawer.getByRole("heading", { name: "Review use case sign-off" })).toBeFocused();
+    await expect(drawer).toHaveAttribute("aria-modal", "true");
+    expect(await drawer.evaluate((el) => el.matches(":modal"))).toBe(true);
+    for (let i = 0; i < 40; i += 1) {
+      await page.keyboard.press("Tab");
+      expect(await inDrawer(page), `Tab ${i + 1} left the drawer`).toBe(true);
+    }
+    await page.keyboard.press("Shift+Tab");
+    expect(await inDrawer(page)).toBe(true);
+    await page.keyboard.press("Escape");
+    await expect(drawer).toBeHidden();
+    await expect(trigger).toBeFocused();
+  });
+
+  test("F35: one drawer at a time: an Inbox item opened beside the review replaces it, and back", async ({ page }) => {
+    await mockGateway(page, { approvals: [intakeApproval("ada", "riley"), deployApproval("riley")] });
+    await page.goto("/ui/inbox");
+    await page.getByRole("button", { name: "Review sign-off for Credit-limit-increase assistant" }).click();
+    const review = page.getByRole("dialog", { name: "Review use case sign-off" });
+    await expect(review).toBeVisible();
+    // the page beside the side panel stays usable: another item's Review opens in its place
+    await page.getByRole("button", { name: /^Review .*Deploy the billing service/ }).click();
+    await expect(page.getByTestId("inbox-item")).toBeVisible();
+    await expect(review).toHaveCount(0);
+    await expect(page.locator("dialog[open]")).toHaveCount(1);
+    await page.getByRole("button", { name: "Review sign-off for Credit-limit-increase assistant" }).click();
+    await expect(review).toBeVisible();
+    await expect(page.getByTestId("inbox-item")).toHaveCount(0);
+    await expect(page.locator("dialog[open]")).toHaveCount(1);
   });
 
   test("the Approvals queue and the Review workbench open the same review task", async ({ page }) => {
@@ -493,6 +554,6 @@ test.describe("ADR-0171: what the record and the review task say", () => {
     const drawer = await openReview(page);
     await expect(drawer.getByText(/Customers in Germany use it, and it decides on access to credit\./)).toBeVisible();
     await expect(drawer.locator("p").filter({ hasText: "Owner unsure about:" })).toContainText("Profiles natural persons, Has an EU nexus");
-    await expectNoAxeViolations(page, "review task (rationale and unsure answers)", '[role="dialog"]');
+    await expectNoAxeViolations(page, "review task (rationale and unsure answers)", '[data-testid="review-drawer"]');
   });
 });
