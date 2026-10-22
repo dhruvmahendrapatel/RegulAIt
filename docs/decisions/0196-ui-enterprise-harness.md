@@ -471,3 +471,9 @@ that the `--guard` rule above requires, and it has one `CEILING_EXCEPTIONS` row.
   137,176 against the 137.3 kB ceiling (124 B headroom), entry CSS 10,594, all JS 1,036,518 against `1038 kB`
   (1,482 B headroom). The `all JS` row from `1035 kB` to `1036 kB` stays; this addendum adds its own row.
 
+
+  Fix round 2 (review of #490): `theme/palettes.css` now loads through a `<link>` (`palettes.css?url`) rather than
+  `import()`, so a failed load can be retried in the same visit; the stylesheet stays lazy and its tiny JS wrapper
+  chunk is gone. Gzip bytes, size-limit 14.2.0, after the change: entry JS 137,179 against 137.3 kB, all JS 1,036,507
+  against `1038 kB`. The `1035 kB` to `1036 kB` row named in the sentence above was dropped after all: main already
+  carries `1036 kB`, so it matched nothing, and `--guard origin/main` still exits 0 without it.
