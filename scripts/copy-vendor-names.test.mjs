@@ -140,6 +140,41 @@ describe("no AI vendor or competitor name in product UI copy (F31)", () => {
       expect(scanText(f, `<p>{/* gemini-0-test */}ok</p>`)).toEqual([]);
     });
 
+    it("#489 finding 2: what a `{...}` child prints, label and aria-label, and a const a help surface names are hits", () => {
+      const names = (src) => scanText(f, src).map((h) => h.name);
+      // a string or template literal printed as an element's child
+      expect(names(`<p>{"e.g. gemini-0-test"}</p>`)).toEqual(["gemini-0-test"]);
+      expect(names("<p>{`e.g. gpt-0-test for ${x}`}</p>")).toEqual(["gpt-0-test"]);
+      expect(names(`<>{ok ? "fine" : "try qwen-0-test"}</>`)).toEqual(["qwen-0-test"]);
+      expect(names(`<p>{err || "use mistral-0-test"}{busy && "llama-0-test"}{"e.g. " + "deepseek-0-test"}</p>`))
+        .toEqual(["mistral-0-test", "llama-0-test", "deepseek-0-test"]);
+      // label and aria-label are help surfaces
+      expect(names(`<Field label="Model (gemini-0-test)" />`)).toEqual(["gemini-0-test"]);
+      expect(names(`<button aria-label="Use the Google model" />`)).toEqual(["Google"]);
+      // a same-file const named by a help attribute or a child, wherever it is declared
+      expect(names(`const PH = "e.g. gpt-0-test";\nexport const F = () => <Input placeholder={PH} />;`)).toEqual(["gpt-0-test"]);
+      expect(names(`const F = () => <p>{TIP}</p>;\nconst TIP = cond ? "ok" : \`try qwen-0-test\`;`)).toEqual(["qwen-0-test"]);
+      expect(names(`const A = "gemini-0-test";\nconst B = A;\nconst F = () => <Input title={B} />;`)).toEqual(["gemini-0-test"]);
+    });
+
+    it("#489 finding 2: a `{...}` child's slugs, comparisons, calls and attributes are still not copy", () => {
+      const src = [
+        `const slug = "gemini";`,
+        `const PH = "e.g. model-name-v1";`,
+        `const F = () => <p>{p === "gemini-0-test" ? "a" : "b"}{fmt("gpt-0-test")}{slug === "x" && <b data-k="qwen-0-test">x</b>}<Input placeholder={PH} /></p>;`,
+      ].join("\n");
+      expect(scanText(f, src)).toEqual([]);
+      // an unreferenced const and a property name that shares a const's name are not help surfaces
+      expect(scanText(f, `const PH = "gpt-0-test";\nconst F = () => <Input placeholder={o.PH} />;`)).toEqual([]);
+    });
+
+    it("the regex prefilter never skips a file the full scan would flag", () => {
+      for (const src of [`<p>{"e.g. gemini-0-test"}</p>`, `const PH = "gpt-0-test";\nconst F = () => <Input placeholder={PH} />;`,
+        `<Field label="Google" />`]) {
+        expect(scanText(f, src).length).toBeGreaterThan(0);
+      }
+    });
+
     it("a proper noun already on the vendor list is reported once, not twice", () => {
       expect(scanText(f, `<p>Works with Gemini</p>`).map((h) => h.name)).toEqual(["Gemini"]);
     });
