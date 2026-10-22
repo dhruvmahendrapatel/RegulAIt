@@ -34,7 +34,7 @@ actions" and "Process" lists of the 2026-10-21 (21:00) paragraph below; its owne
 - **T1 themes:** Phase 1 shipped browser-only (six palettes in light and dark, an Account Appearance card, the choice
   kept in this browser). Phase 2 (saved to the account, an org default and lock, one migration) is after the demo.
 - **Open, HOLD:** #492 (one review drawer at a time, wider copy guard, palette link cleanup; the #489 and #490 review
-  tails), under review.
+  tails), awaiting the builder report and review.
 - **Owner actions:** delete the seven stale `engine-images-lock/*` branches (still on the remote on 2026-10-22), and
   the real-account round trips in
   [docs/deployment/DEMO_REAL_ACCOUNTS.md](../docs/deployment/DEMO_REAL_ACCOUNTS.md).
@@ -5262,7 +5262,7 @@ to personal `dhruvmahendrapatel`.
 ## Known follow-ups (not urgent, not blocking)
 - **Demo-prep follow-ups (2026-10-22)**, from the reviews of #484-#491. Taken from review reports; not re-verified
   one by one.
-  - In #492 (held, under review): the #489 Medium (no test that only one review drawer opens at a time, approvals and
+  - In #492 (held, awaiting review): the #489 Medium (no test that only one review drawer opens at a time, approvals and
     workbench), the #489 copy guard Lows (JSX expression strings, `label`/`aria-label`, constant placeholders) and
     the #490 nit (`link.remove()` untested).
   - CI: spa-mock shard 3 and spa-journeys ran into their timeouts on #490 and #492 (no failing test). If it recurs,
