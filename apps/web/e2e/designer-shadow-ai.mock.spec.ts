@@ -185,6 +185,26 @@ test("Shadow AI remediation: the plan opens as steps, named approver rules, no r
   await expect(page.getByRole("dialog", { name: "Start a remediation workflow?" })).toBeVisible();
 });
 
+test("F23: a plan step that carries a long resource path wraps inside the drawer", async ({ page }) => {
+  const path = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-branch-faq/providers/Microsoft.CognitiveServices/accounts/branch-faq-bot/deployments/branch-faq-bot";
+  await page.route(/\/v1\/shadow-ai\/findings\/[^/]+\/remediation-plan$/, (route) => {
+    const body = plan(new URL(route.request().url()).pathname.split("/")[4]!);
+    body.steps[1] = { ...body.steps[1]!, why: `point ${path} at the gateway's endpoint` };
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+  });
+  await page.goto("/ui/admin/shadow-ai");
+  await page.getByRole("button", { name: "Plan remediation for team-17/payments-api" }).click();
+  const steps = page.getByTestId("shadow-remediation").getByRole("list", { name: "Remediation steps" });
+  await expect(steps).toContainText("branch-faq-bot/deployments");
+  const drawer = (await page.getByRole("dialog", { name: "team-17/payments-api" }).boundingBox())!;
+  const overflow = await steps.locator("li").evaluateAll((items) => items.map((li) => li.scrollWidth - li.clientWidth));
+  expect(overflow.every((d) => d <= 0)).toBe(true);
+  for (const li of await steps.locator("li").all()) {
+    const b = (await li.boundingBox())!;
+    expect(b.x + b.width).toBeLessThanOrEqual(drawer.x + drawer.width);
+  }
+});
+
 test("A1: a finding's plan and triage open in the one shared drawer; Escape closes it and focus returns", async ({ page }) => {
   await page.goto("/ui/admin/shadow-ai");
   const opener = page.getByRole("button", { name: "Plan remediation for team-17/payments-api" });
@@ -239,6 +259,19 @@ test("X6b: a contained section folds from its header, keeps its count and worst 
   await expect(page.getByRole("button", { name: /^Inventory \d+ findings/ })).toHaveAttribute("aria-expanded", "false");
   await page.getByRole("button", { name: /^Inventory \d+ findings/ }).click();
   await expect(page.getByRole("region", { name: "Inventory, scrollable" })).toBeVisible();
+});
+
+test("F33: the Inventory's Showing line counts the rows on screen, a last row cut by a few pixels included", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 520 });
+  await page.goto("/ui/admin/shadow-ai");
+  const region = page.getByRole("region", { name: "Inventory, scrollable" });
+  await expect(region).toBeVisible();
+  // a row is on screen once most of it is in the box
+  const onScreen = await region.evaluate((el) => {
+    const top = el.getBoundingClientRect().top;
+    return [...el.querySelectorAll("tbody > tr")].filter((r) => { const b = r.getBoundingClientRect(); return (b.top + b.bottom) / 2 - top <= el.clientHeight; }).length;
+  });
+  await expect(cardOf(page, "Inventory").getByText(`Showing ${onScreen} of ${findings.length} · scroll the list for the rest, or Expand`)).toBeVisible();
 });
 
 test("X6b (L2): a status filter makes the Inventory header count what the list shows, out of every finding", async ({ page }) => {

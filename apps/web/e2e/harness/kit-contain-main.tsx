@@ -87,6 +87,16 @@ function Harness() {
         <Probe />
         <Toggle />
         <table>
+          {/* head=1: a header row with as many cells as there are rows comes before them (N1) */}
+          {params.get("head") === "1" && (
+            <thead>
+              <tr>
+                {Array.from({ length: rows }, (_, i) => (
+                  <th key={i}>Column {i + 1}</th>
+                ))}
+              </tr>
+            </thead>
+          )}
           <tbody>
             {Array.from({ length: rows }, (_, i) => (
               <tr key={i}>

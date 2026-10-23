@@ -23,6 +23,7 @@ import {
   SHADOW_AI_CATALOG_V1,
   SHADOW_AI_CATALOG_VERSION,
   classifyDiscoveryContent,
+  endpointPatternLiteralLength,
   extractHostCandidatesFromLine,
   matchCatalogEndpoint,
   matchCatalogPackage,
@@ -368,5 +369,21 @@ describe("classifyDiscoveryContent", () => {
     expect(r.shadow).toHaveLength(1);
     expect(r.shadow[0]!.occurrences).toBe(7);
     expect(r.candidateCount).toBe(1);
+  });
+});
+
+describe("endpointPatternLiteralLength — tie-break specificity, the wildcard excluded", () => {
+  // Expected values are what the old form, which removed the first `*` only,
+  // returned for each pattern, so the ranking does not change.
+  it.each([
+    ["openai.com", 10], // no wildcard
+    ["*.openai.com", 11], // leading
+    ["api.openai.*", 11], // trailing
+    ["api.*.com", 8], // middle
+    ["*", 0],
+    ["", 0],
+    ["a*b*c", 4], // only one `*` is ever discounted
+  ] as const)("%j has %i literal characters", (pattern, expected) => {
+    expect(endpointPatternLiteralLength(pattern)).toBe(expected);
   });
 });

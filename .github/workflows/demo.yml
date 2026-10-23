@@ -266,7 +266,7 @@ jobs:
 
       - name: Keep the demo screens (every run)
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: demo-screens
           path: apps/web/e2e/artifacts/demo-screens
@@ -276,7 +276,7 @@ jobs:
 
       - name: Keep the evidence when it fails
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: demo-journey-failure
           path: |
@@ -531,7 +531,7 @@ jobs:
       # the gate output only (no persona credentials in it)
       - name: Keep the gate output (every run)
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: demo-rehearsal-gate
           path: ${{ runner.temp }}/gate-*.txt
@@ -691,7 +691,7 @@ jobs:
 
       - name: Keep the evidence when it fails
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: approval-review-failure
           path: |

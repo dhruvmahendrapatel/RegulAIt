@@ -488,18 +488,33 @@ function useFoldKey(name: string): string {
   const user = useSession().auth?.user?.id ?? "-";
   const params = useParams();
   const path = typeof location === "undefined" ? "" : location.pathname;
-  const values = new Map(Object.entries(params).map(([k, v]) => [v, `:${k}`]));
-  values.delete(params["*"]);
-  const pattern = path
-    .split("/")
-    .map((seg) => values.get(seg) ?? seg)
-    .join("/");
-  return `regulait.contain:${user}:${pattern}:${name}`;
+  return `regulait.contain:${user}:${foldPattern(path, params)}:${name}`;
 }
 
-/** the body's rows: the children of the first element (a tbody, a list) that holds `count` of them */
+/** the route pattern of `path`: each param value becomes `:name`. `params` are decoded and the path is not (N2), so a
+ * segment is matched once decoded too */
+export function foldPattern(path: string, params: Readonly<Record<string, string | undefined>>): string {
+  const values = new Map(Object.entries(params).map(([k, v]) => [v, `:${k}`]));
+  values.delete(params["*"]);
+  return path
+    .split("/")
+    .map((seg) => {
+      let raw = seg;
+      try {
+        raw = decodeURIComponent(seg);
+      } catch {
+        // a malformed escape stays as written
+      }
+      return values.get(seg) ?? values.get(raw) ?? seg;
+    })
+    .join("/");
+}
+
+/** the body's rows: the children of the first tbody or list that holds `count` of them, else of the first element
+ * that does (N1: a header row or wrapper with `count` children comes earlier in document order) */
 function bodyRows(host: HTMLElement, count: number | undefined): Element[] {
-  const list = [host, ...host.querySelectorAll("*")].find((el) => el.childElementCount === count);
+  const lists = [host, ...host.querySelectorAll("*")].filter((el) => el.childElementCount === count);
+  const list = lists.find((el) => el.matches("tbody,ul,ol,[role=list]")) ?? lists[0];
   return list ? [...list.children] : [];
 }
 
@@ -578,7 +593,8 @@ export function Card(props: CardProps) {
         // L3: how many rows fit in the box before the reader scrolls ("Showing N of M")
         const top = el.getBoundingClientRect().top - el.scrollTop;
         const rows = bodyRows(host, countRef.current);
-        if (rows.length > 0) next.shown = rows.filter((r) => r.getBoundingClientRect().bottom - top <= el.clientHeight + 1).length;
+        // F33: a row counts as shown once most of it is in view, so a last row cut by a few pixels is counted
+        if (rows.length > 0) next.shown = rows.filter((r) => { const b = r.getBoundingClientRect(); return (b.top + b.bottom) / 2 - top <= el.clientHeight; }).length;
       }
       setFit((f) =>
         f.refused === next.refused && f.scrolls === next.scrolls && f.long === next.long && f.shown === next.shown ? f : next,
@@ -669,7 +685,8 @@ export function Card(props: CardProps) {
         props.children
       )}
       {contained && fit.scrolls && (
-        <p style={{ margin: "var(--s1) 0 0", fontSize: "var(--text-sm)", color: "var(--text-faint)" }}>
+        // F36: a flush card has no padding of its own, so the line takes the header's inset
+        <p style={{ margin: "var(--s1) 0 0", padding: props.flush ? "0 var(--s2) var(--s2)" : undefined, fontSize: "var(--text-sm)", color: "var(--text-faint)" }}>
           {/* the owner-approved wording (#453); "N of M" needs a count and rows the box can measure */}
           {props.count != null && fit.shown >= 0 && fit.shown < props.count
             ? `Showing ${fit.shown} of ${props.count}${props.countIsLimit ? "+" : ""} · scroll the list for the rest, or Expand`
