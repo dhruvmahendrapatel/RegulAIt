@@ -163,7 +163,7 @@ jobs:
       # always: the coverage job needs a failing shard's report too
       - name: Shard report for the coverage check
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ inputs.artifact-prefix }}-report-${{ matrix.shard }}
           path: ${{ runner.temp }}/mock-shard-${{ matrix.shard }}.json
@@ -172,7 +172,7 @@ jobs:
 
       - name: Keep the evidence when it fails
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ inputs.artifact-prefix }}-failure-${{ matrix.shard }}
           path: apps/web/test-results

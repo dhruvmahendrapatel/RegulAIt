@@ -58,7 +58,7 @@ jobs:
           fetch-depth: 0
       - name: Build reproducibly (no push; a fresh builder on the pinned BuildKit)
         run: scripts/build-engine-image.sh "${{ matrix.engine }}" repro "${RUNNER_TEMP}/${{ matrix.engine }}-a.json"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: engine-repro-${{ matrix.engine }}-a
           path: ${{ runner.temp }}/${{ matrix.engine }}-a.json
@@ -80,7 +80,7 @@ jobs:
           fetch-depth: 0
       - name: Build reproducibly (no push; a fresh builder on the pinned BuildKit)
         run: scripts/build-engine-image.sh "${{ matrix.engine }}" repro "${RUNNER_TEMP}/${{ matrix.engine }}-b.json"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: engine-repro-${{ matrix.engine }}-b
           path: ${{ runner.temp }}/${{ matrix.engine }}-b.json

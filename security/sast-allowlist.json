@@ -11,15 +11,6 @@
       "expires": "2027-01-04"
     },
     {
-      "id": "js/incomplete-sanitization",
-      "path": "packages/shared/src/shadow-discovery.ts",
-      "fingerprint": "d1bc99df45e23f92:1",
-      "line": 243,
-      "reason": "False positive. literalLength() removes the first '*' only to rank wildcard specificity for tie-breaking between catalog patterns; it is not a sanitizer, and matching itself is done by wildcardMatch() and the dot-boundary check in endpointEntryMatches().",
-      "reviewedOn": "2026-10-06",
-      "expires": "2027-01-04"
-    },
-    {
       "id": "js/clear-text-storage-of-sensitive-data",
       "path": "apps/gateway/src/auth.ts",
       "fingerprint": "9988dd1078e54e23:1",
