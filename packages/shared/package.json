@@ -33,7 +33,7 @@
     "re2js": "2.8.6",
     "simple-statistics": "7.12.1",
     "smol-toml": "1.9.0",
-    "zod": "4.6.5"
+    "zod": "4.6.6"
   },
   "devDependencies": {
     "@types/node": "26.1.1",
