@@ -627,7 +627,7 @@ services:
   engine-garak:
     <<: *engine-runner
     platform: linux/amd64
-    image: ${REGULAIT_ENGINE_GARAK_REPOSITORY:-ghcr.io/dhruvmahendrapatel/regulait-engine-garak}@${REGULAIT_ENGINE_GARAK_DIGEST:-sha256:12fdd4bc5904adc97d07976dfd9a4272891a1fb4b66d2b0a705f54d3ffceb41c}
+    image: ${REGULAIT_ENGINE_GARAK_REPOSITORY:-ghcr.io/dhruvmahendrapatel/regulait-engine-garak}@${REGULAIT_ENGINE_GARAK_DIGEST:-sha256:426157556cef62059d16414c3ddbd5e242cdab4f7de3bfbc98be8d65915501bd}
     volumes:
       - engine-garak-state:/state
       - engine-garak-jobs:/jobs
@@ -635,8 +635,8 @@ services:
     environment:
       REGULAIT_GATEWAY_URL: http://gateway:3000
       REGULAIT_ENGINE_ENROLLMENT_TOKEN: ${REGULAIT_ENGINE_GARAK_ENROLLMENT_TOKEN:-}
-      REGULAIT_ENGINE_IMAGE_REF: ${REGULAIT_ENGINE_GARAK_REPOSITORY:-ghcr.io/dhruvmahendrapatel/regulait-engine-garak}@${REGULAIT_ENGINE_GARAK_DIGEST:-sha256:12fdd4bc5904adc97d07976dfd9a4272891a1fb4b66d2b0a705f54d3ffceb41c}
-      REGULAIT_ENGINE_IMAGE_DIGEST: ${REGULAIT_ENGINE_GARAK_DIGEST:-sha256:12fdd4bc5904adc97d07976dfd9a4272891a1fb4b66d2b0a705f54d3ffceb41c}
+      REGULAIT_ENGINE_IMAGE_REF: ${REGULAIT_ENGINE_GARAK_REPOSITORY:-ghcr.io/dhruvmahendrapatel/regulait-engine-garak}@${REGULAIT_ENGINE_GARAK_DIGEST:-sha256:426157556cef62059d16414c3ddbd5e242cdab4f7de3bfbc98be8d65915501bd}
+      REGULAIT_ENGINE_IMAGE_DIGEST: ${REGULAIT_ENGINE_GARAK_DIGEST:-sha256:426157556cef62059d16414c3ddbd5e242cdab4f7de3bfbc98be8d65915501bd}
       REGULAIT_GARAK_JOBS_DIR: /jobs
       REGULAIT_GARAK_RESULTS_DIR: /results
 

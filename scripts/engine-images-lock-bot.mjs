@@ -5,8 +5,9 @@
  * After a signed publish on main, the `lock-pr` job of `.github/workflows/engine-images.yml` runs
  * `engine-images-lock.mjs --apply` and then this script, which compares the lock at HEAD (main at the published
  * commit's run) with the one `--apply` wrote. When an image changed, it writes the PR's branch, title and body; the
- * job pushes the branch and opens the PR as a DRAFT whose title starts with "HOLD". It never merges, never marks the
- * PR ready and never enables auto-merge: the master session releases it (the 2026-10-17/18 merge rules).
+ * job only pushes the branch (push-only, owner decision on #453, 2026-10-21) and the master session opens the PR as a
+ * DRAFT whose title starts with "HOLD". Automation never merges, never marks the PR ready and never enables
+ * auto-merge: the master session releases it (the 2026-10-17/18 merge rules).
  *
  *   node scripts/engine-images-lock-bot.mjs --pr <publish.json> <out-dir>
  *        writes <out-dir>/changed ("true"/"false"), branch, title, body.md and paths (the files to stage, one per line)
@@ -54,9 +55,9 @@ export function lockPr(base, next, publish, opts = {}) {
     "| --- | --- | --- | --- |",
     ...rows,
     "",
-    `Every signature was verified by cosign before this PR was opened: certificate identity \`${identity}\`, OIDC issuer \`https://token.actions.githubusercontent.com\`, against the committed Sigstore trusted root.`,
+    `Every signature was verified by cosign before the lock branch was pushed: certificate identity \`${identity}\`, OIDC issuer \`https://token.actions.githubusercontent.com\`, against the committed Sigstore trusted root.`,
     "",
-    "Opened as a draft with HOLD by GITHUB_TOKEN: it is never merged, marked ready or set to auto-merge by automation. A PR opened with GITHUB_TOKEN starts no workflow run, so CI must be started on it by a person (see ADR-0190, As built: engine image signing).",
+    `Pushed by the \`lock-pr\` job as \`engine-images-lock/${short}\` and opened as a draft HOLD PR by the master session (owner decision on #453, 2026-10-21; see ADR-0190, As built: the lock-pr job is push-only). Automation never merges, approves, marks it ready or enables auto-merge.`,
   ].join("\n");
   return {
     changed,
