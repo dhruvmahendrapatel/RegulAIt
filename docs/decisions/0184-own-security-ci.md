@@ -196,6 +196,23 @@ Run locally with the pinned tool binaries on planted fixtures in a scratch direc
   the first spec can navigate on before that delete lands. The other three runs passed. This is a spec-order race in
   the web app and its specs, not in this batch's code; it is reported to the batch that owns those files.
 
+## As built (2026-10-22): the `sast` job uploads to the Security tab
+
+The decision text above says CodeQL default setup is on and that the `sast` job therefore runs with `upload: never`
+("CodeQL runs with `upload: never`, because GitHub refuses an advanced-setup upload while default setup is on"). That
+stopped being true: default setup is off, so nothing had analysed `main` for the Security tab since about 2026-10-03,
+and alerts already fixed in code stayed open. The owner decided on issue #453 that this job uploads its results and
+default setup stays off. As built:
+
+- The analyze step uploads (`upload: always`) on pushes to `main`, the weekly schedule, manual runs and same-repository
+  pull requests; a fork's pull request runs with `upload: never`. Category `/security-gate`, the pinned action and CLI,
+  the config and the query suites are unchanged.
+- The job's permissions are `contents: read` and `security-events: write`; `actions: read` was dropped because the
+  action needs it only on a private repository. The workflow's top-level permissions stay `contents: read`.
+- The gate is unchanged and still fails the job on any non-allowlisted high finding, after the upload.
+- Alert #28 (`js/incomplete-sanitization`, `shadow-discovery.ts`) was removed at the source, so its allow-list entry
+  was removed too (the gate fails on a stale entry). Alert #31 (`js/unnecessary-use-of-cat`, a gateway test) was fixed.
+
 ## Consequences
 
 - Every PR now pays for four extra jobs. The repository is public, so standard runners do not draw on the minutes

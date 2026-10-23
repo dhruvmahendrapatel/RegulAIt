@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -339,7 +339,7 @@ describe("signed update bundles: the verifier refuses everything but the genuine
   it("a modified manifest breaks the signature and is REFUSED — even a 'newer' version claim buys nothing", () => {
     const t = tamperedBundle("badsig", (root) => {
       const manifest = path.join(root, "manifest.json");
-      const body = execFileSync("cat", [manifest], { encoding: "utf8" });
+      const body = readFileSync(manifest, "utf8");
       writeFileSync(manifest, body.replace('"version": "0.2.0"', '"version": "9.9.9"'));
     });
     const r = verify(t);

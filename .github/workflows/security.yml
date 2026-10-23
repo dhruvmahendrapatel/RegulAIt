@@ -76,10 +76,12 @@ jobs:
     name: SAST (CodeQL)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # security-events: write lets the analyze step upload the SARIF to the
+    # Security tab (issue #453: this job owns it; default setup stays off).
+    # No `actions: read`: the action needs it only on a private repository.
     permissions:
       contents: read
-      actions: read
-      security-events: read
+      security-events: write
     env:
       # On pull_request, codeql-action by default runs "diff-informed" queries:
       # path-problem queries report only results touching the PR's changed
@@ -92,13 +94,15 @@ jobs:
         with:
           persist-credentials: false
 
-      # CodeQL default setup is also enabled on this repository and owns the
-      # Security tab. GitHub refuses an advanced-setup SARIF upload while
-      # default setup is on, so this job does NOT upload (`upload: never`): it
-      # gates on the SARIF itself and keeps it as an artifact. Same CLI bundle
-      # and the same default query suite as default setup (the bundle, and so
-      # the query packs, are pinned by the action's commit: CodeQL 2.27.1 at
-      # v4.38.2). Reproduce locally with the commands in docs/ops/SECURITY_CI.md.
+      # This job owns the Security tab; CodeQL default setup is off (issue
+      # #453). The analyze step uploads the SARIF (pushes to main build the
+      # tab's alerts, same-repo pull requests get PR alerts against them), then
+      # the gate below fails the job on any non-allowlisted high finding: the
+      # upload never replaces the gate. A fork's pull request token cannot
+      # write security events, so it does not upload. The SARIF is also kept
+      # as an artifact. The CLI bundle and the default query suite are pinned
+      # by the action's commit (CodeQL 2.27.1 at v4.38.2). Reproduce locally
+      # with the commands in docs/ops/SECURITY_CI.md.
       - uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           languages: javascript-typescript, actions
@@ -107,7 +111,7 @@ jobs:
       - uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           category: /security-gate
-          upload: never
+          upload: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'always' || 'never' }}
           output: ${{ runner.temp }}/codeql-sarif
 
       - name: Gate — no untriaged high-severity finding
