@@ -3,6 +3,10 @@
 **Decision record:** ADR-0197 (decisions 1-9 and the addendum of 2026-10-18, afternoon). The 2026-10-05 script (`DEMO_SCRIPT_2026-10-05.md`) stays as it was;
 this file replaces it for the 2026-11-01 demo.
 
+**Dates (owner, 2026-10-23, #453):** this script is used twice. A full **internal run-through on Sun 2026-11-01,
+afternoon ET**, and the **external demo on Tue 2026-11-03**. The code freeze stays 2026-10-29. The file keeps its
+name. Every preparation step in `DEMO_RUNBOOK.md` §7.3 is done for each run.
+
 **Objective:** one journey in three acts.
 1. **Find it.** RegulAIt scans a GitLab group, an AWS sandbox account, an Azure subscription and an endpoint device,
    read-only, and finds AI nobody registered.
@@ -19,7 +23,8 @@ right-hand column of the timing table.
 - Every URL, button and screen label below was read from the UI code on `main` on 2026-10-18 (file named per beat),
   and checked again on 2026-10-21 against `main` after #457-#460, #465 and #469, then after #474 (folded sections),
   #477 (wide tables) and #478 (vendor names in UI copy), against the screenshot pack of `Demo journey` run
-  `39666220670` (`DEMO_SCREENS_QA_2026-11-01.md`). Labels that depend on data (finding subjects,
+  `39666220670` (`DEMO_SCREENS_QA_2026-11-01.md`), and on 2026-10-23 against the deep scan of #522 and the pack of
+  run `39940181481` (after #489 and #511). Labels that depend on data (finding subjects,
   counts, alert text) are marked **to confirm** and are checked at rehearsal.
 - **Navigation:** the two Shadow AI pages have their own **Discovery** section in the **AI Governance** sidebar, above
   the registers: **Shadow-AI discovery** and **Discovery sources**. Their breadcrumb reads *Discovery / …* (#469).
@@ -42,7 +47,8 @@ right-hand column of the timing table.
     decision 3): this script promises no subject or count on the LIVE path. Read them off the screen at T-24h.
   - **FALLBACK**: the seeded discovery dataset `demo:prepare` creates (`DEMO_SHADOW_DISCOVERY` in
     `packages/shared/src/demo-intake/shadow-discovery.ts`, loaded by `apps/gateway/src/demo-shadow-seed-lib.ts`),
-    on the **local docker compose stack on the presenting laptop**, prepared the night before (addendum, decision 4).
+    on the **local docker compose stack on the presenting laptop**, prepared less than 18 hours before each run
+    (addendum, decision 4; owner, 2026-10-23).
     The fallback specifics below are read from that code; whether they look right on screen is still checked at
     rehearsal.
 - **Never claim automatic remediation.** Discovery, mapping and monitoring are automated. Every change to governed
@@ -82,13 +88,22 @@ separation of duties is the point of both.
 The full checklist, with what is still pending execution, is in `DEMO_RUNBOOK.md` §7. The short form:
 
 - **T-24h:** every LIVE source has run successfully and its findings are on the Shadow-AI discovery page. A screen
-  recording of one real scan (S1 → S2) is captured. The fallback stack on the laptop is prepared with `demo:prepare`
-  (the night before) and passes `demo:check`.
+  recording of one real scan (S1 → S2) is captured. `demo:traffic` re-run on LIVE and `real-gate.txt` captured after
+  it. The fallback stack on the laptop is prepared with `demo:prepare` (less than 18 hours before the start) and passes
+  `demo:check`.
 - **T-1h:** the three browser profiles below signed in on the hosted dev instance. Navigation pinned (**Pin
-  navigation** at the bottom of the rail) in each. Theme chosen and the same in every profile (the user menu's
-  **Switch to dark theme** / **Switch to light theme**). The fallback: the laptop's local stack running, the same
-  three personas signed in to it in a separate browser so the sessions never mix. A terminal open on the dev
-  instance host for G3 (SSH or Session Manager). The recording open in a local player.
+  navigation** at the bottom of the rail) in each. The same look in every profile, chosen for the projector: light or
+  dark is the ☾ / ☀ button in the top bar (**Switch to dark theme** / **Switch to light theme**), and the palette is
+  on **Account** (`/ui/account`) → **Appearance**; both are kept per browser, so set them in every profile. The
+  fallback: the laptop's local stack running, the same three personas signed in to it in a separate browser so the
+  sessions never mix. A Session Manager shell open on the dev instance host for G3 (the host has no SSH), with the G3
+  script ready and `real-gate.txt` open on the laptop (`DEMO_RUNBOOK.md` §7.6). The recording open in a local player.
+- **Sessions end after 30 idle minutes** (the strict default, not relaxed for the demo). A window that is minimised or
+  fully covered does not keep its session alive. So at **T-10 min**, in every profile and in the fallback browser,
+  sign in again or bring the window to the front, and keep the windows tiled, never fully covered. At **T-5 min**,
+  reconnect the G3 shell.
+- **Morgan's AI policy:** at preparation, sign in as Morgan on both stacks and press **Acknowledge** on the AI-policy
+  gate, not **Not now** (which leaves a banner on every page, her Inbox included).
 - **Personas** (the sign-in addresses are the seeded `@regulait.local` ones):
   - **Profile A — Ada Admin**, governance admin. Drives every `/ui/admin/*` page and initiates the remediation
     workflow.
@@ -145,8 +160,9 @@ UI: `apps/web/src/views/admin/governance/DiscoverySourcesPage.tsx`, `FederationC
     and **Reads** (*all read*, or *could not read: …* per read). No Expand is needed (#477).
   - **Reveal a pseudonym**, its own card below Recent runs.
   - **Cloud federation** card: *on*, and *"Federated AWS, GCP and Entra credentials present a 300-second RS256 token
-    from this issuer. Turning it on asks you to confirm it's you."*, then the issuer, its key set, the subject format
-    and the audiences. The issuer is
+    from this issuer. Rotating or revoking a key asks you to confirm it's you."* (with federation off, as on FALLBACK,
+    the second sentence reads *"Turning it on asks you to confirm it's you."*; `FederationCard.tsx`), then the issuer,
+    its key set, the subject format and the audiences. The issuer is
     `<REGULAIT_PUBLIC_URL>/federation`, separate from the workload-identity issuer (`packages/shared/src/discovery/
     federation.ts`).
 - **Action:**
@@ -275,7 +291,11 @@ UI: `ShadowRemediationPanel.tsx`, `apps/web/src/views/workflows/WorkflowDetailPa
     Morgan's sign-off when the demo starts (`ensureRemediation`; `demo:check` asserts Morgan is the one approver and
     not the initiator). On the fallback, skip Ada's steps below: press the row's **Plan remediation** (the panel
     shows the link; scroll the panel's body to it), say "this one was started and submitted during preparation",
-    open the workflow at **waiting for sign-off**, and go straight to Morgan.
+    and open the workflow at **waiting for sign-off**: the panel shows the workflow id as plain text, not a link, so
+    go to **Workflows** (`/ui/workflows`) and open the row whose title starts *"Pull
+    gitlab:acme-bank-demo/credit-memo-assistant"*. Then go straight to Morgan.
+  - **Run-through and demo:** LIVE allows one remediation workflow per finding, and LIVE is never re-prepared, so the
+    11-01 run-through and the 11-03 demo each need their own finding with no workflow (chosen at each T-24h).
 - **Action — Ada, the plan** (`/ui/admin/shadow-ai`):
   1. On the chosen row, in **Next step**, click **Plan remediation**. The **Remediation plan** panel opens on the
      right (`ds-s3a`, `ds-s3b`): the subject as its title, the provider and confidence badges, and **no governed
@@ -286,17 +306,19 @@ UI: `ShadowRemediationPanel.tsx`, `apps/web/src/views/workflows/WorkflowDetailPa
   3. Point at *"The default remediation workflow (a plan-only stage, then a human sign-off) is set up when the first
      one starts."* if it shows (only until the first one starts).
   4. Scroll the panel's body to the form. Fill **Change description** (prefilled from the plan) and **Environment**:
-     type `staging` **before** drawing attention to the field, because its placeholder reads *"for example
-     production"* (`ShadowRemediationPanel.tsx`).
+     type `staging`. The placeholder reads *"for example staging"* once the copy fixes land (lands with PR D3); until
+     then it reads *"for example production"*, so type `staging` **before** drawing attention to the field
+     (`ShadowRemediationPanel.tsx`).
      The environment must be one an admin already gave a meaning to on a deploy target or assignment rule
-     (`shadow-ai-remediation.ts`); a `demo:prepare`d database has `staging`. Never type `production`: nothing in this
-     demo is production. (Which environment the live instance has configured: check at T-24h.)
+     (`shadow-ai-remediation.ts`). A `demo:prepare`d database has `staging`; on LIVE, `demo:prepare --live` creates an
+     audited mock deploy target `staging` and `demo:check --live` asserts it (lands with PR D2; checked at T-24h).
+     Never type `production`: nothing in this demo is production.
   5. **Start remediation workflow…**, pinned at the panel's foot → the dialog **Start a remediation workflow?** →
      **Start and link**.
   6. The status line, in the panel's body: *"Workflow xxxxxxxx started and linked; the finding is now confirmed"*, then
      *"Linked to workflow …. The loop closes when the next call from … appears in the audit log and usage ledger."*
-     Scroll the panel's body to it: the panel stays scrolled at the form, so the line is below it (the 2026-10-21 pack
-     shows the form, not the line, finding F22). The **Confirmed** chip's count goes up by one and the row's
+     Once the UX fixes land, the panel scrolls the line into view by itself (F22, lands with PR D3); until then it
+     stays scrolled at the form, so scroll the panel's body down to the line. The **Confirmed** chip's count goes up by one and the row's
      **Status** reads **Confirmed**. **Close** the panel.
 - **Action — Ada, the workflow** (`/ui/workflows`, open the new workflow):
   1. The workflow's title is the full change description (finding F8). The **Plan only** card, badge **planning**:
@@ -342,8 +364,11 @@ UI: `IntakeWizardPage.tsx` (the 10-05 beat 1B, unchanged).
   rehearsed on 10-05 fits the fallback's credit-memo drafting use; on LIVE, the set that fits the chosen finding,
   decided at T-24h); **Draft
   suggestions**; reject one framework, **Accept all remaining**; **Continue** through the questionnaire; on **Link
-  stack** choose the governed agent and vendor of the governance seed that fit the finding (decided at rehearsal); on
+  stack** choose the governed agent and vendor of the governance seed that fit the finding (one pairing per stack,
+  proposed by the builder and confirmed by the owner before the freeze, owner decision on #522 #10); on
   **Review** point at the derived data sensitivity; **Submit for human review**.
+- **Do not link the voice / call-centre agent** (deep scan #40): its seeded model card says its bias evaluation's
+  results were "expected by 2026-10-15", which is past on both run days, and G1's **Stack** tab would show it.
 - **Say:** "The finding filled in only what the evidence established: the name and what was observed. The tier comes
   from the structured answers by deterministic rules, never from a model, and every suggestion is accepted or rejected
   by a person."
@@ -375,30 +400,61 @@ the day.
   this use case (`ds-g1d`): *"Showing the audit trail of one AI use case, <id>. The CSV export covers the same rows."*
   and **Show every row**. A non-admin (Avery) sees a note that the full trail is open to administrators instead of
   the link.
-- **Change from 10-05:** the use case is now the one discovered in Act 1. Whether its record or **Audit** tab shows
-  the link back to the finding is **to confirm at rehearsal** (the pack's record is the 10-05 use case, not the one
-  S4 registers); if it does, point at it in one sentence: "the record remembers where it was found".
+- **Change from 10-05:** the use case is now the one discovered in Act 1.
+- **Pending (lands with PR D4):** "the record remembers where it was found". Today intake reads only the source,
+  title and description from the link and ignores the finding id, so the record does not link back. The owner
+  decided to carry the finding link through intake before the freeze. Say the line only once that PR has merged and
+  the link is checked on screen at rehearsal; until then, leave it out.
 
 ### G2. Independent review — Avery — 2 minutes (10-05 beat 2B)
 - **URL:** `/ui/inbox` (Profile B): *AI use case sign-off · Govern <subject> — requested by Ada Admin* → **Review**.
 - **Action:** the row's **Review** opens **Review use case sign-off** (caption *Open task*) as a panel on the right
   (`ds-g2b`); the evidence scrolls in its body. Under **Decision**, choose the **Approve with conditions** card. Scroll
-  the body to **Conditions**: one condition, **Applies** → **Before go-live (holds deployment)**. Press **Approve with
-  conditions** in the pinned foot (beside **Cancel**). Back in Profile A, on the record: the **Approval valid until**
+  the body to **Conditions** and fill the one condition row (`ReviewPanel.tsx`); the form refuses an empty
+  **Condition** (*"Describe the condition."*) or **Due date** (*"Choose a due date."*):
+  1. **Condition**: one plain sentence, for example *"Complete a human-review sampling plan before go-live."* Name no
+     model identifier.
+  2. **Owner**: **Ada Admin**.
+  3. **Due date**: about two weeks after the run day.
+  4. **Applies**: **Before go-live (holds deployment)**.
+
+  Press **Approve with conditions** in the pinned foot (beside **Cancel**). Back in Profile A, on the record: the **Approval valid until**
   chip in the header, and **Conditions of approval** with **Mark met** on the **Overview** tab.
 
 ### G3. Deploy gate — 1.5 minutes (10-05 beat 2C)
 - **Expected:** `DENY` with two **BLOCK open_high_alert** lines for *Real-Time Fraud Detection Engine*, then `ALLOW`
-  with **WARN acknowledged_high_alert** after the alerts are acknowledged.
-- **Change from 10-05: where it runs.** `demo:gate` connects to the database directly (`apps/gateway/src/demo-gate.ts`
-  reads `DATABASE_URL`), and the laptop is only a browser (ADR-0197 decision 1). So it runs **live from a terminal on
-  the dev instance host**, over SSH or Session Manager (addendum, decision 2), opened before the demo. The exact
-  command and environment on that host are **pending execution**: they are written into `DEMO_RUNBOOK.md` §7 only
-  once run there.
-- **On LIVE:** the governance data this beat reads and the gate output it shows depend on the open `DEMO_RUNBOOK.md`
-  §7.1 step, which is **pending execution**.
-- **Fallback:** the output captured at T-24h (`real-gate.txt`, as in the 10-05 fallback). Say plainly it was captured
-  from a real run.
+  with two **WARN acknowledged_high_alert** lines after the alerts are acknowledged. The environment is `staging`,
+  never `production` (owner, #522 #11): the gate only records it, and nothing in this demo is production.
+- **Where it runs.** `demo:gate` reads the database directly, and the laptop is only a browser (ADR-0197 decision 1),
+  so it runs **live on the dev instance host**, in a Session Manager shell (the host has no SSH), inside the gateway
+  container: `docker compose exec -T gateway node apps/gateway/dist/demo-gate.js "Real-Time Fraud Detection Engine"
+  staging <ref>`, kept in the one-line script `~/g3.sh` (`DEMO_RUNBOOK.md` §7.6). The shell was reconnected at
+  T-5 min. **Pending execution** on that host.
+- **Action:**
+  1. In the shell: `~/g3.sh demo-1`. The printout reads `$ regulait gate deploy --use-case "Real-Time Fraud Detection
+     Engine" --env staging --ref demo-1`, then `DENY  "Real-Time Fraud Detection Engine" (approved, EU AI Act tier
+     high) → staging` and two **BLOCK open_high_alert** lines, one per open high alert.
+  2. Profile A (Ada), `/ui/admin/governance/alerts`, **Active** tab. Acknowledge the two alerts the BLOCK lines name
+     (`packages/shared/src/governance-monitor.ts`):
+     - *"Real-Time Fraud Detection Engine inherits a HIGH rating from Acme Internal AI Platform"*;
+     - *"n call(s) for Real-Time Fraud Detection Engine (to …) was / were served by …, which is outside its approved
+       stack"*.
+
+     For each: click its row (not the card title, which folds the list); in the panel on the right type the
+     **Acknowledgement note — required and audited** in the pinned foot, then **Acknowledge**. This is not G5's alert:
+     G5 later acknowledges the unowned-agent alert.
+  3. Back in the shell: `~/g3.sh demo-2`. Expect `ALLOW` with two **WARN acknowledged_high_alert** lines.
+- **Say:** "The pipeline asks the gate, and the gate answers from live governance state: two open high alerts block
+  it. Acknowledging them is a person's audited decision, and the gate still lists them as warnings."
+- **On LIVE:** run `demo:traffic` again at T-24h before each run (owner, #522 #8): the monitor counts the off-stack
+  call over 7 days, so traffic made at preparation would no longer hold the second BLOCK line. Capture
+  `real-gate.txt` after that re-run (`DEMO_RUNBOOK.md` §7.3).
+- **Run-through and demo:** an acknowledged alert stays acknowledged, so an acknowledgement on LIVE on 11-01 would turn
+  11-03's first run into ALLOW. Whether to acknowledge on the fallback only on 11-01 is an **open owner question**
+  (`DEMO_RUNBOOK.md` §7.3, "Between the runs").
+- **Fallback:** if the shell is gone or slow, show `real-gate.txt` (the T-24h capture, open on the laptop). Say plainly
+  it was captured from a real run. The ALLOW half is rehearsed on the fallback database at T-7d (`DEMO_RUNBOOK.md`
+  §7.5, owner step 1).
 
 ### G4. Trust dashboard — Ada — 1.5 minutes (10-05 beat 3A)
 - **URL:** `/ui/admin/governance/trust` (breadcrumb *Overview / Trust & evidence*). The page has no tabs: point at
@@ -421,6 +477,11 @@ the day.
 - **On the FALLBACK pack:** the CI pack runs after the 10-05 journeys, which already resolved the unowned-agent alert
   (*Make Dana Developer the owner of …*, **Applied** in Remediation proposals). A database straight from `demo:prepare` still has it on
   **Active**: check at rehearsal.
+- **SLA chips** (deep scan #13): an alert's SLA chip moves with the clock, and acknowledging it does not stop it. High
+  alerts read *SLA due soon* from 18 h and *SLA breached* from 24 h; medium alerts at 54 h and 72 h. On LIVE, prepared
+  more than a week earlier, every open high and medium alert reads **SLA breached**, the unowned-agent alert included,
+  and the panel adds that it was escalated to the admins. If anyone looks at it, say: "the product escalates overdue
+  alerts". The fallback is prepared less than 18 h before the run, so its chips read *on track*, as in the pack.
 - **Say (added for v3):** "Same rule as the shadow-AI plan: the platform runs only the approved action, and the
   approver is someone else."
 
@@ -428,10 +489,8 @@ the day.
 - **URL:** `/ui/admin/governance/graph`. One path to a vendor's HIGH risk.
 
 ### G7. Regulatory intelligence — 0.5 minutes (10-05 beat 3D)
-- **URL:** `/ui/admin/governance/regulatory`. One entry: the Digital Omnibus date move.
-- **Dates:** this page still writes its dates in US format (*Oct 21, 2026, 8:08 PM*, *Jul 27, 2026*), unlike the
-  rest of the product (finding F32, open). Say the date move in words, as the entry's own text gives it (the Annex III
-  high-risk obligations now apply from 2 December 2027), and do not read the date badges aloud.
+- **URL:** `/ui/admin/governance/regulatory`. One entry: the Digital Omnibus date move. Say it in words, as the
+  entry's own text gives it: the Annex III high-risk obligations now apply from 2 December 2027.
 
 ### G8. Evidence — Ada — 1 minute (10-05 beat 3E)
 - **URL:** `/ui/admin/audit` → **Download signed bundle** (top right, beside **Download CSV**). The page (`ds-g8`):
@@ -462,7 +521,7 @@ re-run `demo:intake`), and WARNs when open incidents or feedback sit on the Real
 - **URL:** `/ui/incidents`. The list opens on **Not closed** and shows the open, medium incident on the Internal IT
   Knowledge Base Bot (owner Dana Developer, two timeline notes, one open corrective action due after the demo day).
   Medium and not serious, so it starts no clock and holds no deploy gate. Its **Aware** column shows an ISO date with
-  *UTC* (finding F32, open): do not read it aloud. For the 10-05 story, set **Status** to
+  *UTC* (F32's G9 part, left as it is for now; its G7 part is fixed): do not read it aloud. For the 10-05 story, set **Status** to
   **All** and open the closed Customer Sentiment Analyzer incident.
 - **URL:** `/ui/feedback`. As an admin, Ada sees the tab **All feedback** (beside **Sent by me**); **Show** opens on
   **Open** and lists two items on the IT knowledge bot, both
@@ -524,10 +583,16 @@ UI: `apps/web/src/views/admin/governance/ContentTrustPage.tsx`.
    stack, which needs no network, or on the screenshot deck.
 3. **Everything is unreachable:** the screenshot deck. Build it from the `demo-screens` artifact of the latest green
    `Demo journey` run, unzipped into `apps/web/e2e/artifacts/demo-screens/`:
-   `node apps/web/e2e/fallback-deck.mjs --pack 2026-11-01 --dark --no-gate` (executed 2026-10-21). With the T-24h gate
-   capture, `--gate <path to real-gate.txt>` in place of `--no-gate` adds the G3 slide: **pending execution**. It writes one self-contained `fallback-deck-2026-11-01.html` with 30 slides in this script's order, S1-G10.
-   Keys: → / ← to move, **S** shows the Say line, **T** switches S1, S2 and S3a to dark. Built from run `39544572823` on
-   2026-10-21 with `--no-gate` (no captured gate output yet). Say plainly these are screenshots from a real run.
+   `node apps/web/e2e/fallback-deck.mjs --pack 2026-11-01 --dark --no-gate`. It writes one self-contained
+   `fallback-deck-2026-11-01.html` with 30 slides in this script's order, S1-G10; with the T-24h gate capture,
+   `--gate <path to real-gate.txt>` in place of `--no-gate` adds the G3 slide, 31 in all.
+   Keys: → / ← to move, **S** shows the Say line, **T** switches S1, S2 and S3a to dark. Say plainly these are
+   screenshots from a real run.
+   **Built from run:** the last deck built (2026-10-21, `--no-gate`) came from run `39544572823`, which predates #486,
+   #489 and #511, so several slides no longer match `main` (G2b, G5, G7, the S3b path wrap, G9 feedback, the S2/S3a
+   row count). Rebuild it now from run `39940181481` (artifact `12497390750`) with `--no-gate`, then after the freeze
+   from the `main` dispatch at the freeze SHA with `--gate` (`DEMO_RUNBOOK.md` §7.3 and §7.5). Both rebuilds are
+   **pending execution**; record the run each deck was built from here.
 
 A failed live call never leaves an empty screen (ADR-0197 decision 7): move to the next path at once rather than
 retrying in front of the audience.
