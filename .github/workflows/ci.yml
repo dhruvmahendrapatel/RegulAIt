@@ -33,9 +33,10 @@ name: CI
 #     --with-deps` took 10-12 min on some runners and pushed `spa-journeys` and
 #     the mocked-UI shards past their caps with no failing test. Every job that
 #     installs browsers restores ~/.cache/ms-playwright from actions/cache, keyed
-#     on runner OS + arch + the exact Playwright version installed from the
-#     lockfile (`playwright --version`) + the browser list; a Playwright bump is
-#     a new key. Hit: only `playwright install-deps` (apt packages). Miss: the
+#     on runner OS + arch + the runner image OS (ImageOS, e.g. ubuntu24, so an
+#     Ubuntu release change misses cleanly) + the exact Playwright version
+#     installed from the lockfile (`playwright --version`) + the browser list; a
+#     Playwright bump is a new key. Hit: only `playwright install-deps` (apt packages). Miss: the
 #     full install, then an explicit save right after it so a later failure
 #     still keeps the cache. The caps were NOT raised. Poisoning: a PR's cache
 #     is scoped to its own ref and cannot replace main's; the key holds no
@@ -536,7 +537,7 @@ jobs:
       # Vitest 4.1.11), so it is the unsharded list by construction.
       - run: pnpm install --frozen-lockfile
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: gateway-report-*
           path: ${{ runner.temp }}/shards
@@ -693,13 +694,15 @@ jobs:
           img="${ImageOS:-unknown}-${ImageVersion:-unknown}"
           [[ "$img" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::unexpected runner image id"; exit 1; }
           echo "image=$img" >> "$GITHUB_OUTPUT"
+          # The browser cache key carries the image OS (e.g. ubuntu24), so an Ubuntu release change misses cleanly.
+          echo "imageos=${ImageOS:-unknown}" >> "$GITHUB_OUTPUT"
 
       - name: Restore Playwright browsers
         id: playwright-cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.version }}-chromium
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.imageos }}-${{ steps.playwright.outputs.version }}-chromium
 
       # The .deb files `install-deps` downloads are cached too (#453): a slow apt mirror stalled them for 9-13 min
       # even on a browser hit. apt still checks every cached file against the signed package index.
