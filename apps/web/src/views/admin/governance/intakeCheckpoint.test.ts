@@ -177,3 +177,17 @@ describe("canonicalDigest treats __proto__ as an ordinary key (ADR-0176 review)"
     expect(canonicalDigest(a)).not.toBe(canonicalDigest(JSON.parse('{"answers":{"y":2}}') as unknown));
   });
 });
+
+describe("issue #522 #30: the shadow-AI finding a use case is registered from", () => {
+  const FINDING = "0b5d3c1e-7f2a-4c11-9a0e-3d2b1c4e5f60";
+  it("is fixed once the use case exists: a retry that changes or drops it is refused before anything is sent", () => {
+    const linked = { ...useCase, discoveryFindingId: FINDING };
+    const done: SubmissionCheckpoint = { ...written(), useCase: { id: "uc", instanceId: "inst", inputs: linked, digest: canonicalDigest(linked) } };
+    expect(planSubmission(done, inputs({ useCase: linked })).kind).toBe("proceed");
+    for (const changed of [{ ...useCase }, { ...useCase, discoveryFindingId: "1b5d3c1e-7f2a-4c11-9a0e-3d2b1c4e5f60" }]) {
+      const plan = planSubmission(done, inputs({ useCase: changed }));
+      expect(plan.kind).toBe("refuse");
+      expect(plan.kind === "refuse" && plan.reasons.join(" ")).toContain("the shadow-AI finding it was registered from");
+    }
+  });
+});

@@ -65,6 +65,7 @@ import {
   contextAnswers,
   diffIsEmpty,
   diffProposals,
+  discoveryFindingFrom,
   emptyForm,
   euAiActAnswers,
   euUnsureKeys,
@@ -153,7 +154,8 @@ function RegisterUseCase() {
   // Every answer starts BLANK. A new operator opening this page must describe
   // their own system — a pre-selected sample read as a record that already
   // existed (UXJ-06). The worked example is one explicit click away below.
-  const [initialForm] = useState(() => emptyForm({ title: prefill.get("title"), description: prefill.get("description") }));
+  // issue #522 #30: the finding's id travels with the form (and its draft), so the use case keeps the link
+  const [initialForm] = useState(() => emptyForm({ title: prefill.get("title"), description: prefill.get("description"), discoveryFindingId: discoveryFindingFrom(prefill) }));
   const [form, setForm] = useState<RegistrationForm>(initialForm);
   const setField = <K extends keyof RegistrationForm>(key: K, value: RegistrationForm[K]) => setForm((f) => ({ ...f, [key]: value }));
   const setAnswer = (key: BooleanQuestion, value: RegistrationForm["answers"][BooleanQuestion]) =>
@@ -409,6 +411,7 @@ function RegisterUseCase() {
           ...(unsureKeys(form).length > 0 ? { unsure: unsureKeys(form) } : {}),
         },
         ...(Object.keys(rationales).length > 0 ? { frameworkRationales: rationales } : {}),
+        ...(form.discoveryFindingId ? { discoveryFindingId: form.discoveryFindingId } : {}),
       },
       questionnaire: questionnaireMarkdown(),
       risks: acceptedRisks.map((risk) => ({
@@ -906,6 +909,9 @@ function RegisterUseCase() {
                 </div>
                 <div className={v.listRow}><strong>Owner</strong><span className={v.grow}>{ownerName}</span></div>
                 <div className={v.listRow}><strong>Data sensitivity</strong><span className={v.grow}><Badge tone="info">{humanize(deriveDataSensitivity(form.dataCategories))}</Badge> <span className={v.faint}>from the data categories — the strictest wins</span></span></div>
+                {form.discoveryFindingId ? (
+                  <div className={v.listRow}><strong>Found by</strong><span className={v.grow}>Shadow-AI discovery <span className={v.faint}>— the use case keeps a link to the finding</span></span></div>
+                ) : null}
                 <div className={v.listRow}><strong>Suggested by</strong><span className={`${v.grow} ${v.row}`}>{sourceSummary.map((source) => <span key={source} className={rg.sourceLabel}>{SOURCE_LABEL[source]}</span>)}</span></div>
                 <ProposalReview
                   form={form}

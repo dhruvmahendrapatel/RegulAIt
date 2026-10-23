@@ -99,6 +99,8 @@ interface Finding {
   firstSeenAt: string;
   lastSeenAt: string;
   replacementAgent: { id: string; name: string; provider: string; enabled: boolean } | null;
+  /** issue #522 #30: the use case registered from this finding (absent from an older gateway) */
+  linkedUseCase?: { id: string; name: string; status: string } | null;
   replacementNote: string | null;
   dispositionStale: boolean;
   /** ADR-0195: the bounded sightings (location, names, actor pseudonym) */
@@ -632,7 +634,11 @@ export default function ShadowAiPage() {
                         secondary={triage}
                         rest={
                           <span className={v.stackTight} style={{ alignItems: "flex-start" }}>
-                            <Link to={`/admin/governance/intake?source=shadow-ai&findingId=${encodeURIComponent(r.id)}&title=${encodeURIComponent(`Govern ${r.subject}`)}&description=${encodeURIComponent(`Register and govern the ${providerLabel(r.provider)} usage observed for ${r.subject}. Evidence: ${r.signalSources.map(evidenceLabel).join(", ")}.`)}`}>Register as use case</Link>
+                            {r.linkedUseCase ? (
+                              <span>Registered as <Link to={`/admin/governance/use-cases/${r.linkedUseCase.id}`}>{r.linkedUseCase.name}</Link></span>
+                            ) : (
+                              <Link to={`/admin/governance/intake?source=shadow-ai&findingId=${encodeURIComponent(r.id)}&title=${encodeURIComponent(`Govern ${r.subject}`)}&description=${encodeURIComponent(`Register and govern the ${providerLabel(r.provider)} usage observed for ${r.subject}. Evidence: ${r.signalSources.map(evidenceLabel).join(", ")}.`)}`}>Register as use case</Link>
+                            )}
                           </span>
                         }
                       />
