@@ -1441,6 +1441,9 @@ export const auditLog = pgTable(
         "remediation",
         // ADR-0161: one CI/CD deploy-gate evaluation (objectId = use case)
         "deploy_gate",
+        // a deploy target created or removed (objectId = the target): its environment is one a remediation may name.
+        // Plain text column — no DDL.
+        "deploy_target",
         // ADR-0173 §3: an admin replacing the model allow-list matrix
         // (objectId null — the policy is org-wide). Plain text column — no DDL.
         "model_policy",

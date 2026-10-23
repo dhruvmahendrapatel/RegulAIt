@@ -2817,22 +2817,37 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     if (body.credential && !opts.dataKey) {
       return reply.status(503).send({ error: "no_data_key", detail: "set REGULAIT_DATA_KEY to store a deploy credential" });
     }
-    const [row] = await db
-      .insert(deployTargets)
-      .values({
-        name: body.name,
-        provider: body.provider,
-        environment: body.environment ?? null,
-        baseUrl: body.baseUrl ?? null,
-        mode: body.mode ?? "hosted",
-        roleArn: body.roleArn ?? null,
-        region: body.region ?? null,
-        // migration 0043: the validated per-kind config (null = none given)
-        providerConfig: deployTargetProviderConfig(body),
-        credentialCiphertext:
-          body.credential && opts.dataKey ? encryptTokenOnce(opts.dataKey, body.credential) : null,
-      })
-      .returning(deployTargetView);
+    // a target's environment widens what a remediation may name (allowedRemediationEnvironments), so the create is
+    // on the record, in the same transaction as the row
+    const row = await db.transaction(async (tx) => {
+      const [created] = await tx
+        .insert(deployTargets)
+        .values({
+          name: body.name,
+          provider: body.provider,
+          environment: body.environment ?? null,
+          baseUrl: body.baseUrl ?? null,
+          mode: body.mode ?? "hosted",
+          roleArn: body.roleArn ?? null,
+          region: body.region ?? null,
+          // migration 0043: the validated per-kind config (null = none given)
+          providerConfig: deployTargetProviderConfig(body),
+          credentialCiphertext:
+            body.credential && opts.dataKey ? encryptTokenOnce(opts.dataKey, body.credential) : null,
+        })
+        .returning(deployTargetView);
+      await tx.insert(auditLog).values({
+        userId: req.authCtx.userId ?? SYSTEM_IDENTITY,
+        objectType: "deploy_target",
+        objectId: created!.id,
+        detail: { phase: "created", name: created!.name, provider: created!.provider, mode: created!.mode, environment: created!.environment },
+        effect: "allow",
+        ruleId: "deploy-target-created",
+        ruleChain: [],
+        reason: `deploy target '${created!.name}' (${created!.provider}, ${created!.environment ?? "no environment"}) created`,
+      });
+      return created;
+    });
     return reply.status(201).send(row);
   });
   app.get("/v1/deploy/targets", async () => ({
@@ -2840,10 +2855,25 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
   }));
   app.delete("/v1/deploy/targets/:name", async (req, reply) => {
     const { name } = z.object({ name: z.string().min(1) }).parse(req.params);
-    const deleted = await db
-      .delete(deployTargets)
-      .where(eq(deployTargets.name, name))
-      .returning({ id: deployTargets.id });
+    const deleted = await db.transaction(async (tx) => {
+      const rows = await tx
+        .delete(deployTargets)
+        .where(eq(deployTargets.name, name))
+        .returning({ id: deployTargets.id, environment: deployTargets.environment });
+      for (const r of rows) {
+        await tx.insert(auditLog).values({
+          userId: req.authCtx.userId ?? SYSTEM_IDENTITY,
+          objectType: "deploy_target",
+          objectId: r.id,
+          detail: { phase: "removed", name, environment: r.environment },
+          effect: "allow",
+          ruleId: "deploy-target-removed",
+          ruleChain: [],
+          reason: `deploy target '${name}' removed`,
+        });
+      }
+      return rows;
+    });
     if (deleted.length === 0) return reply.status(404).send({ error: "unknown_target" });
     return { removed: true };
   });

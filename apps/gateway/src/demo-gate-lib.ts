@@ -14,6 +14,9 @@ import { DEMO_SCRIPT_KEY_TTL_DAYS, demoKeyExpiresAt } from "./demo-identity.js";
 
 type Json = Record<string, any>;
 
+/** the environment the gate is asked about when none is given (owner, finding #11 of the #522 deep scan: staging) */
+export const DEMO_GATE_DEFAULT_ENVIRONMENT = "staging";
+
 export interface DemoGateResult {
   ok: boolean;
   exitCode: 0 | 1 | 2;
@@ -53,7 +56,7 @@ export async function runDemoGate(
   if (!uc) {
     return { ok: false, exitCode: 2, lines: [`no use case matches "${opts.useCase}" — known: ${ucs.map((u) => u.name).join(", ")}`] };
   }
-  const environment = opts.environment ?? "production";
+  const environment = opts.environment ?? DEMO_GATE_DEFAULT_ENVIRONMENT;
   const ref = opts.ref ?? `demo-build-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "")}`;
   const r = await call("POST", "/v1/gates/deploy", auth, { useCaseId: uc.id, environment, ref });
   if (r.status !== 200) {

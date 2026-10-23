@@ -9,6 +9,7 @@
  * `--live` (`demo:prepare --live`; ADR-0197 addendum decision 3): the live database holds real findings only, so the
  * synthetic SaaS export is not imported. The shipped signature catalogues it would have loaded are loaded on their
  * own: without them a real scan matches nothing.
+ * It also creates the mock `staging` deploy target the S3 remediation names (demo-live-staging.ts).
  */
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,6 +18,7 @@ import * as shared from "@regulait/shared";
 import type { DemoIntakeFixtures } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { seedDemoIntake } from "./demo-intake-seed-lib.js";
+import { ensureLiveStagingTarget } from "./demo-live-staging.js";
 import { recertifyDemoModelCards } from "./demo-strict-governance.js";
 
 const connectionString = process.env.DATABASE_URL ?? "postgres://regulait:regulait@localhost:5432/regulait";
@@ -47,6 +49,22 @@ if (live) {
       process.exit(1);
     }
   }
+  // the S3 remediation's `staging`: a mock deploy target through the audited admin route (see demo-live-staging.ts)
+  const staging = await ensureLiveStagingTarget(async (method, url, payload) => {
+    const r = await app.inject({ method, url, headers: { authorization: `Bearer ${BOOT}` }, ...(payload !== undefined ? { payload: payload as object } : {}) });
+    let body: Record<string, any> = {};
+    try {
+      body = r.json() as Record<string, any>;
+    } catch {
+      /* empty */
+    }
+    return { status: r.statusCode, body };
+  });
+  if (!staging.ok) {
+    console.error(`demo:intake --live — ${staging.error}`);
+    process.exit(1);
+  }
+  console.log(`demo:intake --live — ${staging.note}`);
 }
 const report = await seedDemoIntake(app, live ? { ...fixtures, shadowAi: [] } : fixtures, { bootstrapToken: BOOT });
 console.log(`demo:intake — ${fixtures.company.name}`);
