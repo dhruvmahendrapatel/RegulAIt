@@ -148,6 +148,7 @@ describe("N10: the bot's PR is the lock transition CI accepts", () => {
       "engines/signatures/garak.sigstore.json",
     ]);
     expect(pr.body).toContain(expectedIdentity());
+    expect(pr.body).not.toContain("by GITHUB_TOKEN");
     expect(pr.body).toMatch(/\| garak \| `sha256:5{64}` \| 0 -> 1 \| 4242 \|/);
   });
 
