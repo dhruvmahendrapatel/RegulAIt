@@ -166,6 +166,15 @@ export default function UseCaseOverviewPage() {
                     : <li className={`${rec.chip} ${rec["tone-ok"]}`}><span className={rec.chipLabel}>Approval valid until</span> {shortDate(approvedUntil)}</li>
                 ) : null}
                 <li className={rec.chip}><span className={rec.chipLabel}>Owner</span> {data.useCase.ownerName ?? "Unassigned"}</li>
+                {/* issue #522 #30: the record remembers where it was found; the finding opens for an admin */}
+                {detail.data?.discovery ? (
+                  <li className={rec.chip} data-testid="use-case-found-by">
+                    <span className={rec.chipLabel}>Found by</span>{" "}
+                    {detail.data.discovery.finding ? (
+                      <Link to="/admin/shadow-ai?tab=findings" aria-label={`discovery: open the shadow-AI finding for ${detail.data.discovery.finding.subject}`}>discovery</Link>
+                    ) : "discovery"}
+                  </li>
+                ) : null}
               </ul>
             </div>
             {resubmission || data.useCase.workflowInstanceId ? (

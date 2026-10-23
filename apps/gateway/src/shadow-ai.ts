@@ -72,6 +72,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   agents,
   aiEndpointSignatures,
+  aiUseCases,
   and,
   auditLog,
   customModelProviders,
@@ -189,6 +190,8 @@ export const SHADOW_AI_RULE_IDS = {
   rawMalformedRows: "shadow-ai-raw-import-malformed-rows",
   findingDisposition: "shadow-ai-finding-disposition",
   findingRemediationLinked: "shadow-ai-finding-remediation-linked",
+  /** issue #522 finding #30: a use case was registered from this finding (written by POST /v1/use-cases) */
+  findingUseCaseLinked: "shadow-ai-finding-use-case-linked",
   /** ADR-0083: a first-party discovery classification that produced nothing to
    * ingest — audited anyway, because "we looked and found no shadow candidate"
    * is itself a governance event an operator will want to point at */
@@ -1292,6 +1295,13 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
           .from(agents).where(inArray(agents.id, agentIds))
       : [];
     const agentById = new Map(agentRows.map((a) => [a.id, a]));
+    // issue #522 finding #30: the use case each finding was registered as (at most one, migration 0211)
+    const findingIds = rows.map((r) => r.id);
+    const linkedRows = findingIds.length > 0
+      ? await db.select({ id: aiUseCases.id, name: aiUseCases.name, status: aiUseCases.status, findingId: aiUseCases.discoveryFindingId })
+          .from(aiUseCases).where(inArray(aiUseCases.discoveryFindingId, findingIds))
+      : [];
+    const useCaseByFinding = new Map(linkedRows.map((u) => [u.findingId, { id: u.id, name: u.name, status: u.status }]));
 
     const importRows = await db
       .select({ kind: shadowAiImports.kind, rowCount: shadowAiImports.rowCount, createdAt: shadowAiImports.createdAt })
@@ -1318,6 +1328,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
       findings: sorted.map((r) => ({
         ...r,
         replacementAgent: r.replacementAgentId ? (agentById.get(r.replacementAgentId) ?? null) : null,
+        linkedUseCase: useCaseByFinding.get(r.id) ?? null,
         /** a finding closed as remediated/false-positive that has been OBSERVED
          * AGAIN since the judgement. Surfaced rather than silently re-opened:
          * the judgement was a human act and only a human should undo it. */
