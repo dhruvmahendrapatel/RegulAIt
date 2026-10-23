@@ -187,13 +187,15 @@ jobs:
           img="${ImageOS:-unknown}-${ImageVersion:-unknown}"
           [[ "$img" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::unexpected runner image id"; exit 1; }
           echo "image=$img" >> "$GITHUB_OUTPUT"
+          # The browser cache key carries the image OS (e.g. ubuntu24), so an Ubuntu release change misses cleanly.
+          echo "imageos=${ImageOS:-unknown}" >> "$GITHUB_OUTPUT"
 
       - name: Restore Playwright browsers
         id: playwright-cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.version }}-chromium
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.imageos }}-${{ steps.playwright.outputs.version }}-chromium
 
       # The .deb files `install-deps` downloads are cached too (#453): a slow apt mirror stalled them for 9-13 min
       # even on a browser hit. apt still checks every cached file against the signed package index.
@@ -638,13 +640,15 @@ jobs:
           img="${ImageOS:-unknown}-${ImageVersion:-unknown}"
           [[ "$img" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::unexpected runner image id"; exit 1; }
           echo "image=$img" >> "$GITHUB_OUTPUT"
+          # The browser cache key carries the image OS (e.g. ubuntu24), so an Ubuntu release change misses cleanly.
+          echo "imageos=${ImageOS:-unknown}" >> "$GITHUB_OUTPUT"
 
       - name: Restore Playwright browsers
         id: playwright-cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.version }}-chromium
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.imageos }}-${{ steps.playwright.outputs.version }}-chromium
 
       # The .deb files `install-deps` downloads are cached too (#453): a slow apt mirror stalled them for 9-13 min
       # even on a browser hit. apt still checks every cached file against the signed package index.
