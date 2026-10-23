@@ -42,6 +42,12 @@ function world() {
       { id: MORGAN, email: DEMO_SECURITY_LEAD.email, isAdmin: true, totpEnabled: true, disabledAt: null },
     ] as Json[],
     templates: [] as Json[],
+    // what `demo:prepare --live` leaves: the seed's production target and its own mock staging target
+    deployTargets: [
+      { id: "dt1", name: "demo-deploy", provider: "mock", environment: "production" },
+      { id: "dt2", name: "demo-staging", provider: "mock", environment: "staging" },
+    ] as Json[],
+    assignmentRules: [{ id: "ar1", changeType: "deploy-demo", environment: null }] as Json[],
     useCases: [] as Json[],
     activeIncidents: [] as Json[],
     feedbackQueue: [] as Json[],
@@ -66,6 +72,8 @@ function api(w: World) {
     if (u.pathname === "/v1/content-provenance/records") return ok({ records: w.records });
     if (u.pathname === "/v1/users") return ok({ users: w.users });
     if (u.pathname === "/v1/workflows/templates") return ok({ templates: w.templates });
+    if (u.pathname === "/v1/deploy/targets") return ok({ targets: w.deployTargets });
+    if (u.pathname === "/v1/workflows/assignment-rules") return ok({ rules: w.assignmentRules });
     if (u.pathname === "/v1/inventory/graph") return ok({ nodes: [], summary: { nodes: 0 } });
     if (u.pathname === "/v1/use-cases") return ok({ useCases: w.useCases });
     if (u.pathname === "/v1/incidents" && u.searchParams.get("status") === "active") return ok({ incidents: w.activeIncidents });
@@ -273,6 +281,49 @@ describe("checkLiveDiscovery: real findings only, fail closed", () => {
       const c = (await live(w))["1 Remediation routing"]!;
       expect(c.level).toBe("FAIL");
       expect(c.fix).toContain(hint);
+    });
+  }
+});
+
+describe("checkLiveDiscovery: the remediation environment (finding #4 of the #522 deep scan)", () => {
+  const env = async (w: World) => (await live(w))["1 Remediation environment"]!;
+
+  it("PASSes with the mock staging target, naming it", async () => {
+    const c = await env(world());
+    expect(c.level).toBe("PASS");
+    expect(c.detail).toBe("'staging' is an accepted remediation environment: deploy target 'demo-staging' (mock)");
+  });
+
+  it("FAILs with the staging target removed: the scripted Start and link would answer 422", async () => {
+    const w = world();
+    w.deployTargets = w.deployTargets.filter((t) => t.environment !== "staging");
+    const c = await env(w);
+    expect(c.level).toBe("FAIL");
+    expect(c.detail).toContain("accepted: production");
+    expect(c.detail).toContain("environment_not_allowed");
+    expect(c.fix).toContain("demo-staging");
+  });
+
+  it("an assignment rule naming staging is enough on its own, as allowedRemediationEnvironments counts it", async () => {
+    const w = world();
+    w.deployTargets = w.deployTargets.filter((t) => t.environment !== "staging");
+    w.assignmentRules.push({ id: "ar2", changeType: "x", environment: "staging" });
+    expect((await env(w)).level).toBe("PASS");
+  });
+
+  it("the unstated placeholder or a malformed name is not an accepted environment", async () => {
+    const w = world();
+    w.deployTargets = [{ id: "dt3", name: "odd", provider: "mock", environment: "Staging Env!" }];
+    expect((await env(w)).level).toBe("FAIL");
+  });
+
+  for (const path of ["/v1/deploy/targets", "/v1/workflows/assignment-rules"]) {
+    it(`unreadable ${path} FAILs: not proven`, async () => {
+      const w = world();
+      w.failing.add(path);
+      const c = await env(w);
+      expect(c.level).toBe("FAIL");
+      expect(c.detail).toContain("not proven");
     });
   }
 });

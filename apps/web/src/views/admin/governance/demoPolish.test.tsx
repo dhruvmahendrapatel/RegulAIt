@@ -34,7 +34,7 @@ const federation: FederationStatusView = {
   subjectFormat: "", audiences: { aws: "", azure: "", gcp: "" },
 };
 
-function renderDiscovery() {
+function renderDiscovery(fed: FederationStatusView = federation) {
   const qc = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retry: false } } });
   qc.setQueryData(["admin", "discovery", "scanners"], { kinds });
   qc.setQueryData(["admin", "discovery", "sources"], {
@@ -43,7 +43,7 @@ function renderDiscovery() {
   });
   qc.setQueryData(["admin", "discovery", "runs"], { runs: [run] });
   qc.setQueryData(["admin", "discovery", "settings"], { credentialWarningAgeDays: 90, endpointRetentionDays: 90, version: 1 });
-  qc.setQueryData(["admin", "discovery", "federation"], federation);
+  qc.setQueryData(["admin", "discovery", "federation"], fed);
   return renderToStaticMarkup(
     <QueryClientProvider client={qc}>
       <MemoryRouter>
@@ -74,7 +74,19 @@ describe("Discovery sources (S1)", () => {
   it("never names the environment variable behind a missing public URL", () => {
     expect(html).not.toContain("REGULAIT_PUBLIC_URL");
     expect(html).toContain("public URL is not configured");
-    expect(html).toContain("docs/deployment/CLOUD_DISCOVERY.md");
+    // D3 (#46): plain wording, no internal doc path and no cloud API call
+    expect(html).toContain("as described in the cloud discovery deployment guide");
+    expect(html).not.toContain("docs/deployment/");
+    expect(html).not.toContain("AssumeRoleWithWebIdentity");
+    expect(html).toContain("each AWS source assumes your role directly with a short-lived token from this issuer");
+  });
+  it("says what turning federation on does, and what it asks, in both states (D3 #36)", () => {
+    expect(html).toContain("Turning it on lets federated cloud sources run, and asks you to confirm it&#x27;s you.");
+    const on = renderDiscovery({ ...federation, enabled: true });
+    expect(on).toContain(
+      "Federation is on, so federated cloud sources can run. Rotating to a new key or revoking a key asks you to confirm it&#x27;s you; turning federation off does not.",
+    );
+    expect(on).not.toContain("Turning it on asks you to confirm");
   });
   it("writes dates in the en-GB form, never the US one, and keeps them on one line", () => {
     expect(html).toMatch(/white-space:nowrap">\d{1,2} Oct 2026, \d{2}:\d{2}</);

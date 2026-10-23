@@ -144,7 +144,8 @@ sign-off stage, blocks PII, and floors audit retention — nobody configured any
 Without Docker:
 
 ```bash
-pnpm install && NODE_OPTIONS=--max-old-space-size=3072 pnpm -r build   # the gateway's tsc runs out of memory at Node's default heap
+# the gateway's typecheck needs more than Node's default heap (it runs out of memory without this)
+pnpm install && NODE_OPTIONS=--max-old-space-size=3072 pnpm -r build
 # any Postgres 16 works:
 export DATABASE_URL=postgres://user:pass@localhost:5432/regulait
 export REGULAIT_DATA_KEY=$(openssl rand -hex 32)
@@ -238,9 +239,8 @@ node scripts/preflight-ui-affordances.mjs
 #    pnpm/action-setup@v4, which reads the packageManager field above.)
 pnpm install --frozen-lockfile
 
-# 3. Build every workspace. This also typechecks and bundles the React SPA. The
-#    gateway's tsc step runs out of memory at Node 22's default heap, so raise it
-#    (the Dockerfile does the same).
+# 3. Build every workspace. This also typechecks and bundles the React SPA.
+#    The gateway's typecheck needs more than Node's default heap.
 NODE_OPTIONS=--max-old-space-size=3072 pnpm -r build
 
 # 4. Typecheck every workspace against SOURCE, not dist/. Step 3 can pass on a

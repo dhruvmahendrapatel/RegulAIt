@@ -1441,6 +1441,9 @@ export const auditLog = pgTable(
         "remediation",
         // ADR-0161: one CI/CD deploy-gate evaluation (objectId = use case)
         "deploy_gate",
+        // a deploy target created or removed (objectId = the target): its environment is one a remediation may name.
+        // Plain text column — no DDL.
+        "deploy_target",
         // ADR-0173 §3: an admin replacing the model allow-list matrix
         // (objectId null — the policy is org-wide). Plain text column — no DDL.
         "model_policy",
@@ -9514,6 +9517,10 @@ export const aiUseCases = pgTable(
      * applicable incident clock; narrowing it is an admin's audited relaxation
      * (PUT /v1/use-cases/:useCaseId/eu-ai-act-role). */
     euAiActRole: text("eu_ai_act_role", { enum: EU_AI_ACT_ROLES }).notNull().default("both"),
+    /** issue #522 finding #30 (migration 0211): the shadow-AI finding this use
+     * case was registered from. Set once by POST /v1/use-cases (validated and
+     * audited there); NULL when registered any other way. */
+    discoveryFindingId: uuid("discovery_finding_id").references(() => shadowAiFindings.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -9543,6 +9550,10 @@ export const aiUseCases = pgTable(
     uniqueIndex("ai_use_cases_instance_uq")
       .on(t.workflowInstanceId)
       .where(sql`${t.workflowInstanceId} IS NOT NULL`),
+    /** migration 0211: a finding is registered as at most one use case */
+    uniqueIndex("ai_use_cases_discovery_finding_uq")
+      .on(t.discoveryFindingId)
+      .where(sql`${t.discoveryFindingId} IS NOT NULL`),
   ],
 );
 

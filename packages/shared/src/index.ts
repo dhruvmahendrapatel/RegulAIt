@@ -3609,6 +3609,11 @@ export const createUseCaseSchema = z.object({
    * Every key must be one of `complianceTags` (422
    * `rationale_for_unlisted_framework` otherwise); shown to reviewers. */
   frameworkRationales: frameworkRationalesSchema.optional(),
+  /** issue #522 finding #30 — the shadow-AI finding this use case is
+   * registered from. Set once, here: the gateway checks the caller may read
+   * the finding, refuses one already registered as another use case (409
+   * `finding_already_registered`) and audits the link. Never editable. */
+  discoveryFindingId: z.string().uuid().optional(),
 });
 
 /** editable while the intake is in flight; `status` is NOT here on purpose —

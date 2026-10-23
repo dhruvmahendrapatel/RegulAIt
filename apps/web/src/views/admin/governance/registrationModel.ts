@@ -73,9 +73,20 @@ export interface RegistrationForm {
   sectors: string[];
   dataCategories: string[];
   answers: Record<BooleanQuestion, BooleanAnswer>;
+  /** the shadow-AI finding this registration was opened from (issue #522 #30); the use case keeps the link */
+  discoveryFindingId?: string;
 }
 
-export const emptyForm = (prefill: { title?: string | null; description?: string | null } = {}): RegistrationForm => ({
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** the finding id a shadow-AI link carries, or undefined when the link has none (or a malformed one) */
+export const discoveryFindingFrom = (params: URLSearchParams): string | undefined => {
+  const id = params.get("findingId");
+  return params.get("source") === "shadow-ai" && id && UUID.test(id) ? id.toLowerCase() : undefined;
+};
+
+export const emptyForm = (prefill: { title?: string | null; description?: string | null; discoveryFindingId?: string } = {}): RegistrationForm => ({
+  ...(prefill.discoveryFindingId ? { discoveryFindingId: prefill.discoveryFindingId } : {}),
   title: prefill.title ?? "",
   description: prefill.description ?? "",
   businessContext: "",

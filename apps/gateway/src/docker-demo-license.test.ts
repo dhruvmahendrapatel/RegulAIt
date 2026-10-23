@@ -17,13 +17,17 @@
  *  5. a re-seed (a gateway restart) KEEPS a valid demo licence instead of
  *     minting a new one, and does not touch a demo password already set —
  *     run against the BUILT seed (dist/seed.js), twice, on a scratch database;
- *  6. demo prep (the Docker demo is prepared like `demo:prepare`): with the
- *     switch honoured the start script makes the export key, starts the demo
- *     MCP server in the background, and after the seed runs setup → intake →
- *     traffic → check only on an unprepared database, with REGULAIT_OFFLINE_CHECKS
- *     and the export key set for every step and the gateway; a failed step is
- *     named and the gateway still starts. Switch off: none of it. The marker
- *     reader (dist/demo-docker-prepared.js) runs against the scratch database.
+ *  6. demo prep (the Docker demo is prepared like `demo:prepare`; demo-readiness
+ *     scan finding #1): with the switch honoured the start script makes the export
+ *     key, starts the demo MCP server in the background, asks whether the database
+ *     is empty BEFORE the seed and, only then, runs identity-key-init and EVERY
+ *     `demo:prepare` step in its order (shadow --setup, seed --open-assurance-window,
+ *     setup, intake, shadow, traffic, check), read from the step list the native
+ *     command runs — the full order is written out HERE, so a step dropped from that
+ *     list fails this test. REGULAIT_OFFLINE_CHECKS and the export key are set for
+ *     every step and the gateway; a failed step is named and the gateway still
+ *     starts. Switch off: none of it. The marker reader
+ *     (dist/demo-docker-prepared.js) runs against the scratch database.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawnSync, execFileSync } from "node:child_process";
@@ -33,6 +37,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, auditLog, createDb, eq, inArray, licenses, sql, users, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { demoPrepareSteps, formatDemoPrepareSteps } from "./demo-prepare-steps.js";
 import { DEMO_PERSONA_EMAILS, isDemoLicense, setDemoPasswords } from "./demo-set-passwords-lib.js";
 import { DEMO_TRAFFIC_KEY_NAME } from "./demo-traffic-lib.js";
 import { DEMO_SECURITY_LEAD } from "./demo-identity.js";
@@ -49,28 +54,36 @@ const startScript = path.join(root, "apps/gateway/docker-start.sh");
 // ---------------------------------------------------------------------------
 
 /**
- * runs docker-start.sh with a fake `node` that records, per call, the script it was started with and
- * the demo environment it saw. The fake answers where the start script reads an answer:
+ * runs docker-start.sh with a fake `node` that records, per call, its whole command line (the script and
+ * its arguments) and the demo environment it saw. The fake answers where the start script reads an answer:
  * demo-export-key.js --env prints the two `export` lines, demo-docker-prepared.js exits
- * FAKE_PREPARED_EXIT (0 prepared, 3 not, 2 cannot tell), and the script named FAKE_FAIL exits 7.
- * The demo MCP server runs in the BACKGROUND, so its record can land anywhere: it is returned
- * separately (`mcp`), never in the ordered `calls`.
+ * FAKE_PREPARED_EXIT (0 prepared, 3 empty, 4 started but not prepared, 2 cannot tell),
+ * demo-prepare.js --steps prints `steps` (by default the REAL list, from demo-prepare-steps.ts, formatted
+ * as the built script prints it), and the command line FAKE_FAIL names (the part after
+ * `apps/gateway/dist/`) exits 7. The demo MCP server runs in the BACKGROUND, so its record can land
+ * anywhere: it is returned separately (`mcp`), never in the ordered `calls`.
  */
-function runStart(env: Record<string, string>): { calls: string[]; mcp: string[]; stderr: string; stdout: string } {
+function runStart(
+  env: Record<string, string>,
+  steps: string = formatDemoPrepareSteps(demoPrepareSteps(false)),
+): { calls: string[]; mcp: string[]; stderr: string; stdout: string } {
   const dir = mkdtempSync(path.join(os.tmpdir(), "docker-start-"));
   try {
     const log = path.join(dir, "calls.log");
     const fake = path.join(dir, "node");
+    const stepsFile = path.join(dir, "steps.txt");
+    writeFileSync(stepsFile, `${steps}\n`);
     writeFileSync(
       fake,
       [
         "#!/bin/sh",
-        'echo "$1 keyring=${REGULAIT_LICENSE_KEYRING-<unset>} ephemeral=${REGULAIT_EPHEMERAL_LICENSE-<unset>}' +
+        'echo "$* keyring=${REGULAIT_LICENSE_KEYRING-<unset>} ephemeral=${REGULAIT_EPHEMERAL_LICENSE-<unset>}' +
           ' offline=${REGULAIT_OFFLINE_CHECKS-<unset>} signing=${REGULAIT_EXPORT_SIGNING_KEY-<unset>}:${REGULAIT_EXPORT_SIGNING_KEY_ID-<unset>}' +
           ' keydir=${REGULAIT_DEMO_KEY_DIR-<unset>}" >> "$CALL_LOG"',
-        'case "$1" in',
-        '  "apps/gateway/dist/${FAKE_FAIL:-none}.js") exit 7 ;;',
-        "  */demo-export-key.js)",
+        'case "$*" in',
+        '  "apps/gateway/dist/${FAKE_FAIL:-none}") exit 7 ;;',
+        "  */demo-prepare.js\\ --steps) cat \"$FAKE_STEPS_FILE\" ;;",
+        "  */demo-export-key.js\\ --env)",
         `    echo "export REGULAIT_EXPORT_SIGNING_KEY='$REGULAIT_DEMO_KEY_DIR/regulait-demo-export.key'"`,
         `    echo "export REGULAIT_EXPORT_SIGNING_KEY_ID='regulait-demo-export'"`,
         '    echo "Reusing the demo export-signing key - fingerprint sha256:fake" >&2 ;;',
@@ -83,7 +96,7 @@ function runStart(env: Record<string, string>): { calls: string[]; mcp: string[]
     chmodSync(fake, 0o755);
     const r = spawnSync("sh", [startScript], {
       encoding: "utf8",
-      env: { PATH: `${dir}:/usr/bin:/bin`, CALL_LOG: log, ...env },
+      env: { PATH: `${dir}:/usr/bin:/bin`, CALL_LOG: log, FAKE_STEPS_FILE: stepsFile, ...env },
     });
     expect(r.status, r.stderr).toBe(0);
     const all = existsSync(log) ? readFileSync(log, "utf8").trim().split("\n") : [];
@@ -101,59 +114,82 @@ const KEYDIR = "/app/demo-license-keys/export-signing";
 /** the demo environment every prep step and the gateway see once the export key is made */
 const DEMO_ENV = `${DEMO} offline=1 signing=${KEYDIR}/regulait-demo-export.key:regulait-demo-export keydir=${KEYDIR}`;
 /** demo-export-key.js itself: no signing key is set before it answers */
-const KEY_STEP = `apps/gateway/dist/demo-export-key.js ${DEMO} offline=1 signing=<unset>:<unset> keydir=${KEYDIR}`;
-const step = (file: string) => `apps/gateway/dist/${file}.js ${DEMO_ENV}`;
-const PREP_STEPS = ["demo-setup", "demo-intake-seed", "demo-traffic", "demo-check"].map(step);
+const KEY_STEP = `apps/gateway/dist/demo-export-key.js --env ${DEMO} offline=1 signing=<unset>:<unset> keydir=${KEYDIR}`;
+/** a command line (`<file>.js [args]`) as the fake records it, with the demo environment */
+const step = (cmd: string) => `apps/gateway/dist/${cmd} ${DEMO_ENV}`;
+const SEED_OFF = `apps/gateway/dist/seed.js --seed-demo ${UNSET}`;
+const MAIN_OFF = `apps/gateway/dist/main.js ${UNSET}`;
+/** the ordinary demo boot's seed (a prepared, started or unreadable database) */
+const SEED_ON = step("seed.js --seed-demo");
+const MAIN_ON = step("main.js");
+const PREPARED = step("demo-docker-prepared.js");
+/**
+ * An empty database, in full: the installer's identity key, the step list, then `demo:prepare`'s demo order
+ * exactly (demo-prepare.ts / demo-prepare-steps.ts). Written out by hand ON PURPOSE: a step dropped from, or
+ * moved in, the shared list makes the start script's calls differ from this, and the test fails.
+ */
+const PREP_CALLS = [
+  "identity-key-init.js",
+  "demo-prepare.js --steps",
+  "demo-shadow-seed.js --setup",
+  "seed.js --seed-demo --open-assurance-window",
+  "demo-setup.js",
+  "demo-intake-seed.js",
+  "demo-shadow-seed.js",
+  "demo-traffic.js",
+  "demo-check.js",
+].map(step);
+/** the `=== demo prep: <name> ===` headers, in order */
+const PREP_NAMES = [
+  "identity-key:init",
+  "demo:shadow (first-admin setup)",
+  "seed",
+  "demo:setup",
+  "demo:intake",
+  "demo:shadow",
+  "demo:traffic",
+  "demo:check",
+];
 
 describe("docker-start.sh: the switch", () => {
   it("OFF (unset): seed then gateway, with neither licence variable set — the old CMD exactly", () => {
     const r = runStart({ SEED_DEMO: "1" });
-    expect(r.calls).toEqual([`apps/gateway/dist/seed.js ${UNSET}`, `apps/gateway/dist/main.js ${UNSET}`]);
+    expect(r.calls).toEqual([SEED_OFF, MAIN_OFF]);
     expect(r.mcp).toEqual([]);
     expect(r.stdout + r.stderr).toBe("");
   });
 
   it("OFF with SEED_DEMO=0: the gateway only, nothing set", () => {
-    expect(runStart({ SEED_DEMO: "0" }).calls).toEqual([`apps/gateway/dist/main.js ${UNSET}`]);
+    expect(runStart({ SEED_DEMO: "0" }).calls).toEqual([MAIN_OFF]);
   });
 
   it("a Windows CRLF .env value ('1\\r') counts as '1'", () => {
     const r = runStart({ SEED_DEMO: "1", REGULAIT_DEMO_LICENSE: "1\r", FAKE_PREPARED_EXIT: "0" });
-    expect(r.calls).toEqual([
-      KEY_STEP,
-      `apps/gateway/dist/seed.js ${DEMO_ENV}`,
-      step("demo-docker-prepared"),
-      `apps/gateway/dist/main.js ${DEMO_ENV}`,
-    ]);
+    expect(r.calls).toEqual([KEY_STEP, PREPARED, SEED_ON, MAIN_ON]);
   });
   it.each(["", "0", "true", "yes", " 1", "1 ", "01", "\r1", "1\r\r"])("any value but exactly '1' (%j) changes nothing", (v) => {
     const r = runStart({ SEED_DEMO: "1", REGULAIT_DEMO_LICENSE: v });
-    expect(r.calls).toEqual([`apps/gateway/dist/seed.js ${UNSET}`, `apps/gateway/dist/main.js ${UNSET}`]);
+    expect(r.calls).toEqual([SEED_OFF, MAIN_OFF]);
     expect(r.mcp).toEqual([]);
   });
 
   it("ON: the seed and the gateway both get the demo keyring", () => {
     const r = runStart({ SEED_DEMO: "1", REGULAIT_DEMO_LICENSE: "1", FAKE_PREPARED_EXIT: "0" });
-    expect(r.calls).toContain(`apps/gateway/dist/seed.js ${DEMO_ENV}`);
-    expect(r.calls.at(-1)).toBe(`apps/gateway/dist/main.js ${DEMO_ENV}`);
+    expect(r.calls).toContain(SEED_ON);
+    expect(r.calls.at(-1)).toBe(MAIN_ON);
     expect(r.stdout).toContain("NOT A PRODUCTION DEPLOYMENT");
   });
 
   it("ON with REGULAIT_DEPLOY_MODE=hosted (the compose default is empty) still works", () => {
     const r = runStart({ SEED_DEMO: "1", REGULAIT_DEMO_LICENSE: "1", REGULAIT_DEPLOY_MODE: "hosted", FAKE_PREPARED_EXIT: "0" });
-    expect(r.calls.at(-1)).toBe(`apps/gateway/dist/main.js ${DEMO_ENV}`);
+    expect(r.calls.at(-1)).toBe(MAIN_ON);
   });
 
   // ADR-0181 FX3: compose and the installer now default SEED_DEMO to 0, and the switch is
   // itself the explicit demo signal, so it seeds (and prepares) without SEED_DEMO=1
   it("ON with SEED_DEMO=0 (the compose default): the switch alone seeds and prepares the demo", () => {
     const r = runStart({ SEED_DEMO: "0", REGULAIT_DEMO_LICENSE: "1", FAKE_PREPARED_EXIT: "0" });
-    expect(r.calls).toEqual([
-      KEY_STEP,
-      `apps/gateway/dist/seed.js ${DEMO_ENV}`,
-      step("demo-docker-prepared"),
-      `apps/gateway/dist/main.js ${DEMO_ENV}`,
-    ]);
+    expect(r.calls).toEqual([KEY_STEP, PREPARED, SEED_ON, MAIN_ON]);
     expect(r.stderr).not.toContain("REGULAIT_DEMO_LICENSE=1 ignored");
   });
 
@@ -166,85 +202,118 @@ describe("docker-start.sh: the switch", () => {
 
   it.each(["byoc", "air_gapped"])("ignored on a %s deployment", (mode) => {
     const r = runStart({ SEED_DEMO: "1", REGULAIT_DEMO_LICENSE: "1", REGULAIT_DEPLOY_MODE: mode });
-    expect(r.calls).toEqual([`apps/gateway/dist/seed.js ${UNSET}`, `apps/gateway/dist/main.js ${UNSET}`]);
+    expect(r.calls).toEqual([SEED_OFF, MAIN_OFF]);
     expect(r.mcp).toEqual([]);
     expect(r.stderr).toContain(`REGULAIT_DEPLOY_MODE=${mode}`);
   });
 });
 
 describe("docker-start.sh: demo prep (the Docker demo is prepared like `demo:prepare`)", () => {
-  it("ON, fresh database: export key, seed, prepared?, setup, intake, traffic, check, gateway — all with the demo env", () => {
+  it("ON, empty database: export key, empty?, identity key, then EVERY demo:prepare step in order, gateway — all with the demo env", () => {
     const r = runStart({ SEED_DEMO: "1", REGULAIT_DEMO_LICENSE: "1", FAKE_PREPARED_EXIT: "3" });
-    expect(r.calls).toEqual([
-      KEY_STEP,
-      `apps/gateway/dist/seed.js ${DEMO_ENV}`,
-      step("demo-docker-prepared"),
-      ...PREP_STEPS,
-      `apps/gateway/dist/main.js ${DEMO_ENV}`,
-    ]);
-    for (const name of ["demo:setup", "demo:intake", "demo:traffic", "demo:check"]) {
-      expect(r.stdout).toContain(`=== demo prep: ${name} ===`);
+    expect(r.calls).toEqual([KEY_STEP, PREPARED, ...PREP_CALLS, MAIN_ON]);
+    // no second, ordinary seed: the prep's seed (with the assurance window) is the only one
+    expect(r.calls.filter((c) => c.startsWith("apps/gateway/dist/seed.js"))).toHaveLength(1);
+    let at = -1;
+    for (const name of PREP_NAMES) {
+      const next = r.stdout.indexOf(`=== demo prep: ${name} ===`, at + 1);
+      expect(next, `header for ${name}, in order`).toBeGreaterThan(at);
+      at = next;
     }
     expect(r.stdout).toMatch(/demo prep: complete in \d+s/);
     expect(r.stderr).not.toContain("DEMO PREP FAILED");
   });
 
-  it("ON: the demo MCP server starts once, in the background, BEFORE demo:setup, with the demo env", () => {
+  it("the step list the start script runs is the native one: demo-prepare.js --steps prints demoPrepareSteps(false), never the live list", () => {
+    const src = readFileSync(path.join(here, "demo-prepare.ts"), "utf8");
+    const branch = src.slice(src.indexOf('if (process.argv.includes("--steps"))'), src.indexOf("const live ="));
+    expect(branch).toContain("console.log(formatDemoPrepareSteps(demoPrepareSteps(false)))");
+    expect(branch).toContain("process.exit(0)");
+    expect(src).toMatch(/for \(const \{ name, file, args \} of demoPrepareSteps\(live\)\)/);
+    // the start script reads the list from the built command and keeps no step names of its own
+    const sh = readFileSync(startScript, "utf8");
+    expect(sh).toContain("node apps/gateway/dist/demo-prepare.js --steps");
+    const live = sh.split("\n").filter((l) => !l.trimStart().startsWith("#"));
+    for (const own of ["demo-setup", "demo-intake-seed", "demo-traffic", "demo-check", "demo-shadow-seed", "--open-assurance-window", "--live"]) {
+      expect(live.join("\n"), `docker-start.sh names ${own} itself`).not.toContain(own);
+    }
+  });
+
+  it("CONTROL: the start script runs whatever list it is given — a list missing a step runs without it (why the full order is pinned above)", () => {
+    const short = demoPrepareSteps(false).filter((s) => s.name !== "demo:shadow");
+    const r = runStart({ SEED_DEMO: "1", REGULAIT_DEMO_LICENSE: "1", FAKE_PREPARED_EXIT: "3" }, formatDemoPrepareSteps(short));
+    expect(r.calls).not.toEqual([KEY_STEP, PREPARED, ...PREP_CALLS, MAIN_ON]);
+    expect(r.calls).not.toContain(step("demo-shadow-seed.js"));
+  });
+
+  it("ON: the demo MCP server starts once, in the background, BEFORE the first prep step, with the demo env", () => {
     const r = runStart({ SEED_DEMO: "1", REGULAIT_DEMO_LICENSE: "1", FAKE_PREPARED_EXIT: "3" });
     expect(r.mcp).toEqual([`apps/gateway/dist/demo-mcp-server.js ${DEMO_ENV}`]);
     const started = r.stdout.indexOf("demo: MCP server started in the background");
     expect(started).toBeGreaterThan(-1);
-    expect(started).toBeLessThan(r.stdout.indexOf("=== demo prep: demo:setup ==="));
+    expect(started).toBeLessThan(r.stdout.indexOf("=== demo prep: identity-key:init ==="));
   });
 
-  it("ON, database already prepared (a restart, or down/up keeping volumes): no prep step runs, the MCP server still does", () => {
+  it("ON, database already prepared (a restart, or down/up keeping volumes): the ordinary seed only, the MCP server still runs", () => {
     const r = runStart({ SEED_DEMO: "1", REGULAIT_DEMO_LICENSE: "1", FAKE_PREPARED_EXIT: "0" });
-    expect(r.calls).toEqual([
-      KEY_STEP,
-      `apps/gateway/dist/seed.js ${DEMO_ENV}`,
-      step("demo-docker-prepared"),
-      `apps/gateway/dist/main.js ${DEMO_ENV}`,
-    ]);
+    expect(r.calls).toEqual([KEY_STEP, PREPARED, SEED_ON, MAIN_ON]);
     expect(r.mcp).toHaveLength(1);
     expect(r.stdout).not.toContain("=== demo prep:");
     expect(r.stderr).not.toContain("***");
   });
 
-  it("ON, cannot tell whether the database is prepared: no prep step runs, it says so, the gateway starts", () => {
-    const r = runStart({ SEED_DEMO: "1", REGULAIT_DEMO_LICENSE: "1", FAKE_PREPARED_EXIT: "2" });
-    expect(r.calls.slice(2)).toEqual([step("demo-docker-prepared"), `apps/gateway/dist/main.js ${DEMO_ENV}`]);
-    expect(r.stderr).toContain("*** DEMO PREP SKIPPED");
+  it("ON, database started but never prepared: the ordinary seed, no prep step, it says to start from an empty database", () => {
+    const r = runStart({ SEED_DEMO: "1", REGULAIT_DEMO_LICENSE: "1", FAKE_PREPARED_EXIT: "4" });
+    expect(r.calls).toEqual([KEY_STEP, PREPARED, SEED_ON, MAIN_ON]);
+    expect(r.stdout).not.toContain("=== demo prep:");
+    expect(r.stderr).toContain("*** DEMO PREP SKIPPED: this database was started but never fully prepared");
+    expect(r.stderr).toContain("docker compose down -v, then up");
   });
 
-  it.each([
-    ["demo-setup", "demo:setup", 0],
-    ["demo-intake-seed", "demo:intake", 1],
-    ["demo-traffic", "demo:traffic", 2],
-    ["demo-check", "demo:check", 3],
-  ] as const)("ON, %s fails: later steps do not run, the step is named loudly, the gateway STILL starts", (file, name, at) => {
-    const r = runStart({ SEED_DEMO: "1", REGULAIT_DEMO_LICENSE: "1", FAKE_PREPARED_EXIT: "3", FAKE_FAIL: file });
-    expect(r.calls).toEqual([
-      KEY_STEP,
-      `apps/gateway/dist/seed.js ${DEMO_ENV}`,
-      step("demo-docker-prepared"),
-      ...PREP_STEPS.slice(0, at + 1),
-      `apps/gateway/dist/main.js ${DEMO_ENV}`,
-    ]);
+  it("ON, cannot tell whether the database is prepared: the ordinary seed, no prep step, it says so, the gateway starts", () => {
+    const r = runStart({ SEED_DEMO: "1", REGULAIT_DEMO_LICENSE: "1", FAKE_PREPARED_EXIT: "2" });
+    expect(r.calls).toEqual([KEY_STEP, PREPARED, SEED_ON, MAIN_ON]);
+    expect(r.stderr).toContain("*** DEMO PREP SKIPPED: could not tell");
+  });
+
+  // every prep call but the step list itself: [the command line that fails, its name, its index in PREP_CALLS]
+  const FAILING = [
+    ["identity-key-init.js", "identity-key:init", 0],
+    ["demo-shadow-seed.js --setup", "demo:shadow (first-admin setup)", 2],
+    ["seed.js --seed-demo --open-assurance-window", "seed", 3],
+    ["demo-setup.js", "demo:setup", 4],
+    ["demo-intake-seed.js", "demo:intake", 5],
+    ["demo-shadow-seed.js", "demo:shadow", 6],
+    ["demo-traffic.js", "demo:traffic", 7],
+    ["demo-check.js", "demo:check", 8],
+  ] as const;
+  it.each(FAILING)("ON, %s fails: later steps do not run, the step is named loudly, the gateway STILL starts", (cmd, name, at) => {
+    const r = runStart({ SEED_DEMO: "1", REGULAIT_DEMO_LICENSE: "1", FAKE_PREPARED_EXIT: "3", FAKE_FAIL: cmd });
+    // stopped before the prep's own seed: the ordinary seed runs, so the licence and the personas exist
+    const before = at < 3 ? [SEED_ON] : [];
+    expect(r.calls).toEqual([KEY_STEP, PREPARED, ...PREP_CALLS.slice(0, at + 1), ...before, MAIN_ON]);
     expect(r.stderr).toContain(`*** DEMO PREP FAILED at step ${name} (exit 7)`);
+    expect(r.stderr).toContain("docker compose down -v, then up");
     expect(r.stdout).not.toContain("demo prep: complete");
   });
 
+  it("ON, the step list cannot be read: named loudly, no step runs, the ordinary seed and the gateway still do", () => {
+    const r = runStart({ SEED_DEMO: "1", REGULAIT_DEMO_LICENSE: "1", FAKE_PREPARED_EXIT: "3", FAKE_FAIL: "demo-prepare.js --steps" });
+    expect(r.calls).toEqual([KEY_STEP, PREPARED, ...PREP_CALLS.slice(0, 2), SEED_ON, MAIN_ON]);
+    expect(r.stderr).toContain("*** DEMO PREP FAILED at step demo:prepare --steps");
+  });
+
   it("ON, the export key cannot be made: named loudly, no signing key is set, everything else still runs", () => {
-    const r = runStart({ SEED_DEMO: "1", REGULAIT_DEMO_LICENSE: "1", FAKE_PREPARED_EXIT: "3", FAKE_FAIL: "demo-export-key" });
+    const r = runStart({ SEED_DEMO: "1", REGULAIT_DEMO_LICENSE: "1", FAKE_PREPARED_EXIT: "3", FAKE_FAIL: "demo-export-key.js --env" });
     expect(r.stderr).toContain("*** DEMO PREP FAILED at step demo:export-key");
-    expect(r.calls).toHaveLength(8);
+    expect(r.calls).toHaveLength(2 + PREP_CALLS.length + 1);
     expect(r.calls.at(-1)).toBe(`apps/gateway/dist/main.js ${DEMO} offline=1 signing=<unset>:<unset> keydir=${KEYDIR}`);
   });
 
   it("OFF: nothing of the demo runs, whatever the database holds — no key, no MCP, no prep, no offline checks", () => {
-    for (const prepared of ["0", "2", "3"]) {
+    for (const prepared of ["0", "2", "3", "4"]) {
       const r = runStart({ SEED_DEMO: "1", FAKE_PREPARED_EXIT: prepared });
-      expect(r.calls).toEqual([`apps/gateway/dist/seed.js ${UNSET}`, `apps/gateway/dist/main.js ${UNSET}`]);
+      expect(r.calls).toEqual([SEED_OFF, MAIN_OFF]);
       expect(r.mcp).toEqual([]);
     }
   });
@@ -583,13 +652,27 @@ describe("re-seeding a demo-licensed database (a gateway restart under Docker)",
     }
   });
 
-  it("demo-docker-prepared (built) reads the prep marker from THIS database: 3 before demo:traffic, 0 after, 2 unreadable", async () => {
+  it("demo-docker-prepared (built) reads the prep marker from THIS database: 3 empty, 4 seeded, 0 after demo:traffic, 2 unreadable", async () => {
     const script = path.resolve(here, "../dist/demo-docker-prepared.js");
     const run = (url: string) =>
       spawnSync(process.execPath, [script], { encoding: "utf8", env: { ...process.env, DATABASE_URL: url }, timeout: 60_000 });
-    // a seeded database (two seed runs, as after a restart) is NOT prepared: the seed mints no demo-traffic key
+    // a fresh volume: a database with no schema yet (the seed has not migrated it) is empty, so it is prepared
+    const emptyDb = `${SCRATCH_DB}_empty`;
+    await admin.execute(sql.raw(`CREATE DATABASE ${emptyDb}`));
+    try {
+      const fresh = new URL(scratchUrl);
+      fresh.pathname = `/${emptyDb}`;
+      const empty = run(fresh.toString());
+      expect(empty.status, empty.stdout + empty.stderr).toBe(3);
+      expect(empty.stdout).toContain("this database is empty");
+    } finally {
+      await dropScratchDatabase(admin, emptyDb);
+    }
+    // a seeded database (two seed runs, as after a restart) is NOT prepared, and cannot be prepared in place: the
+    // seed mints no demo-traffic key, and it closed the first-admin-setup window demo:shadow --setup needs
     const before = run(scratchUrl);
-    expect(before.status, before.stdout + before.stderr).toBe(3);
+    expect(before.status, before.stdout + before.stderr).toBe(4);
+    expect(before.stderr).toContain("never fully prepared");
     // demo:traffic mints its keys before it sends traffic — the marker (Dana's
     // first: ADR-0181 FX2 issues no key to an admin who has not enrolled TOTP,
     // and demo:set-passwords re-provisioned Ada's authenticator)

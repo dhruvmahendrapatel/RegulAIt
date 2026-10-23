@@ -3,7 +3,7 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
-import { ago, humanize } from "../../../api/format";
+import { ago, fmtDateTime, humanize } from "../../../api/format";
 import { useSession } from "../../../session/SessionContext";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Select, SeverityBadge, Tabs, Textarea, type Tone } from "../../../ui/kit";
@@ -292,7 +292,7 @@ const SLA_CHIP: Record<Exclude<SlaState, "none">, { tone: Tone; label: string }>
 function SlaChip({ alert }: { alert: Pick<GovernanceAlert, "sla" | "dueAt"> }) {
   if (!alert.sla || alert.sla === "none") return null;
   const chip = SLA_CHIP[alert.sla];
-  return <Badge tone={chip.tone} title={alert.dueAt ? `Due ${new Date(alert.dueAt).toUTCString()}` : undefined}>{chip.label}</Badge>;
+  return <Badge tone={chip.tone} title={alert.dueAt ? `Due ${fmtDateTime(alert.dueAt)}` : undefined}>{chip.label}</Badge>;
 }
 
 /** a work item's link only when it is a web address; anything else is shown as text */
@@ -323,7 +323,7 @@ function OwnershipPanel({ alert, onChanged }: { alert: GovernanceAlert; onChange
         </span>
         <SlaChip alert={alert} />
         <span className={v.faint}>
-          {alert.dueAt ? `Due ${new Date(alert.dueAt).toUTCString()}` : "No due time yet"}
+          {alert.dueAt ? `Due ${fmtDateTime(alert.dueAt)}` : "No due time yet"}
           {alert.slaBreachedAt ? ` · breached ${ago(alert.slaBreachedAt)}, escalated to the admins` : ""}
         </span>
       </div>

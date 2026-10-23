@@ -19,8 +19,11 @@ name: Engine images
 # (scripts/engine-images-gate.mjs, which lists the inputs). An engine whose
 # inputs did not change is not built, signed or published, and when no engine
 # changed the record and lock jobs are skipped too, so editing this file alone
-# republishes nothing. The dispatch input `force_publish` publishes every
-# engine anyway (a workflow change that should reach the images).
+# republishes nothing. The dispatch input `force_publish` rebuilds, signs and
+# pushes every engine anyway. Builds are reproducible, so unchanged inputs give
+# the same digest and the lock is not updated: it serves a build-method change
+# outside the input set, or re-signing (which is not recorded), and cannot carry
+# a workflow-only change into the lock.
 #
 # ── Reproducible builds (ADR-0187 addendum 2026-10-21) ───────────────────────
 # scripts/build-engine-image.sh builds the input commit (the last commit that
@@ -95,7 +98,7 @@ on:
   workflow_dispatch:
     inputs:
       force_publish:
-        description: Publish every engine even when its image inputs are unchanged since the lock's sourceCommit
+        description: Rebuild, sign and push every engine even when its image inputs are unchanged since the lock's sourceCommit (unchanged inputs reproduce the same digest, so the lock is not updated)
         type: boolean
         default: false
 
