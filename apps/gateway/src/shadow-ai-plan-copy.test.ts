@@ -31,7 +31,7 @@ describe("remediation plan copy", () => {
       "confirm the next call appears in the audit log and the usage ledger",
     ]);
     expect(without[1]?.blocked).toBe(
-      "no governed replacement is registered for this provider. Set a governed replacement agent on the provider's Detection catalogue entry.",
+      "no governed replacement agent is registered for this provider yet, so this step waits until an admin registers one.",
     );
     const withAgent = remediationPlanSteps({ subject: "acme/billing", severity: "critical" }, { name: "Governed coder" });
     expect(withAgent[0]?.step).toBe("rotate the exposed credential");

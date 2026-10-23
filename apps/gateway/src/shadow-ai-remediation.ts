@@ -81,7 +81,7 @@ export function remediationPlanSteps(
     why: "the gateway's endpoints accept the provider's own request format, so the application changes its base URL, not its code",
     ...(agent
       ? {}
-      : { blocked: "no governed replacement is registered for this provider. Set a governed replacement agent on the provider's Detection catalogue entry." }),
+      : { blocked: "no governed replacement agent is registered for this provider yet, so this step waits until an admin registers one." }),
   });
   steps.push({
     step: "grant the owner a per-user entitlement for that agent",

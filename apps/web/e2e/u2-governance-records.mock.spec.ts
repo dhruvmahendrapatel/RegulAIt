@@ -159,7 +159,7 @@ async function mockApi(page: Page, opts: { noWorkflowMatch?: boolean; failLinkOn
           {
             step: "route acme/billing through the gateway's provider-compatible endpoints",
             why: "the gateway's endpoints accept the provider's own request format, so the application changes its base URL, not its code",
-            blocked: "no governed replacement is registered for this provider. Set a governed replacement agent on the provider's Detection catalogue entry.",
+            blocked: "no governed replacement agent is registered for this provider yet, so this step waits until an admin registers one.",
           },
         ],
         workflowRequest: {
@@ -404,7 +404,7 @@ test.describe("U2: governance records", () => {
     await page.goto("/ui/admin/shadow-ai");
     await page.getByRole("button", { name: "Plan remediation for acme/billing" }).click();
     const plan = page.getByTestId("shadow-remediation");
-    await expect(plan).toContainText("Set a governed replacement agent on the provider's Detection catalogue entry.");
+    await expect(plan).toContainText("so this step waits until an admin registers one.");
     await expect(plan).toContainText("This plan does not start a workflow by itself.");
     for (const internal of [/ADR-\d/, /pillar \d/, /replacementAgentId/, /catalogue row/, /compat surface/, /\bONE\b/]) {
       await expect(plan).not.toContainText(internal);
