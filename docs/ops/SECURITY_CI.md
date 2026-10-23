@@ -20,8 +20,9 @@ a high-severity issue (`security-severity` of 7.0 or more) that is not in `secur
 
 **How it runs:** CodeQL default setup is also on for this repository and owns the Security tab. GitHub refuses an
 advanced-setup upload while default setup is on, so this job runs with `upload: never`, gates on the SARIF file itself,
-and keeps the SARIF as the `codeql-sarif` artifact. The CodeQL bundle is the one pinned by the `github/codeql-action`
-commit (CLI 2.27.1 at v4.38.2). The job sets `CODEQL_ACTION_DIFF_INFORMED_QUERIES=false`: otherwise, on a pull request,
+and keeps the SARIF as the `codeql-sarif` artifact. The CodeQL bundle is pinned via the init step's `tools:` input to the
+exact `codeql-bundle-v2.27.3` linux64 URL (CLI 2.27.3), so a `github/codeql-action` bump does not change the CLI; the
+tarball's sha256 is recorded in the `security.yml` comment (the action does not check it). The job sets `CODEQL_ACTION_DIFF_INFORMED_QUERIES=false`: otherwise, on a pull request,
 the taint-tracking queries report only results on changed lines, and the baseline's entries for them read as stale.
 
 An allow-list entry covers one result: the rule, the file and the result's `partialFingerprints.primaryLocationLineHash`
@@ -29,7 +30,9 @@ An allow-list entry covers one result: the rule, the file and the result's `part
 in the same file is not covered. A run that did not execute, scanned no file, or has a result whose rule or fingerprint
 is missing fails the gate (exit 2).
 
-**Reproduce CI locally** (CodeQL bundle `codeql-bundle-v2.27.1` from the `github/codeql-action` releases):
+**Reproduce CI locally** with the same bundle CI pins: download
+`https://github.com/github/codeql-action/releases/download/codeql-bundle-v2.27.3/codeql-bundle-linux64.tar.gz`, check
+`sha256sum` against the value in `security.yml`, unpack it and put `codeql/` on `PATH` (`codeql version` prints 2.27.3):
 
 ```bash
 codeql database create db --db-cluster --language=javascript-typescript,actions --build-mode=none --source-root=.
