@@ -72,7 +72,7 @@
     "ajv-formats": "3.0.1",
     "asn1js": "3.0.10",
     "diff": "9.0.0",
-    "fastify": "^5.12.6",
+    "fastify": "^5.12.7",
     "jose": "6.2.12",
     "oauth4webapi": "3.8.8",
     "oidc-provider": "9.12.2",
@@ -82,7 +82,7 @@
     "pkijs": "3.4.1",
     "re2js": "2.8.6",
     "standardwebhooks": "1.1.1",
-    "zod": "4.6.5"
+    "zod": "4.6.6"
   },
   "devDependencies": {
     "@regulait/engine-garak": "workspace:*",
