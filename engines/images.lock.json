@@ -19,11 +19,11 @@
     },
     "garak": {
       "repository": "ghcr.io/dhruvmahendrapatel/regulait-engine-garak",
-      "manifestDigest": "sha256:12fdd4bc5904adc97d07976dfd9a4272891a1fb4b66d2b0a705f54d3ffceb41c",
-      "imageId": "sha256:2403c93d86fc9f2008e09936bf931b21ebb56bb839646d210c78944bbe9dd375",
-      "publishGeneration": 6,
-      "sourceCommit": "5b636d57738f1ecaa611bd76588e3ca98ead8694",
-      "publishedAt": "2026-10-23T04:09:02.402Z"
+      "manifestDigest": "sha256:426157556cef62059d16414c3ddbd5e242cdab4f7de3bfbc98be8d65915501bd",
+      "imageId": "sha256:7bf1f75ffd39a7b55d0406a8bb3d4a1fd05a4f9bd7b2b8738a65858b37387f20",
+      "publishGeneration": 7,
+      "sourceCommit": "7be894bd67081b24715f13e256255456a9d52137",
+      "publishedAt": "2026-10-23T14:28:05.705Z"
     }
   }
 }
