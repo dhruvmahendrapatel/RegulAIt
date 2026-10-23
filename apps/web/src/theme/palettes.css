@@ -25,6 +25,22 @@
 [data-swatch="orchid"] { --swatch-ground: #f8f5fd; --swatch-accent: #7e22ce; }
 [data-swatch="contrast"] { --swatch-ground: #ffffff; --swatch-accent: #003a8c; }
 
+/* In dark mode the swatches show each palette's dark ground and link colour. */
+:root[data-theme="dark"] [data-swatch="aurora"] { --swatch-ground: #0a0f27; --swatch-accent: #67e8f9; }
+:root[data-theme="dark"] [data-swatch="harbor"] { --swatch-ground: #0b1226; --swatch-accent: #93c5fd; }
+:root[data-theme="dark"] [data-swatch="evergreen"] { --swatch-ground: #08181a; --swatch-accent: #5eead4; }
+:root[data-theme="dark"] [data-swatch="graphite"] { --swatch-ground: #121317; --swatch-accent: #a5b4fc; }
+:root[data-theme="dark"] [data-swatch="orchid"] { --swatch-ground: #130d22; --swatch-accent: #d8b4fe; }
+:root[data-theme="dark"] [data-swatch="contrast"] { --swatch-ground: #000000; --swatch-accent: #9ecbff; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) [data-swatch="aurora"] { --swatch-ground: #0a0f27; --swatch-accent: #67e8f9; }
+  :root:not([data-theme="light"]) [data-swatch="harbor"] { --swatch-ground: #0b1226; --swatch-accent: #93c5fd; }
+  :root:not([data-theme="light"]) [data-swatch="evergreen"] { --swatch-ground: #08181a; --swatch-accent: #5eead4; }
+  :root:not([data-theme="light"]) [data-swatch="graphite"] { --swatch-ground: #121317; --swatch-accent: #a5b4fc; }
+  :root:not([data-theme="light"]) [data-swatch="orchid"] { --swatch-ground: #130d22; --swatch-accent: #d8b4fe; }
+  :root:not([data-theme="light"]) [data-swatch="contrast"] { --swatch-ground: #000000; --swatch-accent: #9ecbff; }
+}
+
 /* ---- Harbor: blue over slate ------------------------------------- */
 :root[data-palette="harbor"] {
   --rg-signal: #3b82f6;
