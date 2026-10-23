@@ -29,6 +29,29 @@ name: CI
 #     is a HUNG one billing its full cap; 25 -> 20/12 caps that blast radius.
 #     (The 2026-10-10 stopgap of 45 on the unsharded job is gone: every
 #     build-and-test job is back to 20 or less now that the gateway is sharded.)
+#  6. PLAYWRIGHT BROWSERS ARE CACHED (#453, 2026-10-22). `playwright install
+#     --with-deps` took 10-12 min on some runners and pushed `spa-journeys` and
+#     the mocked-UI shards past their caps with no failing test. Every job that
+#     installs browsers restores ~/.cache/ms-playwright from actions/cache, keyed
+#     on runner OS + arch + the exact Playwright version installed from the
+#     lockfile (`playwright --version`) + the browser list; a Playwright bump is
+#     a new key. Hit: only `playwright install-deps` (apt packages). Miss: the
+#     full install, then an explicit save right after it so a later failure
+#     still keeps the cache. The caps were NOT raised. Poisoning: a PR's cache
+#     is scoped to its own ref and cannot replace main's; the key holds no
+#     untrusted input.
+#     APT PACKAGES ARE CACHED TOO (#453 owner decision, 2026-10-22): even on a
+#     browser hit, `install-deps` fetched ~26 MB of .debs (fonts, xvfb, nss/glib
+#     upgrades) from a mirror that sometimes ran at ~48 kB/s (9-13 min). A second
+#     cache entry holds those .debs, keyed additionally on the runner image
+#     (ImageOS + ImageVersion), so a new image misses cleanly. Before install,
+#     apt is told to keep downloaded packages and any cached .debs are copied
+#     into /var/cache/apt/archives; apt then installs from disk and downloads
+#     only what is missing or no longer matches the index (a stale or partial
+#     cache costs time, never correctness). On a miss the archive is copied out
+#     and saved right after the install. The package set is unchanged. Integrity:
+#     apt checks each cached file against the signed index it just fetched, and
+#     the same ref scoping applies (main's entry is written only from main).
 #
 # ── Monthly arithmetic (RE-MEASURED 2026-10-02, runs 37050080219 / 37045578961 /
 #    37042881890; the 2026-08-01 figures below it were 2.5x stale — CI-03) ───
@@ -658,7 +681,78 @@ jobs:
 
       - run: pnpm -r build
 
-      - run: pnpm --filter @regulait/web exec playwright install --with-deps chromium
+      # Playwright browsers cached per OS/arch + the exact installed Playwright version
+      # (#453; see ci.yml header item 6). Hit: only the apt system packages install.
+      - name: Playwright version
+        id: playwright
+        run: |
+          v="$(pnpm --filter @regulait/web exec playwright --version | sed -n 's/^Version \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p')"
+          test -n "$v" || { echo "::error::could not read the Playwright version"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          # Runner image for the apt package cache key; a new image carries new package versions.
+          img="${ImageOS:-unknown}-${ImageVersion:-unknown}"
+          [[ "$img" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::unexpected runner image id"; exit 1; }
+          echo "image=$img" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Playwright browsers
+        id: playwright-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.version }}-chromium
+
+      # The .deb files `install-deps` downloads are cached too (#453): a slow apt mirror stalled them for 9-13 min
+      # even on a browser hit. apt still checks every cached file against the signed package index.
+      - name: Restore Playwright apt packages
+        id: playwright-apt
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/playwright-apt
+          key: playwright-apt-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.image }}-${{ steps.playwright.outputs.version }}-chromium
+
+      - name: Seed apt with the cached packages
+        env:
+          DEBS: ${{ runner.temp }}/playwright-apt
+        run: |
+          echo 'APT::Keep-Downloaded-Packages "true"; Binary::apt::APT::Keep-Downloaded-Packages "true";' | sudo tee /etc/apt/apt.conf.d/99playwright-keep-debs >/dev/null
+          if [ -d "$DEBS" ]; then find "$DEBS" -maxdepth 1 -name '*.deb' -exec sudo cp -t /var/cache/apt/archives/ {} +; fi
+          echo "apt archive holds $(find /var/cache/apt/archives -maxdepth 1 -name '*.deb' | wc -l) packages"
+
+      - name: Install Playwright browsers (cache miss)
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: pnpm --filter @regulait/web exec playwright install --with-deps chromium
+
+      # Saved straight after the install, not in a post step, so a later test failure or a timeout still keeps it.
+      - name: Save Playwright browsers (cache miss)
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ steps.playwright-cache.outputs.cache-primary-key }}
+
+      - name: Install Playwright system dependencies (cache hit)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: pnpm --filter @regulait/web exec playwright install-deps chromium
+
+      # Saved on a miss straight after the install, like the browsers. Nothing collected means nothing to save.
+      - name: Collect Playwright apt packages (cache miss)
+        id: playwright-apt-collect
+        if: steps.playwright-apt.outputs.cache-hit != 'true'
+        env:
+          DEBS: ${{ runner.temp }}/playwright-apt
+        run: |
+          mkdir -p "$DEBS"
+          find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp -t "$DEBS" {} +
+          n="$(find "$DEBS" -maxdepth 1 -name '*.deb' | wc -l)"
+          echo "collected $n packages, $(du -sh "$DEBS" | cut -f1)"
+          echo "count=$n" >> "$GITHUB_OUTPUT"
+
+      - name: Save Playwright apt packages (cache miss)
+        if: steps.playwright-apt.outputs.cache-hit != 'true' && steps.playwright-apt-collect.outputs.count != '0'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/playwright-apt
+          key: ${{ steps.playwright-apt.outputs.cache-primary-key }}
 
       # phase6-agent-builder (ADR-0172) and phase6-builder-tools (ADR-0173 §1, governed tool use against a real MCP server): a non-admin builds an agent from a
       # template, chats with it through the governed core, hits its spend
