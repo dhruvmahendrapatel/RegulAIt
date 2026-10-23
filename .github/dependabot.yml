@@ -109,3 +109,22 @@ updates:
       base-images:
         group-by: dependency-name
         patterns: ["*"]
+
+  # docker-compose image pins (owner decision 2026-10-23, #453). Covers the
+  # services in docker-compose.yml (caddy, seaweedfs, postgres, keycloak). The
+  # engine image references there are our own images, refreshed by the engine
+  # lock PR, not by Dependabot. Images written as ${VAR:-image@sha256:...}
+  # defaults may not be recognised by the updater; they stay pinned by hand.
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: "chore(docker)"
+    groups:
+      compose-images:
+        patterns: ["*"]
