@@ -460,7 +460,8 @@ export function FeedbackSettings() {
       <span id="settings" />
       <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
         <div className={v.stack}>
-          <p className={v.hint}>
+          {/* F27: v.hint centres itself beside buttons; as the card's intro it starts at the left edge */}
+          <p className={v.dim}>
             Every setting starts at its strict value. Relaxing one is allowed and is recorded in the audit trail as a relaxation.
           </p>
           <div className={v.stackTight}>
