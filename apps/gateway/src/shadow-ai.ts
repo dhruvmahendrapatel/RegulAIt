@@ -144,6 +144,8 @@ import {
   allowedRemediationEnvironments,
   endedUnsuccessfully,
   remediationReference,
+  remediationPlanSteps,
+  REMEDIATION_PLAN_NOTE,
   shadowAiRemediationDefaultState,
 } from "./shadow-ai-remediation.js";
 
@@ -1440,32 +1442,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
           .orderBy(desc(workflowInstances.createdAt))
           .limit(1);
 
-    const steps: Array<{ step: string; why: string; blocked?: string }> = [];
-    if (row.severity === "critical") {
-      steps.push({
-        step: "rotate the exposed credential",
-        why: "a catalogue-matched key in source is a live credential exposure as well as an ungoverned-usage signal — it is remediated first and independently of the routing work",
-      });
-    }
-    steps.push({
-      step: "register the endpoint in the model catalogue",
-      why: "ADR-0034: a governed provider entry with an egress allow-list entry is what makes the traffic routable at all",
-    });
-    steps.push({
-      step: agent
-        ? `route ${row.subject} through the governed agent '${agent.name}' via the compat surface`
-        : `route ${row.subject} through the compat surface (ADR-0020)`,
-      why: "the gateway's drop-in, provider-compatible endpoints mean the application changes a base URL, not its code",
-      ...(agent ? {} : { blocked: "no governed replacement is registered for this provider — set replacementAgentId on the catalogue row" }),
-    });
-    steps.push({
-      step: "grant the owner a per-user entitlement for that agent",
-      why: "pillar 1: routing traffic at an ungoverned user is not governance — the entitlement is the control",
-    });
-    steps.push({
-      step: "confirm the next call appears in audit_log and usage_events",
-      why: "ADR-0055 §4: the loop closes MECHANICALLY on the ledgers, not on an assertion that it was fixed",
-    });
+    const steps = remediationPlanSteps(row, agent ?? null);
 
     return {
       findingId,
@@ -1505,9 +1482,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
       currentLink: row.remediationInstanceId
         ? { instanceId: row.remediationInstanceId, status: current?.status ?? null, replaceable }
         : null,
-      note:
-        "This module does not start workflows. It composes the plan and hands back the request body for the ONE " +
-        "instantiation route, so assignment rules, the compliance cascade and the retired-template refusal all still apply.",
+      note: REMEDIATION_PLAN_NOTE,
     };
   });
 

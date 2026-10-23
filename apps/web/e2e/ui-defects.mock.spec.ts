@@ -332,6 +332,30 @@ test("UIW-07: an empty change description cannot be started — nothing is poste
   expect(posted).toBe(1);
 });
 
+test("D3 (#37): the artifact card names the artifact in words, not its output id", async ({ page }) => {
+  const detail = {
+    instance: {
+      id: "wf-2", status: "blocked_on_artifact", createdAt: "2026-10-02T12:00:00Z", initiatorUserId: USER_A.id,
+      change: { description: "Pull acme/billing into governance", changeType: "shadow-ai-remediation", environment: "staging" },
+      definition: { stages: [{ id: "intake", type: "trigger" }, { id: "plan", type: "artifact_generation", output: "shadow_ai_remediation_plan" }, { id: "signoff", type: "human_approval" }] },
+      state: { currentStageIndex: 1, stageStatuses: { 0: "completed", 1: "running" } },
+      context: {},
+    },
+    artifacts: [],
+    pendingApprovals: [],
+  };
+  await routeApi(page, async (route, p) => {
+    if (p === "/auth/me") return json(route, authMe(USER_A));
+    if (p === "/v1/me") return json(route, { userId: USER_A.id, isAdmin: true, user: USER_A });
+    if (p === "/v1/workflows/instances/wf-2") return json(route, detail);
+    if (p === "/v1/approvals") return json(route, { approvals: [] });
+    return json(route, {});
+  });
+  await page.goto("/ui/workflows/wf-2");
+  await expect(page.getByText("Submit shadow AI remediation plan", { exact: true })).toBeVisible();
+  expect(await page.getByText("shadow_ai_remediation_plan").count()).toBe(0);
+});
+
 test("UIW-02 / UIW-09: the workflow page names its stages and renders the questionnaire as a document", async ({ page }) => {
   const content = [
     "# AI use-case intake questionnaire", "", "## 1. Purpose and business context", "Recommends credit-limit increases with human review.", "",
