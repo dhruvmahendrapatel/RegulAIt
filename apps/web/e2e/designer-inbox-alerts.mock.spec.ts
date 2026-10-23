@@ -233,6 +233,20 @@ test("Alerts: the list is a contained card with a count, and the acknowledgement
   await expect(detail.getByRole("button", { name: "Acknowledge" })).toBeInViewport();
 });
 
+test("F36: on the flush Alerts card, the Showing line takes the header's inset, not the card's edge", async ({ page }) => {
+  alertsShown = Array.from({ length: 30 }, (_, i) => ({ ...alert, id: `al${i}`, title: `Assistant ${i + 1} inherits a high rating` }));
+  await page.goto("/ui/admin/governance/alerts");
+  const list = page.locator("section[data-rg-card]").filter({ hasText: "Alerts" }).first();
+  const line = list.getByText(/^Showing \d+ of 30 · scroll the list for the rest, or Expand$/);
+  await expect(line).toBeVisible();
+  const [card, fold] = await Promise.all([list.boundingBox(), page.getByRole("button", { name: /^Alerts 30 alerts/ }).boundingBox()]);
+  // where the words start, not the paragraph's box (which spans the card either way)
+  const textX = await line.evaluate((el) => { const r = document.createRange(); r.selectNodeContents(el); return r.getBoundingClientRect().left; });
+  // the line starts where the header's fold button starts, inside the card's padding
+  expect(textX - card!.x).toBeGreaterThan(4);
+  expect(Math.abs(textX - fold!.x)).toBeLessThanOrEqual(1);
+});
+
 // ---- #460 review round: M1 (L2 / ADR-0180 pinned decision row), L1 (focus after a decision), L2 (passkey line) ----
 
 const own = (id: string, label: string, over: Record<string, unknown> = {}) => ({ id, status: "pending", objectType: "governance_remediation", stageId: "__remediation__link_control", requestedAt: ago(2), userId: "jordan", approverUserId: ME, objectLabel: label, requestedByName: "Jordan Owner", approverName: "Avery Approver", ...over });
