@@ -1,11 +1,77 @@
-# To get started with Dependabot version updates, you'll need to specify which
-# package ecosystems to update and where the package manifests are located.
-# Please see the documentation for all configuration options:
-# https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
-
+# Dependabot version updates (owner decision 2026-10-22, issue #453).
+# Security alerts and security-fix PRs do not depend on this file.
+# Minor and patch bumps are grouped per ecosystem so each week yields at most one
+# PR per entry; major bumps arrive one per PR. Engine manifests are image inputs:
+# merging a bump there republishes the engine images (publish gate, lock PR).
+# Not covered on purpose: infra/demo-fixtures/** (seeded demo data) and spikes/**.
 version: 2
 updates:
-  - package-ecosystem: "" # See documentation for possible values
-    directory: "/" # Location of package manifests
+  - package-ecosystem: "npm" # pnpm workspace (pnpm-lock.yaml)
+    directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      workspace-minor-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm" # promptfoo engine image
+    directory: "/engines/promptfoo"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: "chore(engines)"
+    groups:
+      promptfoo-minor-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "pip" # garak engine image (hash-pinned requirements)
+    directory: "/engines/garak"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: "chore(engines)"
+    groups:
+      garak-minor-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "pip" # modelscan engine image
+    directory: "/engines/modelscan"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: "chore(engines)"
+    groups:
+      modelscan-minor-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "github-actions" # actions pinned by commit SHA
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions-minor-patch:
+        update-types: ["minor", "patch"]
