@@ -22,7 +22,8 @@
  * vendors behind them (`Google`, `Meta`, ...). Everywhere else those words are left alone, where they are identifiers,
  * provider slugs or functional names (a Google Workspace connector). The same holds for what a .tsx file prints by
  * other routes (#492 review): an object-literal `label`/`title`/`placeholder`/`description`/help property (an options
- * array rendered as UI), the first argument of `toast()` and of the error/notice/message setters, and the string a
+ * array rendered as UI), the first argument of `toast()` and of every state setter named `set` + any letters + `Error`,
+ * `Err`, `Notice`, `Message` or `Problem` (`setError`, `setFormError`, `setErr`, `setProblem`), and the string a
  * `.map(...)` callback in a `{...}` child returns (also through `.join(...)` and an array literal's elements). Not
  * followed: a string passed to any other call (a local helper's parameter, so `notice("intendedUse")` stays a key),
  * and a const imported from another file (that needs the whole program's module resolution; the shared copy modules
@@ -61,8 +62,8 @@ export const HELP_VENDOR_NAMES = ["Google", "Meta", "Microsoft", "Amazon", "xAI"
 export const HELP_ATTRS = /^(placeholder|title|label|aria-label|hint|help|helpText|description|tip|info|caption|aria-description)$/;
 /** object-literal properties a .tsx file renders as UI text (an options array's `label`, a card's `description`) */
 export const HELP_PROPS = /^(placeholder|title|label|hint|help|helpText|description|tip|caption)$/;
-/** calls whose first argument the UI shows: the `useToast()` toast and the error, notice and message state setters */
-export const UI_TEXT_CALLS = /^(toast|setError|setNotice|setMessage)$/;
+/** calls whose first argument the UI shows: the `useToast()` toast and the set*Error/Err/Notice/Message/Problem setters */
+export const UI_TEXT_CALLS = /^(toast|set[A-Za-z]*(Error|Err|Notice|Message|Problem))$/;
 
 /** the copy surfaces: directories walked, plus single shared modules whose text the UI prints verbatim */
 export const COPY_ROOTS = [

@@ -201,6 +201,9 @@ describe("no AI vendor or competitor name in product UI copy (F31)", () => {
       expect(names(`toast("Routed to mistral-0-test", "success");`)).toEqual(["mistral-0-test"]);
       expect(names(`act.setError(\`try llama-0-test for \${x}\`); setNotice("Google model ready"); setMessage(MSG);\nconst MSG = "deepseek-0-test";`))
         .toEqual(["llama-0-test", "Google", "deepseek-0-test"]);
+      // #509 review: every set*Error/Err/Notice/Message/Problem setter, not only the four exact names
+      expect(names(`setFormError("Use gpt-0-test"); setErr("qwen-0-test failed"); setProblem(\`gemini-0-test \${x}\`);`))
+        .toEqual(["gpt-0-test", "qwen-0-test", "gemini-0-test"]);
       // a .map callback in a {...} child: its expression body or its returns, also through .join and array literals
       expect(names("<p>{xs.map((x) => `${x} on gpt-0-test`)}</p>")).toEqual(["gpt-0-test"]);
       expect(names(`<p>{[...xs.map((x) => { if (x) return "qwen-0-test"; return x; }), "ok"].join(", ")}</p>`)).toEqual(["qwen-0-test"]);
@@ -213,6 +216,8 @@ describe("no AI vendor or competitor name in product UI copy (F31)", () => {
         `const F = () => <p>{xs.filter((x) => x === "gemini-0-test").length}{xs.map((x) => <b key="gpt-0-test">{x}</b>)}</p>;`,
       ].join("\n");
       expect(scanText(f, src)).toEqual([]);
+      // ordinary setters are not UI text: their argument stays a value
+      expect(scanText(f, `setOpen("gemini-0-test"); setModel("gpt-0-test"); setErrorCount("qwen-0-test");`)).toEqual([]);
       // a .ts file has no help surfaces, as before
       expect(scanText("apps/web/src/x.ts", `const OPTS = [{ label: "gemini-0-test" }]; toast("gpt-0-test");`)).toEqual([]);
     });
