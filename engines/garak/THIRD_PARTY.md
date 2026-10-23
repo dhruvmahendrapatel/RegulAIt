@@ -26,12 +26,12 @@ owner: 3 by decision 106, 20 by decision 193), 0 denied.** The gate prints the w
 build log.
 
 **Open advisories on the pinned closure (OSV, 2026-10-10). None can be fixed without breaking garak's own pins:**
-- fsspec 2025.3.0, GHSA-27vj-qcqg-25rc (high, fixed in 2026.6.0): allow-listed with an expiry, as described above. (cleared 2026-10-21 by the garak 0.17.1 upgrade; see that section)
+- fsspec 2025.3.0, GHSA-27vj-qcqg-25rc (high, fixed in 2026.6.0): allow-listed with an expiry, as described above. (cleared 2026-10-21 by the garak 0.17.1 upgrade, which pins fsspec 2026.7.0 and removed the allow-list entry; see that section)
 - datasets 3.6.0, GHSA-379c-qx7v-6h59 (moderate, path traversal through `file_name` metadata in folder-based
   builders, fixed only in 5.0.1). garak 0.17.0, its latest release, requires `datasets<4.0`, and the last 3.x release
   is 3.6.0, so the fix is a major upgrade that garak forbids. Moderate is below the image gate (HIGH and CRITICAL), and
   datasets is reached only on the same read-only, pre-seeded cache path as fsspec. Take 5.x when a garak release
-  allows it: datasets 5.0.1 also lifts the fsspec cap to `<=2026.6.0`, which clears the fsspec advisory too. (cleared 2026-10-21 by the garak 0.17.1 upgrade; see that section)
+  allows it: datasets 5.0.1 also lifts the fsspec cap to `<=2026.6.0`, which clears the fsspec advisory too. (cleared 2026-10-21 by the garak 0.17.1 upgrade, which pins datasets 5.1.0; see that section)
 - nltk 3.10.3, GHSA-8mgp-746c-j5xp (high, model-artifact APIs bypass the path checks): no patched release exists
   (3.10.3 is both the latest release and the last affected one), so the image gate does not count it. garak requires
   `nltk>=3.10.3`, so a fixed release can be taken by bumping the pin and its hash here, with no change to garak. (cleared 2026-10-22
@@ -74,9 +74,9 @@ re-check. Read from PyPI's JSON API, OSV and garak's repository on 2026-10-16:
   `<=2026.7.0`, past the 2026.6.0 fix), re-hash, and drop the fsspec image allow-list entry. An unreleased commit is not
   pinned.
 - fsspec GHSA-27vj-qcqg-25rc (CVE-2026-104851, high): fixed in 2026.6.0; every datasets 3.x caps fsspec at or below
-  2025.3.0. Allow-listed in the image gate until 2026-12-09 (decision 160), unchanged.
+  2025.3.0. Allow-listed in the image gate until 2026-12-09 (decision 160), unchanged. (Entry removed 2026-10-21 with fsspec 2026.7.0; see that section.)
 - datasets GHSA-379c-qx7v-6h59 (CVE-2026-66007, moderate): fixed only in 5.0.1 (latest 5.1.0); garak forbids 4.x and up.
-  Unreachable as described above.
+  Unreachable as described above. (Fixed 2026-10-21 by datasets 5.1.0; see that section.)
 - nltk GHSA-8mgp-746c-j5xp (CVE-2026-81726, high): still no patched release (OSV `last_affected` 3.10.3, the latest on
   PyPI; nltk's development branch is also 3.10.3). The flaw is in `TransitionParser.train/parse`,
   `AveragedPerceptron.save/load`, `PerceptronTagger.save_to_json` and `save_maxent_params`, which open a caller-chosen

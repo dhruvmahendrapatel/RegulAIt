@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
-import { frameworkLabel } from "../../../api/format";
+import { fmtDateTime, fmtDay, frameworkLabel } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Card, EmptyState, Field, Select } from "../../../ui/kit";
 import { QueryGate } from "../adminKit";
@@ -321,12 +321,11 @@ function formatWords(value: string): string {
   return value.replaceAll("_", " ").replaceAll("-", " ");
 }
 
+// F32: the product's shared en-GB formatters (F16), so this page's dates read like every other screen's
 function formatDate(value: string): string {
-  const parsed = new Date(`${value.slice(0, 10)}T00:00:00Z`);
-  return Number.isNaN(parsed.getTime()) ? value : new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeZone: "UTC" }).format(parsed);
+  return fmtDay(`${value.slice(0, 10)}T00:00:00Z`, value);
 }
 
 function formatDateTime(value: string): string {
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? value : new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(parsed);
+  return fmtDateTime(value, value);
 }

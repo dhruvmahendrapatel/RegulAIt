@@ -20,7 +20,14 @@
  * the strings a `{...}` child prints and the same-file `const` strings either of them names are also checked,
  * case-insensitively, for AI model ids and model-family names (`claude-opus-5`, `gpt-4o`, `gemini`) and for the
  * vendors behind them (`Google`, `Meta`, ...). Everywhere else those words are left alone, where they are identifiers,
- * provider slugs or functional names (a Google Workspace connector).
+ * provider slugs or functional names (a Google Workspace connector). The same holds for what a .tsx file prints by
+ * other routes (#492 review): an object-literal `label`/`title`/`placeholder`/`description`/help property (an options
+ * array rendered as UI), the first argument of `toast()` and of every state setter named `set` + any letters + `Error`,
+ * `Err`, `Notice`, `Message` or `Problem` (`setError`, `setFormError`, `setErr`, `setProblem`), and the string a
+ * `.map(...)` callback in a `{...}` child returns (also through `.join(...)` and an array literal's elements). Not
+ * followed: a string passed to any other call (a local helper's parameter, so `notice("intendedUse")` stays a key),
+ * and a const imported from another file (that needs the whole program's module resolution; the shared copy modules
+ * are scanned for proper nouns as roots instead).
  *
  * Docs are not copy surfaces and are not scanned. The operational commands in docs/deployment/DEMO_REAL_ACCOUNTS.md
  * and docs/deployment/DEMO_TEARDOWN.md name cloud AI services and their API hosts; they are kept as functional
@@ -53,6 +60,10 @@ export const MODEL_PATTERNS = [
 export const HELP_VENDOR_NAMES = ["Google", "Meta", "Microsoft", "Amazon", "xAI", "Alibaba", "IBM", "Nvidia", "NVIDIA"];
 /** JSX attributes that carry hint or help copy */
 export const HELP_ATTRS = /^(placeholder|title|label|aria-label|hint|help|helpText|description|tip|info|caption|aria-description)$/;
+/** object-literal properties a .tsx file renders as UI text (an options array's `label`, a card's `description`) */
+export const HELP_PROPS = /^(placeholder|title|label|hint|help|helpText|description|tip|caption)$/;
+/** calls whose first argument the UI shows: the `useToast()` toast and the set*Error/Err/Notice/Message/Problem setters */
+export const UI_TEXT_CALLS = /^(toast|set[A-Za-z]*(Error|Err|Notice|Message|Problem))$/;
 
 /** the copy surfaces: directories walked, plus single shared modules whose text the UI prints verbatim */
 export const COPY_ROOTS = [
@@ -190,7 +201,8 @@ export function codeOf(line) {
 /**
  * the [start, end) ranges of a file's help surfaces: help attributes' string text, every JSX text node, the strings
  * an element prints from a `{...}` child (`<p>{"..."}</p>`, a template literal, either branch of `a ? "x" : "y"`, a
- * `+` / `||` / `??` operand), and the initialiser of a same-file `const` that either of those names (`placeholder={PH}`)
+ * `+` / `||` / `??` operand, what a `.map(...)` callback returns), an object literal's HELP_PROPS values, the first
+ * argument of a UI_TEXT_CALLS call, and the initialiser of a same-file `const` any of those names (`placeholder={PH}`)
  */
 function helpRanges(file, text) {
   if (!file.endsWith(".tsx")) return [];
@@ -247,12 +259,34 @@ function helpRanges(file, text) {
       ts.SyntaxKind.QuestionQuestionToken, ts.SyntaxKind.AmpersandAmpersandToken].includes(node.operatorToken.kind)) {
       if (node.operatorToken.kind !== ts.SyntaxKind.AmpersandAmpersandToken) printed(node.left);
       printed(node.right);
-    } else if (isReference(node)) constant(node);
+    } else if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+      && node.expression.name.text === "map" && node.arguments[0] && ts.isFunctionLike(node.arguments[0])) returned(node.arguments[0]);
+    // `list.map(...).join(", ")` and `[...a.map(...), ...b]` print their elements
+    else if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "join") {
+      printed(node.expression.expression);
+    } else if (ts.isArrayLiteralExpression(node)) node.elements.forEach(printed);
+    else if (ts.isSpreadElement(node)) printed(node.expression);
+    else if (isReference(node)) constant(node);
   };
+  // what a `.map(...)` callback returns: its expression body, or each `return` of its own block
+  const returned = (fn) => {
+    if (!fn.body) return;
+    if (!ts.isBlock(fn.body)) return printed(fn.body);
+    const walkReturns = (node) => {
+      if (ts.isReturnStatement(node)) printed(node.expression);
+      else if (!ts.isFunctionLike(node)) node.forEachChild(walkReturns);
+    };
+    fn.body.forEachChild(walkReturns);
+  };
+  const callee = (call) => (ts.isIdentifier(call.expression) ? call.expression.text
+    : ts.isPropertyAccessExpression(call.expression) ? call.expression.name.text : "");
   const visit = (node) => {
     if (node.kind === ts.SyntaxKind.JsxText) ranges.push([node.pos, node.end]);
     else if (ts.isJsxAttribute(node) && HELP_ATTRS.test(node.name.getText(sf)) && node.initializer) strings(node.initializer);
     else if (ts.isJsxExpression(node) && (ts.isJsxElement(node.parent) || ts.isJsxFragment(node.parent))) printed(node.expression);
+    else if (ts.isPropertyAssignment(node) && ts.isObjectLiteralExpression(node.parent)
+      && (ts.isIdentifier(node.name) || ts.isStringLiteral(node.name)) && HELP_PROPS.test(node.name.text)) printed(node.initializer);
+    else if (ts.isCallExpression(node) && UI_TEXT_CALLS.test(callee(node))) printed(node.arguments[0]);
     node.forEachChild(visit);
   };
   visit(sf);

@@ -3012,3 +3012,22 @@ No one has run this yet outside CI's double build.
 Two parts of the build fetch pinned artefacts at build time: pip wheels and npm packages by hash, and garak's
 Hugging Face assets by commit and sha256. An air-gapped rebuild therefore needs those artefacts mirrored. Their
 content is pinned, so the digest does not depend on where they come from.
+
+## As built (2026-10-23): correction to the garak 0.17.1 judge-detector sentence
+
+The section "As built: garak 0.17.1, datasets 5 and fsspec (2026-10-21)", behaviour item 5, says: "Judge detectors
+that cannot score now return one `None` per output (`outputs`, not `all_outputs`), so the mapper reads them as
+unscored rather than as broken coverage; the verdict stays `unknown`." That sentence came from the #471 review, and
+it overstates the change. Read again from the two PyPI wheels' `garak/detectors/judge.py` on 2026-10-23:
+- **One site changed, not two.** Only `judge.RefusalOnlyAdversarial.detect` changed, from
+  `[None] * len(attempt.all_outputs)` to `[None] * len(attempt.outputs)`. `judge.JailbreakOnlyAdversarial.detect`
+  already returned `[None] * len(attempt.outputs)` in 0.17.0.
+- **It is the non-adversarial skip, not a judge that cannot score.** Both lines run when an attempt's notes say
+  `is_adversarial: false` (an intermediate turn of a multi-turn probe). A judge failure is not on this path.
+- **No product effect.** `judge.RefusalOnlyAdversarial` is the primary detector only of `fitd.FITD`, and
+  `judge.JailbreakOnlyAdversarial` only of `goat.GOATAttack` (`garak-upstream.ts`). Both probes are
+  `excluded_licence` (`garak.ts`) and never run. If they were admitted, the mapper's reading would be as the sentence
+  says: one score per output, so no `coverage_incomplete`, and each `None` counts as unscored, so the probe reads
+  `unknown` unless another output is a hit (which still fails). The unscored reason text says "(no response from the
+  gateway)", which would not describe a skipped turn; that wording would need its own change when those probes are
+  admitted.

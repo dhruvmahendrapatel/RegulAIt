@@ -123,6 +123,42 @@ test("X6b (L3): the open hint says how many rows show of how many, in the approv
   await expect(page.getByText(/^Showing \d+ of 60 · scroll the list for the rest, or Expand$/)).toBeVisible();
 });
 
+test("F33: a last row mostly in view counts as shown, so the hint agrees with the rows on screen", async ({ page }) => {
+  await open(page, "rows=60");
+  const region = page.getByRole("region", { name: "Findings, scrollable" });
+  await expect(region).toBeVisible();
+  // size the box (60vh while under 560 px) so the eleventh row is three quarters in view
+  const { first, h } = await region.evaluate((el) => {
+    const rows = el.querySelectorAll("tbody > tr");
+    const t = el.getBoundingClientRect().top;
+    return { first: rows[0]!.getBoundingClientRect().top - t, h: rows[1]!.getBoundingClientRect().top - rows[0]!.getBoundingClientRect().top };
+  });
+  await page.setViewportSize({ width: 1280, height: Math.round((first + 10.75 * h) / 0.6) });
+  const counts = () =>
+    region.evaluate((el) => {
+      const rows = [...el.querySelectorAll("tbody > tr")].map((r) => r.getBoundingClientRect());
+      const top = el.getBoundingClientRect().top;
+      return { whole: rows.filter((b) => b.bottom - top <= el.clientHeight).length, most: rows.filter((b) => (b.top + b.bottom) / 2 - top <= el.clientHeight).length };
+    });
+  await expect.poll(async () => (await counts()).most).toBe(11);
+  // non-vacuous: the eleventh row is cut, so a whole-rows count would say 10
+  expect((await counts()).whole).toBe(10);
+  await expect(page.getByText("Showing 11 of 60 · scroll the list for the rest, or Expand")).toBeVisible();
+});
+
+test("N1: the hint measures the body rows, not an earlier header row with as many cells", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 160 });
+  await open(page, "rows=4&head=1");
+  const region = page.getByRole("region", { name: "Findings, scrollable" });
+  await expect(region).toBeVisible();
+  const most = await region.evaluate((el) => {
+    const top = el.getBoundingClientRect().top;
+    return [...el.querySelectorAll("tbody > tr")].filter((r) => { const b = r.getBoundingClientRect(); return (b.top + b.bottom) / 2 - top <= el.clientHeight; }).length;
+  });
+  expect(most).toBeLessThan(4);
+  await expect(page.getByText(`Showing ${most} of 4 · scroll the list for the rest, or Expand`)).toBeVisible();
+});
+
 test("Tab and Shift+Tab stay inside the expanded view, through the portaled body", async ({ page }) => {
   await open(page, "rows=60");
   await page.getByRole("button", { name: "Expand" }).click();
