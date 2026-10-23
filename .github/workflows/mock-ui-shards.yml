@@ -46,7 +46,7 @@ jobs:
     # min, so the slowest shard is ~6.5 min, plus ~2–3 min of install and
     # browser download. 15 is that plus margin — a blast-radius cap, not a
     # target. Re-measure before raising it; add a shard instead.
-    timeout-minutes: 15
+    timeout-minutes: 25 # TEMPORARY 15 -> 25 for freeze week (#522 finding 25): revert after 2026-11-03 (ADR-0198)
     strategy:
       # one failing shard must not cancel the others: the coverage job needs
       # every report, and a cancelled shard hides which specs it would have run
