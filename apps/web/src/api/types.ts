@@ -736,6 +736,9 @@ export interface UseCaseLifecycleDetail {
   frameworkRationales?: Record<string, string>;
   /** ADR-0171: the yes/no screening answers the owner was not sure about (each counted as yes) */
   screeningUnsure?: string[];
+  /** issue #522 #30: the shadow-AI finding it was registered from; `finding` is served to admins only.
+   * null (or absent from an older gateway) when it was registered any other way */
+  discovery?: { findingId: string; finding: { id: string; subject: string; subjectKind: string; provider: string; firstSeenAt: string } | null } | null;
 }
 
 export interface ApprovalConditionInput {

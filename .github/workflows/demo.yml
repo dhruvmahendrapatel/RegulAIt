@@ -23,6 +23,10 @@ on:
       - 'apps/gateway/src/remediation.ts'
       - 'apps/gateway/src/deploy-gate.ts'
       - 'apps/gateway/src/shadow-ai.ts'
+      # #522 finding 21: the Shadow AI remediation, discovery and workflow-engine paths
+      - 'apps/gateway/src/shadow-ai-remediation.ts'
+      - 'apps/gateway/src/discovery-*.ts'
+      - 'apps/gateway/src/workflows.ts'
       # AER-040: the consent-binding path and the signed-export path (beat 3E)
       - 'apps/gateway/src/app.ts'
       - 'apps/gateway/src/mcp-proxy.ts'
@@ -67,7 +71,7 @@ jobs:
           else
             echo "review=false" >> "$GITHUB_OUTPUT"
           fi
-          if git diff --name-only "$BEFORE" "$HEAD_SHA" | grep -qE '^(apps/web/|apps/gateway/src/(demo-|use-cases\.ts|governance-monitor\.ts|remediation\.ts|deploy-gate\.ts|shadow-ai\.ts|app\.ts|export-bundle\.ts|reporting\.ts)|packages/shared/src/|packages/db/|\.github/workflows/demo\.yml)'; then
+          if git diff --name-only "$BEFORE" "$HEAD_SHA" | grep -qE '^(apps/web/|apps/gateway/src/(demo-|use-cases\.ts|governance-monitor\.ts|remediation\.ts|deploy-gate\.ts|shadow-ai\.ts|shadow-ai-remediation\.ts|discovery-[^/]*\.ts|workflows\.ts|app\.ts|export-bundle\.ts|reporting\.ts)|packages/shared/src/|packages/db/|\.github/workflows/demo\.yml)'; then
             echo "demo=true" >> "$GITHUB_OUTPUT"
           else
             echo "demo=false" >> "$GITHUB_OUTPUT"

@@ -10,6 +10,9 @@
  *
  *   seed → demo:setup → demo:intake --live → demo:traffic → demo:check --live
  *
+ * The steps live in demo-prepare-steps.ts, which the Docker demo (docker-start.sh) also runs, through
+ * `demo-prepare.js --steps`: that prints the demo list and exits, preparing nothing.
+ *
  * Each step is the existing script, run as its own process with this
  * environment (DATABASE_URL, REGULAIT_BOOTSTRAP_TOKEN, REGULAIT_DATA_KEY), in
  * order; the first non-zero exit stops the run and names the step. Point
@@ -18,40 +21,19 @@
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { demoPrepareSteps, formatDemoPrepareSteps } from "./demo-prepare-steps.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+if (process.argv.includes("--steps")) {
+  // the Docker demo only: never the live list, whatever else was passed
+  console.log(formatDemoPrepareSteps(demoPrepareSteps(false)));
+  process.exit(0);
+}
 const live = process.argv.includes("--live");
-// ADR-0197 decision 7: the Shadow-AI discovery dataset runs twice. Its first phase comes BEFORE the seed, in
-// first-admin setup, because enabling a discovery source is a step-up the bootstrap credential gives only until an
-// admin can step up (B4S-06); its second phase, after demo:intake, acts as the personas. Without it (`--live`) the
-// seed is the first step, so its own first-admin-setup acts (the personas' one-time passwords, both admins' TOTP)
-// still run inside that window.
-const steps: Array<[string, string, ...string[]]> = live
-  ? [
-      ["seed", "seed.js"],
-      ["demo:setup", "demo-setup.js"],
-      ["demo:intake --live", "demo-intake-seed.js", "--live"],
-      ["demo:traffic", "demo-traffic.js"],
-      ["demo:check --live", "demo-check.js", "--live"],
-    ]
-  : [
-      ["demo:shadow (first-admin setup)", "demo-shadow-seed.js", "--setup"],
-      ["seed", "seed.js"],
-      ["demo:setup", "demo-setup.js"],
-      ["demo:intake", "demo-intake-seed.js"],
-      ["demo:shadow", "demo-shadow-seed.js"],
-      ["demo:traffic", "demo-traffic.js"],
-      ["demo:check", "demo-check.js"],
-    ];
 const started = Date.now();
-for (const [name, file, ...extra] of steps) {
+for (const { name, file, args } of demoPrepareSteps(live)) {
   console.log(`\n=== ${name} ===`);
-  // ADR-0181 FX3: the seed runs only on an explicit demo signal; this command
-  // IS the demo, so it says so.
-  // B4S-06: and the seed opens the assurance run's guardrail window during
-  // first-admin setup (see seed.ts), which demo:intake keeps and closes
-  const args = file === "seed.js" ? [path.join(here, file), "--seed-demo", "--open-assurance-window"] : [path.join(here, file), ...extra];
-  const r = spawnSync(process.execPath, args, { stdio: "inherit", env: process.env });
+  const r = spawnSync(process.execPath, [path.join(here, file), ...args], { stdio: "inherit", env: process.env });
   if (r.status !== 0) {
     console.error(`\ndemo:prepare${live ? " --live" : ""} stopped: ${name} exited ${r.status ?? r.signal}`);
     process.exit(r.status ?? 1);

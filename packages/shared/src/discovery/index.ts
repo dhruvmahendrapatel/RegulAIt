@@ -80,7 +80,7 @@ export const DISCOVERY_KIND_SPECS: Readonly<Record<DiscoverySourceKind, Discover
   endpoint_osquery: { family: "endpoint", evidenceKinds: ["endpoint_osquery"], subjectKinds: ["device"], slice: "SD3", label: "osquery results (no agent)", uploadFed: true },
   endpoint_inventory: { family: "endpoint", evidenceKinds: ["endpoint_inventory"], subjectKinds: ["device"], slice: "SD3", label: "MDM or EDR inventory (no agent)", uploadFed: true },
   // SD4b: fed by the agents' signed uploads (endpoint-agent-routes.ts); RegulAIt never contacts a device, so never scheduled
-  endpoint_agent: { family: "endpoint", evidenceKinds: ["endpoint_agent"], subjectKinds: ["device"], slice: "SD4", label: "RegulAIt endpoint agent", uploadFed: true },
+  endpoint_agent: { family: "endpoint", evidenceKinds: ["endpoint_agent"], subjectKinds: ["device"], slice: "SD4", label: "regulAIt endpoint agent", uploadFed: true },
 });
 
 /** federated (short-lived, the default, free) or static (a stored secret: a `settings_relax` step-up) */
@@ -175,7 +175,7 @@ export function activeDiscoveryPosture(active: readonly ActiveDiscoverySource[])
   const shown = active.slice(0, 20).map((a) => `${a.name} (${DISCOVERY_KIND_SPECS[a.kind].label})`);
   const more = active.length > shown.length ? `, and ${active.length - shown.length} more` : "";
   return (
-    `Active discovery scans ${active.length} enabled source(s), read-only: ${shown.join(", ")}${more}. ` +
+    `Active discovery scans ${active.length} enabled ${active.length === 1 ? "source" : "sources"}, read-only: ${shown.join(", ")}${more}. ` +
     "Nothing outside those sources is scanned."
   );
 }

@@ -640,7 +640,7 @@ jobs:
     # never replayed), so the 47 journeys take ~9.6 min on the runner and the
     # job ~12.5 min with install and build. Raised once; a further rise means
     # something got slower and is a finding.
-    timeout-minutes: 16
+    timeout-minutes: 25 # TEMPORARY 16 -> 25 for freeze week (#522 finding 25): revert after 2026-11-03 (ADR-0198)
 
     services:
       postgres:
