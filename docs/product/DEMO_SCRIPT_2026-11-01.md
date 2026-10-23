@@ -60,23 +60,29 @@ right-hand column of the timing table.
 
 ## Timing
 
-| # | Beat | Persona | Minutes | Clock |
-|---|---|---|---|---|
-| 0 | Opening: what we will show | — | 1.0 | 1.0 |
-| S1 | Discovery sources | Ada | 3.0 | 4.0 |
-| S2 | Findings, sightings, coverage | Ada | 3.0 | 7.0 |
-| S3 | Remediation plan → workflow → second approver | Ada, Morgan | 3.5 | 10.5 |
-| S4 | Register as use case (intake) | Ada | 3.0 | 13.5 |
-| G1 | The use-case record and risks | Ada | 2.0 | 15.5 |
-| G2 | Independent review | Avery | 2.0 | 17.5 |
-| G3 | Deploy gate (terminal on the dev instance host) | Ada | 1.5 | 19.0 |
-| G4 | Trust dashboard | Ada | 1.5 | 20.5 |
-| G5 | Alerts and remediation | Ada, Avery | 2.0 | 22.5 |
-| G6 | Dependency graph | Ada | 0.5 | 23.0 |
-| G7 | Regulatory intelligence | Ada | 0.5 | 23.5 |
-| G8 | Evidence | Ada | 1.0 | 24.5 |
-| — | Close | — | 0.5 | 25.0 |
-| opt | Accountability records (G9), content trust (G10), review policy (2B+ of the 10-05 script) | Ada | 1.5-3 each | only if ahead |
+| # | Beat | Persona | Minutes | Clock | 11-01 run-through |
+|---|---|---|---|---|---|
+| 0 | Opening: what we will show | — | 1.0 | 1.0 | LIVE read-only |
+| S1 | Discovery sources | Ada | 3.0 | 4.0 | LIVE read-only (no **Run now**, no federation toggle) |
+| S2 | Findings, sightings, coverage | Ada | 3.0 | 7.0 | LIVE read-only |
+| S3 | Remediation plan → workflow → second approver | Ada, Morgan | 3.5 | 10.5 | FALLBACK |
+| S4 | Register as use case (intake) | Ada | 3.0 | 13.5 | FALLBACK |
+| G1 | The use-case record and risks | Ada | 2.0 | 15.5 | FALLBACK (S4's use case) |
+| G2 | Independent review | Avery | 2.0 | 17.5 | FALLBACK (S4's use case) |
+| G3 | Deploy gate (terminal on the dev instance host) | Ada | 1.5 | 19.0 | DENY: LIVE read-only; acknowledge then ALLOW: FALLBACK |
+| G4 | Trust dashboard | Ada | 1.5 | 20.5 | LIVE read-only |
+| G5 | Alerts and remediation | Ada, Avery | 2.0 | 22.5 | FALLBACK |
+| G6 | Dependency graph | Ada | 0.5 | 23.0 | LIVE read-only |
+| G7 | Regulatory intelligence | Ada | 0.5 | 23.5 | LIVE read-only |
+| G8 | Evidence | Ada | 1.0 | 24.5 | LIVE read-only |
+| — | Close | — | 0.5 | 25.0 | — |
+| opt | Accountability records (G9), content trust (G10), review policy (2B+ of the 10-05 script) | Ada | 1.5-3 each | only if ahead | LIVE read-only (change nothing) |
+
+**11-01 run-through (owner, #453).** LIVE is prepared once and never re-prepared, so on 11-01 every step that
+changes state runs on the **FALLBACK** laptop stack: G3's acknowledgements then ALLOW, G5 resolve, S3 **Start and
+link**, S4 register (and G1/G2, which work on S4's new use case). LIVE shows only the read-only beats and G3's DENY,
+so it stays as prepared for 11-03. On 11-03 every beat runs on LIVE as written. The same marks are in
+`DEMO_RUNBOOK.md` §7.3.
 
 **Cutting order when behind:** G7, then G6, then G4's drill-down, then S1's federation card. Never cut S3 or G2:
 separation of duties is the point of both.
@@ -130,6 +136,8 @@ The full checklist, with what is still pending execution, is in `DEMO_RUNBOOK.md
 ## Act 1 — Find it
 
 ### S1. Discovery sources — Ada — 3 minutes
+**11-01 run-through:** LIVE read-only.
+
 UI: `apps/web/src/views/admin/governance/DiscoverySourcesPage.tsx`, `FederationCard.tsx`, `EndpointAgentCard.tsx`.
 
 - **URL:** `/ui/admin/shadow-ai/discovery-sources` (sidebar: **Discovery** → **Discovery sources**; breadcrumb
@@ -140,7 +148,7 @@ UI: `apps/web/src/views/admin/governance/DiscoverySourcesPage.tsx`, `FederationC
   - A three-step strip: **Connect read-only** (*n of n sources enabled*), **Scan on a schedule** (*n recent runs*),
     **Findings land in Shadow AI** (**Open the findings**).
   - **Active discovery** card: the posture sentence, which names each enabled source, for example *"Active discovery
-    scans n enabled source(s), read-only: … Nothing outside those sources is scanned."* (the count and names are the
+    scans n enabled sources, read-only: … Nothing outside those sources is scanned."* (the count and names are the
     live data).
   - Five figures: **Sources enabled** (*n of n*), **Static credentials in use**, **Static credentials older than 90
     days**, **Write scope unverified**, **Credentials refused (write access)**.
@@ -160,8 +168,10 @@ UI: `apps/web/src/views/admin/governance/DiscoverySourcesPage.tsx`, `FederationC
     and **Reads** (*all read*, or *could not read: …* per read). No Expand is needed (#477).
   - **Reveal a pseudonym**, its own card below Recent runs.
   - **Cloud federation** card: *on*, and *"Federated AWS, GCP and Entra credentials present a 300-second RS256 token
-    from this issuer. Rotating or revoking a key asks you to confirm it's you."* (with federation off, as on FALLBACK,
-    the second sentence reads *"Turning it on asks you to confirm it's you."*; `FederationCard.tsx`), then the issuer,
+    from this issuer. Federation is on, so federated cloud sources can run. Rotating to a new key or revoking a key asks
+    you to confirm it's you; turning federation off does not."* (with federation off, as on FALLBACK, the second part
+    reads *"Turning it on lets federated cloud sources run, and asks you to confirm it's you."*; `FederationCard.tsx`),
+    then the issuer,
     its key set, the subject format and the audiences. The issuer is
     `<REGULAIT_PUBLIC_URL>/federation`, separate from the workload-identity issuer (`packages/shared/src/discovery/
     federation.ts`).
@@ -189,7 +199,7 @@ UI: `apps/web/src/views/admin/governance/DiscoverySourcesPage.tsx`, `FederationC
   - *Acme Bank MDM inventory (demo dataset)*, an MDM export imported through the endpoint-inventory import route;
   - *Acme Bank laptops (endpoint agent) (demo dataset)*, the endpoint agent, upload-fed.
 
-  So the first figure reads **5 of 5** and the posture sentence *"Active discovery scans 5 enabled source(s), read-only:
+  So the first figure reads **5 of 5** and the posture sentence *"Active discovery scans 5 enabled sources, read-only:
   …"*. The AWS and Azure rows also show **Write scope unverified** beside **Federated**, and the same two sources are
   listed above the Sources table with *write scope unverified* (seen in the 2026-10-21 pack). The GitLab, AWS and
   Azure runs are **recorded runs**, replayed through the real discovery worker with no call to the provider. The
@@ -205,6 +215,8 @@ UI: `apps/web/src/views/admin/governance/DiscoverySourcesPage.tsx`, `FederationC
   only.
 
 ### S2. Findings, sightings and coverage — Ada — 3 minutes
+**11-01 run-through:** LIVE read-only.
+
 UI: `ShadowAiPage.tsx`, `DiscoverySightings.tsx`, `discoverySourcesModel.ts` (`sightingLines`).
 
 - **URL:** `/ui/admin/shadow-ai` (sidebar: **Discovery** → **Shadow-AI discovery**; or **Open the findings** in
@@ -215,7 +227,7 @@ UI: `ShadowAiPage.tsx`, `DiscoverySightings.tsx`, `discoverySourcesModel.ts` (`s
   - Tabs: **Findings · n** (open by default), **Coverage**, **Import evidence**, **Detection catalogue**, **Import
     history**.
   - On **Findings**, the callout **What this can see.**, verbatim from the product: *"Discovery has analyzed n of 4
-    evidence classes. Active discovery scans n enabled source(s), read-only: … Every finding below derives from
+    evidence classes. Active discovery scans n enabled sources, read-only: … Every finding below derives from
     evidence you supplied or from a source an admin enabled, so this inventory reduces shadow AI — it does not prove
     its absence. …"*, ending with the link **See coverage**.
   - Figures: **Critical** (*Leaked credential*), **High** (*Observed model traffic*), **Medium or low** (*Looser
@@ -280,6 +292,8 @@ UI: `ShadowAiPage.tsx`, `DiscoverySightings.tsx`, `discoverySourcesModel.ts` (`s
   its first rows only).
 
 ### S3. Remediation plan → workflow → second approver — Ada, then Morgan — 3.5 minutes
+**11-01 run-through:** FALLBACK.
+
 UI: `ShadowRemediationPanel.tsx`, `apps/web/src/views/workflows/WorkflowDetailPage.tsx`,
 `apps/web/src/views/inbox/InboxPage.tsx`; gateway `apps/gateway/src/shadow-ai-remediation.ts`.
 
@@ -294,36 +308,40 @@ UI: `ShadowRemediationPanel.tsx`, `apps/web/src/views/workflows/WorkflowDetailPa
     and open the workflow at **waiting for sign-off**: the panel shows the workflow id as plain text, not a link, so
     go to **Workflows** (`/ui/workflows`) and open the row whose title starts *"Pull
     gitlab:acme-bank-demo/credit-memo-assistant"*. Then go straight to Morgan.
-  - **Run-through and demo:** LIVE allows one remediation workflow per finding, and LIVE is never re-prepared, so the
-    11-01 run-through and the 11-03 demo each need their own finding with no workflow (chosen at each T-24h).
+  - **Run-through and demo:** LIVE allows one remediation workflow per finding, and LIVE is never re-prepared. So on
+    the 11-01 run-through S3 runs on **FALLBACK** only (owner, #453), and the LIVE finding chosen at T-24h before 11-03
+    stays unused until the demo.
 - **Action — Ada, the plan** (`/ui/admin/shadow-ai`):
   1. On the chosen row, in **Next step**, click **Plan remediation**. The **Remediation plan** panel opens on the
      right (`ds-s3a`, `ds-s3b`): the subject as its title, the provider and confidence badges, and **no governed
      replacement registered** (or the governed replacement).
-  2. Read the numbered steps. Each has a reason; a step that cannot run yet shows **Blocked** with why. Then **Who
+  2. Read the numbered steps, in plain language. Each has a reason; a step that cannot run yet shows **Blocked** with
+     why. With no governed replacement, the routing step reads *"no governed replacement agent is registered for this
+     provider yet, so this step waits until an admin registers one."* The last step is *"Confirm the next call appears
+     in the audit log and the usage ledger"*, and the note under the steps reads *"This plan does not start a workflow
+     by itself. It prepares the request for the standard workflow start, …"*. Then **Who
      acts next** with the **Separate approver** badge: *"By default, a plan-only stage runs first and changes nothing.
      Then a human sign-off."*
   3. Point at *"The default remediation workflow (a plan-only stage, then a human sign-off) is set up when the first
      one starts."* if it shows (only until the first one starts).
   4. Scroll the panel's body to the form. Fill **Change description** (prefilled from the plan) and **Environment**:
-     type `staging`. The placeholder reads *"for example staging"* once the copy fixes land (lands with PR D3); until
-     then it reads *"for example production"*, so type `staging` **before** drawing attention to the field
-     (`ShadowRemediationPanel.tsx`).
+     type `staging`; the field's placeholder reads *"for example staging"* (`ShadowRemediationPanel.tsx`).
      The environment must be one an admin already gave a meaning to on a deploy target or assignment rule
      (`shadow-ai-remediation.ts`). A `demo:prepare`d database has `staging`; on LIVE, `demo:prepare --live` creates an
-     audited mock deploy target `staging` and `demo:check --live` asserts it (lands with PR D2; checked at T-24h).
+     audited mock deploy target `demo-staging` (environment `staging`) and `demo:check --live` asserts it in the beat
+     "1 Remediation environment" (checked at T-24h).
      Never type `production`: nothing in this demo is production.
   5. **Start remediation workflow…**, pinned at the panel's foot → the dialog **Start a remediation workflow?** →
      **Start and link**.
   6. The status line, in the panel's body: *"Workflow xxxxxxxx started and linked; the finding is now confirmed"*, then
      *"Linked to workflow …. The loop closes when the next call from … appears in the audit log and usage ledger."*
-     Once the UX fixes land, the panel scrolls the line into view by itself (F22, lands with PR D3); until then it
-     stays scrolled at the form, so scroll the panel's body down to the line. The **Confirmed** chip's count goes up by one and the row's
+     The panel scrolls the line into view by itself (F22). The success toast briefly covers the right half of the
+     line, so if you read it aloud, wait for the toast to clear. The **Confirmed** chip's count goes up by one and the row's
      **Status** reads **Confirmed**. **Close** the panel.
 - **Action — Ada, the workflow** (`/ui/workflows`, open the new workflow):
   1. The workflow's title is the full change description (finding F8). The **Plan only** card, badge **planning**:
      *"this change is in forced planning — nothing builds from it yet."* Click **Finish planning**.
-  2. The **Submit shadow_ai_remediation_plan** card: paste the plan's steps into the box, **Submit for sign-off**.
+  2. The **Submit shadow AI remediation plan** card: paste the plan's steps into the box, **Submit for sign-off**.
   3. The card now reads **waiting for sign-off** — *"awaiting … — it is in their inbox"*.
 - **Action — Morgan** (Profile C, `/ui/inbox`): the row with the **Sign-off** chip and the workflow's title (the
   long *"Pull … into governance — shadow-AI finding …"* text, finding F8). Click its **Review**: the item opens in
@@ -351,6 +369,8 @@ UI: `ShadowRemediationPanel.tsx`, `apps/web/src/views/workflows/WorkflowDetailPa
   environment means the typed one is not configured. Switch to the FALLBACK database.
 
 ### S4. Register as use case — Ada — 3 minutes
+**11-01 run-through:** FALLBACK.
+
 UI: `IntakeWizardPage.tsx` (the 10-05 beat 1B, unchanged).
 
 - **Action:** back on `/ui/admin/shadow-ai`, on the same row, click **Register as use case**.
@@ -364,15 +384,22 @@ UI: `IntakeWizardPage.tsx` (the 10-05 beat 1B, unchanged).
   rehearsed on 10-05 fits the fallback's credit-memo drafting use; on LIVE, the set that fits the chosen finding,
   decided at T-24h); **Draft
   suggestions**; reject one framework, **Accept all remaining**; **Continue** through the questionnaire; on **Link
-  stack** choose the governed agent and vendor of the governance seed that fit the finding (one pairing per stack,
-  proposed by the builder and confirmed by the owner before the freeze, owner decision on #522 #10); on
+  stack** choose the governed agent and vendor pairing confirmed by the owner (#453; the seed records are named in
+  DEMO_RUNBOOK §7.3, "S4 Link stack pairing"): on FALLBACK, and on a LIVE finding with matching SDK evidence, the
+  seeded agent whose model card has **no** sign-off, with its vendor marked *approved*; for a LIVE finding from
+  another provider, that provider's matching unsigned pair. G1's **Stack** tab then shows **Not signed off** as
+  scripted; on
   **Review** point at the derived data sensitivity; **Submit for human review**.
 - **Do not link the voice / call-centre agent** (deep scan #40): its seeded model card says its bias evaluation's
   results were "expected by 2026-10-15", which is past on both run days, and G1's **Stack** tab would show it.
 - **Say:** "The finding filled in only what the evidence established: the name and what was observed. The tier comes
   from the structured answers by deterministic rules, never from a model, and every suggestion is accepted or rejected
   by a person."
-- **LIVE / FALLBACK:** the same; only the prefilled name differs.
+- **One finding, one use case, ever.** The record keeps the finding it came from, and a second registration from the
+  same finding is refused (409, *"this shadow-AI finding is already registered as the AI use case '…'; a finding is
+  registered once"*). The finding's row then shows *"Registered as <use case>"* (a link) instead of **Register as use
+  case**. So S4 uses up its finding: on LIVE, the 11-03 finding must not have been registered before.
+- **LIVE / FALLBACK:** the same; only the prefilled name differs. On the 11-01 run-through, S4 runs on **FALLBACK**.
 
 ---
 
@@ -383,6 +410,8 @@ These are the 10-05 beats, on the same seeded governance data. The **Say** lines
 the day.
 
 ### G1. The use-case record and risks — Ada — 2 minutes (10-05 beat 2A)
+**11-01 run-through:** FALLBACK (S4's use case).
+
 - **URL:** **Open the use-case workspace** after submit → `/ui/admin/governance/use-cases/<id>`.
 - **Screen** (`ds-g1b`): the dark header band with *AI use cases / <name>*, the **AI USE CASE** label, and the chips
   **Status**, **EU AI Act** tier, **Approval valid until** (once approved) and **Owner**; **Open intake** on the
@@ -401,12 +430,13 @@ the day.
   and **Show every row**. A non-admin (Avery) sees a note that the full trail is open to administrators instead of
   the link.
 - **Change from 10-05:** the use case is now the one discovered in Act 1.
-- **Pending (lands with PR D4):** "the record remembers where it was found". Today intake reads only the source,
-  title and description from the link and ignores the finding id, so the record does not link back. The owner
-  decided to carry the finding link through intake before the freeze. Say the line only once that PR has merged and
-  the link is checked on screen at rehearsal; until then, leave it out.
+- **Found by discovery:** the header carries a **Found by discovery** chip; for an admin, *discovery* links to the
+  Shadow-AI **Findings** tab (`UseCaseOverviewPage.tsx`). Point at it.
+- **Say (added):** "the record remembers where it was found."
 
 ### G2. Independent review — Avery — 2 minutes (10-05 beat 2B)
+**11-01 run-through:** FALLBACK (S4's use case).
+
 - **URL:** `/ui/inbox` (Profile B): *AI use case sign-off · Govern <subject> — requested by Ada Admin* → **Review**.
 - **Action:** the row's **Review** opens **Review use case sign-off** (caption *Open task*) as a panel on the right
   (`ds-g2b`); the evidence scrolls in its body. Under **Decision**, choose the **Approve with conditions** card. Scroll
@@ -422,6 +452,8 @@ the day.
   chip in the header, and **Conditions of approval** with **Mark met** on the **Overview** tab.
 
 ### G3. Deploy gate — 1.5 minutes (10-05 beat 2C)
+**11-01 run-through:** DENY (step 1) LIVE read-only; acknowledge and ALLOW (steps 2-3) FALLBACK.
+
 - **Expected:** `DENY` with two **BLOCK open_high_alert** lines for *Real-Time Fraud Detection Engine*, then `ALLOW`
   with two **WARN acknowledged_high_alert** lines after the alerts are acknowledged. The environment is `staging`,
   never `production` (owner, #522 #11): the gate only records it, and nothing in this demo is production.
@@ -450,19 +482,25 @@ the day.
   call over 7 days, so traffic made at preparation would no longer hold the second BLOCK line. Capture
   `real-gate.txt` after that re-run (`DEMO_RUNBOOK.md` §7.3).
 - **Run-through and demo:** an acknowledged alert stays acknowledged, so an acknowledgement on LIVE on 11-01 would turn
-  11-03's first run into ALLOW. Whether to acknowledge on the fallback only on 11-01 is an **open owner question**
-  (`DEMO_RUNBOOK.md` §7.3, "Between the runs").
+  11-03's first run into ALLOW. On 11-01, run step 1 (DENY) on LIVE, then steps 2-3 on the **FALLBACK** stack (owner,
+  #453): acknowledge in the fallback browser, and run the gate there with
+  `docker compose exec -T gateway node apps/gateway/dist/demo-gate.js "Real-Time Fraud Detection Engine" staging demo-2`
+  from the repo root on the laptop. Never acknowledge these alerts on LIVE before 11-03.
 - **Fallback:** if the shell is gone or slow, show `real-gate.txt` (the T-24h capture, open on the laptop). Say plainly
   it was captured from a real run. The ALLOW half is rehearsed on the fallback database at T-7d (`DEMO_RUNBOOK.md`
   §7.5, owner step 1).
 
 ### G4. Trust dashboard — Ada — 1.5 minutes (10-05 beat 3A)
+**11-01 run-through:** LIVE read-only.
+
 - **URL:** `/ui/admin/governance/trust` (breadcrumb *Overview / Trust & evidence*). The page has no tabs: point at
   the weakest bars in **Evidence coverage by dimension** (on FALLBACK, **Safety 0%** and **Reliability 60%**), then
   click the **Security** tile in **Dimension drilldown** (it opens on **Bias**): its badge (*measured* or
   *unmeasured*) and the **Open · Mitigating · Accepted · Closed** counts.
 
 ### G5. Alerts and remediation — Ada, then Avery — 2 minutes (10-05 beat 3B)
+**11-01 run-through:** FALLBACK.
+
 - **URL:** `/ui/admin/governance/alerts` → **Evaluate now**. The tabs **Active · Acknowledged · Resolved** sit
   above the **Alerts** card, whose title is a fold header (the **Alerts** title and its count, open by default). Click the alert
   rows, not the card title: a click on the title folds the list.
@@ -486,13 +524,19 @@ the day.
   approver is someone else."
 
 ### G6. Dependency graph — 0.5 minutes (10-05 beat 3C)
+**11-01 run-through:** LIVE read-only.
+
 - **URL:** `/ui/admin/governance/graph`. One path to a vendor's HIGH risk.
 
 ### G7. Regulatory intelligence — 0.5 minutes (10-05 beat 3D)
+**11-01 run-through:** LIVE read-only.
+
 - **URL:** `/ui/admin/governance/regulatory`. One entry: the Digital Omnibus date move. Say it in words, as the
   entry's own text gives it: the Annex III high-risk obligations now apply from 2 December 2027.
 
 ### G8. Evidence — Ada — 1 minute (10-05 beat 3E)
+**11-01 run-through:** LIVE read-only.
+
 - **URL:** `/ui/admin/audit` → **Download signed bundle** (top right, beside **Download CSV**). The page (`ds-g8`):
   **Chain integrity** (*Not verified yet*, **Verify chain**), then **Entries**, newest first (every column, the
   **Evidence** link included, fits the card since #477; the object type is a faint line above each event), then three folded
@@ -514,6 +558,8 @@ the day.
 ## Optional beats (only if ahead of the clock)
 
 ### G9. Accountability records — 1.5 minutes (10-05 beat 3F)
+**11-01 run-through:** LIVE read-only.
+
 The 10-05 beat, with work in progress on both screens (`demo:intake` seeds it; `demo:check` beat
 "3 Incidents and feedback"). The beat FAILs when an item routed to Ada is past its resolution SLA (resolve it, then
 re-run `demo:intake`), and WARNs when open incidents or feedback sit on the Real-Time Fraud Detection Engine, the G3
@@ -535,6 +581,8 @@ re-run `demo:intake`), and WARNs when open incidents or feedback sit on the Real
 - The use case's **Decision records** tab, unchanged.
 
 ### G10. Content trust — Ada — 1.5 minutes (ADR-0193)
+**11-01 run-through:** LIVE read-only.
+
 UI: `apps/web/src/views/admin/governance/ContentTrustPage.tsx`.
 - **URL:** `/ui/admin/content-trust` (navigation: **Content trust**).
 - **Screen:** header **Content trust**, *"Which sources' content may drive a write. Every source starts untrusted."*

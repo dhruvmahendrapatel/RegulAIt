@@ -26,12 +26,11 @@ boot warning and Settings → Enforcement posture shows "database TLS: relaxed".
 step fails at its first query with "The server does not support SSL connections". Docker compose
 sets it for the bundled `db` service itself.
 
-**Whole stack in Docker, no pnpm?** §1.3 does steps 1–5 below (and `demo:intake`, `demo:traffic`,
-`demo:check`, the export key) inside the containers with one `.env` switch. **For the laptop fallback use §1.3 or
-§1.1, not the split below** (deep scan #522, #29): step (1) starts the compose `db`, but that service publishes no
-port to the host, and steps 2-5 run on the host against `localhost:5432` by default, so every step fails at its first
-connection. §1.3 runs the full `demo:prepare` order inside the gateway container (lands with PR D1); §1.1 is the
-native-Postgres path CI uses.
+**Whole stack in Docker, no pnpm?** §1.3 runs the full `demo:prepare` order (both `demo:shadow` phases, the seed,
+`demo:setup`, `demo:intake`, `demo:traffic`, `demo:check`, the export key) inside the gateway container with two
+`.env` lines. **For the laptop fallback use §1.3** (deep scan #522, #29). Do not split the stack (compose `db` plus
+`pnpm` on the host): the compose `db` publishes no port to the host, so every host step fails at its first
+connection. The commands below are for a host with its own Postgres; §1.1 is the native-Postgres path CI uses.
 
 **No docker on the demo box?** Skip to §1.1 and come back. Everything from §3 onwards is
 identical — the only thing you lose is the WORM anchor, and §2 says exactly what that costs.
@@ -167,35 +166,54 @@ were aiming at.
 ### 1.3 Everything in Docker — the whole demo, prepared, in one switch (ADR-0174 amendment)
 
 When the whole stack runs under `docker compose` (no pnpm on the box), one switch gives you the
-**same prepared demo as §1 / `demo:prepare`** (the discovery dataset included once PR D1 lands; see the step list
-below), with nothing else to run but the password step:
+**same prepared demo as §1 / `demo:prepare`**, discovery dataset included, with nothing else to run but the
+password step:
 
-1. In the `.env` next to `docker-compose.yml`, add `REGULAIT_DEMO_LICENSE=1`. Only the exact value
-   `1` does anything (a Windows CRLF line ending is fine).
-2. `docker compose up -d --build --wait` on an empty stack (first time, or after `down -v`). The
-   gateway container then does, in order, and prints each step to `docker compose logs gateway`:
+1. In the `.env` next to `docker-compose.yml`, add **both** lines. Only the exact value `1` turns the switch on (a
+   Windows CRLF line ending is fine). Without the public URL the shadow phase cannot enrol the endpoint device, and
+   `demo:check` ends with 1 FAIL ("Endpoint agent: no enrolled device").
+
+   ```
+   REGULAIT_DEMO_LICENSE=1
+   REGULAIT_PUBLIC_URL=http://localhost:3000
+   ```
+2. From the repo root, on an empty stack (the prep runs only on an empty database):
+
+   ```bash
+   docker compose down -v          # laptop only; never on the dev host (§7.6)
+   docker compose up -d --build
+   docker compose logs -f gateway  # wait for "demo prep: complete in <n>s", then Ctrl+C
+   ```
+
+   The gateway container then does, in order, and prints each step to `docker compose logs gateway`:
    - **export-signing key** for the signed export (beat 3E): made once in the `demo_license_keys`
      volume (`/app/demo-license-keys/export-signing`) and reused; the log shows its path and
      **fingerprint** (what you hand an auditor for `verify-export-bundle.sh --fingerprint`), never
      the key;
    - **demo MCP server** (§1 step 3) in the background inside the container, on 127.0.0.1 and
      127.0.0.2 port 8931, for the life of the container;
-   - **seed** — mints (or keeps) the 30-day ephemeral licence that says "NOT A PRODUCTION
-     DEPLOYMENT"; only its public key is written, to the same volume;
-   - **demo:setup → demo:intake → demo:traffic → demo:check** — packs installed and activated,
-     use cases, hardening, governed traffic and alerts, then the dry run. The log ends the prep
-     with the `demo:check` counts and `demo prep: complete in …s`;
-   - **the full `demo:prepare` order** (lands with PR D1; deep scan #522, #1): on an unprepared database, demo mode
-     runs what `demo:prepare` runs natively, in its order: the identity signing key, `demo:shadow --setup`, `seed
-     --open-assurance-window`, `demo:setup`, `demo:intake`, `demo:shadow`, `demo:traffic`, `demo:check`. Until that
-     PR merges, this path omits both `demo:shadow` phases (no discovery dataset: S1-S3 and G10 are empty) and ends
-     `DEMO PREP FAILED at step demo:check`; use §1.1 on the laptop instead. Expected counts: take them from the latest
-     green `Demo journey` run, not from older text here (run `39940181481`, 2026-10-23: `26 pass, 1 warn, 0 fail`; the
-     WARN is `3 Monitor` listing active alerts). The `19 pass` this page used to quote predates the shadow and G9 beats;
+   - **the full `demo:prepare` order** (deep scan #522, #1), from the same step list `demo:prepare` uses natively
+     (`demo-prepare.js --steps`). The headers appear in this order:
+
+     ```
+     === demo prep: identity-key:init ===
+     === demo prep: demo:shadow (first-admin setup) ===
+     === demo prep: seed ===
+     === demo prep: demo:setup ===
+     === demo prep: demo:intake ===
+     === demo prep: demo:shadow ===
+     === demo prep: demo:traffic ===
+     === demo prep: demo:check ===
+     ```
+
+     The seed runs with `--seed-demo --open-assurance-window` and mints (or keeps) the 30-day ephemeral licence that
+     says "NOT A PRODUCTION DEPLOYMENT"; only its public key is written, to the same volume. `demo:check` should end
+     **26 pass, 1 warn, 0 fail** (the WARN is `3 Monitor`, listing the active alerts; run `39940181481`, 2026-10-23,
+     and the 10-21 rehearsal agree), followed by `demo prep: complete in <n>s`. If a later green `Demo journey` run
+     shows different counts, trust the run;
    - the **gateway**, with `REGULAIT_OFFLINE_CHECKS=1` and the export key set (as §1 step 5).
 
-   `--wait` returns once the gateway answers its health check, i.e. after the prep (about
-   30–60 s on a laptop; the first build takes longer). Check it with
+   The prep takes about a minute on a laptop (the first build takes longer). Check it afterwards with
    `docker compose logs gateway | grep -E "demo prep|pass, "` (PowerShell:
    `docker compose logs gateway | Select-String "demo prep|pass, "`).
 3. Set the password with the bash or PowerShell commands in the README ("Demo with your own
@@ -213,19 +231,26 @@ keeps everything) and the gateway run on every start. To prepare from scratch:
 `docker compose down -v`, then `up` again (this deletes the demo data and the demo password).
 
 **If a step fails** the log says `*** DEMO PREP FAILED at step <name> (exit <n>)` after that
-step's own output, and the gateway **still starts**, so the UI and the log stay reachable. A
-failure in demo:setup or demo:intake is retried on the next start (`docker compose restart
-gateway`); from demo:traffic on, use `down -v` and `up` (laptop only: **never `down -v` on the dev host**, §7.6).
+step's own output, and the gateway **still starts**, so the UI and the log stay reachable. If the log instead says
+`*** DEMO PREP SKIPPED: this database was started but never fully prepared`, the database has users but never
+finished the prep (the start script's reader exits 4). Either way the prep cannot be finished in place, and a
+restart does not repair it: run `docker compose down -v`, then `up` again (laptop only: **never `down -v` on the dev
+host**, §7.6).
 
 **Re-checking later (deep scan #522, #28).** A bare `docker compose exec gateway node apps/gateway/dist/demo-check.js`
-FAILs "3 Evidence" even when the gateway has the export key: `docker-start.sh` exports the key and licence variables
-only inside the gateway's own start script, and `demo:check` tests its own process environment. Read the prep's
-result from the log instead (`docker compose logs gateway | grep -E "demo prep|pass, "`), or re-run the check with the
-same variables the start script sets (pending execution; it reuses the existing keys in the volume and changes
-nothing):
+FAILs "3 Evidence" (25 pass, 1 warn, 1 fail) even when the gateway has the export key: `docker-start.sh` exports the
+key and licence variables only inside the gateway's own start script, and `demo:check` tests its own process
+environment. Read the prep's result from the log instead
+(`docker compose logs gateway | grep -E "pass, .* warn, .* fail"`), or re-run the check with the same variables the
+start script sets. It reuses the keys already in the volume, prints paths and key ids (never a key) and changes
+nothing; the D1 builder ran it against the real start script's paths and got 26/1/0 (#526):
 
 ```bash
-docker compose exec gateway sh -c 'export REGULAIT_DEMO_KEY_DIR=/app/demo-license-keys/export-signing; eval "$(node apps/gateway/dist/demo-export-key.js --env)"; REGULAIT_LICENSE_KEYRING=/app/demo-license-keys REGULAIT_OFFLINE_CHECKS=1 node apps/gateway/dist/demo-check.js'
+docker compose exec gateway sh -c '
+  export REGULAIT_LICENSE_KEYRING=/app/demo-license-keys REGULAIT_OFFLINE_CHECKS=1 \
+         REGULAIT_DEMO_KEY_DIR=/app/demo-license-keys/export-signing
+  eval "$(node apps/gateway/dist/demo-export-key.js --env)"
+  node apps/gateway/dist/demo-check.js'
 ```
 
 Compare the counts with the latest green `Demo journey` run (above), not with a number written earlier.
@@ -240,7 +265,8 @@ without `SEED_DEMO=1` (which now defaults to `0`), every seed runs with `--seed-
 seed refuses a database that has a real admin (anyone outside its own personas).
 
 Verified on 2026-10-05 in real containers (Linux, Docker 29, compose 5.1) with a CRLF `.env`: a
-fresh stack prepared itself (19 pass, 0 warn, 0 fail; eu-ai-act and nist-ai-rmf active; the AI
+fresh stack prepared itself (`demo:check` with no warning or failure, at a count from before the shadow and
+G9 beats; today's expected count is in step 2 above; eu-ai-act and nist-ai-rmf active; the AI
 intake linked its EU AI Act controls; a signed audit bundle verified offline against the logged
 fingerprint; Dana's `read_file` through the demo MCP was allowed, `search_code` denied and
 `write_file` queued for Avery); `restart gateway` and `down` / `up` skipped the prep with the alert
@@ -512,10 +538,10 @@ point there rather than repeating commands nobody has run.
     besides the database it deletes `caddy_data` (the ACME certificates; Let's Encrypt allows 5 duplicate certificates
     a week), `install_secrets` and the object-store anchors. If the database must be emptied, stop `gateway` and `db`
     and remove only the `pgdata` volume. Rehearse remediation on a different real finding, never by re-preparing.
-  - **`staging`** (deep scan #4, owner decision): `demo:prepare --live` creates an audited mock deploy target
-    `staging`, so a remediation workflow may target that environment, and `demo:check --live` asserts it (lands with
-    PR D2). Until then the live database accepts only `production`, from the seed's demo-deploy target, and S3's
-    `staging` is refused with `environment_not_allowed`. Detection is unaffected.
+  - **`staging`** (deep scan #4, owner decision): `demo:prepare --live` creates an audited mock deploy target named
+    `demo-staging` (environment `staging`), so a remediation workflow may target that environment, and
+    `demo:check --live` asserts it with the beat "1 Remediation environment" (PASS: "'staging' is an accepted
+    remediation environment: deploy target demo-staging"). Detection is unaffected.
   - **Never the demo switch on the live box** (`REGULAIT_DEMO_LICENSE=1`). It runs the non-live intake and writes the
     fictional dataset into the live database, which `demo:check --live` then FAILs ("1 Fictional dataset"), and the
     audit is append-only, so it cannot be removed. The export key and licence keyring come from the override in §7.6.
@@ -526,7 +552,7 @@ point there rather than repeating commands nobody has run.
   - **Licence** (deep scan #39). `demo:setup` mints a 30-day demo licence with no grace and keeps any valid one. A LIVE
     database prepared from empty on or after 2026-10-05 holds a licence past 11-03; expiry would block expansion
     actions only. After the demo, re-mint when 7 days or less remain.
-- **Fallback:** the local docker compose stack on the presenting laptop (§1.3, lands with PR D1; or §1.1 natively),
+- **Fallback:** the local docker compose stack on the presenting laptop (§1.3),
   prepared from empty **less than 18 hours before each run** (owner, 2026-10-23: once for 11-01 and again for 11-03),
   including the seeded discovery dataset (ADR-0197 decision 7). High alerts read *SLA due soon* 18 h after they are
   raised and *SLA breached* from 24 h, so a fresher database keeps G5's chips on *on track*, as in the screenshot pack.
@@ -572,7 +598,7 @@ time. Rows marked *once* are done a single time for both. The recipes the rows n
 | Before Sun 10-25, *once* | **Power schedule off** (deep scan #2, owner): the owner applies `power_schedule_enabled = false` in `infra/environments/regulait-dev-app` and confirms that both EventBridge schedules, `regulait-dev-app-start` and `regulait-dev-app-stop`, read **DISABLED** (§7.6). By default the box runs only 08:00-20:00 ET Mon-Fri, so it would be off from Fri 10-30 20:00 to Mon 11-02 08:00. If the plan shows a `user_data` change, the apply stops and starts the box: run it outside rehearsal hours | pending execution — owner |
 | Before Thu 10-29, *once* | **Both hosts on post-#508 main** (deep scan #38, owner): update the dev host and the presenting laptop to `main` after #508 (Postgres and Keycloak pinned by digest), run `docker compose pull` while online, then prepare and check (LIVE: §7.1 once; laptop: a trial `demo:prepare`). Close long-running `psql` sessions on the dev host first: the first boot after an update builds an audit index concurrently and stops with `ConcurrentIndexBlockedError` if it cannot get its locks within 60 s (#43). **No `pull` during the freeze**; hold #521 until after the demo | pending execution — owner |
 | Before Thu 10-29, *once* | **Live gateway environment** (deep scan #6, owner): the export-signing key, its id and `REGULAIT_LICENSE_KEYRING` added to the dev host's `docker-compose.override.yml`, gateway recreated (§7.6). **Never the demo switch on the live box** | pending execution — owner |
-| *Once*, before `DEMO_REAL_ACCOUNTS.md` step 2 | `demo:prepare --live` on the dev host from empty, through `docker compose exec` (§7.1). It creates the `staging` deploy target (lands with PR D2) | pending execution — owner |
+| *Once*, before `DEMO_REAL_ACCOUNTS.md` step 2 | `demo:prepare --live` on the dev host from empty, through `docker compose exec` (§7.1). It creates the mock deploy target `demo-staging` (environment `staging`) | pending execution — owner |
 | Now, then after the freeze dispatch | **Offline deck** (deep scan #20): rebuild it from the `demo-screens` artifact of run `39940181481` (artifact `12497390750`, kept until 11-22) with `node apps/web/e2e/fallback-deck.mjs --pack 2026-11-01 --dark --no-gate`. After the freeze-SHA dispatch below, rebuild it from that run's artifact with `--gate <path to real-gate.txt>` in place of `--no-gate` (31 slides) | pending execution |
 | Thu 10-29, *once* | **Freeze-SHA dispatches** (deep scan #21, owner): dispatch `demo.yml`, `ci.yml` and `ui-enterprise.yml` on `main` at the freeze SHA; record each run id and the SHA in §7.5. The 10-21 rehearsal's gate artifact expires 2026-10-28 15:06Z; the freeze dispatch replaces it | pending execution |
 | T-7d | **Power schedule still off**: both schedules still read **DISABLED** (§7.6) | pending execution — owner |
@@ -582,18 +608,20 @@ time. Rows marked *once* are done a single time for both. The recipes the rows n
 | T-7d | The remediation workflow walked once on a rehearsal database as Ada: start → **Finish planning** → **Submit for sign-off** → Morgan's **Review** and **Approve** in `/ui/inbox` (the item opens in the panel on the right; **Approve** is in its pinned foot) | pending execution |
 | T-7d | Morgan Reyes (security lead) is an active admin, Ada is the only other admin, and Morgan has enrolled her authenticator (after `demo:set-passwords`, at her next sign-in) | pending execution |
 | T-7d (prep) | **Morgan's AI policy** (deep scan #32): sign in as Morgan on **both** stacks and press **Acknowledge** on the AI-policy gate, not **Not now**. "Not now" lasts only for that browser session and leaves a banner on every page, which would show on her Inbox in S3. `demo:check` covers this only for Ada, Dana and Avery | pending execution |
+| T-7d (prep) | **S4 Link stack pairing** (owner, #453, lane D4 #527). Seed data: the credit-memo finding links to the seeded agent `claude-opus` and the vendor `Anthropic · approved`, on FALLBACK and on a LIVE finding with matching SDK evidence; that agent's model card has no sign-off, so G1's **Stack** tab shows **Not signed off**. For a LIVE finding from another provider, use that provider's matching unsigned pair from the governance seed. Check on LIVE that nobody has signed off that model card (agent's model card shows **Not signed off**); repeat at T-24h before each run | pending execution |
+| T-7d | **G1 "Found by discovery"** (lane D4, #527): on the fallback, after S4, the use case's header shows the **Found by discovery** chip, *discovery* opens the Shadow-AI **Findings** tab for Ada, and the finding's row reads *"Registered as <use case>"* | pending execution |
 | T-7d | **G3 ALLOW** rehearsed on the fallback database (§7.5 owner step 1, with `staging`) | pending execution |
 | T-3d | Code freeze held (2026-10-29: only demo-blocker fixes merge, ADR-0197 decision 9); the live instance runs the frozen build. Freeze notes: §7.7 | pending execution |
 | T-24h | **Run now** on every live source (the endpoint agent's only if the device has reported since); each run **succeeded**; choose the rows S2-S4 walk from the real findings on `/ui/admin/shadow-ai` | pending execution |
-| T-24h | On the live database, the chosen finding has **no** remediation workflow yet (S3 creates one, and LIVE allows one workflow per finding, so the 11-03 run needs a different finding from 11-01's). On the fallback, `gitlab:acme-bank-demo/credit-memo-assistant`'s workflow waits on Morgan (`demo:check` "1 Remediation plan" PASS); nobody approved it at rehearsal | pending execution |
-| T-24h | `staging` is accepted on the live instance: `demo:check --live` passes its `staging` assertion (lands with PR D2) | pending execution |
+| T-24h | On the live database, the chosen finding has **no** remediation workflow yet and has **not** been registered as a use case (S3 and S4 each use it up: LIVE allows one workflow per finding, and one finding is one use case, ever; a second registration is refused 409). On 11-01 S3 and S4 run on the fallback, so the LIVE finding is chosen for 11-03. On the fallback, `gitlab:acme-bank-demo/credit-memo-assistant`'s workflow waits on Morgan (`demo:check` "1 Remediation plan" PASS); nobody approved it at rehearsal | pending execution |
+| T-24h | `staging` is accepted on the live instance: `demo:check --live` shows "1 Remediation environment" PASS | pending execution |
 | T-24h | **Re-run `demo:traffic` on LIVE, only that step** (deep scan #8, owner): the monitor counts off-stack serving and trace evaluation over **7 days** and resolves alerts that clear, so traffic made at prepare time no longer holds G3's second BLOCK line. Rehearse the re-run on a copy of the database first (once). Then, on LIVE: `sudo docker compose exec gateway node apps/gateway/dist/demo-traffic.js`, after the T-24h scans | pending execution |
 | T-24h | **Capture `real-gate.txt`** after that traffic re-run (deep scans #5, #8, #11): run the G3 script (§7.6) with `staging` and copy its output to `real-gate.txt` on the presenting laptop. Expect `DENY "Real-Time Fraud Detection Engine" (approved, EU AI Act tier high) → staging` with two `BLOCK open_high_alert` lines. Do **not** acknowledge the alerts on LIVE at this check | pending execution |
 | T-24h | **Signed export on LIVE** (deep scan #6, owner): `GET /v1/exports/signing-key` (signed in as Ada) reports `configured: true`, and one **Download signed bundle** on `/ui/admin/audit` as Ada succeeds | pending execution |
 | T-24h | `demo:check --live` on the live instance (§7.1): 0 fail (no fictional-dataset trace, every real source listed with its last run) | pending execution |
 | T-24h | Screen recording of one real scan captured and played back once | pending execution |
 | T-24h | **Offline deck** opened on the presenting laptop with the network off: 31 slides (30 with `--no-gate`), S1 to G10 in script order | pending execution |
-| T-24h, under 18 h before the start | Fallback stack on the laptop prepared from empty (§7.1, lands with PR D1, or §1.1); `demo:check` 0 fail, counts as in the latest green `Demo journey` run (re-check: §1.3); Ada, Avery and Morgan signed in there too, in a separate browser. Re-prepare it for 11-03: the 11-01 run may approve its waiting workflow | pending execution |
+| T-24h, under 18 h before the start | Fallback stack on the laptop prepared from empty (§1.3, with both `.env` lines); `demo:check` 0 fail, counts as in the latest green `Demo journey` run (re-check: §1.3); Ada, Avery and Morgan signed in there too, in a separate browser. Re-prepare it for 11-03: on 11-01 every state-changing beat runs on it (§7.3 "Between the runs") | pending execution |
 | T-24h | F28: the laptop stack's **running gateway** has `REGULAIT_PUBLIC_URL` set, not only the `demo:prepare` step (the Cloud federation card then does not say the public URL is not configured; CI sets it only on the prepare step, so the screenshot pack shows that line) | pending execution |
 | T-24h | Neither demo budget alert has fired (AWS USD 40 and Azure USD 10, USD 50 in total; each alerts at 80%, USD 32 and USD 8, `docs/deployment/DEMO_REAL_ACCOUNTS.md`); planted usage still within budget (ADR-0197 decision 4) | pending execution |
 | Morning of each run | **Backup out of the window** (deep scan #13, owner): the dev host's backup timer runs `pg_dump` daily at 17:00 UTC, which is 12:00 EST on both days. Run the backup by hand before the window, stop the timer, and start it again after the run (§7.6) | pending execution — owner |
@@ -609,9 +637,33 @@ time. Rows marked *once* are done a single time for both. The recipes the rows n
 | T-1h | **Presenter brief on SLA chips** (deep scan #13): on LIVE, prepared more than a week earlier, every open high and medium alert reads **SLA breached** (the G5 unowned-agent alert included), and the drawer adds that it was escalated to the admins. Say: "the product escalates overdue alerts". Acknowledging an alert does not stop its clock. Do not relax the SLAs, and do not re-prepare LIVE | pending execution |
 | T-10 min | **Sessions** (deep scan #7, owner): in every profile, the fallback browser included, sign in again or bring the window to the front so it is active. Keep the windows tiled and never fully covered, so each stays visible and its poll keeps running | pending execution |
 | T-5 min | **G3 shell** (deep scan #12, owner): reconnect the Session Manager shell (`aws ssm start-session`; the 20-minute idle default would close one opened at T-1h before G3) and check the G3 script is still there | pending execution |
-| Between the runs | **What 11-01 leaves on LIVE.** LIVE is never re-prepared, so the run-through's changes stay for 11-03: S3 uses up its finding, G2 approves its use case, and any alert acknowledged in G3 or resolved in G5 stays that way (a re-detected alert keeps its acknowledged status). An acknowledged G3 alert would turn 11-03's DENY into ALLOW. **Open question for the owner** (raised by lane D5): on 11-01, do the G3 acknowledgement and G5's acknowledge and approve on the fallback stack only, or accept the changed state on 11-03 | open — owner decision |
+| 11-01 run-through | **State-changing beats on FALLBACK only** (owner, 2026-10-23, #453). LIVE is never re-prepared, so anything changed there on 11-01 stays for 11-03 (a re-detected alert keeps its acknowledged status, so an acknowledged G3 alert would turn 11-03's DENY into ALLOW; S3 and S4 each use up their finding, one finding is one use case, ever). On 11-01 these run on the **FALLBACK** laptop stack: G3 acknowledge then ALLOW, G5 resolve, S3 **Start and link**, S4 register. **LIVE read-only**: every other beat, plus G3's DENY gate. The per-beat marks are in DEMO_SCRIPT_2026-11-01 S11 and in "11-01 run-through: where each beat runs" below | decided — owner |
+| Between the runs | **`demo:traffic` for 11-03**: re-run it on LIVE again at T-24h before 11-03 (Mon 11-02), after that day's scans, then capture a fresh `real-gate.txt`, so the monitor's 7-day window still holds G3's second BLOCK line on 11-03. The fallback is prepared again from empty, under 18 h before 11-03 | pending execution |
+| T-24h | **S4 model card still unsigned on LIVE** (owner, #453): the agent chosen for S4's **Link stack** shows **Not signed off** on its model card | pending execution |
 | After 11-03 | **Power schedule back on** (owner): `power_schedule_enabled = true`, plan and apply (`DEMO_TEARDOWN.md` T8). Start the backup timer if it is still stopped | pending execution — post-demo, owner |
 | After | Teardown of the sandbox resources and the Azure deployment, tracked as a follow-up (ADR-0197 consequences): [DEMO_TEARDOWN.md](../deployment/DEMO_TEARDOWN.md) | pending execution — post-demo, owner |
+
+
+**11-01 run-through: where each beat runs** (owner, 2026-10-23, #453). LIVE is prepared once and never re-prepared.
+On 11-01 every step that changes state runs on the FALLBACK laptop stack, so LIVE stays as prepared for 11-03. On
+11-03 every beat runs on LIVE as scripted.
+
+| Beat | 11-01 | Why |
+|---|---|---|
+| Opening, S1, S2 | LIVE read-only | no **Run now**, no federation toggle, no disposition change |
+| S3 Plan remediation, **Start and link**, Morgan's **Approve** | FALLBACK | LIVE allows one workflow per finding |
+| S4 Register as use case | FALLBACK | one finding is one use case, ever (409 on a second) |
+| G1 record and risks, G2 independent review | FALLBACK | they work on S4's new use case; **Add risk** and the approval change state |
+| G3 step 1, DENY | LIVE read-only | the gate only reads and records the decision |
+| G3 steps 2-3, acknowledge then ALLOW | FALLBACK | an acknowledged alert stays acknowledged and would turn 11-03's DENY into ALLOW |
+| G4 trust dashboard | LIVE read-only | |
+| G5 **Evaluate now**, acknowledge, propose, approve, resolve | FALLBACK | a resolved alert would be gone on 11-03 |
+| G6, G7, G8, Close | LIVE read-only | |
+| G9, G10 (optional) | LIVE read-only | change nothing |
+
+Answer to the D5 open question ("Between the runs"): the 11-01 acknowledgements and resolutions are done on the
+fallback only. Re-run `demo:traffic` on LIVE at T-24h before 11-03 (Mon 11-02), after that day's scans, and capture
+`real-gate.txt` again after it.
 
 ### 7.4 If something breaks on the day
 
@@ -647,7 +699,7 @@ record, run `39613721998` for #478 (head `b586d88`, all jobs green), was not on 
 | Step | Where | Job (id) | Result |
 |---|---|---|---|
 | `demo:prepare` on an empty database | `demo-rehearsal`, step "demo:prepare, first run" | `119297961420` | pass: every phase ran, `demo:check` 26 PASS, 1 WARN, 0 FAIL |
-| `demo:gate` on the fresh database | `demo-rehearsal`, "demo:gate after the first run" | `119297961420` | pass: `DENY "Real-Time Fraud Detection Engine" (approved, EU AI Act tier high) → production`, exactly two `BLOCK open_high_alert` lines (the inherited HIGH rating from *Acme Internal AI Platform*; the call served by fast-mock outside the approved stack), `assurance: enforced (mode enforce)`, exit 1 |
+| `demo:gate` on the fresh database | `demo-rehearsal`, "demo:gate after the first run" | `119297961420` | pass: `DENY "Real-Time Fraud Detection Engine" (approved, EU AI Act tier high) → production` (the default environment then; `demo:gate` now defaults to `staging`), exactly two `BLOCK open_high_alert` lines (the inherited HIGH rating from *Acme Internal AI Platform*; the call served by fast-mock outside the approved stack), `assurance: enforced (mode enforce)`, exit 1 |
 | `demo:prepare` again on the **same** database (re-run safety) | `demo-rehearsal`, "demo:prepare, second run" | `119297961420` | pass: exit 0, `demo:check` 26 PASS, 1 WARN, 0 FAIL |
 | `demo:check` on its own after the re-run | `demo-rehearsal`, "demo:check after the second run" | `119297961420` | pass: 26 PASS, 1 WARN (`3 Monitor`, 17 active alerts), 0 FAIL |
 | `demo:gate` after the re-run | `demo-rehearsal`, "demo:gate after the second run" | `119297961420` | pass: the same DENY and the same two BLOCK lines, exit 1 |
@@ -681,8 +733,7 @@ the seed, the dataset or the gate: Actions → `Demo journey` → Run workflow.
    decision, and nothing in this demo is production. CI covers the decision rule only in a
    gateway unit test (`apps/gateway/src/zz-adr0161-deploy-gate.test.ts`, "an open high alert on the use case blocks;
    acknowledging it leaves a warning"), not on the demo database. Pending execution.
-2. **The laptop stack.** All of the above on the docker compose stack on the presenting laptop (§1.3, lands with PR
-   D1), less than 18 hours before each run, with `REGULAIT_PUBLIC_URL` and the identity signing key set (§7.1). CI used a Postgres service and node
+2. **The laptop stack.** All of the above on the docker compose stack on the presenting laptop (§1.3), less than 18 hours before each run, with `REGULAIT_PUBLIC_URL` and the identity signing key set (§7.1). CI used a Postgres service and node
    directly, not compose. Pending execution.
 3. **`demo:gate` on the dev instance host** (G3 live, and the T-24h `real-gate.txt` capture, §7.3), through the G3
    script of §7.6. Pending execution.
@@ -819,9 +870,9 @@ builds an audit index concurrently and stops with `ConcurrentIndexBlockedError` 
 - **Bundle ceiling (deep scan #22).** The web entry chunk is about 20 B under its 137.3 kB JS ceiling and about 6 B
   under its 10.6 kB CSS ceiling, so any freeze fix to the kit, the shell or the global styles fails the size gate.
   Pre-approved: a demo-blocker fix may raise the entry JS or CSS ceiling by **up to 1 kB**, recorded in its PR and in
-  an ADR note. Any other freeze fix stays in lazy chunks.
+  ADR-0198's +1 kB bundle note. Any other freeze fix stays in lazy chunks.
 - **CI time caps (deep scan #25).** A temporary raise of the `spa-journeys` and mock-shard time caps until after
-  11-03, recorded in an ADR (lands with PR D6). Dispatch `ci.yml` on `main` after any runner-image or Playwright cache
+  11-03, recorded in ADR-0198 (lands with PR #529). Dispatch `ci.yml` on `main` after any runner-image or Playwright cache
   key change, and once at the freeze SHA (§7.5).
 - **Dependency updates (deep scans #17, #26).** Dependabot stays on. Every bump PR is held and reviewed by hand; none
   merges in freeze week unless it is a demo blocker. Runners are queueing: expect 1-2 hours from push to green, and do

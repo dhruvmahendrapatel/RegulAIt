@@ -116,7 +116,9 @@ on this pack; the button reads "Add source" and the codes are secondary text, 8e
 **F27** (b697f52, #511), **F32** for G7 (ce2f5cb, #511; G9's ISO date with *UTC* is left as it is for now), **F33**
 and **F36** (ce2f5cb, #511), **F34** (710e184 and 2cba778, #489) and **F35** (8a1f28f, #489). The rest of the list
 above is unchanged. The copy and UX fixes the owner approved for the freeze (F7, F17, F22, F26, F28's doc path, the
-S3 placeholder; #453 comment of 2026-10-23) land with PR D3 and are closed against a later pack.
+S3 placeholder; #453 comment of 2026-10-23) are on `main` since #528 (lane D3; the plan's Blocked line now reads "no
+governed replacement agent is registered for this provider yet, so this step waits until an admin registers one."). This
+pack predates them, so they are closed against a later pack.
 
 The two other owner decisions of 2026-10-21 that this pack checks:
 - **X6b folded sections (#474):** built as approved. The fold header is the card title with a chevron and the count:

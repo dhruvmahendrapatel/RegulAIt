@@ -94,6 +94,6 @@ defaults; respond with a human in the loop; the deploy gate; regulatory intellig
 - **Never call the endpoint agent signed and shipped.** Its packages are built unsigned today; keyless release
   signing is decided (owner decision Q2) and not built.
 - **Never present anything as production.** The AWS account is a non-production sandbox (ADR-0197 decision 2), and
-  the remediation workflow's environment is `staging`, and so is the deploy gate's. Type it before pointing at the
-  field: its placeholder reads *"for example production"* until the copy fixes land (lands with PR D3).
+  the remediation workflow's environment is `staging`, and so is the deploy gate's. The field's placeholder reads
+  *"for example staging"*; type `staging` before pointing at it.
 - **Never name or describe another governance product.**
