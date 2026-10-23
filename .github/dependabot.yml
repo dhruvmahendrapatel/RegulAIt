@@ -87,8 +87,11 @@ updates:
   # dependency-name, so each base image (node, python, docker-cli) arrives as ONE
   # PR touching every directory: the engine image tests require the engines'
   # node base to equal the gateway's, so per-directory PRs could never go green.
-  # Node and python bumps republish the engine images (publish gate, lock PR);
-  # a docker-cli bump also needs packages/sandbox-executor/THIRD_PARTY.md updated.
+  # The ignore rules keep these to digest refreshes within the pinned Node major
+  # and Python minor (the engine requirements are compiled for CPython 3.12);
+  # docker-cli may take minor and patch bumps. Node and python refreshes
+  # republish the engine images (publish gate, lock PR); a docker-cli bump also
+  # needs packages/sandbox-executor/THIRD_PARTY.md updated.
   - package-ecosystem: "docker" # gateway, sandbox-executor, stdio-base, engines
     directories:
       - "/"
@@ -105,16 +108,22 @@ updates:
     open-pull-requests-limit: 3
     commit-message:
       prefix: "chore(docker)"
+    ignore:
+      - dependency-name: "node" # stay on the gateway's Node major; digest refreshes only
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "python" # engine closures are compiled for CPython 3.12
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
     groups:
       base-images:
         group-by: dependency-name
         patterns: ["*"]
 
-  # docker-compose image pins (owner decision 2026-10-23, #453). Covers the
-  # services in docker-compose.yml (caddy, seaweedfs, postgres, keycloak). The
-  # engine image references there are our own images, refreshed by the engine
-  # lock PR, not by Dependabot. Images written as ${VAR:-image@sha256:...}
-  # defaults may not be recognised by the updater; they stay pinned by hand.
+  # docker-compose image pins (owner decision 2026-10-23, #453). seaweedfs and
+  # keycloak are updated through their ${VAR:-image@sha256:...} defaults; postgres
+  # once digest-pinned. caddy's pin sits behind a YAML anchor the updater cannot
+  # rewrite, so it needs the anchor restructured (compose pin PR). The engine
+  # images use a separate digest variable and are refreshed by the engine lock PR,
+  # not here. Majors (e.g. a postgres data-directory upgrade) arrive one per PR.
   - package-ecosystem: "docker-compose"
     directory: "/"
     schedule:
@@ -125,6 +134,8 @@ updates:
     open-pull-requests-limit: 2
     commit-message:
       prefix: "chore(docker)"
+    ignore:
+      - dependency-name: "regulait/*" # our own locally built :local images
     groups:
       compose-images:
-        patterns: ["*"]
+        update-types: ["minor", "patch"]
