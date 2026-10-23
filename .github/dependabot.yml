@@ -83,89 +83,29 @@ updates:
         update-types: ["minor", "patch"]
 
   # Base-image digests (owner decision 2026-10-23, #453). Every FROM is pinned by
-  # digest; these entries refresh the digests so OS-level fixes arrive weekly.
-  # Engine digest bumps republish the engine images and may need the engine
-  # image tests updated in the same PR.
-  - package-ecosystem: "docker" # gateway image
-    directory: "/"
+  # digest. One entry across all Dockerfile directories with group-by
+  # dependency-name, so each base image (node, python, docker-cli) arrives as ONE
+  # PR touching every directory: the engine image tests require the engines'
+  # node base to equal the gateway's, so per-directory PRs could never go green.
+  # Node and python bumps republish the engine images (publish gate, lock PR);
+  # a docker-cli bump also needs packages/sandbox-executor/THIRD_PARTY.md updated.
+  - package-ecosystem: "docker" # gateway, sandbox-executor, stdio-base, engines
+    directories:
+      - "/"
+      - "/packages/sandbox-executor"
+      - "/packages/sandbox-executor/stdio-base"
+      - "/engines/garak"
+      - "/engines/promptfoo"
+      - "/engines/modelscan"
     schedule:
       interval: "weekly"
       day: "monday"
       time: "06:00"
       timezone: "Etc/UTC"
-    open-pull-requests-limit: 2
+    open-pull-requests-limit: 3
     commit-message:
       prefix: "chore(docker)"
     groups:
-      gateway-base:
-        patterns: ["*"]
-
-  - package-ecosystem: "docker" # sandbox-executor image
-    directory: "/packages/sandbox-executor"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "06:00"
-      timezone: "Etc/UTC"
-    open-pull-requests-limit: 1
-    commit-message:
-      prefix: "chore(docker)"
-    groups:
-      sandbox-executor-base:
-        patterns: ["*"]
-
-  - package-ecosystem: "docker" # stdio-base image
-    directory: "/packages/sandbox-executor/stdio-base"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "06:00"
-      timezone: "Etc/UTC"
-    open-pull-requests-limit: 1
-    commit-message:
-      prefix: "chore(docker)"
-    groups:
-      stdio-base-base:
-        patterns: ["*"]
-
-  - package-ecosystem: "docker" # garak image
-    directory: "/engines/garak"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "06:00"
-      timezone: "Etc/UTC"
-    open-pull-requests-limit: 1
-    commit-message:
-      prefix: "chore(docker)"
-    groups:
-      garak-base:
-        patterns: ["*"]
-
-  - package-ecosystem: "docker" # promptfoo image
-    directory: "/engines/promptfoo"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "06:00"
-      timezone: "Etc/UTC"
-    open-pull-requests-limit: 1
-    commit-message:
-      prefix: "chore(docker)"
-    groups:
-      promptfoo-base:
-        patterns: ["*"]
-
-  - package-ecosystem: "docker" # modelscan image
-    directory: "/engines/modelscan"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "06:00"
-      timezone: "Etc/UTC"
-    open-pull-requests-limit: 1
-    commit-message:
-      prefix: "chore(docker)"
-    groups:
-      modelscan-base:
+      base-images:
+        group-by: dependency-name
         patterns: ["*"]
