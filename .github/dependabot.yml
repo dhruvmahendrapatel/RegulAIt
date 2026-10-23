@@ -4,6 +4,7 @@
 # PR per entry; major bumps arrive one per PR. Engine manifests are image inputs:
 # merging a bump there republishes the engine images (publish gate, lock PR).
 # Not covered on purpose: infra/demo-fixtures/** (seeded demo data) and spikes/**.
+# The two pip entries open security-fix PRs only (see below).
 version: 2
 updates:
   - package-ecosystem: "npm" # pnpm workspace (pnpm-lock.yaml)
@@ -34,6 +35,11 @@ updates:
       promptfoo-minor-patch:
         update-types: ["minor", "patch"]
 
+  # pip entries: security-fix PRs only (owner decision 2026-10-23, #453). The
+  # requirements are a uv-compiled, one-hash-per-pin, --no-deps closure that
+  # Dependabot's pip updater cannot regenerate, so version-update PRs would fail
+  # the image tests. A limit of 0 turns off version updates; security PRs still
+  # open and need a manual `uv pip compile` re-run (see the file header).
   - package-ecosystem: "pip" # garak engine image (hash-pinned requirements)
     directory: "/engines/garak"
     schedule:
@@ -41,7 +47,7 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "Etc/UTC"
-    open-pull-requests-limit: 2
+    open-pull-requests-limit: 0
     commit-message:
       prefix: "chore(engines)"
     groups:
@@ -55,7 +61,7 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "Etc/UTC"
-    open-pull-requests-limit: 2
+    open-pull-requests-limit: 0
     commit-message:
       prefix: "chore(engines)"
     groups:
@@ -75,3 +81,91 @@ updates:
     groups:
       actions-minor-patch:
         update-types: ["minor", "patch"]
+
+  # Base-image digests (owner decision 2026-10-23, #453). Every FROM is pinned by
+  # digest; these entries refresh the digests so OS-level fixes arrive weekly.
+  # Engine digest bumps republish the engine images and may need the engine
+  # image tests updated in the same PR.
+  - package-ecosystem: "docker" # gateway image
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: "chore(docker)"
+    groups:
+      gateway-base:
+        patterns: ["*"]
+
+  - package-ecosystem: "docker" # sandbox-executor image
+    directory: "/packages/sandbox-executor"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 1
+    commit-message:
+      prefix: "chore(docker)"
+    groups:
+      sandbox-executor-base:
+        patterns: ["*"]
+
+  - package-ecosystem: "docker" # stdio-base image
+    directory: "/packages/sandbox-executor/stdio-base"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 1
+    commit-message:
+      prefix: "chore(docker)"
+    groups:
+      stdio-base-base:
+        patterns: ["*"]
+
+  - package-ecosystem: "docker" # garak image
+    directory: "/engines/garak"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 1
+    commit-message:
+      prefix: "chore(docker)"
+    groups:
+      garak-base:
+        patterns: ["*"]
+
+  - package-ecosystem: "docker" # promptfoo image
+    directory: "/engines/promptfoo"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 1
+    commit-message:
+      prefix: "chore(docker)"
+    groups:
+      promptfoo-base:
+        patterns: ["*"]
+
+  - package-ecosystem: "docker" # modelscan image
+    directory: "/engines/modelscan"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 1
+    commit-message:
+      prefix: "chore(docker)"
+    groups:
+      modelscan-base:
+        patterns: ["*"]
