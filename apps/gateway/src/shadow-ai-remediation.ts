@@ -152,9 +152,14 @@ export async function allowedRemediationEnvironments(db: Db): Promise<string[]> 
       .from(workflowAssignmentRules)
       .where(isNotNull(workflowAssignmentRules.environment)),
   ]);
+  return remediationEnvironmentsFrom([...targets, ...rules].map((r) => r.e));
+}
+
+/** the rule `allowedRemediationEnvironments` applies to the stated environments; `demo:check --live` reads the same */
+export function remediationEnvironmentsFrom(environments: Array<string | null | undefined>): string[] {
   const all = new Set<string>();
-  for (const r of [...targets, ...rules]) {
-    if (r.e && r.e !== SHADOW_AI_REMEDIATION_ENVIRONMENT_UNSTATED && REMEDIATION_ENVIRONMENT_PATTERN.test(r.e)) all.add(r.e);
+  for (const e of environments) {
+    if (e && e !== SHADOW_AI_REMEDIATION_ENVIRONMENT_UNSTATED && REMEDIATION_ENVIRONMENT_PATTERN.test(e)) all.add(e);
   }
   return [...all].sort();
 }

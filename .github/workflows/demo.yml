@@ -366,7 +366,7 @@ jobs:
           echo "$fails"
           test "$(echo "$fails" | wc -l)" -eq 1 && echo "$fails" | grep -q "1 Real discovery sources" \
             || { echo "::error::expected exactly one FAIL, '1 Real discovery sources'"; exit 1; }
-          for beat in "1 Fictional dataset" "1 Signature catalogue" "1 Remediation routing"; do
+          for beat in "1 Fictional dataset" "1 Signature catalogue" "1 Remediation routing" "1 Remediation environment"; do
             grep -qE "^PASS  $beat" "$RUNNER_TEMP/live-unsourced.log" || { echo "::error::$beat did not PASS"; exit 1; }
           done
 
@@ -398,6 +398,19 @@ jobs:
           pnpm demo:prepare --live | tee "$RUNNER_TEMP/live-sourced.log"
           grep -qE "^PASS  1 Real discovery sources .*endpoint_agent 'CI endpoint agent' enabled, never run" "$RUNNER_TEMP/live-sourced.log"
           grep -qE "^PASS  1 Fictional dataset" "$RUNNER_TEMP/live-sourced.log"
+          grep -qE "^PASS  1 Remediation environment 'staging' is an accepted remediation environment: deploy target 'demo-staging' \(mock\)" "$RUNNER_TEMP/live-sourced.log"
+          # re-run safety: the live step again on the same database does not duplicate the staging target
+          pnpm demo:intake --live | grep -E "already present|FAILED" | tee "$RUNNER_TEMP/live-rerun.log"
+          grep -q "deploy target 'demo-staging' (mock, staging) already present" "$RUNNER_TEMP/live-rerun.log"
+
+      - name: The live staging target is one audited mock row
+        run: |
+          for db in regulait_live regulait_live_sourced; do
+            n=$(psql "$PG/$db" -tA -v ON_ERROR_STOP=1 -c "select count(*) from deploy_targets where name = 'demo-staging' and provider = 'mock' and environment = 'staging'")
+            a=$(psql "$PG/$db" -tA -v ON_ERROR_STOP=1 -c "select count(*) from audit_log a join deploy_targets t on t.id = a.object_id where t.name = 'demo-staging' and a.rule_id = 'deploy-target-created'")
+            echo "$db: $n staging target(s), $a create audit row(s)"
+            test "$n" -eq 1 && test "$a" -eq 1
+          done
 
       - name: The fictional dataset is absent from both databases (straight from the tables)
         run: |
@@ -496,7 +509,7 @@ jobs:
       - name: demo:gate after the first run (expected DENY)
         run: |
           set +e
-          pnpm -s --filter @regulait/gateway demo:gate -- "Real-Time Fraud Detection Engine" production ci-rehearsal-1 > "$RUNNER_TEMP/gate-1.txt" 2>&1
+          pnpm -s --filter @regulait/gateway demo:gate -- "Real-Time Fraud Detection Engine" staging ci-rehearsal-1 > "$RUNNER_TEMP/gate-1.txt" 2>&1
           code=$?
           set -e
           cat "$RUNNER_TEMP/gate-1.txt"
@@ -521,7 +534,7 @@ jobs:
       - name: demo:gate after the second run (expected DENY)
         run: |
           set +e
-          pnpm -s --filter @regulait/gateway demo:gate -- "Real-Time Fraud Detection Engine" production ci-rehearsal-2 > "$RUNNER_TEMP/gate-2.txt" 2>&1
+          pnpm -s --filter @regulait/gateway demo:gate -- "Real-Time Fraud Detection Engine" staging ci-rehearsal-2 > "$RUNNER_TEMP/gate-2.txt" 2>&1
           code=$?
           set -e
           cat "$RUNNER_TEMP/gate-2.txt"
