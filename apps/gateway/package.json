@@ -72,25 +72,25 @@
     "ajv-formats": "3.0.1",
     "asn1js": "3.0.10",
     "diff": "9.0.0",
-    "fastify": "^5.12.6",
-    "jose": "6.2.12",
+    "fastify": "^5.12.7",
+    "jose": "6.2.13",
     "oauth4webapi": "3.8.8",
     "oidc-provider": "9.12.2",
     "openid-client": "^6.8.4",
     "otpauth": "9.5.2",
     "pino": "10.4.0",
-    "pkijs": "3.4.1",
-    "re2js": "2.8.6",
+    "pkijs": "3.4.2",
+    "re2js": "2.8.8",
     "standardwebhooks": "1.1.1",
-    "zod": "4.6.5"
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@regulait/engine-garak": "workspace:*",
     "@regulait/engine-modelscan": "workspace:*",
     "@regulait/engine-promptfoo": "workspace:*",
-    "@types/node": "26.1.1",
+    "@types/node": "26.6.5",
     "simple-statistics": "7.12.1",
     "vitest": "^4.1.11",
-    "xml-crypto": "6.1.2"
+    "xml-crypto": "6.4.0"
   }
 }
