@@ -88,12 +88,12 @@ describe("ADR-0190 I5 follow-up: engines in compose", () => {
   });
 
   it("every Caddy service names the one digest-pinned reference; the bundle and the installer name the same", () => {
-    const m = compose.match(/\nx-caddy-image: &caddy-image (\S+)\n/);
+    const m = compose.match(/\nx-caddy: &caddy\n {2}image: (\S+)\n/);
     expect(m).not.toBeNull();
     const ref = m![1]!;
     expect(ref).toMatch(CADDY_RE);
-    for (const svc of ["caddy", "executor-front", "executor-front-ca"]) expect(block(svc), svc).toMatch(/\n {4}image: \*caddy-image\n/);
-    expect(compose).not.toMatch(/image: caddy:/);
+    for (const svc of ["caddy", "executor-front", "executor-front-ca"]) expect(block(svc), svc).toMatch(/\n {4}<<: \*caddy\n/);
+    expect(compose).not.toMatch(/\n {4}image: caddy:/);
     const tag = ref.slice(0, ref.indexOf("@"));
     const bundle = readFileSync(path.join(root, "scripts/build-image-bundle.sh"), "utf8");
     const install = readFileSync(path.join(root, "scripts/install.sh"), "utf8");
@@ -110,6 +110,18 @@ describe("ADR-0190 I5 follow-up: engines in compose", () => {
     expect(new Set(ids(install)).size).toBe(5);
     for (const id of ids(install)!) expect(id).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(ids(install)).toContain(ref.slice(ref.indexOf("@") + 1));
+  });
+
+  it("both Postgres services name the one digest-pinned postgres:16 reference; Keycloak's default is digest-pinned", () => {
+    const m = compose.match(/\nx-postgres: &postgres\n {2}image: (\S+)\n/);
+    expect(m).not.toBeNull();
+    expect(m![1]).toMatch(/^postgres:16@sha256:[0-9a-f]{64}$/);
+    for (const svc of ["db", "keycloak-db-init"]) expect(block(svc), svc).toMatch(/\n {4}<<: \*postgres\n/);
+    expect(compose).not.toMatch(/\n {4}image: postgres:/);
+    expect(block("keycloak")).toMatch(/\n {4}image: \$\{REGULAIT_KC_IMAGE:-keycloak\/keycloak:26\.8\.0@sha256:[0-9a-f]{64}\}\n/);
+    // air-gapped runs the bundle's plain tag (a digest reference does not survive docker save/load)
+    const install = readFileSync(path.join(root, "scripts/install.sh"), "utf8");
+    expect(install).toMatch(/\n {2}db:\n {4}image: postgres:16\n {4}pull_policy: never\n/);
   });
 
   it("air-gapped: the bundle saves the digest and the plain tag; the install runs the tag and checks its image id", () => {

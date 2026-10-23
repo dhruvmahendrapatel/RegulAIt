@@ -365,7 +365,7 @@ volume_exists() {
   docker volume inspect "${PROJECT}_$1" >/dev/null 2>&1
 }
 
-# ADR-0190 I5 follow-up: the Caddy image. ONLINE, compose runs docker-compose.yml's `x-caddy-image`, this digest
+# ADR-0190 I5 follow-up: the Caddy image. ONLINE, compose runs docker-compose.yml's `x-caddy`, this digest
 # reference. AIR-GAPPED, a digest reference does not survive `docker save`/`docker load` on Docker's classic image
 # store (the image arrives untagged, with no repository digest), so the bundle also carries the plain tag, the
 # air-gapped override runs the tag, and the loaded image's id must be one of CADDY_IMAGE_IDS. The ids, read from the
@@ -1041,7 +1041,9 @@ YML
     # AIR-GAPPED: run the pre-seeded image, never pull, never build.
     image: $GATEWAY_IMAGE
     pull_policy: never
+  # the bundle's plain tag: docker-compose.yml's digest reference does not survive docker save/load
   db:
+    image: postgres:16
     pull_policy: never
   caddy:
     image: $CADDY_TAG
