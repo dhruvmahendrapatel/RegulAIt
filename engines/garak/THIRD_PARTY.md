@@ -34,7 +34,8 @@ build log.
   allows it: datasets 5.0.1 also lifts the fsspec cap to `<=2026.6.0`, which clears the fsspec advisory too. (cleared 2026-10-21 by the garak 0.17.1 upgrade; see that section)
 - nltk 3.10.3, GHSA-8mgp-746c-j5xp (high, model-artifact APIs bypass the path checks): no patched release exists
   (3.10.3 is both the latest release and the last affected one), so the image gate does not count it. garak requires
-  `nltk>=3.10.3`, so a fixed release can be taken by bumping the pin and its hash here, with no change to garak.
+  `nltk>=3.10.3`, so a fixed release can be taken by bumping the pin and its hash here, with no change to garak. (cleared 2026-10-22
+  by nltk 3.10.4; see that section)
 Re-check all three at each garak or nltk release.
 
 **Re-checked 2026-10-11 for Dependabot PR #347 (datasets 3.6.0 to 5.0.1, fsspec 2025.3.0 to 2026.6.0), which is
@@ -139,6 +140,32 @@ and the two garak wheels on 2026-10-21:
   passed on all nine assets, the NLI model included. The verify ran in a fresh network namespace with only loopback
   up, the tree read-only and every offline switch set. The cache layout is unchanged, so `preseed-hf.py` and
   `prune-data.py` needed no change. (It was first proven the same way on hub 2.2.0.)
+
+**Bumped 2026-10-22: nltk 3.10.3 to 3.10.4 (released 2026-10-21), the first release past GHSA-8mgp-746c-j5xp
+(CVE-2026-81726, high; OSV `last_affected` 3.10.3). This clears Dependabot alert #83.** Only this pin changed:
+`uv pip compile --upgrade-package nltk` (uv 0.11.32) over `requirements.txt` with the inputs in its header moves no
+other pin, and the closure stays 178 distributions. Read from PyPI, OSV and the two nltk wheels on 2026-10-22:
+- **Hashes:** the py3-none-any wheel is sha256 `769ba5413f265b7d3e87cd163cc28efa01e29eeef8bb6080bc907949d9fcfb51`
+  (the pin) and the sdist `44679f4e9220abfd496d2c8cdb22f8425ccbe557604f9aa5cacb1c44003dabc1` (not installed). Both
+  match PyPI's JSON API and the downloaded files. OSV reports no advisory for 3.10.4.
+- **Dependencies and licence:** `requires-python >=3.10` and the runtime requirements (`defusedxml`, `click`,
+  `joblib`, `regex>=2021.8.3`, `tqdm`) are unchanged, and garak 0.17.1 declares `nltk>=3.10.3`. METADATA still says
+  `License: Apache License, Version 2.0` with the OSI Apache classifier, and `LICENSE.txt` is byte-identical, so the
+  licence gate's reading is unchanged. The wheel adds `csvsec.py`, `termsec.py` and an extended stopwords reader, and
+  no longer ships nltk's unit tests.
+- **garak's nltk use still works.** 3.10.4 widens nltk's path sandbox (`pathsec`, enforced by default as in 3.10.3)
+  and refuses proxied downloads unless `NLTK_ALLOW_PROXIED_URLOPEN` is set. garak 0.17.1 (wheel `cef78a79…cfda8`,
+  grepped) loads no pickle through nltk and passes no model path: at import, `garak/resources/api/nltk.py` (imported
+  by `langproviders/base.py`, which every run loads through `services/langservice.py`) appends
+  `$XDG_CACHE_HOME/garak/data/nltk_data` to `nltk.data.path`, which makes it an allowed root, and calls
+  `Downloader().default_download_dir()`. The call sites are `pos_tag` (`sata.MLM`, declared not run:
+  `missing_preseed`), `word_tokenize` and the `stopwords` and `wordnet` corpora (`resources/autodan/genetic.py`, only
+  for `dan.AutoDAN`, declared not run), `jaro_winkler_similarity` (`propile`, declared not run), and
+  `data.find("corpora/words")` with `nltk.download` (the language provider's English check). The image ships no
+  nltk data. That pattern was run on CPython 3.12 against both 3.10.3 and 3.10.4, installed from these hashes: the
+  import-time setup, `data.find` with no data (`LookupError` in both) and `jaro_winkler_similarity` match, and with
+  the five data packages unpacked into the cache root, `words`, `stopwords`, `wordnet`, `pos_tag` (the JSON
+  `averaged_perceptron_tagger_eng`) and `word_tokenize` (`punkt_tab`) return identical results.
 
 | Component | Version | Licence | Used for, and why |
 |---|---|---|---|
