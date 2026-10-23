@@ -79,7 +79,7 @@ export function RemediationsCard() {
           empty={<span className={v.faint}>{status ? `No remediations with status “${statusWords(status).toLowerCase()}”.` : "No remediation has been proposed from any alert."}</span>}
           columns={[
             { key: "title", header: "Remediation", render: (r) => <span>{r.title}</span> },
-            { key: "kind", header: "Kind", render: (r) => <code>{r.kind}</code> },
+            { key: "kind", header: "Kind", render: (r) => <span title={r.kind}>{humanize(r.kind)}</span> },
             { key: "status", header: "Status", render: (r) => <Badge tone={remediationTone(r.status)}>{statusWords(r.status)}</Badge> },
             { key: "proposed", header: "Proposed", render: (r) => `${who(r.proposedByUserId)} · ${ago(r.createdAt)}`, sort: (r) => r.createdAt },
             {

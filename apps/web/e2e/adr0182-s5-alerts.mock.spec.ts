@@ -197,6 +197,21 @@ test.describe("ADR-0182 S5: governance alerts — owner, SLA, ticket and the sug
     await expectAxeClean(page, "alerts with a suggested halt");
   });
 
+  test("D3 (F26): due times use the product's date format, in the list chip and the drawer", async ({ page }) => {
+    await mockApi(page);
+    await page.goto("/ui/admin/governance/alerts");
+    // the same en-GB form as every other date (fmtDateTime), never the UTC string ("Sat, 24 Oct 2026 04:07:26 GMT")
+    const appDate = /^Due \d{1,2} [A-Z][a-z]{2} \d{4}, \d{2}:\d{2}$/;
+    const halt = page.getByRole("button", { name: /Claims errors: error rate/ });
+    const chip = halt.getByText("SLA due soon");
+    await expect(chip).toHaveAttribute("title", appDate);
+    await halt.click();
+    const ownership = page.getByTestId("alert-detail").getByTestId("alert-ownership");
+    await expect(ownership).toContainText(/Due \d{1,2} [A-Z][a-z]{2} \d{4}, \d{2}:\d{2}/);
+    await expect(ownership).not.toContainText("GMT");
+    await expect(ownership.getByText("SLA due soon")).toHaveAttribute("title", appDate);
+  });
+
   test("an admin reassigns the owner and files one work item", async ({ page }) => {
     const cap = await mockApi(page);
     await page.goto("/ui/admin/governance/alerts");

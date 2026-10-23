@@ -52,6 +52,53 @@ export function remediationReference(findingId: string): string {
   return `shadow-AI finding ${findingId}`;
 }
 
+/** one step of a finding's remediation plan, as the plan screen shows it */
+export type RemediationPlanStep = { step: string; why: string; blocked?: string };
+
+/**
+ * D3 (F7): the plan's steps in product language. The screen prints every string here as it stands, so none of them
+ * names a decision record, a pillar, a table or a column.
+ */
+export function remediationPlanSteps(
+  finding: { subject: string; severity: string },
+  agent: { name: string } | null,
+): RemediationPlanStep[] {
+  const steps: RemediationPlanStep[] = [];
+  if (finding.severity === "critical") {
+    steps.push({
+      step: "rotate the exposed credential",
+      why: "a known AI service key found in source code is a live credential exposure as well as a sign of ungoverned use, so it is fixed first, separately from the routing work",
+    });
+  }
+  steps.push({
+    step: "register the endpoint in the model catalogue",
+    why: "the gateway can route this traffic only once the provider has a governed entry and its host is on the outbound allow-list",
+  });
+  steps.push({
+    step: agent
+      ? `route ${finding.subject} through the governed agent '${agent.name}' using the gateway's provider-compatible endpoints`
+      : `route ${finding.subject} through the gateway's provider-compatible endpoints`,
+    why: "the gateway's endpoints accept the provider's own request format, so the application changes its base URL, not its code",
+    ...(agent
+      ? {}
+      : { blocked: "no governed replacement is registered for this provider. Set a governed replacement agent on the provider's Detection catalogue entry." }),
+  });
+  steps.push({
+    step: "grant the owner a per-user entitlement for that agent",
+    why: "routing the traffic is not enough on its own: the owner's per-user entitlement is what governs it",
+  });
+  steps.push({
+    step: "confirm the next call appears in the audit log and the usage ledger",
+    why: "the fix is confirmed by the recorded call itself, not by someone marking it fixed",
+  });
+  return steps;
+}
+
+/** D3 (F7): the plan's closing note, shown under the steps */
+export const REMEDIATION_PLAN_NOTE =
+  "This plan does not start a workflow by itself. It prepares the request for the standard workflow start, so " +
+  "workflow assignment rules and compliance requirements still apply, and a retired workflow template is never used.";
+
 /** the strict default: intake → forced plan-only → the remediation plan as an artifact → a sign-off by an admin
  * other than the initiator (one is enough) */
 export function shadowAiRemediationDefinition(): WorkflowDefinition {

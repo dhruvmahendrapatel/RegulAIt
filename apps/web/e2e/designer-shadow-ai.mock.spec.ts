@@ -242,6 +242,16 @@ test("Discovery sources: how it works, labelled figures, aligned row actions and
   await expect(sourcesRegion.locator("tbody tr", { hasText: "Azure demo subscription" }).getByRole("button", { name: "Enable" })).toBeVisible();
 });
 
+test("D3 (#36, #46): the federation card says what turning it on does, in plain words", async ({ page }) => {
+  await page.goto("/ui/admin/shadow-ai/discovery-sources");
+  const fed = cardOf(page, "Cloud federation");
+  await expect(fed.getByTestId("federation-status")).toContainText("Turning it on lets federated cloud sources run, and asks you to confirm it's you.");
+  await expect(fed.getByTestId("federation-no-public-url")).toContainText("as described in the cloud discovery deployment guide");
+  await expect(fed).toContainText("each AWS source assumes your role directly with a short-lived token from this issuer");
+  await expect(fed).not.toContainText("docs/deployment/");
+  await expect(fed).not.toContainText("AssumeRoleWithWebIdentity");
+});
+
 test("X6b: a contained section folds from its header, keeps its count and worst status, and is remembered", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 520 });
   await page.goto("/ui/admin/shadow-ai");

@@ -28,6 +28,10 @@ import { DecisionLedgerCard, PmLinksCard } from "../pm/PmAndDecisions";
 import v from "../views.module.css";
 import s from "./workflows.module.css";
 
+/** an artifact's output id in words mid-sentence: `shadow_ai_remediation_plan` → "shadow AI remediation plan" (D3 #37) */
+const artifactWords = (output: string | undefined) =>
+  output ? humanize(output).replace(/^[A-Z](?=[a-z])/, (c) => c.toLowerCase()) : "artifact";
+
 export default function WorkflowDetailPage() {
   const { instanceId } = useParams<{ instanceId: string }>();
   const { toast } = useToast();
@@ -206,7 +210,7 @@ export default function WorkflowDetailPage() {
         )}
 
         {inst.status === "blocked_on_artifact" && current && (
-          <Card title={`Submit ${current.output ?? "artifact"}`}>
+          <Card title={`Submit ${artifactWords(current.output)}`}>
             <textarea
               className={v.grow}
               style={{

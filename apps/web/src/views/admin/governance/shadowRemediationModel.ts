@@ -110,7 +110,7 @@ export function startInstanceBody(plan: RemediationPlan, form: StartForm): { ok:
   if (!description) return { ok: false, problem: "Describe the change the workflow is for." };
   const environment = form.environment.trim();
   if (!environment || environment === ENVIRONMENT_UNSTATED) {
-    return { ok: false, problem: "Name the environment the usage runs in (for example production or staging)." };
+    return { ok: false, problem: "Name the environment the usage runs in (for example staging)." };
   }
   const planned = plan.workflowRequest.body.change;
   const targetSystem = (planned.targetSystem ?? plan.subject).trim().slice(0, 200);
@@ -146,3 +146,12 @@ export const SHADOW_REMEDIATION_REFUSALS: RefusalSentences = {
     "This finding is already linked to a remediation workflow. A new one can replace it only once that workflow is denied, aborted or rolled back.",
   instance_already_linked: "That workflow is already linked to another finding.",
 };
+
+/** F22: how the "linked" status line is brought into view after Start and link. `nearest` moves the drawer only as far
+ * as needed; under reduced motion it jumps rather than animates */
+export function statusScrollOptions(reducedMotion: boolean): ScrollIntoViewOptions {
+  return { block: "nearest", behavior: reducedMotion ? "auto" : "smooth" };
+}
+
+export const prefersReducedMotion = (): boolean =>
+  typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;

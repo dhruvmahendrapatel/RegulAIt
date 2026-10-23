@@ -155,8 +155,12 @@ async function mockApi(page: Page, opts: { noWorkflowMatch?: boolean; failLinkOn
       return json(route, {
         findingId: FINDING, subject: "acme/billing", provider: "example-provider", severity: "high", replacementAgent: null,
         steps: [
-          { step: "register the endpoint in the model catalogue", why: "a governed provider entry makes the traffic routable" },
-          { step: "route acme/billing through the compat surface (ADR-0020)", why: "a base URL change", blocked: "no governed replacement is registered for this provider" },
+          { step: "register the endpoint in the model catalogue", why: "the gateway can route this traffic only once the provider has a governed entry and its host is on the outbound allow-list" },
+          {
+            step: "route acme/billing through the gateway's provider-compatible endpoints",
+            why: "the gateway's endpoints accept the provider's own request format, so the application changes its base URL, not its code",
+            blocked: "no governed replacement is registered for this provider. Set a governed replacement agent on the provider's Detection catalogue entry.",
+          },
         ],
         workflowRequest: {
           route: "POST /v1/workflows/instances",
@@ -180,7 +184,9 @@ async function mockApi(page: Page, opts: { noWorkflowMatch?: boolean; failLinkOn
             }
           : { changeType: "shadow-ai-remediation", ruleConfigured: true, defaultTemplate: { name: "shadow-ai-remediation", state: "active" } },
         pendingLink: startedNotLinked ? { instanceId: startedNotLinked, startedAt: ISO } : null,
-        note: "This module does not start workflows.",
+        note:
+          "This plan does not start a workflow by itself. It prepares the request for the standard workflow start, so " +
+          "workflow assignment rules and compliance requirements still apply, and a retired workflow template is never used.",
       });
     }
     if (p === "/v1/workflows/instances" && method === "POST") {
@@ -310,6 +316,9 @@ test.describe("U2: governance records", () => {
     const c = card(page, "Remediation proposals — all alerts");
     await expect(c).toContainText("Halt Claims bot");
     await expect(c).toContainText("Halt Intake bot");
+    // D3 (F26): the kind reads as words, not the raw code
+    await expect(c.getByRole("row", { name: /Halt Claims bot/ })).toContainText("Halt agent");
+    await expect(c).not.toContainText("halt_agent");
     await c.getByLabel("Status").selectOption("applied");
     await expect(c).not.toContainText("Halt Claims bot");
     expect(calls.some((x) => x.path === "/v1/governance/remediations")).toBe(true);
@@ -387,6 +396,28 @@ test.describe("U2: governance records", () => {
     ]);
     await expect(plan.getByRole("status")).toContainText(INSTANCE);
     await expectAxeClean(page, "shadow-AI remediation plan", "[data-testid='shadow-remediation']");
+  });
+
+  test("D3: the plan reads in product language, suggests staging, and brings the linked status into view", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 520 });
+    await mockApi(page);
+    await page.goto("/ui/admin/shadow-ai");
+    await page.getByRole("button", { name: "Plan remediation for acme/billing" }).click();
+    const plan = page.getByTestId("shadow-remediation");
+    await expect(plan).toContainText("Set a governed replacement agent on the provider's Detection catalogue entry.");
+    await expect(plan).toContainText("This plan does not start a workflow by itself.");
+    for (const internal of [/ADR-\d/, /pillar \d/, /replacementAgentId/, /catalogue row/, /compat surface/, /\bONE\b/]) {
+      await expect(plan).not.toContainText(internal);
+    }
+    // #33: the example environment is staging
+    await expect(plan.getByLabel("Environment", { exact: true })).toHaveAttribute("placeholder", "for example staging");
+    // F22: after Start and link the status line is scrolled into view, not left below the form
+    await plan.getByLabel("Environment", { exact: true }).fill("staging");
+    await plan.getByRole("button", { name: "Start remediation workflow…" }).click();
+    await page.getByRole("dialog", { name: "Start a remediation workflow?" }).getByRole("button", { name: "Start and link" }).click();
+    const status = plan.getByTestId("shadow-linked-status");
+    await expect(status).toContainText(INSTANCE);
+    await expect(status).toBeInViewport();
   });
 
   test("with no assignment rule, the shadow-AI start says so and links nothing; an existing workflow can be linked", async ({ page }) => {

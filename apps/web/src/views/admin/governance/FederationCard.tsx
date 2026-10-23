@@ -87,15 +87,17 @@ export default function FederationCard() {
         <p data-testid="federation-status">
           {s?.enabled ? <Badge tone="ok">on</Badge> : <Badge tone="neutral">off</Badge>}{" "}
           Federated AWS, GCP and Entra credentials present a {s?.tokenTtlSeconds ?? 300}-second RS256 token from this issuer.{" "}
-          {s?.enabled ? "Rotating or revoking a key asks you to confirm it's you." : "Turning it on asks you to confirm it's you."}
+          {s?.enabled
+            ? "Federation is on, so federated cloud sources can run. Rotating to a new key or revoking a key asks you to confirm it's you; turning federation off does not."
+            : "Turning it on lets federated cloud sources run, and asks you to confirm it's you."}
         </p>
         <p className={v.faint}>
           Generated keys are published at once so the clouds can cache them. {s?.enabled ? "Rotate" : "Activate"} after a few minutes.
         </p>
         {s && !s.issuer && (
           <p className={v.faint} data-testid="federation-no-public-url">
-            This deployment&apos;s public URL is not configured, so no token can be minted. An operator sets it as the cloud discovery
-            deployment guide describes (docs/deployment/CLOUD_DISCOVERY.md).
+            This deployment&apos;s public URL is not configured, so no token can be minted. An operator sets it as described in
+            the cloud discovery deployment guide.
           </p>
         )}
         {s?.issuer && (
@@ -109,7 +111,7 @@ export default function FederationCard() {
           <p className={v.faint}>
             {s.awsPrincipal.configured
               ? <>regulAIt&apos;s own AWS principal is <span className={v.mono}>{s.awsPrincipal.roleArn}</span> (subject <span className={v.mono}>{s.awsPrincipal.subject}</span>); an AWS source with target <span className={v.mono}>federation=principal</span> assumes your role from it with the source&apos;s external id.</>
-              : "regulAIt's own AWS principal is not configured, so AWS sources federate directly (AssumeRoleWithWebIdentity)."}
+              : "regulAIt's own AWS principal is not configured, so each AWS source assumes your role directly with a short-lived token from this issuer."}
           </p>
         )}
         <Table
