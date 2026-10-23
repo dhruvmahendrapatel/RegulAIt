@@ -371,7 +371,7 @@ test.describe("U2: governance records", () => {
     await page.goto("/ui/admin/shadow-ai");
     await page.getByRole("button", { name: "Plan remediation for acme/billing" }).click();
     const plan = page.getByTestId("shadow-remediation");
-    await expect(plan).toContainText("no governed replacement is registered for this provider");
+    await expect(plan).toContainText("no governed replacement agent is registered for this provider");
     await expect(plan.getByLabel("Environment", { exact: true })).toHaveValue("");
     // an assigned workflow: no "admin must assign" note
     await expect(plan.getByTestId("shadow-no-assignment-rule")).toHaveCount(0);
