@@ -541,7 +541,7 @@ point there rather than repeating commands nobody has run.
   - **`staging`** (deep scan #4, owner decision): `demo:prepare --live` creates an audited mock deploy target named
     `demo-staging` (environment `staging`), so a remediation workflow may target that environment, and
     `demo:check --live` asserts it with the beat "1 Remediation environment" (PASS: "'staging' is an accepted
-    remediation environment: deploy target demo-staging"). Detection is unaffected.
+    remediation environment: deploy target 'demo-staging' (mock)"). Detection is unaffected.
   - **Never the demo switch on the live box** (`REGULAIT_DEMO_LICENSE=1`). It runs the non-live intake and writes the
     fictional dataset into the live database, which `demo:check --live` then FAILs ("1 Fictional dataset"), and the
     audit is append-only, so it cannot be removed. The export key and licence keyring come from the override in §7.6.
@@ -598,6 +598,7 @@ time. Rows marked *once* are done a single time for both. The recipes the rows n
 | Before Sun 10-25, *once* | **Power schedule off** (deep scan #2, owner): the owner applies `power_schedule_enabled = false` in `infra/environments/regulait-dev-app` and confirms that both EventBridge schedules, `regulait-dev-app-start` and `regulait-dev-app-stop`, read **DISABLED** (§7.6). By default the box runs only 08:00-20:00 ET Mon-Fri, so it would be off from Fri 10-30 20:00 to Mon 11-02 08:00. If the plan shows a `user_data` change, the apply stops and starts the box: run it outside rehearsal hours | pending execution — owner |
 | Before Thu 10-29, *once* | **Both hosts on post-#508 main** (deep scan #38, owner): update the dev host and the presenting laptop to `main` after #508 (Postgres and Keycloak pinned by digest), run `docker compose pull` while online, then prepare and check (LIVE: §7.1 once; laptop: a trial `demo:prepare`). Close long-running `psql` sessions on the dev host first: the first boot after an update builds an audit index concurrently and stops with `ConcurrentIndexBlockedError` if it cannot get its locks within 60 s (#43). **No `pull` during the freeze**; hold #521 until after the demo | pending execution — owner |
 | Before Thu 10-29, *once* | **Live gateway environment** (deep scan #6, owner): the export-signing key, its id and `REGULAIT_LICENSE_KEYRING` added to the dev host's `docker-compose.override.yml`, gateway recreated (§7.6). **Never the demo switch on the live box** | pending execution — owner |
+| Before Thu 10-29, *once* | **Branch rule on main** (deep scan #51, owner): require `ci.yml`'s `build-and-test` check on `main` for the freeze, with an admin bypass for docs-only PRs; remove it after 11-03 | pending execution — owner |
 | *Once*, before `DEMO_REAL_ACCOUNTS.md` step 2 | `demo:prepare --live` on the dev host from empty, through `docker compose exec` (§7.1). It creates the mock deploy target `demo-staging` (environment `staging`) | pending execution — owner |
 | Now, then after the freeze dispatch | **Offline deck** (deep scan #20): rebuild it from the `demo-screens` artifact of run `39940181481` (artifact `12497390750`, kept until 11-22) with `node apps/web/e2e/fallback-deck.mjs --pack 2026-11-01 --dark --no-gate`. After the freeze-SHA dispatch below, rebuild it from that run's artifact with `--gate <path to real-gate.txt>` in place of `--no-gate` (31 slides) | pending execution |
 | Thu 10-29, *once* | **Freeze-SHA dispatches** (deep scan #21, owner): dispatch `demo.yml`, `ci.yml` and `ui-enterprise.yml` on `main` at the freeze SHA; record each run id and the SHA in §7.5. The 10-21 rehearsal's gate artifact expires 2026-10-28 15:06Z; the freeze dispatch replaces it | pending execution |
@@ -618,6 +619,7 @@ time. Rows marked *once* are done a single time for both. The recipes the rows n
 | T-24h | **Re-run `demo:traffic` on LIVE, only that step** (deep scan #8, owner): the monitor counts off-stack serving and trace evaluation over **7 days** and resolves alerts that clear, so traffic made at prepare time no longer holds G3's second BLOCK line. Rehearse the re-run on a copy of the database first (once). Then, on LIVE: `sudo docker compose exec gateway node apps/gateway/dist/demo-traffic.js`, after the T-24h scans | pending execution |
 | T-24h | **Capture `real-gate.txt`** after that traffic re-run (deep scans #5, #8, #11): run the G3 script (§7.6) with `staging` and copy its output to `real-gate.txt` on the presenting laptop. Expect `DENY "Real-Time Fraud Detection Engine" (approved, EU AI Act tier high) → staging` with two `BLOCK open_high_alert` lines. Do **not** acknowledge the alerts on LIVE at this check | pending execution |
 | T-24h | **Signed export on LIVE** (deep scan #6, owner): `GET /v1/exports/signing-key` (signed in as Ada) reports `configured: true`, and one **Download signed bundle** on `/ui/admin/audit` as Ada succeeds | pending execution |
+| T-24h | **S4 model card still unsigned on LIVE** (owner, #453): the agent chosen for S4's **Link stack** shows **Not signed off** on its model card | pending execution |
 | T-24h | `demo:check --live` on the live instance (§7.1): 0 fail (no fictional-dataset trace, every real source listed with its last run) | pending execution |
 | T-24h | Screen recording of one real scan captured and played back once | pending execution |
 | T-24h | **Offline deck** opened on the presenting laptop with the network off: 31 slides (30 with `--no-gate`), S1 to G10 in script order | pending execution |
@@ -639,8 +641,8 @@ time. Rows marked *once* are done a single time for both. The recipes the rows n
 | T-5 min | **G3 shell** (deep scan #12, owner): reconnect the Session Manager shell (`aws ssm start-session`; the 20-minute idle default would close one opened at T-1h before G3) and check the G3 script is still there | pending execution |
 | 11-01 run-through | **State-changing beats on FALLBACK only** (owner, 2026-10-23, #453). LIVE is never re-prepared, so anything changed there on 11-01 stays for 11-03 (a re-detected alert keeps its acknowledged status, so an acknowledged G3 alert would turn 11-03's DENY into ALLOW; S3 and S4 each use up their finding, one finding is one use case, ever). On 11-01 these run on the **FALLBACK** laptop stack: G3 acknowledge then ALLOW, G5 resolve, S3 **Start and link**, S4 register. **LIVE read-only**: every other beat, plus G3's DENY gate. The per-beat marks are in DEMO_SCRIPT_2026-11-01 S11 and in "11-01 run-through: where each beat runs" below | decided — owner |
 | Between the runs | **`demo:traffic` for 11-03**: re-run it on LIVE again at T-24h before 11-03 (Mon 11-02), after that day's scans, then capture a fresh `real-gate.txt`, so the monitor's 7-day window still holds G3's second BLOCK line on 11-03. The fallback is prepared again from empty, under 18 h before 11-03 | pending execution |
-| T-24h | **S4 model card still unsigned on LIVE** (owner, #453): the agent chosen for S4's **Link stack** shows **Not signed off** on its model card | pending execution |
 | After 11-03 | **Power schedule back on** (owner): `power_schedule_enabled = true`, plan and apply (`DEMO_TEARDOWN.md` T8). Start the backup timer if it is still stopped | pending execution — post-demo, owner |
+| After 11-03 | **Remove the freeze branch rule** on `main` (deep scan #51, owner) | pending execution — post-demo, owner |
 | After | Teardown of the sandbox resources and the Azure deployment, tracked as a follow-up (ADR-0197 consequences): [DEMO_TEARDOWN.md](../deployment/DEMO_TEARDOWN.md) | pending execution — post-demo, owner |
 
 
@@ -831,7 +833,7 @@ printf '%s\n' '#!/bin/sh' 'cd /opt/app && sudo docker compose exec -T gateway no
 - Run it as `~/g3.sh <ref>`. It runs inside the gateway container, so it uses the container's build and migrations,
   never a host checkout, and the gateway's own `DATABASE_URL`, bootstrap token and data key. Exit 1 is DENY, 0 is
   ALLOW, 2 is a setup error.
-- Expected first output: `DENY  "Real-Time Fraud Detection Engine" (approved, EU AI Act tier high) → staging`, two
+- Expected output: the `$ regulait gate deploy … --env staging --ref <ref>` line and a blank line, then `DENY  "Real-Time Fraud Detection Engine" (approved, EU AI Act tier high) → staging`, two
   `BLOCK open_high_alert` lines, then `assurance: …`. After the two alerts are acknowledged (DEMO_SCRIPT G3): `ALLOW`
   with two `WARN acknowledged_high_alert` lines.
 - T-24h capture: `~/g3.sh t24h > ~/real-gate.txt; cat ~/real-gate.txt`, then copy the text into `real-gate.txt` on the
@@ -869,10 +871,10 @@ builds an audit index concurrently and stops with `ConcurrentIndexBlockedError` 
 
 - **Bundle ceiling (deep scan #22).** The web entry chunk is about 20 B under its 137.3 kB JS ceiling and about 6 B
   under its 10.6 kB CSS ceiling, so any freeze fix to the kit, the shell or the global styles fails the size gate.
-  Pre-approved: a demo-blocker fix may raise the entry JS or CSS ceiling by **up to 1 kB**, recorded in its PR and in
+  Pre-approved: a demo-blocker fix may raise the entry JS and CSS ceilings by **at most 1 kB in total** (the two raises added together), recorded in its PR and in
   ADR-0198's +1 kB bundle note. Any other freeze fix stays in lazy chunks.
 - **CI time caps (deep scan #25).** A temporary raise of the `spa-journeys` and mock-shard time caps until after
-  11-03, recorded in ADR-0198 (lands with PR #529). Dispatch `ci.yml` on `main` after any runner-image or Playwright cache
+  11-03, recorded in [ADR-0198](../decisions/0198-freeze-week-ci-settings.md) (`spa-journeys` 16 → 25 min, mock UI shards 15 → 25 min). Dispatch `ci.yml` on `main` after any runner-image or Playwright cache
   key change, and once at the freeze SHA (§7.5).
 - **Dependency updates (deep scans #17, #26).** Dependabot stays on. Every bump PR is held and reviewed by hand; none
   merges in freeze week unless it is a demo blocker. Runners are queueing: expect 1-2 hours from push to green, and do
