@@ -32,8 +32,9 @@ anyio==4.15.1 \
     --hash=sha256:6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101
 attrs==26.1.0 \
     --hash=sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309
-avidtools==0.1.2 \
-    --hash=sha256:a1c4805f6529f370ba3ff2a9281cfed5a36475123165f196294134a42fe567b8
+avidtools==0.3.2 \
+    --hash=sha256:2cf090e84ed8ba6cbae377ce095890b851ac0806ab831e529b5866c7e7ad8bf6 \
+    --hash=sha256:b31fa0df2049e3bf02f0bd8884ed62608cee6ec3fa913036b02b6cde7c05db71
 backoff==2.2.1 \
     --hash=sha256:63579f9a0628e06278f7e47b7d7d5b6ce20dc65c5e96a6f3ca99a6adca0396e8
 boto3==1.43.116 \
@@ -66,8 +67,9 @@ datasets==5.1.0 \
     --hash=sha256:86fd08b280485aab82894d2c81842c4151d93b575efea0054315104cb7bc3cec
 datetime==6.0 \
     --hash=sha256:d19988f0657a4e72c9438344157254a8dcad6aea8cd5ae70a5d1b5a75e5dc930
-deepl==1.17.0 \
-    --hash=sha256:2fb51fa8d9c04a081123c1f17c5bc3dd9c4711acd59687a71c470a345ab9b70c
+deepl==1.32.0 \
+    --hash=sha256:3016bf86f1f53eb6e5fedb458746c6bf6579a840b57c54a2ed701b0344bc79e1 \
+    --hash=sha256:36f2faadc79a64712489bfeab32f344536eab25b3c38ea2e39a72084a71e0a7e
 defusedxml==0.7.1 \
     --hash=sha256:a352e7e428770286cc899e2542b6cdaedb2b4953ff269a210103ec58f6198a61
 dill==0.4.1 \
@@ -86,8 +88,9 @@ filelock==3.32.7 \
     --hash=sha256:65ff0d0190ea42038b32bda4b77834fb05be2cad4c5b9b01aa4dfb3614536e52
 frozenlist==1.8.0 \
     --hash=sha256:494a5952b1c597ba44e0e78113a7266e656b9794eec897b19ead706bd7074383
-fsspec==2026.7.0 \
-    --hash=sha256:b57ddbafedfaef7018c1ecab32aa200a9d7ca26b77965f64e48b70061249d279
+fsspec==2026.9.0 \
+    --hash=sha256:0f08147951c8cb31d844c3547d631053b127863b60be04cf06e121333ee0e2fe \
+    --hash=sha256:8dd6e646e99ea382bd85f97a45e6b526a442d79423a7dc673f1e2756d05fcb5f
 ftfy==6.3.1 \
     --hash=sha256:7c70eb532015cd2f9adb53f101fb6c7945988d023a085d127d1573dc49dd0083
 garak==0.17.1 \
@@ -178,8 +181,9 @@ langsmith==0.14.11 \
     --hash=sha256:9ecca7633df228ef2c44563f7187e426b8a79e7c5c2351c5dd8c9074c61512e7
 litellm==1.106.1 \
     --hash=sha256:d412e85ef7046eee701ae178da4c1587eddbeac4aaaacfca0fd5afec28c2abde
-llm==0.32.1 \
-    --hash=sha256:735f50ff515d0f5daccb9c53822ccd28a612b6b7746a7ea86d89176604bbec24
+llm==0.36 \
+    --hash=sha256:801263d046854d15e3f45ee8da5024c23c313d129f67c7c93961649c531bb050 \
+    --hash=sha256:e59ad30875a99be2eea0c880543b1ebfe40eea24ae55d4008eb1e12c77964626
 lorem==0.1.1 \
     --hash=sha256:c9c2914b5a772022417c398bd74b7bbd712e73ff029ba82720855e458f13ae42
 markdown==3.11.2 \
@@ -194,8 +198,9 @@ mikeshardmind-base2048==1.0.4 \
     --hash=sha256:0b0e6e38d2ea2aea187128c39d3016732b5ce588750c3c6fc29fdf87d1437147
 mistralai==1.5.2 \
     --hash=sha256:5b1112acebbcad1afd7732ce0bd60614975b64999801c555c54768ac41f506ae
-mpmath==1.3.0 \
-    --hash=sha256:a0b2b9fe80bbcd81a6647ff13108738cfb482d481d826cc0e02f5b35e5c88d2c
+mpmath==1.4.1 \
+    --hash=sha256:dc4f0ea2304480d4a9a48a94c1020571558ade522b44a6912efac63a586e140f \
+    --hash=sha256:efd6d1b75f09d69524a67609949812668b28e81ecbfe0ab449ced8c13e92642e
 multidict==7.1.0 \
     --hash=sha256:fed6b7705d49dd07e5e0dd5f5c873fc44047e92d714299b13245b5fecac49d01
 multiprocess==0.70.19 \
@@ -210,8 +215,8 @@ numpy==2.5.4 \
     --hash=sha256:fbde6962867ee75b48b0ee29b2b9372ec5d617799dbaf38e82dc0596f2f7738a
 nvdlib==0.9.0 \
     --hash=sha256:6f4a6d74c18264bd3b4b18b0f1a7ddfda2e74e547a26355c42cbea30165dd277
-nvidia-riva-client==2.16.0 \
-    --hash=sha256:99ef37b8f487d75a70c053736848221e09b728e5c910fb476333d375bd4347a3
+nvidia-riva-client==2.27.0 \
+    --hash=sha256:a18b0fa274417455b4fe2db126a340b8e7bfd362de838e05cb64af37c23c7ef3
 ollama==0.6.3 \
     --hash=sha256:6a20bc42c1a5f889295d7ec490d35e5132fc31f339561530f43a8abd4dbfe508
 openai==2.54.0 \
@@ -326,8 +331,9 @@ torch @ https://download.pytorch.org/whl/cpu/torch-2.14.1%2Bcpu-cp312-cp312-many
     --hash=sha256:5a6363570c753812540a05eb82380e329469cbe668643e88111414c12627711f
 tqdm==4.70.1 \
     --hash=sha256:c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73
-transformers==5.19.0 \
-    --hash=sha256:afcd2dd5f603ed28c1e1fcb00a338ccbb4ef5f878ed289635df8b58187afb518
+transformers==5.20.2 \
+    --hash=sha256:080871e061546d720be57f5846fce426f46b44d61574907cc7404c2cba49d180 \
+    --hash=sha256:7ae75dbc1fb3922aff1b6c97b9e5479d6cf26fd86a8866bfb71324190479f807
 truststore==0.10.5 \
     --hash=sha256:9aaaedaefaf06d8b206278cf8b5012bc897f485a874503501e12d776df78951c
 typer==0.27.3 \
