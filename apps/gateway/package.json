@@ -82,7 +82,7 @@
     "pkijs": "3.4.1",
     "re2js": "2.8.6",
     "standardwebhooks": "1.1.1",
-    "zod": "4.6.5"
+    "zod": "4.6.6"
   },
   "devDependencies": {
     "@regulait/engine-garak": "workspace:*",
