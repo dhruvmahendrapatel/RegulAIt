@@ -176,7 +176,7 @@ test.describe("ADR-0179 G14-FEED: regulatory intelligence statuses and kinds", (
 
     const cfpb = entry(page, "CFPB Circular 2022-03 — Adverse-action notices for complex algorithms (withdrawn)");
     await expect(cfpb.getByText("Withdrawn", { exact: true })).toBeVisible();
-    await expect(cfpb.getByText(/Withdrawn on May 12, 2025\./)).toBeVisible();
+    await expect(cfpb.getByText(/Withdrawn on 12 May 2025\./)).toBeVisible();
     await expect(cfpb.getByText("Not counted: withdrawn")).toBeVisible();
     await expect(cfpb.getByText(/\d+ gaps?$/)).toHaveCount(0);
     await expect(cfpb.getByText("Guidance", { exact: true })).toBeVisible();
@@ -188,7 +188,12 @@ test.describe("ADR-0179 G14-FEED: regulatory intelligence statuses and kinds", (
     await expect(nist.getByText(/^published .* ago$/)).toBeVisible();
 
     const nyc = entry(page, "NYC Local Law 144 — Automated employment decision tool bias audits");
-    await expect(nyc.getByText("Effective Jan 1, 2023 · enforced from Jul 5, 2023")).toBeVisible();
+    await expect(nyc.getByText("Effective 1 Jan 2023 · enforced from 5 Jul 2023")).toBeVisible();
+    // F32: the generated line, entry dates and verified dates use the shared en-GB form (F16), never the browser's
+    await expect(page.getByText(/^Generated 5 Oct 2026, \d{2}:\d{2} · impact window/)).toBeVisible();
+    await expect(page.getByRole("list", { name: "Regulatory effective-date timeline" }).locator("time", { hasText: "26 May 2022" }).first()).toBeVisible();
+    await expect(page.getByText("Verified on 5 Oct 2026").first()).toBeVisible();
+    await expect(page.getByText(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2}, \d{4}/)).toHaveCount(0);
 
     await expect(page.getByText("Whether an entry applies to this organisation has not had legal review.")).toBeVisible();
     await expectAxeClean(page, "regulatory intelligence");
