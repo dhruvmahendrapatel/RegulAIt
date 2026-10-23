@@ -26,7 +26,7 @@
 # perl-base (fixed in 5.36.0-7+deb12u4, not yet in the image); the trixie image
 # of the same Node 22 line carried none. Digest of node:22-trixie-slim as
 # published 2026-10-06T05:38Z (linux/amd64 + arm64 index).
-FROM node:22-trixie-slim@sha256:154ba2f4d6fec323d28e4f4bb86bba4677f1223391a1979cf521304e03a98dfa AS build
+FROM node:22-trixie-slim@sha256:8eb619e402eaede1748a3c8173bffab391592812e85136452f781741c7242ddf AS build
 
 RUN corepack enable
 WORKDIR /app
@@ -58,7 +58,7 @@ RUN NODE_OPTIONS=--max-old-space-size=3072 pnpm install --frozen-lockfile \
  && rm -rf node_modules apps/*/node_modules packages/*/node_modules \
  && pnpm install --frozen-lockfile --prod --offline --filter "@regulait/gateway..."
 
-FROM node:22-trixie-slim@sha256:154ba2f4d6fec323d28e4f4bb86bba4677f1223391a1979cf521304e03a98dfa AS runtime
+FROM node:22-trixie-slim@sha256:8eb619e402eaede1748a3c8173bffab391592812e85136452f781741c7242ddf AS runtime
 LABEL org.regulait.build-stage="runtime (production dependencies only)"
 
 # ADR-0184: the runtime runs only `node` and `sh` (docker-start.sh), never a

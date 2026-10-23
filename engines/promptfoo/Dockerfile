@@ -41,7 +41,7 @@
 # binding cannot load. arm64 is an open item (ADR-0187 open question 10).
 
 # ---- stage 1: the pinned promptfoo release -----------------------------------------------------
-FROM --platform=linux/amd64 node:22-trixie-slim@sha256:154ba2f4d6fec323d28e4f4bb86bba4677f1223391a1979cf521304e03a98dfa AS promptfoo
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:8eb619e402eaede1748a3c8173bffab391592812e85136452f781741c7242ddf AS promptfoo
 WORKDIR /opt/promptfoo
 COPY engines/promptfoo/package.json engines/promptfoo/package-lock.json engines/promptfoo/licence-gate.mjs ./
 COPY scripts/engine-images-normalise.mjs /tmp/engine-images-normalise.mjs
@@ -59,7 +59,7 @@ COPY engines/promptfoo/patches/telemetry-disabled-sends-nothing.mjs /tmp/telemet
 RUN node /tmp/telemetry-patch.mjs /opt/promptfoo/node_modules/promptfoo && rm /tmp/telemetry-patch.mjs
 
 # ---- stage 2: the runner shim -----------------------------------------------------------------
-FROM --platform=linux/amd64 node:22-trixie-slim@sha256:154ba2f4d6fec323d28e4f4bb86bba4677f1223391a1979cf521304e03a98dfa AS shim
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:8eb619e402eaede1748a3c8173bffab391592812e85136452f781741c7242ddf AS shim
 RUN corepack enable
 WORKDIR /src
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./
@@ -75,7 +75,7 @@ RUN NODE_OPTIONS=--max-old-space-size=3072 pnpm install --frozen-lockfile \
  && node scripts/engine-images-normalise.mjs modules-yaml /out/node_modules/.modules.yaml
 
 # ---- stage 3: runtime -------------------------------------------------------------------------
-FROM --platform=linux/amd64 node:22-trixie-slim@sha256:154ba2f4d6fec323d28e4f4bb86bba4677f1223391a1979cf521304e03a98dfa AS runtime
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:8eb619e402eaede1748a3c8173bffab391592812e85136452f781741c7242ddf AS runtime
 LABEL org.opencontainers.image.title="regulait-engine-promptfoo" \
       org.regulait.engine="promptfoo" \
       org.regulait.engine-version="0.124.1" \
