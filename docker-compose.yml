@@ -34,8 +34,11 @@
 # `2.11.7-alpine` tags named this same OCI index on 2026-10-17, resolved
 # against the Docker Hub registry API); the digest is what is run. An
 # air-gapped install runs the plain tag instead, checked against pinned image
-# ids (scripts/install.sh). Re-pin the three files together.
-x-caddy-image: &caddy-image caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
+# ids (scripts/install.sh). Re-pin the three files together. A mapping anchor
+# (`<<: *caddy` in each service) keeps an `image:` line an image updater can
+# rewrite.
+x-caddy: &caddy
+  image: caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
 
 # ONE reference for both Postgres services (`db` and the sso profile's
 # `keycloak-db-init`). The tag is unchanged; the digest is the `postgres:16` OCI
@@ -43,7 +46,8 @@ x-caddy-image: &caddy-image caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478
 # 2026-10-23, and the digest is what is run. An air-gapped install runs the
 # plain tag the bundle carries (scripts/install.sh override). CI's service
 # containers pin their own postgres:16 digest in .github/workflows/.
-x-postgres-image: &postgres-image postgres:16@sha256:9e2cf6287f25c3151f4c9421ccce2b17f3e60061c111a29165e0d2cdd9ff0a97
+x-postgres: &postgres
+  image: postgres:16@sha256:9e2cf6287f25c3151f4c9421ccce2b17f3e60061c111a29165e0d2cdd9ff0a97
 
 # --- Sidecar engine runners (profile: engines) — ADR-0187 --------------------
 #
@@ -107,7 +111,7 @@ x-engine-runner: &engine-runner
 
 services:
   db:
-    image: *postgres-image
+    <<: *postgres
     environment:
       POSTGRES_USER: regulait
       # ADR-0041: parameterised so scripts/install.sh can generate a real
@@ -708,7 +712,7 @@ services:
   # database are not changed. Re-running it rotates the keycloak role's
   # password to the current REGULAIT_KC_DB_PASSWORD.
   keycloak-db-init:
-    image: *postgres-image
+    <<: *postgres
     profiles: ["sso"]
     depends_on:
       db:
@@ -909,7 +913,7 @@ services:
   # Nothing is committed; `docker compose down -v` destroys the CA, and the
   # next start makes a new one that executor-front-ca copies again.
   executor-front:
-    image: *caddy-image
+    <<: *caddy
     profiles: ["isolation"]
     restart: unless-stopped
     read_only: true
@@ -933,7 +937,7 @@ services:
   # 120 s for the front to create its CA, and re-copies on every `up`, so a
   # re-created CA is picked up by the executor's next start.
   executor-front-ca:
-    image: *caddy-image
+    <<: *caddy
     profiles: ["isolation"]
     depends_on:
       executor-front:
@@ -966,7 +970,7 @@ services:
       - executor-front-ca:/ca
 
   caddy:
-    image: *caddy-image
+    <<: *caddy
     profiles: ["tls"]
     depends_on:
       - gateway

@@ -143,11 +143,12 @@ jobs:
     #
     # (same for library/postgres, tag 16). The digest is the multi-arch INDEX
     # digest, which is what `docker pull name:tag@sha256:…` resolves on every
-    # platform. Resolved 2026-10-03. The service image below and the
+    # platform. Resolved 2026-10-03 (postgres re-resolved 2026-10-23, the digest
+    # docker-compose.yml runs). The service image below and the
     # POSTGRES_IMAGE echoed in the log step must move together.
     services:
       postgres:
-        image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
+        image: postgres:16@sha256:9e2cf6287f25c3151f4c9421ccce2b17f3e60061c111a29165e0d2cdd9ff0a97
         env:
           POSTGRES_USER: regulait
           POSTGRES_PASSWORD: regulait
@@ -165,7 +166,7 @@ jobs:
       # sandbox behaviour this plugin depends on are version-specific, and a
       # tag alone could not hold the version still.
       KONG_IMAGE: kong:3.6@sha256:a42d2b4503e7b6674ca7914883bdb0d2274b806b0e397a6af28d1dd57aafce4e
-      POSTGRES_IMAGE: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
+      POSTGRES_IMAGE: postgres:16@sha256:9e2cf6287f25c3151f4c9421ccce2b17f3e60061c111a29165e0d2cdd9ff0a97
       E2E_PG: postgres://regulait:regulait@localhost:5432
       # ADR-0181: the gateway's defaults are strict. CI's Postgres service has
       # no TLS, so the database hop is relaxed EXPLICITLY here (the default is
