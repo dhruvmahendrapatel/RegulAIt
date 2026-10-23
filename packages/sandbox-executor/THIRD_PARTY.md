@@ -15,7 +15,7 @@ decision 4; it runs beside a container runtime, never in the gateway.
 | Component | Version | Licence | Used for, and why |
 |---|---|---|---|
 | Docker CLI (`docker:29.3.1-cli@sha256:18f5ab0fab739ea822819b342357947dfba235cdef438cce345ebc0c143c5b34`, the official image's `/usr/local/bin/docker`) | 29.3.1, pinned by the image digest in `Dockerfile` | Apache-2.0 | The `gvisor` backend (`src/runsc-backend.ts`) and the `runc` (L1) backend (`src/runc-backend.ts`), through their shared core (`src/docker-backend.ts`), start, kill and remove each sandbox with Docker's own CLI (`docker run -i --runtime runsc` or `--runtime runc`, `--pull never`) on the host daemon whose socket compose mounts. Open source first (ADR-0176): no Docker client of our own; the few executor-side reads (`/info`, a container's inspect and stats) are plain GETs to the same documented Engine API. |
-| Node.js base (`node:22-trixie-slim@sha256:154ba2f4…`) | as the gateway's `Dockerfile` | MIT (Node.js) | The executor's runtime and the stdio base image (`stdio-base/Dockerfile`), where the sandbox init runs. |
+| Node.js base (`node:22-trixie-slim@sha256:8eb619e4…`, Node 22.23.4) | as the gateway's `Dockerfile` | MIT (Node.js) | The executor's runtime and the stdio base image (`stdio-base/Dockerfile`), where the sandbox init runs. |
 
 gVisor (`runsc`, Apache-2.0, `release-20261012.0`) is **not** in any image: it is installed on the Docker host from
 the release tarball pinned by sha512 in `spikes/isolation-i0/THIRD_PARTY.md` and registered with the daemon

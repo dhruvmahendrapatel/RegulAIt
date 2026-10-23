@@ -25,7 +25,8 @@
 # On 2026-10-06 the bookworm image carried seven fixable HIGH/CRITICAL CVEs in
 # perl-base (fixed in 5.36.0-7+deb12u4, not yet in the image); the trixie image
 # of the same Node 22 line carried none. Digest of node:22-trixie-slim as
-# published 2026-10-06T05:38Z (linux/amd64 + arm64 index).
+# published 2026-10-21T11:36Z (linux/amd64 + arm64 index): Node 22.23.4, for
+# the Node.js 2026-10-21 security release (CVE-2026-111497 and others).
 FROM node:22-trixie-slim@sha256:8eb619e402eaede1748a3c8173bffab391592812e85136452f781741c7242ddf AS build
 
 RUN corepack enable
