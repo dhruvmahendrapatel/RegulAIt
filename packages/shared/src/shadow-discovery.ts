@@ -239,8 +239,13 @@ function wildcardMatch(value: string, pattern: string): boolean {
   );
 }
 
-/** the specificity a tie is broken on: literal characters, wildcard excluded */
-const literalLength = (pattern: string): number => pattern.replace("*", "").length;
+/**
+ * the specificity a tie is broken on: literal characters, the one wildcard
+ * excluded (a pattern carries at most one `*`; see wildcardMatch)
+ */
+export const endpointPatternLiteralLength = (pattern: string): number =>
+  pattern.length - (pattern.includes("*") ? 1 : 0);
+const literalLength = endpointPatternLiteralLength;
 
 /**
  * Match a host against an endpoint entry. A bare pattern matches itself and
