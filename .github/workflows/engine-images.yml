@@ -118,7 +118,7 @@ jobs:
       engines: ${{ steps.plan.outputs.engines }}
       any: ${{ steps.plan.outputs.any }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           # the lock's sourceCommit must be in the local history to diff against
@@ -155,7 +155,7 @@ jobs:
       matrix:
         engine: ${{ fromJSON(needs.gate.outputs.engines) }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           # the build finds the engine's input commit in the history and archives it
@@ -275,7 +275,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           # --apply checks the published commit is reachable from origin/main
