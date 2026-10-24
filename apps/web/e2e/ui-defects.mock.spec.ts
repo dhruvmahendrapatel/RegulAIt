@@ -163,7 +163,7 @@ test("UXJ-06: the intake opens blank — the worked example is loaded only on re
   await page.getByText("Use-case name", { exact: true }).click();
   await expect(page.getByLabel("Use-case name")).toBeFocused();
   // ADR-0168: the field explains itself in a hint under it, read as its description
-  await expect(page.getByLabel("Use-case name")).toHaveAccessibleDescription(/A name reviewers will recognize/);
+  await expect(page.getByLabel("Use-case name")).toHaveAccessibleDescription(/A name reviewers will recognise/);
   await expect(page.getByRole("button", { name: "Continue" })).toBeDisabled();
   // the classification also opens blank: reach it with a name and purpose typed in
   await page.getByLabel("Use-case name").fill("Blank check");
