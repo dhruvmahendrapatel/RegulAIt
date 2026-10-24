@@ -35,7 +35,7 @@ runtime. They reach only the cloud API hosts an admin allow-lists, through the g
 | `@google-cloud/asset` | `7.2.0` | Apache-2.0 | `searchAllResources` for Vertex endpoints, models and index endpoints. REST fallback mode. |
 | `@google-cloud/resource-manager` | `7.2.0` | Apache-2.0 | `getIamPolicy`, read only for its audit configuration (are Data Access logs on). REST fallback mode. |
 | `google-auth-library` (github.com/googleapis/google-auth-library-nodejs) | `11.3.1` | Apache-2.0 | `IdentityPoolClient` (workload identity federation with a programmatic subject token) and `JWT` (service-account key relaxation); its Gaxios transporter carries the guarded fetch. Also used directly for the Logging `entries:list` REST call. |
-| `zod` (github.com/colinhacks/zod) | `4.6.5` | MIT | Credential input schemas. |
+| `zod` (github.com/colinhacks/zod) | `4.6.6` | MIT | Credential input schemas. |
 
 ## Notable transitive dependencies
 
