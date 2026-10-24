@@ -4532,7 +4532,7 @@ NOT covered. Unsupported request fields **fail loudly with a 400 naming the fiel
 being silently dropped (`temperature` included — `ModelDispatchRequest` cannot carry it, so real
 clients that send it unconditionally will 400; documented). Streams open LAZILY so a PII-input
 block or budget gate raised inside dispatch still returns a real HTTP error rather than a 200
-carrying a failure. `internal/product/IDE_INTEGRATION.md` written. Gateway 386 → **426** (40 new).
+carrying a failure. `docs/product/IDE_INTEGRATION.md` written. Gateway 386 → **426** (40 new).
 **Honest limit, restated in ADR-0020:** this makes interception real but NOT universal — at the
 `voluntary` rung it is an honor system, and `CLAUDE.md`/`VISION.md` still promise governance over
 "every agent/model call" on the assumption calls arrive at us. Key custody is the cheapest

@@ -171,7 +171,7 @@ none of them from a request; the previous behaviour of clearing them and
 carrying on made a forgery attempt invisible and was only as safe as every
 later line of code. Duplicates, case variants and underscore spellings are one
 check. **Only those five:** other `x-regulait-*` headers are client traffic and
-pass through untouched — `internal/product/IDE_INTEGRATION.md` tells clients to
+pass through untouched — `docs/product/IDE_INTEGRATION.md` tells clients to
 send `x-regulait-project-id` and `x-regulait-agent-id`, and the console sends
 `x-regulait-csrf`. A request with **more than 1000 headers** (Kong's ceiling
 for the plugin's header scan) is refused as `too_many_headers`, because a

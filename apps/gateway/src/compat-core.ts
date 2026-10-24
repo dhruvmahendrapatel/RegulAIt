@@ -1262,7 +1262,7 @@ export function disclosureHeaderPairs(prepared: CompatPrepared): Record<string, 
  *    credentials 409 and are skipped at dispatch); otherwise it is a DECLARED
  *    rung with a warning — declaring custody does not implement it;
  *  - network: enforcement lives at the customer's network boundary (egress
- *    control), never in this product — see internal/product/IDE_INTEGRATION.md.
+ *    control), never in this product — see docs/product/IDE_INTEGRATION.md.
  */
 export type PostureStatusKind =
   | "honor_system"

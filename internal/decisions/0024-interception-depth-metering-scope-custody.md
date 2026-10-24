@@ -124,7 +124,7 @@ never claim enforcement the deployment does not have:
 | `network` | **Requires egress control at your network boundary — see docs** |
 
 **The network rung stays infrastructure, and the docs now say how.**
-`internal/product/IDE_INTEGRATION.md` gains a Network-rung section with a concrete egress-allowlist
+`docs/product/IDE_INTEGRATION.md` gains a Network-rung section with a concrete egress-allowlist
 recipe (block `api.anthropic.com` / `api.openai.com` / the other vendor APIs at the boundary,
 allow only the RegulAIt gateway). It is documentation of an infra-level control, stated plainly
 as such — not product code, and the product does not pretend otherwise.
@@ -180,4 +180,4 @@ exists.
   `GET /v1/costs/unattributed`, cache-estimate fix)
 - `apps/gateway/src/admin-portal.ts` (Client Access + Cost & Projects)
 - `apps/gateway/src/interception-depth.test.ts` (e2e)
-- `internal/product/IDE_INTEGRATION.md`, `internal/product/GOVERNANCE_LAYER_SPEC.md`
+- `docs/product/IDE_INTEGRATION.md`, `internal/product/GOVERNANCE_LAYER_SPEC.md`

@@ -23,7 +23,7 @@ move them into one top-level `internal/` folder that never ships with the produc
    | `internal/memory/sessions/` | `project-state/sessions/` |
    | `internal/memory/mistakes.md` | `mistakes.md` |
    | `internal/decisions/` | `docs/decisions/` |
-   | `internal/product/` | `docs/product/`, plus `docs/deployment/DEMO_REAL_ACCOUNTS.md` and `DEMO_TEARDOWN.md` (demo-only) |
+   | `internal/product/` | `docs/product/` (all but `IDE_INTEGRATION.md`), plus `docs/deployment/DEMO_REAL_ACCOUNTS.md` and `DEMO_TEARDOWN.md` (demo-only) |
    | `internal/research/` | `docs/research/` |
    | `internal/reviews/` | `docs/reviews/` |
    | `internal/process/` | `docs/CONTRIBUTING_PARALLEL_SESSIONS.md`, `AgentCoordination.md`, `PathForward.md`, `codexInputs.md`, `geminiInputs.md` |
@@ -31,7 +31,10 @@ move them into one top-level `internal/` folder that never ships with the produc
    `decisions/` stays a sibling of `product/`, `research/` and `reviews/`, so ADR links such as `../product/X.md` still
    resolve. `internal/README.md` says what lives where.
 2. **What stays with the code:** `CLAUDE.md` (at the root, where Claude Code loads it), `README.md`, `SECURITY.md`,
-   `LICENSE`, `docs/api`, `docs/deployment` (minus the two demo files) and `docs/ops`.
+   `LICENSE`, `docs/api`, `docs/deployment` (minus the two demo files), `docs/ops` and
+   `docs/product/IDE_INTEGRATION.md`. That last file is a customer recipe (the network rung of IDE interception) that
+   the product names in two UI strings (`apps/gateway/src/compat-core.ts`, `ClientAccessPage.tsx`), so it stays with
+   the operator docs and those strings stay true without a product change.
 3. **Never shipped:** `.dockerignore` lists `internal` (it still excludes `docs` and `*.md`); `.gitattributes` marks
    `internal/ export-ignore`; `scripts/build-update-bundle.sh` packs an explicit path list without `internal/`, and
    `scripts/build-image-bundle.sh` packs only images built from the excluded context.
@@ -40,9 +43,7 @@ move them into one top-level `internal/` folder that never ships with the produc
 5. **References:** every reference to a moved path was rewritten repo-wide (markdown links recomputed for each file's
    new depth, code comments, scripts, tests, CI and `CLAUDE.md`). In ADRs and session records only link targets and
    paths changed, never wording.
-6. **Left as they were:** migration files (applied migrations are not edited) and two product UI strings that name
-   `docs/product/IDE_INTEGRATION.md` (`apps/gateway/src/compat-core.ts`, `ClientAccessPage.tsx`), because this change
-   may not alter product behaviour. Bare file names cited in prose (for example "mistakes.md M-040") are unchanged.
+6. **Left as they were:** migration files (applied migrations are not edited). Bare file names cited in prose (for example "mistakes.md M-040") are unchanged.
 
 ## Consequences
 

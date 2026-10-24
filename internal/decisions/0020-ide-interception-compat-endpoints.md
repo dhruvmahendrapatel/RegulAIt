@@ -135,7 +135,7 @@ else — and the portal says so:
 
 The honest framing is part of the decision: RegulAIt's code buys the *voluntary* rung. Key custody
 and network egress — the two non-bypassable rungs — are the customer's IT policy and network, not
-ours. The product says that in the admin UI and in `internal/product/IDE_INTEGRATION.md` rather than
+ours. The product says that in the admin UI and in `docs/product/IDE_INTEGRATION.md` rather than
 implying universal enforcement.
 
 ### 5. The supported request-field subset is documented, and everything outside it fails loudly
@@ -305,4 +305,4 @@ and infrastructure, not gateway code).
 - `apps/gateway/src/app.ts` (interception gate, `x-api-key` alias, `NON_ADMIN_ROUTES`)
 - `apps/gateway/src/admin-portal.ts` (the **Client Access** tab, under Identity & Access)
 - `apps/gateway/src/ide-interception.test.ts` (40 e2e tests)
-- `internal/product/IDE_INTEGRATION.md`
+- `docs/product/IDE_INTEGRATION.md`
