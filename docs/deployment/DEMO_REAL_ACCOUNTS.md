@@ -1,6 +1,7 @@
 # Demo real accounts: AWS sandbox, Azure, GitLab (owner runbook)
 
-ADR-0197 decisions 1-8. This page sets up real-account Shadow AI discovery for the 2026-11-01 demo: a third AWS account
+ADR-0197 decisions 1-8. This page sets up real-account Shadow AI discovery for the 2026-11-01 internal run-through
+and the 2026-11-03 external demo (owner, 2026-10-23): a third AWS account
 with planted Bedrock activity, a small Azure OpenAI deployment with planted activity, and a GitLab demo group, all read
 by RegulAIt through keyless federation (AWS, Azure) or a read-only token (GitLab).
 
@@ -40,10 +41,12 @@ in each stack's `terraform.tfvars` (git-ignored): pick the lowest-priced text mo
 3. **GitLab.** A top-level demo group on gitlab.com created in the UI, with a fictional name. A group access token needs
    the group on a Premium or Ultimate subscription; trials do not include it. Without that, see the fallback in step 6.
 4. **Budget recipients.** The addresses for budget alerts, set only in `terraform.tfvars`.
-5. **Keep the dev instance up for the demo.** The demo is on Sunday 2026-11-01. The dev box's power schedule (ADR-0032)
-   keeps it off from 20:00 to 08:00 on weekdays and all weekend, and while it is off no cloud can fetch the issuer and
-   no scan runs. Set `power_schedule_enabled = false` in `infra/environments/regulait-dev-app` for the demo weekend and
-   for every rehearsal outside the window, then set it back after the demo.
+5. **Keep the dev instance up for the demo.** The internal run-through is on Sunday 2026-11-01 and the external demo
+   on Tuesday 2026-11-03. The dev box's power schedule (ADR-0032) keeps it off from 20:00 to 08:00 ET on weekdays and
+   all weekend, and while it is off no cloud can fetch the issuer and no scan runs. Before Sunday 2026-10-25, set
+   `power_schedule_enabled = false` in `infra/environments/regulait-dev-app`, apply, and confirm both EventBridge
+   schedules read DISABLED; set it back after 11-03 (owner decision, #453; commands in
+   [DEMO_RUNBOOK.md §7.6](../product/DEMO_RUNBOOK.md#76-live-host-recipes-pending-execution)).
 
 ## Step 1: make the federation issuer publicly reachable (pending execution)
 
@@ -115,7 +118,10 @@ the key set must hold one `RSA` key with `alg` `RS256`. A 404 with `federation_i
 ## Step 2: create the three discovery sources in RegulAIt (pending execution)
 
 Each trust policy names its source's id (subject `regulait:discovery-source:<source id>`), so create the sources first
-and leave them disabled. On **Shadow AI > Discovery sources** (`/admin/shadow-ai/discovery-sources`), choose a kind and
+and leave them disabled. **Prepare the live database before this step, once** (`demo:prepare --live`,
+[DEMO_RUNBOOK.md §7.1](../product/DEMO_RUNBOOK.md#71-what-runs-where)): re-preparing afterwards makes new source ids,
+and every federated run then fails until both stacks are re-applied. Never run `docker compose down -v` on the dev
+host. On **Shadow AI > Discovery sources** (`/admin/shadow-ai/discovery-sources`), choose a kind and
 save:
 
 - kind `cloud_aws`, name e.g. "Demo AWS sandbox";

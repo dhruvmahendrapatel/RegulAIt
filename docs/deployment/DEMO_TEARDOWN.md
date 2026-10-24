@@ -6,7 +6,8 @@ enrolment of [DEMO_RUNBOOK.md §7.2](../product/DEMO_RUNBOOK.md#72-discovery-sou
 Each step names the setup step it reverses, so nothing is missed.
 
 > **Status: pending execution — post-demo, owner (M-041).** Nothing on this page has been run. Do not start before the
-> demo on 2026-11-01 is over. The owner runs every step; no builder or agent session runs any of it. Commands are the
+> external demo on 2026-11-03 is over (the internal run-through on 2026-11-01 needs everything too).
+> The owner runs every step; no builder or agent session runs any of it. Commands are the
 > standard Terraform, AWS CLI, Azure CLI and GitLab forms, written down but never run here, and no expected output is
 > quoted beyond what a check is looking for. Real account, tenant, subscription, client and group identifiers are
 > placeholders in angle brackets; they live in the owner's notes and the stacks' state, never in this repository.
@@ -269,7 +270,9 @@ closure date.
 Reverses DEMO_REAL_ACCOUNTS owner action 5, step 1a and step 1b.
 
 1. Set `power_schedule_enabled` back to `true` in `infra/environments/regulait-dev-app`, then plan and apply there
-   (owner approval, as for every apply).
+   (owner approval, as for every apply). Check that both EventBridge schedules read ENABLED again, and that the backup
+   timer stopped for the demo windows is running (`systemctl list-timers regulait-pg-backup.timer`;
+   [DEMO_RUNBOOK.md §7.6](../product/DEMO_RUNBOOK.md#76-live-host-recipes-pending-execution)).
 2. `REGULAIT_PUBLIC_URL` (step 1b) stays by default: new instances already write it from user data, and passkeys,
    step-up, SAML and Keycloak now use it as their origin, so removing it changes more than federation. Removing it is a
    decision (T11), and step 1b's rollback (delete the line, `docker compose --profile tls up -d`) is the way to do it.
