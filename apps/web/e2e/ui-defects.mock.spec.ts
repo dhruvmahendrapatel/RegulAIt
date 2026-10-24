@@ -354,6 +354,38 @@ test("D3 (#37): the artifact card names the artifact in words, not its output id
   await page.goto("/ui/workflows/wf-2");
   await expect(page.getByText("Submit shadow AI remediation plan", { exact: true })).toBeVisible();
   expect(await page.getByText("shadow_ai_remediation_plan").count()).toBe(0);
+  // D5 runs-projects-01/02: the header and the artifact box name the change in words too
+  await expect(page.getByText(/^Shadow AI remediation · staging · created /)).toBeVisible();
+  await expect(page.getByLabel("Artifact content")).toHaveAttribute("placeholder", "Write the shadow AI remediation plan content…");
+  // D5 runs-projects-18: the rail reads in the sans face, with no hover-only stage meta
+  const rail = page.locator("section[data-rg-card]").filter({ hasText: "Pipeline" }).first();
+  await expect(rail.locator("[title]")).toHaveCount(0);
+  const face = await rail.getByText("Plan", { exact: false }).first().evaluate((el) => getComputedStyle(el).fontFamily);
+  expect(face).not.toMatch(/mono/i);
+});
+
+test("D5 runs-projects-01: an empty environment leaves no '· ·' gap in the workflow header", async ({ page }) => {
+  const detail = {
+    instance: {
+      id: "wf-3", status: "running", createdAt: "2026-10-02T12:00:00Z", initiatorUserId: USER_A.id,
+      change: { description: "Register the claims assistant", changeType: "ai-use-case-intake", environment: "" },
+      definition: { stages: [{ id: "intake", type: "trigger" }, { id: "deploy_check", type: "automated_checks" }] },
+      state: { currentStageIndex: 1, stageStatuses: { 0: "completed", 1: "running" } },
+      context: {},
+    },
+    artifacts: [],
+    pendingApprovals: [],
+  };
+  await routeApi(page, async (route, p) => {
+    if (p === "/auth/me") return json(route, authMe(USER_A));
+    if (p === "/v1/me") return json(route, { userId: USER_A.id, isAdmin: true, user: USER_A });
+    if (p === "/v1/workflows/instances/wf-3") return json(route, detail);
+    if (p === "/v1/approvals") return json(route, { approvals: [] });
+    return json(route, {});
+  });
+  await page.goto("/ui/workflows/wf-3");
+  await expect(page.getByText(/^AI use case intake · created /)).toBeVisible();
+  await expect(page.getByText(/· ·|ai-use-case-intake/)).toHaveCount(0);
 });
 
 test("UIW-02 / UIW-09: the workflow page names its stages and renders the questionnaire as a document", async ({ page }) => {
@@ -382,9 +414,11 @@ test("UIW-02 / UIW-09: the workflow page names its stages and renders the questi
     return json(route, {});
   });
   await page.goto("/ui/workflows/wf-1");
-  const chip = page.locator('[title="questionnaire · artifact_generation"]');
-  await expect(chip).toHaveText("QuestionnaireArtifact generation");
-  await expect(page.locator('[title="signoff · human_approval"]')).toHaveText("Sign-offHuman approval");
+  // D5 runs-projects-18: the stage chips carry no hover-only title; their words are on screen
+  const rail = page.locator("section[data-rg-card]").filter({ hasText: "Pipeline" }).first();
+  await expect(rail).toContainText("QuestionnaireArtifact generation");
+  await expect(rail).toContainText("Sign-offHuman approval");
+  await expect(rail.locator("[title]")).toHaveCount(0);
   expect(await page.getByText("artifact_generation").count()).toBe(0);
   expect(await page.getByText("use_case_questionnaire").count()).toBe(0);
   await page.getByText("Use case questionnaire (v1)").click();

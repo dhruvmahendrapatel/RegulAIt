@@ -11,7 +11,7 @@
  */
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../api/client";
-import { fmtUsd } from "../../api/format";
+import { fmtUsd, plural } from "../../api/format";
 import { Badge, Card, EmptyState, ErrorState, SkeletonBlock, Table } from "../../ui/kit";
 import v from "../views.module.css";
 
@@ -74,13 +74,13 @@ export function MyConsolidatedSpendCard(props: { userId: string }) {
                     <div className={v.stat}>
                       <span className={v.statValue}>{fmtUsd(subject.metered.usd ?? 0)}</span>
                       <span className={v.statLabel}>
-                        metered by regulAIt · {subject.metered.events} calls
+                        metered by regulAIt · {plural(subject.metered.events, "call")}
                         {subject.metered.unpricedEvents > 0 ? ` (${subject.metered.unpricedEvents} unpriced, not counted as zero)` : ""}
                       </span>
                     </div>
                     <div className={v.stat}>
                       <span className={v.statValue}>{subject.imported.usd === null ? "No USD total" : fmtUsd(subject.imported.usd)}</span>
-                      <span className={v.statLabel}>imported from vendor bills · {subject.imported.lines} lines</span>
+                      <span className={v.statLabel}>imported from vendor bills · {plural(subject.imported.lines, "line")}</span>
                       {subject.imported.usdNote ? <span className={v.faint}>{subject.imported.usdNote}</span> : null}
                     </div>
                     <div className={v.stat}>
@@ -107,14 +107,14 @@ export function MyConsolidatedSpendCard(props: { userId: string }) {
                 <p className={v.faint}>{q.data.basisStatement}</p>
                 {q.data.reconciliation && q.data.reconciliation.supersededLinesExcluded > 0 ? (
                   <p className={v.faint}>
-                    {q.data.reconciliation.supersededLinesExcluded} duplicate imported line(s) excluded. {q.data.reconciliation.note}
+                    {plural(q.data.reconciliation.supersededLinesExcluded, "duplicate imported line")} excluded. {q.data.reconciliation.note}
                   </p>
                 ) : null}
                 {q.data.staleness && q.data.staleness.vendors.length > 0 ? (
                   <p className={v.faint}>
                     Last vendor uploads:{" "}
                     {q.data.staleness.vendors
-                      .map((s) => `${s.vendor} ${s.daysSinceLastImport === null ? "never" : `${s.daysSinceLastImport} day(s) ago`}`)
+                      .map((s) => `${s.vendor} ${s.daysSinceLastImport === null ? "never" : `${plural(s.daysSinceLastImport, "day")} ago`}`)
                       .join("; ")}
                     . {q.data.staleness.note}
                   </p>

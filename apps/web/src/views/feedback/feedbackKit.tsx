@@ -13,7 +13,7 @@ import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../api/client";
-import { fmtAt } from "../../api/format";
+import { fmtAt, humanize } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
 import { Badge, Button, Card, EmptyState, Field, IdChip, Input, Modal, Select, Table, Textarea, type Tone } from "../../ui/kit";
 import type { AdminUser } from "../../api/adminTypes";
@@ -346,7 +346,7 @@ export function FeedbackDetail(props: { id: string | null; onClose: () => void }
                     <Select value={incSeverity} onChange={(e) => setIncSeverity(e.target.value)}>
                       {SEVERITIES.map((s) => (
                         <option key={s} value={s}>
-                          {s}
+                          {humanize(s)}
                         </option>
                       ))}
                     </Select>
