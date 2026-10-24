@@ -10,6 +10,7 @@
 
 On 2026-10-24 the owner gave a list of 27 engineering practices to follow across the project, in the master session
 chat: "we don't need to force these but try to use these best practices wherever possible - add these in our rules".
+The durable record is #453 comment 6389193296 (the guidelines) and comment 6389271693 (the security checklist below).
 These are guidelines, not hard rules. Unlike ADR-0176 and ADR-0180, a missing practice is not by itself a review
 blocker.
 
@@ -17,6 +18,8 @@ blocker.
 
 Every session, agent brief and review applies the guidelines below **wherever practical**. A reviewer may raise a
 missed guideline as a non-blocking finding. Where a guideline is skipped on purpose, a line in the PR body says why.
+These two working rules, and the parenthetical details on each item below, are the master session's reading of the
+owner's list, not the owner's words.
 
 ### Precedence
 1. **Secure by default (ADR-0180) and open source first (ADR-0176) win.** For example, no response is cached across
@@ -67,7 +70,7 @@ are read as noted.
 25. Fix N+1 database queries (batch or join instead of per-row queries).
 26. Enable server-side caching where safe (see Precedence 1), with a bounded size and lifetime.
 
-### Security checklist (owner, 2026-10-24, second list)
+### Security checklist (owner, 2026-10-24, second list; #453 comment 6389271693)
 
 Later the same day the owner added 19 security practices. They differ from the guidelines above: a confirmed gap is a
 vulnerability, and under ADR-0180 a vulnerability is a bug and a blocking review finding. Every build checks the
@@ -106,8 +109,8 @@ before 2026-11-03 that is exploitable on the demo path is fixed before the demo,
 
 ## Consequences
 
-- CLAUDE.md gains a short "Engineering guidelines" section that points here. Lane briefs and reviewer prompts cite it.
+- CLAUDE.md gains two short sections that point here, "Engineering guidelines" and "Security checklist". Lane briefs and reviewer prompts cite it.
 - Several items already hold in part: Vite minifies and splits production builds, gateway pools are bounded, size-limit
   and web-vitals budgets run in CI (ADR-0196), and the full-scan lanes of 2026-10-24 added error states with Retry,
   pagination guards and loading states. A post-demo audit batch maps each guideline to its gaps.
-- Nothing here changes behaviour before 2026-11-03.
+- Nothing here changes behaviour before 2026-11-03, except a security fix under ADR-0180.
