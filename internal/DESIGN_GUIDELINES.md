@@ -47,8 +47,8 @@ enforces the rule yet; reviewers check it by hand.
 - Write real plurals with `plural(n, one, many)`; never "thing(s)", and make the verb agree. *Scan (#553 D3-09, #555,
   #556), [format.ts](../apps/web/src/api/format.ts). Review; some older specs still pin "(s)" strings.*
 - Never put internal paths, script commands, slice ids or ADR numbers in admin-facing copy; say what the user does.
-  *Scan (#555 shadow-ai-06 and FS-43, #554 D2-19). #555 adds a pin for one gateway string
-  (`apps/gateway/src/shadow-ai-copy.test.ts`, not on this base yet); otherwise review.*
+  *Scan (#555 shadow-ai-06 and FS-43, #554 D2-19). Enforced for one gateway string by
+  [shadow-ai-copy.test.ts](../apps/gateway/src/shadow-ai-copy.test.ts); otherwise review.*
 - Never name an AI vendor, model id or model family in copy, placeholders or help text; use fictional examples such as
   `acme-llm-sdk`. *Owner decisions F31 and F34, Scan (#555 shadow-ai-12). Enforced by
   [copy-vendor-names.mjs](../scripts/copy-vendor-names.mjs) in CI; a ternary inside a `placeholder` is not scanned yet.*
