@@ -1,10 +1,10 @@
 ---
-phase: demo-prep-deep-scan-lanes-merged-runbook-in-review
-last_updated: 2026-10-23
+phase: demo-prep-emergency-patching-engine-closures-in-review
+last_updated: 2026-10-24
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-10-23-session-01.md
+last_session: sessions/2026-10-24-session-01.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,32 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-24 (02:55 UTC) - emergency patching (ADR-0199): Node 22.23.4 and three high npm advisories are fixed on
+main; the engine closures are in review.** Full record: [sessions/2026-10-24-session-01.md](sessions/2026-10-24-session-01.md).
+This paragraph supersedes the "Open" and "Owner actions" lines of the 2026-10-23 (21:30) paragraph below; everything
+else there stands.
+- **Merged (UTC):** #537 (`33a27694`, 23:23, zod 4.6.6 and body-parser 2.4.0; carries Dependabot #532), #535
+  (`161d4f2e`, 00:12, the 10-23 state records), #525 (`984e66e0`, 00:12, runbook review fixes), #542 (`bb466fc9`,
+  01:04, msal-node 7.1.1 past `@azure/identity`'s declared range, verified) and #536 (`c4670a7f`, 01:26, Node 22.23.4
+  in every image). All audited; dhruv/active is at `c4670a7f`.
+- **Last migration on main: 0211** (unchanged). The ADR index ends at **0199** (194 files, 194 rows); ADR-0187 gained
+  a 2026-10-24 addendum.
+- **Merged after this paragraph was first written:** #545 (`bd35422f`, 02:52), both engine closure fixes: promptfoo's npm
+  overrides (body-parser, zod, undici) and garak's re-resolve on litellm 1.103.7 from #548 (owner decision 2026-10-24,
+  #453 comment 6378601196; only litellm and filelock move, `pip check` clean, pre-seed 9/9, OSV clean). Combined
+  recheck APPROVE at `8d89fbc5` with all three image scans green. #548 closed as merged with it.
+- **Open:** lock PR #549 (held, in review) records the engine publish of `bd35422f` (promptfoo 7, modelscan 7, garak 8). A first
+  filelock 4.2.4 pin failed garak's `pip check` (M-101); lock PR #544 was closed unmerged (M-097). #541 (spikes
+  Dependabot) needs its licence inventories regenerated, after the demo. #516, #517 and #520 wait until after the new
+  lock; #543 and #521 are red.
+- **Owner actions:** after the new lock merges, rebuild both demo hosts (`git pull`, `docker compose pull`,
+  `docker compose up -d --build`, `demo:check`) and set laptop Node to 22.23.4. The stale lock branches were deleted by
+  the owner (verified 2026-10-24 02:15). Still open from 10-23: the power schedule off before 10-25, the dev-host
+  override file, the freeze branch rule and the 10-29 freeze-SHA dispatches. A full feedback scan of the product and
+  the demo plan is running (#547).
+- **Process:** mistakes M-097..M-101 (engine closures missed by workspace fixes, shortened digests, a check claimed
+  before it ran, a re-run during a live run, an owner option offered on an unverified build premise). Post-demo follow-ups are listed in ADR-0199.
 
 **2026-10-23 (21:30 UTC) - demo prep: the security and dependency batch, three engine lock records, the demo
 readiness deep scan (#522, 53 findings) and its fix lanes D1-D4 and D6 are merged. The external demo moves to Tue
@@ -5296,6 +5322,12 @@ Owner decision (2026-10-23): ADR-0198 (freeze-week CI settings) is accepted and 
 mocked UI shard caps rise to 25 minutes for cold-cache installs until after 2026-11-03, a demo-blocking fix during the
 freeze may raise the entry JS and CSS ceilings by at most 1 kB in total, and the Demo journey path filter gains the
 files the deep scan found missing (#522 finding 21). The index now ends at 0198, with 193 files and 193 rows.
+
+Owner decision (2026-10-24): ADR-0199 (emergency patching of 2026-10-23/24) records the patch-not-allow-list rule,
+Node 22.23.4 in every image, the workspace overrides (body-parser in range; msal-node 7 past `@azure/identity`'s
+declared range, verified), the engine closure overrides, and the owner's choice to re-resolve garak's closure on
+litellm 1.103.7 so filelock ≥4.2.1 fits every declared range (#453 comment 6378601196, superseding comment 6378502293). ADR-0187 has a matching addendum. The index now ends at 0199, with
+194 files and 194 rows.
 
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
