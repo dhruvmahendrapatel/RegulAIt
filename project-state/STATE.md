@@ -21,7 +21,7 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
-**2026-10-24 (02:10 UTC) - emergency patching (ADR-0199): Node 22.23.4 and three high npm advisories are fixed on
+**2026-10-24 (02:55 UTC) - emergency patching (ADR-0199): Node 22.23.4 and three high npm advisories are fixed on
 main; the engine closures are in review.** Full record: [sessions/2026-10-24-session-01.md](sessions/2026-10-24-session-01.md).
 This paragraph supersedes the "Open" and "Owner actions" lines of the 2026-10-23 (21:30) paragraph below; everything
 else there stands.
@@ -35,7 +35,7 @@ else there stands.
   overrides (body-parser, zod, undici) and garak's re-resolve on litellm 1.103.7 from #548 (owner decision 2026-10-24,
   #453 comment 6378601196; only litellm and filelock move, `pip check` clean, pre-seed 9/9, OSV clean). Combined
   recheck APPROVE at `8d89fbc5` with all three image scans green. #548 closed as merged with it.
-- **Open:** the engine publish of `bd35422f` and ONE held lock PR from it (promptfoo 7, modelscan 7, garak 8). A first
+- **Open:** lock PR #549 (held, in review) records the engine publish of `bd35422f` (promptfoo 7, modelscan 7, garak 8). A first
   filelock 4.2.4 pin failed garak's `pip check` (M-101); lock PR #544 was closed unmerged (M-097). #541 (spikes
   Dependabot) needs its licence inventories regenerated, after the demo. #516, #517 and #520 wait until after the new
   lock; #543 and #521 are red.
