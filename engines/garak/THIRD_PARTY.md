@@ -114,12 +114,6 @@ and the two garak wheels on 2026-10-21:
   (`file_download.py` differs only in using httpx instead of httpx2, and `utils/_shared_blobs.py` is byte-identical),
   so the Hub cache layout, including the shared `hub/blobs/<xx>/<xet hash>` store, is unchanged. OSV is clean apart
   from nltk.
-- **filelock 3.32.7 to 4.2.4 (owner decision 2026-10-24).** 3.32.7 has CVE-2026-112940 (high, arbitrary file
-  overwrite through insecure database-file reopening), fixed only in 4.2.1+, and the Trivy image gate (ADR-0184)
-  fails on it. litellm 1.106.1 (and 1.106.2, 1.105.3) declares `filelock<4.0`; only litellm 1.103.x drops the cap.
-  The owner chose to keep litellm 1.106.1 and the hub client 1.33.0 and pin filelock 4.2.4 (MIT) past litellm's
-  declared cap: the image installs with `--no-deps`, the hub client declares no cap and its lock helpers
-  (`FileLock`, `SoftFileLock`, `WeakFileLock`) run on 4.2.4, and the gateway route never calls litellm.
 - **Changed pins (42):** aiohttp 3.14.5, boto3 and botocore 1.43.116, datasets 5.1.0, dill 0.4.1, filelock 3.32.7,
   fsspec 2026.7.0, garak 0.17.1, google-auth 2.62.0, httpcore2 and httpx2 2.16.0 (released 2026-10-21),
   huggingface-hub 1.33.0, jsonpatch 1.36, jsonpath-ng 1.12.0,
