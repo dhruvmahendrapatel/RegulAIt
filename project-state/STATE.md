@@ -1,10 +1,10 @@
 ---
-phase: demo-prep-emergency-patching-engine-closures-in-review
+phase: demo-prep-full-scan-lanes-merged
 last_updated: 2026-10-24
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-10-24-session-01.md
+last_session: sessions/2026-10-24-session-02.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,27 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-24 (21:00 UTC) - the full feedback scan and the designer's demo-path leads are fixed on main; one lane is
+in its last recheck.** Full record: [sessions/2026-10-24-session-02.md](sessions/2026-10-24-session-02.md). This paragraph
+supersedes the "Open" and "Owner actions" lines of the 02:55 paragraph below; everything else there stands.
+- **Merged (UTC):** #549 (03:41, engine lock), #551 (`3b8517d`, lane R), #552 (`56e078e`, lane U5), #553 (`1a812b2`, U3),
+  #556 (`9154bc7`, U4), #554 (`0e89cb6`, U2), #550 (`2117706`, lane A, demo docs) and #557 (`88cbcd3`, the master merge
+  loop under `scripts/master/` plus the `all JS` ceiling at 1,040 kB). All audited; dhruv/active is at `88cbcd3`.
+- **Owner decisions (#453):** c6385378784 (FS-1 LIVE re-script, the FS-8 beat, all designer batches, the remaining scan
+  recommendations), c6387779914 (the FS-8 beat is a simulated decision on the Simulation page on both dates),
+  c6388659678 (`all JS` 1,040 kB), c6389193296 and c6389271693 (ADR-0200 guidelines and security checklist) and
+  c6389334200 (the `internal/` folder, ADR-0201).
+- **Last migration on main: 0211** (unchanged). The ADR index has one row per file and is now checked in CI
+  (`scripts/adr-index.test.mjs`); ADR-0176, ADR-0196 and ADR-0197 gained addenda.
+- **Open:** #555 (lane U1, Shadow AI) is in its last recheck at `e9337bc`. Deferred until after the demo: the
+  Dependabot PRs #515–#543 (none released), #541, #518 and the lane follow-ups listed in the session record.
+- **Owner actions:** FS-21 (required checks on main), FS-26 (supply SUITE_RULES.md), rebuild both demo hosts
+  (`git pull`, `docker compose pull`, `docker compose up -d --build`, `demo:check`) and set laptop Node 22.23.4, the
+  10-29 freeze-SHA dispatches, and no `terraform apply` to the dev host before 11-03.
+- **Process:** M-102..M-105 (master state kept only in a scratchpad, an unreviewed merge gate, combined bundle size,
+  shell interpolation in a brief). The merge loop now lives in the repo and merges only `<pr> <full sha>` lines the
+  master writes after an APPROVE at that sha.
 
 **2026-10-24 (02:55 UTC) - emergency patching (ADR-0199): Node 22.23.4 and three high npm advisories are fixed on
 main; the engine closures are in review.** Full record: [sessions/2026-10-24-session-01.md](sessions/2026-10-24-session-01.md).
@@ -5328,6 +5349,12 @@ Node 22.23.4 in every image, the workspace overrides (body-parser in range; msal
 declared range, verified), the engine closure overrides, and the owner's choice to re-resolve garak's closure on
 litellm 1.103.7 so filelock ≥4.2.1 fits every declared range (#453 comment 6378601196, superseding comment 6378502293). ADR-0187 has a matching addendum. The index now ends at 0199, with
 194 files and 194 rows.
+
+Owner decision (2026-10-24, #453 comments 6389193296 and 6389271693): ADR-0200 (engineering best-practice guidelines) records the owner's 27 practices, to be
+applied wherever practical rather than as hard gates; secure by default and open source first take precedence, and
+nothing is refactored only to meet them before the 2026-11-03 demo. CLAUDE.md has a matching "Engineering guidelines"
+section, and a 19-item security checklist (owner's second list) whose gaps are blocking bugs under ADR-0180, with a
+matching CLAUDE.md section. The index now ends at 0200, with 195 files and 195 rows.
 
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
