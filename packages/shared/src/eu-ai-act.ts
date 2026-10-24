@@ -1,6 +1,6 @@
 /**
  * ADR-0085 — EU AI ACT RISK-TIER SCREENING, the pure half (gap L10,
- * docs/product/GAP_ANALYSIS_FOUR_VENDORS_2026-08.md).
+ * internal/product/GAP_ANALYSIS_FOUR_VENDORS_2026-08.md).
  *
  *   THIS FILE                        the questionnaire vocabulary, the frozen
  *                                    rule set, the deterministic classifier,

@@ -1,6 +1,6 @@
 /**
  * ADR-0080 — THE AI USE-CASE REGISTRY, the L1 pre-build front-door
- * (docs/product/GAP_ANALYSIS_CREDO_AI_2026-08.md).
+ * (internal/product/GAP_ANALYSIS_CREDO_AI_2026-08.md).
  *
  * Credo-style governance starts BEFORE anything runs: propose an AI use case,
  * fill an intake questionnaire, and an approval REGISTERS the use case. This

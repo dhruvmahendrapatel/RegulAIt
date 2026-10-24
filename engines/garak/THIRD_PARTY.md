@@ -5,7 +5,7 @@ public-domain dedication; maintained; pinned; works air-gapped). The Python clos
 `engines/garak/requirements.txt` (every wheel by version and sha256; torch is the CPU-only wheel by direct URL) and
 `requirements-sdist.txt` (two hashed sdists), installed with `pip install --require-hashes --no-deps`; the runner and
 worker shim (`packages/engine-garak`) is pinned by `pnpm-lock.yaml`. Facts were read from the pinned wheels on
-2026-10-10 (docs/research/R10-engine-admission.md §garak, and ADR-0187 decisions 140 onward), and re-read for the
+2026-10-10 (internal/research/R10-engine-admission.md §garak, and ADR-0187 decisions 140 onward), and re-read for the
 garak 0.17.1 upgrade on 2026-10-21 (the section of that date below).
 
 **Admission status: NOT ADMISSIBLE YET.** The image has not been built where its digest could be recorded (no Docker

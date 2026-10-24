@@ -1,6 +1,6 @@
 /**
  * ADR-0090 — GRANT CERTIFICATION CAMPAIGNS (gap L22,
- * docs/product/GAP_ANALYSIS_SAVIYNT_2026-08.md).
+ * internal/product/GAP_ANALYSIS_SAVIYNT_2026-08.md).
  *
  * Saviynt's core loop is the access-certification campaign: a periodic,
  * owner-driven review of entitlements where a named reviewer attests KEEP or

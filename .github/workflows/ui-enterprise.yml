@@ -23,7 +23,7 @@ on:
     paths-ignore:
       - '**/*.md'
       - 'docs/**'
-      - 'project-state/**'
+      - 'internal/**'
       - '.gitignore'
       - 'LICENSE'
   schedule:

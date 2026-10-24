@@ -1,6 +1,6 @@
 /**
  * ADR-0091 — TOXIC-COMBINATION SEGREGATION OF DUTIES (gap L23,
- * docs/product/GAP_ANALYSIS_SAVIYNT_2026-08.md).
+ * internal/product/GAP_ANALYSIS_SAVIYNT_2026-08.md).
  *
  * Saviynt's SoD franchise is cross-application ERP rulesets. Ours is
  * deliberately narrower and OURS: an admin declares that two GATEWAY

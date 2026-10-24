@@ -1,6 +1,6 @@
 /**
  * ADR-0092 — ACCESS RECOMMENDATIONS, the deterministic half (gap L24,
- * docs/product/GAP_ANALYSIS_SAVIYNT_2026-08.md).
+ * internal/product/GAP_ANALYSIS_SAVIYNT_2026-08.md).
  *
  * Saviynt's Intelligence Suite recommends who should lose or gain access via
  * peer analytics and trust scores. This module is the half of that story we

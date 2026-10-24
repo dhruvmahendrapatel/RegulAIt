@@ -41,7 +41,7 @@ export const SIZE_LIMIT_FILE = "apps/web/.size-limit.json";
 const WEB_DIR = path.join(root, "apps", "web");
 /** the one way the `size` script may call size-limit: with the guarded file pinned */
 export const SIZE_SCRIPT_PIN = "size-limit --config .size-limit.json";
-export const SIZE_LIMIT_ADR = "docs/decisions/0196-ui-enterprise-harness.md";
+export const SIZE_LIMIT_ADR = "internal/decisions/0196-ui-enterprise-harness.md";
 
 /**
  * Owner-approved ceiling raises (ADR-0196). Each row allows one raise of one `.size-limit.json` entry, from exactly

@@ -3,7 +3,7 @@
  *
  * One pure, versioned catalogue shared by the gateway (manifest set classes, the reduced set and the
  * taxonomy map) and the garak runner (planning, config and the report mapper). Every disposition is
- * from G19 (docs/research/R10-engine-admission.md §garak), probe by probe; the detector and OWASP-tag
+ * from G19 (internal/research/R10-engine-admission.md §garak), probe by probe; the detector and OWASP-tag
  * columns are garak's own metadata, generated from the pinned wheel (garak-upstream.ts). Where a fact
  * could not be established the probe fails closed: it is not run and says why.
  *

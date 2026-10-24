@@ -18,7 +18,7 @@
  * are one-directional: never define an `--rg-*` token in terms of a legacy one.
  *
  * Documented deviations (the UI Structures "Traps" section requires these be
- * written down rather than improvised — see docs/decisions/0075-*.md):
+ * written down rather than improvised — see internal/decisions/0075-*.md):
  *   1. The brand defines no success/positive hue. We borrow the regulAIt Governed
  *      product ramp, matching the precedent the source app set.
  *   2. The brand is silent on radii and spacing. Both scales are ours.

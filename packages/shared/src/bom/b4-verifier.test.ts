@@ -347,7 +347,7 @@ const decisionRowOf = (v: Vector) => {
 
 describe("ADR-0189 B4.9 G12: the AI BOM worked example is what buildAiBom writes (the build requirement)", () => {
   /** the fenced `b4-ai-example:<name>` blocks of the ADR (a line scan) */
-  const adr = readFileSync(path.resolve(here, "../../../../docs/decisions/0189-batch6-decision-bom-ai-bom.md"), "utf8").split("\n");
+  const adr = readFileSync(path.resolve(here, "../../../../internal/decisions/0189-batch6-decision-bom-ai-bom.md"), "utf8").split("\n");
   const block = (name: string) => {
     const i = adr.indexOf(`\`\`\`text b4-ai-example:${name}`);
     expect(i, name).toBeGreaterThanOrEqual(0);

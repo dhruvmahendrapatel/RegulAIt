@@ -7,7 +7,7 @@ maintenance window, nothing to patch.
 Project-agnostic: it takes instance IDs and cron expressions and knows nothing
 about what runs on the boxes. RegulAIt composes it in
 [`infra/environments/regulait-dev-app`](../../environments/regulait-dev-app);
-the decision record is [ADR-0032](../../../docs/decisions/0032-scheduled-power-off-dev-infra.md).
+the decision record is [ADR-0032](../../../internal/decisions/0032-scheduled-power-off-dev-infra.md).
 
 ```hcl
 module "power_schedule" {

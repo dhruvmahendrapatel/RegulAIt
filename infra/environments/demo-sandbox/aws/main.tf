@@ -1,6 +1,6 @@
 # demo-sandbox / aws: what lives INSIDE the sandbox account (ADR-0197 decisions
 # 2-4 and 8). Applied after ../account. Runbook:
-# docs/deployment/DEMO_REAL_ACCOUNTS.md.
+# internal/product/DEMO_REAL_ACCOUNTS.md.
 #
 # 1. A CloudTrail trail (management events) to a private, expiring bucket.
 # 2. The discovery role RegulAIt assumes by web identity: it trusts RegulAIt's

@@ -1,6 +1,6 @@
 /**
  * ADR-0082 — THE STANDING AGENT DEPENDENCY INVENTORY (gap L7,
- * docs/product/GAP_ANALYSIS_CREDO_AI_2026-08.md).
+ * internal/product/GAP_ANALYSIS_CREDO_AI_2026-08.md).
  *
  * Credo AI renders a static "agent X uses tools Y,Z and feeds agent W" map as
  * a registry view. RegulAIt's DAGs are per-run and its lineage is per-trace —
@@ -43,7 +43,7 @@
  * for what-if questions).
  *
  * ADR-0089 ADDS TWO MORE READ-TIME BLOCKS, same discipline (gaps L20/L21,
- * docs/product/GAP_ANALYSIS_SAVIYNT_2026-08.md):
+ * internal/product/GAP_ANALYSIS_SAVIYNT_2026-08.md):
  *  - OWNERSHIP: `owned` / `unowned` (no owner recorded — a flag, never a
  *    default) / `orphaned` (the recorded owner's account is deactivated, the
  *    ADR-0022 state SCIM deprovisioning writes). Computed at read time from

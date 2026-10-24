@@ -6,7 +6,7 @@ import { LIMITS, lint } from "./coordination.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 /** the checked-in file as read from disk — CRLF on a Windows (autocrlf) checkout */
-const onDisk = readFileSync(path.join(here, "..", "AgentCoordination.md"), "utf8");
+const onDisk = readFileSync(path.join(here, "..", "internal", "process", "AgentCoordination.md"), "utf8");
 /** LF-normalised: every mutation below finds its anchor whatever the checkout */
 const real = onDisk.replace(/\r\n/g, "\n");
 

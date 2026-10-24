@@ -1,7 +1,7 @@
 {
   "format": "regulait.delegation-spec-vectors.v2",
   "source": {
-    "adr": "docs/decisions/0188-batch6-agent-workload-identity.md",
+    "adr": "internal/decisions/0188-batch6-agent-workload-identity.md",
     "draftCommit": "b91c6072b2e28c38bed163c68ff33be6635b852c",
     "reviewedAgainst": {
       "branch": "b6-identity-s5",

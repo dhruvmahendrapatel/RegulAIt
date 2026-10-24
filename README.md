@@ -13,16 +13,16 @@ one plane where the control and its enforcement are the same object — vendor-n
 models, clouds, git hosts, and PM tools by construction.
 
 Every claim above links to an ADR and the adversarial test that pins it — see
-[docs/product/POSITIONING.md](docs/product/POSITIONING.md) and the market/gap analyses beside
+[internal/product/POSITIONING.md](internal/product/POSITIONING.md) and the market/gap analyses beside
 it. Long-term vision, architecture decisions, and live project status are tracked in this repo
 rather than in any one conversation, so work can be picked up by anyone (or any AI session)
 cold.
 
-- **Start here if you're a human:** [project-state/STATE.md](project-state/STATE.md) for current
-  status, [docs/product/VISION.md](docs/product/VISION.md) for the long-term product vision.
+- **Start here if you're a human:** [internal/memory/STATE.md](internal/memory/STATE.md) for current
+  status, [internal/product/VISION.md](internal/product/VISION.md) for the long-term product vision.
 - **Start here if you're Claude Code:** [CLAUDE.md](CLAUDE.md) — read it first, always.
-- **Decisions:** [docs/decisions/](docs/decisions/) — one ADR per architectural/technical
-  decision, indexed in `docs/decisions/README.md`.
+- **Decisions:** [internal/decisions/](internal/decisions/) — one ADR per architectural/technical
+  decision, indexed in `internal/decisions/README.md`.
 - **Infrastructure:** [infra/](infra/) — Terraform, organized as reusable `modules/` composed
   into per-project `environments/`.
 
@@ -80,7 +80,7 @@ gateway. If the log says `*** DEMO PREP FAILED` or `*** DEMO PREP SKIPPED: this 
 prepared`, run `docker compose down -v`, then `up` again. This runs **once per database**: `docker compose restart` and
 `down` / `up` keep the prepared data, the licence, the key and a password you set, and skip the
 prep (the log says so); `down -v` deletes it all, and the next `up` prepares again. Details and
-what to do if a step fails: [docs/product/DEMO_RUNBOOK.md §1.3](docs/product/DEMO_RUNBOOK.md).
+what to do if a step fails: [internal/product/DEMO_RUNBOOK.md §1.3](internal/product/DEMO_RUNBOOK.md).
 **Demo only:** `scripts/install.sh` refuses the switch and pins it off. Without the switch (or
 `SEED_DEMO=1`), `docker compose up` starts an empty gateway: no demo users, keys or relaxations.
 
@@ -141,7 +141,7 @@ sign-off stage, blocks PII, and floors audit retention — nobody configured any
   env var instead (below).
 
 > **`/ui` is the whole product surface.** The single-file `/app` and `/admin` shells were
-> deleted by [ADR-0033](docs/decisions/0033-delete-legacy-template-literal-uis.md). *Corrected
+> deleted by [ADR-0033](internal/decisions/0033-delete-legacy-template-literal-uis.md). *Corrected
 > 2026-10-03:* those two paths **302 into `/ui`** (`app.ts`, kept for SSO's `returnTo` whitelist
 > and old bookmarks) — an earlier revision of this note said they 404, which they never did. Only
 > `/legacy/*` is gone outright.
@@ -292,7 +292,7 @@ git status --short --untracked-files=all
 assertion *and* for an unhandled error thrown outside any assertion — the
 second kind is the one that used to make this suite's exit code
 non-deterministic on an all-green run, closed by
-[ADR-0106](docs/decisions/0106-mock-socket-net-contract.md). Do not read the
+[ADR-0106](internal/decisions/0106-mock-socket-net-contract.md). Do not read the
 "N passed" line and stop; read `echo $?`.
 
 ### Tamper-evident audit anchoring (no cloud account needed)
@@ -316,7 +316,7 @@ or an unreadable lock config all report `false` with a disclosure saying why.
 Point it at real S3 (or any S3-compatible endpoint) by setting
 `REGULAIT_AUDIT_ANCHOR_S3_BUCKET` and friends; `REGULAIT_AUDIT_ANCHOR=off`
 disables anchoring entirely. Decision:
-[ADR-0060](docs/decisions/0060-tamper-evident-audit.md).
+[ADR-0060](internal/decisions/0060-tamper-evident-audit.md).
 
 > Object Lock protects a **version**, not a name: a later write to the same key
 > adds a version rather than replacing it, so verification deliberately reads
@@ -340,12 +340,12 @@ docker compose --profile tls -f docker-compose.yml \
 ```
 
 Runbook and caveats: [docs/ops/TLS.md](docs/ops/TLS.md). Decision:
-[ADR-0029](docs/decisions/0029-zero-cost-tls-caddy-sslip-letsencrypt.md).
+[ADR-0029](internal/decisions/0029-zero-cost-tls-caddy-sslip-letsencrypt.md).
 
 ### Deploy it into your own environment (BYOC / air-gapped)
 
 The quickstart above is local dev. To stand RegulAIt up in a customer's own cloud account or on an
-air-gapped host — [ADR-0041](docs/decisions/0041-byoc-primary-motion.md) makes that the primary
+air-gapped host — [ADR-0041](internal/decisions/0041-byoc-primary-motion.md) makes that the primary
 motion — there is one command:
 
 ```bash
@@ -405,7 +405,7 @@ whether the audit-prune and backup-verification schedulers are failing.
 ## Status
 
 Governance MVP — all eight P0 pillars have working, tested cores; see
-[project-state/STATE.md](project-state/STATE.md) for the live picture.
+[internal/memory/STATE.md](internal/memory/STATE.md) for the live picture.
 
 ## License
 

@@ -4,7 +4,7 @@ node_modules
 .git
 infra
 docs
-project-state
+internal
 graphify-out
 *.md
 # ADR-0167 (CFG-07): test code and the browser e2e suite are not part of the

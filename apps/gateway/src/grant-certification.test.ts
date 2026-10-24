@@ -1,6 +1,6 @@
 /**
  * ADR-0090 — grant certification campaigns (gap L22,
- * docs/product/GAP_ANALYSIS_SAVIYNT_2026-08.md).
+ * internal/product/GAP_ANALYSIS_SAVIYNT_2026-08.md).
  *
  * What this file makes impossible to fake:
  *
