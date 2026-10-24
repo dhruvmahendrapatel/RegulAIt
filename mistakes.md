@@ -1801,3 +1801,15 @@ check-in.
 
 Rule: re-run a failed job only after its workflow run has completed (`actions/runs/<id>` status `completed`), then use
 `rerun-failed-jobs` on the run. A 403 with that message is GitHub's own answer, not the proxy's.
+
+### M-101 (2026-10-24) - An owner option was offered on an unverified build premise
+
+The master put three options to the owner for garak's filelock advisory. The recommended one, "pin filelock 4.2.4
+past litellm's declared `filelock<4.0`", rested on the claim that the image's `--no-deps` install would not enforce the
+cap. The master had not read garak's Dockerfile, which runs `pip check` after the install, and states that `pip check`
+must pass. The owner chose that option, the build failed at `pip check` on #545, and the owner had to decide again
+(litellm 1.103.7 re-resolve).
+
+Rule: before offering an owner option that depends on how a build, gate or script behaves, read that build file or
+script (for an image, its Dockerfile from `FROM` to the last `RUN`), and test the premise the way CI will. Say in the
+option which parts were verified and which were assumed.

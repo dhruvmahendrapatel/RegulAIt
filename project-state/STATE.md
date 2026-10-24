@@ -31,17 +31,19 @@ else there stands.
   in every image). All audited; dhruv/active is at `c4670a7f`.
 - **Last migration on main: 0211** (unchanged). The ADR index ends at **0199** (194 files, 194 rows); ADR-0187 gained
   a 2026-10-24 addendum.
-- **Open:** #545 (held, in review): promptfoo's own npm closure (body-parser, zod, undici overrides) and garak's
-  filelock 4.2.4 pin (owner decision 2026-10-24). Lock PR #544 was closed unmerged because the image gate failed
-  those two images (M-097). After #545 merges, ONE lock PR from its publish (promptfoo 7, modelscan 7, garak 8).
-  #541 (spikes-only Dependabot) is in review. #516, #517 and #520 wait until after the new lock; #543 and #521 are red.
+- **Open:** #545 (held, in review, head `824289d4`): promptfoo's own npm closure (body-parser, zod, undici overrides).
+  garak's filelock fix is a separate re-resolve on litellm 1.103.7 (owner decision 2026-10-24, #453 comment 6378601196),
+  being built. A filelock 4.2.4 pin failed garak's `pip check` (M-101) and was reverted. Lock PR #544 was closed
+  unmerged because the image gate failed both images (M-097). After both fixes merge, ONE lock PR from the last publish
+  (promptfoo 7, modelscan 7, garak 8). #541 (spikes-only Dependabot) is in review. #516, #517 and #520 wait until
+  after the new lock; #543 and #521 are red.
 - **Owner actions:** after the new lock merges, rebuild both demo hosts (`git pull`, `docker compose pull`,
   `docker compose up -d --build`, `demo:check`) and set laptop Node to 22.23.4; delete the stale lock branches
   `engine-images-lock/{9ff1c5bf7fc5,5b636d57738f,115f8dc954cc,7be894bd6708,33a27694804d,c4670a7fa7bf}`; plus the
   10-23 items still open (power schedule off before 10-25, dev-host override file, freeze branch rule, 10-29
   freeze-SHA dispatches).
-- **Process:** mistakes M-097..M-100 (engine closures missed by workspace fixes, shortened digests, a check claimed
-  before it ran, a re-run during a live run). Post-demo follow-ups are listed in ADR-0199.
+- **Process:** mistakes M-097..M-101 (engine closures missed by workspace fixes, shortened digests, a check claimed
+  before it ran, a re-run during a live run, an owner option offered on an unverified build premise). Post-demo follow-ups are listed in ADR-0199.
 
 **2026-10-23 (21:30 UTC) - demo prep: the security and dependency batch, three engine lock records, the demo
 readiness deep scan (#522, 53 findings) and its fix lanes D1-D4 and D6 are merged. The external demo moves to Tue
@@ -5321,8 +5323,8 @@ files the deep scan found missing (#522 finding 21). The index now ends at 0198,
 
 Owner decision (2026-10-24): ADR-0199 (emergency patching of 2026-10-23/24) records the patch-not-allow-list rule,
 Node 22.23.4 in every image, the workspace overrides (body-parser in range; msal-node 7 past `@azure/identity`'s
-declared range, verified), the engine closure overrides, and the owner's choice to pin garak's filelock 4.2.4 past
-litellm's `filelock<4.0` (#453 comment 6378502293). ADR-0187 has a matching addendum. The index now ends at 0199, with
+declared range, verified), the engine closure overrides, and the owner's choice to re-resolve garak's closure on
+litellm 1.103.7 so filelock ≥4.2.1 fits every declared range (#453 comment 6378601196, superseding comment 6378502293). ADR-0187 has a matching addendum. The index now ends at 0199, with
 194 files and 194 rows.
 
 ## Open Questions
