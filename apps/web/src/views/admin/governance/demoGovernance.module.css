@@ -70,7 +70,6 @@
   min-height: 40px;
   color: var(--text-faint);
   font-size: var(--text-xs);
-  text-transform: capitalize;
 }
 
 /* borderless cells on a graphite ramp: density is data, not an action colour */
@@ -141,10 +140,16 @@
 }
 
 .dimensionButton:hover,
-.dimensionButton:focus-visible,
 .dimensionButtonActive {
   border-color: var(--rg-signal);
   outline: none;
+}
+
+/* FS-41: the focus indicator is the signal ring (Signal 500 is 2.36:1 on the surface) */
+.dimensionButton:focus-visible {
+  border-color: var(--rg-signal);
+  outline: 2px solid var(--rg-signal-ring);
+  outline-offset: 2px;
 }
 
 .dimensionButtonActive {
@@ -217,7 +222,7 @@
 }
 .stageHeading:focus { outline: none; }
 .stageHeading:focus-visible {
-  outline: 2px solid var(--rg-signal);
+  outline: 2px solid var(--rg-signal-ring);
   outline-offset: 2px;
 }
 
@@ -771,7 +776,25 @@
 .zone_low { background: var(--rg-low-tint); color: var(--rg-low-deep); }
 .zone_medium { background: var(--rg-medium-tint); color: var(--rg-medium-deep); }
 .zone_high { background: var(--rg-high-tint); color: var(--rg-high-deep); }
-.zoneEmpty { opacity: 0.55; }
+/* FS-5: an empty cell dims its fill only; its count and zone word keep a readable ink (opacity dimmed the text
+   below AA) */
+.zone_low.zoneEmpty { background: color-mix(in srgb, var(--rg-low-tint) 45%, var(--surface-1)); }
+.zone_medium.zoneEmpty { background: color-mix(in srgb, var(--rg-medium-tint) 45%, var(--surface-1)); }
+.zone_high.zoneEmpty { background: color-mix(in srgb, var(--rg-high-tint) 45%, var(--surface-1)); }
+.zoneEmpty { color: var(--rg-ink-muted); }
+
+/* visually hidden, still read by assistive tech (an empty column's header) */
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: calc(-1 * var(--s-hair));
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
 .heatCell {
   flex-direction: column;
 }

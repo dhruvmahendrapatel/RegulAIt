@@ -13,7 +13,7 @@ import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { ApiError, api } from "../../api/client";
-import { ago } from "../../api/format";
+import { ago, plural } from "../../api/format";
 import { PageHeader } from "../../shell/AppShell";
 import { Badge, Button, Card, CodeBlock, EmptyState, ErrorState, Field, Input, Select, SkeletonBlock, Textarea } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
@@ -279,7 +279,7 @@ export default function AnnotationReviewPage() {
     <>
       <PageHeader
         title={`Review · ${d.queue.name}`}
-        sub={`${SUBJECT_LABEL[d.item.subjectKind]} · ${d.item.submissionCount} of ${d.item.requiredReviews} review(s)${d.item.dueAt ? ` · due ${ago(d.item.dueAt)}` : ""}`}
+        sub={`${SUBJECT_LABEL[d.item.subjectKind]} · ${d.item.submissionCount} of ${plural(d.item.requiredReviews, "review")}${d.item.dueAt ? ` · due ${ago(d.item.dueAt)}` : ""}`}
       />
       <div className={v.stack}>
         <div className={v.row}>

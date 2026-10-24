@@ -348,7 +348,7 @@ test("audit log: A4 deploy-mode filter, including the honest unknown / pre-0044 
   const modeFilter = page.getByLabel("Filter by deploy mode");
   await expect(modeFilter).toBeVisible();
   // the control must NAME the un-backfillable bucket rather than hiding it
-  await expect(modeFilter.locator("option", { hasText: "None recorded" })).toHaveCount(1);
+  await expect(modeFilter.locator("option", { hasText: "Not recorded" })).toHaveCount(1);
   // …and the page must say out loud why unknown is not a mode. (cb55473, the
   // visual-QA batch, rewrote this copy — "never back-filled or guessed"
   // replaced "un-backfillable" — along with the mode cells and the empty

@@ -131,7 +131,7 @@ test("seeded credit-assistant journey: discover, register, assess, approve, moni
   await expect(page.getByText("claude-opus").first()).toBeVisible();
   await shotBoth(page, "real-03b-stack");
   await page.getByRole("tab", { name: "Dependencies" }).click();
-  await expect(page.getByRole("img", { name: "AI dependency and propagated risk graph" })).toBeVisible();
+  await expect(page.getByRole("group", { name: "AI dependency and propagated risk graph" })).toBeVisible();
   await shotBoth(page, "real-03c-dependencies");
 
   await page.getByRole("tab", { name: "Risks" }).click();
@@ -202,7 +202,7 @@ test("seeded credit-assistant journey: discover, register, assess, approve, moni
   await expect(approver).toBeVisible();
   await approver.selectOption({ label: "Avery Approver" });
   await page.getByRole("button", { name: "Propose…" }).first().click();
-  await expect(page.getByText("pending approval", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("alert-detail").getByText("Waiting for approval", { exact: true })).toBeVisible();
   await shotBoth(page, "real-07-remediation-proposed");
 
   await avery.goto("/ui/inbox");
