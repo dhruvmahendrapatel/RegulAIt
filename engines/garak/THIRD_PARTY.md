@@ -167,6 +167,37 @@ other pin, and the closure stays 178 distributions. Read from PyPI, OSV and the 
   the five data packages unpacked into the cache root, `words`, `stopwords`, `wordnet`, `pos_tag` (the JSON
   `averaged_perceptron_tagger_eng`) and `word_tokenize` (`punkt_tab`) return identical results.
 
+**Re-resolved 2026-10-24: filelock 3.32.7 to 4.2.4 and litellm 1.106.1 to 1.103.7 (owner decision 2026-10-24,
+issue #453).** The image's Trivy gate fails on filelock 3.32.7: GHSA-v4x8-3wr5-3wq8 (CVE-2026-112940, high, fixed in
+4.2.1; OSV also lists GHSA-567q-5qvw-pf92 and GHSA-9vhv-jxww-xfm5, both low, fixed in 4.2.1). litellm 1.106.x
+declares `filelock<4.0` and the Dockerfile's `pip check` enforces it, so filelock 4.x cannot be pinned on its own. The
+owner chose litellm 1.103.7 (released 2026-10-21, MIT, no OSV advisory), which declares neither a filelock nor a
+huggingface-hub dependency; garak 0.17.1 needs `litellm>=1.84.0`. litellm 1.107.0 is the backdoored release and is
+never taken. Read from PyPI, OSV and the installed wheels on 2026-10-24:
+- **Resolve:** `uv pip compile` (uv 0.11.32, CPython 3.12, x86_64-manylinux_2_28) with the inputs in the header of
+  `requirements.txt` plus `litellm==1.103.7` and `filelock>=4.2.1`, using that file as the resolver's preferences and
+  upgrading only litellm and filelock. **Only these two pins changed:** filelock 4.2.4 (py3-none-any, sha256
+  `30124143…f8db8358e`, released 2026-10-19, `License-Expression: MIT`) and litellm 1.103.7 (cp310-abi3 manylinux_2_28
+  x86_64, sha256 `4a866318…505dcb54`, `License-Expression: MIT`), each hash from PyPI's JSON API. The closure stays
+  178 distributions. A resolve without preferences would also have moved 25 unrelated pins (websockets to 17.x and
+  pandas to 3.1.0 among them), which this security fix does not take. huggingface-hub stays 1.33.0: litellm 1.103.7
+  no longer caps it, but the hub client declares `filelock>=3.10.0` and nothing requires a newer one. litellm imports
+  no filelock; the users are datasets, huggingface_hub, torch and transformers.
+- **Install:** in a Python 3.12 venv, `pip install --require-hashes --no-deps --only-binary :all:` of
+  `requirements.txt`, then `requirements-sdist.txt` as the Dockerfile builds it, then `pip check`: **no broken
+  requirements**. The garak version check reads 0.17.1, and the prune removes its 23 paths with `plugin_cache.json`
+  matching.
+- **Licences:** the gate on the installed, pruned closure with pip removed reads **197 allowed, 23 admitted, 0
+  denied**, as before. Both changed packages carry an SPDX MIT expression, so no reading or allow entry changed, and
+  `IMAGE-NOTICES.txt` is unchanged.
+- **Pre-seed:** with hub 1.33.0 and filelock 4.2.4, `preseed-hf.py fetch` (all nine assets, licences read at the
+  pinned commits, every hash matching), `materialise` (the seven datasets) and an offline `verify` passed. The verify
+  ran in a fresh network namespace with only loopback, the tree read-only and every offline switch set, and reported
+  "9 pre-seeded assets verified offline", the NLI model included. The hub client is unchanged, so the cache layout
+  (`hub/blobs`, `models--…`, `datasets--…`, `refs/main`) is unchanged, and `preseed-hf.py` and `prune-data.py` needed
+  no change.
+- **OSV** over all 178 pinned distributions (the two sdists and torch 2.14.1 included): **no advisory**.
+
 | Component | Version | Licence | Used for, and why |
 |---|---|---|---|
 | `garak` (PyPI, github.com/NVIDIA/garak) | `0.17.1` (released 2026-10-16; wheel sha256 `cef78a79…cfda8`, from PyPI's JSON API and the downloaded wheel; 0.17.0's `9a67e629…db145` was the hash R10 checked independently) | Apache-2.0 (`LICENSE`, SPDX headers; its METADATA names no licence) | The engine (ADR-0187 B5-G). Only the probes in the shared catalogue run (`packages/shared/src/engines/garak.ts`); 23 data paths whose licence or provenance is excluded are DELETED from the image (`excluded-data.txt`, decisions 145 and 197). Its probe metadata (`plugin_cache.json`, sha256 `6ba9cca2…230209`) is what the catalogue's detector and OWASP columns are generated from; the build refuses another. |
