@@ -219,7 +219,7 @@ test("A1: a finding's plan and triage open in the one shared drawer; Escape clos
   await opener.click();
   const row = page.getByRole("region", { name: /Inventory, scrollable/ }).locator("tbody tr", { hasText: "team-17/payments-api" });
   // N1: the page gives up the drawer's width, so a real click reaches the row beside the open drawer
-  await row.getByRole("button", { name: /^(Triage|Review again)$/ }).click();
+  await row.getByRole("button", { name: /^(Triage|Review again)\b/ }).click();
   await expect(page.getByRole("dialog")).toHaveCount(1);
   await expect(page.getByRole("dialog")).toContainText("Triage");
   await page.getByRole("button", { name: "Close triage" }).click();
@@ -702,7 +702,7 @@ test("L1: after the drawer switches subject, focus returns to the control that o
 
   // another drawer type: the plan drawer unmounts, and focus still ends on the triage opener
   await page.getByRole("button", { name: "Plan remediation for team-17/payments-api" }).click();
-  const triage = findingRow(page, "team-08/marketing-site").getByRole("button", { name: /^(Triage|Review again)$/ });
+  const triage = findingRow(page, "team-08/marketing-site").getByRole("button", { name: /^(Triage|Review again)\b/ });
   await triage.focus();
   await page.keyboard.press("Enter");
   await expect(page.getByRole("dialog")).toContainText("Triage");
@@ -734,7 +734,7 @@ for (const [label, size] of [["390 px", { width: 390, height: 520 }], ["desktop"
     await expect(page.getByRole("dialog", { name: "Start a remediation workflow?" })).toHaveCount(0);
     await page.getByRole("button", { name: "Close plan" }).click();
 
-    await findingRow(page, "team-17/payments-api").getByRole("button", { name: /^(Triage|Review again)$/ }).click();
+    await findingRow(page, "team-17/payments-api").getByRole("button", { name: /^(Triage|Review again)\b/ }).click();
     await expect(page.getByRole("dialog")).toContainText("Triage");
     expect(await pinned("Record")).toBe("pinned");
     expect(await pinned("Cancel")).toBe("pinned");
@@ -759,4 +759,141 @@ test("L5: folding still works when this browser refuses storage, and nothing is 
   await page.reload();
   await expect(page.getByRole("button", { name: /^Inventory \d+ findings/ })).toHaveAttribute("aria-expanded", "true");
   expect(errors).toEqual([]);
+});
+
+// ---- design batch D1 (#547): the S1-S3 demo path, verified on main before the fix ----
+
+test("shadow-ai-13: triage opens on Confirmed, and Record waits for the reason the gateway requires", async ({ page }) => {
+  await page.goto("/ui/admin/shadow-ai");
+  await findingRow(page, "team-17/payments-api").getByRole("button", { name: /^(Triage|Review again)\b/ }).click();
+  const drawer = page.getByRole("dialog");
+  await expect(drawer.getByRole("combobox", { name: "Disposition" })).toHaveValue("confirmed");
+  const record = drawer.getByRole("button", { name: "Record", exact: true });
+  await expect(record).toBeDisabled();
+  const reason = drawer.getByRole("textbox", { name: "Reason" });
+  await reason.fill("docs mention only");
+  await expect(record).toBeEnabled();
+  // reopening as "open" needs no reason, as the gateway allows
+  await reason.fill("");
+  await drawer.getByRole("combobox", { name: "Disposition" }).selectOption("open");
+  await expect(record).toBeEnabled();
+  // a later drawer never inherits an earlier choice: Sanctioned, Cancel, then another row opens on Confirmed again
+  await drawer.getByRole("combobox", { name: "Disposition" }).selectOption("sanctioned");
+  await drawer.getByRole("button", { name: "Cancel", exact: true }).click();
+  await findingRow(page, "team-22").getByRole("button", { name: /^(Triage|Review again)\b/ }).click();
+  await expect(page.getByRole("dialog").getByRole("combobox", { name: "Disposition" })).toHaveValue("confirmed");
+  // the "Seen again after closing" callout opens the same drawer and resets it too
+  await page.getByRole("dialog").getByRole("combobox", { name: "Disposition" }).selectOption("sanctioned");
+  await page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.getByTestId("shadow-seen-again").getByRole("button", { name: "Review laptop psn:1a2b3c again" }).click();
+  await expect(page.getByRole("dialog").getByRole("combobox", { name: "Disposition" })).toHaveValue("confirmed");
+});
+
+test("shadow-ai-17: each row's Triage and Register as use case name their finding", async ({ page }) => {
+  await page.goto("/ui/admin/shadow-ai");
+  const row = findingRow(page, "team-17/payments-api");
+  await expect(row.getByRole("button", { name: /^(Triage|Review again:?) team-17\/payments-api$/ })).toBeVisible();
+  await expect(row.getByRole("link", { name: "Register as use case: team-17/payments-api" })).toHaveCount(1);
+});
+
+test("shadow-ai-05: a psn: link lands on the prefilled Pseudonym field, in view and focused", async ({ page }) => {
+  await page.goto(`/ui/admin/shadow-ai/discovery-sources?pseudonym=${encodeURIComponent(PSN)}`);
+  const field = page.getByRole("textbox", { name: "Pseudonym" });
+  await expect(field).toHaveValue(PSN);
+  await expect(field).toBeFocused();
+  await expect(field).toBeInViewport();
+  // still a deliberate act: nothing was revealed on arrival
+  await expect(page.getByTestId("revealed-pseudonym")).toHaveCount(0);
+});
+
+test("FS-6: the posture paragraph's link is underlined, not told apart by colour alone", async ({ page }) => {
+  await page.goto("/ui/admin/shadow-ai/discovery-sources");
+  const link = page.getByRole("link", { name: "Shadow-AI discovery", exact: true }).and(page.locator("p a"));
+  await expect(link).toHaveCSS("text-decoration-line", "underline");
+});
+
+test("shadow-ai-01: the federation card shows a failed read as an error with Retry, never as off", async ({ page }) => {
+  await page.route("**/v1/discovery/federation", (route) => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "unavailable" }) }));
+  await page.goto("/ui/admin/shadow-ai/discovery-sources");
+  const fed = page.locator("section[data-rg-card]").filter({ hasText: "Cloud federation" }).first();
+  await expect(fed.getByRole("alert")).toBeVisible();
+  await expect(fed.getByRole("button", { name: "Retry" })).toBeVisible();
+  await expect(fed.getByTestId("federation-status")).toHaveCount(0);
+  await expect(fed).not.toContainText("No federation key yet");
+});
+
+test("shadow-ai-02/03: failed runs, token and device reads show errors with Retry, not empty states", async ({ page }) => {
+  const fail = (route: Route) => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "unavailable" }) });
+  await page.route("**/v1/discovery/runs?*", fail);
+  await page.route("**/enrolment-tokens", fail);
+  await page.route("**/endpoint-devices", fail);
+  await page.route("**/v1/discovery/sources", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ sources: [...sources, source(5, { name: "Fleet agent", kind: "endpoint_agent", credential: null })], posture }) }));
+  await page.goto("/ui/admin/shadow-ai/discovery-sources");
+  await expect(page.getByRole("list", { name: "How discovery works" })).toContainText("Scan on a schedule—");
+  await expect(page.getByText("No scan has run")).toHaveCount(0);
+  await expect(page.getByText("No enrolment token")).toHaveCount(0);
+  await expect(page.getByText("No device has enrolled")).toHaveCount(0);
+  await expect(page.getByText("Couldn't load this list")).toHaveCount(3);
+});
+
+test("shadow-ai-14: the link-a-workflow options read the workflow status in words", async ({ page }) => {
+  await page.route("**/v1/workflows/instances", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ instances: [{
+      id: "11111111-2222-4333-8444-555555555555", status: "blocked_on_approval", createdAt: ago(5), initiatorUserId: "u",
+      change: { description: `Remove ungoverned Acme LLM usage — shadow-AI finding ${F(1)}`, paths: [], changeType: "shadow-ai-remediation", environment: "staging" },
+    }] }) }));
+  await page.goto("/ui/admin/shadow-ai");
+  await page.getByRole("button", { name: `Plan remediation for ${findings[0]!.subject}` }).click();
+  const select = page.getByRole("dialog").getByLabel("Or link an existing workflow");
+  const options = (await select.locator("option").allTextContents()).join("\n");
+  expect(options).not.toContain("blocked_on_approval");
+  expect(options).toContain("Blocked on approval");
+});
+
+test("shadow-ai-16: the signatures table folds to fit its card, names its actions column and says when a confidence is missing", async ({ page }) => {
+  const sig = (n: number, over: Record<string, unknown>) => ({
+    id: `5160000${n}-0000-4000-8000-000000000000`, provider: "acme-model-services", kind: "sdk_package", value: `acme-llm-sdk-${n}`, matchType: "host_suffix",
+    minLength: null, replacementAgentId: null, replacementNote: null, provenance: "seed", enabled: true, lastUpdatedAt: ago(30),
+    os: "macos", ecosystem: "npm", toolId: "local-runtime", note: "Default listener port", ...over,
+  });
+  await page.route("**/v1/shadow-ai/catalogue", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+      signatures: [sig(1, { confidence: "medium" }), sig(2, { provenance: "admin" })], total: 2, enabled: 2, oldestEntryAt: null, posture: "No collector ships.",
+    }) }));
+  await page.goto("/ui/admin/shadow-ai?tab=catalogue");
+  const card = page.locator("section[data-rg-card]").filter({ hasText: "Signatures" }).filter({ has: page.locator("tbody tr") }).first();
+  await expect(card.locator("thead th").last()).toHaveText("Actions");
+  // at 1440 px paired values share a cell, so no value is squeezed to one word per line
+  await expect(card.locator("thead th")).toHaveText(["Provider", "Kind / match", "Value", "Scope / tool", "Confidence", "Provenance", "Enabled", "Actions"]);
+  const first = card.locator("tbody tr").first();
+  // each cell's first line of text (its value) stays on one line
+  const wrapped = await first.evaluate((tr) => [...tr.querySelectorAll("td")].flatMap((td) => {
+    const text = [...td.childNodes].find((n) => n.nodeType === Node.TEXT_NODE && n.textContent?.trim()) ?? td.querySelector("code, span");
+    if (!text) return [];
+    const range = document.createRange();
+    range.selectNodeContents(text);
+    return new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size > 1 ? [td.textContent] : [];
+  }));
+  expect(wrapped).toEqual([]);
+  await expect(first).toContainText("macOS");
+  await expect(first).toContainText("Seed");
+  await expect(card.locator("tbody tr").nth(1)).toContainText("Admin");
+  await expect(card.locator("tbody tr").nth(1).getByRole("cell").filter({ hasText: /^—$/ })).toHaveCount(1);
+  await expect(first).not.toContainText("high");
+  await expect(card.getByRole("button", { name: "Remove signature acme-llm-sdk-1" })).toBeVisible();
+});
+
+test("shadow-ai-10: import history reads its mode and status in words, with an absolute date", async ({ page }) => {
+  await page.route("**/v1/shadow-ai/imports", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ imports: [
+      { id: "1", kind: "egress_log", mode: "dry_run", status: "accepted", rowCount: 1240, reason: "parsed", createdAt: ago(96) },
+    ] }) }));
+  await page.goto("/ui/admin/shadow-ai?tab=history");
+  const row = page.locator("tbody tr").first();
+  await expect(row).toContainText("Dry run");
+  await expect(row).not.toContainText("dry_run");
+  await expect(row).toContainText("Accepted");
+  await expect(row).toContainText("1,240");
+  await expect(row).toContainText(/\d{1,2} \w{3} 2026, \d{2}:\d{2}/);
 });
