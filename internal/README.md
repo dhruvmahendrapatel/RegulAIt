@@ -8,6 +8,14 @@ Everything in this folder is for the people and agents building RegulAIt. None o
   `scripts/build-image-bundle.sh` packs only images built from that context.
 - **Source archives:** `.gitattributes` marks `internal/ export-ignore`, so `git archive` leaves it out.
 
+## Start here
+
+- [ARCHITECTURE.md](ARCHITECTURE.md): a map of the system as built, with the key ADRs per area and the places where
+  an ADR and the code disagree.
+- [DESIGN_GUIDELINES.md](DESIGN_GUIDELINES.md): the product's UI rules in one place, each with its source.
+- [PRODUCT_GOALS.md](PRODUCT_GOALS.md): the mission, the eight pillars and their status, near-term and next goals,
+  and non-goals.
+
 ## Where each kind of record lives
 
 | Folder | What it holds |
