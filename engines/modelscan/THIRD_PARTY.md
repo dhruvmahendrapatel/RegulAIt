@@ -4,7 +4,7 @@ Open-source components the modelscan image ships (ADR-0176 admission rules: MIT,
 public-domain dedication; maintained; pinned; works air-gapped). The Python closure is pinned by
 `engines/modelscan/requirements.txt` (every wheel by version and sha256) and installed with
 `pip install --require-hashes --no-deps --only-binary :all:`; the runner and scanner shim (`packages/engine-modelscan`) is
-pinned by `pnpm-lock.yaml`. Facts were read from the pinned wheels on 2026-10-09 (docs/research/R10-engine-admission.md
+pinned by `pnpm-lock.yaml`. Facts were read from the pinned wheels on 2026-10-09 (internal/research/R10-engine-admission.md
 §modelscan, and ADR-0187 decisions 104 onward).
 
 **Admission status: NOT ADMISSIBLE YET.** The image has not been built in an environment that can report its digest

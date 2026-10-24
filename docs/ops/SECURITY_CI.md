@@ -1,6 +1,6 @@
 # Security CI: what each gate proves, and what it does not
 
-Workflow: [`.github/workflows/security.yml`](../../.github/workflows/security.yml). Decision: [ADR-0184](../decisions/0184-own-security-ci.md).
+Workflow: [`.github/workflows/security.yml`](../../.github/workflows/security.yml). Decision: [ADR-0184](../../internal/decisions/0184-own-security-ci.md).
 It runs on every pull request (docs-only ones too), on every push to `main`, weekly on Monday at 05:17 UTC, and on demand.
 
 Every gate fails closed. A scanner that cannot run, a report the gate cannot parse, a malformed allow-list, an expired

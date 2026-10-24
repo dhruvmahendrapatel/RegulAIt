@@ -91,7 +91,7 @@ replaced. Nothing reads any of them from a request any more, and a request that
 carries one is either a misconfigured chain or an attempt to borrow a decision.
 
 ONLY THOSE FIVE. Other `x-regulait-*` headers are ordinary client traffic and
-pass through untouched: docs/product/IDE_INTEGRATION.md tells clients to send
+pass through untouched: internal/product/IDE_INTEGRATION.md tells clients to send
 `x-regulait-project-id` and `x-regulait-agent-id` (on the MCP transport too),
 and the console sends `x-regulait-csrf`. Refusing the whole prefix refused
 every request that carried project attribution and labelled it a forgery.

@@ -164,7 +164,7 @@ services:
   # `bitnamilegacy/minio` build. The switch was made only after the ADR-0060
   # "proof by attack against a REAL Object-Lock bucket" suite passed 9/9
   # against this exact release, run the way this service runs (see
-  # docs/product/PENDING.md, "Dev/CI object store after MinIO").
+  # internal/product/PENDING.md, "Dev/CI object store after MinIO").
   objectstore:
     # The official image, pinned by DIGEST (the multi-arch index of tag 4.48,
     # 2026-09-28), so a re-pushed tag cannot change what a fresh clone runs.

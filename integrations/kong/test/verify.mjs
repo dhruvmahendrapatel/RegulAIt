@@ -1121,7 +1121,7 @@ plugins:
 
   // (b) ALLOW -> the upstream IS reached. The control for every case below.
   //
-  //     It carries the two client headers docs/product/IDE_INTEGRATION.md
+  //     It carries the two client headers internal/product/IDE_INTEGRATION.md
   //     tells clients to send. They are NOT protocol headers: the plugin must
   //     let them through untouched, because refusing them refuses every
   //     request that carries project attribution — which is what the first

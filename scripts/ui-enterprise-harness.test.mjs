@@ -201,12 +201,12 @@ describe("bundle-size ceilings guard (ADR-0196)", () => {
     expect(ceilingExceptionProblems([row()], `${link}\n\`x\` goes from \`1 kB\`\nto \`2 kB\``)).toEqual([expect.stringMatching(names)]);
     // the real decision link, reused for a raise ADR-0196 does not name (review M3: SeriesLineChart 109 -> 110 kB)
     const reuse = { ...CEILING_EXCEPTIONS[0], name: "lazy: SeriesLineChart", from: "109 kB", to: "110 kB" };
-    const real = readFileSync(new URL("../docs/decisions/0196-ui-enterprise-harness.md", import.meta.url), "utf8");
+    const real = readFileSync(new URL("../internal/decisions/0196-ui-enterprise-harness.md", import.meta.url), "utf8");
     expect(ceilingExceptionProblems([reuse], real)).toEqual([expect.stringMatching(names)]);
   });
 
   it("records every real exception in ADR-0196", () => {
-    const adr = readFileSync(new URL("../docs/decisions/0196-ui-enterprise-harness.md", import.meta.url), "utf8");
+    const adr = readFileSync(new URL("../internal/decisions/0196-ui-enterprise-harness.md", import.meta.url), "utf8");
     expect(ceilingExceptionProblems(CEILING_EXCEPTIONS, adr)).toEqual([]);
   });
 

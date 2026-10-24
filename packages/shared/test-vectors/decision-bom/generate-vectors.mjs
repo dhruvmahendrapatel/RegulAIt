@@ -32,7 +32,7 @@ const byCodeUnit = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 const clone = (v) => JSON.parse(JSON.stringify(v));
 
 /** a fenced block of ADR-0189 (the AI BOM worked example, B4.9 G12, is taken from the spec text itself) */
-const ADR_LINES = readFileSync(new URL("../../../../docs/decisions/0189-batch6-decision-bom-ai-bom.md", import.meta.url), "utf8").split("\n");
+const ADR_LINES = readFileSync(new URL("../../../../internal/decisions/0189-batch6-decision-bom-ai-bom.md", import.meta.url), "utf8").split("\n");
 function adrBlock(tag) {
   const i = ADR_LINES.indexOf(`\`\`\`text ${tag}`);
   if (i < 0) throw new Error(`ADR-0189 has no block ${tag}`);

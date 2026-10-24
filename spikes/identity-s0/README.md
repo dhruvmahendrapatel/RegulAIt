@@ -24,4 +24,4 @@ The proposed resource wrapper checks the issued-token binding and rereads fixtur
 
 The TLS test uses an actual Node HTTPS handshake and the same offline PKIJS validator. Proxy-header tests inject trusted-peer/authenticated-proxy facts; establishing those facts through the deployment's proxy and configuring its strip rules remain S5 integration work.
 
-See [R11](../../docs/research/R11-identity-s0-spike.md) for the GO decision, evidence and integration requirements.
+See [R11](../../internal/research/R11-identity-s0-spike.md) for the GO decision, evidence and integration requirements.

@@ -1,5 +1,5 @@
 # demo-sandbox / gitlab: a demo group's repositories for real-account repo
-# discovery (ADR-0197 decision 5). Runbook: docs/deployment/DEMO_REAL_ACCOUNTS.md.
+# discovery (ADR-0197 decision 5). Runbook: internal/product/DEMO_REAL_ACCOUNTS.md.
 #
 # The group is created by its owner in the GitLab UI first (a top-level group
 # on gitlab.com belongs to a person and carries the subscription). This stack

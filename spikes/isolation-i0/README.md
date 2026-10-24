@@ -1,7 +1,7 @@
 # Isolation I0 spike (ADR-0190 slice I0)
 
 Throwaway research code. **Not product code, not part of the pnpm workspace** (no `package.json`; the workspace covers
-`apps/*` and `packages/*` only). Findings: [`docs/research/R13-isolation-i0-spike.md`](../../docs/research/R13-isolation-i0-spike.md).
+`apps/*` and `packages/*` only). Findings: [`internal/research/R13-isolation-i0-spike.md`](../../internal/research/R13-isolation-i0-spike.md).
 
 ## Files
 

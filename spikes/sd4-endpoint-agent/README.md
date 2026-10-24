@@ -1,6 +1,6 @@
 # SD4 endpoint agent spike: size probes
 
-Throwaway code for the design spike in [`docs/research/R15-endpoint-agent-sd4-spike.md`](../../docs/research/R15-endpoint-agent-sd4-spike.md)
+Throwaway code for the design spike in [`internal/research/R15-endpoint-agent-sd4-spike.md`](../../internal/research/R15-endpoint-agent-sd4-spike.md)
 (ADR-0195 slice SD4). Nothing here is product code, nothing is in the pnpm workspace, and nothing is shipped.
 
 | Path | What it is |

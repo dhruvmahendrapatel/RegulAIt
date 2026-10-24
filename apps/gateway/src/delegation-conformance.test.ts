@@ -17,7 +17,7 @@ import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 /**
- * TIGHTEN-ONLY DELEGATION CONFORMANCE SUITE (docs/product/DELEGATION_CONFORMANCE.md,
+ * TIGHTEN-ONLY DELEGATION CONFORMANCE SUITE (internal/product/DELEGATION_CONFORMANCE.md,
  * ADR-0078). The delegation lattice enumerated systematically: for each
  * entitlement DIMENSION (agent allow-list / tool refs / budget cap) at each
  * composition LEVEL (user grant / lead ceiling / nested-lead ceiling / run

@@ -5,7 +5,7 @@
  * map) and the promptfoo runner (config generator and result mapper). Every fact below was read
  * from the pinned release's own published package (npm `promptfoo@0.124.1`, its `dist/src`
  * bundle), offline, and is recorded with how it was read in
- * docs/research/R10-engine-admission.md §promptfoo. Where a fact could not be established, the
+ * internal/research/R10-engine-admission.md §promptfoo. Where a fact could not be established, the
  * entry fails closed: the plugin is not run and says why.
  *
  * DISPOSITIONS (why a plugin does or does not run here):

@@ -50,7 +50,7 @@ const SELF = repoRel(REPO, fileURLToPath(import.meta.url));
  * fixtures, the gateway (demo setup, tests), the console and its e2e mocks,
  * scripts, and the product docs (the demo runbook). ADRs and session notes are
  * immutable history and are deliberately not scanned. */
-const SCAN_ROOTS = ["packages", "apps/gateway/src", "apps/web/src", "apps/web/e2e", "scripts", "docs/product"];
+const SCAN_ROOTS = ["packages", "apps/gateway/src", "apps/web/src", "apps/web/e2e", "scripts", "internal/product"];
 const EXTENSIONS = new Set([".ts", ".tsx", ".js", ".mjs", ".cjs", ".json", ".md", ".sh", ".yaml", ".yml"]);
 const SKIP_DIRS = new Set(["node_modules", "dist", "build", ".turbo", "artifacts", "test-results", "playwright-report"]);
 
@@ -135,7 +135,7 @@ describe("every NIST AI RMF reference in the repository is real and current", ()
       "packages/shared/src/demo-intake/fixtures.ts",
       "packages/shared/src/demo-intake/regulatory-updates.ts",
       "apps/gateway/src/demo-setup.ts",
-      "docs/product/DEMO_RUNBOOK.md",
+      "internal/product/DEMO_RUNBOOK.md",
     ]) {
       expect(rels, must).toContain(must);
     }

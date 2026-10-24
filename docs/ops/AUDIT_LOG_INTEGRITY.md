@@ -25,7 +25,7 @@ The header of `0192_ai_bom_signoff_audit_indexes.sql` says: "The append-only gua
 INSERT, UPDATE, DELETE and TRUNCATE". That is wrong: the guards are the three triggers above, and TRUNCATE is refused by
 a statement trigger. The comment's conclusion still holds (building an index fires none of these triggers). The
 migration file is not edited, because an applied migration is left byte-for-byte as it ran
-([CONTRIBUTING_PARALLEL_SESSIONS.md](../CONTRIBUTING_PARALLEL_SESSIONS.md) §4.1); this note is the correction.
+([CONTRIBUTING_PARALLEL_SESSIONS.md](../../internal/process/CONTRIBUTING_PARALLEL_SESSIONS.md) §4.1); this note is the correction.
 
 ## What makes the trail trustworthy
 

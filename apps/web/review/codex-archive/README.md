@@ -3,7 +3,7 @@
 These files are **historical records, not tests**. They are the independent review probes the Codex
 reviewer published on its `codex/*` branches between X34 and X53 (2026-10-10). Codex is retired
 (ADR-0191), and its branches are being deleted, so the probes were copied here unchanged to keep the
-evidence. The matching ledger entries are in the root `codexInputs.md`, under "Codex review ledger
+evidence. The matching ledger entries are in `internal/process/codexInputs.md`, under "Codex review ledger
 X33–X59 (archived from branches at retirement, 2026-10-11)".
 
 **Several probes were written to fail until their finding was fixed.** A red result from one of them

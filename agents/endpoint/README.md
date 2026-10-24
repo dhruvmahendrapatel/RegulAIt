@@ -2,7 +2,7 @@
 
 A read-only Go agent that runs as the logged-in user, collects the ADR-0195 decision-18 facts named by a signed
 collection manifest, and sends signed, pseudonymous snapshots only to the org's gateway. Design: R15
-(`docs/research/R15-endpoint-agent-sd4-spike.md`). What is built, the gateway contract and what is still pending:
+(`internal/research/R15-endpoint-agent-sd4-spike.md`). What is built, the gateway contract and what is still pending:
 ADR-0195, "As built: SD4a".
 
 This module is outside the pnpm workspace. From this directory:

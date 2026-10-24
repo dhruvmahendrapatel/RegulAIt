@@ -47,7 +47,7 @@ import {
 } from "./testing/bom-b4-spec-example.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const ADR_PATH = path.resolve(here, "../../../docs/decisions/0189-batch6-decision-bom-ai-bom.md");
+const ADR_PATH = path.resolve(here, "../../../internal/decisions/0189-batch6-decision-bom-ai-bom.md");
 const sha256 = (b: Buffer | string) => createHash("sha256").update(b).digest("hex");
 
 /** the fenced blocks opened by a line "```text b4-example:<name>" (a line scan, no regex over the document) */
