@@ -137,6 +137,17 @@ in the PR body saying why.
 - **Data:** index the database for real queries; connection pooling; cache expensive computed results; fix N+1 queries;
   server-side caching where safe. Caching never crosses users, tenants or an authorisation decision.
 
+## Security checklist — every build and review (owner, 2026-10-24; ADR-0200)
+
+**A confirmed gap here is a vulnerability, and under ADR-0180 a blocking bug.** Check what your change touches, and
+walk the full list in security reviews: SQL injection (parameterised queries only); XSS (no raw untrusted HTML, strict
+CSP); CSRF on state-changing requests; file-upload validation; object-level authorisation on every read and write;
+rate limiting; JWT and signing secrets out of code, rotatable, algorithm and audience pinned; API secrets server side
+only; memory-hard password hashing; MFA (required for admins and step-up); a strict CORS allow-list; no auth tokens in
+local storage; permissions enforced server side; Postgres row-level security on tenant tables; webhook signatures
+verified with replay protection; SSRF through the guarded fetch; no source maps in production; no sensitive data in
+logs; vulnerable dependencies patched, never allow-listed.
+
 ## Session bootstrap sequence (do this first, every time, before taking any action)
 
 1. Read this file (you just did).

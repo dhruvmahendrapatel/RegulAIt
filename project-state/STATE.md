@@ -5352,7 +5352,8 @@ litellm 1.103.7 so filelock ≥4.2.1 fits every declared range (#453 comment 637
 Owner decision (2026-10-24): ADR-0200 (engineering best-practice guidelines) records the owner's 27 practices, to be
 applied wherever practical rather than as hard gates; secure by default and open source first take precedence, and
 nothing is refactored only to meet them before the 2026-11-03 demo. CLAUDE.md has a matching "Engineering guidelines"
-section. The index now ends at 0200, with 195 files and 195 rows.
+section, and a 19-item security checklist (owner's second list) whose gaps are blocking bugs under ADR-0180, with a
+matching CLAUDE.md section. The index now ends at 0200, with 195 files and 195 rows.
 
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);

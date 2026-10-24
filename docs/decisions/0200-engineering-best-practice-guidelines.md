@@ -67,6 +67,43 @@ are read as noted.
 25. Fix N+1 database queries (batch or join instead of per-row queries).
 26. Enable server-side caching where safe (see Precedence 1), with a bounded size and lifetime.
 
+### Security checklist (owner, 2026-10-24, second list)
+
+Later the same day the owner added 19 security practices. They differ from the guidelines above: a confirmed gap is a
+vulnerability, and under ADR-0180 a vulnerability is a bug and a blocking review finding. Every build checks the
+items its change touches, and every security review walks the whole list. Item 15 is read as noted.
+
+1. Check for SQL injection: parameterised queries through the ORM or the driver only, never string-built SQL.
+2. Block cross-site scripting: no raw HTML injection of untrusted content, output encoding, and a strict Content
+   Security Policy.
+3. Add CSRF protection on every state-changing request that a browser authenticates automatically.
+4. Validate file uploads: type by content, size limits, safe names and storage, and no execution.
+5. Fix broken object-level authorisation: every read and write checks that the caller may act on *that* object
+   (tenant and owner), not only on the route.
+6. Add rate limiting, per identity and per address, on authentication and expensive routes.
+7. Secure JWT and signing secrets: from a secret store or environment, never in code, rotatable, and with algorithm
+   and audience pinned on verification.
+8. Keep API secrets server side: no provider key or secret ever reaches the browser bundle.
+9. Hash passwords securely, with a memory-hard algorithm (Argon2id, or scrypt/bcrypt) and per-password salts.
+10. Add MFA: available for every account and required for administrators and step-up actions.
+11. Tighten CORS: an explicit origin allow-list, never `*` with credentials.
+12. Remove auth tokens from local storage: session tokens live in `HttpOnly`, `Secure`, `SameSite` cookies or in
+    memory.
+13. Enforce permissions server side; the UI only hides what the server already refuses.
+14. Enable row-level security in Postgres for tenant-scoped tables, as defence in depth behind the application
+    checks.
+15. **Verify webhook signatures** (written "verify we hook signature"; read as webhook): an HMAC or signature over the
+    raw body, a timestamp window and replay protection, with a constant-time comparison.
+16. Check for SSRF: outbound requests to user-supplied URLs go through the guarded fetch (allow-list, no private or
+    metadata addresses, no redirects to them).
+17. Remove exposed source maps from production builds and images.
+18. Keep sensitive data out of logs: secrets, tokens, passwords and personal data are redacted at the logger.
+19. Update vulnerable dependencies: patch, never allow-list (ADR-0199), with the dependency audit gate in CI.
+
+Several items are already built in part (rate-limit tiers, step-up and MFA, DPoP-bound tokens, the guarded fetch,
+signed webhooks and logger redaction). A post-demo security audit maps every item to code and tests; a gap found
+before 2026-11-03 that is exploitable on the demo path is fixed before the demo, like any other security bug.
+
 ## Consequences
 
 - CLAUDE.md gains a short "Engineering guidelines" section that points here. Lane briefs and reviewer prompts cite it.
