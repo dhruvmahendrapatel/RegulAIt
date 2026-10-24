@@ -312,6 +312,13 @@ export default function ShadowAiPage() {
   const dispositionRef = useRef<HTMLElement>(null);
   const closeRemediation = useCallback(() => setRemediationFor(null), []);
   const closeDisposition = useCallback(() => setDispositionFor(null), []);
+  /** Triage and Review again open the drawer fresh: Confirmed, with no reason */
+  const openTriage = (id: string) => {
+    setRemediationFor(null);
+    setDispositionFor(id);
+    setDisposition("confirmed");
+    setReason("");
+  };
 
   // ---- ADR-0071 raw-file import ----
   const [rawAdapter, setRawAdapter] = useState("cef");
@@ -623,9 +630,9 @@ export default function ShadowAiPage() {
                       </Button>
                     );
                     const triage = r.dispositionStale ? (
-                      <Button aria-label={`Review again: ${r.subject}`} onClick={() => { setRemediationFor(null); setDispositionFor(r.id); setDisposition("confirmed"); setReason(""); }}>Review again</Button>
+                      <Button aria-label={`Review again: ${r.subject}`} onClick={() => openTriage(r.id)}>Review again</Button>
                     ) : (
-                      <Button variant="ghost" aria-label={`Triage ${r.subject}`} onClick={() => { setRemediationFor(null); setDispositionFor(r.id); setDisposition("confirmed"); setReason(""); }}>Triage</Button>
+                      <Button variant="ghost" aria-label={`Triage ${r.subject}`} onClick={() => openTriage(r.id)}>Triage</Button>
                     );
                     return (
                       <RowActions
@@ -1220,7 +1227,7 @@ export default function ShadowAiPage() {
                   const tool = [r.toolId, r.note].filter(Boolean).join(" — ");
                   return (
                     <>
-                      {[r.os ? OS_LABEL[r.os] ?? humanize(r.os) : null, r.ecosystem].filter(Boolean).join(" · ") || <span className={v.dim}>Any</span>}
+                      {[r.os && (OS_LABEL[r.os] ?? r.os), r.ecosystem].filter(Boolean).join(" · ") || <span className={v.dim}>Any</span>}
                       {tool ? <div className={v.dim}>{tool}</div> : null}
                     </>
                   );

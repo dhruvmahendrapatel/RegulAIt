@@ -483,11 +483,15 @@ export default function DiscoverySourcesPage() {
                   <>
                     <Badge tone={RUN_TONE[r.status]}>{r.status}</Badge>
                     {/* A20: the reason in words, the code as secondary text under it */}
-                    {r.errorCode && <div>{humanize(r.errorCode)}{r.errorDetail ? `: ${r.errorDetail}` : ""}</div>}
-                    {r.errorCode && <div className={`${v.faint} ${v.mono}`} style={{ overflowWrap: "anywhere" }}>{r.errorCode}</div>}
+                    {r.errorCode && (
+                      <>
+                        <div>{humanize(r.errorCode)}{r.errorDetail ? `: ${r.errorDetail}` : ""}</div>
+                        <div className={`${v.faint} ${v.mono}`} style={{ overflowWrap: "anywhere" }}>{r.errorCode}</div>
+                      </>
+                    )}
                   </>
                 ) },
-                { key: "when", header: "Queued", fold: { md: "source" }, render: (r) => <><span style={nowrap}>{fmtDateTime(r.createdAt)}</span><div className={v.faint}>{r.trigger === "schedule" ? "Scheduled" : humanize(r.trigger)} · attempt {r.attempt}</div></> },
+                { key: "when", header: "Queued", fold: { md: "source" }, render: (r) => <><span style={nowrap}>{fmtDateTime(r.createdAt)}</span><div className={v.faint}>{r.trigger === "schedule" ? "Scheduled" : "Manual"} · attempt {r.attempt}</div></> },
                 { key: "counts", header: "Observed / matched", fold: { md: "findings" }, render: (r) => `${r.observed} / ${r.matched}` },
                 { key: "findings", header: "Findings", fold: { sm: "source" }, render: (r) => `${r.findingsCreated} new, ${r.findingsUpdated} updated` },
                 {
