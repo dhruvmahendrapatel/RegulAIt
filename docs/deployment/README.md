@@ -1,6 +1,6 @@
 # Deploying RegulAIt in your own environment
 
-[ADR-0041](../decisions/0041-byoc-primary-motion.md) makes **BYOC / air-gapped,
+[ADR-0041](../../internal/decisions/0041-byoc-primary-motion.md) makes **BYOC / air-gapped,
 single-tenant-per-deployment** the primary motion: one deployment, one customer, one org. Your
 control plane runs in your cloud or your air gap, under your IAM, holding your
 `REGULAIT_DATA_KEY`. There is no shared SaaS control plane for your prompts, documents, policy
@@ -51,7 +51,7 @@ is not this machine.** A restore onto a new host without it recovers every row a
 connector token, model API key and TOTP secret permanently undecryptable. We do not hold a copy —
 that is what BYOC means. See [BACKUP_RESTORE.md](BACKUP_RESTORE.md).
 
-Then **attest it** ([ADR-0063](../decisions/0063-data-key-custody.md)). The gateway fingerprints
+Then **attest it** ([ADR-0063](../../internal/decisions/0063-data-key-custody.md)). The gateway fingerprints
 the key, prints that fingerprint at boot, writes it into every backup so a restore can check the
 key *before* restoring, and **refuses to start** if the running key is not the one this
 deployment's ciphertext was written under. Until somebody records that the key is held somewhere
@@ -61,7 +61,7 @@ an unattested backup is a backup that may not be restorable.
 
 ## What is not built yet
 
-- **Offline licensing** — [ADR-0052](../decisions/0052-licensing-seats.md). There is no license
+- **Offline licensing** — [ADR-0052](../../internal/decisions/0052-licensing-seats.md). There is no license
   check in the product today, which is why there is nothing to phone home about.
 - **Non-AWS backup destination modules.** `infra/modules/backup-target-s3` is AWS-only; the posture
   it implements (versioned, write-only, no read-back, no delete) is portable, the module is not.

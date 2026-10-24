@@ -1,7 +1,7 @@
 /**
  * ADR-0077 — THE WORKFLOW-TEMPLATE GALLERY, MAPPED TO THE §8.3 CASCADE.
  *
- * The market analysis (docs/product/MARKET_ANALYSIS_2026-08.md §3) named the
+ * The market analysis (internal/product/MARKET_ANALYSIS_2026-08.md §3) named the
  * compliance cascade the product's most defensible claim — and templates were
  * not discoverable by cascade profile. This module makes them so, under two
  * hard rules:

@@ -13,16 +13,16 @@ one plane where the control and its enforcement are the same object — vendor-n
 models, clouds, git hosts, and PM tools by construction.
 
 Every claim above links to an ADR and the adversarial test that pins it — see
-[docs/product/POSITIONING.md](docs/product/POSITIONING.md) and the market/gap analyses beside
+[internal/product/POSITIONING.md](internal/product/POSITIONING.md) and the market/gap analyses beside
 it. Long-term vision, architecture decisions, and live project status are tracked in this repo
 rather than in any one conversation, so work can be picked up by anyone (or any AI session)
 cold.
 
-- **Start here if you're a human:** [project-state/STATE.md](project-state/STATE.md) for current
-  status, [docs/product/VISION.md](docs/product/VISION.md) for the long-term product vision.
+- **Start here if you're a human:** [internal/memory/STATE.md](internal/memory/STATE.md) for current
+  status, [internal/product/VISION.md](internal/product/VISION.md) for the long-term product vision.
 - **Start here if you're Claude Code:** [CLAUDE.md](CLAUDE.md) — read it first, always.
-- **Decisions:** [docs/decisions/](docs/decisions/) — one ADR per architectural/technical
-  decision, indexed in `docs/decisions/README.md`.
+- **Decisions:** [internal/decisions/](internal/decisions/) — one ADR per architectural/technical
+  decision, indexed in `internal/decisions/README.md`.
 - **Infrastructure:** [infra/](infra/) — Terraform, organized as reusable `modules/` composed
   into per-project `environments/`.
 
@@ -34,6 +34,7 @@ The fastest path (Docker):
 # a bare `docker compose up --build` starts an EMPTY gateway: no demo users, keys
 # or relaxations (ADR-0181). The demo dataset needs an explicit demo signal:
 echo 'REGULAIT_DEMO_LICENSE=1' >> .env    # the prepared demo (below), or …
+echo 'REGULAIT_PUBLIC_URL=http://localhost:3000' >> .env   # needed for 0 FAIL (endpoint device enrolment)
 docker compose up --build                 # … `SEED_DEMO=1 docker compose up --build` for the seed alone
 # one-time sign-in passwords AND demo API keys are printed once, at the end of
 # the gateway's first-boot log:
@@ -66,16 +67,20 @@ demo licence it requires — with no licence, an expired one, or a customer lice
 refuses and changes nothing.
 
 **Demo with your own password (Docker), prepared for you.** Under Docker Compose the whole demo is
-one opt-in switch: `REGULAIT_DEMO_LICENSE=1` in the `.env` next to `docker-compose.yml`. On an
-empty stack the gateway container then prepares **exactly what `demo:prepare` prepares natively**,
-by itself: the 30-day ephemeral demo licence ("NOT A PRODUCTION DEPLOYMENT"), the compliance packs
+one opt-in switch: `REGULAIT_DEMO_LICENSE=1` in the `.env` next to `docker-compose.yml`, plus
+`REGULAIT_PUBLIC_URL=http://localhost:3000` so the endpoint device can enrol (without it `demo:check` ends with
+1 FAIL, "Endpoint agent: no enrolled device"). On an
+empty stack the gateway container then runs **the full `demo:prepare` order**,
+by itself: the discovery dataset (both `demo:shadow` phases), the 30-day ephemeral demo licence ("NOT A PRODUCTION DEPLOYMENT"), the compliance packs
 (EU AI Act, NIST AI RMF) installed and active, the approved use cases, the hardening gates, governed
 demo traffic and alerts, the export-signing key for the signed export, and the demo MCP server
-(running inside the container). It ends with `demo:check` in the log — `19 pass, 0 warn, 0 fail` —
-and then starts the gateway. This runs **once per database**: `docker compose restart` and
+(running inside the container). It ends with `demo:check` in the log: **26 pass, 1 warn (`3 Monitor`), 0 fail**,
+then `demo prep: complete in <n>s` (if a later green `Demo journey` run differs, trust the run), and then starts the
+gateway. If the log says `*** DEMO PREP FAILED` or `*** DEMO PREP SKIPPED: this database was started but never fully
+prepared`, run `docker compose down -v`, then `up` again. This runs **once per database**: `docker compose restart` and
 `down` / `up` keep the prepared data, the licence, the key and a password you set, and skip the
 prep (the log says so); `down -v` deletes it all, and the next `up` prepares again. Details and
-what to do if a step fails: [docs/product/DEMO_RUNBOOK.md §1.3](docs/product/DEMO_RUNBOOK.md).
+what to do if a step fails: [internal/product/DEMO_RUNBOOK.md §1.3](internal/product/DEMO_RUNBOOK.md).
 **Demo only:** `scripts/install.sh` refuses the switch and pins it off. Without the switch (or
 `SEED_DEMO=1`), `docker compose up` starts an empty gateway: no demo users, keys or relaxations.
 
@@ -83,9 +88,10 @@ bash / zsh (macOS, Linux) — the password is typed without echo and never appea
 line, in shell history, in compose files, in logs or in audit detail:
 
 ```bash
-echo 'REGULAIT_DEMO_LICENSE=1' >> .env
-docker compose up -d --build --wait     # returns once the demo is prepared and the gateway is healthy
-docker compose logs gateway | grep -E "demo prep|pass, "    # expect: 19 pass, 0 warn, 0 fail
+printf '%s\n' 'REGULAIT_DEMO_LICENSE=1' 'REGULAIT_PUBLIC_URL=http://localhost:3000' >> .env
+docker compose up -d --build            # on an empty stack (first time, or after down -v)
+docker compose logs -f gateway          # wait for "demo prep: complete in <n>s", then Ctrl+C
+docker compose logs gateway | grep -E "pass, .* warn, .* fail"    # expect 26 pass, 1 warn, 0 fail
 printf 'Demo password: '; read -rs pw; echo
 REGULAIT_DEMO_USER_PASSWORD="$pw" docker compose exec -e REGULAIT_DEMO_USER_PASSWORD gateway node apps/gateway/dist/demo-set-passwords.js
 unset pw
@@ -94,9 +100,10 @@ unset pw
 Windows PowerShell (Docker Desktop):
 
 ```powershell
-Add-Content -Path .env -Value 'REGULAIT_DEMO_LICENSE=1' -Encoding ascii
-docker compose up -d --build --wait     # returns once the demo is prepared and the gateway is healthy
-docker compose logs gateway | Select-String "demo prep|pass, "   # expect: 19 pass, 0 warn, 0 fail
+Add-Content -Path .env -Value 'REGULAIT_DEMO_LICENSE=1','REGULAIT_PUBLIC_URL=http://localhost:3000' -Encoding ascii
+docker compose up -d --build            # on an empty stack (first time, or after down -v)
+docker compose logs -f gateway          # wait for "demo prep: complete in <n>s", then Ctrl+C
+docker compose logs gateway | Select-String "pass, .* warn, .* fail"   # expect 26 pass, 1 warn, 0 fail
 $sec = Read-Host -AsSecureString 'Demo password'
 try {
   $env:REGULAIT_DEMO_USER_PASSWORD = [System.Net.NetworkCredential]::new('', $sec).Password
@@ -134,7 +141,7 @@ sign-off stage, blocks PII, and floors audit retention — nobody configured any
   env var instead (below).
 
 > **`/ui` is the whole product surface.** The single-file `/app` and `/admin` shells were
-> deleted by [ADR-0033](docs/decisions/0033-delete-legacy-template-literal-uis.md). *Corrected
+> deleted by [ADR-0033](internal/decisions/0033-delete-legacy-template-literal-uis.md). *Corrected
 > 2026-10-03:* those two paths **302 into `/ui`** (`app.ts`, kept for SSO's `returnTo` whitelist
 > and old bookmarks) — an earlier revision of this note said they 404, which they never did. Only
 > `/legacy/*` is gone outright.
@@ -142,7 +149,8 @@ sign-off stage, blocks PII, and floors audit retention — nobody configured any
 Without Docker:
 
 ```bash
-pnpm install && pnpm -r build
+# the gateway's typecheck needs more than Node's default heap (it runs out of memory without this)
+pnpm install && NODE_OPTIONS=--max-old-space-size=3072 pnpm -r build
 # any Postgres 16 works:
 export DATABASE_URL=postgres://user:pass@localhost:5432/regulait
 export REGULAIT_DATA_KEY=$(openssl rand -hex 32)
@@ -237,7 +245,8 @@ node scripts/preflight-ui-affordances.mjs
 pnpm install --frozen-lockfile
 
 # 3. Build every workspace. This also typechecks and bundles the React SPA.
-pnpm -r build
+#    The gateway's typecheck needs more than Node's default heap.
+NODE_OPTIONS=--max-old-space-size=3072 pnpm -r build
 
 # 4. Typecheck every workspace against SOURCE, not dist/. Step 3 can pass on a
 #    stale dist/; this cannot.
@@ -283,7 +292,7 @@ git status --short --untracked-files=all
 assertion *and* for an unhandled error thrown outside any assertion — the
 second kind is the one that used to make this suite's exit code
 non-deterministic on an all-green run, closed by
-[ADR-0106](docs/decisions/0106-mock-socket-net-contract.md). Do not read the
+[ADR-0106](internal/decisions/0106-mock-socket-net-contract.md). Do not read the
 "N passed" line and stop; read `echo $?`.
 
 ### Tamper-evident audit anchoring (no cloud account needed)
@@ -307,7 +316,7 @@ or an unreadable lock config all report `false` with a disclosure saying why.
 Point it at real S3 (or any S3-compatible endpoint) by setting
 `REGULAIT_AUDIT_ANCHOR_S3_BUCKET` and friends; `REGULAIT_AUDIT_ANCHOR=off`
 disables anchoring entirely. Decision:
-[ADR-0060](docs/decisions/0060-tamper-evident-audit.md).
+[ADR-0060](internal/decisions/0060-tamper-evident-audit.md).
 
 > Object Lock protects a **version**, not a name: a later write to the same key
 > adds a version rather than replacing it, so verification deliberately reads
@@ -331,12 +340,12 @@ docker compose --profile tls -f docker-compose.yml \
 ```
 
 Runbook and caveats: [docs/ops/TLS.md](docs/ops/TLS.md). Decision:
-[ADR-0029](docs/decisions/0029-zero-cost-tls-caddy-sslip-letsencrypt.md).
+[ADR-0029](internal/decisions/0029-zero-cost-tls-caddy-sslip-letsencrypt.md).
 
 ### Deploy it into your own environment (BYOC / air-gapped)
 
 The quickstart above is local dev. To stand RegulAIt up in a customer's own cloud account or on an
-air-gapped host — [ADR-0041](docs/decisions/0041-byoc-primary-motion.md) makes that the primary
+air-gapped host — [ADR-0041](internal/decisions/0041-byoc-primary-motion.md) makes that the primary
 motion — there is one command:
 
 ```bash
@@ -348,7 +357,8 @@ It preflights docker/compose/ports/disk, **refuses a missing or weak `REGULAIT_D
 `.env` + a compose override deterministically (re-running converges; it never destroys data), and
 brings the stack up. The air-gapped path pulls and builds nothing — it runs pre-seeded images
 loaded from a file and refuses Let's Encrypt, whose ACME challenge is an outbound call by
-construction.
+construction. The object store is not in the air-gapped bundle yet, so that path does not
+come up as shipped today (see [INSTALL.md](docs/deployment/INSTALL.md)).
 
 Updates are **signed bundles verified offline against a pinned public key**
 (`scripts/build-update-bundle.sh` / `verify-update-bundle.sh` / `apply-update-bundle.sh`); the
@@ -395,7 +405,7 @@ whether the audit-prune and backup-verification schedulers are failing.
 ## Status
 
 Governance MVP — all eight P0 pillars have working, tested cores; see
-[project-state/STATE.md](project-state/STATE.md) for the live picture.
+[internal/memory/STATE.md](internal/memory/STATE.md) for the live picture.
 
 ## License
 

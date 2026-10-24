@@ -223,7 +223,7 @@ function PolicyForm(props: { policy: ReviewPolicy; people: DirectoryUser[] }) {
             {typeof (props.policy as { version?: number | null }).version === "number" ? `Version ${(props.policy as { version?: number }).version}. ` : ""}
             {props.policy.updatedAt ? `Last changed ${shortDate(props.policy.updatedAt)}${props.policy.updatedByName ? ` by ${props.policy.updatedByName}` : ""}.` : "Not changed yet."}
           </p>
-          {errors && policyHasErrors(errors) ? <p className={p.error} role="alert">Fix the highlighted fields, then save.</p> : null}
+          {errors && policyHasErrors(errors) ? <p className={p.error} role="alert">Fix the highlighted fields, then preview the impact.</p> : null}
           {submitError ? <p className={p.error} role="alert">The policy was not saved: {submitError}</p> : null}
           <Button type="submit" variant="primary" disabled={busy}>{busy ? "Saving…" : "Preview impact"}</Button>
         </div>

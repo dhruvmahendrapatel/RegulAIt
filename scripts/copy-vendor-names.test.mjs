@@ -191,6 +191,52 @@ describe("no AI vendor or competitor name in product UI copy (F31)", () => {
       ]);
     });
 
+    it("#492 review: an options array's label, a toast or error setter, and what a .map in a child returns are hits", () => {
+      const names = (src) => scanText(f, src).map((h) => h.name);
+      // object-literal UI properties, followed through a same-file const
+      expect(names(`const OPTS = [{ value: "a", label: "Fast (gemini-0-test)" }];`)).toEqual(["gemini-0-test"]);
+      expect(names(`const card = { title: "x", description: ok ? "fine" : "uses gpt-0-test", "placeholder": PH };\nconst PH = "e.g. qwen-0-test";`))
+        .toEqual(["gpt-0-test", "qwen-0-test"]);
+      // the toast and the error/notice/message setters show their first argument
+      expect(names(`toast("Routed to mistral-0-test", "success");`)).toEqual(["mistral-0-test"]);
+      expect(names(`act.setError(\`try llama-0-test for \${x}\`); setNotice("Google model ready"); setMessage(MSG);\nconst MSG = "deepseek-0-test";`))
+        .toEqual(["llama-0-test", "Google", "deepseek-0-test"]);
+      // #509 review: every set*Error/Err/Notice/Message/Problem setter, not only the four exact names
+      expect(names(`setFormError("Use gpt-0-test"); setErr("qwen-0-test failed"); setProblem(\`gemini-0-test \${x}\`);`))
+        .toEqual(["gpt-0-test", "qwen-0-test", "gemini-0-test"]);
+      // a .map callback in a {...} child: its expression body or its returns, also through .join and array literals
+      expect(names("<p>{xs.map((x) => `${x} on gpt-0-test`)}</p>")).toEqual(["gpt-0-test"]);
+      expect(names(`<p>{[...xs.map((x) => { if (x) return "qwen-0-test"; return x; }), "ok"].join(", ")}</p>`)).toEqual(["qwen-0-test"]);
+    });
+
+    it("#492 review: other calls, other properties and the toast's kind stay keys, slugs and values", () => {
+      const src = [
+        `const OPTS = [{ value: "gemini-0-test", id: "gpt-0-test", label: model }];`,
+        `toast("Saved", "gemini-0-test"); setError(fmt("qwen-0-test")); notice("llama-0-test"); record.set("mistral-0-test");`,
+        `const F = () => <p>{xs.filter((x) => x === "gemini-0-test").length}{xs.map((x) => <b key="gpt-0-test">{x}</b>)}</p>;`,
+      ].join("\n");
+      expect(scanText(f, src)).toEqual([]);
+      // ordinary setters are not UI text: their argument stays a value
+      expect(scanText(f, `setOpen("gemini-0-test"); setModel("gpt-0-test"); setErrorCount("qwen-0-test");`)).toEqual([]);
+      // a .ts file has no help surfaces, as before
+      expect(scanText("apps/web/src/x.ts", `const OPTS = [{ label: "gemini-0-test" }]; toast("gpt-0-test");`)).toEqual([]);
+    });
+
+    it("guard proof: a model id put into a real options label and a real toast fails the guard, and the shipped copy passes", () => {
+      for (const [file, neutral, injected] of [
+        ["apps/web/src/views/admin/identity/IssuerSigningKeys.tsx", `label: "Rotate key",`, `label: "Rotate key (gemini-0-test)",`],
+        ["apps/web/src/views/admin/integrations/WebhooksPage.tsx", `toast("Copied", "success")`, `toast("Copied for gpt-0-test", "success")`],
+      ]) {
+        const real = readFileSync(path.join(root, file), "utf8");
+        expect(findVendorNames(root, [file], () => real).hits).toEqual([]);
+        expect(real).toContain(neutral);
+        const broken = real.replace(neutral, injected);
+        expect(findVendorNames(root, [file], () => broken).hits.map((h) => `${h.line}: ${h.name}`)).toEqual([
+          `${real.split("\n").findIndex((l) => l.includes(neutral)) + 1}: ${injected.match(/(gemini|gpt)-0-test/)[0]}`,
+        ]);
+      }
+    });
+
     it("the reviewed exceptions still hold on a help surface: an excepted line excuses only its listed names", () => {
       const file = "apps/web/src/views/admin/identity/SsoPage.tsx";
       const line = `        buttons (the bundled Keycloak) shows “Continue with Microsoft / Google / GitHub” on the sign-in page;`;

@@ -1,6 +1,6 @@
 /**
  * ADR-0092 — ACCESS RECOMMENDATIONS, the pure half (gap L24,
- * docs/product/GAP_ANALYSIS_SAVIYNT_2026-08.md).
+ * internal/product/GAP_ANALYSIS_SAVIYNT_2026-08.md).
  *
  *   THIS FILE                                  the frozen, versioned rule
  *                                              set: id, plain-language

@@ -89,6 +89,8 @@ export interface UseCaseInputs {
   screeningAnswers?: IntakeScreeningAnswers;
   /** ADR-0171: the proposer's own explanation of why an accepted framework applies, by framework tag */
   frameworkRationales?: Record<string, string>;
+  /** issue #522 #30: the shadow-AI finding it was registered from; set once, at creation */
+  discoveryFindingId?: string;
 }
 
 /** what POST /v1/risks is sent, less `useCaseId` (always the checkpoint's own use case) */
@@ -142,6 +144,8 @@ const USE_CASE_FIXED: Array<{ key: keyof UseCaseInputs; label: string }> = [
   // stored with the use case at registration; PATCH takes them only once a
   // reviewer sends the use case back, so a changed answer cannot be applied
   { key: "screeningAnswers", label: "the classification answers" },
+  // set once, when the use case is created: no route links it later
+  { key: "discoveryFindingId", label: "the shadow-AI finding it was registered from" },
 ];
 const RISK_PATCHABLE = ["title", "description", "likelihood", "impact", "agentId", "vendorId"] as const;
 

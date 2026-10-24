@@ -1,8 +1,8 @@
 # Connecting an IDE / existing coding agent to RegulAIt
 
-> Implements [ROADMAP Batch H](ROADMAP.md); the decisions behind it are
-> [ADR-0020](../decisions/0020-ide-interception-compat-endpoints.md) and
-> [ADR-0024](../decisions/0024-interception-depth-metering-scope-custody.md).
+> Implements [ROADMAP Batch H](../../internal/product/ROADMAP.md); the decisions behind it are
+> [ADR-0020](../../internal/decisions/0020-ide-interception-compat-endpoints.md) and
+> [ADR-0024](../../internal/decisions/0024-interception-depth-metering-scope-custody.md).
 >
 > **Read the honest framing first.** RegulAIt governs *calls that arrive at it*. Nothing in this
 > document makes a developer's IDE send its calls here. What it makes possible is that when they

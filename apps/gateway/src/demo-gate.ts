@@ -3,6 +3,7 @@
  *
  * The deploy-gate beat as a CI step (see demo-gate-lib.ts): prints the gate's
  * decision and reasons and exits 1 on DENY, 0 on ALLOW, 2 on a setup error.
+ * The environment defaults to `staging` (DEMO_GATE_DEFAULT_ENVIRONMENT).
  * Same environment as the other demo commands: DATABASE_URL,
  * REGULAIT_BOOTSTRAP_TOKEN, REGULAIT_DATA_KEY.
  */

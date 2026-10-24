@@ -27,3 +27,5 @@ infra/caddy/*Caddyfile text eol=lf
 # the macOS install step (no .sh suffix) is executed by the macOS installer
 agents/endpoint/**/testdata/** -text
 agents/endpoint/packaging/macos/scripts/* text eol=lf
+# ADR-0201: project memory and internal docs never ship; `git archive` source exports leave them out
+internal/ export-ignore

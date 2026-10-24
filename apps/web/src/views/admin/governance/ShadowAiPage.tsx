@@ -37,7 +37,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
-import { ago, evidenceLabel, humanize, plural, providerLabel } from "../../../api/format";
+import { ago, evidenceLabel, fmtDateTime, humanize, plural, providerLabel } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, CodeBlock, EmptyState, Field, InfoButton, Input, RowActions, Select, SeverityBadge, Table, Tabs, tabIds, Textarea } from "../../../ui/kit";
 import { FoldTable } from "../../../ui/fold";
@@ -99,6 +99,8 @@ interface Finding {
   firstSeenAt: string;
   lastSeenAt: string;
   replacementAgent: { id: string; name: string; provider: string; enabled: boolean } | null;
+  /** issue #522 #30: the use case registered from this finding (absent from an older gateway) */
+  linkedUseCase?: { id: string; name: string; status: string } | null;
   replacementNote: string | null;
   dispositionStale: boolean;
   /** ADR-0195: the bounded sightings (location, names, actor pseudonym) */
@@ -266,12 +268,14 @@ const FORMAT_BASIS_WORD: Record<string, string> = {
 /** the adapters whose config the operator MUST supply, and why */
 const ADAPTER_CONFIG_HINT: Record<string, string> = {
   proxy_common:
-    'REQUIRED: {"layout":"squid"} — or "common" / "combined". These formats carry no header, so the layout is an operator assertion and is never sniffed: a mis-declared layout would read the client-IP column as the destination.',
+    'Required: {"layout":"squid"} — or "common" / "combined". These formats carry no header, so the layout is an operator assertion and is never sniffed: a mis-declared layout would read the client-IP column as the destination.',
   generic_mapped:
-    'REQUIRED: {"kind":"egress_log"} (or code_scan / saas_export / self_reported). Add "mapping" to name the columns yourself; omit it and header inference proposes them and REFUSES on ambiguity.',
+    'Required: {"kind":"egress_log"} (or code_scan / saas_export / self_reported). Add "mapping" to name the columns yourself; omit it and header inference proposes them and refuses on ambiguity.',
 };
 
 const EXAMPLE = JSON.stringify(IMPORT_EXAMPLE, null, 2);
+/** a signature's OS scope as the add form names it */
+const OS_LABEL: Record<string, string> = { macos: "macOS", windows: "Windows", linux: "Linux" };
 
 export default function ShadowAiPage() {
   const catalogue = useQuery({ queryKey: ["shadow-ai", "catalogue"], queryFn: () => api.get<CatalogueResponse>("/v1/shadow-ai/catalogue") });
@@ -296,7 +300,8 @@ export default function ShadowAiPage() {
   const [preview, setPreview] = useState<unknown>(null);
   const [dispositionFor, setDispositionFor] = useState<string | null>(null);
   const [remediationFor, setRemediationFor] = useState<string | null>(null);
-  const [disposition, setDisposition] = useState("sanctioned");
+  // A5: the drawer never opens on the permissive outcome; every Triage and Review again resets it to "Confirmed", which keeps the finding in view
+  const [disposition, setDisposition] = useState("confirmed");
   const [reason, setReason] = useState("");
   // A2: one tab per job; the tab is in the URL so a link (and a test) can open it directly
   const [params, setParams] = useSearchParams();
@@ -307,6 +312,13 @@ export default function ShadowAiPage() {
   const dispositionRef = useRef<HTMLElement>(null);
   const closeRemediation = useCallback(() => setRemediationFor(null), []);
   const closeDisposition = useCallback(() => setDispositionFor(null), []);
+  /** Triage and Review again open the drawer fresh: Confirmed, with no reason */
+  const openTriage = (id: string) => {
+    setRemediationFor(null);
+    setDispositionFor(id);
+    setDisposition("confirmed");
+    setReason("");
+  };
 
   // ---- ADR-0071 raw-file import ----
   const [rawAdapter, setRawAdapter] = useState("cef");
@@ -379,7 +391,7 @@ export default function ShadowAiPage() {
     const res = await rawAct.run<RawImportResult>(
       () => api.post<RawImportResult>("/v1/shadow-ai/imports/raw", body),
       mode === "dry_run"
-        ? "File parsed and analyzed — nothing was written."
+        ? "File parsed and analysed — nothing was written."
         : "File parsed and applied to the inventory.",
     );
     if (res) setRawResult(res);
@@ -426,7 +438,7 @@ export default function ShadowAiPage() {
     const ok = await act.run(async () => {
       const res = await api.post<unknown>("/v1/shadow-ai/imports", { ...parsed, mode });
       setPreview(res);
-    }, mode === "dry_run" ? "Evidence analyzed (nothing written)" : "Evidence applied to the inventory");
+    }, mode === "dry_run" ? "Evidence analysed (nothing written)" : "Evidence applied to the inventory");
     if (ok) refresh();
   };
 
@@ -517,7 +529,7 @@ export default function ShadowAiPage() {
           </span>
           <span className={v.row}>
             {seenAgain.map((f) => (
-              <Button key={f.id} size="sm" aria-label={`Review ${f.subject} again`} onClick={() => { setDispositionFor(f.id); setReason(""); }}>
+              <Button key={f.id} size="sm" aria-label={`Review ${f.subject} again`} onClick={() => openTriage(f.id)}>
                 {f.subject}
               </Button>
             ))}
@@ -561,11 +573,11 @@ export default function ShadowAiPage() {
                 { key: "severity", header: "Severity", fold: { sm: "subject" }, render: (r) => <SeverityBadge severity={r.severity} /> },
                 { key: "subject", header: "Subject", // a floor so a name never wraps to one word per line
                   render: (r) => (
-                    <span title={r.subjectKind} style={{ display: "inline-block", minWidth: "14ch" }}>
+                    <span style={{ display: "inline-block", minWidth: "14ch" }}>
                       {/* a long resource path breaks rather than widening the table (F6) */}
                       <strong style={{ overflowWrap: "anywhere" }}>{r.subject}</strong>
                       <span className={v.dim} style={{ display: "block" }}>
-                        {providerLabel(r.provider)}
+                        {humanize(r.subjectKind)} · {providerLabel(r.provider)}
                         {r.replacementAgent ? <> · alternative: {r.replacementAgent.name}</> : r.replacementNote ? <> · {r.replacementNote}</> : null}
                       </span>
                     </span>
@@ -618,9 +630,9 @@ export default function ShadowAiPage() {
                       </Button>
                     );
                     const triage = r.dispositionStale ? (
-                      <Button onClick={() => { setRemediationFor(null); setDispositionFor(r.id); setReason(""); }}>Review again</Button>
+                      <Button aria-label={`Review again: ${r.subject}`} onClick={() => openTriage(r.id)}>Review again</Button>
                     ) : (
-                      <Button variant="ghost" onClick={() => { setRemediationFor(null); setDispositionFor(r.id); setReason(""); }}>Triage</Button>
+                      <Button variant="ghost" aria-label={`Triage ${r.subject}`} onClick={() => openTriage(r.id)}>Triage</Button>
                     );
                     return (
                       <RowActions
@@ -632,7 +644,11 @@ export default function ShadowAiPage() {
                         secondary={triage}
                         rest={
                           <span className={v.stackTight} style={{ alignItems: "flex-start" }}>
-                            <Link to={`/admin/governance/intake?source=shadow-ai&findingId=${encodeURIComponent(r.id)}&title=${encodeURIComponent(`Govern ${r.subject}`)}&description=${encodeURIComponent(`Register and govern the ${providerLabel(r.provider)} usage observed for ${r.subject}. Evidence: ${r.signalSources.map(evidenceLabel).join(", ")}.`)}`}>Register as use case</Link>
+                            {r.linkedUseCase ? (
+                              <span>Registered as <Link to={`/admin/governance/use-cases/${r.linkedUseCase.id}`}>{r.linkedUseCase.name}</Link></span>
+                            ) : (
+                              <Link to={`/admin/governance/intake?source=shadow-ai&findingId=${encodeURIComponent(r.id)}&title=${encodeURIComponent(`Govern ${r.subject}`)}&description=${encodeURIComponent(`Register and govern the ${providerLabel(r.provider)} usage observed for ${r.subject}. Evidence: ${r.signalSources.map(evidenceLabel).join(", ")}.`)}`} aria-label={`Register as use case: ${r.subject}`}>Register as use case</Link>
+                            )}
                           </span>
                         }
                       />
@@ -686,12 +702,13 @@ export default function ShadowAiPage() {
               </Select>
             </Field>
             <Field label="Reason">
-              <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="why this judgement" />
+              <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="for example SDK import confirmed in src/billing" />
             </Field>
             <DrawerActions className={v.row}>
               <Button
                 variant="primary"
-                disabled={act.busy}
+                // the gateway refuses a move off "open" without a reason; the button says so before the call does
+                disabled={act.busy || (disposition !== "open" && !reason.trim())}
                 onClick={() =>
                   void act
                     .run(
@@ -780,7 +797,7 @@ export default function ShadowAiPage() {
                 <Input
                   value={rawSource}
                   onChange={(e) => setRawSource(e.target.value)}
-                  placeholder="e.g. squid-access-2026-07-28.log"
+                  placeholder="for example squid-access-2026-07-28.log"
                   data-testid="raw-source"
                 />
               </Field>
@@ -790,15 +807,15 @@ export default function ShadowAiPage() {
                   onChange={(e) => setOnMalformed(e.target.value as "refuse_file" | "report_and_continue")}
                   data-testid="raw-malformed"
                 >
-                  <option value="refuse_file">refuse the WHOLE file (default)</option>
-                  <option value="report_and_continue">accept readable lines, list every refusal</option>
+                  <option value="refuse_file">Refuse the whole file (default)</option>
+                  <option value="report_and_continue">Accept readable lines, list every refusal</option>
                 </Select>
               </Field>
             </div>
 
             {onMalformed === "report_and_continue" && (
               <div className={v.errLine} role="alert">
-                You have opted out of the safe default. The resulting inventory will be SMALLER than the
+                You have opted out of the safe default. The resulting inventory will be smaller than the
                 file, and a smaller inventory that looks complete is the one failure this feature exists to
                 avoid. Every refused line is still listed with its number below.
               </div>
@@ -884,7 +901,7 @@ export default function ShadowAiPage() {
                 onClick={() => void submitRaw("dry_run")}
                 data-testid="raw-dry-run"
               >
-                Parse &amp; analyze (dry run)
+                Parse &amp; analyse (dry run)
               </Button>
               <Button
                 variant="primary"
@@ -919,14 +936,14 @@ export default function ShadowAiPage() {
                 </p>
                 {rawResult.rowsWithoutTimestamp > 0 && (
                   <p className={v.dim}>
-                    {rawResult.rowsWithoutTimestamp} accepted line(s) carried no timestamp of their own and
+                    {plural(rawResult.rowsWithoutTimestamp, "accepted line")} carried no timestamp of their own and
                     were stamped with the import time. That is not when the traffic happened.
                   </p>
                 )}
                 <RefusalList refusals={rawResult.refusals} testId="raw-result-refusals" />
                 <p className={v.faint}>
                   Fields actually read: {rawResult.fieldsUsed.join(", ") || "none"} — everything else in the
-                  file was DISCARDED and is stored nowhere.
+                  file was discarded and is stored nowhere.
                 </p>
                 <CodeBlock maxHeight="280px">{JSON.stringify(rawResult, null, 2)}</CodeBlock>
               </div>
@@ -978,8 +995,8 @@ export default function ShadowAiPage() {
             <p className={v.faint}>
               Compiled catalogue v{discovery.data?.catalogVersion}: {discovery.data?.endpoints} endpoint and{" "}
               {discovery.data?.sdks} SDK signatures, frozen. This deployment currently fronts{" "}
-              {discovery.data?.governedHosts.length ?? 0} governed host(s) — hits on those are labelled{" "}
-              <code>governed_via_gateway</code>, not shadow.
+              {plural(discovery.data?.governedHosts.length ?? 0, "governed host")}. Hits on those are labelled Governed via
+              gateway, not shadow.
             </p>
 
             <div className={a.formRow}>
@@ -992,7 +1009,7 @@ export default function ShadowAiPage() {
                 <Input
                   value={discSubject}
                   onChange={(e) => setDiscSubject(e.target.value)}
-                  placeholder={discIsManifest ? "e.g. acme/checkout-service" : "e.g. office-dns-resolver"}
+                  placeholder={discIsManifest ? "for example acme/checkout-service" : "for example office-dns-resolver"}
                   data-testid="disc-subject"
                 />
               </Field>
@@ -1006,7 +1023,7 @@ export default function ShadowAiPage() {
                 spellCheck={false}
                 placeholder={
                   discIsManifest
-                    ? '{"dependencies": {"openai": "^4.0.0"}}'
+                    ? '{"dependencies": {"acme-llm-sdk": "^4.0.0"}}'
                     : "Aug 20 10:00:01 dnsmasq[812]: query[A] llm.example from laptop-07.example"
                 }
                 data-testid="disc-content"
@@ -1077,7 +1094,7 @@ export default function ShadowAiPage() {
                         { key: "value", header: "Host", render: (r) => <code>{r.value}</code> },
                         { key: "reason", header: "Why not shadow", render: (r) => <span className={v.dim}>{r.governedReason}</span> },
                         { key: "n", header: "Occurrences", render: (r) => r.occurrences },
-                        { key: "class", header: "Class", render: () => <Badge tone="ok">governed_via_gateway</Badge> },
+                        { key: "class", header: "Class", render: () => <><Badge tone="ok">Governed via gateway</Badge><div className={`${v.faint} ${v.mono}`}>governed_via_gateway</div></> },
                       ]}
                     />
                   </>
@@ -1085,7 +1102,7 @@ export default function ShadowAiPage() {
 
                 {discResult.classification.unmatchedCount > 0 && (
                   <p className={v.faint} data-testid="disc-unmatched">
-                    {discResult.classification.unmatchedCount} distinct name(s) matched nothing (sample:{" "}
+                    {plural(discResult.classification.unmatchedCount, "distinct name")} matched nothing (sample:{" "}
                     {discResult.classification.unmatchedSample.slice(0, 8).join(", ")}). Unmatched names are
                     counted, never ingested and never listed in full.
                   </p>
@@ -1103,10 +1120,11 @@ export default function ShadowAiPage() {
                 {discResult.ingest ? (
                   <p className={v.dim} data-testid="disc-ingest-summary">
                     {discResult.ingest.mode === "apply"
-                      ? `Ingested: ${discResult.ingest.observed} shadow row(s) through the evidence pipeline — ${
-                          (discResult.ingest.created ?? 0) + (discResult.ingest.updated ?? 0)
-                        } finding(s) written by the admin catalogue.`
-                      : `Preview: ${discResult.ingest.observed} shadow row(s) would be ingested; the admin catalogue matched ${discResult.ingest.matched} of them.`}
+                      ? `Ingested: ${plural(discResult.ingest.observed, "shadow row")} through the evidence pipeline — ${plural(
+                          (discResult.ingest.created ?? 0) + (discResult.ingest.updated ?? 0),
+                          "finding",
+                        )} written by the admin catalogue.`
+                      : `Preview: ${plural(discResult.ingest.observed, "shadow row")} would be ingested; the admin catalogue matched ${discResult.ingest.matched} of them.`}
                   </p>
                 ) : (
                   <p className={v.dim} data-testid="disc-ingest-summary">
@@ -1134,7 +1152,7 @@ export default function ShadowAiPage() {
               { key: "host", header: "Host", render: (row) => <><code>{row.host}</code>{row.path ? <span className={v.faint}> {row.path}</span> : null}</> },
               { key: "confidence", header: "Confidence", render: (row) => row.confidence },
               { key: "registry", header: "Registry", render: (row) => <Badge tone={row.registered ? "ok" : "danger"}>{row.registered ? row.registeredAs ?? "registered" : "unregistered"}</Badge> },
-              { key: "evidence", header: "Evidence", render: (row) => <span className={v.dim}>{row.indicators.join(", ")} · {row.occurrences} line(s)</span> },
+              { key: "evidence", header: "Evidence", render: (row) => <span className={v.dim}>{row.indicators.join(", ")} · {plural(row.occurrences, "line")}</span> },
               { key: "verdict", header: "Verdict", render: (row) => <span className={v.dim}>{row.verdict}</span> },
             ]} />}
             <p className={v.faint}>{mcpResult.posture}</p>
@@ -1153,7 +1171,7 @@ export default function ShadowAiPage() {
         {act.error ? <p className={v.errLine} role="alert">{act.error}</p> : null}
         <div className={v.row}>
           <Button disabled={act.busy} onClick={() => void submitEvidence("dry_run")}>
-            Analyze (dry run)
+            Analyse (dry run)
           </Button>
           <Button variant="primary" disabled={act.busy} onClick={() => void submitEvidence("apply")}>
             Apply to inventory
@@ -1186,34 +1204,55 @@ export default function ShadowAiPage() {
 
       <Card title="Signatures" contain>
         <QueryGate loading={catalogue.isLoading} error={catalogue.error} onRetry={refresh}>
-          <Table<Signature>
+          <FoldTable<Signature>
             rows={catalogue.data?.signatures ?? []}
             rowKey={(r) => r.id}
             columns={[
+              // A12: paired values share a cell (the second as dim text under the first), so eleven fields fit a
+              // 1440 px card without one word per line; below 1000 px of table width Scope and Provenance fold under
+              // Value, and on a phone Kind folds under Provider
               { key: "provider", header: "Provider", render: (r) => providerLabel(r.provider) },
-              { key: "kind", header: "Kind", render: (r) => evidenceLabel(r.kind) },
+              {
+                key: "kind",
+                header: "Kind / match",
+                fold: { sm: "provider" },
+                render: (r) => <>{evidenceLabel(r.kind)}<div className={v.dim}>{evidenceLabel(r.matchType) + (r.minLength ? ` (≥${r.minLength})` : "")}</div></>,
+              },
               { key: "value", header: "Value", render: (r) => <code>{r.value}</code> },
-              { key: "match", header: "Match", render: (r) => evidenceLabel(r.matchType) + (r.minLength ? ` (≥${r.minLength})` : "") },
               {
                 key: "scope",
-                header: "Scope",
-                render: (r) => [r.os, r.ecosystem].filter(Boolean).join(" · ") || <span className={v.dim}>any</span>,
+                header: "Scope / tool",
+                fold: { md: "value" },
+                render: (r) => {
+                  const tool = [r.toolId, r.note].filter(Boolean).join(" — ");
+                  return (
+                    <>
+                      {[r.os && (OS_LABEL[r.os] ?? r.os), r.ecosystem].filter(Boolean).join(" · ") || <span className={v.dim}>Any</span>}
+                      {tool ? <div className={v.dim}>{tool}</div> : null}
+                    </>
+                  );
+                },
               },
               {
                 key: "confidence",
                 header: "Confidence",
-                render: (r) => <Badge tone={r.confidence === "low" ? "warn" : r.confidence === "medium" ? "info" : "ok"}>{r.confidence ?? "high"}</Badge>,
+                // a signature without a confidence says so, rather than claiming "high"
+                render: (r) => (r.confidence ? <Badge tone={r.confidence === "low" ? "warn" : r.confidence === "medium" ? "info" : "ok"}>{humanize(r.confidence)}</Badge> : <span className={v.dim}>—</span>),
               },
-              { key: "tool", header: "Tool / note", render: (r) => <span className={v.dim}>{[r.toolId, r.note].filter(Boolean).join(" — ") || "—"}</span> },
-              { key: "provenance", header: "Provenance", render: (r) => r.provenance },
-              { key: "updated", header: "Updated", render: (r) => ago(r.lastUpdatedAt) },
+              {
+                key: "provenance",
+                header: "Provenance",
+                fold: { md: "value" },
+                render: (r) => <>{humanize(r.provenance)}<div className={v.dim} style={{ whiteSpace: "nowrap" }}>updated {ago(r.lastUpdatedAt)}</div></>,
+              },
               { key: "enabled", header: "Enabled", render: (r) => <Badge tone={r.enabled ? "ok" : "neutral"}>{r.enabled ? "yes" : "no"}</Badge> },
               {
                 key: "remove",
-                header: "",
+                header: <span className={sh.srOnly}>Actions</span>,
                 render: (r) => (
                   <Button
                     variant="ghost"
+                    aria-label={`Remove signature ${r.value}`}
                     disabled={act.busy}
                     onClick={() => void act.run(() => api.del(`/v1/shadow-ai/catalogue/${r.id}`), "Signature removed").then((ok) => ok && refresh())}
                   >
@@ -1238,11 +1277,11 @@ export default function ShadowAiPage() {
             rows={imports.data?.imports ?? []}
             rowKey={(r) => r.id}
             columns={[
-              { key: "when", header: "When", render: (r) => ago(r.createdAt) },
+              { key: "when", header: "When", render: (r) => <><span style={{ whiteSpace: "nowrap" }}>{fmtDateTime(r.createdAt)}</span><div className={v.faint}>{ago(r.createdAt)}</div></> },
               { key: "kind", header: "Kind", render: (r) => evidenceLabel(r.kind) },
-              { key: "mode", header: "Mode", render: (r) => r.mode },
-              { key: "status", header: "Status", render: (r) => <Badge tone={r.status === "refused" ? "danger" : "ok"}>{r.status}</Badge> },
-              { key: "rows", header: "Rows", render: (r) => r.rowCount },
+              { key: "mode", header: "Mode", render: (r) => (r.mode === "dry_run" ? "Dry run" : r.mode === "apply" ? "Applied" : humanize(r.mode)) },
+              { key: "status", header: "Status", render: (r) => <Badge tone={r.status === "refused" ? "danger" : "ok"}>{humanize(r.status)}</Badge> },
+              { key: "rows", header: "Rows", render: (r) => r.rowCount.toLocaleString() },
               { key: "outcome", header: "Outcome", render: (r) => <span className={v.dim}>{r.reason}</span> },
             ]}
           />
@@ -1357,25 +1396,25 @@ function AddSignatureForm(props: { onAdded: () => void }) {
       }}
     >
       <Field label="Provider">
-        <Input required value={provider} onChange={(e) => setProvider(e.target.value)} placeholder="e.g. Acme LLM" />
+        <Input required value={provider} onChange={(e) => setProvider(e.target.value)} placeholder="for example Acme LLM" />
       </Field>
       <Field label="Detect by">
         <Select value={kind} onChange={(e) => setKind(e.target.value as typeof kind)}>
-          <option value="hostname">hostname</option>
-          <option value="web_app">web app</option>
+          <option value="hostname">Hostname</option>
+          <option value="web_app">Web app</option>
           <option value="sdk_package">SDK package</option>
           <option value="api_key_prefix">API key prefix</option>
-          <option value="cloud_ai_service">cloud AI service</option>
-          <option value="desktop_app">desktop app</option>
+          <option value="cloud_ai_service">Cloud AI service</option>
+          <option value="desktop_app">Desktop app</option>
           <option value="ide_extension">IDE extension</option>
-          <option value="browser_extension">browser extension</option>
-          <option value="local_runtime">local model runtime</option>
-          <option value="assistant_config">assistant config file</option>
+          <option value="browser_extension">Browser extension</option>
+          <option value="local_runtime">Local model runtime</option>
+          <option value="assistant_config">Assistant config file</option>
         </Select>
       </Field>
       <Field label="OS (optional)">
         <Select value={os} onChange={(e) => setOs(e.target.value)}>
-          <option value="">any</option>
+          <option value="">Any</option>
           <option value="macos">macOS</option>
           <option value="windows">Windows</option>
           <option value="linux">Linux</option>
@@ -1392,9 +1431,9 @@ function AddSignatureForm(props: { onAdded: () => void }) {
       </Field>
       <Field label="Confidence">
         <Select value={confidence} onChange={(e) => setConfidence(e.target.value as typeof confidence)}>
-          <option value="high">high</option>
-          <option value="medium">medium</option>
-          <option value="low">low</option>
+          <option value="high">High</option>
+          <option value="medium">Medium</option>
+          <option value="low">Low</option>
         </Select>
       </Field>
       <Field label={kind === "sdk_package" ? "Package name" : kind === "api_key_prefix" ? "Key prefix" : isArtifact ? "Identifier (exact)" : "Hostname"}>
@@ -1410,8 +1449,8 @@ function AddSignatureForm(props: { onAdded: () => void }) {
       {kind === "hostname" || kind === "web_app" ? (
         <Field label="Match">
           <Select value={hostMatch} onChange={(e) => setHostMatch(e.target.value as typeof hostMatch)}>
-            <option value="host_suffix">suffix — this host and anything under it</option>
-            <option value="exact_host">exact — only this host</option>
+            <option value="host_suffix">Suffix — this host and anything under it</option>
+            <option value="exact_host">Exact — only this host</option>
           </Select>
         </Field>
       ) : null}

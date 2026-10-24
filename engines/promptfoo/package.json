@@ -3,12 +3,18 @@
   "version": "0.124.1",
   "private": true,
   "license": "UNLICENSED",
-  "description": "ADR-0187 B5-P: the pinned promptfoo release the engine image installs (npm ci --omit=optional --ignore-scripts). An override lifts one transitive package past a published advisory (see engines/promptfoo/THIRD_PARTY.md).",
+  "description": "ADR-0187 B5-P: the pinned promptfoo release the engine image installs (npm ci --omit=optional --ignore-scripts). Overrides lift transitive packages past published advisories (see engines/promptfoo/THIRD_PARTY.md).",
   "dependencies": {
     "@libsql/linux-x64-gnu": "0.5.29",
     "promptfoo": "0.124.1"
   },
   "overrides": {
-    "basic-ftp": "6.2.2"
+    "basic-ftp": "6.2.2",
+    "body-parser": "2.4.0",
+    "zod": "4.6.6",
+    "undici@6": "6.29.1",
+    "undici@7": "7.30.1",
+    "undici@8": "8.12.2",
+    "@azure/msal-node": "7.1.1"
   }
 }

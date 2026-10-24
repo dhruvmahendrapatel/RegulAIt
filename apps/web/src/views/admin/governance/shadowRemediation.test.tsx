@@ -15,6 +15,7 @@ import {
   startFormFrom,
   startInstanceBody,
   startWillMatch,
+  statusScrollOptions,
   type RemediationPlan,
 } from "./shadowRemediationModel";
 
@@ -81,6 +82,19 @@ describe("shadow-AI remediation start body", () => {
 
   it("never accepts the placeholder environment", () => {
     expect(startInstanceBody(plan(), { ...startFormFrom(plan()), environment: "unstated" })).toMatchObject({ ok: false });
+  });
+
+  it("suggests staging as the example environment, in the field and in the problem line (D3 #33)", () => {
+    expect(render(plan())).toContain('placeholder="for example staging"');
+    expect(startInstanceBody(plan(), { ...startFormFrom(plan()), environment: "" })).toEqual({
+      ok: false,
+      problem: "Name the environment the usage runs in (for example staging).",
+    });
+  });
+
+  it("brings the status line into view only as far as needed, and without animation under reduced motion (D3 F22)", () => {
+    expect(statusScrollOptions(false)).toEqual({ block: "nearest", behavior: "smooth" });
+    expect(statusScrollOptions(true)).toEqual({ block: "nearest", behavior: "auto" });
   });
 
   it("knows when a start can match: a rule, or a default still to be installed; not a retired default", () => {

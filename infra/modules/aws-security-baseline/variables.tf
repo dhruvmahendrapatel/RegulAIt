@@ -37,7 +37,7 @@ variable "allowed_regions" {
 }
 
 variable "monthly_budget_usd" {
-  description = "Monthly AWS spend cap for the Budgets alert stack. OQ-002 in project-state/STATE.md — confirm with the user before applying."
+  description = "Monthly AWS spend cap for the Budgets alert stack. OQ-002 in internal/memory/STATE.md — confirm with the user before applying."
   type        = number
   default     = 100
 }

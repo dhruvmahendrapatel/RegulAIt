@@ -13,7 +13,7 @@ import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../api/client";
-import { fmtAt } from "../../api/format";
+import { fmtAt, humanize } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
 import { Badge, Button, Card, EmptyState, Field, IdChip, Input, Modal, Select, Table, Textarea, type Tone } from "../../ui/kit";
 import type { AdminUser } from "../../api/adminTypes";
@@ -346,7 +346,7 @@ export function FeedbackDetail(props: { id: string | null; onClose: () => void }
                     <Select value={incSeverity} onChange={(e) => setIncSeverity(e.target.value)}>
                       {SEVERITIES.map((s) => (
                         <option key={s} value={s}>
-                          {s}
+                          {humanize(s)}
                         </option>
                       ))}
                     </Select>
@@ -460,7 +460,8 @@ export function FeedbackSettings() {
       <span id="settings" />
       <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
         <div className={v.stack}>
-          <p className={v.hint}>
+          {/* F27: v.hint centres itself beside buttons; as the card's intro it starts at the left edge */}
+          <p className={v.dim}>
             Every setting starts at its strict value. Relaxing one is allowed and is recorded in the audit trail as a relaxation.
           </p>
           <div className={v.stackTight}>

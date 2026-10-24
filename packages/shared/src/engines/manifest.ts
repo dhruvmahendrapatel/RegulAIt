@@ -13,7 +13,7 @@
  * `imageDigest` is null, so no runner can pass the self-test and no engine can
  * be enabled: the secure default holds by construction, not by a flag. The
  * usage-data switches below are the documented ones from the R9 source review
- * (docs/research/R9-engine-reverification.md); G19 (R10) confirms or replaces
+ * (internal/research/R9-engine-reverification.md); G19 (R10) confirms or replaces
  * them per engine, and network denial stays the real control either way.
  */
 import { GARAK_ENGINE_VERSION, GARAK_USAGE_DATA_ENV, GARAK_WORKER_SELF_TEST_SWITCH, garakJudgeSets, garakManifestSets, garakReducedSet } from "./garak.js";

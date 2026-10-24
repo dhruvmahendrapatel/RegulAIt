@@ -157,9 +157,8 @@ export function VerifyResult({ result }: { result: VerifyView }) {
 export function OfflineVerifyNote() {
   return (
     <p className={v.faint}>
-      Offline: <code className={v.mono}>node scripts/verify-bom.mjs &lt;bundle.tar.gz&gt; --fingerprint sha256:… --receipt-keyring keys.json</code>. Supply the
-      export key fingerprint and the receipt keys from a source other than the bundle; the keys inside it are convenience copies, never the trust
-      root. Keep the downloaded bytes unchanged.
+      Verify offline with the bundle verifier from your operator guide. Supply the export key fingerprint and the receipt keys from a source
+      other than the bundle; the keys inside it are convenience copies, never the trust root. Keep the downloaded bytes unchanged.
     </p>
   );
 }

@@ -1,7 +1,7 @@
 /**
  * ADR-0197 — the populated-state screenshot pack for the 2026-11-01 demo, and an automated visual QA pass over it.
  *
- * Walks the beats of `docs/product/DEMO_SCRIPT_2026-11-01.md` in order on a `demo:prepare` database (after the
+ * Walks the beats of `internal/product/DEMO_SCRIPT_2026-11-01.md` in order on a `demo:prepare` database (after the
  * 10-05 journeys in the same CI job, which leave it populated): Shadow AI first (discovery sources, findings and
  * sightings, agents, the remediation plan, the workflow and Morgan's sign-off in the Inbox, the intake prefill),
  * then the governance beats (the use-case record, trust, alerts, graph, regulatory, evidence, posture, content
@@ -14,7 +14,7 @@
  * the signed-in persona's name, and the spec fails on any console error or uncaught page error. A 4xx console line is
  * ignored only for a path the walk reaches on purpose (`EXPECTED_4XX`), and every ignored line is kept in
  * `qa-report.json`. Raw ids, ISO timestamps, truncated text and horizontal overflow are recorded per screen in
- * `qa-report.json` for the human review in `docs/product/DEMO_SCREENS_QA_2026-11-01.md`, never asserted: some ids
+ * `qa-report.json` for the human review in `internal/product/DEMO_SCREENS_QA_2026-11-01.md`, never asserted: some ids
  * are shown on purpose (a workflow id in a status line).
  *
  * Personas sign in with what demo:prepare printed (E2E_DEMO_PREPARE_LOG, `demo-credentials.ts`); a password a

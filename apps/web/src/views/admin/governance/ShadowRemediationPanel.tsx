@@ -18,7 +18,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { WorkflowListResponse } from "../../../api/types";
-import { ago } from "../../../api/format";
+import { ago, humanize, providerLabel } from "../../../api/format";
 import { Badge, Button, ConfirmModal, Field, InfoButton, Input, Select, SeverityBadge } from "../../../ui/kit";
 import { DrawerActions } from "../../../ui/DetailDrawer";
 import { QueryGate, optionEls, projectOpts, useAction, useProjects } from "../adminKit";
@@ -27,9 +27,11 @@ import {
   SHADOW_REMEDIATION_REFUSALS,
   linkStands,
   linkableInstances,
+  prefersReducedMotion,
   startFormFrom,
   startInstanceBody,
   startWillMatch,
+  statusScrollOptions,
   type RemediationPlan,
   type StartForm,
   type StartInstanceBody,
@@ -92,6 +94,11 @@ export function PlanBody(props: { plan: RemediationPlan; onLinked: () => void })
   const ids = { note: useId(), env: useId(), problem: useId(), start: useId(), link: useId() };
   // linked to a workflow that is still live (or completed): nothing here may start or link another
   const locked = startedUnlinked !== null || linkStands(p);
+  // F22: after Start and link the drawer is still scrolled at the form, so the status line is brought into view
+  const status = useRef<HTMLParagraphElement>(null);
+  useEffect(() => {
+    if (linked) status.current?.scrollIntoView(statusScrollOptions(prefersReducedMotion()));
+  }, [linked]);
   const instances = useQuery({
     queryKey: ["admin", "shadow-ai-link-instances"],
     queryFn: () => api.get<WorkflowListResponse>("/v1/workflows/instances"),
@@ -133,7 +140,7 @@ export function PlanBody(props: { plan: RemediationPlan; onLinked: () => void })
     <div className={v.stack}>
       <div className={v.row}>
         <strong>{p.subject}</strong>
-        <Badge tone="neutral">{p.provider}</Badge>
+        <Badge tone="neutral">{providerLabel(p.provider)}</Badge>
         <SeverityBadge severity={p.severity} />
         {p.replacementAgent ? (
           <Badge tone="ok">governed replacement: {p.replacementAgent.name}</Badge>
@@ -223,7 +230,7 @@ export function PlanBody(props: { plan: RemediationPlan; onLinked: () => void })
             label="Environment"
             help="Where the change will be made. Workflow assignment rules may give some environments extra stages."
           >
-            <Input required value={form.environment} placeholder="for example production" aria-describedby={ids.env} onChange={(e) => set("environment", e.target.value)} />
+            <Input required value={form.environment} placeholder="for example staging" aria-describedby={ids.env} onChange={(e) => set("environment", e.target.value)} />
           </Field>
           <Field label="Bill to project (optional)" help="Charges the workflow's AI spend to this project's budget.">
             <Select value={form.projectId} onChange={(e) => set("projectId", e.target.value)}>
@@ -275,7 +282,7 @@ export function PlanBody(props: { plan: RemediationPlan; onLinked: () => void })
             {optionEls(
               linkableInstances(p.findingId, instances.data?.instances ?? []).map((i) => ({
                 v: i.id,
-                l: `${i.change?.description ?? i.id.slice(0, 8)} · ${i.status} · ${ago(i.createdAt)}`,
+                l: `${i.change?.description ?? i.id.slice(0, 8)} · ${humanize(i.status)} · ${ago(i.createdAt)}`,
               })),
               "— choose a workflow —",
             )}
@@ -310,7 +317,7 @@ export function PlanBody(props: { plan: RemediationPlan; onLinked: () => void })
         </p>
       )}
       {linked && (
-        <p role="status" className={v.dim}>
+        <p ref={status} role="status" className={v.dim} data-testid="shadow-linked-status">
           Linked to workflow <code>{linked}</code>. The loop closes when the next call from {p.subject} appears in the audit
           log and usage ledger.
         </p>

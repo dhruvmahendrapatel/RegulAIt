@@ -1,5 +1,5 @@
 # demo-sandbox / azure: the Azure side of real-account discovery (ADR-0197
-# decisions 3, 4 and 8). Runbook: docs/deployment/DEMO_REAL_ACCOUNTS.md.
+# decisions 3, 4 and 8). Runbook: internal/product/DEMO_REAL_ACCOUNTS.md.
 #
 # 1. A demo resource group holding one small Azure OpenAI deployment (keys
 #    disabled), planted activity from a keyless Logic App on a recurrence,

@@ -184,6 +184,9 @@ test.describe("ADR-0182 A13: feedback and appeal", () => {
     await expect(page.getByRole("status")).toContainText("One item is past a response time.");
     // no admin settings for a non-admin
     await expect(page.getByText("Feedback settings (admin)")).toHaveCount(0);
+    // FS-46 (G9): the tab set names the panel it shows, and the panel is labelled by its tab
+    await expect(page.getByRole("tab", { name: "Routed to me" })).toHaveAttribute("aria-controls", "feedback-panel-queue");
+    await expect(page.getByRole("tabpanel", { name: "Routed to me" }).getByRole("table")).toBeVisible();
     await expectAxeClean(page, "feedback queue");
 
     await table.getByRole("row").filter({ hasText: "Due soon" }).getByRole("button", { name: /^Open appeal/ }).click();
@@ -215,6 +218,10 @@ test.describe("ADR-0182 A13: feedback and appeal", () => {
     const card = page.locator("section", { has: page.getByText("Feedback settings (admin)", { exact: true }) });
     await expect(card).toContainText("Off: only signed-in users can report a problem or appeal a decision.");
     await expect(card.getByText("strict default", { exact: true })).toHaveCount(4);
+    // F27: the intro starts at the card's left edge, under the title, not in a narrow centred column
+    const intro = card.getByText(/^Every setting starts at its strict value\./);
+    const [title, para] = await Promise.all([card.getByText("Feedback settings (admin)", { exact: true }).boundingBox(), intro.boundingBox()]);
+    expect(Math.abs(para!.x - title!.x)).toBeLessThanOrEqual(1);
     await expectAxeClean(page, "feedback settings (admin)");
     await card.getByLabel("Feedback acknowledgement time (hours)").fill("200");
     await expect(card.getByRole("alert")).toContainText("outside its allowed range");

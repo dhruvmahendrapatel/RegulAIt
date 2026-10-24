@@ -31,7 +31,7 @@ copy-paste. Read the box at the top before you type anything.
 >
 > The key is deliberately **not** in the backup bucket — storing it beside the
 > ciphertext it protects would defeat the point
-> ([ADR-0035](../decisions/0035-nightly-pg-dump-to-s3.md)).
+> ([ADR-0035](../../internal/decisions/0035-nightly-pg-dump-to-s3.md)).
 >
 > ### Since ADR-0063 you no longer have to guess whether you have the right key
 >
@@ -56,7 +56,7 @@ copy-paste. Read the box at the top before you type anything.
 > **Settings → Data key custody**.
 >
 > **If they differ, the gateway will refuse to start.** That is deliberate — see
-> [ADR-0063](../decisions/0063-data-key-custody.md). A gateway that boots with
+> [ADR-0063](../../internal/decisions/0063-data-key-custody.md). A gateway that boots with
 > the wrong key looks completely healthy and then fails every decryption days
 > later, by which time the old box is usually gone.
 
@@ -67,7 +67,7 @@ copy-paste. Read the box at the top before you type anything.
 | | |
 | --- | --- |
 | **What is backed up** | the whole `regulait` Postgres database, `pg_dump -Fc` |
-| **How often** | daily, `17:00 UTC` (= 13:00 EDT / 12:00 EST), mid-way through the box's 08:00–20:00 power window ([ADR-0032](../decisions/0032-scheduled-power-off-dev-infra.md)) |
+| **How often** | daily, `17:00 UTC` (= 13:00 EDT / 12:00 EST), mid-way through the box's 08:00–20:00 power window ([ADR-0032](../../internal/decisions/0032-scheduled-power-off-dev-infra.md)) |
 | **Plus** | one catch-up run shortly after Monday's boot, for the weekend's missed elapse |
 | **Where** | `terraform output -raw backup_destination` → `s3://regulait-dev-app-db-backup-<acct>/postgres/<host>/<stamp>/` |
 | **Kept for** | 30 days (`terraform output -raw backup_retention`) |
@@ -432,13 +432,13 @@ curl -sS "$API/v1/security/data-key/attestations" \
 
 ## Reference
 
-- [ADR-0035](../decisions/0035-nightly-pg-dump-to-s3.md) — why this shape, what
+- [ADR-0035](../../internal/decisions/0035-nightly-pg-dump-to-s3.md) — why this shape, what
   is not covered, the `REGULAIT_DATA_KEY` dependency
-- [ADR-0063](../decisions/0063-data-key-custody.md) — the key fingerprint, why a
+- [ADR-0063](../../internal/decisions/0063-data-key-custody.md) — the key fingerprint, why a
   mismatched key REFUSES to start rather than booting, the custody attestation
   and its honest limits, and why full re-encryption is named follow-up scope
   rather than half-built
-- [ADR-0032](../decisions/0032-scheduled-power-off-dev-infra.md) → [POWER_SCHEDULE.md](POWER_SCHEDULE.md)
+- [ADR-0032](../../internal/decisions/0032-scheduled-power-off-dev-infra.md) → [POWER_SCHEDULE.md](POWER_SCHEDULE.md)
   — the power window the schedule has to fit inside
 - `infra/modules/backup-target-s3/README.md` — the bucket/IAM threat model
 - `infra/scripts/pg-backup.sh` — the job itself; every non-obvious choice is

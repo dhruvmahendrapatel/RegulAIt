@@ -1,6 +1,6 @@
 /**
  * ADR-0092 — access recommendations, the deterministic half (gap L24,
- * docs/product/GAP_ANALYSIS_SAVIYNT_2026-08.md).
+ * internal/product/GAP_ANALYSIS_SAVIYNT_2026-08.md).
  *
  * What this file makes impossible to fake:
  *

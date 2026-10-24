@@ -1,6 +1,6 @@
 # Security CI: what each gate proves, and what it does not
 
-Workflow: [`.github/workflows/security.yml`](../../.github/workflows/security.yml). Decision: [ADR-0184](../decisions/0184-own-security-ci.md).
+Workflow: [`.github/workflows/security.yml`](../../.github/workflows/security.yml). Decision: [ADR-0184](../../internal/decisions/0184-own-security-ci.md).
 It runs on every pull request (docs-only ones too), on every push to `main`, weekly on Monday at 05:17 UTC, and on demand.
 
 Every gate fails closed. A scanner that cannot run, a report the gate cannot parse, a malformed allow-list, an expired
@@ -24,8 +24,9 @@ analyze step uploads the SARIF under the category `/security-gate` on pushes to 
 manual runs and on pull requests from this repository (a fork's pull request token cannot write security events, so
 those run with `upload: never`). The job has `security-events: write` for that and nothing wider. The upload does not
 replace the gate: the next step gates on the SARIF file itself and fails the job on any non-allowlisted high finding,
-and the SARIF is also kept as the `codeql-sarif` artifact. The CodeQL bundle is the one pinned by the `github/codeql-action`
-commit (CLI 2.27.1 at v4.38.2). The job sets `CODEQL_ACTION_DIFF_INFORMED_QUERIES=false`: otherwise, on a pull request,
+and the SARIF is also kept as the `codeql-sarif` artifact. The CodeQL bundle is pinned via the init step's `tools:` input to
+the exact `codeql-bundle-v2.27.3` linux64 URL (CLI 2.27.3), so a `github/codeql-action` bump does not change the CLI; the
+tarball's sha256 is recorded in the `security.yml` comment (the action does not check it). The job sets `CODEQL_ACTION_DIFF_INFORMED_QUERIES=false`: otherwise, on a pull request,
 the taint-tracking queries report only results on changed lines, and the baseline's entries for them read as stale.
 
 An allow-list entry covers one result: the rule, the file and the result's `partialFingerprints.primaryLocationLineHash`
@@ -33,7 +34,9 @@ An allow-list entry covers one result: the rule, the file and the result's `part
 in the same file is not covered. A run that did not execute, scanned no file, or has a result whose rule or fingerprint
 is missing fails the gate (exit 2).
 
-**Reproduce CI locally** (CodeQL bundle `codeql-bundle-v2.27.1` from the `github/codeql-action` releases):
+**Reproduce CI locally** with the same bundle CI pins: download
+`https://github.com/github/codeql-action/releases/download/codeql-bundle-v2.27.3/codeql-bundle-linux64.tar.gz`, check
+`sha256sum` against the value in `security.yml`, unpack it and put `codeql/` on `PATH` (`codeql version` prints 2.27.3):
 
 ```bash
 codeql database create db --db-cluster --language=javascript-typescript,actions --build-mode=none --source-root=.

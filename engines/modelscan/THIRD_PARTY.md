@@ -4,7 +4,7 @@ Open-source components the modelscan image ships (ADR-0176 admission rules: MIT,
 public-domain dedication; maintained; pinned; works air-gapped). The Python closure is pinned by
 `engines/modelscan/requirements.txt` (every wheel by version and sha256) and installed with
 `pip install --require-hashes --no-deps --only-binary :all:`; the runner and scanner shim (`packages/engine-modelscan`) is
-pinned by `pnpm-lock.yaml`. Facts were read from the pinned wheels on 2026-10-09 (docs/research/R10-engine-admission.md
+pinned by `pnpm-lock.yaml`. Facts were read from the pinned wheels on 2026-10-09 (internal/research/R10-engine-admission.md
 §modelscan, and ADR-0187 decisions 104 onward).
 
 **Admission status: NOT ADMISSIBLE YET.** The image has not been built in an environment that can report its digest
@@ -24,7 +24,7 @@ shipped manifest carries no digest, so the engine cannot be enabled (ADR-0187 de
 | **Still pending an owner decision** (ADR-0187 open question 15) | as installed | `h5py.libs/libhdf5` and `libhdf5_hl`: LicenseRef-HDF5 (the HDF Group's BSD-style licence); the CPython runtime: PSF-2.0 | Not yet put to the owner. Both are permissive. Each entry in `licence-allow.json` says exactly "pending owner decision". |
 | How the gate treats them | — | — | `licence-gate.mjs` runs on the installed closure in the build. It denies anything outside the ADR-0176 list that `licence-allow.json` does not name, refuses an entry whose decision is neither "pending owner decision" nor a dated owner acceptance naming its ADR decision, and fails on an entry that matches nothing (stale). |
 | Python base image `python:3.12-slim-trixie` | digest `sha256:a6e34c59…dc11b1` (CPython 3.12.15) | CPython: PSF-2.0 (still pending, above); Debian packages: various (the OS layer carries GPL-licensed system packages such as the shell and coreutils, as the gateway image does) | The runtime of both containers. pip is removed from it and from the venv. The OS-layer licence and vulnerability scan is Trivy's, in CI (ADR-0184), and has not run on this image yet. modelscan 0.8.8 requires Python < 3.13. |
-| Node.js binary, from the gateway image's base `node:22-trixie-slim` | the gateway image's digest (`sha256:154ba2f4…a98dfa`) | MIT (with its bundled dependencies' notices) | Runs the runner and scanner shim. Only the `node` binary is copied in; no npm, npx or corepack. |
+| Node.js binary, from the gateway image's base `node:22-trixie-slim` | the gateway image's digest (`sha256:8eb619e4…742ddf`, Node 22.23.4) | MIT (with its bundled dependencies' notices) | Runs the runner and scanner shim. Only the `node` binary is copied in; no npm, npx or corepack. |
 | `zod` (npm, a direct dependency of the shim) | `4.6.5` (the version `@regulait/shared` already locks; ADR-0192) | MIT | Validates modelscan's report, the exchange's job and done files and the scanner's self-test. |
 | `write-file-atomic` 8.0.0 and `signal-exit` 4.1.0 (npm, through `@regulait/engine-runner`) | as locked | ISC | The runner's key (ADR-0188 S7; it replaced the runner token) and retained results are written durably; see `packages/engine-runner/THIRD_PARTY.md`. |
 | `jose` 6.2.12 (npm, through `@regulait/engine-runner`) | as locked (exact) | MIT | ADR-0188 S7: the runner key's RFC 7638 thumbprint and the compact JWS a key rotation carries. No dependencies; no network. |

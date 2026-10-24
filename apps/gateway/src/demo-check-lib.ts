@@ -23,7 +23,8 @@ import type { FastifyInstance } from "fastify";
 import { DEMO_SCRIPT_KEY_TTL_DAYS, DEMO_SECURITY_LEAD, demoKeyExpiresAt, revokeScriptKeys } from "./demo-identity.js";
 import { DEMO_INTAKE_FIXTURES, DEMO_SHADOW_DISCOVERY, type DemoIntakeFixtures, type DemoShadowDiscoveryDataset } from "@regulait/shared";
 import { DEMO_AUP_KEY, DEMO_INCIDENT_TITLE, DEMO_OPEN_INCIDENT_TITLE } from "./demo-intake-seed-lib.js";
-import { SHADOW_AI_REMEDIATION_TEMPLATE_NAME } from "./shadow-ai-remediation.js";
+import { DEMO_LIVE_STAGING_TARGET, DEMO_REMEDIATION_ENVIRONMENT } from "./demo-live-staging.js";
+import { remediationEnvironmentsFrom, SHADOW_AI_REMEDIATION_TEMPLATE_NAME } from "./shadow-ai-remediation.js";
 import { APPROVER_ADMIN_NOT_INITIATOR } from "./workflow-approvers.js";
 
 export type CheckLevel = "PASS" | "WARN" | "FAIL";
@@ -631,7 +632,7 @@ export async function checkShadowDiscovery(
 }
 
 /** the beats `checkLiveDiscovery` reports in place of SHADOW_DISCOVERY_BEATS on the live database */
-export const LIVE_DISCOVERY_BEATS = ["1 Fictional dataset", "1 Signature catalogue", "1 Real discovery sources", "1 Remediation routing"] as const;
+export const LIVE_DISCOVERY_BEATS = ["1 Fictional dataset", "1 Signature catalogue", "1 Real discovery sources", "1 Remediation routing", "1 Remediation environment"] as const;
 
 /**
  * The strings only the fictional dataset carries: its company, its source names and their " (demo dataset)" suffix, and
@@ -836,6 +837,27 @@ export async function checkLiveDiscovery(
       "PASS",
       `the remediation default (${tpl ? "installed" : "installs at the first remediation"}) routes the sign-off to ${LEAD} alone: the only active admin other than Ada, with MFA`,
     );
+  }
+
+  // --- the environment the S3 remediation states: one a deploy target or an assignment rule gives a meaning to ------
+  // (finding #4 of the #522 deep scan: without it "Start and link" answers 422 environment_not_allowed)
+  const targetsRes = await get("/v1/deploy/targets");
+  const rulesRes = await get("/v1/workflows/assignment-rules");
+  const ENV = DEMO_REMEDIATION_ENVIRONMENT;
+  if (targetsRes.status !== 200 || rulesRes.status !== 200) {
+    add("1 Remediation environment", "FAIL", `deploy targets (${targetsRes.status}), assignment rules (${rulesRes.status}): '${ENV}' not proven`);
+  } else {
+    const targets: Json[] = targetsRes.body.targets ?? [];
+    const allowed = remediationEnvironmentsFrom([...targets, ...((rulesRes.body.rules ?? []) as Json[])].map((x) => x.environment));
+    const named = targets.filter((t) => t.environment === ENV).map((t) => `'${t.name}' (${t.provider})`);
+    if (!allowed.includes(ENV)) {
+      add(
+        "1 Remediation environment",
+        "FAIL",
+        `'${ENV}' is not an accepted remediation environment (accepted: ${allowed.join(", ") || "none"}): "Start and link" would answer 422 environment_not_allowed`,
+        `run \`demo:prepare --live\` on an empty database (its \`demo:intake --live\` step creates the mock '${DEMO_LIVE_STAGING_TARGET.name}' target)`,
+      );
+    } else add("1 Remediation environment", "PASS", `'${ENV}' is an accepted remediation environment${named.length ? `: deploy target ${named.join(", ")}` : " (an assignment rule names it)"}`);
   }
   return out;
 }

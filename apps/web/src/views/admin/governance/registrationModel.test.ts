@@ -7,6 +7,7 @@ import {
   detailUnsure,
   diffIsEmpty,
   diffProposals,
+  discoveryFindingFrom,
   emptyForm,
   euAiActAnswers,
   euUnsureKeys,
@@ -175,5 +176,23 @@ describe("ADR-0171 registration model", () => {
     expect(detailUnsure({ screeningUnsure: ["generatesSyntheticContent", "generative", "euNexus"] })).toEqual(["generatesSyntheticContent", "euNexus"]);
     expect(detailUnsure({ resubmission: { screeningAnswers: { unsure: ["socialScoring"] } } })).toEqual(["socialScoring"]);
     expect(detailUnsure({ screeningUnsure: "nope" })).toEqual([]);
+  });
+});
+
+describe("issue #522 #30: a shadow-AI link carries its finding", () => {
+  const FINDING = "0B5D3C1E-7F2A-4C11-9A0E-3D2B1C4E5F60";
+  it("takes the finding id only from a shadow-AI link with a well-formed id", () => {
+    expect(discoveryFindingFrom(new URLSearchParams(`source=shadow-ai&findingId=${FINDING}`))).toBe(FINDING.toLowerCase());
+    expect(discoveryFindingFrom(new URLSearchParams(`findingId=${FINDING}`))).toBeUndefined();
+    expect(discoveryFindingFrom(new URLSearchParams("source=shadow-ai&findingId=finding"))).toBeUndefined();
+    expect(discoveryFindingFrom(new URLSearchParams("source=shadow-ai"))).toBeUndefined();
+  });
+
+  it("is kept in the form and survives a saved draft read back; a form without one has no key", () => {
+    const form = emptyForm({ title: "Govern repo", discoveryFindingId: FINDING.toLowerCase() });
+    expect(form.discoveryFindingId).toBe(FINDING.toLowerCase());
+    expect("discoveryFindingId" in emptyForm({ title: "x" })).toBe(false);
+    const back = readRegistrationDraft({ kind: "registration", version: 1, step: 2, form });
+    expect(back?.form.discoveryFindingId).toBe(FINDING.toLowerCase());
   });
 });

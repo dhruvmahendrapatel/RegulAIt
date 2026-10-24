@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
-import { frameworkLabel } from "../../../api/format";
+import { fmtDateTime, fmtDay, frameworkLabel, humanize } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Card, EmptyState, Field, Select } from "../../../ui/kit";
 import { QueryGate } from "../adminKit";
@@ -208,7 +208,7 @@ function RegulatoryTimelineEntry({ update }: { update: RegulatoryUpdate }) {
           <div className={v.row}>
             <time className={s.timelineDate} dateTime={update.effectiveDate}>{formatDate(update.effectiveDate)}</time>
             {/* status is a lifecycle state, not a rating: neutral; withdrawn is the one a reader must not miss */}
-            <Badge tone={withdrawn ? "warn" : "neutral"}>{STATUS_LABELS[update.status] ?? formatWords(update.status)}</Badge>
+            <Badge tone={withdrawn ? "warn" : "neutral"}>{STATUS_LABELS[update.status] ?? humanize(update.status)}</Badge>
             <Badge tone="neutral">{update.instrumentKind ? KIND_LABELS[update.instrumentKind] : "Instrument kind not stated"}</Badge>
             <span className={v.faint}>{dateCaption(update)}</span>
             <span className={v.grow} />
@@ -244,14 +244,14 @@ function RegulatoryTimelineEntry({ update }: { update: RegulatoryUpdate }) {
           <details>
             <summary>Mapped controls and impacted use cases</summary>
             <div className={v.stack}>
-              <p className={v.faint}>Scope basis: {formatWords(update.impact.scopeBasis)} · {update.impact.controlsEvidenced}/{update.impact.controlsMapped} mapped controls evidenced</p>
+              <p className={v.faint}>Scope basis: {SCOPE_BASIS_LABELS[update.impact.scopeBasis] ?? humanize(update.impact.scopeBasis)} · {update.impact.controlsEvidenced}/{update.impact.controlsMapped} mapped controls evidenced</p>
               {update.controls.length ? (
                 <div className={v.stackTight}>
                   {update.controls.map((control) => (
                     <div className={s.controlRow} key={`${control.controlRef}:${control.status}`}>
                       <code>{control.controlRef}</code>
                       <span className={v.dim}>{control.title ?? "Not present in the active pack"}</span>
-                      <Badge tone={controlTone(control.status)}>{formatWords(control.status)}</Badge>
+                      <Badge tone={controlTone(control.status)}>{humanize(control.status)}</Badge>
                     </div>
                   ))}
                 </div>
@@ -263,7 +263,7 @@ function RegulatoryTimelineEntry({ update }: { update: RegulatoryUpdate }) {
                     {update.impact.useCases.map((useCase) => (
                       <li key={useCase.id}>
                         <Link to={`/admin/governance/use-cases/${useCase.id}`}>{useCase.name}</Link>
-                        <span className={v.faint}>{formatWords(useCase.status)} · EU AI Act tier {useCase.euAiActTier ?? "not screened"}</span>
+                        <span className={v.faint}>{humanize(useCase.status)} · EU AI Act tier {useCase.euAiActTier ?? "not screened"}</span>
                       </li>
                     ))}
                   </ul>
@@ -317,16 +317,17 @@ function relativeEffectiveDate(days: number): string {
   return days > 0 ? `in ${span}` : `${span} ago`;
 }
 
-function formatWords(value: string): string {
-  return value.replaceAll("_", " ").replaceAll("-", " ");
-}
+/** the gateway's scope-basis codes as words; `humanize` would lower-case "Act" */
+const SCOPE_BASIS_LABELS: Record<string, string> = {
+  eu_ai_act_tier: "EU AI Act tier",
+  all_live_use_cases: "All live use cases",
+};
 
+// F32: the product's shared en-GB formatters (F16), so this page's dates read like every other screen's
 function formatDate(value: string): string {
-  const parsed = new Date(`${value.slice(0, 10)}T00:00:00Z`);
-  return Number.isNaN(parsed.getTime()) ? value : new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeZone: "UTC" }).format(parsed);
+  return fmtDay(`${value.slice(0, 10)}T00:00:00Z`, value);
 }
 
 function formatDateTime(value: string): string {
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? value : new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(parsed);
+  return fmtDateTime(value, value);
 }

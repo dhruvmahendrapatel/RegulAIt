@@ -28,7 +28,7 @@ in-session sign-off — see CLAUDE.md).
 - [ ] Restore drill automated and run on a schedule (not just the one-time proof in ADR-0035)
 - [ ] `REGULAIT_DATA_KEY` in KMS/Secrets Manager, **recorded out-of-band** (deferred security D1)
 - [ ] …and **attested** — `POST /v1/security/data-key/attestations`, or Admin → Settings → Data key
-      custody ([ADR-0063](../decisions/0063-data-key-custody.md)). Until somebody does, every backup
+      custody ([ADR-0063](../../internal/decisions/0063-data-key-custody.md)). Until somebody does, every backup
       run reports `custody=UNATTESTED` and publishes `Backup/DataKeyAttested=0`.
 - [ ] The key's fingerprint (`dk1:…`, from the gateway boot line or `GET /v1/security/data-key`)
       recorded **alongside** the key. It is not secret, and it is what a future restore compares
@@ -57,5 +57,5 @@ customer to serve**, not before. Revisit at the first serious pilot.
 
 Related, tracked elsewhere:
 - The **product** readiness plan (identity, guardrails, differentiators, commercial):
-  [docs/product/ENTERPRISE_READINESS_PLAN.md](../product/ENTERPRISE_READINESS_PLAN.md)
+  [internal/product/ENTERPRISE_READINESS_PLAN.md](../../internal/product/ENTERPRISE_READINESS_PLAN.md)
 - Deferred **security hardening** and **compliance** lists: in the plan above (Bucket 3).

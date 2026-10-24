@@ -63,7 +63,7 @@
   overflow-wrap: anywhere;
 }
 .title:focus { outline: none; }
-.title:focus-visible { box-shadow: 0 0 0 2px var(--focus-ring); border-radius: var(--radius-sm); }
+.title:focus-visible { box-shadow: var(--focus-ring); border-radius: var(--radius-sm); }
 .meta {
   display: flex;
   flex-wrap: wrap;

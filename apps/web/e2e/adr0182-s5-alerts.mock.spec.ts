@@ -197,6 +197,20 @@ test.describe("ADR-0182 S5: governance alerts — owner, SLA, ticket and the sug
     await expectAxeClean(page, "alerts with a suggested halt");
   });
 
+  test("D3 (F26): due times use the product's date format, in the list chip and the drawer", async ({ page }) => {
+    await mockApi(page);
+    await page.goto("/ui/admin/governance/alerts");
+    // the same en-GB form as every other date (fmtDateTime), never the UTC string ("Sat, 24 Oct 2026 04:07:26 GMT")
+    const halt = page.getByRole("button", { name: /Claims errors: error rate/ });
+    // D3 alerts-inbox-05 (A8): the due time is printed on the row, never only in a hover title
+    await expect(halt).toContainText(/ · due \d{1,2} [A-Z][a-z]{2} \d{4}, \d{2}:\d{2}/);
+    await expect(halt.getByText("SLA due soon")).not.toHaveAttribute("title", /.*/);
+    await halt.click();
+    const ownership = page.getByTestId("alert-detail").getByTestId("alert-ownership");
+    await expect(ownership).toContainText(/Due \d{1,2} [A-Z][a-z]{2} \d{4}, \d{2}:\d{2}/);
+    await expect(ownership).not.toContainText("GMT");
+  });
+
   test("an admin reassigns the owner and files one work item", async ({ page }) => {
     const cap = await mockApi(page);
     await page.goto("/ui/admin/governance/alerts");
@@ -221,11 +235,11 @@ test.describe("ADR-0182 S5: governance alerts — owner, SLA, ticket and the sug
     await page.goto("/ui/admin/governance/alerts");
     const card = page.getByTestId("alert-settings");
     await expect(card).toContainText("24 hours for high, 72 for medium, 168 for low");
-    await expect(card.getByText("strict default", { exact: true })).toHaveCount(2);
+    await expect(card.getByText("Strict default", { exact: true })).toHaveCount(2);
     await card.getByLabel("High (hours)").fill("48");
     await card.getByRole("button", { name: "Save SLA" }).click();
     await expect.poll(() => cap.settingsPuts).toEqual([{ alertSlaHours: { high: 48, medium: 72, low: 168 } }]);
-    await expect(card.getByText("relaxed", { exact: true })).toHaveCount(1);
+    await expect(card.getByText("Relaxed", { exact: true })).toHaveCount(1);
     // automatic filing needs a named connection: nothing is sent without one
     await card.getByLabel("Filing").selectOption("auto_high");
     await expect(card.getByRole("alert")).toContainText("never picks one for you");
@@ -236,6 +250,76 @@ test.describe("ADR-0182 S5: governance alerts — owner, SLA, ticket and the sug
     expect(cap.settingsPuts[1]).toEqual({ alertTicketMode: "auto_high", alertTicketConnectionId: "c1" });
     await expect(card).toContainText("in the work item description; people appear as 'a user (id …)'");
     await expectAxeClean(page, "alerts settings, relaxed");
+  });
+});
+
+test.describe("Design D3 and FS-19/FS-42/FS-46: the alerts page on the demo path", () => {
+  test("D3 alerts-inbox-01 (A15): before the read lands and when it fails, the figures are unknown, never 0", async ({ page }) => {
+    await mockApi(page);
+    await page.route((url) => url.pathname === "/v1/governance/alerts", (route) => json(route, { error: "unavailable" }, 503));
+    await page.goto("/ui/admin/governance/alerts");
+    await expect(page.getByRole("alert").first()).toBeVisible();
+    await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
+    await expect(page.getByText("Last evaluated: —")).toBeVisible();
+    await expect(page.getByText("not evaluated yet")).toHaveCount(0);
+    const strip = page.locator("main").getByText("Open", { exact: true }).locator("..");
+    await expect(strip).toContainText("—");
+    await expect(strip).not.toContainText("0");
+  });
+
+  test("FS-19: Evaluate now keeps focus while it is busy, and FS-46: the filter tabs own a tabpanel", async ({ page }) => {
+    await mockApi(page);
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let evaluations = 0;
+    await page.route("**/v1/governance/monitor/evaluate", async (route) => {
+      evaluations += 1;
+      await held;
+      await json(route, { evaluatedAt: iso(0), raised: 0, refreshed: 2, resolved: 0, active: 2 });
+    });
+    await page.goto("/ui/admin/governance/alerts");
+    const evaluate = page.getByRole("button", { name: "Evaluate now" });
+    await evaluate.focus();
+    await page.keyboard.press("Enter");
+    await expect(evaluate).toHaveAttribute("aria-busy", "true");
+    await expect(evaluate).toBeFocused();
+    await page.keyboard.press("Enter"); // a second press while busy sends nothing
+    release();
+    await expect(page.getByText(/Evaluation raised 0, refreshed 2/)).toBeVisible();
+    await expect(evaluate).toBeFocused();
+    expect(evaluations).toBe(1);
+
+    const tab = page.getByRole("tab", { name: "Active" });
+    const panel = page.getByRole("tabpanel", { name: "Active" });
+    await expect(panel).toContainText("Claims errors");
+    await expect(tab).toHaveAttribute("aria-controls", (await panel.getAttribute("id"))!);
+  });
+
+  test("D3 alerts-inbox-02/03/04: the incident link says what it does; proposals read in words and open their approval", async ({ page }) => {
+    await mockApi(page);
+    const proposals = [
+      { id: "p1", kind: "halt_agent", title: "Halt Claims assistant", rationale: "r", status: "pending_approval", approvalId: "a1", proposedByUserId: "u", decidedByUserId: null, decidedAt: null, result: null, createdAt: iso(-1) },
+      { id: "p2", kind: "halt_agent", title: "Halt the older run", rationale: "r", status: "applied", approvalId: "a2", proposedByUserId: "u", decidedByUserId: "u2", decidedAt: iso(-1), result: null, createdAt: iso(-3) },
+    ];
+    await page.route("**/v1/governance/alerts/halt/remediation", (route) => json(route, { ...remediation("halt"), proposals }));
+    await page.route((url) => url.pathname === "/v1/governance/remediations", (route) => json(route, { proposals: proposals.map((p) => ({ ...p, alertId: "halt", params: {} })) }));
+    await page.goto("/ui/admin/governance/alerts");
+    await page.getByRole("button", { name: /Claims errors: error rate/ }).click();
+    const drawer = page.getByTestId("alert-detail");
+    await expect(drawer.getByRole("link", { name: "Report an incident from this alert" })).toHaveAttribute("href", /\/incidents\?new=1&detectionSource=monitor_alert&sourceRef=halt$/);
+    await expect(drawer.getByRole("link", { name: "Open incident", exact: true })).toHaveCount(0);
+    await expect(drawer.getByText("Waiting for approval", { exact: true })).toBeVisible();
+    await expect(drawer.getByText("pending approval")).toHaveCount(0);
+    // a pending one opens the pending queue; a decided one opens the list across every status, which includes it
+    await expect(drawer.getByRole("link", { name: "Open the approval for Halt Claims assistant" })).toHaveAttribute("href", "/ui/admin/approvals?objectType=remediation");
+    await expect(drawer.getByRole("link", { name: "Open the approval for Halt the older run" })).toHaveAttribute("href", "/ui/admin/approvals?objectType=remediation&status=");
+    await page.getByRole("button", { name: "Close alert" }).click();
+    // FS-42: the all-alerts table names its actions column for assistive tech
+    const table = page.getByRole("table").filter({ hasText: "Halt the older run" });
+    // the kit's header row names its cells; the actions column's is visually hidden, not empty
+    await expect(table.getByRole("row").first().getByRole("cell", { name: "Actions", exact: true })).toHaveCount(1);
+    await expect(table.getByRole("link", { name: "Open the approval for Halt the older run" })).toHaveAttribute("href", "/ui/admin/approvals?objectType=remediation&status=");
+    await expectAxeClean(page, "alerts with proposals");
   });
 });
 

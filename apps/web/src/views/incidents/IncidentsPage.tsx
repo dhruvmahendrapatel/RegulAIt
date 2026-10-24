@@ -15,7 +15,8 @@ import { Link, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../api/client";
 import { PageHeader } from "../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Select, SeverityBadge, Table } from "../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, Select, SeverityBadge } from "../../ui/kit";
+import { FoldTable } from "../../ui/fold";
 import { useSession } from "../../session/SessionContext";
 import { QueryGate, useAction } from "../admin/adminKit";
 import v from "../views.module.css";
@@ -207,7 +208,7 @@ export default function IncidentsPage() {
           <p className={v.faint}>
             {list.data?.scope === "all" ? "Showing every incident (admin)." : "Showing the incidents you own or reported, those on use cases you own and those linked to agents you steward."} {CLOCK_DISCLAIMER}
           </p>
-          <Table
+          <FoldTable
             rows={rows}
             loading={list.isLoading}
             error={list.error}
@@ -236,11 +237,12 @@ export default function IncidentsPage() {
                 ),
               },
               { key: "status", header: "Status", render: (r) => <Badge tone={STATUS_TONE[r.status]}>{r.status}</Badge> },
-              { key: "uc", header: "Use case", render: (r) => (r.useCaseId ? <Link to={`/admin/governance/use-cases/${r.useCaseId}`}>{r.useCaseName ?? "use case"}</Link> : <span className={v.faint}>—</span>) },
-              { key: "owner", header: "Owner", render: (r) => r.ownerName ?? <span className={v.faint}>unassigned</span> },
+              { key: "uc", header: "Use case", fold: { sm: "ref" }, render: (r) => (r.useCaseId ? <Link to={`/admin/governance/use-cases/${r.useCaseId}`}>{r.useCaseName ?? "use case"}</Link> : <span className={v.faint}>—</span>) },
+              { key: "owner", header: "Owner", fold: { md: "ref" }, render: (r) => r.ownerName ?? <span className={v.faint}>unassigned</span> },
               {
                 key: "clock",
                 header: "Next clock",
+                fold: { sm: "ref" },
                 render: (r) =>
                   r.clocks.nextDue ? (
                     <span className={v.stackTight}>
@@ -257,13 +259,14 @@ export default function IncidentsPage() {
               {
                 key: "actions",
                 header: "Actions",
+                fold: { md: "ref" },
                 render: (r) => (
                   <span>
                     {r.actions.open} open{r.actions.overdue ? <> · <Badge tone="danger">{r.actions.overdue} overdue</Badge></> : null}
                   </span>
                 ),
               },
-              { key: "aware", header: "Aware", render: (r) => utc(r.awareAt) },
+              { key: "aware", header: "Aware", fold: { md: "ref" }, render: (r) => utc(r.awareAt) },
             ]}
           />
         </Card>

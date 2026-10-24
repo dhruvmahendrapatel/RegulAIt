@@ -41,14 +41,14 @@
  *    because a process SIGKILLed mid-pass would otherwise strand its job
  *    forever.
  *
- * 2. OFF BY DEFAULT, AND EXPLICITLY ON. `buildApp` does not start a timer —
+ * 2. ON BY DEFAULT, STARTED ONLY BY BOOT. `buildApp` does not start a timer —
  *    ~103 test files construct an app, and a scheduler that started on
  *    construction would slow all of them and make some of them flaky. The loop
- *    is started by the BOOT path (boot.ts), and only when `REGULAIT_SCHEDULER`
- *    says so. Default: OFF, in every environment. Turning this feature on
- *    changes nothing except that the sweeps now actually run, and an operator
- *    has to have decided that. Under vitest it is forced off even if the
- *    variable says otherwise, so a stray env var in CI cannot resurrect it.
+ *    is started by the BOOT path (boot.ts). Since ADR-0181 it is ON unless
+ *    `REGULAIT_SCHEDULER` explicitly says off (ADR-0064's off-by-default is
+ *    reversed; see `resolveSchedulerConfig` below). Under vitest it is forced
+ *    off even if the variable says otherwise, so a stray env var in CI cannot
+ *    start it.
  *
  * 3. A CRASHING JOB DOES NOT TAKE DOWN THE GATEWAY. Each job is run inside its
  *    own try/catch, its failure is written to its run row, to its job row and

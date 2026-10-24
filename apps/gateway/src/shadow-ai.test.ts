@@ -463,7 +463,7 @@ describe("the inventory is actionable and states its own coverage", () => {
     expect(plan.json().replacementAgent?.id).toBe(agentId);
     expect(plan.json().steps.length).toBeGreaterThanOrEqual(4);
     // the loop closes on the LEDGERS, not on an assertion
-    expect(JSON.stringify(plan.json().steps)).toMatch(/usage_events/);
+    expect(JSON.stringify(plan.json().steps)).toMatch(/usage ledger/);
     // and it hands back the ONE workflow route rather than starting one itself
     expect(plan.json().workflowRequest.route).toBe("POST /v1/workflows/instances");
     // … and the body it hands back is one that route accepts as it stands (no unknown keys either)

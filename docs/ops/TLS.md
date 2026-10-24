@@ -2,14 +2,14 @@
 
 **What it is:** the `regulait-dev-app` EC2 box serves the app over **HTTPS with a real,
 browser-trusted Let's Encrypt certificate**, at no added AWS cost. See
-[ADR-0029](../decisions/0029-zero-cost-tls-caddy-sslip-letsencrypt.md) for why this shape and not
+[ADR-0029](../../internal/decisions/0029-zero-cost-tls-caddy-sslip-letsencrypt.md) for why this shape and not
 an ALB.
 
 **URL:** `terraform output tls_hostname` — **this is the only authoritative source.** The
 `<dashed-eip-address>.sslip.io` literals throughout this file were refreshed on 2026-08-01 and are correct
 as of then, but treat them as illustrative: the address moved twice in one day before it was
 pinned (`<first-address>` → `<second-address>` → `<eip-address>`). As of
-[ADR-0032](../decisions/0032-scheduled-power-off-dev-infra.md) an Elastic IP pins it, and the box
+[ADR-0032](../../internal/decisions/0032-scheduled-power-off-dev-infra.md) an Elastic IP pins it, and the box
 is [powered off outside weekday hours](POWER_SCHEDULE.md) — so if nothing answers, check whether
 it is simply outside the window before debugging TLS.
 
@@ -113,7 +113,7 @@ failure counts against Let's Encrypt's failed-validation limit (5 per account/ho
    the box was stopped and its address moved from `<eip-address>` to `<second-address>` while every
    literal in this file and the Caddyfile still said the old one.
 
-   **Now mitigated:** [ADR-0032](../decisions/0032-scheduled-power-off-dev-infra.md) attaches an
+   **Now mitigated:** [ADR-0032](../../internal/decisions/0032-scheduled-power-off-dev-infra.md) attaches an
    **Elastic IP** (`assign_elastic_ip = true`), which survives stop/start and pins the hostname for
    the life of the stack. This was mandatory once the box started being powered off nightly to save
    cost — see [POWER_SCHEDULE.md](POWER_SCHEDULE.md).

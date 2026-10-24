@@ -33,9 +33,10 @@ name: CI
 #     --with-deps` took 10-12 min on some runners and pushed `spa-journeys` and
 #     the mocked-UI shards past their caps with no failing test. Every job that
 #     installs browsers restores ~/.cache/ms-playwright from actions/cache, keyed
-#     on runner OS + arch + the exact Playwright version installed from the
-#     lockfile (`playwright --version`) + the browser list; a Playwright bump is
-#     a new key. Hit: only `playwright install-deps` (apt packages). Miss: the
+#     on runner OS + arch + the runner image OS (ImageOS, e.g. ubuntu24, so an
+#     Ubuntu release change misses cleanly) + the exact Playwright version
+#     installed from the lockfile (`playwright --version`) + the browser list; a
+#     Playwright bump is a new key. Hit: only `playwright install-deps` (apt packages). Miss: the
 #     full install, then an explicit save right after it so a later failure
 #     still keeps the cache. The caps were NOT raised. Poisoning: a PR's cache
 #     is scoped to its own ref and cannot replace main's; the key holds no
@@ -131,7 +132,7 @@ on:
     paths-ignore:
       - '**/*.md'
       - 'docs/**'
-      - 'project-state/**'
+      - 'internal/**'
       - '.gitignore'
       - 'LICENSE'
   # Weekly health check of `main`. This is what replaces the deleted `push:`
@@ -282,7 +283,7 @@ jobs:
         if: ${{ !cancelled() && (steps.affordances.outcome == 'success' || steps.affordances.outcome == 'failure') }}
         run: node scripts/preflight-ui-route-census.mjs
 
-      # AgentCoordination.md stays a CURRENT-STATE file: one Live-status row per
+      # internal/process/AgentCoordination.md stays a CURRENT-STATE file: one Live-status row per
       # agent, one Status line per task, inboxes acked within 12h, a line
       # budget. History lives in git. `pnpm checkin` is the only writer of a row.
       #
@@ -300,6 +301,15 @@ jobs:
         run: |
           node scripts/coordination.mjs lint
           pnpm exec vitest run --dir scripts
+
+      # FS-22 / ADR-0176 addendum (2026-10-24): every package in the shipped
+      # workspace closure (`pnpm licenses list --prod`) is on the ADR-0176 list,
+      # or is named with BlueOak-1.0.0 / Python-2.0 in
+      # scripts/licence-allow-workspace.json. The ADR index parity test
+      # (scripts/adr-index.test.mjs, FS-55) runs in the step above.
+      - name: Licence gate — the shipped workspace closure (ADR-0176)
+        if: ${{ !cancelled() && (steps.affordances.outcome == 'success' || steps.affordances.outcome == 'failure') }}
+        run: node scripts/licence-gate-workspace.mjs
 
       # The engine image lock may only change as `--apply` changes it (#425
       # review): every published sourceCommit is on main, and an engine whose
@@ -353,7 +363,7 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
+        image: postgres:16@sha256:9e2cf6287f25c3151f4c9421ccce2b17f3e60061c111a29165e0d2cdd9ff0a97
         env:
           POSTGRES_USER: regulait
           POSTGRES_PASSWORD: regulait
@@ -536,7 +546,7 @@ jobs:
       # Vitest 4.1.11), so it is the unsharded list by construction.
       - run: pnpm install --frozen-lockfile
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: gateway-report-*
           path: ${{ runner.temp }}/shards
@@ -553,7 +563,7 @@ jobs:
         run: node scripts/vitest-shard-coverage.mjs --root apps/gateway "$RUNNER_TEMP/gateway-list.json" "$RUNNER_TEMP"/shards/gateway-shard-*.json
 
   # THE REQUIRED CHECK. Branch protection on `main` requires a check named
-  # `build-and-test` (project-state/sessions/2026-07-24-session-02.md); this job
+  # `build-and-test` (internal/memory/sessions/2026-07-24-session-02.md); this job
   # keeps that name so the split needs no settings change. It is green only
   # when every part is: a SKIPPED required check counts as passing, so this
   # runs whenever a dependency failed (`!cancelled()`, not the default
@@ -639,11 +649,11 @@ jobs:
     # never replayed), so the 47 journeys take ~9.6 min on the runner and the
     # job ~12.5 min with install and build. Raised once; a further rise means
     # something got slower and is a finding.
-    timeout-minutes: 16
+    timeout-minutes: 25 # TEMPORARY 16 -> 25 for freeze week (#522 finding 25): revert after 2026-11-03 (ADR-0198)
 
     services:
       postgres:
-        image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
+        image: postgres:16@sha256:9e2cf6287f25c3151f4c9421ccce2b17f3e60061c111a29165e0d2cdd9ff0a97
         env:
           POSTGRES_USER: regulait
           POSTGRES_PASSWORD: regulait
@@ -693,13 +703,15 @@ jobs:
           img="${ImageOS:-unknown}-${ImageVersion:-unknown}"
           [[ "$img" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::unexpected runner image id"; exit 1; }
           echo "image=$img" >> "$GITHUB_OUTPUT"
+          # The browser cache key carries the image OS (e.g. ubuntu24), so an Ubuntu release change misses cleanly.
+          echo "imageos=${ImageOS:-unknown}" >> "$GITHUB_OUTPUT"
 
       - name: Restore Playwright browsers
         id: playwright-cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.version }}-chromium
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.imageos }}-${{ steps.playwright.outputs.version }}-chromium
 
       # The .deb files `install-deps` downloads are cached too (#453): a slow apt mirror stalled them for 9-13 min
       # even on a browser hit. apt still checks every cached file against the signed package index.

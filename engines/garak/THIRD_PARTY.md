@@ -5,7 +5,7 @@ public-domain dedication; maintained; pinned; works air-gapped). The Python clos
 `engines/garak/requirements.txt` (every wheel by version and sha256; torch is the CPU-only wheel by direct URL) and
 `requirements-sdist.txt` (two hashed sdists), installed with `pip install --require-hashes --no-deps`; the runner and
 worker shim (`packages/engine-garak`) is pinned by `pnpm-lock.yaml`. Facts were read from the pinned wheels on
-2026-10-10 (docs/research/R10-engine-admission.md §garak, and ADR-0187 decisions 140 onward), and re-read for the
+2026-10-10 (internal/research/R10-engine-admission.md §garak, and ADR-0187 decisions 140 onward), and re-read for the
 garak 0.17.1 upgrade on 2026-10-21 (the section of that date below).
 
 **Admission status: NOT ADMISSIBLE YET.** The image has not been built where its digest could be recorded (no Docker
@@ -26,12 +26,12 @@ owner: 3 by decision 106, 20 by decision 193), 0 denied.** The gate prints the w
 build log.
 
 **Open advisories on the pinned closure (OSV, 2026-10-10). None can be fixed without breaking garak's own pins:**
-- fsspec 2025.3.0, GHSA-27vj-qcqg-25rc (high, fixed in 2026.6.0): allow-listed with an expiry, as described above. (cleared 2026-10-21 by the garak 0.17.1 upgrade; see that section)
+- fsspec 2025.3.0, GHSA-27vj-qcqg-25rc (high, fixed in 2026.6.0): allow-listed with an expiry, as described above. (cleared 2026-10-21 by the garak 0.17.1 upgrade, which pins fsspec 2026.7.0 and removed the allow-list entry; see that section)
 - datasets 3.6.0, GHSA-379c-qx7v-6h59 (moderate, path traversal through `file_name` metadata in folder-based
   builders, fixed only in 5.0.1). garak 0.17.0, its latest release, requires `datasets<4.0`, and the last 3.x release
   is 3.6.0, so the fix is a major upgrade that garak forbids. Moderate is below the image gate (HIGH and CRITICAL), and
   datasets is reached only on the same read-only, pre-seeded cache path as fsspec. Take 5.x when a garak release
-  allows it: datasets 5.0.1 also lifts the fsspec cap to `<=2026.6.0`, which clears the fsspec advisory too. (cleared 2026-10-21 by the garak 0.17.1 upgrade; see that section)
+  allows it: datasets 5.0.1 also lifts the fsspec cap to `<=2026.6.0`, which clears the fsspec advisory too. (cleared 2026-10-21 by the garak 0.17.1 upgrade, which pins datasets 5.1.0; see that section)
 - nltk 3.10.3, GHSA-8mgp-746c-j5xp (high, model-artifact APIs bypass the path checks): no patched release exists
   (3.10.3 is both the latest release and the last affected one), so the image gate does not count it. garak requires
   `nltk>=3.10.3`, so a fixed release can be taken by bumping the pin and its hash here, with no change to garak. (cleared 2026-10-22
@@ -74,9 +74,9 @@ re-check. Read from PyPI's JSON API, OSV and garak's repository on 2026-10-16:
   `<=2026.7.0`, past the 2026.6.0 fix), re-hash, and drop the fsspec image allow-list entry. An unreleased commit is not
   pinned.
 - fsspec GHSA-27vj-qcqg-25rc (CVE-2026-104851, high): fixed in 2026.6.0; every datasets 3.x caps fsspec at or below
-  2025.3.0. Allow-listed in the image gate until 2026-12-09 (decision 160), unchanged.
+  2025.3.0. Allow-listed in the image gate until 2026-12-09 (decision 160), unchanged. (Entry removed 2026-10-21 with fsspec 2026.7.0; see that section.)
 - datasets GHSA-379c-qx7v-6h59 (CVE-2026-66007, moderate): fixed only in 5.0.1 (latest 5.1.0); garak forbids 4.x and up.
-  Unreachable as described above.
+  Unreachable as described above. (Fixed 2026-10-21 by datasets 5.1.0; see that section.)
 - nltk GHSA-8mgp-746c-j5xp (CVE-2026-81726, high): still no patched release (OSV `last_affected` 3.10.3, the latest on
   PyPI; nltk's development branch is also 3.10.3). The flaw is in `TransitionParser.train/parse`,
   `AveragedPerceptron.save/load`, `PerceptronTagger.save_to_json` and `save_maxent_params`, which open a caller-chosen
@@ -167,6 +167,37 @@ other pin, and the closure stays 178 distributions. Read from PyPI, OSV and the 
   the five data packages unpacked into the cache root, `words`, `stopwords`, `wordnet`, `pos_tag` (the JSON
   `averaged_perceptron_tagger_eng`) and `word_tokenize` (`punkt_tab`) return identical results.
 
+**Re-resolved 2026-10-24: filelock 3.32.7 to 4.2.4 and litellm 1.106.1 to 1.103.7 (owner decision 2026-10-24,
+issue #453).** The image's Trivy gate fails on filelock 3.32.7: GHSA-v4x8-3wr5-3wq8 (CVE-2026-112940, high, fixed in
+4.2.1; OSV also lists GHSA-567q-5qvw-pf92 and GHSA-9vhv-jxww-xfm5, both low, fixed in 4.2.1). litellm 1.106.x
+declares `filelock<4.0` and the Dockerfile's `pip check` enforces it, so filelock 4.x cannot be pinned on its own. The
+owner chose litellm 1.103.7 (released 2026-10-21, MIT, no OSV advisory), which declares neither a filelock nor a
+huggingface-hub dependency; garak 0.17.1 needs `litellm>=1.84.0`. litellm 1.107.0 is the backdoored release and is
+never taken. Read from PyPI, OSV and the installed wheels on 2026-10-24:
+- **Resolve:** `uv pip compile` (uv 0.11.32, CPython 3.12, x86_64-manylinux_2_28) with the inputs in the header of
+  `requirements.txt` plus `litellm==1.103.7` and `filelock>=4.2.1`, using that file as the resolver's preferences and
+  upgrading only litellm and filelock. **Only these two pins changed:** filelock 4.2.4 (py3-none-any, sha256
+  `30124143…f8db8358e`, released 2026-10-19, `License-Expression: MIT`) and litellm 1.103.7 (cp310-abi3 manylinux_2_28
+  x86_64, sha256 `4a866318…505dcb54`, `License-Expression: MIT`), each hash from PyPI's JSON API. The closure stays
+  178 distributions. A resolve without preferences would also have moved 25 unrelated pins (websockets to 17.x and
+  pandas to 3.1.0 among them), which this security fix does not take. huggingface-hub stays 1.33.0: litellm 1.103.7
+  no longer caps it, but the hub client declares `filelock>=3.10.0` and nothing requires a newer one. litellm imports
+  no filelock; the users are datasets, huggingface_hub, torch and transformers.
+- **Install:** in a Python 3.12 venv, `pip install --require-hashes --no-deps --only-binary :all:` of
+  `requirements.txt`, then `requirements-sdist.txt` as the Dockerfile builds it, then `pip check`: **no broken
+  requirements**. The garak version check reads 0.17.1, and the prune removes its 23 paths with `plugin_cache.json`
+  matching.
+- **Licences:** the gate on the installed, pruned closure with pip removed reads **197 allowed, 23 admitted, 0
+  denied**, as before. Both changed packages carry an SPDX MIT expression, so no reading or allow entry changed, and
+  `IMAGE-NOTICES.txt` is unchanged.
+- **Pre-seed:** with hub 1.33.0 and filelock 4.2.4, `preseed-hf.py fetch` (all nine assets, licences read at the
+  pinned commits, every hash matching), `materialise` (the seven datasets) and an offline `verify` passed. The verify
+  ran in a fresh network namespace with only loopback, the tree read-only and every offline switch set, and reported
+  "9 pre-seeded assets verified offline", the NLI model included. The hub client is unchanged, so the cache layout
+  (`hub/blobs`, `models--…`, `datasets--…`, `refs/main`) is unchanged, and `preseed-hf.py` and `prune-data.py` needed
+  no change.
+- **OSV** over all 178 pinned distributions (the two sdists and torch 2.14.1 included): **no advisory**.
+
 | Component | Version | Licence | Used for, and why |
 |---|---|---|---|
 | `garak` (PyPI, github.com/NVIDIA/garak) | `0.17.1` (released 2026-10-16; wheel sha256 `cef78a79…cfda8`, from PyPI's JSON API and the downloaded wheel; 0.17.0's `9a67e629…db145` was the hash R10 checked independently) | Apache-2.0 (`LICENSE`, SPDX headers; its METADATA names no licence) | The engine (ADR-0187 B5-G). Only the probes in the shared catalogue run (`packages/shared/src/engines/garak.ts`); 23 data paths whose licence or provenance is excluded are DELETED from the image (`excluded-data.txt`, decisions 145 and 197). Its probe metadata (`plugin_cache.json`, sha256 `6ba9cca2…230209`) is what the catalogue's detector and OWASP columns are generated from; the build refuses another. |
@@ -180,7 +211,7 @@ other pin, and the closure stays 178 distributions. Read from PyPI, OSV and the 
 | **Accepted by owner 2026-10-10 (ADR-0187 open question 21; decision 193)** | as installed | PSF-2.0: CPython, `aiohappyeyeballs`, `defusedxml`, `typing_extensions`; MPL-2.0 (file-level copyleft, **admitted only while unmodified**): `certifi`, `mikeshardmind-base2048` (a direct garak dependency), `orjson`, `tqdm`; ZPL-2.1: `datetime`, `zope.interface`; MIT-0: `cffi`; CNRI-Python: `regex`; MIT-CMU: `pillow`; pillow's bundled `libfreetype` (FTL), `libharfbuzz` (MIT-Modern-Variant), `libjpeg` (IJG AND BSD-3-Clause AND Zlib), `libpng16` (libpng-2.0), `libtiff` (libtiff); torch's LLVM-exception and BSL-1.0 terms | All permissive or file-level; none is GPL, AGPL, SSPL or BUSL. Each entry in `licence-allow.json` says "accepted by owner 2026-10-10 (ADR-0187 decision 193)" with its reason; the four MPL-2.0 entries carry `"condition": "unmodified"`, and the gate admits them only when every file of the distribution matches its wheel RECORD hash (decision 194). The acceptance amends ADR-0176's list for these named licences in shipped engine images only. |
 | How the gate treats them | — | — | `licence-gate.mjs` is the modelscan gate (decision 106) plus pinned readings and pillow's native-library table (decision 157) and conditions (decision 194). It denies anything outside the list that `licence-allow.json` does not name (a licence not named stays DENIED, even for a subject that has another admitted term), refuses an allow entry whose decision is neither "pending owner decision" nor a dated owner acceptance naming its ADR decision, refuses an MPL-2.0 entry without the `unmodified` condition, denies a conditional row whose condition fails, refuses a malformed reading, and fails on an allow entry or a reading that matches nothing installed (stale). |
 | Python base image `python:3.12-slim-trixie` | digest `sha256:a6e34c59…dc11b1` (the modelscan image's) | CPython: PSF-2.0 (pending, above); Debian packages: various (the OS layer carries GPL-licensed system packages such as the shell and coreutils, as the gateway image does) | The runtime of both containers. pip is removed from it and from the venv. |
-| Node.js binary, from the gateway image's base `node:22-trixie-slim` | the gateway image's digest (`sha256:154ba2f4…a98dfa`) | MIT (with its bundled dependencies' notices) | Runs the runner and worker shim. Only the `node` binary is copied in; no npm, npx or corepack. |
+| Node.js binary, from the gateway image's base `node:22-trixie-slim` | the gateway image's digest (`sha256:8eb619e4…742ddf`, Node 22.23.4) | MIT (with its bundled dependencies' notices) | Runs the runner and worker shim. Only the `node` binary is copied in; no npm, npx or corepack. |
 | `zod` (npm, a direct dependency of the shim) | `4.6.5` (the version `@regulait/shared` already locks; ADR-0192) | MIT | Validates the exchange's job and done files and the worker's self-test. |
 | `write-file-atomic` 8.0.0 and `signal-exit` 4.1.0 (npm, through `@regulait/engine-runner`) | as locked | ISC | The runner's key (ADR-0188 S7; it replaced the runner token) and retained results are written durably; see `packages/engine-runner/THIRD_PARTY.md`. |
 | `jose` 6.2.12 (npm, through `@regulait/engine-runner`) | as locked (exact) | MIT | ADR-0188 S7: the runner key's RFC 7638 thumbprint and the compact JWS a key rotation carries. No dependencies; no network. |

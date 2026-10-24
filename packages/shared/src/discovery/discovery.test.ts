@@ -55,7 +55,15 @@ describe("ADR-0195 SD0 discovery vocabulary", () => {
   it("the posture sentence says nothing is scanned with no source, and names each enabled source otherwise", () => {
     expect(activeDiscoveryPosture([])).toMatch(/No active discovery source is enabled, so nothing is scanned/);
     const s = activeDiscoveryPosture([{ name: "Main org", kind: "repo_github" }]);
-    expect(s).toMatch(/1 enabled source/);
+    expect(s).toMatch(/scans 1 enabled source, read-only/);
+    // D3 (#47): counted properly, never "source(s)"
+    const two = activeDiscoveryPosture([{ name: "Main org", kind: "repo_github" }, { name: "Prod", kind: "cloud_aws" }]);
+    expect(two).toMatch(/scans 2 enabled sources, read-only/);
+    expect(`${s} ${two}`).not.toMatch(/\(s\)/);
+    // one brand casing in the posture sentences
+    expect(activeDiscoveryPosture([])).toMatch(/regulAIt reaches out to no repository/);
+    expect(DISCOVERY_KIND_SPECS.endpoint_agent.label).toBe("regulAIt endpoint agent");
+    for (const spec of Object.values(DISCOVERY_KIND_SPECS)) expect(spec.label).not.toMatch(/RegulAIt|Regulait/);
     expect(s).toMatch(/Main org \(GitHub repositories\)/);
     expect(coverageScorecard([], [{ name: "Prod", kind: "cloud_aws" }]).statement).toMatch(/Prod \(AWS\)/);
   });

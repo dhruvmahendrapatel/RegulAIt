@@ -1,6 +1,6 @@
 /**
  * ADR-0080 — THE AI USE-CASE REGISTRY, the L1 pre-build front-door
- * (docs/product/GAP_ANALYSIS_CREDO_AI_2026-08.md).
+ * (internal/product/GAP_ANALYSIS_CREDO_AI_2026-08.md).
  *
  * Credo-style governance starts BEFORE anything runs: propose an AI use case,
  * fill an intake questionnaire, and an approval REGISTERS the use case. This
@@ -77,6 +77,7 @@ import {
   or,
   projectMembers,
   projects,
+  shadowAiFindings,
   sql,
   users,
   useCaseConditions,
@@ -159,9 +160,54 @@ import {
 } from "./review-policy.js";
 // ADR-0180 A2: a measured condition is closed only by passing evidence
 import { specOf, storedMeasurement } from "./condition-metrics.js";
+import { SHADOW_AI_RULE_IDS } from "./shadow-ai.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 const useCaseIdParam = z.object({ useCaseId: z.string().uuid() });
+
+/** issue #522 finding #30: the use case a shadow-AI finding is registered as, if any */
+async function discoveryFindingHolder(db: Db, findingId: string): Promise<{ id: string; name: string } | null> {
+  const [row] = await db
+    .select({ id: aiUseCases.id, name: aiUseCases.name })
+    .from(aiUseCases)
+    .where(eq(aiUseCases.discoveryFindingId, findingId));
+  return row ?? null;
+}
+
+function findingAlreadyRegistered(holder: { id: string; name: string }) {
+  return {
+    error: "finding_already_registered",
+    detail: `this shadow-AI finding is already registered as the AI use case '${holder.name}'; a finding is registered once`,
+    useCaseId: holder.id,
+  };
+}
+
+/** what a use-case read shows of the finding it was registered from (null when registered any other way) */
+async function discoveryViewFor(
+  db: Db,
+  row: AiUseCaseRow,
+  isAdmin: boolean,
+): Promise<{ findingId: string; finding: { id: string; subject: string; subjectKind: string; provider: string; firstSeenAt: Date } | null } | null> {
+  if (!row.discoveryFindingId) return null;
+  if (!isAdmin) return { findingId: row.discoveryFindingId, finding: null };
+  const [finding] = await db
+    .select({
+      id: shadowAiFindings.id,
+      subject: shadowAiFindings.subject,
+      subjectKind: shadowAiFindings.subjectKind,
+      provider: shadowAiFindings.provider,
+      firstSeenAt: shadowAiFindings.firstSeenAt,
+    })
+    .from(shadowAiFindings)
+    .where(eq(shadowAiFindings.id, row.discoveryFindingId));
+  return { findingId: row.discoveryFindingId, finding: finding ?? null };
+}
+
+function isDiscoveryFindingConflict(err: unknown): boolean {
+  const pg = err as { code?: string; constraint?: string; cause?: { code?: string; constraint?: string } } | null;
+  const e = pg?.code === "23505" ? pg : pg?.cause?.code === "23505" ? pg.cause : null;
+  return e?.constraint === "ai_use_cases_discovery_finding_uq";
+}
 
 /** the artifact_generation output name the intake template declares */
 export const USE_CASE_QUESTIONNAIRE_OUTPUT = "use_case_questionnaire";
@@ -2066,6 +2112,27 @@ export function registerUseCaseRoutes(
       }
     }
 
+    // issue #522 finding #30: a use case registered from a shadow-AI finding keeps the link. Findings are readable by
+    // admins only (the shadow-AI routes are admin-only), so only an admin may name one. That is checked BEFORE the
+    // lookup, so a refusal never says whether an id exists. A finding is registered as one use case at most.
+    let discoveryFinding: { id: string; subject: string; provider: string } | null = null;
+    if (body.discoveryFindingId) {
+      if (!req.authCtx.isAdmin) {
+        return reply.status(403).send({
+          error: "finding_not_readable",
+          detail: "only an administrator may register a use case from a shadow-AI finding",
+        });
+      }
+      const [finding] = await db
+        .select({ id: shadowAiFindings.id, subject: shadowAiFindings.subject, provider: shadowAiFindings.provider })
+        .from(shadowAiFindings)
+        .where(eq(shadowAiFindings.id, body.discoveryFindingId));
+      if (!finding) return reply.status(400).send({ error: "invalid_reference", field: "discoveryFindingId" });
+      const holder = await discoveryFindingHolder(db, finding.id);
+      if (holder) return reply.status(409).send(findingAlreadyRegistered(holder));
+      discoveryFinding = finding;
+    }
+
     const template = await resolveIntakeTemplate(db);
     if (!template.ok) return reply.status(template.status).send(template.body);
 
@@ -2141,6 +2208,7 @@ export function registerUseCaseRoutes(
             // ADR-0168 amendment: kept for resubmission prefill — nothing else reads it
             ...(split ? { intakeAnswers: split.rest, screeningUnsure: split.unsure } : {}),
             ...(body.frameworkRationales ? { frameworkRationales: body.frameworkRationales } : {}),
+            ...(discoveryFinding ? { discoveryFindingId: discoveryFinding.id } : {}),
           })
           .returning();
         await tx.insert(auditLog).values({
@@ -2156,13 +2224,29 @@ export function registerUseCaseRoutes(
             workflowInstanceId: started.instance.id,
             ...(split?.unsure.length ? { screeningUnsure: split.unsure } : {}),
             ...(body.frameworkRationales ? { rationaleFrameworks: Object.keys(body.frameworkRationales) } : {}),
+            ...(discoveryFinding ? { discoveryFindingId: discoveryFinding.id } : {}),
             ...(idemKey ? { idempotencyKey: true } : {}),
           },
           effect: "allow",
           ruleId: "use-case-proposed",
           ruleChain: [],
-          reason: `AI use case '${body.name}' proposed — intake workflow started`,
+          reason: discoveryFinding
+            ? `AI use case '${body.name}' proposed from shadow-AI finding ${discoveryFinding.id} — intake workflow started`
+            : `AI use case '${body.name}' proposed — intake workflow started`,
         });
+        if (discoveryFinding) {
+          // the finding's own trail records it too, in the same transaction as the link
+          await tx.insert(auditLog).values({
+            userId,
+            objectType: "shadow_ai_finding",
+            objectId: discoveryFinding.id,
+            detail: { useCaseId: row!.id, useCaseName: body.name, provider: discoveryFinding.provider, subject: discoveryFinding.subject },
+            effect: "allow",
+            ruleId: SHADOW_AI_RULE_IDS.findingUseCaseLinked,
+            ruleChain: [],
+            reason: `finding for ${discoveryFinding.provider} on ${discoveryFinding.subject} registered as AI use case '${body.name}' (${row!.id})`,
+          });
+        }
         // ADR-0189 R25 item 13: an intake that completed while it started
         // approves the proposal now, in this transaction, rather than leaving it
         // behind its instance. The snapshot it owes runs after commit.
@@ -2197,6 +2281,11 @@ export function registerUseCaseRoutes(
       });
     } catch (err) {
       if (err instanceof CreateRefused) return reply.status(err.status).send(err.body);
+      // a concurrent registration of the same finding committed first: the unique index refused this one
+      if (discoveryFinding && isDiscoveryFindingConflict(err)) {
+        const holder = await discoveryFindingHolder(db, discoveryFinding.id);
+        if (holder) return reply.status(409).send(findingAlreadyRegistered(holder));
+      }
       throw err;
     }
     if (outcome.kind === "replay") {
@@ -2330,6 +2419,9 @@ export function registerUseCaseRoutes(
     const now = new Date();
     return {
       useCase: { ...row, approvalExpired: approvalExpired(row, now), recertificationDueAt: recertificationDueAt(row) },
+      // issue #522 finding #30: where it was found. The finding's details are shown to admins only (the shadow-AI
+      // inventory is admin-only); another reader sees that discovery found it, and the id, which opens nothing for them
+      discovery: await discoveryViewFor(db, row, req.authCtx.isAdmin),
       // ADR-0171: the owner's per-framework "why it applies" (AER-052) and the
       // answers they were unsure about, counted as yes (AER-053) — for reviewers
       frameworkRationales: row.frameworkRationales ?? {},

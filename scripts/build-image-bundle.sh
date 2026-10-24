@@ -23,7 +23,7 @@
 # Caddy serves two roles: the public TLS front (`tls` profile) and the
 # sandbox executor's internal TLS front and CA copy (`isolation` profile,
 # ADR-0190 I4 follow-ups). Every Caddy service names ONE reference, pinned by
-# digest (docker-compose.yml `x-caddy-image`), and CADDY_IMAGE below must be
+# digest (docker-compose.yml `x-caddy`), and CADDY_IMAGE below must be
 # that same string, so one saved image covers both. The bundle saves the image
 # under the digest reference AND the plain tag (CADDY_TAG): on Docker's classic
 # image store a digest reference does not survive save/load, so the air-gapped

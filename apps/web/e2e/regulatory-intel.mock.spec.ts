@@ -85,7 +85,13 @@ const updates = [
     status: "upcoming",
     daysUntilEffective: 88,
     sourceUrl: "https://leg.colorado.gov/bills/sb26-189",
-    impact: impact(1),
+    // D5 risk-registers-03: a tier-scoped entry with gateway codes the page must put into words
+    impact: {
+      ...impact(1),
+      scopeBasis: "eu_ai_act_tier",
+      useCases: [{ id: "00000000-0000-4000-8000-000000000001", name: "Loan triage", status: "under_review", euAiActTier: "high" }],
+    },
+    controls: [{ controlRef: "eu-ai-act:ART-9", title: null, framework: null, status: "not_in_active_pack" }],
   },
 ];
 
@@ -176,7 +182,7 @@ test.describe("ADR-0179 G14-FEED: regulatory intelligence statuses and kinds", (
 
     const cfpb = entry(page, "CFPB Circular 2022-03 — Adverse-action notices for complex algorithms (withdrawn)");
     await expect(cfpb.getByText("Withdrawn", { exact: true })).toBeVisible();
-    await expect(cfpb.getByText(/Withdrawn on May 12, 2025\./)).toBeVisible();
+    await expect(cfpb.getByText(/Withdrawn on 12 May 2025\./)).toBeVisible();
     await expect(cfpb.getByText("Not counted: withdrawn")).toBeVisible();
     await expect(cfpb.getByText(/\d+ gaps?$/)).toHaveCount(0);
     await expect(cfpb.getByText("Guidance", { exact: true })).toBeVisible();
@@ -188,10 +194,30 @@ test.describe("ADR-0179 G14-FEED: regulatory intelligence statuses and kinds", (
     await expect(nist.getByText(/^published .* ago$/)).toBeVisible();
 
     const nyc = entry(page, "NYC Local Law 144 — Automated employment decision tool bias audits");
-    await expect(nyc.getByText("Effective Jan 1, 2023 · enforced from Jul 5, 2023")).toBeVisible();
+    await expect(nyc.getByText("Effective 1 Jan 2023 · enforced from 5 Jul 2023")).toBeVisible();
+    // F32: the generated line, entry dates and verified dates use the shared en-GB form (F16), never the browser's
+    await expect(page.getByText(/^Generated 5 Oct 2026, \d{2}:\d{2} · impact window/)).toBeVisible();
+    await expect(page.getByRole("list", { name: "Regulatory effective-date timeline" }).locator("time", { hasText: "26 May 2022" }).first()).toBeVisible();
+    await expect(page.getByText("Verified on 5 Oct 2026").first()).toBeVisible();
+    await expect(page.getByText(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2}, \d{4}/)).toHaveCount(0);
 
     await expect(page.getByText("Whether an entry applies to this organisation has not had legal review.")).toBeVisible();
     await expectAxeClean(page, "regulatory intelligence");
+  });
+
+  test("D5: the impact detail puts the scope basis and statuses into words, never gateway codes", async ({ page }) => {
+    await mockApi(page);
+    await page.goto("/ui/admin/governance/regulatory");
+    const co = entry(page, "Colorado SB 26-189 — Automated decision-making technology in consequential decisions");
+    await co.getByText("Mapped controls and impacted use cases").click();
+    await expect(co.getByText(/^Scope basis: EU AI Act tier · 1\/2 mapped controls evidenced$/)).toBeVisible();
+    await expect(co.getByText("Not in active pack", { exact: true })).toBeVisible();
+    await expect(co.getByText("Under review · EU AI Act tier high")).toBeVisible();
+    await expect(co.getByText(/eu ai act tier|not in active pack|under review/)).toHaveCount(0);
+    const nist = entry(page, "NIST AI RMF 1.0 — Voluntary framework for managing AI risks");
+    await nist.getByText("Mapped controls and impacted use cases").click();
+    await expect(nist.getByText(/^Scope basis: All live use cases · /)).toBeVisible();
+    await expect(nist.getByText("Satisfied", { exact: true })).toBeVisible();
   });
 
   test("the status and instrument-kind filters reach the API and narrow the list", async ({ page }) => {

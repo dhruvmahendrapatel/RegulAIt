@@ -18,7 +18,7 @@
 # NOT EXECUTED in the session that wrote it (no Docker daemon there; M-041).
 ARG REGULAIT_STDIO_BASE=regulait/stdio-base:local
 
-FROM --platform=linux/amd64 node:22-trixie-slim@sha256:154ba2f4d6fec323d28e4f4bb86bba4677f1223391a1979cf521304e03a98dfa AS install
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:8eb619e402eaede1748a3c8173bffab391592812e85136452f781741c7242ddf AS install
 WORKDIR /srv/mcp
 COPY package.json package-lock.json ./
 # no install scripts, production modules only, from the lockfile

@@ -13,6 +13,7 @@ import { useState, type ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../api/client";
+import { humanize, plural } from "../../api/format";
 import type { DirectoryUser } from "../../api/types";
 import { PageHeader } from "../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Fieldset, Input, Modal, Select, SeverityBadge, Table, Textarea } from "../../ui/kit";
@@ -121,7 +122,7 @@ function EditModal(props: { open: boolean; d: IncidentDetail; onClose: () => voi
             <Select value={severity} onChange={(e) => setSeverity(e.target.value as typeof severity)}>
               {SEVERITIES.map((s) => (
                 <option key={s} value={s}>
-                  {s}
+                  {humanize(s)}
                 </option>
               ))}
             </Select>
@@ -220,13 +221,13 @@ function CloseModal(props: { open: boolean; d: IncidentDetail; onClose: () => vo
         )}
         {openClocks.length > 0 && (
           <div className={v.errLine} role="alert">
-            {openClocks.length} notification clock(s) are not final: record the complete report, or an admin marks them not required or tolled
+            {plural(openClocks.length, "notification clock")} {openClocks.length === 1 ? "is" : "are"} not final: record the complete report, or an admin marks them not required or tolled
             with a reason.
           </div>
         )}
         {openActions.length > 0 && (
           <div className={v.errLine} role="alert">
-            {openActions.length} corrective action(s) are still open: mark each done with its evidence, or cancel it with a reason.
+            {plural(openActions.length, "corrective action")} {openActions.length === 1 ? "is" : "are"} still open: mark each done with its evidence, or cancel it with a reason.
           </div>
         )}
         <Field label="Root cause">

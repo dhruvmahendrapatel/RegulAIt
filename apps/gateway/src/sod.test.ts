@@ -1,6 +1,6 @@
 /**
  * ADR-0091 — toxic-combination SoD at the grant choke point (gap L23,
- * docs/product/GAP_ANALYSIS_SAVIYNT_2026-08.md).
+ * internal/product/GAP_ANALYSIS_SAVIYNT_2026-08.md).
  *
  * What this file makes impossible to fake:
  *

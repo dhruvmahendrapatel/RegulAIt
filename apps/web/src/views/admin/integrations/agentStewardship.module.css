@@ -33,7 +33,7 @@
   cursor: pointer;
 }
 .chip:hover { border-color: var(--border-strong); color: var(--text); }
-.chip:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--focus-ring); }
+.chip:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .chip[aria-pressed="true"] {
   background: var(--primary-soft);
   border-color: var(--primary);
@@ -101,7 +101,7 @@
   overflow-wrap: anywhere;
 }
 .drawerTitle:focus { outline: none; }
-.drawerTitle:focus-visible { box-shadow: 0 0 0 2px var(--focus-ring); border-radius: var(--radius-sm); }
+.drawerTitle:focus-visible { box-shadow: var(--focus-ring); border-radius: var(--radius-sm); }
 .drawerBody {
   flex: 1;
   overflow-y: auto;

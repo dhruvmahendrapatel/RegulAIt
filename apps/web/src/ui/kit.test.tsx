@@ -5,7 +5,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../api/client";
-import { Badge, Card, EmptyState, Field, Fieldset, InfoButton, Input, RecordError, RowActions, Table, Tabs, tabIds } from "./kit";
+import { Badge, Card, EmptyState, Field, Fieldset, InfoButton, Input, RecordError, RowActions, Table, Tabs, foldPattern, tabIds } from "./kit";
 import { FoldTable, foldHosts } from "./fold";
 // Digest lives with the BOM evidence panel; it is tested here with the other shared primitives
 import { Digest } from "../views/admin/governance/BomEvidencePanel";
@@ -235,6 +235,22 @@ describe("InfoTip slots — every (i) is a real, named button (X1)", () => {
   });
 });
 
+describe("Table sort — a sortable header is a keyboard control (FS-4)", () => {
+  it("puts a sortable header's text in a type=button button and leaves a plain header as text", () => {
+    const html = render({
+      columns: [
+        { key: "name", header: "Name", sort: (r: Row) => r.name, render: (r: Row) => r.name },
+        { key: "id", header: "Id", render: (r: Row) => r.id },
+      ],
+      rows: [{ id: "1", name: "a" }],
+    });
+    expect(html).toMatch(/<th[^>]*><button type="button"[^>]*>Name<\/button><\/th>/);
+    expect(html).toMatch(/<th[^>]*>Id<\/th>/);
+    // aria-sort belongs to the header cell (set once a sort is chosen), never to the button
+    expect(html).not.toMatch(/<button[^>]*aria-sort/);
+  });
+});
+
 describe("Card contain — a long body scrolls in a contained box (X6)", () => {
   it("is not a tab stop or a landmark until the box is known to scroll", () => {
     const html = renderToStaticMarkup(<Card title="Findings" contain>rows</Card>);
@@ -266,6 +282,15 @@ describe("Card contain — a long body scrolls in a contained box (X6)", () => {
     const fold = renderToStaticMarkup(<Card title="Findings" contain foldable count={3}>rows</Card>);
     expect(fold).toContain('aria-expanded="true"');
     expect(fold).toContain(">3 rows<");
+  });
+
+  it("keys a remembered fold on the route pattern, an encoded id included (X6b, N2)", () => {
+    expect(foldPattern("/ui/x/abc/tab", { id: "abc" })).toBe("/ui/x/:id/tab");
+    // useParams decodes, location.pathname does not
+    expect(foldPattern("/ui/x/a%20b%2Fc", { id: "a b/c" })).toBe("/ui/x/:id");
+    expect(foldPattern("/ui/x/100%25", { id: "100%" })).toBe("/ui/x/:id");
+    // a splat is not a record id, and a malformed escape is kept
+    expect(foldPattern("/ui/docs/a%zz", { "*": "a%zz" })).toBe("/ui/docs/a%zz");
   });
 
   it("says when the body is filtered or the count is a fetch limit", () => {

@@ -17,6 +17,7 @@ import { Badge, Button, Card, EmptyState, Field, Input, Table } from "../../ui/k
 import { RemoveButton } from "../admin/adminKit";
 import { api, withStepUp } from "../../stepup/stepUp";
 import v from "../views.module.css";
+import a from "./appearance.module.css";
 import { RenamePasskeyButton } from "../admin/editForms";
 
 export interface OwnPasskey {
@@ -132,7 +133,7 @@ export default function PasskeysCard() {
             { key: "used", header: "Last used", render: (p) => (p.lastUsedAt ? ago(p.lastUsedAt) : "never") },
             {
               key: "actions",
-              header: "",
+              header: <span className={a.srOnly}>Actions</span>,
               render: (p) => (
                 <div className={v.rowTight}>
                 <RenamePasskeyButton passkey={p} onSaved={refresh} />

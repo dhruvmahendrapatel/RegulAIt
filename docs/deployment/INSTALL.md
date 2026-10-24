@@ -1,7 +1,7 @@
 # Installing RegulAIt in your own environment
 
 One command, three modes, no hand-assembled environment variables. This is the operator guide
-for [ADR-0041](../decisions/0041-byoc-primary-motion.md)'s productised install.
+for [ADR-0041](../../internal/decisions/0041-byoc-primary-motion.md)'s productised install.
 
 ```sh
 ./scripts/install.sh --mode byoc --domain regulait.acme.example --tls letsencrypt
@@ -18,7 +18,7 @@ and TOTP secret in the database is ciphertext under it (`apps/gateway/src/secret
 
 **If you lose it, a restore onto a new machine recovers every user, every audit row, every
 project — and leaves every credential permanently undecryptable.** There is no recovery path.
-[ADR-0035](../decisions/0035-nightly-pg-dump-to-s3.md) calls this the sharpest edge in the stack,
+[ADR-0035](../../internal/decisions/0035-nightly-pg-dump-to-s3.md) calls this the sharpest edge in the stack,
 and it is not exaggerating.
 
 The installer therefore:
@@ -50,7 +50,7 @@ Two things follow:
    `manifest.json` → `data_key_fingerprint`), so a future restore can check *before* restoring
    whether the key on hand is the right one.
 2. **Starting the gateway with a different key against this database will REFUSE**, naming both
-   fingerprints. That is the point — see [ADR-0063](../decisions/0063-data-key-custody.md).
+   fingerprints. That is the point — see [ADR-0063](../../internal/decisions/0063-data-key-custody.md).
 
 Once the key is filed somewhere that is not this machine, say so. This is the step that turns the
 banner into a record:
@@ -85,12 +85,12 @@ The installer preflights all of these and refuses rather than half-installing.
 
 | flag | what it means | TLS default |
 | --- | --- | --- |
-| `--mode hosted` | a single-tenant instance we happen to operate for you — an evaluation on-ramp, **not** shared SaaS ([ADR-0041](../decisions/0041-byoc-primary-motion.md) §3) | `letsencrypt` |
+| `--mode hosted` | a single-tenant instance we happen to operate for you — an evaluation on-ramp, **not** shared SaaS ([ADR-0041](../../internal/decisions/0041-byoc-primary-motion.md) §3) | `letsencrypt` |
 | `--mode byoc` | your cloud account, your IAM, your key. **The primary motion.** | `letsencrypt` |
 | `--mode air_gapped` | no outbound internet at all | `internal` (Let's Encrypt is **refused**) |
 
 `--mode` records installer-level metadata in `.env`. It is **not** the same thing as
-[ADR-0015](../decisions/0015-byoc-deploy-modes-data-boundary.md)'s deploy-target mode, which is a
+[ADR-0015](../../internal/decisions/0015-byoc-deploy-modes-data-boundary.md)'s deploy-target mode, which is a
 column on each `deploy_targets` row and is what the code enforces the data boundary against. Both
 exist; do not confuse them. `.env` says so in a comment.
 
@@ -121,7 +121,7 @@ docker compose -p regulait cp \
 ```
 
 With `--tls none`, set `REGULAIT_TRUSTED_PROXIES` in `.env` to **your** proxy's address.
-[ADR-0031](../decisions/0031-p0-hardening-streaming-exports-proxy-trust-rate-limits-csp.md) makes
+[ADR-0031](../../internal/decisions/0031-p0-hardening-streaming-exports-proxy-trust-rate-limits-csp.md) makes
 this the only peer allowed to speak for the client via `X-Forwarded-*`, and `req.ip` lands on every
 `auth_sessions` row — it is the attribution pillar 1 sells. Never widen it to a range.
 
@@ -147,7 +147,7 @@ what differs.
 
 ## Air-gapped: the pre-seeded image bundle
 
-`docker compose up --build` pulls `node:22-slim` from Docker Hub and runs
+`docker compose up --build` pulls `node:22-trixie-slim` from Docker Hub and runs
 `pnpm install --frozen-lockfile` against the npm registry. Both are internet. **An air-gapped host
 cannot build; it can only run images loaded from a file.** That is why the air-gapped path passes
 `--no-build` and refuses to start without the images present.
@@ -159,7 +159,11 @@ cannot build; it can only run images loaded from a file.** That is why the air-g
 sha256sum regulait-images-0.1.0.tar        # record this; the tar is not self-verifying
 ```
 
-It builds `regulait/gateway:0.1.0` and saves it together with `postgres:16` and Caddy (`caddy:2.11.7-alpine`, pinned by digest: the `x-caddy-image` reference in `docker-compose.yml`). Caddy is saved under both the digest reference and the plain tag; the air-gapped install runs the tag and refuses it unless its image id is one of the pinned ids in `scripts/install.sh` (the round trip is pending execution, ADR-0190 "I5 follow-up: engines in compose").
+It builds `regulait/gateway:0.1.0` and saves it together with `postgres:16` and Caddy (`caddy:2.11.7-alpine`, pinned by digest: the `x-caddy` reference in `docker-compose.yml`). Caddy is saved under both the digest reference and the plain tag; the air-gapped install runs the tag and refuses it unless its image id is one of the pinned ids in `scripts/install.sh` (the round trip is pending execution, ADR-0190 "I5 follow-up: engines in compose").
+**Not yet complete: the object store is not in the air-gapped bundle yet.** The audit-anchor object store
+(`objectstore` and `objectstore-init`, on by default in `docker-compose.yml`) is neither saved by `build-image-bundle.sh`
+nor pinned in the air-gapped override, so `up` on a host with no registry stops at that image. Adding it to the bundle,
+and executing the round trip once, is the next ops item.
 The tag and the `--version` you pass to the installer must be the **same string** — the generated
 override pins `image: regulait/gateway:<version>` with `pull_policy: never`.
 
@@ -232,7 +236,7 @@ The installer prints all of this; it is repeated here so it is findable later.
 
 ### 1. The first admin (the installer asks for it)
 
-Once the stack is up, the installer creates your first admin ([ADR-0194](../decisions/0194-installer-sets-first-admin.md)).
+Once the stack is up, the installer creates your first admin ([ADR-0194](../../internal/decisions/0194-installer-sets-first-admin.md)).
 Interactively it asks for:
 
 - a **username** (press Enter for `admin`);
@@ -327,7 +331,7 @@ assertion.
 
 OIDC providers are **database rows**, not environment variables — `--oidc-issuer` only records what
 you installed against and prints the calls to make.
-[ADR-0043](../decisions/0043-mcp-oidc-egress-guard.md) puts the issuer URL behind the egress guard,
+[ADR-0043](../../internal/decisions/0043-mcp-oidc-egress-guard.md) puts the issuer URL behind the egress guard,
 so the host needs an allow-list entry **first** or discovery is refused. (That refusal is the guard
 working.)
 
@@ -347,7 +351,7 @@ server-to-server call at all — it is redirect/POST-binding through the browser
 ### 3. Set up backups before you have data worth losing
 
 See [BACKUP_RESTORE.md](BACKUP_RESTORE.md). The short version: the entire database is one Docker
-volume, and [ADR-0035](../decisions/0035-nightly-pg-dump-to-s3.md)'s verified nightly `pg_dump` is
+volume, and [ADR-0035](../../internal/decisions/0035-nightly-pg-dump-to-s3.md)'s verified nightly `pg_dump` is
 the only thing standing between you and losing it.
 
 ### 4. Know what leaves the box

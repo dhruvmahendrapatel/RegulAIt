@@ -23,6 +23,7 @@ import AppearanceCard from "./AppearanceCard";
 import a from "./appearance.module.css";
 import { LiteracyDocumentList, useMyLiteracy } from "./AcknowledgeGate";
 import v from "../views.module.css";
+import a from "./appearance.module.css";
 import s from "../auth/auth.module.css";
 
 export default function AccountPage() {
@@ -246,7 +247,7 @@ function SessionsCard() {
             { key: "origin", header: "Via", render: (x) => <span className={v.mono}>{x.origin}</span> },
             {
               key: "actions",
-              header: "",
+              header: <span className={a.srOnly}>Actions</span>,
               render: (x) =>
                 x.current ? null : (
                   <Button

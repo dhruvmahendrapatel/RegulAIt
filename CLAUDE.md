@@ -16,8 +16,8 @@
 
 RegulAIt is a from-scratch build of an AI-native agent/development platform in the spirit of
 Atlas (atlasapp.ai), Cursor, and Lovable, with **eight co-equal, non-negotiable P0 pillars**
-(escalated from two → six per [ADR-0007](docs/decisions/0007-six-p0-pillars.md), then six → eight
-per [ADR-0008](docs/decisions/0008-eight-p0-pillars.md)):
+(escalated from two → six per [ADR-0007](internal/decisions/0007-six-p0-pillars.md), then six → eight
+per [ADR-0008](internal/decisions/0008-eight-p0-pillars.md)):
 
 1. A **per-user governance/access-control layer** gating every agent/model, connector, and
    MCP-server-tool call (default-deny, per-user tool-level allow-lists, approvals, rate limits,
@@ -74,16 +74,18 @@ never hard-locks to one vendor at any layer:
   own bootstrap dev-infra (ADR-0002/0003), which is deliberately AWS-only — that's a build-tooling
   choice for building RegulAIt itself, not a constraint on what RegulAIt supports for its users.
 
-Full specs: [docs/product/VISION.md](docs/product/VISION.md),
-[docs/product/GOVERNANCE_LAYER_SPEC.md](docs/product/GOVERNANCE_LAYER_SPEC.md) (pillars 1, 3, 4,
-5), [docs/product/WORKFLOW_ENGINE_SPEC.md](docs/product/WORKFLOW_ENGINE_SPEC.md) (pillar 2),
-[docs/product/TOKEN_OPTIMIZATION_SPEC.md](docs/product/TOKEN_OPTIMIZATION_SPEC.md) (pillar 6),
-[docs/product/MULTI_AGENT_ORCHESTRATION_SPEC.md](docs/product/MULTI_AGENT_ORCHESTRATION_SPEC.md)
+Full specs: [internal/product/VISION.md](internal/product/VISION.md),
+[internal/product/GOVERNANCE_LAYER_SPEC.md](internal/product/GOVERNANCE_LAYER_SPEC.md) (pillars 1, 3, 4,
+5), [internal/product/WORKFLOW_ENGINE_SPEC.md](internal/product/WORKFLOW_ENGINE_SPEC.md) (pillar 2),
+[internal/product/TOKEN_OPTIMIZATION_SPEC.md](internal/product/TOKEN_OPTIMIZATION_SPEC.md) (pillar 6),
+[internal/product/MULTI_AGENT_ORCHESTRATION_SPEC.md](internal/product/MULTI_AGENT_ORCHESTRATION_SPEC.md)
 (pillar 7),
-[docs/product/PM_TOOL_INTEGRATION_SPEC.md](docs/product/PM_TOOL_INTEGRATION_SPEC.md) (pillar 8).
+[internal/product/PM_TOOL_INTEGRATION_SPEC.md](internal/product/PM_TOOL_INTEGRATION_SPEC.md) (pillar 8).
 
 This is a multi-month, multi-session build. **No session should assume it remembers the last
-one — this file plus `project-state/STATE.md` are the only things guaranteed to persist.**
+one — this file plus `internal/memory/STATE.md` are the only things guaranteed to persist.**
+Project memory, ADRs, specs, research, reviews and process notes live under `internal/`
+([internal/README.md](internal/README.md), ADR-0201); nothing there ships with the product.
 
 ## Standing guardrail — read this every session
 
@@ -121,18 +123,48 @@ every agent prompt and every review.
    with the specific unmet requirement and re-checked when the ecosystem changes.
 5. **Reviews enforce it.** A hand-written solution to a solved problem is a review finding, the same as a bug.
 
+## Engineering guidelines — best practice wherever practical (owner, 2026-10-24; ADR-0200)
+
+**Apply these wherever practical; they are guidelines, not hard gates.** Secure by default and open source first win
+over them, and nothing is refactored only to meet them before the 2026-11-03 demo. A skipped guideline gets one line
+in the PR body saying why.
+
+- **Structure:** a clean folder structure; business logic separate from UI components; no duplicate or dead code;
+  consistent naming; reusable components in the shared kit; proper state management; documented code.
+- **Robustness:** proper error handling everywhere; environment variables and secrets out of code; scalable APIs
+  (versioned, bounded, paginated).
+- **Front end:** compress images (unless asked not to); lazy-load where possible; cache API responses where safe; minify
+  JS and CSS; avoid unnecessary re-renders; debounce input handlers; paginate large lists; remove unused dependencies;
+  defer non-critical scripts; loading skeletons; compressed API payloads; run a Lighthouse audit on the main screens.
+- **Data:** index the database for real queries; connection pooling; cache expensive computed results; fix N+1 queries;
+  server-side caching where safe. Caching never crosses users, tenants or an authorisation decision.
+
+## Security checklist — every build and review (owner, 2026-10-24; ADR-0200)
+
+**A confirmed gap here is a vulnerability, and under ADR-0180 a blocking bug.** Check what your change touches, and
+walk the full list in security reviews: SQL injection (parameterised queries only); XSS (no raw untrusted HTML, strict
+CSP); CSRF on state-changing requests; file-upload validation; object-level authorisation on every read and write;
+rate limiting; JWT and signing secrets out of code, rotatable, algorithm and audience pinned; API secrets server side
+only; memory-hard password hashing; MFA (required for admins and step-up); a strict CORS allow-list; no auth tokens in
+local storage; permissions enforced server side; Postgres row-level security on tenant tables; webhook signatures
+verified with replay protection; SSRF through the guarded fetch; no source maps in production; no sensitive data in
+logs; vulnerable dependencies patched, never allow-listed.
+
 ## Session bootstrap sequence (do this first, every time, before taking any action)
 
 1. Read this file (you just did).
-2. Read [project-state/STATE.md](project-state/STATE.md) in full.
-3. Read [mistakes.md](mistakes.md) — the append-only ledger of this agent's own past
+2. Read [internal/memory/STATE.md](internal/memory/STATE.md) in full.
+3. Read [internal/memory/mistakes.md](internal/memory/mistakes.md) — the append-only ledger of this agent's own past
    process errors, each with an extractable rule. Owner-mandated (2026-08-13): the point of
    the file is that no logged mistake is ever made twice.
-4. Skim [docs/decisions/README.md](docs/decisions/README.md) for any ADR not yet reflected in
+4. Skim [internal/decisions/README.md](internal/decisions/README.md) for any ADR not yet reflected in
    `STATE.md`'s decisions table — if you find drift, reconcile it before doing anything else.
+   Keep the three reference maps at hand rather than re-deriving them: [internal/ARCHITECTURE.md](internal/ARCHITECTURE.md)
+   (the system as built), [internal/DESIGN_GUIDELINES.md](internal/DESIGN_GUIDELINES.md) (UI rules, for any UI work) and
+   [internal/PRODUCT_GOALS.md](internal/PRODUCT_GOALS.md) (pillars, goals and non-goals). Update them when a change makes them wrong.
 5. **If any other session may be working this repo** (a second Claude Code session, cloud or
    local, or a human at a checkout), read
-   [docs/CONTRIBUTING_PARALLEL_SESSIONS.md](docs/CONTRIBUTING_PARALLEL_SESSIONS.md) and
+   [internal/process/CONTRIBUTING_PARALLEL_SESSIONS.md](internal/process/CONTRIBUTING_PARALLEL_SESSIONS.md) and
    **establish which surface you own before editing anything**. Its §4 lists collisions git
    merges without a conflict — a same-numbered migration, a lost ADR index row, and a
    `drizzle-kit generate` timestamp that silently stops every later migration from ever
@@ -161,12 +193,12 @@ every agent prompt and every review.
 
 ## Update/commit discipline
 
-- **The moment a decision is made**: write/update its ADR in `docs/decisions/` → update
-  `docs/decisions/README.md` → update the relevant row(s) in `project-state/STATE.md` → commit
+- **The moment a decision is made**: write/update its ADR in `internal/decisions/` → update
+  `internal/decisions/README.md` → update the relevant row(s) in `internal/memory/STATE.md` → commit
   immediately with a scoped message (e.g. `docs(adr): 0005 choose X over Y for Z`). Never batch
   decisions to session-end — sessions can end unexpectedly.
 - **End of every session/chapter**: update `STATE.md`'s recap paragraph + `phase` field, write an
-  immutable `project-state/sessions/<date>-session-<n>.md` (append-only, never edited
+  immutable `internal/memory/sessions/<date>-session-<n>.md` (append-only, never edited
   retroactively), commit.
 - Before ending a session or if context is running low, checklist: is `STATE.md` current? Any
   decision missing an ADR? Any open question uncaptured? Is everything committed?
@@ -211,11 +243,11 @@ Rules:
 
 **Security constraint (see ADR-0005) — always use `--code-only`.** graphify's code parsing is
 100% local (tree-sitter AST, no LLM). But running it on anything other than pure code files
-(docs, PDFs, images — including `docs/product/*.md`, our prose product-vision/spec files)
+(docs, PDFs, images — including `internal/product/*.md`, our prose product-vision/spec files)
 triggers a semantic-extraction pass that **auto-sends that file content to whichever LLM API key
 happens to be set in the environment** (Gemini → Kimi → Claude → OpenAI → DeepSeek → Azure →
 Bedrock → Ollama, in that priority order — no per-file confirmation). Never run `/graphify` or
-`graphify extract` against `docs/product/` or any other prose content in this repo. Always pass
+`graphify extract` against `internal/product/` or any other prose content in this repo. Always pass
 `--code-only` for headless `graphify extract`/`update` calls, or confirm no LLM API key is set.
 
 ## caveman

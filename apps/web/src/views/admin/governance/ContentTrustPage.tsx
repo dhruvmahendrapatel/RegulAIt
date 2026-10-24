@@ -11,10 +11,10 @@
  */
 import { useId, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ago } from "../../../api/format";
+import { ago, humanize } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
-import { Badge, Button, Card, Field, Select, Table, type Column } from "../../../ui/kit";
+import { Badge, Button, Card, Field, IdChip, Select, Table, type Column } from "../../../ui/kit";
 import { QueryGate, useAction } from "../adminKit";
 import {
   CONTENT_TRUST_TIERS,
@@ -136,8 +136,9 @@ function SourcesCard(props: { sources: ContentTrustSource[]; onSaved: () => void
       key: "tier",
       header: "Tier",
       render: (s) => (
-        <Badge tone={tierTone(s.tier)} title={TIER_COPY[s.tier]}>
-          {s.tier}
+        // D6: the tier's meaning sits behind an (i) button, not a hover-only title
+        <Badge tone={tierTone(s.tier)} info={TIER_COPY[s.tier]} infoLabel={`what ${s.tier} means`}>
+          {humanize(s.tier)}
           {s.explicit ? "" : " (default)"}
         </Badge>
       ),
@@ -207,16 +208,15 @@ function RecordsCard() {
       header: "Source",
       render: (r) => `${r.sourceKind === "mcp_server" ? "MCP" : "Connector"} ${r.sourceDetail ?? ""}`.trim(),
     },
-    { key: "tier", header: "Tier", render: (r) => <Badge tone={tierTone(r.trustTier)}>{r.trustTier}</Badge> },
+    { key: "tier", header: "Tier", render: (r) => <Badge tone={tierTone(r.trustTier)}>{humanize(r.trustTier)}</Badge> },
     { key: "class", header: "Classification", render: (r) => r.classification },
     { key: "digest", header: "Digest", render: (r) => DIGEST_COPY[r.digestAlg] },
     {
       key: "delivered",
       header: "Delivered",
       render: (r) => (
-        <code className={v.mono} title={r.deliveredDigest ?? undefined}>
-          {shortDigest(r.deliveredDigest)}
-        </code>
+        // the kit chip copies the full digest; a missing one says so
+        r.deliveredDigest ? <IdChip id={r.deliveredDigest} /> : <span className={v.faint}>{shortDigest(null)}</span>
       ),
     },
     {

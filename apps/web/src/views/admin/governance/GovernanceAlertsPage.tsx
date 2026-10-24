@@ -3,17 +3,17 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
-import { ago, humanize } from "../../../api/format";
+import { ago, fmtDateTime, humanize } from "../../../api/format";
 import { useSession } from "../../../session/SessionContext";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Select, SeverityBadge, Tabs, Textarea, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Select, SeverityBadge, tabIds, Tabs, Textarea, type Tone } from "../../../ui/kit";
 import { focusFirst, foldButtonOf } from "../../../ui/focus";
 import { DetailDrawer, DrawerActions } from "../../../ui/DetailDrawer";
 import { QueryGate, useAction, useUsers } from "../adminKit";
 import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
 import { putOrgSettings } from "../../../stepup/stepUp";
-import { RemediationsCard } from "./RemediationsCard";
+import { REMEDIATION_STATUS_WORDS, RemediationsCard, remediationApprovalHref } from "./RemediationsCard";
 
 type AlertStatus = "open" | "acknowledged" | "resolved";
 interface GovernanceAlert {
@@ -129,6 +129,7 @@ export default function GovernanceAlertsPage() {
   // M2 (WCAG 2.4.3): under Active the server keeps an acknowledged alert listed, so the drawer stays open while its
   // Acknowledge footer unmounts with focus inside it; focus moves to the drawer heading instead of falling to <body>
   const drawerHeadingId = useId();
+  const tabsId = useId();
   const ackedId = useRef<string | null>(null);
   useEffect(() => {
     if (!selected || selected.status === "open" || ackedId.current !== selected.id) return;
@@ -149,27 +150,34 @@ export default function GovernanceAlertsPage() {
         <Card>
           <div className={v.row}>
             <div className={v.kpiStrip} style={{ flex: 1 }}>
-              <AlertStat label="Open" value={alerts.data?.counts.open ?? 0} alarm />
-              <AlertStat label="Acknowledged" value={alerts.data?.counts.acknowledged ?? 0} />
-              <AlertStat label="Resolved" value={alerts.data?.counts.resolved ?? 0} />
+              {/* A15: before the read lands, or when it fails, the figures are unknown ("—"), never an all-clear 0 */}
+              <AlertStat label="Open" value={alerts.data?.counts.open ?? null} alarm />
+              <AlertStat label="Acknowledged" value={alerts.data?.counts.acknowledged ?? null} />
+              <AlertStat label="Resolved" value={alerts.data?.counts.resolved ?? null} />
             </div>
+            {/* FS-19 (WCAG 2.4.3): aria-disabled, not disabled, while busy, so focus stays on the button */}
             <Button
               variant="primary"
-              disabled={action.busy}
-              onClick={() => void action.run(async () => {
-                const result = await api.post<EvaluationResult>("/v1/governance/monitor/evaluate");
-                setEvaluation(result);
-                await refresh();
-              }, null)}
+              aria-disabled={action.busy}
+              aria-busy={action.busy}
+              onClick={() => {
+                if (action.busy) return;
+                void action.run(async () => {
+                  const result = await api.post<EvaluationResult>("/v1/governance/monitor/evaluate");
+                  setEvaluation(result);
+                  await refresh();
+                }, null);
+              }}
             >
               Evaluate now
             </Button>
           </div>
-          <p className={v.faint}>Last evaluated: {alerts.data?.lastEvaluatedAt ? ago(alerts.data.lastEvaluatedAt) : "not evaluated yet"}</p>
+          <p className={v.faint}>Last evaluated: {!alerts.data ? "—" : alerts.data.lastEvaluatedAt ? ago(alerts.data.lastEvaluatedAt) : "not evaluated yet"}</p>
           {evaluation ? <p className={s.statusLine} role="status">Evaluation raised {evaluation.raised}, refreshed {evaluation.refreshed}, resolved {evaluation.resolved}; {evaluation.active} remain active.</p> : null}
         </Card>
 
-        <Tabs tabs={FILTERS} active={status} onChange={(next) => { setStatus(next); setSelectedId(null); }} />
+        <Tabs tabs={FILTERS} active={status} idPrefix={tabsId} onChange={(next) => { setStatus(next); setSelectedId(null); }} />
+        <div role="tabpanel" id={tabIds(tabsId, status).panel} aria-labelledby={tabIds(tabsId, status).tab}>
         <QueryGate loading={alerts.isLoading} error={alerts.error} onRetry={() => void alerts.refetch()}>
           {(alerts.data?.alerts.length ?? 0) === 0 ? (
             <EmptyState
@@ -193,15 +201,16 @@ export default function GovernanceAlertsPage() {
             <div ref={list} className={s.alertList}>
               {alerts.data?.alerts.map((alert) => (
                 <button key={alert.id} className={`${s.alertRow} ${selectedId === alert.id ? s.alertRowActive : ""}`} aria-current={selectedId === alert.id ? "true" : undefined} onClick={() => setSelectedId(alert.id)}>
-                  <span className={s.alertRowHead}><SeverityBadge severity={alert.severity} />{alert.status === "open" ? null : <span className={v.faint}>{alert.status}</span>}<SlaChip alert={alert} /></span>
+                  <span className={s.alertRowHead}><SeverityBadge severity={alert.severity} />{alert.status === "open" ? null : <span className={v.faint}>{humanize(alert.status)}</span>}<SlaChip alert={alert} /></span>
                   <strong>{alert.title}</strong>
-                  <span className={v.faint}>{alert.ruleLabel} · seen {ago(alert.lastDetectedAt)}{alert.owner !== undefined ? ` · ${alert.owner ? `owner ${alert.owner.name ?? "a user"}` : "unowned"}` : ""}</span>
+                  <span className={v.faint}>{alert.ruleLabel} · seen {ago(alert.lastDetectedAt)}{alert.owner !== undefined ? ` · ${alert.owner ? `owner ${alert.owner.name ?? "a user"}` : "unowned"}` : ""}{alert.sla && alert.sla !== "none" && alert.dueAt ? ` · due ${fmtDateTime(alert.dueAt)}` : ""}</span>
                 </button>
               ))}
             </div>
             </Card>
           )}
         </QueryGate>
+        </div>
         {/* owner decision on #453: an alert's detail opens in the shared detail drawer (A1), not a split column */}
         {selected ? (
           <DetailDrawer
@@ -234,8 +243,8 @@ export default function GovernanceAlertsPage() {
               </div>
             ) : null}
             {selected.detail.sourceRiskId ? <Link to={`/admin/risks?riskId=${selected.detail.sourceRiskId}`}>Open source risk</Link> : null}
-            {/* ADR-0182 A12: report an incident from this alert (the form arrives pre-linked to it) */}
-            <div><Link to={`/incidents?new=1&detectionSource=monitor_alert&sourceRef=${selected.id}`}>Open incident</Link></div>
+            {/* ADR-0182 A12: report an incident from this alert (the form arrives pre-linked to it); the label says it starts one */}
+            <div><Link to={`/incidents?new=1&detectionSource=monitor_alert&sourceRef=${selected.id}`}>Report an incident from this alert</Link></div>
             {selected.ackNote ? <p className={v.dim}>Acknowledgement note: {selected.ackNote}</p> : null}
             {selected.detail.suggestedAction?.kind === "halt_agent" && selected.status !== "resolved" ? (
               <p className={s.statusLine} role="note" data-testid="suggested-halt">
@@ -289,10 +298,11 @@ const SLA_CHIP: Record<Exclude<SlaState, "none">, { tone: Tone; label: string }>
   met: { tone: "ok", label: "SLA met" },
 };
 
-function SlaChip({ alert }: { alert: Pick<GovernanceAlert, "sla" | "dueAt"> }) {
+function SlaChip({ alert }: { alert: Pick<GovernanceAlert, "sla"> }) {
   if (!alert.sla || alert.sla === "none") return null;
   const chip = SLA_CHIP[alert.sla];
-  return <Badge tone={chip.tone} title={alert.dueAt ? `Due ${new Date(alert.dueAt).toUTCString()}` : undefined}>{chip.label}</Badge>;
+  // A8: no hover-only due time; the row's faint line and the drawer's Owner and SLA line both print it
+  return <Badge tone={chip.tone}>{chip.label}</Badge>;
 }
 
 /** a work item's link only when it is a web address; anything else is shown as text */
@@ -323,7 +333,7 @@ function OwnershipPanel({ alert, onChanged }: { alert: GovernanceAlert; onChange
         </span>
         <SlaChip alert={alert} />
         <span className={v.faint}>
-          {alert.dueAt ? `Due ${new Date(alert.dueAt).toUTCString()}` : "No due time yet"}
+          {alert.dueAt ? `Due ${fmtDateTime(alert.dueAt)}` : "No due time yet"}
           {alert.slaBreachedAt ? ` · breached ${ago(alert.slaBreachedAt)}, escalated to the admins` : ""}
         </span>
       </div>
@@ -429,7 +439,7 @@ function AlertSettingsCard() {
       <div className={v.stack} data-testid="alert-settings">
         <div className={v.row}>
           <strong>Alert SLA (hours per severity)</strong>
-          {slaRelaxed ? <Badge tone="warn">relaxed</Badge> : <Badge tone="ok">strict default</Badge>}
+          {slaRelaxed ? <Badge tone="warn">Relaxed</Badge> : <Badge tone="ok">Strict default</Badge>}
         </div>
         <p className={v.faint}>Strict default: {SLA_COPY.strict} {slaRelaxed ? SLA_COPY.relaxed : null}</p>
         <div className={v.row}>
@@ -453,7 +463,7 @@ function AlertSettingsCard() {
         {!valid ? <p className={v.errLine} role="alert">Each SLA is a whole number of hours from 1 to {ALERT_SLA_MAX}.</p> : null}
         <div className={v.row}>
           <strong>Alert tickets</strong>
-          {ticketRelaxed ? <Badge tone="warn">relaxed</Badge> : <Badge tone="ok">strict default</Badge>}
+          {ticketRelaxed ? <Badge tone="warn">Relaxed</Badge> : <Badge tone="ok">Strict default</Badge>}
         </div>
         <p className={v.faint}>Strict default: {TICKET_COPY.strict} {ticketRelaxed ? TICKET_COPY.relaxed : null}</p>
         {stopped ? (
@@ -580,8 +590,8 @@ function RemediationPanel({ alertId }: { alertId: string }) {
                   {remediation.data.proposals.map((proposal) => (
                     <div className={s.proposalRow} key={proposal.id}>
                       <span>{proposal.title}</span>
-                      <Badge tone={proposalTone(proposal.status)}>{proposal.status.replaceAll("_", " ")}</Badge>
-                      <Link to={`/admin/approvals?objectType=remediation`}>Open approval</Link>
+                      <Badge tone={proposalTone(proposal.status)}>{REMEDIATION_STATUS_WORDS[proposal.status] ?? humanize(proposal.status)}</Badge>
+                      <Link to={remediationApprovalHref(proposal.status)} aria-label={`Open the approval for ${proposal.title}`}>Open approval</Link>
                     </div>
                   ))}
                 </div>
@@ -602,9 +612,9 @@ function proposalTone(status: RemediationProposal["status"]): "ok" | "warn" | "d
   return "warn";
 }
 
-/** a plain figure; colour only when there is something open to act on */
-function AlertStat({ label, value, alarm }: { label: string; value: number; alarm?: boolean }) {
-  return <div className={v.stat}><span className={v.statValue} style={alarm && value > 0 ? { color: "var(--danger)" } : undefined}>{value}</span><span className={v.statLabel}>{label}</span></div>;
+/** a plain figure; colour only when there is something open to act on; null is not yet known */
+function AlertStat({ label, value, alarm }: { label: string; value: number | null; alarm?: boolean }) {
+  return <div className={v.stat}><span className={v.statValue} style={alarm && value !== null && value > 0 ? { color: "var(--danger)" } : undefined}>{value ?? "—"}</span><span className={v.statLabel}>{label}</span></div>;
 }
 
 function SubjectLinks({ alert }: { alert: GovernanceAlert }) {
@@ -686,7 +696,7 @@ function DetectionMonitorSettings() {
         {fields.map(field=><Field key={field.key} label={field.label} help={`Whole number from ${field.min} to ${field.max}. Saved value: ${current![field.key]}. ${BATCH4_SETTING_COPY[field.key].strict} ${BATCH4_SETTING_COPY[field.key].relaxed}`}>
           <Input type="number" min={field.min} max={field.max} step={1} disabled={action.busy} value={draft[field.key]??String(current![field.key])} onChange={event=>{setDraft(old=>({...old,[field.key]:event.target.value}));setValidation(null);}} />
         </Field>)}
-        {fields.map(field=><p key={field.key}>{field.label}: <Badge tone={batch4SettingRelaxed(field.key,current![field.key]!)?"warn":"ok"}>{batch4SettingRelaxed(field.key,current![field.key]!)?"Relaxed":"Strict"}</Badge> <Button disabled={action.busy} onClick={()=>setDraft(old=>({...old,[field.key]:String(BATCH4_STRICT_DEFAULTS[field.key])}))}>Restore strict {field.label.toLowerCase()}</Button></p>)}
+        {fields.map(field=><p key={field.key}>{field.label}: <Badge tone={batch4SettingRelaxed(field.key,current![field.key]!)?"warn":"ok"}>{batch4SettingRelaxed(field.key,current![field.key]!)?"Relaxed":"Strict default"}</Badge> <Button disabled={action.busy} onClick={()=>setDraft(old=>({...old,[field.key]:String(BATCH4_STRICT_DEFAULTS[field.key])}))}>Restore strict: {field.label}</Button></p>)}
         <p>Relaxing these thresholds is audited and requires step-up authentication when the deployment enforces it.</p>
         {validation&&<p role="alert">{validation}</p>}
         <Button disabled={action.busy||!Object.keys(draft).length} onClick={()=>{

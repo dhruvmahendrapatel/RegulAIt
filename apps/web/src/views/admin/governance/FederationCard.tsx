@@ -11,8 +11,9 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { fmtDateTime } from "../../../api/format";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
-import { Badge, Button, Card, Table } from "../../../ui/kit";
-import { useAction } from "../adminKit";
+import { Badge, Button, Card, RowActions, Table } from "../../../ui/kit";
+import { QueryGate, useAction } from "../adminKit";
+import ds from "./discoverySources.module.css";
 import v from "../../views.module.css";
 
 export interface FederationKeyView {
@@ -83,38 +84,40 @@ export default function FederationCard() {
         </>
       }
     >
+      {/* A15: while the status loads, or when it cannot be read, the card says so instead of asserting "off" */}
+      <QueryGate loading={status.isPending} error={status.error} onRetry={() => void status.refetch()}>
+      {s && (
       <div className={v.stack}>
         <p data-testid="federation-status">
-          {s?.enabled ? <Badge tone="ok">on</Badge> : <Badge tone="neutral">off</Badge>}{" "}
-          Federated AWS, GCP and Entra credentials present a {s?.tokenTtlSeconds ?? 300}-second RS256 token from this issuer.{" "}
-          {s?.enabled ? "Rotating or revoking a key asks you to confirm it's you." : "Turning it on asks you to confirm it's you."}
+          {s.enabled ? <Badge tone="ok">on</Badge> : <Badge tone="neutral">off</Badge>}{" "}
+          Federated AWS, GCP and Entra credentials present a {s.tokenTtlSeconds}-second RS256 token from this issuer.{" "}
+          {s.enabled
+            ? "Federation is on, so federated cloud sources can run. Rotating to a new key or revoking a key asks you to confirm it's you; turning federation off does not."
+            : "Turning it on lets federated cloud sources run, and asks you to confirm it's you."}
         </p>
         <p className={v.faint}>
-          Generated keys are published at once so the clouds can cache them. {s?.enabled ? "Rotate" : "Activate"} after a few minutes.
+          Generated keys are published at once so the clouds can cache them. {s.enabled ? "Rotate" : "Activate"} after a few minutes.
         </p>
-        {s && !s.issuer && (
+        {!s.issuer && (
           <p className={v.faint} data-testid="federation-no-public-url">
-            This deployment&apos;s public URL is not configured, so no token can be minted. An operator sets it as the cloud discovery
-            deployment guide describes (docs/deployment/CLOUD_DISCOVERY.md).
+            This deployment&apos;s public URL is not configured, so no token can be minted. An operator sets it as described in
+            the cloud discovery deployment guide.
           </p>
         )}
-        {s?.issuer && (
+        {s.issuer && (
           <p className={v.faint}>
             Issuer <span className={v.mono}>{s.issuer}</span>, keys at <span className={v.mono}>{s.jwksUri}</span>. Subject{" "}
             <span className={v.mono}>{s.subjectFormat}</span>; audiences: AWS <span className={v.mono}>{s.audiences.aws}</span>, Entra{" "}
             <span className={v.mono}>{s.audiences.azure}</span>, GCP <span className={v.mono}>{s.audiences.gcp}</span>.
           </p>
         )}
-        {s && (
-          <p className={v.faint}>
-            {s.awsPrincipal.configured
-              ? <>regulAIt&apos;s own AWS principal is <span className={v.mono}>{s.awsPrincipal.roleArn}</span> (subject <span className={v.mono}>{s.awsPrincipal.subject}</span>); an AWS source with target <span className={v.mono}>federation=principal</span> assumes your role from it with the source&apos;s external id.</>
-              : "regulAIt's own AWS principal is not configured, so AWS sources federate directly (AssumeRoleWithWebIdentity)."}
-          </p>
-        )}
+        <p className={v.faint}>
+          {s.awsPrincipal.configured
+            ? <>regulAIt&apos;s own AWS principal is <span className={v.mono}>{s.awsPrincipal.roleArn}</span> (subject <span className={v.mono}>{s.awsPrincipal.subject}</span>); an AWS source with target <span className={v.mono}>federation=principal</span> assumes your role from it with the source&apos;s external id.</>
+            : "regulAIt's own AWS principal is not configured, so each AWS source assumes your role directly with a short-lived token from this issuer."}
+        </p>
         <Table
-          rows={s?.keys}
-          loading={status.isPending}
+          rows={s.keys}
           rowKey={(k) => k.kid}
           empty="No federation key yet. Generate one, then turn federation on."
           columns={[
@@ -124,17 +127,21 @@ export default function FederationCard() {
             { key: "activated", header: "Activated", render: (k) => when(k.activatedAt) },
             {
               key: "actions",
-              header: "",
+              header: <span className={ds.srOnly}>Actions</span>,
+              // A10: the turn-on / rotate button keeps the primary slot on every row, so Revoke never moves into it
               render: (k) => (
-                <>
-                  {k.state === "pending" && <Button disabled={act.busy} onClick={() => activate(k)}>{s?.enabled ? "Rotate to this key" : "Turn on with this key"}</Button>}
-                  {k.state !== "revoked" && <Button disabled={act.busy} onClick={() => revoke(k)}>Revoke</Button>}
-                </>
+                <RowActions
+                  slot="11rem"
+                  primary={k.state === "pending" ? <Button disabled={act.busy} onClick={() => activate(k)}>{s.enabled ? "Rotate to this key" : "Turn on with this key"}</Button> : null}
+                  secondary={k.state !== "revoked" ? <Button disabled={act.busy} onClick={() => revoke(k)}>Revoke</Button> : null}
+                />
               ),
             },
           ]}
         />
       </div>
+      )}
+      </QueryGate>
     </Card>
   );
 }

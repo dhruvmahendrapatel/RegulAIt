@@ -65,6 +65,7 @@ import {
   contextAnswers,
   diffIsEmpty,
   diffProposals,
+  discoveryFindingFrom,
   emptyForm,
   euAiActAnswers,
   euUnsureKeys,
@@ -128,6 +129,8 @@ const FRAMEWORK_RATIONALE_MAX = 2000;
 
 /** who wrote a suggestion, in words — never the internal source key */
 const SOURCE_LABEL: Record<Source, string> = { rules: "Suggested by rules", model: "Suggested by AI", mock: "Sample suggestion" };
+/** D2-13: the same sources under a row already headed "Suggested by" */
+const SOURCE_SHORT: Record<Source, string> = { rules: "Rules", model: "AI", mock: "Sample agent" };
 
 /** a rule's lowercase clause as a sentence: capital first letter, one closing period */
 const sentence = (text: string) => `${text.charAt(0).toUpperCase()}${text.slice(1).replace(/\.$/, "")}.`;
@@ -153,7 +156,8 @@ function RegisterUseCase() {
   // Every answer starts BLANK. A new operator opening this page must describe
   // their own system — a pre-selected sample read as a record that already
   // existed (UXJ-06). The worked example is one explicit click away below.
-  const [initialForm] = useState(() => emptyForm({ title: prefill.get("title"), description: prefill.get("description") }));
+  // issue #522 #30: the finding's id travels with the form (and its draft), so the use case keeps the link
+  const [initialForm] = useState(() => emptyForm({ title: prefill.get("title"), description: prefill.get("description"), discoveryFindingId: discoveryFindingFrom(prefill) }));
   const [form, setForm] = useState<RegistrationForm>(initialForm);
   const setField = <K extends keyof RegistrationForm>(key: K, value: RegistrationForm[K]) => setForm((f) => ({ ...f, [key]: value }));
   const setAnswer = (key: BooleanQuestion, value: RegistrationForm["answers"][BooleanQuestion]) =>
@@ -409,6 +413,7 @@ function RegisterUseCase() {
           ...(unsureKeys(form).length > 0 ? { unsure: unsureKeys(form) } : {}),
         },
         ...(Object.keys(rationales).length > 0 ? { frameworkRationales: rationales } : {}),
+        ...(form.discoveryFindingId ? { discoveryFindingId: form.discoveryFindingId } : {}),
       },
       questionnaire: questionnaireMarkdown(),
       risks: acceptedRisks.map((risk) => ({
@@ -712,7 +717,7 @@ function RegisterUseCase() {
             {STEPS.map((label, index) => (
               <li key={label} className={`${rg.step} ${index === step ? rg.stepActive : index < step ? rg.stepDone : ""}`} aria-current={index === step ? "step" : undefined}>
                 <span className={rg.stepNumber} aria-hidden>{index < step ? "✓" : index + 1}</span>
-                <span className={rg.stepLabel}>{label}</span>
+                <span className={rg.stepLabel}>{label}{index < step ? <span className={rg.srOnly}> (complete)</span> : null}</span>
               </li>
             ))}
           </ol>
@@ -731,7 +736,7 @@ function RegisterUseCase() {
                     <Button size="sm" variant="ghost" onClick={() => setForm(exampleForm())}>Fill in an example</Button>
                   </div>
                 )}
-                <HintField label="Use-case name" hint="A name reviewers will recognize, such as “Credit-limit-increase assistant”.">
+                <HintField label="Use-case name" hint="A name reviewers will recognise, such as “Credit-limit-increase assistant”.">
                   <Input value={form.title} onChange={(event) => setField("title", event.target.value)} required />
                 </HintField>
                 <HintField label="What will the system do?" hint="The task, who it affects, and what the AI produces or changes.">
@@ -822,7 +827,7 @@ function RegisterUseCase() {
             <Card title={<StageHeading headingRef={stageHeading}>Review suggestions</StageHeading>}>
               <div className={v.stack}>
                 <div className={s.callout}>
-                  Proposed tier: <strong>{proposal.tier.value} risk</strong>. {proposal.tier.disclaimer}
+                  Proposed tier: <strong>{humanize(proposal.tier.value)} risk</strong>. {proposal.tier.disclaimer}
                 </div>
                 {prohibitedAlert}
                 <div className={v.row}>
@@ -891,7 +896,12 @@ function RegisterUseCase() {
                     </Select>
                   </HintField>
                 </div>
-                {agents.isError || vendors.isError ? <p className={v.errLine}>Some choices could not be loaded. You can continue without them.</p> : null}
+                {agents.isError || vendors.isError ? (
+                  <p className={v.errLine} role="alert">
+                    Some choices could not be loaded. You can continue without them.{" "}
+                    <Button size="sm" onClick={() => { if (agents.isError) void agents.refetch(); if (vendors.isError) void vendors.refetch(); }}>Retry</Button>
+                  </p>
+                ) : null}
               </div>
             </Card>
           )}
@@ -906,7 +916,10 @@ function RegisterUseCase() {
                 </div>
                 <div className={v.listRow}><strong>Owner</strong><span className={v.grow}>{ownerName}</span></div>
                 <div className={v.listRow}><strong>Data sensitivity</strong><span className={v.grow}><Badge tone="info">{humanize(deriveDataSensitivity(form.dataCategories))}</Badge> <span className={v.faint}>from the data categories — the strictest wins</span></span></div>
-                <div className={v.listRow}><strong>Suggested by</strong><span className={`${v.grow} ${v.row}`}>{sourceSummary.map((source) => <span key={source} className={rg.sourceLabel}>{SOURCE_LABEL[source]}</span>)}</span></div>
+                {form.discoveryFindingId ? (
+                  <div className={v.listRow}><strong>Found by</strong><span className={v.grow}>Shadow-AI discovery <span className={v.faint}>— the use case keeps a link to the finding</span></span></div>
+                ) : null}
+                <div className={v.listRow}><strong>Suggested by</strong><span className={`${v.grow} ${v.row}`}><span className={rg.sourceLabel}>{sourceSummary.map((source) => SOURCE_SHORT[source]).join(" · ")}</span></span></div>
                 <ProposalReview
                   form={form}
                   proposal={proposal}

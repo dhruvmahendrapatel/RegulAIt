@@ -132,3 +132,26 @@ test("Audit log folds keep each warning in the closed summary (G8 f)", async ({ 
     await expect(fold.locator("summary").getByText(warning, { exact: true })).toBeVisible();
   }
 });
+
+test("D4 trust-audit-01/07/08: a failed retention read alerts with Retry; the deploy-mode bucket and rows carry no hover-only text", async ({ page }) => {
+  let failRetention = true;
+  await page.route((url) => url.pathname === "/v1/audit/retention", (route) => failRetention
+    ? route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "unavailable" }) })
+    : route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ retainedDays: 30, prunable: 2, floorSource: [] }) }));
+  await page.goto("/ui/admin/audit");
+  // trust-audit-07: the filter names the null bucket the way the column does
+  await expect(page.getByLabel("Filter by deploy mode").locator("option", { hasText: "Not recorded" })).toHaveCount(1);
+  await expect(page.getByLabel("Filter by deploy mode").locator("option", { hasText: "None recorded" })).toHaveCount(0);
+  // trust-audit-08: no raw ISO timestamp or rule id behind a hover title on a row
+  await expect(page.locator("table [title]")).toHaveCount(0);
+  // trust-audit-01 (A15): never "Loading retention…" forever
+  const fold = page.locator("details").filter({ hasText: "Retention" });
+  await fold.locator("summary").click();
+  const failed = fold.getByRole("alert");
+  await expect(failed).toContainText("Retention could not be read");
+  await expect(fold.getByText("Loading retention…")).toHaveCount(0);
+  failRetention = false;
+  await fold.getByRole("button", { name: "Retry" }).click();
+  await expect(fold).toContainText("30 days");
+  await expect(fold.getByRole("alert")).toHaveCount(0);
+});
