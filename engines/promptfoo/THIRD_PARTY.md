@@ -4,7 +4,7 @@ Open-source components the promptfoo runner image ships (ADR-0176 admission rule
 public-domain dedication; maintained; pinned; works air-gapped). The npm closure is pinned by
 `engines/promptfoo/package-lock.json` and installed with `npm ci --omit=optional --ignore-scripts`; the runner shim
 (`packages/engine-promptfoo`) is pinned by `pnpm-lock.yaml`. Facts below were read from the published packages on
-2026-10-08 (docs/research/R10-engine-admission.md §promptfoo), and re-read for 0.124.1 on 2026-10-10 (ADR-0187 decisions 176 and 177).
+2026-10-08 (internal/research/R10-engine-admission.md §promptfoo), and re-read for 0.124.1 on 2026-10-10 (ADR-0187 decisions 176 and 177).
 
 **Admission status: NOT ADMISSIBLE YET.** The image has not been built in an environment that can report its digest, the
 image-level scan (OS layer, vulnerabilities, licences) has not run, and 11 npm packages carry permissive licences outside

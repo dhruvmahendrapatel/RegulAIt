@@ -29,8 +29,8 @@
  * and a const imported from another file (that needs the whole program's module resolution; the shared copy modules
  * are scanned for proper nouns as roots instead).
  *
- * Docs are not copy surfaces and are not scanned. The operational commands in docs/deployment/DEMO_REAL_ACCOUNTS.md
- * and docs/deployment/DEMO_TEARDOWN.md name cloud AI services and their API hosts; they are kept as functional
+ * Docs are not copy surfaces and are not scanned. The operational commands in internal/product/DEMO_REAL_ACCOUNTS.md
+ * and internal/product/DEMO_TEARDOWN.md name cloud AI services and their API hosts; they are kept as functional
  * exceptions (owner decision 2026-10-21, https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6327272521).
  *
  * ALLOWED_LINES are the reviewed exceptions, one line each, each with its reason and the names it excuses. An entry

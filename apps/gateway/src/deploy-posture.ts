@@ -24,7 +24,7 @@
  * `deployMode` exists in the schema today only on *deploy-target rows* — a
  * property of a thing a user creates. "Is this installation air-gapped" is not
  * that. It is a fact about the box, and it follows the
- * [ADR-0029 HSTS precedent](../../../docs/decisions/0029-zero-cost-tls-caddy-sslip-letsencrypt.md)
+ * [ADR-0029 HSTS precedent](../../../internal/decisions/0029-zero-cost-tls-caddy-sslip-letsencrypt.md)
  * exactly, for the same three reasons HSTS was deliberately kept out of
  * `org_settings`:
  *

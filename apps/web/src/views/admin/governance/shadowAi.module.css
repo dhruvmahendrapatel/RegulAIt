@@ -141,3 +141,16 @@
 .tabsScroll [role="tab"] {
   white-space: nowrap;
 }
+
+/* FS-42: a column header read by screen readers only (an actions column still has a name) */
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: calc(-1 * var(--s-hair));
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}

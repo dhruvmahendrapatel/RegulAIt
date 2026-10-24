@@ -1,11 +1,11 @@
-// FS-55: the ADR index (docs/decisions/README.md) has one well-formed row per
+// FS-55: the ADR index (internal/decisions/README.md) has one well-formed row per
 // ADR file, in number order, and every relative link in it resolves.
 import { describe, expect, it } from "vitest";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const dir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../docs/decisions");
+const dir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../internal/decisions");
 const index = readFileSync(path.join(dir, "README.md"), "utf8");
 const rowLines = index.split("\n").filter((l) => /^\| *\[\d{4}\]/.test(l));
 /** GFM splits a table row on every `|` not escaped as `\|`, code spans included */

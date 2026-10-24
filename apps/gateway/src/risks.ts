@@ -1,6 +1,6 @@
 /**
  * ADR-0081 — THE AI RISK REGISTER, the gateway half (gap L2,
- * docs/product/GAP_ANALYSIS_CREDO_AI_2026-08.md).
+ * internal/product/GAP_ANALYSIS_CREDO_AI_2026-08.md).
  *
  *   `packages/shared/src/risks.ts`   the vocabulary, the fixed category →
  *                                    resolver mapping, the request shapes,

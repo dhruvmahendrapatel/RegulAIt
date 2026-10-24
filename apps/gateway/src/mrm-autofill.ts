@@ -1,6 +1,6 @@
 /**
  * ADR-0086 — MODEL-CARD AUTOFILL FROM THE LEDGERS (gap L12,
- * docs/product/GAP_ANALYSIS_FOUR_VENDORS_2026-08.md).
+ * internal/product/GAP_ANALYSIS_FOUR_VENDORS_2026-08.md).
  *
  * watsonx factsheets auto-collect lifecycle metadata into the card. Our
  * version is the ADR-0082 idiom instead: the card's evidence-shaped sections

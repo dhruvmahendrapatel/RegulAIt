@@ -2,7 +2,7 @@
 
 Throwaway research code for ADR-0189 slice B0. No workspace package imports it, and `pnpm-workspace.yaml` includes
 only `apps/*` and `packages/*`. It writes no product code, migration, route or CI job. The findings and the GO/NO-GO
-decisions are in [R12](../../docs/research/R12-bom-b0-spike.md).
+decisions are in [R12](../../internal/research/R12-bom-b0-spike.md).
 
 Run from the repository root. Node 22 or later runs the suite, because the suite imports the product `canonicalJson`
 from `packages/shared/src/audit-chain.ts` through Node's type stripping. The fresh-process check also uses

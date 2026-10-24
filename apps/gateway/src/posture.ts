@@ -1,6 +1,6 @@
 /**
  * ADR-0082 — THE BOARDROOM POSTURE ONE-PAGER (gap L8,
- * docs/product/GAP_ANALYSIS_CREDO_AI_2026-08.md), riding ADR-0047's rails.
+ * internal/product/GAP_ANALYSIS_CREDO_AI_2026-08.md), riding ADR-0047's rails.
  *
  * One JSON document a board can read: pack coverage, open risks, red-team
  * posture, eval coverage, spend vs budget, governance activity, audit-chain

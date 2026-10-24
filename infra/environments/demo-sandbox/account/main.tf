@@ -2,7 +2,7 @@
 # ADR-0002 and ADR-0004). It holds only planted demo AI resources. It is
 # non-production: no prod/production tag, account or role.
 #
-# Apply order and the full runbook: docs/deployment/DEMO_REAL_ACCOUNTS.md.
+# Apply order and the full runbook: internal/product/DEMO_REAL_ACCOUNTS.md.
 # The workload inside the account is a separate stack (../aws), because a
 # provider cannot be configured from an account id this stack has not created yet.
 

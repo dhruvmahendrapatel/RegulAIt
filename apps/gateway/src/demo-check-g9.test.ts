@@ -133,13 +133,13 @@ describe("the G9 use case", () => {
   });
 
   it("is not a gate subject anywhere the demo runs `demo:gate`", () => {
-    const sources = ["docs/product/DEMO_SCRIPT_2026-11-01.md", "docs/product/DEMO_SCRIPT_2026-10-05.md", "apps/web/e2e/fallback-deck.mjs"];
+    const sources = ["internal/product/DEMO_SCRIPT_2026-11-01.md", "internal/product/DEMO_SCRIPT_2026-10-05.md", "apps/web/e2e/fallback-deck.mjs"];
     const subjects = new Set<string>();
     for (const s of sources) {
       for (const m of read(s).matchAll(/demo:gate --\s+"([^"]+)"/g)) subjects.add(m[1]!);
     }
     // the 11-01 G3 beat names its subject in prose ("... lines for *<use case>*")
-    const g3 = read("docs/product/DEMO_SCRIPT_2026-11-01.md").split("### G3.")[1]!.split("\n### ")[0]!;
+    const g3 = read("internal/product/DEMO_SCRIPT_2026-11-01.md").split("### G3.")[1]!.split("\n### ")[0]!;
     for (const m of g3.matchAll(/\*([^*]+)\*/g)) if (DEMO_INTAKE_FIXTURES.useCases.some((u) => u.name === m[1])) subjects.add(m[1]!);
     // non-vacuous: the scripted subject is found
     expect([...subjects]).toContain("Real-Time Fraud Detection Engine");

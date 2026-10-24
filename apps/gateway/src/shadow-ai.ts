@@ -870,8 +870,8 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
     const validated = evidenceImportSchema.safeParse(imp);
     if (!validated.success) {
       const reason =
-        `evidence import refused: adapter '${adapter.id}' produced rows that ADR-0055's row schema rejects ` +
-        `(${validated.error.issues.length} issue(s)). This is an adapter defect, not a file defect — nothing was written.`;
+        `evidence import refused: adapter '${adapter.id}' produced rows that the evidence row schema rejects ` +
+        `(${validated.error.issues.length} ${validated.error.issues.length === 1 ? "issue" : "issues"}). This is an adapter defect, not a file defect — nothing was written.`;
       const row = await recordRefusal(SHADOW_AI_RULE_IDS.importRejected, reason, {
         ...parseSummary,
         issues: validated.error.issues.slice(0, 10).map((i) => ({ path: i.path.join("."), message: i.message })),

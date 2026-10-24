@@ -3,7 +3,7 @@
 **What it is:** the `regulait-dev-app` EC2 instance is automatically **stopped at
 20:00 and started at 08:00, Monday–Friday, America/New_York**, to stop paying for
 a box nobody is using. See
-[ADR-0032](../decisions/0032-scheduled-power-off-dev-infra.md) for why this shape.
+[ADR-0032](../../internal/decisions/0032-scheduled-power-off-dev-infra.md) for why this shape.
 
 **This is a stop/start, never a terminate.** The EBS root volume — which holds
 the Postgres container volume — is preserved untouched. The IAM role that drives
@@ -201,7 +201,7 @@ container was SIGKILLed. `docker-compose.yml` sets `stop_grace_period: 60s` on
 db container's `StopTimeout`); if not, redeploy the compose stack.
 
 **Terraform wants to replace the instance.** Stop. Read
-[ADR-0032](../decisions/0032-scheduled-power-off-dev-infra.md) and the `ami_id`
+[ADR-0032](../../internal/decisions/0032-scheduled-power-off-dev-infra.md) and the `ami_id`
 comment in `infra/modules/app-instance/variables.tf`. Nothing in the power
 schedule touches `aws_instance`; a replacement proposal means something else
 drifted, and applying it destroys the database.

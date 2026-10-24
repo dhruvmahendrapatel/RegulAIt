@@ -1,7 +1,7 @@
 # Backup and restore for a customer-hosted deployment
 
 This is the BYOC/air-gapped operator view. The mechanism, the measurements behind it, and the
-honest limits are in [ADR-0035](../decisions/0035-nightly-pg-dump-to-s3.md); the exercised
+honest limits are in [ADR-0035](../../internal/decisions/0035-nightly-pg-dump-to-s3.md); the exercised
 restore procedure for our own dev stack is in [`docs/ops/DB_BACKUP.md`](../ops/DB_BACKUP.md).
 This page is what an operator running RegulAIt in *their* environment needs to know.
 

@@ -1,7 +1,7 @@
 {
   "format": "synthetic-placement-semantic-vectors/2",
   "source": {
-    "adrPath": "docs/decisions/0190-batch6-isolation-execution-profiles.md",
+    "adrPath": "internal/decisions/0190-batch6-isolation-execution-profiles.md",
     "baseCommit": "2276739bb1ca3d5cddfcf03cbef186d59e1966a7",
     "boardCommit": "2536ab4b4ca5ad54efd6741534f91c720770a302",
     "draftGitBlob": "e359ffd660f0b023659ae28ded5a4a36cbc443b3",

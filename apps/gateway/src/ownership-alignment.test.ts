@@ -1,6 +1,6 @@
 /**
  * ADR-0089 — agent ownership + lifecycle (gap L20) and intended-vs-granted
- * alignment (gap L21), docs/product/GAP_ANALYSIS_SAVIYNT_2026-08.md.
+ * alignment (gap L21), internal/product/GAP_ANALYSIS_SAVIYNT_2026-08.md.
  *
  * What this file makes impossible to fake:
  *

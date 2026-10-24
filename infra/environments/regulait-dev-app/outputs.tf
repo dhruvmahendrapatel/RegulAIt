@@ -6,7 +6,7 @@ output "app_url" {
 
 # ADR-0195 SD2b: the federation issuer clouds trust (AWS IAM OIDC provider,
 # Entra federated credential). It exists only while the gateway's
-# REGULAIT_PUBLIC_URL is this https origin; see docs/deployment/DEMO_REAL_ACCOUNTS.md.
+# REGULAIT_PUBLIC_URL is this https origin; see internal/product/DEMO_REAL_ACCOUNTS.md.
 output "federation_issuer_url" {
   value = "https://${module.app.sslip_hostname}/federation"
 }

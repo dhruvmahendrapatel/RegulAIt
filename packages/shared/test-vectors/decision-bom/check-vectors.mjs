@@ -550,7 +550,7 @@ function checkAiPositive(v) {
 }
 
 function checkAgainstAdrExample(v) {
-  const lines = readFileSync(new URL("../../../../docs/decisions/0189-batch6-decision-bom-ai-bom.md", dir), "utf8").split("\n");
+  const lines = readFileSync(new URL("../../../../internal/decisions/0189-batch6-decision-bom-ai-bom.md", dir), "utf8").split("\n");
   const block = (name) => {
     const i = lines.indexOf(`\`\`\`text b4-example:${name}`);
     assert.ok(i >= 0, `ADR block ${name}`);
@@ -584,7 +584,7 @@ for (const v of corpus.positives) {
 }
 check("P01 equals the B4.6 worked example byte for byte", () => checkAgainstAdrExample(positives.get("P01")));
 check("A01 to A03 carry the B4.9 AI BOM worked example byte for byte", () => {
-  const lines = readFileSync(new URL("../../../../docs/decisions/0189-batch6-decision-bom-ai-bom.md", dir), "utf8").split("\n");
+  const lines = readFileSync(new URL("../../../../internal/decisions/0189-batch6-decision-bom-ai-bom.md", dir), "utf8").split("\n");
   const block = (name) => {
     const i = lines.indexOf(`\`\`\`text b4-ai-example:${name}`);
     assert.ok(i >= 0, `ADR block ${name}`);

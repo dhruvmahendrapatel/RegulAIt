@@ -1,11 +1,11 @@
 # The RegulAIt data boundary — what crosses it, per deployment mode
 
 - **Applies to**: RegulAIt 0.1.0 (verified against the tree at the time of writing)
-- **Decisions**: [ADR-0041](../decisions/0041-byoc-primary-motion.md) (BYOC/air-gapped as the
-  primary motion), [ADR-0015](../decisions/0015-byoc-deploy-modes-data-boundary.md) (the three
-  modes and the code-enforced boundary), [ADR-0034](../decisions/0034-custom-llm-providers-egress-guard.md)
-  and [ADR-0043](../decisions/0043-mcp-oidc-egress-guard.md) (the egress guard),
-  [ADR-0062](../decisions/0062-mode-scoped-egress.md) (mode-scoped egress — §4/§4.1),
+- **Decisions**: [ADR-0041](../../internal/decisions/0041-byoc-primary-motion.md) (BYOC/air-gapped as the
+  primary motion), [ADR-0015](../../internal/decisions/0015-byoc-deploy-modes-data-boundary.md) (the three
+  modes and the code-enforced boundary), [ADR-0034](../../internal/decisions/0034-custom-llm-providers-egress-guard.md)
+  and [ADR-0043](../../internal/decisions/0043-mcp-oidc-egress-guard.md) (the egress guard),
+  [ADR-0062](../../internal/decisions/0062-mode-scoped-egress.md) (mode-scoped egress — §4/§4.1),
   GOVERNANCE_LAYER_SPEC §8.4/§8.5
 - **Status of this document**: every claim below was checked against source, and the file names
   and line-level behaviours are cited so you can check them yourself. Where the code does **not**
@@ -53,7 +53,7 @@ At the time of writing that list is exactly: `api.github.com`, `gitlab.com`,
 address, which appears **only** in the egress guard that blocks it and in the comments explaining
 why), plus `localhost`/`127.0.0.1`/`*.internal` and `example.com`-style documentation strings.
 
-> **Updated 2026-08-03 ([ADR-0062](../decisions/0062-mode-scoped-egress.md)).** `api.anthropic.com`
+> **Updated 2026-08-03 ([ADR-0062](../../internal/decisions/0062-mode-scoped-egress.md)).** `api.anthropic.com`
 > and `api.openai.com` are **new to this list and not new to the product**. They were always the
 > destinations those two adapters reached with no `baseUrl` override — they simply lived inside
 > `@anthropic-ai/sdk`'s and `openai`'s own compiled defaults rather than in our source, so this
@@ -152,7 +152,7 @@ webhooks (`packages/pm-provider/src/inbound.ts`), and the IDE-compat endpoints (
 > **Status of this section, 2026-08-03.** Everything below the horizontal rule is the finding
 > **exactly as it was originally written**, kept verbatim. It is what this document said while it
 > was true, and a trust artifact that quietly rewrites its own weakest point is worth less than one
-> that shows the repair. [ADR-0062](../decisions/0062-mode-scoped-egress.md) closed it; **§4.1 at
+> that shows the repair. [ADR-0062](../../internal/decisions/0062-mode-scoped-egress.md) closed it; **§4.1 at
 > the end of this section describes what the code enforces now and what remains true.**
 
 This is the part a trust document is tempted to omit. We are not omitting it.
@@ -209,7 +209,7 @@ The follow-up named in the paragraph above was built, with one deliberate differ
 sketch: the deployment-wide posture is **derived from the environment**, not from `org_settings`.
 "Is this installation air-gapped" is a fact about the box, not a row an admin can judge from a
 portal — and an air-gapped posture a compromised admin account could switch off from a web form
-would not be one. This follows the [ADR-0029](../decisions/0029-zero-cost-tls-caddy-sslip-letsencrypt.md)
+would not be one. This follows the [ADR-0029](../../internal/decisions/0029-zero-cost-tls-caddy-sslip-letsencrypt.md)
 HSTS precedent exactly, and it is the same category as `REGULAIT_HSTS` and
 `REGULAIT_TRUSTED_PROXIES`.
 
@@ -273,11 +273,11 @@ audit trail.
 | Question | Answer |
 | --- | --- |
 | Does anything reach RegulAIt (the vendor)? | **No.** No endpoint of ours exists in the product. §1 is checkable in five minutes. |
-| Does anything reach the public internet? | **Only what you configure — and since [ADR-0062](../decisions/0062-mode-scoped-egress.md), only what you also allow-list.** In this mode a built-in model provider, connector, git or PM adapter running on its compiled vendor endpoint is refused by the application (403 + audit, adapter never constructed) unless that host is in `egress_allow_hosts`. The network is still the stronger backstop and §4.1 says so; it is no longer the only one. With nothing configured, nothing is attempted. |
+| Does anything reach the public internet? | **Only what you configure — and since [ADR-0062](../../internal/decisions/0062-mode-scoped-egress.md), only what you also allow-list.** In this mode a built-in model provider, connector, git or PM adapter running on its compiled vendor endpoint is refused by the application (403 + audit, adapter never constructed) unless that host is in `egress_allow_hosts`. The network is still the stronger backstop and §4.1 says so; it is no longer the only one. With nothing configured, nothing is attempted. |
 | Is TLS issuance an outbound call? | Not in this mode. `install.sh --mode air_gapped` **refuses** `--tls letsencrypt` and uses Caddy's internal CA (`tls internal`), which issues locally. |
 | Does the install pull images? | **No.** The air-gapped path runs `docker compose up --no-build` against pre-seeded images loaded from a file (`scripts/build-image-bundle.sh` on a connected host). |
 | Does an update phone home? | **No.** Update bundles are files. `scripts/verify-update-bundle.sh` verifies offline against a pinned public key and makes no network call — deliberately, since there is no revocation endpoint or timestamp authority to reach. |
-| Does licensing phone home? | Not applicable yet — offline licensing is [ADR-0052](../decisions/0052-licensing-seats.md) and is **not built**. There is no license check in the product today, so there is nothing to phone home. |
+| Does licensing phone home? | Not applicable yet — offline licensing is [ADR-0052](../../internal/decisions/0052-licensing-seats.md) and is **not built**. There is no license check in the product today, so there is nothing to phone home. |
 | What does the control plane retain about a deploy? | Metadata only — id, target, environment, mode. Never the deploy URL or the provider detail string. Code-enforced, and asserted in `deploy-byoc.test.ts`. |
 | Does an operator ever have to trust us at runtime? | No. The only trust decision is at update time, and it is a signature check you can perform yourself. |
 
@@ -342,7 +342,7 @@ That is the test we would ask for in your position.
   `infra/release-keys/README.md` §"What signing does and does not prove".
 - §4 **was** a real gap between "air-gapped" as a marketing word and air-gapped as an enforced code
   property. It is written here rather than in an internal ticket because a trust artifact that
-  omits its own weakest point is not a trust artifact. [ADR-0062](../decisions/0062-mode-scoped-egress.md)
+  omits its own weakest point is not a trust artifact. [ADR-0062](../../internal/decisions/0062-mode-scoped-egress.md)
   closed it for `air_gapped`; §4.1 records what is enforced and the four things that remain true —
   above all that the network is still the stronger control, and that an operator who never sets
   `REGULAIT_DEPLOY_MODE` gets the permissive posture.

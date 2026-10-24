@@ -1,6 +1,6 @@
 # Upgrading a RegulAIt deployment — signed, offline-verifiable update bundles
 
-[ADR-0041](../decisions/0041-byoc-primary-motion.md) names this as load-bearing scope, not polish:
+[ADR-0041](../../internal/decisions/0041-byoc-primary-motion.md) names this as load-bearing scope, not polish:
 if the primary motion is *many customer-hosted deployments*, then fleet lifecycle
 (GOVERNANCE_LAYER_SPEC §8.2) means updates must be **cryptographically verifiable offline before
 they are applied** — because an air-gapped customer has no way to check anything with us at apply

@@ -1,5 +1,5 @@
 /**
- * AgentCoordination.md tooling — the ONE way agents check in, and the lint
+ * internal/process/AgentCoordination.md tooling — the ONE way agents check in, and the lint
  * that keeps the file small.
  *
  *   pnpm checkin <claude|codex|gemini> --now "<doing>" [--next "<then>"]
@@ -8,7 +8,7 @@
  *       Rewrites YOUR row of the Live-status table IN PLACE (one row per agent,
  *       never a history), stamps the UTC time, prints your inbox and your
  *       tasks, then lints. `--ack` clears the "To <You>" messages you have just
- *       read. `--push` commits ONLY AgentCoordination.md, rebases, pushes.
+ *       read. `--push` commits ONLY internal/process/AgentCoordination.md, rebases, pushes.
  *
  *   pnpm coord:status   every agent's row with its age; STALE > 60 min,
  *                       OFFLINE > 90 min (owner directive: check in hourly)
@@ -24,7 +24,7 @@
  *
  * WHY A SCRIPT. "Edit your row, don't append" is a rule people (and agents)
  * break under time pressure; a command that can only overwrite cannot. The
- * history is in git — `git log -p AgentCoordination.md` — so nothing is lost
+ * history is in git — `git log -p internal/process/AgentCoordination.md` — so nothing is lost
  * by keeping the file to the current state.
  */
 import { execFileSync } from "node:child_process";
@@ -33,7 +33,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const FILE = path.join(root, "AgentCoordination.md");
+const FILE = path.join(root, "internal", "process", "AgentCoordination.md");
 const AGENTS = { claude: "Claude", codex: "Codex", gemini: "Gemini" };
 
 /** structural limits — the file stays readable in one sitting */
@@ -235,7 +235,7 @@ function checkin(argv) {
       process.exit(1);
     }
     const trailers = args(argv, "--trailer");
-    git("add", "AgentCoordination.md");
+    git("add", "internal/process/AgentCoordination.md");
     const msg = [`chore(checkin): ${name} ${stamp(now)} UTC`, "", cell(nowText), ...(trailers.length ? ["", ...trailers] : [])].join("\n");
     try {
       git("commit", "-m", msg);

@@ -35,7 +35,7 @@ variable "allowed_regions" {
 }
 
 variable "monthly_budget_usd" {
-  description = "OQ-002 in project-state/STATE.md — confirm the real number with the user before applying."
+  description = "OQ-002 in internal/memory/STATE.md — confirm the real number with the user before applying."
   type        = number
   default     = 100
 }

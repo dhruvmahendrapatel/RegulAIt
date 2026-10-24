@@ -1,6 +1,6 @@
 # SPIFFE workload sign-in (BYOC and air-gapped)
 
-[ADR-0188](../decisions/0188-batch6-agent-workload-identity.md) decisions 10, 11, 12 and 21, built in slice S9.
+[ADR-0188](../../internal/decisions/0188-batch6-agent-workload-identity.md) decisions 10, 11, 12 and 21, built in slice S9.
 
 A worker that runs in your own environment can sign in to RegulAIt's token endpoint with the X.509-SVID your SPIRE
 issues it, instead of holding a key registered with us. RegulAIt then issues it a short-lived token bound to that

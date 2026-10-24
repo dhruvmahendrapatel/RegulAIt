@@ -1,6 +1,6 @@
 /**
  * ADR-0084 — THE AI VENDOR REGISTRY, the L5 third-party front-door
- * (docs/product/GAP_ANALYSIS_CREDO_AI_2026-08.md).
+ * (internal/product/GAP_ANALYSIS_CREDO_AI_2026-08.md).
  *
  * Credo's Vendor Portal collects AI-risk evidence from vendors and applies
  * policy packs to them. RegulAIt's vendor story was COST (ADR-0069/0076) —
