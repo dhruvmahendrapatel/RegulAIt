@@ -484,7 +484,7 @@ export default function DiscoverySourcesPage() {
                     <Badge tone={RUN_TONE[r.status]}>{r.status}</Badge>
                     {/* A20: the reason in words, the code as secondary text under it */}
                     {r.errorCode && <div>{humanize(r.errorCode)}{r.errorDetail ? `: ${r.errorDetail}` : ""}</div>}
-                    {r.errorCode && <div className={`${v.faint} ${v.mono}`}>{r.errorCode}</div>}
+                    {r.errorCode && <div className={`${v.faint} ${v.mono}`} style={{ overflowWrap: "anywhere" }}>{r.errorCode}</div>}
                   </>
                 ) },
                 { key: "when", header: "Queued", fold: { md: "source" }, render: (r) => <><span style={nowrap}>{fmtDateTime(r.createdAt)}</span><div className={v.faint}>{r.trigger === "schedule" ? "Scheduled" : humanize(r.trigger)} · attempt {r.attempt}</div></> },
