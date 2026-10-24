@@ -566,7 +566,7 @@ services:
   engine-promptfoo:
     <<: *engine-runner
     platform: linux/amd64
-    image: ${REGULAIT_ENGINE_PROMPTFOO_REPOSITORY:-ghcr.io/dhruvmahendrapatel/regulait-engine-promptfoo}@${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:5c46073b0b65a04b7b4b1b10c6d4d66fca38f33609e49e1847669ae63cb5826e}
+    image: ${REGULAIT_ENGINE_PROMPTFOO_REPOSITORY:-ghcr.io/dhruvmahendrapatel/regulait-engine-promptfoo}@${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:c54fe2d821a46cd7a6ed68c09cac2b3713d99ae2cf705d4f6957c99c29db0be2}
     volumes:
       - engine-promptfoo-state:/state
       - engine-promptfoo-jobs:/jobs
@@ -574,8 +574,8 @@ services:
     environment:
       REGULAIT_GATEWAY_URL: http://gateway:3000
       REGULAIT_ENGINE_ENROLLMENT_TOKEN: ${REGULAIT_ENGINE_PROMPTFOO_ENROLLMENT_TOKEN:-}
-      REGULAIT_ENGINE_IMAGE_REF: ${REGULAIT_ENGINE_PROMPTFOO_REPOSITORY:-ghcr.io/dhruvmahendrapatel/regulait-engine-promptfoo}@${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:5c46073b0b65a04b7b4b1b10c6d4d66fca38f33609e49e1847669ae63cb5826e}
-      REGULAIT_ENGINE_IMAGE_DIGEST: ${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:5c46073b0b65a04b7b4b1b10c6d4d66fca38f33609e49e1847669ae63cb5826e}
+      REGULAIT_ENGINE_IMAGE_REF: ${REGULAIT_ENGINE_PROMPTFOO_REPOSITORY:-ghcr.io/dhruvmahendrapatel/regulait-engine-promptfoo}@${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:c54fe2d821a46cd7a6ed68c09cac2b3713d99ae2cf705d4f6957c99c29db0be2}
+      REGULAIT_ENGINE_IMAGE_DIGEST: ${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:c54fe2d821a46cd7a6ed68c09cac2b3713d99ae2cf705d4f6957c99c29db0be2}
       REGULAIT_PROMPTFOO_JOBS_DIR: /jobs
       REGULAIT_PROMPTFOO_RESULTS_DIR: /results
 

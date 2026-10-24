@@ -3,11 +3,11 @@
   "engines": {
     "promptfoo": {
       "repository": "ghcr.io/dhruvmahendrapatel/regulait-engine-promptfoo",
-      "manifestDigest": "sha256:5c46073b0b65a04b7b4b1b10c6d4d66fca38f33609e49e1847669ae63cb5826e",
-      "imageId": "sha256:7e36f8947a4a189c212c4e96271391382dba1acd0afd06f404ac71042632732f",
-      "publishGeneration": 8,
-      "sourceCommit": "4ae0eebcb170abf65840baafe9bec834ac4ea4a4",
-      "publishedAt": "2026-10-24T22:26:31.270Z"
+      "manifestDigest": "sha256:c54fe2d821a46cd7a6ed68c09cac2b3713d99ae2cf705d4f6957c99c29db0be2",
+      "imageId": "sha256:d500a7b03421aa96fd10126a7c6f75f2f8b76115781d65570dbdeb7dd27dbe30",
+      "publishGeneration": 9,
+      "sourceCommit": "fe5cfbb43a61f3ad975d260170f6c29beab03a44",
+      "publishedAt": "2026-10-24T23:15:26.890Z"
     },
     "modelscan": {
       "repository": "ghcr.io/dhruvmahendrapatel/regulait-engine-modelscan",
