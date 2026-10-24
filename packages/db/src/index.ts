@@ -121,7 +121,7 @@ export interface DbPoolConfig {
   max: number;
   /** connect + wait-for-a-client deadline (REGULAIT_DB_CONNECT_TIMEOUT_MS, default 5000) */
   connectionTimeoutMillis: number;
-  /** idle client reaped after (REGULAIT_DB_IDLE_TIMEOUT_MS, default 30000) */
+  /** idle client reaped after (REGULAIT_DB_IDLE_TIMEOUT_MS, default 10000) */
   idleTimeoutMillis: number;
   /** REGULAIT_DATABASE_SSL (ADR-0181): require (DEFAULT — TLS, server cert
    * verified) | no-verify (TLS without verification — a self-signed RDS/BYOC

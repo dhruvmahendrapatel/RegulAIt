@@ -235,6 +235,22 @@ describe("InfoTip slots — every (i) is a real, named button (X1)", () => {
   });
 });
 
+describe("Table sort — a sortable header is a keyboard control (FS-4)", () => {
+  it("puts a sortable header's text in a type=button button and leaves a plain header as text", () => {
+    const html = render({
+      columns: [
+        { key: "name", header: "Name", sort: (r: Row) => r.name, render: (r: Row) => r.name },
+        { key: "id", header: "Id", render: (r: Row) => r.id },
+      ],
+      rows: [{ id: "1", name: "a" }],
+    });
+    expect(html).toMatch(/<th[^>]*><button type="button"[^>]*>Name<\/button><\/th>/);
+    expect(html).toMatch(/<th[^>]*>Id<\/th>/);
+    // aria-sort belongs to the header cell (set once a sort is chosen), never to the button
+    expect(html).not.toMatch(/<button[^>]*aria-sort/);
+  });
+});
+
 describe("Card contain — a long body scrolls in a contained box (X6)", () => {
   it("is not a tab stop or a landmark until the box is known to scroll", () => {
     const html = renderToStaticMarkup(<Card title="Findings" contain>rows</Card>);

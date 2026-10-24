@@ -1,0 +1,38 @@
+[
+  {
+    "subject": "jackspeak",
+    "licence": "BlueOak-1.0.0",
+    "decision": "accepted by owner 2026-10-24 (ADR-0176 addendum, FS-22)",
+    "why": "permissive, no copyleft; reached through glob ← rimraf ← gaxios from the Google Cloud SDKs the gateway ships."
+  },
+  {
+    "subject": "minipass",
+    "licence": "BlueOak-1.0.0",
+    "decision": "accepted by owner 2026-10-24 (ADR-0176 addendum, FS-22)",
+    "why": "permissive, no copyleft; reached through glob ← rimraf ← gaxios from the Google Cloud SDKs the gateway ships."
+  },
+  {
+    "subject": "package-json-from-dist",
+    "licence": "BlueOak-1.0.0",
+    "decision": "accepted by owner 2026-10-24 (ADR-0176 addendum, FS-22)",
+    "why": "permissive, no copyleft; reached through glob ← rimraf ← gaxios from the Google Cloud SDKs the gateway ships."
+  },
+  {
+    "subject": "path-scurry",
+    "licence": "BlueOak-1.0.0",
+    "decision": "accepted by owner 2026-10-24 (ADR-0176 addendum, FS-22)",
+    "why": "permissive, no copyleft; reached through glob ← rimraf ← gaxios from the Google Cloud SDKs the gateway ships."
+  },
+  {
+    "subject": "sax",
+    "licence": "BlueOak-1.0.0",
+    "decision": "accepted by owner 2026-10-24 (ADR-0176 addendum, FS-22)",
+    "why": "permissive, no copyleft; reached through xml2js from the SAML library and the Azure resource-graph SDK."
+  },
+  {
+    "subject": "argparse",
+    "licence": "Python-2.0",
+    "decision": "accepted by owner 2026-10-24 (ADR-0176 addendum, FS-22)",
+    "why": "permissive (PSF), no copyleft; reached through js-yaml from the Kubernetes client."
+  }
+]

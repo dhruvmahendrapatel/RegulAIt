@@ -993,7 +993,9 @@ export function Table<T>(props: TableProps<T>) {
                   aria-sort={sortKey != null && (c.sortKeys ?? [c.key]).includes(sortKey) ? (sortDir === 1 ? "ascending" : "descending") : undefined}
                   onClick={sortable ? () => by(c.key) : undefined}
                 >
-                  {c.header}
+                  {/* FS-4: the header text is a real button so the keyboard reaches the sort; its click (Enter, Space)
+                      bubbles to the cell's handler, so the whole cell stays the mouse target */}
+                  {sortable ? <button type="button" className={s.thSortBtn}>{c.header}</button> : c.header}
                   {c.info != null && (
                     <InfoButton label={c.infoLabel ?? (typeof c.header === "string" ? c.header : c.key)}>{c.info}</InfoButton>
                   )}

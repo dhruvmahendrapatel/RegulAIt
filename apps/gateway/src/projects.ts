@@ -44,6 +44,7 @@ import {
   createInitiativeSchema,
   createProjectSchema,
   createTeamSchema,
+  csvRecord,
   deleteTeamSchema,
   detectPII,
   type InternationalPiiCategory,
@@ -88,11 +89,13 @@ const costsCsvQuery = z.object({
 });
 const initiativeIdParam = z.object({ initiativeId: z.string().uuid() });
 
-/** RFC-4180 field escaping: quote and double-up embedded quotes whenever a
- * field carries a comma, quote, or newline; leave plain fields untouched. */
-function csvField(value: unknown): string {
+/** One cell through the shared `csvRecord` (csv-stringify: RFC 4180 quoting
+ * plus `escape_formulas`, OWASP "CSV injection"; FS-33), as the audit-log and
+ * report exports do. A plain decimal (a token count or a numeric(…) cost,
+ * including a negative saving) is written as it is, so it is never prefixed. */
+export function csvField(value: unknown): string {
   const s = value == null ? "" : String(value);
-  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  return /^-?[0-9]+(\.[0-9]+)?$/.test(s) ? s : csvRecord([s]);
 }
 
 /** The per-invocation CSV shape shared by both export endpoints: one header row

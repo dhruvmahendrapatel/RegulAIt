@@ -302,6 +302,15 @@ jobs:
           node scripts/coordination.mjs lint
           pnpm exec vitest run --dir scripts
 
+      # FS-22 / ADR-0176 addendum (2026-10-24): every package in the shipped
+      # workspace closure (`pnpm licenses list --prod`) is on the ADR-0176 list,
+      # or is named with BlueOak-1.0.0 / Python-2.0 in
+      # scripts/licence-allow-workspace.json. The ADR index parity test
+      # (scripts/adr-index.test.mjs, FS-55) runs in the step above.
+      - name: Licence gate — the shipped workspace closure (ADR-0176)
+        if: ${{ !cancelled() && (steps.affordances.outcome == 'success' || steps.affordances.outcome == 'failure') }}
+        run: node scripts/licence-gate-workspace.mjs
+
       # The engine image lock may only change as `--apply` changes it (#425
       # review): every published sourceCommit is on main, and an engine whose
       # image changed moved its publishGeneration to exactly main's + 1. A

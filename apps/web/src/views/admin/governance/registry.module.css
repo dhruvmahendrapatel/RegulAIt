@@ -59,7 +59,7 @@
   outline: none;
 }
 .menuItem:focus-visible {
-  box-shadow: 0 0 0 2px var(--focus-ring);
+  box-shadow: var(--focus-ring);
 }
 .menuHint {
   color: var(--text-dim);
@@ -93,7 +93,7 @@
   transition: border-color 120ms ease, background 120ms ease;
 }
 .tile:hover { border-color: var(--border-strong); }
-.tile:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--focus-ring); }
+.tile:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .tile[aria-pressed="true"] {
   border-color: var(--primary);
   box-shadow: inset 0 0 0 1px var(--primary);
@@ -143,7 +143,7 @@
   cursor: pointer;
 }
 .chip:hover { border-color: var(--border-strong); color: var(--text); }
-.chip:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--focus-ring); }
+.chip:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .chip[aria-pressed="true"] {
   background: var(--primary-soft);
   border-color: var(--primary);
@@ -226,7 +226,7 @@
   overflow-wrap: anywhere;
 }
 .drawerTitle:focus { outline: none; }
-.drawerTitle:focus-visible { box-shadow: 0 0 0 2px var(--focus-ring); border-radius: var(--radius-sm); }
+.drawerTitle:focus-visible { box-shadow: var(--focus-ring); border-radius: var(--radius-sm); }
 .drawerBody {
   flex: 1;
   overflow-y: auto;

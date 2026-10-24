@@ -357,7 +357,8 @@ It preflights docker/compose/ports/disk, **refuses a missing or weak `REGULAIT_D
 `.env` + a compose override deterministically (re-running converges; it never destroys data), and
 brings the stack up. The air-gapped path pulls and builds nothing — it runs pre-seeded images
 loaded from a file and refuses Let's Encrypt, whose ACME challenge is an outbound call by
-construction.
+construction. The object store is not in the air-gapped bundle yet, so that path does not
+come up as shipped today (see [INSTALL.md](docs/deployment/INSTALL.md)).
 
 Updates are **signed bundles verified offline against a pinned public key**
 (`scripts/build-update-bundle.sh` / `verify-update-bundle.sh` / `apply-update-bundle.sh`); the
