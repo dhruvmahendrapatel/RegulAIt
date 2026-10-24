@@ -115,8 +115,8 @@ export function DependencyGraphPanel({ useCaseId }: { useCaseId?: string }) {
                   return (
                     <g key={`${edge.from}-${edge.to}-${index}`}>
                       <line x1={from.x + 80} y1={from.y} x2={to.x - 80} y2={to.y} className={edge.basis === "observed" ? s.graphEdgeObserved : s.graphEdge} />
-                      {edge.basis === "observed" && edge.observedCount != null ? // above the node boxes (each reaches 27 above its centre), so the label never crosses a node's outline
-                        <text x={(from.x + to.x) / 2} y={(from.y + to.y) / 2 - 32} className={s.graphEdgeLabel}>{edge.observedCount} calls</text> : null}
+                      {edge.basis === "observed" && edge.observedCount != null ? // above the node boxes and their inherited-risk rings (which reach 33 above the centre), so the label crosses no outline
+                        <text x={(from.x + to.x) / 2} y={(from.y + to.y) / 2 - 38} className={s.graphEdgeLabel}>{edge.observedCount} calls</text> : null}
                     </g>
                   );
                 })}

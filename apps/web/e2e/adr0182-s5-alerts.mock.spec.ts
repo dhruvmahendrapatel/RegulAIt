@@ -258,7 +258,8 @@ test.describe("Design D3 and FS-19/FS-42/FS-46: the alerts page on the demo path
     await mockApi(page);
     await page.route((url) => url.pathname === "/v1/governance/alerts", (route) => json(route, { error: "unavailable" }, 503));
     await page.goto("/ui/admin/governance/alerts");
-    await expect(page.getByRole("alert").filter({ hasText: "Retry" }).first()).toBeVisible();
+    await expect(page.getByRole("alert").first()).toBeVisible();
+    await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
     await expect(page.getByText("Last evaluated: —")).toBeVisible();
     await expect(page.getByText("not evaluated yet")).toHaveCount(0);
     const strip = page.locator("main").getByText("Open", { exact: true }).locator("..");
@@ -315,7 +316,8 @@ test.describe("Design D3 and FS-19/FS-42/FS-46: the alerts page on the demo path
     await page.getByRole("button", { name: "Close alert" }).click();
     // FS-42: the all-alerts table names its actions column for assistive tech
     const table = page.getByRole("table").filter({ hasText: "Halt the older run" });
-    await expect(table.getByRole("columnheader", { name: "Actions" })).toHaveCount(1);
+    // the kit's header row names its cells; the actions column's is visually hidden, not empty
+    await expect(table.getByRole("row").first().getByRole("cell", { name: "Actions", exact: true })).toHaveCount(1);
     await expect(table.getByRole("link", { name: "Open the approval for Halt the older run" })).toHaveAttribute("href", "/ui/admin/approvals?objectType=remediation&status=");
     await expectAxeClean(page, "alerts with proposals");
   });
