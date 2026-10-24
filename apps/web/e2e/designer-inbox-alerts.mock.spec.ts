@@ -193,6 +193,18 @@ for (const [label, size] of [["390 px", { width: 390, height: 844 }], ["1440 px"
 // #460 delta review (Low): the drawer body was blank whenever an item carried an instanceId but nothing rendered
 const wfItem = (id: string, instanceId: string, objectLabel: string, objectType = "workflow") => ({ ...dryRun, id, instanceId, objectLabel, objectType });
 
+test("Inbox: 'waiting on you' counts only the items this person can decide (D3 alerts-inbox-07)", async ({ page }) => {
+  // a requester who is not an admin: their own request awaits Morgan, the remediation is theirs to decide
+  for (const path of ["**/auth/me", "**/v1/me"]) {
+    await page.route(path, (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ userId: ME, isAdmin: false, via: "session", user: { id: ME, email: "avery@example.test", displayName: "Avery Approver" }, mustChangePassword: false, totpEnabled: true, passwordSet: true, mfaSetupRequired: false }) }));
+  }
+  shown = [approvals[0], { ...approvals[1], userId: ME, requestedByName: "Avery Approver" }];
+  await page.goto("/ui/inbox");
+  await expect(page.getByText("awaiting Morgan Reyes")).toBeVisible();
+  await expect(page.getByText("1 waiting on you")).toBeVisible();
+  await expect(page.getByText("2 waiting on you")).toHaveCount(0);
+});
+
 test("Inbox: a workflow item whose instance has nothing to show says it has no evidence", async ({ page }) => {
   // the default instance mock has no artifacts, PR, branch, checks or deploys
   shown = [wfItem("E1", "W9", "Merge the empty change")];
@@ -214,8 +226,15 @@ test("Inbox: a failed instance read says the evidence could not be loaded, never
   await page.goto("/ui/inbox");
   await page.getByRole("button", { name: "Review Merge with unreadable evidence" }).click();
   const item = page.getByTestId("inbox-item");
-  await expect(item.getByTestId("inbox-evidence-failed")).toHaveText("Evidence could not be loaded.");
+  // D3 alerts-inbox-08 (A15): an alert with a Retry, not a faint status line
+  const failed = item.getByTestId("inbox-evidence-failed").getByRole("alert");
+  await expect(failed).toContainText("Evidence could not be loaded");
   await expect(item.getByTestId("inbox-no-evidence")).toHaveCount(0);
+  // Retry reads the instance again; the default mock then has nothing to show
+  await page.unroute("**/v1/workflows/instances/W8");
+  await failed.getByRole("button", { name: "Retry" }).click();
+  await expect(item.getByTestId("inbox-no-evidence")).toHaveText("No evidence attached to this request.");
+  await expect(item.getByTestId("inbox-evidence-failed")).toHaveCount(0);
 });
 
 test("Alerts: the list is a contained card with a count, and the acknowledgement stays in view beside long remediation", async ({ page }) => {

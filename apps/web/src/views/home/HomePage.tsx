@@ -82,13 +82,24 @@ const readDismissed = () => {
   }
 };
 
+/**
+ * The pending figures count from the server-filtered queue: the full list is
+ * capped at 100 rows, so filtering it client-side under-counts a busy queue.
+ * Every approval decision invalidates the ["approvals"] prefix, which covers this key.
+ */
+function usePendingApprovals() {
+  return useQuery({
+    queryKey: ["approvals", "pending"],
+    queryFn: () => api.get<{ approvals: Approval[] }>("/v1/approvals?status=pending"),
+  });
+}
+const pendingOf = (data: { approvals?: Approval[] } | undefined): Approval[] =>
+  (Array.isArray(data?.approvals) ? data.approvals : []).filter((a) => a.status === "pending");
+
 function OrientationCard() {
   const [dismissed, setDismissed] = useState(readDismissed);
   // deduped against the cards below — same query keys, no extra fetches
-  const approvals = useQuery({
-    queryKey: ["approvals"],
-    queryFn: () => api.get<{ approvals: Approval[] }>("/v1/approvals"),
-  });
+  const approvals = usePendingApprovals();
   const usage = useQuery({
     queryKey: ["usage-events"],
     queryFn: () => api.get<UsageEventsResponse>("/v1/usage-events?limit=100"),
@@ -97,7 +108,7 @@ function OrientationCard() {
     queryKey: ["setup-status"],
     queryFn: () => api.get<SetupStatusResponse>("/v1/setup/status"),
   });
-  const pending = (approvals.data?.approvals ?? []).filter((a) => a.status === "pending").length;
+  const pending = pendingOf(approvals.data).length;
   const totals = usage.data?.totals ?? {};
   // Dismissal hides the ORIENTATION (prose + start-here links), never the live
   // numbers — those are a dashboard, not onboarding (owner feedback, 2026-08-21).
@@ -177,10 +188,7 @@ function OrientationCard() {
  * suite without a cheap number shows none rather than inventing one.
  */
 function SuiteLauncher() {
-  const approvals = useQuery({
-    queryKey: ["approvals"],
-    queryFn: () => api.get<{ approvals: Approval[] }>("/v1/approvals"),
-  });
+  const approvals = usePendingApprovals();
   const usage = useQuery({
     queryKey: ["usage-events"],
     queryFn: () => api.get<UsageEventsResponse>("/v1/usage-events?limit=100"),
@@ -194,7 +202,7 @@ function SuiteLauncher() {
     queryFn: () => api.get<{ runs: RunSummary[] }>("/v1/runs"),
   });
 
-  const pending = (approvals.data?.approvals ?? []).filter((a) => a.status === "pending").length;
+  const pending = pendingOf(approvals.data).length;
   const stat = (suiteId: string): { value: string; label: string } | null => {
     switch (suiteId) {
       case "workspace":
@@ -206,7 +214,8 @@ function SuiteLauncher() {
       case "cost-optimization":
         return usage.data ? { value: fmtUsd(usage.data.totals?.costUsd), label: "attributed spend" } : null;
       case "settings":
-        return setup.data
+        // an unexpected body shows no number rather than "undefined/undefined"
+        return typeof setup.data?.doneCount === "number" && typeof setup.data.totalCount === "number"
           ? { value: `${setup.data.doneCount}/${setup.data.totalCount}`, label: "setup steps done" }
           : null;
       default:
@@ -272,7 +281,7 @@ function SetupCard() {
         <div className={v.row}>
           <StatusDot tone="ok" />
           <span className={v.dim}>
-            All {d.totalCount} setup steps are complete — this deployment is fully wired.
+            All {d.totalCount ?? 0} setup steps are complete — this deployment is fully wired.
           </span>
           <span className={v.grow} />
           <Link to="/admin/setup">Review the checklist</Link>
@@ -287,9 +296,9 @@ function SetupCard() {
     >
       {/* one progress line; the steps themselves live on the checklist page */}
       <p className={v.dim}>
-        {d.doneCount} of {d.totalCount} setup steps done
+        {d.doneCount ?? 0} of {d.totalCount ?? 0} setup steps done
         {(() => {
-          const next = d.steps.find((step) => !step.done);
+          const next = (Array.isArray(d.steps) ? d.steps : []).find((step) => !step.done);
           return next ? <> · next: {next.title}</> : null;
         })()}
       </p>
@@ -299,11 +308,7 @@ function SetupCard() {
 
 function ApprovalsCard() {
   const { auth } = useSession();
-  const navigate = useNavigate();
-  const q = useQuery({
-    queryKey: ["approvals"],
-    queryFn: () => api.get<{ approvals: Approval[] }>("/v1/approvals"),
-  });
+  const q = usePendingApprovals();
   if (q.isLoading)
     return (
       <Card title="Approvals">
@@ -316,7 +321,7 @@ function ApprovalsCard() {
         <ErrorState message={(q.error as Error).message} onRetry={() => void q.refetch()} />
       </Card>
     );
-  const pending = (q.data?.approvals ?? []).filter((a) => a.status === "pending");
+  const pending = pendingOf(q.data);
   return (
     <Card
       title={auth?.isAdmin ? "Pending approvals — org-wide" : "Waiting on you"}
@@ -334,13 +339,13 @@ function ApprovalsCard() {
             <span className={v.statLabel}>pending decision{pending.length === 1 ? "" : "s"}</span>
           </div>
           {pending.slice(0, 4).map((a) => (
-            <div key={a.id} className={v.listRow} style={{ cursor: "pointer" }} onClick={() => navigate("/inbox")}>
+            <Link key={a.id} to="/inbox" className={v.listRow} style={{ color: "inherit", textDecoration: "none" }}>
               <span className={v.grow} style={{ fontSize: "var(--text-sm)" }}>
                 {approvalStageLabel(a) ?? a.objectLabel ?? a.objectType}
                 <span className={v.faint}> · requested by {a.requestedByName ?? "unknown"}</span>
               </span>
               <span className={v.faint}>{ago(a.requestedAt)}</span>
-            </div>
+            </Link>
           ))}
         </>
       )}

@@ -14,6 +14,7 @@ import { api } from "../../../api/client";
 import { Badge, Card, EmptyState, Table, type Tone } from "../../../ui/kit";
 import { QueryGate } from "../adminKit";
 import v from "../../views.module.css";
+import rec from "./record.module.css";
 import { shortDate } from "./useCaseLifecycle";
 
 interface DecisionRecord {
@@ -43,13 +44,14 @@ const OUTCOME: Record<DecisionRecord["outcome"], { label: string; tone: Tone }> 
   needs_info: { label: "Returned for information", tone: "warn" },
 };
 
-/** a digest shown short, with the whole value on hover and for copying */
+/** a digest shown short for the eye; assistive technology reads the whole value (D2-06: no aria-label on `code`, no hover-only text) */
 function Digest(props: { value: string | null; label: string }) {
   if (!props.value) return <span className={v.faint}>none</span>;
   return (
-    <code title={`${props.label}: ${props.value}`} aria-label={`${props.label} ${props.value}`}>
-      {props.value.slice(0, 12)}
-    </code>
+    <span className={v.mono}>
+      <span aria-hidden="true">{props.value.slice(0, 12)}</span>
+      <span className={rec.srOnly}>{props.label}: {props.value}</span>
+    </span>
   );
 }
 

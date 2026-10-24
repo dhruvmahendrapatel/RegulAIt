@@ -14,6 +14,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, CSRF_HEADER, api } from "../../../api/client";
+import { fmtDateTime } from "../../../api/format";
 import { canonicalDigest } from "./intakeCheckpoint";
 
 export interface DraftRecord { scope: string; state: unknown; updatedAt: string }
@@ -306,12 +307,12 @@ export function useIntakeDraft<S>(opts: {
   return { status, unsaved, ownerChanged: ownerHasChanged, flush: save, resume, startFresh, discard, abandon };
 }
 
-/** "Draft saved 14:05" — the time in the viewer's own clock */
+const savedTime = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit" });
+
+/** "Draft saved 14:05" (today) or "21 Oct 2026, 14:05" — the viewer's own clock, in the product's en-GB form, never the browser's default */
 export const savedAtText = (iso: string) => {
   const at = new Date(iso);
   if (Number.isNaN(at.getTime())) return "";
   const today = new Date().toDateString() === at.toDateString();
-  return today
-    ? at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-    : at.toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  return today ? savedTime.format(at) : fmtDateTime(at);
 };

@@ -85,7 +85,13 @@ const updates = [
     status: "upcoming",
     daysUntilEffective: 88,
     sourceUrl: "https://leg.colorado.gov/bills/sb26-189",
-    impact: impact(1),
+    // D5 risk-registers-03: a tier-scoped entry with gateway codes the page must put into words
+    impact: {
+      ...impact(1),
+      scopeBasis: "eu_ai_act_tier",
+      useCases: [{ id: "00000000-0000-4000-8000-000000000001", name: "Loan triage", status: "under_review", euAiActTier: "high" }],
+    },
+    controls: [{ controlRef: "eu-ai-act:ART-9", title: null, framework: null, status: "not_in_active_pack" }],
   },
 ];
 
@@ -197,6 +203,21 @@ test.describe("ADR-0179 G14-FEED: regulatory intelligence statuses and kinds", (
 
     await expect(page.getByText("Whether an entry applies to this organisation has not had legal review.")).toBeVisible();
     await expectAxeClean(page, "regulatory intelligence");
+  });
+
+  test("D5: the impact detail puts the scope basis and statuses into words, never gateway codes", async ({ page }) => {
+    await mockApi(page);
+    await page.goto("/ui/admin/governance/regulatory");
+    const co = entry(page, "Colorado SB 26-189 — Automated decision-making technology in consequential decisions");
+    await co.getByText("Mapped controls and impacted use cases").click();
+    await expect(co.getByText(/^Scope basis: EU AI Act tier · 1\/2 mapped controls evidenced$/)).toBeVisible();
+    await expect(co.getByText("Not in active pack", { exact: true })).toBeVisible();
+    await expect(co.getByText("Under review · EU AI Act tier high")).toBeVisible();
+    await expect(co.getByText(/eu ai act tier|not in active pack|under review/)).toHaveCount(0);
+    const nist = entry(page, "NIST AI RMF 1.0 — Voluntary framework for managing AI risks");
+    await nist.getByText("Mapped controls and impacted use cases").click();
+    await expect(nist.getByText(/^Scope basis: All live use cases · /)).toBeVisible();
+    await expect(nist.getByText("Satisfied", { exact: true })).toBeVisible();
   });
 
   test("the status and instrument-kind filters reach the API and narrow the list", async ({ page }) => {

@@ -490,3 +490,15 @@ buttons, FS-15 toast placement and the two shell keyboard/count fixes).
 - `entry CSS (index)` from `10.6 kB` to `10.7 kB` (gzip, measured 10,594 → 10,652 B).
 - Used: +0.4 kB of the +1 kB JS allowance and +0.1 kB of the +0.3 kB CSS allowance. `all JS` and the lazy chunks are
   unchanged.
+
+## Addendum / As built (2026-10-24) — all JS 1,038 → 1,040 kB (full-scan lanes combined)
+
+The owner decided this raise on 2026-10-24:
+<https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6388659678>. It is the ADR-recorded exception
+the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
+
+- `all JS` from `1038 kB` to `1040 kB` (+2 kB). The entry JS and entry CSS ceilings and the two lazy chunks are unchanged.
+- Why: the five full-scan UI lanes (#552, #553, #554, #556 and the merged #551) each fitted the ceilings on their own,
+  but together they bring total gzipped JS on main to 1,038,335 B (size-limit 14.2.0), 335 B over. The added bytes are
+  lazy page chunks (state, error and accessibility fixes); #555 (Shadow AI) adds a little more, so the raise leaves
+  headroom for it and no more.

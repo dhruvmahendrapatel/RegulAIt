@@ -420,7 +420,7 @@ test.describe("review policy settings", () => {
     await page.getByRole("group", { name: "Required reviews for the high tier" }).getByRole("checkbox", { name: "Privacy!" }).check();
     await page.getByLabel("High tier: approval valid for (months)").fill("40");
     await page.getByRole("button", { name: "Preview impact" }).first().click();
-    await expect(page.getByText("Fix the highlighted fields, then save.")).toBeVisible();
+    await expect(page.getByText("Fix the highlighted fields, then preview the impact.")).toBeVisible();
     await expect(page.getByText("Name the role.")).toBeVisible();
     await expect(page.getByText("Another role already has this name.")).toBeVisible();
     await expect(page.getByText("Add at least one member: the high tier requires this review.")).toBeVisible();

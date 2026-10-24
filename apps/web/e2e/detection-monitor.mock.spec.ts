@@ -52,6 +52,6 @@ test("refused save preserves the draft and does not claim success",async({page})
 test("R24-07: measured relaxed settings show their posture and Restore strict changes only that field",async({page})=>{
  const puts=await setup(page);await page.getByLabel("Jailbreak finding threshold",{exact:true}).fill("5");await page.getByRole("button",{name:"Save detection thresholds",exact:true}).click();
  await expect(page.getByText("Relaxed",{exact:true})).toBeVisible();await expect(page.getByText(/requires step-up authentication/)).toBeVisible();
- await page.getByRole("button",{name:"Restore strict jailbreak finding threshold",exact:true}).click();await page.getByRole("button",{name:"Save detection thresholds",exact:true}).click();
+ await page.getByRole("button",{name:"Restore strict: Jailbreak finding threshold",exact:true}).click();await page.getByRole("button",{name:"Save detection thresholds",exact:true}).click();
  await expect(page.getByText("Relaxed",{exact:true})).toHaveCount(0);expect(puts).toEqual([{monitorJailbreakThreshold:5},{monitorJailbreakThreshold:3}]);
 });

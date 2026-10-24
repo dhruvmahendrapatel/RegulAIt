@@ -129,6 +129,8 @@ const FRAMEWORK_RATIONALE_MAX = 2000;
 
 /** who wrote a suggestion, in words — never the internal source key */
 const SOURCE_LABEL: Record<Source, string> = { rules: "Suggested by rules", model: "Suggested by AI", mock: "Sample suggestion" };
+/** D2-13: the same sources under a row already headed "Suggested by" */
+const SOURCE_SHORT: Record<Source, string> = { rules: "Rules", model: "AI", mock: "Sample agent" };
 
 /** a rule's lowercase clause as a sentence: capital first letter, one closing period */
 const sentence = (text: string) => `${text.charAt(0).toUpperCase()}${text.slice(1).replace(/\.$/, "")}.`;
@@ -715,7 +717,7 @@ function RegisterUseCase() {
             {STEPS.map((label, index) => (
               <li key={label} className={`${rg.step} ${index === step ? rg.stepActive : index < step ? rg.stepDone : ""}`} aria-current={index === step ? "step" : undefined}>
                 <span className={rg.stepNumber} aria-hidden>{index < step ? "✓" : index + 1}</span>
-                <span className={rg.stepLabel}>{label}</span>
+                <span className={rg.stepLabel}>{label}{index < step ? <span className={rg.srOnly}> (complete)</span> : null}</span>
               </li>
             ))}
           </ol>
@@ -734,7 +736,7 @@ function RegisterUseCase() {
                     <Button size="sm" variant="ghost" onClick={() => setForm(exampleForm())}>Fill in an example</Button>
                   </div>
                 )}
-                <HintField label="Use-case name" hint="A name reviewers will recognize, such as “Credit-limit-increase assistant”.">
+                <HintField label="Use-case name" hint="A name reviewers will recognise, such as “Credit-limit-increase assistant”.">
                   <Input value={form.title} onChange={(event) => setField("title", event.target.value)} required />
                 </HintField>
                 <HintField label="What will the system do?" hint="The task, who it affects, and what the AI produces or changes.">
@@ -825,7 +827,7 @@ function RegisterUseCase() {
             <Card title={<StageHeading headingRef={stageHeading}>Review suggestions</StageHeading>}>
               <div className={v.stack}>
                 <div className={s.callout}>
-                  Proposed tier: <strong>{proposal.tier.value} risk</strong>. {proposal.tier.disclaimer}
+                  Proposed tier: <strong>{humanize(proposal.tier.value)} risk</strong>. {proposal.tier.disclaimer}
                 </div>
                 {prohibitedAlert}
                 <div className={v.row}>
@@ -894,7 +896,12 @@ function RegisterUseCase() {
                     </Select>
                   </HintField>
                 </div>
-                {agents.isError || vendors.isError ? <p className={v.errLine}>Some choices could not be loaded. You can continue without them.</p> : null}
+                {agents.isError || vendors.isError ? (
+                  <p className={v.errLine} role="alert">
+                    Some choices could not be loaded. You can continue without them.{" "}
+                    <Button size="sm" onClick={() => { if (agents.isError) void agents.refetch(); if (vendors.isError) void vendors.refetch(); }}>Retry</Button>
+                  </p>
+                ) : null}
               </div>
             </Card>
           )}
@@ -912,7 +919,7 @@ function RegisterUseCase() {
                 {form.discoveryFindingId ? (
                   <div className={v.listRow}><strong>Found by</strong><span className={v.grow}>Shadow-AI discovery <span className={v.faint}>— the use case keeps a link to the finding</span></span></div>
                 ) : null}
-                <div className={v.listRow}><strong>Suggested by</strong><span className={`${v.grow} ${v.row}`}>{sourceSummary.map((source) => <span key={source} className={rg.sourceLabel}>{SOURCE_LABEL[source]}</span>)}</span></div>
+                <div className={v.listRow}><strong>Suggested by</strong><span className={`${v.grow} ${v.row}`}><span className={rg.sourceLabel}>{sourceSummary.map((source) => SOURCE_SHORT[source]).join(" · ")}</span></span></div>
                 <ProposalReview
                   form={form}
                   proposal={proposal}

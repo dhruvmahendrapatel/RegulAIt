@@ -225,6 +225,32 @@ test.describe("the use-case record", () => {
     await expect(history).toContainText("Approved");
   });
 
+  test("FS-20/FS-46 + design D2: the tab set is a labelled tabpanel, a tab that fails stays in its panel, risks and audit read in words", async ({ page }) => {
+    await mockGateway(page, { status: "approved", approvedUntil: "2027-04-02T11:00:00Z" });
+    // the mock answers an unmocked read with `{}`, so the decision records tab throws on render
+    await page.goto(`/ui/admin/governance/use-cases/${UC}?tab=decisions`);
+    const panel = page.getByRole("tabpanel", { name: "Decision records" });
+    await expect(panel).toContainText("This card couldn't load.");
+    await expect(page.getByRole("heading", { level: 1, name: "Credit-limit-increase assistant" })).toBeVisible();
+    await expect(page.getByText("Something went wrong on this page")).toHaveCount(0);
+    await expect(page.getByRole("tab", { name: "Decision records", selected: true })).toHaveAttribute("aria-controls", "use-case-panel-decisions");
+    await expect(page.getByRole("navigation", { name: "Breadcrumb" })).toContainText("AI Governance");
+    await expect(page.getByRole("navigation", { name: "Breadcrumb" }).getByRole("link", { name: "AI registry" })).toBeVisible();
+    // another tab renders normally: the boundary is per tab
+    await page.getByRole("tab", { name: /^Risks/ }).click();
+    const risks = page.getByRole("tabpanel", { name: /^Risks/ });
+    await expect(risks).toContainText("Medium × High");
+    await expect(risks).toContainText("Low × Medium");
+    await expect(risks.getByText("Mitigating", { exact: true })).toBeVisible();
+    await expect(risks.getByText("Bias", { exact: true })).toBeVisible();
+    await expect(risks.getByLabel("Residual likelihood").locator("option")).toHaveText(["Choose likelihood", "Low", "Medium", "High"]);
+    await expect(risks.getByLabel("Residual likelihood")).toHaveValue("low");
+    await page.getByRole("tab", { name: /^Audit/ }).click();
+    const audit = page.getByRole("tabpanel", { name: /^Audit/ });
+    await expect(audit.getByRole("cell", { name: "Allow", exact: true })).toBeVisible();
+    await expectNoAxeViolations(page, "use-case record audit tab (tabpanel)");
+  });
+
   test("Mark met follows the server's answer for this viewer: no button where it would refuse; an after-go-live one closes without a note", async ({ page }) => {
     // the proposer, here an admin who proposed it: the server says someone else confirms the before-go-live condition
     const state = await mockGateway(page, { persona: PROPOSER, status: "approved", approvedUntil: "2027-04-02T11:00:00Z", blockingRefused: true, approvals: [] });
