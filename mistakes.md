@@ -1813,3 +1813,44 @@ must pass. The owner chose that option, the build failed at `pip check` on #545,
 Rule: before offering an owner option that depends on how a build, gate or script behaves, read that build file or
 script (for an image, its Dockerfile from `FROM` to the last `RUN`), and test the premise the way CI will. Say in the
 option which parts were verified and which were assumed.
+
+### M-102 (2026-10-24) - The master's merge loop and release lists lived only in a session scratchpad
+
+The master merge loop, its guard script, the hold and release lists, the follow-up log and the seven lane briefs were
+kept only in the session scratchpad under `/tmp`. A container restart at about 17:45 UTC wiped all of them; the running
+loop died with them. The master rebuilt the follow-up log from GitHub and the session records, and rewrote the loop
+from memory (now `scripts/master/merge-loop.sh`, #557). Bot PRs that had been released lost their release lines.
+
+Rule: anything the master needs to keep operating (merge tooling, release decisions, lane briefs) goes in the repo or
+on GitHub (a committed script, a PR comment, an issue comment) the moment it is created; the scratchpad holds only
+copies.
+
+### M-103 (2026-10-24) - A merge gate was run before it was reviewed, and it failed open
+
+After the restart the master ran its newly written merge loop at once. The first independent review then found two
+fail-open paths: a failed commit lookup let the 600 s soak pass, and the soak was measured from the commit date, so an
+old commit pushed late could merge before slow check suites registered. Two rechecks found more (a unit in MIN_AGE or
+a 20-digit value skipped the soak; an unknown commit-status state counted as green; tabs or a no-break space hid
+"HOLD"). #551 and #552 merged under the first version; both had been green for over an hour, so no harm followed.
+
+Rule: a script that merges, deploys or releases fails closed on every lookup error, unexpected reply and bad input
+(validate numbers and lines explicitly), and it gets an independent review against a stubbed API before it acts on
+real PRs; until then, merge by hand.
+
+### M-104 (2026-10-24) - Parallel UI lanes each fitted the bundle ceilings, but the combined tree did not
+
+Five UI lanes were sized against main one by one. Each passed size-limit, so each was approved and released. After
+the fifth merged, total gzipped JS on main was 1,038,335 B against the 1,038 kB `all JS` ceiling, so every later web
+PR failed the size check. The owner raised the ceiling to 1,040 kB (#453 comment 6388659678).
+
+Rule: when several PRs touching apps/web are released together, merge main into the last of them (or build the
+combined tree) and run size-limit before releasing it, and leave headroom in the brief for the sum, not each lane.
+
+### M-105 (2026-10-24) - An unquoted heredoc ran a command inside a lane brief
+
+The master wrote the lane briefs with `echo` inside an unquoted shell block. A backticked `pnpm licenses` in lane R's
+item list was executed, and its usage text replaced the sentence in the brief. It was caught by reading the brief back
+before dispatch and repaired.
+
+Rule: write briefs and other prose files with a quoted heredoc (`<<'EOF'`) or the Write tool, never with unquoted
+shell interpolation, and read every brief back before dispatching it.
