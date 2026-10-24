@@ -4,8 +4,8 @@
  *
  * Honesty rules this page keeps:
  *  - A source kind is selectable only when its scanner is built. SD0 builds
- *    only SD3's two upload-fed endpoint kinds; every other kind shows "not built yet" with the slice that builds it,
- *    and the add form says so instead of offering a submit that would fail.
+ *    only SD3's two upload-fed endpoint kinds; every other kind shows "Not built yet", and the add form says so
+ *    instead of offering a submit that would fail.
  *  - Every source starts disabled. Enabling one, widening an enabled one's
  *    target or scope, storing a static secret, lengthening the warning age or
  *    the endpoint retention, and revealing a pseudonym each ask the admin to
@@ -14,7 +14,7 @@
  *    page shows its mode, its public config, its age and whether its write
  *    scope has been verified.
  */
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
@@ -79,6 +79,11 @@ export default function DiscoverySourcesPage() {
   const runs = useQuery({ queryKey: ["admin", "discovery", "runs"], queryFn: () => api.get<{ runs: DiscoveryRunView[] }>("/v1/discovery/runs?limit=50") });
   // X6b: a collapsed "Recent runs" still says when a scan failed
   const failedRuns = (runs.data?.runs ?? []).filter((r) => r.status === "failed").length;
+  // A15: the Recent runs fold header (and its count) waits for the runs read, so a pending or failed read never says
+  // "0 runs"; until then the table shows its skeleton, or the error with Retry
+  const runsFold = runs.data
+    ? ({ contain: true, foldable: true, startCollapsed: true, count: runs.data.runs.length } as const)
+    : ({ contain: true } as const);
   const settings = useQuery({ queryKey: ["admin", "discovery", "settings"], queryFn: () => api.get<DiscoverySettingsView>("/v1/discovery/settings") });
 
   const [form, setForm] = useState<SourceForm>(EMPTY_FORM);
@@ -91,6 +96,17 @@ export default function DiscoverySourcesPage() {
   const [params] = useSearchParams();
   const [pseudonym, setPseudonym] = useState(params.get("pseudonym") ?? "");
   const [revealed, setRevealed] = useState<{ pseudonym: string; kind: string; displayName: string } | null>(null);
+  // a psn: link lands on the prefilled Pseudonym field: scrolled into view and focused, once the page has rendered
+  const pseudonymRef = useRef<HTMLInputElement>(null);
+  const linkedPseudonym = params.get("pseudonym");
+  const pageReady = !sources.isPending && !scanners.isPending && !sources.error && !scanners.error;
+  useEffect(() => {
+    const el = pseudonymRef.current;
+    if (!linkedPseudonym || !pageReady || !el) return;
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    el.scrollIntoView?.({ block: "center", behavior: reduce ? "auto" : "smooth" });
+    el.focus({ preventScroll: true });
+  }, [linkedPseudonym, pageReady]);
 
   const kinds = scanners.data?.kinds ?? [];
   const built = kinds.filter((k) => k.built);
@@ -217,16 +233,16 @@ export default function DiscoverySourcesPage() {
             </li>
             <li>
               <span className={ds.stepNo} aria-hidden="true">2</span>
-              <span><strong>Scan on a schedule</strong><span className={v.faint}>{plural(runs.data?.runs.length ?? 0, "recent run")}</span></span>
+              <span><strong>Scan on a schedule</strong><span className={v.faint}>{runs.data ? plural(runs.data.runs.length, "recent run") : "—"}</span></span>
             </li>
             <li>
               <span className={ds.stepNo} aria-hidden="true">3</span>
-              <span><strong>Findings land in Shadow AI</strong><span className={v.faint}><Link to="/admin/shadow-ai">Open the findings</Link></span></span>
+              <span><strong>Findings land in Shadow-AI discovery</strong><span className={v.faint}><Link to="/admin/shadow-ai">Open the findings</Link></span></span>
             </li>
           </ol>
           <Card title="Active discovery">
             <p data-testid="discovery-statement">{posture?.statement}</p>
-            <p className={v.faint}>
+            <p className={`${v.faint} ${ds.inlineLinks}`}>
               Findings land in <Link to="/admin/shadow-ai">Shadow-AI discovery</Link> only when an observation matches an enabled row of your
               signature catalogue. Unmatched observations are listed per run as catalogue gaps.
             </p>
@@ -248,9 +264,9 @@ export default function DiscoverySourcesPage() {
                 {
                   key: "state",
                   header: "State",
-                  render: (k) => (k.built ? <Badge tone="ok">built</Badge> : <Badge tone="neutral">{`not built yet (${k.slice})`}</Badge>),
+                  render: (k) => (k.built ? <Badge tone="ok">built</Badge> : <Badge tone="neutral">Not built yet</Badge>),
                 },
-                { key: "evidence", header: "Evidence kinds", render: (k) => <span title={k.evidenceKinds.join(", ")}>{k.evidenceKinds.map(humanize).join(", ")}</span> },
+                { key: "evidence", header: "Evidence kinds", render: (k) => <>{k.evidenceKinds.map(humanize).join(", ")}<div className={`${v.faint} ${v.mono}`}>{k.evidenceKinds.join(", ")}</div></> },
               ]}
             />
           </Card>
@@ -259,7 +275,7 @@ export default function DiscoverySourcesPage() {
             {built.length === 0 && !form.editing ? (
               <EmptyState
                 title="No scanner is built yet"
-                body="Repository, cloud and endpoint scanners arrive in later releases (ADR-0195 SD1 to SD4). A source can be added once its scanner is built."
+                body="Repository, cloud and endpoint scanners arrive in later releases. A source can be added once its scanner is built."
               />
             ) : (
               <div className={v.stack}>
@@ -419,8 +435,8 @@ export default function DiscoverySourcesPage() {
                 </p>
                 <Field label="Mode" error={credError}>
                   <Select value={cred.mode} onChange={(e) => setCred({ ...cred, mode: e.target.value === "static" ? "static" : "federated" })}>
-                    <option value="federated">federated (default)</option>
-                    <option value="static">static secret (relaxation)</option>
+                    <option value="federated">Federated (default)</option>
+                    <option value="static">Static secret (relaxation)</option>
                   </Select>
                 </Field>
                 <Field label="Public config (non-secret identifiers, one key=value per line)">
@@ -446,25 +462,32 @@ export default function DiscoverySourcesPage() {
           {/* F20 (#453): Recent runs takes the full width, and Reveal a pseudonym its own row below it */}
           <Card
             title="Recent runs"
-            contain
-            foldable
-            startCollapsed
-            count={runs.data?.runs.length ?? 0}
+            {...runsFold}
             // L4: the list is the latest RUNS_LIMIT runs; a full page means older runs exist
             countIsLimit={(runs.data?.runs.length ?? 0) >= RUNS_LIMIT}
             countNoun={["run", "runs"]}
             attention={failedRuns > 0 ? <Badge tone="danger">{failedRuns} failed</Badge> : undefined}
           >
             <FoldTable<DiscoveryRunView>
-              rows={runs.data?.runs ?? []}
+              rows={runs.data?.runs}
+              loading={runs.isPending}
+              error={runs.error}
+              onRetry={() => void runs.refetch()}
               rowKey={(r) => r.id}
               empty={<EmptyState title="No scan has run" body="Runs appear here once an enabled source is scanned." />}
               columns={[
                 // below 1000 px of table width, Queued folds under Source, Observed / matched under Findings and Reads
                 // under Status; on a phone Findings and Catalogue gaps fold under Source too
                 { key: "source", header: "Source", render: (r) => list.find((s) => s.id === r.sourceId)?.name ?? r.sourceId },
-                { key: "status", header: "Status", render: (r) => <><Badge tone={RUN_TONE[r.status]}>{r.status}</Badge>{r.errorCode && <div className={v.faint}>{r.errorCode}</div>}</> },
-                { key: "when", header: "Queued", fold: { md: "source" }, render: (r) => <><span style={nowrap}>{fmtDateTime(r.createdAt)}</span><div className={v.faint}>{r.trigger}, attempt {r.attempt}</div></> },
+                { key: "status", header: "Status", render: (r) => (
+                  <>
+                    <Badge tone={RUN_TONE[r.status]}>{r.status}</Badge>
+                    {/* A20: the reason in words, the code as secondary text under it */}
+                    {r.errorCode && <div>{humanize(r.errorCode)}{r.errorDetail ? `: ${r.errorDetail}` : ""}</div>}
+                    {r.errorCode && <div className={`${v.faint} ${v.mono}`}>{r.errorCode}</div>}
+                  </>
+                ) },
+                { key: "when", header: "Queued", fold: { md: "source" }, render: (r) => <><span style={nowrap}>{fmtDateTime(r.createdAt)}</span><div className={v.faint}>{r.trigger === "schedule" ? "Scheduled" : humanize(r.trigger)} · attempt {r.attempt}</div></> },
                 { key: "counts", header: "Observed / matched", fold: { md: "findings" }, render: (r) => `${r.observed} / ${r.matched}` },
                 { key: "findings", header: "Findings", fold: { sm: "source" }, render: (r) => `${r.findingsCreated} new, ${r.findingsUpdated} updated` },
                 {
@@ -501,7 +524,7 @@ export default function DiscoverySourcesPage() {
               </p>
               <div className={v.row}>
                 <Field label="Pseudonym" help="People in findings appear as pseudonyms. Revealing a real name asks you to confirm it's you, and every reveal is audited.">
-                  <Input value={pseudonym} spellCheck={false} placeholder="psn:…" onChange={(e) => setPseudonym(e.target.value)} />
+                  <Input ref={pseudonymRef} value={pseudonym} spellCheck={false} placeholder="psn:…" onChange={(e) => setPseudonym(e.target.value)} />
                 </Field>
                 <Button disabled={act.busy || !/^psn:[0-9a-f]{24}$/.test(pseudonym.trim())} onClick={reveal}>Reveal</Button>
               </div>
@@ -516,6 +539,8 @@ export default function DiscoverySourcesPage() {
           <FederationCard />
 
           <Card title="Settings">
+            {/* A15: the stated ages wait for the read; a failed read says so, with Retry */}
+            <QueryGate loading={settings.isPending} error={settings.error} onRetry={() => void settings.refetch()}>
             <div className={v.stack}>
               <p className={v.faint}>
                 Static credentials older than {settings.data?.credentialWarningAgeDays ?? 90} days are flagged. Endpoint evidence is kept{" "}
@@ -533,6 +558,7 @@ export default function DiscoverySourcesPage() {
                 <Button disabled={act.busy || !settings.data || (!warnDays.trim() && !retentionDays.trim())} onClick={saveSettings}>Save settings</Button>
               </div>
             </div>
+            </QueryGate>
           </Card>
 
         </QueryGate>
