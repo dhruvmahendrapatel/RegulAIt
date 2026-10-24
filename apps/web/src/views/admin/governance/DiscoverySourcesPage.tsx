@@ -463,6 +463,8 @@ export default function DiscoverySourcesPage() {
           <Card
             title="Recent runs"
             {...runsFold}
+            // the folding card mounts fresh once the runs are read, so it starts collapsed (a fold reads its start once)
+            key={runs.data ? "runs" : "runs-pending"}
             // L4: the list is the latest RUNS_LIMIT runs; a full page means older runs exist
             countIsLimit={(runs.data?.runs.length ?? 0) >= RUNS_LIMIT}
             countNoun={["run", "runs"]}
