@@ -194,3 +194,39 @@ Taken with ADR-0189 spike B0.
 - **Specification data files.** Data files published by a standards body (schemas, models, JSON-LD contexts) may be
   vendored under Community-Spec-1.0 or CC-BY-3.0/4.0, with attribution in THIRD_PARTY.md and a pinned sha256. They are
   data, not code. The first use is the SPDX 3.0.1 schema, model and context.
+
+## Amendment — BlueOak-1.0.0 and Python-2.0 in the shipped workspace closure, and a licence gate (owner, 2026-10-24)
+
+Owner decision on the full feedback scan (#453, comment 6385378784, item 4: "Accept all"), finding FS-22.
+
+- **What was found.** `pnpm licenses list --prod --json` (the closure the gateway and web images install with `--prod`)
+  reports 528 packages. All are on the rule-3 list except six: BlueOak-1.0.0 on `jackspeak`, `minipass`,
+  `package-json-from-dist` and `path-scurry` (through glob ← rimraf ← gaxios, from the Google Cloud SDKs) and on `sax`
+  (through xml2js, from `@node-saml/node-saml` and `@azure/arm-resourcegraph`); Python-2.0 (PSF) on `argparse` (through
+  js-yaml, from `@kubernetes/client-node`). Both licences are permissive with no copyleft. Replacing those SDKs was not
+  feasible before the 2026-10-29 freeze.
+- **Decision.** BlueOak-1.0.0 and Python-2.0 are admitted for the shipped workspace closure, **per package**: each
+  package is named with its licence in `scripts/licence-allow-workspace.json`, with the decision and the reason. A new
+  package under either licence fails until it is added there. No other licence is admitted by this amendment, and the
+  copyleft exclusions of rule 3 are unchanged.
+- **Enforcement.** `scripts/licence-gate-workspace.mjs` runs in CI (`ci.yml`, "Licence gate — the shipped workspace
+  closure"). It fails on a package outside the list and the allow file, on an allow-file entry naming any other licence,
+  and on an allow-file entry that no longer matches a package (so the file cannot rot). Its tests are
+  `scripts/licence-gate-workspace.test.mjs`.
+
+## As built / still open — the "Replace" decisions of 2026-10-05 (2026-10-24, FS-24)
+
+The universal-rule amendment above decided six replacements. Their state on main at 2026-10-24, checked against the
+package manifests and the code:
+
+| Component | Decision | State | Evidence |
+|---|---|---|---|
+| TOTP and base32 (`auth.ts`) | Replace with `otpauth` | **Done** | `otpauth` in `apps/gateway/package.json`; `apps/gateway/src/totp.ts` (ADR-0183 batch 2). |
+| Constant-time compares | Replace with one `crypto.timingSafeEqual` helper | **Done** | `packages/shared/src/constant-time.ts`; no other `timingSafeEqual` call in `apps/*/src` or `packages/*/src`. |
+| Retry/backoff (`upstream-retry.ts`) | Replace with `cockatiel` | **Open** | No `cockatiel` dependency; `upstream-retry.ts` is still hand-written. |
+| OTLP/JSON encoder (`shared/tracing.ts`) | Replace with `@opentelemetry/otlp-transformer` | **Open** | No `otlp-transformer` dependency. |
+| Scheduler (`scheduler.ts`) | Replace with a Postgres-backed queue (own ADR) | **Open** | No `pg-boss` or `graphile-worker` dependency, and no ADR yet. |
+| Canonical JSON (non-audit copies) | One RFC 8785 implementation | **Partly done** | `canonicalize` is a dependency of `packages/shared`, but `config-versions.ts` (`stableStringify`) and `mcp-admission.ts` (`canonicalize`) still carry their own. |
+
+The open rows are post-demo work (after 2026-11-03). This table is the tracking home: a row moves to **Done** in the PR
+that lands the replacement.

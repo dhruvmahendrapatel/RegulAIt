@@ -1,5 +1,7 @@
 # AgentCoordination.md — AI Intake Demo (Monday 2026-10-05, 06:00)
 
+> **Retired (ADR-0191, [docs/decisions/0191-claude-sole-builder.md](docs/decisions/0191-claude-sole-builder.md)).** Since 2026-10-10 there is one builder; this three-agent board is no longer live and is kept as a record. Moving it out of the root and dropping its CI lint step are scheduled after 2026-11-03.
+
 > **Shared working file for three agents: Claude (master), Codex, Gemini.**
 > Claude owns this file's structure, assigns work, reviews it, and is the ONLY
 > agent that marks a task VERIFIED or removes anything. Codex and Gemini edit

@@ -147,7 +147,7 @@ what differs.
 
 ## Air-gapped: the pre-seeded image bundle
 
-`docker compose up --build` pulls `node:22-slim` from Docker Hub and runs
+`docker compose up --build` pulls `node:22-trixie-slim` from Docker Hub and runs
 `pnpm install --frozen-lockfile` against the npm registry. Both are internet. **An air-gapped host
 cannot build; it can only run images loaded from a file.** That is why the air-gapped path passes
 `--no-build` and refuses to start without the images present.
@@ -160,6 +160,10 @@ sha256sum regulait-images-0.1.0.tar        # record this; the tar is not self-ve
 ```
 
 It builds `regulait/gateway:0.1.0` and saves it together with `postgres:16` and Caddy (`caddy:2.11.7-alpine`, pinned by digest: the `x-caddy` reference in `docker-compose.yml`). Caddy is saved under both the digest reference and the plain tag; the air-gapped install runs the tag and refuses it unless its image id is one of the pinned ids in `scripts/install.sh` (the round trip is pending execution, ADR-0190 "I5 follow-up: engines in compose").
+**Not yet complete: the object store is not in the air-gapped bundle yet.** The audit-anchor object store
+(`objectstore` and `objectstore-init`, on by default in `docker-compose.yml`) is neither saved by `build-image-bundle.sh`
+nor pinned in the air-gapped override, so `up` on a host with no registry stops at that image. Adding it to the bundle,
+and executing the round trip once, is the next ops item.
 The tag and the `--version` you pass to the installer must be the **same string** — the generated
 override pins `image: regulait/gateway:<version>` with `pull_policy: never`.
 

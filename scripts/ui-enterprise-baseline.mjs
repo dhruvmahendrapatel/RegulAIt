@@ -51,6 +51,8 @@ export const SIZE_LIMIT_ADR = "docs/decisions/0196-ui-enterprise-harness.md";
  */
 export const CEILING_EXCEPTIONS = [
   { name: "all JS", from: "1036 kB", to: "1038 kB", date: "2026-10-21", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6328260537" },
+  { name: "entry JS (index)", from: "137.3 kB", to: "137.7 kB", date: "2026-10-24", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6385378784" },
+  { name: "entry CSS (index)", from: "10.6 kB", to: "10.7 kB", date: "2026-10-24", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6385378784" },
 ];
 const DECISION_LINK = /^https:\/\/github\.com\/dhruvmahendrapatel\/RegulAIt\/issues\/\d+#issuecomment-\d+$/;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;

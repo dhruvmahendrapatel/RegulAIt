@@ -477,3 +477,16 @@ that the `--guard` rule above requires, and it has one `CEILING_EXCEPTIONS` row.
   chunk is gone. Gzip bytes, size-limit 14.2.0, after the change: entry JS 137,179 against 137.3 kB, all JS 1,036,507
   against `1038 kB`. The `1035 kB` to `1036 kB` row named in the sentence above was dropped after all: main already
   carries `1036 kB`, so it matched nothing, and `--guard origin/main` still exits 0 without it.
+
+## Addendum / As built (2026-10-24) — entry JS 137.3 → 137.7 kB and entry CSS 10.6 → 10.7 kB
+
+The owner decided this raise on 2026-10-24, when accepting the full feedback scan's entry-bundle allowance (at most
++1 kB entry JS and +0.3 kB entry CSS, within ADR-0198 §2):
+<https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6385378784>. It is the ADR-recorded exception
+that the `--guard` rule above requires, and it has two `CEILING_EXCEPTIONS` rows. It is for #552 (FS-4 sortable-header
+buttons, FS-15 toast placement and the two shell keyboard/count fixes).
+
+- `entry JS (index)` from `137.3 kB` to `137.7 kB` (gzip, measured 137,272 → 137,607 B).
+- `entry CSS (index)` from `10.6 kB` to `10.7 kB` (gzip, measured 10,594 → 10,652 B).
+- Used: +0.4 kB of the +1 kB JS allowance and +0.1 kB of the +0.3 kB CSS allowance. `all JS` and the lazy chunks are
+  unchanged.

@@ -144,7 +144,8 @@ function TrustReportView(props: {
     <div className={v.stack}>
       {/* one meta line: scope, window, packs, generated, and the monitor state */}
       <div className={`${v.row} ${s.metaLine}`}>
-        <span>{d.scope.label}</span>
+        {/* A6: the UI's own spelling; the gateway's scope label is "Organization" */}
+        <span>{d.scope.projectId == null ? "Organisation" : "Project"}</span>
         <span aria-hidden>·</span>
         <span>Last {d.window.days} days</span>
         <span aria-hidden>·</span>
@@ -228,7 +229,7 @@ function TrustReportView(props: {
           <div className={v.stack} style={{ marginTop: "var(--s2)" }} aria-live="polite">
             <div className={v.row}>
               <strong>{current.label}</strong>
-              <Badge tone={current.measured ? "info" : "neutral"}>{current.measured ? "measured" : "unmeasured"}</Badge>
+              <Badge tone={current.measured ? "info" : "neutral"}>{current.measured ? "Measured" : "Unmeasured"}</Badge>
             </div>
             <div className={v.grid4}>
               <Stat value={current.risks.open} label="Open" />
@@ -394,10 +395,10 @@ function Heatmap({ cells, label }: { cells: HeatCell[]; label: string }) {
   return (
     <div className={s.heatmap} role="img" aria-label={`${label} matrix by likelihood and impact. ${cellNames.join("; ")}`}>
       <span />
-      {impacts.map((impact) => <span key={impact} className={s.heatLabel}>{impact} impact</span>)}
+      {impacts.map((impact) => <span key={impact} className={s.heatLabel}>{capitalise(impact)} impact</span>)}
       {levels.map((likelihood) => (
         <Fragment key={likelihood}>
-          <span key={`${likelihood}-label`} className={s.heatLabel}>{likelihood}<br />likelihood</span>
+          <span key={`${likelihood}-label`} className={s.heatLabel}>{capitalise(likelihood)}<br />likelihood</span>
           {impacts.map((impact) => {
             const value = count(likelihood, impact);
             // G4: the cell's colour is its ZONE (likelihood + impact on the severity scale), not a computed score;
@@ -409,7 +410,7 @@ function Heatmap({ cells, label }: { cells: HeatCell[]; label: string }) {
                 className={`${s.heatCell} ${s[`zone_${zone}`]} ${value === 0 ? s.zoneEmpty : ""}`}
               >
                 <strong>{value}</strong>
-                <span className={s.zoneWord}>{zone.charAt(0).toUpperCase() + zone.slice(1)}</span>
+                <span className={s.zoneWord}>{capitalise(zone)}</span>
               </div>
             );
           })}
@@ -418,6 +419,9 @@ function Heatmap({ cells, label }: { cells: HeatCell[]; label: string }) {
     </div>
   );
 }
+
+/** sentence case: only the first letter is a capital ("Low impact", never "Low Impact") */
+const capitalise = (word: string) => word.charAt(0).toUpperCase() + word.slice(1);
 
 export function TrustSnapshotCard() {
   const q = useQuery(trustQuery());

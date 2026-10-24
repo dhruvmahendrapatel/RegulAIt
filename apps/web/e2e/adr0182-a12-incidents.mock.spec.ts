@@ -222,12 +222,29 @@ test.describe("ADR-0182 A12: the AI incident register", () => {
     await expect(settingsCard.getByText("relaxed", { exact: true })).toHaveCount(1);
   });
 
+  test("D5 runs-projects-19: on a phone the register folds into the Incident column instead of clipping", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 900 });
+    await mockApi(page);
+    await page.goto("/ui/incidents");
+    const table = page.getByRole("table");
+    const row = table.getByRole("row").filter({ hasText: "INC-00042" });
+    await expect(row).toContainText("Article 26(5)");
+    // Incident (with Use case, Owner, Next clock, Actions and Aware folded in), Severity, Status
+    await expect(table.locator("thead th")).toHaveCount(3);
+    // values move into the Incident cell, never off the card
+    const box = await table.boundingBox();
+    const card = await page.locator("section[data-rg-card]").filter({ has: table }).first().boundingBox();
+    expect(box!.x + box!.width).toBeLessThanOrEqual(card!.x + card!.width + 1);
+  });
+
   test("report an incident, pre-filled from a monitor alert; an Art. 3(49) criterion marks it serious", async ({ page }) => {
     const cap = await mockApi(page);
     await page.goto("/ui/incidents?new=1&detectionSource=monitor_alert&sourceRef=44444444-4444-4444-8444-444444444444");
     const dialog = page.getByRole("dialog", { name: "Report an AI incident" });
     await expect(dialog.getByLabel("Detected by")).toHaveValue("monitor_alert");
     await expect(dialog.getByRole("textbox", { name: "Source reference (optional)" })).toHaveValue("44444444-4444-4444-8444-444444444444");
+    // D5 runs-projects-14: the severity choices read as words, like the filter and the badge; values stay codes
+    await expect(dialog.getByLabel("Severity").locator("option")).toHaveText(["Critical", "High", "Medium", "Low"]);
     await expectAxeClean(page, "report an incident");
     await dialog.getByLabel("Title").fill("Claims assistant denied valid claims");
     await dialog.getByRole("combobox", { name: "Use case" }).selectOption(UC);

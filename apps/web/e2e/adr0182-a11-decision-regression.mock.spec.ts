@@ -239,7 +239,9 @@ test.describe("ADR-0182 A11: decision regression", () => {
     await expect(card.getByRole("cell", { name: "Version 4" })).toBeVisible();
     await expect(card).toContainText("ai-use-case-intake/governance-owner");
     await expect(card).toContainText("screening v1, suggestions 2026-10-06.1");
-    await expect(card.getByLabel(`Answers digest ${"e".repeat(64)}`)).toBeVisible();
+    // design D2-06: the whole digest is read to assistive technology from text, never an aria-label on <code>
+    await expect(card).toContainText(`Answers digest: ${"e".repeat(64)}`);
+    await expect(card.locator("code[aria-label]")).toHaveCount(0);
     await expectAxeClean(page, "decision records tab");
   });
 });

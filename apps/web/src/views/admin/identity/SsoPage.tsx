@@ -741,7 +741,7 @@ function SessionsPolicyForm(props: { settings: Record<string, unknown> }) {
           )}
         </div>
         <p className={v.faint}>
-          Defaults: 12+ characters using 2 of 4 character classes; sessions live at most 24h with a 2h idle
+          Defaults: 12+ characters using 3 of 4 character classes; sessions live at most 24h with a 30-minute idle
           wall (any use slides the idle wall, never the lifetime); 5 failures inside 15 minutes lock the
           account for 15 minutes — audited, and the login answer stays the same uniform 401 so lockout
           leaks nothing. “SSO only” will not engage while zero enabled SSO providers exist — OIDC and

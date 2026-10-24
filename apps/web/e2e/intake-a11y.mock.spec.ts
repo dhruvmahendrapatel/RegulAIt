@@ -171,7 +171,7 @@ test.describe("AER-029: the intake wizard is accessible at every stage, in both 
       "link:Cancel", "button:Continue",
     ]) expect(names, `"${expected}" is announced on the Describe stage`).toContain(expected);
     // ADR-0168: a hint under each field, announced as its description rather than hidden in a popover
-    await expect(page.getByLabel("Use-case name")).toHaveAccessibleDescription(/A name reviewers will recognize/);
+    await expect(page.getByLabel("Use-case name")).toHaveAccessibleDescription(/A name reviewers will recognise/);
     await expect(page.getByLabel("What will the system do?")).toHaveAccessibleDescription(/who it affects/);
     await expect(page.getByLabel("Business context")).toHaveAccessibleDescription(/Leave blank to reuse the purpose/);
     // the duplicate check is a labelled region beside the form

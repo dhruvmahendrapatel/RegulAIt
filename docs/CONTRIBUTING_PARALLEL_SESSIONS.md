@@ -72,7 +72,8 @@ So a single generated migration with a real timestamp sets the watermark far int
 The schema simply stops advancing.
 
 > **Rule: never run `drizzle-kit generate` on this repo.** Hand-author the `.sql` file and hand-append
-> the journal entry, continuing the +1,000,000 ms convention. Next value by convention: `1785036000000`.
+> the journal entry, continuing the +1,000,000 ms convention (the journal's last `when` plus 1,000,000;
+> the §4.2 commands print it).
 
 Two related traps from the same mechanism:
 
@@ -93,18 +94,24 @@ migrations claiming one number and a journal that can only describe one of them.
 > **Rule: claim the number before you use it.** Push a one-line placeholder commit reserving the
 > number, or announce the claim, before writing the body.
 
-Current sequence heads, verified:
+Do not trust a table of sequence heads in a document: it goes stale with the next merge. Read the heads
+from the tree at the moment you claim a number:
 
-| Sequence | Location | Highest now | Next | Notes |
-|---|---|---|---|---|
-| Migrations | `packages/db/migrations/` | `0100_copilot_apply_and_judged_recommendations.sql` | **0101** | 100 files, `0065` never existed |
-| Journal | `packages/db/migrations/meta/_journal.json` | `idx: 100` | **101** | 705 lines; `idx` mirrors the filename, so it inherits the 0065 hole |
-| ADRs | `docs/decisions/` | `0096-entity-aware-copilot-planning.md` | **0097** | 96 files, no gaps |
-| ADR index | `docs/decisions/README.md` | 95 rows | — | **already drifted: 96 files, 95 rows — ADR-0078 has no row** |
+```bash
+ls packages/db/migrations/*.sql | sed 's#.*/##' | sort | tail -1          # highest migration file
+python3 -c "import json;e=json.load(open('packages/db/migrations/meta/_journal.json'))['entries'];\
+print('journal idx', e[-1]['idx'], 'when', e[-1]['when'])"                # journal head (next when = +1000000)
+ls docs/decisions/[0-9]*.md | sed 's#.*/##' | sort | tail -1               # highest ADR file
+```
 
-**Retired migration numbers (never reuse):** `0065`, `0147` (ADR-0173) and `0152` (ADR-0179). Each was skipped and the
-journal has no entry for it. A file with that number added now would carry a `when` below the database's watermark, so
-it would never apply (§4.1). Always take the number after the highest existing file.
+then run the §6 checklist, which shows whether the files, the journal and the ADR index agree.
+
+**Retired migration numbers (never reuse):** every number below the highest file that has no `.sql` file and no
+journal entry. On 2026-10-24 they are `0065`, `0147` (ADR-0173), `0152` (ADR-0179), `0163`–`0166` and `0177`–`0179`;
+list them again with
+`python3 -c "import os,re;f=sorted(int(x[:4]) for x in os.listdir('packages/db/migrations') if re.match(r'\d{4}_.*\.sql$',x));print([n for n in range(1,f[-1]) if n not in f])"`.
+A file with a retired number added now would carry a `when` below the database's watermark, so it would never apply
+(§4.1). Always take the number after the highest existing file. ADR numbers `0151`–`0155` were never used either.
 
 ### 4.3 `_journal.json` always conflicts on append
 
@@ -119,7 +126,8 @@ Both sessions append a row to the end of `docs/decisions/README.md`; the conflic
 keeping one. The lost row is invisible forever after.
 
 > **Merge-time assertion:** `ls docs/decisions/[0-9]*.md | wc -l` must equal
-> `grep -cE '^\| \[[0-9]{4}\]' docs/decisions/README.md`. It does **not** today (96 vs 95).
+> `grep -cE '^\| \[[0-9]{4}\]' docs/decisions/README.md`. CI now checks this, row order and links with
+> `scripts/adr-index.test.mjs` (FS-55).
 
 ### 4.5 STATE.md recap clobber
 
@@ -144,6 +152,9 @@ from runs 37050080219 / 37045578961 / 37042881890; run 37036782298 was green at 
 `21b3094`). The two structural facts in this subsection are unchanged: no `push:` trigger, and a
 docs-only or state-only diff never enters CI, so every §4 assertion is still checked by hand.*
 
+*2026-10-24 (FS-55): `scripts/adr-index.test.mjs` checks §4.4 in CI, but only on a run that happens (a PR that
+touches code, or the weekly run of `main`). A docs-only ADR PR still skips CI, so run §6 step 1 by hand.*
+
 ## 5. Shared machine resources
 
 If both sessions run on **one** machine, these fight:
@@ -167,7 +178,7 @@ If both sessions run on **one** machine, these fight:
 
 ## 6. Merge-time checklist
 
-Run these by hand before merging either direction — CI will not:
+Run these by hand before merging either direction. CI runs only the first (as `scripts/adr-index.test.mjs`):
 
 ```bash
 # 1. ADR files and index rows agree

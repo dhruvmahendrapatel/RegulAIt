@@ -3,13 +3,13 @@
     "name": "entry JS (index)",
     "path": "dist/assets/index-*.js",
     "gzip": true,
-    "limit": "137.3 kB"
+    "limit": "137.7 kB"
   },
   {
     "name": "entry CSS (index)",
     "path": "dist/assets/index-*.css",
     "gzip": true,
-    "limit": "10.6 kB"
+    "limit": "10.7 kB"
   },
   {
     "name": "lazy: SeriesLineChart",

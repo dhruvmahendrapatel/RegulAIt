@@ -4,7 +4,8 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
 import type { DirectoryUser, UseCaseCondition, UseCaseLifecycleDetail, UseCaseResubmission, UseCaseReview, UseCaseRiskAcceptance } from "../../../api/types";
 import { ago, frameworkLabel, humanize, plural, providerLabel } from "../../../api/format";
-import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Modal, Select, Table, Tabs, Textarea, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Modal, Select, Table, Tabs, Textarea, tabIds, type Tone } from "../../../ui/kit";
+import { CardBoundary } from "../../../ui/CardBoundary";
 import { QueryGate, RemoveButton, useAction } from "../adminKit";
 import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
@@ -116,6 +117,9 @@ export default function UseCaseOverviewPage() {
   const directory = useQuery({ queryKey: ["directory"], queryFn: () => api.get<{ users: DirectoryUser[] }>("/v1/users/directory") });
   const refresh = async () => { await Promise.all([overview.refetch(), detail.refetch()]); };
   const data = overview.data;
+  // FS-46: the record's tab set is a real tablist with one labelled tabpanel
+  const panel = tabIds("use-case", tab);
+  const tabLabel = TABS.find((item) => item.id === tab)?.label ?? "Overview";
   const names = new Map((directory.data?.users ?? []).map((u) => [u.id, u.name ?? ""]));
   const userName = (userId: string | null) => (userId ? names.get(userId) || null : null);
 
@@ -141,7 +145,8 @@ export default function UseCaseOverviewPage() {
             <div className={rec.bandMain}>
               <nav aria-label="Breadcrumb">
                 <ol className={rec.crumbs}>
-                  <li><Link to="/admin/use-cases">AI use cases</Link></li>
+                  <li>AI Governance</li>
+                  <li><Link to="/admin/use-cases">AI registry</Link></li>
                   <li aria-current="page">{data.useCase.name}</li>
                 </ol>
               </nav>
@@ -189,9 +194,13 @@ export default function UseCaseOverviewPage() {
               <Tabs
                 tabs={TABS.map((t) => withTabCount(t, data))}
                 active={tab}
+                idPrefix="use-case"
                 onChange={(next) => setParams({ tab: next })}
               />
             </div>
+            {/* FS-20: a tab that fails to render says so in its own panel; the record, its band and the other tabs stay */}
+            <div role="tabpanel" id={panel.panel} aria-labelledby={panel.tab} className={v.stack}>
+            <CardBoundary key={tab} title={tabLabel}>
             {tab === "overview" ? (
               <OverviewTab
                 data={data}
@@ -233,6 +242,8 @@ export default function UseCaseOverviewPage() {
               </Suspense>
             ) : null}
             {tab === "feedback" ? <FeedbackTab useCaseId={id} /> : null}
+            </CardBoundary>
+            </div>
           </div>
         </>
       ) : null}
@@ -244,7 +255,7 @@ type DetailState = "ok" | "loading" | "error";
 
 /** AER-055: what the record says while its lifecycle detail is not (yet) known */
 function DetailUnknown(props: { state: Exclude<DetailState, "ok">; what: string; onRetry: () => void; alert?: boolean }) {
-  if (props.state === "loading") return <p className={v.dim}>Loading {props.what}…</p>;
+  if (props.state === "loading") return <p className={v.dim} role="status">Loading {props.what}…</p>;
   return (
     <div className={ix.detailState} {...(props.alert ? { role: "alert" } : {})}>
       <span>The {props.what} could not be loaded, so they are not shown. Nothing here means they are empty.</span>
@@ -695,11 +706,12 @@ const packNote = (title: string) => {
 };
 
 /** whether the pack's compliance tag is on the use case — the tag that turns the mapping into workflow requirements */
-function PackAppliedBadge({ framework }: { framework: FrameworksResponse["frameworks"][number] }) {
-  if (!framework.cascadeTag) return <Badge tone="neutral" title="This pack maps controls only; it adds no workflow requirements">Mapping only</Badge>;
+export function PackAppliedBadge({ framework }: { framework: FrameworksResponse["frameworks"][number] }) {
+  // D2-04: the meaning is in an (i) disclosure, never in hover-only title text
+  if (!framework.cascadeTag) return <Badge tone="neutral" infoLabel="pack status" info={<p>This pack maps controls only; it adds no workflow requirements.</p>}>Mapping only</Badge>;
   return framework.carriedByUseCase
-    ? <Badge tone="ok" title="The use case carries this pack's compliance tag, so its workflow requirements apply">Applied</Badge>
-    : <Badge tone="warn" title={`Add the ${frameworkLabel(framework.cascadeTag)} tag to apply this pack's workflow requirements${framework.profileExists ? "" : " (no compliance profile exists for it yet)"}`}>Not applied</Badge>;
+    ? <Badge tone="ok" infoLabel="pack status" info={<p>The use case carries this pack&apos;s compliance tag, so its workflow requirements apply.</p>}>Applied</Badge>
+    : <Badge tone="warn" infoLabel="pack status" info={<p>Add the {frameworkLabel(framework.cascadeTag)} tag to apply this pack&apos;s workflow requirements{framework.profileExists ? "" : " (no compliance profile exists for it yet)"}.</p>}>Not applied</Badge>;
 }
 
 function FrameworksTab({ query }: { query: ReturnType<typeof useQuery<FrameworksResponse>> }) {
@@ -708,6 +720,8 @@ function FrameworksTab({ query }: { query: ReturnType<typeof useQuery<Frameworks
 
 /** open is the state that needs attention; mitigating and accepted are decided workflow states */
 const RISK_STATUS_TONE: Record<string, Tone> = { open: "warn", mitigating: "neutral", accepted: "neutral", closed: "ok" };
+/** the residual levels: the stored value stays the code, the reader sees the word */
+const LEVEL_OPTIONS = ["low", "medium", "high"].map((level) => <option key={level} value={level}>{humanize(level)}</option>);
 
 function RisksTab({ useCaseId, risks, acceptance, onRefresh }: { useCaseId: string; risks: OverviewRisk[]; acceptance: Map<string, UseCaseRiskAcceptance>; onRefresh: () => Promise<void> }) {
   const action = useAction();
@@ -717,12 +731,12 @@ function RisksTab({ useCaseId, risks, acceptance, onRefresh }: { useCaseId: stri
     <div className={v.stack}>
       {risks.length === 0 ? <EmptyState title="No risks linked to this use case" body="Add a scenario from the library to make the inherent and residual position explicit." /> : risks.map((risk) => {
         const draft = residuals[risk.id] ?? { likelihood: risk.residual?.likelihood ?? "", impact: risk.residual?.impact ?? "" };
-        return <Card key={risk.id} title={risk.title} actions={<div className={v.row}><span className={v.faint}>{risk.dimension}</span><Badge tone={RISK_STATUS_TONE[risk.status] ?? "neutral"}>{risk.status}</Badge></div>}><div className={v.stack}>
+        return <Card key={risk.id} title={risk.title} actions={<div className={v.row}><span className={v.faint}>{humanize(risk.dimension)}</span><Badge tone={RISK_STATUS_TONE[risk.status] ?? "neutral"}>{humanize(risk.status)}</Badge></div>}><div className={v.stack}>
           {acceptance.has(risk.id) ? (() => { const a = acceptance.get(risk.id)!; return <p className={rr.acceptedBy}>Accepted by {a.acceptedByName ?? "a risk acceptor"}{a.acceptedAt ? ` on ${shortDate(a.acceptedAt)}` : ""}{a.acceptanceRationale ? ` · ${a.acceptanceRationale}` : ""}</p>; })() : null}
-          <p className={s.riskFlow}><span className={v.dim}>Inherent</span> <strong>{risk.inherent.likelihood} × {risk.inherent.impact}</strong> <span aria-hidden>→</span> <span className={v.dim}>Residual</span> <InfoButton label="residual risk"><p>The risk left after linked controls take effect. The registrant rates it and the reviewer checks it.</p></InfoButton> <strong>{risk.residual ? `${risk.residual.likelihood} × ${risk.residual.impact}` : "unmeasured"}</strong></p>
+          <p className={s.riskFlow}><span className={v.dim}>Inherent</span> <strong>{humanize(risk.inherent.likelihood)} × {humanize(risk.inherent.impact)}</strong> <span aria-hidden>→</span> <span className={v.dim}>Residual</span> <InfoButton label="residual risk"><p>The risk left after linked controls take effect. The registrant rates it and the reviewer checks it.</p></InfoButton> <strong>{risk.residual ? `${humanize(risk.residual.likelihood)} × ${humanize(risk.residual.impact)}` : "Not measured"}</strong></p>
           <div><strong>Linked controls</strong>{risk.controls.length === 0 ? <p className={v.dim}>No controls linked.</p> : risk.controls.map((control) => <div key={control.controlRef} className={v.listRow}><span className={v.grow}><code>{control.controlRef}</code><br /><span className={v.faint}>{control.title}</span></span><RemoveButton what={`control ${control.controlRef}`} consequence={<>The control link is removed from this risk. The risk and its audit history remain.</>} onRemove={() => api.del(`/v1/risks/${risk.id}/controls/${encodeURIComponent(control.controlRef)}`)} onDone={() => void onRefresh()} /></div>)}</div>
           <div className={s.libraryFilters}><Field label="Control reference" helpLabel="the mitigation link created here" help={<p>Enter the canonical reference of an existing control. Linking it records that this control mitigates the selected use-case risk; it does not by itself prove the control is implemented or evidenced.</p>}><Input value={controlRefs[risk.id] ?? ""} onChange={(event) => setControlRefs((current) => ({ ...current, [risk.id]: event.target.value }))} placeholder="Control reference" /></Field><Field label=" "><Button disabled={action.busy || !(controlRefs[risk.id] ?? "").trim()} onClick={() => void action.run(async () => { await api.post(`/v1/risks/${risk.id}/controls`, { controlRef: controlRefs[risk.id]!.trim() }); setControlRefs((current) => ({ ...current, [risk.id]: "" })); await onRefresh(); }, "Control linked")}>Link control</Button></Field></div>
-          <div className={s.libraryFilters}><Field label="Residual likelihood"><Select value={draft.likelihood} onChange={(event) => setResiduals((current) => ({ ...current, [risk.id]: { ...draft, likelihood: event.target.value } }))}><option value="">Choose likelihood</option><option>low</option><option>medium</option><option>high</option></Select></Field><Field label="Residual impact"><Select value={draft.impact} onChange={(event) => setResiduals((current) => ({ ...current, [risk.id]: { ...draft, impact: event.target.value } }))}><option value="">Choose impact</option><option>low</option><option>medium</option><option>high</option></Select></Field><Field label=" "><Button disabled={action.busy || !draft.likelihood || !draft.impact} onClick={() => void action.run(async () => { await api.put(`/v1/risks/${risk.id}/residual`, draft); await onRefresh(); }, "Residual position updated")}>Save residual</Button></Field></div>
+          <div className={s.libraryFilters}><Field label="Residual likelihood"><Select value={draft.likelihood} onChange={(event) => setResiduals((current) => ({ ...current, [risk.id]: { ...draft, likelihood: event.target.value } }))}><option value="">Choose likelihood</option>{LEVEL_OPTIONS}</Select></Field><Field label="Residual impact"><Select value={draft.impact} onChange={(event) => setResiduals((current) => ({ ...current, [risk.id]: { ...draft, impact: event.target.value } }))}><option value="">Choose impact</option>{LEVEL_OPTIONS}</Select></Field><Field label=" "><Button disabled={action.busy || !draft.likelihood || !draft.impact} onClick={() => void action.run(async () => { await api.put(`/v1/risks/${risk.id}/residual`, draft); await onRefresh(); }, "Residual position updated")}>Save residual</Button></Field></div>
         </div></Card>;
       })}
       {/* this use case's own risks come first; the generic library sits below them */}
@@ -773,7 +787,7 @@ function AgentCard({ id, fallback }: { id: string; fallback: OverviewResponse["s
           <p className={v.faint}>{[card.data.dataSources.note, card.data.oversight.note].filter(Boolean).map(sentenceCase).join(" ")}</p>
           <Link to={`/admin/agents#agent-${id}`}>Open this agent in the full inventory</Link>
         </div>
-      ) : <p className={v.dim}>Loading agent card…</p>}
+      ) : <p className={v.dim} role="status">Loading agent card…</p>}
     </div>
   );
 }
@@ -808,7 +822,7 @@ export function AuditTab({ rows, total, useCaseId, isAdmin }: { rows: OverviewRe
   const more = total !== undefined ? total > rows.length : rows.length >= AUDIT_ROW_LIMIT;
   return (
     <Card title="Recent use-case audit evidence">
-      {rows.length === 0 ? <EmptyState title="No audit rows returned" body="Every registration, review and lifecycle change on this use case writes an audit row. None has been recorded yet." /> : <Table rows={rows} rowKey={(row) => String(row.id)} columns={[{ key: "at", header: "When", render: (row) => <span style={{ whiteSpace: "nowrap" }}>{ago(row.at)}</span> }, { key: "rule", header: "Event", render: (row) => <span style={{ whiteSpace: "nowrap" }}>{humanize(row.ruleId)}</span> }, { key: "effect", header: "Effect", render: (row) => <Badge tone={row.effect === "allow" ? "ok" : row.effect === "deny" ? "danger" : "warn"}>{row.effect}</Badge> }, { key: "reason", header: "Reason", render: (row) => row.reason }]} />}
+      {rows.length === 0 ? <EmptyState title="No audit rows returned" body="Every registration, review and lifecycle change on this use case writes an audit row. None has been recorded yet." /> : <Table rows={rows} rowKey={(row) => String(row.id)} columns={[{ key: "at", header: "When", render: (row) => <span style={{ whiteSpace: "nowrap" }}>{ago(row.at)}</span> }, { key: "rule", header: "Event", render: (row) => <span style={{ whiteSpace: "nowrap" }}>{humanize(row.ruleId)}</span> }, { key: "effect", header: "Effect", render: (row) => row.effect === "allow" ? <span className={v.dim}>{humanize(row.effect)}</span> : <Badge tone={row.effect === "deny" ? "danger" : "warn"}>{humanize(row.effect)}</Badge> }, { key: "reason", header: "Reason", render: (row) => row.reason }]} />}
       {more ? (
         <p className={v.dim} data-testid="use-case-audit-partial">
           {total !== undefined

@@ -56,3 +56,16 @@ This is a permanent fix, not a freeze-week setting.
 
 ## As built
 _(Append here: each ceiling raise under §2, with its PR, and the revert of §1.)_
+
+**2026-10-24, lane U5 (branch `ui-kit-entry-1024`, the #547 kit and shell fixes FS-4, FS-15 and the two shell leads).**
+The owner's decision on #453 (comment 6385378784) allowed this lane at most +1 kB entry JS and +0.3 kB entry CSS,
+inside §2. Measured with `pnpm --filter ./apps/web size` (gzip) on a fresh `vite build`:
+
+| Entry chunk | Before (main `75159bb`) | After | Ceiling before | Ceiling after |
+|---|---|---|---|---|
+| JS (index) | 137,272 B | 137,607 B (+335 B) | 137.3 kB | 137.7 kB (+0.4 kB) |
+| CSS (index) | 10,594 B | 10,652 B (+58 B) | 10.6 kB | 10.7 kB (+0.1 kB) |
+
+The two raises add up to 0.5 kB, within §2's 1 kB. What the bytes pay for: a `<button type="button">` in each sortable
+kit Table header (FS-4), the toast docking left of an open side drawer (FS-15), and the user menu's keyboard pattern
+and the status=pending Inbox badge in the shell. The post-demo reset in Consequences applies to both ceilings.

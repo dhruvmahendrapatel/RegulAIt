@@ -10,7 +10,7 @@ import { Link } from "react-router-dom";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api/client";
 import type { Approval, WorkflowDetailResponse } from "../../api/types";
-import { ago, approvalStageLabel, humanize } from "../../api/format";
+import { ago, approvalStageLabel, humanize, plural } from "../../api/format";
 import { QuestionnaireView } from "../admin/governance/UseCaseQuestionnaire";
 import { drawerEvidenceState, mergeGateParts } from "./inboxEvidence";
 import { useSession } from "../../session/SessionContext";
@@ -241,6 +241,8 @@ export default function InboxPage() {
   // list, so its drawer closes with it
   const open = pending.find((a) => a.id === openId && !isIntakeSignoff(a) && !isBoundAction(a)) ?? null;
   const openView = open ? itemView(open) : null;
+  const decidable = pending.filter((a) => itemView(a).canDecide).length;
+  const openInstance = open?.instanceId ? instanceQueries[instanceIds.indexOf(open.instanceId)] : undefined;
   const openEvidence = open && openView
     ? drawerEvidenceState({
         toolCall: openView.toolCall,
@@ -277,7 +279,8 @@ export default function InboxPage() {
       <PageHeader
         title="Inbox"
         sub="Everything that pauses for you: sign-offs, escalations, budget overages, context conflicts."
-        actions={pending.length > 0 ? <Badge tone="info">{`${pending.length} waiting on you`}</Badge> : undefined}
+        // only the items this person can decide are waiting on them; their own requests awaiting someone else are not
+        actions={decidable > 0 ? <Badge tone="info">{`${decidable} waiting on you`}</Badge> : undefined}
       />
       <div className={v.stack}>
         <Card>
@@ -351,7 +354,9 @@ export default function InboxPage() {
             {openEvidence === "none" ? (
               <p className={v.faint} data-testid="inbox-no-evidence">No evidence attached to this request.</p>
             ) : openEvidence === "failed" ? (
-              <p className={v.faint} role="status" data-testid="inbox-evidence-failed">Evidence could not be loaded.</p>
+              <div data-testid="inbox-evidence-failed">
+                <ErrorState title="Evidence could not be loaded" message="The workflow's evidence could not be read. Retry before deciding." onRetry={openInstance ? () => void openInstance.refetch() : undefined} />
+              </div>
             ) : null}
             {/* L2 (ADR-0180): the reason warning, the reason and the decision stay together in the pinned footer */}
             {openView.canDecide ? (
@@ -504,7 +509,7 @@ function AnnotationsCard(props: { items: AnnotationInboxItem[] }) {
               </Link>
             </div>
             <div className={v.faint}>
-              {i.submissionCount} of {i.requiredReviews} review(s) · queued {ago(i.createdAt)}
+              {i.submissionCount} of {plural(i.requiredReviews, "review")} · queued {ago(i.createdAt)}
               {i.dueAt ? ` · due ${shortDate(i.dueAt)}` : ""}
             </div>
           </div>
@@ -518,6 +523,7 @@ function AnnotationsCard(props: { items: AnnotationInboxItem[] }) {
 /** the merge-gate context: latest artifacts, PR/branch, recorded checks, dry-run honesty */
 function MergeGateEvidence(props: { inst: WorkflowDetailResponse }) {
   const { ctx, latest, checkRows, deploys, hasPrRow } = mergeGateParts(props.inst);
+  const autoPassed = checkRows.filter((c) => c.autoPassed).length;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--s0)" }}>
       {Object.values(latest).map((art) => (
@@ -562,25 +568,27 @@ function MergeGateEvidence(props: { inst: WorkflowDetailResponse }) {
                     ? "ok"
                     : "danger"
               }
-              title={
+              // A8: the reason and detail in an (i), not a hover-only title
+              info={
                 c.autoPassed
                   ? "Auto-passed — no result was reported for this check (offline mode)"
                   : c.selfReported
                     ? `Reported by the change's own initiator, not by CI${c.reason ? ` — reason: ${c.reason}` : ""}${c.detail ? ` (${c.detail})` : ""}`
-                    : (c.detail ?? "")
+                    : c.detail || undefined
               }
+              infoLabel={`check ${humanize(c.check)}`}
             >
-              {c.check} · {c.status}
+              {humanize(c.check)} · {humanize(c.status)}
               {c.autoPassed ? " · auto-passed (no report)" : ""}
               {c.selfReported ? " · self-reported" : ""}
             </Badge>
           ))}
         </div>
       )}
-      {checkRows.some((c) => c.autoPassed) && (
+      {autoPassed > 0 && (
         <div className={v.faint}>
-          No result was reported for {checkRows.filter((c) => c.autoPassed).length} check(s) — the template's
-          offline mode auto-passed them; nothing ran them.
+          No result was reported for {plural(autoPassed, "check")} — the template's offline mode auto-passed{" "}
+          {autoPassed === 1 ? "it; nothing ran it." : "them; nothing ran them."}
         </div>
       )}
       {deploys.some((d) => d?.dryRun) && (

@@ -26,7 +26,7 @@ import type {
   ProposalNode,
   RunSummary,
 } from "../../api/types";
-import { ago, fmtUsd } from "../../api/format";
+import { ago, fmtUsd, plural } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
 import {
@@ -519,17 +519,17 @@ function ProposalEditor(props: {
       : []),
     ...((n.droppedAllowedAgents ?? []).length
       ? [
-          `Node ${n.id}: the delegation ceiling dropped un-granted agent(s) ${n.droppedAllowedAgents!.join(", ")} — not in your entitlements.`,
+          `Node ${n.id}: the delegation ceiling dropped ${plural(n.droppedAllowedAgents!.length, "un-granted agent")}: ${n.droppedAllowedAgents!.join(", ")} — not in your entitlements.`,
         ]
       : []),
     ...((n.droppedAllowedTools ?? []).length
       ? [
-          `Node ${n.id}: the delegation ceiling dropped un-entitled tool(s) ${n.droppedAllowedTools!.join(", ")}.`,
+          `Node ${n.id}: the delegation ceiling dropped ${plural(n.droppedAllowedTools!.length, "un-entitled tool")}: ${n.droppedAllowedTools!.join(", ")}.`,
         ]
       : []),
     ...((n.droppedToolServers ?? []).length
       ? [
-          `Node ${n.id}: dropped tool server(s) ${n.droppedToolServers!.join(", ")} — you are not entitled on them.`,
+          `Node ${n.id}: dropped ${plural(n.droppedToolServers!.length, "tool server")}: ${n.droppedToolServers!.join(", ")} — you are not entitled on them.`,
         ]
       : []),
   ]);
