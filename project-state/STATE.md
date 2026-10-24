@@ -5349,6 +5349,11 @@ declared range, verified), the engine closure overrides, and the owner's choice 
 litellm 1.103.7 so filelock ≥4.2.1 fits every declared range (#453 comment 6378601196, superseding comment 6378502293). ADR-0187 has a matching addendum. The index now ends at 0199, with
 194 files and 194 rows.
 
+Owner decision (2026-10-24): ADR-0200 (engineering best-practice guidelines) records the owner's 27 practices, to be
+applied wherever practical rather than as hard gates; secure by default and open source first take precedence, and
+nothing is refactored only to meet them before the 2026-11-03 demo. CLAUDE.md has a matching "Engineering guidelines"
+section. The index now ends at 0200, with 195 files and 195 rows.
+
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
 (b) standing policy for future scaffolds recorded (ADR-0006, no implementation yet — nothing to

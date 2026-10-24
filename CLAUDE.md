@@ -121,6 +121,22 @@ every agent prompt and every review.
    with the specific unmet requirement and re-checked when the ecosystem changes.
 5. **Reviews enforce it.** A hand-written solution to a solved problem is a review finding, the same as a bug.
 
+## Engineering guidelines — best practice wherever practical (owner, 2026-10-24; ADR-0200)
+
+**Apply these wherever practical; they are guidelines, not hard gates.** Secure by default and open source first win
+over them, and nothing is refactored only to meet them before the 2026-11-03 demo. A skipped guideline gets one line
+in the PR body saying why.
+
+- **Structure:** a clean folder structure; business logic separate from UI components; no duplicate or dead code;
+  consistent naming; reusable components in the shared kit; proper state management; documented code.
+- **Robustness:** proper error handling everywhere; environment variables and secrets out of code; scalable APIs
+  (versioned, bounded, paginated).
+- **Front end:** compress images (unless asked not to); lazy-load where possible; cache API responses where safe; minify
+  JS and CSS; avoid unnecessary re-renders; debounce input handlers; paginate large lists; remove unused dependencies;
+  defer non-critical scripts; loading skeletons; compressed API payloads; run a Lighthouse audit on the main screens.
+- **Data:** index the database for real queries; connection pooling; cache expensive computed results; fix N+1 queries;
+  server-side caching where safe. Caching never crosses users, tenants or an authorisation decision.
+
 ## Session bootstrap sequence (do this first, every time, before taking any action)
 
 1. Read this file (you just did).
