@@ -26,7 +26,7 @@ POLL="${3:-120}"
 MIN_AGE="${MIN_AGE:-600}"
 REPO="${REPO:-dhruvmahendrapatel/RegulAIt}"
 for v in RUN_FOR POLL MIN_AGE; do
-  [[ "${!v}" =~ ^[0-9]+$ ]] || { echo "$v must be whole seconds" >&2; exit 2; }
+  [[ "${!v}" =~ ^(0|[1-9][0-9]{0,8})$ ]] || { echo "$v must be whole seconds (0 to 999999999, no leading zero)" >&2; exit 2; }
 done
 RELEASED="$STATE/released.txt"
 LOG="$STATE/loop.log"
@@ -59,19 +59,21 @@ checks_state() {
 }
 
 try_merge() {
-  local pr="$1" want="$2" info head draft state title mergeable now seen checks out
-  info="$(gh api "repos/$REPO/pulls/$pr" --jq '[.head.sha, .draft, .state, .title, (.mergeable|tostring)] | @tsv' 2>/dev/null)" \
+  local pr="$1" want="$2" info head draft state held mergeable now seen checks out
+  # the HOLD test runs in jq on the raw title, so no escaping can hide it
+  info="$(gh api "repos/$REPO/pulls/$pr" \
+    --jq '[.head.sha, (.draft|tostring), .state, ((.title // "HOLD") | test("^[\\s\\p{Z}]*\\[?hold"; "i") | tostring), (.mergeable|tostring)] | @tsv' 2>/dev/null)" \
     || { note "$pr:$want" "skip $pr: PR lookup failed"; return 0; }
-  IFS=$'\t' read -r head draft state title mergeable <<< "$info"
+  IFS=$'\t' read -r head draft state held mergeable <<< "$info"
   [ "$state" = "open" ] || { note "$pr:$want" "skip $pr: state $state"; return 0; }
   if [ "$head" != "$want" ]; then note "$pr:$want" "skip $pr: head ${head:0:10} is not the released ${want:0:10}"; return 0; fi
-  if [[ "${title^^}" =~ ^[[:space:]]*\[?HOLD ]]; then note "$pr:$want" "skip $pr: title still HOLD"; return 0; fi
-  if [ "$draft" = "true" ]; then note "$pr:$want" "skip $pr: still a draft"; return 0; fi
+  if [ "$held" != "false" ]; then note "$pr:$want" "skip $pr: title still HOLD"; return 0; fi
+  if [ "$draft" != "false" ]; then note "$pr:$want" "skip $pr: still a draft"; return 0; fi
   if [ "$mergeable" != "true" ]; then note "$pr:$want" "skip $pr: mergeable=$mergeable"; return 0; fi
   now="$(date -u +%s)"
   seen="${first_seen[$pr:$head]:-}"
   if [ -z "$seen" ]; then first_seen[$pr:$head]="$now"; seen="$now"; fi
-  if [ $(( now - seen )) -lt "$MIN_AGE" ]; then note "$pr:$want" "wait $pr: soaking ${head:0:10}"; return 0; fi
+  if (( now - seen < MIN_AGE )); then note "$pr:$want" "wait $pr: soaking ${head:0:10}"; return 0; fi
   checks="$(checks_state "$head")"
   case "$checks" in
     green) ;;
@@ -91,7 +93,7 @@ log "loop start (runs ${RUN_FOR}s)"
 while [ "$(date -u +%s)" -lt "$end" ]; do
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%$'\r'}"
-    case "$line" in ''|\#*) continue;; esac
+    [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
     read -r pr sha _ <<< "$line"
     if ! [[ "$pr" =~ ^[0-9]+$ && "${sha:-}" =~ ^[0-9a-f]{40}$ ]]; then note "bad:$line" "bad released.txt line: $line"; continue; fi
     try_merge "$pr" "$sha" || log "error while checking $pr"
