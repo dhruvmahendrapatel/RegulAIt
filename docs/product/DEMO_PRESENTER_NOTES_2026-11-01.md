@@ -85,7 +85,8 @@ acknowledge these alerts on LIVE before 11-03.
 Say it unprompted at the Close, in about ten seconds (owner, item 4):
 
 > "To be exact about what you saw: the model provider behind the governed traffic is a mock, the AI usage in our
-> accounts was planted by us, and anything on the prepared copy was a recorded replay. The scans, the workflow, the
-> sign-offs and the gate were the real product."
+> accounts was planted by us, and on the prepared copy the three network scans were recorded replays and the endpoint
+> agent's reports were seeded. The scans on the live accounts, the workflow, the sign-offs and the gate were the real
+> product."
 
 On the LIVE path, drop the last clause about the prepared copy if no beat used it.

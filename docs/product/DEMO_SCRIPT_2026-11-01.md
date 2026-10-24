@@ -74,7 +74,7 @@ right-hand column of the timing table.
 | S4 | Register as use case (intake) | Ada | 3.0 | 12.5 | FALLBACK |
 | G1 | The use-case record and risks | Ada | 1.5 | 14.0 | FALLBACK (S4's use case) |
 | G2 | Independent review | Avery | 2.0 | 16.0 | FALLBACK (S4's use case) |
-| E | Enforce it: a denied call, a queued call, the audit row | Ada | 2.0 | 18.0 | FALLBACK |
+| E | Enforce it: a simulated decision (deny, require approval) and the audit row | Ada | 2.0 | 18.0 | Simulation page; FALLBACK on 11-01, LIVE on 11-03 |
 | G3 | Deploy gate (terminal on the dev instance host) | Ada | 2.0 | 20.0 | DENY: LIVE read-only; acknowledge then ALLOW: FALLBACK |
 | G4 | Trust dashboard | Ada | 1.0 | 21.0 | LIVE read-only |
 | G5 | Alerts and remediation | Ada, Avery | 2.0 | 23.0 | FALLBACK |
@@ -95,7 +95,7 @@ for three profile switches and one terminal: plan for 28-30 minutes and use the 
 changes state runs on the **FALLBACK** laptop stack: G3's acknowledgements then ALLOW, G5 resolve, S3 **Start and
 link** (on the second finding, FS-7), S4 register (and G1/G2, which work on S4's new use case), and E. LIVE shows
 only the read-only beats and G3's DENY, so it stays as prepared for 11-03. On 11-03 every beat runs on LIVE as
-written, except E (see E: it stays on FALLBACK, or becomes the Execution control page read-only). The same marks are
+written, E included: E runs on the Simulation page on both dates, on LIVE and FALLBACK alike. The same marks are
 in `DEMO_RUNBOOK.md` §7.3.
 
 **Cutting order when behind:** G7, then **E. Enforce it** (second, owner 2026-10-24), then G4's drill-down, then S1's
@@ -494,7 +494,8 @@ the day.
   chip in the header, and **Conditions of approval** with **Mark met** on the **Overview** tab.
 
 ### E. Enforce it — Ada — 2 minutes (added 2026-10-24)
-**11-01 run-through:** FALLBACK. **11-03:** see "On 11-03" below.
+**11-01 run-through:** FALLBACK. **11-03:** LIVE. The beat is the same on both stacks (owner, 2026-10-24, #453
+comment 6387779914).
 
 Owner decision of 2026-10-24 (#453 comment 6385378784, item 2; full-scan FS-8): the script told enforcement but never
 showed it. This beat shows one governed call denied with its rule named, one that needs a named approver, and the
@@ -510,7 +511,7 @@ header (`DEMO_RUNBOOK.md` §3(b)); nothing packages that for a presenter. What e
 preview** page: it runs the live policy kernel for one call (user, server, tool) and renders the decision, the rule
 it matched and every rule it walked, executing nothing and queuing nothing. It records each question as an audit row
 marked advisory (not counted against rate limits). So the beat shows the decision the gateway would enforce on
-Dana's next call, and says so; it does not show a queued item in Avery's Inbox. (A packaged real call is proposed as
+Dana's next call, and calls it a *simulated decision*; it does not show a queued item in Avery's Inbox. (A packaged real call is proposed as
 a demo-prep addition in the PR that added this beat; it is not built.)
 
 - **URL:** `/ui/admin/simulation` (sidebar: **Simulation**). Header **Simulation / access preview**: *"Would this call
@@ -525,19 +526,16 @@ a demo-prep addition in the PR that added this beat; it is not built.)
   3. Optional, if ahead: `read_file` → **allow**.
   4. `/ui/admin/audit` (**Audit log**): the newest rows are the two decisions just asked for, each with its effect, rule
      id and reason. Say they are the preview's own advisory rows.
-- **Say:** "This is the gateway's policy kernel answering for Dana's next call. No grant, no call: this one is denied,
-  and the refusal names the rule, her own revocation beating her role. The write is not refused; it waits for a named
-  person, Avery, and an approval is bound to the exact arguments approved. This page asks the question without running
-  anything, and even the question lands in the ledger."
-- **Never say** that a call was made or queued on this page: it is a preview of the enforced decision.
-- **On 11-03** (owner): the demo MCP server does not run on LIVE as prepared (it starts only with the demo switch,
-  `apps/gateway/docker-start.sh`, which never goes on the live box). Unless the T-24h check found it running on LIVE,
-  show **Execution control** (`/ui/admin/execution`) on LIVE **read-only** instead, for about a minute: *"The emergency
-  stop — deployment-wide, per agent, or per tool. Nothing here trips on its own."*, the **Right now** card, **Stop one
-  agent or one tool**, **Halted agents** and **Halted tools**. Press nothing: every position needs a reason and is
-  audited. Say: "Per tool, per agent or the whole deployment, each by a named person with a reason, and nothing trips
-  it automatically." The spare minute is slack for G3.
-- **Data:** on FALLBACK, `seed` gives Dana the role grant, the `search_code` revocation and the `write_file` approval
+- **Say:** "This is a simulated decision: the gateway's real policy engine evaluating a call Dana proposes. No grant,
+  no call: the decision is deny, and it names the rule, her own revocation beating her role. For the write the
+  decision is not deny but require approval from a named person, Avery, and an approval is bound to the exact
+  arguments approved. This page asks the question without running anything, and even the question lands in the
+  ledger."
+- **Never say** that the call "was blocked" or "was queued", or that a call was made: on screen and aloud it is a
+  *simulated decision*, the real policy engine evaluating a proposed call.
+- **On 11-03** (owner, 2026-10-24): the same beat on LIVE. `POST /v1/evaluate` reads the policy registry and never
+  contacts the MCP server, so it does not depend on the demo MCP server running there.
+- **Data:** on both stacks the governance `seed` gives Dana the role grant, the `search_code` revocation and the `write_file` approval
   rule naming Avery; `demo:check` does not assert them (pending execution at the first rehearsal).
 
 ### G3. Deploy gate — 2 minutes (10-05 beat 2C; 1.5 until 2026-10-24, FS-49)
@@ -642,8 +640,9 @@ a demo-prep addition in the PR that added this beat; it is not built.)
   filtered to one object (`?objectType=…&objectId=…`, the G1 audit-tab link), and both downloads follow the filter;
   which filter puts the discovery rows in the bundle is **to confirm at rehearsal**.
 - **Say (added 2026-10-24, scan G8 sentence):** "Retention is a floor composed from the compliance profiles, and
-  pruning is off by default. The chain is tamper-evident, with external anchors: its head is anchored to write-once
-  storage and graded from the medium itself." Never say "immutable" (FS-34).
+  pruning is off by default. The chain is tamper-evident, with external anchors, graded from the medium itself." Add
+  "its head is anchored to write-once storage" only if the T-7d `GET /v1/audit/verify` check on LIVE found the anchor
+  tamper-resistant; otherwise use the runbook §2 line below. Never say "immutable" (FS-34).
 - **On LIVE:** know what **Anchor timestamps** reads before presenting (the T-7d check of `GET /v1/audit/verify`,
   `DEMO_RUNBOOK.md` §7.3). If the anchor is not tamper-resistant there and the panel is opened, say the runbook §2
   line: the install has no write-once medium, and rather than let us claim one, the product grades itself down.
@@ -652,8 +651,9 @@ a demo-prep addition in the PR that added this beat; it is not built.)
 - **Say:** "We found it, we brought it in with a second person's sign-off, and we governed it, and every step is in one
   signed trail. Discovery, mapping and monitoring are automated; every change was approved by a person."
 - **Then, unprompted (Q13, owner 2026-10-24):** the mock-vs-live sentence from `DEMO_PRESENTER_NOTES_2026-11-01.md`:
-  the model provider is a mock, the usage in our accounts was planted, anything on the prepared copy was a recorded
-  replay, and the scans, workflow, sign-offs and gate were the real product.
+  the model provider is a mock, the usage in our accounts was planted, on the prepared copy the three network scans
+  were recorded replays and the endpoint agent's reports were seeded, and the scans on the live accounts, the
+  workflow, the sign-offs and the gate were the real product.
 
 ---
 
@@ -722,10 +722,10 @@ UI: `apps/web/src/views/admin/governance/ContentTrustPage.tsx`.
 - **Mock:** the model provider for governed traffic (keyless mock agents); the governed traffic itself is generated
   by `demo:traffic` through the real dispatch path.
 - **Live product code on both paths:** every page and API shown, the remediation workflow and its sign-off, the
-  intake, the monitor, the deploy gate and the approvals. **E. Enforce it** shows the live policy kernel's decision
-  for a call it does not execute (the Simulation / access preview page); say so.
+  intake, the monitor, the deploy gate and the approvals. **E. Enforce it** shows a simulated decision: the live
+  policy kernel evaluating a proposed call it does not execute (the Simulation / access preview page); say so.
 - **Said unprompted at the Close** (Q13): the mock model provider, the planted usage and, if the prepared copy was
-  used, its recorded replays.
+  used, that its three network scans were recorded replays and its endpoint agent's reports were seeded.
 - **Recorded:** the screen recording of a real scan is a recording. If it is shown, say so.
 - **Never claim** automatic remediation. Never claim the inventory is complete: it reduces shadow AI, it does not
   prove its absence.

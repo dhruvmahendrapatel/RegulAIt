@@ -73,8 +73,9 @@ defaults; respond with a human in the loop; the deploy gate; regulatory intellig
 
 ### Enforcement, shown (beat E, added 2026-10-24; FS-8)
 - No grant, no call: the kernel denies by default and the refusal names its rule; a write can wait for a named
-  approver instead, and the approval is bound to the exact arguments approved. On screen this is the Simulation page:
-  the live kernel's decision for a call it does not execute. Say that; never say a call was made or queued there.
+  approver instead, and the approval is bound to the exact arguments approved. On screen this is the Simulation page,
+  on both dates: a *simulated decision*, the real policy engine evaluating a proposed call it does not execute. Say
+  that; never say the call "was blocked" or "was queued".
 - The cost line for G5: the off-stack alert exists because cost routing served approved traffic from an agent the
   approval never covered; cost and governance read the same ledger (ADR-0164).
 - The audit line for G8: a **tamper-evident chain with external anchors**, graded from the medium. Never "immutable"
@@ -98,12 +99,13 @@ defaults; respond with a human in the loop; the deploy gate; regulatory intellig
    audience." (Federation; FS-50)
 6. "The plan is not the change. The change needs someone else's signature." (Remediation workflow)
 7. "The finding filled in only what the evidence established." (Register as use case)
-8. "No grant, no call; the refusal names the rule and lands in the ledger." (E. Enforce it)
+8. "A simulated decision: no grant, no call; the decision names the rule and lands in the ledger." (E. Enforce it)
 9. "Cost and governance read the same ledger." (G5)
 10. "A tamper-evident chain with external anchors, graded from the medium." (G8)
 11. **At the Close, unprompted** (Q13, owner 2026-10-24): "The model provider behind the governed traffic is a mock,
-    the AI usage in our accounts was planted by us, and anything on the prepared copy was a recorded replay. The
-    scans, the workflow, the sign-offs and the gate were the real product." (`DEMO_PRESENTER_NOTES_2026-11-01.md`)
+    the AI usage in our accounts was planted by us, and on the prepared copy the three network scans were recorded
+    replays and the endpoint agent's reports were seeded. The scans on the live accounts, the workflow, the sign-offs
+    and the gate were the real product." (`DEMO_PRESENTER_NOTES_2026-11-01.md`)
 12. The 10-05 lines 1-7 for the governance beats.
 
 ## Things never to say

@@ -207,8 +207,11 @@ edited; where these supersede them, it is said here.
    scans and the real device's inventory import find. Docs only; no code changed.
 3. **An "Enforce it" beat (owner, 2026-10-24, FS-8, "Add it").** Two minutes on the fallback between G2 and G3: one
    governed call denied with its rule named, one that needs a named approver, and the audit row. It is second in the
-   cutting order. On 11-03, if the demo MCP server is not on the live instance, the Execution control page is shown
-   read-only instead.
+   cutting order. Superseded for 11-03 by decision 4.
+4. **"Enforce it" is a simulated decision, on both dates (owner, 2026-10-24, #453 comment 6387779914).** The beat
+   runs on the Simulation page on 11-01 and 11-03, on LIVE and FALLBACK alike. On screen and in the talk track it is
+   a *simulated decision*: the real policy engine evaluating a proposed call; never say the call "was blocked" or
+   "was queued". The 11-03 Execution control read-only fallback and the MCP-server check are dropped.
 
 ### As built (2026-10-24)
 
@@ -221,6 +224,5 @@ edited; where these supersede them, it is said here.
   the live kernel for Dana's `search_code` (deny, her per-user revocation named) and `write_file` (require approval,
   the approver named), executes and queues nothing, and records each question as an advisory audit row. The script
   says so on stage. A packaged real call for the beat is proposed in that PR as a demo-prep addition and is not built.
-- **11-03:** the demo MCP server starts only with the demo switch (`apps/gateway/docker-start.sh`), which never goes
-  on the live box, so E on 11-03 is planned as the Execution control page read-only unless the T-24h check finds the
-  server running there.
+- **11-03:** `POST /v1/evaluate` reads the policy registry and never contacts the MCP server, so the Simulation beat
+  works on LIVE as prepared whether or not the demo MCP server runs there (decision 4).
