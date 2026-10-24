@@ -28,8 +28,9 @@ supersedes the "Open" and "Owner actions" lines of the 02:55 paragraph below; ev
   #556 (`9154bc7`, U4), #554 (`0e89cb6`, U2), #550 (`2117706`, lane A, demo docs) and #557 (`88cbcd3`, the master merge
   loop under `scripts/master/` plus the `all JS` ceiling at 1,040 kB). All audited; dhruv/active is at `88cbcd3`.
 - **Owner decisions (#453):** c6385378784 (FS-1 LIVE re-script, the FS-8 beat, all designer batches, the remaining scan
-  recommendations), c6387779914 (the FS-8 beat is a simulated decision on the Simulation page on both dates) and
-  c6388659678 (`all JS` 1,040 kB).
+  recommendations), c6387779914 (the FS-8 beat is a simulated decision on the Simulation page on both dates),
+  c6388659678 (`all JS` 1,040 kB), c6389193296 and c6389271693 (ADR-0200 guidelines and security checklist) and
+  c6389334200 (the `internal/` folder, ADR-0201).
 - **Last migration on main: 0211** (unchanged). The ADR index has one row per file and is now checked in CI
   (`scripts/adr-index.test.mjs`); ADR-0176, ADR-0196 and ADR-0197 gained addenda.
 - **Open:** #555 (lane U1, Shadow AI) is in its last recheck at `e9337bc`. Deferred until after the demo: the
@@ -5349,7 +5350,7 @@ declared range, verified), the engine closure overrides, and the owner's choice 
 litellm 1.103.7 so filelock ≥4.2.1 fits every declared range (#453 comment 6378601196, superseding comment 6378502293). ADR-0187 has a matching addendum. The index now ends at 0199, with
 194 files and 194 rows.
 
-Owner decision (2026-10-24): ADR-0200 (engineering best-practice guidelines) records the owner's 27 practices, to be
+Owner decision (2026-10-24, #453 comments 6389193296 and 6389271693): ADR-0200 (engineering best-practice guidelines) records the owner's 27 practices, to be
 applied wherever practical rather than as hard gates; secure by default and open source first take precedence, and
 nothing is refactored only to meet them before the 2026-11-03 demo. CLAUDE.md has a matching "Engineering guidelines"
 section, and a 19-item security checklist (owner's second list) whose gaps are blocking bugs under ADR-0180, with a
