@@ -173,7 +173,10 @@ export function EndpointAgentCard({ sources }: { sources: readonly DiscoverySour
                   </div>
                 )}
                 <Table<TokenView>
-                  rows={tokens.data?.tokens ?? []}
+                  rows={tokens.data?.tokens}
+                  loading={tokens.isPending}
+                  error={tokens.error}
+                  onRetry={() => void tokens.refetch()}
                   rowKey={(t) => t.id}
                   empty={<EmptyState title="No enrolment token" body="Issue one above to enrol devices." />}
                   columns={[
@@ -194,13 +197,18 @@ export function EndpointAgentCard({ sources }: { sources: readonly DiscoverySour
                     },
                   ]}
                 />
-                <p className={v.faint}>
-                  {devices.data
-                    ? `${plural(devices.data.summary.devices, "device")}, ${devices.data.summary.revoked} revoked, ${plural(devices.data.summary.softwareKeys, "agent identity", "agent identities")} with a software key (no key hardware on the device).`
-                    : "Loading devices…"}
-                </p>
+                {devices.data ? (
+                  <p className={v.faint}>
+                    {`${plural(devices.data.summary.devices, "device")}, ${devices.data.summary.revoked} revoked, ${plural(devices.data.summary.softwareKeys, "agent identity", "agent identities")} with a software key (no key hardware on the device).`}
+                  </p>
+                ) : devices.isPending ? (
+                  <p className={v.faint} role="status">Loading devices…</p>
+                ) : null}
                 <Table<DeviceView>
-                  rows={devices.data?.devices ?? []}
+                  rows={devices.data?.devices}
+                  loading={devices.isPending}
+                  error={devices.error}
+                  onRetry={() => void devices.refetch()}
                   rowKey={(d) => d.id}
                   empty={<EmptyState title="No device has enrolled" body="Devices appear here once their install step redeems an enrolment token." />}
                   columns={[

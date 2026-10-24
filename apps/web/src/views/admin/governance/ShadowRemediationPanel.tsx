@@ -18,7 +18,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { WorkflowListResponse } from "../../../api/types";
-import { ago } from "../../../api/format";
+import { ago, humanize, providerLabel } from "../../../api/format";
 import { Badge, Button, ConfirmModal, Field, InfoButton, Input, Select, SeverityBadge } from "../../../ui/kit";
 import { DrawerActions } from "../../../ui/DetailDrawer";
 import { QueryGate, optionEls, projectOpts, useAction, useProjects } from "../adminKit";
@@ -140,7 +140,7 @@ export function PlanBody(props: { plan: RemediationPlan; onLinked: () => void })
     <div className={v.stack}>
       <div className={v.row}>
         <strong>{p.subject}</strong>
-        <Badge tone="neutral">{p.provider}</Badge>
+        <Badge tone="neutral">{providerLabel(p.provider)}</Badge>
         <SeverityBadge severity={p.severity} />
         {p.replacementAgent ? (
           <Badge tone="ok">governed replacement: {p.replacementAgent.name}</Badge>
@@ -282,7 +282,7 @@ export function PlanBody(props: { plan: RemediationPlan; onLinked: () => void })
             {optionEls(
               linkableInstances(p.findingId, instances.data?.instances ?? []).map((i) => ({
                 v: i.id,
-                l: `${i.change?.description ?? i.id.slice(0, 8)} · ${i.status} · ${ago(i.createdAt)}`,
+                l: `${i.change?.description ?? i.id.slice(0, 8)} · ${humanize(i.status)} · ${ago(i.createdAt)}`,
               })),
               "— choose a workflow —",
             )}

@@ -5,6 +5,7 @@
  */
 import { useState } from "react";
 import { api, ApiError } from "../../../api/client";
+import { plural } from "../../../api/format";
 import { Badge, Button, Card, Field, Select, Table, Textarea } from "../../../ui/kit";
 import { useAction } from "../adminKit";
 import v from "../../views.module.css";
@@ -82,7 +83,7 @@ export function EndpointImportCard({ sources, onDone }: { sources: readonly Disc
         const out = await api.post<ImportView>(`/v1/discovery/sources/${chosen.id}/endpoint-imports`, body);
         setResult(out);
         if (mode === "apply") await onDone();
-        return mode === "apply" ? `Imported: ${out.findingsCreated ?? 0} finding(s) created, ${out.findingsUpdated ?? 0} updated` : "Dry run complete";
+        return mode === "apply" ? `Imported: ${plural(out.findingsCreated ?? 0, "finding")} created, ${(out.findingsUpdated ?? 0).toLocaleString()} updated` : "Dry run complete";
       } catch (e) {
         if (e instanceof ApiError && e.payload.error === "rows_refused") {
           setRefused({ total: Number(e.payload.refusalsTotal ?? 0), rows: (e.payload.refusals as ImportView["refusals"]) ?? [] });
@@ -157,7 +158,7 @@ export function EndpointImportCard({ sources, onDone }: { sources: readonly Disc
         )}
         {refused && (
           <div data-testid="endpoint-import-refusals">
-            <p>{`${refused.total} row(s) were refused, so nothing was imported.`}</p>
+            <p>{`${plural(refused.total, "row was", "rows were")} refused, so nothing was imported.`}</p>
             <ul>
               {refused.rows.slice(0, 20).map((r, i) => (
                 <li key={i}>{`Line ${r.line}${r.item !== undefined ? ` item ${r.item}` : ""}: ${r.reason}`}</li>
@@ -169,8 +170,8 @@ export function EndpointImportCard({ sources, onDone }: { sources: readonly Disc
           <div className={v.stack} data-testid="endpoint-import-result">
             <p>
               <Badge tone={result.mode === "apply" ? "ok" : "neutral"}>{result.mode === "apply" ? "imported" : "dry run"}</Badge>{" "}
-              {`${result.summary.rowsParsed} row(s) read, ${result.summary.observations} observation(s) on ${result.summary.devices} device(s), ` +
-                `${result.summary.sightingsMatched} matched sighting(s), ${result.summary.observationsUnmatched} unmatched, ${result.summary.refused} refused, ${result.summary.removedRows} removal(s) counted.`}
+              {`${plural(result.summary.rowsParsed, "row")} read, ${plural(result.summary.observations, "observation")} on ${plural(result.summary.devices, "device")}, ` +
+                `${plural(result.summary.sightingsMatched, "matched sighting")}, ${result.summary.observationsUnmatched.toLocaleString()} unmatched, ${result.summary.refused.toLocaleString()} refused, ${plural(result.summary.removedRows, "removal")} counted.`}
             </p>
             <Table<ImportView["matchedArtifacts"][number]>
               rows={result.matchedArtifacts}
