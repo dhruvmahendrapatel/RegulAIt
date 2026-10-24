@@ -34,7 +34,8 @@ supersedes the "Open" and "Owner actions" lines of the 02:55 paragraph below; ev
 - **Last migration on main: 0211** (unchanged). The ADR index has one row per file and is now checked in CI
   (`scripts/adr-index.test.mjs`); ADR-0176, ADR-0196 and ADR-0197 gained addenda.
 - **Open:** #555 (lane U1, Shadow AI) is in its last recheck at `e9337bc`. Deferred until after the demo: the
-  Dependabot PRs #515–#543 (none released), #541, #518 and the lane follow-ups listed in the session record.
+  Dependabot PRs #515–#543 (none released), #541, #518, the lane follow-ups listed in the session record, and
+  Postgres row-level security (owner, 2026-10-24, #453 comment 6390166382; [PENDING](../product/PENDING.md) S7).
 - **Owner actions:** FS-21 (required checks on main), FS-26 (supply SUITE_RULES.md), rebuild both demo hosts
   (`git pull`, `docker compose pull`, `docker compose up -d --build`, `demo:check`) and set laptop Node 22.23.4, the
   10-29 freeze-SHA dispatches, and no `terraform apply` to the dev host before 11-03.

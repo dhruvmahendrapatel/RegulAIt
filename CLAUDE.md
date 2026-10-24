@@ -159,6 +159,9 @@ logs; vulnerable dependencies patched, never allow-listed.
    the file is that no logged mistake is ever made twice.
 4. Skim [internal/decisions/README.md](internal/decisions/README.md) for any ADR not yet reflected in
    `STATE.md`'s decisions table — if you find drift, reconcile it before doing anything else.
+   Keep the three reference maps at hand rather than re-deriving them: [internal/ARCHITECTURE.md](internal/ARCHITECTURE.md)
+   (the system as built), [internal/DESIGN_GUIDELINES.md](internal/DESIGN_GUIDELINES.md) (UI rules, for any UI work) and
+   [internal/PRODUCT_GOALS.md](internal/PRODUCT_GOALS.md) (pillars, goals and non-goals). Update them when a change makes them wrong.
 5. **If any other session may be working this repo** (a second Claude Code session, cloud or
    local, or a human at a checkout), read
    [internal/process/CONTRIBUTING_PARALLEL_SESSIONS.md](internal/process/CONTRIBUTING_PARALLEL_SESSIONS.md) and
