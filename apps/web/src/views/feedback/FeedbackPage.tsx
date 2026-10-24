@@ -13,7 +13,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../api/client";
 import { PageHeader } from "../../shell/AppShell";
 import { useSession } from "../../session/SessionContext";
-import { Card, EmptyState, Field, Select, Tabs } from "../../ui/kit";
+import { Card, EmptyState, Field, Select, Tabs, tabIds } from "../../ui/kit";
 import { FeedbackDetail, FeedbackList, FeedbackSettings, type FeedbackItem } from "./feedbackKit";
 import v from "../views.module.css";
 
@@ -31,6 +31,7 @@ export default function FeedbackPage() {
   });
   const items = q.data?.items;
   const overdue = (items ?? []).filter((i) => i.sla.chip === "breached").length;
+  const panel = tabIds("feedback", scope);
 
   return (
     <>
@@ -58,6 +59,7 @@ export default function FeedbackPage() {
                 ]}
                 active={scope}
                 onChange={(id) => setScope(id as Scope)}
+                idPrefix="feedback"
               />
               <span className={v.grow} />
               <Field label="Show">
@@ -68,28 +70,30 @@ export default function FeedbackPage() {
                 </Select>
               </Field>
             </div>
-            {scope === "queue" && overdue > 0 && (
-              <p role="status" className={v.hint}>
-                {overdue === 1 ? "One item is" : `${overdue} items are`} past a response time.
-              </p>
-            )}
-            <FeedbackList
-              rows={items}
-              loading={q.isLoading}
-              error={q.error}
-              onRetry={() => void q.refetch()}
-              onOpen={scope === "queue" ? (r) => setOpenId(r.id) : undefined}
-              empty={
-                <EmptyState
-                  title={scope === "queue" ? "Nothing routed to you" : "Nothing sent yet"}
-                  body={
-                    scope === "queue"
-                      ? "Problem reports and appeals about the use cases you own appear here."
-                      : "Reports and appeals you send from a use case's feedback form appear here, with their status."
-                  }
-                />
-              }
-            />
+            <div className={v.stack} role="tabpanel" id={panel.panel} aria-labelledby={panel.tab}>
+              {scope === "queue" && overdue > 0 && (
+                <p role="status" className={v.hint}>
+                  {overdue === 1 ? "One item is" : `${overdue} items are`} past a response time.
+                </p>
+              )}
+              <FeedbackList
+                rows={items}
+                loading={q.isLoading}
+                error={q.error}
+                onRetry={() => void q.refetch()}
+                onOpen={scope === "queue" ? (r) => setOpenId(r.id) : undefined}
+                empty={
+                  <EmptyState
+                    title={scope === "queue" ? "Nothing routed to you" : "Nothing sent yet"}
+                    body={
+                      scope === "queue"
+                        ? "Problem reports and appeals about the use cases you own appear here."
+                        : "Reports and appeals you send from a use case's feedback form appear here, with their status."
+                    }
+                  />
+                }
+              />
+            </div>
           </div>
         </Card>
         {isAdmin && <FeedbackSettings />}
