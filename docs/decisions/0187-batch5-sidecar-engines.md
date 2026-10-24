@@ -3039,6 +3039,7 @@ closure still had body-parser 2.3.0, zod 4.6.5 and undici 6.29.0/7.30.0/8.11.2, 
 filelock 3.32.7 (CVE-2026-112940, fixed only in 4.2.1+). PR #545 adds npm `overrides` for promptfoo (undici one per
 major). For garak, a filelock 4.2.4 pin past litellm 1.106.1's declared `filelock<4.0` failed the image's `pip check`.
 By owner decision 2026-10-24 (#453 comment 6378601196), garak's closure is instead re-resolved on litellm 1.103.7 (no
-filelock cap), which reverses this ADR's 2026-10-21 choice of the newest litellm and moves huggingface-hub back to 2.x.
+filelock cap), which reverses this ADR's 2026-10-21 choice of the newest litellm. Only litellm and filelock move;
+huggingface-hub stays at 1.33.0 and the HF pre-seed was re-verified.
 The full record and follow-ups are in [ADR-0199](0199-emergency-patching-2026-10-23.md). The other decisions above are
 unchanged.

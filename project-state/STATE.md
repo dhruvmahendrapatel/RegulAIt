@@ -31,17 +31,18 @@ else there stands.
   in every image). All audited; dhruv/active is at `c4670a7f`.
 - **Last migration on main: 0211** (unchanged). The ADR index ends at **0199** (194 files, 194 rows); ADR-0187 gained
   a 2026-10-24 addendum.
-- **Open:** #545 (held, in review, head `824289d4`): promptfoo's own npm closure (body-parser, zod, undici overrides).
-  garak's filelock fix is a separate re-resolve on litellm 1.103.7 (owner decision 2026-10-24, #453 comment 6378601196),
-  being built. A filelock 4.2.4 pin failed garak's `pip check` (M-101) and was reverted. Lock PR #544 was closed
-  unmerged because the image gate failed both images (M-097). After both fixes merge, ONE lock PR from the last publish
-  (promptfoo 7, modelscan 7, garak 8). #541 (spikes-only Dependabot) is in review. #516, #517 and #520 wait until
-  after the new lock; #543 and #521 are red.
+- **Open:** #545 (held, head `8d89fbc5`, combined recheck in progress) carries both engine closure fixes: promptfoo's
+  npm overrides (body-parser, zod, undici) and garak's re-resolve on litellm 1.103.7 from #548 (owner decision 2026-10-24,
+  #453 comment 6378601196; only litellm and filelock move, `pip check` clean, pre-seed 9/9, OSV clean). The
+  `security.yml` image scans run on every PR, so every PR is red on the promptfoo and garak scans until #545 merges.
+  A first filelock 4.2.4 pin failed garak's `pip check` (M-101). Lock PR #544 was closed unmerged (M-097). After #545,
+  ONE lock PR from its publish (promptfoo 7, modelscan 7, garak 8). #541 (spikes Dependabot) needs its licence
+  inventories regenerated, after the demo. #516, #517 and #520 wait until after the new lock; #543 and #521 are red.
 - **Owner actions:** after the new lock merges, rebuild both demo hosts (`git pull`, `docker compose pull`,
-  `docker compose up -d --build`, `demo:check`) and set laptop Node to 22.23.4; delete the stale lock branches
-  `engine-images-lock/{9ff1c5bf7fc5,5b636d57738f,115f8dc954cc,7be894bd6708,33a27694804d,c4670a7fa7bf}`; plus the
-  10-23 items still open (power schedule off before 10-25, dev-host override file, freeze branch rule, 10-29
-  freeze-SHA dispatches).
+  `docker compose up -d --build`, `demo:check`) and set laptop Node to 22.23.4. The stale lock branches were deleted by
+  the owner (verified 2026-10-24 02:15). Still open from 10-23: the power schedule off before 10-25, the dev-host
+  override file, the freeze branch rule and the 10-29 freeze-SHA dispatches. A full feedback scan of the product and
+  the demo plan is running (#547).
 - **Process:** mistakes M-097..M-101 (engine closures missed by workspace fixes, shortened digests, a check claimed
   before it ran, a re-run during a live run, an owner option offered on an unverified build premise). Post-demo follow-ups are listed in ADR-0199.
 

@@ -2,13 +2,14 @@
 
 - **Status**: Accepted
 - **Date**: 2026-10-24
-- **Decision owner**: owner, 2026-10-23 ("Let's patch asap before the demo") and 2026-10-24 (the garak fix, #453
+- **Decision owner**: owner, 2026-10-23 ("Let's patch asap before the demo", said to the master session in chat; not
+  posted on GitHub) and 2026-10-24 (the garak fix, recorded by the master on #453
   comment 6378601196, which supersedes comment 6378502293); the master took the rest under ADR-0180 (secure by default)
   and ADR-0176 (open source first)
 
 ## Context
-Between 2026-10-21 and 2026-10-24, five weeks before the code freeze (2026-10-29) and ten days before the external demo
-(2026-11-03), several upstream security releases landed:
+Between 2026-10-21 and 2026-10-24, less than a week before the code freeze (2026-10-29) and about ten days before the
+external demo (2026-11-03), several upstream security releases landed:
 
 - **Node.js 2026-10-21 security release.** Seven of its ten CVEs affect 22.x, three of them high, including
   CVE-2026-111497 (a Brotli out-of-bounds write) and two TLS bypasses (CVE-2026-106069 high, CVE-2026-106072 medium).
@@ -48,16 +49,19 @@ All 13 `FROM` lines in 7 Dockerfiles move to `node:22-trixie-slim@sha256:8eb619e
 - promptfoo: npm `overrides` in `engines/promptfoo/package.json` (as the existing `basic-ftp` entry): body-parser
   2.4.0, zod 4.6.6, and undici per major (`undici@6` 6.29.1, `undici@7` 7.30.1, `undici@8` 8.12.2), so each consumer
   stays inside its declared range.
-- garak (owner decision 2026-10-24, #453 comment 6378601196): **"litellm 1.103.7 re-resolve"**. garak's closure is
-  re-resolved with litellm 1.103.7 (released 2026-10-21, no known advisories; garak 0.17.1 needs `litellm>=1.84.0`),
-  the line that declares no filelock cap, so the hub client moves to 2.x and filelock to ≥4.2.1. Every declared range
-  is honoured and the image's `pip check` guard stays whole. This reverses the 2026-10-21 choice (ADR-0187) of the
-  newest litellm. litellm 1.107.0 is never taken (the backdoored release). Built in its own PR after #545.
-- The first answer (comment 6378502293, "pin filelock 4.2.4" past litellm 1.106.1's `filelock<4.0`) is superseded.
+- garak: the owner chose, in the master session, the option recorded by the master on #453 (comment 6378601196) as
+  "**Answer: litellm 1.103.7 re-resolve (recommended option).**" garak's closure is re-resolved with litellm 1.103.7
+  (released 2026-10-21, no known advisories; garak 0.17.1 needs `litellm>=1.84.0`), the line that declares no filelock
+  cap. Only litellm (1.106.1 → 1.103.7) and filelock (3.32.7 → 4.2.4) move; huggingface-hub stays at 1.33.0, and the
+  HF pre-seed verified offline (9 of 9 assets). Every declared range is honoured and the image's `pip check` guard
+  stays whole. This reverses the 2026-10-21 choice (ADR-0187) of the newest litellm. litellm 1.107.0 is never taken
+  (the backdoored release). Built in #548 and shipped through #545 (merge commit `8d89fbc5`).
+- The first answer, recorded by the master on #453 (comment 6378502293) as "**Answer: pin filelock 4.2.4 (recommended
+  option).**", pinned filelock past litellm 1.106.1's `filelock<4.0`. It is superseded.
   The master offered it on the premise that the `--no-deps` install would not enforce the cap. The Dockerfile's
-  `pip check` does enforce it, and the build failed on #545 (M-101). The commit was reverted on #545, which now carries
-  only the promptfoo fix. The alternatives offered with the revised question were a narrow `pip check` exception and a
-  time-boxed allow-list entry.
+  `pip check` does enforce it, and the build failed on #545 (M-101). The commit was reverted on #545 (`824289d4`). The other
+  options the master presented with the revised question (in the session, not on #453) were a narrow `pip check`
+  exception and a time-boxed allow-list entry.
 
 ### 5. One engine lock record after the last image-input change
 The lock PR from the `c4670a7f` publish (#544) was closed unmerged, because its promptfoo and garak images failed the
