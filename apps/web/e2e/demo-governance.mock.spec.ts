@@ -1,3 +1,4 @@
+import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
@@ -205,7 +206,7 @@ test("enterprise governance demo surfaces render and complete their core actions
   await expect(page.getByText("Declared purpose")).toBeVisible();
   await expect(page.getByText(/Credit support/)).toBeVisible();
   await page.getByRole("tab", { name: "Dependencies" }).click();
-  await expect(page.getByRole("img", { name: /AI dependency/ })).toBeVisible();
+  await expect(page.getByRole("group", { name: /AI dependency/ })).toBeVisible();
   await expect(page.getByText("Unattached risks", { exact: true })).toBeVisible();
   await expect(page.getByText(graph.notes.unattached)).toBeVisible();
   await page.getByRole("tab", { name: "Approvals" }).click();
@@ -231,7 +232,7 @@ test("enterprise governance demo surfaces render and complete their core actions
   await expect(page.getByText("Reassess Acme Model Services")).toBeVisible();
   await page.getByLabel("Independent approver").selectOption("reviewer");
   await page.getByRole("button", { name: "Propose…" }).click();
-  await expect(page.getByText("pending approval")).toBeVisible();
+  await expect(page.getByTestId("alert-detail").getByText("Waiting for approval", { exact: true })).toBeVisible();
   // the review shot must not catch the action toasts: wait for them to leave
   // (they auto-dismiss after 3.8s) rather than a fixed 4s
   await page.waitForFunction(
@@ -242,7 +243,7 @@ test("enterprise governance demo surfaces render and complete their core actions
   await shotBoth(page, "06-governance-alerts");
 
   await page.goto("/ui/admin/governance/graph");
-  await expect(page.getByRole("img", { name: /AI dependency/ })).toBeVisible();
+  await expect(page.getByRole("group", { name: /AI dependency/ })).toBeVisible();
   await shotBoth(page, "07-dependency-graph");
 
   await page.goto("/ui/admin/governance/regulatory");
@@ -595,4 +596,57 @@ test("each heatmap names every cell's count and zone in its accessible name (L2)
   await expect(inherent).toHaveAttribute("aria-label", /low likelihood, low impact: 0 \(low zone\)/);
   const residual = page.getByRole("img", { name: /^Residual risk matrix by likelihood and impact\./ });
   await expect(residual).toHaveAttribute("aria-label", /low likelihood, low impact: 3 \(low zone\)/);
+});
+
+async function axeBoth(page: Page, label: string) {
+  for (const theme of ["light", "dark"] as const) {
+    await page.evaluate((next) => { document.documentElement.dataset.theme = next; localStorage.setItem("regulait.theme", next); }, theme);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    await page.waitForTimeout(300); // let the theme's colour transitions finish before contrast is measured
+    const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"]).analyze();
+    const summary = results.violations.map((v) => `${v.id} (${v.impact}) — ${v.nodes.slice(0, 3).map((n) => n.target.join(" ")).join(", ")}`);
+    expect(summary, `axe on "${label}" (${theme})`).toEqual([]);
+  }
+}
+
+test("FS-5 and D4: the populated trust dashboard passes axe, labels are sentence case and the scope is spelt the UI's way", async ({ page }) => {
+  await page.goto("/ui/admin/governance/trust");
+  const inherent = page.getByRole("img", { name: /^Inherent risk matrix by likelihood and impact\./ });
+  await expect(inherent.getByText("Low impact", { exact: true })).toBeVisible();
+  await expect(inherent.getByText("Low Impact", { exact: true })).toHaveCount(0);
+  await expect(inherent).toContainText("Highlikelihood"); // the <br> joins the two words in textContent
+  await expect(page.getByText("Organisation", { exact: true })).toBeVisible();
+  await expect(page.getByText("Organization", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Measured", { exact: true }).first()).toBeVisible();
+  // FS-41: the tile's focus indicator is the signal ring, as an outline
+  const tile = page.getByRole("button", { name: /^Security/ }).first();
+  await tile.focus();
+  await page.keyboard.press("Shift+Tab");
+  await page.keyboard.press("Tab");
+  await expect(tile).toBeFocused();
+  expect(await tile.evaluate((el) => getComputedStyle(el).outlineStyle)).toBe("solid");
+  await axeBoth(page, "trust dashboard, populated");
+});
+
+test("FS-18 and D5: the dependency graph is a group of buttons, names each band in words, and takes Space", async ({ page }) => {
+  await page.goto("/ui/admin/governance/graph");
+  const graphGroup = page.getByRole("group", { name: "AI dependency and propagated risk graph" });
+  await expect(graphGroup).toBeVisible();
+  await expect(page.getByRole("img", { name: /AI dependency/ })).toHaveCount(0);
+  // the propagated band is written in the node, not carried by the outline colour alone
+  const model = graphGroup.getByRole("button", { name: "mock-balanced, propagated risk high" });
+  await expect(model).toContainText("model · high");
+  await expect(graphGroup.getByRole("button", { name: "Acme Model Services, propagated risk high" })).toContainText("high");
+  await model.focus();
+  await page.keyboard.press("Space");
+  await expect(page.getByText("Propagation path")).toBeVisible();
+  // D2: the observed-call label sits clear of every node box
+  const label = await graphGroup.getByText("42 calls").boundingBox();
+  const boxes = await graphGroup.locator("rect").evaluateAll((rects) => rects.map((r) => { const b = r.getBoundingClientRect(); return { x: b.x, y: b.y, w: b.width, h: b.height }; }));
+  expect(label).not.toBeNull();
+  for (const b of boxes) {
+    const overlaps = label!.x < b.x + b.w && label!.x + label!.width > b.x && label!.y < b.y + b.h && label!.y + label!.height > b.y;
+    expect(overlaps, `"42 calls" overlaps a node box at ${JSON.stringify(b)}`).toBe(false);
+  }
+  await axeBoth(page, "dependency graph");
 });
