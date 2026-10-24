@@ -119,6 +119,13 @@ describe("REGULATORY_UPDATES", () => {
       expect(u.jurisdiction.length, `empty jurisdiction on '${u.key}'`).toBeGreaterThan(0);
     }
   });
+
+  it("seeded prose writes the product wordmark as regulAIt (ADR-0075), never mis-cased", () => {
+    for (const u of REGULATORY_UPDATES) {
+      for (const text of [u.title, u.summary]) expect(text, u.key).not.toMatch(/RegulAIt|REGULAIT|Regulait/);
+    }
+    expect(REGULATORY_UPDATES.find((u) => u.key === "nist-ai-rmf-1-0")?.summary).toContain("regulAIt's compliance packs");
+  });
 });
 
 // ADR-0179 G14-FEED: the factual corrections, pinned per entry so a later edit
