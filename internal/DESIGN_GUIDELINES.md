@@ -9,7 +9,7 @@ Sources, in short form:
 |---|---|
 | ADR-0026 | [React SPA](decisions/0026-react-spa-ui.md) |
 | ADR-0075 | [Brand identity and UI structure](decisions/0075-brand-identity-and-ui-structure-adoption.md) |
-| ADR-0168 | [Calm UI pass, one primary action](decisions/0168-governance-flow-registry-lifecycle-review.md) |
+| ADR-0168 | [Governance-flow registry and lifecycle review](decisions/0168-governance-flow-registry-lifecycle-review.md): item 9 (one accent, sentence case) and its later note on one primary action |
 | ADR-0169 | [Shaded theme and auto-hide shell](decisions/0169-shaded-theme-and-auto-hide-shell.md) |
 | ADR-0196 | [UI enterprise harness](decisions/0196-ui-enterprise-harness.md) |
 | ADR-0198 | [Freeze-week CI settings](decisions/0198-freeze-week-ci-settings.md) |
@@ -173,7 +173,7 @@ follow-ups, [session record](memory/sessions/2026-10-24-session-02.md).*
   CSS 10.7 kB, lazy `SeriesLineChart` 109 kB, lazy `RunGraphCanvas` 78 kB, all JS 1,040 kB. Raise a ceiling only through
   an ADR-recorded exception. *ADR-0196. Enforced in [ui-enterprise.yml](../.github/workflows/ui-enterprise.yml).*
 - During freeze week (2026-10-29 to 11-03), raise entry JS plus CSS by at most 1 kB in total, and only for a
-  demo blocker recorded in the PR body. *ADR-0198.*
+  demo blocker recorded in the PR body and in an ADR note. *ADR-0198.*
 - Put heavy code in lazy, section-level chunks; never in the entry bundle. *ADR-0196 (U4 code splitting).*
 - Keep LCP at or under 2,500 ms and INP at or under 200 ms on every screen. *ADR-0196. Enforced by `perf.ent.spec.ts`.*
 - Keep logic in hooks and services; components only render. *ADR-0200 #2.*

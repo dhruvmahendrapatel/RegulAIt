@@ -51,7 +51,7 @@ builds on its own.
 
 | Path | What it does |
 |---|---|
-| [apps/gateway](../apps/gateway) | The Fastify control plane. Serves the API (`/v1`, `/auth`, `/mcp`) and the SPA at `/ui`. Entry `main.ts` → `boot.ts` (migrates, verifies the data key, starts the scheduler when `REGULAIT_SCHEDULER=on`); every route is registered in `app.ts`. |
+| [apps/gateway](../apps/gateway) | The Fastify control plane. Serves the API (`/v1`, `/auth`, `/mcp`) and the SPA at `/ui`. Entry `main.ts` → `boot.ts` (migrates, verifies the data key, starts the scheduler unless `REGULAIT_SCHEDULER=off`, on by default since ADR-0181); every route is registered in `app.ts`. |
 | [apps/web](../apps/web) | The React SPA (Vite), served by the gateway at `/ui`. See [web SPA](#web-spa-and-its-kit). |
 
 ### packages/
@@ -267,7 +267,7 @@ Key ADRs: [0013](decisions/0013-dev-app-deploy-single-ec2-compose.md),
 | Guarded fetch | `egress-guard.ts` and `pinned-fetch.ts` (DNS pinned, SSRF blocked) behind per-surface guards for MCP, connections, credentials and compiled egress. | [0034](decisions/0034-custom-llm-providers-egress-guard.md), [0043](decisions/0043-mcp-oidc-egress-guard.md), [0062](decisions/0062-mode-scoped-egress.md) |
 | Audit chain | Every `audit_log` insert is chained under an advisory lock; anchors to WORM storage; RFC 3161 timestamps; credential scrubs; signed decision receipts and signed offline exports. | [0060](decisions/0060-tamper-evident-audit.md), [0099](decisions/0099-audit-log-credential-scrub.md), [0116](decisions/0116-signed-offline-verifiable-exports.md), [AUDIT_LOG_INTEGRITY](../docs/ops/AUDIT_LOG_INTEGRITY.md) |
 | Secrets at rest | `REGULAIT_DATA_KEY` (AES-256-GCM envelope over every stored secret), verified at boot; re-encryption tool. | [0063](decisions/0063-data-key-custody.md) |
-| Hardening | CSP without `unsafe-inline`, HSTS, trusted-proxy handling, dev-secret refusal when deployed, kill switch, break-glass, separation of duties, strict defaults everywhere. | [0031](decisions/0031-p0-hardening-streaming-exports-proxy-trust-rate-limits-csp.md), [0124](decisions/0124-kill-switch-and-safe-modes.md), [0170](decisions/0170-governance-separation-of-duties.md), [0180](decisions/0180-continuous-assurance-strict-by-default.md), [0181](decisions/0181-strict-defaults.md) |
+| Hardening | CSP with `script-src` free of `unsafe-inline` (inline scripts are hashed; `style-src` keeps `unsafe-inline` as a disclosed relaxation), HSTS, trusted-proxy handling, dev-secret refusal when deployed, kill switch, break-glass, separation of duties, strict defaults everywhere. | [0031](decisions/0031-p0-hardening-streaming-exports-proxy-trust-rate-limits-csp.md), [0124](decisions/0124-kill-switch-and-safe-modes.md), [0170](decisions/0170-governance-separation-of-duties.md), [0180](decisions/0180-continuous-assurance-strict-by-default.md), [0181](decisions/0181-strict-defaults.md) |
 
 The security checklist every change is held to is in [CLAUDE.md](../CLAUDE.md) and
 [ADR-0200](decisions/0200-engineering-best-practice-guidelines.md).
@@ -343,3 +343,5 @@ The code wins in each case. These are recorded here for a follow-up, not fixed b
    the SPA uses its own `src/api/client.ts` instead.
 7. **WORM anchor module.** `infra/modules/audit-anchor-worm-s3` exists but no environment uses it; the compose anchor
    sink is the local Object Lock store.
+8. **Scheduler default.** ADR-0064 had the scheduler off by default; since ADR-0181 it is on unless
+   `REGULAIT_SCHEDULER=off` (`apps/gateway/src/scheduler.ts`). The comment in `boot.ts` still describes the old default.

@@ -27,7 +27,7 @@ are complete ([STATE](memory/STATE.md), epics table).
 
 | # | Pillar | Status today |
 |---|---|---|
-| 1 | Per-user governance and access control | MVP shipped (EPIC-02) with strict defaults ([ADR-0181](decisions/0181-strict-defaults.md)); IDE interception shipped. Model dispatch in the demo runs on a mock because no live model key is connected ([PENDING](product/PENDING.md) P1). |
+| 1 | Per-user governance and access control | MVP shipped (EPIC-02) with strict defaults ([ADR-0181](decisions/0181-strict-defaults.md)); IDE interception shipped. The demo deliberately runs on the mock provider; one provider was verified live on 2026-08-21, and the other adapters are proven against fake servers only ([PENDING](product/PENDING.md) P1, unparked). |
 | 2 | Multi-stage workflow engine | MVP shipped (EPIC-03): declarative templates, stage machine, executable git/build/check/deploy/rollback stages, six-dimension assignment; all four git providers verified. |
 | 3 | Infra ops, compliance cascade, BYOC/air-gapped | Spine shipped; air-gap egress is enforced in code ([ADR-0062](decisions/0062-mode-scoped-egress.md)). Live infra and deploy clients exist but are flag-gated off and default to dry run ([ROADMAP](product/ROADMAP.md) Batch C, "partial"). |
 | 4 | Shared Projects with cross-team context | Shipped in the EPIC-02 MVP. No pillar-specific open item found **(inferred)**. |
@@ -72,7 +72,7 @@ In rough order **(inferred from the sources' own ordering)**:
 
 1. **Tear down and unfreeze.** Remove the demo sandbox accounts and the freeze branch rule, restore the power schedule
    and backup timer ([DEMO_RUNBOOK](product/DEMO_RUNBOOK.md), "After 11-03";
-   [DEMO_TEARDOWN](../docs/deployment/DEMO_TEARDOWN.md)); revert the freeze-week CI caps
+   [DEMO_TEARDOWN](product/DEMO_TEARDOWN.md)); revert the freeze-week CI caps
    ([ADR-0198](decisions/0198-freeze-week-ci-settings.md)).
 2. **Clear the held dependency work.** The Dependabot queue (#515–#543), the framework major upgrades (#506, #507), and
    the emergency-patch follow-ups: engine closure audits on every PR, removing the temporary overrides
@@ -81,7 +81,7 @@ In rough order **(inferred from the sources' own ordering)**:
    the action hook, consistent audit-effect casing, sidebar naming, a wider vendor-name guard, and theme saved to the
    account with an org default and lock ([session record](memory/sessions/2026-10-24-session-02.md), "Open";
    [STATE](memory/STATE.md), known follow-ups).
-4. **Make the product real for a first pilot.** Connect a live model provider (highest impact per minute), sign the
+4. **Make the product real for a first pilot.** Connect live model providers beyond the one already verified (highest impact per minute), sign the
    endpoint collection pack, verify PM adapters against a live instance, then real BYOC execution once a named customer
    account exists ([PENDING](product/PENDING.md), "Suggested order for a first pilot"; [ROADMAP](product/ROADMAP.md)
    Batches C and G).
