@@ -646,7 +646,7 @@ test("FS-18 and D5: the dependency graph is a group of buttons, names each band 
   expect(label).not.toBeNull();
   for (const b of boxes) {
     const overlaps = label!.x < b.x + b.w && label!.x + label!.width > b.x && label!.y < b.y + b.h && label!.y + label!.height > b.y;
-    expect(overlaps, `"42 calls" overlaps a node box at ${JSON.stringify(b)}`).toBe(false);
+    expect(overlaps, `"42 calls" ${JSON.stringify(label)} overlaps a node box at ${JSON.stringify(b)}`).toBe(false);
   }
   await axeBoth(page, "dependency graph");
 });
