@@ -5,7 +5,7 @@
  * ADR-0033 removed the legacy consoles entirely, so this shell is the whole
  * product surface — there are no outbound bridges left.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type FocusEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FocusEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
@@ -74,6 +74,7 @@ export default function AppShell(props: { children: ReactNode }) {
   const [filter, setFilter] = useState("");
   const filterRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const userBtnRef = useRef<HTMLButtonElement>(null);
 
   /*
    * ADR-0169 — rail state. Three independent reasons to show the full rail:
@@ -126,13 +127,17 @@ export default function AppShell(props: { children: ReactNode }) {
     });
   };
 
-  // pending-inbox count for the nav badge (soft-refreshing, never blocking)
+  // pending-inbox count for the nav badge (soft-refreshing, never blocking). It asks for pending rows only: the
+  // unfiltered queue is capped at 100 rows oldest first, so decided rows could push live ones out of the count.
+  // Every decide path invalidates ["approvals"], which this key falls under, so a decision refreshes it.
   const inbox = useQuery({
-    queryKey: ["approvals"],
-    queryFn: () => api.get<{ approvals: Approval[] }>("/v1/approvals"),
+    queryKey: ["approvals", "pending"],
+    queryFn: () => api.get<{ approvals: Approval[] }>("/v1/approvals?status=pending"),
     refetchInterval: 30_000,
   });
   const pendingCount = (inbox.data?.approvals ?? []).filter((a) => a.status === "pending").length;
+  // the answer is capped at 100 rows, so a full page is shown as "99+" rather than as an exact total
+  const pendingShown = pendingCount > 99 ? "99+" : String(pendingCount);
 
   // "/" focuses the nav filter from anywhere outside a form control
   useEffect(() => {
@@ -165,6 +170,39 @@ export default function AppShell(props: { children: ReactNode }) {
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, []);
+
+  // the user menu follows the menu-button pattern: focus starts on its first item, the arrow keys, Home and End move
+  // between items, Escape closes it back onto the button, and Tab out of it closes it
+  const menuItems = () => Array.from(menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? []);
+  useEffect(() => {
+    if (menuOpen) menuItems()[0]?.focus();
+  }, [menuOpen]);
+  const onMenuKey = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (!menuOpen) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      setMenuOpen(false);
+      userBtnRef.current?.focus();
+      return;
+    }
+    const items = menuItems();
+    const at = items.indexOf(document.activeElement as HTMLElement);
+    const next =
+      e.key === "ArrowDown" ? (at + 1) % items.length
+      : e.key === "ArrowUp" ? (at - 1 + items.length) % items.length
+      : e.key === "Home" ? 0
+      : e.key === "End" ? items.length - 1
+      : null;
+    if (next == null) return;
+    e.preventDefault();
+    items[next]?.focus();
+  };
+  // a click elsewhere is the mousedown below; this closes it when focus moves to another element (a null
+  // relatedTarget is a click, which a browser that does not focus buttons on click also reports)
+  const onMenuBlur = (e: FocusEvent<HTMLDivElement>) => {
+    const next = e.relatedTarget as Node | null;
+    if (next && !menuRef.current?.contains(next)) setMenuOpen(false);
+  };
 
   // click-away closes the user menu
   useEffect(() => {
@@ -220,6 +258,8 @@ export default function AppShell(props: { children: ReactNode }) {
       <NavLink
         key={n.to}
         to={n.to}
+        // the count is part of the link's name: an aria-label on the plain badge span is not announced
+        aria-label={n.to === "/inbox" && pendingCount > 0 ? `${n.label}, ${pendingShown} pending approvals` : undefined}
         end={n.to === "/" || shadowed}
         className={({ isActive }) =>
           !shadowed && (isActive || (n.also ?? []).some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`)))
@@ -235,8 +275,8 @@ export default function AppShell(props: { children: ReactNode }) {
         <NavGlyph to={n.to} label={n.label} className={s.navIcon} />
         <span className={s.navLabel}>{n.label}</span>
         {n.to === "/inbox" && pendingCount > 0 && (
-          <span className={s.navCount} aria-label={`${pendingCount} pending approvals`}>
-            {pendingCount}
+          <span className={s.navCount} aria-hidden>
+            {pendingShown}
           </span>
         )}
       </NavLink>
@@ -450,8 +490,9 @@ export default function AppShell(props: { children: ReactNode }) {
           >
             {theme === "dark" ? "☀" : "☾"}
           </button>
-          <div style={{ position: "relative" }} ref={menuRef}>
+          <div style={{ position: "relative" }} ref={menuRef} onKeyDown={onMenuKey} onBlur={onMenuBlur}>
             <button
+              ref={userBtnRef}
               className={s.userBtn}
               aria-haspopup="menu"
               aria-expanded={menuOpen}

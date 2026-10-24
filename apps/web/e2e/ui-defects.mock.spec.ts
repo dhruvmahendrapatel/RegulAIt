@@ -64,6 +64,10 @@ test("L4: signing out clears the previous user's cached data before the next sig
       current = USER_B;
       return json(route, {});
     }
+    // the shell's Inbox badge asks for ?status=pending under its own key; the count below is the Inbox list's
+    if (p === "/v1/approvals" && new URL(route.request().url()).searchParams.has("status")) {
+      return json(route, { approvals: current?.id === USER_A.id ? [approvalForA] : [] });
+    }
     if (p === "/v1/approvals") {
       approvalsRequests += 1;
       // the second answer is slow on purpose: a stale cache would be painted
