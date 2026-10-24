@@ -7,8 +7,9 @@ platform saw — and labelled as an attestation where it cannot be.
 ## 1. Discover & Register
 RegulAIt finds AI in use that nobody registered in two ways. It scans, read-only, the sources an
 admin enables: source-control groups, cloud accounts and endpoints (ADR-0195). Every source starts
-off, cloud accounts are read through short-lived federated tokens with no stored secret, and git
-providers through a read-only token. It also classifies evidence you import: SaaS exports, egress
+off, cloud accounts are read through short-lived federated tokens with no stored secret, GitHub and
+Azure DevOps federate the same way by default (built; not yet run against a live account), and GitLab
+and Bitbucket, which accept no third-party token, use a read-only token stored encrypted. It also classifies evidence you import: SaaS exports, egress
 logs, code scans. Each finding says what each scanner saw and where; it keeps locations and names,
 never contents, and shows people as pseudonyms. The page states its coverage: the inventory
 reduces shadow AI, it does not prove its absence. A finding's remediation plan starts a workflow
