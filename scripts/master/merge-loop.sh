@@ -25,6 +25,9 @@ RUN_FOR="${2:-7000}"
 POLL="${3:-120}"
 MIN_AGE="${MIN_AGE:-600}"
 REPO="${REPO:-dhruvmahendrapatel/RegulAIt}"
+for v in RUN_FOR POLL MIN_AGE; do
+  [[ "${!v}" =~ ^[0-9]+$ ]] || { echo "$v must be whole seconds" >&2; exit 2; }
+done
 RELEASED="$STATE/released.txt"
 LOG="$STATE/loop.log"
 
@@ -50,9 +53,7 @@ checks_state() {
     $1 == "completed" && $2 != "success" && $2 != "neutral" && $2 != "skipped" { bad++ }
     END {
       if (total != n) { print "error"; exit }          # more than one page, or a malformed reply
-      if (scount > 0 && sstate == "failure") bad++
-      if (scount > 0 && sstate == "error") bad++
-      if (scount > 0 && sstate == "pending") pending++
+      if (scount != 0 && sstate != "success") { if (sstate == "pending") pending++; else bad++ }
       if (bad > 0) print "red"; else if (n == 0 || pending > 0) print "wait"; else print "green"
     }'
 }
@@ -60,28 +61,28 @@ checks_state() {
 try_merge() {
   local pr="$1" want="$2" info head draft state title mergeable now seen checks out
   info="$(gh api "repos/$REPO/pulls/$pr" --jq '[.head.sha, .draft, .state, .title, (.mergeable|tostring)] | @tsv' 2>/dev/null)" \
-    || { note "$pr" "skip $pr: PR lookup failed"; return 0; }
+    || { note "$pr:$want" "skip $pr: PR lookup failed"; return 0; }
   IFS=$'\t' read -r head draft state title mergeable <<< "$info"
-  [ "$state" = "open" ] || { note "$pr" "skip $pr: state $state"; return 0; }
-  if [ "$head" != "$want" ]; then note "$pr" "skip $pr: head ${head:0:10} is not the released ${want:0:10}"; return 0; fi
-  if [[ "${title^^}" =~ ^\[?HOLD ]]; then note "$pr" "skip $pr: title still HOLD"; return 0; fi
-  if [ "$draft" = "true" ]; then note "$pr" "skip $pr: still a draft"; return 0; fi
-  if [ "$mergeable" != "true" ]; then note "$pr" "skip $pr: mergeable=$mergeable"; return 0; fi
+  [ "$state" = "open" ] || { note "$pr:$want" "skip $pr: state $state"; return 0; }
+  if [ "$head" != "$want" ]; then note "$pr:$want" "skip $pr: head ${head:0:10} is not the released ${want:0:10}"; return 0; fi
+  if [[ "${title^^}" =~ ^[[:space:]]*\[?HOLD ]]; then note "$pr:$want" "skip $pr: title still HOLD"; return 0; fi
+  if [ "$draft" = "true" ]; then note "$pr:$want" "skip $pr: still a draft"; return 0; fi
+  if [ "$mergeable" != "true" ]; then note "$pr:$want" "skip $pr: mergeable=$mergeable"; return 0; fi
   now="$(date -u +%s)"
   seen="${first_seen[$pr:$head]:-}"
   if [ -z "$seen" ]; then first_seen[$pr:$head]="$now"; seen="$now"; fi
-  if [ $(( now - seen )) -lt "$MIN_AGE" ]; then note "$pr" "wait $pr: soaking ${head:0:10}"; return 0; fi
+  if [ $(( now - seen )) -lt "$MIN_AGE" ]; then note "$pr:$want" "wait $pr: soaking ${head:0:10}"; return 0; fi
   checks="$(checks_state "$head")"
   case "$checks" in
     green) ;;
-    red) note "$pr" "skip $pr: checks red at ${head:0:10}"; return 0;;
-    error) note "$pr" "skip $pr: checks unavailable at ${head:0:10}"; return 0;;
-    *) note "$pr" "wait $pr: checks running at ${head:0:10}"; return 0;;
+    red) note "$pr:$want" "skip $pr: checks red at ${head:0:10}"; return 0;;
+    error) note "$pr:$want" "skip $pr: checks unavailable at ${head:0:10}"; return 0;;
+    *) note "$pr:$want" "wait $pr: checks running at ${head:0:10}"; return 0;;
   esac
   if out="$(gh api -X PUT "repos/$REPO/pulls/$pr/merge" -f merge_method=merge -f sha="$head" 2>&1)"; then
     log "MERGED $pr at ${head:0:10}"
   else
-    log "merge refused for $pr at ${head:0:10}: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
+    note "$pr:$want" "merge refused for $pr at ${head:0:10}: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
   fi
 }
 
