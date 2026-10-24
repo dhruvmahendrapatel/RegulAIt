@@ -267,6 +267,14 @@
 .thSortable:hover {
   color: var(--text);
 }
+.thSortBtn {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: inherit;
+}
 .sortArrow {
   margin-left: var(--s0);
   font-size: 9px;
@@ -380,6 +388,10 @@
   gap: var(--s1);
   z-index: 60;
   max-width: 360px;
+}
+/* FS-15: beside an open side drawer the toast sits left of it, never over the drawer's pinned action row */
+:global(:root[data-detail-drawer="side"]) .toastRegion {
+  right: calc(var(--detail-drawer-w) + var(--s3));
 }
 .toast {
   background: var(--surface-1);
