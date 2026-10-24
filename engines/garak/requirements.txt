@@ -2,10 +2,13 @@
 # Re-resolved 2026-10-21 with `uv pip compile` (uv 0.11.32) for garak 0.17.1, for CPython 3.12 on
 # x86_64-manylinux_2_28. The input was garak==0.17.1, the CPU-only torch wheel by URL, certifi>=2026.10.19,
 # pillow>=13.0.0, with no hub floor (owner decision 2026-10-21): litellm 1.106.1 declares
-# `huggingface-hub<2.0` and `filelock<4.0`, so the hub client is 1.33.0 and filelock 3.32.7; the pre-seed was
+# `huggingface-hub<2.0` and `filelock<4.0`, so the hub client is 1.33.0; the pre-seed was
 # re-proven on that hub client (THIRD_PARTY.md). Each pin's exact distribution was then chosen from PyPI's JSON
 # API for CPython 3.12 on linux/amd64 (the base image python:3.12-slim-trixie, pinned by digest in the
 # Dockerfile, glibc 2.41).
+# filelock is pinned to 4.2.4 past litellm's declared `filelock<4.0` (owner decision 2026-10-24): 3.32.7 has
+# CVE-2026-112940 (high), fixed only in 4.2.1+. The install is --no-deps, so the cap is not enforced; the hub
+# client 1.33.0 declares no cap and works on 4.2.4, and the gateway route never calls litellm (THIRD_PARTY.md).
 # One sha256 per package: the exact file pip installs there.
 # Installed with: pip install --require-hashes --no-deps --only-binary :all: -r requirements.txt
 # torch is the CPU-only build, by direct URL from the CPU wheel index (the ONLY package from that index,
@@ -84,8 +87,8 @@ fastavro==1.13.1 \
     --hash=sha256:2f56a127d71e45083306d2650efff827cad0f4b0744dd42cb69c631d77943b1d
 fastuuid==0.14.0 \
     --hash=sha256:808527f2407f58a76c916d6aa15d58692a4a019fdf8d4c32ac7ff303b7d7af09
-filelock==3.32.7 \
-    --hash=sha256:65ff0d0190ea42038b32bda4b77834fb05be2cad4c5b9b01aa4dfb3614536e52
+filelock==4.2.4 \
+    --hash=sha256:301241438c57936ef93f4243a94f2559022268bfcf9b375a9a72eb0f8db8358e
 frozenlist==1.8.0 \
     --hash=sha256:494a5952b1c597ba44e0e78113a7266e656b9794eec897b19ead706bd7074383
 fsspec==2026.7.0 \
