@@ -1,9 +1,12 @@
 # ADR-0187 B5-G — the garak image's Python closure, pinned by version AND sha256 (our lockfile).
-# Re-resolved 2026-10-21 with `uv pip compile` (uv 0.11.32) for garak 0.17.1, for CPython 3.12 on
-# x86_64-manylinux_2_28. The input was garak==0.17.1, the CPU-only torch wheel by URL, certifi>=2026.10.19,
-# pillow>=13.0.0, with no hub floor (owner decision 2026-10-21): litellm 1.106.1 declares
-# `huggingface-hub<2.0` and `filelock<4.0`, so the hub client is 1.33.0 and filelock 3.32.7; the pre-seed was
-# re-proven on that hub client (THIRD_PARTY.md). Each pin's exact distribution was then chosen from PyPI's JSON
+# Re-resolved 2026-10-24 with `uv pip compile` (uv 0.11.32) for garak 0.17.1, for CPython 3.12 on
+# x86_64-manylinux_2_28 (owner decision 2026-10-24, issue #453): filelock 3.32.7 carries CVE-2026-112940 (high,
+# fixed in 4.2.1) and litellm 1.106.x declares `filelock<4.0`, so litellm moves to 1.103.7, the line with no
+# filelock or hub cap (litellm 1.107.0 is the backdoored release and is never taken). The input was
+# garak==0.17.1, the CPU-only torch wheel by URL, certifi>=2026.10.19, pillow>=13.0.0, litellm==1.103.7 and
+# filelock>=4.2.1, with this file as the resolver's preferences and only litellm and filelock upgraded
+# (`--upgrade-package`), so no other pin moved: filelock is 4.2.4, and huggingface-hub stays 1.33.0, on which the
+# pre-seed was re-proven (THIRD_PARTY.md). Each pin's exact distribution was then chosen from PyPI's JSON
 # API for CPython 3.12 on linux/amd64 (the base image python:3.12-slim-trixie, pinned by digest in the
 # Dockerfile, glibc 2.41).
 # One sha256 per package: the exact file pip installs there.
@@ -84,8 +87,8 @@ fastavro==1.13.1 \
     --hash=sha256:2f56a127d71e45083306d2650efff827cad0f4b0744dd42cb69c631d77943b1d
 fastuuid==0.14.0 \
     --hash=sha256:808527f2407f58a76c916d6aa15d58692a4a019fdf8d4c32ac7ff303b7d7af09
-filelock==3.32.7 \
-    --hash=sha256:65ff0d0190ea42038b32bda4b77834fb05be2cad4c5b9b01aa4dfb3614536e52
+filelock==4.2.4 \
+    --hash=sha256:301241438c57936ef93f4243a94f2559022268bfcf9b375a9a72eb0f8db8358e
 frozenlist==1.8.0 \
     --hash=sha256:494a5952b1c597ba44e0e78113a7266e656b9794eec897b19ead706bd7074383
 fsspec==2026.7.0 \
@@ -178,8 +181,8 @@ langgraph-sdk==0.4.8 \
     --hash=sha256:bef8ac54bdfe3ac2f7eba5be2f322dde296701b39e1c1aa403302f08d273fab5
 langsmith==0.14.11 \
     --hash=sha256:9ecca7633df228ef2c44563f7187e426b8a79e7c5c2351c5dd8c9074c61512e7
-litellm==1.106.1 \
-    --hash=sha256:d412e85ef7046eee701ae178da4c1587eddbeac4aaaacfca0fd5afec28c2abde
+litellm==1.103.7 \
+    --hash=sha256:4a86631887d5a03a63f911066d4eb4cedbe37da3c746f65d9375b8ec505dcb54
 llm==0.32.1 \
     --hash=sha256:735f50ff515d0f5daccb9c53822ccd28a612b6b7746a7ea86d89176604bbec24
 lorem==0.1.1 \
