@@ -3031,3 +3031,13 @@ it overstates the change. Read again from the two PyPI wheels' `garak/detectors/
   `unknown` unless another output is a hit (which still fails). The unscored reason text says "(no response from the
   gateway)", which would not describe a skipped turn; that wording would need its own change when those probes are
   admitted.
+
+## Addendum (2026-10-24): engine closure advisories and the garak filelock pin
+
+The Trivy image gate failed the `c4670a7f` engine publish (#544, closed unmerged). The promptfoo image's own npm
+closure still had body-parser 2.3.0, zod 4.6.5 and undici 6.29.0/7.30.0/8.11.2, and garak's Python closure had
+filelock 3.32.7 (CVE-2026-112940, fixed only in 4.2.1+). PR #545 adds npm `overrides` for promptfoo (undici one per
+major) and, by owner decision 2026-10-24 (#453 comment 6378502293), pins filelock 4.2.4 by hash past litellm 1.106.1's
+declared `filelock<4.0`. That keeps this ADR's 2026-10-21 litellm and huggingface-hub choice, because the image
+installs with `--require-hashes --no-deps`. The full record and follow-ups are in
+[ADR-0199](0199-emergency-patching-2026-10-23.md). The decisions above are unchanged.

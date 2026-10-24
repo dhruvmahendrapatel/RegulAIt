@@ -1763,3 +1763,41 @@ as `regulAIt`, and a test enforces it. The conflict surfaced during the lane, an
 
 Rule: before a brief dictates a product name, casing or any brand detail, read the brand ADR (ADR-0075) and its test,
 and quote the ADR's form.
+
+### M-097 (2026-10-24) - Workspace dependency fixes were treated as covering the engine images
+
+After #537 and #542 cleared the `pnpm audit` gate, the master treated body-parser and zod as fixed everywhere. The
+promptfoo engine image installs its own npm closure from `engines/promptfoo/package-lock.json`, and garak installs a
+hashed Python closure from `engines/garak/requirements.txt`. Neither is in `pnpm-lock.yaml`, so both still had the
+vulnerable versions. The Trivy image gate on the lock PR (#544) found them, together with undici and filelock
+advisories, after a full publish cycle. #544 had to be closed and a fix PR (#545) opened.
+
+Rule: when an advisory lands, search every lockfile in the repo before saying it is fixed: `pnpm-lock.yaml`,
+`engines/*/package-lock.json`, `engines/garak/requirements*.txt` and `spikes/*/package-lock.json`. Fix the engine
+closures in the same round as the workspace, so a single publish carries every fix.
+
+### M-098 (2026-10-23) - Shortened digests were missed by a full-digest grep
+
+On #536 the master grepped for the full old Node digest to find every record that named it. The THIRD_PARTY files
+wrote it shortened (`sha256:154ba2f4…`), so three engine records and the sandbox-executor record kept the old digest
+until recheck 1 caught them (fixed at `ecee3401`).
+
+Rule: when replacing a digest, hash or id, grep for its first 8 to 12 characters as well as the full value, and
+update every shortened form. This is the M-095 rule applied to identifiers.
+
+### M-099 (2026-10-24) - A commit message claimed a check had passed before it was run
+
+The #542 commit message said "Local: pnpm audit gate PASSED". The gate was run in the same command, after the commit
+was written. It did pass, but the claim was made before the evidence existed.
+
+Rule: run every check a commit message or PR body reports before writing that text, and quote the result as it came
+back.
+
+### M-100 (2026-10-24) - A job re-run was attempted while its workflow run was still in progress
+
+On #542 the master asked GitHub to re-run the failed gateway shard while the rest of the workflow run was still going.
+GitHub refused with 403 ("The workflow run containing this job is already running"), so the re-run waited for a later
+check-in.
+
+Rule: re-run a failed job only after its workflow run has completed (`actions/runs/<id>` status `completed`), then use
+`rerun-failed-jobs` on the run. A 403 with that message is GitHub's own answer, not the proxy's.
