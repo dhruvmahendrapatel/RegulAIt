@@ -782,6 +782,11 @@ test("shadow-ai-13: triage opens on Confirmed, and Record waits for the reason t
   await drawer.getByRole("button", { name: "Cancel", exact: true }).click();
   await findingRow(page, "team-22").getByRole("button", { name: /^(Triage|Review again)\b/ }).click();
   await expect(page.getByRole("dialog").getByRole("combobox", { name: "Disposition" })).toHaveValue("confirmed");
+  // the "Seen again after closing" callout opens the same drawer and resets it too
+  await page.getByRole("dialog").getByRole("combobox", { name: "Disposition" }).selectOption("sanctioned");
+  await page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.getByTestId("shadow-seen-again").getByRole("button", { name: "Review laptop psn:1a2b3c again" }).click();
+  await expect(page.getByRole("dialog").getByRole("combobox", { name: "Disposition" })).toHaveValue("confirmed");
 });
 
 test("shadow-ai-17: each row's Triage and Register as use case name their finding", async ({ page }) => {

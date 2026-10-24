@@ -529,7 +529,7 @@ export default function ShadowAiPage() {
           </span>
           <span className={v.row}>
             {seenAgain.map((f) => (
-              <Button key={f.id} size="sm" aria-label={`Review ${f.subject} again`} onClick={() => { setDispositionFor(f.id); setReason(""); }}>
+              <Button key={f.id} size="sm" aria-label={`Review ${f.subject} again`} onClick={() => openTriage(f.id)}>
                 {f.subject}
               </Button>
             ))}
