@@ -300,7 +300,7 @@ export default function ShadowAiPage() {
   const [preview, setPreview] = useState<unknown>(null);
   const [dispositionFor, setDispositionFor] = useState<string | null>(null);
   const [remediationFor, setRemediationFor] = useState<string | null>(null);
-  // A5: the drawer never opens on the permissive outcome; "Confirmed" keeps the finding in view
+  // A5: the drawer never opens on the permissive outcome; every Triage and Review again resets it to "Confirmed", which keeps the finding in view
   const [disposition, setDisposition] = useState("confirmed");
   const [reason, setReason] = useState("");
   // A2: one tab per job; the tab is in the URL so a link (and a test) can open it directly
@@ -623,9 +623,9 @@ export default function ShadowAiPage() {
                       </Button>
                     );
                     const triage = r.dispositionStale ? (
-                      <Button aria-label={`Review again: ${r.subject}`} onClick={() => { setRemediationFor(null); setDispositionFor(r.id); setReason(""); }}>Review again</Button>
+                      <Button aria-label={`Review again: ${r.subject}`} onClick={() => { setRemediationFor(null); setDispositionFor(r.id); setDisposition("confirmed"); setReason(""); }}>Review again</Button>
                     ) : (
-                      <Button variant="ghost" aria-label={`Triage ${r.subject}`} onClick={() => { setRemediationFor(null); setDispositionFor(r.id); setReason(""); }}>Triage</Button>
+                      <Button variant="ghost" aria-label={`Triage ${r.subject}`} onClick={() => { setRemediationFor(null); setDispositionFor(r.id); setDisposition("confirmed"); setReason(""); }}>Triage</Button>
                     );
                     return (
                       <RowActions
@@ -695,7 +695,7 @@ export default function ShadowAiPage() {
               </Select>
             </Field>
             <Field label="Reason">
-              <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="for example docs mention only, no SDK in use" />
+              <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="for example SDK import confirmed in src/billing" />
             </Field>
             <DrawerActions className={v.row}>
               <Button

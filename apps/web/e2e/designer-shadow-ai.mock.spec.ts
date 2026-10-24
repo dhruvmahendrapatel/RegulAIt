@@ -777,6 +777,11 @@ test("shadow-ai-13: triage opens on Confirmed, and Record waits for the reason t
   await reason.fill("");
   await drawer.getByRole("combobox", { name: "Disposition" }).selectOption("open");
   await expect(record).toBeEnabled();
+  // a later drawer never inherits an earlier choice: Sanctioned, Cancel, then another row opens on Confirmed again
+  await drawer.getByRole("combobox", { name: "Disposition" }).selectOption("sanctioned");
+  await drawer.getByRole("button", { name: "Cancel", exact: true }).click();
+  await findingRow(page, "team-22").getByRole("button", { name: /^(Triage|Review again)\b/ }).click();
+  await expect(page.getByRole("dialog").getByRole("combobox", { name: "Disposition" })).toHaveValue("confirmed");
 });
 
 test("shadow-ai-17: each row's Triage and Register as use case name their finding", async ({ page }) => {
