@@ -31,13 +31,14 @@ else there stands.
   in every image). All audited; dhruv/active is at `c4670a7f`.
 - **Last migration on main: 0211** (unchanged). The ADR index ends at **0199** (194 files, 194 rows); ADR-0187 gained
   a 2026-10-24 addendum.
-- **Open:** #545 (held, head `8d89fbc5`, combined recheck in progress) carries both engine closure fixes: promptfoo's
-  npm overrides (body-parser, zod, undici) and garak's re-resolve on litellm 1.103.7 from #548 (owner decision 2026-10-24,
-  #453 comment 6378601196; only litellm and filelock move, `pip check` clean, pre-seed 9/9, OSV clean). The
-  `security.yml` image scans run on every PR, so every PR is red on the promptfoo and garak scans until #545 merges.
-  A first filelock 4.2.4 pin failed garak's `pip check` (M-101). Lock PR #544 was closed unmerged (M-097). After #545,
-  ONE lock PR from its publish (promptfoo 7, modelscan 7, garak 8). #541 (spikes Dependabot) needs its licence
-  inventories regenerated, after the demo. #516, #517 and #520 wait until after the new lock; #543 and #521 are red.
+- **Merged after this paragraph was first written:** #545 (`bd35422f`, 02:52), both engine closure fixes: promptfoo's npm
+  overrides (body-parser, zod, undici) and garak's re-resolve on litellm 1.103.7 from #548 (owner decision 2026-10-24,
+  #453 comment 6378601196; only litellm and filelock move, `pip check` clean, pre-seed 9/9, OSV clean). Combined
+  recheck APPROVE at `8d89fbc5` with all three image scans green. #548 closed as merged with it.
+- **Open:** the engine publish of `bd35422f` and ONE held lock PR from it (promptfoo 7, modelscan 7, garak 8). A first
+  filelock 4.2.4 pin failed garak's `pip check` (M-101); lock PR #544 was closed unmerged (M-097). #541 (spikes
+  Dependabot) needs its licence inventories regenerated, after the demo. #516, #517 and #520 wait until after the new
+  lock; #543 and #521 are red.
 - **Owner actions:** after the new lock merges, rebuild both demo hosts (`git pull`, `docker compose pull`,
   `docker compose up -d --build`, `demo:check`) and set laptop Node to 22.23.4. The stale lock branches were deleted by
   the owner (verified 2026-10-24 02:15). Still open from 10-23: the power schedule off before 10-25, the dev-host
