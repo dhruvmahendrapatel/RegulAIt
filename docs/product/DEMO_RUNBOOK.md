@@ -6,7 +6,8 @@ credential it mints is printed once and dies with the database.
 
 Sections 1-6 describe that local, seeded environment. **§7** adds what the 2026-11-01 demo needs on top: the hosted
 dev instance, the real-account discovery sources (read-only scans of a GitLab demo group, a non-production AWS sandbox
-account, an Azure subscription and an endpoint device, ADR-0197), and the pre-demo checklist.
+account and an Azure subscription, plus an imported inventory export of a demo laptop, ADR-0197 and its 2026-10-24
+addendum), and the pre-demo checklist.
 
 ---
 
@@ -219,8 +220,10 @@ password step:
 3. Set the password with the bash or PowerShell commands in the README ("Demo with your own
    password (Docker)"). The value goes from your shell into one `docker compose exec` process via
    `-e REGULAIT_DEMO_USER_PASSWORD`. It is never on a command line or in a file.
-4. Sign in at `http://localhost:3000/ui` as `admin`, `dana` or `avery`, and go to §1.2. The first
-   `admin` sign-in enrols two-factor (see §1).
+4. Sign in at `http://localhost:3000/ui` as `admin`, `dana`, `avery` or `morgan`, and go to §1.2. The first
+   `admin` and `morgan` sign-ins enrol two-factor (see §1). The 2026-11-01 script needs `morgan` on this stack too:
+   she gives S3's sign-off and acknowledges the AI policy at preparation (§7.3; `DEMO_SECURITY_LEAD` in
+   `apps/gateway/src/demo-identity.ts`).
 
 **Once per database.** The prep steps run only when the database has not been prepared yet: the
 marker is the API key `demo:traffic` mints (a row in the database, so it goes with the data).
@@ -312,7 +315,7 @@ never WORM."*
 That is worth thirty seconds on screen rather than an apology. The point the row makes is the point
 the whole product makes: **the grade comes from asking the medium, not from reading the
 configuration.** No environment variable can flip that boolean, a GOVERNANCE-mode bucket grades
-`false` too, and a competitor's green tick here would mean nothing. Say: *"this install has no WORM
+`false` too, so a green tick here means a medium answered, not a setting. Say: *"this install has no WORM
 medium, and rather than let me claim one, the product grades itself down."*
 
 If the buyer wants to see the `true` case, that needs docker (`objectstore` + `objectstore-init`) or a real S3
@@ -345,8 +348,8 @@ audited, before any entitlement decision. That refusal is worth a sentence of it
 see the tool she is not entitled to. Then approve the `write_file` request as Avery and retry.
 
 Worth stating: the approval is bound to **the arguments that were approved**. Retry with different
-arguments and it re-queues rather than spending a signature on a payload nobody signed. No vendor in
-the analysis document does this.
+arguments and it re-queues rather than spending a signature on a payload nobody signed. Say what we do;
+do not compare it with any other product (talk-track rule).
 
 ### (c) The audit record of that block
 
@@ -515,9 +518,13 @@ point there rather than repeating commands nobody has run.
 ### 7.1 What runs where
 
 - **Live instance:** the hosted dev instance over public HTTPS (ADR-0197 decision 1). The laptop is only a browser.
-  Its database carries the governance seed and the four real discovery sources, and **only real findings**: what the real
-  GitLab, AWS and Azure scans and the real endpoint device find (owner, 2026-10-19, ADR-0197 addendum decision 3,
-  option A). No seeded discovery dataset. Prepare it from empty with `demo:prepare --live`: the same pipeline without
+  Its database carries the governance seed and the four real discovery sources (three network scanners and one
+  device inventory import source), and **only real findings**: what the real GitLab, AWS and Azure scans and the real
+  device's inventory export find (owner, 2026-10-19, ADR-0197 addendum decision 3, option A; device import: owner,
+  2026-10-24, ADR-0197 addendum of that date). **No endpoint agent on LIVE** (FS-1): `GET /v1/endpoint-agent/config`
+  answers 503 `collection_pack_unavailable` until the signing stage (ADR-0195 SD4g) exists, and the agent's compiled
+  keyring is empty, so a real agent never reaches the report stage. The agent stays on the fallback, where its
+  reports are seeded. No seeded discovery dataset. Prepare it from empty with `demo:prepare --live`: the same pipeline without
   either `demo:shadow` phase, with `demo:intake --live` (the shipped signature catalogues, not the synthetic SaaS
   export), ending in `demo:check --live`. That check FAILs on any trace of the fictional dataset, and on "1 Real
   discovery sources" until one real source is enabled, so on a fresh database it ends with that one FAIL: add the
@@ -578,7 +585,26 @@ Target and credential fields, from the code on `main`:
 | `repo_gitlab` (GitLab repositories) | `namespace=<demo-group>`; optional `baseUrl` (https), `history`, `historyDepth` (`REPO_TARGET_KEYS`) | the repositories as `group/project`, or organisation-level | **static** read-only group access token, scopes `read_api` and `read_repository` (ADR-0197 decision 5). Static is a relaxation: the step-up is asked and the posture page lists it. The repo scanner refuses a federated credential today |
 | `cloud_aws` (AWS) | `accountId=<sandbox-account-id>`; optional `stsRegion`, `trailBucket`, `trailBucketRegion`, `trailPrefix`, `federation=oidc` (default) or `principal` | the regions, or organisation-level (every enabled region) | **federated**, public config `roleArn=<read-only role in the sandbox>`. The role trusts the federation issuer (ADR-0195 SD2b; owner decision Q12 keeps the trust mode per source, default OIDC) |
 | `cloud_azure` (Azure) | `tenantId=<tenant-id>`; optional `managementGroupId`, `logAnalyticsWorkspaceIds`, `authorityHost` | the subscription ids, or organisation-level (needs `managementGroupId`) | **federated**, public config `tenantId`, `clientId` of the app registration whose federated credential trusts the issuer |
-| `endpoint_agent` (RegulAIt endpoint agent) | none: the gateway checks a target only for AWS (`targetProblem`); leave the box empty | tick **Organisation-level scope** (the add form asks for a scope on every kind); fed by uploads, no schedule | none. Enrol the device: **Endpoint agent enrolment** → choose the source → **Token name**, **Device cap (required)**, **Expires in (days, at most 30)** → **Issue enrolment token**, then deliver the enrolment file shown once (root-owned, mode 0600) and run the agent's install step on the device (`agents/endpoint/README.md`) |
+| `endpoint_inventory` (MDM/EDR inventory export) | none: leave the box empty | tick **Organisation-level scope**; fed by uploads, no schedule | none. No egress entry either: nothing is fetched. The import is described below the table |
+| `endpoint_agent` (RegulAIt endpoint agent) | **Not on LIVE** (owner, 2026-10-24, FS-1): the gateway serves no signed collection pack yet, so an enrolled agent backs off at its config call and never reports. Fallback only, where the reports are seeded | — | — |
+
+**The device inventory import (pending execution).** The agentless endpoint path of FS-1: a software inventory export
+of a real demo laptop we own, imported through `POST /v1/discovery/sources/:sourceId/endpoint-imports`
+(`apps/gateway/src/endpoint-import-routes.ts`, ADR-0195 SD3).
+1. The file: CSV or JSON with at least a device column and an application-name column; version, publisher, user, OS
+   and observed-at columns are optional. Headers are inferred from common names (for example `hostname`,
+   `application`, `version`, `publisher`, `user`, `os`, `last_seen`) and inference **refuses on ambiguity**; an explicit
+   mapping goes in the card's **Inventory configuration** box (`packages/shared/src/endpoint-discovery/
+   inventory-import.ts`). Produce it from the MDM that manages the demo laptop if one does, otherwise from the
+   laptop's own installed-software list, and include the AI desktop apps planted on it. It describes a real device:
+   never the fallback's dataset (`demo:check --live` FAILs on any of its markers).
+2. The match: only applications in the endpoint signature catalogue become findings; `demo:prepare --live` loads it
+   (`demo:intake --live` posts `/v1/discovery/endpoint-signatures/seed`). Device names and users leave only as
+   pseudonyms; the raw file is kept only as a digest.
+3. On **Import endpoint evidence**: choose the source, the format, the file → **Dry run** (writes only an audit row and
+   shows matched and refused rows) → once the matches are the planted apps, **Import** (enabled only when the source
+   is enabled). The import opens a discovery run for the source, so it appears in **Recent runs**.
+4. The import is a state change on LIVE: do it at T-7d (first) and T-24h (refresh), never on stage and never on 11-01.
 
 Then, on the **Cloud federation** card: **Generate key** → **Turn on with this key** (a step-up). The card says the
 issuer needs the deployment's public URL (`REGULAIT_PUBLIC_URL`); its discovery document and key set must be reachable
@@ -604,8 +630,8 @@ time. Rows marked *once* are done a single time for both. The recipes the rows n
 | Thu 10-29, *once* | **Freeze-SHA dispatches** (deep scan #21, owner): dispatch `demo.yml`, `ci.yml` and `ui-enterprise.yml` on `main` at the freeze SHA; record each run id and the SHA in §7.5. The 10-21 rehearsal's gate artifact expires 2026-10-28 15:06Z; the freeze dispatch replaces it | pending execution |
 | T-7d | **Power schedule still off**: both schedules still read **DISABLED** (§7.6) | pending execution — owner |
 | T-7d | First real-account round trip done for each source: a run **succeeded**, **Reads** says *all read* or names what it could not read, findings appear | pending execution |
-| T-7d | The endpoint agent has reported at least once since enrolment (the `endpoint_agent` source is upload-fed: **Run now** only commits reports the device already uploaded) | pending execution |
-| T-7d | **Endpoint clock** (deep scan #41): time sync is on and the device clock is within 1 s of true time. A report signed more than 5 s ahead of the database clock is refused as `report_signature_stale` | pending execution |
+| T-7d | **Device inventory import** (FS-1, owner 2026-10-24): the `endpoint_inventory` source exists and is enabled; the demo laptop's export has a **Dry run** that matches the planted AI apps and refuses nothing unexpected, then one **Import**; its run reads *succeeded* in **Recent runs** and the device finding (*Endpoint inventory*) is on `/ui/admin/shadow-ai` (§7.2). No endpoint agent is enrolled on LIVE | pending execution |
+| T-7d | **Audit anchor on LIVE** (scan Q12, owner 2026-10-24): signed in as Ada, `GET /v1/audit/verify` on the live instance; note whether the anchor reads tamper-resistant and that at least one anchor has been written. If not, brief the presenter for G8 with the §2 "graded down honestly" line (*"this install has no WORM medium, and rather than let me claim one, the product grades itself down"*) rather than avoiding the folded panels | pending execution |
 | T-7d | The remediation workflow walked once on a rehearsal database as Ada: start → **Finish planning** → **Submit for sign-off** → Morgan's **Review** and **Approve** in `/ui/inbox` (the item opens in the panel on the right; **Approve** is in its pinned foot) | pending execution |
 | T-7d | Morgan Reyes (security lead) is an active admin, Ada is the only other admin, and Morgan has enrolled her authenticator (after `demo:set-passwords`, at her next sign-in) | pending execution |
 | T-7d (prep) | **Morgan's AI policy** (deep scan #32): sign in as Morgan on **both** stacks and press **Acknowledge** on the AI-policy gate, not **Not now**. "Not now" lasts only for that browser session and leaves a banner on every page, which would show on her Inbox in S3. `demo:check` covers this only for Ada, Dana and Avery | pending execution |
@@ -613,7 +639,8 @@ time. Rows marked *once* are done a single time for both. The recipes the rows n
 | T-7d | **G1 "Found by discovery"** (lane D4, #527): on the fallback, after S4, the use case's header shows the **Found by discovery** chip, *discovery* opens the Shadow-AI **Findings** tab for Ada, and the finding's row reads *"Registered as <use case>"* | pending execution |
 | T-7d | **G3 ALLOW** rehearsed on the fallback database (§7.5 owner step 1, with `staging`) | pending execution |
 | T-3d | Code freeze held (2026-10-29: only demo-blocker fixes merge, ADR-0197 decision 9); the live instance runs the frozen build. Freeze notes: §7.7 | pending execution |
-| T-24h | **Run now** on every live source (the endpoint agent's only if the device has reported since); each run **succeeded**; choose the rows S2-S4 walk from the real findings on `/ui/admin/shadow-ai` | pending execution |
+| T-24h | **Run now** on the three live network sources; each run **succeeded**. Re-import the demo laptop's inventory export (**Dry run**, then **Import**; §7.2) so its run is fresh. Choose the rows S2-S4 walk from the real findings on `/ui/admin/shadow-ai`, and fill in the 11-03 S3 plan text in `DEMO_PRESENTER_NOTES_2026-11-01.md` with the chosen repository and path | pending execution |
+| T-24h | **E. Enforce it** (FS-8, owner 2026-10-24 and #453 comment 6387779914): on the stack the beat runs on (FALLBACK before 11-01, LIVE before 11-03), `/ui/admin/simulation` as Ada answers Dana · `repo-tools` · `search_code` with **deny** and `write_file` with **require approval** naming Avery. Each question writes one advisory audit row and nothing else. The beat is a *simulated decision* on both dates; it does not need the demo MCP server, so there is no MCP-server check (DEMO_SCRIPT E) | pending execution |
 | T-24h | On the live database, the chosen finding has **no** remediation workflow yet and has **not** been registered as a use case (S3 and S4 each use it up: LIVE allows one workflow per finding, and one finding is one use case, ever; a second registration is refused 409). On 11-01 S3 and S4 run on the fallback, so the LIVE finding is chosen for 11-03. On the fallback, `gitlab:acme-bank-demo/credit-memo-assistant`'s workflow waits on Morgan (`demo:check` "1 Remediation plan" PASS); nobody approved it at rehearsal | pending execution |
 | T-24h | `staging` is accepted on the live instance: `demo:check --live` shows "1 Remediation environment" PASS | pending execution |
 | T-24h | **Re-run `demo:traffic` on LIVE, only that step** (deep scan #8, owner): the monitor counts off-stack serving and trace evaluation over **7 days** and resolves alerts that clear, so traffic made at prepare time no longer holds G3's second BLOCK line. Rehearse the re-run on a copy of the database first (once). Then, on LIVE: `sudo docker compose exec gateway node apps/gateway/dist/demo-traffic.js`, after the T-24h scans | pending execution |
@@ -623,6 +650,7 @@ time. Rows marked *once* are done a single time for both. The recipes the rows n
 | T-24h | `demo:check --live` on the live instance (§7.1): 0 fail (no fictional-dataset trace, every real source listed with its last run) | pending execution |
 | T-24h | Screen recording of one real scan captured and played back once | pending execution |
 | T-24h | **Offline deck** opened on the presenting laptop with the network off: 31 slides (30 with `--no-gate`), S1 to G10 in script order | pending execution |
+| T-24h, under 18 h before the start | **Gateway health on the laptop** (FS-37): after the prep has finished, `docker compose ps` shows the gateway **(healthy)**. During the prep it can read *unhealthy* on a slow laptop (the healthcheck's `start_period` is 90 s and does not cover the in-container prep); that is cosmetic, but present only once it reads healthy | pending execution |
 | T-24h, under 18 h before the start | Fallback stack on the laptop prepared from empty (§1.3, with both `.env` lines); `demo:check` 0 fail, counts as in the latest green `Demo journey` run (re-check: §1.3); Ada, Avery and Morgan signed in there too, in a separate browser. Re-prepare it for 11-03: on 11-01 every state-changing beat runs on it (§7.3 "Between the runs") | pending execution |
 | T-24h | F28: the laptop stack's **running gateway** has `REGULAIT_PUBLIC_URL` set, not only the `demo:prepare` step (the Cloud federation card then does not say the public URL is not configured; CI sets it only on the prepare step, so the screenshot pack shows that line) | pending execution |
 | T-24h | Neither demo budget alert has fired (AWS USD 40 and Azure USD 10, USD 50 in total; each alerts at 80%, USD 32 and USD 8, `docs/deployment/DEMO_REAL_ACCOUNTS.md`); planted usage still within budget (ADR-0197 decision 4) | pending execution |
@@ -639,7 +667,7 @@ time. Rows marked *once* are done a single time for both. The recipes the rows n
 | T-1h | **Presenter brief on SLA chips** (deep scan #13): on LIVE, prepared more than a week earlier, every open high and medium alert reads **SLA breached** (the G5 unowned-agent alert included), and the drawer adds that it was escalated to the admins. Say: "the product escalates overdue alerts". Acknowledging an alert does not stop its clock. Do not relax the SLAs, and do not re-prepare LIVE | pending execution |
 | T-10 min | **Sessions** (deep scan #7, owner): in every profile, the fallback browser included, sign in again or bring the window to the front so it is active. Keep the windows tiled and never fully covered, so each stays visible and its poll keeps running | pending execution |
 | T-5 min | **G3 shell** (deep scan #12, owner): reconnect the Session Manager shell (`aws ssm start-session`; the 20-minute idle default would close one opened at T-1h before G3) and check the G3 script is still there | pending execution |
-| 11-01 run-through | **State-changing beats on FALLBACK only** (owner, 2026-10-23, #453). LIVE is never re-prepared, so anything changed there on 11-01 stays for 11-03 (a re-detected alert keeps its acknowledged status, so an acknowledged G3 alert would turn 11-03's DENY into ALLOW; S3 and S4 each use up their finding, one finding is one use case, ever). On 11-01 these run on the **FALLBACK** laptop stack: G3 acknowledge then ALLOW, G5 resolve, S3 **Start and link**, S4 register. **LIVE read-only**: every other beat, plus G3's DENY gate. The per-beat marks are in DEMO_SCRIPT_2026-11-01 S11 and in "11-01 run-through: where each beat runs" below | decided — owner |
+| 11-01 run-through | **State-changing beats on FALLBACK only** (owner, 2026-10-23, #453). LIVE is never re-prepared, so anything changed there on 11-01 stays for 11-03 (a re-detected alert keeps its acknowledged status, so an acknowledged G3 alert would turn 11-03's DENY into ALLOW; S3 and S4 each use up their finding, one finding is one use case, ever). On 11-01 these run on the **FALLBACK** laptop stack: G3 acknowledge then ALLOW, G5 resolve, S3 **Start and link** (Ada's live half on the second finding, FS-7), S4 register, and E (Enforce it). **LIVE read-only**: every other beat, plus G3's DENY gate. The per-beat marks are in DEMO_SCRIPT_2026-11-01 (each beat's "11-01 run-through" line) and in "11-01 run-through: where each beat runs" below | decided — owner |
 | Between the runs | **`demo:traffic` for 11-03**: re-run it on LIVE again at T-24h before 11-03 (Mon 11-02), after that day's scans, then capture a fresh `real-gate.txt`, so the monitor's 7-day window still holds G3's second BLOCK line on 11-03. The fallback is prepared again from empty, under 18 h before 11-03 | pending execution |
 | After 11-03 | **Power schedule back on** (owner): `power_schedule_enabled = true`, plan and apply (`DEMO_TEARDOWN.md` T8). Start the backup timer if it is still stopped | pending execution — post-demo, owner |
 | After 11-03 | **Remove the freeze branch rule** on `main` (deep scan #51, owner) | pending execution — post-demo, owner |
@@ -653,15 +681,16 @@ On 11-01 every step that changes state runs on the FALLBACK laptop stack, so LIV
 | Beat | 11-01 | Why |
 |---|---|---|
 | Opening, S1, S2 | LIVE read-only | no **Run now**, no federation toggle, no disposition change |
-| S3 Plan remediation, **Start and link**, Morgan's **Approve** | FALLBACK | LIVE allows one workflow per finding |
+| S3 Plan remediation, **Start and link**, Morgan's **Approve** | FALLBACK: Morgan approves the seeded workflow, then Ada walks **Plan remediation** → **Start and link** → **Finish planning** → **Submit for sign-off** on `gitlab:acme-bank-demo/support-ticket-triage` and Morgan approves again (FS-7) | LIVE allows one workflow per finding; the second finding rehearses the clicks Ada makes live on 11-03 |
 | S4 Register as use case | FALLBACK | one finding is one use case, ever (409 on a second) |
 | G1 record and risks, G2 independent review | FALLBACK | they work on S4's new use case; **Add risk** and the approval change state |
+| E Enforce it | FALLBACK | owner, 2026-10-24; on 11-03 the same Simulation beat runs on LIVE (a simulated decision; it writes only advisory audit rows) |
 | G3 step 1, DENY | LIVE read-only | the gate only reads and records the decision |
 | G3 steps 2-3, acknowledge then ALLOW | FALLBACK | an acknowledged alert stays acknowledged and would turn 11-03's DENY into ALLOW |
 | G4 trust dashboard | LIVE read-only | |
 | G5 **Evaluate now**, acknowledge, propose, approve, resolve | FALLBACK | a resolved alert would be gone on 11-03 |
-| G6, G7, G8, Close | LIVE read-only | |
-| G9, G10 (optional) | LIVE read-only | change nothing |
+| G7, G8, Close | LIVE read-only | |
+| G6, G9, G10 (optional) | LIVE read-only | change nothing |
 
 Answer to the D5 open question ("Between the runs"): the 11-01 acknowledgements and resolutions are done on the
 fallback only. Re-run `demo:traffic` on LIVE at T-24h before 11-03 (Mon 11-02), after that day's scans, and capture

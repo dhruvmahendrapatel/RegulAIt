@@ -13,6 +13,7 @@ import { Badge, Card, Field, Select, Table, type Tone } from "../../../ui/kit";
 import { QueryGate, useNameMaps } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+import s from "./demoGovernance.module.css";
 
 export const REMEDIATION_STATUSES = ["pending_approval", "applied", "denied", "failed"] as const;
 export type RemediationStatus = (typeof REMEDIATION_STATUSES)[number];
@@ -41,6 +42,13 @@ export const REMEDIATION_STATUS_WORDS: Record<RemediationStatus, string> = {
   failed: "Failed",
 };
 const statusWords = (s: string) => REMEDIATION_STATUS_WORDS[s as RemediationStatus] ?? humanize(s);
+
+/**
+ * The approvals list that shows this proposal's approval. The list defaults to pending approvals, which leaves out a
+ * proposal already decided, so a decided one opens the list across every status (an empty `status`).
+ */
+export const remediationApprovalHref = (status: string) =>
+  `/admin/approvals?objectType=remediation${status === "pending_approval" ? "" : "&status="}`;
 
 export const remediationTone = (status: string): Tone =>
   status === "applied" ? "ok" : status === "pending_approval" ? "info" : status === "denied" || status === "failed" ? "danger" : "warn";
@@ -89,11 +97,12 @@ export function RemediationsCard() {
             },
             {
               key: "links",
-              header: "",
+              // FS-42: a named column for assistive tech, hidden on screen
+              header: <span className={s.srOnly}>Actions</span>,
               align: "right",
               render: (r) => (
                 r.approvalId ? (
-                  <Link to="/admin/approvals?objectType=remediation" aria-label={`Open the approval for ${r.title}`}>
+                  <Link to={remediationApprovalHref(r.status)} aria-label={`Open the approval for ${r.title}`}>
                     Open approval
                   </Link>
                 ) : null

@@ -3,7 +3,10 @@
 ADR-0197 decisions 1-8. This page sets up real-account Shadow AI discovery for the 2026-11-01 internal run-through
 and the 2026-11-03 external demo (owner, 2026-10-23): a third AWS account
 with planted Bedrock activity, a small Azure OpenAI deployment with planted activity, and a GitLab demo group, all read
-by RegulAIt through keyless federation (AWS, Azure) or a read-only token (GitLab).
+by RegulAIt through keyless federation (AWS, Azure) or a read-only token (GitLab). The live endpoint is agentless:
+an inventory export of a demo laptop we own, imported through an `endpoint_inventory` source (owner, 2026-10-24,
+full-scan FS-1; ADR-0197 addendum of that date). The endpoint agent is not used on the live instance: the gateway
+serves no signed collection pack yet (`GET /v1/endpoint-agent/config` answers 503), so a real agent cannot report.
 
 > **Status: pending execution (M-041).** No step below has been run against a real account. What was executed is
 > listed under [What has been run](#what-has-been-run). Every other step is marked **pending execution**: its commands
@@ -115,7 +118,7 @@ curl -fsS https://<demo-host>/federation/.well-known/jwks.json
 The first document's `issuer` must equal `https://<demo-host>/federation` and its `jwks_uri` must be the second URL;
 the key set must hold one `RSA` key with `alg` `RS256`. A 404 with `federation_issuer_unset` means 1b did not take.
 
-## Step 2: create the three discovery sources in RegulAIt (pending execution)
+## Step 2: create the four discovery sources in RegulAIt (pending execution)
 
 Each trust policy names its source's id (subject `regulait:discovery-source:<source id>`), so create the sources first
 and leave them disabled. **Prepare the live database before this step, once** (`demo:prepare --live`,
@@ -126,9 +129,12 @@ save:
 
 - kind `cloud_aws`, name e.g. "Demo AWS sandbox";
 - kind `cloud_azure`, name e.g. "Demo Azure";
-- kind `repo_gitlab`, name e.g. "Demo GitLab group".
+- kind `repo_gitlab`, name e.g. "Demo GitLab group";
+- kind `endpoint_inventory`, name e.g. "Demo laptop inventory" (no stack needs its id: it trusts nothing and fetches
+  nothing; it is fed by an import, step 7).
 
-Copy each source's id for the stacks below.
+Copy each cloud and GitLab source's id for the stacks below. Do not add an `endpoint_agent` source on the live
+instance.
 
 ## Step 3: the sandbox account (pending execution)
 
@@ -245,6 +251,7 @@ On **Shadow AI > Discovery sources**, for each source enter the values from the 
 | `cloud_aws` | `accountId`, `stsRegion`, `trailBucket`, `trailBucketRegion` from `terraform output regulait_source_target` | regions: `us-east-1` | federated, `roleArn` = `terraform output discovery_role_arn` |
 | `cloud_azure` | `tenantId`, `logAnalyticsWorkspaceIds` from `terraform output regulait_source_target` | subscriptions: the subscription id | federated, `tenantId` and `clientId` from `terraform output regulait_credential_public_config` |
 | `repo_gitlab` | `namespace` = the group's full path | organisation-level (the group), or the four `group/project` paths | static token from step 6 (stored encrypted) |
+| `endpoint_inventory` | none (leave empty) | organisation-level | none; no egress entry |
 
 Add each cloud's API hosts to the egress allow-list (each addition is a step-up):
 
@@ -255,6 +262,14 @@ Add each cloud's API hosts to the egress allow-list (each addition is a step-up)
 - GitLab: `gitlab.com`.
 
 Then enable each source (a `settings_relax` step-up).
+
+**The device inventory import (pending execution).** Export the demo laptop's installed software, from the MDM that
+manages it if one does, otherwise from the laptop's own installed-software list, as CSV or JSON with at least a
+device column and an application-name column, with the AI desktop apps planted on it included. On **Import endpoint
+evidence**, choose the `endpoint_inventory` source and the file, press **Dry run**, check that the planted apps match
+and nothing unexpected is refused, then **Import**. The file and the fields are described in
+[DEMO_RUNBOOK.md §7.2](../product/DEMO_RUNBOOK.md#72-discovery-sources-on-the-live-instance-pending-execution). Never
+import the fallback's dataset here: `demo:check --live` FAILs on any of its markers.
 
 ## Step 8: verify a first real scan (pending execution)
 
@@ -271,6 +286,8 @@ Analytics hold events. On the run, every read is listed with an outcome:
   the Log Analytics workspace, attributed to the account.
 - **GitLab.** The four projects read; sightings for the Python and npm AI SDKs, the provider hosts, the MCP config,
   the IDE extension recommendations, and env-variable presence signatures (ids only; names and values are never stored).
+- **Device inventory.** The import's run reads *succeeded* in **Recent runs**, and each planted AI app is a finding
+  with the evidence *Endpoint inventory*, its device and user as pseudonyms.
 
 Reading the outcomes: `denied` names a missing permission (compare with the stack's policy); `unreachable` means a host
 is missing from the egress allow-list; an AWS `credential_unusable` or an STS error usually means the issuer was not
@@ -284,7 +301,8 @@ Tracked follow-up (ADR-0197). The full post-demo runbook, which mirrors every se
 verification checks, is [DEMO_TEARDOWN.md](DEMO_TEARDOWN.md) (pending execution — post-demo, owner). The summary below
 is kept for reference. In this order:
 
-1. In RegulAIt: disable the three sources and delete their credentials. Turn federation off if nothing else uses it.
+1. In RegulAIt: disable the four sources (three scanners and the device inventory source) and delete the scanners'
+   credentials. Turn federation off if nothing else uses it.
 2. GitLab: `terraform destroy` in `demo-sandbox/gitlab` (revokes the group token and deletes the projects), then delete
    the group in the UI. If the fallback was used, revoke the demo account's personal access token instead. Either way,
    no scanner token from the demo stays valid, and the destroy also removes the token's plaintext copy from state.

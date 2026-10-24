@@ -8,7 +8,7 @@ import { Link, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
 import type { ProjectCosts, ProjectMember } from "../../api/types";
-import { ago, fmtUsd } from "../../api/format";
+import { ago, fmtUsd, plural } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
 import {
@@ -152,7 +152,7 @@ export default function ProjectDetailPage() {
           <Card title="Measured spend">
             <div className={v.stat}>
               <span className={v.statValue}>{fmtUsd(m.costUsd)}</span>
-              <span className={v.statLabel}>project measured spend · {m.events ?? 0} calls</span>
+              <span className={v.statLabel}>project measured spend · {plural(m.events ?? 0, "call")}</span>
             </div>
           </Card>
           <Card title="Forecast">

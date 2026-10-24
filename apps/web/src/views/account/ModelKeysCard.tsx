@@ -49,6 +49,7 @@ import { Logo } from "../../ui/logos/Logo";
 import { providerLogoKey } from "../../ui/logos/providerLogo";
 import { providerLabel } from "../models/modelBindings";
 import v from "../views.module.css";
+import a from "./appearance.module.css";
 
 /** mirrors createModelCredentialSchema's provider enum in @regulait/shared */
 const PROVIDERS = ["anthropic", "openai", "google", "xai"] as const;
@@ -214,7 +215,7 @@ export default function ModelKeysCard() {
             { key: "added", header: "Set", render: (c) => ago(c.createdAt) },
             {
               key: "actions",
-              header: "",
+              header: <span className={a.srOnly}>Actions</span>,
               align: "right",
               render: (c) => (
                 <Button

@@ -522,7 +522,7 @@ function TracesView() {
                       <button
                         className={`${v.listRow} ${t.rowButton}`}
                         onClick={() => setFilter("sessionId", s.sessionId ?? "")}
-                        title="filter the trace list to this session"
+                        aria-label={`Filter the trace list to session ${shortId(s.sessionId ?? "")}`}
                       >
                         <span className={v.mono}>{shortId(s.sessionId ?? "")}</span>
                       </button>
@@ -792,7 +792,7 @@ function TracesView() {
                       },
                       { key: "refused", header: "Refused", render: (r) =>
                           r.deniedSpanCount > 0 ? (
-                            <Badge tone="danger" title="a governance decision refused something in this trace">
+                            <Badge tone="danger">
                               {r.deniedSpanCount}
                             </Badge>
                           ) : (
@@ -982,8 +982,8 @@ function TracesView() {
                               {s.model && <span className={v.mono}>{s.model}</span>}
                               <span className={v.grow} />
                               {s.inputTokens != null && (
-                                <span className={v.num} title="input/output tokens">
-                                  {s.inputTokens}/{s.outputTokens ?? 0}
+                                <span className={v.num}>
+                                  {s.inputTokens} in / {s.outputTokens ?? 0} out tokens
                                 </span>
                               )}
                               {s.costUsd != null && <span className={v.num}>{fmtUsd(s.costUsd)}</span>}
@@ -1030,7 +1030,7 @@ function TracesView() {
                                   [
                                     "Cost source",
                                     s.usageEventId ? (
-                                      <span className={v.mono} title="the usage_events row this span's figures were copied from">
+                                      <span className={v.mono}>
                                         usage_events {shortId(s.usageEventId)}
                                       </span>
                                     ) : (

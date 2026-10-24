@@ -27,7 +27,7 @@ import type { AuditEntry } from "../../../api/types";
 import { UUID_RE, actorLabel, fmtAt, frameworkLabel, humanize, plural, shortId } from "../../../api/format";
 import type { AuditRetention } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, ConfirmModal, EmptyState, Field, InfoButton, Select, Table, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, InfoButton, Select, Table, type Tone } from "../../../ui/kit";
 import { FoldTable } from "../../../ui/fold";
 import { useToast } from "../../../ui/toast";
 import { downloadCsv, optionEls, useAction, useUsers, userOpts } from "../adminKit";
@@ -53,7 +53,7 @@ const MODE_OPTS = [
   { v: "hosted", l: "Hosted" },
   { v: "byoc", l: "BYOC" },
   { v: "air_gapped", l: "Air-gapped" },
-  { v: "unknown", l: "None recorded" },
+  { v: "unknown", l: "Not recorded" },
 ];
 const modeLabel = (mode: string) => MODE_OPTS.find((o) => o.v === mode)?.l ?? mode;
 
@@ -250,7 +250,7 @@ export default function AuditLogPage() {
                 header: "At",
                 fold: { sm: "event" },
                 sort: (e) => e.at,
-                render: (e) => <span className={v.mono} style={{ whiteSpace: "nowrap" }} title={String(e.at)}>{fmtAt(e.at)}</span>,
+                render: (e) => <span className={v.mono} style={{ whiteSpace: "nowrap" }}>{fmtAt(e.at)}</span>,
               },
               {
                 key: "user",
@@ -264,7 +264,7 @@ export default function AuditLogPage() {
                 header: "Event",
                 sort: (e) => `${e.objectType ?? ""} ${e.ruleId}`,
                 render: (e) => (
-                  <span title={e.ruleId}>
+                  <span>
                     {e.objectType ? <span className={v.faint} style={{ display: "block" }}>{humanize(e.objectType)}</span> : null}
                     {UUID_RE.test(e.ruleId) ? `Policy rule ${shortId(e.ruleId)}` : humanize(e.ruleId)}
                   </span>
@@ -338,8 +338,11 @@ export default function AuditLogPage() {
         </EvidenceFold>
         <EvidenceFold title="Retention" status={retentionStatus(ret, retention.isError)}>
         <Card>
-          {ret == null ? (
-            <span className={v.dim}>Loading retention…</span>
+          {ret == null && retention.isError ? (
+            // A15: a failed read says so, with a Retry; it never stays on "Loading"
+            <ErrorState title="Retention could not be read" message="The retention floor and the prunable count are unknown until it loads." onRetry={() => void retention.refetch()} />
+          ) : ret == null ? (
+            <span className={v.dim} role="status">Loading retention…</span>
           ) : ret.retainedDays == null ? (
             <p className={v.dim}>
               No compliance profile sets a retention — nothing is eligible for pruning (all rows kept).

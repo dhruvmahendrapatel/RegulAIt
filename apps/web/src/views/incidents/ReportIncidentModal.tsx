@@ -7,6 +7,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../api/client";
+import { humanize } from "../../api/format";
 import { Button, Field, Fieldset, Input, Modal, Select, Textarea } from "../../ui/kit";
 import { useAction } from "../admin/adminKit";
 import v from "../views.module.css";
@@ -116,7 +117,7 @@ export function ReportIncidentModal(props: { open: boolean; prefill?: ReportPref
             <Select value={severity} onChange={(e) => setSeverity(e.target.value)}>
               {SEVERITIES.map((s) => (
                 <option key={s} value={s}>
-                  {s}
+                  {humanize(s)}
                 </option>
               ))}
             </Select>

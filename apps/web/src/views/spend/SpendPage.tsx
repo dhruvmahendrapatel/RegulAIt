@@ -19,7 +19,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../api/client";
 import type { CostEventsResponse } from "../../api/adminTypes";
 import type { MyAgentsResponse, Project, UsageEventsResponse } from "../../api/types";
-import { ago, fmtUsd } from "../../api/format";
+import { ago, fmtUsd, plural } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
 import {
@@ -260,7 +260,7 @@ export default function SpendPage() {
           <Card>
             <div className={v.stat}>
               <span className={v.statValue}>{fmtUsd(totals.costUsd)}</span>
-              <span className={v.statLabel}>measured spend · {totals.events ?? 0} calls</span>
+              <span className={v.statLabel}>measured spend · {plural(totals.events ?? 0, "call")}</span>
             </div>
           </Card>
           <Card>

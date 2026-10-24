@@ -136,9 +136,11 @@ export default function WorkflowDetailPage() {
         sub={
           <span className={v.rowTight}>
             <StatusBadge status={inst.status} />
+            {/* only the parts that exist, so an empty environment leaves no "· ·" gap */}
             <span>
-              {inst.change?.changeType ?? ""} · {inst.change?.environment ?? ""} · created{" "}
-              {ago(inst.createdAt)}
+              {[inst.change?.changeType ? humanize(inst.change.changeType) : "", inst.change?.environment ?? "", `created ${ago(inst.createdAt)}`]
+                .filter(Boolean)
+                .join(" · ")}
             </span>
             <IdChip id={inst.id} />
           </span>
@@ -159,7 +161,7 @@ export default function WorkflowDetailPage() {
                       ? s.stageFailed
                       : s.stage;
               return (
-                <span key={stage.id} className={cls} title={`${stage.id} · ${stage.type}`}>
+                <span key={stage.id} className={cls}>
                   {humanize(stage.id)}
                   <span className={s.stageType}>{humanize(stage.type)}</span>
                 </span>
@@ -224,7 +226,7 @@ export default function WorkflowDetailPage() {
                 font: "inherit",
                 fontSize: "var(--text-sm)",
               }}
-              placeholder={`Write the ${current.output ?? "artifact"} content…`}
+              placeholder={`Write the ${artifactWords(current.output)} content…`}
               value={artifactText}
               onChange={(e) => setArtifactText(e.target.value)}
               aria-label="Artifact content"
@@ -275,7 +277,7 @@ export default function WorkflowDetailPage() {
                 )
               }
             >
-              Run {current.id}
+              Run {humanize(current.id)}
             </Button>
           </Card>
         )}
@@ -488,7 +490,7 @@ export default function WorkflowDetailPage() {
         )}
 
         {checkCards.map(({ stage, results }) => (
-          <Card key={stage.id} title={`Checks · ${stage.id}`}>
+          <Card key={stage.id} title={`Checks · ${humanize(stage.id)}`}>
             {results.map((c) => (
               <div key={c.check} className={v.listRow} style={{ alignItems: "center" }}>
                 <span className={v.mono}>{c.check}</span>

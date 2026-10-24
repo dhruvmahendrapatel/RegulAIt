@@ -186,3 +186,43 @@ live database holds the governance seed but only real Shadow-AI findings. Built 
   was created. Every step is pending execution, post-demo, by the owner. It adds one step the setup runbook's teardown
   did not have (removing the AWS discovery role and its OIDC provider before the account closure), which needs the
   owner's agreement, and lists the owner actions above that have no runbook step.
+
+## Addendum: owner decisions, 2026-10-23 and 2026-10-24 (dates, the live endpoint, the "Enforce it" beat)
+
+Recorded from the owner's decisions on #453 (2026-10-23 for the dates; comment 6385378784 of 2026-10-24 for the rest),
+after the full feedback scan of #547 (comment 6385243736, findings FS-1, FS-8 and FS-59). The decisions above are not
+edited; where these supersede them, it is said here.
+
+1. **Dates (owner, 2026-10-23).** The script is used twice: an internal run-through on Sun 2026-11-01 and the
+   **external demo on Tue 2026-11-03**. The code freeze stays 2026-10-29. The plan's files keep their 2026-11-01
+   names. On 11-01 every state-changing beat runs on the fallback stack, so the live instance stays as prepared for
+   11-03 (`DEMO_RUNBOOK.md` §7.3).
+2. **The live endpoint is agentless (owner, 2026-10-24, FS-1, "Re-script LIVE").** The gateway serves no signed
+   collection pack yet (`GET /v1/endpoint-agent/config` answers 503 `collection_pack_unavailable`; the agent's compiled
+   keyring is empty until ADR-0195 SD4g), so a real endpoint agent cannot reach the report stage. Live Act 1 therefore
+   shows the three network sources (GitLab, AWS, Azure) plus an agentless MDM/EDR inventory import of a demo laptop
+   through an `endpoint_inventory` source. The endpoint agent stays on the fallback, and the script says: "its signed
+   collection-pack stage is pending, so this copy's agent reports were seeded." This narrows addendum decision 3's
+   "the real endpoint device" wording in the runbook: the live database holds what the real GitLab, AWS and Azure
+   scans and the real device's inventory import find. Docs only; no code changed.
+3. **An "Enforce it" beat (owner, 2026-10-24, FS-8, "Add it").** Two minutes on the fallback between G2 and G3: one
+   governed call denied with its rule named, one that needs a named approver, and the audit row. It is second in the
+   cutting order. Superseded for 11-03 by decision 4.
+4. **"Enforce it" is a simulated decision, on both dates (owner, 2026-10-24, #453 comment 6387779914).** The beat
+   runs on the Simulation page on 11-01 and 11-03, on LIVE and FALLBACK alike. On screen and in the talk track it is
+   a *simulated decision*: the real policy engine evaluating a proposed call; never say the call "was blocked" or
+   "was queued". The 11-03 Execution control read-only fallback and the MCP-server check are dropped.
+
+### As built (2026-10-24)
+
+- **Script, runbook, Q&A, talk track, leave-behind, real-accounts runbook and presenter notes** updated in one docs
+  batch (PR "HOLD docs(demo): full-scan fixes …"). The time budget still sums to 25.0 minutes: E takes 2.0 and G3
+  grows to 2.0 (0.5 from G4, owner); G6 moved to the optional beats, and S1, S2 and G1 each gave 0.5.
+- **What E shows, as verified on main.** No console page makes a governed tool call as another person and no demo
+  command does it; a real call needs an MCP client holding Dana's key and the project header (`DEMO_RUNBOOK.md` §3(b)).
+  E therefore uses the **Simulation / access preview** page (`/ui/admin/simulation`, `POST /v1/evaluate`), which runs
+  the live kernel for Dana's `search_code` (deny, her per-user revocation named) and `write_file` (require approval,
+  the approver named), executes and queues nothing, and records each question as an advisory audit row. The script
+  says so on stage. A packaged real call for the beat is proposed in that PR as a demo-prep addition and is not built.
+- **11-03:** `POST /v1/evaluate` reads the policy registry and never contacts the MCP server, so the Simulation beat
+  works on LIVE as prepared whether or not the demo MCP server runs there (decision 4).

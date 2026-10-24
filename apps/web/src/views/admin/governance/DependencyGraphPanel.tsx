@@ -103,7 +103,8 @@ export function DependencyGraphPanel({ useCaseId }: { useCaseId?: string }) {
               )}
             </p>
             <div className={s.graphScroller}>
-              <svg className={s.graph} viewBox={`0 0 800 ${height}`} role="img" aria-label="AI dependency and propagated risk graph">
+              {/* FS-18: a group, not an image: an image's children are presentational, and these nodes are buttons */}
+              <svg className={s.graph} viewBox={`0 0 800 ${height}`} role="group" aria-label="AI dependency and propagated risk graph">
                 <g className={s.graphHeadings}>
                   <text x="90" y="25">Use case</text><text x="290" y="25">Agent</text><text x="500" y="25">Model / MCP / connector</text><text x="710" y="25">Vendor</text>
                 </g>
@@ -114,28 +115,38 @@ export function DependencyGraphPanel({ useCaseId }: { useCaseId?: string }) {
                   return (
                     <g key={`${edge.from}-${edge.to}-${index}`}>
                       <line x1={from.x + 80} y1={from.y} x2={to.x - 80} y2={to.y} className={edge.basis === "observed" ? s.graphEdgeObserved : s.graphEdge} />
-                      {edge.basis === "observed" && edge.observedCount != null ? <text x={(from.x + to.x) / 2} y={(from.y + to.y) / 2 - 5} className={s.graphEdgeLabel}>{edge.observedCount} calls</text> : null}
+                      {edge.basis === "observed" && edge.observedCount != null ? // below the node boxes and their inherited-risk rings (which reach 33 past the centre), so the label crosses no outline and stays off the column headings
+                        <text x={(from.x + to.x) / 2} y={(from.y + to.y) / 2 + 47} className={s.graphEdgeLabel}>{edge.observedCount} calls</text> : null}
                     </g>
                   );
                 })}
                 {graph.data.nodes.map((node) => {
                   const point = layout.get(node.key)!;
                   const inherited = node.ownRisk.band !== node.propagatedRisk.band;
+                  // WCAG 1.4.1: the propagated band is written in the node's kicker, not carried by the outline colour alone
+                  const kicker = [point.x === MIXED_COLUMN ? node.type.replace("_", " ") : null, node.propagatedRisk.band !== "none" ? node.propagatedRisk.band : null]
+                    .filter(Boolean).join(" · ");
                   return (
-                    <g key={node.key} role="button" tabIndex={0} aria-label={`${node.label}, propagated risk ${node.propagatedRisk.band}`} onClick={() => setSelectedKey(node.key)} onKeyDown={(event) => event.key === "Enter" && setSelectedKey(node.key)} className={s.graphNode}>
+                    <g key={node.key} role="button" tabIndex={0} aria-label={`${node.label}, propagated risk ${node.propagatedRisk.band}`} onClick={() => setSelectedKey(node.key)}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Enter" && event.key !== " ") return;
+                        event.preventDefault();
+                        setSelectedKey(node.key);
+                      }}
+                      className={s.graphNode}>
                       <title>{node.label}</title>
                       {inherited ? <rect x={point.x - 86} y={point.y - 33} width="172" height="66" rx="12" className={s.graphInheritedRing} /> : null}
                       <rect x={point.x - 80} y={point.y - 27} width="160" height="54" rx="9" className={`${s.graphNodeBox} ${s[`graphBand_${node.propagatedRisk.band}`]}`} />
-                      {point.x === MIXED_COLUMN ? <text x={point.x} y={point.y - 12} className={s.graphNodeType}>{node.type.replace("_", " ")}</text> : null}
+                      {kicker ? <text x={point.x} y={point.y - 12} className={s.graphNodeType}>{kicker}</text> : null}
                       {labelLines(node.label).map((line, i, all) => (
-                        <text key={i} x={point.x} y={point.y + (point.x === MIXED_COLUMN ? (all.length === 1 ? 8 : 3 + i * 13) : (all.length === 1 ? 4 : -3 + i * 13))} className={s.graphNodeLabel}>{line}</text>
+                        <text key={i} x={point.x} y={point.y + (kicker ? (all.length === 1 ? 8 : 3 + i * 13) : (all.length === 1 ? 4 : -3 + i * 13))} className={s.graphNodeLabel}>{line}</text>
                       ))}
                     </g>
                   );
                 })}
               </svg>
             </div>
-            <p className={v.faint}>Solid edges are declared. Dashed edges are observed in the last {graph.data.window.days} days. A node’s outline is its propagated rating; a dashed ring means propagated exposure differs from the node’s own risk.</p>
+            <p className={v.faint}>Solid edges are declared. Dashed edges are observed in the last {graph.data.window.days} days. A node’s outline and its kicker give its propagated rating; a dashed ring means propagated exposure differs from the node’s own risk.</p>
             {selected ? <GraphNodeDetail node={selected} nodes={graph.data.nodes} /> : <p className={v.dim}>Select a node to inspect its inherited-risk path and source.</p>}
             {/* how ratings are computed: kept on the face of the page, after the detail */}
             <div className={v.stackTight}>
