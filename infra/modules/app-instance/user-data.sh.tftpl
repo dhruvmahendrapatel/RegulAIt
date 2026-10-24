@@ -3,6 +3,11 @@
 # from S3 (waiting for it if the upload hasn't happened yet), generate fresh
 # runtime secrets, compose up. Progress + errors land in /var/log/app-boot.log.
 set -uxo pipefail
+# FS-12: the log is root-only. Tracing (-x) is switched off around every line
+# that holds a secret below, so neither the data key nor the bootstrap token
+# is ever written here.
+touch /var/log/app-boot.log
+chmod 600 /var/log/app-boot.log
 exec >> /var/log/app-boot.log 2>&1
 
 dnf install -y docker
@@ -35,9 +40,11 @@ done
 tar xzf source.tar.gz
 
 # Fresh secrets per deployment — never the dev defaults from the compose file.
+# FS-12: no trace while they exist, and the override file is created 0600.
+set +x
 DATA_KEY=$(openssl rand -hex 32)
 BOOT_TOKEN=$(openssl rand -hex 24)
-cat > docker-compose.override.yml <<EOF
+(umask 077; cat > docker-compose.override.yml <<EOF
 services:
   gateway:
     environment:
@@ -52,6 +59,10 @@ services:
   db:
     restart: unless-stopped
 EOF
+)
+chmod 600 docker-compose.override.yml
+unset DATA_KEY BOOT_TOKEN
+set -x
 
 # --- on-box TLS (ADR-0029) ----------------------------------------------------
 # Caddy terminates TLS in the compose stack and gets a real Let's Encrypt
