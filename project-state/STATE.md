@@ -1,10 +1,10 @@
 ---
-phase: demo-prep-final-refresh-and-t1-phase-1-merged-followups-in-review
-last_updated: 2026-10-22
+phase: demo-prep-deep-scan-lanes-merged-runbook-in-review
+last_updated: 2026-10-23
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-10-22-session-01.md
+last_session: sessions/2026-10-23-session-01.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,52 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-23 (21:30 UTC) - demo prep: the security and dependency batch, three engine lock records, the demo
+readiness deep scan (#522, 53 findings) and its fix lanes D1-D4 and D6 are merged. The external demo moves to Tue
+2026-11-03.** Full record: [sessions/2026-10-23-session-01.md](sessions/2026-10-23-session-01.md). This paragraph
+supersedes the "Open", "Owner actions", "Process" and "Dates" lines of the 2026-10-22 (14:30) paragraph below; its
+owner decisions stand.
+- **Merged (UTC, 2026-10-22 20:16 to 2026-10-23 20:56):** #492 (`6d6f4de8`, one review drawer at a time, wider copy
+  guard), #496 (`159e6210`, Playwright and apt caches, carrying the valid Dependabot config from #497), #495
+  (`9ff1c5bf`, nltk 3.10.4 for garak, vitest 4.1.12), #494 (`2248acec`, CodeQL results uploaded to the Security tab),
+  #503 (`5b636d57`, upload-artifact action), #512 (`c1f1ee8f`, engine lock record), #511 (`91c507ac`, demo QA lows),
+  #504 (`e2395310`, pip entries security-only, Docker base-image updates), #502 (`4ac353e9`, actions group), #508
+  (`d1ed4358`, digest-pinned postgres and keycloak images), #509 (`115f8dc9`, copy-guard gaps and doc lows), #519
+  (`e932ed14`, engine lock record), #510 (`7be894bd`, CodeQL bundle pin 2.27.3, Playwright cache key), #513
+  (`e6cae5a4`, fastify 5.12.6 security patch), #530 (`d1b945c2`, garak lock record), and the deep-scan lanes #524
+  (`fb1267bf`, D2 live prep defines `staging`), #527 (`4f553a01`, D4 use case keeps its shadow-AI finding link,
+  **0211**), #526 (`b3c47e21`, D1 Docker fallback prep runs the full `demo:prepare` order), #528 (`525e122f`, D3 copy
+  and UX fixes) and #529 (`440e067c`, D6 freeze-week CI settings, **ADR-0198**).
+- **Last migration on main: 0211** (`use_case_discovery_finding`). The ADR index ends at 0198 (193 files, 193 rows).
+- **Deep scan:** [#522](https://github.com/dhruvmahendrapatel/RegulAIt/issues/522), 53 findings (2 demo-blocking, 7
+  high). Owner decisions on #453:
+  [6365927299](https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6365927299) (dates, the
+  findings table, the lanes) and
+  [6371221958](https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6371221958) (S4 link pairing,
+  the `regulAIt` wordmark, every state-changing step of the 11-01 run on FALLBACK with LIVE read-only).
+- **Demo check:** the Demo journey on main `525e122f` (run 40021015526) passed every job.
+- **Open:** #525 (HOLD, D5 runbook and script updates; fix round at `0b978059` in review). #518 (HOLD, designer
+  session: theme swatches follow the mode). Dependabot PRs, all held and reviewed by hand (owner: updates stay on):
+  #516, #517, #520 and #521 (held until after the demo), and the newer #515 and #531-#534. #505 and #523 were closed by
+  Dependabot as superseded.
+- **Owner actions:** the dev instance power schedule off before Sun 10-25 (re-enable after 11-03); the
+  `docker-compose.override.yml` on the dev host (export signing key and licence keyring); the branch rule on main
+  requiring ci.yml's build-and-test check; the #508 image rollout on the dev host and the laptop before 10-29; deleting
+  the four stale `engine-images-lock/*` branches (`9ff1c5bf7fc5`, `5b636d57738f`, `115f8dc954cc`, `7be894bd6708`, all
+  merged or superseded); the real-account round trips in
+  [docs/deployment/DEMO_REAL_ACCOUNTS.md](../docs/deployment/DEMO_REAL_ACCOUNTS.md).
+- **Post-demo backlog:** #527 LOW-1 (a non-admin sees an opaque finding id; accepted as intended), LOW-2 (PATCH drops
+  `discoveryFindingId` silently; add a by-name 422) and LOW-3 (resuming a draft replaces the finding id silently);
+  the `engine-images.yml` paths filter misses `pnpm-lock.yaml` and `apps/*/package.json`; five gateway files missing
+  from the demo path filter; widening the vendor-name guard to `.ts` help text; the bumps #505 excluded; React 19 and
+  Vite 8 (#506, #507 closed); T1 Phase 2; ADR-0183 batches 3-6; revert the ADR-0198 caps.
+- **Process:** the merge loop now requires a head at least 10 minutes old, every check suite completed and at least
+  one Actions suite; bot branches are held unless `<PR> <full sha>` is in its release list. Merge a pending engine lock
+  PR before any other image-input or engine-workflow change, and update-branch every open PR after a lock merges.
+  Mistakes M-089 to M-096.
+- **Dates:** code freeze 2026-10-29; internal full run-through Sun 2026-11-01, afternoon ET; external demo Tue
+  2026-11-03.
 
 **2026-10-22 (14:30 UTC) - demo prep: the routing library's production build, the final screenshot pack, the F34/F35
 copy and drawer fixes and T1 Phase 1 (six colour themes, kept in the browser) are merged.** Full record:
@@ -5246,6 +5292,11 @@ JS to 137.3 kB (#484), and the owner's all JS raise from 1036 kB to 1038 kB for 
 As built (2026-10-21): ADR-0197 gained As-built notes for the fallback rehearsal record and the post-demo teardown
 runbook (#482), and for the audit object index and `objectType` validation (#476). The owner's text is unedited.
 
+Owner decision (2026-10-23): ADR-0198 (freeze-week CI settings) is accepted and built (#529): the `spa-journeys` and
+mocked UI shard caps rise to 25 minutes for cold-cache installs until after 2026-11-03, a demo-blocking fix during the
+freeze may raise the entry JS and CSS ceilings by at most 1 kB in total, and the Demo journey path filter gains the
+files the deep scan found missing (#522 finding 21). The index now ends at 0198, with 193 files and 193 rows.
+
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
 (b) standing policy for future scaffolds recorded (ADR-0006, no implementation yet — nothing to
@@ -5260,6 +5311,13 @@ region-allowlist SCP; OQ-002 (budget cap) resolved to $5/month; OQ-003 (GitHub a
 to personal `dhruvmahendrapatel`.
 
 ## Known follow-ups (not urgent, not blocking)
+- **Demo-prep follow-ups (2026-10-23)**, from the reviews of #494-#530 and the owner's decisions. Taken from review
+  reports and the master log; not re-verified one by one. #492 merged, so the 2026-10-22 items held in it are done.
+  - After the demo: #527 LOW-1, LOW-2 and LOW-3 (see the 2026-10-23 paragraph); the `engine-images.yml` trigger paths
+    miss `pnpm-lock.yaml` and `apps/*/package.json`, which are gate inputs; five gateway files are still missing from
+    the demo path filter (#529 low); widen the vendor-name guard to `.ts` help text (owner); the bumps excluded from
+    #505; React 19 and Vite 8; T1 Phase 2; ADR-0183 batches 3-6; revert the ADR-0198 job caps.
+  - #511 L1: the F33 shadow-AI test cannot fail. Also the feedback page's centred hint, and 23 B of entry JS headroom.
 - **Demo-prep follow-ups (2026-10-22)**, from the reviews of #484-#491. Taken from review reports; not re-verified
   one by one.
   - In #492 (held, awaiting review): the #489 Medium (no test that only one review drawer opens at a time, approvals and

@@ -16,7 +16,14 @@ line is listed in `qa-report.json` (`ignoredConsole`). The spec also asserts the
 "blocked on approval" on S3a. It records raw ids, ISO timestamps, truncated text and empty states per screen in
 `qa-report.json`.
 
-**Pack of record (2026-10-21, after #477 and #474):** workflow run `39666220670` (head `77ba10ba`, branch
+**Pack of record (from 2026-10-23):** workflow run `39940181481` (pull request #508, which tested the merge ref
+`18a696dc`: `main` at `91c507a`, after #489 and #511, plus #508), job `demo-journey` (`120371376649`), artifact
+`demo-screens` (id `12497390750`, kept until 2026-11-22). Its `demo:check` printed `26 pass, 1 warn, 0 fail`. The deep
+scan of #522 (track T3a) checked this pack and run `39895745511` against `main`; this update takes its results and the
+commits named below, and does not re-view every PNG. Use this run, or a later green one, for the deck and rehearsal.
+The per-beat table below is still the 2026-10-21 walk.
+
+**Previous pack of record (2026-10-21, after #477 and #474):** workflow run `39666220670` (head `77ba10ba`, branch
 `demo-refresh-1021b`: `main` at `a042596` after #477 wide tables, #474 X6b folded sections and #478 the F31 copy, plus
 this refresh's spec change), job `demo-journey` (`119452106915`), artifact `demo-screens` (id `12378735534`), 39 files,
 ~17 MB. Every PNG was opened and looked at (tall pages in 1,500 px slices), not only checked by the `qa-report.json`
@@ -104,6 +111,15 @@ with evidence:** **F6** and **F21** (#477; `ds-s2`, `ds-s3a`-`ds-s3d`), **F20** 
 seeded names. **F5, F7, F8, F9, F10, F13, F15, F17, F19, F22, F23, F24, F26, F27, F28, F29 and F32** still show or
 stay open. **F33-F36** are new in this pack. No product code changes in this PR.
 
+**Update 2026-10-23 (pack `39940181481`, deep scan #522 #34):** **closed on `main`, with evidence:** **F15** (scan T3a
+on this pack; the button reads "Add source" and the codes are secondary text, 8efb22a), **F23** (ce2f5cb, #511),
+**F27** (b697f52, #511), **F32** for G7 (ce2f5cb, #511; G9's ISO date with *UTC* is left as it is for now), **F33**
+and **F36** (ce2f5cb, #511), **F34** (710e184 and 2cba778, #489) and **F35** (8a1f28f, #489). The rest of the list
+above is unchanged. The copy and UX fixes the owner approved for the freeze (F7, F17, F22, F26, F28's doc path, the
+S3 placeholder; #453 comment of 2026-10-23) are on `main` since #528 (lane D3; the plan's Blocked line now reads "no
+governed replacement agent is registered for this provider yet, so this step waits until an admin registers one."). This
+pack predates them, so they are closed against a later pack.
+
 The two other owner decisions of 2026-10-21 that this pack checks:
 - **X6b folded sections (#474):** built as approved. The fold header is the card title with a chevron and the count:
   *Recent runs* with 5 runs (`ds-s1`), *Inventory* with 15 findings (`ds-s2`, `ds-s3a`), *Alerts* with 24 alerts (`ds-g5`) and
@@ -162,7 +178,7 @@ lane.
 - **F15 (UI copy, S1):** a button reads literally "Add source (disabled)". The Scanner kinds table shows raw codes
   (`repo_github`, `cloud_inventory, cloud_audit_log`). Cloud federation shows the env var `REGULAIT_PUBLIC_URL` on an
   admin screen. Catalogue gaps show raw signature codes (a desktop-app code and an IDE-extension code, each naming the tool) under
-  the display name; still so in run 39666220670.
+  the display name; still so in run 39666220670. **Closed (2026-10-23, pack `39940181481`, deep scan #522 T3a; 8efb22a).**
 - **F16 (UI, S1 tables):** dates use US format (`10/26/2026, 12:11:07 AM`) while the copy is British English
   ("organisation", "enrolment"). Queued timestamps and the "all read" cells wrap awkwardly in narrow columns.
 - **F17 (copy, S1–S3, Inbox):** brand and term casing is inconsistent. "RegulAIt" (S1 subtitle, federation note)
@@ -185,7 +201,7 @@ lane.
 - **F22 (UI, S3 `ds-s3d`):** after **Start and link**, the drawer's body stays scrolled at the form, so the
   "started and linked" status line is out of view and the footer's two buttons are disabled with no visible reason.
 - **F23 (UI, S3 `ds-s3b`):** a long resource path in a plan step runs past the drawer's right edge
-  ("…Microsoft.CognitiveServices/a"), and the drawer title takes four lines. Related to F8.
+  ("…Microsoft.CognitiveServices/a"), and the drawer title takes four lines. Related to F8. **Closed (#511, ce2f5cb; pack `39940181481`):** a plan step wraps a long resource path inside the drawer.
 - **F24 (UI, G1 `ds-g1b`, `ds-g1c`, `ds-g9-decision-records`):** on the use-case record the group captions sit at two
   heights (*Overview* and *Assessment* lower than *Evidence* and *Activity*). *Decision records*, *AI BOM* and
   *Decision path* wrap onto two lines, and counts sit under their tab names, so the tab row reads uneven at 1440 px.
@@ -196,7 +212,7 @@ lane.
 - **F26 (copy, G5 `ds-g5`, `ds-g5b`):** the alert drawer's due date reads "Due Thu, 22 Oct 2026 04:39:53 GMT", unlike
   every other date on screen. The Remediation proposals table shows the raw kind `assign_agent_owner`.
 - **F27 (UI, G9 `ds-g9-feedback`):** the **Feedback settings (admin)** intro sentence sits in a narrow column in the
-  middle of the card instead of at its left edge (the W4 pattern).
+  middle of the card instead of at its left edge (the W4 pattern). **Closed (#511, b697f52; pack `39940181481`):** the intro starts at the card's left edge.
 - **F28 (copy/data, S1 `ds-s1`):** the Cloud federation card names an internal path
   (`docs/deployment/CLOUD_DISCOVERY.md`) and an API call name (`AssumeRoleWithWebIdentity`) on an admin screen. This
   copy point stands. The card also says the deployment's public URL is not configured, while the endpoint device in
@@ -228,20 +244,20 @@ lane.
   G7 shows US format, both in its generated line and on entry dates; G9 Incidents shows an ISO date with a UTC suffix
   on the awareness date. **Still open in this pack:** G7 reads *Generated Oct 21, 2026, 8:08 PM*, *May 26, 2022* and
   *Verified on Oct 5, 2026*, while its body text writes *12 May 2025*; G9's **Aware** reads *2026-10-21 20:05 UTC*. No fix
-  is merged yet. The script tells the presenter not to read these dates aloud.
+  is merged yet. The script tells the presenter not to read these dates aloud. **G7 closed (#511, ce2f5cb; pack `39940181481`):** the page uses the shared en-GB formatters. G9's *UTC* date is left as it is for now; the script still says not to read it aloud.
 - **F33 (UI, S2 `ds-s2`, `ds-s3a`; new):** the Inventory's line reads *"Showing 3 of 15 · scroll the list for the
   rest, or Expand"* while a fourth row is in view, cut by a few pixels at the bottom of the box. The count counts whole
-  rows only. Cosmetic; the presenter does not read it.
+  rows only. Cosmetic; the presenter does not read it. **Closed (#511, ce2f5cb; pack `39940181481`):** a row mostly in view is counted.
 - **F34 (copy, S2c `ds-s2c`; new, not a script beat):** on the Agents page, the **Name** and **Model id** placeholders
   give a vendor model as their example, and the Model & pricing help names a vendor's seeded id. That is UI copy, so
   the no-vendor-names rule applies (the #478 sweep did not cover it). The catalogue rows themselves are seeded records
-  (F30, kept). For the copy owner.
+  (F30, kept). For the copy owner. **Closed (#489, 710e184 and 2cba778; pack `39940181481`):** neutral placeholders and help text; the copy guard now scans them.
 - **F35 (UI, G2 `ds-g2b`; pre-existing, logged now):** the **Open task** review panel dims the Inbox behind it at
   1440 px, unlike the shared detail drawer, which is a side panel above 900 px (the #459 rule). It was the same in run
-  39544572823. To confirm with the Designer lane whether the task panel should follow the drawer rule.
+  39544572823. To confirm with the Designer lane whether the task panel should follow the drawer rule. **Closed (#489, 8a1f28f; pack `39940181481`):** the review opens in the shared detail drawer, beside an undimmed page above 900 px.
 - **F36 (UI, G5 `ds-g5`, `ds-g5b`; new with X6b):** on the flush **Alerts** card, the *"Showing 5 of 24 · scroll the
   list for the rest, or Expand"* line sits flush with the card's left edge, without the card padding the other cards
-  give it.
+  give it. **Closed (#511, ce2f5cb; pack `39940181481`):** the hint line takes the header's inset.
 - **Screenshot artefact (not a defect):** in full-page captures the page background gradient covers only the first
   900 px; the browser keeps it fixed while scrolling.
 

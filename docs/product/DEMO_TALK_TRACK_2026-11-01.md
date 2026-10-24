@@ -1,6 +1,6 @@
 # RegulAIt Positioning Talk Track — 2026-11-01 demo (v3)
 
-**Date:** 2026-11-01 · **Audience:** internal, whoever presents the demo
+**Date:** internal run-through Sun 2026-11-01; external demo Tue 2026-11-03 · **Audience:** internal, whoever presents the demo
 **Goes with:** `DEMO_SCRIPT_2026-11-01.md`. The 2026-10-05 talk track stays valid for the governance beats; this
 file adds the Shadow AI opening and restates the rules.
 **Rule:** every claim here is something the demo shows or an ADR documents. Say what RegulAIt does; do not
@@ -40,9 +40,10 @@ into the governed path with a second person's sign-off, and then governs it from
   `<REGULAIT_PUBLIC_URL>/federation`, which is separate from the workload-identity issuer, so a token from one never
   verifies at the other. The customer's role or app registration trusts that issuer; no long-lived cloud secret is
   stored.
-- Git providers are the stated exception today: repository scans use a read-only token, stored encrypted and never
-  shown, and the posture page lists it as a relaxation. Federated git credentials are planned (ADR-0197 work plan,
-  A5).
+- Git: GitHub and Azure DevOps sources federate by default (built; not yet run against a live account). GitLab and
+  Bitbucket accept no third-party token, so they use a read-only token, stored encrypted and never shown, and the
+  posture page lists it as a relaxation (`docs/deployment/GIT_DISCOVERY_CREDENTIALS.md`). The demo's GitLab group is
+  that case.
 - A credential found to grant write access is refused and never used again.
 
 ### 4. From finding to governed state, with a second person (ADR-0055 §4, ADR-0195 A4)
@@ -88,10 +89,11 @@ defaults; respond with a human in the loop; the deploy gate; regulatory intellig
 - **Never present the fallback's recorded runs as live scans.** On the prepared copy, the GitLab, AWS and Azure runs
   are recorded replays through the real worker. The screen does not say so (**Reads** shows *all read*; only the
   *(demo dataset)* suffix on each source name marks them), so say it aloud.
-- **Never call git scanning keyless.** It uses a read-only token today.
+- **Never call the demo's git scanning keyless.** GitLab uses a read-only token. GitHub and Azure DevOps federation
+  is built but has not run against a live account: say "built", not "proven".
 - **Never call the endpoint agent signed and shipped.** Its packages are built unsigned today; keyless release
   signing is decided (owner decision Q2) and not built.
 - **Never present anything as production.** The AWS account is a non-production sandbox (ADR-0197 decision 2), and
-  the remediation workflow's environment is `staging`. Type it before pointing at the field: its placeholder reads
-  *"for example production"*.
+  the remediation workflow's environment is `staging`, and so is the deploy gate's. The field's placeholder reads
+  *"for example staging"*; type `staging` before pointing at it.
 - **Never name or describe another governance product.**

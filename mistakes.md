@@ -1678,3 +1678,88 @@ Git now prints 8 characters because the repository has grown, so the comparison 
 with no message. The master then looked for a concurrent push that had never happened.
 
 Rule: scripts compare full 40-character SHAs, or use `git merge-base --is-ancestor`, never a fixed-length short SHA.
+
+### M-089 (2026-10-23) - The merge loop merged #495 with 31 checks still queued
+
+At 00:42 the merge loop merged #495. The master had just update-branched it, and only one green run was reported on
+the new head while 31 other checks were still queued. The loop read that as green. The content audit was clean (the
+approved head plus update-branch merges), but the merge was not verified by CI, and main's CI on `9ff1c5bf` had to be
+watched afterwards. The race: right after an update-branch, a head has a few finished suites and many not yet created
+or started, so "no failing check" is not "all checks passed".
+
+Rule: the merge loop merges a head only when it is at least 10 minutes old, every check suite on it is completed and
+green, and at least one of them is a GitHub Actions suite.
+
+### M-090 (2026-10-23) - Dependabot PRs were not held automatically
+
+The merge loop held PRs by title ("HOLD"). Dependabot opened #498-#503 at about 00:35 with its own titles, so none of
+them was held. The master held them by hand at 00:46, before any merged. A bot cannot be asked to follow a title
+convention, and a later rebase by the bot changes the head after review.
+
+Rule: a bot branch (`dependabot/*` or any other bot) is held unless the release list has a line `<PR> <full 40-char
+sha>` for its exact current head; a rebase by the bot needs a new release line after its changed lines are checked.
+
+### M-091 (2026-10-23) - A CodeQL upload workflow was shipped while code-scanning default setup was on
+
+#494 added a CodeQL analysis with an upload from our own workflow. After an update-branch, its SAST job failed: the
+repository had code-scanning default setup enabled (configured on 10-22 at 21:59), and GitHub refuses advanced uploads
+while default setup is on. The failed uploads also raised a "configuration error" banner in the Security tab. The
+owner turned default setup off at 00:41 and the job passed on rerun.
+
+Rule: before shipping or merging a workflow that uploads code-scanning results, read the repository's code-scanning
+default-setup state (`GET /repos/{owner}/{repo}/code-scanning/default-setup`) and have it set to not-configured first.
+
+### M-092 (2026-10-23) - Two PRs each needed the other green, and neither could merge
+
+The owner's template `dependabot.yml` (an empty ecosystem) turned the Dependabot config check red on main and every
+PR. #497 fixed the config, but its CI needed #496's Playwright cache to finish inside the shard cap. #496 was red only
+on the config check it inherited from main. Each PR waited for the other. The master broke it at 23:55 by porting
+#497's approved file into #496, had the delta verified against the approved file, and closed #497 as superseded.
+
+Rule: when two PRs each need the other green to pass, port the smaller approved fix into the other PR, verify the
+delta equals the approved content, merge that one and close the other. Do not wait for either to go green.
+
+### M-093 (2026-10-23) - Engine lock-PR races, three times in one day
+
+Each merge that changes an engine image input publishes images and opens a lock branch, compared against the lock
+file on main. Three races followed from that:
+- #503 touched `engine-images.yml` and merged at 03:17 while #512 (the lock for `9ff1c5bf7fc5`) was still pending.
+  Its run compared against the stale lock and republished, which needed a second lock PR (#519).
+- #509's run started after its merge at 12:17, before #519 merged at 13:09, and so compared against the stale
+  generation-5 lock. #509 changed only `engines/garak/THIRD_PARTY.md`, a docs file, but every file under
+  `engines/<engine>/` is an image input, so garak republished (lock branch `115f8dc954cc`, later superseded by #530).
+- Lock PRs went stale when another lock merged: #519's review found its publish generation had to be 6, not 5. After
+  #530 merged, #524, #526, #527 and #529 failed the stale-base lock check, because they had been update-branched
+  before #530 merged.
+
+Rule: merge a pending lock PR before any other PR that changes an image input or an engine workflow; treat any edit
+under `engines/<engine>/`, docs included, as an image input; and after a lock PR merges, update-branch every open PR
+before trusting its CI.
+
+### M-094 (2026-10-23) - The merge loop was dead for seven hours, and the session tools were down for three
+
+A container restart killed the merge loop after its last activity at 03:30. Nothing noticed until a check-in at 10:36
+restarted it, so released PRs waited about seven hours. Later the remote session tools were unreachable from about
+14:55 to 17:50, so reviews could not be dispatched, and the loop died again at 16:26 and was restarted at about 17:54.
+This is the 2026-10-22 idle gap again (05:48 to 10:53).
+
+Rule: every check-in first confirms the merge loop is alive and restarts it if it is not, and an outage of the loop or
+the session tools is recorded with its start and end times in the master log and the session record.
+
+### M-095 (2026-10-23) - A copy change missed a fourth pin, because the grep was for the full sentence
+
+On #528 the master changed a UI string and grepped for the old sentence to update the tests that pinned it. Three
+pins matched. A fourth spec pinned only a prefix of the old sentence, so the grep missed it, and recheck 1 came back
+CHANGES.
+
+Rule: when changing copy, grep for every distinctive prefix and substring of the old text (and of each sentence in
+it), not only the full sentence, before saying all pins are updated.
+
+### M-096 (2026-10-23) - A review brief dictated a brand casing that contradicts ADR-0075
+
+The master's review brief for the D3 copy lane (#528) asked for "RegulAIt" in product copy. ADR-0075 sets the wordmark
+as `regulAIt`, and a test enforces it. The conflict surfaced during the lane, and the owner confirmed `regulAIt` (#453,
+17:50) and recorded the brief's casing as a master error.
+
+Rule: before a brief dictates a product name, casing or any brand detail, read the brand ADR (ADR-0075) and its test,
+and quote the ADR's form.
