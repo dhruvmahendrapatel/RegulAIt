@@ -166,7 +166,7 @@ export const REGULATORY_UPDATES: RegulatoryUpdate[] = [
     summary:
       "NIST AI RMF 1.0 was published in January 2023. The framework describes itself as voluntary, " +
       "rights-preserving, non-sector-specific and use-case agnostic. Its four core functions — GOVERN, MAP, " +
-      "MEASURE and MANAGE — map to the risk-register categories in RegulAIt's compliance packs.",
+      "MEASURE and MANAGE — map to the risk-register categories in regulAIt's compliance packs.",
     effectiveDate: "2023-01-26",
     status: "published",
     frameworks: ["nist-ai-rmf"],
