@@ -25,7 +25,8 @@ roadmap: ../product/ROADMAP.md
 decided (#453 c6393636981, c6393671561) that the 11-03 demo connects for real to GitHub, Jira Cloud, Azure DevOps, Slack
 and Resend (sign-in email over SMTP, plus a new product email channel), on the existing AWS dev host behind a subdomain
 and HTTPS. The "Enforce it" beat becomes a live governed call, superseding c6387779914. Every beat keeps an audited,
-off-by-default simulated fallback. The 10-29 freeze stands. #518 merged (`c1d5a19`); main and dhruv/active are at
+off-by-default simulated fallback. Everything (code, accounts, DNS, the apply, live checks) is due by the 10-29 freeze
+(c6394196962). #518 merged (`c1d5a19`); main and dhruv/active are at
 `c1d5a19`. Lanes and owner account setup are next.
 
 **2026-10-24 (21:00 UTC) - the full feedback scan and the designer's demo-path leads are fixed on main; one lane is

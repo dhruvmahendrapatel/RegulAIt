@@ -6,7 +6,7 @@
 ## Context
 
 The owner wants the 2026-11-03 demo to be as authentic as possible: deployed as a hosted service and linked to real
-third-party apps (owner, 2026-10-25, #453 comments 6393636981 and 6393671561). Until now the demo seed pointed every git,
+third-party apps (owner, 2026-10-25, #453 comments 6393636981, 6393671561, 6393712592 and 6394196962). Until now the demo seed pointed every git,
 PM, deploy and model connection at `provider: "mock"`. The "Enforce it" beat (ADR-0197 addendum, FS-8) was a simulated
 decision on the Simulation page (#453 c6387779914). The dev host (ADR-0013) serves plain HTTP on port 3000 with no domain.
 
@@ -31,22 +31,26 @@ An inventory of origin/main (2026-10-25) found the following:
    - A new product email channel for approvals and alerts, built on Resend's official SDK. ADR-0176 applies: the
      licence and maintenance are checked, the version is pinned, there is a `THIRD_PARTY.md` row, and
      `api.resend.com` is on the egress allow-list.
-3. **Hosting: the existing AWS dev host, behind a domain and HTTPS.**
-   - The domain is a subdomain of a domain the owner already owns.
-   - Mail sends from its own mail subdomain.
-   - The domain lives in environment config (`REGULAIT_PUBLIC_URL` and related settings), never in code.
+3. **Hosting: the existing AWS dev host, behind a domain and HTTPS** (c6393636981).
+   - The app runs on a subdomain of a domain the owner already owns (c6394196962).
    - TLS is terminated by an open-source reverse proxy with automatic certificates, and port 3000 stops being public.
-   - This lifts the earlier "no `terraform apply` to the dev host before 11-03" hold for this change only. Each apply
-     still runs on the owner's go-ahead in that session.
+     This is the lane plan the owner approved with the go-ahead (c6393712592).
+   - Implementation choices, not separate owner decisions:
+     - mail sends from its own mail subdomain, following Resend's guidance;
+     - the domain lives in environment config (`REGULAIT_PUBLIC_URL` and related settings), never in code.
+   - This lifts the earlier "no `terraform apply` to the dev host before 11-03" hold for this change only. Under the
+     standing guardrail, each apply still runs on the owner's go-ahead in that session.
    - **It remains a demo environment and gets no production designation** (standing guardrail).
 4. **A simulated fallback is kept.** Every beat is live by default. An admin switch per beat returns it to today's
    simulated version, so a third-party outage cannot sink the demo. The switch is off by default and audited when used
-   (ADR-0180). The simulated path must still be labelled "simulated decision" on screen.
-5. **Credentials never pass through chat or files in the repo.** The owner creates the accounts and enters each token,
+   (ADR-0180). As ADR-0197 already requires, the simulated path is labelled "simulated decision" on screen.
+5. **Credentials never pass through chat or files in the repo.** This follows from existing policy (the CLAUDE.md
+   security checklist and the standing constraints), not a new owner decision. The owner creates the accounts and enters each token,
    signing secret or API key through the product's admin UI or API, or on the host. Only variable names appear in
    docs.
-6. **The freeze stands.** Work under this ADR must be merged by 2026-10-29 through the normal review and release
-   process. A beat that is not green by then runs on its simulated fallback on 11-01 and 11-03.
+6. **Everything by 10-29 (owner, c6394196962).** The lane code, account setup, DNS, the Terraform apply and the live
+   checks are all done by the 2026-10-29 freeze, through the normal review and release process. A beat that is not
+   working live by then runs on its simulated fallback on 11-01 and 11-03.
 
 ## Consequences
 
