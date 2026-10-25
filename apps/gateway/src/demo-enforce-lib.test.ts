@@ -11,6 +11,12 @@
  *     rejection by the approver ends the beat, and the write never runs in either case.
  *  5. SIMULATED: with the beat on its fallback, the command asks `POST /v1/evaluate` only. No approval row, no chat
  *     post, no upstream contact; every line it prints is under the "simulated decision" label.
+ *  6. APPROVE, THEN RE-RUN (PR #573 review, finding 1): after a timed-out run is approved, the re-run's first call
+ *     spends that approval and executes once, reported "APPROVED (earlier) and EXECUTED", exit 0, never the bypass
+ *     alarm. NEGATIVE CONTROL: with the approval rule removed, a write that executes with no approval spent still
+ *     prints the `***` bypass line and exits 1.
+ *  7. REFUSED (finding 5): when the demo-gateway check refuses or throws, or the switch cannot be read, nothing is
+ *     called: no approval, no upstream contact, exit 2.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import http from "node:http";
@@ -19,7 +25,7 @@ import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { approvals, auditLog, and, createDb, eq, mcpServers, runMigrations, type Db } from "@regulait/db";
+import { approvalRules, approvals, auditLog, and, createDb, eq, mcpServers, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { CHATOPS_RULE_IDS } from "./chatops.js";
 import { runEnforceBeat, type EnforceBeatOptions } from "./demo-enforce-lib.js";
@@ -47,6 +53,7 @@ let gatewayUrl = "";
 let requesterId = "";
 let requesterKey = "";
 let approverKey = "";
+let approverId = "";
 let serverId = "";
 let slackConnectionId = "";
 let loopbackAllowHostId: string | undefined;
@@ -72,6 +79,7 @@ const beat = (extra: Partial<EnforceBeatOptions> = {}) =>
     baseUrl: gatewayUrl,
     bootstrapToken: BOOT,
     isSimulated: async () => false,
+    verifyTarget: async () => null,
     requesterEmail: REQUESTER_EMAIL,
     serverName: SERVER,
     projectName: PROJECT,
@@ -160,6 +168,7 @@ beforeAll(async () => {
   requesterKey = requester.key;
   const approver = await mkUser(`lanef-avery-${RUN}@example.com`, "Avery Lane F");
   approverKey = approver.key;
+  approverId = approver.id;
 
   const s = await post("/v1/servers", { name: SERVER, url: `${upstreamUrl}/` });
   expect(s.statusCode).toBe(201);
@@ -273,6 +282,71 @@ describe("demo:enforce LIVE", () => {
     expect(runs.write_file).toBe(before);
     // leave the shared database without a pending row of ours
     await decide(first.approvalId!, "denied", approverKey);
+  });
+
+  it("approve after a timeout, then re-run: the first call spends that approval and reports it, never a bypass", async () => {
+    const before = runs.write_file;
+    const first = await beat({ waitMs: 200 });
+    expect(first.outcome).toBe("timed_out");
+    expect(runs.write_file).toBe(before);
+    expect((await decide(first.approvalId!, "approved", approverKey)).statusCode).toBe(200);
+
+    const again = await beat({ waitMs: 200 });
+    expect(again.outcome).toBe("executed");
+    expect(again.exitCode).toBe(0);
+    expect(again.approvalId).toBe(first.approvalId);
+    expect(again.lines.some((l) => l.includes("write_file    APPROVED (earlier) and EXECUTED") && l.includes(first.approvalId!))).toBe(true);
+    expect(again.lines.some((l) => l.startsWith("***"))).toBe(false);
+    expect(runs.write_file).toBe(before + 1);
+    const [spent] = await db.select({ status: approvals.status }).from(approvals).where(eq(approvals.id, first.approvalId!));
+    expect(spent?.status).toBe("consumed");
+  });
+
+  it("negative control: a write that executes with no approval spent is still reported as a bypass", async () => {
+    const before = runs.write_file;
+    await db.delete(approvalRules).where(and(eq(approvalRules.userId, requesterId), eq(approvalRules.serverId, serverId)));
+    try {
+      const r = await beat({ waitMs: 200 });
+      expect(runs.write_file).toBe(before + 1);
+      expect(r.outcome).toBe("unexpected");
+      expect(r.exitCode).toBe(1);
+      expect(r.lines.at(-1)).toContain("*** write_file ran WITHOUT approval");
+      expect(r.lines.some((l) => l.includes("APPROVED (earlier)"))).toBe(false);
+    } finally {
+      const back = await post("/v1/rules/approvals", { userId: requesterId, serverId, toolName: "write_file", approverUserId: approverId });
+      expect(back.statusCode).toBeLessThan(300);
+    }
+  });
+});
+
+describe("demo:enforce REFUSED (not a demo gateway, or the switch cannot be read)", () => {
+  const nothingCalled = async (extra: Partial<EnforceBeatOptions>, expectLine: RegExp) => {
+    const hits = upstreamHits;
+    const posts = slackPosts.length;
+    const rowsBefore = (await db.select({ id: approvals.id }).from(approvals).where(eq(approvals.userId, requesterId))).length;
+    const r = await beat(extra);
+    expect(r.outcome).toBe("refused");
+    expect(r.exitCode).toBe(2);
+    expect(r.lines.at(-1)).toMatch(expectLine);
+    expect(upstreamHits).toBe(hits);
+    expect(slackPosts.length).toBe(posts);
+    expect((await db.select({ id: approvals.id }).from(approvals).where(eq(approvals.userId, requesterId))).length).toBe(rowsBefore);
+  };
+
+  it("refuses when the demo-gateway check says no", async () => {
+    await nothingCalled({ verifyTarget: async () => "no demo personas here" }, /^REFUSED {2}no demo personas here\. Nothing was called\.$/);
+  });
+  it("refuses when the demo-gateway check throws", async () => {
+    await nothingCalled(
+      { verifyTarget: async () => Promise.reject(new Error("GET /v1/demo/beats -> 503")) },
+      /^REFUSED {2}the demo-gateway check failed: GET \/v1\/demo\/beats -> 503/,
+    );
+  });
+  it("refuses when the beat's switch cannot be read", async () => {
+    await nothingCalled(
+      { isSimulated: async () => Promise.reject(new Error("GET /v1/demo/beats -> 500")) },
+      /^REFUSED {2}the beat's fallback switch could not be read: GET \/v1\/demo\/beats -> 500/,
+    );
   });
 });
 

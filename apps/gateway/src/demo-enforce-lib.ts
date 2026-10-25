@@ -10,6 +10,14 @@
  *     (`POST /v1/chatops/approvals/:id/post`), so Slack, Teams, Outlook and any later mail channel are just entries;
  *  5. the command waits for the decision. Approved: the SAME call is retried and the gateway spends the approval and
  *     executes it. Denied, or no decision before the wait ends: nothing executes.
+ *  RE-RUN AFTER A TIMEOUT: when the approver approved after the last run gave up waiting, step 3's call itself spends
+ *  that approval and executes. The command tells that apart from a real bypass by the approvals the gateway marked
+ *  consumed for her, this server and this tool across that one call: a newly spent one is "APPROVED (earlier) and
+ *  EXECUTED"; none is the `***` bypass alarm.
+ *
+ * It refuses to run at all unless `verifyTarget` accepts the gateway (see demo-beat-switch.ts: lane L's beats route and
+ * the demo seed's personas), and when the switch cannot be read: an admin token against a non-demo gateway must not be
+ * able to make a real write.
  *
  * SIMULATED (lane L's switch says so): exactly today's beat, the Simulation page's question asked of `POST
  * /v1/evaluate`, which executes and queues nothing, printed under the "simulated decision" label.
@@ -47,7 +55,10 @@ export interface EnforceBeatOptions {
   /** the running gateway, e.g. http://127.0.0.1:3000 */
   baseUrl: string;
   bootstrapToken: string;
+  /** the beat's fallback switch; a throw refuses the run */
   isSimulated: () => Promise<boolean>;
+  /** a refusal to print when the gateway is not a demo one, else null; a throw refuses the run */
+  verifyTarget: (userEmails: string[]) => Promise<string | null>;
   requesterEmail?: string;
   serverName?: string;
   projectName?: string;
@@ -66,6 +77,7 @@ export type EnforceOutcome =
   | "rejected"
   | "timed_out"
   | "unexpected"
+  | "refused"
   | "setup_error";
 
 export interface EnforceBeatResult {
@@ -108,13 +120,32 @@ export async function runEnforceBeat(opts: EnforceBeatOptions): Promise<EnforceB
     return { exitCode: 2, outcome, lines };
   };
 
+  const ask = async <T>(what: string, q: () => Promise<T>): Promise<{ ok: true; value: T } | { ok: false; why: string }> => {
+    try {
+      return { ok: true, value: await q() };
+    } catch (err) {
+      return { ok: false, why: `${what}: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  };
+  const refuse = (why: string): EnforceBeatResult => {
+    say(`REFUSED  ${why}. Nothing was called.`);
+    return { exitCode: 2, outcome: "refused", lines };
+  };
+
   const users = (await api("GET", "/v1/users")).body.users as Json[] | undefined;
+  const target = await ask("the demo-gateway check failed", () =>
+    o.verifyTarget((users ?? []).map((u) => String(u.email ?? ""))),
+  );
+  if (!target.ok) return refuse(target.why);
+  if (target.value !== null) return refuse(target.value);
   const requester = users?.find((u) => u.email === o.requesterEmail);
   if (!requester) return fail("setup_error", `no user ${o.requesterEmail} (is the governance seed loaded?)`);
   const server = ((await api("GET", "/v1/servers")).body.servers as Json[] | undefined)?.find((s) => s.name === o.serverName);
   if (!server) return fail("setup_error", `no MCP server '${o.serverName}'`);
 
-  if (await o.isSimulated()) {
+  const simulated = await ask("the beat's fallback switch could not be read", o.isSimulated);
+  if (!simulated.ok) return refuse(simulated.why);
+  if (simulated.value) {
     say(`SIMULATED DECISION  beat 'enforce-it' is on its fallback: the policy engine is asked, nothing runs or queues`);
     for (const tool of [o.deniedTool, o.approvalTool]) {
       const r = await api("POST", "/v1/evaluate", { userId: requester.id, serverId: server.id, toolName: tool });
@@ -182,9 +213,31 @@ export async function runEnforceBeat(opts: EnforceBeatOptions): Promise<EnforceB
       );
     }
 
+    // the approvals the gateway has already spent for her on this tool, so a first call that executes can be told apart:
+    // spending one approved after an earlier run timed out is the beat working; spending none is a bypass
+    const spentApprovals = async (): Promise<string[] | null> => {
+      const r = await api("GET", "/v1/approvals?objectType=mcp_tool&status=consumed");
+      if (r.status !== 200) return null;
+      return ((r.body.approvals as Json[] | undefined) ?? [])
+        .filter((a) => a.userId === requester.id && a.serverId === server.id && a.toolName === o.approvalTool)
+        .map((a) => String(a.id));
+    };
+    const spentBefore = new Set((await spentApprovals()) ?? []);
     const first = await call(o.approvalTool, o.writeArgs);
     if (first.ok) {
-      say(`*** ${o.approvalTool} ran WITHOUT approval. Expected it to queue: check the approval rule before presenting.`);
+      const spentNow = await spentApprovals();
+      // newest first, so this is the approval the call just spent
+      const justSpent = spentNow?.find((id) => !spentBefore.has(id));
+      if (justSpent) {
+        say(`  ${o.approvalTool}    APPROVED (earlier) and EXECUTED   approval '${justSpent}' was spent on this call   ${first.text}`);
+        say("  Every step is in /ui/admin/audit: the deny, the queued approval, the chat post, the decision, the call.");
+        return { exitCode: 0, outcome: "executed", lines, approvalId: justSpent };
+      }
+      say(
+        spentNow === null
+          ? `*** ${o.approvalTool} ran, and the approvals queue could not be read to show an approval was spent: check before presenting.`
+          : `*** ${o.approvalTool} ran WITHOUT approval. Expected it to queue: check the approval rule before presenting.`,
+      );
       return { exitCode: 1, outcome: "unexpected", lines };
     }
     const approvalId = APPROVAL_ID.exec(first.message)?.[1];

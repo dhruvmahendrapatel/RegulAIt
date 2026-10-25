@@ -61,7 +61,11 @@ printf '%s\n' '#!/bin/sh' 'cd /opt/app && sudo docker compose exec -T gateway no
 It runs inside the gateway container with the gateway's own bootstrap token and calls the gateway on its own loopback
 port. On 11-01, on the laptop's FALLBACK stack: `pnpm --filter @regulait/gateway demo:enforce` with the same
 environment as the other demo commands. Exit 0: the beat ran as scripted (or printed the simulated decision). Exit 1:
-something answered differently, read the `***` line. Exit 2: a setup error.
+something answered differently, read the `***` line. Exit 2: a setup error, or a `REFUSED` line. The command refuses to
+call anything unless the gateway shows it is a demo one (lane L's `GET /v1/demo/beats` answers and the seed's four
+personas exist), and when that switch cannot be read; so until lane L's PR #572 is deployed on the stack it refuses.
+After a timeout, approving and re-running prints `APPROVED (earlier) and EXECUTED` with exit 0: the re-run's first call
+spent Avery's approval, which is the beat working, not a bypass.
 
 **Avery's approval note** (Profile B, **Inbox**, the `write_file` request from Dana, **Approve**; paste, do not type):
 
