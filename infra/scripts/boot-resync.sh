@@ -15,6 +15,13 @@
 #      no longer resolves to this box: the site is unreachable AND ACME renewal
 #      fails.
 #
+# HOSTED MODE (ADR-0202 lane H): when /opt/app/.env sets REGULAIT_PUBLIC_HOST, the
+# box serves THAT name (a DNS A record pointing at the Elastic IP) instead of the
+# address-derived one, and this script keeps the override pointed at it. The
+# name is checked by hosted-config.sh first; if it is invalid or disagrees with
+# REGULAIT_PUBLIC_URL the stack is left untouched (never silently moved back to
+# the address-derived name). See docs/deployment/HOSTED_HTTPS.md.
+#
 # With an Elastic IP attached (ADR-0032) case 2 should never trigger again — but
 # "should never" is not a mechanism, and this box already lost its address once.
 # This script is the mechanism: it is idempotent, it is a no-op when everything
@@ -32,8 +39,12 @@ set -uo pipefail
 APP_DIR="${APP_DIR:-/opt/app}"
 OVERRIDE="${APP_DIR}/docker-compose.override.yml"
 SELF_PATH="/usr/local/sbin/regulait-boot-resync.sh"
+HOSTED_CONFIG_PATH="/usr/local/sbin/regulait-hosted-config.sh"
 UNIT_PATH="/etc/systemd/system/regulait-boot-resync.service"
-LOG="/var/log/regulait-boot-resync.log"
+LOG="${REGULAIT_RESYNC_LOG:-/var/log/regulait-boot-resync.log}"
+# How the stack is re-applied. Overridable only so scripts/hosted-front-door.test.mjs
+# can run this file against a scratch directory without a Docker daemon.
+COMPOSE="${REGULAIT_RESYNC_COMPOSE:-docker compose}"
 
 exec > >(tee -a "$LOG") 2>&1
 echo "=== $(date -u +%FT%TZ) boot-resync starting ==="
@@ -46,6 +57,12 @@ install_unit() {
   if [ "$(readlink -f "${BASH_SOURCE[0]}")" != "$SELF_PATH" ]; then
     install -m 0755 "${BASH_SOURCE[0]}" "$SELF_PATH"
     echo "install: copied to $SELF_PATH"
+  fi
+  local here
+  here="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+  if [ -f "$here/hosted-config.sh" ] && [ "$(readlink -f "$here/hosted-config.sh")" != "$HOSTED_CONFIG_PATH" ]; then
+    install -m 0755 "$here/hosted-config.sh" "$HOSTED_CONFIG_PATH"
+    echo "install: copied hosted-config.sh to $HOSTED_CONFIG_PATH"
   fi
 
   cat > "$UNIT_PATH" <<UNIT
@@ -98,20 +115,43 @@ if [ ! -f "$OVERRIDE" ]; then
   exit 0
 fi
 
-IMDS_TOKEN=$(curl -sS -m 5 -X PUT "http://169.254.169.254/latest/api/token" \
-  -H "X-aws-ec2-metadata-token-ttl-seconds: 300" 2>/dev/null)
-PUBLIC_IP=$(curl -sS -m 5 -H "X-aws-ec2-metadata-token: ${IMDS_TOKEN}" \
-  "http://169.254.169.254/latest/meta-data/public-ipv4" 2>/dev/null)
-
-if [ -z "${PUBLIC_IP}" ]; then
-  # Do NOT tear anything down: a transient IMDS blip must not take the site off
-  # the air. Leave the stack exactly as it is and complain in the log.
-  echo "tls: WARNING no public IPv4 from IMDS; leaving the stack untouched"
-  echo "=== done ==="
-  exit 0
+# Hosted mode first: an owner-registered name wins over the address-derived one.
+HOSTED_CONFIG="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/hosted-config.sh"
+[ -f "$HOSTED_CONFIG" ] || HOSTED_CONFIG="$HOSTED_CONFIG_PATH"
+HOSTED_HOST=""
+if [ -f "${APP_DIR}/.env" ] && grep -qs '^\(export \)\?REGULAIT_PUBLIC_HOST=.' "${APP_DIR}/.env"; then
+  if [ ! -f "$HOSTED_CONFIG" ]; then
+    echo "tls: WARNING REGULAIT_PUBLIC_HOST is set but hosted-config.sh is missing; leaving the stack untouched"
+    echo "=== done ==="
+    exit 0
+  fi
+  if ! HOSTED_HOST="$(bash "$HOSTED_CONFIG" want-host "${APP_DIR}/.env")"; then
+    echo "tls: WARNING hosted settings in ${APP_DIR}/.env are invalid (above); leaving the stack untouched"
+    echo "=== done ==="
+    exit 0
+  fi
 fi
 
-WANT_HOST="$(echo "${PUBLIC_IP}" | tr '.' '-').sslip.io"
+if [ -n "${HOSTED_HOST}" ]; then
+  PUBLIC_IP="(hosted)"
+  WANT_HOST="${HOSTED_HOST}"
+else
+  IMDS_TOKEN=$(curl -sS -m 5 -X PUT "http://169.254.169.254/latest/api/token" \
+    -H "X-aws-ec2-metadata-token-ttl-seconds: 300" 2>/dev/null)
+  PUBLIC_IP=$(curl -sS -m 5 -H "X-aws-ec2-metadata-token: ${IMDS_TOKEN}" \
+    "http://169.254.169.254/latest/meta-data/public-ipv4" 2>/dev/null)
+
+  if [ -z "${PUBLIC_IP}" ]; then
+    # Do NOT tear anything down: a transient IMDS blip must not take the site off
+    # the air. Leave the stack exactly as it is and complain in the log.
+    echo "tls: WARNING no public IPv4 from IMDS; leaving the stack untouched"
+    echo "=== done ==="
+    exit 0
+  fi
+
+  WANT_HOST="$(echo "${PUBLIC_IP}" | tr '.' '-').sslip.io"
+fi
+
 HAVE_HOST=$(sed -n 's/^[[:space:]]*REGULAIT_TLS_HOST:[[:space:]]*//p' "$OVERRIDE" | tail -1)
 
 if [ "${WANT_HOST}" = "${HAVE_HOST}" ]; then
@@ -120,7 +160,7 @@ if [ "${WANT_HOST}" = "${HAVE_HOST}" ]; then
   exit 0
 fi
 
-echo "tls: public IP is ${PUBLIC_IP}; hostname ${HAVE_HOST:-<unset>} -> ${WANT_HOST}"
+echo "tls: source ${PUBLIC_IP}; hostname ${HAVE_HOST:-<unset>} -> ${WANT_HOST}"
 cp -a "$OVERRIDE" "${OVERRIDE}.bak.$(date -u +%Y%m%dT%H%M%SZ)"
 
 if grep -q '^[[:space:]]*caddy:' "$OVERRIDE"; then
@@ -136,7 +176,7 @@ fi
 cd "$APP_DIR" || exit 1
 # No --build: the image is already on this disk. `up -d` recreates only the
 # containers whose effective config changed, i.e. caddy.
-docker compose --profile tls up -d
+$COMPOSE --profile tls up -d
 echo "tls: compose up returned $? — now serving https://${WANT_HOST}"
 
 echo "=== done ==="

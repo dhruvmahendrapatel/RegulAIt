@@ -1,6 +1,6 @@
 ---
 phase: demo-prep-full-scan-lanes-merged
-last_updated: 2026-10-24
+last_updated: 2026-10-25
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -20,6 +20,14 @@ roadmap: ../product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-25 (02:00 UTC) - the demo goes live ([ADR-0202](../decisions/0202-live-integrations-hosted-demo.md)).** The owner
+decided (#453 c6393636981, c6393671561) that the 11-03 demo connects for real to GitHub, Jira Cloud, Azure DevOps, Slack
+and Resend (sign-in email over SMTP, plus a new product email channel), on the existing AWS dev host behind a subdomain
+and HTTPS. The "Enforce it" beat becomes a live governed call, superseding c6387779914. Every beat keeps an audited,
+off-by-default simulated fallback. Everything (code, accounts, DNS, the apply, live checks) is due by the 10-29 freeze
+(c6394196962). #518 merged (`c1d5a19`); main and dhruv/active are at
+`c1d5a19`. Lanes and owner account setup are next.
 
 **2026-10-24 (21:00 UTC) - the full feedback scan and the designer's demo-path leads are fixed on main; one lane is
 in its last recheck.** Full record: [sessions/2026-10-24-session-02.md](sessions/2026-10-24-session-02.md). This paragraph

@@ -31,7 +31,7 @@ import v from "../../views.module.css";
  * strict egress posture, so a kind this list offers is always one the egress
  * guard can name (AER-015: teams and outlook used to be creatable only by API).
  */
-export const PROVIDER_KINDS = ["", "http", "webhook", "slack", "teams", "outlook", "github", "jira", "snowflake", "generic", "mock"];
+export const PROVIDER_KINDS = ["", "http", "webhook", "slack", "teams", "outlook", "resend", "github", "jira", "snowflake", "generic", "mock"];
 
 /**
  * The adapters whose platform credential is a JSON document rather than a bare
@@ -46,6 +46,7 @@ export const PROVIDER_KINDS = ["", "http", "webhook", "slack", "teams", "outlook
 export const JSON_CREDENTIAL_FIELDS: Record<string, { required: string[]; optional: string[] }> = {
   teams: { required: ["appId", "appPassword"], optional: ["tenantId", "loginBaseUrl"] },
   outlook: { required: ["appId", "appPassword", "tenantId", "senderUpn"], optional: ["loginBaseUrl"] },
+  resend: { required: ["apiKey", "from"], optional: ["fromName"] },
 };
 
 /** what an optional key is for — shown beside it in the hint */

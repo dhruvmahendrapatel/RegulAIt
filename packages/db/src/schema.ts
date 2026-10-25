@@ -7365,7 +7365,7 @@ export type EndpointAgentReportRow = typeof endpointAgentReports.$inferSelect;
 export const chatopsConnections = pgTable("chatops_connections", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: text("name").notNull().unique(),
-  provider: text("provider", { enum: ["slack", "teams", "outlook"] }).notNull(),
+  provider: text("provider", { enum: ["slack", "teams", "outlook", "resend"] }).notNull(),
   connectorId: uuid("connector_id")
     .notNull()
     .references(() => connectors.id, { onDelete: "cascade" }),

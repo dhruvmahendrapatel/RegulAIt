@@ -29,9 +29,8 @@ export default function DemoBeatsCard() {
     const b = pending;
     setPending(null);
     if (!b) return;
-    void act
-      .run(() => api.put(`/v1/demo/beats/${b.beatId}`, { simulated: b.mode === "live", reason }))
-      .then(() => beats.refetch());
+    // useAction toasts a refusal and re-fetches every ["admin"] query once the write lands
+    void act.run(() => api.put(`/v1/demo/beats/${b.beatId}`, { simulated: b.mode === "live", reason }));
   };
 
   return (
@@ -46,11 +45,10 @@ export default function DemoBeatsCard() {
           </li>
         ))}
       </ul>
-      {act.error && <div className={v.errLine}>{act.error}</div>}
       <ReasonModal
         open={pending !== null}
         title={`${pending?.label}: ${toSimulated ? "simulated" : "live"}`}
-        body={<p>{toSimulated ? pending?.simulated : pending?.live}. Audited.</p>}
+        body={toSimulated ? pending?.simulated : pending?.live}
         minLength={3}
         onConfirm={confirm}
         onCancel={() => setPending(null)}
