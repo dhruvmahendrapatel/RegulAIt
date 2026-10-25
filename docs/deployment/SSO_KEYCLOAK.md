@@ -65,6 +65,25 @@ for an existing realm. Secrets in the JSON are placeholders only:
 | `REGULAIT_KC_GITHUB_CLIENT_ID` / `_CLIENT_SECRET` | GitHub OAuth app |
 | `REGULAIT_KC_SMTP_*` | outbound mail for email verification (needed for all three upstream IdPs, see below) |
 
+**Sign-in email through Resend (ADR-0202).** Keycloak sends verification, invite and password-reset mail
+itself. Mail stays off while `REGULAIT_KC_SMTP_HOST` is empty. To send through Resend, verify a mail
+subdomain in Resend first, then set (placeholders only; the password is a Resend API key and belongs in a
+secret store, never in the repository):
+
+| Variable | Value |
+| --- | --- |
+| `REGULAIT_KC_SMTP_HOST` | `smtp.resend.com` |
+| `REGULAIT_KC_SMTP_PORT` | `587` (STARTTLS, the default) or `465` (implicit TLS) |
+| `REGULAIT_KC_SMTP_STARTTLS` | `true` for 587 (default); `false` for 465 |
+| `REGULAIT_KC_SMTP_SSL` | `false` for 587 (default); `true` for 465 |
+| `REGULAIT_KC_SMTP_USER` | `resend` |
+| `REGULAIT_KC_SMTP_PASSWORD` | `<RESEND_API_KEY>`, a sending-only key |
+| `REGULAIT_KC_SMTP_FROM` | `no-reply@mail.example.com`, on the verified mail subdomain |
+
+SMTP authentication is always on. Never set both `SSL` and `STARTTLS` to `false`: the API key would travel in
+clear text. The realm is imported only once, so on an existing realm set the same values under
+*Realm settings → Email* in the admin console and press *Test connection*.
+
 Prefer a secret store over a plain `.env` where you have one: compose `secrets:` files, Docker/Kubernetes
 secrets, or your cloud's secret manager injecting the same environment variables. Never put a secret in
 `realm-regulait.json`, in the repository, or in a ticket.
