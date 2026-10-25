@@ -361,8 +361,10 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
     await expect(item.getByRole("button", { name: "Approve" })).toBeVisible();
     await capture(morgan, MORGAN, "ds-s3h-morgan-inbox");
     await item.getByRole("button", { name: "Approve" }).click();
-    await settleWithStepUp(morgan, morgan.getByText("Approved", { exact: true }).first(), PERSONA_EMAIL.morgan);
-    await expect(morgan.getByText("Approved", { exact: true }).first()).toBeVisible();
+    // the success toast: a decided item's status badge reads "Approved" too, folded away in Recently decided
+    const approvedToast = morgan.locator('[aria-live="polite"]').getByText("Approved", { exact: true });
+    await settleWithStepUp(morgan, approvedToast, PERSONA_EMAIL.morgan);
+    await expect(approvedToast).toBeVisible();
     await capture(morgan, MORGAN, "ds-s3i-morgan-approved");
     await morgan.context().close();
     await ada.goto(`/ui/workflows/${liveInstance}`);
