@@ -26,6 +26,7 @@ import {
   connectorCredentialHosts,
   connectorDefaultBaseUrl,
   outlookCredentialSchema,
+  resendCredentialSchema,
   teamsCredentialSchema,
 } from "@regulait/connector-provider";
 import { buildApp } from "./app.js";
@@ -509,9 +510,11 @@ describe("AER-015 — what the page offers is what strict egress can name", () =
     const page = readPage(CONNECTORS_PAGE);
     const fields = pageConst(page, "JSON_CREDENTIAL_FIELDS");
     if (!ts.isObjectLiteralExpression(fields)) throw new Error("ConnectorsPage JSON_CREDENTIAL_FIELDS: not an object literal");
-    const schemas: Record<string, typeof teamsCredentialSchema | typeof outlookCredentialSchema> = {
+    const schemas: Record<string, typeof teamsCredentialSchema | typeof outlookCredentialSchema | typeof resendCredentialSchema> = {
       teams: teamsCredentialSchema,
       outlook: outlookCredentialSchema,
+      // ADR-0202 lane E
+      resend: resendCredentialSchema,
     };
     const seen: string[] = [];
     for (const prop of fields.properties) {

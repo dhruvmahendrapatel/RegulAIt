@@ -800,6 +800,10 @@ services:
       REGULAIT_KC_SMTP_FROM: ${REGULAIT_KC_SMTP_FROM:-no-reply@regulait.invalid}
       REGULAIT_KC_SMTP_USER: ${REGULAIT_KC_SMTP_USER:-}
       REGULAIT_KC_SMTP_PASSWORD: ${REGULAIT_KC_SMTP_PASSWORD:-}
+      # ADR-0202: 587 + STARTTLS (the default) or 465 + implicit TLS
+      # (SSL=true, STARTTLS=false). Mail stays off while SMTP_HOST is empty.
+      REGULAIT_KC_SMTP_SSL: ${REGULAIT_KC_SMTP_SSL:-false}
+      REGULAIT_KC_SMTP_STARTTLS: ${REGULAIT_KC_SMTP_STARTTLS:-true}
     volumes:
       - ./infra/keycloak/realm-regulait.json:/opt/keycloak/data/import/realm-regulait.json:ro
     # loopback only: the admin console must never face the internet. Publish

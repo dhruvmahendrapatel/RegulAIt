@@ -39,7 +39,8 @@
     "port": "${REGULAIT_KC_SMTP_PORT:587}",
     "from": "${REGULAIT_KC_SMTP_FROM:no-reply@regulait.invalid}",
     "fromDisplayName": "regulAIt sign-in",
-    "starttls": "true",
+    "ssl": "${REGULAIT_KC_SMTP_SSL:false}",
+    "starttls": "${REGULAIT_KC_SMTP_STARTTLS:true}",
     "auth": "true",
     "user": "${REGULAIT_KC_SMTP_USER:}",
     "password": "${REGULAIT_KC_SMTP_PASSWORD:}"
