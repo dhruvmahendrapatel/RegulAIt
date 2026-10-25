@@ -22,6 +22,7 @@ import {
   CodeBlock,
   EmptyState,
   ErrorState,
+  Field,
   InfoButton,
   Input,
   SkeletonBlock,
@@ -215,10 +216,12 @@ export default function InboxPage() {
     const reasonRequired = override || (ownRules && Boolean(a.selfReview));
     const missingReason = reasonRequired && !(reasons[a.id] ?? "").trim();
     const controls = (blockedReason: string | null) => <div className={ib.decide}>
-      <Input style={{ maxWidth: 260 }}
-        placeholder={reasonRequired ? "Reason (required)" : "Reason (optional)"}
-        aria-label="Decision reason" aria-required={reasonRequired || undefined} value={reasons[a.id] ?? ""}
-        onChange={(e) => setReasons((r) => ({ ...r, [a.id]: e.target.value }))} />
+      {/* A19: a visible label owns the reason, and "required" stays on screen while typing */}
+      <Field label={reasonRequired ? "Decision reason (required)" : "Decision reason (optional)"}>
+        <Input style={{ maxWidth: 260 }}
+          aria-required={reasonRequired || undefined} value={reasons[a.id] ?? ""}
+          onChange={(e) => setReasons((r) => ({ ...r, [a.id]: e.target.value }))} />
+      </Field>
       <div className={v.row}>
         <Button size="sm" disabled={deciding === a.id} onClick={() => void decide(a, "denied")}>Deny</Button>
         <Button size="sm" variant="primary" disabled={deciding === a.id || !!blockedReason || missingReason} onClick={() => void decide(a, "approved")}>Approve</Button>

@@ -267,7 +267,7 @@ export default function VendorsPage() {
 
                   {/* the linked workflow's state */}
                   {d.instance && (
-                    <Card title="Assessment workflow (pillar-2 rails)">
+                    <Card title="Assessment workflow">
                       <div className={v.stack}>
                         <div>
                           {d.instance.stages.map((s) => (

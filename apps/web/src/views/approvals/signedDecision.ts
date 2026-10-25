@@ -107,7 +107,7 @@ const REFUSAL_COPY: Readonly<Record<string, string>> = {
   approval_action_changed:
     "The call this approval describes changed after you were asked to sign it. Reload the queue and review it again.",
   passkey_rp_unconfigured:
-    "Passkey signing isn't set up on this deployment (its public address is missing), so this approval can't be signed. Ask an operator to set REGULAIT_PUBLIC_URL.",
+    "Passkey signing isn't set up on this deployment (its public address is missing), so this approval can't be signed. Ask an operator to configure this deployment's public address.",
   duplicate_approver:
     "You've already decided this approval, or someone you're linked to by delegation has. Another approver must decide it.",
   caller_cannot_approve: "This is your own call (or someone you're linked to by delegation), so someone else must decide it.",

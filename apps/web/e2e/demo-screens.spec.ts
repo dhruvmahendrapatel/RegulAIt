@@ -311,7 +311,9 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
     const linked = panel.getByRole("status").filter({ hasText: /^Linked to workflow/ });
     await settleWithStepUp(ada, linked.or(panel.getByRole("alert")).first(), PERSONA_EMAIL.admin);
     await expect(linked).toBeVisible();
-    liveInstance = (await linked.locator("code").first().textContent())?.trim() ?? null;
+    // the panel links the workflow by its short id; the full id is in the link's address
+    const href = await linked.getByRole("link").first().getAttribute("href");
+    liveInstance = href ? decodeURIComponent(href.split("/workflows/")[1] ?? "") || null : null;
     await capture(ada, ADA, "ds-s3d-started-and-linked");
   });
 
@@ -359,8 +361,10 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
     await expect(item.getByRole("button", { name: "Approve" })).toBeVisible();
     await capture(morgan, MORGAN, "ds-s3h-morgan-inbox");
     await item.getByRole("button", { name: "Approve" }).click();
-    await settleWithStepUp(morgan, morgan.getByText("Approved", { exact: true }).first(), PERSONA_EMAIL.morgan);
-    await expect(morgan.getByText("Approved", { exact: true }).first()).toBeVisible();
+    // the success toast: a decided item's status badge reads "Approved" too, folded away in Recently decided
+    const approvedToast = morgan.locator('[aria-live="polite"]').getByText("Approved", { exact: true });
+    await settleWithStepUp(morgan, approvedToast, PERSONA_EMAIL.morgan);
+    await expect(approvedToast).toBeVisible();
     await capture(morgan, MORGAN, "ds-s3i-morgan-approved");
     await morgan.context().close();
     await ada.goto(`/ui/workflows/${liveInstance}`);

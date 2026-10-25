@@ -212,7 +212,7 @@ test("seeded credit-assistant journey: discover, register, assess, approve, moni
   // the item's evidence and decision open in the shared detail drawer (owner decision on #453)
   await remediation.getByRole("button", { name: /^Review / }).click();
   await avery.getByTestId("inbox-item").getByRole("button", { name: "Approve" }).click();
-  await expect(avery.getByText("Approved", { exact: true })).toBeVisible();
+  await expect(avery.locator('[aria-live="polite"]').getByText("Approved", { exact: true })).toBeVisible();
   await shotBoth(avery, "real-08-remediation-approved");
   await avery.close();
 

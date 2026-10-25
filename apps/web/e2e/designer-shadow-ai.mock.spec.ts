@@ -837,6 +837,18 @@ test("shadow-ai-02/03: failed runs, token and device reads show errors with Retr
   await expect(page.getByText("Couldn't load this list")).toHaveCount(3);
 });
 
+test("E1 (S2): a failed findings read shows the figures as unknown, never an all-clear 0", async ({ page }) => {
+  await page.route("**/v1/shadow-ai/findings*", (route) => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "unavailable" }) }));
+  await page.goto("/ui/admin/shadow-ai");
+  await expect(page.getByRole("tab", { name: "Findings", exact: true })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /Findings · 0/ })).toHaveCount(0);
+  await expect(page.getByText("Coverage could not be read.")).toBeVisible();
+  for (const label of ["Critical", "High", "Medium or low", "Evidence classes supplied"]) {
+    const stat = page.locator("div").filter({ has: page.getByText(label, { exact: true }) }).filter({ hasText: "—" }).first();
+    await expect(stat, label).toBeVisible();
+  }
+});
+
 test("shadow-ai-14: the link-a-workflow options read the workflow status in words", async ({ page }) => {
   await page.route("**/v1/workflows/instances", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ instances: [{

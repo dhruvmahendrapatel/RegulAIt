@@ -42,7 +42,7 @@ export default function PmConnectionsPage() {
       <PageHeader
         title="PM connections"
         sub="Task graphs and stages mapped onto the customer's own work items."
-        info={<p>Task graphs and workflow stages map onto the customer's own work items (pillar 8). Users link a run from its detail page; status, sign-offs and decisions mirror out; inbound webhooks record drift, never overwrite the state machine.</p>}
+        info={<p>Task graphs and workflow stages map onto the customer's own work items. Users link a run from its detail page; status, sign-offs and decisions mirror out; inbound webhooks record drift, never overwrite the state machine.</p>}
       />
       <div className={v.stack}>
         {reveal && <RevealCard reveal={reveal} onDismiss={() => setReveal(null)} />}
@@ -163,7 +163,7 @@ export default function PmConnectionsPage() {
             empty={
               <EmptyState
                 title="No PM connections"
-                body="Pillar 8: work items stay the source of truth — connect your PM tool so decisions and sign-offs mirror into it instead of a shadow copy."
+                body="Work items stay the source of truth — connect your PM tool so decisions and sign-offs mirror into it instead of a shadow copy."
               />
             }
           />

@@ -321,7 +321,7 @@ export function DecisionLedgerCard(props: { parent: Parent }) {
           <Input
             value={decision}
             onChange={(e) => setDecision(e.target.value)}
-            placeholder="for example Ship behind a feature flag rather than blocking the release"
+            placeholder="for example ship behind a feature flag rather than blocking the release"
           />
         </Field>
         <div style={{ alignSelf: "flex-end" }}>
@@ -383,7 +383,7 @@ export function DecisionLedgerCard(props: { parent: Parent }) {
         empty={
           <EmptyState
             title="No decisions recorded yet"
-            body="Record the calls that shaped this work — they become part of the same single audit trail every pillar writes into."
+            body="Record the calls that shaped this work — they become part of the same audit trail every governed action writes to."
           />
         }
       />

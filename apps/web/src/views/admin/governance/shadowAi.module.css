@@ -154,3 +154,8 @@
   white-space: nowrap;
   border: 0;
 }
+
+/* a link inside running text is underlined, so it is told apart by more than its colour (axe link-in-text-block) */
+.textLink {
+  text-decoration: underline;
+}

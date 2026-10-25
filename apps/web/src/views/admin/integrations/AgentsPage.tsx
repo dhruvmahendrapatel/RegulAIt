@@ -68,7 +68,7 @@ export default function AgentsPage() {
       <PageHeader
         title="Agents"
         sub="The agent catalog, decoupled from entitlement — registering one grants nobody anything."
-        info={<p>The global catalog is decoupled from entitlement: registering an agent grants nobody anything. Pricing feeds pillar 5's meters; the tier feeds pillar 6's routing.</p>}
+        info={<p>The global catalog is decoupled from entitlement: registering an agent grants nobody anything. Pricing feeds the cost meters; the tier feeds cost-aware routing.</p>}
       />
       <div className={v.stack}>
         <StewardshipCard

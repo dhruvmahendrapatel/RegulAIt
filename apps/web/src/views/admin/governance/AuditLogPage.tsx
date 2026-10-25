@@ -148,7 +148,7 @@ export default function AuditLogPage() {
       <PageHeader
         title="Audit log"
         sub="Every governed decision, lifecycle action and settings change."
-        info={<p>Every governed decision, lifecycle action and settings change lands here — one trail, all eight pillars. Filter by user and by deploy mode; the table loads the newest rows first and older ones on request, and the CSV export carries the full filtered trail.</p>}
+        info={<p>Every governed decision, lifecycle action and settings change lands here: one trail for every governed action. Filter by user and by deploy mode; the table loads the newest rows first and older ones on request, and the CSV export carries the full filtered trail.</p>}
         actions={
           <>
             <Button

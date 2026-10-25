@@ -50,7 +50,9 @@ export function humanize(id: string | null | undefined): string {
     .replace(/[_-]+/g, " ")
     .replace(/\bsignoff\b/gi, "sign-off")
     .replace(/\s+/g, " ")
-    .replace(/\b[a-z]+\b/gi, (w) => ACRONYMS[w.toLowerCase()] ?? w);
+    .replace(/\b[a-z]+\b/gi, (w) => ACRONYMS[w.toLowerCase()] ?? w)
+    // A20: "shadow-AI finding", "Shadow-AI remediation plan"
+    .replace(/\b([Ss])hadow AI\b/g, "$1hadow-AI");
   return words.replace(/^./, (c) => c.toUpperCase());
 }
 
