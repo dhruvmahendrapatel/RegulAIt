@@ -206,7 +206,7 @@ function ProjectRollup(props: { projectId: string; projectName: string }) {
             />
             <Stat
               value={fmtUsd((m as { measuredCostSavedUsd?: number }).measuredCostSavedUsd)}
-              label="measured savings (pillar 6)"
+              label="measured savings"
             />
           </div>
           <div className={v.sectionTitle}>Budget vs actual</div>

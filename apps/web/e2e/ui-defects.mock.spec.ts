@@ -356,11 +356,11 @@ test("D3 (#37): the artifact card names the artifact in words, not its output id
     return json(route, {});
   });
   await page.goto("/ui/workflows/wf-2");
-  await expect(page.getByText("Submit shadow AI remediation plan", { exact: true })).toBeVisible();
+  await expect(page.getByText("Submit shadow-AI remediation plan", { exact: true })).toBeVisible();
   expect(await page.getByText("shadow_ai_remediation_plan").count()).toBe(0);
   // D5 runs-projects-01/02: the header and the artifact box name the change in words too
-  await expect(page.getByText(/^Shadow AI remediation · staging · created /)).toBeVisible();
-  await expect(page.getByLabel("Artifact content")).toHaveAttribute("placeholder", "Write the shadow AI remediation plan content…");
+  await expect(page.getByText(/^Shadow-AI remediation · staging · created /)).toBeVisible();
+  await expect(page.getByLabel("Artifact content")).toHaveAttribute("placeholder", "Write the shadow-AI remediation plan content…");
   // D5 runs-projects-18: the rail reads in the sans face, with no hover-only stage meta
   const rail = page.locator("section[data-rg-card]").filter({ hasText: "Pipeline" }).first();
   await expect(rail.locator("[title]")).toHaveCount(0);

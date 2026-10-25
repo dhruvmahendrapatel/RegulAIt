@@ -394,7 +394,7 @@ test.describe("U2: governance records", () => {
         },
       },
     ]);
-    await expect(plan.getByRole("status")).toContainText(INSTANCE);
+    await expect(plan.getByRole("status").getByRole("link", { name: `workflow ${INSTANCE.slice(0, 8)}…` })).toHaveAttribute("href", `/ui/workflows/${INSTANCE}`);
     await expectAxeClean(page, "shadow-AI remediation plan", "[data-testid='shadow-remediation']");
   });
 
@@ -416,7 +416,8 @@ test.describe("U2: governance records", () => {
     await plan.getByRole("button", { name: "Start remediation workflow…" }).click();
     await page.getByRole("dialog", { name: "Start a remediation workflow?" }).getByRole("button", { name: "Start and link" }).click();
     const status = plan.getByTestId("shadow-linked-status");
-    await expect(status).toContainText(INSTANCE);
+    // the workflow is a link in words, its short id only; the full id is in the link
+    await expect(status.getByRole("link", { name: `workflow ${INSTANCE.slice(0, 8)}…` })).toHaveAttribute("href", `/ui/workflows/${INSTANCE}`);
     await expect(status).toBeInViewport();
   });
 
@@ -454,7 +455,7 @@ test.describe("U2: governance records", () => {
     await expect(plan.getByRole("button", { name: "Start remediation workflow…" })).toBeDisabled();
     await unlinked.getByRole("button", { name: "Retry linking this workflow" }).click();
     await expect(unlinked).toHaveCount(0);
-    await expect(plan.getByRole("status")).toContainText(INSTANCE);
+    await expect(plan.getByRole("status").getByRole("link", { name: `workflow ${INSTANCE.slice(0, 8)}…` })).toHaveAttribute("href", `/ui/workflows/${INSTANCE}`);
     expect(posted(calls, "POST", "/v1/workflows/instances")).toHaveLength(1);
     expect(posted(calls, "POST", `/v1/shadow-ai/findings/${FINDING}/remediate`)).toEqual([{ instanceId: INSTANCE }, { instanceId: INSTANCE }]);
   });

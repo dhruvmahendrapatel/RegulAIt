@@ -1018,7 +1018,7 @@ export function coverageScorecard(
     sourcesOn,
     sourcesPossible: EVIDENCE_KINDS.length,
     statement:
-      `Discovery has analyzed ${sourcesOn} of ${EVIDENCE_KINDS.length} evidence classes. ` +
+      `Discovery has analysed ${sourcesOn} of ${EVIDENCE_KINDS.length} evidence classes. ` +
       `${activeDiscoveryPosture(activeSources)} Every finding below derives from evidence you supplied or from a ` +
       `source an admin enabled, so this inventory reduces shadow AI — it does not prove its absence.`,
   };

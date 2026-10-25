@@ -17,10 +17,12 @@ import {
   Button,
   Card,
   CodeBlock,
+  Field,
   RecordError,
   IdChip,
   SkeletonBlock,
   StatusBadge,
+  Textarea,
 } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
 import { useSession } from "../../session/SessionContext";
@@ -28,7 +30,7 @@ import { DecisionLedgerCard, PmLinksCard } from "../pm/PmAndDecisions";
 import v from "../views.module.css";
 import s from "./workflows.module.css";
 
-/** an artifact's output id in words mid-sentence: `shadow_ai_remediation_plan` → "shadow AI remediation plan" (D3 #37) */
+/** an artifact's output id in words mid-sentence: `shadow_ai_remediation_plan` → "shadow-AI remediation plan" (D3 #37, A20) */
 const artifactWords = (output: string | undefined) =>
   output ? humanize(output).replace(/^[A-Z](?=[a-z])/, (c) => c.toLowerCase()) : "artifact";
 
@@ -194,7 +196,6 @@ export default function WorkflowDetailPage() {
             <div className={v.row} style={{ marginTop: "var(--s2)" }}>
               <Button
                 variant="primary"
-                title="Record that planning is finished and move to the next stage — build work attributed to this change stops being refused"
                 onClick={() =>
                   void act(
                     () =>
@@ -207,30 +208,23 @@ export default function WorkflowDetailPage() {
               >
                 Finish planning
               </Button>
+              {/* A8: the button's effect, on screen rather than in a hover title */}
+              <span className={v.faint}>Moves to the next stage; build work attributed to this change stops being refused.</span>
             </div>
           </Card>
         )}
 
         {inst.status === "blocked_on_artifact" && current && (
           <Card title={`Submit ${artifactWords(current.output)}`}>
-            <textarea
-              className={v.grow}
-              style={{
-                width: "100%",
-                minHeight: 130,
-                padding: "var(--s1)",
-                borderRadius: "var(--radius-sm)",
-                border: "1px solid var(--border)",
-                background: "var(--surface-1)",
-                color: "var(--text)",
-                font: "inherit",
-                fontSize: "var(--text-sm)",
-              }}
-              placeholder={`Write the ${artifactWords(current.output)} content…`}
-              value={artifactText}
-              onChange={(e) => setArtifactText(e.target.value)}
-              aria-label="Artifact content"
-            />
+            {/* the kit field: a visible label owns the box, and it takes the shared focus ring */}
+            <Field label="Artifact content">
+              <Textarea
+                rows={6}
+                placeholder={`Write the ${artifactWords(current.output)} content…`}
+                value={artifactText}
+                onChange={(e) => setArtifactText(e.target.value)}
+              />
+            </Field>
             <div className={v.row} style={{ marginTop: "var(--s1)" }}>
               <Button
                 variant="primary"

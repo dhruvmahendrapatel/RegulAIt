@@ -27,7 +27,7 @@ const META: Record<string, { why: string; to?: string; cta: string; app?: boolea
     cta: "Connect git",
   },
   pm_connection: {
-    why: "Pillar 8: work items stay the source of truth — decisions and sign-offs mirror into your own PM tool instead of a shadow copy.",
+    why: "Work items stay the source of truth — decisions and sign-offs mirror into your own PM tool instead of a shadow copy.",
     to: "/admin/pm-connections",
     cta: "Connect a PM tool",
   },

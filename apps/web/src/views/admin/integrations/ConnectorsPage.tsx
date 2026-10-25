@@ -82,7 +82,7 @@ export default function ConnectorsPage() {
       <PageHeader
         title="Connectors"
         sub="The connector catalog, decoupled from entitlement — registering one grants nobody anything."
-        info={<p>The catalog is decoupled from entitlement. kind is the display category; providerKind is the execution adapter (absent = governance-only). Per-call price feeds pillar 5.</p>}
+        info={<p>The catalogue is separate from entitlement: listing a connector grants nobody anything. Kind is the category shown here; the adapter decides how calls run, and a connector without one is governance-only. The per-call price feeds the cost meters.</p>}
       />
       <div className={v.stack}>
         <IntegrationOwnership kind="connectors" rows={connectors.data?.connectors ?? []} />

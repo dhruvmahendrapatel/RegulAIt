@@ -871,8 +871,16 @@ export function statusTone(status: string): Tone {
       return "neutral";
   }
 }
+/** E1 (A20): the workflow states a person waits on, in words; any other status reads as its code in sentence case */
+const STATUS_WORDS: Record<string, string> = {
+  blocked_on_plan: "Planning",
+  blocked_on_artifact: "Waiting for a submission",
+  blocked_on_approval: "Waiting for sign-off",
+  awaiting_execution: "Ready to run",
+};
 export function StatusBadge(props: { status: string }) {
-  return <Badge tone={statusTone(props.status)}>{props.status.replaceAll("_", " ")}</Badge>;
+  const words = STATUS_WORDS[props.status] ?? props.status.replaceAll("_", " ");
+  return <Badge tone={statusTone(props.status)}>{words.charAt(0).toUpperCase() + words.slice(1)}</Badge>;
 }
 
 /**

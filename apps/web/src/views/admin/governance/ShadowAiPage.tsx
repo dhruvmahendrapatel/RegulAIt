@@ -481,7 +481,8 @@ export default function ShadowAiPage() {
       <div className={sh.tabsScroll}>
       <Tabs
         tabs={[
-          { id: "findings", label: `Findings · ${statusCounts.all ?? 0}` },
+          // A15: no count until the findings arrive, so a slow or failed read never reads "Findings · 0"
+          { id: "findings", label: findings.data ? `Findings · ${statusCounts.all ?? 0}` : "Findings" },
           { id: "coverage", label: "Coverage" },
           { id: "import", label: "Import evidence" },
           { id: "catalogue", label: "Detection catalogue" },
@@ -499,21 +500,22 @@ export default function ShadowAiPage() {
       {/* what this can and cannot see, stated once, on the face of the page */}
       <div className={sh.callout} role="note">
         <span>
-          <strong>What this can see.</strong> {findings.data?.coverage.statement ?? "Loading coverage…"}
+          <strong>What this can see.</strong> {findings.data?.coverage.statement ?? (findings.isError ? "Coverage could not be read." : "Loading coverage…")}
           {findings.data?.posture ? <> {findings.data.posture}</> : null}{" "}
           <button type="button" className={sh.linkButton} onClick={() => setTab("coverage")}>See coverage</button>
         </span>
       </div>
 
+      {/* A15: the figures are unknown ("—") until the findings arrive, never an all-clear 0 */}
       <div className={sh.kpis}>
-        <KpiFigure tone="critical" value={bySeverity.critical} label="Critical" hint="Leaked credential"
+        <KpiFigure tone="critical" value={findings.data ? bySeverity.critical : "—"} label="Critical" hint="Leaked credential"
           info="A live credential for an AI service was found, for example an API key in code or logs. Treat it as exposed: revoke it, then triage the finding." />
-        <KpiFigure tone="high" value={bySeverity.high} label="High" hint="Observed model traffic"
+        <KpiFigure tone="high" value={findings.data ? bySeverity.high : "—"} label="High" hint="Observed model traffic"
           info="Evidence shows traffic to an AI model endpoint from a person, team or system with no registered use case." />
-        <KpiFigure tone="medium" value={(bySeverity.medium ?? 0) + (bySeverity.low ?? 0)} label="Medium or low" hint="Looser signals to check" />
+        <KpiFigure tone="medium" value={findings.data ? (bySeverity.medium ?? 0) + (bySeverity.low ?? 0) : "—"} label="Medium or low" hint="Looser signals to check" />
         <KpiFigure
           tone="low"
-          value={`${findings.data?.coverage.sourcesOn ?? 0} / ${findings.data?.coverage.sourcesPossible ?? 4}`}
+          value={findings.data ? `${findings.data.coverage.sourcesOn} / ${findings.data.coverage.sourcesPossible}` : "—"}
           label="Evidence classes supplied"
           info="The four kinds of evidence you can import: network egress logs, code scans, SaaS and identity records, and self-reported use. Each kind not supplied is a blind spot. Findings from discovery sources (repository, cloud and endpoint scans) are not counted here."
         />
@@ -560,7 +562,7 @@ export default function ShadowAiPage() {
       >
         <QueryGate loading={findings.isLoading} error={findings.error} onRetry={refresh}>
           {(findings.data?.findings.length ?? 0) === 0 ? (
-            <EmptyState title="No findings yet" body="Import an egress-log, code-scan, SaaS or self-reported evidence file under Import evidence." />
+            <EmptyState title="No findings yet" body="Enable a source under Discovery sources, or import an egress-log, code-scan, SaaS or self-reported evidence file under Import evidence." />
           ) : findingRows.length === 0 ? (
             <EmptyState title="No finding has this status" body="Choose another status above." />
           ) : (

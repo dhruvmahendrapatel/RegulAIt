@@ -268,7 +268,7 @@ function PostureForm(props: { cur: InterceptionSettings }) {
             rows={[
               ["map_by_model", "Resolve to the governed agent whose model id matches the request. Several matches tie-break on lowest tier, then oldest. Least developer friction."],
               ["require_agent", "The caller MUST send x-regulait-agent-id; the model string is advisory. Missing header is a 400. Strictest, explicit attribution per call."],
-              ["router_decides", "The requested model is a HINT the pillar-6 router may override for cost. The response always carries the model actually served, and the audit row records requested-vs-served."],
+              ["router_decides", "The requested model is a hint the cost router may override. The response always carries the model actually served, and the audit row records requested-vs-served."],
               ["Unmapped model", "Always 403 default-deny, in every mode. regulAIt never passes an ungoverned call through to the vendor."],
               ["Attribution (compat)", "ON (the strict default) rejects any compat call without an x-regulait-project-id header, rather than running it as untracked spend. A client that cannot send custom headers (see the matrix below) needs it relaxed to OFF; the change is audited."],
               ["Attribution (MCP)", "ON (the strict default) rejects an MCP tool call with no x-regulait-project-id. Relaxed to OFF, an unattributed call is still METERED and lands in the explicit Unattributed bucket (Cost dashboard). Together the two require-toggles close the unattributed gap entirely."],

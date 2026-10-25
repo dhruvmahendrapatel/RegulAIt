@@ -268,7 +268,7 @@ function Loaded(props: { settings: Record<string, unknown> }) {
 
   return (
     <div className={v.stack}>
-      <Card title="1 · Optimization — pillar-6 techniques (org-wide ceilings)">
+      <Card title="1 · Optimisation techniques (organisation-wide ceilings)">
         <SectionShell
           title="Technique toggles"
           busy={opt.act.busy}
@@ -524,7 +524,7 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               "Budgets & limits saved (audited)",
             )
           }
-          help="'Block' (default) refuses attributed dispatches once measured spend reaches the hard-block threshold, until the named approver sanctions the overage. 'Warn only' still files the overage into the Approvals queue and audits every crossing, but lets the calls run — showback without enforcement. Worker caps bound the pillar-7 tool-using loop; the size ceilings narrow below their API walls (at most 8 attachments of 6 MiB, a flat 1200-token estimate per image, 100k-char node instructions, 20k chars of stored node output)."
+          help="'Block' (default) refuses attributed dispatches once measured spend reaches the hard-block threshold, until the named approver sanctions the overage. 'Warn only' still files the overage into the Approvals queue and audits every crossing, but lets the calls run — showback without enforcement. Worker caps bound the tool-using agent loop; the size ceilings narrow below their API walls (at most 8 attachments of 6 MiB, a flat 1200-token estimate per image, 100k-char node instructions, 20k chars of stored node output)."
         >
           <Field label="Project budget enforcement">
             <Select value={budget.f.budgetEnforcement} onChange={(e) => budget.set("budgetEnforcement", e.target.value)}>
