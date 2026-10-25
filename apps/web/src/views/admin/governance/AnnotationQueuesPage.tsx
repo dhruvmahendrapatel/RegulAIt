@@ -22,7 +22,8 @@ import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Fieldset, Input, Modal, Select, Table } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
-import { NewestNote, QueryGate, RemoveButton, downloadCsv, useAction, useUsers } from "../adminKit";
+import { QueryGate, RemoveButton, downloadCsv, useAction, useUsers } from "../adminKit";
+import { NewestNote } from "../../../ui/fold";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 

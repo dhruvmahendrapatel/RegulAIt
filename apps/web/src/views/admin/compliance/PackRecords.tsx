@@ -13,7 +13,8 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago, fmtAt } from "../../../api/format";
 import { Badge, Button, Card, Field, Input, Select, Table, Textarea } from "../../../ui/kit";
-import { KV, NewestNote, QueryGate, Stat, useAction, useNameMaps } from "../adminKit";
+import { KV, QueryGate, Stat, useAction, useNameMaps } from "../adminKit";
+import { NewestNote } from "../../../ui/fold";
 import { withRefusalCopy } from "../governance/refusalCopy";
 import {
   EMPTY_ATTESTATION,

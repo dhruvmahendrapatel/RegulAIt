@@ -22,7 +22,8 @@ import { Link, useSearchParams } from "react-router-dom";
 import { ApiError, api } from "../../../api/client";
 import { UUID_RE, ago, fmtUsd } from "../../../api/format";
 import { Badge, Button, Card, ConfirmModal, EmptyState, Field, IdChip, Input, Meter, Select, SeverityBadge, Table } from "../../../ui/kit";
-import { KV, NewestNote, OutcomePanel, agentOpts, optionEls, projectOpts, useAgents, useApiAction, useProjects, useUserPicker, userOpts } from "../adminKit";
+import { KV, OutcomePanel, agentOpts, optionEls, projectOpts, useAgents, useApiAction, useProjects, useUserPicker, userOpts } from "../adminKit";
+import { NewestNote } from "../../../ui/fold";
 import { EngineProvenanceChip, EngineRunStatusBadge, EngineVerdictBadge } from "./EngineRunBadges";
 import { EngineSchedulesCard } from "../integrations/EngineSchedulesCard";
 import {

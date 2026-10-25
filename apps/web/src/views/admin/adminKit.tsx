@@ -556,13 +556,6 @@ export function RefusalList(props: { refusals: RowRefusal[] | undefined; truncat
 
 // ---- loading / error wrappers ---------------------------------------------
 
-/** A list read with `?limit=N` says so once it is full, so a full page never reads as the whole history (A15) */
-export function NewestNote(props: { shown: number; limit: number; noun: string }) {
-  return props.shown >= props.limit ? (
-    <p className={v.faint} data-testid="newest-note">Showing the newest {props.limit} {props.noun}; older ones are not listed here.</p>
-  ) : null;
-}
-
 export function QueryGate(props: {
   loading: boolean;
   error: unknown;

@@ -47,7 +47,8 @@ import {
   Textarea,
   type Tone,
 } from "../../../ui/kit";
-import { KV, NewestNote, OutcomePanel, QueryGate, RemoveButton, Stat, agentOpts, optionEls, projectOpts, useAction, useAgents, useApiAction, useProjects } from "../adminKit";
+import { KV, OutcomePanel, QueryGate, RemoveButton, Stat, agentOpts, optionEls, projectOpts, useAction, useAgents, useApiAction, useProjects } from "../adminKit";
+import { NewestNote } from "../../../ui/fold";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 import { SpdxFieldsPanel } from "../governance/SpdxFieldsPanel";

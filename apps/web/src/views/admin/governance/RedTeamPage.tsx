@@ -29,7 +29,8 @@ import { RefusalNotice } from "../../../ui/RefusalNotice";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, SeverityBadge, Table, Textarea } from "../../../ui/kit";
 import { EngineRunsPanel } from "./EngineRunsPanel";
 import { AttachRunEvidence, RedTeamFindingsCard, RedTeamSummaryCard, RunTrialsSection } from "./RedTeamPosture";
-import { NewestNote, QueryGate, agentOpts, optionEls, projectOpts, useAction, useAgents, useProjects } from "../adminKit";
+import { QueryGate, agentOpts, optionEls, projectOpts, useAction, useAgents, useProjects } from "../adminKit";
+import { NewestNote } from "../../../ui/fold";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 

@@ -56,7 +56,8 @@ import {
   Tabs,
   type Tone,
 } from "../../../ui/kit";
-import { KV, NewestNote, QueryGate, Stat, agentOpts, optionEls, useAction, useAgents } from "../adminKit";
+import { KV, QueryGate, Stat, agentOpts, optionEls, useAction, useAgents } from "../adminKit";
+import { NewestNote } from "../../../ui/fold";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 import t from "./traces.module.css";
