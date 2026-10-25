@@ -665,8 +665,6 @@ describe("11. X19-S01: a reflected client secret escapes no sink", () => {
     new URLSearchParams([["k", SYN]]).toString().slice(2).toLowerCase(),
   ];
   const leaks = (text: string) => forms.filter((f) => text.includes(f));
-  const strings = (v: unknown): string[] =>
-    typeof v === "string" ? [v] : Array.isArray(v) ? v.flatMap(strings) : v && typeof v === "object" ? Object.entries(v).flatMap(([k, x]) => [k, ...strings(x)]) : [];
 
   it("token reflection: 502 chatops_post_failed with the upstream status and code; Graph never reached; Graph reflection: 502 and a scrubbed log", async () => {
     const since = new Date();
@@ -723,16 +721,13 @@ describe("11. X19-S01: a reflected client secret escapes no sink", () => {
     expect(audits.some((r) => r.ruleId === CHATOPS_RULE_IDS.alertPostFailed)).toBe(true);
     for (const row of audits) expect(leaks(JSON.stringify(row)), JSON.stringify(row)).toEqual([]);
     for (const line of logLines.slice(logFrom)) expect(leaks(line), line).toEqual([]);
-    const graphLog = consoleLines.filter((l) => l.startsWith("[outlook] sendMail HTTP 400: "));
-    expect(graphLog.length).toBe(1);
+    // #568 review item 3: the adapter logs the status and Graph's code only, no body
+    const graphLog = consoleLines.filter((l) => l.startsWith("[outlook] sendMail HTTP 400"));
+    expect(graphLog).toEqual(["[outlook] sendMail HTTP 400 ErrorInvalidRequest"]);
     for (const line of consoleLines) {
       expect(leaks(line), line).toEqual([]);
       expect(line).not.toMatch(/graph-token-\d/);
+      expect(line).not.toContain("@");
     }
-    // the logged body is still JSON, and parsing it cannot recover the secret
-    const parsed = JSON.parse(graphLog[0]!.replace("[outlook] sendMail HTTP 400: ", "")) as unknown;
-    const decoded = strings(parsed);
-    expect(decoded).toContain("ErrorInvalidRequest");
-    for (const str of decoded) expect(leaks(str), str).toEqual([]);
   });
 });

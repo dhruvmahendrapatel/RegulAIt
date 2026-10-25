@@ -1762,13 +1762,6 @@ function expectNoSecret(text: string, secret: string) {
   // nor a recognisable fragment of it (a cap that cut it in half, say)
   expect(text).not.toMatch(/etic|ith\+spec|with%2Bspec/i);
 }
-/** every string inside a JSON value, keys included */
-function jsonStrings(v: unknown): string[] {
-  if (typeof v === "string") return [v];
-  if (Array.isArray(v)) return v.flatMap(jsonStrings);
-  if (v && typeof v === "object") return Object.entries(v).flatMap(([k, x]) => [k, ...jsonStrings(x)]);
-  return [];
-}
 async function providerError(p: Promise<unknown>): Promise<ConnectorProviderError> {
   try {
     await p;
@@ -1864,17 +1857,42 @@ describe("X19-S01: outlook — a reflected client secret or token is scrubbed in
       vi.restoreAllMocks();
       expect(logged.length).toBe(1);
       const line = logged[0]!;
-      expect(line).toMatch(/^\[outlook\] sendMail HTTP 400: /);
+      // #568 review item 3: the log line is the status and Graph's code, no body
+      expect(line).toBe("[outlook] sendMail HTTP 400 ErrorInvalidRequest");
       expectNoSecret(line, SYN_SECRET);
       expect(line).not.toContain("minted-jwt");
-      // the logged body is still JSON, and parsing it cannot recover the secret
-      const parsed = JSON.parse(line.replace(/^\[outlook\] sendMail HTTP 400: /, "")) as unknown;
-      const strings = jsonStrings(parsed);
-      expect(strings).toContain("ErrorInvalidRequest");
-      for (const str of strings) {
-        expect(str).not.toContain(SYN_SECRET);
-        expect(str).not.toContain("minted-jwt");
-      }
+    }
+  });
+
+  it("#568 review item 3: an error echoing the recipient puts no address in the log or the detail", async () => {
+    const recipient = "ana@acme.com";
+    const bodies = [
+      JSON.stringify({ error: { code: "ErrorInvalidRecipients", message: `Recipient ${recipient} is not valid; from sender@acme.com` } }),
+      // a non-JSON body, and a code that is not a bare identifier, are not logged
+      `<html>bad recipient ${recipient}</html>`,
+      JSON.stringify({ error: { code: `bad ${recipient}`, message: "x" } }),
+    ];
+    for (const body of bodies) {
+      clearOutlookTokenCache();
+      const logged: string[] = [];
+      vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+        logged.push(args.map(String).join(" "));
+      });
+      await withUpstream(
+        teamsUpstream((_req, res) => {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(body);
+        }),
+        async (up) => {
+          const err = await providerError(send(outlookFor(up.url)));
+          expect(err.status).toBe(400);
+          expect(err.message).not.toMatch(/@/);
+        },
+      );
+      vi.restoreAllMocks();
+      expect(logged.length).toBe(1);
+      expect(logged[0]!).toMatch(/^\[outlook\] sendMail HTTP 400( ErrorInvalidRecipients)?$/);
+      expect(logged[0]!).not.toContain("@");
     }
   });
 });

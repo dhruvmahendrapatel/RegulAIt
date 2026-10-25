@@ -147,6 +147,35 @@ describe("send", () => {
     }
   });
 
+  it("#568 review item 3: an error echoing the recipient puts no address in the log or the message", async () => {
+    const errors: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => void errors.push(a.join(" ")));
+    const to = "named.approver@example.com";
+    const bodies = [
+      JSON.stringify({ name: "validation_error", message: `Invalid \`to\` field: ${to} (from approvals@mail.example.com)` }),
+      // the address JSON-escaped, and a body that is not JSON at all
+      JSON.stringify({ name: "validation_error", message: "bad" }).replace('"bad"', `"bad ${to.replace("@", "\\u0040")}"`),
+      `upstream proxy: refused ${to}`,
+    ];
+    try {
+      for (const body of bodies) {
+        const { fetchImpl } = stub(422, body);
+        let err: ConnectorProviderError | undefined;
+        try {
+          await provider(fetchImpl).invoke({ operation: "write", object: to, payload: { subject: "s", text: "t" } });
+        } catch (e) {
+          err = e as ConnectorProviderError;
+        }
+        expect(err).toBeInstanceOf(ConnectorProviderError);
+        expect(err!.message).not.toContain(to);
+        expect(err!.message).not.toContain("@");
+      }
+      expect(errors).toEqual(["[resend] send HTTP 422 validation_error", "[resend] send HTTP 422 validation_error", "[resend] send HTTP 422"]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("is constructed only from a parsed credential", () => {
     expect(() => resolveConnectorProvider({ kind: "resend", token: null, baseUrl: null })).toThrow(ConnectorProviderError);
     expect(new ResendConnectorProvider({ credential: parseResendCredential(CRED) }).kind).toBe("resend");
