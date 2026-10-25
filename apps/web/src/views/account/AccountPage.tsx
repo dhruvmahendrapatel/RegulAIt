@@ -20,7 +20,6 @@ import ModelKeysCard from "./ModelKeysCard";
 import { UsernameForm } from "./UsernameForm";
 import PasskeysCard from "./PasskeysCard";
 import AppearanceCard from "./AppearanceCard";
-import a from "./appearance.module.css";
 import { LiteracyDocumentList, useMyLiteracy } from "./AcknowledgeGate";
 import v from "../views.module.css";
 import a from "./appearance.module.css";
