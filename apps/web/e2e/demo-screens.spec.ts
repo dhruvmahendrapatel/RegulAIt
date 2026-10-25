@@ -311,7 +311,9 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
     const linked = panel.getByRole("status").filter({ hasText: /^Linked to workflow/ });
     await settleWithStepUp(ada, linked.or(panel.getByRole("alert")).first(), PERSONA_EMAIL.admin);
     await expect(linked).toBeVisible();
-    liveInstance = (await linked.locator("code").first().textContent())?.trim() ?? null;
+    // the panel links the workflow by its short id; the full id is in the link's address
+    const href = await linked.getByRole("link").first().getAttribute("href");
+    liveInstance = href ? decodeURIComponent(href.split("/workflows/")[1] ?? "") || null : null;
     await capture(ada, ADA, "ds-s3d-started-and-linked");
   });
 
