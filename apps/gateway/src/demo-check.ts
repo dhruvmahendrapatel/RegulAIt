@@ -44,9 +44,9 @@ if (liveConnections) {
       ...(await runLiveConnectionChecks(db, {
         env: process.env,
         decrypt: (c) => decryptSecret(dataKey, c),
-        fetchFor: async (baseUrl, label) =>
+        fetchFor: async (baseUrl, label, surface) =>
           (await guardConnectionCall(db, {
-            surface: baseUrl.startsWith("https://slack.com") ? "connector" : baseUrl.startsWith("https://api.github.com") ? "git_connection" : "pm_connection",
+            surface,
             baseUrl,
             label,
             detail: { probe: "demo:check --live-connections" },

@@ -17,6 +17,8 @@ import type { DemoCheck } from "./demo-check-lib.js";
 import { isBeatSimulated, type DemoBeatId } from "./demo-beats.js";
 import { LIVE_NAMES, readLiveDemoConfig, scrub, type LiveDemoConfig } from "./demo-live-lib.js";
 
+export type ProbeSurface = "git_connection" | "pm_connection" | "connector";
+
 export type ProbeFetch = (url: string, init: { method: string; headers: Record<string, string> }) => Promise<{ status: number; json(): Promise<unknown> }>;
 
 export interface LiveProbeInput {
@@ -27,8 +29,8 @@ export interface LiveProbeInput {
   azureDevOps?: { token: string; baseUrl: string };
   slack?: { token: string; signingSecretSet: boolean };
   simulated: (beat: DemoBeatId) => Promise<boolean>;
-  /** a guarded fetch for this base URL (refuses with an Error whose message is the guard's reason) */
-  fetchFor: (baseUrl: string, label: string) => Promise<ProbeFetch>;
+  /** a guarded fetch for this base URL on its egress surface (refuses with an Error whose message is the guard's reason) */
+  fetchFor: (baseUrl: string, label: string, surface: ProbeSurface) => Promise<ProbeFetch>;
   publicUrl?: string | null;
 }
 
@@ -40,13 +42,14 @@ async function probe(
   name: string,
   token: string,
   baseUrl: string,
+  surface: ProbeSurface,
   url: string,
   init: { method: string; headers: Record<string, string> },
   ok: (status: number, body: unknown) => string | null,
 ): Promise<DemoCheck> {
   const label = `${beat} (${name})`;
   try {
-    const f = await input.fetchFor(baseUrl, `live probe '${name}'`);
+    const f = await input.fetchFor(baseUrl, `live probe '${name}'`, surface);
     const res = await f(url, init);
     let body: unknown = null;
     try {
@@ -86,7 +89,7 @@ export async function runLiveProbes(input: LiveProbeInput): Promise<DemoCheck[]>
       const { owner, repo } = config.github;
       const t = input.github.token;
       out.push(
-        await probe(input, "git-pr", LIVE_NAMES.github, t, "https://api.github.com", `https://api.github.com/repos/${owner}/${repo}`, {
+        await probe(input, "git-pr", LIVE_NAMES.github, t, "https://api.github.com", "git_connection", `https://api.github.com/repos/${owner}/${repo}`, {
           method: "GET",
           headers: { authorization: `Bearer ${t}`, accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28" },
         }, httpOk),
@@ -101,7 +104,7 @@ export async function runLiveProbes(input: LiveProbeInput): Promise<DemoCheck[]>
       else {
         const { token, baseUrl } = input.jira;
         out.push(
-          await probe(input, "pm-sync", LIVE_NAMES.jira, token, baseUrl, `${baseUrl.replace(/\/$/, "")}/rest/api/2/project/${encodeURIComponent(config.jira.project)}`, {
+          await probe(input, "pm-sync", LIVE_NAMES.jira, token, baseUrl, "pm_connection", `${baseUrl.replace(/\/$/, "")}/rest/api/2/project/${encodeURIComponent(config.jira.project)}`, {
             method: "GET",
             headers: { authorization: basic(token), accept: "application/json" },
           }, httpOk),
@@ -113,7 +116,7 @@ export async function runLiveProbes(input: LiveProbeInput): Promise<DemoCheck[]>
       else {
         const { token, baseUrl } = input.azureDevOps;
         out.push(
-          await probe(input, "pm-sync", LIVE_NAMES.azureDevOps, token, baseUrl, `${baseUrl.replace(/\/$/, "")}/_apis/projects/${encodeURIComponent(config.azureDevOps.project)}?api-version=7.1`, {
+          await probe(input, "pm-sync", LIVE_NAMES.azureDevOps, token, baseUrl, "pm_connection", `${baseUrl.replace(/\/$/, "")}/_apis/projects/${encodeURIComponent(config.azureDevOps.project)}?api-version=7.1`, {
             method: "GET",
             headers: { authorization: basic(`:${token}`), accept: "application/json" },
           }, httpOk),
@@ -128,7 +131,7 @@ export async function runLiveProbes(input: LiveProbeInput): Promise<DemoCheck[]>
     else {
       const t = input.slack.token;
       out.push(
-        await probe(input, "chatops-approval", LIVE_NAMES.slackConnector, t, "https://slack.com/api", "https://slack.com/api/auth.test", {
+        await probe(input, "chatops-approval", LIVE_NAMES.slackConnector, t, "https://slack.com/api", "connector", "https://slack.com/api/auth.test", {
           method: "POST",
           headers: { authorization: `Bearer ${t}`, "content-type": "application/x-www-form-urlencoded" },
         }, (status, body) => {

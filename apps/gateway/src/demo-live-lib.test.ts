@@ -21,6 +21,8 @@ import {
 } from "./demo-live-lib.js";
 import { runLiveProbes, type LiveProbeInput, type ProbeFetch } from "./demo-live-check.js";
 
+const hostOf = (url: string) => new URL(url).hostname;
+
 const ENV = {
   REGULAIT_DEMO_GITHUB_REPO: "regulait-demo/payments-api",
   REGULAIT_DEMO_JIRA_SITE: "regulait-demo.atlassian.net",
@@ -240,7 +242,7 @@ describe("live probes (stubbed vendors)", () => {
   const seen: Array<{ url: string; method: string }> = [];
   const okFetch: ProbeFetch = async (url, init) => {
     seen.push({ url, method: init.method });
-    return { status: 200, json: async () => (url.includes("slack.com") ? { ok: true } : {}) };
+    return { status: 200, json: async () => (hostOf(url) === "slack.com" ? { ok: true } : {}) };
   };
 
   it("passes every beat with one read-only call each", async () => {
@@ -259,8 +261,8 @@ describe("live probes (stubbed vendors)", () => {
     const checks = await runLiveProbes(
       base({
         fetchFor: async (baseUrl) => {
-          if (baseUrl.includes("atlassian")) throw new Error(`host not allow-listed (${SECRETS.jiraApiToken})`);
-          return async (url) => ({ status: url.includes("slack") ? 200 : 401, json: async () => ({ ok: false, error: "invalid_auth" }) });
+          if (hostOf(baseUrl) === "regulait-demo.atlassian.net") throw new Error(`host not allow-listed (${SECRETS.jiraApiToken})`);
+          return async (url) => ({ status: hostOf(url) === "slack.com" ? 200 : 401, json: async () => ({ ok: false, error: "invalid_auth" }) });
         },
       }),
     );
@@ -274,11 +276,17 @@ describe("live probes (stubbed vendors)", () => {
     for (const v of secretValues) expect(text).not.toContain(v);
   });
 
+  it("asks for each probe's fetch on its own egress surface", async () => {
+    const surfaces: string[] = [];
+    await runLiveProbes(base({ fetchFor: async (_b, _l, surface) => (surfaces.push(surface), okFetch) }));
+    expect(surfaces).toEqual(["git_connection", "pm_connection", "pm_connection", "connector"]);
+  });
+
   it("does not probe a beat switched to simulated, and says so", async () => {
     seen.length = 0;
     const checks = await runLiveProbes(base({ simulated: async (b) => b === "pm-sync" }));
     expect(checks.find((c) => c.beat === "pm-sync")).toMatchObject({ level: "WARN" });
-    expect(seen.some((s) => s.url.includes("atlassian") || s.url.includes("dev.azure.com"))).toBe(false);
+    expect(seen.some((s) => ["regulait-demo.atlassian.net", "dev.azure.com"].includes(hostOf(s.url)))).toBe(false);
   });
 
   it("fails a configured integration with no connection", async () => {
