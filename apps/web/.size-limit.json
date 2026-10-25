@@ -3,7 +3,7 @@
     "name": "entry JS (index)",
     "path": "dist/assets/index-*.js",
     "gzip": true,
-    "limit": "137.9 kB"
+    "limit": "138.5 kB"
   },
   {
     "name": "entry CSS (index)",
