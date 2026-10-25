@@ -1,18 +1,43 @@
 # ADR-0029: the app is served over HTTPS at the sslip.io name derived from the
-# instance's public IP. Plain http://<ip>:3000 no longer answers from off-box.
+# instance's public IP, or (ADR-0202 lane H) at var.public_hostname once the
+# owner's DNS record exists. Plain http://<ip>:3000 never answers from off-box.
+locals {
+  tls_hostname = var.public_hostname != "" ? var.public_hostname : module.app.sslip_hostname
+}
+
 output "app_url" {
-  value = "https://${module.app.sslip_hostname}"
+  value = "https://${local.tls_hostname}"
 }
 
 # ADR-0195 SD2b: the federation issuer clouds trust (AWS IAM OIDC provider,
 # Entra federated credential). It exists only while the gateway's
 # REGULAIT_PUBLIC_URL is this https origin; see internal/product/DEMO_REAL_ACCOUNTS.md.
 output "federation_issuer_url" {
-  value = "https://${module.app.sslip_hostname}/federation"
+  value = "https://${local.tls_hostname}/federation"
 }
 
 output "tls_hostname" {
-  value = module.app.sslip_hostname
+  value = local.tls_hostname
+}
+
+# ADR-0202 lane H: the one record the owner registers at their DNS provider, and
+# the .env lines the box needs for it. Null while public_hostname is empty.
+output "dns_a_record" {
+  description = "The DNS record to create for the hosted demo (null while public_hostname is empty)."
+  value = var.public_hostname == "" ? null : {
+    name  = var.public_hostname
+    type  = "A"
+    value = module.app.public_ip
+  }
+}
+
+output "hosted_env" {
+  description = "Lines to put in /opt/app/.env on the box for the hosted demo (null while public_hostname is empty). Holds no secret."
+  value = var.public_hostname == "" ? null : join("\n", [
+    "REGULAIT_PUBLIC_HOST=${var.public_hostname}",
+    "REGULAIT_PUBLIC_URL=https://${var.public_hostname}",
+    "",
+  ])
 }
 
 output "public_ip" {

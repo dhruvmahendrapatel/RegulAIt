@@ -771,8 +771,16 @@ services:
       # the PUBLIC URL of the broker, as browsers reach it (TLS terminated in
       # front of it — caddy or the customer's own proxy)
       KC_HOSTNAME: ${REGULAIT_KC_HOSTNAME:-http://localhost:8080}
+      # The path Keycloak serves under. `/` locally (http://localhost:8080/realms/…);
+      # the hosted demo publishes it on the app's own name under /idp, so it sets
+      # REGULAIT_KC_RELATIVE_PATH=/idp and REGULAIT_KC_HOSTNAME=https://<host>/idp
+      # (docs/deployment/HOSTED_HTTPS.md).
+      KC_HTTP_RELATIVE_PATH: ${REGULAIT_KC_RELATIVE_PATH:-/}
       KC_HTTP_ENABLED: "true"
       KC_PROXY_HEADERS: xforwarded
+      # X-Forwarded-* is believed only from the TLS front's fixed address (the
+      # caddy service below, ADR-0031), never from any peer that reaches 8080.
+      KC_PROXY_TRUSTED_ADDRESSES: ${REGULAIT_KC_TRUSTED_PROXIES:-172.28.0.2}
       KC_HEALTH_ENABLED: "true"
       KC_BOOTSTRAP_ADMIN_USERNAME: ${REGULAIT_KC_ADMIN_USER:-kc-bootstrap-admin}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${REGULAIT_KC_ADMIN_PASSWORD:-}
@@ -971,23 +979,30 @@ services:
 
   caddy:
     <<: *caddy
-    profiles: ["tls"]
+    # `hosted` (ADR-0202 lane H) is the same service under the name the hosted
+    # demo uses: `docker compose --profile hosted up -d` with REGULAIT_PUBLIC_HOST
+    # and REGULAIT_PUBLIC_URL in .env (docs/deployment/HOSTED_HTTPS.md). With no
+    # profile the stack is the plain laptop demo on http://localhost:3000.
+    profiles: ["tls", "hosted"]
     depends_on:
       - gateway
     restart: unless-stopped
     environment:
-      # Public hostname this stack serves. Set it (scripts/install.sh writes it
-      # to .env from --domain; compose.tls-local.yml sets localhost). The default
-      # is a placeholder under `.invalid`, which never resolves and can never be
-      # issued a certificate, so a `tls` stack started without it fails visibly
-      # instead of serving somebody else's name.
-      REGULAIT_TLS_HOST: ${REGULAIT_TLS_HOST:-set-regulait-tls-host.invalid}
+      # Public hostname this stack serves. REGULAIT_PUBLIC_HOST (the hosted demo's
+      # registered name) wins; otherwise REGULAIT_TLS_HOST (scripts/install.sh
+      # writes it to .env from --domain; compose.tls-local.yml sets localhost).
+      # The default is a placeholder under `.invalid`, which never resolves and
+      # can never be issued a certificate, so a `tls` stack started without it
+      # fails visibly instead of serving somebody else's name.
+      REGULAIT_TLS_HOST: ${REGULAIT_PUBLIC_HOST:-${REGULAIT_TLS_HOST:-set-regulait-tls-host.invalid}}
       # Where Caddy proxies to. Compose-network DNS name of the gateway.
       REGULAIT_TLS_UPSTREAM: ${REGULAIT_TLS_UPSTREAM:-gateway:3000}
       # Empty = real Let's Encrypt. compose.tls-local.yml sets `tls internal`.
       REGULAIT_TLS_ISSUER: ${REGULAIT_TLS_ISSUER:-}
       # Optional ACME account contact, e.g. "email ops@example.com".
       REGULAIT_TLS_EMAIL_DIRECTIVE: ${REGULAIT_TLS_EMAIL_DIRECTIVE:-}
+      # Where /idp/realms/ and /idp/resources/ go (the `sso` profile's Keycloak).
+      REGULAIT_KC_UPSTREAM: ${REGULAIT_KC_UPSTREAM:-keycloak:8080}
     ports:
       - "80:80" # ACME HTTP-01 challenge + redirect to HTTPS
       - "443:443" # TLS
