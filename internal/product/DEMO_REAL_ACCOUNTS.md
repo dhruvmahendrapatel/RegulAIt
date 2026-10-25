@@ -358,10 +358,10 @@ If the seed ran after Ada enrolled, an admin adds any missing host under **Custo
 with a step-up. `demo:live-setup` names any missing host.
 
 **Fallback (ADR-0202 decision 4).** Each beat is live by default. An admin can switch one beat back to its simulated
-path with `PUT /v1/demo/beats/<beat> { "simulated": true, "reason": "…" }`, sent with an admin's API key
-(`curl -X PUT https://demo.example.com/v1/demo/beats/pm-sync -H "authorization: Bearer $REGULAIT_ADMIN_API_KEY"
+path from the admin console (Execution control › Demo beats) or with `PUT /v1/demo/beats/<beat> { "simulated": true, "reason": "…" }`,
+sent with an admin's API key (`curl -X PUT https://demo.example.com/v1/demo/beats/pm-sync -H "authorization: Bearer $REGULAIT_ADMIN_API_KEY"
 -H "content-type: application/json" -d '{"simulated":true,"reason":"vendor outage"}'`); `GET /v1/demo/beats` lists every
-beat's mode. There is no console card yet: the `all JS` ceiling has no room for one. Every switch is
+beat's mode. Every switch is
 audited under the rule `demo-beat-fallback-changed`. The beats are `shadow-ai-discovery`, `enforce-it`, `pm-sync`,
 `git-pr`, `chatops-approval` and `email-notify`. Switch a beat back when the vendor recovers.
 
