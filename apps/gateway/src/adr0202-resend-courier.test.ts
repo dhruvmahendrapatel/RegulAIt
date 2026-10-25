@@ -16,7 +16,10 @@
  *     nothing requested;
  *  4. sends are rate-limited per workspace (429, audited, nothing sent);
  *  5. a governance alert is mailed to its OWNER only; an unowned alert is not
- *     mailed, and a request cannot name a recipient;
+ *     mailed, and a request cannot name a recipient (refused and audited);
+ *  5b. the courier's own recipient pin (#568 review item 2): called directly
+ *     with a recipient other than the server-resolved one, it refuses, audited,
+ *     and sends nothing, whichever route would have called it;
  *  6. inbound stays `inbound_unsupported_by_design`;
  *  7. the API key never appears in a response, an audit row or a log line.
  */
@@ -46,7 +49,7 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { resolveGatewayLogger } from "./gateway-logger.js";
-import { CHATOPS_OUTBOUND_PROVIDERS, CHATOPS_RULE_IDS, RESEND_RECIPIENT_MODE, RESEND_SEND_LIMIT } from "./chatops.js";
+import { CHATOPS_OUTBOUND_PROVIDERS, CHATOPS_RULE_IDS, RESEND_RECIPIENT_MODE, RESEND_SEND_LIMIT, chatCourierForTest } from "./chatops.js";
 import { setOrgSettingsForTest } from "./testing/strict-data-posture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -365,6 +368,60 @@ describe("5. a governance alert is mailed to its owner only", () => {
     expect(res.statusCode, res.body).toBe(400);
     expect(res.json().error).toBe("recipient_not_selectable");
     expect(hits.length).toBe(before);
+  });
+
+  it("#568 review item 1: a request-named recipient on an alert is refused AND audited, for an owned alert too", async () => {
+    const alertId = await mkAlert(approverId);
+    const before = hits.length;
+    const refusals = async () =>
+      (await auditSince(CHATOPS_RULE_IDS.postRefusedNoNamedRecipient)).filter((r) => (r.detail as { alertId?: string }).alertId === alertId);
+    for (const channel of ["attacker@example.net", approverEmail]) {
+      const res = await inject("POST", `/v1/governance/alerts/${alertId}/post`, { connectionName: CONNECTION, channel });
+      expect(res.statusCode, res.body).toBe(400);
+      expect(res.json().error).toBe("recipient_not_selectable");
+    }
+    expect(hits.length).toBe(before);
+    const rows = await refusals();
+    expect(rows).toHaveLength(2);
+    for (const r of rows) {
+      expect(r.effect).toBe("deny");
+      expect(r.detail).toMatchObject({ subsystem: "chatops", alertId, label: "alert-mirror" });
+      // the refused address is not copied into the audit row
+      expect(JSON.stringify(r)).not.toContain("attacker@example.net");
+    }
+  });
+});
+
+describe("5b. the courier's own recipient pin (#568 review item 2)", () => {
+  const mail = () => ({ op: "sendEmail", subject: "pin probe", html: "<p>pin probe</p>" });
+  const connRow = async () => (await db.select().from(chatopsConnections).where(eq(chatopsConnections.name, CONNECTION)))[0]!;
+
+  it("refuses a channel that is not the server-resolved recipient, or no resolved recipient at all: 403, audited, nothing sent", async () => {
+    const courier = chatCourierForTest(db);
+    expect(courier).toBeDefined();
+    const conn = await connRow();
+    const before = hits.length;
+    const auditsBefore = (await auditSince(CHATOPS_RULE_IDS.postRefusedNoNamedRecipient)).length;
+    const cases: Array<[string, string | null]> = [
+      ["attacker@example.net", approverEmail],
+      [approverEmail, null],
+      [`${approverEmail}.example.net`, approverEmail],
+      ["not-an-address", "not-an-address"],
+    ];
+    for (const [channel, named] of cases) {
+      const res = await courier!(conn, channel, mail, null, "pin-probe", named);
+      expect(res, `${channel} / ${named}`).toMatchObject({ ok: false, status: 403, body: { error: "recipient_not_named" } });
+    }
+    expect(hits.length).toBe(before);
+    expect((await auditSince(CHATOPS_RULE_IDS.postRefusedNoNamedRecipient)).length).toBe(auditsBefore + cases.length);
+  });
+
+  it("positive control: the same call to the resolved recipient sends one mail to that address", async () => {
+    const before = hits.length;
+    const res = await chatCourierForTest(db)!(await connRow(), approverEmail, mail, null, "pin-probe", approverEmail);
+    expect(res.ok, JSON.stringify(res)).toBe(true);
+    expect(hits.length).toBe(before + 1);
+    expect(lastSend().to).toEqual([approverEmail]);
   });
 });
 

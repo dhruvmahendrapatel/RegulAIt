@@ -47,7 +47,7 @@
  */
 
 import { createHash, createPrivateKey, createPublicKey, createSign } from "node:crypto";
-import { constantTimeEqual, scrubSecrets, secretRepresentations } from "@regulait/shared";
+import { constantTimeEqual, redactPII, scrubSecrets, secretRepresentations } from "@regulait/shared";
 import { z } from "zod";
 
 export const CONNECTOR_PROVIDER_KINDS = [
@@ -1138,6 +1138,31 @@ export function clearOutlookTokenCache(): void {
 export const OUTLOOK_ERROR_DETAIL_MAX = 300;
 /** Graph's `{error:{code,message}}` as one capped, scrubbed line (the scrub is
  * the shared `scrubSecrets`, applied before the cap) */
+/**
+ * #568 review item 5 — the server log line for a mail provider's upstream
+ * refusal: the status and the upstream's error CODE only, never its body or
+ * message. A mail API's error text echoes the recipient (and the sender), in
+ * forms a pattern can miss once JSON- or percent-escaped, so the body is not
+ * logged at all; the code is kept only when it is a bare identifier.
+ */
+export function mailErrorLogLine(prefix: string, status: number, code: unknown): string {
+  const safe = typeof code === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(code) ? ` ${code}` : "";
+  return `${prefix} HTTP ${status}${safe}`;
+}
+
+/** the upstream error code of a mail API body, or null (never throws) */
+function mailErrorCode(text: string, pick: (parsed: unknown) => unknown): unknown {
+  try {
+    return pick(JSON.parse(text));
+  } catch {
+    return null;
+  }
+}
+
+/** #568 review item 5 — an error detail with every address (and other PII
+ * shape) redacted; the caller sees it and the gateway audits it */
+const redactMailDetail = (detail: string): string => redactPII(detail).text;
+
 export function graphErrorDetail(text: string, status: number, secrets: readonly string[] = []): string {
   let line = `HTTP ${status}`;
   try {
@@ -1317,9 +1342,12 @@ export class OutlookConnectorProvider implements ConnectorProvider {
       // capped, scrubbed message; the whole body goes to the server log only.
       // X19-S01: both sinks use the ONE scrub with the same credentials, so a
       // JSON-escaped reflection is no more visible in the log than in the detail
-      const secrets = [this.cred.appPassword, ...sentTokens];
-      console.error(`[outlook] sendMail HTTP ${res.status}: ${scrubSecrets(text, secrets)}`);
-      throw new ConnectorProviderError(`outlook sendMail failed: ${graphErrorDetail(text, res.status, secrets)}`, res.status);
+      // #568 review item 5: the log line carries the status and Graph's code
+      // only; the detail is scrubbed of the recipient in every encoding and of
+      // any address shape
+      const secrets = [this.cred.appPassword, ...sentTokens, ...(recipient ? [recipient] : [])];
+      console.error(mailErrorLogLine("[outlook] sendMail", res.status, mailErrorCode(text, (b) => (b as { error?: { code?: unknown } } | null)?.error?.code)));
+      throw new ConnectorProviderError(`outlook sendMail failed: ${redactMailDetail(graphErrorDetail(text, res.status, secrets))}`, res.status);
     }
     // Graph answers 202 with an EMPTY body on success. Reporting that honestly
     // matters: "accepted for delivery" is not "delivered", and the adapter does
@@ -1489,8 +1517,10 @@ export class ResendConnectorProvider implements ConnectorProvider {
       throw new ConnectorProviderError("resend send rate-limited by Resend (HTTP 429)", 429);
     }
     if (res.status >= 400) {
-      console.error(`[resend] send HTTP ${res.status}: ${scrubSecrets(body, secrets)}`);
-      throw new ConnectorProviderError(`resend send failed: ${resendErrorDetail(body, res.status, secrets)}`, res.status);
+      // #568 review item 5: status and Resend's error name only in the log;
+      // the detail is scrubbed of the recipient and of any address shape
+      console.error(mailErrorLogLine("[resend] send", res.status, mailErrorCode(body, (b) => (b as { name?: unknown } | null)?.name)));
+      throw new ConnectorProviderError(`resend send failed: ${redactMailDetail(resendErrorDetail(body, res.status, [...secrets, recipient.data]))}`, res.status);
     }
     // `{id}` on success. Accepted for delivery, not delivered.
     const decoded = decodeBody(res.status, body).body as { id?: unknown } | null;

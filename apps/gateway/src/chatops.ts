@@ -281,6 +281,25 @@ export async function notifyGovernanceAlerts(db: Db, alertIds: string[], actorUs
   return notify(alertIds, actorUserId);
 }
 
+/**
+ * #568 review item 2 — the courier itself, per database handle, so a test can
+ * hand it a recipient no route passes today and prove the resend pin inside it
+ * refuses (the routes alone could not tell the pin from dead code). Test use
+ * only; nothing in the app reads it.
+ */
+export type ChatCourierForTest = (
+  conn: typeof chatopsConnections.$inferSelect,
+  channel: string,
+  payloadFor: (provider: "slack" | "teams" | "outlook" | "resend") => Record<string, unknown> | null,
+  actorUserId: string | null,
+  label: string,
+  namedRecipient: string | null,
+) => Promise<{ ok: true; messageRef: string | null } | { ok: false; status: number; body: Record<string, unknown> }>;
+const couriersForTest = new WeakMap<object, ChatCourierForTest>();
+export function chatCourierForTest(db: Db): ChatCourierForTest | undefined {
+  return couriersForTest.get(db as object);
+}
+
 /** the ONE decide function, handed in by app.ts. Chat never gets its own. */
 export type DecideOne = (input: {
   approvalId: string;
@@ -1181,6 +1200,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
     return posted.ok;
   }
 
+  couriersForTest.set(db as object, postToChat);
   alertNotifiers.set(db as object, async (alertIds, actorUserId) => {
     const out = { posted: 0, failed: 0 };
     const conns = await db
@@ -1349,6 +1369,9 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
     if (!conn) return reply.status(400).send({ error: "no_chatops_connection" });
     if (!conn.enabled) return reply.status(422).send({ error: "connection_disabled" });
     if (conn.provider === "resend" && body.channel !== undefined) {
+      await audit(req.authCtx.userId, "chatops_connection", conn.id, CHATOPS_RULE_IDS.postRefusedNoNamedRecipient, "deny",
+        `resend workspace '${conn.name}': a request-named recipient was refused for alert ${alertId}`,
+        { alertId, label: "alert-mirror" });
       return reply.status(400).send({
         error: "recipient_not_selectable",
         detail: "a resend workspace mails the alert's owner; a request cannot choose the recipient",
