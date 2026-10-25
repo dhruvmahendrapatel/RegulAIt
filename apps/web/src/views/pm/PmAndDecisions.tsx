@@ -321,7 +321,7 @@ export function DecisionLedgerCard(props: { parent: Parent }) {
           <Input
             value={decision}
             onChange={(e) => setDecision(e.target.value)}
-            placeholder="e.g. Ship behind a feature flag rather than blocking the release"
+            placeholder="for example Ship behind a feature flag rather than blocking the release"
           />
         </Field>
         <div style={{ alignSelf: "flex-end" }}>

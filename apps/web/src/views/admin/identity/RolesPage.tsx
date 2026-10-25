@@ -98,7 +98,7 @@ export default function RolesPage() {
             }}
           >
             <Field label="Role name">
-              <Input required value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. data-analyst" />
+              <Input required value={name} onChange={(e) => setName(e.target.value)} placeholder="for example data-analyst" />
             </Field>
             <Field label="Description (optional)" grow>
               <Input value={description} onChange={(e) => setDescription(e.target.value)} />

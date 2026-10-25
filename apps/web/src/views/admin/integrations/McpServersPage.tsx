@@ -372,7 +372,7 @@ function RegisterServerForm() {
       }}
     >
       <Field label="Name">
-        <Input required value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. repo-tools" />
+        <Input required value={name} onChange={(e) => setName(e.target.value)} placeholder="for example repo-tools" />
       </Field>
       <Field label="Upstream transport"><Select value={transport} disabled={act.busy} onChange={(event) => setTransport(event.target.value)}>
         <option value="streamable_http">Streamable HTTP</option><option value="sse">SSE</option><option value="stdio">Stdio</option>
@@ -615,7 +615,7 @@ function RegisterToolCard(props: { servers: McpServer[] }) {
           </Select>
         </Field>
         <Field label="Tool name">
-          <Input required value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. read_file" />
+          <Input required value={name} onChange={(e) => setName(e.target.value)} placeholder="for example read_file" />
         </Field>
         <Field label="Kind">
           <Select value={kind} onChange={(e) => setKind(e.target.value)}>

@@ -877,7 +877,7 @@ function ContextEditorModal(props: {
             <Field label="Key">
               <Input
                 value={keyName}
-                placeholder="e.g. coding-standards"
+                placeholder="for example coding-standards"
                 onChange={(e) => setKeyName(e.target.value)}
               />
             </Field>

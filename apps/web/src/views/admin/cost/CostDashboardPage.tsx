@@ -424,10 +424,10 @@ function CreateProjectCard() {
           <Input required value={f.name} onChange={(e) => set("name", e.target.value)} />
         </Field>
         <Field label="Cost center">
-          <Input value={f.costCenter} onChange={(e) => set("costCenter", e.target.value)} placeholder="e.g. CC-0042" />
+          <Input value={f.costCenter} onChange={(e) => set("costCenter", e.target.value)} placeholder="for example CC-0042" />
         </Field>
         <Field label="Budget USD">
-          <Input type="number" step="any" value={f.budgetUsd} onChange={(e) => set("budgetUsd", e.target.value)} placeholder="e.g. 25" />
+          <Input type="number" step="any" value={f.budgetUsd} onChange={(e) => set("budgetUsd", e.target.value)} placeholder="for example 25" />
         </Field>
         <Field label="Budget approver">
           <Select value={f.budgetApproverUserId} onChange={(e) => set("budgetApproverUserId", e.target.value)}>
@@ -607,10 +607,10 @@ function InitiativesCard(props: { initiatives: Initiative[]; loading: boolean })
         }}
       >
         <Field label="Name">
-          <Input required value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Platform Modernization" />
+          <Input required value={name} onChange={(e) => setName(e.target.value)} placeholder="for example Platform Modernization" />
         </Field>
         <Field label="Cost center">
-          <Input value={costCenter} onChange={(e) => setCostCenter(e.target.value)} placeholder="e.g. CC-PLAT" />
+          <Input value={costCenter} onChange={(e) => setCostCenter(e.target.value)} placeholder="for example CC-PLAT" />
         </Field>
         <Button type="submit" size="sm" disabled={act.busy}>
           Create initiative

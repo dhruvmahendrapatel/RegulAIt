@@ -149,7 +149,7 @@ function NewPromptDialog(props: { open: boolean; onClose: () => void }) {
       }
     >
       <Field label="Name">
-        <Input value={name} onChange={(e) => setName(e.target.value)} maxLength={80} placeholder="e.g. use-case-summary" />
+        <Input value={name} onChange={(e) => setName(e.target.value)} maxLength={80} placeholder="for example use-case-summary" />
       </Field>
       <Field label="Description">
         <Textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} maxLength={500} placeholder="What this prompt is for" />

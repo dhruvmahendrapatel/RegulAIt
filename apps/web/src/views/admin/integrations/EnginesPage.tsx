@@ -932,7 +932,7 @@ function EnrolForm(props: { engine: Engine; busy: boolean; onCancel: () => void;
           gateway keeps only its hash. It cannot reach any other route.
         </p>
         <Field label="Label (optional)">
-          <Input value={label} onChange={(ev) => setLabel(ev.target.value)} placeholder="e.g. rack-2 runner" maxLength={100} />
+          <Input value={label} onChange={(ev) => setLabel(ev.target.value)} placeholder="for example rack-2 runner" maxLength={100} />
         </Field>
         <Field label="Valid for (minutes)">
           <Input type="number" min={ENROLLMENT_TTL_MINUTES.min} max={ENROLLMENT_TTL_MINUTES.max} step={1} value={ttl} onChange={(ev) => setTtl(ev.target.value)} />

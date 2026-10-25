@@ -367,7 +367,7 @@ export default function ReviewWorkbenchPage() {
                   <Input
                     value={rSensitivity}
                     onChange={(e) => setRSensitivity(e.target.value)}
-                    placeholder="e.g. hipaa"
+                    placeholder="for example hipaa"
                   />
                 </Field>
                 <Field label="Stage pattern">

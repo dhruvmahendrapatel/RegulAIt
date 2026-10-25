@@ -209,7 +209,7 @@ export function EngineRunsPanel(props: { surface: EngineSurface }) {
               grow
               help="The engine's named plugin or probe sets, separated by commas. The server classes each one: any agentic, offensive or unlisted set sends the run for approval."
             >
-              <Input value={form.sets} onChange={set("sets")} placeholder="e.g. basic" required />
+              <Input value={form.sets} onChange={set("sets")} placeholder="for example basic" required />
             </Field>
             <Field label="Trials">
               <Input type="number" min={1} max={25} step={1} value={form.trials} onChange={set("trials")} required />

@@ -134,7 +134,7 @@ test.describe("ADR-0169: the auto-hiding rail", () => {
     await expect(rail(page).getByLabel("Filter navigation")).toBeFocused();
     await expect(rail(page)).toHaveAttribute("data-expanded", "true");
     await page.keyboard.type("Audit log");
-    await expect(rail(page).getByText("Approvals & Audit", { exact: true })).toBeVisible();
+    await expect(rail(page).getByText("Approvals & audit", { exact: true })).toBeVisible();
     await expectAxeClean(page, "registry, rail open by keyboard with a filter");
     await rail(page).getByRole("link", { name: "Audit log", exact: true }).click();
     await expect(page).toHaveURL(/\/ui\/admin\/audit$/);

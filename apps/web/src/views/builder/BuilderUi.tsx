@@ -888,13 +888,13 @@ export function NewAgentDialog(props: { open: boolean; onClose: () => void; temp
         }}
       >
         <Field label="Name your agent" error={nameErr}>
-          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Intake reviewer" maxLength={120} autoFocus />
+          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="for example Intake reviewer" maxLength={120} autoFocus />
         </Field>
         <Field label="Describe what it should do" error={description.length > 500 ? "Use 500 characters or fewer" : null}>
           <Textarea
             value={description}
             onChange={(e) => setDescription(e.target.value)}
-            placeholder="e.g. Read new AI intake requests, flag missing details and suggest a risk tier."
+            placeholder="for example Read new AI intake requests, flag missing details and suggest a risk tier."
             rows={3}
           />
         </Field>
