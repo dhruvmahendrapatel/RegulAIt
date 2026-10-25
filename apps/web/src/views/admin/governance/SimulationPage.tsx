@@ -26,15 +26,7 @@ import type { EvaluateDecision, RuleTrace } from "../../../api/adminTypes";
 import { UUID_RE } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, CodeBlock, EmptyState, Field, IdChip, Input, Select, Table, type Tone } from "../../../ui/kit";
-import {
-  optionEls,
-  serverOpts,
-  useAction,
-  useServerTools,
-  useServers,
-  useUsers,
-  userOpts,
-} from "../adminKit";
+import { NewestNote, optionEls, serverOpts, useAction, useServerTools, useServers, useUsers, userOpts } from "../adminKit";
 import { PolicySimulationSettingsCard } from "./PolicySimulationSettingsCard";
 import { POLICY_SIMULATION_REFUSALS } from "./policySimulationModel";
 import { withRefusalCopy } from "./refusalCopy";
@@ -354,6 +346,7 @@ function BlastRadiusPanel() {
       )}
 
       <div className={v.sectionTitle}>Previous previews</div>
+      <NewestNote shown={history.data?.simulations?.length ?? 0} limit={25} noun="previews" />
       <Table
         rows={history.data?.simulations ?? []}
         rowKey={(r) => r.id}

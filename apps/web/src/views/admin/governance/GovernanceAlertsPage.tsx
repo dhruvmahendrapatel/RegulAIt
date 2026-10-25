@@ -362,6 +362,14 @@ function OwnershipPanel({ alert, onChanged }: { alert: GovernanceAlert; onChange
         </p>
       ) : resolved ? (
         <p className={v.faint}>No work item was filed for this alert.</p>
+      ) : connections.isPending ? (
+        <p className={v.faint} role="status">Loading PM connections…</p>
+      ) : connections.isError ? (
+        // A15: a failed read is not "none configured"
+        <p className={v.errLine} role="alert">
+          PM connections could not be loaded.{" "}
+          <Button size="sm" onClick={() => void connections.refetch()}>Retry</Button>
+        </p>
       ) : (connections.data?.connections ?? []).length === 0 ? (
         <p className={v.faint}>No PM connection is configured. Add one under integrations to file a work item.</p>
       ) : (
@@ -568,7 +576,7 @@ function RemediationPanel({ alertId }: { alertId: string }) {
                           await remediation.refetch();
                         }, "Remediation proposed for independent approval")}
                       >
-                        {candidate.kind === "halt_agent" ? "Propose halt" : "Propose…"}
+                        {candidate.kind === "halt_agent" ? "Propose halt" : "Propose for approval"}
                       </Button>
                       {approvers.length === 0 ? <span className={v.hint}>Another user is required; proposers cannot approve their own remediation.</span> : null}
                     </div>
@@ -591,7 +599,7 @@ function RemediationPanel({ alertId }: { alertId: string }) {
                     <div className={s.proposalRow} key={proposal.id}>
                       <span>{proposal.title}</span>
                       <Badge tone={proposalTone(proposal.status)}>{REMEDIATION_STATUS_WORDS[proposal.status] ?? humanize(proposal.status)}</Badge>
-                      <Link to={remediationApprovalHref(proposal.status)} aria-label={`Open the approval for ${proposal.title}`}>Open approval</Link>
+                      <Link to={remediationApprovalHref(proposal.status)} aria-label={`Open approval: ${proposal.title}`}>Open approval</Link>
                     </div>
                   ))}
                 </div>

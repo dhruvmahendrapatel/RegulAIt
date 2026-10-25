@@ -66,7 +66,7 @@ test.describe("ADR-0173 2b: prompts", () => {
     await page.goto(`/ui/builder/prompts/${P1}`);
     const commits = page.getByRole("list", { name: "Commits" });
 
-    await commits.getByRole("button", { name: `Move a tag to commit ${H1.slice(0, 12)}` }).click();
+    await commits.getByRole("button", { name: `Move tag here: commit ${H1.slice(0, 12)}` }).click();
     let dialog = page.getByRole("dialog", { name: `Move a tag to ${H1.slice(0, 12)}` });
     await expect(dialog.getByLabel("Tag")).toHaveValue("staging");
     await dialog.getByRole("button", { name: "Move tag" }).click();
@@ -74,7 +74,7 @@ test.describe("ADR-0173 2b: prompts", () => {
     expect(sentTo(st, "PUT", `/v1/prompts/${P1}/tags/staging`)).toEqual([{ commitHash: H1 }]);
 
     // H2 was written by Drew: the approver list offers neither me nor Drew
-    await commits.getByRole("button", { name: `Move a tag to commit ${H2.slice(0, 12)}` }).click();
+    await commits.getByRole("button", { name: `Move tag here: commit ${H2.slice(0, 12)}` }).click();
     dialog = page.getByRole("dialog", { name: `Move a tag to ${H2.slice(0, 12)}` });
     await dialog.getByLabel("Tag").fill("prod");
     await expect(dialog.getByTestId("prod-note")).toContainText("approvals queue");

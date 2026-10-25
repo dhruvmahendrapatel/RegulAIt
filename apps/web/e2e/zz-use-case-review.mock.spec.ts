@@ -284,8 +284,8 @@ test.describe("the use-case record", () => {
     await page.unrouteAll({ behavior: "ignoreErrors" });
     await mockGateway(page, { status: "approved", approvedUntil: "2026-09-01T00:00:00Z", approvalExpired: true, conditionMet: true });
     await page.goto(`/ui/admin/governance/use-cases/${UC}`);
-    await expect(page.getByRole("list", { name: "Record status" })).toContainText("Approval expired 1 Sep 2026");
-    await expect(page.getByText(/The approval expired on 1 Sep 2026/)).toBeVisible();
+    await expect(page.getByRole("list", { name: "Record status" })).toContainText("Approval expired 1 Sept 2026");
+    await expect(page.getByText(/The approval expired on 1 Sept 2026/)).toBeVisible();
     await expect(page.getByText("Approval expired — re-review required")).toBeVisible();
     await expect(page.getByRole("list", { name: "Lifecycle" }).locator('[aria-current="step"]')).toContainText("Under review");
   });

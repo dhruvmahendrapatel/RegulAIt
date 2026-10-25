@@ -24,7 +24,7 @@ import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Input, Modal, Table } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
-import { QueryGate, RemoveButton, useAction, useEgressAllowHosts } from "../adminKit";
+import { NewestNote, QueryGate, RemoveButton, useAction, useEgressAllowHosts } from "../adminKit";
 import { selectorCovers, webhookSelectors } from "../../builder/promptsLogic";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
@@ -185,6 +185,7 @@ function DeliveriesModal(props: { sub: Subscription | null; onClose: () => void 
   return (
     <Modal open={props.sub !== null} title={`Deliveries — ${props.sub?.name ?? ""}`} onClose={props.onClose} wide actions={<Button onClick={props.onClose}>Close</Button>}>
       <QueryGate loading={deliveries.isLoading} error={deliveries.error} onRetry={() => void deliveries.refetch()}>
+        <NewestNote shown={deliveries.data?.deliveries?.length ?? 0} limit={50} noun="deliveries" />
         <Table
           rows={deliveries.data?.deliveries ?? []}
           rowKey={(r) => r.id}
@@ -474,7 +475,7 @@ export default function WebhooksPage() {
                           size="sm"
                           variant="ghost"
                           disabled={act.busy}
-                          aria-label={`Rotate the secret of ${r.name}`}
+                          aria-label={`Rotate secret of ${r.name}`}
                           onClick={() =>
                             void act.run(async () => {
                               const res = await api.post<{ name: string; secret: string }>(`/v1/webhooks/${r.id}/rotate-secret`, {});

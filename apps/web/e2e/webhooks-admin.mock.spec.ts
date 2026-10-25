@@ -175,7 +175,7 @@ test.describe("ADR-0173 2b: outbound webhooks (admin)", () => {
     await expect(edit).toHaveCount(0);
     expect(sentTo(st, "PATCH", `/v1/webhooks/${SUB}`)[1]).toEqual({ events: ["prompt.promotion.decided"] });
 
-    await row.getByRole("button", { name: "Rotate the secret of release-notifier" }).click();
+    await row.getByRole("button", { name: "Rotate secret of release-notifier" }).click();
     await expect(page.getByTestId("webhook-secret")).toHaveText(SECRET_2);
 
     await page.getByRole("button", { name: "Run the retry pass now" }).click();

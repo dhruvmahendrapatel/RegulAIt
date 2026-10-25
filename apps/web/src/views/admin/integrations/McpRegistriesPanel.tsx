@@ -141,7 +141,7 @@ export function McpRegistriesPanel() {
                   <Button size="sm" variant="ghost" aria-label={`Edit registry ${r.name}`} onClick={() => setEditing(r)}>
                     Edit
                   </Button>
-                  <Button size="sm" variant="ghost" aria-label={`Sync registry ${r.name}`} disabled={sync.busy} onClick={() => void runSync(r)}>
+                  <Button size="sm" variant="ghost" aria-label={`Sync now: registry ${r.name}`} disabled={sync.busy} onClick={() => void runSync(r)}>
                     Sync now
                   </Button>
                   <Button size="sm" variant="ghost" aria-label={`Browse entries of ${r.name}`} aria-pressed={browsing === r.id} onClick={() => setBrowsing(browsing === r.id ? null : r.id)}>

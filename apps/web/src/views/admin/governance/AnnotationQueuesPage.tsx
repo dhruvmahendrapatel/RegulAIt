@@ -22,7 +22,7 @@ import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Fieldset, Input, Modal, Select, Table } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
-import { QueryGate, RemoveButton, downloadCsv, useAction, useUsers } from "../adminKit";
+import { NewestNote, QueryGate, RemoveButton, downloadCsv, useAction, useUsers } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -265,6 +265,7 @@ function ItemsModal(props: { queue: QueueSummary | null; onClose: () => void }) 
   return (
     <Modal open={props.queue !== null} wide title={`Items — ${props.queue?.name ?? ""}`} onClose={props.onClose} actions={<Button onClick={props.onClose}>Close</Button>}>
       <QueryGate loading={items.isLoading} error={items.error} onRetry={() => void items.refetch()}>
+        <NewestNote shown={items.data?.items?.length ?? 0} limit={200} noun="items" />
         <Table
           rows={items.data?.items ?? []}
           rowKey={(r) => r.id}
@@ -417,7 +418,7 @@ export default function AnnotationQueuesPage() {
                         <Button
                           size="sm"
                           variant="ghost"
-                          aria-label={`Export the reviews of ${r.name}`}
+                          aria-label={`Export CSV of the reviews of ${r.name}`}
                           onClick={() => void downloadCsv(`/v1/annotation-queues/${r.id}/export`, `annotations-${r.name}.csv`, (m) => toast(m, "error"))}
                         >
                           Export CSV

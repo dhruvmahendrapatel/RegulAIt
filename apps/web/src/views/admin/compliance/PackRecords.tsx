@@ -13,7 +13,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago, fmtAt } from "../../../api/format";
 import { Badge, Button, Card, Field, Input, Select, Table, Textarea } from "../../../ui/kit";
-import { KV, QueryGate, Stat, useAction, useNameMaps } from "../adminKit";
+import { KV, NewestNote, QueryGate, Stat, useAction, useNameMaps } from "../adminKit";
 import { withRefusalCopy } from "../governance/refusalCopy";
 import {
   EMPTY_ATTESTATION,
@@ -233,6 +233,7 @@ export function PackReportsCard(props: { packId?: string | null; packLabel?: str
         stored report is a record of that moment, not a live figure.
       </p>
       <QueryGate loading={reports.isLoading} error={reports.error} onRetry={() => void reports.refetch()}>
+        <NewestNote shown={reports.data?.reports?.length ?? 0} limit={50} noun="reports" />
         <Table<PackReportSummary>
           rows={reports.data?.reports ?? []}
           rowKey={(r) => r.id}

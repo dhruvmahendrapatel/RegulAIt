@@ -533,7 +533,7 @@ function ArtifactDetail(props: {
 
         <div>
           <div className={v.sectionTitle}>Delete</div>
-          <Button variant="danger" disabled={deleting} onClick={() => setConfirmDelete(true)} aria-label={`Delete ${a.filename}`}>
+          <Button variant="danger" disabled={deleting} onClick={() => setConfirmDelete(true)} aria-label={`Delete artifact ${a.filename}`}>
             Delete artifact…
           </Button>
           {deleteError && (

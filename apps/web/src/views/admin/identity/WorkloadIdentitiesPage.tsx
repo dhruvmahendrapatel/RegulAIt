@@ -775,7 +775,7 @@ function RunDelegationTree(props: {
                     size="sm"
                     variant="danger"
                     disabled={props.busy}
-                    aria-label={`Revoke grant for ${actorLabel(r.grant.actorIdentityId)} and its descendants`}
+                    aria-label={`Revoke cascade: grant for ${actorLabel(r.grant.actorIdentityId)} and its descendants`}
                     onClick={() =>
                       props.ask({
                         title: "Revoke grant and descendants?",

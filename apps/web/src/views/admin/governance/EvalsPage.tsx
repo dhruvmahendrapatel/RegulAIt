@@ -48,17 +48,7 @@ import EvalsCatalogTab from "./EvalsCatalogTab";
 import EvalsCompareTab from "./EvalsCompareTab";
 import EvalsJudgeCalibration from "./EvalsJudgeCalibration";
 import { EngineRunsPanel } from "./EngineRunsPanel";
-import {
-  QueryGate,
-  RemoveButton,
-  Stat,
-  agentOpts,
-  optionEls,
-  projectOpts,
-  useAction,
-  useAgents,
-  useProjects,
-} from "../adminKit";
+import { NewestNote, QueryGate, RemoveButton, Stat, agentOpts, optionEls, projectOpts, useAction, useAgents, useProjects } from "../adminKit";
 import a from "../admin.module.css";
 import { EvalsSummaryCard } from "./EvalsSummaryCard";
 import v from "../../views.module.css";
@@ -853,6 +843,7 @@ export default function EvalsPage() {
 
           {/* ---------------- runs ---------------- */}
           <Card title="Runs" contain>
+            <NewestNote shown={runs.data?.runs?.length ?? 0} limit={100} noun="runs" />
             <Table
               rows={runs.data?.runs ?? []}
               rowKey={(r) => r.id}

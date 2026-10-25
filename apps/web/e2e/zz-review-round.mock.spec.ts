@@ -622,9 +622,9 @@ test.describe("the use-case record in a review round", () => {
   test("a recertification reads Re-review with the expiry date on the band and the tracker", async ({ page }) => {
     await mockGateway(page, { recertification: true });
     await page.goto(`/ui/admin/governance/use-cases/${UC}`);
-    await expect(page.getByRole("list", { name: "Record status" })).toContainText("Re-review: approval expired 1 Sep 2026");
+    await expect(page.getByRole("list", { name: "Record status" })).toContainText("Re-review: approval expired 1 Sept 2026");
     await expect(page.getByRole("list", { name: "Record status" })).not.toContainText("Approval valid until");
-    await expect(page.locator("section", { has: page.getByText("Lifecycle tracker", { exact: true }) }).getByText("Re-review: approval expired 1 Sep 2026")).toBeVisible();
+    await expect(page.locator("section", { has: page.getByText("Lifecycle tracker", { exact: true }) }).getByText("Re-review: approval expired 1 Sept 2026")).toBeVisible();
     await expect(page.getByRole("list", { name: "Lifecycle" }).locator('[aria-current="step"]')).toContainText("Under review");
     await expect(page.getByText(/so the use case is back in review/)).toBeVisible();
     await checkScreen(page, "record in re-review", "record-re-review");

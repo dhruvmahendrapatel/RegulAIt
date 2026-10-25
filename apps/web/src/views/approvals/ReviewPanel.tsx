@@ -378,7 +378,13 @@ function ReviewDrawer(props: { approval: Approval; onClose: () => void; onDecide
                   </button>
                   {showDoc ? <div className={r.docBox}><QuestionnaireView content={questionnaire.content} /></div> : null}
                 </>
-              ) : instance.isLoading ? <span className={r.muted}>Loading…</span> : <span className={r.muted}>Not submitted</span>}
+              ) : instance.isLoading ? <span className={r.muted} role="status">Loading…</span> : instance.isError ? (
+                // A15: a failed read is not "Not submitted"
+                <span className={r.muted} role="alert">
+                  The questionnaire could not be loaded. Retry before deciding.{" "}
+                  <Button size="sm" onClick={() => void instance.refetch()}>Retry</Button>
+                </span>
+              ) : <span className={r.muted}>Not submitted</span>}
             </EvidenceRow>
             {ov ? (
               <EvidenceRow label="Stack">

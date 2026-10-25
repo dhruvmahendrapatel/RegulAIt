@@ -541,7 +541,7 @@ test.describe("U4: report definition, run and run history", () => {
     const dialog = page.getByRole("dialog", { name: "Report definition — Exec summary" });
     await expect(dialog.getByRole("list", { name: "Projects in scope" })).toContainText("Atlas");
     await expectAxeClean(page, "report definition dialog", '[role="dialog"]');
-    await dialog.getByRole("button", { name: "Open the last monthly run" }).click();
+    await dialog.getByRole("button", { name: "Open last run (monthly)" }).click();
     const runDialog = page.getByRole("dialog", { name: "Report run" });
     await expect(runDialog.getByText("Spend is an estimate.")).toBeVisible();
     await expect(runDialog.getByRole("cell", { name: "Atlas" })).toBeVisible();

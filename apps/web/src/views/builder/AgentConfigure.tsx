@@ -525,7 +525,7 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
                   </span>
                 </span>
                 {k.updateAvailable && !k.unavailable && (
-                  <Button size="sm" aria-label={`Take the new version of ${k.name}`} disabled={ro || reattach.isPending} onClick={() => reattach.mutate(k.id)}>
+                  <Button size="sm" aria-label={`Update ${k.name} to the new version`} disabled={ro || reattach.isPending} onClick={() => reattach.mutate(k.id)}>
                     Update
                   </Button>
                 )}

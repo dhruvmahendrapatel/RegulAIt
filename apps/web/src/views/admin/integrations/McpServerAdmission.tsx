@@ -51,7 +51,7 @@ export function McpAdmissionClearButton(props: { server: McpServer }) {
   return (
     // the registry rows toggle the tools card on click; this control must not
     <span onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
-      <Button size="sm" variant="ghost" disabled={act.busy} aria-label={`Clear admission hold on ${s.name}`} onClick={() => setOpen(true)}>
+      <Button size="sm" variant="ghost" disabled={act.busy} aria-label={`Clear hold on ${s.name}`} onClick={() => setOpen(true)}>
         Clear hold…
       </Button>
       {act.error && (
