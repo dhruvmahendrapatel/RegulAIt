@@ -355,7 +355,7 @@ function WaitingPeriodCard(props: {
               key: "act",
               header: "",
               render: (x) => (
-                <Button size="sm" aria-label={`Allow ${x.name} now`} onClick={() => props.onOverride(x, x.target)}>
+                <Button size="sm" aria-label={`Allow now: ${x.name}`} onClick={() => props.onOverride(x, x.target)}>
                   Allow now…
                 </Button>
               ),

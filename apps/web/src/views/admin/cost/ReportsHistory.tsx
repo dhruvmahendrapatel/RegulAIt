@@ -194,7 +194,7 @@ export function ReportDefinitionDetail(props: { id: string; onClose: () => void;
                 align: "right",
                 render: (s) =>
                   s.lastRunId ? (
-                    <Button size="sm" aria-label={`Open the last ${s.cadence} run`} onClick={() => props.onOpenRun(s.lastRunId!)}>
+                    <Button size="sm" aria-label={`Open last run (${s.cadence})`} onClick={() => props.onOpenRun(s.lastRunId!)}>
                       Open last run
                     </Button>
                   ) : null,

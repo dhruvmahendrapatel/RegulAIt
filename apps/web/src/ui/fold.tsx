@@ -6,6 +6,7 @@
 import { Fragment, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { InfoButton, Table, type Column, type TableProps } from "./kit";
 import s from "./kit.module.css";
+import v from "../views/views.module.css";
 
 export type FoldStep = "lg" | "md" | "sm";
 
@@ -125,4 +126,12 @@ export function FoldTable<T>(props: TableProps<T>) {
       <Table {...props} columns={columns} />
     </div>
   );
+}
+
+/** A list read with `?limit=N` says so once it is full, so a full page never reads as the whole history (A15).
+ * Here, beside FoldTable, rather than in adminKit: adminKit ships in the entry bundle, this module is lazy. */
+export function NewestNote(props: { shown: number; limit: number; noun: string }) {
+  return props.shown >= props.limit ? (
+    <p className={v.faint} data-testid="newest-note">Showing the newest {props.limit} {props.noun}; older ones are not listed here.</p>
+  ) : null;
 }

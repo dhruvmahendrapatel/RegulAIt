@@ -57,6 +57,7 @@ import {
   type Tone,
 } from "../../../ui/kit";
 import { KV, QueryGate, Stat, agentOpts, optionEls, useAction, useAgents } from "../adminKit";
+import { NewestNote } from "../../../ui/fold";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 import t from "./traces.module.css";
@@ -511,6 +512,7 @@ function TracesView() {
             error={sessions.error}
             onRetry={() => void sessions.refetch()}
           >
+            <NewestNote shown={sessions.data?.sessions?.length ?? 0} limit={50} noun="sessions" />
             {(sessions.data?.sessions ?? []).length === 0 ? (
               <EmptyState title="No sessions yet" body="A conversation or a run will create one." />
             ) : (

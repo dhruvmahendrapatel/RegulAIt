@@ -454,11 +454,11 @@ function ClocksCard(props: { d: IncidentDetail; refetch: () => void }) {
               {canEdit && (c.status === "pending" || c.status === "sent_initial") && (
                 <div className={v.row} style={{ flexWrap: "wrap", gap: "var(--s1)" }}>
                   {c.allowsInitialReport && c.status === "pending" && (
-                    <Button size="sm" onClick={() => setSending({ clock: c, stage: "initial" })} aria-label={`Record the initial report for ${c.clockId}`}>
+                    <Button size="sm" onClick={() => setSending({ clock: c, stage: "initial" })} aria-label={`Initial report sent for ${c.clockId}`}>
                       Initial report sent…
                     </Button>
                   )}
-                  <Button size="sm" variant="primary" onClick={() => setSending({ clock: c, stage: "complete" })} aria-label={`Record the report for ${c.clockId}`}>
+                  <Button size="sm" variant="primary" onClick={() => setSending({ clock: c, stage: "complete" })} aria-label={`Report sent for ${c.clockId}`}>
                     Report sent…
                   </Button>
                   {d.permissions.isAdmin && (

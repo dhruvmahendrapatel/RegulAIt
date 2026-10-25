@@ -30,6 +30,7 @@ import { Badge, Button, Card, EmptyState, Field, Input, Select, SeverityBadge, T
 import { EngineRunsPanel } from "./EngineRunsPanel";
 import { AttachRunEvidence, RedTeamFindingsCard, RedTeamSummaryCard, RunTrialsSection } from "./RedTeamPosture";
 import { QueryGate, agentOpts, optionEls, projectOpts, useAction, useAgents, useProjects } from "../adminKit";
+import { NewestNote } from "../../../ui/fold";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -470,6 +471,7 @@ export default function RedTeamPage() {
           </Card>
 
           <Card title="Runs">
+            <NewestNote shown={runs.data?.runs?.length ?? 0} limit={100} noun="runs" />
             {(runs.data?.runs ?? []).length === 0 ? (
               <EmptyState title="No red-team runs yet" body="Install the shipped corpus, publish it, and run it against an agent." />
             ) : (

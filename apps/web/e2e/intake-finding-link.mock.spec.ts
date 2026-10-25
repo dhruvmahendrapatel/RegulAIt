@@ -141,7 +141,7 @@ test("G1: the record says it was found by discovery, and an admin can follow the
   await page.goto(`/ui/admin/governance/use-cases/${ID}`);
   const chip = page.getByTestId("use-case-found-by");
   await expect(chip).toHaveText(/Found by\s*discovery/);
-  await chip.getByRole("link", { name: /open the shadow-AI finding for acme\/credit-memo-assistant/ }).click();
+  await chip.getByRole("link", { name: /open the Shadow-AI discovery findings \(this use case came from acme\/credit-memo-assistant\)/ }).click();
   await expect(page).toHaveURL(/\/ui\/admin\/shadow-ai\?tab=findings/);
 });
 

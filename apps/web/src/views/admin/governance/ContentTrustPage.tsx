@@ -209,7 +209,7 @@ function RecordsCard() {
       render: (r) => `${r.sourceKind === "mcp_server" ? "MCP" : "Connector"} ${r.sourceDetail ?? ""}`.trim(),
     },
     { key: "tier", header: "Tier", render: (r) => <Badge tone={tierTone(r.trustTier)}>{humanize(r.trustTier)}</Badge> },
-    { key: "class", header: "Classification", render: (r) => r.classification },
+    { key: "class", header: "Classification", render: (r) => humanize(r.classification) },
     { key: "digest", header: "Digest", render: (r) => DIGEST_COPY[r.digestAlg] },
     {
       key: "delivered",
@@ -222,12 +222,12 @@ function RecordsCard() {
     {
       key: "changed",
       header: "Transformed",
-      render: (r) => (r.upstreamDigest && r.deliveredDigest ? (r.upstreamDigest === r.deliveredDigest ? "no" : "yes") : "unknown"),
+      render: (r) => (r.upstreamDigest && r.deliveredDigest ? (r.upstreamDigest === r.deliveredDigest ? "No" : "Yes") : "Unknown"),
     },
     {
       key: "anchor",
       header: "Anchor",
-      render: (r) => (r.anchor ? `#${r.anchor.anchorSeq}, timestamp ${r.anchor.tsaStatus}` : "not yet anchored"),
+      render: (r) => (r.anchor ? `#${r.anchor.anchorSeq}, timestamp ${humanize(r.anchor.tsaStatus).toLowerCase()}` : "Not yet anchored"),
     },
   ];
   return (

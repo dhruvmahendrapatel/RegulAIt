@@ -47,20 +47,8 @@ import {
   Textarea,
   type Tone,
 } from "../../../ui/kit";
-import {
-  KV,
-  OutcomePanel,
-  QueryGate,
-  RemoveButton,
-  Stat,
-  agentOpts,
-  optionEls,
-  projectOpts,
-  useAction,
-  useAgents,
-  useApiAction,
-  useProjects,
-} from "../adminKit";
+import { KV, OutcomePanel, QueryGate, RemoveButton, Stat, agentOpts, optionEls, projectOpts, useAction, useAgents, useApiAction, useProjects } from "../adminKit";
+import { NewestNote } from "../../../ui/fold";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 import { SpdxFieldsPanel } from "../governance/SpdxFieldsPanel";
@@ -782,6 +770,7 @@ export default function RegulAItLlmPage() {
           {openJob && <TrainingJobDetail key={openJob} jobId={openJob} onClose={() => setOpenJob(null)} />}
           {/* ---------------- jobs ---------------- */}
           <Card title="Training jobs" contain>
+            <NewestNote shown={jobs.data?.jobs?.length ?? 0} limit={100} noun="jobs" />
             <Table
               rows={jobs.data?.jobs ?? []}
               rowKey={(r) => r.id}

@@ -254,7 +254,7 @@ test.describe("ADR-0173 2c: annotation queues", () => {
     await expect(page.getByText("Deadline check: 1 item(s) newly past their deadline")).toBeVisible();
 
     const download = page.waitForEvent("download");
-    await row.getByRole("button", { name: "Export the reviews of support-answers" }).click();
+    await row.getByRole("button", { name: "Export CSV of the reviews of support-answers" }).click();
     expect((await download).suggestedFilename()).toBe("annotations-support-answers.csv");
     expect(sentTo(st, "GET", `/v1/annotation-queues/${Q1}/export`)).toHaveLength(1);
 

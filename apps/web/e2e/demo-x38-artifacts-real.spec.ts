@@ -109,7 +109,7 @@ async function open(page: Page, artifact: { id: string; filename: string }) {
   if (await button.getAttribute("aria-pressed") !== "true") await activate(page, button);
 }
 async function confirmDelete(page: Page, filename: string, checkTrap = false) {
-  const trigger = page.getByRole("button", { name: `Delete ${filename}`, exact: true });
+  const trigger = page.getByRole("button", { name: `Delete artifact ${filename}`, exact: true });
   await activate(page, trigger);
   let dialog = page.getByRole("dialog", { name: `Delete ${filename}?` });
   if (checkTrap) { await expectDialogTrap(page, dialog); await escapeToTrigger(page, dialog, trigger); await activate(page, trigger); dialog = page.getByRole("dialog", { name: `Delete ${filename}?` }); }
@@ -157,7 +157,7 @@ test("actual unfinished-run delete refuses; terminal fixture permits confirmed r
     await evidence(page, info, "unfinished-delete-refused");
     sql(`UPDATE engine_runs SET status='cancelled',finished_at=now(),error_code='test_cleanup' WHERE id='${run}'`);
     await open(page, artifact);
-    await activate(page, page.getByRole("button", { name: `Delete ${artifact.filename}`, exact: true }));
+    await activate(page, page.getByRole("button", { name: `Delete artifact ${artifact.filename}`, exact: true }));
     await evidence(page, info, "delete-confirmation");
     const needsStepUp = page.waitForResponse(r => r.url().endsWith(`/v1/model-artifacts/${artifact.id}`) && r.request().method() === "DELETE");
     await activate(page, page.getByRole("dialog").getByRole("button", { name: "Delete", exact: true }));

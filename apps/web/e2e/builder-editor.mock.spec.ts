@@ -147,7 +147,7 @@ test.describe("ADR-0172: agent editor", () => {
     await expect(row.getByText("Update available")).toBeVisible();
     await expect(row).toContainText("The agent keeps the version it has until you take the new one.");
     await expectAxeClean(page, "editor, skill update available");
-    await row.getByRole("button", { name: "Take the new version of Assess an AI use case" }).click();
+    await row.getByRole("button", { name: "Update Assess an AI use case to the new version" }).click();
     await expect(page.getByText("Skill updated to the newest version")).toBeVisible();
     await expect(row.getByText("Update available")).toHaveCount(0);
     expect(st.calls.filter((c) => c.method === "POST" && c.path === `/v1/builder/agents/${id}/skills/sk-0001/reattach`)).toHaveLength(1);

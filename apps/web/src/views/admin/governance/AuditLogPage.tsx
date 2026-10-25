@@ -86,6 +86,15 @@ export default function AuditLogPage() {
     ? { type: objectTypeParam, id: objectParam.toLowerCase() }
     : null;
   const objectLinkIgnored = !onlyObject && (objectParam !== null || objectTypeParam !== null);
+  // G1 deep link: a filtered use-case trail is named for the use case, read from the record itself (never the URL);
+  // the same cache entry the record page fills, and the full id stays on screen if the name cannot be read
+  const onlyUseCase = useQuery({
+    queryKey: ["governance", "use-case-detail", onlyObject?.id],
+    queryFn: () => api.get<{ useCase?: { name?: string } }>(`/v1/use-cases/${onlyObject!.id}`),
+    enabled: onlyObject?.type === "ai_use_case",
+    retry: false,
+  });
+  const onlyName = onlyObject?.type === "ai_use_case" ? onlyUseCase.data?.useCase?.name : undefined;
 
   const qs = useMemo(() => {
     const p = new URLSearchParams();
@@ -235,7 +244,7 @@ export default function AuditLogPage() {
           {onlyObject && (
             <p role="status" data-testid="audit-only-object">
               Showing the audit trail of one {onlyObject.type === "ai_use_case" ? "AI use case" : humanize(onlyObject.type).toLowerCase()},{" "}
-              <code className={v.mono}>{onlyObject.id}</code>. The CSV export covers the same rows.{" "}
+              {onlyName ? <><strong>{onlyName}</strong> <span className={`${v.faint} ${v.mono}`}>{shortId(onlyObject.id)}</span></> : <code className={v.mono}>{onlyObject.id}</code>}. The CSV export covers the same rows.{" "}
               <Button size="sm" variant="ghost" onClick={() => setSearch((p) => { const n = new URLSearchParams(p); n.delete("objectType"); n.delete("objectId"); return n; })}>
                 Show every row
               </Button>
