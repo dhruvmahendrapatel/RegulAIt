@@ -721,7 +721,7 @@ describe("11. X19-S01: a reflected client secret escapes no sink", () => {
     expect(audits.some((r) => r.ruleId === CHATOPS_RULE_IDS.alertPostFailed)).toBe(true);
     for (const row of audits) expect(leaks(JSON.stringify(row)), JSON.stringify(row)).toEqual([]);
     for (const line of logLines.slice(logFrom)) expect(leaks(line), line).toEqual([]);
-    // #568 review item 3: the adapter logs the status and Graph's code only, no body
+    // #568 review item 5: the adapter logs the status and Graph's code only, no body
     const graphLog = consoleLines.filter((l) => l.startsWith("[outlook] sendMail HTTP 400"));
     expect(graphLog).toEqual(["[outlook] sendMail HTTP 400 ErrorInvalidRequest"]);
     for (const line of consoleLines) {

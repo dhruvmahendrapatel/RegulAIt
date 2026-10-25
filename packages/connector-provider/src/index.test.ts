@@ -1857,14 +1857,14 @@ describe("X19-S01: outlook — a reflected client secret or token is scrubbed in
       vi.restoreAllMocks();
       expect(logged.length).toBe(1);
       const line = logged[0]!;
-      // #568 review item 3: the log line is the status and Graph's code, no body
+      // #568 review item 5: the log line is the status and Graph's code, no body
       expect(line).toBe("[outlook] sendMail HTTP 400 ErrorInvalidRequest");
       expectNoSecret(line, SYN_SECRET);
       expect(line).not.toContain("minted-jwt");
     }
   });
 
-  it("#568 review item 3: an error echoing the recipient puts no address in the log or the detail", async () => {
+  it("#568 review item 5: an error echoing the recipient puts no address in the log or the detail", async () => {
     const recipient = "ana@acme.com";
     const bodies = [
       JSON.stringify({ error: { code: "ErrorInvalidRecipients", message: `Recipient ${recipient} is not valid; from sender@acme.com` } }),

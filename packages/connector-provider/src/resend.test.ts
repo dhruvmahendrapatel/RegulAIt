@@ -147,7 +147,7 @@ describe("send", () => {
     }
   });
 
-  it("#568 review item 3: an error echoing the recipient puts no address in the log or the message", async () => {
+  it("#568 review item 5: an error echoing the recipient puts no address in the log or the message", async () => {
     const errors: string[] = [];
     const spy = vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => void errors.push(a.join(" ")));
     const to = "named.approver@example.com";
