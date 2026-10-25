@@ -659,7 +659,7 @@ test("infrastructure: posture, set approver, propose a governed remediation", as
 // six sections since ADR-0034 added the custom-model-provider master switch
 test("organization: the six-section org settings form saves partially", async () => {
   await nav("Organization", "Organization");
-  await expect(page.getByText("1 · Optimization", { exact: false })).toBeVisible();
+  await expect(page.getByText("1 · Optimisation", { exact: false })).toBeVisible();
   await page.getByRole("button", { name: "Save approval policy" }).click();
   await expect(page.getByText("Approval policy saved", { exact: false }).first()).toBeVisible();
   await page.getByRole("button", { name: "Save optimization settings" }).click();

@@ -245,7 +245,8 @@ test("inbox: a pending item is decidable with a reason", async () => {
   await expect(approve).toBeVisible();
   await item.getByLabel("Decision reason").fill("e2e: arbitrated in the SPA rewrite journey");
   await approve.click();
-  await expect(page.getByText("Approved", { exact: true })).toBeVisible();
+  // the success toast (a status badge now reads "Approved" too)
+  await expect(page.locator('[aria-live="polite"]').getByText("Approved", { exact: true })).toBeVisible();
   await shot(page, "10-inbox-decided");
   track.assertClean("inbox approve");
 });
