@@ -356,7 +356,7 @@ export default function RulesEnginePage() {
    */
   const removeColumn = <T extends RuleBase>(kind: RuleKind, describe: (r: T) => string) => ({
     key: "actions",
-    header: "" as ReactNode,
+    header: "", srHeader: "Actions" as ReactNode,
     align: "right" as const,
     render: (r: T) => (
       <RemoveButton
@@ -818,6 +818,7 @@ function ShadowCanaryCard() {
           {
             key: "act",
             header: "",
+            srHeader: "Actions",
             render: (r) => (
               <Button size="sm" onClick={() => setSelected(r)}>
                 What would change

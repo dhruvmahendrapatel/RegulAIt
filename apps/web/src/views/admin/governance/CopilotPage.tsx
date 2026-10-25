@@ -432,6 +432,7 @@ export default function CopilotPage() {
                 {
                   key: "do",
                   header: "",
+                  srHeader: "Actions",
                   render: (p) =>
                     p.appliedAt ? (
                       <span className={v.faint}>{applied[p.id] ?? "applied once; applying is not repeatable"}</span>

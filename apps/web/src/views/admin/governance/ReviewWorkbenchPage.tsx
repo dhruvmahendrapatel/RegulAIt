@@ -296,6 +296,7 @@ export default function ReviewWorkbenchPage() {
                   {
                     key: "x",
                     header: "",
+                    srHeader: "Actions",
                     render: (r) => (
                       <Button
                         variant="ghost"
@@ -450,6 +451,7 @@ export default function ReviewWorkbenchPage() {
                   {
                     key: "x",
                     header: "",
+                    srHeader: "Actions",
                     render: (r) => (
                       <Button
                         variant="ghost"
@@ -482,6 +484,7 @@ export default function ReviewWorkbenchPage() {
                     {
                       key: "sel",
                       header: "",
+                      srHeader: "Select",
                       render: (r) => (
                         <input
                           type="checkbox"
@@ -524,6 +527,7 @@ export default function ReviewWorkbenchPage() {
                     {
                       key: "claim",
                       header: "",
+                      srHeader: "Actions",
                       render: (r) =>
                         r.assignment?.claimable ? (
                           <Button

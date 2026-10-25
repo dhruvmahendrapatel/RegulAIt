@@ -251,6 +251,57 @@ describe("Table sort — a sortable header is a keyboard control (FS-4)", () => 
   });
 });
 
+describe("Table — a column with no visible header is named by the column, not a blanket \"Actions\" (#569 review)", () => {
+  type Key = { id: string; revoked: boolean };
+  const html = renderToStaticMarkup(
+    <Table<Key>
+      columns={[
+        { key: "id", header: "Key", render: (r) => r.id },
+        { key: "revoked", header: "", srHeader: "Status", render: (r) => (r.revoked ? <Badge tone="danger">revoked</Badge> : null) },
+        { key: "actions", header: "", srHeader: "Actions", render: () => <button type="button">Revoke</button> },
+      ]}
+      rows={[{ id: "k1", revoked: true }]}
+      rowKey={(r) => r.id}
+      empty={<EmptyState title="No keys" />}
+    />,
+  );
+  const heads = [...html.matchAll(/<th(\s[^>]*)?>/g)].map((m) => (m[1] ?? "").match(/aria-label="([^"]*)"/)?.[1] ?? null);
+
+  it("a status column is announced as Status, and only the controls column as Actions", () => {
+    expect(heads).toEqual([null, "Status", "Actions"]);
+  });
+
+  it("every column with an empty header in the app names itself with srHeader", async () => {
+    const { readdirSync, readFileSync, statSync } = await import("node:fs");
+    const path = await import("node:path");
+    const files: string[] = [];
+    const walk = (dir: string) => {
+      for (const e of readdirSync(dir)) {
+        const p = path.join(dir, e);
+        if (statSync(p).isDirectory()) walk(p);
+        else if (/\.tsx?$/.test(e) && !/\.test\.tsx?$/.test(e)) files.push(p);
+      }
+    };
+    walk(path.resolve(__dirname, ".."));
+    const unnamed: string[] = [];
+    const named: Record<string, string> = {};
+    for (const f of files) {
+      const src = readFileSync(f, "utf8");
+      for (const m of src.matchAll(/header:\s*(?:""|''|``)\s*,(\s*srHeader:\s*"([^"]+)")?/g)) {
+        const line = src.slice(0, m.index).split("\n").length;
+        if (m[2] == null) unnamed.push(`${path.basename(f)}:${line}`);
+        else named[`${path.basename(f)}:${line}`] = m[2];
+      }
+    }
+    expect(unnamed).toEqual([]);
+    // the badge and checkbox columns the review listed are not called Actions
+    const statusLike = Object.entries(named).filter(([k]) =>
+      /^(AgentsPage|ConnectorsPage|McpServersPage|LicensingPage|IncidentDetailPage|CompliancePacksPage|EvalsCompareTab|ReviewWorkbenchPage|RetentionHoldsCard)\.tsx/.test(k) && named[k] !== "Actions",
+    );
+    expect(statusLike.length).toBeGreaterThanOrEqual(10);
+  });
+});
+
 describe("Card contain — a long body scrolls in a contained box (X6)", () => {
   it("is not a tab stop or a landmark until the box is known to scroll", () => {
     const html = renderToStaticMarkup(<Card title="Findings" contain>rows</Card>);

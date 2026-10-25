@@ -323,6 +323,7 @@ export default function ExecutionControlPage() {
                 {
                   key: "go",
                   header: "",
+                  srHeader: "Actions",
                   render: (m) => (
                     <Button
                       size="sm"
@@ -472,6 +473,7 @@ export default function ExecutionControlPage() {
                   {
                     key: "lift",
                     header: "",
+                    srHeader: "Actions",
                     render: (r) => (
                       <Button
                         size="sm"
@@ -515,6 +517,7 @@ export default function ExecutionControlPage() {
                   {
                     key: "lift",
                     header: "",
+                    srHeader: "Actions",
                     render: (r) => (
                       <Button
                         size="sm"

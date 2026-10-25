@@ -248,6 +248,7 @@ export function PackReportsCard(props: { packId?: string | null; packLabel?: str
             {
               key: "open",
               header: "",
+              srHeader: "Actions",
               align: "right",
               render: (r) => (
                 <Button size="sm" aria-label={`Open the ${r.framework} v${r.packVersion} report from ${ago(r.generatedAt)}`} onClick={() => setOpenId(r.id === openId ? null : r.id)}>

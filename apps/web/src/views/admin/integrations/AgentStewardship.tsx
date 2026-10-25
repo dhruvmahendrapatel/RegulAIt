@@ -145,6 +145,7 @@ export function StewardshipCard(props: {
           {
             key: "manage",
             header: "",
+            srHeader: "Actions",
             align: "right",
             render: (a) => (
               <Button

@@ -58,9 +58,9 @@ test("independent X30 cited earlier run remains selected", async ({page})=>{
   await page.route(`**/v1/model-artifacts/${a.id}`,route=>json(route,{artifact:a,scans:[latest,cited]}));
   await page.goto(`/ui/admin/admission?tab=artifacts&artifact=${a.id}&run=${cited.engineRunId}`);
   await expect(page.getByTestId("scan-run")).toBeVisible();
-  const current=await page.getByTestId("scan-run").getByTitle(new RegExp(latest.engineRunId)).count();
-  console.log("X30 evidence link actual latest run chips",current,"cited run chips",await page.getByTestId("scan-run").getByTitle(new RegExp(cited.engineRunId)).count());
-  await expect(page.getByTestId("scan-run").getByTitle(new RegExp(cited.engineRunId))).toBeVisible();
+  const current=await page.getByTestId("scan-run").getByLabel(new RegExp(latest.engineRunId)).count();
+  console.log("X30 evidence link actual latest run chips",current,"cited run chips",await page.getByTestId("scan-run").getByLabel(new RegExp(cited.engineRunId)).count());
+  await expect(page.getByTestId("scan-run").getByLabel(new RegExp(cited.engineRunId))).toBeVisible();
 });
 
 test("independent X30 malformed finding severity leaves artifact detail readable", async ({page}) => {

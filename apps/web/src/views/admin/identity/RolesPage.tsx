@@ -148,6 +148,7 @@ export default function RolesPage() {
               {
                 key: "actions",
                 header: "",
+                srHeader: "Actions",
                 align: "right",
                 render: (r) => (
                   <Button
@@ -311,6 +312,7 @@ function RoleGrantsPanel(props: { roleId: string }) {
             {
               key: "actions",
               header: "",
+              srHeader: "Actions",
               align: "right",
               render: (x) => (
                 <Button size="sm" variant="ghost" onClick={() => setUnassign(x)}>
@@ -454,7 +456,7 @@ function RoleGrantsPanel(props: { roleId: string }) {
           columns={[
             { key: "agent", header: "Agent", render: (x: NonNullable<RoleGrants["agents"]>[number]) => x.agentName ?? x.agentId },
             { key: "modes", header: "Modes", render: (x) => (x.allowedModes ?? []).join(", ") || "all" },
-            { key: "actions", header: "", align: "right", render: (x) => rmButton("agents", x.grantId, x.agentName ?? "agent") },
+            { key: "actions", header: "", srHeader: "Actions", align: "right", render: (x) => rmButton("agents", x.grantId, x.agentName ?? "agent") },
           ]}
           rows={grants.data?.agents ?? []}
           rowKey={(x) => x.grantId}
@@ -466,7 +468,7 @@ function RoleGrantsPanel(props: { roleId: string }) {
             { key: "connector", header: "Connector", render: (x: NonNullable<RoleGrants["connectors"]>[number]) => x.connectorName ?? x.connectorId },
             { key: "mode", header: "Mode", render: (x) => x.mode },
             { key: "objects", header: "Objects", render: (x) => (x.allowedObjects ?? []).join(", ") || "all" },
-            { key: "actions", header: "", align: "right", render: (x) => rmButton("connectors", x.grantId, x.connectorName ?? "connector") },
+            { key: "actions", header: "", srHeader: "Actions", align: "right", render: (x) => rmButton("connectors", x.grantId, x.connectorName ?? "connector") },
           ]}
           rows={grants.data?.connectors ?? []}
           rowKey={(x) => x.grantId}
@@ -477,7 +479,7 @@ function RoleGrantsPanel(props: { roleId: string }) {
           columns={[
             { key: "server", header: "Server", render: (x: NonNullable<RoleGrants["servers"]>[number]) => x.serverName ?? x.serverId },
             { key: "readOnlyAll", header: "Read-only all", render: (x) => String(x.readOnlyAll) },
-            { key: "actions", header: "", align: "right", render: (x) => rmButton("servers", x.grantId, x.serverName ?? "server") },
+            { key: "actions", header: "", srHeader: "Actions", align: "right", render: (x) => rmButton("servers", x.grantId, x.serverName ?? "server") },
           ]}
           rows={grants.data?.servers ?? []}
           rowKey={(x) => x.grantId}
@@ -488,7 +490,7 @@ function RoleGrantsPanel(props: { roleId: string }) {
           columns={[
             { key: "server", header: "Server", render: (x: NonNullable<RoleGrants["tools"]>[number]) => x.serverName ?? x.serverId },
             { key: "tool", header: "Tool", render: (x) => x.toolName },
-            { key: "actions", header: "", align: "right", render: (x) => rmButton("tools", x.grantId, x.toolName) },
+            { key: "actions", header: "", srHeader: "Actions", align: "right", render: (x) => rmButton("tools", x.grantId, x.toolName) },
           ]}
           rows={grants.data?.tools ?? []}
           rowKey={(x) => x.grantId}

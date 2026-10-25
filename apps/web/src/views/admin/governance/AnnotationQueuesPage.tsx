@@ -289,6 +289,7 @@ function ItemsModal(props: { queue: QueueSummary | null; onClose: () => void }) 
             {
               key: "actions",
               header: "",
+              srHeader: "Actions",
               render: (r) => (
                 <div className={v.row}>
                   <Link to={`/inbox/annotations/${r.id}`} aria-label={`Open item ${r.subjectId.slice(0, 8)}`}>
@@ -403,6 +404,7 @@ export default function AnnotationQueuesPage() {
                   {
                     key: "actions",
                     header: "",
+                    srHeader: "Actions",
                     render: (r) => (
                       <div className={v.row}>
                         <Button size="sm" variant="ghost" aria-label={`Items of ${r.name}`} onClick={() => setViewing(r)}>

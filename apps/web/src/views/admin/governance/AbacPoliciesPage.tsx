@@ -274,6 +274,7 @@ export default function AbacPoliciesPage() {
                 {
                   key: "actions",
                   header: "",
+                  srHeader: "Actions",
                   align: "right",
                   render: (p) => (
                     <div className={v.rowTight}>
@@ -398,6 +399,7 @@ function PolicyDetail(props: { policyId: string; currentSchema: string | null })
             {
               key: "actions",
               header: "",
+              srHeader: "Actions",
               align: "right",
               render: (x) => (
                 <div className={v.rowTight}>

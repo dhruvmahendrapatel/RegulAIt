@@ -134,6 +134,7 @@ export function FeedbackList(props: {
               {
                 key: "open",
                 header: "",
+                srHeader: "Actions",
                 render: (r: FeedbackItem) => (
                   <Button size="sm" aria-label={`Open ${KIND_LABEL[r.kind].toLowerCase()} received ${fmtAt(r.createdAt)}`} onClick={() => props.onOpen!(r)}>
                     Open

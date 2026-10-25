@@ -103,6 +103,7 @@ export function RedTeamSummaryCard(props: { onOpenRun: (id: string) => void }) {
                 {
                   key: "open",
                   header: "",
+                  srHeader: "Actions",
                   align: "right",
                   render: (r) => (
                     <Button size="sm" aria-label={`Open the run of ${r.libraryName} against ${r.agentName}`} onClick={() => props.onOpenRun(r.id)}>
@@ -179,6 +180,7 @@ export function RedTeamFindingsCard(props: { attackClasses: string[]; onOpenRun:
             {
               key: "open",
               header: "",
+              srHeader: "Actions",
               align: "right",
               render: (r) => (
                 <Button size="sm" aria-label={`Open run that found ${r.finding.probeKey}`} onClick={() => props.onOpenRun(r.finding.runId)}>

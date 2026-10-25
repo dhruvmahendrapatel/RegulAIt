@@ -175,6 +175,7 @@ export default function GroupMappingsPage() {
               {
                 key: "actions",
                 header: "",
+                srHeader: "Actions",
                 align: "right",
                 render: (m) => (
                   <Button size="sm" variant="danger" onClick={() => setConfirmDelete(m)}>

@@ -1076,6 +1076,7 @@ export default function CostConsolidationPage() {
                   {
                     key: "rm",
                     header: "",
+                    srHeader: "Actions",
                     render: (r) => (
                       <Button
                         size="sm"
@@ -1159,6 +1160,7 @@ export default function CostConsolidationPage() {
                   {
                     key: "rm",
                     header: "",
+                    srHeader: "Actions",
                     render: (r) => (
                       <Button
                         size="sm"
@@ -1404,6 +1406,7 @@ export default function CostConsolidationPage() {
                 {
                   key: "act",
                   header: "",
+                  srHeader: "Actions",
                   render: (r) => (
                     <div className={v.row}>
                       <Button size="sm" aria-label={`Open the ${r.vendor} import from ${ago(r.createdAt)}`} onClick={() => setOpenImport(r.id)}>

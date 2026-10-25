@@ -193,6 +193,7 @@ export default function WorkflowTemplatesPage() {
               {
                 key: "actions",
                 header: "",
+                srHeader: "Actions",
                 align: "right",
                 render: (r) => <DeleteRuleButton rule={r} />,
               },

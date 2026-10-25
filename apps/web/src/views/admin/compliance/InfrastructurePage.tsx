@@ -260,6 +260,7 @@ export default function InfrastructurePage() {
               {
                 key: "actions",
                 header: "",
+                srHeader: "Actions",
                 align: "right",
                 render: (f) =>
                   f.status === "open" ? (
@@ -301,6 +302,7 @@ export default function InfrastructurePage() {
               {
                 key: "actions",
                 header: "",
+                srHeader: "Actions",
                 align: "right",
                 render: (c) => (
                   <div className={v.rowTight} style={{ justifyContent: "flex-end" }}>
@@ -356,6 +358,7 @@ export default function InfrastructurePage() {
               {
                 key: "actions",
                 header: "",
+                srHeader: "Actions",
                 align: "right",
                 render: (x) =>
                   x.status === "open" ? (
@@ -399,6 +402,7 @@ export default function InfrastructurePage() {
               {
                 key: "actions",
                 header: "",
+                srHeader: "Actions",
                 align: "right",
                 render: (b) =>
                   b.status === "missed" ? (

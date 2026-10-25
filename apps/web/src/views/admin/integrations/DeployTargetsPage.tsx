@@ -174,6 +174,7 @@ export default function DeployTargetsPage() {
               {
                 key: "actions",
                 header: "",
+                srHeader: "Actions",
                 align: "right",
                 render: (t) => (
                   <Button size="sm" variant="danger" onClick={() => setDeleteTarget(t)}>

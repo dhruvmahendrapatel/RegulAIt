@@ -166,6 +166,7 @@ function SignedLinks(props: { useCaseId: string }) {
                 {
                   key: "revoke",
                   header: "",
+                  srHeader: "Actions",
                   render: (l) =>
                     l.state === "revoked" ? null : (
                       <RemoveButton

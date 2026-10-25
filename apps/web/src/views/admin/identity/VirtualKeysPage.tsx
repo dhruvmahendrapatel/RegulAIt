@@ -488,6 +488,7 @@ export default function VirtualKeysPage() {
                   {
                     key: "act",
                     header: "",
+                    srHeader: "Actions",
                     render: (k) => (
                       <span className={v.row}>
                         <Button size="sm" onClick={() => openEdit(k)} data-testid={`vk-edit-${k.name}`}>

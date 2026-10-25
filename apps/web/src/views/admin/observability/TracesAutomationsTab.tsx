@@ -142,6 +142,7 @@ export default function TracesAutomationsTab() {
                   {
                     key: "do",
                     header: "",
+                    srHeader: "Actions",
                     render: (r) => (
                       <div className={v.row}>
                         <Button size="sm" variant="ghost" aria-label={`Edit rule ${r.name}`} onClick={() => setEditing(r)}>
