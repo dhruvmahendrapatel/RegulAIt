@@ -533,3 +533,15 @@ requires, with one `CEILING_EXCEPTIONS` row.
   lazy demo-beats card on Execution control, which the presenter uses to switch a beat to its simulated fallback. The
   remaining ~2 kB is margin for review fixes. The combined total on main is measured after these merge and recorded in
   the next As built note.
+
+## Addendum / As built (2026-10-25) — entry JS 137.9 → 138.5 kB
+
+The owner decided this raise on 2026-10-25:
+<https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6402364303>. It is the ADR-recorded exception
+the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
+
+- `entry JS (index)` from `137.9 kB` to `138.5 kB` (+0.6 kB). All JS stays at 1,043 kB; entry CSS and the lazy chunks
+  are unchanged.
+- Why: with design-scan E1 (#565) on top of main, entry JS measures about 137,815 B, 85 B under the 137.9 kB ceiling
+  (#565 review finding 1), so the next change touching the entry chunk would fail. The raise lands before the
+  2026-10-29 freeze, so ADR-0198's freeze-week allowance (at most +1 kB of entry raises) is untouched.
