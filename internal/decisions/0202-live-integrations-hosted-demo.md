@@ -66,3 +66,14 @@ An inventory of origin/main (2026-10-25) found the following:
   section for each.
 - After the demo, a hosted service beyond demo use (managed Postgres, autoscaling, a production designation) is a
   separate decision under ADR-0013's own limits.
+
+## Addendum: 2026-10-25, the "Enforce it" scope and the Resend client
+
+- **The live "Enforce it" beat ends at the approved write (owner, #453 c6397414910).** This narrows decision 1. The beat shows:
+  - a real deny, audited, with the revocation named;
+  - a real approval request posted to Slack and email;
+  - approval;
+  - the approved write executing through the governed route.
+
+  It does not open a PR or update Jira/Azure DevOps work items. Those are shown in the demo's own git-PR and PM-sync beats (lane L's beat ids `git-pr` and `pm-sync`).
+- **Resend is called through its REST API, not its SDK (#568, as built).** Decision 2 named Resend's official SDK. The SDK cannot route requests through an injected fetch, reads `RESEND_*` environment variables and logs error bodies. It therefore fails the requirement that the egress guard decides every outbound request. Under ADR-0176 rule 4, the channel calls `POST /emails` through the guarded fetch instead. The check is recorded in `packages/connector-provider/THIRD_PARTY.md`.
