@@ -1,4 +1,4 @@
-# Demo real accounts: AWS sandbox, Azure, GitLab (owner runbook)
+# Demo real accounts: AWS sandbox, Azure, GitLab, and the live integrations (owner runbook)
 
 ADR-0197 decisions 1-8. This page sets up real-account Shadow AI discovery for the 2026-11-01 internal run-through
 and the 2026-11-03 external demo (owner, 2026-10-23): a third AWS account
@@ -7,6 +7,8 @@ by RegulAIt through keyless federation (AWS, Azure) or a read-only token (GitLab
 an inventory export of a demo laptop we own, imported through an `endpoint_inventory` source (owner, 2026-10-24,
 full-scan FS-1; ADR-0197 addendum of that date). The endpoint agent is not used on the live instance: the gateway
 serves no signed collection pack yet (`GET /v1/endpoint-agent/config` answers 503), so a real agent cannot report.
+ADR-0202 adds the live GitHub, Jira Cloud, Azure DevOps and Slack accounts: see
+[Live integrations](#live-integrations-github-jira-cloud-azure-devops-slack-adr-0202-pending-execution).
 
 > **Status: pending execution (M-041).** No step below has been run against a real account. What was executed is
 > listed under [What has been run](#what-has-been-run). Every other step is marked **pending execution**: its commands
@@ -294,6 +296,157 @@ is missing from the egress allow-list; an AWS `credential_unusable` or an STS er
 reachable, the source id in the trust policy is wrong, or federation is off.
 
 Record the first successful scan of each source on screen (ADR-0197 decision 7).
+
+## Live integrations: GitHub, Jira Cloud, Azure DevOps, Slack (ADR-0202, pending execution)
+
+ADR-0202 decision 1 connects the 11-03 demo to real GitHub, Jira Cloud, Azure DevOps and Slack accounts. Every
+section below is **pending execution**: none of it has been run against a real account. Placeholders: the public URL
+is `https://demo.example.com` (the real one is `REGULAIT_PUBLIC_URL` on the host, never in the repo), the Jira site is
+`regulait-demo.atlassian.net`, and the Azure DevOps organisation is `regulait-demo`.
+
+**Credentials never pass through chat or the repo (ADR-0202 decision 5).** `demo:live-setup` asks for each one at a
+hidden prompt. Alternatively, put them in a JSON file **outside the checkout**, run `chmod 600` on it, and set
+`REGULAIT_DEMO_LIVE_SECRETS_FILE` to its absolute path. The script refuses a file inside the repository or readable by
+group or others. The file holds only these keys:
+`githubToken`, `jiraApiToken`, `adoPat`, `slackBotToken`, `slackSigningSecret`. Nothing is echoed or logged, and
+every message the script prints is scrubbed of the values. Delete the file after setup.
+
+### Order of operations (pending execution)
+
+1. Create the four accounts and their credentials, as described in the sections below.
+2. On the host, set the non-secret settings:
+
+   | Variable | Example |
+   |---|---|
+   | `REGULAIT_DEMO_PROFILE` | `live` |
+   | `REGULAIT_DEMO_GITHUB_REPO` | `regulait-demo/payments-api` |
+   | `REGULAIT_DEMO_JIRA_SITE` | `regulait-demo.atlassian.net` |
+   | `REGULAIT_DEMO_JIRA_PROJECT` | `DEMO` |
+   | `REGULAIT_DEMO_JIRA_EMAIL` | the token owner's email |
+   | `REGULAIT_DEMO_ADO_ORG` | `regulait-demo` |
+   | `REGULAIT_DEMO_ADO_PROJECT` | `Payments` |
+   | `REGULAIT_DEMO_SLACK_CHANNEL` | the channel id, `C…` |
+   | `REGULAIT_DEMO_SLACK_TEAM_ID` | the workspace id, `T…` (optional; it pins inbound callbacks to that workspace) |
+
+   Also set `REGULAIT_PUBLIC_URL`, `DATABASE_URL`, `REGULAIT_BOOTSTRAP_TOKEN` and `REGULAIT_DATA_KEY`, as for every
+   demo script.
+3. Run the seed (`pnpm --filter @regulait/gateway seed`) with `REGULAIT_DEMO_PROFILE=live`. This adds the live egress
+   entries during first-admin setup, before Ada enrols her authenticator. The mock seed, without the variable, adds
+   none.
+4. Run `pnpm --filter @regulait/gateway demo:live-setup`. It re-checks the egress entries, then creates `live-github`,
+   `live-jira`, `live-azure-devops`, the `live-slack` connector (with the bot token) and the `live-slack` ChatOps
+   workspace. Re-running it is safe: existing connections are kept, and the Slack bot token is re-stored.
+   - The product mints one **inbound secret** per PM connection. With `REGULAIT_DEMO_LIVE_INBOUND_FILE` (an absolute
+     path outside the checkout), the secrets are written there with mode 0600. Otherwise they are printed once.
+     Register them as described under Jira and Azure DevOps below.
+   - To replace a GitHub, Jira or Azure DevOps token, delete that connection in the admin UI and re-run. The API has
+     no route that replaces those tokens in place.
+5. Run `pnpm --filter @regulait/gateway demo:check -- --live-connections`. This makes one read-only call per
+   connection through the egress guard and reports PASS, WARN or FAIL per beat. No credential is printed.
+
+**Egress entries** (exact hosts; the guard supports no wildcards, by design):
+
+| Host | Used for |
+|---|---|
+| `api.github.com` | the git provider's only host (REST; there is no git-over-https push) |
+| the one Jira site, `regulait-demo.atlassian.net` | Jira; never `*.atlassian.net` |
+| `dev.azure.com` | Azure DevOps |
+| `slack.com` | the Web API |
+| `api.resend.com` | lane E's email channel |
+
+If the seed ran after Ada enrolled, an admin adds any missing host under **Custom LLM providers > Egress allow-list**,
+with a step-up. `demo:live-setup` names any missing host.
+
+**Fallback (ADR-0202 decision 4).** Each beat is live by default. An admin can switch one beat back to its simulated
+path from the admin console (Execution control › Demo beats) or with `PUT /v1/demo/beats/<beat> { "simulated": true, "reason": "…" }`,
+sent with an admin's API key (`curl -X PUT https://demo.example.com/v1/demo/beats/pm-sync -H "authorization: Bearer $REGULAIT_ADMIN_API_KEY"
+-H "content-type: application/json" -d '{"simulated":true,"reason":"vendor outage"}'`); `GET /v1/demo/beats` lists every
+beat's mode. Every switch is
+audited under the rule `demo-beat-fallback-changed`. The beats are `shadow-ai-discovery`, `enforce-it`, `pm-sync`,
+`git-pr`, `chatops-approval` and `email-notify`. Switch a beat back when the vendor recovers.
+
+### GitHub (git-pr beat, pending execution)
+
+1. Create a GitHub organisation for the demo, for example `regulait-demo`, and one private repository in it, for
+   example `payments-api`, with a `main` branch and one commit. Use fictional content only.
+2. Create a **fine-grained personal access token**:
+   - Resource owner: the demo organisation.
+   - Repository access: **only** the demo repository.
+   - Expiry: 2026-11-10.
+   - Repository permissions:
+     - **Contents**: read and write (branch and commit).
+     - **Pull requests**: read and write (open and merge).
+     - **Checks**: read (check runs on the PR head).
+     - **Commit statuses**: read.
+     - **Metadata**: read (always on).
+   - Grant nothing at organisation level.
+   - Confirm at setup that these permissions cover the beat: the git provider calls `git/refs`, `pulls`,
+     `pulls/:n/merge`, `commits/:sha/check-runs`, `contents` and `git/trees`.
+3. Enter it at the `GitHub fine-grained token` prompt.
+4. There is no inbound webhook: PR and check state is polled.
+
+### Jira Cloud (pm-sync beat, pending execution)
+
+1. Create a free Jira Cloud site, for example `regulait-demo.atlassian.net`, with one Scrum or Kanban project whose key
+   is `DEMO`.
+2. Create a demo user who can browse, create, edit and transition issues in that project, and nothing else. As that
+   user, create an **API token** at id.atlassian.com > Security > API tokens. RegulAIt sends it as basic auth in the
+   form `email:token`; set `REGULAIT_DEMO_JIRA_EMAIL` to the user's email.
+3. Enter the token at the `Jira Cloud API token` prompt.
+4. Register the inbound webhook under Jira settings > System > WebHooks > Create:
+   - URL: `https://demo.example.com/v1/pm/webhooks/live-jira?token=<the inbound secret for live-jira>`. The token is
+     compared in constant time.
+   - Events: Issue created, updated and deleted, and Comment created.
+   - JQL: `project = DEMO`.
+
+### Azure DevOps (pm-sync beat, pending execution)
+
+1. Create a free Azure DevOps organisation, for example `regulait-demo`, and one project, for example `Payments`, with
+   the Agile or Basic process.
+2. Create a **personal access token** under User settings > Personal access tokens:
+   - Organisation: the demo organisation only.
+   - Expiry: 2026-11-10.
+   - Custom scopes:
+     - **Work Items**: read and write.
+     - **Project and Team**: read (the health check reads the project).
+     - **Code**: read and write, only if the demo also uses an Azure DevOps repository. The live profile does not by
+       default.
+3. Enter it at the `Azure DevOps personal access token` prompt.
+4. Register the inbound service hook under Project settings > Service hooks > + > **Web Hooks**:
+   - Events: **Work item created** and **Work item updated**, one subscription each.
+   - URL: `https://demo.example.com/v1/pm/webhooks/live-azure-devops`.
+   - Basic authentication: any username; the password is the inbound secret for `live-azure-devops`. It is compared in
+     constant time.
+
+### Slack (chatops-approval beat, pending execution)
+
+1. Create a free Slack workspace for the demo and a public channel, for example `#regulait-approvals`. Note the
+   channel id (`C…`, under channel details) and the workspace id (`T…`).
+2. Create the app from the committed manifest,
+   [`infra/demo-fixtures/slack/regulait-demo-app.manifest.yaml`](../../infra/demo-fixtures/slack/regulait-demo-app.manifest.yaml).
+   Replace `demo.example.com` with the real public host before pasting it. The manifest sets:
+   - bot scopes `chat:write`, `users:read`, `users:read.email`, `channels:read`, `channels:history` and
+     `app_mentions:read`;
+   - the interactivity URL `/v1/chatops/live-slack/interactions`;
+   - the events URL `/v1/chatops/live-slack/events`, with the `app_mention` event.
+3. Install the app to the workspace and invite the bot to the channel (`/invite @regulait-demo`).
+4. Enter the two credentials at their prompts:
+   - **Bot User OAuth Token** (OAuth & Permissions; it starts `xoxb-`) at `Slack bot token`.
+   - **Signing Secret** (Basic Information > App Credentials) at `Slack signing secret`. Inbound callbacks are
+     HMAC-verified against it with a 300-second replay window.
+5. After `demo:live-setup` has created the `live-slack` workspace, save the events URL in the app settings again.
+   Slack's `url_verification` handshake is answered only once the workspace exists.
+6. Link each approver's Slack user to their RegulAIt user under **ChatOps > Identity links**. Approvals decided in
+   Slack are recorded against the linked person, never the bot.
+
+### Teardown (pending execution)
+
+Add these steps after the demo:
+- Revoke the GitHub token and the Azure DevOps PAT.
+- Revoke the Jira API token, and delete the Jira webhook and the Azure DevOps service hooks.
+- Uninstall the Slack app.
+- Delete the `live-*` connections in RegulAIt.
+- Delete the secrets file and the inbound file.
 
 ## Teardown after the demo (pending execution)
 

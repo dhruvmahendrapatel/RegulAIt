@@ -26,7 +26,7 @@
  * is stopped?" and is read in a hurry. The posture page links here when the
  * deployment is restricted.
  */
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
@@ -44,6 +44,9 @@ import {
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
+
+// ADR-0202 decision 4: the demo beats' simulated fallback, in its own chunk
+const DemoBeatsCard = lazy(() => import("./DemoBeatsCard"));
 
 type Mode = "normal" | "read_only" | "require_approval" | "halted";
 
@@ -541,6 +544,9 @@ export default function ExecutionControlPage() {
 
           {act.error && <div className={v.errLine}>{act.error}</div>}
         </QueryGate>
+        <Suspense fallback={null}>
+          <DemoBeatsCard />
+        </Suspense>
       </div>
 
       <ReasonModal

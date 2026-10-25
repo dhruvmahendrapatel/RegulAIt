@@ -56,6 +56,7 @@ export const ENTRY_POINTS = new Map([
   ["demo-enforce.js", "runs the Enforce it beat against a running gateway"],
   ["demo-gate.js", "runs the demo gate against a database"],
   ["demo-intake-seed.js", "seeds demo intake data"],
+  ["demo-live-setup.js", "prompts for live-demo credentials and creates the live connections (ADR-0202)"],
   ["demo-shadow-seed.js", "seeds the demo Shadow-AI discovery dataset"],
   ["demo-mcp-server.js", "starts the demo MCP servers (listens)"],
   ["demo-prepare.js", "runs every demo preparation step"],

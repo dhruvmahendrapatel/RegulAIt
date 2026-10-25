@@ -1,0 +1,36 @@
+# ADR-0202 (lane L): the Slack app for the live demo's chatops-approval beat.
+# Create it at api.slack.com/apps > Create New App > From an app manifest, in the DEMO workspace only.
+# Replace demo.example.com with the demo's REGULAIT_PUBLIC_URL host before pasting. No credential lives here: the bot
+# token and signing secret are entered through `demo:live-setup` (internal/product/DEMO_REAL_ACCOUNTS.md, Slack).
+# The URLs end in the ChatOps workspace name `live-slack` (LIVE_NAMES in apps/gateway/src/demo-live-lib.ts).
+display_information:
+  name: RegulAIt Demo
+  description: Approval requests from the RegulAIt demo gateway
+features:
+  bot_user:
+    display_name: regulait-demo
+    always_online: false
+oauth_config:
+  scopes:
+    bot:
+      # post approval cards and update them after a decision (chat.postMessage, chat.update)
+      - chat:write
+      # resolve a decider's email to their Slack user for the identity link (users.lookupByEmail)
+      - users:read
+      - users:read.email
+      # list and read the demo channel (conversations.list, conversations.history)
+      - channels:read
+      - channels:history
+      # receive @mentions of the bot (the Events URL below)
+      - app_mentions:read
+settings:
+  interactivity:
+    is_enabled: true
+    request_url: https://demo.example.com/v1/chatops/live-slack/interactions
+  event_subscriptions:
+    request_url: https://demo.example.com/v1/chatops/live-slack/events
+    bot_events:
+      - app_mention
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

@@ -16,6 +16,7 @@
     "reencrypt": "node dist/reencrypt.js",
     "demo:intake": "node dist/demo-intake-seed.js",
     "demo:check": "node dist/demo-check.js",
+    "demo:live-setup": "node dist/demo-live-setup.js",
     "demo:traffic": "node dist/demo-traffic.js",
     "demo:prepare": "node dist/demo-prepare.js",
     "demo:gate": "node dist/demo-gate.js",
