@@ -13,8 +13,9 @@ import {
   isConnectorProviderKind,
   parseResendCredential,
   resolveConnectorProvider,
-  type FetchLike,
 } from "./index.js";
+
+type FetchLike = NonNullable<Parameters<typeof resolveConnectorProvider>[1]>;
 
 const KEY = "re_SYNTHETIC_resend_key_for_tests_only";
 const CRED = JSON.stringify({ apiKey: KEY, from: "Approvals@Mail.Example.com" });
