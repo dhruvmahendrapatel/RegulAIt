@@ -85,29 +85,52 @@
 		-Server
 	}
 
-	# --- reverse proxy ---------------------------------------------------------
-	# `gateway:3000` is the compose service name + its in-container port. The
-	# gateway publishes 3000 to host LOOPBACK ONLY (ADR-0029), so Caddy is the
-	# only route in from off-box.
-	#
-	# Caddy sets these upstream headers automatically, with no directives needed:
-	#   X-Forwarded-For    <- client IP (appended to any inbound value)
-	#   X-Forwarded-Proto  <- "https" for TLS requests
-	#   X-Forwarded-Host   <- the original Host header
-	# The gateway's requestIsSecure() reads x-forwarded-proto straight off the
-	# raw headers, so the session cookie's `Secure` flag activates behind this.
-	#
-	# We override X-Forwarded-For with {remote_host} instead of letting Caddy
-	# append: overwriting discards any client-supplied X-Forwarded-For, so the
-	# left-most entry the gateway sees is always the real peer and cannot be
-	# spoofed. That is what makes Fastify's `trustProxy` safe to enable.
-	reverse_proxy {$REGULAIT_TLS_UPSTREAM:gateway:3000} {
-		header_up X-Forwarded-For {remote_host}
-		header_up X-Real-IP {remote_host}
+	# --- sign-in service (ADR-0202 lane H) --------------------------------------
+	# Keycloak (compose profile `sso`) is published on THIS name under /idp, so a
+	# hosted deployment needs one DNS record and one certificate. Only the public
+	# surface is proxied: /idp/realms/ (OIDC endpoints, login pages) and
+	# /idp/resources/ (their static assets). Everything else under /idp (the admin
+	# console, /idp/admin/, metrics, health) is refused here, as
+	# docs/deployment/SSO_KEYCLOAK.md § Hardening requires. Keycloak must run
+	# with KC_HTTP_RELATIVE_PATH=/idp and KC_HOSTNAME=https://<host>/idp
+	# (docs/deployment/HOSTED_HTTPS.md). Without the `sso` profile these paths
+	# answer 502; nothing else changes.
+	@idp_public path /idp/realms/* /idp/resources/*
+	handle @idp_public {
+		reverse_proxy {$REGULAIT_KC_UPSTREAM:keycloak:8080} {
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Real-IP {remote_host}
+		}
+	}
+	handle /idp* {
+		respond 404
+	}
 
-		# The gateway streams SSE (playground / run output). Disable response
-		# buffering so tokens reach the browser as they are produced.
-		flush_interval -1
+	# --- reverse proxy ---------------------------------------------------------
+	handle {
+		# `gateway:3000` is the compose service name + its in-container port. The
+		# gateway publishes 3000 to host LOOPBACK ONLY (ADR-0029), so Caddy is the
+		# only route in from off-box.
+		#
+		# Caddy sets these upstream headers automatically, with no directives needed:
+		#   X-Forwarded-For    <- client IP (appended to any inbound value)
+		#   X-Forwarded-Proto  <- "https" for TLS requests
+		#   X-Forwarded-Host   <- the original Host header
+		# The gateway's requestIsSecure() reads x-forwarded-proto straight off the
+		# raw headers, so the session cookie's `Secure` flag activates behind this.
+		#
+		# We override X-Forwarded-For with {remote_host} instead of letting Caddy
+		# append: overwriting discards any client-supplied X-Forwarded-For, so the
+		# left-most entry the gateway sees is always the real peer and cannot be
+		# spoofed. That is what makes Fastify's `trustProxy` safe to enable.
+		reverse_proxy {$REGULAIT_TLS_UPSTREAM:gateway:3000} {
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Real-IP {remote_host}
+
+			# The gateway streams SSE (playground / run output). Disable response
+			# buffering so tokens reach the browser as they are produced.
+			flush_interval -1
+		}
 	}
 
 	# Access log to stdout, so `docker compose logs caddy` is the one place to look.

@@ -1468,6 +1468,7 @@ export const connectorProviderKindSchema = z.enum([
   // and `senderUpn` are REQUIRED — Graph app-only is single-tenant by nature
   // and a message needs a mailbox to be sent from.
   "outlook",
+  "resend",
   "github",
   "jira",
   "snowflake",
@@ -3267,6 +3268,9 @@ export {
   outlookMessageForAlert,
   outlookMessageForCard,
   type OutlookMessagePayload,
+  // ADR-0202 lane E — the same mail, as a Resend send
+  resendEmailForMail,
+  type ResendEmailPayload,
   teamsSignature,
   verifyChatSignature,
   // ADR-0173 §2 — inbound conversations to builder agents

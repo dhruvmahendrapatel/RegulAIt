@@ -1,5 +1,8 @@
 # TLS for the dev stack — runbook
 
+> **A name you own instead of the address-derived one:** see [HOSTED_HTTPS.md](../deployment/HOSTED_HTTPS.md)
+> (ADR-0202 lane H, `REGULAIT_PUBLIC_HOST`). Everything below still applies to it.
+
 **What it is:** the `regulait-dev-app` EC2 box serves the app over **HTTPS with a real,
 browser-trusted Let's Encrypt certificate**, at no added AWS cost. See
 [ADR-0029](../../internal/decisions/0029-zero-cost-tls-caddy-sslip-letsencrypt.md) for why this shape and not

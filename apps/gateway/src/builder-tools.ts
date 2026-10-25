@@ -125,9 +125,9 @@ export function toolNames(items: Array<{ kind: string; refId: string; base: stri
   return out;
 }
 
-/** the operations a connector kind supports (ADR-0121: outlook is send-only) */
+/** the operations a connector kind supports (ADR-0121: outlook is send-only; ADR-0202: resend too) */
 export function connectorOperations(providerKind: string | null): Array<"read" | "write"> {
-  return providerKind === "outlook" ? ["write"] : ["read", "write"];
+  return providerKind === "outlook" || providerKind === "resend" ? ["write"] : ["read", "write"];
 }
 
 function connectorSchema(ops: Array<"read" | "write">): Record<string, unknown> {

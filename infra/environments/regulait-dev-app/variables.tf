@@ -22,6 +22,28 @@ variable "ingress_cidrs" {
   default     = ["0.0.0.0/0"]
 }
 
+# --- hosted demo name (ADR-0202 lane H) --------------------------------------
+variable "public_hostname" {
+  description = <<-EOT
+    The name the hosted demo is served at: a subdomain of a domain the owner
+    already owns, with one DNS A record pointing at the Elastic IP. Empty (the
+    default) keeps the address-derived name (ADR-0029). NEVER commit a value:
+    pass it at plan time (`-var public_hostname=...`) or in an untracked
+    *.tfvars file. It changes OUTPUTS only; the box itself reads the name from
+    REGULAIT_PUBLIC_HOST in its own .env (docs/deployment/HOSTED_HTTPS.md).
+  EOT
+  type        = string
+  default     = ""
+
+  validation {
+    condition = var.public_hostname == "" || (
+      length(var.public_hostname) <= 253 &&
+      can(regex("^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$", var.public_hostname))
+    )
+    error_message = "public_hostname must be a lowercase DNS name such as demo.example.com (no scheme, port or path), or empty."
+  }
+}
+
 # --- scheduled power off/on (ADR-0032) ---------------------------------------
 #
 # Every knob is a variable on purpose: the schedule is an operator choice, not

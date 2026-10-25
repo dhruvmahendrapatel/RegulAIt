@@ -47,6 +47,7 @@ import {
   connectorDefaultBaseUrl,
   isConnectorProviderKind,
   parseOutlookCredential,
+  parseResendCredential,
   parseSnowflakeCredential,
   parseTeamsCredential,
   resolveConnectorProvider,
@@ -5157,6 +5158,8 @@ export function registerAgentConnectorRoutes(
       snowflake: parseSnowflakeCredential,
       teams: parseTeamsCredential,
       outlook: parseOutlookCredential,
+      // ADR-0202 lane E: {apiKey, from}, the sender explicit
+      resend: parseResendCredential,
     };
     const parseShape = connector.providerKind ? shapeParsers[connector.providerKind] : undefined;
     if (parseShape) {
