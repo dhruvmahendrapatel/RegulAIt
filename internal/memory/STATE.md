@@ -1,10 +1,10 @@
 ---
-phase: demo-prep-full-scan-lanes-merged
+phase: demo-prep-live-integrations-merged
 last_updated: 2026-10-25
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-10-24-session-02.md
+last_session: sessions/2026-10-25-session-01.md
 roadmap: ../product/ROADMAP.md
 ---
 
@@ -20,6 +20,16 @@ roadmap: ../product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-25 (14:45 UTC) - every ADR-0202 live-integration lane is on main (`e3d9321`).** Full record:
+[sessions/2026-10-25-session-01.md](sessions/2026-10-25-session-01.md). The following merged and were audited: #518,
+#567 (ADR-0202), #570 (HTTPS front door), #568 (Resend), #566/#569/#571 (designer E2–E4), #574 (ADR-0202 addendum),
+#573 ("Enforce it" live), #575 (all JS 1,043 kB) and #572 (live-demo setup and fallback switch). Last migration on
+main: 0213.
+- **What remains is owner setup, due 10-29 (#453 c6394022384):** the Terraform apply and DNS, the HTTPS switch, the
+  Slack app, `demo:live-setup`, the webhooks, Resend, and `demo:check`. A beat not working live by 10-29 runs on its
+  audited fallback.
+- **Process:** M-106 (one writer per branch: stop the builder before a fixer) and M-107 (never trust a piped exit code).
 
 **2026-10-25 (02:00 UTC) - the demo goes live ([ADR-0202](../decisions/0202-live-integrations-hosted-demo.md)).** The owner
 decided (#453 c6393636981, c6393671561) that the 11-03 demo connects for real to GitHub, Jira Cloud, Azure DevOps, Slack

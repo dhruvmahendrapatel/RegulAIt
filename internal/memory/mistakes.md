@@ -1854,3 +1854,24 @@ before dispatch and repaired.
 
 Rule: write briefs and other prose files with a quoted heredoc (`<<'EOF'`) or the Write tool, never with unquoted
 shell interpolation, and read every brief back before dispatching it.
+
+### M-106 (2026-10-25) - A builder kept pushing to its PR after the master handed the PR to a fixer
+
+The master dispatched fixer sessions to lanes L and F after their reviews requested changes, but did not stop the
+original builders, which were still watching their PRs. Lane L's builder pushed three commits after the fixer
+finished. One of them (42d2796) removed the fallback switch's admin card to fit the old 1,040 kB ceiling, because the
+builder had not seen the owner's 1,043 kB decision (#453 c6396960492). That left two writers on one branch, and a
+change that went against an owner decision. The master caught it by diffing the fix report's sha against the head,
+interrupted and archived the builder, and restored the card (880e186).
+
+Rule: before dispatching a fixer to a branch, interrupt and archive the session that built it, so that every branch
+has exactly one writer. Before every recheck, compare the head with the sha in the latest report.
+
+### M-107 (2026-10-25) - A pipe to `tail` hid a failing typecheck in a lane builder
+
+Lane E's builder ran `tsc ... && ... | tail`, so the pipeline's exit code was tail's. A type error in `resend.test.ts`
+was pushed (ff007a5), and CI caught it; the builder reported the slip itself. The same failure mode is easy for the
+master: `cmd | tail -5` always exits 0.
+
+Rule: never judge success from a command piped to `tail`, `head` or `grep`. Use `set -o pipefail`, or print the exit
+code separately (`cmd > log 2>&1; echo exit=$?; tail log`). Put the same line in builder briefs.
