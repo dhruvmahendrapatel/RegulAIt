@@ -226,3 +226,7 @@ edited; where these supersede them, it is said here.
   says so on stage. A packaged real call for the beat is proposed in that PR as a demo-prep addition and is not built.
 - **11-03:** `POST /v1/evaluate` reads the policy registry and never contacts the MCP server, so the Simulation beat
   works on LIVE as prepared whether or not the demo MCP server runs there (decision 4).
+
+## Addendum: live integrations, 2026-10-25 (owner)
+
+The "Enforce it" beat is no longer a simulated decision by default. Under [ADR-0202](0202-live-integrations-hosted-demo.md) it runs as a live governed call, with the simulated version kept behind an audited admin fallback switch. The hosted dev instance gains a domain and HTTPS (#453 comments 6393636981 and 6393671561).
