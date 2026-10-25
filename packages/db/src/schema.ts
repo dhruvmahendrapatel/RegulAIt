@@ -1089,6 +1089,9 @@ export const auditLog = pgTable(
         // ADR-0021: an admin change to the org-wide functional defaults
         // (org_settings singleton). Plain text column — no DDL needed.
         "org_settings",
+        // ADR-0202 decision 4: an admin switching one demo beat between live and
+        // its simulated fallback (demo_beat_fallbacks). Plain text column.
+        "demo_beat",
         // A4 (ADR-0027): an admin set/clear of the deploy-mode scope on a
         // pillar-1 restriction rule. Plain text column — no DDL needed.
         "restriction_rule",
@@ -14349,3 +14352,21 @@ export const contentProvenanceRecords = pgTable(
   ],
 );
 export type ContentProvenanceRecordRow = typeof contentProvenanceRecords.$inferSelect;
+
+/**
+ * ADR-0202 decision 4 — the per-beat SIMULATED FALLBACK for the hosted demo. One row per demo beat an admin has
+ * switched; a beat with no row is LIVE (the default, ADR-0180). Written only through `PUT /v1/demo/beats/:beatId`
+ * (admin-only, audited); read server side through `isBeatSimulated` in `apps/gateway/src/demo-beats.ts`.
+ */
+export const demoBeatFallbacks = pgTable(
+  "demo_beat_fallbacks",
+  {
+    beatId: text("beat_id").primaryKey(),
+    simulated: boolean("simulated").notNull().default(false),
+    reason: text("reason").notNull(),
+    updatedBy: uuid("updated_by"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [check("demo_beat_fallbacks_beat_id_check", sql`${t.beatId} ~ '^[a-z][a-z0-9-]{1,63}$'`)],
+);
+export type DemoBeatFallbackRow = typeof demoBeatFallbacks.$inferSelect;

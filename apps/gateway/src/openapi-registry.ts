@@ -386,6 +386,9 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/org/posture/harden": "internal",
   "GET /v1/org/settings": "internal",
   "PUT /v1/org/settings": "internal",
+  // ADR-0202 decision 4: the demo beats' simulated fallback (admin-only, demo operations)
+  "GET /v1/demo/beats": "internal",
+  "PUT /v1/demo/beats/:beatId": "internal",
   "GET /v1/pm/connections": "internal",
   "POST /v1/pm/connections": "internal",
   "GET /v1/pm/links": "internal",
@@ -1326,6 +1329,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/delegations": "delegations",
   "POST /v1/delegations": "delegations",
   "DELETE /v1/delegations/:delegationId": "delegations",
+  "GET /v1/demo/beats": "demo",
+  "PUT /v1/demo/beats/:beatId": "demo",
   "GET /v1/deploy/targets": "deploy",
   "POST /v1/deploy/targets": "deploy",
   "DELETE /v1/deploy/targets/:name": "deploy",
