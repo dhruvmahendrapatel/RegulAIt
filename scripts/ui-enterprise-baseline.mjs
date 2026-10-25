@@ -56,6 +56,7 @@ export const CEILING_EXCEPTIONS = [
   { name: "all JS", from: "1038 kB", to: "1040 kB", date: "2026-10-24", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6388659678" },
   { name: "entry JS (index)", from: "137.7 kB", to: "137.9 kB", date: "2026-10-25", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6393701751" },
   { name: "all JS", from: "1040 kB", to: "1041 kB", date: "2026-10-25", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6393701751" },
+  { name: "all JS", from: "1041 kB", to: "1043 kB", date: "2026-10-25", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6396960492" },
 ];
 const DECISION_LINK = /^https:\/\/github\.com\/dhruvmahendrapatel\/RegulAIt\/issues\/\d+#issuecomment-\d+$/;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
