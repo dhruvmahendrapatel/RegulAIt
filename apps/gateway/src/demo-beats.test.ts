@@ -122,7 +122,8 @@ describe("demo beat fallback switch (ADR-0202 decision 4)", () => {
     expect(off.statusCode).toBe(200);
     expect(await isBeatSimulated(db, "enforce-it")).toBe(false);
 
-    const rows = (await beatAudits("enforce-it")).slice(before).sort((a, b) => a.at.getTime() - b.at.getTime());
+    // the audit chain's seq orders rows written in the same millisecond; the query itself returns no order
+    const rows = (await beatAudits("enforce-it")).sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0)).slice(before);
     expect(rows.map((r) => (r.detail as { transition: unknown }).transition)).toEqual([
       { from: "live", to: "simulated" },
       { from: "simulated", to: "live" },
