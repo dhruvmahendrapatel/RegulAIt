@@ -502,3 +502,34 @@ the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
   but together they bring total gzipped JS on main to 1,038,335 B (size-limit 14.2.0), 335 B over. The added bytes are
   lazy page chunks (state, error and accessibility fixes); #555 (Shadow AI) adds a little more, so the raise leaves
   headroom for it and no more.
+
+## Addendum / As built (2026-10-25) — entry JS 137.7 → 137.9 kB and all JS 1,040 → 1,041 kB (design-scan batches E1 to E4)
+
+The owner decided this raise on 2026-10-25:
+<https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6393701751>. It supersedes a 137.8 kB raise agreed earlier the same day
+from per-batch estimates, and it is the ADR-recorded exception the `--guard` rule requires, with two
+`CEILING_EXCEPTIONS` rows.
+
+- `entry JS (index)` from `137.7 kB` to `137.9 kB` (+0.2 kB).
+- `all JS` from `1040 kB` to `1041 kB` (+1 kB). Entry CSS and the lazy chunks are unchanged.
+- Why: the second design-scan run's owner-approved batches E1 (Shadow AI and S3 wording), E2 (governance beats), E3
+  (kit accessibility) and E4 (copy consistency) each fit on their own, but built together on main c1d5a19e they put
+  entry JS near 137,824 B (main 137,598 B) and all JS near 1,039,911 B before E4 (main 1,039,012 B). Entry bytes come
+  mostly from the kit: error toasts that carry a visible "Error:" and stay until cleared, an "Actions" name on empty
+  action headers, an IdChip name that starts with the visible short id, an optional tablist label and focusable
+  scrolling code blocks (E3), and the workflow status words and the "shadow-AI" casing rule (E1). E2's "newest N"
+  note lives in the lazy fold module, not the entry-bundled adminKit. E4's "for example" placeholders add lazy bytes.
+
+## Addendum / As built (2026-10-25) — all JS 1,041 → 1,043 kB (design-scan E1 to E4 plus the ADR-0202 lanes)
+
+The owner decided this raise on 2026-10-25:
+<https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6396960492>. It extends the 1,041 kB raise above
+(which covered E1 to E4 only) to the ADR-0202 live-demo lanes, and it is the ADR-recorded exception the `--guard` rule
+requires, with one `CEILING_EXCEPTIONS` row.
+
+- `all JS` from `1041 kB` to `1043 kB` (+2 kB). Entry JS stays at 137.9 kB; entry CSS and the lazy chunks are unchanged.
+- Why: estimated on main `c1d5a19` (1,039,012 B), E1 to E3 add about 899 B, E4 about 62 B, lane E (#568) 276 B and lane
+  L (#572) about 782 B, about 1,041,031 B in all, just over 1,041 kB. Lane F (#573) adds no UI. Lane L's bytes are the
+  lazy demo-beats card on Execution control, which the presenter uses to switch a beat to its simulated fallback. The
+  remaining ~2 kB is margin for review fixes. The combined total on main is measured after these merge and recorded in
+  the next As built note.

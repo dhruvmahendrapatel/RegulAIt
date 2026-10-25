@@ -50,6 +50,40 @@ evidence, never automatic (FS-51; Q&A 29).
 
 ---
 
+## E — Enforce it, live (ADR-0202 lane F)
+
+**The command.** On 11-03, in the dev host's Session Manager shell, as for G3 (one line, pending execution on that host):
+
+```sh
+printf '%s\n' '#!/bin/sh' 'cd /opt/app && sudo docker compose exec -T gateway node apps/gateway/dist/demo-enforce.js' > ~/enforce.sh && chmod +x ~/enforce.sh
+```
+
+It runs inside the gateway container with the gateway's own bootstrap token and calls the gateway on its own loopback
+port. On 11-01, on the laptop's FALLBACK stack: `pnpm --filter @regulait/gateway demo:enforce` with the same
+environment as the other demo commands. Exit 0: the beat ran as scripted (or printed the simulated decision). Exit 1:
+something answered differently, read the `***` line. Exit 2: a setup error, or a `REFUSED` line. The command refuses to
+call anything unless the gateway shows it is a demo one (lane L's `GET /v1/demo/beats` answers and the seed's four
+personas exist), and when that switch cannot be read; so until lane L's PR #572 is deployed on the stack it refuses.
+After a timeout, approving and re-running prints `APPROVED (earlier) and EXECUTED` with exit 0: the re-run's first call
+spent Avery's approval, which is the beat working, not a bypass.
+
+**Avery's approval note** (Profile B, **Inbox**, the `write_file` request from Dana, **Approve**; paste, do not type):
+
+```text
+Approved for the Enforce it beat: one write of docs/enforce-it.md to the demo/enforce-it branch on the demo
+repo-tools server, with exactly these arguments. Any other arguments need a new request.
+```
+
+The note is true for the beat's fixed arguments (`demo-enforce-lib.ts`, `ENFORCE_WRITE_ARGS`). If they change, change
+the note before the run. If the approval asks for a passkey or a step-up, that is the stack's signing posture working;
+the prompt on Avery's device is **to confirm at rehearsal**.
+
+**Flip to the simulated fallback** only between runs (lane L's `enforce-it` switch, audited), never on stage. On stage,
+if the shell shows no `DENIED` line within 15 seconds, press Ctrl-C and run the simulated beat on
+`/ui/admin/simulation` (DEMO_SCRIPT E). Say "simulated decision" there, every time.
+
+---
+
 ## G3 — the two acknowledgement notes (Alerts, Active tab, pinned foot)
 
 Each alert's panel asks for an **Acknowledgement note — required and audited** before **Acknowledge**. G3 takes

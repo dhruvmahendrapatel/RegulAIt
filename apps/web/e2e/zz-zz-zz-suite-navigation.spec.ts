@@ -95,13 +95,13 @@ const SUITE_MANIFEST: Array<{ id: string; name: string; landing: string; entries
   },
   {
     id: "access-reviews",
-    name: "Access Reviews",
+    name: "Access reviews",
     landing: "/ui/admin/inventory",
     entries: ["Agent inventory", "Access recommendations", "Certification campaigns", "SoD rules"],
   },
   {
     id: "approvals-audit",
-    name: "Approvals & Audit",
+    name: "Approvals & audit",
     landing: "/ui/admin/approvals",
     entries: [
       "Approvals queue",
@@ -114,7 +114,7 @@ const SUITE_MANIFEST: Array<{ id: string; name: string; landing: string; entries
   },
   {
     id: "policies-gates",
-    name: "Policies & Gates",
+    name: "Policies & gates",
     landing: "/ui/admin/rules",
     entries: [
       "Rules engine",
@@ -127,19 +127,19 @@ const SUITE_MANIFEST: Array<{ id: string; name: string; landing: string; entries
   },
   {
     id: "quality-security",
-    name: "Quality & Security",
+    name: "Quality & security",
     landing: "/ui/admin/evals",
     entries: ["Evaluations", "Red-teaming", "External scorers"],
   },
   {
     id: "compliance-infra",
-    name: "Compliance & Infra",
+    name: "Compliance & infra",
     landing: "/ui/admin/compliance",
     entries: ["Compliance profiles", "Compliance packs", "Infrastructure"],
   },
   {
     id: "cost-optimization",
-    name: "Cost & Optimization",
+    name: "Cost & optimisation",
     landing: "/ui/admin/cost",
     entries: [
       "Cost dashboard",
@@ -151,7 +151,7 @@ const SUITE_MANIFEST: Array<{ id: string; name: string; landing: string; entries
   },
   {
     id: "identity-access",
-    name: "Identity & Access",
+    name: "Identity & access",
     landing: "/ui/admin/users",
     entries: [
       "Users",
@@ -208,7 +208,7 @@ test.afterAll(async () => {
 });
 
 test("the / filter searches ACROSS suites — the anti-stranding escape hatch", async () => {
-  // stand inside Policies & Gates, where Identity's and Audit's links are
+  // stand inside Policies & gates, where Identity's and Audit's links are
   // (correctly) not rendered
   await page.goto("/ui/admin/rules");
   await expect(page.getByRole("heading", { name: "Rules engine", exact: true })).toBeVisible();
@@ -222,7 +222,7 @@ test("the / filter searches ACROSS suites — the anti-stranding escape hatch", 
   await page.keyboard.type("Audit log");
   const hit = aside.getByRole("link", { name: "Audit log", exact: true });
   await expect(hit).toBeVisible();
-  await expect(aside.getByText("Approvals & Audit", { exact: true })).toBeVisible();
+  await expect(aside.getByText("Approvals & audit", { exact: true })).toBeVisible();
 
   // selecting the match navigates, clears the filter, and re-scopes the
   // sidebar to the destination's suite
@@ -280,7 +280,7 @@ test("home keeps orientation + at-a-glance stats ABOVE the launcher tiles", asyn
   await page.goto("/ui/");
   // the three live numbers of the at-a-glance card (they survive dismissal —
   // the just-shipped rework this must not regress)
-  // ("attributed spend" also captions the Cost & Optimization tile below, so
+  // ("attributed spend" also captions the Cost & optimisation tile below, so
   // take the first match — DOM order puts the at-a-glance card first)
   for (const label of ["decisions waiting on a human", "governed calls metered", "attributed spend"]) {
     await expect(page.getByText(label, { exact: true }).first()).toBeVisible();
@@ -299,7 +299,7 @@ test("phone width: the drawer opens scoped, and the switcher still switches", as
   await expect(page.getByRole("heading", { name: "Evaluations", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Toggle navigation" }).click();
   const aside = page.locator("aside");
-  await expect(aside.getByText("Quality & Security", { exact: true }).first()).toBeVisible();
+  await expect(aside.getByText("Quality & security", { exact: true }).first()).toBeVisible();
   await expect(aside.getByRole("link", { name: "Red-teaming", exact: true })).toBeVisible();
   await page.screenshot({ path: path.join(SHOTS, "zz-suite-nav-03-mobile-drawer.png") });
 
@@ -318,8 +318,8 @@ test("a non-admin gets no launcher — their Workspace, and the agent builder be
   const dana = await (await page.context().browser()!.newContext()).newPage();
   await signIn(dana, "dana@regulait.local", [DANA_PASSWORD, state.passwords.dana], DANA_PASSWORD);
   // ADR-0172: the agent builder is a non-admin suite, so a non-admin's switcher
-  // offers exactly Workspace and Agent Builder — nothing admin-only
-  await expect(dana.getByLabel("Switch suite").locator("option")).toHaveText(["Workspace", "Agent Builder"]);
+  // offers exactly Workspace and Agent builder — nothing admin-only
+  await expect(dana.getByLabel("Switch suite").locator("option")).toHaveText(["Workspace", "Agent builder"]);
   await expect(dana.locator('[data-testid^="suite-tile-"]')).toHaveCount(0);
   const aside = dana.locator("aside");
   for (const label of ["Chat", "Runs", "Projects", "Spend & savings"]) {

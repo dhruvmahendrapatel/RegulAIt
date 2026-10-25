@@ -303,6 +303,7 @@ export default function ChatOpsPage() {
                 {
                   key: "remove",
                   header: "",
+                  srHeader: "Actions",
                   render: (r) => (
                     <Button
                       disabled={act.busy}
@@ -501,6 +502,7 @@ export default function ChatOpsPage() {
               {
                 key: "remove",
                 header: "",
+                srHeader: "Actions",
                 render: (r) => (
                   <Button
                     disabled={act.busy}

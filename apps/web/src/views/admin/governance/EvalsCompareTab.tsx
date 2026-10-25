@@ -138,7 +138,7 @@ export default function EvalsCompareTab(props: { runs: CompareRunOption[] }) {
               ]}
               rowKey={(r) => r.field}
               columns={[
-                { key: "f", header: "", render: (r) => r.field },
+                { key: "f", header: "", srHeader: "Field", render: (r) => r.field },
                 { key: "a", header: "Run A", render: (r) => <code>{r.a}</code> },
                 { key: "b", header: "Run B", render: (r) => <code>{r.b}</code> },
                 {

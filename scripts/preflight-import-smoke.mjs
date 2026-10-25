@@ -53,6 +53,7 @@ export const ENTRY_POINTS = new Map([
   ["demo-check.js", "migrates and checks the demo database"],
   ["demo-docker-prepared.js", "asks the database whether the Docker demo is prepared (docker-start.sh)"],
   ["demo-export-key.js", "writes the demo export and receipt keys into the home directory"],
+  ["demo-enforce.js", "runs the Enforce it beat against a running gateway"],
   ["demo-gate.js", "runs the demo gate against a database"],
   ["demo-intake-seed.js", "seeds demo intake data"],
   ["demo-live-setup.js", "prompts for live-demo credentials and creates the live connections (ADR-0202)"],

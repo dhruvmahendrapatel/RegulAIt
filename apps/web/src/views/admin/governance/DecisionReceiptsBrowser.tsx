@@ -193,6 +193,7 @@ export function DecisionReceiptsBrowser() {
                   {
                     key: "open",
                     header: "",
+                    srHeader: "Actions",
                     align: "right",
                     render: (r) =>
                       r.auditId ? (

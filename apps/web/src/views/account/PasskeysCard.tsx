@@ -160,7 +160,7 @@ export default function PasskeysCard() {
             <Input
               value={label}
               maxLength={100}
-              placeholder="e.g. Work laptop"
+              placeholder="for example Work laptop"
               onChange={(e) => setLabel(e.target.value)}
             />
           </Field>

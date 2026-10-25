@@ -223,6 +223,7 @@ function DocumentsCard() {
             {
               key: "actions",
               header: "",
+              srHeader: "Actions",
               render: (d) => (
                 <span className={v.rowTight}>
                   {d.status === "draft" && (
@@ -555,6 +556,7 @@ function CoverageCard() {
                       {
                         key: "record",
                         header: "",
+                        srHeader: "Actions",
                         render: (p) => (
                           <Button size="sm" disabled={act.busy} onClick={() => setRecording({ doc: d, person: p })}>
                             Record completion

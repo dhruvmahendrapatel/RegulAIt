@@ -151,6 +151,7 @@ export default function AgentsPage() {
               {
                 key: "actions",
                 header: "",
+                srHeader: "Actions",
                 align: "right",
                 render: (x) => (
                   <Button
@@ -272,7 +273,7 @@ function RegisterAgentCard() {
       >
         <div className={a.formRow}>
           <Field label="Name">
-            <Input required value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="e.g. large-general" />
+            <Input required value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="for example large-general" />
           </Field>
           <ProviderTiles
             legend="Provider"
@@ -314,7 +315,7 @@ function RegisterAgentCard() {
             <Input required type="number" min={0} value={f.tier} onChange={(e) => set("tier", e.target.value)} />
           </Field>
           <Field label="Model id (blank = not dispatchable)">
-            <Input value={f.model} onChange={(e) => set("model", e.target.value)} placeholder="e.g. model-name-v1" />
+            <Input value={f.model} onChange={(e) => set("model", e.target.value)} placeholder="for example model-name-v1" />
           </Field>
           {isCustom && (
             <Field label="Pricing for this custom model">
@@ -359,7 +360,7 @@ function RegisterAgentCard() {
             rows={4}
             value={f.systemPrompt}
             onChange={(e) => set("systemPrompt", e.target.value)}
-            placeholder="e.g. You are the billing-support agent. Never quote raw account numbers."
+            placeholder="for example You are the billing-support agent. Never quote raw account numbers."
           />
         </Field>
         <div className={v.row}>
@@ -828,7 +829,7 @@ function PolicyCard(props: { uOpts: Array<{ v: string; l: string }>; aOpts: Arra
           </Select>
         </Field>
         <Field label="Run budget USD">
-          <Input type="number" step="any" value={f.runBudgetUsd} onChange={(e) => set("runBudgetUsd", e.target.value)} placeholder="e.g. 0.25" />
+          <Input type="number" step="any" value={f.runBudgetUsd} onChange={(e) => set("runBudgetUsd", e.target.value)} placeholder="for example 0.25" />
         </Field>
         <Field label="On breach">
           <Select value={f.runBudgetBreachAction} onChange={(e) => set("runBudgetBreachAction", e.target.value)}>
@@ -930,11 +931,13 @@ function EntitlementCard(props: { uOpts: Array<{ v: string; l: string }>; agents
               {
                 key: "revoked",
                 header: "",
+                srHeader: "Status",
                 render: (x) => (x.revoked ? <Badge tone="danger">revoked</Badge> : null),
               },
               {
                 key: "actions",
                 header: "",
+                srHeader: "Actions",
                 align: "right",
                 render: (x) => (
                   <RemoveButton

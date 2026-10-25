@@ -326,6 +326,7 @@ export default function ExecutionControlPage() {
                 {
                   key: "go",
                   header: "",
+                  srHeader: "Actions",
                   render: (m) => (
                     <Button
                       size="sm"
@@ -475,6 +476,7 @@ export default function ExecutionControlPage() {
                   {
                     key: "lift",
                     header: "",
+                    srHeader: "Actions",
                     render: (r) => (
                       <Button
                         size="sm"
@@ -518,6 +520,7 @@ export default function ExecutionControlPage() {
                   {
                     key: "lift",
                     header: "",
+                    srHeader: "Actions",
                     render: (r) => (
                       <Button
                         size="sm"
@@ -561,7 +564,7 @@ export default function ExecutionControlPage() {
         confirmLabel={copy.confirmLabel}
         danger={copy.danger}
         minLength={REASON_MIN}
-        placeholder="why — e.g. 'vendor advisory VA-2026-11, tool returning injected content'"
+        placeholder="why, for example 'vendor advisory VA-2026-11, tool returning injected content'"
         onConfirm={confirm}
         onCancel={() => setPending(null)}
       />

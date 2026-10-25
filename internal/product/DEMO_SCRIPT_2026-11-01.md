@@ -74,7 +74,7 @@ right-hand column of the timing table.
 | S4 | Register as use case (intake) | Ada | 3.0 | 12.5 | FALLBACK |
 | G1 | The use-case record and risks | Ada | 1.5 | 14.0 | FALLBACK (S4's use case) |
 | G2 | Independent review | Avery | 2.0 | 16.0 | FALLBACK (S4's use case) |
-| E | Enforce it: a simulated decision (deny, require approval) and the audit row | Ada | 2.0 | 18.0 | Simulation page; FALLBACK on 11-01, LIVE on 11-03 |
+| E | Enforce it: a live governed deny, an approval in the Inbox and Slack, the call after approval, the audit rows | Ada, Avery | 2.0 | 18.0 | live call: FALLBACK stack on 11-01, LIVE on 11-03; simulated fallback: the Simulation page |
 | G3 | Deploy gate (terminal on the dev instance host) | Ada | 2.0 | 20.0 | DENY: LIVE read-only; acknowledge then ALLOW: FALLBACK |
 | G4 | Trust dashboard | Ada | 1.0 | 21.0 | LIVE read-only |
 | G5 | Alerts and remediation | Ada, Avery | 2.0 | 23.0 | FALLBACK |
@@ -95,7 +95,7 @@ for three profile switches and one terminal: plan for 28-30 minutes and use the 
 changes state runs on the **FALLBACK** laptop stack: G3's acknowledgements then ALLOW, G5 resolve, S3 **Start and
 link** (on the second finding, FS-7), S4 register (and G1/G2, which work on S4's new use case), and E. LIVE shows
 only the read-only beats and G3's DENY, so it stays as prepared for 11-03. On 11-03 every beat runs on LIVE as
-written, E included: E runs on the Simulation page on both dates, on LIVE and FALLBACK alike. The same marks are
+written, E included: E is a live governed call on both dates (ADR-0202), on the FALLBACK stack on 11-01 and on LIVE on 11-03, and runs on its simulated fallback on the Simulation page if lane L's switch is on. The same marks are
 in `DEMO_RUNBOOK.md` §7.3.
 
 **Cutting order when behind:** G7, then **E. Enforce it** (second, owner 2026-10-24), then G4's drill-down, then S1's
@@ -493,26 +493,66 @@ the day.
   Press **Approve with conditions** in the pinned foot (beside **Cancel**). Back in Profile A, on the record: the **Approval valid until**
   chip in the header, and **Conditions of approval** with **Mark met** on the **Overview** tab.
 
-### E. Enforce it — Ada — 2 minutes (added 2026-10-24)
-**11-01 run-through:** FALLBACK. **11-03:** LIVE. The beat is the same on both stacks (owner, 2026-10-24, #453
-comment 6387779914).
+### E. Enforce it — Ada, Avery — 2 minutes (added 2026-10-24; live since ADR-0202)
+**11-01 run-through:** a live governed call on the FALLBACK laptop stack (it changes state, so it stays off LIVE,
+as every such step does on 11-01). **11-03:** a live governed call on LIVE. Live is the default on both dates (ADR-0202
+decision 1, which supersedes #453 comment 6387779914 for this beat); the beat's *simulated fallback* is the
+simulated decision below, chosen by lane L's per-beat switch for `enforce-it`.
 
-Owner decision of 2026-10-24 (#453 comment 6385378784, item 2; full-scan FS-8): the script told enforcement but never
-showed it. This beat shows one governed call denied with its rule named, one that needs a named approver, and the
-audit row. It is second in the cutting order.
+The beat shows one governed call denied with its rule named, one queued for a named approver and mirrored to chat,
+the approval, the call executing only after it, and the audit rows. It is second in the cutting order.
 
-UI: `apps/web/src/views/admin/governance/SimulationPage.tsx`, `AuditLogPage.tsx`; gateway `POST /v1/evaluate`
-(`apps/gateway/src/app.ts`). Seed: `apps/gateway/src/seed.ts` (Dana's grants on `repo-tools`, her revocation of
-`search_code`, the approval rule that sends her `write_file` calls to Avery).
+Code: `apps/gateway/src/demo-enforce-lib.ts` (`demo:enforce`: on the dev host `~/enforce.sh`, on the laptop
+`pnpm --filter @regulait/gateway demo:enforce`), the gateway's
+own MCP route `POST /mcp/:serverId` and ChatOps route `POST /v1/chatops/approvals/:id/post`; UI: Avery's **Inbox**,
+`AuditLogPage.tsx`, and on the fallback `SimulationPage.tsx`. Seed: `apps/gateway/src/seed.ts` (Dana's role grant on
+`repo-tools`, her revocation of `search_code`, the approval rule that sends her `write_file` calls to Avery).
 
-**What exists, and what this beat therefore is.** No page in the console makes a governed tool call as another
-person, and no demo command does it. The real call goes over the MCP protocol with Dana's API key and the project
-header (`DEMO_RUNBOOK.md` §3(b)); nothing packages that for a presenter. What exists is the **Simulation / access
-preview** page: it runs the live policy kernel for one call (user, server, tool) and renders the decision, the rule
-it matched and every rule it walked, executing nothing and queuing nothing. It records each question as an audit row
-marked advisory (not counted against rate limits). So the beat shows the decision the gateway would enforce on
-Dana's next call, and calls it a *simulated decision*; it does not show a queued item in Avery's Inbox. (A packaged real call is proposed as
-a demo-prep addition in the PR that added this beat; it is not built.)
+**What runs.** The command issues Dana a one-day key (revoked at the end of the run) and makes her calls over the MCP
+protocol through the running gateway, with the demo project header. The gateway decides every call: nothing in the
+command evaluates, approves or executes anything itself. `repo-tools` is the demo MCP server (`demo:mcp`), so the
+executed write is the demo server's answer (`committed … as commit demo01a`), not a commit to a real repository.
+The existing wiring does not link a bare tool-call approval to a workflow PR or a PM work item (pm-sync mirrors
+workflow-stage and run decisions only), so this beat shows no PR and no Jira or Azure DevOps update; never say it does.
+
+**Live flow, with timings** (profiles: Ada in A, Avery in B; on 11-03 the host shell reconnected at T-5 min, as for
+G3; on 11-01 a laptop terminal):
+
+| Time | Where | What happens | What is on screen |
+|---|---|---|---|
+| 0:00-0:15 | host shell | `~/enforce.sh` | `LIVE  Dana Developer calls repo-tools …`, then `tools/list` without `search_code` |
+| 0:15-0:30 | host shell | Dana's `search_code` | `DENIED  Denied by policy: …` and the `audit:` line: rule `default-deny`, her role's `role-server-read-only-all` grant **REVOKED** for her |
+| 0:30-0:45 | host shell, then Slack | Dana's `write_file` | `QUEUED … pending sign-off by approver 'Avery …'`, `notify posted to slack …` (and one line per other enabled channel, email included once lane E's channel is configured). Show the card in Slack |
+| 0:45-1:15 | Profile B, **Inbox** | Avery opens the request and presses **Approve**, pasting the note from the presenter notes | the request leaves the queue |
+| 1:15-1:30 | host shell | the command sees the decision and retries the same call | `write_file  APPROVED and EXECUTED  committed docs/enforce-it.md …` |
+| 1:30-2:00 | Profile A, `/ui/admin/audit` | the newest rows | the deny with its rule chain, the queued approval, the chat post, Avery's decision, the executed call |
+
+- **Say:** "Dana's own key, the real MCP protocol, the real gateway. Her search is refused, and the ledger names why:
+  no grant matches, because her role's read grant is revoked for her alone. Her write is not refused; it waits for a
+  named person, Avery, and the request is in his Inbox and in Slack. Dana cannot approve it herself. Avery approves,
+  the same call is retried, and only now does it run, bound to the exact arguments he approved. Every step is in the
+  ledger."
+- **Never say** that the write reached a real repository, opened a PR or updated a Jira or Azure DevOps item.
+- **If a third-party call is slow.** Only the chat post leaves the box; the MCP calls go to the demo server on the
+  host. If the Slack line is slow or prints `NOT posted`: "The request is in Avery's Inbox either way; chat is a mirror,
+  never the only copy," and approve in the Inbox. The command waits up to five minutes
+  (`REGULAIT_DEMO_ENFORCE_WAIT_SECONDS`). If it gives up first it prints `no decision yet: nothing executed`; approve,
+  then run `~/enforce.sh` again: it lands on the same request (same arguments) and executes it.
+- **When and how to flip to the simulated fallback.**
+  - At T-24h on the stack the beat runs on: if `~/enforce.sh` does not end with `APPROVED and EXECUTED` (exit 0), or
+    the deny or the queue line reads differently from the table, turn the `enforce-it` beat to simulated with lane L's
+    switch (audited; its location is in lane L's PR, to confirm at rehearsal), re-run `~/enforce.sh` and confirm it
+    prints `SIMULATED DECISION`. ADR-0202 decision 6: a beat not green by the 10-29 freeze runs on its fallback.
+  - On stage: if the shell shows no `DENIED` line within 15 seconds, or the gateway answers `502
+    mcp_upstream_unreachable` or `503 mcp_upstream_circuit_open`, press Ctrl-C and go straight to the simulated beat
+    below on `/ui/admin/simulation`. Do not flip the switch on stage; flip it after the beat so a re-run prints the
+    simulated decision.
+
+**Simulated fallback: the simulated decision (exactly the 2026-10-24 beat).** With the switch on, `~/enforce.sh` asks `POST
+/v1/evaluate` for both tools, prints each under `simulated decision`, and executes, queues and posts nothing. On
+stage, use the **Simulation / access preview** page: it runs the live policy kernel for one call (user, server,
+tool) and renders the decision, the rule it matched and every rule it walked, executing nothing and queuing nothing.
+It records each question as an audit row marked advisory (not counted against rate limits).
 
 - **URL:** `/ui/admin/simulation` (sidebar: **Simulation**). Header **Simulation / access preview**: *"Would this call
   be allowed right now? Evaluated live, executing nothing."*
@@ -531,12 +571,11 @@ a demo-prep addition in the PR that added this beat; it is not built.)
   decision is not deny but require approval from a named person, Avery, and an approval is bound to the exact
   arguments approved. This page asks the question without running anything, and even the question lands in the
   ledger."
-- **Never say** that the call "was blocked" or "was queued", or that a call was made: on screen and aloud it is a
-  *simulated decision*, the real policy engine evaluating a proposed call.
-- **On 11-03** (owner, 2026-10-24): the same beat on LIVE. `POST /v1/evaluate` reads the policy registry and never
-  contacts the MCP server, so it does not depend on the demo MCP server running there.
+- **Never say**, on the simulated fallback, that the call "was blocked" or "was queued", or that a call was made: on screen and
+  aloud it is a *simulated decision*, the real policy engine evaluating a proposed call.
 - **Data:** on both stacks the governance `seed` gives Dana the role grant, the `search_code` revocation and the `write_file` approval
-  rule naming Avery; `demo:check` does not assert them (pending execution at the first rehearsal).
+  rule naming Avery; `demo:check` does not assert them. The live path also needs `demo:mcp` running and an enabled
+  Slack ChatOps connection on the stack (pending execution at the first rehearsal).
 
 ### G3. Deploy gate — 2 minutes (10-05 beat 2C; 1.5 until 2026-10-24, FS-49)
 **11-01 run-through:** DENY (step 1) LIVE read-only; acknowledge and ALLOW (steps 2-3) FALLBACK.
@@ -722,8 +761,9 @@ UI: `apps/web/src/views/admin/governance/ContentTrustPage.tsx`.
 - **Mock:** the model provider for governed traffic (keyless mock agents); the governed traffic itself is generated
   by `demo:traffic` through the real dispatch path.
 - **Live product code on both paths:** every page and API shown, the remediation workflow and its sign-off, the
-  intake, the monitor, the deploy gate and the approvals. **E. Enforce it** shows a simulated decision: the live
-  policy kernel evaluating a proposed call it does not execute (the Simulation / access preview page); say so.
+  intake, the monitor, the deploy gate and the approvals. **E. Enforce it** is a live governed call through the gateway
+  against the demo MCP server (no real repository, PR or work item); on its simulated fallback it is a simulated decision on the
+  Simulation / access preview page, and is called that.
 - **Said unprompted at the Close** (Q13): the mock model provider, the planted usage and, if the prepared copy was
   used, that its three network scans were recorded replays and its endpoint agent's reports were seeded.
 - **Recorded:** the screen recording of a real scan is a recording. If it is shown, say so.

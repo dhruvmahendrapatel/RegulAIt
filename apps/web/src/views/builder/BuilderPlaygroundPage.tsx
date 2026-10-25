@@ -243,7 +243,7 @@ function SaveCommitDialog(props: {
         </Field>
       )}
       <Field label="What changed">
-        <Input value={message} onChange={(e) => setMessage(e.target.value)} maxLength={500} placeholder="e.g. Ask for three bullet points" />
+        <Input value={message} onChange={(e) => setMessage(e.target.value)} maxLength={500} placeholder="for example Ask for three bullet points" />
       </Field>
       {chosen && (
         <p className={s.small} style={{ margin: 0 }} data-testid="commit-parent">

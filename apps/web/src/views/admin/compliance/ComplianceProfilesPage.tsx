@@ -137,7 +137,7 @@ function UpsertProfileCard(props: { templates: WorkflowTemplate[] }) {
         }}
       >
         <Field label="Tag">
-          <Input required value={f.tag} onChange={(e) => set("tag", e.target.value)} placeholder="e.g. hipaa" />
+          <Input required value={f.tag} onChange={(e) => set("tag", e.target.value)} placeholder="for example hipaa" />
         </Field>
         <Field label="Required workflow templates (ctrl/cmd-click)">
           <Select

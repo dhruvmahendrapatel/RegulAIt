@@ -200,7 +200,7 @@ function CreateRegistryForm() {
       }}
     >
       <Field label="Registry name">
-        <Input value={draft.name} maxLength={200} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="e.g. internal-mirror" />
+        <Input value={draft.name} maxLength={200} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="for example internal-mirror" />
       </Field>
       <Field label="Registry base URL" grow>
         <Input value={draft.url} maxLength={2000} onChange={(e) => setDraft({ ...draft, url: e.target.value })} placeholder="https://registry.example.com" />

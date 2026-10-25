@@ -316,6 +316,7 @@ export default function PromptVersionsPage() {
                   {
                     key: "act",
                     header: "",
+                    srHeader: "Actions",
                     render: (r) =>
                       r.status === "active" ? null : (
                         <Button

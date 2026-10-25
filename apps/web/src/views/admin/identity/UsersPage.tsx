@@ -520,6 +520,7 @@ function SessionsPanel(props: { userId: string }) {
             {
               key: "actions",
               header: "",
+              srHeader: "Actions",
               render: (s) =>
                 !s.revokedAt && new Date(s.expiresAt).getTime() > Date.now() ? (
                   <Button
@@ -707,6 +708,7 @@ function OverridesPanel(props: { userId: string }) {
           {
             key: "actions",
             header: "",
+            srHeader: "Actions",
             align: "right",
             render: (r) => (
               <Button
@@ -768,6 +770,7 @@ function OverridesPanel(props: { userId: string }) {
               {
                 key: "actions",
                 header: "",
+                srHeader: "Actions",
                 align: "right",
                 render: (r) => (
                   <Button
@@ -837,6 +840,7 @@ function OverridesPanel(props: { userId: string }) {
               {
                 key: "actions",
                 header: "",
+                srHeader: "Actions",
                 align: "right",
                 render: (r) => (
                   <Button
@@ -898,6 +902,7 @@ function ApiKeysCard() {
           {
             key: "actions",
             header: "",
+            srHeader: "Actions",
             align: "right",
             render: (k) =>
               k.revokedAt ? null : (

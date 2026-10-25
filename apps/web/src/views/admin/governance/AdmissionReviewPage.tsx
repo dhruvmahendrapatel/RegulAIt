@@ -189,6 +189,7 @@ export default function AdmissionReviewPage() {
               {
                 key: "act",
                 header: "",
+                srHeader: "Actions",
                 render: (k) =>
                   k.admissionState === "held" ? (
                     <Button size="sm" disabled={act.busy} onClick={() => setPending({ kind: "admit", skill: k })} aria-label={`Admit ${k.name}`}>
@@ -217,6 +218,7 @@ export default function AdmissionReviewPage() {
               {
                 key: "act",
                 header: "",
+                srHeader: "Actions",
                 render: (k) => (
                   <span style={{ display: "inline-flex", gap: 6 }}>
                     <Button
@@ -354,6 +356,7 @@ function WaitingPeriodCard(props: {
             {
               key: "act",
               header: "",
+              srHeader: "Actions",
               render: (x) => (
                 <Button size="sm" aria-label={`Allow now: ${x.name}`} onClick={() => props.onOverride(x, x.target)}>
                   Allow now…

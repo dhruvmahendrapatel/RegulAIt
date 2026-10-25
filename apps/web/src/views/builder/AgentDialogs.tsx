@@ -242,7 +242,7 @@ export function NewScheduleDialog(props: { open: boolean; onClose: () => void; o
     >
       <div style={{ display: "flex", flexDirection: "column", gap: 16, color: "var(--rg-ink)" }}>
         <Field label="Name">
-          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Morning intake sweep" maxLength={120} />
+          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="for example Morning intake sweep" maxLength={120} />
         </Field>
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           <span className={s.subhead} id="cadence-label">
@@ -258,7 +258,7 @@ export function NewScheduleDialog(props: { open: boolean; onClose: () => void; o
           agent owner's access and land in their inbox.
         </p>
         <Field label="What should the agent do?">
-          <Textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={4} placeholder="e.g. Review intake requests submitted since yesterday and list any missing details." />
+          <Textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={4} placeholder="for example Review intake requests submitted since yesterday and list any missing details." />
         </Field>
         <label style={{ display: "flex", alignItems: "center", gap: 10, fontSize: "var(--text-sm)" }}>
           <Switch checked={enabled} onChange={setEnabled} label="Turn on now" />
@@ -335,10 +335,10 @@ export function NewSubagentDialog(props: {
         </Field>
         {options.length === 0 && <p className={s.small} style={{ margin: 0 }}>No other agents are available. Create another agent first.</p>}
         <Field label="Name">
-          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Evidence collector" maxLength={80} />
+          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="for example Evidence collector" maxLength={80} />
         </Field>
         <Field label="When should it be used?">
-          <Textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={3} placeholder="e.g. Gathers the documents a control needs as evidence." />
+          <Textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={3} placeholder="for example Gathers the documents a control needs as evidence." />
         </Field>
         {props.error && (
           <p role="alert" style={{ margin: 0, color: "var(--danger)", fontSize: "var(--text-sm)" }}>

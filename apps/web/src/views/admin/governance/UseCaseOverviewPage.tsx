@@ -195,6 +195,7 @@ export default function UseCaseOverviewPage() {
                 tabs={TABS.map((t) => withTabCount(t, data))}
                 active={tab}
                 idPrefix="use-case"
+                label="Use case record sections"
                 onChange={(next) => setParams({ tab: next })}
               />
             </div>
@@ -584,6 +585,7 @@ function ConditionsCard(props: {
             {
               key: "act",
               header: "",
+              srHeader: "Actions",
               align: "right",
               render: (row) => (
                 <span className={mc.actions}>

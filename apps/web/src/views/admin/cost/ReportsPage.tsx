@@ -219,6 +219,7 @@ export default function ReportsPage() {
                     {
                       key: "act",
                       header: "",
+                      srHeader: "Actions",
                       render: (d) => (
                         <div className={a.formRow}>
                           <Button
@@ -338,6 +339,7 @@ export default function ReportsPage() {
                     {
                       key: "act",
                       header: "",
+                      srHeader: "Actions",
                       render: (s) => (
                         <div className={v.row}>
                           {s.lastRunId && (

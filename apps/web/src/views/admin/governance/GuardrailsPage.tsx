@@ -338,6 +338,7 @@ export default function GuardrailsPage() {
                   {
                     key: "actions",
                     header: "",
+                    srHeader: "Actions",
                     render: (r) => (
                       <Button
                         size="sm"

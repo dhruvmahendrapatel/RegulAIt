@@ -193,6 +193,7 @@ export default function WorkflowTemplatesPage() {
               {
                 key: "actions",
                 header: "",
+                srHeader: "Actions",
                 align: "right",
                 render: (r) => <DeleteRuleButton rule={r} />,
               },
@@ -493,7 +494,7 @@ function AuthorCard(props: { connections: GitConnection[] }) {
       >
         <div className={a.formRow}>
           <Field label="Name">
-            <Input required value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. api-change" />
+            <Input required value={name} onChange={(e) => setName(e.target.value)} placeholder="for example api-change" />
           </Field>
           <Field label="Start from">
             <Select value={starter} onChange={(e) => setStarter(e.target.value)}>
@@ -580,19 +581,19 @@ function RuleForm(props: { templates: WorkflowTemplate[]; sensitivities: string[
         </Select>
       </Field>
       <Field label="Path pattern">
-        <Input value={f.pathPattern} onChange={(e) => set("pathPattern", e.target.value)} placeholder="e.g. src/**" />
+        <Input value={f.pathPattern} onChange={(e) => set("pathPattern", e.target.value)} placeholder="for example src/**" />
       </Field>
       <Field label="Change type">
-        <Input value={f.changeType} onChange={(e) => set("changeType", e.target.value)} placeholder="e.g. feature" />
+        <Input value={f.changeType} onChange={(e) => set("changeType", e.target.value)} placeholder="for example feature" />
       </Field>
       <Field label="Environment">
-        <Input value={f.environment} onChange={(e) => set("environment", e.target.value)} placeholder="e.g. production" />
+        <Input value={f.environment} onChange={(e) => set("environment", e.target.value)} placeholder="for example staging" />
       </Field>
       <Field label="Target system">
-        <Input value={f.targetSystem} onChange={(e) => set("targetSystem", e.target.value)} placeholder="e.g. checkout-svc" />
+        <Input value={f.targetSystem} onChange={(e) => set("targetSystem", e.target.value)} placeholder="for example checkout-svc" />
       </Field>
       <Field label="Initiator role">
-        <Input value={f.initiatorRole} onChange={(e) => set("initiatorRole", e.target.value)} placeholder="e.g. release-manager" />
+        <Input value={f.initiatorRole} onChange={(e) => set("initiatorRole", e.target.value)} placeholder="for example release-manager" />
       </Field>
       <Field label="Data sensitivity">
         <Select value={f.dataSensitivity} onChange={(e) => set("dataSensitivity", e.target.value)}>

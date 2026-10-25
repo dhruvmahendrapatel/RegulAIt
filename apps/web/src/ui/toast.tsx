@@ -1,5 +1,6 @@
 /** Toast — the app-wide, aria-live notification channel. */
 import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
+import { Button } from "./kit";
 import s from "./kit.module.css";
 
 type ToastKind = "info" | "error" | "success";
@@ -22,11 +23,13 @@ export function useToast() {
 export function ToastProvider(props: { children: ReactNode }) {
   const [items, setItems] = useState<ToastItem[]>([]);
   const seq = useRef(0);
+  const dismiss = useCallback((id: number) => setItems((xs) => xs.filter((x) => x.id !== id)), []);
   const toast = useCallback((message: string, kind: ToastKind = "info") => {
     const id = ++seq.current;
     setItems((xs) => [...xs, { id, kind, message }]);
-    setTimeout(() => setItems((xs) => xs.filter((x) => x.id !== id)), 3800);
-  }, []);
+    // an error stays until it is dismissed, so it is never gone before it was read
+    if (kind !== "error") setTimeout(() => dismiss(id), 3800);
+  }, [dismiss]);
   const api = useMemo(() => ({ toast }), [toast]);
   return (
     <ToastContext.Provider value={api}>
@@ -40,7 +43,8 @@ export function ToastProvider(props: { children: ReactNode }) {
               t.kind === "error" ? s.toastError : t.kind === "success" ? s.toastSuccess : "",
             ].join(" ")}
           >
-            {t.message}
+            {/* an error says so in words, not only by its colour, and stays until it is dismissed */}
+            {t.kind === "error" ? <><strong>Error:</strong> {t.message}{" "}<Button size="sm" variant="ghost" onClick={() => dismiss(t.id)}>Clear error</Button></> : t.message}
           </div>
         ))}
       </div>

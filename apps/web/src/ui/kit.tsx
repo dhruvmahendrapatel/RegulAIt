@@ -907,6 +907,11 @@ export function SeverityBadge(props: { severity: string; title?: string }) {
 export interface Column<T> {
   key: string;
   header: ReactNode;
+  /**
+   * the column's name for screen readers when `header` is "": "Actions" only where the cells are controls, otherwise
+   * what the cells hold ("Status", "Select"). Required in practice: kit.test.tsx fails on an empty header without it.
+   */
+  srHeader?: string;
   render: (row: T) => ReactNode;
   sort?: (row: T) => string | number;
   align?: "left" | "right";
@@ -989,6 +994,8 @@ export function Table<T>(props: TableProps<T>) {
                   key={c.key}
                   style={{ textAlign: c.align ?? "left", width: c.width }}
                   className={sortable ? s.thSortable : undefined}
+                  // a column with no visible header still has a name for screen readers, given by the column itself
+                  aria-label={c.header === "" ? c.srHeader : undefined}
                   // a folded column's sort is announced on the header that now shows it
                   aria-sort={sortKey != null && (c.sortKeys ?? [c.key]).includes(sortKey) ? (sortDir === 1 ? "ascending" : "descending") : undefined}
                   onClick={sortable ? () => by(c.key) : undefined}
@@ -1292,6 +1299,8 @@ export function Tabs(props: {
    * `role="tabpanel"` and `aria-labelledby` the tab (`tabIds` builds both).
    */
   idPrefix?: string;
+  /** names the tablist, so a page with two of them tells them apart */
+  label?: string;
 }) {
   const tabStop = props.tabs.find((tab) => tab.id === props.active)?.id ?? props.tabs[0]?.id;
   const groupPrefix = useId();
@@ -1299,7 +1308,7 @@ export function Tabs(props: {
   const groupId = (group: string) => `${groupPrefix}-group-${groups.indexOf(group)}`;
   return (
     <>
-    <div className={s.tabs} role="tablist">
+    <div className={s.tabs} role="tablist" aria-label={props.label}>
       {props.tabs.map((t, i) => (
         <button
           key={t.id}
@@ -1459,7 +1468,8 @@ export function RecordError(props: {
 
 export function CodeBlock(props: { children: string; maxHeight?: string }) {
   return (
-    <pre className={s.code} style={props.maxHeight ? { maxHeight: props.maxHeight } : undefined}>
+    // a box that scrolls must take focus, so a keyboard can scroll it
+    <pre className={s.code} style={props.maxHeight ? { maxHeight: props.maxHeight } : undefined} tabIndex={props.maxHeight ? 0 : undefined}>
       {props.children}
     </pre>
   );
@@ -1476,7 +1486,9 @@ export function IdChip(props: { id: string | null | undefined }) {
       className={s.idChip}
       // a stable hook for tests (a CSS-module class name is hashed)
       data-id-chip=""
-      title={`${id} — click to copy`}
+      // the name starts with what the chip shows, then says what a press does and gives the full id (no hover-only text)
+      aria-label={copied ? "Copied" : `${id.slice(0, 8)}…, copy the full ID ${id}`}
+      aria-live="polite"
       onClick={async (e) => {
         e.stopPropagation();
         try {
@@ -1488,7 +1500,7 @@ export function IdChip(props: { id: string | null | undefined }) {
         }
       }}
     >
-      {copied ? "copied" : id.slice(0, 8) + "…"}
+      {copied ? "Copied" : id.slice(0, 8) + "…"}
     </button>
   );
 }
