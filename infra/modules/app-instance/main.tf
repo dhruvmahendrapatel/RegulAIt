@@ -141,6 +141,16 @@ resource "aws_security_group" "app" {
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
+
+  # With the on-box TLS front, the app port is loopback-only on the host and
+  # must never be an ingress port: opening it would serve the app in cleartext
+  # around the proxy (ADR-0029, ADR-0202 lane H). Refused at plan time.
+  lifecycle {
+    precondition {
+      condition     = !var.enable_onbox_tls || !contains(local.ingress_ports, var.app_port)
+      error_message = "enable_onbox_tls is true, so app_port (${var.app_port}) must not be in ingress_ports; open only 80 and 443."
+    }
+  }
 }
 
 # --- instance -----------------------------------------------------------------
