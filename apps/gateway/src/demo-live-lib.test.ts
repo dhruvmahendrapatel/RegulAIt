@@ -6,6 +6,7 @@
 import { describe, expect, it } from "vitest";
 import {
   applyLiveDemoSetup,
+  EGRESS_ALLOW_HOSTS_PATH,
   ensureLiveEgressHosts,
   jiraSiteHost,
   LIVE_NAMES,
@@ -51,14 +52,14 @@ function fakeApi(opts: { refuse?: Record<string, { status: number; body: unknown
     if (method === "GET" && url === "/v1/pm/connections") return { status: 200, body: { connections: store.pm } };
     if (method === "GET" && url === "/v1/connectors") return { status: 200, body: { connectors: store.connectors } };
     if (method === "GET" && url === "/v1/chatops/connections") return { status: 200, body: { connections: store.chatops } };
-    if (method === "GET" && url === "/v1/egress-allow-hosts") return { status: 200, body: { hosts: store.hosts } };
+    if (method === "GET" && url === EGRESS_ALLOW_HOSTS_PATH) return { status: 200, body: { hosts: store.hosts } };
     const p = payload as any;
     if (method === "POST" && url === "/v1/git/connections") return store.git.push({ name: p.name }), { status: 201, body: { name: p.name } };
     if (method === "POST" && url === "/v1/pm/connections") return store.pm.push({ name: p.name }), { status: 201, body: { name: p.name, webhookSecret: `rglwh_${p.name}` } };
     if (method === "POST" && url === "/v1/connectors") return store.connectors.push({ id: "11111111-1111-1111-1111-111111111111", name: p.name }), { status: 201, body: { id: "11111111-1111-1111-1111-111111111111" } };
     if (method === "POST" && url.endsWith("/credential")) return { status: 201, body: {} };
     if (method === "POST" && url === "/v1/chatops/connections") return store.chatops.push({ name: p.name }), { status: 201, body: { id: "x" } };
-    if (method === "POST" && url === "/v1/egress-allow-hosts") return store.hosts.push({ host: p.host }), { status: 201, body: {} };
+    if (method === "POST" && url === EGRESS_ALLOW_HOSTS_PATH) return store.hosts.push({ host: p.host }), { status: 201, body: {} };
     return { status: 404, body: { error: "not_stubbed" } };
   };
   return { call, calls, store };
@@ -107,7 +108,7 @@ describe("live-demo egress entries", () => {
 
   it("adds only the missing hosts, and reports a step-up refusal instead of forcing it", async () => {
     const api = fakeApi({
-      refuse: { "POST /v1/egress-allow-hosts": { status: 403, body: { error: "step_up_required", actionKind: "settings_relax" } } },
+      refuse: { [`POST ${EGRESS_ALLOW_HOSTS_PATH}`]: { status: 403, body: { error: "step_up_required", actionKind: "settings_relax" } } },
     });
     api.store.hosts.push({ host: "api.github.com" });
     const out = await ensureLiveEgressHosts(api.call, liveDemoEgressHosts(ENV));

@@ -232,6 +232,9 @@ export function scrub(text: string, secrets: LiveSecrets, extra: string[] = []):
 // the API calls
 // ---------------------------------------------------------------------------
 
+/** the egress allow-list route this module reads and writes */
+export const EGRESS_ALLOW_HOSTS_PATH = "/v1/egress-allow-hosts";
+
 export type ApiCall = (method: string, url: string, payload?: unknown) => Promise<{ status: number; body: any }>;
 
 export type StepOutcome = "created" | "kept" | "updated" | "skipped" | "failed";
@@ -383,14 +386,14 @@ export async function ensureLiveEgressHosts(
   hosts: Array<{ host: string; note: string }>,
 ): Promise<{ added: string[]; present: string[]; needsAdmin: string[]; failed: string[] }> {
   const out = { added: [] as string[], present: [] as string[], needsAdmin: [] as string[], failed: [] as string[] };
-  const list = await call("GET", "/v1/egress-allow-hosts");
+  const list = await call("GET", EGRESS_ALLOW_HOSTS_PATH);
   const have = new Set(((list.body?.hosts ?? []) as Array<{ host: string }>).map((h) => h.host));
   for (const { host, note } of hosts) {
     if (have.has(host)) {
       out.present.push(host);
       continue;
     }
-    const res = await call("POST", "/v1/egress-allow-hosts", { host, note });
+    const res = await call("POST", EGRESS_ALLOW_HOSTS_PATH, { host, note });
     if (res.status < 300) out.added.push(host);
     else if (res.status === 403 && res.body?.error === "step_up_required") out.needsAdmin.push(host);
     else out.failed.push(`${host} (${errorDetail(res)})`);
