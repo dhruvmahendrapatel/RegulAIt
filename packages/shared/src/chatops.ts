@@ -35,7 +35,8 @@
 import { createHmac } from "node:crypto";
 import { constantTimeEqual } from "./constant-time.js";
 
-export const CHATOPS_PROVIDERS = ["slack", "teams", "outlook"] as const;
+/** ADR-0202 lane E: `resend` is send-only mail, like outlook (ADR-0121) */
+export const CHATOPS_PROVIDERS = ["slack", "teams", "outlook", "resend"] as const;
 export type ChatOpsProvider = (typeof CHATOPS_PROVIDERS)[number];
 
 /** Slack's own recommendation, and the value we enforce. */
@@ -157,7 +158,7 @@ export function verifyChatSignature(input: ChatSignatureInput): ChatSignatureRes
     return { ok: true, provider: "teams", replayWindowEnforced: false };
   }
 
-  if (input.provider === "outlook") {
+  if (input.provider === "outlook" || input.provider === "resend") {
     // ADR-0121 — A DECISION, NOT A GAP, stated here because this is where
     // someone will look for it.
     //
@@ -176,7 +177,7 @@ export function verifyChatSignature(input: ChatSignatureInput): ChatSignatureRes
     // verify for a customer — so it is not pretended at here.
     return refuse(
       "inbound_unsupported_by_design",
-      "outlook is a send-only ChatOps provider: an inbound email is an unauthenticated assertion, not a " +
+      `${input.provider} is a send-only ChatOps provider: an inbound email is an unauthenticated assertion, not a ` +
         "signed callback, so a decision is never taken from one. Decide from the portal link in the message.",
     );
   }
@@ -486,7 +487,8 @@ function escapeHtml(v: string): string {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 /**
@@ -565,6 +567,22 @@ export function outlookMessageForAlert(input: {
       ].join("\n"),
     },
   };
+}
+
+/** ADR-0202 lane E — the body Resend's `POST /emails` takes for one mail */
+export interface ResendEmailPayload {
+  op: "sendEmail";
+  subject: string;
+  html: string;
+}
+
+/**
+ * ADR-0202 lane E — the SAME mail the outlook courier sends, for Resend. The
+ * HTML is the outlook composer's, which escapes every untrusted field before
+ * adding its own tags, so this adds no rendering of its own. Pure.
+ */
+export function resendEmailForMail(mail: OutlookMessagePayload): ResendEmailPayload {
+  return { op: "sendEmail", subject: mail.subject.replace(/[\r\n\t]+/g, " ").slice(0, 200), html: mail.body.content };
 }
 
 export function teamsActivityForCard(card: ApprovalCard): TeamsActivityPayload {
