@@ -19,6 +19,7 @@
     "demo:traffic": "node dist/demo-traffic.js",
     "demo:prepare": "node dist/demo-prepare.js",
     "demo:gate": "node dist/demo-gate.js",
+    "demo:enforce": "node dist/demo-enforce.js",
     "demo:export-key": "node dist/demo-export-key.js",
     "receipt-key:init": "node dist/receipt-key-init.js",
     "identity-key:init": "node dist/identity-key-init.js",
