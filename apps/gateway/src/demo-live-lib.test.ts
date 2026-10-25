@@ -3,15 +3,18 @@
  * duplicates nothing, that no secret reaches a report, the egress entries (exact hosts, opt-in), the secrets-file
  * checks, and the read-only probes. No database, no network.
  */
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   applyLiveDemoSetup,
   EGRESS_ALLOW_HOSTS_PATH,
   ensureLiveEgressHosts,
+  inboundFileRefusal,
   jiraSiteHost,
   LIVE_NAMES,
   liveDemoEgressHosts,
   liveProfileRequested,
+  liveSetupRefusal,
   loadSecretsFile,
   neededSecrets,
   readLiveDemoConfig,
@@ -94,6 +97,11 @@ describe("live-demo config", () => {
       expect(jiraSiteHost(bad)).toBeNull();
     }
   });
+
+  it("accepts a public Slack channel only: the manifest has no groups:* scope for a private one", () => {
+    expect(readLiveDemoConfig({ ...ENV, REGULAIT_DEMO_SLACK_CHANNEL: "C0123456789" }).config.slack?.channel).toBe("C0123456789");
+    expect(readLiveDemoConfig({ ...ENV, REGULAIT_DEMO_SLACK_CHANNEL: "G0123456789" }).config.slack).toBeUndefined();
+  });
 });
 
 describe("live-demo egress entries", () => {
@@ -121,7 +129,9 @@ describe("live-demo egress entries", () => {
 });
 
 describe("secrets file", () => {
-  const read = (content: string) => ({ stat: () => ({ mode: 0o100600, isFile: () => true }), read: () => content });
+  const file = (mode: number, link = false) => () => ({ mode, isFile: () => !link, isSymbolicLink: () => link });
+  const same = (p: string) => p;
+  const read = (content: string) => ({ lstat: file(0o100600), realpath: same, read: () => content });
   it("reads a 0600 JSON file outside the repository", () => {
     expect(loadSecretsFile("/home/op/.regulait-live.json", "/srv/regulait", read(JSON.stringify(SECRETS)))).toEqual(SECRETS);
   });
@@ -129,9 +139,19 @@ describe("secrets file", () => {
     expect(() => loadSecretsFile("/srv/regulait/secrets.json", "/srv/regulait", read("{}"))).toThrow(/inside the repository/);
     expect(() => loadSecretsFile("secrets.json", "/srv/regulait", read("{}"))).toThrow(/absolute/);
     expect(() =>
-      loadSecretsFile("/home/op/s.json", "/srv/regulait", { stat: () => ({ mode: 0o100644, isFile: () => true }), read: () => "{}" }),
+      loadSecretsFile("/home/op/s.json", "/srv/regulait", { lstat: file(0o100644), realpath: same, read: () => "{}" }),
     ).toThrow(/chmod 600/);
     expect(() => loadSecretsFile("/home/op/s.json", "/srv/regulait", read('{"awsKey":"x"}'))).toThrow(/unknown key/);
+  });
+  it("refuses a symbolic link, and a path whose directory resolves inside the repository", () => {
+    expect(() =>
+      loadSecretsFile("/home/op/s.json", "/srv/regulait", { lstat: file(0o120777, true), realpath: same, read: () => "{}" }),
+    ).toThrow(/symbolic link/);
+    // /home/op/link is a directory symlink to /srv/regulait/tmp: path.resolve alone would let it through
+    const realpath = (p: string) => p.replace("/home/op/link", "/srv/regulait/tmp");
+    expect(() =>
+      loadSecretsFile("/home/op/link/s.json", "/srv/regulait", { lstat: file(0o100600), realpath, read: () => "{}" }),
+    ).toThrow(/resolves inside the repository/);
   });
   it("never quotes the file's content in a parse error", () => {
     let msg = "";
@@ -293,5 +313,49 @@ describe("live probes (stubbed vendors)", () => {
     const checks = await runLiveProbes(base({ github: undefined, slack: undefined }));
     expect(checks.find((c) => c.beat === "git-pr")).toMatchObject({ level: "FAIL" });
     expect(checks.find((c) => c.beat === "chatops-approval")).toMatchObject({ level: "FAIL" });
+  });
+});
+
+describe("live-setup guard (review finding 1, ADR-0181 FX3)", () => {
+  const LIVE = { REGULAIT_DEMO_PROFILE: "live" };
+  it("refuses unless the live profile is asked for explicitly", () => {
+    expect(liveSetupRefusal({}, null)).toMatch(/REGULAIT_DEMO_PROFILE=live is not set/);
+    expect(liveSetupRefusal({ REGULAIT_DEMO_PROFILE: "mock" }, [])).toMatch(/is not set.*Nothing was written/);
+  });
+  it("refuses a database with an admin who is not a demo persona, naming at most three", () => {
+    const msg = liveSetupRefusal(LIVE, ["a@corp.example", "b@corp.example", "c@corp.example", "d@corp.example"]);
+    expect(msg).toMatch(/not a demo persona \(a@corp.example, b@corp.example, c@corp.example, and 1 more\)/);
+    expect(msg).toMatch(/Nothing was written/);
+  });
+  it("lets the live profile run on a demo database", () => {
+    expect(liveSetupRefusal(LIVE, null)).toBeNull();
+    expect(liveSetupRefusal(LIVE, [])).toBeNull();
+  });
+  it("is checked by the CLI before migrations, the app or any write", () => {
+    const src = readFileSync(new URL("./demo-live-setup.ts", import.meta.url), "utf8");
+    const profileCheck = src.indexOf("liveSetupRefusal(process.env, null)");
+    const adminCheck = src.indexOf("liveSetupRefusal(process.env, await realAdminEmails(db))");
+    expect(profileCheck).toBeGreaterThan(-1);
+    expect(adminCheck).toBeGreaterThan(-1);
+    expect(profileCheck).toBeLessThan(src.indexOf("createDb("));
+    for (const later of ["await runMigrations(", "buildApp(", "ensureLiveEgressHosts(call", "applyLiveDemoSetup(call", "writeFileSync("]) {
+      expect(src.indexOf(later), later).toBeGreaterThan(adminCheck);
+    }
+  });
+});
+
+describe("inbound secrets file", () => {
+  const plain = { isFile: () => true, isSymbolicLink: () => false };
+  const link = { isFile: () => false, isSymbolicLink: () => true };
+  const same = (p: string) => p;
+  it("accepts a new or existing plain file outside the repository", () => {
+    expect(inboundFileRefusal("/home/op/inbound.json", "/srv/regulait", { lstat: () => null, realpath: same })).toBeNull();
+    expect(inboundFileRefusal("/home/op/inbound.json", "/srv/regulait", { lstat: () => plain, realpath: same })).toBeNull();
+  });
+  it("refuses a relative path, a symbolic link, and a directory that resolves inside the repository", () => {
+    expect(inboundFileRefusal("inbound.json", "/srv/regulait", { lstat: () => null, realpath: same })).toMatch(/absolute/);
+    expect(inboundFileRefusal("/home/op/inbound.json", "/srv/regulait", { lstat: () => link, realpath: same })).toMatch(/symbolic link/);
+    const realpath = (p: string) => p.replace("/home/op/link", "/srv/regulait/tmp");
+    expect(inboundFileRefusal("/home/op/link/inbound.json", "/srv/regulait", { lstat: () => null, realpath })).toMatch(/outside the repository/);
   });
 });

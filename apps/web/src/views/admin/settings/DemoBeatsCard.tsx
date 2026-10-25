@@ -7,7 +7,8 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
-import { Badge, Button, Card } from "../../../ui/kit";
+import { fmtDateTime } from "../../../api/format";
+import { Badge, Button, Card, ErrorState, SkeletonBlock } from "../../../ui/kit";
 import { ReasonModal, useAction } from "../adminKit";
 import v from "../../views.module.css";
 
@@ -17,6 +18,9 @@ interface Beat {
   mode: "live" | "simulated";
   live: string;
   simulated: string;
+  reason: string | null;
+  updatedBy: string | null;
+  updatedAt: string | null;
 }
 
 export default function DemoBeatsCard() {
@@ -35,6 +39,8 @@ export default function DemoBeatsCard() {
 
   return (
     <Card title="Demo beats: live or simulated">
+      {beats.isPending && <SkeletonBlock lines={3} />}
+      {beats.isError && <ErrorState title="Couldn't load the demo beats" message={beats.error.message} onRetry={() => void beats.refetch()} />}
       <ul className={v.stack}>
         {(beats.data?.beats ?? []).map((b) => (
           <li key={b.beatId}>
@@ -42,6 +48,11 @@ export default function DemoBeatsCard() {
             <Button size="sm" variant="ghost" disabled={act.busy} onClick={() => setPending(b)}>
               {b.mode === "live" ? "Simulate" : "Go live"}
             </Button>
+            {b.updatedAt && (
+              <div className={v.hint}>
+                {b.reason} ({b.updatedBy}, {fmtDateTime(b.updatedAt)})
+              </div>
+            )}
           </li>
         ))}
       </ul>

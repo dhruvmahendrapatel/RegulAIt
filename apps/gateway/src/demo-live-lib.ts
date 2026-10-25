@@ -70,12 +70,37 @@ export interface LiveDemoConfig {
 const JIRA_SITE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.atlassian\.net$/;
 const GITHUB_REPO = /^([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))\/([A-Za-z0-9._-]{1,100})$/;
 const ADO_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9 ._-]{0,62}[A-Za-z0-9])?$/;
-const SLACK_CHANNEL = /^[CG][A-Z0-9]{6,20}$/;
+// public channels only: the manifest has no groups:read / groups:history scope, so a private (G…) channel is refused
+const SLACK_CHANNEL = /^C[A-Z0-9]{6,20}$/;
 const SLACK_TEAM = /^T[A-Z0-9]{6,20}$/;
 
 /** the live profile is opt-in, spelled exactly */
 export function liveProfileRequested(env: NodeJS.ProcessEnv): boolean {
   return (env[LIVE_DEMO_ENV.profile] ?? "").trim().toLowerCase() === "live";
+}
+
+/**
+ * ADR-0202 lane L review finding 1 (ADR-0181 FX3 for this script): `demo:live-setup` stores real vendor tokens through
+ * a bootstrap admin, so it refuses, before migrations or any write, unless the live profile is asked for explicitly AND
+ * the database is a demo one (every admin is a seed persona). Pass `realAdmins: null` for the first check, made before
+ * a database pool exists; pass `realAdminEmails(db)` for the second. null = the setup may run.
+ */
+export function liveSetupRefusal(env: NodeJS.ProcessEnv, realAdmins: readonly string[] | null): string | null {
+  if (!liveProfileRequested(env)) {
+    return (
+      `Refusing to set up live connections: ${LIVE_DEMO_ENV.profile}=live is not set. The live profile stores real ` +
+      "vendor tokens and runs only when asked for explicitly, on a database seeded with the same setting. Nothing was written."
+    );
+  }
+  if (realAdmins && realAdmins.length > 0) {
+    const shown = realAdmins.slice(0, 3).join(", ") + (realAdmins.length > 3 ? `, and ${realAdmins.length - 3} more` : "");
+    return (
+      `Refusing to set up live connections: this database has an admin who is not a demo persona (${shown}), so it is ` +
+      "in real use. The live-demo setup only ever runs on a database whose admins are its own personas. Use a fresh " +
+      "database for the demo. Nothing was written."
+    );
+  }
+  return null;
 }
 
 /**
@@ -158,7 +183,10 @@ export function liveDemoEgressHosts(env: NodeJS.ProcessEnv): Array<{ host: strin
 // ---------------------------------------------------------------------------
 
 export interface SecretsFileDeps {
-  stat: (p: string) => { mode: number; isFile: () => boolean };
+  /** `lstat`, not `stat`: a symbolic link at the path is refused rather than followed */
+  lstat: (p: string) => { mode: number; isFile: () => boolean; isSymbolicLink: () => boolean };
+  /** `realpathSync`: the outside-the-checkout check compares resolved paths, so a link in a parent directory cannot point it inside */
+  realpath: (p: string) => string;
   read: (p: string) => string;
 }
 
@@ -177,8 +205,12 @@ export function loadSecretsFile(filePath: string, repoRoot: string, deps: Secret
   if (!isOutsideRepo(filePath, repoRoot)) {
     throw new Error(`${LIVE_DEMO_ENV.secretsFile} points inside the repository; keep the secrets file outside the checkout`);
   }
-  const st = deps.stat(filePath);
+  const st = deps.lstat(filePath);
+  if (st.isSymbolicLink()) throw new Error(`${LIVE_DEMO_ENV.secretsFile} is a symbolic link; point it at the file itself`);
   if (!st.isFile()) throw new Error(`${LIVE_DEMO_ENV.secretsFile} is not a regular file`);
+  if (!isOutsideRepo(deps.realpath(filePath), deps.realpath(repoRoot))) {
+    throw new Error(`${LIVE_DEMO_ENV.secretsFile} resolves inside the repository; keep the secrets file outside the checkout`);
+  }
   if ((st.mode & 0o077) !== 0) {
     throw new Error(`${LIVE_DEMO_ENV.secretsFile} is readable by group or others; run chmod 600 on it`);
   }
@@ -199,6 +231,29 @@ export function loadSecretsFile(filePath: string, repoRoot: string, deps: Secret
     if (v.trim() !== "") out[k as LiveSecretKey] = v.trim();
   }
   return out;
+}
+
+export interface InboundFileDeps {
+  /** `lstat`, or null when nothing is at the path yet */
+  lstat: (p: string) => { isFile: () => boolean; isSymbolicLink: () => boolean } | null;
+  realpath: (p: string) => string;
+}
+
+/**
+ * Where the inbound webhook secrets may be written, or the refusal. The path must be absolute, its directory must
+ * resolve outside the checkout, and whatever already sits at the path must be a regular file, never a symbolic link.
+ * The CLI then writes a 0600 temp file (`wx`) in that directory and renames it over the path, so no link is followed.
+ */
+export function inboundFileRefusal(filePath: string, repoRoot: string, deps: InboundFileDeps): string | null {
+  const name = "REGULAIT_DEMO_LIVE_INBOUND_FILE";
+  if (!path.isAbsolute(filePath)) return `${name} must be an absolute path`;
+  if (!isOutsideRepo(path.join(deps.realpath(path.dirname(filePath)), path.basename(filePath)), deps.realpath(repoRoot))) {
+    return `${name} must be outside the repository`;
+  }
+  const st = deps.lstat(filePath);
+  if (st?.isSymbolicLink()) return `${name} is a symbolic link; point it at a plain file path`;
+  if (st && !st.isFile()) return `${name} is not a regular file`;
+  return null;
 }
 
 /** the secrets each configured integration needs, in prompt order */
