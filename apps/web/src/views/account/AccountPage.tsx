@@ -104,27 +104,27 @@ export default function AccountPage() {
           ) : null}
         </Card>
 
-        <div ref={appearanceRef}>
+        <div ref={appearanceRef} className={a.anchor}>
           <AppearanceCard />
         </div>
-        <div ref={pwRef}>
+        <div ref={pwRef} className={a.anchor}>
           <PasswordCard passwordSet={Boolean(auth?.passwordSet)} />
         </div>
-        <div ref={mfaRef}>
+        <div ref={mfaRef} className={a.anchor}>
           <MfaCard totpEnabled={Boolean(auth?.totpEnabled)} onChanged={() => void refresh()} />
         </div>
         {auth?.userId && (
-          <div ref={passkeysRef} data-testid="account-passkeys">
+          <div ref={passkeysRef} className={a.anchor} data-testid="account-passkeys">
             <PasskeysCard />
           </div>
         )}
-        <div ref={sessionsRef}>
+        <div ref={sessionsRef} className={a.anchor}>
           <SessionsCard />
         </div>
-        <div ref={keysRef}>
+        <div ref={keysRef} className={a.anchor}>
           <ModelKeysCard />
         </div>
-        <div ref={policiesRef} data-testid="account-ai-policies">
+        <div ref={policiesRef} className={a.anchor} data-testid="account-ai-policies">
           <AiPoliciesCard hasUser={Boolean(auth?.userId)} />
         </div>
       </div>
