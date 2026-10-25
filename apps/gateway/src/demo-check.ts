@@ -8,6 +8,9 @@
  *
  * `--live` (ADR-0197 addendum decision 3): the live database, which holds real findings only. The seeded-dataset
  * beats are replaced: any trace of the fictional dataset FAILs, and the real discovery sources are reported.
+ *
+ * `--live-connections` (ADR-0202 lane L): also probe each live-demo connection (`demo:live-setup`) with one read-only
+ * call through the egress guard, per beat, without printing a credential (`demo-live-check.ts`).
  */
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,10 +19,14 @@ import * as shared from "@regulait/shared";
 import type { DemoIntakeFixtures } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { formatDemoCheck, runDemoCheck } from "./demo-check-lib.js";
+import { runLiveConnectionChecks } from "./demo-live-check.js";
+import { guardConnectionCall } from "./connection-egress.js";
+import { decryptSecret } from "./secrets.js";
 
 const connectionString = process.env.DATABASE_URL ?? "postgres://regulait:regulait@localhost:5432/regulait";
 const BOOT = process.env.REGULAIT_BOOTSTRAP_TOKEN ?? "seed-bootstrap";
 const live = process.argv.includes("--live");
+const liveConnections = process.argv.includes("--live-connections");
 const fixtures = (shared as unknown as { DEMO_INTAKE_FIXTURES?: DemoIntakeFixtures }).DEMO_INTAKE_FIXTURES ?? null;
 
 const db = createDb(connectionString);
@@ -28,6 +35,26 @@ const app = buildApp(db, { bootstrapToken: BOOT, dataKey: process.env.REGULAIT_D
 await app.ready();
 
 const checks = await runDemoCheck(app, { bootstrapToken: BOOT, fixtures, live });
+if (liveConnections) {
+  const dataKey = process.env.REGULAIT_DATA_KEY;
+  if (!dataKey) {
+    checks.push({ beat: "live connections", level: "FAIL", detail: "REGULAIT_DATA_KEY is not set, so the live credentials cannot be read" });
+  } else {
+    checks.push(
+      ...(await runLiveConnectionChecks(db, {
+        env: process.env,
+        decrypt: (c) => decryptSecret(dataKey, c),
+        fetchFor: async (baseUrl, label) =>
+          (await guardConnectionCall(db, {
+            surface: baseUrl.startsWith("https://slack.com") ? "connector" : baseUrl.startsWith("https://api.github.com") ? "git_connection" : "pm_connection",
+            baseUrl,
+            label,
+            detail: { probe: "demo:check --live-connections" },
+          })).fetchImpl as never,
+      })),
+    );
+  }
+}
 console.log(`demo:check${live ? " --live" : ""} — ${fixtures?.company.name ?? "no fixtures"}${live ? " (live database: real discovery only)" : ""}\n`);
 console.log(formatDemoCheck(checks));
 await app.close();

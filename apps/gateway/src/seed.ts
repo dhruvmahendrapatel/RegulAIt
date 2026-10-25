@@ -34,6 +34,7 @@ import { assuranceAgentNames } from "./demo-intake-seed-lib.js"; // B4S-06: --op
 import * as sharedForFixtures from "@regulait/shared";
 import type { DemoIntakeFixtures } from "@regulait/shared";
 import { demoSeedRefusal, demoSeedSignal, realAdminEmails } from "./seed-demo-guard.js"; // ADR-0181 FX3
+import { liveDemoEgressHosts, liveProfileRequested } from "./demo-live-lib.js"; // ADR-0202 lane L: live-demo egress
 
 const connectionString =
   process.env.DATABASE_URL ?? "postgres://regulait:regulait@localhost:5432/regulait";
@@ -1726,6 +1727,13 @@ async function seedDemoEgressAllow(): Promise<void> {
       host: "generativelanguage.googleapis.com",
       note: "demo: the seeded gemini-pro agent's compiled endpoint (strict compiled-egress posture, ADR-0181)",
     });
+  }
+  // ADR-0202 (lane L): the live-demo profile's vendor hosts, OPT-IN. The mock seed stays the default and adds none
+  // of them; each entry is an exact host (the guard has no wildcards) and its note says why (demo-live-lib.ts).
+  if (liveProfileRequested(process.env)) {
+    for (const { host, note } of liveDemoEgressHosts(process.env)) {
+      if (!allowed.has(host)) await addEntry({ host, note });
+    }
   }
   if (skipped.length > 0) {
     console.log(
