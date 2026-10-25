@@ -98,7 +98,8 @@ export default function TrustDashboardPage() {
         : `${plural(activeAlerts, "active governance alert")}`;
   const monitorTone = alerts.isError || !alerts.data?.lastEvaluatedAt
     ? "neutral"
-    : (alerts.data.counts.open > 0 ? "danger" : "ok");
+    // green only when nothing is active: acknowledged alerts still count as active, so they read as a warning
+    : alerts.data.counts.open > 0 ? "danger" : alerts.data.counts.acknowledged > 0 ? "warn" : "ok";
 
   return (
     <>

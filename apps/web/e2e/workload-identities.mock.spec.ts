@@ -349,7 +349,7 @@ test.describe("ADR-0188 S6: workload identities", () => {
     await expect(tree.getByRole("row").nth(3)).not.toContainText("Root");
     await expectNoAxeViolations(page, "the loaded delegation tree");
     expect(m.calls.some((c) => c.path === "/v1/delegation-grants" && c.search.includes(`runId=${RUN}`))).toBe(true);
-    await page.getByRole("button", { name: `Revoke grant for ${IDENTITY.identifier} and its descendants` }).click();
+    await page.getByRole("button", { name: `Revoke cascade: grant for ${IDENTITY.identifier} and its descendants` }).click();
     await page.getByRole("dialog", { name: "Revoke grant and descendants?" }).getByRole("button", { name: "Revoke grant and descendants" }).click();
     await confirmStepUp(page);
     await su.expectResentOnce();

@@ -71,11 +71,16 @@ Unchanged from the 10-05 talk track, sections 1-8: trust metrics as evidence cov
 structured answers; separation of duties by construction; the dependency graph; continuous monitoring and strict
 defaults; respond with a human in the loop; the deploy gate; regulatory intelligence joined to our own state.
 
-### Enforcement, shown (beat E, added 2026-10-24; FS-8)
+### Enforcement, shown (beat E, added 2026-10-24; FS-8; live since ADR-0202)
 - No grant, no call: the kernel denies by default and the refusal names its rule; a write can wait for a named
-  approver instead, and the approval is bound to the exact arguments approved. On screen this is the Simulation page,
-  on both dates: a *simulated decision*, the real policy engine evaluating a proposed call it does not execute. Say
-  that; never say the call "was blocked" or "was queued".
+  approver instead, and the approval is bound to the exact arguments approved. On screen this is a live governed call
+  on both dates: Dana's own key over the real MCP protocol through the gateway, her search refused with her revocation
+  in the ledger, her write queued for Avery in his Inbox and in Slack, and run only after he approves. The server it
+  runs against is the demo MCP server: never say it reached a real repository, opened a PR or updated a work item.
+- If a chat post is slow: "the request is in Avery's Inbox either way; chat is a mirror, never the only copy."
+- On the beat's simulated fallback (lane L's switch, or Ctrl-C on stage) it is the Simulation page: a *simulated
+  decision*, the real policy engine evaluating a proposed call it does not execute. Say that; there, never say the
+  call "was blocked" or "was queued".
 - The cost line for G5: the off-stack alert exists because cost routing served approved traffic from an agent the
   approval never covered; cost and governance read the same ledger (ADR-0164).
 - The audit line for G8: a **tamper-evident chain with external anchors**, graded from the medium. Never "immutable"
@@ -99,7 +104,9 @@ defaults; respond with a human in the loop; the deploy gate; regulatory intellig
    audience." (Federation; FS-50)
 6. "The plan is not the change. The change needs someone else's signature." (Remediation workflow)
 7. "The finding filled in only what the evidence established." (Register as use case)
-8. "A simulated decision: no grant, no call; the decision names the rule and lands in the ledger." (E. Enforce it)
+8. "No grant, no call: her search is refused, her write waits for a named person, and every step is in the ledger."
+   (E. Enforce it; on the simulated fallback: "A simulated decision: no grant, no call; the decision names the rule
+   and lands in the ledger.")
 9. "Cost and governance read the same ledger." (G5)
 10. "A tamper-evident chain with external anchors, graded from the medium." (G8)
 11. **At the Close, unprompted** (Q13, owner 2026-10-24): "The model provider behind the governed traffic is a mock,

@@ -559,6 +559,7 @@ export default function ModelRiskPage() {
                   {
                     key: "open",
                     header: "",
+                    srHeader: "Actions",
                     render: (r) => (
                       <Button variant="ghost" onClick={() => setOpenCard(r.id === openCard ? null : r.id)}>
                         {r.id === openCard ? "Close" : "Open"}
@@ -568,6 +569,7 @@ export default function ModelRiskPage() {
                   {
                     key: "actions",
                     header: "",
+                    srHeader: "Actions",
                     align: "right",
                     render: (r) => (
                       <RemoveButton
@@ -952,6 +954,7 @@ export default function ModelRiskPage() {
                       {
                         key: "actions",
                         header: "",
+                        srHeader: "Actions",
                         align: "right",
                         render: (r) => (
                           <RemoveButton

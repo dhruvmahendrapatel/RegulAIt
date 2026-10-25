@@ -580,7 +580,7 @@ export default function CostConsolidationPage() {
                   <Input
                     value={source}
                     onChange={(e) => setSource(e.target.value)}
-                    placeholder="e.g. copilot-seats-2026-07.csv"
+                    placeholder="for example copilot-seats-2026-07.csv"
                     data-testid="ci-source"
                   />
                 </Field>
@@ -1023,7 +1023,7 @@ export default function CostConsolidationPage() {
                   <Input
                     value={aliasAccount}
                     onChange={(e) => setAliasAccount(e.target.value)}
-                    placeholder="e.g. a.smith@contractor.example"
+                    placeholder="for example a.smith@contractor.example"
                     data-testid="al-account"
                   />
                 </Field>
@@ -1076,6 +1076,7 @@ export default function CostConsolidationPage() {
                   {
                     key: "rm",
                     header: "",
+                    srHeader: "Actions",
                     render: (r) => (
                       <Button
                         size="sm"
@@ -1159,6 +1160,7 @@ export default function CostConsolidationPage() {
                   {
                     key: "rm",
                     header: "",
+                    srHeader: "Actions",
                     render: (r) => (
                       <Button
                         size="sm"
@@ -1248,7 +1250,7 @@ export default function CostConsolidationPage() {
                 <Input
                   value={rosterSource}
                   onChange={(e) => setRosterSource(e.target.value)}
-                  placeholder="e.g. okta-export-2026-08.json"
+                  placeholder="for example okta-export-2026-08.json"
                   data-testid="ro-source"
                 />
               </Field>
@@ -1404,6 +1406,7 @@ export default function CostConsolidationPage() {
                 {
                   key: "act",
                   header: "",
+                  srHeader: "Actions",
                   render: (r) => (
                     <div className={v.row}>
                       <Button size="sm" aria-label={`Open the ${r.vendor} import from ${ago(r.createdAt)}`} onClick={() => setOpenImport(r.id)}>

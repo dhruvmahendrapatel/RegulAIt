@@ -35,6 +35,7 @@
  *   - outlook   → ONE recipient mailbox address (e.g. "ana@acme.com"). A
  *                 mailbox, never a distribution list the adapter resolves:
  *                 the authorized object has to be the thing that receives.
+ *   - resend    → ONE recipient mailbox address, as outlook (ADR-0202)
  *   - github    → an "owner/repo" slug (e.g. "acme/billing")
  *   - jira      → a project key (e.g. "PLAT")
  *   - snowflake → a "DATABASE.SCHEMA" pair (e.g. "ANALYTICS.PUBLIC")
@@ -55,6 +56,7 @@ export const CONNECTOR_PROVIDER_KINDS = [
   "slack",
   "teams",
   "outlook",
+  "resend",
   "github",
   "jira",
   "snowflake",
@@ -1329,6 +1331,174 @@ export class OutlookConnectorProvider implements ConnectorProvider {
   }
 }
 
+// ---------------------------------------------------------------------------
+// ADR-0202 lane E — RESEND: an approval and alert COURIER, send-only like
+// outlook (ADR-0121), over Resend's REST API (`POST /emails`).
+//
+// Open-source check (ADR-0176): Resend's official Node SDK (`resend`, MIT,
+// 6.34.1 released 2026-10-16) was checked first. It calls the global `fetch`
+// directly (`fetch(`${baseUrl}${path}`)` in `Resend.fetchRequest`) and takes
+// no fetch option, so its requests cannot be routed through the injected
+// egress-guarded fetch every request here must use. It also reads
+// `RESEND_BASE_URL` / `RESEND_API_KEY` from the environment and logs error
+// bodies to the console outside production. The unmet hard requirement is
+// "every request URL adjudicated by the egress guard", so the one call the
+// courier needs is made here, through `fetchImpl`.
+//
+// THE SENDER IS EXPLICIT. The credential carries `from`; there is no default
+// sender (not Resend's shared testing domain, not one derived from anything),
+// so mail is sent only from a domain the operator verified in Resend.
+//
+// THE RECIPIENT IS THE GOVERNED OBJECT, ONE ADDRESS, NEVER THE PAYLOAD. Any
+// `to`/`cc`/`bcc`/`reply_to`/`from`/`headers`/`attachments` a caller puts in
+// the payload is dropped: only `subject`, `html` and `text` are read.
+//
+// READ IS REFUSED. Resend's read endpoints list sent mail; nothing in an
+// approval flow needs them.
+// ---------------------------------------------------------------------------
+
+export const RESEND_DEFAULT_BASE_URL = "https://api.resend.com";
+export const RESEND_SUBJECT_MAX = 200;
+export const RESEND_BODY_MAX = 100_000;
+
+const resendMailbox = z.string().trim().toLowerCase().pipe(z.string().email().max(200));
+
+export const resendCredentialSchema = z
+  .object({
+    /** a Resend API key (`re_…`); a sending-only key is enough and preferred */
+    apiKey: z.string().min(8).max(500),
+    /** the sender, on a domain verified in Resend, e.g. approvals@mail.example.com */
+    from: resendMailbox,
+    /** optional display name shown with the sender */
+    fromName: z
+      .string()
+      .trim()
+      .min(1)
+      .max(80)
+      .regex(/^[^<>"\r\n]+$/, "a plain display name (no <, >, quotes or line breaks)")
+      .optional(),
+  })
+  .strict();
+export type ResendCredential = z.infer<typeof resendCredentialSchema>;
+
+export function parseResendCredential(token: string): ResendCredential {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(token);
+  } catch {
+    throw new ConnectorProviderError(
+      "resend credential must be a JSON document {apiKey, from, fromName?} (the API key plus the sender on a " +
+        "domain verified in Resend, serialized then stored as the connection's single token) — got a non-JSON token",
+      400,
+    );
+  }
+  const parsed = resendCredentialSchema.safeParse(raw);
+  if (!parsed.success) {
+    // the issue paths and messages only: never the values, one of which is the key
+    const issues = parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
+    throw new ConnectorProviderError(`resend credential JSON is invalid — expected {apiKey, from, fromName?}: ${issues}`, 400);
+  }
+  return parsed.data;
+}
+
+export interface ResendAdapterOptions {
+  credential: ResendCredential;
+  /** the API base; defaults to https://api.resend.com */
+  baseUrl?: string | null;
+  fetchImpl?: FetchLike;
+}
+
+/** Resend's `{name, message}` error as one capped, scrubbed line */
+export function resendErrorDetail(text: string, status: number, secrets: readonly string[] = []): string {
+  let line = `HTTP ${status}`;
+  try {
+    const e = JSON.parse(text) as { name?: unknown; message?: unknown };
+    if (e && typeof e === "object") {
+      line = `HTTP ${status} ${typeof e.name === "string" ? e.name : ""}: ${typeof e.message === "string" ? e.message : ""}`;
+    }
+  } catch {
+    line = `HTTP ${status}: ${text}`;
+  }
+  const clean = scrubSecrets(line.replace(/[\r\n\t]+/g, " "), secrets);
+  return clean.length > OUTLOOK_ERROR_DETAIL_MAX ? `${clean.slice(0, OUTLOOK_ERROR_DETAIL_MAX)}…` : clean;
+}
+
+export class ResendConnectorProvider implements ConnectorProvider {
+  readonly kind = "resend" as const;
+  private readonly base: string;
+  private readonly cred: ResendCredential;
+  private readonly fetchImpl: FetchLike;
+
+  constructor(opts: ResendAdapterOptions) {
+    this.base = (opts.baseUrl ?? RESEND_DEFAULT_BASE_URL).replace(/\/$/, "");
+    this.cred = opts.credential;
+    this.fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
+  }
+
+  async invoke(invocation: ConnectorInvocation): Promise<ConnectorInvokeResult> {
+    const payload = invocation.payload ?? {};
+    const op = typeof payload.op === "string" ? payload.op : null;
+    if (invocation.operation !== "write") {
+      throw new ConnectorProviderError(
+        "resend is send-only: reading would list the mail this account has sent, which no approval needs. " +
+          "A read-only grant on this connector authorizes nothing.",
+        400,
+      );
+    }
+    if (op !== null && op !== "sendEmail") {
+      throw new ConnectorProviderError(`resend write supports 'sendEmail' (got op '${op}')`, 400);
+    }
+    const recipient = resendMailbox.safeParse(invocation.object ?? "");
+    if (!recipient.success) {
+      throw new ConnectorProviderError(
+        "resend write requires an object that is ONE recipient mailbox address — a message with no recipient is meaningless",
+        400,
+      );
+    }
+    const subject = typeof payload.subject === "string" ? payload.subject.replace(/[\r\n\t]+/g, " ").trim() : "";
+    const html = typeof payload.html === "string" ? payload.html : undefined;
+    const text = typeof payload.text === "string" ? payload.text : undefined;
+    if (!subject || subject.length > RESEND_SUBJECT_MAX) {
+      throw new ConnectorProviderError(`resend write requires a subject of 1–${RESEND_SUBJECT_MAX} characters`, 400);
+    }
+    if ((html ?? text ?? "") === "" || (html?.length ?? 0) > RESEND_BODY_MAX || (text?.length ?? 0) > RESEND_BODY_MAX) {
+      throw new ConnectorProviderError(`resend write requires an html or text body of at most ${RESEND_BODY_MAX} characters`, 400);
+    }
+    const from = this.cred.fromName ? `${this.cred.fromName} <${this.cred.from}>` : this.cred.from;
+    const res = await this.fetchImpl(`${this.base}/emails`, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        authorization: `Bearer ${this.cred.apiKey}`,
+        "content-type": "application/json",
+        ...(typeof payload.idempotencyKey === "string" && /^[\w.:/-]{1,256}$/.test(payload.idempotencyKey)
+          ? { "idempotency-key": payload.idempotencyKey }
+          : {}),
+      },
+      body: JSON.stringify({
+        from,
+        to: [recipient.data],
+        subject,
+        ...(html !== undefined ? { html } : {}),
+        ...(text !== undefined ? { text } : {}),
+      }),
+    });
+    const body = await res.text();
+    const secrets = [this.cred.apiKey];
+    if (res.status === 429) {
+      throw new ConnectorProviderError("resend send rate-limited by Resend (HTTP 429)", 429);
+    }
+    if (res.status >= 400) {
+      console.error(`[resend] send HTTP ${res.status}: ${scrubSecrets(body, secrets)}`);
+      throw new ConnectorProviderError(`resend send failed: ${resendErrorDetail(body, res.status, secrets)}`, res.status);
+    }
+    // `{id}` on success. Accepted for delivery, not delivered.
+    const decoded = decodeBody(res.status, body).body as { id?: unknown } | null;
+    const id = decoded && typeof decoded === "object" && typeof decoded.id === "string" ? decoded.id : null;
+    return { status: res.status, body: { accepted: true, op: "sendEmail", recipient: recipient.data, id } };
+  }
+}
+
 export const GITHUB_DEFAULT_BASE_URL = "https://api.github.com";
 
 export interface GitHubAdapterOptions {
@@ -2102,6 +2272,16 @@ export function resolveConnectorProvider(
         ...(fetchImpl ? { fetchImpl } : {}),
       });
     }
+    case "resend": {
+      if (!config.token) {
+        throw new ConnectorProviderError("resend connector requires a credential (the JSON {apiKey, from} — see parseResendCredential)");
+      }
+      return new ResendConnectorProvider({
+        credential: parseResendCredential(config.token),
+        baseUrl: config.baseUrl ?? null,
+        ...(fetchImpl ? { fetchImpl } : {}),
+      });
+    }
     case "generic":
     case "http": {
       if (!config.baseUrl) {
@@ -2239,6 +2419,8 @@ export function connectorDefaultBaseUrl(kind: string): string | null | undefined
       // ADR-0167: the Graph default, so a strict posture adjudicates it like
       // every other compiled vendor host instead of refusing it as unknown
       return OUTLOOK_DEFAULT_GRAPH_BASE_URL;
+    case "resend":
+      return RESEND_DEFAULT_BASE_URL;
     case "github":
       return GITHUB_DEFAULT_BASE_URL;
     // these cannot be constructed without an explicit baseUrl (the adapter

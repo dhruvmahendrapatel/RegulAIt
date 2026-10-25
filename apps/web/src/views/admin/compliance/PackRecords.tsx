@@ -14,6 +14,7 @@ import { api } from "../../../api/client";
 import { ago, fmtAt } from "../../../api/format";
 import { Badge, Button, Card, Field, Input, Select, Table, Textarea } from "../../../ui/kit";
 import { KV, QueryGate, Stat, useAction, useNameMaps } from "../adminKit";
+import { NewestNote } from "../../../ui/fold";
 import { withRefusalCopy } from "../governance/refusalCopy";
 import {
   EMPTY_ATTESTATION,
@@ -181,7 +182,7 @@ function AttestationFormView(props: { packId: string; controls: readonly PackCon
           <Input type="date" value={form.validUntil} aria-describedby={ids.valid} onChange={(e) => set("validUntil", e.target.value)} />
         </Field>
         <Field label="Evidence reference (optional)" grow>
-          <Input value={form.evidenceRef} maxLength={600} onChange={(e) => set("evidenceRef", e.target.value)} placeholder="where the proof lives, e.g. LMS report 2026-Q3" />
+          <Input value={form.evidenceRef} maxLength={600} onChange={(e) => set("evidenceRef", e.target.value)} placeholder="where the proof lives, for example LMS report 2026-Q3" />
         </Field>
       </div>
       <p className={v.faint} id={ids.valid}>
@@ -233,6 +234,7 @@ export function PackReportsCard(props: { packId?: string | null; packLabel?: str
         stored report is a record of that moment, not a live figure.
       </p>
       <QueryGate loading={reports.isLoading} error={reports.error} onRetry={() => void reports.refetch()}>
+        <NewestNote shown={reports.data?.reports?.length ?? 0} limit={50} noun="reports" />
         <Table<PackReportSummary>
           rows={reports.data?.reports ?? []}
           rowKey={(r) => r.id}
@@ -246,6 +248,7 @@ export function PackReportsCard(props: { packId?: string | null; packLabel?: str
             {
               key: "open",
               header: "",
+              srHeader: "Actions",
               align: "right",
               render: (r) => (
                 <Button size="sm" aria-label={`Open the ${r.framework} v${r.packVersion} report from ${ago(r.generatedAt)}`} onClick={() => setOpenId(r.id === openId ? null : r.id)}>

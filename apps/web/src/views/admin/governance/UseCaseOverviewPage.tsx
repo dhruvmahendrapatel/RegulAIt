@@ -176,7 +176,7 @@ export default function UseCaseOverviewPage() {
                   <li className={rec.chip} data-testid="use-case-found-by">
                     <span className={rec.chipLabel}>Found by</span>{" "}
                     {detail.data.discovery.finding ? (
-                      <Link to="/admin/shadow-ai?tab=findings" aria-label={`discovery: open the shadow-AI finding for ${detail.data.discovery.finding.subject}`}>discovery</Link>
+                      <Link to="/admin/shadow-ai?tab=findings" aria-label={`discovery: open the Shadow-AI discovery findings (this use case came from ${detail.data.discovery.finding.subject})`}>discovery</Link>
                     ) : "discovery"}
                   </li>
                 ) : null}
@@ -195,6 +195,7 @@ export default function UseCaseOverviewPage() {
                 tabs={TABS.map((t) => withTabCount(t, data))}
                 active={tab}
                 idPrefix="use-case"
+                label="Use case record sections"
                 onChange={(next) => setParams({ tab: next })}
               />
             </div>
@@ -584,6 +585,7 @@ function ConditionsCard(props: {
             {
               key: "act",
               header: "",
+              srHeader: "Actions",
               align: "right",
               render: (row) => (
                 <span className={mc.actions}>

@@ -278,6 +278,7 @@ export function BillingHistoryCard() {
                   {
                     key: "o",
                     header: "",
+                    srHeader: "Actions",
                     align: "right",
                     render: (s) => (
                       <Button size="sm" aria-label={`Open statement v${s.version} of ${periodName.get(s.periodId) ?? "its period"}`} onClick={() => setOpenStatement(s.id)}>
@@ -308,6 +309,7 @@ export function BillingHistoryCard() {
                 {
                   key: "o",
                   header: "",
+                  srHeader: "Actions",
                   align: "right",
                   render: (p) => (
                     <Button
@@ -342,6 +344,7 @@ export function BillingHistoryCard() {
                 {
                   key: "o",
                   header: "",
+                  srHeader: "Actions",
                   align: "right",
                   render: (c) => (
                     <Button size="sm" aria-label={`Open rate card ${c.name} v${c.version}`} onClick={() => setOpenCard(c.id)}>

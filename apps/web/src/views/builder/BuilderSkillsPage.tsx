@@ -136,7 +136,7 @@ function SkillDrawer(props: { skillId: string | "new" | null; onClose: () => voi
             </p>
           )}
           <Field label="Name">
-            <Input value={name} onChange={(e) => setName(e.target.value)} maxLength={80} disabled={ro} placeholder="e.g. Assess an AI use case" />
+            <Input value={name} onChange={(e) => setName(e.target.value)} maxLength={80} disabled={ro} placeholder="for example Assess an AI use case" />
           </Field>
           <Field label="When to use it">
             <Textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} maxLength={500} disabled={ro} placeholder="Use when someone asks to review a new AI use case…" />

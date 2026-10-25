@@ -91,7 +91,7 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
   },
   {
     // "what is waiting on a human, and what happened?" — the daily loop
-    group: "Approvals & Audit",
+    group: "Approvals & audit",
     items: [
       { label: "Approvals queue", to: "/admin/approvals" },
       // ADR-0046 — the SAME approvals, scaled: routing, SLA timers, escalation,
@@ -164,7 +164,7 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
   },
   {
     // "who holds what, and should they still?" — the access-review loop
-    group: "Access Reviews",
+    group: "Access reviews",
     items: [
       // ADR-0082 — the STANDING dependency view over the per-run records: per
       // agent, who MAY use it (the grant rows) beside what its runs actually
@@ -192,7 +192,7 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
   },
   {
     // "may this call proceed, and under which version of the policy?"
-    group: "Policies & Gates",
+    group: "Policies & gates",
     items: [
       { label: "Rules engine", to: "/admin/rules" },
       // ADR-0040 — beside the rules engine because it is the same question
@@ -222,7 +222,7 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
   },
   {
     // "is the agent good, and does it hold under attack?" — measurement
-    group: "Quality & Security",
+    group: "Quality & security",
     items: [
       // ADR-0044 — the QUALITY gate: "may this proceed?" asked of the agent's
       // OUTPUT against a fixed dataset, blocking promotion the same way the
@@ -242,7 +242,7 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
     ],
   },
   {
-    group: "Identity & Access",
+    group: "Identity & access",
     items: [
       { label: "Users", to: "/admin/users" },
       { label: "Roles", to: "/admin/roles" },
@@ -302,7 +302,7 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
     ],
   },
   {
-    group: "Cost & Optimization",
+    group: "Cost & optimisation",
     items: [
       { label: "Cost dashboard", to: "/admin/cost" },
       // ADR-0069 — directly under the Cost dashboard, because it is the same
@@ -327,7 +327,7 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
     ],
   },
   {
-    group: "Compliance & Infra",
+    group: "Compliance & infra",
     items: [
       { label: "Compliance profiles", to: "/admin/compliance" },
       // ADR-0058 — framework control mappings evidenced from the same ledgers
@@ -449,7 +449,7 @@ export const SUITES: Suite[] = [
   },
   {
     id: "agent-builder",
-    name: "Agent Builder",
+    name: "Agent builder",
     purpose: "Build governed agents without code — instructions, tools, skills, memory and schedules.",
     admin: false,
     sections: [BUILDER_SECTION],
@@ -463,52 +463,52 @@ export const SUITES: Suite[] = [
   },
   {
     id: "access-reviews",
-    name: "Access Reviews",
+    name: "Access reviews",
     purpose: "Who holds what, and should they still?",
     admin: true,
-    sections: sectionsOf("Access Reviews"),
+    sections: sectionsOf("Access reviews"),
   },
   {
     id: "approvals-audit",
-    name: "Approvals & Audit",
+    name: "Approvals & audit",
     purpose: "What waits on a human, and what happened.",
     admin: true,
-    sections: sectionsOf("Approvals & Audit"),
+    sections: sectionsOf("Approvals & audit"),
   },
   {
     id: "policies-gates",
-    name: "Policies & Gates",
+    name: "Policies & gates",
     purpose: "May this call proceed, and under which policy version?",
     admin: true,
-    sections: sectionsOf("Policies & Gates"),
+    sections: sectionsOf("Policies & gates"),
   },
   {
     id: "quality-security",
-    name: "Quality & Security",
+    name: "Quality & security",
     purpose: "Is the agent good, and does it hold under attack?",
     admin: true,
-    sections: sectionsOf("Quality & Security"),
+    sections: sectionsOf("Quality & security"),
   },
   {
     id: "compliance-infra",
-    name: "Compliance & Infra",
+    name: "Compliance & infra",
     purpose: "Compliance profiles and packs, and this installation's own infrastructure.",
     admin: true,
-    sections: sectionsOf("Compliance & Infra"),
+    sections: sectionsOf("Compliance & infra"),
   },
   {
     id: "cost-optimization",
-    name: "Cost & Optimization",
+    name: "Cost & optimisation",
     purpose: "Per-project spend attribution, forecasts, billing and measured savings.",
     admin: true,
-    sections: sectionsOf("Cost & Optimization"),
+    sections: sectionsOf("Cost & optimisation"),
   },
   {
     id: "identity-access",
-    name: "Identity & Access",
+    name: "Identity & access",
     purpose: "Users, roles, teams and the credentials they hold.",
     admin: true,
-    sections: sectionsOf("Identity & Access"),
+    sections: sectionsOf("Identity & access"),
   },
   {
     id: "integrations",

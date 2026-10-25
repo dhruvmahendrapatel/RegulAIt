@@ -525,7 +525,7 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
                   </span>
                 </span>
                 {k.updateAvailable && !k.unavailable && (
-                  <Button size="sm" aria-label={`Take the new version of ${k.name}`} disabled={ro || reattach.isPending} onClick={() => reattach.mutate(k.id)}>
+                  <Button size="sm" aria-label={`Update ${k.name} to the new version`} disabled={ro || reattach.isPending} onClick={() => reattach.mutate(k.id)}>
                     Update
                   </Button>
                 )}
@@ -571,7 +571,7 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
           </ul>
         )}
         <Field label="Something to remember">
-          <Textarea value={memory} onChange={(e) => setMemory(e.target.value)} rows={2} maxLength={2000} disabled={ro} placeholder="e.g. Our review board meets on Thursdays." />
+          <Textarea value={memory} onChange={(e) => setMemory(e.target.value)} rows={2} maxLength={2000} disabled={ro} placeholder="for example Our review board meets on Thursdays." />
         </Field>
         <div>
           <Button size="sm" disabled={ro || !memory.trim() || addMemory.isPending} onClick={() => addMemory.mutate(memory.trim())}>

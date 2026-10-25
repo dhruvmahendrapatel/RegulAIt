@@ -287,7 +287,7 @@ export default function VirtualKeysPage() {
                 <Input
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="e.g. contractor-ide"
+                  placeholder="for example contractor-ide"
                   data-testid="vk-name"
                 />
               </Field>
@@ -488,6 +488,7 @@ export default function VirtualKeysPage() {
                   {
                     key: "act",
                     header: "",
+                    srHeader: "Actions",
                     render: (k) => (
                       <span className={v.row}>
                         <Button size="sm" onClick={() => openEdit(k)} data-testid={`vk-edit-${k.name}`}>

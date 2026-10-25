@@ -119,6 +119,7 @@ export default function ScimPage() {
               {
                 key: "actions",
                 header: "",
+                srHeader: "Actions",
                 align: "right",
                 render: (t) =>
                   t.revokedAt ? null : (

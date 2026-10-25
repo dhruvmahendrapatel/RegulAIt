@@ -172,7 +172,9 @@ pre code {
 /* Visible focus everywhere — keyboard users are first-class. Never the default
    browser ring; always Signal. */
 :focus-visible {
-  outline: none;
+  /* a transparent outline, not none: forced-colours mode drops the box-shadow and paints this outline instead */
+  outline: 2px solid transparent;
+  outline-offset: 2px;
   box-shadow: var(--focus-ring);
   border-radius: var(--rg-r-sm);
 }

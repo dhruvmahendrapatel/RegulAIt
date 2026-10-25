@@ -129,6 +129,7 @@ export default function ModelCredentialsPage() {
               {
                 key: "actions",
                 header: "",
+                srHeader: "Actions",
                 align: "right",
                 render: (c) => (
                   <Button size="sm" variant="danger" onClick={() => setRemoveCred(c.provider)}>
@@ -282,6 +283,7 @@ function ByoKeysCard() {
               {
                 key: "actions",
                 header: "",
+                srHeader: "Actions",
                 align: "right",
                 render: (c) => (
                   <Button size="sm" variant="danger" onClick={() => setRemoveByo(c.provider)}>

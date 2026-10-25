@@ -34,15 +34,18 @@ import { BuilderRoutesCard, PostApprovalCard } from "./ChatOpsPostAndRoutes";
  * and fails if the two drift — AER-015: outlook was accepted by the API and
  * could not be picked here.
  */
-export const CHATOPS_PROVIDERS = ["slack", "teams", "outlook"];
+export const CHATOPS_PROVIDERS = ["slack", "teams", "outlook", "resend"];
 /** Mirror of the gateway's `CHATOPS_OUTBOUND_PROVIDERS` (ADR-0113): the ones
  * the courier can post a card to — outlook since ADR-0183 batch 2.6 (a Graph
  * sendMail courier). Pinned by the same suite. */
-export const CHATOPS_OUTBOUND_PROVIDERS = ["slack", "teams", "outlook"];
+export const CHATOPS_OUTBOUND_PROVIDERS = ["slack", "teams", "outlook", "resend"];
 /** Providers with NO inbound path by decision (ADR-0121): registered with no
  * signing secret, and the API refuses one. Pinned by the same suite against
  * shared's `verifyChatSignature` (`inbound_unsupported_by_design`). */
-export const CHATOPS_SEND_ONLY_PROVIDERS = ["outlook"];
+export const CHATOPS_SEND_ONLY_PROVIDERS = ["outlook", "resend"];
+/** ADR-0202 lane E: a resend workspace mails each approval's named approver,
+ * so it takes no recipient; the gateway requires this marker instead */
+export const RESEND_RECIPIENT_MODE = "named-approvers";
 
 /** ADR-0179 (AER-015): a provider the courier cannot post to cannot be
  * registered — the API answers 422 `outbound_provider_unavailable` — so its
@@ -124,6 +127,15 @@ export function outlookCredentialToken(f: OutlookAppFields): { token: string | n
   return { token: JSON.stringify({ appId: v.clientId, appPassword: v.clientSecret, tenantId: v.tenantId, senderUpn: v.senderMailbox }) };
 }
 
+/** ADR-0202 lane E — the Resend API key and sender as the connector
+ * credential (stored encrypted, never shown again): both or none */
+export function resendCredentialToken(apiKey: string, from: string): { token: string | null } | { error: string } {
+  const f = from.trim();
+  if (!apiKey && !f) return { token: null };
+  if (!apiKey || !f) return { error: "Fill in both the API key and the sender address, or neither to use the connector's stored credential." };
+  return { token: JSON.stringify({ apiKey, from: f }) };
+}
+
 interface Connection {
   id: string;
   name: string;
@@ -183,6 +195,9 @@ export default function ChatOpsPage() {
   const [outlookApp, setOutlookApp] = useState<OutlookAppFields>({ tenantId: "", clientId: "", clientSecret: "", senderMailbox: "" });
   const setApp = (k: keyof OutlookAppFields) => (e: { target: { value: string } }) => setOutlookApp((a) => ({ ...a, [k]: e.target.value }));
   const sendOnly = CHATOPS_SEND_ONLY_PROVIDERS.includes(provider);
+  const resend = provider === "resend";
+  const [resendKey, setResendKey] = useState("");
+  const [resendFrom, setResendFrom] = useState("");
 
   const [linkConnection, setLinkConnection] = useState("");
   const [chatUserId, setChatUserId] = useState("");
@@ -288,6 +303,7 @@ export default function ChatOpsPage() {
                 {
                   key: "remove",
                   header: "",
+                  srHeader: "Actions",
                   render: (r) => (
                     <Button
                       disabled={act.busy}
@@ -346,14 +362,25 @@ export default function ChatOpsPage() {
               assertion, not a signed callback, and approvals are decided from the portal link the message carries.
             </p>
             <p className={v.faint}>
-              The app registration that sends the mail (application permission Mail.Send) is stored encrypted on the
-              connector above, like every other credential, and is never displayed again. Leave these empty if the
-              connector already holds it.
+              The credential that sends the mail is stored encrypted on the connector above, like every other
+              credential, and is never displayed again. Leave these empty if the connector already holds it.
             </p>
             <p className={v.faint}>
-              The link in each email uses only the gateway&apos;s configured public URL (REGULAIT_PUBLIC_URL); an Outlook
+              The link in each email uses only the gateway&apos;s configured public URL (REGULAIT_PUBLIC_URL); a mail
               workspace cannot be registered until it is set.
             </p>
+            {resend ? (
+              <>
+                <p className={v.faint}>Mail goes to each approval&apos;s named approver only.</p>
+                <Field label="API key (write-only — never displayed again)">
+                  <Input type="password" value={resendKey} onChange={(e) => setResendKey(e.target.value)} autoComplete="new-password" />
+                </Field>
+                <Field label="Sender, on a domain verified in Resend">
+                  <Input value={resendFrom} onChange={(e) => setResendFrom(e.target.value)} placeholder="approvals@mail.example.com" autoComplete="off" />
+                </Field>
+              </>
+            ) : (
+              <>
             <Field label="Tenant ID">
               <Input value={outlookApp.tenantId} onChange={setApp("tenantId")} placeholder="contoso.onmicrosoft.com" autoComplete="off" />
             </Field>
@@ -366,6 +393,8 @@ export default function ChatOpsPage() {
             <Field label="Sender mailbox">
               <Input value={outlookApp.senderMailbox} onChange={setApp("senderMailbox")} placeholder="regulait-approvals@acme.com" autoComplete="off" />
             </Field>
+              </>
+            )}
           </>
         ) : (
           <Field label="Signing secret (write-only — never displayed again)">
@@ -389,13 +418,15 @@ export default function ChatOpsPage() {
             </Field>
           </>
         ) : null}
-        <Field label={sendOnly ? "Default recipient mailbox" : "Default channel"}>
-          <Input
-            value={defaultChannel}
-            onChange={(e) => setDefaultChannel(e.target.value)}
-            placeholder={sendOnly ? "approvers@acme.com" : "C0123456789"}
-          />
-        </Field>
+        {resend ? null : (
+          <Field label={sendOnly ? "Default recipient mailbox" : "Default channel"}>
+            <Input
+              value={defaultChannel}
+              onChange={(e) => setDefaultChannel(e.target.value)}
+              placeholder={sendOnly ? "approvers@acme.com" : "C0123456789"}
+            />
+          </Field>
+        )}
         {sendOnly ? null : (
           <Field label="Allow deciding SENSITIVE (compliance-fenced) approvals from chat">
             <Select value={allowFencedDecide ? "yes" : "no"} onChange={(e) => setAllowFencedDecide(e.target.value === "yes")}>
@@ -414,7 +445,7 @@ export default function ChatOpsPage() {
                 .run(
                   async () => {
                     if (sendOnly) {
-                      const cred = outlookCredentialToken(outlookApp);
+                      const cred = resend ? resendCredentialToken(resendKey, resendFrom) : outlookCredentialToken(outlookApp);
                       if ("error" in cred) throw new Error(cred.error);
                       // the app registration goes to the connector's own encrypted
                       // credential store first; registration then checks it parses
@@ -423,7 +454,8 @@ export default function ChatOpsPage() {
                     await api.post(
                       "/v1/chatops/connections",
                       chatOpsConnectionBody({
-                        name, provider, connectorId, signingSecret, defaultChannel,
+                        name, provider, connectorId, signingSecret,
+                        defaultChannel: resend ? RESEND_RECIPIENT_MODE : defaultChannel,
                         allowFencedDecide: sendOnly ? false : allowFencedDecide,
                         botAppId, botTenantId, botOpenidMetadataUrl,
                       }),
@@ -433,6 +465,7 @@ export default function ChatOpsPage() {
                 )
                 .then((ok) => {
                   setOutlookApp((a) => ({ ...a, clientSecret: "" }));
+                  setResendKey("");
                   if (ok) {
                     setSigningSecret("");
                     refresh();
@@ -469,6 +502,7 @@ export default function ChatOpsPage() {
               {
                 key: "remove",
                 header: "",
+                srHeader: "Actions",
                 render: (r) => (
                   <Button
                     disabled={act.busy}

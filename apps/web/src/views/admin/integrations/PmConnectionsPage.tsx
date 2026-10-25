@@ -77,7 +77,7 @@ export default function PmConnectionsPage() {
             }}
           >
             <Field label="Name">
-              <Input required value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="e.g. demo-pm" />
+              <Input required value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="for example demo-pm" />
             </Field>
             <Field label="Provider">
               <Select value={f.provider} onChange={(e) => set("provider", e.target.value)}>
@@ -89,7 +89,7 @@ export default function PmConnectionsPage() {
               </Select>
             </Field>
             <Field label="Project">
-              <Input required value={f.project} onChange={(e) => set("project", e.target.value)} placeholder="e.g. REGULAIT-DEMO" />
+              <Input required value={f.project} onChange={(e) => set("project", e.target.value)} placeholder="for example REGULAIT-DEMO" />
             </Field>
             <Field label={`Base URL${needsBase ? " (required for this provider)" : " (optional)"}`}>
               <Input

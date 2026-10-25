@@ -226,3 +226,35 @@ edited; where these supersede them, it is said here.
   says so on stage. A packaged real call for the beat is proposed in that PR as a demo-prep addition and is not built.
 - **11-03:** `POST /v1/evaluate` reads the policy registry and never contacts the MCP server, so the Simulation beat
   works on LIVE as prepared whether or not the demo MCP server runs there (decision 4).
+
+## Addendum: live integrations, 2026-10-25 (owner)
+
+The "Enforce it" beat is no longer a simulated decision by default. Under [ADR-0202](0202-live-integrations-hosted-demo.md) it runs as a live governed call, with the simulated version kept behind an audited admin fallback switch. The hosted dev instance gains a domain and HTTPS (#453 comments 6393636981 and 6393671561).
+
+### As built (2026-10-25): the live "Enforce it" beat (ADR-0202 lane F)
+
+ADR-0202 decision 1 supersedes decision 4 above for this beat: E is a live governed call by default, with the
+simulated decision kept as its fallback (ADR-0202 decision 4). Decisions 3 and 4 are not edited.
+
+- **The packaged real call now exists.** `demo:enforce` (`apps/gateway/src/demo-enforce-lib.ts`) issues Dana a one-day
+  key, revoked at the end of the run, and calls `repo-tools` through the running gateway's own MCP route (`POST
+  /mcp/:serverId`) with the demo project header. No new route was added and the command decides nothing itself:
+  `search_code` is denied by the gateway and audited; the command reads that audit row back and prints its rule
+  (`default-deny`) and the chain step that names her revocation (`role-server-read-only-all`, `revoked`).
+  `write_file` is queued for Avery; the command mirrors it to every enabled ChatOps connection through the existing
+  `POST /v1/chatops/approvals/:id/post`, waits for the decision, and on approval retries the same call, which the
+  gateway then spends and executes. Rejected or undecided: nothing executes. The requester cannot approve her own call
+  (the gateway's rule, covered by the test).
+- **Correction to decision 4's wording.** The kernel's matched rule for Dana's `search_code` is `default-deny`; her
+  revocation is the `revoked` step in the precedence chain, the same on `POST /v1/evaluate` and on a real call. The
+  script now says "no grant matches, because her role's read grant is revoked for her alone".
+- **Not built, because the existing wiring does not support it.** A bare tool-call approval has no workflow stage, so
+  pm-sync's `mirrorApprovalDecision` does not touch a Jira or Azure DevOps item, and `write_file` on the demo MCP
+  server is not a workflow PR. The beat therefore shows no PR and no work-item update, and the script says never to
+  claim one. Email reaches the approver once lane E's channel is configured as a ChatOps connection; a channel outside
+  `chatops_connections` would not be posted to by this command.
+- **The fallback switch** is lane L's `isBeatSimulated("enforce-it")`. Until lane L merges, `demo-beat-switch.ts` is a
+  marked adapter that answers live. Simulated, the command asks `POST /v1/evaluate` only and prints each answer as a
+  *simulated decision*; the Simulation page is unchanged.
+- **Tests:** `demo-enforce-lib.test.ts` runs both paths against a listening gateway, a counting MCP upstream and a
+  local Slack double. No web code changed (`all JS` unchanged), and there is no migration.

@@ -181,7 +181,7 @@ test.describe("ADR-0175: Admission review (admin)", () => {
     await expect(days).toHaveValue("7");
     await page.getByRole("button", { name: "Save", exact: true }).click();
     await expect.poll(() => posted(st, "/v1/org/settings")).toEqual([{ minReleaseAgeDays: 7 }]);
-    await page.getByRole("button", { name: "Allow weather-mcp now" }).click();
+    await page.getByRole("button", { name: "Allow now: weather-mcp" }).click();
     const allow = page.getByRole("dialog", { name: "Allow weather-mcp now?" });
     await allow.getByLabel("Reason").fill("internal server, reviewed");
     await allow.getByRole("button", { name: "Allow now" }).click();

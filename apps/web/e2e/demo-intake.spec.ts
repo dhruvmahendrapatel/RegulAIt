@@ -201,7 +201,7 @@ test("seeded credit-assistant journey: discover, register, assess, approve, moni
   const approver = page.getByLabel("Independent approver").first();
   await expect(approver).toBeVisible();
   await approver.selectOption({ label: "Avery Approver" });
-  await page.getByRole("button", { name: "Propose…" }).first().click();
+  await page.getByRole("button", { name: "Propose for approval" }).first().click();
   await expect(page.getByTestId("alert-detail").getByText("Waiting for approval", { exact: true })).toBeVisible();
   await shotBoth(page, "real-07-remediation-proposed");
 

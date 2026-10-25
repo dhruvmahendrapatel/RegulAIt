@@ -333,7 +333,7 @@ export default function WorkflowDetailPage() {
                       onChange={(e) => setCheckReason(e.target.value)}
                       rows={2}
                       style={{ display: "block", width: "100%", marginTop: "var(--s1)" }}
-                      placeholder="e.g. re-ran the scan after upgrading lodash; CI run #412 is green"
+                      placeholder="for example re-ran the scan after upgrading lodash; CI run #412 is green"
                     />
                   </label>
                 )}
@@ -416,7 +416,7 @@ export default function WorkflowDetailPage() {
                     onChange={(e) => setDeployReason(e.target.value)}
                     rows={2}
                     style={{ display: "block", width: "100%", marginTop: "var(--s1)" }}
-                    placeholder="e.g. shipped by hand from the ops runbook; ticket OPS-411"
+                    placeholder="for example shipped by hand from the ops runbook; ticket OPS-411"
                   />
                 </label>
                 <div className={v.row} style={{ marginTop: "var(--s2)" }}>

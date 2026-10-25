@@ -491,6 +491,7 @@ export default function ShadowAiPage() {
         active={tab}
         onChange={setTab}
         idPrefix={panel.id}
+        label="Shadow-AI discovery sections"
       />
       </div>
 

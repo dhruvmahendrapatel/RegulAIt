@@ -97,6 +97,7 @@ export function RetentionHoldsCard() {
             {
               key: "pick",
               header: "",
+              srHeader: "Select",
               width: "40px",
               render: (h) =>
                 isActiveHold(h) ? (

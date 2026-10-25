@@ -173,6 +173,7 @@ export default function ModelArtifactsTab(props: {
             {
               key: "open",
               header: "",
+              srHeader: "Actions",
               align: "right",
               render: (a) => (
                 <Button size="sm" aria-label={`Open ${a.filename}`} aria-pressed={props.selected === a.id} onClick={() => props.onSelect(props.selected === a.id ? null : a.id)}>
@@ -533,7 +534,7 @@ function ArtifactDetail(props: {
 
         <div>
           <div className={v.sectionTitle}>Delete</div>
-          <Button variant="danger" disabled={deleting} onClick={() => setConfirmDelete(true)} aria-label={`Delete ${a.filename}`}>
+          <Button variant="danger" disabled={deleting} onClick={() => setConfirmDelete(true)} aria-label={`Delete artifact ${a.filename}`}>
             Delete artifact…
           </Button>
           {deleteError && (

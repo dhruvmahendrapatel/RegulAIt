@@ -215,7 +215,7 @@ test.describe("ADR-0187 X28: Model artifacts in Admission review", () => {
     const { eng } = await setup(page);
     const su = await requireStepUpOn(page, { method: "DELETE", path: `/v1/model-artifacts/${ARTIFACTS.gguf.id}`, kind: "settings_relax" });
     await page.goto(`/ui/admin/admission?tab=artifacts&artifact=${ARTIFACTS.gguf.id}`);
-    await page.getByRole("button", { name: "Delete model.gguf" }).click();
+    await page.getByRole("button", { name: "Delete artifact model.gguf" }).click();
     const dialog = page.getByRole("dialog", { name: "Delete model.gguf?" });
     await expect(dialog).toContainText("recorded in the audit log under your name");
     await expect(dialog).toContainText("confirm it's you (a step-up)");
@@ -315,7 +315,7 @@ test.describe("ADR-0187 X28: Model artifacts in Admission review", () => {
         : route.fallback(),
     );
     await page.goto(`/ui/admin/admission?tab=artifacts&artifact=${ARTIFACTS.safetensors.id}`);
-    await page.getByRole("button", { name: "Delete weights.safetensors" }).click();
+    await page.getByRole("button", { name: "Delete artifact weights.safetensors" }).click();
     await page.getByRole("dialog", { name: "Delete weights.safetensors?" }).getByRole("button", { name: "Delete", exact: true }).click();
     await expect(page.getByTestId("delete-error")).toHaveText(
       "This artifact is still in use, so it was not deleted: a scan of it is cited as model-card evidence, or a run on it has not finished. Detach the evidence from the model card or wait for the run to end, then delete it.",

@@ -493,6 +493,7 @@ export function AiBomPanel({
               {
                 key: "open",
                 header: "",
+                srHeader: "Actions",
                 render: (s) => (
                   <Button size="sm" variant="ghost" aria-label={`Open snapshot version ${s.version}`} onClick={() => setSelected(s.id)}>
                     Open

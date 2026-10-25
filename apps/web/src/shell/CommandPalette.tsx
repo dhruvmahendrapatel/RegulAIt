@@ -247,7 +247,7 @@ function PaletteDialog(props: { onClose: () => void; isAdmin: boolean; userId: s
             autoComplete="off"
             spellCheck={false}
           />
-          <button type="button" className={s.close} onClick={props.onClose} aria-label="Close search">
+          <button type="button" className={s.close} onClick={props.onClose} aria-label="Esc: close search">
             Esc
           </button>
         </div>

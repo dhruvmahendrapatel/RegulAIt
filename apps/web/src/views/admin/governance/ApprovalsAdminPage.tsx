@@ -224,6 +224,7 @@ export default function ApprovalsAdminPage() {
               {
                 key: "decide",
                 header: "",
+                srHeader: "Actions",
                 align: "right",
                 render: (r) => {
                   if (r.status !== "pending") {
@@ -434,6 +435,7 @@ function SavedViewsCard(props: {
             {
               key: "apply",
               header: "",
+              srHeader: "Actions",
               render: (r) => (
                 <Button size="sm" onClick={() => props.onApply(r.filters)}>
                   Apply
@@ -443,6 +445,7 @@ function SavedViewsCard(props: {
             {
               key: "remove",
               header: "",
+              srHeader: "Actions",
               align: "right",
               render: (r) => (
                 <RemoveButton
@@ -561,6 +564,7 @@ function DelegationsCard() {
           {
             key: "actions",
             header: "",
+            srHeader: "Actions",
             align: "right",
             render: (d) => (
               <Button size="sm" variant="danger" onClick={() => setEndNow(d)}>

@@ -196,6 +196,7 @@ export default function LineagePage() {
                     {
                       key: "run",
                       header: "",
+                      srHeader: "Actions",
                       align: "right",
                       render: (n) =>
                         n.kind === "run" && n.refId ? (

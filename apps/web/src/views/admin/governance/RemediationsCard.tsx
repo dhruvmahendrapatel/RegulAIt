@@ -102,7 +102,7 @@ export function RemediationsCard() {
               align: "right",
               render: (r) => (
                 r.approvalId ? (
-                  <Link to={remediationApprovalHref(r.status)} aria-label={`Open the approval for ${r.title}`}>
+                  <Link to={remediationApprovalHref(r.status)} aria-label={`Open approval: ${r.title}`}>
                     Open approval
                   </Link>
                 ) : null

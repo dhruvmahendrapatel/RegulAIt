@@ -228,6 +228,7 @@ export default function LicensingPage() {
                   {
                     key: "s",
                     header: "",
+                    srHeader: "Status",
                     render: (r) => <Badge tone={r.on ? "ok" : "neutral"}>{r.on ? "granted" : "closed"}</Badge>,
                   },
                 ]}
@@ -374,6 +375,7 @@ export default function LicensingPage() {
                   {
                     key: "ok",
                     header: "",
+                    srHeader: "Status",
                     render: (c) => <Badge tone={c.ok ? "ok" : "danger"}>{c.ok ? "ok" : "REFUSED"}</Badge>,
                   },
                   { key: "s", header: "State", render: (c) => c.state },

@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import type { Approval, WorkflowDetailResponse } from "../../api/types";
 import { ago, approvalStageLabel, humanize, plural } from "../../api/format";
 import { QuestionnaireView } from "../admin/governance/UseCaseQuestionnaire";
@@ -88,9 +88,13 @@ export default function InboxPage() {
     retry: false,
   });
   const annotationItems = Array.isArray(annotations.data?.items) ? annotations.data.items : [];
+  // A15: a failed annotation read is said, not shown as "nothing waiting"; a 403/404 (no annotation access) stays quiet
+  const annotationsFailed = annotations.isError && !(annotations.error instanceof ApiError && (annotations.error.status === 403 || annotations.error.status === 404));
   const approvals = q.data?.approvals ?? [];
   const pending = approvals.filter((a) => a.status === "pending");
-  const decided = approvals.filter((a) => a.status !== "pending").slice(0, 12);
+  const decidedAll = approvals.filter((a) => a.status !== "pending");
+  const decidedTotal = decidedAll.length;
+  const decided = decidedAll.slice(0, 12);
   // L1: a decided item leaves the list, taking its drawer and the Review button that opened it, so focus moves to
   // the next item's Review button (the one before it when it was last), or to the page heading when none is left
   useEffect(() => {
@@ -290,7 +294,7 @@ export default function InboxPage() {
           <div ref={list}>
           {pending.length === 0 ? (
             <EmptyState
-              title={annotationItems.length > 0 ? "No sign-offs waiting on you" : "Nothing waiting on you"}
+              title={annotationItems.length > 0 || annotationsFailed ? "No sign-offs waiting on you" : "Nothing waiting on you"}
               body="When a governed action needs your decision it appears here — and the requester is unblocked the moment you decide."
             />
           ) : (
@@ -375,8 +379,15 @@ export default function InboxPage() {
 
         {annotationItems.length > 0 && <AnnotationsCard items={annotationItems} />}
 
+        {annotationsFailed && (
+          <p className={v.errLine} role="alert" data-testid="inbox-annotations-failed">
+            Annotation reviews could not be loaded.{" "}
+            <Button size="sm" onClick={() => void annotations.refetch()}>Retry</Button>
+          </p>
+        )}
         {decided.length > 0 && (
-          <Card title="Recently decided" contain foldable startCollapsed count={decided.length} countNoun={["decision", "decisions"]}>
+          // the list shows the newest 12, so a full list reads "12+" rather than as the whole history
+          <Card title="Recently decided" contain foldable startCollapsed count={decided.length} countIsLimit={decidedTotal > decided.length} countNoun={["decision", "decisions"]}>
             {decided.map((a) => (
               <div key={a.id} className={v.listRow} style={{ alignItems: "center" }}>
                 <div className={v.grow}>

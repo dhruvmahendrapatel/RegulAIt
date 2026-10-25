@@ -302,6 +302,7 @@ export default function BillingPage() {
                     {
                       key: "open",
                       header: "",
+                      srHeader: "Actions",
                       align: "right",
                       render: (c) => (
                         <Button size="sm" aria-label={`Open rate card ${c.name} v${c.version}`} onClick={() => setOpenCard(c.id)}>
@@ -394,6 +395,7 @@ export default function BillingPage() {
                     {
                       key: "act",
                       header: "",
+                      srHeader: "Actions",
                       render: (p) => (
                         <div className={a.formRow}>
                           <Button

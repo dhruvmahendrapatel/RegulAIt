@@ -41,13 +41,13 @@ export const MODEL_POLICY_FEATURE_LABELS: Record<ModelPolicyFeature, string> = {
 /** one line per feature: where in the product it applies */
 export const MODEL_POLICY_FEATURE_HINTS: Record<ModelPolicyFeature, string> = {
   chat: "The Chat page, the Models page's Run, and direct invoke calls.",
-  builder: "Agents built in the Agent Builder, their chats and schedules.",
+  builder: "Agents built in the Agent builder, their chats and schedules.",
   copilot: "The governance copilot's narration.",
   intake_assist: "Drafting a use-case intake with a model.",
   evals: "Evaluation and red-team runs — the agent under test and the judge.",
   orchestration: "Runs: plan envelopes, workers and goal decomposition.",
   compat: "The provider-compatible endpoints and their model list.",
-  playground: "The Agent Builder's prompt playground: single runs and evaluate-mode rows.",
+  playground: "The Agent builder's prompt playground: single runs and evaluate-mode rows.",
 };
 
 export const MODEL_POLICY_DATA_CLASSES = ["public", "internal", "confidential", "regulated"] as const;

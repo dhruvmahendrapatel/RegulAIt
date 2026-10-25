@@ -109,6 +109,7 @@ import {
   teamsActivityFreshness,
   outlookMessageForAlert,
   outlookMessageForCard,
+  resendEmailForMail,
   type OutlookMessagePayload,
   type ApprovalCard,
   verifyChatSignature,
@@ -130,6 +131,8 @@ import {
   ConnectorProviderError,
   OUTLOOK_DEFAULT_GRAPH_BASE_URL,
   parseOutlookCredential,
+  parseResendCredential,
+  RESEND_DEFAULT_BASE_URL,
   resolveConnectorProvider,
   SlackConnectorProvider,
   SLACK_DEFAULT_BASE_URL,
@@ -144,6 +147,7 @@ import { verifyTeamsBotToken } from "./teams-bot-auth.js";
 // ADR-0182 S5 (PF-14): the alert-SLA sweep posts through this file's courier
 import { registerAlertSlaCourier } from "./alert-ownership.js";
 import { errMessage } from "./err-serializer.js";
+import { SharedRateLimitStore } from "./rate-limit-store.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -165,10 +169,21 @@ type OwnMessageUpdate = { [OWN_MESSAGE_UPDATE]: { ts: string; text: string; bloc
  * Its courier is a Microsoft Graph `sendMail` carrying the request summary and
  * the portal link; inbound stays `inbound_unsupported_by_design`.
  */
-export const CHATOPS_OUTBOUND_PROVIDERS: readonly ChatOpsProvider[] = ["slack", "teams", "outlook"];
+export const CHATOPS_OUTBOUND_PROVIDERS: readonly ChatOpsProvider[] = ["slack", "teams", "outlook", "resend"];
 
 /** the providers a card is posted to as MAIL: no decide affordance, ever */
-const MAIL_PROVIDERS: readonly ChatOpsProvider[] = ["outlook"];
+const MAIL_PROVIDERS: readonly ChatOpsProvider[] = ["outlook", "resend"];
+
+/**
+ * ADR-0202 lane E — A RESEND WORKSPACE HAS NO RECIPIENT OF ITS OWN. Its mail
+ * goes to the people the record names: an approval's named approver, an
+ * alert's owner. `defaultChannel` holds this marker rather than an address, and
+ * no request can name a recipient, so no free-form address reaches the API.
+ */
+export const RESEND_RECIPIENT_MODE = "named-approvers";
+/** ADR-0202 lane E — sends per resend workspace per window, shared across
+ * replicas (the HTTP edge limiter's Postgres store) */
+export const RESEND_SEND_LIMIT = { max: 30, windowMs: 60_000 } as const;
 /** an outlook "channel" is one recipient mailbox */
 const mailboxSchema = z.string().email().max(200);
 
@@ -193,7 +208,7 @@ function mailPublicUrl(): { ok: true; url: string } | { ok: false; status: 422; 
     body: {
       error: "public_url_required",
       detail:
-        `outlook mail links to the approval in RegulAIt, and that link may only use the deployment's public URL ` +
+        `approval mail links to the approval in RegulAIt, and that link may only use the deployment's public URL ` +
         `(${PUBLIC_URL_ENV}) — never the origin a request happened to arrive on. ${why === "it is unset" ? `${PUBLIC_URL_ENV} is unset` : why}. ` +
         `Set it to this deployment's https origin and restart; nothing was sent.`,
     },
@@ -227,6 +242,9 @@ export const CHATOPS_RULE_IDS = {
   postRefusedRecipient: "chatops-post-refused-unregistered-recipient",
   /** ADR-0185 — an admin changed an outlook workspace's recipient allow-list */
   outlookRecipientsChanged: "chatops-outlook-recipients-changed",
+  /** ADR-0202 lane E — resend mail goes to the named approver/owner only */
+  postRefusedNoNamedRecipient: "chatops-post-refused-no-named-recipient",
+  resendSendRateLimited: "chatops-resend-send-rate-limited",
 } as const;
 
 /** ADR-0173 batch 2b review — the Slack workspace (team) a signed body came
@@ -384,6 +402,27 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
 
   const portalUrl = (approvalId: string) => `/admin/review-workbench?approval=${approvalId}`;
 
+  /** ADR-0202 lane E — a named person's mailbox, or null when the user is
+   * gone, disabled or has no usable address */
+  const activeUserEmail = async (userId: string): Promise<string | null> => {
+    const [u] = await db.select({ email: users.email, disabledAt: users.disabledAt }).from(users).where(eq(users.id, userId));
+    const email = u && !u.disabledAt ? u.email?.trim().toLowerCase() : null;
+    return email && mailboxSchema.safeParse(email).success ? email : null;
+  };
+
+  /** ADR-0202 lane E — this send's count in the current window for one resend
+   * workspace (the HTTP edge limiter's shared Postgres store) */
+  const resendLimiter = new SharedRateLimitStore(db);
+  const resendSendHits = (connectionId: string) =>
+    new Promise<number>((resolve, reject) =>
+      resendLimiter.incr(
+        `chatops-resend:${connectionId}`,
+        (err, verdict) => (err ? reject(err) : resolve(verdict?.current ?? Number.MAX_SAFE_INTEGER)),
+        RESEND_SEND_LIMIT.windowMs,
+        RESEND_SEND_LIMIT.max,
+      ),
+    );
+
   // =======================================================================
   // Admin: the workspace
   // =======================================================================
@@ -506,6 +545,42 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         throw err;
       }
     }
+    // ADR-0202 lane E — A RESEND WORKSPACE IS REGISTERED ONLY WHEN IT CAN SEND,
+    // under the same strict rules as outlook, and it names no recipient: its
+    // mail goes to the approval's named approver (or the alert's owner).
+    if (body.provider === "resend") {
+      const pub = mailPublicUrl();
+      if (!pub.ok) return reply.status(pub.status).send(pub.body);
+      if (body.defaultChannel !== RESEND_RECIPIENT_MODE) {
+        return reply.status(400).send({
+          error: "recipient_not_configurable",
+          detail:
+            `a resend workspace mails the approval's named approver (and an alert's owner) only, so it takes no ` +
+            `recipient: set defaultChannel to '${RESEND_RECIPIENT_MODE}'`,
+        });
+      }
+      if (body.allowFencedDecide) {
+        return reply.status(400).send({
+          error: "fenced_decide_not_applicable",
+          detail: "resend mail carries no decision of any kind (ADR-0121): approvals are decided in the portal",
+        });
+      }
+      const [cred] = await db.select().from(connectorCredentials).where(eq(connectorCredentials.connectorId, connector.id));
+      if (!cred) {
+        return reply.status(400).send({
+          error: "connector_credential_missing",
+          detail: `connector '${connector.name}' holds no credential: set {apiKey, from} first (the API key and a sender on a domain verified in Resend)`,
+        });
+      }
+      try {
+        parseResendCredential(decryptSecret(opts.dataKey, cred.tokenCiphertext));
+      } catch (err) {
+        if (err instanceof ConnectorProviderError) {
+          return reply.status(400).send({ error: "invalid_connector_credential", detail: err.message });
+        }
+        throw err;
+      }
+    }
     // ADR-0121 — THE SIGNING SECRET IS PER-PROVIDER, AND BOTH DIRECTIONS ARE
     // REFUSED RATHER THAN QUIETLY TOLERATED.
     //
@@ -515,11 +590,12 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
     // believes there is an inbound path to secure. There is not, by decision,
     // so the refusal names the decision instead of storing the secret and
     // letting them find out when no reply is ever acted on.
-    if (body.provider === "outlook" && body.signingSecret !== undefined) {
+    if (MAIL_PROVIDERS.includes(body.provider) && body.signingSecret !== undefined) {
       return reply.status(400).send({
         error: "signing_secret_not_applicable",
         detail:
-          "outlook is send-only: a signing secret verifies an INBOUND callback's HMAC and outlook has no " +
+          `${body.provider} is send-only:` +
+          " a signing secret verifies an INBOUND callback's HMAC and mail has no " +
           "inbound path — an email is an unauthenticated assertion, not a signed callback. Register it with " +
           "no signing secret; approvals are decided from the portal link the message carries.",
       });
@@ -531,7 +607,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
     }
     // ADR-0173 batch 2b: a teams workspace reached only through its registered
     // bot verifies inbound tokens against the platform's keys, not a secret
-    if (body.provider !== "outlook" && body.signingSecret === undefined && !(body.provider === "teams" && body.botAppId)) {
+    if (!MAIL_PROVIDERS.includes(body.provider) && body.signingSecret === undefined && !(body.provider === "teams" && body.botAppId)) {
       return reply.status(400).send({
         error: "signing_secret_required",
         detail: `${body.provider} callbacks are HMAC-verified against this secret — registering without one would create a workspace that can post and can never be answered`,
@@ -688,6 +764,8 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
      * this kind of card is not sent as mail (a decided card: outlook has no
      * inbound decision to retire) */
     mail: OutlookMessagePayload | null = null,
+    /** ADR-0202 lane E: the recipient the server resolved from the record */
+    namedRecipient: string | null = null,
   ): Promise<{ ok: true; messageRef: string | null } | { ok: false; status: number; body: Record<string, unknown> }> {
     // The SAME composed card, rendered for the provider that will show it. The
     // fence decision is NOT re-taken here: `card.actions` is already empty when
@@ -699,11 +777,14 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
       (provider) =>
         provider === "outlook"
           ? mail && { op: "sendMail", ...mail }
-          : provider === "teams"
-            ? { op: "conversations.sendToConversation", ...teamsActivityForCard(card) }
-            : { op: "chat.postMessage", text: card.text, blocks: card.blocks },
+          : provider === "resend"
+            ? mail && { ...resendEmailForMail(mail) }
+            : provider === "teams"
+              ? { op: "conversations.sendToConversation", ...teamsActivityForCard(card) }
+              : { op: "chat.postMessage", text: card.text, blocks: card.blocks },
       actorUserId,
       label,
+      namedRecipient,
     );
   }
 
@@ -717,9 +798,12 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
   async function postToChat(
     conn: typeof chatopsConnections.$inferSelect,
     channel: string,
-    payloadFor: (provider: "slack" | "teams" | "outlook") => Record<string, unknown> | OwnMessageUpdate | null,
+    payloadFor: (provider: "slack" | "teams" | "outlook" | "resend") => Record<string, unknown> | OwnMessageUpdate | null,
     actorUserId: string | null,
     label: string,
+    /** ADR-0202 lane E: a resend mail is sent only to this server-resolved
+     * address (the approval's named approver, the alert's owner) */
+    namedRecipient: string | null = null,
   ): Promise<{ ok: true; messageRef: string | null } | { ok: false; status: number; body: Record<string, unknown> }> {
     const [connector] = await db.select().from(connectors).where(eq(connectors.id, conn.connectorId));
     if (!connector) return { ok: false, status: 400, body: { error: "invalid_reference", detail: "the ChatOps connector was deleted" } };
@@ -753,8 +837,28 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         ? TEAMS_DEFAULT_BASE_URL
         : conn.provider === "outlook"
           ? OUTLOOK_DEFAULT_GRAPH_BASE_URL
-          : SLACK_DEFAULT_BASE_URL);
-    const kind = conn.provider as "slack" | "teams" | "outlook";
+          : conn.provider === "resend"
+            ? RESEND_DEFAULT_BASE_URL
+            : SLACK_DEFAULT_BASE_URL);
+    const kind = conn.provider as "slack" | "teams" | "outlook" | "resend";
+    // ADR-0202 lane E — STRICT: resend mail goes to the address the server
+    // resolved from the record, never to a channel a request named
+    if (kind === "resend") {
+      const wanted = channel.trim().toLowerCase();
+      if (!namedRecipient || !mailboxSchema.safeParse(wanted).success || wanted !== namedRecipient.trim().toLowerCase()) {
+        await audit(actorUserId, "chatops_connection", conn.id, CHATOPS_RULE_IDS.postRefusedNoNamedRecipient, "deny",
+          `resend workspace '${conn.name}': mail refused, the recipient is not the record's named approver or owner ('${label}')`,
+          { label, namedRecipientResolved: namedRecipient !== null });
+        return {
+          ok: false,
+          status: 403,
+          body: {
+            error: "recipient_not_named",
+            detail: "a resend workspace mails the approval's named approver (or the alert's owner) only",
+          },
+        };
+      }
+    }
     // an outlook "channel" is ONE recipient mailbox, whoever named it
     if (kind === "outlook" && !mailboxSchema.safeParse(channel).success) {
       return { ok: false, status: 400, body: { error: "invalid_recipient", detail: "an outlook message is sent to ONE mailbox address" } };
@@ -784,7 +888,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         };
       }
     }
-    if (kind === "outlook") {
+    if (kind === "outlook" || kind === "resend") {
       const pub = mailPublicUrl();
       if (!pub.ok) return pub;
     }
@@ -798,6 +902,20 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
           detail: `this kind of message is not sent to ${conn.provider} workspaces ('${label}')`,
         },
       };
+    }
+    // ADR-0202 lane E — sends are rate-limited per workspace, across replicas
+    if (kind === "resend") {
+      const hits = await resendSendHits(conn.id);
+      if (hits > RESEND_SEND_LIMIT.max) {
+        await audit(actorUserId, "chatops_connection", conn.id, CHATOPS_RULE_IDS.resendSendRateLimited, "deny",
+          `resend workspace '${conn.name}': send refused, more than ${RESEND_SEND_LIMIT.max} in ${RESEND_SEND_LIMIT.windowMs / 1000}s ('${label}')`,
+          { label, limit: RESEND_SEND_LIMIT.max, windowMs: RESEND_SEND_LIMIT.windowMs });
+        return {
+          ok: false,
+          status: 429,
+          body: { error: "rate_limited", detail: `at most ${RESEND_SEND_LIMIT.max} mails per ${RESEND_SEND_LIMIT.windowMs / 1000}s from one resend workspace` },
+        };
+      }
     }
 
     // EVERY post is guarded — no vendor-default exemption. Posting approval
@@ -880,10 +998,12 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
             code: err.decision.code,
             detail:
               `chatops workspace '${conn.name}': ${err.decision.reason} (` +
-              (conn.provider === "outlook"
-                ? "an Outlook send reaches the Microsoft Entra login host as well as Microsoft Graph"
-                : "a Teams post reaches the Microsoft Entra login host as well as the Bot Connector service host") +
-              " — BOTH need an Egress Allow Hosts entry)",
+              (conn.provider === "resend"
+                ? "a Resend send reaches the Resend API host, which needs an Egress Allow Hosts entry)"
+                : (conn.provider === "outlook"
+                    ? "an Outlook send reaches the Microsoft Entra login host as well as Microsoft Graph"
+                    : "a Teams post reaches the Microsoft Entra login host as well as the Bot Connector service host") +
+                  " — BOTH need an Egress Allow Hosts entry)"),
           },
         };
       }
@@ -906,7 +1026,8 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
     // PROVIDER rather than by a `ts ?? id` fallback, so a response that happens
     // to carry both cannot silently make one provider read the other's handle.
     // Graph's sendMail answers 202 with no handle at all: outlook has none.
-    const refField = conn.provider === "teams" ? "id" : conn.provider === "outlook" ? null : "ts";
+    // Resend answers `{id}`, the email's id.
+    const refField = conn.provider === "teams" || conn.provider === "resend" ? "id" : conn.provider === "outlook" ? null : "ts";
     const messageRef = refField && typeof body[refField] === "string" ? (body[refField] as string) : null;
     return { ok: true, messageRef };
   }
@@ -961,8 +1082,32 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
       decidable,
     });
 
-    const channel = body.channel ?? conn.defaultChannel;
-    const posted = await postCard(conn, channel, card, req.authCtx.userId, "approval-mirror", mail ? outlookMessageForCard(card) : null);
+    // ADR-0202 lane E — resend mails the approval's NAMED APPROVER, and a
+    // request cannot name anyone else
+    let namedRecipient: string | null = null;
+    if (conn.provider === "resend") {
+      if (body.channel !== undefined) {
+        await audit(req.authCtx.userId, "chatops_connection", conn.id, CHATOPS_RULE_IDS.postRefusedNoNamedRecipient, "deny",
+          `resend workspace '${conn.name}': a request-named recipient was refused for approval ${approvalId}`,
+          { approvalId, label: "approval-mirror" });
+        return reply.status(400).send({
+          error: "recipient_not_selectable",
+          detail: "a resend workspace mails the approval's named approver; a request cannot choose the recipient",
+        });
+      }
+      namedRecipient = await activeUserEmail(row.approverUserId);
+      if (!namedRecipient) {
+        await audit(req.authCtx.userId, "chatops_connection", conn.id, CHATOPS_RULE_IDS.postRefusedNoNamedRecipient, "deny",
+          `resend workspace '${conn.name}': approval ${approvalId} has no active named approver with an email address — nothing sent`,
+          { approvalId, label: "approval-mirror" });
+        return reply.status(422).send({
+          error: "no_named_recipient",
+          detail: "the approval's named approver is disabled or has no email address, so there is nobody to mail",
+        });
+      }
+    }
+    const channel = namedRecipient ?? body.channel ?? conn.defaultChannel;
+    const posted = await postCard(conn, channel, card, req.authCtx.userId, "approval-mirror", mail ? outlookMessageForCard(card) : null, namedRecipient);
     if (!posted.ok) return reply.status(posted.status).send(posted.body);
 
     const [msg] = await db
@@ -995,12 +1140,17 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
       portalUrl: alertPortalUrl(alert.id),
     });
     let posted: Awaited<ReturnType<typeof postCard>>;
-    const pub = conn.provider === "outlook" ? mailPublicUrl() : null;
+    const pub = MAIL_PROVIDERS.includes(conn.provider as ChatOpsProvider) ? mailPublicUrl() : null;
+    // ADR-0202 lane E — resend mails the alert's OWNER; an unowned alert is not mailed
+    const namedRecipient = conn.provider === "resend" && alert.ownerUserId ? await activeUserEmail(alert.ownerUserId) : null;
+    if (conn.provider === "resend") channel = namedRecipient ?? RESEND_RECIPIENT_MODE;
     try {
       posted =
         pub && !pub.ok
           ? pub
-          : await postCard(
+          : conn.provider === "resend" && !namedRecipient
+            ? { ok: false, status: 422, body: { error: "no_named_recipient" } }
+            : await postCard(
               conn,
               channel,
               card,
@@ -1012,6 +1162,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
                 title: alert.title,
                 portalUrl: pub?.ok ? joinPublicUrl(pub.url, `/ui${alertPortalUrl(alert.id)}`) : `/ui${alertPortalUrl(alert.id)}`,
               }),
+              namedRecipient,
             );
     } catch (err) {
       posted = { ok: false, status: 502, body: { error: errMessage(err) } };
@@ -1197,6 +1348,12 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
           .limit(1);
     if (!conn) return reply.status(400).send({ error: "no_chatops_connection" });
     if (!conn.enabled) return reply.status(422).send({ error: "connection_disabled" });
+    if (conn.provider === "resend" && body.channel !== undefined) {
+      return reply.status(400).send({
+        error: "recipient_not_selectable",
+        detail: "a resend workspace mails the alert's owner; a request cannot choose the recipient",
+      });
+    }
     const ok = await postAlert(alert, conn, body.channel ?? conn.defaultChannel, req.authCtx.userId);
     if (!ok) return reply.status(502).send({ error: "post_failed", detail: "see the chatops-alert-post-failed audit row" });
     return { posted: true, connection: conn.name, channel: body.channel ?? conn.defaultChannel };
@@ -1217,8 +1374,8 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
       conn,
       input.target,
       (provider) =>
-        // outlook has no inbound conversation to reply into (ADR-0121)
-        provider === "outlook"
+        // mail has no inbound conversation to reply into (ADR-0121)
+        provider === "outlook" || provider === "resend"
           ? null
           : provider === "teams"
             ? input.threadRef

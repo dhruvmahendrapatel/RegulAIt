@@ -231,7 +231,7 @@ test("enterprise governance demo surfaces render and complete their core actions
   await expect(page.getByText("Alert acknowledged")).toBeVisible();
   await expect(page.getByText("Reassess Acme Model Services")).toBeVisible();
   await page.getByLabel("Independent approver").selectOption("reviewer");
-  await page.getByRole("button", { name: "Propose…" }).click();
+  await page.getByRole("button", { name: "Propose for approval" }).click();
   await expect(page.getByTestId("alert-detail").getByText("Waiting for approval", { exact: true })).toBeVisible();
   // the review shot must not catch the action toasts: wait for them to leave
   // (they auto-dismiss after 3.8s) rather than a fixed 4s

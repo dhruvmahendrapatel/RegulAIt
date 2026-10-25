@@ -141,7 +141,7 @@ export function McpRegistriesPanel() {
                   <Button size="sm" variant="ghost" aria-label={`Edit registry ${r.name}`} onClick={() => setEditing(r)}>
                     Edit
                   </Button>
-                  <Button size="sm" variant="ghost" aria-label={`Sync registry ${r.name}`} disabled={sync.busy} onClick={() => void runSync(r)}>
+                  <Button size="sm" variant="ghost" aria-label={`Sync now: registry ${r.name}`} disabled={sync.busy} onClick={() => void runSync(r)}>
                     Sync now
                   </Button>
                   <Button size="sm" variant="ghost" aria-label={`Browse entries of ${r.name}`} aria-pressed={browsing === r.id} onClick={() => setBrowsing(browsing === r.id ? null : r.id)}>
@@ -200,7 +200,7 @@ function CreateRegistryForm() {
       }}
     >
       <Field label="Registry name">
-        <Input value={draft.name} maxLength={200} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="e.g. internal-mirror" />
+        <Input value={draft.name} maxLength={200} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="for example internal-mirror" />
       </Field>
       <Field label="Registry base URL" grow>
         <Input value={draft.url} maxLength={2000} onChange={(e) => setDraft({ ...draft, url: e.target.value })} placeholder="https://registry.example.com" />

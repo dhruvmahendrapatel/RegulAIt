@@ -91,13 +91,12 @@ export function SlaChip(props: { sla: FeedbackSla }) {
   if (s.chip === "breached") {
     const late = s.breached.includes("resolve") ? "resolution" : "acknowledgement";
     return (
-      <Badge tone="danger" title={`The ${late} was due ${due}`}>
-        {`Overdue: ${late}`}
-      </Badge>
+      // A8: the due date in the chip's text, never a hover-only title
+      <Badge tone="danger">{`Overdue: ${late}, due ${due}`}</Badge>
     );
   }
-  if (s.chip === "due_soon") return <Badge tone="warn" title={`Due ${due}`}>{`Due soon: ${what} by ${due}`}</Badge>;
-  return <Badge tone="ok" title={`Due ${due}`}>{`On time: ${what} by ${due}`}</Badge>;
+  if (s.chip === "due_soon") return <Badge tone="warn">{`Due soon: ${what} by ${due}`}</Badge>;
+  return <Badge tone="ok">{`On time: ${what} by ${due}`}</Badge>;
 }
 
 export function FeedbackList(props: {
@@ -135,6 +134,7 @@ export function FeedbackList(props: {
               {
                 key: "open",
                 header: "",
+                srHeader: "Actions",
                 render: (r: FeedbackItem) => (
                   <Button size="sm" aria-label={`Open ${KIND_LABEL[r.kind].toLowerCase()} received ${fmtAt(r.createdAt)}`} onClick={() => props.onOpen!(r)}>
                     Open

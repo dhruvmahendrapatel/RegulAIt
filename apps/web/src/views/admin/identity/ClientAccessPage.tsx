@@ -380,7 +380,7 @@ function ScopeRulesCard() {
           </Select>
         </Field>
         <Field label="Note">
-          <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. anthropic pilot" />
+          <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="for example anthropic pilot" />
         </Field>
         <Button type="submit" size="sm" disabled={act.busy}>
           Create rule
@@ -414,6 +414,7 @@ function ScopeRulesCard() {
           {
             key: "actions",
             header: "",
+            srHeader: "Actions",
             align: "right",
             render: (r) => (
               <div className={v.row} style={{ justifyContent: "flex-end" }}>
@@ -708,7 +709,7 @@ function ConfigGeneratorCard() {
           </Select>
         </Field>
         <Field label="Model id">
-          <Input value={model} onChange={(e) => setModel(e.target.value)} placeholder="e.g. model-name-v1" />
+          <Input value={model} onChange={(e) => setModel(e.target.value)} placeholder="for example model-name-v1" />
         </Field>
         <Button type="submit" size="sm" variant="primary">
           Generate

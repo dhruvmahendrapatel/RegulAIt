@@ -409,7 +409,7 @@ export default function BuilderPromptDetailPage() {
                       Playground
                     </Link>
                     {d.prompt.canEdit && (
-                      <Button size="sm" aria-label={`Move a tag to commit ${shortHash(c.hash)}`} onClick={() => setMoving(c)}>
+                      <Button size="sm" aria-label={`Move tag here: commit ${shortHash(c.hash)}`} onClick={() => setMoving(c)}>
                         Move tag here
                       </Button>
                     )}

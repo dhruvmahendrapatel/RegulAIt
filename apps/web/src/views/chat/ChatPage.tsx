@@ -873,7 +873,7 @@ export default function ChatPage() {
               toast("Conversation deleted", "success");
               void refreshRail();
             } catch (e) {
-              toast(`✗ ${e instanceof Error ? e.message : e}`, "error");
+              toast(`${e instanceof Error ? e.message : e}`, "error");
             }
           })();
         }}

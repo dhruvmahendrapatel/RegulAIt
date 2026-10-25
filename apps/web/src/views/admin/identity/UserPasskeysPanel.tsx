@@ -53,6 +53,7 @@ export default function UserPasskeysPanel(props: { userId: string; userName: str
           {
             key: "actions",
             header: "",
+            srHeader: "Actions",
             render: (p) =>
               p.revokedAt ? null : (
                 <RemoveButton

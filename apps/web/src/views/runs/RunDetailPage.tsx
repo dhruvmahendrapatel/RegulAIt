@@ -138,7 +138,7 @@ export default function RunDetailPage() {
         toast(label, "success");
         void refresh();
       } catch (e) {
-        toast(`✗ ${e instanceof Error ? e.message : e}`, "error");
+        toast(`${e instanceof Error ? e.message : e}`, "error");
       }
     },
     [runId, toast, refresh],
@@ -223,7 +223,7 @@ export default function RunDetailPage() {
         j = null;
       }
       if (!res.ok) {
-        toast(`✗ ${errMessage(res.status, j ?? {})}`, "error");
+        toast(`${errMessage(res.status, j ?? {})}`, "error");
         void refresh();
         return;
       }
@@ -232,7 +232,7 @@ export default function RunDetailPage() {
       toast(`Auto-advance took ${j?.steps?.length ?? 0} step${(j?.steps?.length ?? 0) === 1 ? "" : "s"} — ${label}`);
       void refresh();
     } catch (e) {
-      toast(`✗ ${e instanceof Error ? e.message : e}`, "error");
+      toast(`${e instanceof Error ? e.message : e}`, "error");
       void refresh();
     } finally {
       setAutoBusy(false);
@@ -279,7 +279,7 @@ export default function RunDetailPage() {
           const err = failed as { error?: string; detail?: string } | null;
           patchPane(node.id, (p) => ({ ...p, status: err ? "failed" : "done" }));
           if (err) {
-            toast(`✗ ${err.detail ?? err.error ?? "dispatch failed"}`, "error");
+            toast(`${err.detail ?? err.error ?? "dispatch failed"}`, "error");
             void refresh();
             return;
           }
@@ -294,7 +294,7 @@ export default function RunDetailPage() {
             j = null;
           }
           if (!res.ok) {
-            toast(`✗ ${errMessage(res.status, j ?? {})}`, "error");
+            toast(`${errMessage(res.status, j ?? {})}`, "error");
             void refresh();
             return;
           }
@@ -304,7 +304,7 @@ export default function RunDetailPage() {
         toast("Node dispatched — output submitted for review", "success");
         void refresh();
       } catch (e) {
-        toast(`✗ ${e instanceof Error ? e.message : e}`, "error");
+        toast(`${e instanceof Error ? e.message : e}`, "error");
         void refresh();
       } finally {
         setDispatchingNode(null);

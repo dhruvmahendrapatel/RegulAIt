@@ -383,6 +383,7 @@ export default function CompliancePacksPage() {
                 {
                   key: "actions",
                   header: "",
+                  srHeader: "Actions",
                   render: (p) => {
                     const activeVersion = activeVersionOf(p.framework);
                     return (
@@ -517,6 +518,7 @@ export default function CompliancePacksPage() {
                     {
                       key: "kind",
                       header: "",
+                      srHeader: "Change",
                       render: (c) => <Badge tone={c.kind === "added" ? "info" : "warn"}>{c.kind}</Badge>,
                     },
                     { key: "ref", header: "Control", render: (c) => <code>{c.controlRef}</code> },

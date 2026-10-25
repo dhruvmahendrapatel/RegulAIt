@@ -17,6 +17,8 @@ import {
   chatOpsProviderRegistrable,
   chatOpsProviderUnavailableReason,
   outlookCredentialToken,
+  resendCredentialToken,
+  RESEND_RECIPIENT_MODE,
 } from "./ChatOpsPage";
 
 const base = { name: "n", connectorId: "c", signingSecret: "s3cret-value", defaultChannel: "d", allowFencedDecide: false };
@@ -178,5 +180,23 @@ describe("ChatOpsPage — an Outlook save merges this admin's delta into the re-
 
   it("refuses rather than send a stale full list when the re-read failed", () => {
     expect(outlookRecipientChange(["a@x.test"], "a@x.test\nb@x.test", null)).toMatchObject({ kind: "error" });
+  });
+});
+
+describe("ADR-0202 lane E — the resend workspace", () => {
+  it("is a send-only outbound provider whose body carries no signing secret", () => {
+    expect(chatOpsProviderRegistrable("resend")).toBe(true);
+    expect(CHATOPS_SEND_ONLY_PROVIDERS).toContain("resend");
+    const body = chatOpsConnectionBody({ ...base, provider: "resend", defaultChannel: RESEND_RECIPIENT_MODE });
+    expect(body).not.toHaveProperty("signingSecret");
+    expect(body.defaultChannel).toBe("named-approvers");
+  });
+
+  it("builds the {apiKey, from} credential from both fields, or none, never one", () => {
+    expect(resendCredentialToken("", "")).toEqual({ token: null });
+    expect(resendCredentialToken("re_x", "")).toHaveProperty("error");
+    expect(resendCredentialToken("", "a@mail.example.com")).toHaveProperty("error");
+    const out = resendCredentialToken("re_synthetic", " a@mail.example.com ");
+    expect("token" in out && JSON.parse(out.token!)).toEqual({ apiKey: "re_synthetic", from: "a@mail.example.com" });
   });
 });
