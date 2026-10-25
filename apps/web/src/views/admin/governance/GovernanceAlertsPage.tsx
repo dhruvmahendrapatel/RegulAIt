@@ -176,7 +176,7 @@ export default function GovernanceAlertsPage() {
           {evaluation ? <p className={s.statusLine} role="status">Evaluation raised {evaluation.raised}, refreshed {evaluation.refreshed}, resolved {evaluation.resolved}; {evaluation.active} remain active.</p> : null}
         </Card>
 
-        <Tabs tabs={FILTERS} active={status} idPrefix={tabsId} onChange={(next) => { setStatus(next); setSelectedId(null); }} />
+        <Tabs tabs={FILTERS} active={status} idPrefix={tabsId} label="Alert state" onChange={(next) => { setStatus(next); setSelectedId(null); }} />
         <div role="tabpanel" id={tabIds(tabsId, status).panel} aria-labelledby={tabIds(tabsId, status).tab}>
         <QueryGate loading={alerts.isLoading} error={alerts.error} onRetry={() => void alerts.refetch()}>
           {(alerts.data?.alerts.length ?? 0) === 0 ? (

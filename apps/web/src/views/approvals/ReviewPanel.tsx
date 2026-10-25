@@ -373,10 +373,11 @@ function ReviewDrawer(props: { approval: Approval; onClose: () => void; onDecide
               {questionnaire ? (
                 <>
                   <span>Version {questionnaire.version}{ov?.questionnaire.submittedAt ? `, submitted ${shortDate(ov.questionnaire.submittedAt)}` : ""} · </span>
-                  <button type="button" className={r.linkButton} aria-expanded={showDoc} onClick={() => setShowDoc((s) => !s)}>
+                  <button type="button" className={r.linkButton} aria-expanded={showDoc} aria-controls={`${titleId}-doc`} onClick={() => setShowDoc((s) => !s)}>
                     {showDoc ? "Hide questionnaire" : "View questionnaire"}
                   </button>
-                  {showDoc ? <div className={r.docBox}><QuestionnaireView content={questionnaire.content} /></div> : null}
+                  {/* the box scrolls, so it takes focus and has a name (a keyboard can scroll it) */}
+                  {showDoc ? <div className={r.docBox} id={`${titleId}-doc`} tabIndex={0} role="region" aria-label="Submitted questionnaire"><QuestionnaireView content={questionnaire.content} /></div> : null}
                 </>
               ) : instance.isLoading ? <span className={r.muted}>Loading…</span> : <span className={r.muted}>Not submitted</span>}
             </EvidenceRow>
