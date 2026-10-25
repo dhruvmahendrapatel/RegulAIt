@@ -23,10 +23,10 @@ const PROVIDER_FIELDS: Record<
   mock: {},
   aws: {
     role: { label: "IAM role ARN", ph: "arn:aws:iam::123456789012:role/regulait-deploy", required: true },
-    region: "e.g. us-east-1",
+    region: "for example us-east-1",
   },
-  azure: { role: { label: "Subscription id", ph: "00000000-…" }, region: "e.g. westeurope", credential: { label: "Service-principal credential (optional)" } },
-  gcp: { role: { label: "Project id", ph: "my-project" }, region: "e.g. europe-west1", credential: { label: "Service-account key JSON (optional)" } },
+  azure: { role: { label: "Subscription id", ph: "00000000-…" }, region: "for example westeurope", credential: { label: "Service-principal credential (optional)" } },
+  gcp: { role: { label: "Project id", ph: "my-project" }, region: "for example europe-west1", credential: { label: "Service-account key JSON (optional)" } },
   kubernetes: { region: "namespace (optional)", credential: { label: "kubeconfig (required)", required: true } },
 };
 
@@ -86,7 +86,7 @@ export default function DeployTargetsPage() {
             }}
           >
             <Field label="Name">
-              <Input required value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="e.g. staging-us" />
+              <Input required value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="for example staging-us" />
             </Field>
             <Field label="Provider">
               <Select value={f.provider} onChange={(e) => set("provider", e.target.value)}>
@@ -105,7 +105,7 @@ export default function DeployTargetsPage() {
               </Select>
             </Field>
             <Field label="Environment (optional)">
-              <Input value={f.environment} onChange={(e) => set("environment", e.target.value)} placeholder="e.g. production" />
+              <Input value={f.environment} onChange={(e) => set("environment", e.target.value)} placeholder="for example production" />
             </Field>
             <Field label="Base URL (optional)">
               <Input value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)} />

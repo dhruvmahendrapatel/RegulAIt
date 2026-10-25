@@ -287,7 +287,7 @@ export default function VirtualKeysPage() {
                 <Input
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="e.g. contractor-ide"
+                  placeholder="for example contractor-ide"
                   data-testid="vk-name"
                 />
               </Field>

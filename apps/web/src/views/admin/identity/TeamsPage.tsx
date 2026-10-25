@@ -111,7 +111,7 @@ export default function TeamsPage() {
             }}
           >
             <Field label="Team name">
-              <Input required value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. platform" />
+              <Input required value={name} onChange={(e) => setName(e.target.value)} placeholder="for example platform" />
             </Field>
             <Field label="Default classifications (ctrl/cmd-click for several)">
               <Select

@@ -571,7 +571,7 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
           </ul>
         )}
         <Field label="Something to remember">
-          <Textarea value={memory} onChange={(e) => setMemory(e.target.value)} rows={2} maxLength={2000} disabled={ro} placeholder="e.g. Our review board meets on Thursdays." />
+          <Textarea value={memory} onChange={(e) => setMemory(e.target.value)} rows={2} maxLength={2000} disabled={ro} placeholder="for example Our review board meets on Thursdays." />
         </Field>
         <div>
           <Button size="sm" disabled={ro || !memory.trim() || addMemory.isPending} onClick={() => addMemory.mutate(memory.trim())}>

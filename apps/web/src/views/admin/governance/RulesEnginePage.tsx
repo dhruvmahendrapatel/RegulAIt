@@ -500,7 +500,7 @@ export default function RulesEnginePage() {
                     required
                     value={extraState.argPath ?? ""}
                     onChange={(e) => setExtra({ argPath: e.target.value })}
-                    placeholder="e.g. database"
+                    placeholder="for example database"
                   />
                 </Field>
                 <Field label="Allowed values">

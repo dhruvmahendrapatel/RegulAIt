@@ -70,7 +70,7 @@ export default function GitConnectionsPage() {
             }}
           >
             <Field label="Name">
-              <Input required value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. demo-git" />
+              <Input required value={name} onChange={(e) => setName(e.target.value)} placeholder="for example demo-git" />
             </Field>
             <Field label="Provider">
               <Select value={provider} onChange={(e) => setProvider(e.target.value)}>

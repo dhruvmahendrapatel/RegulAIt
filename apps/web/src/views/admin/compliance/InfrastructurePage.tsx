@@ -495,7 +495,7 @@ function RegisterResourceCard() {
         }}
       >
         <Field label="Name">
-          <Input required value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="e.g. control-plane-gateway" />
+          <Input required value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="for example control-plane-gateway" />
         </Field>
         <Field label="Kind">
           <Select value={f.kind} onChange={(e) => set("kind", e.target.value)}>
@@ -598,7 +598,7 @@ function PolicyCard(props: { resources: InfraResource[]; policies: InfraPolicy[]
           <Input type="number" value={f.certRotationDaysBeforeExpiry} onChange={(e) => set("certRotationDaysBeforeExpiry", e.target.value)} />
         </Field>
         <Field label="Backup schedule">
-          <Input value={f.backupSchedule} onChange={(e) => set("backupSchedule", e.target.value)} placeholder="e.g. daily-0200" />
+          <Input value={f.backupSchedule} onChange={(e) => set("backupSchedule", e.target.value)} placeholder="for example daily-0200" />
         </Field>
         <Field label="Backup retention days">
           <Input type="number" value={f.backupRetentionDays} onChange={(e) => set("backupRetentionDays", e.target.value)} />

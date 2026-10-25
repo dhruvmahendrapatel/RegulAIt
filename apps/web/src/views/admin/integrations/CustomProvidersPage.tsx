@@ -600,7 +600,7 @@ function EgressAllowListCard(props: {
               required
               value={host}
               onChange={(e) => setHost(e.target.value)}
-              placeholder="e.g. models.internal.example.com  ·  127.0.0.1  ·  localhost"
+              placeholder="for example models.internal.example.com  ·  127.0.0.1  ·  localhost"
               autoComplete="off"
               data-testid="allow-host-input"
             />
@@ -609,7 +609,7 @@ function EgressAllowListCard(props: {
             <Input
               value={note}
               onChange={(e) => setNote(e.target.value)}
-              placeholder="e.g. on-prem model server, approved by security 2026-07-14 (TICKET-4412)"
+              placeholder="for example on-prem model server, approved by security 2026-07-14 (TICKET-4412)"
               data-testid="allow-host-note"
             />
           </Field>
@@ -1078,7 +1078,7 @@ function RegisterProviderCard(props: { hosts: EgressAllowHost[] }) {
               required
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. on-prem-vllm"
+              placeholder="for example on-prem-vllm"
               data-testid="provider-name"
             />
           </Field>

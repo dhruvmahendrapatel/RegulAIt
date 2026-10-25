@@ -182,7 +182,7 @@ function AttestationFormView(props: { packId: string; controls: readonly PackCon
           <Input type="date" value={form.validUntil} aria-describedby={ids.valid} onChange={(e) => set("validUntil", e.target.value)} />
         </Field>
         <Field label="Evidence reference (optional)" grow>
-          <Input value={form.evidenceRef} maxLength={600} onChange={(e) => set("evidenceRef", e.target.value)} placeholder="where the proof lives, e.g. LMS report 2026-Q3" />
+          <Input value={form.evidenceRef} maxLength={600} onChange={(e) => set("evidenceRef", e.target.value)} placeholder="where the proof lives, for example LMS report 2026-Q3" />
         </Field>
       </div>
       <p className={v.faint} id={ids.valid}>

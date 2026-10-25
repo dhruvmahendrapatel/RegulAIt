@@ -97,7 +97,7 @@ export default function EvalsCatalogTab() {
                 </Select>
               </Field>
               <Field label="Search name or control" grow>
-                <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="e.g. MEASURE-2.7 or owasp:llm:01" />
+                <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="for example MEASURE-2.7 or owasp:llm:01" />
               </Field>
             </div>
             <Table<CatalogEvaluator>

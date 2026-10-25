@@ -155,10 +155,10 @@ function CreateConnectorCard() {
         }}
       >
         <Field label="Name">
-          <Input required value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="e.g. salesforce" />
+          <Input required value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="for example salesforce" />
         </Field>
         <Field label="Kind (display category)">
-          <Input required value={f.kind} onChange={(e) => set("kind", e.target.value)} placeholder="e.g. crm" />
+          <Input required value={f.kind} onChange={(e) => set("kind", e.target.value)} placeholder="for example crm" />
         </Field>
         <Field label="Execution adapter">
           <Select value={f.providerKind} onChange={(e) => set("providerKind", e.target.value)}>
