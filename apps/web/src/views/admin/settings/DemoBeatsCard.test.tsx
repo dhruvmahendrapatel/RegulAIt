@@ -49,4 +49,10 @@ describe("DemoBeatsCard", () => {
     expect(html).toContain("Go live");
     expect(html).toContain("Simulate");
   });
+
+  it("renders an empty card, not a crash, when the reply has no beats list", () => {
+    const html = render((qc) => qc.setQueryData(KEY, {}));
+    expect(html).toContain("Demo beats: live or simulated");
+    expect(html).not.toContain("Simulate");
+  });
 });

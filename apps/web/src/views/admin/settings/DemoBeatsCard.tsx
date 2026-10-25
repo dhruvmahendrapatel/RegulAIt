@@ -38,7 +38,8 @@ export default function DemoBeatsCard() {
     <QueryGate loading={beats.isPending} error={beats.error} onRetry={() => void beats.refetch()}>
       <Card title="Demo beats: live or simulated">
         <ul className={v.stack}>
-          {beats.data?.beats.map((b) => (
+          {/* a reply without `beats` (an older gateway, or a mock) shows an empty card, never a page crash */}
+          {(beats.data?.beats ?? []).map((b) => (
             <li key={b.beatId}>
               {/* the last switch's reason on hover; who and when are in the audit log (demo-beat-fallback-changed) */}
               <Badge tone={b.mode === "live" ? "ok" : "warn"} title={b.reason ?? undefined}>
