@@ -22,18 +22,8 @@ import { Link, useSearchParams } from "react-router-dom";
 import { ApiError, api } from "../../../api/client";
 import { UUID_RE, ago, fmtUsd } from "../../../api/format";
 import { Badge, Button, Card, ConfirmModal, EmptyState, Field, IdChip, Input, Meter, Select, SeverityBadge, Table } from "../../../ui/kit";
-import {
-  KV,
-  OutcomePanel,
-  agentOpts,
-  optionEls,
-  projectOpts,
-  useAgents,
-  useApiAction,
-  useProjects,
-  useUserPicker,
-  userOpts,
-} from "../adminKit";
+import { KV, OutcomePanel, agentOpts, optionEls, projectOpts, useAgents, useApiAction, useProjects, useUserPicker, userOpts } from "../adminKit";
+import { NewestNote } from "../../../ui/fold";
 import { EngineProvenanceChip, EngineRunStatusBadge, EngineVerdictBadge } from "./EngineRunBadges";
 import { EngineSchedulesCard } from "../integrations/EngineSchedulesCard";
 import {
@@ -251,6 +241,7 @@ export function EngineRunsPanel(props: { surface: EngineSurface }) {
       />
 
       <Card title="Engine runs" contain>
+        <NewestNote shown={runs.data?.runs?.length ?? 0} limit={100} noun="runs" />
         <Table
           rows={agentRuns}
           loading={runs.isLoading}

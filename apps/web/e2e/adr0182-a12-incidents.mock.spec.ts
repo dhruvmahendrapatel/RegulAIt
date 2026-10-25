@@ -279,7 +279,7 @@ test.describe("ADR-0182 A12: the AI incident register", () => {
     await expect(page.getByText(/until it is closed by an admin; marking it resolved does not release it/)).toBeVisible();
     await expectAxeClean(page, "incident detail");
 
-    await general.getByRole("button", { name: "Record the initial report for art73-2-general" }).click();
+    await general.getByRole("button", { name: "Initial report sent for art73-2-general" }).click();
     const dialog = page.getByRole("dialog", { name: "Record the initial report" });
     await dialog.getByRole("textbox", { name: "Reference (optional)" }).fill("MSA-2026-118");
     await dialog.getByRole("button", { name: "Record" }).click();
@@ -314,7 +314,7 @@ test.describe("ADR-0182 A12: the AI incident register", () => {
   test("a report recorded more than an hour after it was sent asks why, and sends the reason", async ({ page }) => {
     const cap = await mockApi(page);
     await page.goto(`/ui/incidents/${INC}`);
-    await page.getByTestId("clock-art73-2-general").getByRole("button", { name: "Record the report for art73-2-general" }).click();
+    await page.getByTestId("clock-art73-2-general").getByRole("button", { name: "Report sent for art73-2-general", exact: true }).click();
     const dialog = page.getByRole("dialog", { name: "Record the report as sent" });
     await expect(dialog.getByText(/Not before the clock started/)).toBeVisible();
     await expect(dialog.getByLabel(/Why is this recorded late/)).toHaveCount(0);
@@ -363,7 +363,7 @@ test("X14 keyboard: incident detail report dialog traps focus, announces refusal
     await expectDialogTrap(page, actionDialog);
     await escapeToTrigger(page, actionDialog, actionTrigger);
   }
-  const trigger = page.getByTestId("clock-art73-2-general").getByRole("button", { name: "Record the initial report for art73-2-general" });
+  const trigger = page.getByTestId("clock-art73-2-general").getByRole("button", { name: "Initial report sent for art73-2-general" });
   await activate(page, trigger);
   const dialog = page.getByRole("dialog", { name: "Record the initial report", exact: true });
   await expectDialogTrap(page, dialog);

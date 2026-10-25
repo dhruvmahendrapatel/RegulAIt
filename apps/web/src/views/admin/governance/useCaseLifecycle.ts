@@ -4,6 +4,7 @@
  * questionnaire artifact, the EU AI Act screening on the use case, the linked
  * stack, the risk register and the sign-off approval.
  */
+import { fmtDay } from "../../../api/format";
 import type { Tone } from "../../../ui/kit";
 import type { UseCaseCondition, UseCaseStatus } from "../../../api/types";
 
@@ -230,13 +231,10 @@ const signoffStatusOf = (status: string): ActivityStatus =>
 
 const cap = (s: string) => (s ? s[0]!.toUpperCase() + s.slice(1) : s);
 
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-/** a calendar date the way a record shows it: `3 Oct 2026` (local time; a bare YYYY-MM-DD is that day) */
+/** a calendar date the way a record shows it: `3 Oct 2026`, through the shared en-GB formatter in UTC, so the record,
+ * the registry and the Inbox never disagree about the day (a bare YYYY-MM-DD is that day) */
 export function shortDate(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  const d = new Date(iso.length === 10 ? `${iso}T00:00:00` : iso);
-  if (Number.isNaN(d.getTime())) return String(iso);
-  return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+  return iso ? fmtDay(iso, String(iso)) : "—";
 }
 
 /**

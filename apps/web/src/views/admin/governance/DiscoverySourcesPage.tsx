@@ -233,7 +233,7 @@ export default function DiscoverySourcesPage() {
             </li>
             <li>
               <span className={ds.stepNo} aria-hidden="true">2</span>
-              <span><strong>Scan on a schedule</strong><span className={v.faint}>{runs.data ? plural(runs.data.runs.length, "recent run") : "—"}</span></span>
+              <span><strong>Scan on a schedule</strong><span className={v.faint}>{runs.data ? (runs.data.runs.length >= RUNS_LIMIT ? `${RUNS_LIMIT}+ recent runs` : plural(runs.data.runs.length, "recent run")) : "—"}</span></span>
             </li>
             <li>
               <span className={ds.stepNo} aria-hidden="true">3</span>

@@ -341,7 +341,7 @@ export default function ReportsPage() {
                       render: (s) => (
                         <div className={v.row}>
                           {s.lastRunId && (
-                            <Button size="sm" aria-label={`Open the last run of ${s.definition}`} onClick={() => setOpenRun(s.lastRunId)}>
+                            <Button size="sm" aria-label={`Last run of ${s.definition}`} onClick={() => setOpenRun(s.lastRunId)}>
                               Last run
                             </Button>
                           )}

@@ -311,14 +311,14 @@ test.describe("Design D3 and FS-19/FS-42/FS-46: the alerts page on the demo path
     await expect(drawer.getByText("Waiting for approval", { exact: true })).toBeVisible();
     await expect(drawer.getByText("pending approval")).toHaveCount(0);
     // a pending one opens the pending queue; a decided one opens the list across every status, which includes it
-    await expect(drawer.getByRole("link", { name: "Open the approval for Halt Claims assistant" })).toHaveAttribute("href", "/ui/admin/approvals?objectType=remediation");
-    await expect(drawer.getByRole("link", { name: "Open the approval for Halt the older run" })).toHaveAttribute("href", "/ui/admin/approvals?objectType=remediation&status=");
+    await expect(drawer.getByRole("link", { name: "Open approval: Halt Claims assistant" })).toHaveAttribute("href", "/ui/admin/approvals?objectType=remediation");
+    await expect(drawer.getByRole("link", { name: "Open approval: Halt the older run" })).toHaveAttribute("href", "/ui/admin/approvals?objectType=remediation&status=");
     await page.getByRole("button", { name: "Close alert" }).click();
     // FS-42: the all-alerts table names its actions column for assistive tech
     const table = page.getByRole("table").filter({ hasText: "Halt the older run" });
     // the kit's header row names its cells; the actions column's is visually hidden, not empty
     await expect(table.getByRole("row").first().getByRole("cell", { name: "Actions", exact: true })).toHaveCount(1);
-    await expect(table.getByRole("link", { name: "Open the approval for Halt the older run" })).toHaveAttribute("href", "/ui/admin/approvals?objectType=remediation&status=");
+    await expect(table.getByRole("link", { name: "Open approval: Halt the older run" })).toHaveAttribute("href", "/ui/admin/approvals?objectType=remediation&status=");
     await expectAxeClean(page, "alerts with proposals");
   });
 });

@@ -175,7 +175,7 @@ test.describe("MCP servers — federated registries (ADR-0101)", () => {
     await expect.poll(() => sent(calls, "POST", "/v1/mcp-registries").length).toBe(2);
     expect(sent(calls, "POST", "/v1/mcp-registries")[1]).toMatchObject({ name: "third", enabled: true });
 
-    await page.getByRole("button", { name: "Sync registry internal-mirror" }).click();
+    await page.getByRole("button", { name: "Sync now: registry internal-mirror" }).click();
     await expect(page.getByTestId("registry-sync-result")).toContainText("3 entries seen, 3 new, 0 refreshed, 2 importable, 1 catalogue only. No server and no grant was created.");
 
     await page.getByRole("button", { name: "Browse entries of internal-mirror" }).click();
@@ -201,7 +201,7 @@ test.describe("MCP servers — federated registries (ADR-0101)", () => {
     await expect(form.getByRole("alert")).toHaveText("A registry with this name already exists. Choose another name.");
 
     // a sync answers 200 for every outcome: a refused one is an error, never a success
-    await page.getByRole("button", { name: "Sync registry internal-mirror" }).click();
+    await page.getByRole("button", { name: "Sync now: registry internal-mirror" }).click();
     await expect(page.getByRole("alert").filter({ hasText: "Sync of internal-mirror refused: the egress guard refused the registry url" }).first()).toBeVisible();
     await expect(page.getByTestId("registry-sync-result")).toContainText("refused");
 
@@ -259,10 +259,10 @@ test.describe("MCP servers — admission clear and tools/list preview", () => {
     ]);
     const su = await requireStepUpOn(page, { method: "POST", path: `/v1/servers/${HELD.id}/admission/clear`, kind: "settings_relax" });
     await page.goto("/ui/admin/mcp-servers");
-    await expect(page.getByRole("button", { name: "Clear admission hold on records" })).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByRole("button", { name: "Clear admission hold on search" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Clear hold on records" })).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole("button", { name: "Clear hold on search" })).toHaveCount(0);
     await axeMcpServers(page, "mcp servers with a held server");
-    await page.getByRole("button", { name: "Clear admission hold on records" }).click();
+    await page.getByRole("button", { name: "Clear hold on records" }).click();
     const dialog = page.getByRole("dialog", { name: "Clear the admission hold on records?" });
     await expect(dialog).toContainText("pinned to the manifest that was scanned");
     await dialog.getByRole("button", { name: "Clear the hold" }).click();
@@ -329,7 +329,7 @@ test.describe("MCP servers — admission clear and tools/list preview", () => {
       ["GET", new RegExp(`^/v1/users/${ME}/servers/${HELD.id}/tools$`), () => ({ body: { tools: [] } })],
     ]);
     await page.goto("/ui/admin/mcp-servers");
-    await page.getByRole("button", { name: "Clear admission hold on records" }).click({ timeout: 30_000 });
+    await page.getByRole("button", { name: "Clear hold on records" }).click({ timeout: 30_000 });
     const dialog = page.getByRole("dialog", { name: "Clear the admission hold on records?" });
     await dialog.getByLabel("Reason").fill("needed for the pilot");
     await dialog.getByRole("button", { name: "Clear the hold" }).click();

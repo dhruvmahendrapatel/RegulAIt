@@ -114,7 +114,7 @@ describe("review rounds and re-review (ADR-0168 amendment)", () => {
 
   it("a recertification reads as a re-review with the expiry date", () => {
     const phase = phaseFor("under_review", { recertification: { dueAt: "2026-09-01T00:00:00" } });
-    expect(phase).toEqual({ current: 1, flag: { text: "Re-review: approval expired 1 Sep 2026", tone: "warn" } });
+    expect(phase).toEqual({ current: 1, flag: { text: "Re-review: approval expired 1 Sept 2026", tone: "warn" } });
     // control: an ordinary review round has no flag
     expect(phaseFor("under_review", { recertification: null })).toEqual({ current: 1, flag: null });
   });
