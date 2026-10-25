@@ -685,6 +685,7 @@ function EgressAllowListCard(props: {
           {
             key: "actions",
             header: "",
+            srHeader: "Actions",
             align: "right",
             render: (h) => (
               <Button size="sm" variant="danger" onClick={() => setRemove(h)}>
@@ -916,6 +917,7 @@ function ProvidersCard(props: {
           {
             key: "actions",
             header: "",
+            srHeader: "Actions",
             align: "right",
             render: (p) => {
               const s = connState(p);

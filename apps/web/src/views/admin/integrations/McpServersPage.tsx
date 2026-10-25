@@ -260,11 +260,13 @@ function McpEntitlementCard(props: { users: ReturnType<typeof useUsers>; servers
             {
               key: "revoked",
               header: "",
+              srHeader: "Status",
               render: (r) => (r.revoked ? <Badge tone="danger">revoked</Badge> : null),
             },
             {
               key: "actions",
               header: "",
+              srHeader: "Actions",
               align: "right",
               render: (r) => (
                 <RemoveButton

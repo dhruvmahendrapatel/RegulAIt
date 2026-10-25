@@ -635,6 +635,7 @@ function InitiativesCard(props: { initiatives: Initiative[]; loading: boolean })
           {
             key: "actions",
             header: "",
+            srHeader: "Actions",
             align: "right",
             render: (i) => (
               <div className={v.row} style={{ justifyContent: "flex-end" }}>

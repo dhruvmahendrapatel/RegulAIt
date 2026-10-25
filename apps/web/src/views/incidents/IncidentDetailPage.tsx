@@ -554,7 +554,7 @@ function LinksCard(props: { d: IncidentDetail; refetch: () => void }) {
         columns={[
           { key: "type", header: "Kind", render: (l) => LINK_LABEL[l.objectType] ?? l.objectType },
           { key: "id", header: "Record", render: (l) => <span>{l.label ?? <code>{l.objectId}</code>}</span> },
-          { key: "state", header: "", render: (l) => (l.halted ? <Badge tone="danger">halted</Badge> : null) },
+          { key: "state", header: "", srHeader: "Status", render: (l) => (l.halted ? <Badge tone="danger">halted</Badge> : null) },
         ]}
       />
       {props.d.permissions.canEdit && (
@@ -611,6 +611,7 @@ function ActionsCard(props: { d: IncidentDetail; refetch: () => void }) {
           {
             key: "act",
             header: "",
+            srHeader: "Actions",
             render: (x) =>
               props.d.permissions.canEdit && x.status === "open" ? (
                 <span className={v.row} style={{ gap: "var(--s1)" }}>

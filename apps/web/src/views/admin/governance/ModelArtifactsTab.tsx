@@ -173,6 +173,7 @@ export default function ModelArtifactsTab(props: {
             {
               key: "open",
               header: "",
+              srHeader: "Actions",
               align: "right",
               render: (a) => (
                 <Button size="sm" aria-label={`Open ${a.filename}`} aria-pressed={props.selected === a.id} onClick={() => props.onSelect(props.selected === a.id ? null : a.id)}>

@@ -151,6 +151,7 @@ export default function AgentsPage() {
               {
                 key: "actions",
                 header: "",
+                srHeader: "Actions",
                 align: "right",
                 render: (x) => (
                   <Button
@@ -930,11 +931,13 @@ function EntitlementCard(props: { uOpts: Array<{ v: string; l: string }>; agents
               {
                 key: "revoked",
                 header: "",
+                srHeader: "Status",
                 render: (x) => (x.revoked ? <Badge tone="danger">revoked</Badge> : null),
               },
               {
                 key: "actions",
                 header: "",
+                srHeader: "Actions",
                 align: "right",
                 render: (x) => (
                   <RemoveButton

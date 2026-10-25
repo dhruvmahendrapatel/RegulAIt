@@ -907,6 +907,11 @@ export function SeverityBadge(props: { severity: string; title?: string }) {
 export interface Column<T> {
   key: string;
   header: ReactNode;
+  /**
+   * the column's name for screen readers when `header` is "": "Actions" only where the cells are controls, otherwise
+   * what the cells hold ("Status", "Select"). Required in practice: kit.test.tsx fails on an empty header without it.
+   */
+  srHeader?: string;
   render: (row: T) => ReactNode;
   sort?: (row: T) => string | number;
   align?: "left" | "right";
@@ -989,8 +994,8 @@ export function Table<T>(props: TableProps<T>) {
                   key={c.key}
                   style={{ textAlign: c.align ?? "left", width: c.width }}
                   className={sortable ? s.thSortable : undefined}
-                  // an action column has no visible header; screen readers still get a column name
-                  aria-label={c.header === "" ? "Actions" : undefined}
+                  // a column with no visible header still has a name for screen readers, given by the column itself
+                  aria-label={c.header === "" ? c.srHeader : undefined}
                   // a folded column's sort is announced on the header that now shows it
                   aria-sort={sortKey != null && (c.sortKeys ?? [c.key]).includes(sortKey) ? (sortDir === 1 ? "ascending" : "descending") : undefined}
                   onClick={sortable ? () => by(c.key) : undefined}

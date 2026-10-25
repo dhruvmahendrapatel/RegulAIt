@@ -245,6 +245,7 @@ export function EnergyFactorsCard() {
             {
               key: "rm",
               header: "",
+              srHeader: "Actions",
               render: (f) => <RemoveButton what={`the energy factor for ${f.subject}`} consequence="Its calls read unknown from the next estimate." onRemove={() => api.del(`/v1/energy/factors/${f.id}`)} />,
             },
           ]}

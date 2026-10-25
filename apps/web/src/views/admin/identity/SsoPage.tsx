@@ -232,6 +232,7 @@ function OidcCard() {
           {
             key: "actions",
             header: "",
+            srHeader: "Actions",
             align: "right",
             render: (p) => (
               <span className={v.rowTight}>
@@ -532,6 +533,7 @@ function SamlCard() {
           {
             key: "actions",
             header: "",
+            srHeader: "Actions",
             align: "right",
             render: (p) => (
               <span className={v.rowTight}>
@@ -800,6 +802,7 @@ function LinkRequestsCard() {
           {
             key: "actions",
             header: "",
+            srHeader: "Actions",
             align: "right",
             render: (r) =>
               r.expired ? (

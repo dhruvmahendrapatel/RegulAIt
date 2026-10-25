@@ -456,11 +456,13 @@ function EntitlementCard(props: { users: ReturnType<typeof useUsers> }) {
             {
               key: "revoked",
               header: "",
+              srHeader: "Status",
               render: (r) => (r.revoked ? <Badge tone="danger">revoked</Badge> : null),
             },
             {
               key: "actions",
               header: "",
+              srHeader: "Actions",
               align: "right",
               render: (r) => (
                 <RemoveButton

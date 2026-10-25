@@ -191,6 +191,7 @@ export function ReportDefinitionDetail(props: { id: string; onClose: () => void;
               {
                 key: "o",
                 header: "",
+                srHeader: "Actions",
                 align: "right",
                 render: (s) =>
                   s.lastRunId ? (
@@ -259,6 +260,7 @@ export function ReportRunsCard(props: { definitions: Array<{ id: string; name: s
             {
               key: "o",
               header: "",
+              srHeader: "Actions",
               align: "right",
               render: (r) => (
                 <Button size="sm" aria-label={`Open the ${defName.get(r.definitionId) ?? "report"} run from ${ago(r.generatedAt)}`} onClick={() => props.onOpenRun(r.id)}>

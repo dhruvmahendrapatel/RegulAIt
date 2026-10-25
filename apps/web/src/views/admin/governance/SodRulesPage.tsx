@@ -425,6 +425,7 @@ export default function SodRulesPage() {
                   {
                     key: "actions",
                     header: "",
+                    srHeader: "Actions",
                     align: "right",
                     render: (r) => (
                       <span className={v.rowTight} style={{ justifyContent: "flex-end" }}>

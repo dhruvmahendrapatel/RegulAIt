@@ -366,6 +366,7 @@ function BlastRadiusPanel() {
           {
             key: "open",
             header: "",
+            srHeader: "Actions",
             align: "right",
             render: (r) => (
               <Button

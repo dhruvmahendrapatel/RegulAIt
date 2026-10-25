@@ -418,6 +418,7 @@ export default function RegulAItLlmPage() {
                 {
                   key: "configure",
                   header: "",
+                  srHeader: "Actions",
                   align: "right",
                   render: (r) => (
                     <BackendConfigActions
@@ -865,6 +866,7 @@ export default function RegulAItLlmPage() {
                 {
                   key: "act",
                   header: "",
+                  srHeader: "Actions",
                   render: (r) =>
                     ["running", "queued", "pending_approval"].includes(r.status) ? (
                       <span className={v.row}>

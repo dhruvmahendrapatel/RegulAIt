@@ -204,6 +204,7 @@ function DeliveriesModal(props: { sub: Subscription | null; onClose: () => void 
             {
               key: "actions",
               header: "",
+              srHeader: "Actions",
               render: (r) =>
                 r.status === "failed" && r.event !== "webhook.test" ? (
                   <Button
@@ -435,6 +436,7 @@ export default function WebhooksPage() {
                   {
                     key: "actions",
                     header: "",
+                    srHeader: "Actions",
                     render: (r) => (
                       <div className={v.row}>
                         <Button

@@ -414,6 +414,7 @@ function ScopeRulesCard() {
           {
             key: "actions",
             header: "",
+            srHeader: "Actions",
             align: "right",
             render: (r) => (
               <div className={v.row} style={{ justifyContent: "flex-end" }}>

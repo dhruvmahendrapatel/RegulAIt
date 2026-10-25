@@ -689,6 +689,7 @@ export default function EvalsPage() {
                   {
                     key: "actions",
                     header: "",
+                    srHeader: "Actions",
                     align: "right",
                     render: (r) => (
                       <RemoveButton

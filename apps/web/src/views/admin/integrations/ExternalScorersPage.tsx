@@ -240,6 +240,7 @@ export default function ExternalScorersPage() {
                   {
                     key: "actions",
                     header: "",
+                    srHeader: "Actions",
                     render: (r) => (
                       <div className={v.row}>
                         <Button

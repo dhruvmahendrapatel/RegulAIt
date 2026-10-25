@@ -585,6 +585,7 @@ function ConditionsCard(props: {
             {
               key: "act",
               header: "",
+              srHeader: "Actions",
               align: "right",
               render: (row) => (
                 <span className={mc.actions}>

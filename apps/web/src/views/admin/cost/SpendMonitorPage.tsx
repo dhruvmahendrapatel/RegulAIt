@@ -366,6 +366,7 @@ export default function SpendMonitorPage() {
                     {
                       key: "act",
                       header: "",
+                      srHeader: "Actions",
                       render: (r) =>
                         r.status !== "open" ? null : (
                           <Button
@@ -451,6 +452,7 @@ export default function SpendMonitorPage() {
                     {
                       key: "act",
                       header: "",
+                      srHeader: "Actions",
                       render: (c) => (
                         <Button
                           variant="ghost"
