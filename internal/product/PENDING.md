@@ -34,6 +34,18 @@ Ordered by what actually blocks a sale, not by ADR number.
 
 ---
 
+## 2b. Product gaps found by a market comparison — post-demo backlog (owner, 2026-10-26)
+
+The owner put these on the backlog after RegulAIt was compared with a governance product for employees' AI tools
+(#453 comment 6416122421). Neither is demo-blocking, and neither is built before 2026-11-03. Each needs its own ADR.
+
+| # | Gap | What it would take |
+|---|---|---|
+| **P1** | **On-device enforcement.** Endpoint coverage only discovers: the agentless MDM/EDR inventory import and a read-only endpoint agent ([ADR-0195](../decisions/0195-shadow-ai-active-discovery.md), [ADR-0197](../decisions/0197-demo-2026-11-01-plan-and-owner-decisions.md)). Nothing on an employee's machine blocks an unapproved model endpoint or MCP server. Calls through the gateway are governed; calls that bypass it are only discovered. | A signed, MDM-deployable client that enforces the same per-user policy locally: block unapproved model hosts and MCP servers, and steer AI tools to the gateway's single governed endpoint. It needs signed policy pulled from the control plane, tamper reporting into the audit chain, and an honest offline mode. Search for open-source endpoint-policy components first (ADR-0176). |
+| **P2** | **A live, synced context graph.** Shared Projects ([ADR-0011](../decisions/0011-shared-projects-on-one-project-entity.md), pillar 4) hold a governed context store with provenance, but nothing continuously ingests people, customers, tickets and documents from the source systems into one graph that agents can query. | Incremental sync from the existing connectors and PM, git and identity integrations into a graph. Every node and edge carries its source's access control, and queries are filtered by the caller's per-user entitlements, so a graph never widens what a user could already read. Provenance and retention follow the compliance cascade. Use an existing open-source graph or index store rather than a hand-built one (ADR-0176). |
+
+---
+
 ## 3. Structural gaps — the ADR shipped, a named half did not
 
 These are cases where an ADR is Accepted and genuinely working, but a specific clause is
