@@ -77,3 +77,9 @@ An inventory of origin/main (2026-10-25) found the following:
 
   It does not open a PR or update Jira/Azure DevOps work items. Those are shown in the demo's own git-PR and PM-sync beats (lane L's beat ids `git-pr` and `pm-sync`).
 - **Resend is called through its REST API, not its SDK (#568, as built).** Decision 2 named Resend's official SDK. The SDK cannot route requests through an injected fetch, reads `RESEND_*` environment variables and logs error bodies. It therefore fails the requirement that the egress guard decides every outbound request. Under ADR-0176 rule 4, the channel calls `POST /emails` through the guarded fetch instead. The check is recorded in `packages/connector-provider/THIRD_PARTY.md`.
+
+## Addendum: 2026-10-26, hosting moves to the laptop behind a Cloudflare Tunnel
+
+Decision 3's "existing AWS dev host" no longer exists. Under [ADR-0203](0203-demo-hosting-after-aws-org-loss.md)
+(owner, #453 c6406353285) the demo runs on the owner's laptop, published at the same subdomain through a Cloudflare
+Tunnel, and the live AWS discovery uses a new sandbox account in the company AWS account.
