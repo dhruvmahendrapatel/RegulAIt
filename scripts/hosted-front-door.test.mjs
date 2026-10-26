@@ -156,6 +156,8 @@ describe("boot-resync.sh in hosted mode", () => {
 describe("compose and Caddy wiring", () => {
   const compose = readFileSync(path.join(ROOT, "docker-compose.yml"), "utf8");
   const caddyfile = readFileSync(path.join(ROOT, "infra/caddy/Caddyfile"), "utf8");
+  // the routes and headers moved to a snippet file shared with the tunnel front (ADR-0203 lane T)
+  const routes = readFileSync(path.join(ROOT, "infra/caddy/routes.Caddyfile"), "utf8");
   const caddyService = compose.slice(compose.indexOf("\n  caddy:\n"), compose.indexOf("\nnetworks:"));
 
   it("the TLS front is opt-in: profile `hosted` (and `tls`), never the default stack", () => {
@@ -181,13 +183,16 @@ describe("compose and Caddy wiring", () => {
   });
 
   it("only Keycloak's public surface is proxied; the rest of /idp is refused", () => {
-    expect(caddyfile).toMatch(/@idp_public path \/idp\/realms\/\* \/idp\/resources\/\*\n/);
-    expect(caddyfile).toMatch(/handle \/idp\* \{\n\t\trespond 404\n\t\}/);
+    expect(caddyfile).toMatch(/\nimport routes\.Caddyfile\n/);
+    expect(caddyfile).toMatch(/\n\timport regulait_routes \{remote_host\} https\n/);
+    expect(routes).toMatch(/@idp_public path \/idp\/realms\/\* \/idp\/resources\/\*\n/);
+    expect(routes).toMatch(/handle \/idp\* \{\n\t\trespond 404\n\t\}/);
     // the Keycloak route sits before the catch-all gateway handle
-    expect(caddyfile.indexOf("handle @idp_public")).toBeLessThan(caddyfile.indexOf("reverse_proxy {$REGULAIT_TLS_UPSTREAM"));
+    expect(routes.indexOf("handle @idp_public")).toBeLessThan(routes.indexOf("reverse_proxy {$REGULAIT_TLS_UPSTREAM"));
   });
 
   it("HSTS stays owned by the gateway, not the proxy (ADR-0029 amendment)", () => {
     expect(caddyfile).not.toMatch(/^\s*Strict-Transport-Security/m);
+    expect(routes).not.toMatch(/^\s*Strict-Transport-Security/m);
   });
 });

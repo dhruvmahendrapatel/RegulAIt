@@ -1,0 +1,84 @@
+# RegulAIt — the Cloudflare Tunnel front (ADR-0203 lane T).
+#
+# The laptop-hosted demo has no inbound port. Cloudflare terminates TLS at its
+# edge for the public name, and `cloudflared` (compose profile `tunnel`) holds
+# an OUTBOUND connection to Cloudflare and hands each request to THIS Caddy as
+# plain HTTP over a private compose network (`tunnel`) that only the two of
+# them are on. From here on the request takes the same routes as the TLS front
+# (./routes.Caddyfile): the /idp allow-list, the gateway proxy, the overwritten
+# forwarding headers.
+#
+#   internet --HTTPS--> Cloudflare edge <--outbound tunnel-- cloudflared
+#        --HTTP, `tunnel` network--> this Caddy (172.28.0.2 on `regulait`)
+#        --> gateway:3000 / keycloak:8080
+#
+# This file never asks for a certificate: there is no ACME, no :80, no :443, no
+# published port. Caddy listens on ONE address, its own on the `tunnel`
+# network, so nothing on the `regulait` network (db, object store, Keycloak,
+# the gateway itself) can reach this listener at all.
+#
+# Who may speak for the client, and how that is checked:
+#
+#   * The peer must be the cloudflared container's fixed address. Anything else
+#     is dropped before any header is read. That is what makes it safe to read
+#     CF-Connecting-IP below: Cloudflare's edge sets that header itself
+#     (overwriting a client-sent one), and only cloudflared can reach here.
+#   * CF-Connecting-IP must be present and look like one IP address, or the
+#     request is refused (400). It becomes X-Forwarded-For / X-Real-IP; the
+#     header itself is then stripped (routes.Caddyfile), so nothing behind
+#     Caddy ever reads it. Any client-sent X-Forwarded-For is discarded.
+#   * Cloudflare's edge sets X-Forwarded-Proto to the scheme the browser used.
+#     Anything but exactly `https` is redirected to https:// before proxying,
+#     so the `https` this front then sends upstream is true. (Turn on "Always
+#     Use HTTPS" for the zone too: docs/deployment/TUNNEL.md.)
+#   * The site only answers for REGULAIT_PUBLIC_HOST; another Host header gets
+#     no route.
+#
+# The gateway and Keycloak keep trusting X-Forwarded-* from 172.28.0.2 only
+# (ADR-0031). This front holds that address on the `regulait` network, exactly
+# like the TLS front, which is why the `tunnel` and `hosted`/`tls` profiles are
+# mutually exclusive: start both and compose refuses the second container
+# ("Address already in use"). One public door at a time.
+#
+#   REGULAIT_PUBLIC_HOST             the public name (REQUIRED; the default is a
+#                                    `.invalid` placeholder that matches no real
+#                                    request, so an unset host serves nothing)
+#   REGULAIT_TUNNEL_CADDY_ADDR       this listener's address  (compose sets it)
+#   REGULAIT_TUNNEL_CLOUDFLARED_ADDR the only peer accepted   (compose sets it)
+{
+	# No certificates, no HTTP->HTTPS redirect server, no ACME: TLS ends at
+	# Cloudflare's edge.
+	auto_https off
+}
+
+import routes.Caddyfile
+
+http://{$REGULAIT_PUBLIC_HOST:set-regulait-public-host.invalid}:8080 {
+	bind {$REGULAIT_TUNNEL_CADDY_ADDR:127.0.0.1}
+
+	@not_cloudflared not remote_ip {$REGULAIT_TUNNEL_CLOUDFLARED_ADDR:127.0.0.1}/32
+	# Matched on the placeholder, not with the `header` matcher: a placeholder
+	# joins repeated header lines with a comma, so a second X-Forwarded-Proto or
+	# CF-Connecting-IP line fails the anchored pattern instead of slipping past
+	# a matcher that accepts any one matching line.
+	@not_https not vars_regexp {http.request.header.X-Forwarded-Proto} ^https$
+	# one IPv4 or IPv6 address, nothing else (no list, no port, no name)
+	@bad_client_ip not vars_regexp {http.request.header.CF-Connecting-IP} ^[0-9A-Fa-f:.]{2,45}$
+
+	import regulait_headers
+
+	# `route` keeps these in the written order: the peer check first, then the
+	# scheme, then the client address, and only then the shared routes.
+	route {
+		abort @not_cloudflared
+		redir @not_https https://{host}{uri} 308
+		respond @bad_client_ip "missing or malformed CF-Connecting-IP" 400
+		import regulait_routes {http.request.header.CF-Connecting-IP} https
+	}
+
+	# Access log to stdout, so `docker compose logs caddy-tunnel` is the one place to look.
+	log {
+		output stdout
+		format console
+	}
+}
