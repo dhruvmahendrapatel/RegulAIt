@@ -34,7 +34,7 @@
 
 # ---- stage 1: the Python closure ----------------------------------------------------------------
 FROM --platform=linux/amd64 node:22-trixie-slim@sha256:8eb619e402eaede1748a3c8173bffab391592812e85136452f781741c7242ddf AS node
-FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS closure
+FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704 AS closure
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 WORKDIR /build
 COPY engines/modelscan/requirements.txt engines/modelscan/licence-gate.mjs engines/modelscan/licence-allow.json ./
@@ -66,7 +66,7 @@ RUN NODE_OPTIONS=--max-old-space-size=3072 pnpm install --frozen-lockfile \
  && node scripts/engine-images-normalise.mjs modules-yaml /out/node_modules/.modules.yaml
 
 # ---- stage 3: runtime ---------------------------------------------------------------------------
-FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS runtime
+FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704 AS runtime
 LABEL org.opencontainers.image.title="regulait-engine-modelscan" \
       org.regulait.engine="modelscan" \
       org.regulait.engine-version="0.8.8" \
