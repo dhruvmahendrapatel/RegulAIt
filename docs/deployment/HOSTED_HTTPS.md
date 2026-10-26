@@ -29,6 +29,9 @@ This change lets the box serve a **name you choose** instead:
 
 With no profile, `docker compose up` is the laptop demo on `http://localhost:3000`, unchanged.
 
+For the laptop-hosted demo behind a Cloudflare Tunnel (no inbound port, no ACME), use the `tunnel` profile instead:
+[TUNNEL.md](TUNNEL.md). It shares this front's routes (`infra/caddy/routes.Caddyfile`) and its trusted address.
+
 ## Variables
 
 | Variable | Example | Meaning |

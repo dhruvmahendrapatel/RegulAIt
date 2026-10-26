@@ -1013,6 +1013,8 @@ services:
       - "443:443/udp" # HTTP/3
     volumes:
       - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # the headers and routes shared with the `tunnel` front (caddy-tunnel)
+      - ./infra/caddy/routes.Caddyfile:/etc/caddy/routes.Caddyfile:ro
       # THE operationally critical bit: /data holds the ACME account key and
       # every issued certificate. Without a named volume, each `compose up`
       # (i.e. every deploy) starts from an empty /data and re-issues from
@@ -1027,6 +1029,95 @@ services:
         # hands out whatever is free and the only expressible trust would be
         # the whole subnet — which would also cover the db container.
         ipv4_address: 172.28.0.2
+
+
+  # --- the `tunnel` front (ADR-0203 lane T) ----------------------------------
+  # The laptop-hosted demo: no inbound port at all. Cloudflare terminates TLS at
+  # its edge for REGULAIT_PUBLIC_HOST; `cloudflared` holds an outbound-only
+  # connection to Cloudflare and hands each request to `caddy-tunnel` over the
+  # private `tunnel` network as plain HTTP; caddy-tunnel takes the same routes as
+  # the TLS front (infra/caddy/routes.Caddyfile). docs/deployment/TUNNEL.md.
+  #
+  #   docker compose --profile tunnel up -d     (add --profile sso for sign-in)
+  #
+  # `tunnel` replaces `hosted`/`tls`, it does not stack on them: caddy-tunnel
+  # holds the TLS front's fixed address 172.28.0.2, the ONLY address the gateway
+  # (REGULAIT_TRUSTED_PROXIES) and Keycloak (KC_PROXY_TRUSTED_ADDRESSES) accept
+  # X-Forwarded-* from (ADR-0031), so neither trust list changes. Starting both
+  # fronts makes compose refuse the second one ("Address already in use").
+  caddy-tunnel:
+    <<: *caddy
+    profiles: ["tunnel"]
+    depends_on:
+      - gateway
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    # the image's caddy binary carries the file capability cap_net_bind_service; exec fails without it in the
+    # bounding set (the listener itself is on 8080).
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    pids_limit: 64
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+      # no certificates are ever issued here (auto_https off); Caddy still wants
+      # writable state directories, and nothing in them needs to survive
+      - /data:size=8m,mode=0700
+      - /config:size=8m,mode=0700
+    environment:
+      # The public name. Unset, the site answers for a `.invalid` placeholder,
+      # i.e. for nothing. infra/scripts/hosted-config.sh tunnel-check verifies it
+      # against REGULAIT_PUBLIC_URL (and the Keycloak hostname) before `up`.
+      REGULAIT_PUBLIC_HOST: ${REGULAIT_PUBLIC_HOST:-}
+      REGULAIT_TLS_UPSTREAM: ${REGULAIT_TLS_UPSTREAM:-gateway:3000}
+      REGULAIT_KC_UPSTREAM: ${REGULAIT_KC_UPSTREAM:-keycloak:8080}
+      # the listener's own address on `tunnel`, and the one peer it accepts;
+      # both must match the ipv4_address pins below
+      REGULAIT_TUNNEL_CADDY_ADDR: 192.168.255.250
+      REGULAIT_TUNNEL_CLOUDFLARED_ADDR: 192.168.255.251
+    # NO `ports:`. The listener binds only its `tunnel` address.
+    volumes:
+      - ./infra/caddy/tunnel.Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./infra/caddy/routes.Caddyfile:/etc/caddy/routes.Caddyfile:ro
+    networks:
+      regulait:
+        # the TLS front's address: see the block comment above
+        ipv4_address: 172.28.0.2
+      tunnel:
+        ipv4_address: 192.168.255.250
+
+  cloudflared:
+    # pinned: cloudflare/cloudflared:2026.10.3 (Apache-2.0), the OCI index digest
+    # resolved against Docker Hub on 2026-10-26. infra/THIRD_PARTY.md.
+    image: cloudflare/cloudflared:2026.10.3@sha256:faa8e0a1475f137c910be6025f43c8e4092fdd35461b31e19fd1390657a1ff39
+    profiles: ["tunnel"]
+    depends_on:
+      - caddy-tunnel
+    restart: unless-stopped
+    # A REMOTELY MANAGED tunnel: the public hostname and its service URL
+    # (http://caddy-tunnel:8080) live in the Cloudflare dashboard, and the token
+    # is the tunnel's only credential. cloudflared reads it from TUNNEL_TOKEN, so
+    # it never appears on a command line or in `ps`. It comes from the
+    # operator's environment or untracked .env, never from a file in this
+    # repository; an empty token makes cloudflared exit with an error (no
+    # tunnel, nothing exposed). `--no-autoupdate`: the image digest is the
+    # version, and an air-gapped-style pin must not replace its own binary.
+    command: ["tunnel", "--no-autoupdate", "--metrics", "127.0.0.1:20241", "run"]
+    environment:
+      TUNNEL_TOKEN: ${REGULAIT_CF_TUNNEL_TOKEN:-}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    pids_limit: 64
+    # NO `ports:`. Only outbound connections (to Cloudflare on 7844, QUIC or
+    # HTTP/2). It is on `tunnel` ONLY, so even a dashboard service URL pointed
+    # at gateway:3000, keycloak:8080 or db:5432 resolves to nothing: the one
+    # thing it can reach inside the stack is caddy-tunnel.
+    networks:
+      tunnel:
+        ipv4_address: 192.168.255.251
 
 # ADR-0031: an explicit network with a pinned subnet, rather than the implicit
 # default one, purely so the proxy's address is deterministic and can be named
@@ -1052,6 +1143,18 @@ networks:
   # self-test proves it from inside the runner). Not in REGULAIT_TRUSTED_PROXIES.
   engines:
     internal: true
+  # ADR-0203 lane T: cloudflared's only network, shared with caddy-tunnel and
+  # nothing else. Not internal (cloudflared must reach Cloudflare). The /29 is
+  # pinned so caddy-tunnel can bind to, and accept requests only from, fixed
+  # addresses. Only the `tunnel` profile's two services join it, so with that
+  # profile off the network is never created. If 192.168.255.248/29 collides
+  # with something on the host, change it here together with the two
+  # ipv4_address pins and the two REGULAIT_TUNNEL_*_ADDR values above.
+  tunnel:
+    ipam:
+      config:
+        - subnet: 192.168.255.248/29
+          gateway: 192.168.255.249
   regulait:
     ipam:
       config:
