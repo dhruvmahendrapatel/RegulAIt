@@ -1,11 +1,11 @@
 variable "aws_region" {
-  description = "Region of every resource here; must be in the Organization's region allow-list SCP."
+  description = "Region of every resource here; must be in allowed_regions of ../account (the sandbox guardrail SCP)."
   type        = string
   default     = "us-east-1"
 }
 
 variable "management_sso_profile" {
-  description = "AWS CLI Identity Center profile for the management account (it assumes into the sandbox)."
+  description = "AWS CLI Identity Center profile for the company (management) account; it assumes into the sandbox."
   type        = string
 }
 
@@ -24,11 +24,18 @@ variable "sandbox_access_role_name" {
 }
 
 variable "regulait_federation_issuer_url" {
-  description = "RegulAIt's federation issuer: REGULAIT_PUBLIC_URL of the demo instance plus /federation (shown on the Cloud federation card)."
+  description = "RegulAIt's federation issuer: REGULAIT_PUBLIC_URL of the demo instance plus /federation (shown on the Cloud federation card). For the laptop behind the Cloudflare Tunnel that is https://regulait.<domain>/federation."
   type        = string
   validation {
     condition     = startswith(var.regulait_federation_issuer_url, "https://") && endswith(var.regulait_federation_issuer_url, "/federation")
-    error_message = "regulait_federation_issuer_url must be https://<host>/federation (REGULAIT_PUBLIC_URL plus /federation)."
+    error_message = "regulait_federation_issuer_url must be https://<host>/federation (REGULAIT_PUBLIC_URL plus /federation); plain http is refused."
+  }
+  validation {
+    # IAM fetches the issuer over the public internet, and the trust policy is
+    # keyed on the exact host: a loopback, an IP literal or a rotating
+    # trycloudflare.com quick-tunnel name would never verify, or would break.
+    condition     = !can(regex("^https://(localhost|127\\.|\\[|[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+[:/])|\\.trycloudflare\\.com[:/]", var.regulait_federation_issuer_url))
+    error_message = "regulait_federation_issuer_url must use a stable public DNS name (a named Cloudflare Tunnel hostname), not localhost, an IP address or a trycloudflare.com quick tunnel."
   }
 }
 
@@ -57,7 +64,7 @@ variable "allow_cross_region_inference" {
 }
 
 variable "bedrock_allowed_regions" {
-  description = "Regions the Organization's region allow-list SCP allows. Every ARN in bedrock_extra_invoke_arns must name one of them (or none, for a global ARN)."
+  description = "Regions the sandbox guardrail SCP allows (allowed_regions in ../account; keep the two equal). Every ARN in bedrock_extra_invoke_arns must name one of them (or none, for a global ARN)."
   type        = list(string)
   default     = ["us-east-1", "us-east-2"]
 }

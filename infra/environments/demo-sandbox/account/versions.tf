@@ -10,6 +10,6 @@ terraform {
 
   backend "s3" {
     # Filled via `terraform init -backend-config=backend.hcl` (see backend.hcl.example):
-    # the same state bucket as infra/environments/regulait-dev, its own key.
+    # the state bucket infra/bootstrap creates in the company account, its own key.
   }
 }

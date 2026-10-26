@@ -91,3 +91,18 @@ variable "tags" {
     error_message = "A sandbox account never carries a prod or production tag."
   }
 }
+
+variable "enable_guardrails" {
+  description = "Attach the guardrail SCP (region allow-list, no LeaveOrganization, no StopLogging or DeleteTrail) to the account. Needs the SERVICE_CONTROL_POLICY policy type enabled on the Organization root."
+  type        = bool
+  default     = true
+}
+
+variable "allowed_regions" {
+  description = "Regions the guardrail SCP allows; every other region is denied except for global services."
+  type        = list(string)
+  validation {
+    condition     = length(var.allowed_regions) >= 1 && alltrue([for r in var.allowed_regions : can(regex("^[a-z]{2}(-[a-z]+)+-[0-9]$", r))])
+    error_message = "Give at least one region, e.g. us-east-1."
+  }
+}

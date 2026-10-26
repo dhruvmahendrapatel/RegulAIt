@@ -19,7 +19,7 @@ ADR-0202 adds the live GitHub, Jira Cloud, Azure DevOps and Slack accounts: see
 
 | Stack | Directory | Creates | Expected cost |
 |---|---|---|---|
-| Sandbox account | `infra/environments/demo-sandbox/account` | A member account in the Organization (tagged `Environment=sandbox`, `Purpose=demo`; nothing production), a USD 40 total budget from 2026-10-01 with an alert at 80% and a forecast alert at 100%, and an automatic spend cap: at 100% AWS Budgets attaches an SCP denying Bedrock invocation and Lambda invocation to the account | none |
+| Sandbox account | `infra/environments/demo-sandbox/account` | A member account in the company account's Organization (tagged `Environment=sandbox`, `Purpose=demo`; nothing production), a USD 40 total budget from 2026-10-01 with an alert at 80% and a forecast alert at 100%, and an automatic spend cap: at 100% AWS Budgets attaches an SCP denying Bedrock invocation and Lambda invocation to the account; a guardrail SCP on the account (region allow-list, no leaving the Organization, no stopping or deleting the trail) | none |
 | Sandbox workload | `infra/environments/demo-sandbox/aws` | A CloudTrail trail (management events, private bucket, 30-day expiry); the role `regulait-ai-discovery` trusting RegulAIt's federation issuer for one discovery source; two scheduled Bedrock generators (`larkfield-support-reply-bot`, `larkfield-invoice-summariser`); one Bedrock guardrail | under USD 1 per month (worked figure in the stack's `main.tf`) |
 | Azure | `infra/environments/demo-sandbox/azure` | Resource group `rg-larkfield-ai-demo` with one Azure OpenAI account (key authentication off) and one pay-per-token deployment, a Logic App calling it every 3 hours with its managed identity, diagnostic logs to a capped Log Analytics workspace, a budget alerting at 80%; an Entra app registration with a federated credential for RegulAIt's issuer, Reader on the resource group and an activity-log-only role on the subscription | under USD 1 per month |
 | GitLab | `infra/environments/demo-sandbox/gitlab` | Four private projects in the owner's demo group, seeded from `infra/demo-fixtures/gitlab/` (fictional company Larkfield Outfitters), and a group access token with `read_api` and `read_repository` only | none (needs a Premium or Ultimate group for the token, see step 6) |
@@ -39,8 +39,9 @@ in each stack's `terraform.tfvars` (git-ignored): pick the lowest-priced text mo
 
 ## Owner actions before starting
 
-1. **AWS.** An Identity Center session on the management account that may create accounts, budgets, SCPs and IAM roles
-   (the `Admin-BreakGlass` permission set). The new account counts against the Organization's account quota.
+1. **AWS.** The company AWS account, with Organizations and IAM Identity Center enabled and an admin permission set
+   (step 3a-3c); an Identity Center session in it creates accounts, budgets, SCPs and IAM roles. The July Organization is
+   deleted and nothing here depends on it. The sandbox counts against the new Organization's account quota.
 2. **Azure.** In the tenant, the right to register applications and create service principals. On the subscription,
    Owner (or Contributor plus User Access Administrator). Quota for the chosen model and deployment type in the region.
 3. **GitLab.** A top-level demo group on gitlab.com created in the UI, with a fictional name. A group access token needs
@@ -55,77 +56,45 @@ in each stack's `terraform.tfvars` (git-ignored): pick the lowest-priced text mo
 
 ## Step 1: make the federation issuer publicly reachable (pending execution)
 
-The clouds verify RegulAIt's federation tokens by fetching, over public HTTPS:
+The issuer is served from the owner's laptop through a named Cloudflare Tunnel at `https://regulait.<domain>` (owner
+decision on #453; lane T of ADR-0203 owns the tunnel, `docker-compose.yml` and Caddy, and its runbook section has the
+tunnel commands). This step only states what the AWS stacks need from it. The clouds verify RegulAIt's federation
+tokens by fetching, over public HTTPS:
 
-- `https://<demo-host>/federation/.well-known/openid-configuration`
-- `https://<demo-host>/federation/.well-known/jwks.json`
+- `https://regulait.<domain>/federation/.well-known/openid-configuration`
+- `https://regulait.<domain>/federation/.well-known/jwks.json`
 
-Both routes are served by the gateway (`apps/gateway/src/federation-routes.ts`, ADR-0195 SD2b) and are public. Caddy
-(`infra/caddy/Caddyfile`) already proxies every path to the gateway over the Let's Encrypt certificate, and ports 80 and
-443 are open (`infra/environments/regulait-dev-app`). What was missing is the issuer itself: it is
-`<REGULAIT_PUBLIC_URL>/federation`, and the dev box never set `REGULAIT_PUBLIC_URL`. Compose passes the gateway and the
-engine runners an empty value (only Keycloak falls back to `http://localhost:3000`), so the discovery document answers
-404 and no public issuer exists.
+Both routes are served by the gateway (`apps/gateway/src/federation-routes.ts`, ADR-0195 SD2b). The issuer is
+`<REGULAIT_PUBLIC_URL>/federation`, so the laptop's `REGULAIT_PUBLIC_URL` must be exactly `https://regulait.<domain>`,
+with no trailing slash. The `aws` stack refuses an issuer that is plain `http://`, does not end in `/federation`, or
+uses `localhost`, an IP address or a `trycloudflare.com` quick-tunnel name (those names change on every restart, and the
+IAM trust is keyed on the exact host).
 
-This change fixes it for every new instance: `infra/modules/app-instance/user-data.sh.tftpl` now writes
-`REGULAIT_PUBLIC_URL=https://<sslip host>` to `/opt/app/.env`, which compose interpolates into the gateway and the
-engine runners. `terraform output federation_issuer_url` in `infra/environments/regulait-dev-app` prints the issuer.
+**1a. Keep the laptop and the tunnel up** (pending execution) whenever a cloud must reach the issuer: when IAM creates
+the OIDC provider (step 4), and at every scan.
 
-Two things to know about the running box:
-
-- User data runs only on an instance's first boot, so the **running** box needs the value set by hand once (1b).
-- The next `terraform apply` of `infra/environments/regulait-dev-app` sees the changed user data. The AWS provider
-  applies a user-data change by stopping and starting the instance (the Elastic IP keeps the address; the database
-  volume is kept). Apply it outside demo and rehearsal hours.
-
-**1a. Keep the box on** (owner action 5): pending execution.
-
-**1b. Set the public URL on the running box** (pending execution). Open an SSM session to the instance
-(`terraform output instance_id` in `infra/environments/regulait-dev-app`), then in `/opt/app`:
-
-```bash
-# pending execution
-grep -q '^REGULAIT_PUBLIC_URL=' /opt/app/.env \
-  || echo "REGULAIT_PUBLIC_URL=https://<sslip host>" | sudo tee -a /opt/app/.env
-cd /opt/app && sudo docker compose --profile tls up -d
-```
-
-The guard keeps a second run from adding a duplicate line. The value must be exactly the origin users reach
-(`terraform output app_url`), with no trailing slash. The gateway refuses to boot on an invalid value (ADR-0121), so
-check the gateway logs after the restart.
-
-Setting `REGULAIT_PUBLIC_URL` turns on more than the federation issuer. The same value becomes:
-
-- the issuer and endpoint of the ADR-0188 self-token (the gateway's own OAuth tokens);
-- the passkey relying-party origin, so passkeys are bound to this origin;
-- the public URLs in the MCP authorization metadata, SAML and step-up flows;
-- Keycloak's public URL (`docker-compose.yml`), in place of `http://localhost:3000`.
-
-So after 1b, check on the public URL (pending execution) that admin sign-in works, that a step-up prompt completes,
-and that the **Cloud federation** card shows the issuer `https://<sslip host>/federation`. If sign-in breaks, remove
-the line from `/opt/app/.env` and run the same `docker compose` command to go back.
-
-**1c. Turn federation on in RegulAIt** (pending execution). Admin, **Shadow AI > Discovery sources**
+**1b. Turn federation on in RegulAIt** (pending execution). Admin, **Shadow AI > Discovery sources**
 (`/admin/shadow-ai/discovery-sources`), **Cloud federation** card: generate a key, then turn federation on (a
-`settings_relax` step-up). The card shows the issuer, the subject format and the audiences.
+`settings_relax` step-up). The card must show the issuer `https://regulait.<domain>/federation`.
 
-**1d. Check from outside the box** (pending execution), from any machine:
+**1c. Check from outside the laptop** (pending execution), for example from a phone hotspot, in PowerShell:
 
-```bash
+```powershell
 # pending execution
-curl -fsS https://<demo-host>/federation/.well-known/openid-configuration
-curl -fsS https://<demo-host>/federation/.well-known/jwks.json
+curl.exe -fsS https://regulait.<domain>/federation/.well-known/openid-configuration
+curl.exe -fsS https://regulait.<domain>/federation/.well-known/jwks.json
 ```
 
-The first document's `issuer` must equal `https://<demo-host>/federation` and its `jwks_uri` must be the second URL;
-the key set must hold one `RSA` key with `alg` `RS256`. A 404 with `federation_issuer_unset` means 1b did not take.
+The first document's `issuer` must equal `https://regulait.<domain>/federation` and its `jwks_uri` must be the second
+URL; the key set must hold one `RSA` key with `alg` `RS256`. A 404 with `federation_issuer_unset` means
+`REGULAIT_PUBLIC_URL` is not set on the laptop.
 
 ## Step 2: create the four discovery sources in RegulAIt (pending execution)
 
 Each trust policy names its source's id (subject `regulait:discovery-source:<source id>`), so create the sources first
 and leave them disabled. **Prepare the live database before this step, once** (`demo:prepare --live`,
 [DEMO_RUNBOOK.md §7.1](DEMO_RUNBOOK.md#71-what-runs-where)): re-preparing afterwards makes new source ids,
-and every federated run then fails until both stacks are re-applied. Never run `docker compose down -v` on the dev
+and every federated run then fails until both stacks are re-applied. Never run `docker compose down -v` on the live
 host. On **Shadow AI > Discovery sources** (`/admin/shadow-ai/discovery-sources`), choose a kind and
 save:
 
@@ -138,40 +107,81 @@ save:
 Copy each cloud and GitLab source's id for the stacks below. Do not add an `endpoint_agent` source on the live
 instance.
 
-## Step 3: the sandbox account (pending execution)
+## Step 3: the company account and the sandbox account (pending execution)
+
+The July Organization (management account plus `regulait-dev`) is deleted. Everything here runs in the new company
+AWS account, which becomes the management account of a new Organization; the sandbox is a member account inside it.
+No IAM user and no access key is created at any point (ADR-0004).
+
+**3a. Organizations** (pending execution, console, signed in to the company account). AWS Organizations > Create an
+organization, with all features. The company account becomes the management account.
+
+**3b. IAM Identity Center** (pending execution, console). IAM Identity Center > Enable (an organization instance, in
+the region you will use, e.g. `us-east-1`). Create your user, create a permission set based on `AdministratorAccess`
+(any name, e.g. `<admin-permission-set>`), and assign it to your user on the company account. Use it only for these
+stacks and the bootstrap. Note the AWS access portal URL.
+
+**3c. The CLI profile** (pending execution, PowerShell):
+
+```powershell
+# pending execution
+aws configure sso --profile <company-account-sso-profile-name>   # portal URL from 3b, region, the admin permission set
+aws sso login --profile <company-account-sso-profile-name>
+aws sts get-caller-identity --profile <company-account-sso-profile-name>   # Account = the company account, Arn = ...AWSReservedSSO_...
+```
+
+**3d. The state backend** (pending execution). `infra/bootstrap/bootstrap-backend.sh` creates the KMS key, the state
+bucket and the lock table in the company account, enables the SCP policy type on the Organization root (the sandbox
+guardrails and the spend cap are SCPs), and writes a git-ignored `backend.hcl` into `demo-sandbox/account` and
+`demo-sandbox/aws`. It refuses to run, before creating anything, if the profile resolves to any account other than
+`EXPECTED_ACCOUNT_ID`, if the session is not an Identity Center role, if the account is not the management account of
+an all-features Organization, or if the bucket, table or key alias already exists. Run it from Git Bash in the repo
+root, preflight first:
 
 ```bash
+# pending execution, Git Bash, repo root
+export AWS_PROFILE=<company-account-sso-profile-name> AWS_REGION=us-east-1 EXPECTED_ACCOUNT_ID=<12-digit-company-account-id>
+infra/bootstrap/bootstrap-backend.sh --preflight-only
+infra/bootstrap/bootstrap-backend.sh
+```
+
+**3e. The sandbox account** (pending execution, PowerShell). The plan creates the member account, its USD 40 budget
+and spend cap, and a guardrail SCP attached to the sandbox account only: a region allow-list (`allowed_regions`,
+default `us-east-1` and `us-east-2`), no `organizations:LeaveOrganization`, and no `cloudtrail:StopLogging` or
+`cloudtrail:DeleteTrail`. The provider refuses any account other than `management_account_id`. Review the plan before
+applying it.
+
+```powershell
 # pending execution, in infra/environments/demo-sandbox/account
-cp backend.hcl.example backend.hcl            # fill in the state bucket, as for regulait-dev
-cp terraform.tfvars.example terraform.tfvars # fill in the profile, root email, alert recipients
-aws sso login --profile <management-sso-profile-name>
+Copy-Item terraform.tfvars.example terraform.tfvars   # profile, company account id, root email, alert recipients
+# backend.hcl was written by 3d; otherwise copy backend.hcl.example and fill it in from the bootstrap output
 terraform init -backend-config=backend.hcl
 terraform plan -out=tfplan
+# review the plan: one aws_organizations_account, the budget, the spend-cap SCP and its role, the guardrail SCP and its attachment
 terraform apply tfplan
 terraform output sandbox_account_id
 ```
 
-The account lands at the Organization root by default, so the baseline SCPs apply to it: the region allow-list and
-the "deny disable guardrails" SCP. The second one denies `cloudtrail:UpdateTrail` and `cloudtrail:DeleteTrail`, so the
-trail created in step 4 cannot be changed or destroyed from inside the account; teardown closes the account instead.
+The account lands at the Organization root by default. The new Organization has no baseline SCPs; the guardrail SCP
+above is what limits the sandbox. Because it denies `cloudtrail:DeleteTrail`, the trail created in step 4 cannot be
+destroyed from inside the account; teardown closes the account instead.
 
 ## Step 4: the sandbox workload (pending execution)
 
-Before applying, check in the Bedrock console of the sandbox account (region `us-east-1`, Model catalog) that the
-chosen text model can be invoked on demand **in that region**, and put its id in `bedrock_model_id`. This keeps every
-call inside the baseline region allow-list SCP, and it is the default: the stack rejects an inference-profile id
-(`us.`, `eu.`, `global.` and similar prefixes) unless `allow_cross_region_inference = true`.
+Before applying, check in the Bedrock console of the sandbox account (switch role into
+`OrganizationAccountAccessRole` of the new account from the company account; region `us-east-1`, Model catalog) that
+the chosen text model can be invoked on demand **in that region**, and put its id in `bedrock_model_id`. This keeps
+every call inside the guardrail SCP's region allow-list, and it is the default: the stack rejects an inference-profile
+id (`us.`, `eu.`, `global.` and similar prefixes) unless `allow_cross_region_inference = true`.
 
-Cross-region inference profiles route a call to other regions, and the region allow-list SCP denies any region outside
-its list (`allowed_regions` in `infra/environments/regulait-dev`, which the example sets to `us-east-1` and `us-east-2`).
-A profile that also routes to, say, `us-west-2` fails with an access-denied error there. Use one only if no suitable
-model is invocable on demand in-region, and then:
+Cross-region inference profiles route a call to other regions, and the guardrail SCP denies any region outside
+`allowed_regions` of the account stack. A profile that also routes to, say, `us-west-2` fails with an access-denied
+error there. Use one only if no suitable model is invocable on demand in-region, and then:
 
-1. check that every region the profile routes to is in the SCP's `allowed_regions`; adding a region is an owner change
-   to `infra/environments/regulait-dev`, outside this runbook;
+1. add every region the profile routes to into `allowed_regions` in `demo-sandbox/account` (plan, review, apply), and
+   set the same list as `bedrock_allowed_regions` here;
 2. set `allow_cross_region_inference = true`, `bedrock_model_id` to the profile id, and `bedrock_extra_invoke_arns` to
-   the profile ARN and the regional model ARNs behind it. The stack rejects any ARN outside `bedrock_allowed_regions`,
-   which must match the SCP's list.
+   the profile ARN and the regional model ARNs behind it. The stack rejects any ARN outside `bedrock_allowed_regions`.
 
 Each generator Lambda reserves a concurrency of 1, so runs never overlap, and neither the schedule nor Lambda retries
 a failed run. A new account's Lambda concurrency quota can be as low as 10, and AWS keeps 10 unreserved, so the apply
@@ -179,19 +189,30 @@ can fail with "decreases account's UnreservedConcurrentExecution below its minim
 quota increase or set `generator_reserved_concurrency = -1` (no reservation). The retry limits still apply, so a run
 still makes at most `calls_per_run` calls.
 
-```bash
+IAM fetches the issuer's discovery document when it creates the OIDC provider, so step 1 must be complete and the
+tunnel up while you apply.
+
+```powershell
 # pending execution, in infra/environments/demo-sandbox/aws
-cp backend.hcl.example backend.hcl
-cp terraform.tfvars.example terraform.tfvars # account id from step 3, issuer from step 1, source id from step 2, model id
+Copy-Item terraform.tfvars.example terraform.tfvars   # account id from 3e, issuer https://regulait.<domain>/federation, source id from step 2, model id
+aws sso login --profile <company-account-sso-profile-name>
 terraform init -backend-config=backend.hcl
 terraform plan -out=tfplan
+# review the plan: the OIDC provider for the issuer, role regulait-ai-discovery (trust: aud sts.amazonaws.com,
+# sub regulait:discovery-source:<id>, StringEquals), the trail and its bucket, two generators, one guardrail
 terraform apply tfplan
 terraform output
 ```
 
-IAM fetches the issuer's discovery document when it creates the OIDC provider, so step 1 must be complete first.
 The generators run on weekdays hourly from 09:17 to 17:17 and daily at 10:43 and 14:43 (America/New_York) and stop
 for good after 2026-11-30. Set `activity_enabled = false` to pause them.
+
+**Teardown note (company account).** `terraform destroy` in `demo-sandbox/account` closes the sandbox account
+(`close_on_deletion = true`) and removes its budget and SCPs; do not destroy `demo-sandbox/aws` first (its trail
+cannot be deleted under the guardrail SCP). Afterwards remove the `demo-sandbox/aws` state object from the state
+bucket. The state bucket, lock table and KMS key in the company account are kept unless the owner deletes them by
+hand (the key with a pending-deletion window). The Organization and Identity Center stay. Full sequence:
+[DEMO_TEARDOWN.md](DEMO_TEARDOWN.md).
 
 ## Step 5: Azure (pending execution)
 
@@ -462,7 +483,7 @@ is kept for reference. In this order:
 3. Azure: `terraform destroy` in `demo-sandbox/azure`.
 4. AWS: `terraform destroy` in `demo-sandbox/account` closes the sandbox account (`close_on_deletion = true`), which
    stops everything in it from billing. The workload stack is not destroyed first: its trail cannot be deleted under
-   the baseline SCP. After the account is closed, remove the workload stack's state object from the state bucket.
+   the sandbox guardrail SCP. After the account is closed, remove the workload stack's state object from the state bucket.
    A closed account stays suspended for 90 days and counts against the Organization's close-account quota.
 5. Set `power_schedule_enabled` back to true in `infra/environments/regulait-dev-app`.
 
@@ -482,3 +503,20 @@ On 2026-10-18, in the build session, with Terraform 1.9.8 and no cloud credentia
   an ARN in `us-west-2` fails against the default `bedrock_allowed_regions`.
 
 Nothing was planned or applied against AWS, Azure or GitLab.
+
+On 2026-10-26, lane S (company-account sandbox), with Terraform 1.9.8 and no cloud credentials:
+
+- `terraform fmt -check -recursive` over `infra/environments/demo-sandbox` and `infra/modules/aws-sandbox-account`:
+  exit 0.
+- `terraform init -backend=false` and `terraform validate` in `demo-sandbox/account`, `demo-sandbox/aws` and the
+  `aws-sandbox-account` module: valid, exit 0 each.
+- The issuer variable checked with `terraform plan` on a provider-free copy of the `aws` stack's variables:
+  `https://regulait.example.com/federation` passes; plain `http://`, `localhost`, `127.0.0.1`, an IP address, a
+  `trycloudflare.com` name and a URL without `/federation` are refused. The module's `allowed_regions` check refuses an
+  empty list and a malformed region.
+- `bootstrap-backend.sh` run against a stub `aws` command (no AWS call): it refuses, with exit 1 and before creating
+  anything, a wrong account, an IAM-user caller, no Organization, a non-management account, a consolidated-billing-only
+  Organization, an existing bucket and a malformed or missing `EXPECTED_ACCOUNT_ID`; `--preflight-only` creates nothing;
+  a full stub run writes both `backend.hcl` files and a second run keeps them. `shellcheck` 0.10.0: clean.
+
+Nothing was planned or applied against AWS.

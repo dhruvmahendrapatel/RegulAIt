@@ -1,5 +1,7 @@
 # Copy to terraform.tfvars (git-ignored) and fill in. Never commit real values.
-management_sso_profile     = "<management-sso-profile-name>"
+management_sso_profile     = "<company-account-sso-profile-name>"
+management_account_id      = "<12-digit-company-account-id>"
 account_email              = "<unique-root-email-for-the-sandbox-account>"
 budget_notification_emails = ["<alert-recipient>"]
-# parent_id                = "ou-xxxx-xxxxxxxx"
+# allowed_regions          = ["us-east-1", "us-east-2"]
+# parent_id                = "<ou-id, or leave unset for the Organization root>"
