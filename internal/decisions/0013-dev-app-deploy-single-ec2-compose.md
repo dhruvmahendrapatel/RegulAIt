@@ -38,3 +38,9 @@ deployed. This is a throwaway demo stack, not the product's own hosted/BYOC depl
 - The module is reusable for future single-box demo stacks of any compose-based project.
 - Anything beyond demo use (TLS, managed Postgres, autoscaling, a production designation)
   requires a new decision and, per the standing guardrail, explicit user sign-off.
+
+## Addendum: 2026-10-26, the dev host no longer exists
+
+The AWS Organization holding `regulait-dev` was deleted (owner, #453 c6406298827). The single-EC2 dev host described
+here, its state backend and its Elastic IP are gone, and nothing currently runs this design. [ADR-0203](0203-demo-hosting-after-aws-org-loss.md)
+records the interim laptop-plus-tunnel hosting for the 2026-11-03 demo and defers a rebuild in the company account.

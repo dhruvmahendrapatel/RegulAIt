@@ -1,6 +1,6 @@
 ---
 phase: demo-prep-live-integrations-merged
-last_updated: 2026-10-25
+last_updated: 2026-10-26
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -20,6 +20,14 @@ roadmap: ../product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-26 (02:00 UTC) - the July AWS Organization is deleted; the demo moves to a laptop behind a Cloudflare
+Tunnel ([ADR-0203](../decisions/0203-demo-hosting-after-aws-org-loss.md)).** The management account, `regulait-dev`, the
+state backend, the dev host and the discovery sandbox are gone (#453 c6406298827). EPIC-01's "applied, zero drift" and
+ADR-0013's "LIVE" entries below are therefore historical. Owner decisions (c6406353285): laptop plus tunnel for 11-03,
+and live AWS discovery in a new sandbox account under the company AWS account. Lanes T (tunnel profile) and S
+(company-account sandbox Terraform) are building. Main is at `57c5066` (#565, #577 and #578 merged; entry JS ceiling
+138.5 kB). Everything is due by 10-29.
 
 **2026-10-25 (14:45 UTC) - every ADR-0202 live-integration lane is on main (`e3d9321`).** Full record:
 [sessions/2026-10-25-session-01.md](sessions/2026-10-25-session-01.md). The following merged and were audited: #518,
