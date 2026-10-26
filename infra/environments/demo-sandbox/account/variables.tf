@@ -5,8 +5,23 @@ variable "aws_region" {
 }
 
 variable "management_sso_profile" {
-  description = "AWS CLI Identity Center profile for the Organization's management account."
+  description = "AWS CLI Identity Center profile for the company (management) account."
   type        = string
+}
+
+variable "management_account_id" {
+  description = "The company account's id (the Organization's management account). The provider refuses any other account. Set in terraform.tfvars, never committed."
+  type        = string
+  validation {
+    condition     = can(regex("^[0-9]{12}$", var.management_account_id))
+    error_message = "management_account_id must be 12 digits."
+  }
+}
+
+variable "allowed_regions" {
+  description = "Regions the sandbox guardrail SCP allows. Keep equal to bedrock_allowed_regions in ../aws, and include that stack's aws_region."
+  type        = list(string)
+  default     = ["us-east-1", "us-east-2"]
 }
 
 variable "account_name" {

@@ -169,3 +169,51 @@ resource "aws_budgets_budget_action" "spend_cap" {
 
   depends_on = [aws_iam_role_policy.budget_action]
 }
+
+# --- guardrails ------------------------------------------------------------------
+#
+# Attached to this account only, from creation. An Organization with no baseline
+# SCPs would otherwise leave the sandbox free to run in any region, leave the
+# Organization (escaping the spend cap) or stop its own audit trail.
+
+resource "aws_organizations_policy" "guardrails" {
+  count       = var.enable_guardrails ? 1 : 0
+  name        = "${var.account_name}-guardrails"
+  description = "Region allow-list, no leaving the Organization, no stopping or deleting CloudTrail trails in ${var.account_name}."
+  type        = "SERVICE_CONTROL_POLICY"
+  content = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "DenyOutsideAllowedRegions"
+        Effect = "Deny"
+        # Global services are served from us-east-1 whatever region is asked for.
+        NotAction = [
+          "iam:*", "organizations:*", "sts:*", "support:*", "budgets:*", "ce:*",
+          "account:*", "route53:*", "cloudfront:*", "waf:*", "wafv2:*", "health:*",
+        ]
+        Resource  = "*"
+        Condition = { StringNotEquals = { "aws:RequestedRegion" = var.allowed_regions } }
+      },
+      {
+        Sid      = "DenyLeavingTheOrganization"
+        Effect   = "Deny"
+        Action   = ["organizations:LeaveOrganization"]
+        Resource = "*"
+      },
+      {
+        Sid      = "DenyDisablingTheTrail"
+        Effect   = "Deny"
+        Action   = ["cloudtrail:StopLogging", "cloudtrail:DeleteTrail"]
+        Resource = "*"
+      },
+    ]
+  })
+  tags = var.tags
+}
+
+resource "aws_organizations_policy_attachment" "guardrails" {
+  count     = var.enable_guardrails ? 1 : 0
+  policy_id = aws_organizations_policy.guardrails[0].id
+  target_id = aws_organizations_account.this.id
+}

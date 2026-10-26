@@ -16,3 +16,8 @@ output "spend_cap_policy_id" {
   description = "The SCP AWS Budgets attaches at 100% (null when the cap is off). Detach it by hand to lift the cap."
   value       = var.enable_spend_cap ? aws_organizations_policy.spend_cap[0].id : null
 }
+
+output "guardrails_policy_id" {
+  description = "The guardrail SCP attached to the account (null when off)."
+  value       = var.enable_guardrails ? aws_organizations_policy.guardrails[0].id : null
+}

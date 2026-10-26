@@ -1,5 +1,5 @@
-# Inside the sandbox account: the management account's short-lived Identity
-# Center session assumes the role Organizations created in the new account
+# Inside the sandbox account: the company (management) account's short-lived
+# Identity Center session assumes the role Organizations created in the new account
 # (ADR-0004: no IAM user, no access key anywhere).
 provider "aws" {
   region  = var.aws_region

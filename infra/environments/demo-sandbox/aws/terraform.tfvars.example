@@ -1,6 +1,7 @@
 # Copy to terraform.tfvars (git-ignored) and fill in. Never commit real values.
-management_sso_profile         = "<management-sso-profile-name>"
+management_sso_profile         = "<company-account-sso-profile-name>"
 sandbox_account_id             = "<output sandbox_account_id of ../account>"
-regulait_federation_issuer_url = "https://<demo-instance-host>/federation"
+regulait_federation_issuer_url = "https://regulait.<domain>/federation"
 aws_discovery_source_id        = "<uuid of the cloud_aws discovery source>"
 bedrock_model_id               = "<lowest-priced on-demand text model id enabled in the region>"
+# bedrock_allowed_regions      = ["us-east-1", "us-east-2"] # equal to allowed_regions in ../account

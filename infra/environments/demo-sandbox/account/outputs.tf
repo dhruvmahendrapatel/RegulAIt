@@ -15,3 +15,8 @@ output "spend_cap_policy_id" {
   description = "Attached automatically at 100% of the budget. Detaching it by hand lifts the cap."
   value       = module.sandbox_account.spend_cap_policy_id
 }
+
+output "guardrails_policy_id" {
+  description = "Guardrail SCP attached to the sandbox account (region allow-list, no LeaveOrganization, no StopLogging or DeleteTrail)."
+  value       = module.sandbox_account.guardrails_policy_id
+}

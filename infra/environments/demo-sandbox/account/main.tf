@@ -1,6 +1,8 @@
-# demo-sandbox / account: the third AWS account (ADR-0197 decision 2, amending
-# ADR-0002 and ADR-0004). It holds only planted demo AI resources. It is
-# non-production: no prod/production tag, account or role.
+# demo-sandbox / account: the sandbox member account (ADR-0197 decision 2, amending
+# ADR-0002 and ADR-0004), created in the Organization whose management account is
+# the company AWS account (owner decision on #453; ADR-0203 lane S). It holds only
+# planted demo AI resources. It is non-production: no prod/production tag,
+# account or role.
 #
 # Apply order and the full runbook: internal/product/DEMO_REAL_ACCOUNTS.md.
 # The workload inside the account is a separate stack (../aws), because a
@@ -29,6 +31,9 @@ module "sandbox_account" {
   budget_alert_threshold_percent = 80
   budget_notification_emails     = var.budget_notification_emails
   enable_spend_cap               = true
+
+  enable_guardrails = true
+  allowed_regions   = var.allowed_regions
 
   tags = local.tags
 }

@@ -1,6 +1,9 @@
-bucket         = "regulait-terraform-state-<management-account-id>"
+# Copy to backend.hcl (git-ignored), or let infra/bootstrap/bootstrap-backend.sh
+# write it. Values come from the bootstrap output for the company account.
+bucket         = "regulait-terraform-state-<company-account-id>"
 key            = "demo-sandbox/account/terraform.tfstate"
 dynamodb_table = "regulait-terraform-locks"
 kms_key_id     = "<kms-key-id-from-bootstrap-output>"
 region         = "<aws-region>"
-profile        = "<management-sso-profile-name>"
+encrypt        = true
+profile        = "<company-account-sso-profile-name>"
