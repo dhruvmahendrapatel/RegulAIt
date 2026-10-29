@@ -93,10 +93,19 @@ test("Inbox: one item layout, visible reasons, and Approve waits for a required 
   await own.click();
   await expect(page.getByRole("note")).toContainText("A recorded reason is required.");
   await page.keyboard.press("Escape");
+  // the admin override names itself and explains why a reason is needed
+  await expect(page.getByText("Admin override", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "What is Admin override?" }).click();
+  await expect(page.getByRole("note")).toContainText("You are not the named approver, so a reason is required.");
+  await page.keyboard.press("Escape");
 
   const row = page.locator("div").filter({ hasText: /^Governance remediation/ }).filter({ has: page.getByRole("button", { name: /^Review / }) }).last();
-  // the row already says a reason is required; the decision opens in the shared detail drawer (owner decision on #453)
-  await expect(row.getByText("Deciding this approves your own request, so a reason is required.")).toBeVisible();
+  // the row already says a reason is required (a chip, the sentence in its (i)); the decision opens in the shared
+  // detail drawer (owner decision on #453)
+  await expect(row.getByText("Reason required", { exact: true })).toBeVisible();
+  await row.getByRole("button", { name: "What is Reason required?" }).click();
+  await expect(page.getByRole("note")).toContainText("Deciding this approves your own request, so a reason is required.");
+  await page.keyboard.press("Escape");
   await row.getByRole("button", { name: /^Review / }).click();
   const item = page.getByTestId("inbox-item");
   await expect(item.getByRole("heading", { name: /Link the human-oversight control/ })).toBeFocused();
@@ -108,8 +117,6 @@ test("Inbox: one item layout, visible reasons, and Approve waits for a required 
   // Deny is a real button with an edge, not ghost text
   await expect(item.getByRole("button", { name: "Deny" })).toBeEnabled();
 
-  // the admin override names itself and explains why a reason is needed
-  await expect(page.getByText("You are not the named approver, so a reason is required.")).toBeVisible();
   // one decided item fits, so the contained card is no scroll stop (the region role appears only while it scrolls)
   // X6b: "Recently decided" is a secondary section, so it starts folded
   const decided = page.getByRole("button", { name: /^Recently decided/ });
@@ -142,6 +149,7 @@ test("Inbox: an intake sign-off carries the tier pill and leaves its rules and c
   // M1: no Inbox sentence that contradicts the review panel's refusal, and a role member is no admin override
   await expect(page.getByText("Deciding this approves your own request, so a reason is required.")).toHaveCount(0);
   await expect(page.getByText("You are not the named approver, so a reason is required.")).toHaveCount(0);
+  await expect(page.getByText("Reason required", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Admin override", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "What is Your own request?" })).toHaveCount(0);
 

@@ -12,7 +12,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../api/client";
 import { fmtUsd, plural } from "../../api/format";
-import { Badge, Card, EmptyState, ErrorState, SkeletonBlock, Table } from "../../ui/kit";
+import { Badge, Card, EmptyState, ErrorState, InfoButton, SkeletonBlock, Table } from "../../ui/kit";
 import v from "../views.module.css";
 
 interface Side {
@@ -66,8 +66,9 @@ export function MyConsolidatedSpendCard(props: { userId: string }) {
             const subject = ownSubject(q.data, props.userId);
             return (
               <>
+                {/* the honesty caveats stay as short visible qualifiers; their full sentences are in the (i)s */}
                 <p className={v.faint}>
-                  {day(q.data.window.from)} to {day(q.data.window.to)}. {q.data.note}
+                  {day(q.data.window.from)} to {day(q.data.window.to)} · no combined figure
                 </p>
                 {subject ? (
                   <div className={v.grid3}>
@@ -76,11 +77,15 @@ export function MyConsolidatedSpendCard(props: { userId: string }) {
                       <span className={v.statLabel}>
                         metered by regulAIt · {plural(subject.metered.events, "call")}
                         {subject.metered.unpricedEvents > 0 ? ` (${subject.metered.unpricedEvents} unpriced, not counted as zero)` : ""}
+                        <InfoButton label="metered spend">{q.data.note}</InfoButton>
                       </span>
                     </div>
                     <div className={v.stat}>
                       <span className={v.statValue}>{subject.imported.usd === null ? "No USD total" : fmtUsd(subject.imported.usd)}</span>
-                      <span className={v.statLabel}>imported from vendor bills · {plural(subject.imported.lines, "line")}</span>
+                      <span className={v.statLabel}>
+                        Imported · customer-supplied · {plural(subject.imported.lines, "line")}
+                        <InfoButton label="imported spend">{q.data.basisStatement}</InfoButton>
+                      </span>
                       {subject.imported.usdNote ? <span className={v.faint}>{subject.imported.usdNote}</span> : null}
                     </div>
                     <div className={v.stat}>
@@ -104,7 +109,6 @@ export function MyConsolidatedSpendCard(props: { userId: string }) {
                     ]}
                   />
                 ) : null}
-                <p className={v.faint}>{q.data.basisStatement}</p>
                 {q.data.reconciliation && q.data.reconciliation.supersededLinesExcluded > 0 ? (
                   <p className={v.faint}>
                     {plural(q.data.reconciliation.supersededLinesExcluded, "duplicate imported line")} excluded. {q.data.reconciliation.note}

@@ -93,5 +93,6 @@ test("posture carries the agent-ownership coverage with its honesty note", async
   await expect(page.getByText("Agent ownership", { exact: true })).toBeVisible();
   // the seeded agents predate ownership: the unowned count is said in words
   await expect(page.getByText(/are unowned \(no owner recorded\)/)).toBeVisible();
-  await expect(page.getByText(/governance record, not authentication/).first()).toBeVisible();
+  await page.getByRole("button", { name: "What is Agent ownership?" }).click();
+  await expect(page.getByRole("note")).toContainText(/governance record, not authentication/);
 });

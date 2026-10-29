@@ -15,7 +15,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../api/client";
 import { fmtAt, humanize } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
-import { Badge, Button, Card, EmptyState, Field, IdChip, Input, Modal, Select, Table, Textarea, type Tone } from "../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, IdChip, InfoButton, Input, Modal, Select, Table, Textarea, type Tone } from "../../ui/kit";
 import type { AdminUser } from "../../api/adminTypes";
 import { QueryGate, useAction } from "../admin/adminKit";
 import v from "../views.module.css";
@@ -423,6 +423,10 @@ const isRelaxed = (k: SettingKey, val: unknown) =>
       ? Number(val) !== STRICT[k]
       : Number(val) > (STRICT[k] as number);
 
+function SettingPill(props: { relaxed: boolean }) {
+  return props.relaxed ? <Badge tone="warn">Relaxed</Badge> : <Badge tone="ok">Strict default</Badge>;
+}
+
 export function FeedbackSettings() {
   const act = useAction();
   const q = useQuery({
@@ -456,15 +460,15 @@ export function FeedbackSettings() {
       .then((ok) => ok && setDraft({}));
 
   return (
-    <Card title="Feedback settings (admin)">
+    <Card
+      title="Feedback settings (admin)"
+      info={<p>Every setting starts at its strict value. Relaxing one is allowed and is recorded in the audit trail as a relaxation.</p>}
+    >
       <span id="settings" />
       <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
         <div className={v.stack}>
-          {/* F27: v.hint centres itself beside buttons; as the card's intro it starts at the left edge */}
-          <p className={v.dim}>
-            Every setting starts at its strict value. Relaxing one is allowed and is recorded in the audit trail as a relaxation.
-          </p>
-          <div className={v.stackTight}>
+          {/* each setting: label with its (i), control, and its state as a pill */}
+          <div className={v.row}>
             <label className={v.row}>
               <input
                 type="checkbox"
@@ -472,16 +476,16 @@ export function FeedbackSettings() {
                 onChange={(e) => setDraft({ ...draft, feedbackSignedLinksEnabled: e.target.checked })}
               />
               <span>{COPY.feedbackSignedLinksEnabled.label}</span>
-              {isRelaxed("feedbackSignedLinksEnabled", current.feedbackSignedLinksEnabled) ? <Badge tone="warn">relaxed</Badge> : <Badge tone="ok">strict default</Badge>}
             </label>
-            <p className={v.faint}>
+            <InfoButton label={COPY.feedbackSignedLinksEnabled.label}>
               {current.feedbackSignedLinksEnabled ? COPY.feedbackSignedLinksEnabled.relaxed : COPY.feedbackSignedLinksEnabled.strict}
-            </p>
+            </InfoButton>
+            <SettingPill relaxed={isRelaxed("feedbackSignedLinksEnabled", current.feedbackSignedLinksEnabled)} />
           </div>
           {NUMERIC.map((k) => (
             <div key={k} className={v.stackTight}>
               <div className={v.row}>
-                <Field label={COPY[k].label}>
+                <Field label={COPY[k].label} help={isRelaxed(k, current[k]) ? COPY[k].relaxed : COPY[k].strict} helpLabel={COPY[k].label}>
                   <Input
                     type="number"
                     min={COPY[k].min}
@@ -490,10 +494,10 @@ export function FeedbackSettings() {
                     onChange={(e) => setDraft({ ...draft, [k]: e.target.value })}
                   />
                 </Field>
-                {isRelaxed(k, current[k]) ? <Badge tone="warn">relaxed</Badge> : <Badge tone="ok">strict default</Badge>}
-                <span className={v.faint}>strict default {STRICT[k]}</span>
+                <SettingPill relaxed={isRelaxed(k, current[k])} />
+                {/* the hint needed to fill the field stays visible: the strict value and the allowed range */}
+                <span className={v.faint}>strict default {STRICT[k]} · allowed {COPY[k].min}–{COPY[k].max}</span>
               </div>
-              <p className={v.faint}>{isRelaxed(k, current[k]) ? COPY[k].relaxed : COPY[k].strict}</p>
             </div>
           ))}
           <div>

@@ -19,7 +19,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
 import { fmtAt, plural } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
-import { Badge, Button, Card, EmptyState, type Tone } from "../../ui/kit";
+import { Badge, Button, Card, EmptyState, InfoButton, type Tone } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
 import v from "../views.module.css";
 
@@ -196,6 +196,12 @@ export function LiteracyDocumentList(props: { data: MyLiteracy }) {
   );
 }
 
+// shared by the interstitial and the pill's (i), so the two can never say different things
+const ASKS =
+  "Your organisation asks everyone who uses AI systems through regulAIt to read and acknowledge its AI policies and trainings.";
+const REFUSED = " Until you acknowledge, your AI tool calls through regulAIt are refused.";
+const RECORDED = " Your organisation records the gap but does not refuse your calls.";
+
 const DISMISS_KEY = "regulait.literacy.notNow";
 
 function dismissedFor(data: MyLiteracy): boolean {
@@ -249,13 +255,10 @@ export default function AcknowledgeGate(props: { children: ReactNode }) {
           <div className={v.stack}>
             {/* `hint` centres itself (it is made for empty states); in this stack the text starts at the card's edge */}
             <p className={v.hint} style={{ alignSelf: "flex-start", maxWidth: "80ch" }}>
-              Your organisation asks everyone who uses AI systems through regulAIt to read and acknowledge its AI
-              policies and trainings. This is one of the measures it takes to support the development of AI literacy
+              {ASKS} This is one of the measures it takes to support the development of AI literacy
               (Regulation (EU) 2024/1689, Article 4, as amended). It records that you read the current version; it is
               not a test.
-              {enforce
-                ? " Until you acknowledge, your AI tool calls through regulAIt are refused."
-                : " Your organisation records the gap but does not refuse your calls."}
+              {enforce ? REFUSED : RECORDED}
             </p>
             <LiteracyDocumentList data={data} />
             <div className={v.row}>
@@ -286,10 +289,18 @@ export default function AcknowledgeGate(props: { children: ReactNode }) {
   return (
     <>
       {pending && !onAccount && (
-        <div className={v.errLine} role="status" style={{ marginBottom: "var(--s2)" }}>
-          {plural(data.documents.filter((d) => d.state !== "current").length, "AI policy", "AI policies")} to
-          acknowledge{enforce ? "; until then your AI tool calls through regulAIt are refused" : ""}.{" "}
-          <Link to="/account?section=ai-policies" style={{ textDecoration: "underline" }}>Acknowledge now</Link>
+        <div className={v.row} role="status" style={{ marginBottom: "var(--s2)" }}>
+          {/* a compact pill on every page: the count, linked to the acknowledgement; the why is in the (i) */}
+          <Link to="/account?section=ai-policies">
+            <Badge tone={enforce ? "danger" : "warn"}>
+              {plural(data.documents.filter((d) => d.state !== "current").length, "AI policy", "AI policies")} to
+              acknowledge{enforce ? " · AI tool calls refused" : ""}
+            </Badge>
+          </Link>
+          <InfoButton label="AI policy acknowledgement">
+            {ASKS}
+            {enforce ? REFUSED : RECORDED}
+          </InfoButton>
         </div>
       )}
       {!pending && soon.length > 0 && !onAccount && (
