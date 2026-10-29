@@ -47,12 +47,11 @@ in each stack's `terraform.tfvars` (git-ignored): pick the lowest-priced text mo
 3. **GitLab.** A top-level demo group on gitlab.com created in the UI, with a fictional name. A group access token needs
    the group on a Premium or Ultimate subscription; trials do not include it. Without that, see the fallback in step 6.
 4. **Budget recipients.** The addresses for budget alerts, set only in `terraform.tfvars`.
-5. **Keep the dev instance up for the demo.** The internal run-through is on Sunday 2026-11-01 and the external demo
-   on Tuesday 2026-11-03. The dev box's power schedule (ADR-0032) keeps it off from 20:00 to 08:00 ET on weekdays and
-   all weekend, and while it is off no cloud can fetch the issuer and no scan runs. Before Sunday 2026-10-25, set
-   `power_schedule_enabled = false` in `infra/environments/regulait-dev-app`, apply, and confirm both EventBridge
-   schedules read DISABLED; set it back after 11-03 (owner decision, #453; commands in
-   [DEMO_RUNBOOK.md §7.6](DEMO_RUNBOOK.md#76-live-host-recipes-pending-execution)).
+5. **Keep the live instance up for the demo.** The internal run-through is on Sunday 2026-11-01 and the external demo
+   on Tuesday 2026-11-03. Under ADR-0203 the live instance is the owner's laptop behind the Cloudflare Tunnel; while
+   it is off or offline no cloud can fetch the issuer and no scan runs (step 1a). Its one-time preparation, before
+   step 2, is in [DEMO_RUNBOOK.md §7.6](DEMO_RUNBOOK.md#76-live-host-recipes-pending-execution). (The dev box's power
+   schedule of ADR-0032 is superseded by ADR-0203: that box no longer exists.)
 
 ## Step 1: make the federation issuer publicly reachable (pending execution)
 
@@ -94,8 +93,8 @@ URL; the key set must hold one `RSA` key with `alg` `RS256`. A 404 with `federat
 Each trust policy names its source's id (subject `regulait:discovery-source:<source id>`), so create the sources first
 and leave them disabled. **Prepare the live database before this step, once** (`demo:prepare --live`,
 [DEMO_RUNBOOK.md §7.1](DEMO_RUNBOOK.md#71-what-runs-where)): re-preparing afterwards makes new source ids,
-and every federated run then fails until both stacks are re-applied. Never run `docker compose down -v` on the live
-host. On **Shadow AI > Discovery sources** (`/admin/shadow-ai/discovery-sources`), choose a kind and
+and every federated run then fails until both stacks are re-applied. The laptop's one `docker compose --profile tunnel
+down -v` comes before this step (DEMO_RUNBOOK §7.6 step 3); never run `down -v` on the live laptop after it. On **Shadow AI > Discovery sources** (`/admin/shadow-ai/discovery-sources`), choose a kind and
 save:
 
 - kind `cloud_aws`, name e.g. "Demo AWS sandbox";
@@ -322,7 +321,7 @@ Record the first successful scan of each source on screen (ADR-0197 decision 7).
 
 ADR-0202 decision 1 connects the 11-03 demo to real GitHub, Jira Cloud, Azure DevOps and Slack accounts. Every
 section below is **pending execution**: none of it has been run against a real account. Placeholders: the public URL
-is `https://demo.example.com` (the real one is `REGULAIT_PUBLIC_URL` on the host, never in the repo), the Jira site is
+is `https://demo.example.com` (the real one is `REGULAIT_PUBLIC_URL` on the live laptop, never in the repo), the Jira site is
 `regulait-demo.atlassian.net`, and the Azure DevOps organisation is `regulait-demo`.
 
 **Credentials never pass through chat or the repo (ADR-0202 decision 5).** `demo:live-setup` asks for each one at a
@@ -335,7 +334,7 @@ every message the script prints is scrubbed of the values. Delete the file after
 ### Order of operations (pending execution)
 
 1. Create the four accounts and their credentials, as described in the sections below.
-2. On the host, set the non-secret settings:
+2. On the live laptop, set the non-secret settings:
 
    | Variable | Example |
    |---|---|
@@ -362,6 +361,9 @@ every message the script prints is scrubbed of the values. Delete the file after
      Register them as described under Jira and Azure DevOps below.
    - To replace a GitHub, Jira or Azure DevOps token, delete that connection in the admin UI and re-run. The API has
      no route that replaces those tokens in place.
+   - A **kept** line on a freshly prepared database means an earlier run of this step, after the wipe, already
+     stored a token: `demo:prepare --live` creates none of these connections. If that token is wrong (a 403 from the
+     `--live-connections` check), delete the connection and re-run (laptop, 2026-10-29, #453 c6486350055).
 5. Run `pnpm --filter @regulait/gateway demo:check -- --live-connections`. This makes one read-only call per
    connection through the egress guard and reports PASS, WARN or FAIL per beat. No credential is printed.
 
@@ -466,7 +468,8 @@ Add these steps after the demo:
 - Revoke the GitHub token and the Azure DevOps PAT.
 - Revoke the Jira API token, and delete the Jira webhook and the Azure DevOps service hooks.
 - Uninstall the Slack app.
-- Delete the `live-*` connections in RegulAIt.
+- Delete the `live-*` connections in RegulAIt. This also revokes their inbound secrets, which were shown in a chat
+  transcript on 2026-10-29 (#453 c6486350055), so treat them as exposed until then.
 - Delete the secrets file and the inbound file.
 
 ## Teardown after the demo (pending execution)
@@ -485,7 +488,8 @@ is kept for reference. In this order:
    stops everything in it from billing. The workload stack is not destroyed first: its trail cannot be deleted under
    the sandbox guardrail SCP. After the account is closed, remove the workload stack's state object from the state bucket.
    A closed account stays suspended for 90 days and counts against the Organization's close-account quota.
-5. Set `power_schedule_enabled` back to true in `infra/environments/regulait-dev-app`.
+5. Set `power_schedule_enabled` back to true in `infra/environments/regulait-dev-app`: superseded by ADR-0203 (the dev
+   box no longer exists). Stop the laptop's tunnel instead (`docs/deployment/TUNNEL.md`, "Stopping and rolling back").
 
 ## What has been run
 

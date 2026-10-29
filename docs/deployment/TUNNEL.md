@@ -8,6 +8,10 @@ dashboard and in the laptop's untracked `.env`, never in this repository.
 
 It is still a **demo environment, not production** (standing guardrail).
 
+For the 2026-11-01 and 2026-11-03 demo, this laptop is the live instance (ADR-0203, replacing the AWS dev host). Its
+one-time live preparation (the local override, the single `down -v`, `demo:prepare --live`, passwords, admin MFA and
+`demo:check --live`) is in [DEMO_RUNBOOK.md §7.6](../../internal/product/DEMO_RUNBOOK.md#76-live-host-recipes-pending-execution).
+
 ## How it fits together
 
 ```
@@ -201,7 +205,7 @@ the gateway's `127.0.0.1:3000`, which is loopback only.
 ## Stopping and rolling back
 
 ```powershell
-docker compose --profile tunnel down      # the public name stops answering (Cloudflare shows error 1033)
+docker compose --profile tunnel down      # the public name stops answering (Cloudflare shows error 1033); never add -v on the live laptop (DEMO_RUNBOOK §7.6)
 Remove-Item Env:REGULAIT_CF_TUNNEL_TOKEN
 ```
 
