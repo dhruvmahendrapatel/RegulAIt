@@ -2775,6 +2775,32 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       })
       .from(gitConnections),
   }));
+  // #453: a connection holding a wrong token is replaced by deleting it and creating it again. Deleting only removes
+  // access, so it needs no step-up; the removal is on the record in the same transaction as the delete.
+  app.delete("/v1/git/connections/:name", async (req, reply) => {
+    const { name } = z.object({ name: z.string().min(1) }).parse(req.params);
+    const deleted = await db.transaction(async (tx) => {
+      const rows = await tx
+        .delete(gitConnections)
+        .where(eq(gitConnections.name, name))
+        .returning({ id: gitConnections.id, provider: gitConnections.provider, baseUrl: gitConnections.baseUrl });
+      for (const r of rows) {
+        await tx.insert(auditLog).values({
+          userId: req.authCtx.userId ?? SYSTEM_IDENTITY,
+          objectType: "git_connection",
+          objectId: r.id,
+          detail: { phase: "removed", name, provider: r.provider, baseUrl: r.baseUrl },
+          effect: "allow",
+          ruleId: "git-connection-removed",
+          ruleChain: [],
+          reason: `git connection '${name}' (${r.provider}) removed`,
+        });
+      }
+      return rows;
+    });
+    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_connection" });
+    return { removed: true };
+  });
 
   // §2 deploy targets: admin-only; credentials (when given) encrypted at rest,
   // never returned. A deployment/rollback stage names one of these; a stage
