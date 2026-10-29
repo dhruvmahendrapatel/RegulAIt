@@ -1,6 +1,6 @@
 # RegulAIt Positioning Talk Track — 2026-11-01 demo (v3)
 
-**Date:** internal run-through Sun 2026-11-01; external demo Tue 2026-11-03 · **Audience:** internal, whoever presents the demo
+**Date:** Sat 2026-10-31, one run (owner, 2026-10-29, #453 c6508111468; first planned for 11-01 and 11-03) · **Audience:** internal, whoever presents the demo
 **Goes with:** `DEMO_SCRIPT_2026-11-01.md`. The 2026-10-05 talk track stays valid for the governance beats; this
 file adds the Shadow AI opening and restates the rules.
 **Rule:** every claim here is something the demo shows or an ADR documents. Say what RegulAIt does; do not

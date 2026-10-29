@@ -1,4 +1,7 @@
-# Presenter notes — 2026-11-01 run-through and 2026-11-03 demo
+# Presenter notes — demo of Saturday 2026-10-31
+
+> **New date (owner, 2026-10-29, #453 comment 6508111468):** the demo runs once, on Sat 2026-10-31. The 11-01
+> run-through and the 11-03 demo are gone; the file keeps its name.
 
 **Goes with:** `DEMO_SCRIPT_2026-11-01.md`. Owner decision of 2026-10-24 (#453, comment 6385378784, item 4): the S3
 plan text and the two G3 acknowledgement notes are written here in advance, so nothing is composed on stage
@@ -16,9 +19,9 @@ identifier and no real host, account, tenant or person.
 The card's box takes the plan as text. The panel renders the plan's steps as list items and has no copy button, so
 paste from here (FS-47). The plan names the repository it is about.
 
-### 11-01, FALLBACK, second finding (FS-7)
+### FALLBACK rehearsal, second finding (FS-7)
 
-On 11-01 the seeded workflow for `gitlab:acme-bank-demo/credit-memo-assistant` was already submitted by `demo:prepare`
+On the FALLBACK rehearsal before 10-31 the seeded workflow for `gitlab:acme-bank-demo/credit-memo-assistant` was already submitted by `demo:prepare`
 (its plan is the seed's own text, `DEMO_SHADOW_DISCOVERY.remediation.plan`). Ada's live half is walked on the second
 repository finding, which has no workflow yet:
 
@@ -31,7 +34,7 @@ repository finding, which has no workflow yet:
 3. Confirm the next call appears in the audit log and the usage ledger, then record the finding's disposition.
 ```
 
-### 11-03, LIVE, the finding chosen at T-24h
+### 10-31, LIVE, the finding chosen at T-24h
 
 Fill in `<repository>` and the step 2 path from the finding's sighting line (`path:line @commit`) at the T-24h check,
 then keep the three steps as written:
@@ -52,14 +55,14 @@ evidence, never automatic (FS-51; Q&A 29).
 
 ## E — Enforce it, live (ADR-0202 lane F)
 
-**The command.** On 11-03, in the dev host's Session Manager shell, as for G3 (one line, pending execution on that host):
+**The command.** On 10-31, in the dev host's Session Manager shell, as for G3 (one line, pending execution on that host):
 
 ```sh
 printf '%s\n' '#!/bin/sh' 'cd /opt/app && sudo docker compose exec -T gateway node apps/gateway/dist/demo-enforce.js' > ~/enforce.sh && chmod +x ~/enforce.sh
 ```
 
 It runs inside the gateway container with the gateway's own bootstrap token and calls the gateway on its own loopback
-port. On 11-01, on the laptop's FALLBACK stack: `pnpm --filter @regulait/gateway demo:enforce` with the same
+port. At the FALLBACK rehearsal, on the laptop's FALLBACK stack: `pnpm --filter @regulait/gateway demo:enforce` with the same
 environment as the other demo commands. Exit 0: the beat ran as scripted (or printed the simulated decision). Exit 1:
 something answered differently, read the `***` line. Exit 2: a setup error, or a `REFUSED` line. The command refuses to
 call anything unless the gateway shows it is a demo one (lane L's `GET /v1/demo/beats` answers and the seed's four
@@ -109,8 +112,8 @@ off-stack serving.
 Neither note claims a fix that has not happened: an acknowledgement records that a person saw the alert and accepted
 it for this release, and the gate still prints both as **WARN acknowledged_high_alert**.
 
-On 11-01 these notes are entered on the FALLBACK stack only (`DEMO_RUNBOOK.md` §7.3, "11-01 run-through"). Never
-acknowledge these alerts on LIVE before 11-03.
+At rehearsal these notes are entered on the FALLBACK stack only (`DEMO_RUNBOOK.md` §7.3). On 10-31 they are entered
+on LIVE, once. Never acknowledge these alerts on LIVE before the demo.
 
 ---
 
