@@ -616,7 +616,7 @@ test.describe("ADR-0072 — an operator can SEE which baselines are stranded", (
     });
     await expect(card.getByText("Current semantics", { exact: true })).toBeVisible();
     await expect(card.getByText("Pinned baselines that are stranded", { exact: true })).toBeVisible();
-    await expect(card.getByRole("cell", { name: "ADR-0072", exact: true })).toBeVisible();
+    await expect(card.getByRole("columnheader", { name: "What a score MEANT" })).toBeVisible();
     await expect(card.getByText(/PLATFORM HOLD/)).toBeVisible();
     await shot(page, "phase6-16-scoring-semantics");
     track.assertClean("scoring semantics");

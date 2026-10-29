@@ -158,7 +158,6 @@ export default function GuardrailsPage() {
     <>
       <PageHeader
         title="Guardrails"
-        sub="Content-safety detectors, in and out. Every detector shipped today is a deterministic rule set, not a model."
         info={<p>Content-safety detectors evaluated at the same interception point, and with the same block / warn / log verbs, as PII enforcement — on the way in AND on the way out. Every detector shipped today is a deterministic local rule set, not a model: it catches literal phrasings, misses novel ones, and will occasionally fire on benign text. That is why the shipped posture is 'log', and why this page shows each detector's limits next to its switch.</p>}
       />
       <div className={v.stack}>
@@ -174,9 +173,16 @@ export default function GuardrailsPage() {
           {/* ---------------- org defaults ---------------- */}
           <Card title="Deployment defaults">
             <div className={v.faint} style={{ marginBottom: "var(--s2)" }}>
-              {config.data?.org
-                ? "These apply to every governed call unless an override or a compliance profile says otherwise."
-                : "No deployment default has been set, so the shipped posture applies: every added layer observes in 'log' mode and refuses nothing. Turning a layer up is a deliberate act."}
+              {config.data?.org ? (
+                "These apply to every governed call unless an override or a compliance profile says otherwise."
+              ) : (
+                <Badge
+                  tone="warn"
+                  info="No deployment default has been set, so the shipped posture applies: every added layer observes in 'log' mode and refuses nothing. Turning a layer up is a deliberate act."
+                >
+                  Shipped posture
+                </Badge>
+              )}
             </div>
             <form
               className={v.stack}
@@ -217,14 +223,14 @@ export default function GuardrailsPage() {
                   <div className={v.stack} style={{ flex: 1, gap: "var(--s1)" }}>
                     <div>
                       {d.summary}{" "}
-                      <Badge tone="neutral" title="detection tier">
-                        {d.tier}
-                      </Badge>{" "}
+                      <Badge tone="neutral">{d.tier}</Badge>{" "}
                       <Badge tone="neutral">{d.phases.join(" + ")}</Badge>{" "}
                       <Badge tone="neutral">{d.ruleCount} rules</Badge>
                     </div>
-                    <div className={v.faint}>
-                      <strong>Limits:</strong> {d.limits}
+                    <div>
+                      <Badge tone="warn" infoLabel={`the limits of ${d.id.replace(/_/g, " ")}`} info={d.limits}>
+                        Limited coverage
+                      </Badge>
                     </div>
                   </div>
                 </div>
@@ -417,12 +423,16 @@ export default function GuardrailsPage() {
           </Card>
 
           {/* ---------------- tuning sandbox ---------------- */}
-          <Card title="Try a sample">
-            <div className={v.faint} style={{ marginBottom: "var(--s2)" }}>
-              Runs every detector over the text and reports what WOULD fire. Nothing is enforced,
-              dispatched or recorded as a violation — this is how you measure a layer's
-              false-positive rate on your own text before moving it off &lsquo;log&rsquo;.
-            </div>
+          <Card
+            title="Try a sample"
+            info={
+              <p>
+                Runs every detector over the text and reports what WOULD fire. Nothing is enforced,
+                dispatched or recorded as a violation — this is how you measure a layer's
+                false-positive rate on your own text before moving it off &lsquo;log&rsquo;.
+              </p>
+            }
+          >
             <div className={v.stack}>
               <Textarea
                 rows={4}

@@ -116,7 +116,7 @@ export const ACCESS_RECOMMENDATION_NOTES = {
     "open an ADR-0090 certification campaign scoped to exactly the flagged grants (scope kind " +
     "'from_recommendations'), or use the ordinary revocation endpoints each finding references.",
   observed:
-    "the unused-grant rule reads the pillar-5 usage ledger: EXECUTED governed calls only, " +
+    "the unused-grant rule reads the usage ledger: EXECUTED governed calls only, " +
     "metered per user for model dispatches, connector invokes and MCP tool calls alike, " +
     "regardless of the tracing switch, and never pruned. Denied attempts are not use; activity " +
     "that never crossed this gateway is invisible — though it also never exercised a gateway " +
@@ -549,7 +549,7 @@ export async function computeAccessRecommendations(
           windowDays,
           governedCallsInWindow: 0,
           lastGovernedUseAt: lastAt ? lastAt.toISOString() : null,
-          source: "usage_events (pillar-5 metering: executed governed calls per user; tracing-independent)",
+          source: "usage ledger (executed governed calls per user; tracing-independent)",
           ...(g.roleId ? { assessedAssignees: holderIds.length } : {}),
         },
         action: {

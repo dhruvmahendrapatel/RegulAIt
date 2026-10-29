@@ -136,10 +136,17 @@ export function EngineRunsPanel(props: { surface: EngineSurface }) {
 
   return (
     <>
-      <Card title="Run an engine">
+      <Card
+        title="Run an engine"
+        info={
+          <p>
+            A sidecar engine runs its sets against an agent through the same governed path as real traffic, on a
+            run-scoped key billed to the project you choose.
+          </p>
+        }
+      >
         <p className={v.faint}>
-          A sidecar engine runs its sets against an agent through the same governed path as real traffic, on a run-scoped
-          key billed to the project you choose. A run that uses an agentic, offensive or unlisted set, or a budget over the
+          A run that uses an agentic, offensive or unlisted set, or a budget over the
           organisation&apos;s approval threshold, waits in the <Link className={er.inlineLink} to="/admin/approvals">Approvals Queue</Link> and does
           not start until an approver decides.
         </p>

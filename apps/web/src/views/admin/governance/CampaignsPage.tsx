@@ -137,7 +137,6 @@ export default function CampaignsPage() {
     <>
       <PageHeader
         title="Certification campaigns"
-        sub="Periodic re-attestation of gateway grants."
         info={<p>Periodic re-attestation of GATEWAY GRANTS ONLY — the agent, connector and MCP tool/server grant rows this gateway enforces, direct and role-bundled. Items are a snapshot taken at open; each keep/revoke is a decision on the one Approvals queue by the item's named reviewer; a revoke executes the real grant removal; a past-due campaign reads expired-incomplete and its undecided items stay undecided forever.</p>}
       />
       <div className={v.stack}>
@@ -237,7 +236,7 @@ export default function CampaignsPage() {
             {(list.data?.campaigns ?? []).length === 0 ? (
               <EmptyState
                 title="No certification campaign has ever been run"
-                body="Gateway grants have never been re-attested. Open one above — the posture page states this fact outright until then."
+                body="Gateway grants have never been re-attested. Open one above."
               />
             ) : (
               <Table
