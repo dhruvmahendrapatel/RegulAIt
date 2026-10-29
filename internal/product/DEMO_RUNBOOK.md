@@ -820,7 +820,7 @@ improvise around it (c6485593621).
    makes the container run the sample-data prep on an empty database, §7.1). Then check, without printing the file:
 
    ```bash
-   # pending execution
+   # done on the laptop 2026-10-29 (#453 c6486350055)
    grep -c '^REGULAIT_DEMO_LICENSE' .env    # 0
    grep -c '^REGULAIT_PUBLIC_URL=https://' .env   # 1: the tunnel URL of TUNNEL.md step 4
    ```
@@ -830,7 +830,7 @@ improvise around it (c6485593621).
    (`.git/info/exclude` is local and never committed), then confirm:
 
    ```bash
-   # pending execution
+   # done on the laptop 2026-10-29 (#453 c6486350055)
    test -e docker-compose.override.yml && echo "an override already exists: stop and report" || echo "none yet"
    echo 'docker-compose.override.yml' >> .git/info/exclude
    git check-ignore -q docker-compose.override.yml && echo ignored    # must print "ignored"
@@ -844,7 +844,7 @@ improvise around it (c6485593621).
    credentials. If `.env` already sets either name to a real value, the override's value wins for the gateway.
 
    ```bash
-   # pending execution — writes secrets into the file; prints nothing
+   # done on the laptop 2026-10-29 (#453 c6486350055); — writes secrets into the file; prints nothing
    ( umask 077
      { printf '%s\n' 'services:' '  gateway:' '    environment:'
        printf '      REGULAIT_DATA_KEY: "%s"\n' "$(openssl rand -hex 32)"
@@ -863,10 +863,11 @@ improvise around it (c6485593621).
    receipt-key variables: with none set, the gateway's first boot makes its own receipt key (`docker-compose.yml`,
    ADR-0189 R25).
 
-3. **The one wipe.** Allowed now only because no discovery source or trust policy exists yet:
+3. **The one wipe. Done on 2026-10-29; never run it again.** It was allowed then only because no discovery source or
+   trust policy existed yet:
 
    ```bash
-   # pending execution — EXACTLY ONCE, and never again after DEMO_REAL_ACCOUNTS step 2
+   # DONE 2026-10-29 (#453 c6486350055). Do NOT run it again: it was the one wipe
    docker compose --profile tunnel down -v
    ```
 
@@ -876,7 +877,7 @@ improvise around it (c6485593621).
 4. **Bring the stack up:**
 
    ```bash
-   # pending execution
+   # done on the laptop 2026-10-29 (#453 c6486350055)
    docker compose --profile tunnel up -d --build
    docker compose ps    # gateway (healthy), cloudflared and caddy-tunnel running
    docker compose logs gateway | grep -c "demo prep"    # 0: no sample-data prep ran
@@ -888,7 +889,7 @@ improvise around it (c6485593621).
 5. **The export-signing key**, inside the gateway container, on the keyring volume step 3 recreated:
 
    ```bash
-   # pending execution
+   # done on the laptop 2026-10-29 (#453 c6486350055)
    docker compose exec -e REGULAIT_DEMO_KEY_DIR=/app/demo-license-keys/export-signing gateway node apps/gateway/dist/demo-export-key.js
    ```
 
@@ -901,7 +902,7 @@ improvise around it (c6485593621).
 6. **Live prep:**
 
    ```bash
-   # pending execution
+   # done on the laptop 2026-10-29 (#453 c6486350055)
    docker compose exec gateway node apps/gateway/dist/demo-prepare.js --live
    ```
 
@@ -1007,6 +1008,7 @@ The fallback is the sample-data stack of §1.3, run on the same laptop as the li
 | Database | the live volumes | its own `regulait-fallback_*` volumes |
 | `.env` | live values, **no** demo switch | `REGULAIT_DEMO_LICENSE=1` and `REGULAIT_PUBLIC_URL=http://localhost:3100` only |
 | Gateway port | `127.0.0.1:3000` | `127.0.0.1:3100` |
+| Compose network | `172.28.0.0/16` (`docker-compose.yml`) | `172.29.0.0/16`, set in its override (two projects cannot share a pinned subnet) |
 | Profiles | `tunnel` | **none**: never `tunnel` (one tunnel per token), `sso`, or `isolation` (its volumes have fixed names shared by every project on the host) |
 | Reached at | `https://regulait.<domain>/ui` | `http://localhost:3100/ui`, on the laptop only |
 
@@ -1031,13 +1033,42 @@ never run `down -v` anywhere else (§7.6, step 3).
    printf '%s\n' 'REGULAIT_DEMO_LICENSE=1' 'REGULAIT_PUBLIC_URL=http://localhost:3100' > .env
    ```
 
-3. **Its port.** Write `docker-compose.override.yml` in `regulait-fallback` so the gateway publishes `3100` instead of
-   `3000`. The `!override` tag replaces the list instead of adding to it (Docker Compose 2.24.4 or later):
+3. **Its port and network.** Both stacks pin their compose network, and Docker refuses a second network on the
+   same subnet, so the fallback moves to `172.29.0.0/16` and moves `REGULAIT_TRUSTED_PROXIES` with it, as the comment
+   above the `networks:` block in `docker-compose.yml` requires. Nothing listens at `172.29.0.2` without the `tls`
+   profile, so nothing is trusted. First check that the range is free on the laptop (the output must not show
+   `172.29.`):
+
+   ```bash
+   # pending execution
+   docker network inspect $(docker network ls -q) --format '{{.Name}} {{range .IPAM.Config}}{{.Subnet}}{{end}}' | grep 172.29. || echo "172.29.0.0/16 is free"
+   ```
+
+   Then create `docker-compose.override.yml` in `regulait-fallback` with exactly this content. The `!override` tags
+   replace the lists instead of adding to them (Docker Compose 2.24.4 or later):
+
+   ```yaml
+   services:
+     gateway:
+       ports: !override
+         - "127.0.0.1:3100:3000"
+       environment:
+         REGULAIT_TRUSTED_PROXIES: 172.29.0.2
+   networks:
+     regulait:
+       ipam: !override
+         config:
+           - subnet: 172.29.0.0/16
+             gateway: 172.29.0.1
+             ip_range: 172.29.1.0/24
+   ```
+
+   Check it. The gateway must publish only `3100`, and the network must be `172.29.0.0/16`:
 
    ```bash
    # pending execution — in regulait-fallback
-   printf '%s\n' 'services:' '  gateway:' '    ports: !override' '      - "127.0.0.1:3100:3000"' > docker-compose.override.yml
-   docker compose config --quiet && docker compose config | grep -n '3100'   # must show the 3100 mapping only
+   docker compose config --quiet && docker compose config --format json \
+     | node -e 'const c=JSON.parse(require("fs").readFileSync(0));console.log(JSON.stringify(c.services.gateway.ports), JSON.stringify(c.networks.regulait.ipam.config))'
    ```
 
 4. **The wipe guard.** Before any `down -v` on this stack, check the folder and the project, and stop if either is
@@ -1053,7 +1084,10 @@ never run `down -v` anywhere else (§7.6, step 3).
    database. Then set the demo passwords and enrol the two admins' authenticators exactly as §1.3 describes (read
    `http://localhost:3100` wherever §1.3 says `3000`), in a
    **separate** browser profile at `http://localhost:3100/ui`, never in a live profile.
-6. **Check it:** `docker compose exec gateway node apps/gateway/dist/demo-check.js` must PASS against this stack.
+6. **Check it** the way §1.3 says ("Re-checking later"): read the prep's result with
+   `docker compose logs gateway | grep -E "pass, .* warn, .* fail"`, or run §1.3's re-check block, in `regulait-fallback`.
+   A bare `demo-check.js` FAILs "3 Evidence" by design, so do not use it. From Git Bash on Windows, run
+   `export MSYS_NO_PATHCONV=1` first (§7.6).
 7. **On the day:** keep the fallback stack running from T-1h with its browser profile signed in, so switching is
    instant. If the laptop runs short of memory, `docker compose stop` it after the check and `docker compose start` it
    at T-10 min. After the demo, `docker compose down -v` in `regulait-fallback` (after step 4), then
