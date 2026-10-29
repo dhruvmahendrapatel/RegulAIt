@@ -15,13 +15,14 @@ import { Link, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../api/client";
 import { PageHeader } from "../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Select, SeverityBadge } from "../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, RowActions, Select, SeverityBadge } from "../../ui/kit";
 import { FoldTable } from "../../ui/fold";
 import { useSession } from "../../session/SessionContext";
 import { QueryGate, useAction } from "../admin/adminKit";
 import v from "../views.module.css";
 import a from "../admin/admin.module.css";
 import { ReportIncidentModal } from "./ReportIncidentModal";
+import { CloseIncidentFromList } from "./CloseIncidentModal";
 import {
   CLOCK_DISCLAIMER,
   INCIDENT_SETTING_COPY,
@@ -141,6 +142,8 @@ export default function IncidentsPage() {
   const [severity, setSeverity] = useState("");
   const [seriousOnly, setSeriousOnly] = useState(false);
   const reporting = params.get("new") === "1";
+  // G11: the row's Close opens the incident page's own dialog
+  const [closing, setClosing] = useState<string | null>(null);
   const qs = new URLSearchParams();
   if (status !== "all") qs.set("status", status);
   if (severity) qs.set("severity", severity);
@@ -267,11 +270,32 @@ export default function IncidentsPage() {
                 ),
               },
               { key: "aware", header: "Aware", fold: { md: "ref" }, render: (r) => utc(r.awareAt) },
+              {
+                // who may close is the server's rule for editing (owner or admin, never once closed); the dialog says when it is an admin's
+                key: "close",
+                header: "",
+                srHeader: "Actions",
+                align: "right",
+                // on a phone it moves into the Incident cell (D5), so the register still fits its card
+                fold: { sm: "ref" },
+                render: (r) =>
+                  r.status !== "closed" && (isAdmin || (auth?.userId != null && r.ownerUserId === auth.userId)) ? (
+                    <RowActions
+                      slot="5rem"
+                      primary={
+                        <Button size="sm" aria-label={`Close ${r.ref} ${r.title}`} onClick={() => setClosing(r.id)}>
+                          Close…
+                        </Button>
+                      }
+                    />
+                  ) : null,
+              },
             ]}
           />
         </Card>
         {isAdmin && <IncidentSettingsCard />}
       </div>
+      {closing && <CloseIncidentFromList key={closing} id={closing} onClose={() => setClosing(null)} onSaved={() => void list.refetch()} />}
       <ReportIncidentModal
         open={reporting}
         prefill={{ useCaseId: params.get("useCaseId"), detectionSource: params.get("detectionSource"), sourceRef: params.get("sourceRef") }}

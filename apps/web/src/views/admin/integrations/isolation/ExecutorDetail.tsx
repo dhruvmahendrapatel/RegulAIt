@@ -16,7 +16,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../../api/client";
 import { fmtAt } from "../../../../api/format";
 import { api as stepUpApi, withStepUp } from "../../../../stepup/stepUp";
-import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Modal, Select, Table } from "../../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Select, Table } from "../../../../ui/kit";
 import { KV, useAction } from "../../adminKit";
 import {
   CLASSES,
@@ -32,22 +32,13 @@ import {
   type AttestationRecord,
   type Executor,
 } from "./isolationModel";
+import { RevokeDialog, executorCall, revokeExecutor } from "./RevokeExecutor";
 import v from "../../../views.module.css";
 
 export const executorKeys = {
   detail: (id: string) => ["admin", "isolation", "executor", id] as const,
   attestations: (id: string) => ["admin", "isolation", "executor", id, "attestations"] as const,
 };
-
-/** an executor refusal in the page's words, else the client's own reading */
-async function executorCall<T>(fn: () => Promise<T>): Promise<T> {
-  try {
-    return await fn();
-  } catch (e) {
-    const text = executorRefusal(e);
-    throw text ? new Error(text) : e;
-  }
-}
 
 type Pending = null | { kind: "quarantine" | "reenable" } | { kind: "revoke" } | { kind: "declared"; value: string };
 
@@ -206,7 +197,7 @@ export function ExecutorDetail(props: { executorId: string; onClose: () => void 
           onCancel={() => setPending(null)}
           onConfirm={() => {
             setPending(null);
-            void run(() => api.post(`/v1/executors/${encodeURIComponent(id)}/revoke`, {}), `${executor.name} revoked`);
+            void run(() => revokeExecutor(id), `${executor.name} revoked`);
           }}
         />
       )}
@@ -292,38 +283,5 @@ function DeclaredClassForm(props: { executor: Executor; gate: { ok: true } | { o
           : props.gate.reason}
       </span>
     </form>
-  );
-}
-
-function RevokeDialog(props: { name: string; onCancel: () => void; onConfirm: () => void }) {
-  const [typed, setTyped] = useState("");
-  const helpId = useId();
-  return (
-    <Modal
-      open
-      title={`Revoke ${props.name}?`}
-      onClose={props.onCancel}
-      actions={
-        <>
-          <Button onClick={props.onCancel}>Cancel</Button>
-          <Button variant="danger" disabled={typed !== props.name} aria-describedby={helpId} onClick={props.onConfirm}>
-            Revoke permanently
-          </Button>
-        </>
-      }
-    >
-      <div className={v.stack}>
-        <p>
-          Revoking is terminal. The executor is quarantined first if it is active, its open work is withdrawn, and it never places anything again. Its
-          identity stays; a replacement needs a new identity and key. The act is audited.
-        </p>
-        <Field label={`Type ${props.name} to confirm`}>
-          <Input value={typed} autoComplete="off" spellCheck={false} onChange={(e) => setTyped(e.target.value)} />
-        </Field>
-        <p id={helpId} className={v.faint}>
-          {typed === props.name ? "Ready to revoke." : "The revoke button stays disabled until the name matches exactly."}
-        </p>
-      </div>
-    </Modal>
   );
 }
