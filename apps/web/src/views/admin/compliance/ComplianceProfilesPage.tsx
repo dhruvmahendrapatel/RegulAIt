@@ -87,7 +87,7 @@ export default function ComplianceProfilesPage() {
           />
         </Card>
 
-        <UpsertProfileCard templates={templates.data?.templates ?? []} />
+        <UpsertProfileCard templates={templates.data?.templates ?? []} profiles={profiles.data?.profiles ?? []} />
         <CascadePreviewCard />
         <ReclassifyCard />
       </div>
@@ -95,18 +95,53 @@ export default function ComplianceProfilesPage() {
   );
 }
 
-function UpsertProfileCard(props: { templates: WorkflowTemplate[] }) {
+/** the profile fields this form does not show: an update sends them back as they are, because the route replaces the
+ * whole profile and an omitted floor would otherwise be cleared */
+const CARRIED = [
+  "maxProjectBudgetUsd",
+  "budgetEnforcement",
+  "guardrailModes",
+  "redteamGatingClasses",
+  "redteamMinTrials",
+  "redteamFailOnSeverity",
+  "minIsolationClass",
+] as const;
+
+// ADR-0181: a new profile starts at the strict defaults (read_only, block), the same as the server's
+const EMPTY_FORM = {
+  tag: "",
+  requiredTemplateIds: [] as string[],
+  mcpDefaultMode: "read_only",
+  piiMode: "block",
+  auditRetentionDays: "",
+  backupRetentionDays: "",
+  patchCadenceDays: "",
+};
+
+const numText = (n: number | null | undefined) => (n == null ? "" : String(n));
+
+function UpsertProfileCard(props: { templates: WorkflowTemplate[]; profiles: ComplianceProfile[] }) {
   const act = useAction();
-  const [f, setF] = useState({
-    tag: "",
-    requiredTemplateIds: [] as string[],
-    mcpDefaultMode: "read_write",
-    piiMode: "log",
-    auditRetentionDays: "",
-    backupRetentionDays: "",
-    patchCadenceDays: "",
-  });
+  const [f, setF] = useState(EMPTY_FORM);
   const set = (k: keyof typeof f, val: string | string[]) => setF((s) => ({ ...s, [k]: val }));
+  const existing = props.profiles.find((p) => p.tag === f.tag.trim());
+  // typing an existing tag loads that profile, so saving changes only what is edited here
+  const setTag = (tag: string) => {
+    const match = props.profiles.find((p) => p.tag === tag.trim());
+    setF(
+      match
+        ? {
+            tag,
+            requiredTemplateIds: match.requiredTemplateIds ?? [],
+            mcpDefaultMode: match.mcpDefaultMode,
+            piiMode: match.piiMode,
+            auditRetentionDays: numText(match.auditRetentionDays),
+            backupRetentionDays: numText(match.backupRetentionDays),
+            patchCadenceDays: numText(match.patchCadenceDays),
+          }
+        : (s) => ({ ...s, tag }),
+    );
+  };
   const tplOpts = props.templates.filter((t) => !t.retiredAt);
   return (
     <Card title="Define or update a profile (upsert by tag)">
@@ -121,7 +156,8 @@ function UpsertProfileCard(props: { templates: WorkflowTemplate[] }) {
                 api.postWithHeaders(
                   "/v1/compliance/profiles",
                   {
-                    tag: f.tag,
+                    ...(existing ? Object.fromEntries(CARRIED.map((k) => [k, existing[k] ?? null])) : {}),
+                    tag: f.tag.trim(),
                     ...(f.requiredTemplateIds.length ? { requiredTemplateIds: f.requiredTemplateIds } : {}),
                     mcpDefaultMode: f.mcpDefaultMode,
                     piiMode: f.piiMode,
@@ -137,7 +173,7 @@ function UpsertProfileCard(props: { templates: WorkflowTemplate[] }) {
         }}
       >
         <Field label="Tag">
-          <Input required value={f.tag} onChange={(e) => set("tag", e.target.value)} placeholder="for example hipaa" />
+          <Input required value={f.tag} onChange={(e) => setTag(e.target.value)} placeholder="for example hipaa" />
         </Field>
         <Field label="Required workflow templates (ctrl/cmd-click)">
           <Select
@@ -176,7 +212,7 @@ function UpsertProfileCard(props: { templates: WorkflowTemplate[] }) {
           <Input type="number" value={f.patchCadenceDays} onChange={(e) => set("patchCadenceDays", e.target.value)} />
         </Field>
         <Button type="submit" variant="primary" disabled={act.busy}>
-          Save profile
+          {existing ? "Update profile" : "Save profile"}
         </Button>
         {act.error && (
           <span className={v.errLine} role="alert">
@@ -184,6 +220,11 @@ function UpsertProfileCard(props: { templates: WorkflowTemplate[] }) {
           </span>
         )}
       </form>
+      {existing && (
+        <p className={v.hint} role="status">
+          Updating “{existing.tag}”: its budget, guardrail, red-team and isolation floors keep their current values.
+        </p>
+      )}
       <p className={v.faint}>
         Posting an existing tag updates the profile in place — every classified project immediately
         inherits the new cascade. Retention floors compose longest-wins across profiles; patch cadence
