@@ -57,6 +57,9 @@ const xml = (body: string) => `<?xml version="1.0" encoding="UTF-8"?>\n${body}`;
 const listXml = (inner: string) =>
   xml(`<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>${BUCKET}</Name><IsTruncated>false</IsTruncated>${inner}</ListBucketResult>`);
 
+const pad2 = (n: number) => String(n).padStart(2, "0");
+const dayPrefix = (d: Date) => `${PREFIX}us-east-1/${d.getUTCFullYear()}/${pad2(d.getUTCMonth() + 1)}/${pad2(d.getUTCDate())}/`;
+
 let server: http.Server;
 let port = 0;
 const acceptEncodingOnGet: string[] = [];
@@ -76,9 +79,11 @@ beforeAll(async () => {
       if (url.searchParams.get("list-type") === "2") {
         res.writeHead(200, { "content-type": "application/xml" });
         if (prefix === PREFIX) res.end(listXml(`<CommonPrefixes><Prefix>${PREFIX}us-east-1/</Prefix></CommonPrefixes>`));
-        else if (prefix.startsWith(`${PREFIX}us-east-1/`)) {
-          res.end(listXml(`<Contents><Key>${prefix}${ACCOUNT}_CloudTrail_us-east-1_obj.json.gz</Key><Size>${stored.length}</Size></Contents>`));
-        } else res.end(listXml(""));
+        else {
+          // today's or yesterday's day prefix (the scan walks back from now), built here: nothing from the request is echoed
+          const day = [0, 1].map((back) => dayPrefix(new Date(Date.now() - back * 86_400_000))).find((p) => p === prefix);
+          res.end(listXml(day ? `<Contents><Key>${day}${ACCOUNT}_CloudTrail_us-east-1_obj.json.gz</Key><Size>${stored.length}</Size></Contents>` : ""));
+        }
         return;
       }
       // GetObject: S3 serves the stored bytes whatever the client accepts, and checksums those bytes
