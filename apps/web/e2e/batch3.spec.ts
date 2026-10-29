@@ -143,7 +143,7 @@ test("stdio registration refuses a disabled transport and preserves separate arg
   await page.goto("/ui/admin/mcp-servers");
   const form = page.getByRole("button", { name: "Register", exact: true }).locator("..");
   await form.getByLabel("Name", { exact: true }).fill(SERVER);
-  await page.getByLabel("Upstream transport").selectOption("stdio");
+  await page.getByLabel("Upstream transport", { exact: true }).selectOption("stdio");
   await page.getByLabel("Closure image digest", { exact: true }).fill(IMAGE);
   await page.getByLabel("Entry point in the image", { exact: true }).fill("/srv/mcp/server.js");
   await page.getByRole("button", { name: "Add argument", exact: true }).click();
