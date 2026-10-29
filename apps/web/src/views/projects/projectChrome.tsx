@@ -229,7 +229,7 @@ function ArchiveControl(props: { project: Project }) {
             {refusal && (
               <div className={`${a.outcome} ${a.outcomeDeny}`} role="alert" data-testid="archive-refusal" data-refusal={refusal.code}>
                 <strong>{refusal.message}</strong>
-                <ul style={{ margin: 0, paddingLeft: "1.2em" }}>
+                <ul className={v.flush} style={{ paddingLeft: "var(--s3)" }}>
                   {refusal.ids.map((id) => (
                     <li key={id}>
                       <span className={v.mono}>{id}</span>

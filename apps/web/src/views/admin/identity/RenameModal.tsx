@@ -173,7 +173,7 @@ export function RenameModal(props: {
               This name is used by {counts}, which match on the name, not the {noun}. Renaming changes which
               requests they apply to until they are updated. Past approvals and audit entries keep the old name.
             </strong>
-            <ul style={{ margin: 0, paddingLeft: "1.2em" }}>
+            <ul className={v.flush} style={{ paddingLeft: "var(--s3)" }}>
               {referenced.policies.map((p) => (
                 <li key={p.id}>
                   Access policy: {p.name} <span className={v.mono}>{p.id}</span>
