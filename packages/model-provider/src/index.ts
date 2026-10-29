@@ -435,24 +435,33 @@ export class AnthropicProvider implements ModelProvider {
 /**
  * The Messages API `thinking` parameter for a caller's thinking budget.
  *
- * From the fifth Claude generation on, a fixed `budget_tokens` is REJECTED with
- * a 400: thinking is adaptive (the model decides how much to think) and is on
- * by default. Sending the budget form there would turn every thinking request
- * into a provider error, so those models get `{ type: "adaptive" }`. The
- * caller's `maxTokens` stays the hard ceiling on output, thinking included, so
- * the spend bound the budget expressed is still enforced, just not split.
+ * Claude 4.7 and later (every 4.7/4.8 model and the whole fifth generation)
+ * REJECT a fixed `budget_tokens` with a 400: thinking is adaptive (the model
+ * decides how much to think). Claude 4.6 still accepts the budget form but has
+ * deprecated it in favour of adaptive. So from 4.6 on these models get
+ * `{ type: "adaptive" }`; sending the budget form to 4.7+ would turn every
+ * thinking request into a provider error. The caller's `maxTokens` stays the
+ * hard ceiling on output, thinking included, so the spend bound the budget
+ * expressed is still enforced, just not split.
  *
- * Anything else (an earlier generation, or an `anthropic_messages` bridge whose
- * model id is not a Claude id) keeps the budget form unchanged. The generation
- * is read from the id's shape (`claude-<family>-<major>…`), never from a list,
- * so a later model inherits the right form without an edit here.
+ * Anything else (4.5 and earlier, a dated snapshot id such as
+ * `claude-sonnet-4-20250514`, an id with a platform prefix, or an
+ * `anthropic_messages` bridge whose model id is not a Claude id) keeps the
+ * budget form unchanged. The version is read from the id's shape
+ * (`claude-<family>-<major>[-<minor>]…`, a minor of at most two digits so a
+ * date is never read as one), never from a list, so a later model inherits
+ * the right form without an edit here.
  */
 export function anthropicThinking(
   model: string,
   budgetTokens: number,
 ): { type: "adaptive" } | { type: "enabled"; budget_tokens: number } {
-  const major = /^claude-[a-z]+-(\d+)(?:-|$)/.exec(model)?.[1];
-  if (major !== undefined && Number(major) >= 5) return { type: "adaptive" };
+  const m = /^claude-[a-z]+-(\d+)(?:-(\d{1,2}))?(?:-|$)/.exec(model);
+  if (m) {
+    const major = Number(m[1]);
+    const minor = m[2] === undefined ? 0 : Number(m[2]);
+    if (major >= 5 || (major === 4 && minor >= 6)) return { type: "adaptive" };
+  }
   return { type: "enabled", budget_tokens: budgetTokens };
 }
 

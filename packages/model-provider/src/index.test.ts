@@ -2493,6 +2493,12 @@ describe("thinking (ADR-0020 long tail): Anthropic extended thinking", () => {
     expect(anthropicThinking("claude-opus-5-5", 900)).toEqual({ type: "adaptive" });
     expect(anthropicThinking("claude-test-12", 900)).toEqual({ type: "adaptive" });
     expect(anthropicThinking("claude-test-4", 900)).toEqual({ type: "enabled", budget_tokens: 900 });
+    expect(anthropicThinking("claude-opus-4-8", 900)).toEqual({ type: "adaptive" });
+    expect(anthropicThinking("claude-opus-4-7", 900)).toEqual({ type: "adaptive" });
+    expect(anthropicThinking("claude-sonnet-4-6", 900)).toEqual({ type: "adaptive" });
+    expect(anthropicThinking("claude-haiku-4-5", 900)).toEqual({ type: "enabled", budget_tokens: 900 });
+    expect(anthropicThinking("claude-sonnet-4-20250514", 900)).toEqual({ type: "enabled", budget_tokens: 900 });
+    expect(anthropicThinking("claude-opus-5", 900)).toEqual({ type: "adaptive" });
     expect(anthropicThinking("local-bridge-model-7", 900)).toEqual({ type: "enabled", budget_tokens: 900 });
     expect(anthropicThinking("claude", 900)).toEqual({ type: "enabled", budget_tokens: 900 });
   });
