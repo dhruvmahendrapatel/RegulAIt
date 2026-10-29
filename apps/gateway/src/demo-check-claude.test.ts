@@ -4,6 +4,8 @@
  */
 import { describe, expect, it } from "vitest";
 import { CLAUDE_BEAT, CLAUDE_BEAT_EGRESS_HOST, CLAUDE_BEAT_MODEL, checkClaudeBeat } from "./demo-check-lib.js";
+// the read route, imported rather than spelled out: this suite only serves canned GET bodies and writes nothing
+import { EGRESS_ALLOW_HOSTS_PATH } from "./demo-live-lib.js";
 
 type Bodies = Record<string, { status: number; body: Record<string, unknown> }>;
 const getter = (bodies: Bodies) => async (url: string) => bodies[url] ?? { status: 404, body: {} };
@@ -18,7 +20,7 @@ const agent = (over: Record<string, unknown> = {}) => ({
 const ready: Bodies = {
   "/v1/agents?limit=200": { status: 200, body: { agents: [agent()] } },
   "/v1/model-credentials": { status: 200, body: { credentials: [{ provider: "anthropic" }] } },
-  "/v1/egress-allow-hosts": { status: 200, body: { hosts: [{ host: CLAUDE_BEAT_EGRESS_HOST }] } },
+  [EGRESS_ALLOW_HOSTS_PATH]: { status: 200, body: { hosts: [{ host: CLAUDE_BEAT_EGRESS_HOST }] } },
 };
 
 describe("checkClaudeBeat", () => {
@@ -47,7 +49,7 @@ describe("checkClaudeBeat", () => {
       getter({
         ...ready,
         "/v1/model-credentials": { status: 200, body: { credentials: [] } },
-        "/v1/egress-allow-hosts": { status: 200, body: { hosts: [] } },
+        [EGRESS_ALLOW_HOSTS_PATH]: { status: 200, body: { hosts: [] } },
       }),
     );
     expect(out.map((c) => c.level)).toEqual(["PASS", "FAIL", "FAIL"]);
