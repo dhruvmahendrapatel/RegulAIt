@@ -41,13 +41,23 @@ export default function PmConnectionsPage() {
     <>
       <PageHeader
         title="PM connections"
-        sub="Task graphs and stages mapped onto the customer's own work items."
         info={<p>Task graphs and workflow stages map onto the customer's own work items. Users link a run from its detail page; status, sign-offs and decisions mirror out; inbound webhooks record drift, never overwrite the state machine.</p>}
       />
       <div className={v.stack}>
         {reveal && <RevealCard reveal={reveal} onDismiss={() => setReveal(null)} />}
 
-        <Card title="Add a connection">
+        <Card
+          title="Add a connection"
+          infoLabel="secrets handling"
+          info={
+            <p>
+              Tokens are AES-256-GCM encrypted at rest and never returned. The webhook secret verifies inbound
+              traffic with each provider's NATIVE mechanism: HMAC signatures for linear / asana /
+              generic_webhook; a ?token= URL parameter for jira and monday (which cannot sign); basic-auth
+              password for azure_devops.
+            </p>
+          }
+        >
           <form
             className={a.formRow}
             onSubmit={(e) => {
@@ -79,7 +89,19 @@ export default function PmConnectionsPage() {
             <Field label="Name">
               <Input required value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="for example demo-pm" />
             </Field>
-            <Field label="Provider">
+            <Field
+              label="Provider"
+              helpLabel="provider kinds"
+              help={
+                <>
+                  Every provider kind is implemented — generic_webhook speaks regulAIt's signed normalized event
+                  contract (HMAC-SHA256 in x-regulait-signature) to any HTTP receiver at its base URL. jira,
+                  azure_devops and generic_webhook need their base URL. The api version select applies to jira
+                  only: v2 (default) sends plain-text descriptions/comments; v3 sends ADF rich text. The demo
+                  runs entirely on the mock provider.
+                </>
+              }
+            >
               <Select value={f.provider} onChange={(e) => set("provider", e.target.value)}>
                 {PROVIDERS.map((p) => (
                   <option key={p.v} value={p.v}>
@@ -127,13 +149,6 @@ export default function PmConnectionsPage() {
               {act.error}
             </div>
           )}
-          <p className={v.faint}>
-            Every provider kind is implemented — generic_webhook speaks regulAIt's signed normalized event
-            contract (HMAC-SHA256 in x-regulait-signature) to any HTTP receiver at its base URL. jira,
-            azure_devops and generic_webhook need their base URL. The api version select applies to jira
-            only: v2 (default) sends plain-text descriptions/comments; v3 sends ADF rich text. The demo
-            runs entirely on the mock provider.
-          </p>
         </Card>
 
         <Card flush title="Connections">
@@ -168,12 +183,6 @@ export default function PmConnectionsPage() {
             }
           />
         </Card>
-        <p className={v.faint}>
-          Tokens are AES-256-GCM encrypted at rest and never returned. The webhook secret verifies inbound
-          traffic with each provider's NATIVE mechanism: HMAC signatures for linear / asana /
-          generic_webhook; a ?token= URL parameter for jira and monday (which cannot sign); basic-auth
-          password for azure_devops.
-        </p>
       </div>
     </>
   );

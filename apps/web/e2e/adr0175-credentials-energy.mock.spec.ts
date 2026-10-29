@@ -337,7 +337,9 @@ test.describe("ADR-0175 A15: the energy estimate", () => {
     await expect(panel.getByRole("row", { name: /model-a/ })).toContainText("provider disclosure 2026 · v2026-09");
     expect(state.estimateQueries[0]).toContain(`projectId=${PROJECT}`);
     const factorsCard = page.locator("section").filter({ has: page.getByText("Energy factors", { exact: true }) }).first();
-    await expect(factorsCard).toContainText("ships no energy factor");
+    await factorsCard.getByRole("button", { name: "What is Energy factors?" }).click();
+    await expect(page.getByRole("note")).toContainText("ships no energy factor");
+    await page.getByRole("button", { name: "Hide help for Energy factors" }).click();
     await expect(factorsCard.getByRole("row", { name: /model-a/ })).toContainText("0.3 / 0.6 Wh per 1k tokens in/out");
     await expectAxeClean(page, "Cost dashboard with energy estimate");
   });

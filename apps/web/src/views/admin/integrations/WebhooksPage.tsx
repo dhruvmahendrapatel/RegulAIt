@@ -321,21 +321,20 @@ export default function WebhooksPage() {
       />
       <div className={v.stack}>
         {reveal && <SecretReveal name={reveal.name} secret={reveal.secret} onDismiss={() => setReveal(null)} />}
-        <Card title="How deliveries are signed and what they carry">
-          <p className={v.faint}>
-            Signing follows the <strong>Standard Webhooks</strong> specification: each delivery carries <code>webhook-id</code> (the same on every retry,
-            so a receiver can drop duplicates), <code>webhook-timestamp</code> and <code>webhook-signature</code>, an HMAC-SHA256 under the
-            subscription&apos;s <code>whsec_</code> secret. The body is <code>{"{type, timestamp, data}"}</code>, and <code>data</code> holds only ids,
-            names, hashes, the acting person&apos;s id and times — never a prompt&apos;s text and never a secret.
-          </p>
-        </Card>
         <QueryGate loading={subs.isLoading || catalog.isLoading} error={subs.error ?? catalog.error} onRetry={() => void Promise.all([subs.refetch(), catalog.refetch()])}>
-          <Card title="Add a webhook">
-            <p className={v.faint}>
-              The URL&apos;s host must be on the egress allow-list (managed on the Custom LLM providers page); private addresses and plaintext http are
-              opt-ins there.
-              {(hosts.data?.hosts ?? []).length === 0 && <> The allow-list is empty, so no endpoint is reachable yet.</>}
-            </p>
+          <Card
+            title="Add a webhook"
+            infoLabel="delivery signing"
+            info={
+              <p>
+                Signing follows the <strong>Standard Webhooks</strong> specification: each delivery carries <code>webhook-id</code> (the same on every retry,
+                so a receiver can drop duplicates), <code>webhook-timestamp</code> and <code>webhook-signature</code>, an HMAC-SHA256 under the
+                subscription&apos;s <code>whsec_</code> secret. The body is <code>{"{type, timestamp, data}"}</code>, and <code>data</code> holds only ids,
+                names, hashes, the acting person&apos;s id and times — never a prompt&apos;s text and never a secret.
+              </p>
+            }
+          >
+            {(hosts.data?.hosts ?? []).length === 0 && <p className={v.faint}>The allow-list is empty, so no endpoint is reachable yet.</p>}
             <form
               className={v.stack}
               onSubmit={(e) => {
@@ -366,7 +365,12 @@ export default function WebhooksPage() {
                 <Field label="Name">
                   <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="release-notifier" maxLength={80} required />
                 </Field>
-                <Field label="Endpoint URL" grow>
+                <Field
+                  label="Endpoint URL"
+                  grow
+                  helpLabel="allowed endpoint hosts"
+                  help="The URL's host must be on the egress allow-list (managed on the Custom LLM providers page); private addresses and plaintext http are opt-ins there."
+                >
                   <Input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://hooks.example.internal/regulait" required />
                 </Field>
               </div>
@@ -394,6 +398,12 @@ export default function WebhooksPage() {
 
           <Card
             title="Webhooks"
+            info={
+              <p>
+                A delivery that fails is retried with exponential backoff by the scheduler&apos;s webhook job, up to its attempt limit, and then marked
+                failed and audited. A paused webhook receives nothing.
+              </p>
+            }
             actions={
               <Button size="sm" variant="ghost" disabled={act.busy} onClick={() => void act.run(async () => {
                 const r = await api.post<{ due: number; delivered: number; retrying: number; failed: number }>("/v1/webhooks/sweep", {});
@@ -405,7 +415,7 @@ export default function WebhooksPage() {
             }
           >
             {(subs.data?.subscriptions ?? []).length === 0 ? (
-              <EmptyState title="No webhooks" body="Nothing leaves this deployment as a webhook until you add one." />
+              <EmptyState title="No webhooks" />
             ) : (
               <Table
                 rows={subs.data?.subscriptions ?? []}
@@ -500,10 +510,6 @@ export default function WebhooksPage() {
                 ]}
               />
             )}
-            <p className={v.faint}>
-              A delivery that fails is retried with exponential backoff by the scheduler&apos;s webhook job, up to its attempt limit, and then marked
-              failed and audited. A paused webhook receives nothing.
-            </p>
           </Card>
         </QueryGate>
       </div>

@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { putOrgSettings } from "../../../stepup/stepUp";
 import type { McpServer, OrgSettingsResponse } from "../../../api/adminTypes";
-import { Button, Card, ConfirmModal, Field, Input, Select } from "../../../ui/kit";
+import { Button, Card, ConfirmModal, Field, InfoButton, Input, Select } from "../../../ui/kit";
 import { adminKeys, optionEls, QueryGate, readCurrentOrgSettings, reconfirmNeeded, serverOpts, StaleAfterWrite, useAction, useSettleAfterWrite, useSingleFlight, useUserPicker, userOpts } from "../adminKit";
 import { PeopleLoadError, UserListTruncated } from "./IntegrationOwnership";
 import v from "../../views.module.css";
@@ -16,8 +16,7 @@ export const MCP_UPSTREAM_TRANSPORTS = ["streamable_http", "sse", "stdio"] as co
 export function McpCoverage({ servers }: { servers: McpServer[] }) {
   const settings = useQuery({ queryKey: ["admin", "org-settings"], queryFn: () => api.get<OrgSettingsResponse>("/v1/org/settings") });
   return <>
-    <Card title="MCP protocol coverage">
-      <p>Tool calls use their existing tool grants. Other protocol methods need both organisation enablement and a separate per-user protocol grant. A read-only server grant includes no protocol methods.</p>
+    <Card title="MCP protocol coverage" info={<p>Tool calls use their existing tool grants. Other protocol methods need both organisation enablement and a separate per-user protocol grant. A read-only server grant includes no protocol methods.</p>}>
       <QueryGate loading={settings.isLoading} error={settings.error} onRetry={() => void settings.refetch()}>
         {settings.data?.settings ? <CoverageSettings key={JSON.stringify(settings.data.settings)} settings={settings.data.settings} />
           : !settings.isLoading && !settings.error && <p role="alert">This gateway has not reported MCP protocol coverage. Refresh before changing it.</p>}
@@ -118,14 +117,13 @@ function CoverageSettings({ settings }: { settings: Record<string, unknown> }) {
   const busy = act.busy || flight.busy || baseline.stale;
   return <form className={v.stack} onSubmit={(event) => { event.preventDefault(); void submit(); }}>
     {unavailable && <p role="alert">This gateway has not reported MCP protocol coverage. Refresh before changing it.</p>}
-    <fieldset disabled={busy || unavailable}><legend>Enabled protocol methods</legend>
+    {/* the (i) sits in the legend, which a disabled fieldset never disables */}
+    <fieldset disabled={busy || unavailable}><legend>Enabled protocol methods <InfoButton label="enabled protocol methods">The strict default refuses all these methods. Enabling one relaxes that boundary and is audited; a matching user grant is still required.</InfoButton></legend>
       {MCP_PROTOCOL_METHODS.map((method) => <label key={method} className={v.row}><input type="checkbox" checked={methods.includes(method)} onChange={(event) => setMethods(toggle(methods, method, event.target.checked))} />{method} · {method.startsWith("logging/") ? "write" : "read"}</label>)}
     </fieldset>
-    <p>The strict default refuses all these methods. Enabling one relaxes that boundary and is audited; a matching user grant is still required.</p>
-    <fieldset disabled={busy || unavailable}><legend>Enabled upstream transports</legend>
+    <fieldset disabled={busy || unavailable}><legend>Enabled upstream transports <InfoButton label="enabled upstream transports">Only streamable HTTP is enabled by default. Enabling SSE or stdio is an audited relaxation. A stdio server never runs on the gateway: it runs from an image pinned by digest, inside a sandbox started by an executor that proves the required isolation, and it still needs admission approval.</InfoButton></legend>
       {MCP_UPSTREAM_TRANSPORTS.map((transport) => <label key={transport} className={v.row}><input type="checkbox" checked={transports.includes(transport)} onChange={(event) => setTransports(toggle(transports, transport, event.target.checked))} />{transport}</label>)}
     </fieldset>
-    <p>Only streamable HTTP is enabled by default. Enabling SSE or stdio is an audited relaxation. A stdio server never runs on the gateway: it runs from an image pinned by digest, inside a sandbox started by an executor that proves the required isolation, and it still needs admission approval.</p>
     <Button type="submit" disabled={busy || unavailable}>Save MCP coverage</Button>
     {act.error && <p role="alert">{act.error}</p>}
     {baseline.stale && <StaleAfterWrite onRetry={() => void baseline.settle()} />}
@@ -138,7 +136,7 @@ function CoverageSettings({ settings }: { settings: Record<string, unknown> }) {
 function ProtocolGrantForm({ servers }: { servers: McpServer[] }) {
   const users = useUserPicker(); const act = useAction(); const flight = useSingleFlight();
   const [userId, setUserId] = useState(""); const [serverId, setServerId] = useState(""); const [grant, setGrant] = useState<string>(MCP_PROTOCOL_GRANT_NAMES[0]);
-  return <Card title="Per-user protocol grants"><form className={v.stack} onSubmit={(event) => {
+  return <Card title="Per-user protocol grants" info={<p>Granting protocol access relaxes this person's default deny and is audited. The corresponding method must also be enabled above. Read-only server access does not include these grants; logging is a write operation.</p>}><form className={v.stack} onSubmit={(event) => {
     event.preventDefault();
     if (!flight.enter()) return;
     void (async () => {
@@ -158,7 +156,6 @@ function ProtocolGrantForm({ servers }: { servers: McpServer[] }) {
     {users.error && <PeopleLoadError onRetry={() => void users.refetch()} />}
     <Field label="Protocol server"><Select required value={serverId} onChange={(event) => setServerId(event.target.value)}>{optionEls(serverOpts(servers), "— select —")}</Select></Field>
     <Field label="Protocol grant"><Select value={grant} onChange={(event) => setGrant(event.target.value)}>{MCP_PROTOCOL_GRANT_NAMES.map((name) => <option key={name} value={name}>{name}</option>)}</Select></Field>
-    <p>Granting protocol access relaxes this person's default deny and is audited. The corresponding method must also be enabled above. Read-only server access does not include these grants; logging is a write operation.</p>
     <Button type="submit" disabled={act.busy || flight.busy || users.isLoading || !!users.error}>Add protocol grant</Button>
     {act.error && <p role="alert">{act.error}</p>}
   </form></Card>;

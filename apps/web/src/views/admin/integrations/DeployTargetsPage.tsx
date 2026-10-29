@@ -55,11 +55,21 @@ export default function DeployTargetsPage() {
     <>
       <PageHeader
         title="Deploy targets"
-        sub="Where a deployment or rollback stage acts. Every non-mock kind is a dry-run shape, and a dry run can never satisfy a production deploy gate."
+        sub="Every non-mock kind is a dry-run shape, and a dry run can never satisfy a production deploy gate."
         info={<p>Where a deployment/rollback stage acts. mock runs everywhere with no credential; aws/azure/gcp/kubernetes execute as deterministic dry-run shapes — a dry-run deploy is recorded and badged as such, and it can never satisfy a production deploy gate.</p>}
       />
       <div className={v.stack}>
-        <Card title="Add a target">
+        <Card
+          title="Add a target"
+          infoLabel="secrets handling"
+          info={
+            <p>
+              Credentials are AES-256-GCM encrypted at rest and never returned. An aws target needs a role
+              ARN (arn:aws:iam::&lt;acct&gt;:role/&lt;name&gt;) and region; azure/gcp reuse the role/account
+              field for their subscription/project; kubernetes needs a kubeconfig credential.
+            </p>
+          }
+        >
           <form
             className={a.formRow}
             onSubmit={(e) => {
@@ -146,11 +156,6 @@ export default function DeployTargetsPage() {
               {act.error}
             </div>
           )}
-          <p className={v.faint}>
-            Credentials are AES-256-GCM encrypted at rest and never returned. An aws target needs a role
-            ARN (arn:aws:iam::&lt;acct&gt;:role/&lt;name&gt;) and region; azure/gcp reuse the role/account
-            field for their subscription/project; kubernetes needs a kubeconfig credential.
-          </p>
         </Card>
 
         <Card flush title="Targets">

@@ -114,8 +114,11 @@ test.describe("ADR-0187 X26: the Engines page", () => {
     const ms = card(page, "modelscan");
     await expect(ms.getByText("Off — not built")).toBeVisible();
     await expect(ms.getByText("none (not built)")).toBeVisible();
-    await expect(ms.getByText("No self-test is recorded.", { exact: false })).toBeVisible();
-    await expect(ms.getByText("No egress probe is recorded", { exact: false })).toBeVisible();
+    await expect(ms.getByText("No self-test recorded", { exact: true })).toBeVisible();
+    await expect(ms.getByText("No egress probe recorded", { exact: true })).toBeVisible();
+    await ms.getByRole("button", { name: "What is the missing self-test?" }).click();
+    await expect(page.getByRole("note")).toContainText("No self-test is recorded.");
+    await ms.getByRole("button", { name: "Hide help for the missing self-test" }).click();
     await expect(ms.getByRole("heading", { name: "Runners (0)" })).toBeVisible();
     await expect(ms.getByRole("link", { name: "Admission review (model artifacts)" })).toBeVisible();
     // nothing about the unbuilt engine reads as passing
