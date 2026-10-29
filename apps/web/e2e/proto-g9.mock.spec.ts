@@ -1,7 +1,7 @@
 /** PROTOTYPE (#453 G9) — libraries: retire eval dataset (with refusal), retire red-team version, edit/delete engine schedule, cancel campaign. */
 import { expect, test, type Page } from "@playwright/test";
 import { ENGINE_AGENT, installEnginesMock } from "./engines-fixtures";
-import { AVERY, ISO, ME, MORGAN, SHOTS, json, mockApi } from "./proto-fixtures";
+import { AVERY, ISO, ME, MORGAN, json, mockApi } from "./proto-fixtures";
 
 const AGENTS = { agents: [{ id: ENGINE_AGENT, name: "Credit-limit-increase assistant", provider: "mock", tier: 1, model: "m1", enabled: true }] };
 
@@ -36,11 +36,11 @@ test("g9 eval dataset retire: refused, then confirm", async ({ page }) => {
   const dialog = page.getByRole("dialog", { name: /Retire dataset “support-golden”/ });
   await expect(dialog).toContainText("No new runs or quality gates can use ‘support-golden’. Past runs and every version stay readable.");
   await dialog.getByLabel("Reason").fill("Superseded by support-golden-2026");
-  await page.screenshot({ path: `${SHOTS}/g9-evals-retire-confirm.png` });
+  await page.screenshot({ path: test.info().outputPath("g9-evals-retire-confirm.png") });
   await dialog.getByRole("button", { name: "Retire dataset" }).click();
   await expect(page.getByTestId("reasoned-refusal")).toContainText("Model change review");
   await expect(page.getByTestId("reasoned-refusal")).toContainText("1 automation rule");
-  await page.screenshot({ path: `${SHOTS}/g9-evals-retire-refused.png` });
+  await page.screenshot({ path: test.info().outputPath("g9-evals-retire-refused.png") });
   refuse = false;
 });
 
@@ -69,12 +69,12 @@ test("g9 red-team retire version", async ({ page }) => {
   await expect(retire).toBeVisible();
   await page.getByText("Attack libraries").evaluate((el) => el.scrollIntoView({ block: "start" }));
   await page.mouse.wheel(0, -120);
-  await page.screenshot({ path: `${SHOTS}/g9-redteam-list.png` });
+  await page.screenshot({ path: test.info().outputPath("g9-redteam-list.png") });
   await retire.click();
   const dialog = page.getByRole("dialog", { name: /Retire Support jailbreak set v2/ });
   await expect(dialog).toContainText("Scheduled sweeps stop probing agents with this version.");
   await dialog.getByLabel("Reason").fill("v3 replaces it once published");
-  await page.screenshot({ path: `${SHOTS}/g9-redteam-retire.png` });
+  await page.screenshot({ path: test.info().outputPath("g9-redteam-retire.png") });
 });
 
 test("g9 engine schedules edit and delete", async ({ page }) => {
@@ -100,15 +100,15 @@ test("g9 engine schedules edit and delete", async ({ page }) => {
   await card.evaluate((el) => el.scrollIntoView({ block: "start" }));
   await page.mouse.wheel(0, -120);
   await page.waitForTimeout(150);
-  await page.screenshot({ path: `${SHOTS}/g9-schedules.png` });
+  await page.screenshot({ path: test.info().outputPath("g9-schedules.png") });
   await page.getByRole("button", { name: "Delete schedule every 24 h" }).click();
   const dialog = page.getByRole("dialog", { name: /Delete the schedule/ });
   await expect(dialog).toContainText("No further runs start from this schedule. A run already in progress keeps going; cancel it from Runs.");
-  await page.screenshot({ path: `${SHOTS}/g9-schedule-delete.png` });
+  await page.screenshot({ path: test.info().outputPath("g9-schedule-delete.png") });
   await dialog.getByRole("button", { name: "Cancel" }).click();
   await page.getByRole("button", { name: "Edit schedule every 24 h" }).click();
   await expect(page.getByRole("dialog", { name: "Edit recurring run" })).toBeVisible();
-  await page.screenshot({ path: `${SHOTS}/g9-schedule-edit.png` });
+  await page.screenshot({ path: test.info().outputPath("g9-schedule-edit.png") });
 });
 
 test("g9 campaign cancel", async ({ page }) => {
@@ -146,14 +146,14 @@ test("g9 campaign cancel", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Cancel campaign" })).toBeVisible();
   await page.getByText("Campaigns", { exact: true }).evaluate((el) => el.scrollIntoView({ block: "start" }));
   await page.mouse.wheel(0, -120);
-  await page.screenshot({ path: `${SHOTS}/g9-campaigns.png` });
+  await page.screenshot({ path: test.info().outputPath("g9-campaigns.png") });
   await page.getByRole("button", { name: "Cancel campaign" }).click();
   const dialog = page.getByRole("dialog", { name: /Cancel campaign/ });
   await expect(dialog).toContainText("The 7 undecided reviews are withdrawn from reviewers’ queues");
   await expect(dialog).toContainText("The 5 decisions already made, including revocations, stand.");
   await dialog.getByLabel("Reason").fill("Scope was wrong; reopening with contractor grants only");
-  await page.screenshot({ path: `${SHOTS}/g9-campaign-cancel.png` });
+  await page.screenshot({ path: test.info().outputPath("g9-campaign-cancel.png") });
   await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
   await page.getByRole("button", { name: /^Cancelled/ }).click();
-  await page.screenshot({ path: `${SHOTS}/g9-campaigns-cancelled.png` });
+  await page.screenshot({ path: test.info().outputPath("g9-campaigns-cancelled.png") });
 });

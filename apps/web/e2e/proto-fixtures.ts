@@ -1,7 +1,6 @@
 /** PROTOTYPE (#453 G7–G9): the shared mocked shell for the after-demo screenshots. Throwaway. */
 import type { Page, Route } from "@playwright/test";
 
-export const SHOTS = "/tmp/claude-0/-home-user/ded6cb3a-43af-5029-b67a-cd4793943c17/scratchpad/proposals/shots";
 export const ISO = "2026-10-29T10:00:00.000Z";
 export const ME = "11111111-1111-4111-8111-111111111111";
 export const AVERY = "11111111-1111-4111-8111-111111111112";

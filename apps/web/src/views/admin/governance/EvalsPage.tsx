@@ -558,7 +558,7 @@ export default function EvalsPage() {
                           label="Retire dataset"
                           ariaLabel={`Retire dataset ${r.name}`}
                           title={`Retire dataset “${r.name}”?`}
-                          body={<p style={{ margin: 0 }}>No new runs or quality gates can use ‘{r.name}’. Past runs and every version stay readable.</p>}
+                          body={<p className={v.flush}>No new runs or quality gates can use ‘{r.name}’. Past runs and every version stay readable.</p>}
                           path={`/v1/evals/datasets/${r.id}/retire`}
                           done={`Dataset “${r.name}” retired`}
                           refusal={(code, payload) => {
@@ -568,7 +568,7 @@ export default function EvalsPage() {
                             return (
                               <>
                                 Still in use. Remove it from these first, then retire it:
-                                <ul style={{ margin: "var(--s1) 0 0", paddingLeft: "1.2em" }}>
+                                <ul style={{ margin: "var(--s1) 0 0", paddingLeft: "var(--s3)" }}>
                                   {templates.map((t) => (
                                     <li key={t}>workflow template “{t}” (quality gate)</li>
                                   ))}

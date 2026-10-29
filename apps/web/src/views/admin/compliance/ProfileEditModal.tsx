@@ -204,7 +204,7 @@ export function ProfileEditModal(props: { profile: ProfileRecord; templates: Wor
     >
       {step === "form" ? (
         <div className={v.stack} data-testid="g7-edit-form">
-          <p className={v.dim} style={{ margin: 0 }}>
+          <p className={`${v.dim} ${v.flush}`}>
             Prefilled from version {p.version ?? 1}. Saving creates version {nextVersion}; it applies only after a reviewer approves it.
           </p>
           <div className={v.sectionTitle}>Workflows and data</div>
@@ -298,7 +298,7 @@ export function ProfileEditModal(props: { profile: ProfileRecord; templates: Wor
         </div>
       ) : (
         <div className={v.stack} data-testid="g7-edit-review">
-          <p style={{ margin: 0 }}>
+          <p className={v.flush}>
             <strong>This change creates version {nextVersion} and needs a reviewer before it applies.</strong>
           </p>
           <Table<DiffRow>
@@ -319,7 +319,7 @@ export function ProfileEditModal(props: { profile: ProfileRecord; templates: Wor
               },
             ]}
           />
-          <p className={v.dim} style={{ margin: 0 }}>
+          <p className={`${v.dim} ${v.flush}`}>
             Affects {reachSentence(p.usage)}.
           </p>
           <div className={a.formRow}>
@@ -333,7 +333,7 @@ export function ProfileEditModal(props: { profile: ProfileRecord; templates: Wor
             </Field>
           </div>
           {loosens && (
-            <p className={v.dim} style={{ margin: 0 }}>
+            <p className={`${v.dim} ${v.flush}`}>
               This change loosens {rows.filter((r) => r.effect === "loosens").length === 1 ? "a floor" : "floors"}. You will be asked to confirm it's you.
             </p>
           )}

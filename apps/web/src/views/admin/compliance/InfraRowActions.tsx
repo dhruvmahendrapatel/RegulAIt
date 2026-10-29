@@ -46,7 +46,7 @@ export function ResourceActions(props: { resource: ResourceRecord }) {
         confirmLabel="Retire resource"
         body={
           <>
-            <p style={{ margin: 0 }}>
+            <p className={v.flush}>
               Scans stop checking ‘{r.name}’ and no new findings are raised. Its findings, rotations, patches and backups stay readable.
             </p>
             {refusal && (
@@ -164,7 +164,7 @@ export function PolicyActions(props: { policy: InfraPolicy; fleet: InfraPolicy |
         title={`Retire the policy for “${props.resourceName}”?`}
         confirmLabel="Retire policy"
         body={
-          <p style={{ margin: 0 }} data-testid="policy-fallback">
+          <p className={v.flush} data-testid="policy-fallback">
             {fallback} The retired policy stays readable in the audit log.
           </p>
         }

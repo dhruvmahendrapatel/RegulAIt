@@ -310,7 +310,7 @@ export default function CampaignsPage() {
                           title={`Cancel campaign “${d.name}”?`}
                           confirmLabel="Cancel campaign"
                           body={
-                            <p style={{ margin: 0 }}>
+                            <p className={v.flush}>
                               The {undecided} undecided {undecided === 1 ? "review is" : "reviews are"} withdrawn from reviewers’ queues and those grants stay
                               unattested. The {decided} {decided === 1 ? "decision" : "decisions"} already made, including revocations, stand. You will be
                               asked to confirm it's you.

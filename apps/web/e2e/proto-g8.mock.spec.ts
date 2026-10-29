@@ -1,6 +1,6 @@
 /** PROTOTYPE (#453 G8) — infrastructure: Edit / Retire resource (with its 409 refusal) and Edit / Retire policy (with the fallback stated). */
 import { expect, test, type Page } from "@playwright/test";
-import { ISO, SHOTS, json, mockApi } from "./proto-fixtures";
+import { ISO, json, mockApi } from "./proto-fixtures";
 
 const RESOURCES = [
   { id: "r1", name: "prod-cp", kind: "control_plane", provider: "mock", classifications: ["hipaa"], status: "active", effectivePolicy: { autoRemediateMaxSeverity: "medium", backupRetentionDaysFloor: 35, patchCadenceDaysCeiling: 30 } },
@@ -32,15 +32,15 @@ test("g8 infra list, retire resource confirm, refusal", async ({ page }) => {
   await page.getByText("Resources — with cascade-derived floors").evaluate((el) => el.scrollIntoView({ block: "start" }));
   await page.mouse.wheel(0, -120);
   await page.waitForTimeout(150);
-  await page.screenshot({ path: `${SHOTS}/g8-infra.png` });
+  await page.screenshot({ path: test.info().outputPath("g8-infra.png") });
   await page.getByRole("button", { name: "Retire resource prod-cp" }).click();
   const dialog = page.getByRole("dialog", { name: /Retire resource “prod-cp”/ });
   await expect(dialog).toContainText("Scans stop checking ‘prod-cp’");
   await dialog.getByLabel("Reason").fill("Control plane moved to the new region");
-  await page.screenshot({ path: `${SHOTS}/g8-retire-resource.png` });
+  await page.screenshot({ path: test.info().outputPath("g8-retire-resource.png") });
   await dialog.getByRole("button", { name: "Retire resource" }).click();
   await expect(page.getByTestId("infra-retire-refusal")).toHaveText("2 remediations are waiting on approval for this resource. Decide them first.");
-  await page.screenshot({ path: `${SHOTS}/g8-retire-refused.png` });
+  await page.screenshot({ path: test.info().outputPath("g8-retire-refused.png") });
 });
 
 test("g8 retire policy shows the fallback", async ({ page }) => {
@@ -48,5 +48,5 @@ test("g8 retire policy shows the fallback", async ({ page }) => {
   await page.getByRole("button", { name: "Retire policy for prod-cp" }).click();
   const dialog = page.getByRole("dialog", { name: /Retire the policy for “prod-cp”/ });
   await expect(dialog.getByTestId("policy-fallback")).toContainText("falls back to the fleet policy");
-  await page.screenshot({ path: `${SHOTS}/g8-retire-policy.png` });
+  await page.screenshot({ path: test.info().outputPath("g8-retire-policy.png") });
 });

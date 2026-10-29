@@ -142,7 +142,7 @@ export default function ComplianceProfilesPage() {
                             </span>
                             <InfoButton label={`projects using ${p.tag}`} term="Projects tagged with this profile" align="end">
                               <span>Reclassify these first, then retire it:</span>
-                              <ul style={{ margin: "var(--s1) 0 0", paddingLeft: "1.2em" }}>
+                              <ul style={{ margin: "var(--s1) 0 0", paddingLeft: "var(--s3)" }}>
                                 {p.usage!.projects.map((n) => (
                                   <li key={n}>{n}</li>
                                 ))}
@@ -181,7 +181,7 @@ export default function ComplianceProfilesPage() {
           title={`Retire profile “${retiring?.tag ?? ""}”?`}
           confirmLabel="Retire profile"
           body={
-            <p style={{ margin: 0 }}>
+            <p className={v.flush}>
               Projects, teams and resources tagged ‘{retiring?.tag}’ stop inheriting its floors. Its versions and audit history are kept. Audit
               retention it set is kept as a floor. You will be asked to confirm it's you.
             </p>

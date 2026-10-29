@@ -1,6 +1,6 @@
 /** PROTOTYPE (#453 G7) — compliance profiles: create-only card, Edit profile with a reviewed diff, Retire with its in-use refusal. */
 import { expect, test, type Page } from "@playwright/test";
-import { ISO, SHOTS, json, mockApi } from "./proto-fixtures";
+import { ISO, json, mockApi } from "./proto-fixtures";
 
 const hipaa = (projects: string[]) => ({
   id: "cp-hipaa",
@@ -50,10 +50,10 @@ async function open(page: Page, hipaaProjects = ["Credit operations", "team-17 s
 
 test("g7 profiles list, edit form, review, send", async ({ page }) => {
   const api = await open(page);
-  await page.screenshot({ path: `${SHOTS}/g7-profiles.png`, fullPage: true });
+  await page.screenshot({ path: test.info().outputPath("g7-profiles.png"), fullPage: true });
   await page.getByRole("button", { name: /^Retired/ }).click();
   await expect(page.getByText("Read-only")).toBeVisible();
-  await page.screenshot({ path: `${SHOTS}/g7-profiles-retired.png` });
+  await page.screenshot({ path: test.info().outputPath("g7-profiles-retired.png") });
   await page.getByRole("button", { name: /^Active/ }).click();
 
   await page.getByRole("button", { name: "Edit profile hipaa" }).click();
@@ -63,14 +63,14 @@ test("g7 profiles list, edit form, review, send", async ({ page }) => {
   await dialog.getByLabel("Patch cadence (days, at most)").fill("14");
   await dialog.getByLabel("Gating classes").selectOption(["prompt_injection", "data_exfiltration"]);
   await dialog.getByLabel("Minimum isolation class").selectOption("microvm");
-  await dialog.screenshot({ path: `${SHOTS}/g7-edit-form.png` });
+  await dialog.screenshot({ path: test.info().outputPath("g7-edit-form.png") });
   await dialog.getByRole("button", { name: "Review change" }).click();
   const review = page.getByRole("dialog", { name: /Review the change/ });
   await expect(review).toContainText("This change creates version 4 and needs a reviewer before it applies.");
   await expect(review).toContainText("Affects 3 projects, 1 team and 2 infrastructure resources");
   await review.getByLabel("Reviewer").selectOption({ label: "Avery Approver" });
   await review.getByLabel(/Reason/).fill("Support desk needs warn-level PII handling for the pilot");
-  await review.screenshot({ path: `${SHOTS}/g7-edit-review.png` });
+  await review.screenshot({ path: test.info().outputPath("g7-edit-review.png") });
   await review.getByRole("button", { name: "Send for review" }).click();
   await expect(page.getByText("Sent to Avery Approver for review")).toBeVisible();
   expect(api.calls.map((c) => c.path)).toContain("/v1/compliance/profiles/cp-hipaa/versions");
@@ -82,7 +82,7 @@ test("g7 retire blocked while in use", async ({ page }) => {
   await expect(blocked).toContainText("In use by 3 projects");
   await blocked.getByRole("button", { name: /projects using hipaa/ }).click();
   await page.waitForTimeout(200);
-  await page.screenshot({ path: `${SHOTS}/g7-retire-blocked.png` });
+  await page.screenshot({ path: test.info().outputPath("g7-retire-blocked.png") });
 });
 
 test("g7 retire confirm when unused by projects", async ({ page }) => {
@@ -91,5 +91,5 @@ test("g7 retire confirm when unused by projects", async ({ page }) => {
   const dialog = page.getByRole("dialog", { name: /Retire profile “hipaa”/ });
   await expect(dialog).toContainText("stop inheriting its floors");
   await dialog.getByLabel("Reason").fill("Replaced by the hipaa-2026 profile");
-  await page.screenshot({ path: `${SHOTS}/g7-retire-confirm.png` });
+  await page.screenshot({ path: test.info().outputPath("g7-retire-confirm.png") });
 });

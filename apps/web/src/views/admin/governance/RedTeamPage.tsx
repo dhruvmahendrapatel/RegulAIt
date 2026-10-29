@@ -334,7 +334,7 @@ export default function RedTeamPage() {
                       label="Retire version"
                       title={`Retire ${libDetail.data.library.name} v${libDetail.data.library.version}?`}
                       body={
-                        <p style={{ margin: 0 }}>
+                        <p className={v.flush}>
                           Scheduled sweeps stop probing agents with this version. Its runs and findings stay readable. You will be asked to confirm it's you.
                         </p>
                       }
