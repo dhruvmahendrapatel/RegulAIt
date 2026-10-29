@@ -10,7 +10,8 @@ import { api } from "../../../api/client";
 import type { PmConnection } from "../../../api/adminTypes";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, RowActions, Select, Table } from "../../../ui/kit";
+import { RefusalNotice } from "../../../ui/RefusalNotice";
 import { RevealCard, useAction, type RevealedSecret } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
@@ -33,6 +34,7 @@ export default function PmConnectionsPage() {
   });
 
   const [reveal, setReveal] = useState<RevealedSecret | null>(null);
+  const [deleting, setDeleting] = useState<PmConnection | null>(null);
   const [f, setF] = useState({ name: "", provider: "mock", project: "", baseUrl: "", apiVersion: "", token: "" });
   const set = (k: keyof typeof f, val: string) => setF((s) => ({ ...s, [k]: val }));
   const needsBase = ["jira", "azure_devops", "generic_webhook"].includes(f.provider);
@@ -122,10 +124,14 @@ export default function PmConnectionsPage() {
               Add connection
             </Button>
           </form>
-          {act.error && (
-            <div className={v.errLine} role="alert">
-              {act.error}
-            </div>
+          {act.guidance ? (
+            <RefusalNotice guidance={act.guidance} />
+          ) : (
+            act.error && (
+              <div className={v.errLine} role="alert">
+                {act.error}
+              </div>
+            )
           )}
           <p className={v.faint}>
             Every provider kind is implemented — generic_webhook speaks regulAIt's signed normalized event
@@ -154,6 +160,21 @@ export default function PmConnectionsPage() {
                 render: (c) => <span className={v.mono}>/v1/pm/webhooks/{c.name}</span>,
               },
               { key: "created", header: "Created", render: (c) => ago(c.createdAt) },
+              {
+                key: "actions",
+                header: "",
+                srHeader: "Actions",
+                render: (c) => (
+                  <RowActions
+                    slot="0"
+                    rest={
+                      <Button size="sm" variant="danger" disabled={act.busy} onClick={() => setDeleting(c)}>
+                        Delete connection
+                      </Button>
+                    }
+                  />
+                ),
+              },
             ]}
             rows={q.data?.connections ?? []}
             rowKey={(c) => c.name}
@@ -175,6 +196,23 @@ export default function PmConnectionsPage() {
           password for azure_devops.
         </p>
       </div>
+      <ConfirmModal
+        open={deleting !== null}
+        title={`Delete PM connection “${deleting?.name}”?`}
+        body="Its stored token and inbound webhook secret are destroyed, its work-item links and sync history are removed, and it stops being the alert-ticket connection. Re-creating it mints a new webhook secret, which must be registered again in Jira or Azure DevOps. The removal is recorded in the audit log."
+        danger
+        confirmLabel="Delete connection"
+        onCancel={() => setDeleting(null)}
+        onConfirm={() => {
+          const c = deleting;
+          setDeleting(null);
+          if (c)
+            void act.run(
+              () => api.del(`/v1/pm/connections/${encodeURIComponent(c.name)}`),
+              `PM connection “${c.name}” deleted`,
+            );
+        }}
+      />
     </>
   );
 }
