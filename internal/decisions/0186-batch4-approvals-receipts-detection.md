@@ -962,7 +962,7 @@ are kept as written; they describe what was measured and built then. Since #589 
 version other than 2.8.8.
 
 - **Why:** GHSA-gg6h-894w-4m9c (high), quadratic-time matching with lookbehinds in re2js `>=2.2.0 <2.8.7`. It failed
-  the dependency audit and the image scans on every PR. Patched, not allow-listed.
+  the dependency audit (pnpm) on `main` and on every PR. Patched, not allow-listed.
 - **The derivation still holds.** Between 2.8.6 and 2.8.8 the opcodes (1–13), the `Inst` fields and the compiler's
   emitted order are unchanged. `Inst.runes` became an `Int32Array`, which the scan-plan code only reads by length and
   index. Regenerating the vendored detection content is byte-identical (`convert-detection-content.mjs --check`), and
