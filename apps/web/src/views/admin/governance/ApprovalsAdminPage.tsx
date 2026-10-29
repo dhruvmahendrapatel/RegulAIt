@@ -387,11 +387,15 @@ function SavedViewsCard(props: {
       });
 
   return (
-    <Card title="Saved views">
-      <p className={v.faint}>
-        A view stores the three filters above — the ones the queue endpoint itself applies. Saving one changes nothing
-        about who may see or decide anything; it is a bookmark over the same visibility rules.
-      </p>
+    <Card
+      title="Saved views"
+      info={
+        <p>
+          A view stores the three filters above — the ones the queue endpoint itself applies. Saving one changes
+          nothing about who may see or decide anything; it is a bookmark over the same visibility rules.
+        </p>
+      }
+    >
       <form
         className={a.formRow}
         onSubmit={(e) => {
@@ -494,7 +498,16 @@ function DelegationsCard() {
     d.active ? "active" : new Date(d.endsAt).getTime() < Date.now() ? "expired" : "scheduled";
 
   return (
-    <Card title="Approver delegations — vacation / offboarding coverage">
+    <Card
+      title="Approver delegations — vacation / offboarding coverage"
+      info={
+        <p>
+          While a window is active, the delegate's inbox additionally shows the delegator's PENDING approvals and the
+          delegate may decide them; the decision records the real decider plus an on-behalf-of audit row. Ending a
+          delegation takes effect immediately. The org-wide master switch lives in Settings → Organization.
+        </p>
+      }
+    >
       <form
         className={a.formRow}
         onSubmit={(e) => {
@@ -580,12 +593,6 @@ function DelegationsCard() {
         onRetry={() => void q.refetch()}
         empty={<EmptyState title="No delegation windows" />}
       />
-      <p className={v.faint}>
-        While a window is active, the delegate's inbox additionally shows the delegator's PENDING approvals
-        and the delegate may decide them; the decision records the real decider plus an on-behalf-of audit
-        row. Ending a delegation takes effect immediately. The org-wide master switch lives in Settings →
-        Organization.
-      </p>
       <ConfirmModal
         open={endNow !== null}
         title="End this delegation now?"

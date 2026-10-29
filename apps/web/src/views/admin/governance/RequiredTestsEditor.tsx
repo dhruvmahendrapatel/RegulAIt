@@ -16,7 +16,7 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../../api/client";
-import { Badge, Button, Card, Field, Input, Select } from "../../../ui/kit";
+import { Badge, Button, Card, Field, InfoButton, Input, Select } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
 import { QueryGate } from "../adminKit";
 import { shortDate } from "./useCaseLifecycle";
@@ -190,13 +190,19 @@ function RequiredTestsForm(props: { view: RequiredTestsView }) {
 
   return (
     <form noValidate onSubmit={(e) => { e.preventDefault(); preview(); }}>
-      <Card title="Required AI tests by tier">
-        <p className={p.lead}>
-          Before a use case may ship, every agent in its stack needs a completed red-team or eval run that measured each
-          required OWASP test class, on the agent&apos;s current configuration, within the freshness limit, and within the
-          threshold. The deploy gate checks this live.
-        </p>
-        <p className={p.lead}>{view.defaultsNote}</p>
+      <Card
+        title="Required AI tests by tier"
+        info={
+          <>
+            <p>
+              Before a use case may ship, every agent in its stack needs a completed red-team or eval run that measured
+              each required OWASP test class, on the agent&apos;s current configuration, within the freshness limit, and
+              within the threshold. The deploy gate checks this live.
+            </p>
+            <p>{view.defaultsNote}</p>
+          </>
+        }
+      >
         <ul className={p.tiers}>
           {TIERS.map((tier) => {
             const td = draft[tier.id];
@@ -283,12 +289,14 @@ function RequiredTestsForm(props: { view: RequiredTestsView }) {
             );
           })}
         </ul>
-        <div className={p.people} style={{ marginTop: "var(--s2)" }}>
-          <span className={p.peopleLabel}>Why some OWASP classes cannot be required</span>
+        {unmeasurable.length > 0 ? <div className={p.people} style={{ marginTop: "var(--s2)" }}>
           <p className={p.lead}>
-            {unmeasurable.map((c) => `${owaspShort(c.id)} ${c.name}`).join(", ")}: {view.unmeasurableExplanation}
+            {unmeasurable.map((c) => owaspShort(c.id)).join(", ")} cannot be required.{" "}
+            <InfoButton label="why some OWASP classes cannot be required">
+              {unmeasurable.map((c) => `${owaspShort(c.id)} ${c.name}`).join(", ")}: {view.unmeasurableExplanation}
+            </InfoButton>
           </p>
-        </div>
+        </div> : null}
         <div className={p.footer}>
           <p className={p.footerNote}>
             {view.updatedAt ? `Last changed ${shortDate(view.updatedAt)}${view.updatedByName ? ` by ${view.updatedByName}` : ""}.` : "Not changed yet: every tier uses the strict default."}

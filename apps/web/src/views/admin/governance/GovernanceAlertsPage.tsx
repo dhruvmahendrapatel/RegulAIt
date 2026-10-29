@@ -143,8 +143,7 @@ export default function GovernanceAlertsPage() {
     <>
       <PageHeader
         title="Governance alerts"
-        sub="Monitor conditions that require a human response, with acknowledgement and automatic resolution kept distinct."
-        info={<p>Evaluation checks the current governed graph, risk register, model-card state, vendor state, and evidence coverage. Acknowledging records ownership of the response; it does not resolve the underlying condition.</p>}
+        info={<><p>Monitor conditions that require a human response, with acknowledgement and automatic resolution kept distinct.</p><p>Evaluation checks the current governed graph, risk register, model-card state, vendor state, and evidence coverage. Acknowledging records ownership of the response; it does not resolve the underlying condition.</p></>}
       />
       <div className={v.stack}>
         <Card>
@@ -694,10 +693,10 @@ function DetectionMonitorSettings() {
   return <Card title="Detection monitor rules and thresholds">
     <p>These rules observe retained governance records; they do not block calls or prove a jailbreak succeeded.</p>
     <ul>
-      <li>New MCP servers: compare attributed calls in the last 24 hours with the separate baseline window immediately before those hours.</li>
-      <li>Sharing widened: observe wider scopes or additional selected recipients in the last 24 hours. An edit with no earlier recipient snapshot remains unmeasured.</li>
-      <li>Instructions changed after approval: compare the current active prompt version with activation history at the latest approving decision. Missing or ambiguous history holds an existing alert.</li>
-      <li>Jailbreak correlation: findings must reach the threshold before an allowed tool call by the same person within the observation window. Correlation does not establish cause or successful execution.</li>
+      <li>New MCP servers <InfoButton label="New MCP servers">Compare attributed calls in the last 24 hours with the separate baseline window immediately before those hours.</InfoButton></li>
+      <li>Sharing widened <InfoButton label="Sharing widened">Observe wider scopes or additional selected recipients in the last 24 hours. An edit with no earlier recipient snapshot remains unmeasured.</InfoButton></li>
+      <li>Instructions changed after approval <InfoButton label="Instructions changed after approval">Compare the current active prompt version with activation history at the latest approving decision. Missing or ambiguous history holds an existing alert.</InfoButton></li>
+      <li>Jailbreak correlation <InfoButton label="Jailbreak correlation">Findings must reach the threshold before an allowed tool call by the same person within the observation window. Correlation does not establish cause or successful execution.</InfoButton></li>
     </ul>
     <QueryGate loading={query.isLoading} error={query.error} onRetry={()=>void query.refetch()}>
       {!reported?<p>Detection monitor thresholds are not reported by this gateway.</p>:<div className={v.stack}>
