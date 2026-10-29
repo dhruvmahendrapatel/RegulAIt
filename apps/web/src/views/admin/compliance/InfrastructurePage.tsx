@@ -27,6 +27,7 @@ import v from "../../views.module.css";
 import { CertRotationsCard } from "./CertRotations";
 import { putOrgSettings } from "../../../stepup/stepUp";
 import { OrgSettingsCard } from "../settings/OrgSettingsCard";
+import { PolicyActions, ResourceActions, type ResourceRecord } from "./InfraRowActions";
 
 const SEV_TONE: Record<string, Tone> = { critical: "danger", high: "danger", medium: "warn", low: "ok" };
 const STATUS_TONE: Record<string, Tone> = {
@@ -159,9 +160,18 @@ export default function InfrastructurePage() {
         <RegisterResourceCard />
 
         <Card flush title="Resources — with cascade-derived floors">
-          <Table<InfraResource>
+          <Table<ResourceRecord>
             columns={[
-              { key: "name", header: "Name", render: (r) => r.name },
+              {
+                key: "name",
+                header: "Name",
+                render: (r) => (
+                  <span className={v.row}>
+                    {r.name}
+                    {r.status === "retired" && <Badge tone="neutral">retired</Badge>}
+                  </span>
+                ),
+              },
               { key: "kind", header: "Kind", render: (r) => r.kind },
               { key: "provider", header: "Provider", render: (r) => r.provider },
               {
@@ -186,6 +196,7 @@ export default function InfrastructurePage() {
                 align: "right",
                 render: (r) => r.effectivePolicy?.patchCadenceDaysCeiling ?? "—",
               },
+              { key: "actions", header: "Actions", render: (r) => <ResourceActions resource={r} /> },
             ]}
             rows={resources.data?.resources ?? []}
             rowKey={(r) => r.id}
@@ -632,6 +643,13 @@ function PolicyCard(props: { resources: InfraResource[]; policies: InfraPolicy[]
           { key: "schedule", header: "Backup schedule", render: (p) => p.backupSchedule ?? "—" },
           { key: "retention", header: "Backup retention (d)", align: "right", render: (p) => p.backupRetentionDays ?? "—" },
           { key: "auto", header: "Auto ceiling", render: (p) => p.autoRemediateMaxSeverity ?? "never" },
+          {
+            key: "actions",
+            header: "Actions",
+            render: (p) => (
+              <PolicyActions policy={p} fleet={props.policies.find((x) => x.resourceId == null)} resourceName={p.resourceId ? (props.resources.find((r) => r.id === p.resourceId)?.name ?? "resource") : "fleet-wide"} />
+            ),
+          },
         ]}
         rows={props.policies}
         rowKey={(p) => p.id ?? `${p.resourceId ?? "fleet"}`}

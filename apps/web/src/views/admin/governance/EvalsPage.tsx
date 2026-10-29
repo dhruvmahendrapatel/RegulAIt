@@ -52,6 +52,7 @@ import { QueryGate, RemoveButton, Stat, agentOpts, optionEls, projectOpts, useAc
 import { NewestNote } from "../../../ui/fold";
 import a from "../admin.module.css";
 import { EvalsSummaryCard } from "./EvalsSummaryCard";
+import { ReasonedAction } from "./ReasonedAction";
 import v from "../../views.module.css";
 
 interface ScorerInfo {
@@ -78,6 +79,9 @@ interface DatasetRow {
   runCount: number;
   frozen: boolean;
   createdAt: string;
+  /** PROTOTYPE (#453 G9): shipped datasets cannot be retired; retired ones are read-only */
+  builtIn?: boolean;
+  status?: "active" | "retired";
 }
 interface CaseRow {
   id: string;
@@ -531,12 +535,49 @@ export default function EvalsPage() {
                     key: "frozen",
                     header: "State",
                     render: (r) =>
-                      r.frozen ? (
+                      r.status === "retired" ? (
+                        <Badge tone="neutral">retired</Badge>
+                      ) : r.frozen ? (
                         <Badge tone="info" title="A run has scored against this version, so its cases can no longer change.">
                           frozen
                         </Badge>
                       ) : (
                         <Badge tone="neutral">editable</Badge>
+                      ),
+                  },
+                  {
+                    key: "actions",
+                    header: "Actions",
+                    render: (r) =>
+                      r.status === "retired" ? (
+                        <span className={v.faint}>Read-only</span>
+                      ) : r.builtIn ? (
+                        <span className={v.faint}>Built in</span>
+                      ) : (
+                        <ReasonedAction
+                          label="Retire dataset"
+                          ariaLabel={`Retire dataset ${r.name}`}
+                          title={`Retire dataset “${r.name}”?`}
+                          body={<p style={{ margin: 0 }}>No new runs or quality gates can use ‘{r.name}’. Past runs and every version stay readable.</p>}
+                          path={`/v1/evals/datasets/${r.id}/retire`}
+                          done={`Dataset “${r.name}” retired`}
+                          refusal={(code, payload) => {
+                            if (code !== "eval_dataset_in_use") return null;
+                            const templates = (payload.templates as string[] | undefined) ?? [];
+                            const rules = Number(payload.automationRules ?? 0);
+                            return (
+                              <>
+                                Still in use. Remove it from these first, then retire it:
+                                <ul style={{ margin: "var(--s1) 0 0", paddingLeft: "1.2em" }}>
+                                  {templates.map((t) => (
+                                    <li key={t}>workflow template “{t}” (quality gate)</li>
+                                  ))}
+                                  {rules > 0 && <li>{rules} automation {rules === 1 ? "rule" : "rules"}</li>}
+                                </ul>
+                              </>
+                            );
+                          }}
+                        />
                       ),
                   },
                 ]}

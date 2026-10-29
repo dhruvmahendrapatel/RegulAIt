@@ -31,11 +31,13 @@ import { PageHeader } from "../../../shell/AppShell";
 import { useSession } from "../../../session/SessionContext";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, type Tone } from "../../../ui/kit";
 import { QueryGate, useAction } from "../adminKit";
+import { ReasonedAction } from "./ReasonedAction";
+import sh from "./shadowAi.module.css";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
 type ScopeKind = "all" | "agent_lifecycle" | "agent_owner" | "user" | "from_recommendations";
-type CampaignStatus = "open" | "completed" | "expired-incomplete";
+type CampaignStatus = "open" | "completed" | "expired-incomplete" | "cancelled";
 
 interface CampaignListRow {
   id: string;
@@ -72,7 +74,14 @@ interface CampaignDetail {
 }
 
 const statusTone = (s: CampaignStatus): Tone =>
-  s === "completed" ? "ok" : s === "expired-incomplete" ? "danger" : "info";
+  s === "completed" ? "ok" : s === "expired-incomplete" ? "danger" : s === "cancelled" ? "neutral" : "info";
+// PROTOTYPE (#453 G9): status chips
+const CHIPS: Array<[CampaignStatus, string]> = [
+  ["open", "Open"],
+  ["completed", "Completed"],
+  ["expired-incomplete", "Expired"],
+  ["cancelled", "Cancelled"],
+];
 
 const SCOPE_LABELS: Record<ScopeKind, string> = {
   all: "all gateway grants",
@@ -132,6 +141,8 @@ export default function CampaignsPage() {
     await Promise.all([list.refetch(), openId ? detail.refetch() : Promise.resolve(null)]);
   };
   const d = detail.data;
+  const [chip, setChip] = useState<CampaignStatus>("open");
+  const allCampaigns = list.data?.campaigns ?? [];
 
   return (
     <>
@@ -233,15 +244,26 @@ export default function CampaignsPage() {
 
         {/* ---------------- list ---------------- */}
         <QueryGate loading={list.isLoading} error={list.error} onRetry={() => void list.refetch()}>
-          <Card title="Campaigns">
-            {(list.data?.campaigns ?? []).length === 0 ? (
+          <Card
+            title="Campaigns"
+            actions={
+              <div className={v.row} role="group" aria-label="Filter by status">
+                {CHIPS.map(([k, l]) => (
+                  <button key={k} type="button" className={sh.chip} aria-pressed={chip === k} onClick={() => setChip(k)}>
+                    {l} {allCampaigns.filter((c) => c.status === k).length}
+                  </button>
+                ))}
+              </div>
+            }
+          >
+            {allCampaigns.length === 0 ? (
               <EmptyState
                 title="No certification campaign has ever been run"
                 body="Gateway grants have never been re-attested. Open one above — the posture page states this fact outright until then."
               />
             ) : (
               <Table
-                rows={list.data?.campaigns ?? []}
+                rows={allCampaigns.filter((c) => c.status === chip)}
                 rowKey={(r) => r.id}
                 onRowClick={(r) => setOpenId(openId === r.id ? null : r.id)}
                 columns={[
@@ -276,13 +298,41 @@ export default function CampaignsPage() {
             {d && (
               <Card
                 title={`Campaign: ${d.name}`}
-                actions={<Button variant="ghost" onClick={() => setOpenId(null)}>Close</Button>}
+                actions={
+                  <div className={v.row}>
+                    {d.status === "open" && (() => {
+                      const undecided = d.items.filter((i) => i.decision === null).length;
+                      const decided = d.items.length - undecided;
+                      return (
+                        <ReasonedAction
+                          label="Cancel campaign"
+                          variant="danger"
+                          title={`Cancel campaign “${d.name}”?`}
+                          confirmLabel="Cancel campaign"
+                          body={
+                            <p style={{ margin: 0 }}>
+                              The {undecided} undecided {undecided === 1 ? "review is" : "reviews are"} withdrawn from reviewers’ queues and those grants stay
+                              unattested. The {decided} {decided === 1 ? "decision" : "decisions"} already made, including revocations, stand. You will be
+                              asked to confirm it's you.
+                            </p>
+                          }
+                          path={`/v1/certification-campaigns/${d.id}/cancel`}
+                          done={`Campaign “${d.name}” cancelled; ${undecided} reviews withdrawn`}
+                        />
+                      );
+                    })()}
+                    {d.status === "cancelled" && <span className={v.faint}>Read-only</span>}
+                    <Button variant="ghost" onClick={() => setOpenId(null)}>Close</Button>
+                  </div>
+                }
               >
                 <div className={v.stack}>
                   <div>
                     <Badge tone={statusTone(d.status)}>{d.status}</Badge>{" "}
                     <span className={v.faint}>
-                      {d.status === "expired-incomplete"
+                      {d.status === "cancelled"
+                        ? "cancelled — undecided reviews were withdrawn and those grants stay unattested; decisions already made stand"
+                        : d.status === "expired-incomplete"
                         ? "past due with undecided items — they stay undecided forever; this is a posture fact, open a new campaign to review these grants"
                         : d.status === "completed"
                           ? `every item decided${d.completedAt ? ` (${ago(d.completedAt)})` : ""}`

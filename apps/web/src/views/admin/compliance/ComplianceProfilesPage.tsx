@@ -9,11 +9,14 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { withStepUp } from "../../../stepup/stepUp";
-import type { ComplianceProfile, ProjectCompliance, WorkflowTemplate } from "../../../api/adminTypes";
+import type { ProjectCompliance, WorkflowTemplate } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, CodeBlock, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
+import { Badge, Button, Card, CodeBlock, EmptyState, Field, InfoButton, Input, RowActions, Select, Table } from "../../../ui/kit";
+import { ProfileEditModal, reachSentence, type ProfileRecord } from "./ProfileEditModal";
+import sh from "../governance/shadowAi.module.css";
 import {
   KV,
+  ReasonModal,
   optionEls,
   projectOpts,
   useAction,
@@ -32,6 +35,13 @@ export default function ComplianceProfilesPage() {
     queryFn: () => api.get<{ templates: WorkflowTemplate[] }>("/v1/workflows/templates"),
   });
   const tplName = new Map((templates.data?.templates ?? []).map((t) => [t.id, t.name]));
+  // PROTOTYPE (#453 G7): row actions, Active / Retired filter, retire with its in-use refusal
+  const all = (profiles.data?.profiles ?? []) as ProfileRecord[];
+  const [filter, setFilter] = useState<"active" | "retired">("active");
+  const rows = all.filter((p) => (p.status ?? "active") === filter);
+  const [editing, setEditing] = useState<ProfileRecord | null>(null);
+  const [retiring, setRetiring] = useState<ProfileRecord | null>(null);
+  const retire = useAction();
 
   return (
     <>
@@ -41,10 +51,33 @@ export default function ComplianceProfilesPage() {
         info={<p>A single classification tag on a project cascades required workflow stages, MCP data-scope defaults, audit-log retention, PII handling and infra floors — policy-as-code, one tag.</p>}
       />
       <div className={v.stack}>
-        <Card flush title="Profiles">
-          <Table<ComplianceProfile>
+        <Card
+          flush
+          title="Profiles"
+          actions={
+            <div className={v.row} role="group" aria-label="Filter by status">
+              {(["active", "retired"] as const).map((g) => (
+                <button key={g} type="button" className={sh.chip} aria-pressed={filter === g} onClick={() => setFilter(g)}>
+                  {g === "active" ? "Active" : "Retired"} {all.filter((p) => (p.status ?? "active") === g).length}
+                </button>
+              ))}
+            </div>
+          }
+        >
+          <Table<ProfileRecord>
             columns={[
-              { key: "tag", header: "Tag", sort: (p) => p.tag, render: (p) => <Badge tone="info">{p.tag}</Badge> },
+              {
+                key: "tag",
+                header: "Tag",
+                sort: (p) => p.tag,
+                render: (p) => (
+                  <span className={v.row}>
+                    <Badge tone={p.status === "retired" ? "neutral" : "info"}>{p.tag}</Badge>
+                    <span className={v.faint}>v{p.version ?? 1}</span>
+                    {p.status === "retired" && <Badge tone="neutral">retired</Badge>}
+                  </span>
+                ),
+              },
               {
                 key: "templates",
                 header: "Required templates",
@@ -72,8 +105,61 @@ export default function ComplianceProfilesPage() {
                 align: "right",
                 render: (p) => (p.patchCadenceDays != null ? `${p.patchCadenceDays}d` : "—"),
               },
+              {
+                key: "reach",
+                header: "Applies to",
+                render: (p) =>
+                  p.status === "retired" ? (
+                    <span className={v.faint}>nothing (retired)</span>
+                  ) : (
+                    <span title={reachSentence(p.usage)}>
+                      {p.usage?.projects.length ?? 0} proj · {p.usage?.teams.length ?? 0} team · {p.usage?.resources.length ?? 0} infra
+                    </span>
+                  ),
+              },
+              {
+                key: "actions",
+                header: "Actions",
+                render: (p) =>
+                  p.status === "retired" ? (
+                    <span className={v.faint}>Read-only{p.retiredAt ? ` · retired ${p.retiredAt.slice(0, 10)}` : ""}</span>
+                  ) : (
+                    <RowActions
+                      slot="8rem"
+                      primary={
+                        <Button size="sm" variant="primary" aria-label={`Edit profile ${p.tag}`} onClick={() => setEditing(p)}>
+                          Edit profile
+                        </Button>
+                      }
+                      rest={
+                        (p.usage?.projects.length ?? 0) > 0 ? (
+                          <span data-testid={`retire-blocked-${p.tag}`} style={{ display: "inline-flex", flexWrap: "wrap", alignItems: "center", gap: "var(--s1)", maxWidth: "14rem" }}>
+                            <Button size="sm" disabled aria-describedby={`retire-why-${p.tag}`}>
+                              Retire
+                            </Button>
+                            <span id={`retire-why-${p.tag}`} className={v.faint}>
+                              In use by {p.usage!.projects.length} {p.usage!.projects.length === 1 ? "project" : "projects"}
+                            </span>
+                            <InfoButton label={`projects using ${p.tag}`} term="Projects tagged with this profile" align="end">
+                              <span>Reclassify these first, then retire it:</span>
+                              <ul style={{ margin: "var(--s1) 0 0", paddingLeft: "1.2em" }}>
+                                {p.usage!.projects.map((n) => (
+                                  <li key={n}>{n}</li>
+                                ))}
+                              </ul>
+                            </InfoButton>
+                          </span>
+                        ) : (
+                          <Button size="sm" variant="ghost" aria-label={`Retire ${p.tag}`} onClick={() => setRetiring(p)}>
+                            Retire
+                          </Button>
+                        )
+                      }
+                    />
+                  ),
+              },
             ]}
-            rows={profiles.data?.profiles ?? []}
+            rows={rows}
             rowKey={(p) => p.tag}
             loading={profiles.isLoading}
             error={profiles.error}
@@ -87,6 +173,26 @@ export default function ComplianceProfilesPage() {
           />
         </Card>
 
+        {editing && <ProfileEditModal profile={editing} templates={(templates.data?.templates ?? []).filter((t) => !t.retiredAt)} onClose={() => setEditing(null)} />}
+        <ReasonModal
+          open={retiring !== null}
+          danger
+          minLength={10}
+          title={`Retire profile “${retiring?.tag ?? ""}”?`}
+          confirmLabel="Retire profile"
+          body={
+            <p style={{ margin: 0 }}>
+              Projects, teams and resources tagged ‘{retiring?.tag}’ stop inheriting its floors. Its versions and audit history are kept. Audit
+              retention it set is kept as a floor. You will be asked to confirm it's you.
+            </p>
+          }
+          onCancel={() => setRetiring(null)}
+          onConfirm={(reason) => {
+            const p = retiring;
+            setRetiring(null);
+            if (p) void retire.run(() => api.post(`/v1/compliance/profiles/${p.id}/retire`, { reason }), `Profile “${p.tag}” retired`);
+          }}
+        />
         <UpsertProfileCard templates={templates.data?.templates ?? []} />
         <CascadePreviewCard />
         <ReclassifyCard />
@@ -100,8 +206,8 @@ function UpsertProfileCard(props: { templates: WorkflowTemplate[] }) {
   const [f, setF] = useState({
     tag: "",
     requiredTemplateIds: [] as string[],
-    mcpDefaultMode: "read_write",
-    piiMode: "log",
+    mcpDefaultMode: "read_only",
+    piiMode: "block",
     auditRetentionDays: "",
     backupRetentionDays: "",
     patchCadenceDays: "",
@@ -109,7 +215,7 @@ function UpsertProfileCard(props: { templates: WorkflowTemplate[] }) {
   const set = (k: keyof typeof f, val: string | string[]) => setF((s) => ({ ...s, [k]: val }));
   const tplOpts = props.templates.filter((t) => !t.retiredAt);
   return (
-    <Card title="Define or update a profile (upsert by tag)">
+    <Card title="New profile">
       <form
         className={a.formRow}
         onSubmit={(e) => {
@@ -132,7 +238,7 @@ function UpsertProfileCard(props: { templates: WorkflowTemplate[] }) {
                   h,
                 ),
               ),
-            "Profile saved — re-posting the same tag updates it in place",
+            "Profile created at version 1",
           );
         }}
       >
@@ -155,15 +261,15 @@ function UpsertProfileCard(props: { templates: WorkflowTemplate[] }) {
         </Field>
         <Field label="MCP default mode">
           <Select value={f.mcpDefaultMode} onChange={(e) => set("mcpDefaultMode", e.target.value)}>
-            <option value="read_write">read_write</option>
-            <option value="read_only">read_only — write tools denied on attributed calls</option>
+            <option value="read_only">read only — write tools denied on attributed calls</option>
+            <option value="read_write">read and write</option>
           </Select>
         </Field>
         <Field label="PII mode">
           <Select value={f.piiMode} onChange={(e) => set("piiMode", e.target.value)}>
+            <option value="block">block — deny or withhold</option>
+            <option value="warn">warn — proceed with a warning</option>
             <option value="log">log — record category counts</option>
-            <option value="warn">warn — proceed with warning</option>
-            <option value="block">block — deny / withhold</option>
           </Select>
         </Field>
         <Field label="Audit retention days (blank = none)">
@@ -176,7 +282,7 @@ function UpsertProfileCard(props: { templates: WorkflowTemplate[] }) {
           <Input type="number" value={f.patchCadenceDays} onChange={(e) => set("patchCadenceDays", e.target.value)} />
         </Field>
         <Button type="submit" variant="primary" disabled={act.busy}>
-          Save profile
+          Create profile
         </Button>
         {act.error && (
           <span className={v.errLine} role="alert">
@@ -185,9 +291,9 @@ function UpsertProfileCard(props: { templates: WorkflowTemplate[] }) {
         )}
       </form>
       <p className={v.faint}>
-        Posting an existing tag updates the profile in place — every classified project immediately
-        inherits the new cascade. Retention floors compose longest-wins across profiles; patch cadence
-        composes shortest-wins.
+        Creates a new tag at version 1, strict by default (MCP read only, PII blocked). A tag that already
+        exists is refused: change it with Edit profile on its row, which creates the next version and waits
+        for a reviewer. Retention floors compose longest-wins across profiles; patch cadence shortest-wins.
       </p>
     </Card>
   );
@@ -310,7 +416,7 @@ function ReclassifyCard() {
     | { pending: true; diff: unknown }
     | null
   >(null);
-  const tagList = (profiles.data?.profiles ?? []).map((p) => p.tag);
+  const tagList = ((profiles.data?.profiles ?? []) as ProfileRecord[]).filter((p) => p.status !== "retired").map((p) => p.tag);
 
   return (
     <Card title="Classify / reclassify a project — never silent">

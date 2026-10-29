@@ -28,6 +28,7 @@ import { PageHeader } from "../../../shell/AppShell";
 import { RefusalNotice } from "../../../ui/RefusalNotice";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, SeverityBadge, Table, Textarea } from "../../../ui/kit";
 import { EngineRunsPanel } from "./EngineRunsPanel";
+import { ReasonedAction } from "./ReasonedAction";
 import { AttachRunEvidence, RedTeamFindingsCard, RedTeamSummaryCard, RunTrialsSection } from "./RedTeamPosture";
 import { QueryGate, agentOpts, optionEls, projectOpts, useAction, useAgents, useProjects } from "../adminKit";
 import { NewestNote } from "../../../ui/fold";
@@ -94,6 +95,13 @@ interface FindingRow {
 }
 
 const pct = (n: number | null | undefined) => (n == null ? "—" : `${Math.round(n * 100)}%`);
+
+/** PROTOTYPE (#453 G9): draft / published / retired */
+function LibraryStatus(props: { row: LibraryRow }) {
+  const r = props.row;
+  if (r.status === "retired") return <Badge tone="neutral">retired</Badge>;
+  return <Badge tone={r.frozen ? "ok" : "info"}>{r.frozen ? "published" : "draft"}</Badge>;
+}
 
 export default function RedTeamPage() {
   const agents = useAgents();
@@ -306,9 +314,7 @@ export default function RedTeamPage() {
                 {
                   key: "status",
                   header: "Status",
-                  render: (r) => (
-                    <Badge tone={r.frozen ? "ok" : "info"}>{r.frozen ? "published (frozen)" : "draft"}</Badge>
-                  ),
+                  render: (r) => <LibraryStatus row={r} />,
                 },
                 { key: "created", header: "Created", render: (r) => ago(r.createdAt) },
               ]}
@@ -316,7 +322,29 @@ export default function RedTeamPage() {
           </Card>
 
           {selectedLibrary && libDetail.data ? (
-            <Card title={`${libDetail.data.library.name} v${libDetail.data.library.version}`}>
+            <Card
+              title={`${libDetail.data.library.name} v${libDetail.data.library.version}`}
+              actions={
+                <div className={v.row}>
+                  <LibraryStatus row={libDetail.data.library} />
+                  {libDetail.data.library.status === "retired" ? (
+                    <span className={v.faint}>Read-only</span>
+                  ) : libDetail.data.frozen ? (
+                    <ReasonedAction
+                      label="Retire version"
+                      title={`Retire ${libDetail.data.library.name} v${libDetail.data.library.version}?`}
+                      body={
+                        <p style={{ margin: 0 }}>
+                          Scheduled sweeps stop probing agents with this version. Its runs and findings stay readable. You will be asked to confirm it's you.
+                        </p>
+                      }
+                      path={`/v1/redteam/libraries/${selectedLibrary}/retire`}
+                      done={`${libDetail.data.library.name} v${libDetail.data.library.version} retired`}
+                    />
+                  ) : null}
+                </div>
+              }
+            >
               {libDetail.data.frozen ? (
                 <form
                   aria-label="Mint the next library version"
@@ -450,7 +478,7 @@ export default function RedTeamPage() {
                 <Select value={selectedLibrary} onChange={(e) => setSelectedLibrary(e.target.value)} required>
                   {optionEls(
                     (libraries.data?.libraries ?? [])
-                      .filter((l) => l.frozen)
+                      .filter((l) => l.frozen && l.status !== "retired")
                       .map((l) => ({ v: l.id, l: `${l.name} v${l.version}` })),
                     "Select a published library",
                   )}
