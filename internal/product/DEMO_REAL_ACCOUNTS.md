@@ -273,7 +273,7 @@ On **Shadow AI > Discovery sources**, for each source enter the values from the 
 | `cloud_aws` | `accountId`, `stsRegion`, `trailBucket`, `trailBucketRegion` from `terraform output regulait_source_target` | regions: `us-east-1` | federated, `roleArn` = `terraform output discovery_role_arn` |
 | `cloud_azure` | `tenantId`, `logAnalyticsWorkspaceIds` from `terraform output regulait_source_target` | subscriptions: the subscription id | federated, `tenantId` and `clientId` from `terraform output regulait_credential_public_config` |
 | `repo_gitlab` | `namespace` = the group's full path | organisation-level (the group), or the four `group/project` paths | static token from step 6 (stored encrypted) |
-| `endpoint_inventory` | none (leave empty) | organisation-level | none; no egress entry |
+| `endpoint_inventory` | one descriptive line, e.g. `exporter=demo-laptop-export`; not read by the scanner | organisation-level | none; no egress entry |
 
 Add each cloud's API hosts to the egress allow-list (each addition is a step-up):
 
@@ -359,11 +359,13 @@ every message the script prints is scrubbed of the values. Delete the file after
    - The product mints one **inbound secret** per PM connection. With `REGULAIT_DEMO_LIVE_INBOUND_FILE` (an absolute
      path outside the checkout), the secrets are written there with mode 0600. Otherwise they are printed once.
      Register them as described under Jira and Azure DevOps below.
-   - To replace a GitHub, Jira or Azure DevOps token, delete that connection in the admin UI and re-run. The API has
-     no route that replaces those tokens in place.
+   - To replace a GitHub, Jira or Azure DevOps token, open the admin **Git connections** or **PM connections** page
+     (`/ui/admin/git-connections`, `/ui/admin/pm-connections`), choose **Delete connection** on its row, confirm, and
+     re-run. A token is not replaced in place. The removal is audited. Deleting a PM connection also removes its
+     work-item links, and re-creating it mints a **new inbound secret**: register it again in Jira or Azure DevOps.
    - A **kept** line on a freshly prepared database means an earlier run of this step, after the wipe, already
      stored a token: `demo:prepare --live` creates none of these connections. If that token is wrong (a 403 from the
-     `--live-connections` check), delete the connection and re-run (laptop, 2026-10-29, #453 c6486350055).
+     `--live-connections` check), delete the connection on its admin page as above and re-run (laptop, 2026-10-29, #453 c6486350055).
 5. Run `pnpm --filter @regulait/gateway demo:check -- --live-connections`. This makes one read-only call per
    connection through the egress guard and reports PASS, WARN or FAIL per beat. No credential is printed.
 

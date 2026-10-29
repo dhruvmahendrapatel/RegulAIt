@@ -10,6 +10,7 @@ import {
   inArray,
   isNull,
   orchestrationRuns,
+  orgSettings,
   pmConnections,
   pmLinks,
   pmSyncEvents,
@@ -70,6 +71,9 @@ export function providerErrorText(err: PmProviderError): string {
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 
 const runIdParam = z.object({ runId: z.string().uuid() });
+
+/** the audit actor when a bootstrap credential (no user) acts */
+const SYSTEM_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
 const CONNECTION_COLUMNS = {
   id: pmConnections.id,
@@ -465,6 +469,46 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
   app.get("/v1/pm/connections", async () => ({
     connections: await db.select(CONNECTION_COLUMNS).from(pmConnections),
   }));
+
+  // #453: a connection holding a wrong token is replaced by deleting it and creating it again. Deleting cascades to the
+  // connection's work-item links and inbound sync events, and clears it as the alert-ticket connection (the schema's
+  // FKs), so the audit row, written in the same transaction, records what went with it. Re-creating mints a new
+  // inbound webhook secret, which must be registered again in the PM tool. Deleting only removes access: no step-up.
+  app.delete("/v1/pm/connections/:name", async (req, reply) => {
+    const { name } = z.object({ name: z.string().min(1) }).parse(req.params);
+    const removed = await db.transaction(async (tx) => {
+      const [conn] = await tx
+        .select({ id: pmConnections.id, provider: pmConnections.provider, project: pmConnections.project })
+        .from(pmConnections)
+        .where(eq(pmConnections.name, name))
+        .for("update");
+      if (!conn) return null;
+      const [links] = await tx.select({ n: sql<number>`count(*)::int` }).from(pmLinks).where(eq(pmLinks.connectionId, conn.id));
+      const [events] = await tx
+        .select({ n: sql<number>`count(*)::int` })
+        .from(pmSyncEvents)
+        .where(eq(pmSyncEvents.connectionId, conn.id));
+      const alertTicket = await tx
+        .select({ id: orgSettings.id })
+        .from(orgSettings)
+        .where(eq(orgSettings.alertTicketConnectionId, conn.id));
+      await tx.delete(pmConnections).where(eq(pmConnections.id, conn.id));
+      const cascade = { links: links?.n ?? 0, syncEvents: events?.n ?? 0, alertTicketConnectionCleared: alertTicket.length > 0 };
+      await tx.insert(auditLog).values({
+        userId: req.authCtx.userId ?? SYSTEM_IDENTITY,
+        objectType: "pm_connection",
+        objectId: conn.id,
+        detail: { phase: "removed", name, provider: conn.provider, project: conn.project, ...cascade },
+        effect: "allow",
+        ruleId: "pm-connection-removed",
+        ruleChain: [],
+        reason: `PM connection '${name}' (${conn.provider}) removed with ${cascade.links} work-item link(s)`,
+      });
+      return cascade;
+    });
+    if (!removed) return reply.status(404).send({ error: "unknown_connection" });
+    return { removed: true, ...removed };
+  });
 
   // §2/§3: link every task-graph node to a real work item in the customer's
   // tool. Idempotent — already-linked nodes are skipped, not duplicated.

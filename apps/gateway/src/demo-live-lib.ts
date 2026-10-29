@@ -17,8 +17,9 @@
  * entries are added by the seed only under `REGULAIT_DEMO_PROFILE=live`.
  *
  * IDEMPOTENT. A connection that already exists by name is kept, not duplicated; the Slack bot token is re-posted
- * (the connector credential route upserts). The API has no route that replaces a git or PM connection's token, so a
- * rotated GitHub, Jira or Azure DevOps token is applied by deleting that connection in the admin UI and re-running.
+ * (the connector credential route upserts). A git or PM connection's token is not replaced in place: a rotated GitHub,
+ * Jira or Azure DevOps token is applied by deleting that connection ("Delete connection" on the admin Git connections
+ * or PM connections page, or `DELETE /v1/git|pm/connections/:name`) and re-running.
  *
  * Open source first (ADR-0176): no library is needed. Reading a hidden line is `node:readline`, the JSON file is
  * `node:fs`, and the calls are the product's own API.
@@ -333,7 +334,7 @@ export async function applyLiveDemoSetup(call: ApiCall, config: LiveDemoConfig, 
     else {
       const list = await call("GET", "/v1/git/connections");
       const exists = ((list.body?.connections ?? []) as Array<{ name: string }>).some((c) => c.name === LIVE_NAMES.github);
-      if (exists) report({ beat: "git-pr", step: "github connection", outcome: "kept", detail: `'${LIVE_NAMES.github}' exists; delete it in the admin UI to replace its token` });
+      if (exists) report({ beat: "git-pr", step: "github connection", outcome: "kept", detail: `'${LIVE_NAMES.github}' exists; to replace its token, use "Delete connection" on the admin Git connections page (/ui/admin/git-connections), then re-run` });
       else {
         const res = await call("POST", "/v1/git/connections", { name: LIVE_NAMES.github, provider: "github", token: secrets.githubToken });
         report(

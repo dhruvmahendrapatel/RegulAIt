@@ -10,7 +10,8 @@ import { api } from "../../../api/client";
 import type { GitConnection } from "../../../api/adminTypes";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, RowActions, Select, Table } from "../../../ui/kit";
+import { RefusalNotice } from "../../../ui/RefusalNotice";
 import { useAction } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
@@ -35,6 +36,7 @@ export default function GitConnectionsPage() {
   const [baseUrl, setBaseUrl] = useState("");
   const [token, setToken] = useState("");
   const selected = PROVIDERS.find((p) => p.v === provider)!;
+  const [deleting, setDeleting] = useState<GitConnection | null>(null);
 
   return (
     <>
@@ -98,10 +100,14 @@ export default function GitConnectionsPage() {
               Add connection
             </Button>
           </form>
-          {act.error && (
-            <div className={v.errLine} role="alert">
-              {act.error}
-            </div>
+          {act.guidance ? (
+            <RefusalNotice guidance={act.guidance} />
+          ) : (
+            act.error && (
+              <div className={v.errLine} role="alert">
+                {act.error}
+              </div>
+            )
           )}
           <p className={v.dim} style={{ marginTop: "var(--s1)" }}>
             <strong>{selected.l}:</strong> {selected.hint}
@@ -122,6 +128,20 @@ export default function GitConnectionsPage() {
               },
               { key: "baseUrl", header: "Base URL", render: (c) => c.baseUrl ?? "provider default" },
               { key: "created", header: "Created", sort: (c) => c.createdAt, render: (c) => ago(c.createdAt) },
+              {
+                key: "actions",
+                header: "",
+                render: (c) => (
+                  <RowActions
+                    slot="0"
+                    rest={
+                      <Button size="sm" variant="danger" disabled={act.busy} onClick={() => setDeleting(c)}>
+                        Delete connection
+                      </Button>
+                    }
+                  />
+                ),
+              },
             ]}
             rows={q.data?.connections ?? []}
             rowKey={(c) => c.name}
@@ -141,6 +161,23 @@ export default function GitConnectionsPage() {
           entirely on the mock provider — no external service is touched.
         </p>
       </div>
+      <ConfirmModal
+        open={deleting !== null}
+        title={`Delete git connection “${deleting?.name}”?`}
+        body="Its stored token is destroyed. Workflow git stages naming this connection stop until a connection with the same name is added again. The removal is recorded in the audit log."
+        danger
+        confirmLabel="Delete connection"
+        onCancel={() => setDeleting(null)}
+        onConfirm={() => {
+          const c = deleting;
+          setDeleting(null);
+          if (c)
+            void act.run(
+              () => api.del(`/v1/git/connections/${encodeURIComponent(c.name)}`),
+              `Git connection “${c.name}” deleted`,
+            );
+        }}
+      />
     </>
   );
 }
