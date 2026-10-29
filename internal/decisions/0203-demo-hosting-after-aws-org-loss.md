@@ -62,12 +62,16 @@ Owner decisions, #453 comment 6508111468:
 - **The date moves to Saturday 2026-10-31.** The customer demo is on 10-31. The internal run-through on Sun 11-01 and
   the external demo on Tue 11-03 are both dropped: there is one date. Every "11-03" and "11-01 run-through" above now
   reads 10-31. The 10-29 freeze stands.
+- **Freeze exception (a):** Claude, through the Anthropic API, as the model and as the agent, pointed at our MCP
+  endpoint.
+- **Freeze exception (b):** the ABAP MCP server behind our MCP proxy, so a live SAP change runs through governance.
+
+Re-plan (master session, recorded here for the owner's review; the owner said only that the LIVE/FALLBACK split needs
+re-planning for one date):
+
 - **Single-date plan.** LIVE is prepared once and never re-prepared, so each state-changing step runs on it only once:
   at the demo. With no later run to spoil, every beat runs on LIVE as scripted. The FALLBACK laptop stack stays the
   failure fallback and the only place to rehearse a state-changing step (`DEMO_SCRIPT_2026-11-01.md`,
   `DEMO_RUNBOOK.md` §7.3).
-- **Freeze exception (a):** Claude, through the Anthropic API, as the model and as the agent, pointed at our MCP
-  endpoint.
-- **Freeze exception (b):** the ABAP MCP server behind our MCP proxy, so a live SAP change runs through governance.
 
 Both exceptions are built by their own PRs; this addendum only records them.

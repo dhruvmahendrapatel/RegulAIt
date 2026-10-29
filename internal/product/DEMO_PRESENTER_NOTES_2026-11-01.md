@@ -55,10 +55,11 @@ evidence, never automatic (FS-51; Q&A 29).
 
 ## E — Enforce it, live (ADR-0202 lane F)
 
-**The command.** On 10-31, in the dev host's Session Manager shell, as for G3 (one line, pending execution on that host):
+**The command.** On 10-31, in the laptop terminal in the LIVE checkout, as for G3 (`DEMO_RUNBOOK.md` §7.6; the dev-host
+Session Manager recipe is superseded by ADR-0203). One line, run from the checkout, pending execution on the laptop:
 
 ```sh
-printf '%s\n' '#!/bin/sh' 'cd /opt/app && sudo docker compose exec -T gateway node apps/gateway/dist/demo-enforce.js' > ~/enforce.sh && chmod +x ~/enforce.sh
+printf '#!/bin/sh\ncd %s && docker compose exec -T gateway node apps/gateway/dist/demo-enforce.js\n' "'$PWD'" > ~/enforce.sh && chmod +x ~/enforce.sh
 ```
 
 It runs inside the gateway container with the gateway's own bootstrap token and calls the gateway on its own loopback

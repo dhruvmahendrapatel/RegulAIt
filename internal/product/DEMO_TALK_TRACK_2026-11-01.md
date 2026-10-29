@@ -74,7 +74,7 @@ defaults; respond with a human in the loop; the deploy gate; regulatory intellig
 ### Enforcement, shown (beat E, added 2026-10-24; FS-8; live since ADR-0202)
 - No grant, no call: the kernel denies by default and the refusal names its rule; a write can wait for a named
   approver instead, and the approval is bound to the exact arguments approved. On screen this is a live governed call
-  on both dates: Dana's own key over the real MCP protocol through the gateway, her search refused with her revocation
+  on LIVE: Dana's own key over the real MCP protocol through the gateway, her search refused with her revocation
   in the ledger, her write queued for Avery in his Inbox and in Slack, and run only after he approves. The server it
   runs against is the demo MCP server: never say it reached a real repository, opened a PR or updated a work item.
 - If a chat post is slow: "the request is in Avery's Inbox either way; chat is a mirror, never the only copy."

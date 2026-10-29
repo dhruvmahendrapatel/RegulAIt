@@ -81,7 +81,7 @@ right-hand column of the timing table.
 | G1 | The use-case record and risks | Ada | 1.5 | 14.0 | LIVE (S4's use case) |
 | G2 | Independent review | Avery | 2.0 | 16.0 | LIVE (S4's use case) |
 | E | Enforce it: a live governed deny, an approval in the Inbox and Slack, the call after approval, the audit rows | Ada, Avery | 2.0 | 18.0 | live call on LIVE; simulated fallback: the Simulation page |
-| G3 | Deploy gate (terminal on the dev instance host) | Ada | 2.0 | 20.0 | LIVE: DENY, acknowledge, then ALLOW (changes state) |
+| G3 | Deploy gate (laptop terminal) | Ada | 2.0 | 20.0 | LIVE: DENY, acknowledge, then ALLOW (changes state) |
 | G4 | Trust dashboard | Ada | 1.0 | 21.0 | LIVE read-only |
 | G5 | Alerts and remediation | Ada, Avery | 2.0 | 23.0 | LIVE (changes state) |
 | G7 | Regulatory intelligence | Ada | 0.5 | 23.5 | LIVE read-only |
@@ -125,8 +125,8 @@ The full checklist, with what is still pending execution, is in `DEMO_RUNBOOK.md
   dark is the ☾ / ☀ button in the top bar (**Switch to dark theme** / **Switch to light theme**), and the palette is
   on **Account** (`/ui/account`) → **Appearance**; both are kept per browser, so set them in every profile. The
   fallback: the laptop's local stack running, the same three personas signed in to it in a separate browser so the
-  sessions never mix. A Session Manager shell open on the dev instance host for G3 (the host has no SSH), with the G3
-  script ready and `real-gate.txt` open on the laptop (`DEMO_RUNBOOK.md` §7.6). The recording open in a local player.
+  sessions never mix. A laptop terminal open in the LIVE checkout for G3 and E (ADR-0203), with `~/g3.sh` and `~/enforce.sh`
+  ready and `real-gate.txt` open on the laptop (`DEMO_RUNBOOK.md` §7.6). The recording open in a local player.
 - **Sessions end after 30 idle minutes** (the strict default, not relaxed for the demo). A window that is minimised or
   fully covered does not keep its session alive. So at **T-10 min**, in every profile and in the fallback browser,
   sign in again or bring the window to the front, and keep the windows tiled, never fully covered. At **T-5 min**,
@@ -509,7 +509,7 @@ simulated decision below, chosen by lane L's per-beat switch for `enforce-it`.
 The beat shows one governed call denied with its rule named, one queued for a named approver and mirrored to chat,
 the approval, the call executing only after it, and the audit rows. It is second in the cutting order.
 
-Code: `apps/gateway/src/demo-enforce-lib.ts` (`demo:enforce`: on the dev host `~/enforce.sh`, on the laptop
+Code: `apps/gateway/src/demo-enforce-lib.ts` (`demo:enforce`: on 10-31 `~/enforce.sh` in the laptop terminal against LIVE, ADR-0203; at the FALLBACK rehearsal
 `pnpm --filter @regulait/gateway demo:enforce`), the gateway's
 own MCP route `POST /mcp/:serverId` and ChatOps route `POST /v1/chatops/approvals/:id/post`; UI: Avery's **Inbox**,
 `AuditLogPage.tsx`, and on the fallback `SimulationPage.tsx`. Seed: `apps/gateway/src/seed.ts` (Dana's role grant on
@@ -522,16 +522,16 @@ executed write is the demo server's answer (`committed … as commit demo01a`), 
 The existing wiring does not link a bare tool-call approval to a workflow PR or a PM work item (pm-sync mirrors
 workflow-stage and run decisions only), so this beat shows no PR and no Jira or Azure DevOps update; never say it does.
 
-**Live flow, with timings** (profiles: Ada in A, Avery in B; on 10-31 the host shell reconnected at T-5 min, as for
-G3; at the FALLBACK rehearsal a laptop terminal):
+**Live flow, with timings** (profiles: Ada in A, Avery in B; on 10-31 the laptop terminal used for G3, checked at
+T-5 min; at the FALLBACK rehearsal a laptop terminal on the FALLBACK checkout):
 
 | Time | Where | What happens | What is on screen |
 |---|---|---|---|
-| 0:00-0:15 | host shell | `~/enforce.sh` | `LIVE  Dana Developer calls repo-tools …`, then `tools/list` without `search_code` |
-| 0:15-0:30 | host shell | Dana's `search_code` | `DENIED  Denied by policy: …` and the `audit:` line: rule `default-deny`, her role's `role-server-read-only-all` grant **REVOKED** for her |
-| 0:30-0:45 | host shell, then Slack | Dana's `write_file` | `QUEUED … pending sign-off by approver 'Avery …'`, `notify posted to slack …` (and one line per other enabled channel, email included once lane E's channel is configured). Show the card in Slack |
+| 0:00-0:15 | laptop terminal | `~/enforce.sh` | `LIVE  Dana Developer calls repo-tools …`, then `tools/list` without `search_code` |
+| 0:15-0:30 | laptop terminal | Dana's `search_code` | `DENIED  Denied by policy: …` and the `audit:` line: rule `default-deny`, her role's `role-server-read-only-all` grant **REVOKED** for her |
+| 0:30-0:45 | laptop terminal, then Slack | Dana's `write_file` | `QUEUED … pending sign-off by approver 'Avery …'`, `notify posted to slack …` (and one line per other enabled channel, email included once lane E's channel is configured). Show the card in Slack |
 | 0:45-1:15 | Profile B, **Inbox** | Avery opens the request and presses **Approve**, pasting the note from the presenter notes | the request leaves the queue |
-| 1:15-1:30 | host shell | the command sees the decision and retries the same call | `write_file  APPROVED and EXECUTED  committed docs/enforce-it.md …` |
+| 1:15-1:30 | laptop terminal | the command sees the decision and retries the same call | `write_file  APPROVED and EXECUTED  committed docs/enforce-it.md …` |
 | 1:30-2:00 | Profile A, `/ui/admin/audit` | the newest rows | the deny with its rule chain, the queued approval, the chat post, Avery's decision, the executed call |
 
 - **Say:** "Dana's own key, the real MCP protocol, the real gateway. Her search is refused, and the ledger names why:
@@ -590,11 +590,11 @@ It records each question as an audit row marked advisory (not counted against ra
 - **Expected:** `DENY` with two **BLOCK open_high_alert** lines for *Real-Time Fraud Detection Engine*, then `ALLOW`
   with two **WARN acknowledged_high_alert** lines after the alerts are acknowledged. The environment is `staging`,
   never `production` (owner, #522 #11): the gate only records it, and nothing in this demo is production.
-- **Where it runs.** `demo:gate` reads the database directly, and the laptop is only a browser (ADR-0197 decision 1),
-  so it runs **live on the dev instance host**, in a Session Manager shell (the host has no SSH), inside the gateway
+- **Where it runs.** `demo:gate` reads the database directly, and the live stack runs on the laptop (ADR-0203, which
+  supersedes the dev instance host), so it runs **live in a laptop terminal** in the LIVE checkout, inside the gateway
   container: `docker compose exec -T gateway node apps/gateway/dist/demo-gate.js "Real-Time Fraud Detection Engine"
-  staging <ref>`, kept in the one-line script `~/g3.sh` (`DEMO_RUNBOOK.md` §7.6). The shell was reconnected at
-  T-5 min. **Pending execution** on that host.
+  staging <ref>`, kept in the one-line script `~/g3.sh` (`DEMO_RUNBOOK.md` §7.6). The terminal was checked at
+  T-5 min. **Pending execution** on the laptop.
 - **Action:**
   1. In the shell: `~/g3.sh demo-1`. The printout reads `$ regulait gate deploy --use-case "Real-Time Fraud Detection
      Engine" --env staging --ref demo-1`, then `DENY  "Real-Time Fraud Detection Engine" (approved, EU AI Act tier
@@ -651,8 +651,9 @@ It records each question as an audit row marked advisory (not counted against ra
   **Active**: check at rehearsal.
 - **SLA chips** (deep scan #13): an alert's SLA chip moves with the clock, and acknowledging it does not stop it. High
   alerts read *SLA due soon* from 18 h and *SLA breached* from 24 h; medium alerts at 54 h and 72 h. On LIVE, prepared
-  more than a week earlier, every open high and medium alert reads **SLA breached**, the unowned-agent alert included,
-  and the panel adds that it was escalated to the admins. If anyone looks at it, say: "the product escalates overdue
+  on 10-29 (about two days before the demo), every open high alert reads **SLA breached**, the unowned-agent alert
+  included, and the panel adds that it was escalated to the admins; open medium alerts read *on track* or *SLA due
+  soon*, not breached (check at T-1h). If anyone looks at it, say: "the product escalates overdue
   alerts". The fallback is prepared less than 18 h before the run, so its chips read *on track*, as in the pack.
 - **Say (added for v3):** "Same rule as the shadow-AI plan: the platform runs only the approved action, and the
   approver is someone else. Approving the fix re-ran the monitor, so the alert resolved from evidence, not by hand."
