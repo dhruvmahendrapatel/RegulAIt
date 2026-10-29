@@ -634,9 +634,9 @@ time. Rows marked *once* are done a single time for both. The recipes the rows n
 |---|---|---|
 | Before Sun 10-25, *once* | **Power schedule off**: **superseded by ADR-0203** (the EC2 box and its EventBridge schedules no longer exist). Instead: keep the laptop on, awake and online for both runs and whenever a cloud must reach the issuer (`DEMO_REAL_ACCOUNTS.md` step 1a) | superseded |
 | Before Thu 10-29, *once* | **The laptop on post-#508 main** (deep scan #38, owner): update the laptop's checkout to `main` after #508 (Postgres and Keycloak pinned by digest) and run `docker compose pull` while online, before the §7.6 wipe. The first boot after an update builds an audit index concurrently and stops with `ConcurrentIndexBlockedError` if it cannot get its locks within 60 s (#43): close any `psql` session first. **No `pull` during the freeze**; hold #521 until after the demo. (The dev host half is superseded by ADR-0203.) | pending execution — owner |
-| Before Thu 10-29, *once* | **Live gateway environment** (deep scan #6, owner; #453 c6485593621): `REGULAIT_DEMO_LICENSE=1` removed from the laptop's `.env`, and the export-signing key, its id and `REGULAIT_LICENSE_KEYRING` in the laptop's git-ignored local `docker-compose.override.yml`, written before the wipe (§7.6 steps 1-2). **Never the demo switch on the live laptop** | pending execution — owner |
+| Before Thu 10-29, *once* | **Live gateway environment** (deep scan #6, owner; #453 c6485593621): `REGULAIT_DEMO_LICENSE=1` removed from the laptop's `.env`, and the export-signing key, its id and `REGULAIT_LICENSE_KEYRING` in the laptop's git-ignored local `docker-compose.override.yml`, written before the wipe (§7.6 steps 1-2). **Never the demo switch on the live laptop** | done 2026-10-29 (#453 c6486350055) |
 | Before Thu 10-29, *once* | **Branch rule on main** (deep scan #51, owner): require `ci.yml`'s `build-and-test` check on `main` for the freeze, with an admin bypass for docs-only PRs; remove it after 11-03 | pending execution — owner |
-| *Once*, before `DEMO_REAL_ACCOUNTS.md` step 2 | The one wipe (`docker compose --profile tunnel down -v`), then `demo:prepare --live` from empty, passwords, admin MFA and `demo:check --live` on the laptop, through `docker compose exec` (§7.6 steps 3-8). It creates the mock deploy target `demo-staging` (environment `staging`). Never `down -v` again after step 2 | pending execution — owner |
+| *Once*, before `DEMO_REAL_ACCOUNTS.md` step 2 | The one wipe (`docker compose --profile tunnel down -v`) **done 2026-10-29, never again**, then `demo:prepare --live` from empty, passwords, admin MFA and `demo:check --live` on the laptop, through `docker compose exec` (§7.6 steps 3-8). It creates the mock deploy target `demo-staging` (environment `staging`). Never `down -v` again after step 2 | wipe, prep and passwords done 2026-10-29 (#453 c6486350055); admin MFA and `demo:check --live` pending — owner |
 | Now, then after the freeze dispatch | **Offline deck** (deep scan #20): rebuild it from the `demo-screens` artifact of run `39940181481` (artifact `12497390750`, kept until 11-22) with `node apps/web/e2e/fallback-deck.mjs --pack 2026-11-01 --dark --no-gate`. After the freeze-SHA dispatch below, rebuild it from that run's artifact with `--gate <path to real-gate.txt>` in place of `--no-gate` (31 slides) | pending execution |
 | Thu 10-29, *once* | **Freeze-SHA dispatches** (deep scan #21, owner): dispatch `demo.yml`, `ci.yml` and `ui-enterprise.yml` on `main` at the freeze SHA; record each run id and the SHA in §7.5. The 10-21 rehearsal's gate artifact expires 2026-10-28 15:06Z; the freeze dispatch replaces it | pending execution |
 | T-7d | **Power schedule still off**: **superseded by ADR-0203**. Instead: the laptop's sleep settings keep it awake while plugged in, and the tunnel shows **HEALTHY** (TUNNEL.md, Verify) | superseded |
@@ -662,7 +662,7 @@ time. Rows marked *once* are done a single time for both. The recipes the rows n
 | T-24h | Screen recording of one real scan captured and played back once | pending execution |
 | T-24h | **Offline deck** opened on the presenting laptop with the network off: 31 slides (30 with `--no-gate`), S1 to G10 in script order | pending execution |
 | T-24h | **Gateway health on the laptop** (FS-37): `docker compose ps` shows the gateway **(healthy)**, and `cloudflared` and `caddy-tunnel` running (TUNNEL.md, Verify) | pending execution |
-| T-24h, under 18 h before the start | Fallback stack prepared from empty in the second checkout (§7.8, steps 4–6), then `demo:check` PASS on `http://localhost:3100` | pending execution |
+| T-24h, under 18 h before the start | Fallback stack prepared from empty in the second checkout (§7.8, steps 4–6), then the prep result read from the log as in §7.8 step 6 (never a bare `demo-check.js`), on `http://localhost:3100` | pending execution |
 | T-24h | F28: the live gateway has `REGULAIT_PUBLIC_URL` set to `https://regulait.<domain>` (TUNNEL.md step 4), so the Cloud federation card shows the issuer and does not say the public URL is not configured | pending execution |
 | T-24h | Neither demo budget alert has fired (AWS USD 40 and Azure USD 10, USD 50 in total; each alerts at 80%, USD 32 and USD 8, `internal/product/DEMO_REAL_ACCOUNTS.md`); planted usage still within budget (ADR-0197 decision 4) | pending execution |
 | Morning of each run | **Backup out of the window**: **superseded by ADR-0203** (the dev host's `regulait-pg-backup.timer` no longer exists; the laptop runs no backup timer, so nothing runs in the window) | superseded |
@@ -800,9 +800,9 @@ it on `main`. Also dispatch `ci.yml` on `main` once #510 merges, to warm the cac
 | `ci.yml` | pending execution | pending | pending | |
 | `ui-enterprise.yml` | pending execution | pending | pending | |
 
-### 7.6 Live host recipes (pending execution)
+### 7.6 Live host recipes (steps 1–6 done 2026-10-29; the rest pending execution)
 
-Everything in this subsection is **pending execution**: written from the code on `main`, not yet run on the laptop.
+Steps 1–6 were run on the laptop on 2026-10-29 (#453 c6486350055), including **the one wipe, which is never run again**. The steps after them are **pending execution**: written from the code on `main`, not yet run on the laptop.
 The owner runs each step. The live host is the owner's laptop (ADR-0203); the order below is the owner decision of
 2026-10-29 (#453 c6485593621). Real values (the public name, account ids, keys, passwords) stay in the owner's notes,
 `.env` and the password manager, never here.
