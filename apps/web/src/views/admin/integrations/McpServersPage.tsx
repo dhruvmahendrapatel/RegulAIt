@@ -181,7 +181,7 @@ function McpServersTab() {
                   ),
               },
               { key: "id", header: "Proxy id", render: (s) => <IdChip id={s.id} /> },
-              { key: "actions", header: "", srHeader: "Actions", render: (s) => life.actions(s) },
+              { key: "actions", header: "Actions", render: (s) => life.actions(s) },
             ]}
             rows={servers.data?.servers ?? []}
             rowKey={(s) => s.id}
