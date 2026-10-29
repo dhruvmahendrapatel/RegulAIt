@@ -342,9 +342,7 @@ export class AnthropicProvider implements ModelProvider {
       // ADR-0020 long tail: extended thinking is a REAL Anthropic parameter;
       // the response's thinking blocks are surfaced on the result and the
       // provider's own usage already counts them as output tokens.
-      ...(req.thinking
-        ? { thinking: { type: "enabled" as const, budget_tokens: req.thinking.budgetTokens } }
-        : {}),
+      ...(req.thinking ? { thinking: anthropicThinking(req.model, req.thinking.budgetTokens) } : {}),
     };
     if (req.responseFormat) {
       // No native structured-output mechanism exists on the Messages API. A
@@ -432,6 +430,30 @@ export class AnthropicProvider implements ModelProvider {
       servedModel: reportedModel(msg.model),
     };
   }
+}
+
+/**
+ * The Messages API `thinking` parameter for a caller's thinking budget.
+ *
+ * From the fifth Claude generation on, a fixed `budget_tokens` is REJECTED with
+ * a 400: thinking is adaptive (the model decides how much to think) and is on
+ * by default. Sending the budget form there would turn every thinking request
+ * into a provider error, so those models get `{ type: "adaptive" }`. The
+ * caller's `maxTokens` stays the hard ceiling on output, thinking included, so
+ * the spend bound the budget expressed is still enforced, just not split.
+ *
+ * Anything else (an earlier generation, or an `anthropic_messages` bridge whose
+ * model id is not a Claude id) keeps the budget form unchanged. The generation
+ * is read from the id's shape (`claude-<family>-<major>…`), never from a list,
+ * so a later model inherits the right form without an edit here.
+ */
+export function anthropicThinking(
+  model: string,
+  budgetTokens: number,
+): { type: "adaptive" } | { type: "enabled"; budget_tokens: number } {
+  const major = /^claude-[a-z]+-(\d+)(?:-|$)/.exec(model)?.[1];
+  if (major !== undefined && Number(major) >= 5) return { type: "adaptive" };
+  return { type: "enabled", budget_tokens: budgetTokens };
 }
 
 /** neutral tool_choice -> Anthropic's native shape (1:1, no loss) */
