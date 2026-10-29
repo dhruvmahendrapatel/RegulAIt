@@ -1092,3 +1092,179 @@ never run `down -v` anywhere else (§7.6, step 3).
    instant. If the laptop runs short of memory, `docker compose stop` it after the check and `docker compose start` it
    at T-10 min. After the demo, `docker compose down -v` in `regulait-fallback` (after step 4), then
    `git worktree remove ../regulait-fallback` from the live checkout.
+
+### 7.9 Claude as model and agent (owner, 2026-10-29, #453 c6508111468; freeze exception)
+
+Claude appears in two roles: as a **model** that a persona dispatches through the gateway, and as an **agent** whose
+tool calls reach the governed MCP proxy (`POST /mcp/:serverId`) and get a deny or an approval request. Every value
+below is a placeholder. The Anthropic key and every `rgl_` key are read into the shell with `read -rs`, so they never
+land in a file, a shell history, a log or this repository. Use a **demo-scoped** Anthropic key with a spend limit set
+in the Anthropic Console.
+
+**Placeholders used below** (set them in the terminal you run the steps from):
+
+```bash
+# pending execution
+export GW='https://regulait.<domain>'          # the tunnel front door (docs/deployment/TUNNEL.md); on the laptop alone, http://localhost:3000
+read -rs BOOT && export BOOT                   # the bootstrap token (admin setup calls only)
+read -rs RGL_KEY && export RGL_KEY             # Dana's rgl_ key, printed once by the seed (or minted below)
+H_BOOT="authorization: Bearer $BOOT"
+```
+
+**Defaults that stay strict** (ADR-0180, ADR-0181), and what each one means for this beat:
+
+- The egress posture is strict, so the compiled vendor endpoint is refused until an admin adds its host (step 1).
+- The env-key fallback is off, so the key is stored through the API, encrypted under `REGULAIT_DATA_KEY` (step 2).
+- An agent dispatches only with an approved model card (MRM), a project id, and a project whose use case is approved
+  (steps 3–5).
+- Every MCP call must name a project (`require_mcp_attribution`). Claude Code sends the `x-regulait-project-id` header.
+  The Messages API MCP connector cannot send custom headers, so it names the project in the URL as `?project=<id>`.
+  That parameter goes through the same check as the header, and a request whose header and query name different
+  projects is refused with 400 `project_attribution_conflict`.
+
+#### Model: claude-opus-5-5 through the gateway
+
+1. **Egress host (admin, step-up).** Adding a host is a stepped-up relaxation (ADR-0186 A). Ada adds it in the UI:
+   **Admin → Custom providers → Egress allow-list → Add host**. Enter host `api.anthropic.com`, leave private ranges
+   and plain HTTP off, and add the note "Claude beat (#453 c6508111468)". She confirms the step-up prompt.
+   Check it:
+
+   ```bash
+   curl -sS "$GW/v1/egress-allow-hosts" -H "$H_BOOT" | jq '.hosts[] | select(.host=="api.anthropic.com")'
+   ```
+
+2. **The key, stored through the API, encrypted.** The key is read without echo and piped as the request body. It is
+   never an argument and never in a file:
+
+   ```bash
+   # pending execution
+   read -rs ANTHROPIC_DEMO_KEY
+   jq -n --arg k "$ANTHROPIC_DEMO_KEY" '{provider:"anthropic", apiKey:$k}' \
+     | curl -sS -X POST "$GW/v1/model-credentials" -H "$H_BOOT" -H 'content-type: application/json' --data-binary @- \
+     | jq '{provider, baseUrl, createdAt}'
+   ```
+
+   Expect `201` with `provider: "anthropic"` and `baseUrl: null`. The response never contains the key. The audit row
+   `model-credential-stored` records the provider, never the key. Without `REGULAIT_DATA_KEY` the answer is
+   `503 no_data_key`. Keep `ANTHROPIC_DEMO_KEY` set only if you will run the Messages API example below; otherwise
+   `unset ANTHROPIC_DEMO_KEY` now.
+
+3. **Register the model connection, priced** (the beat's cost view must not read "Unpriced"). The list price is
+   $4 per million input tokens and $20 per million output tokens; check the Anthropic pricing page on the day. Tier
+   must be 2 or lower, because Dana's ceiling is tier 2:
+
+   ```bash
+   # pending execution
+   AGENT_ID=$(curl -sS -X POST "$GW/v1/agents" -H "$H_BOOT" -H 'content-type: application/json' \
+     -d '{"name":"claude-demo","provider":"anthropic","tier":2,"model":"claude-opus-5-5","costPerMTokIn":4,"costPerMTokOut":20}' \
+     | jq -r .id)
+   ```
+
+   To fix the prices later, use `PATCH /v1/agents/$AGENT_ID` with `{"costPerMTokIn":4,"costPerMTokOut":20}`.
+
+4. **Grant Dana the model.** Look up the personas and the project, then grant the agent to Dana:
+
+   ```bash
+   # pending execution
+   DANA_ID=$(curl -sS "$GW/v1/users" -H "$H_BOOT" | jq -r '.users[] | select(.email=="dana@regulait.local") | .id')
+   AVERY_ID=$(curl -sS "$GW/v1/users" -H "$H_BOOT" | jq -r '.users[] | select(.email=="avery@regulait.local") | .id')
+   PROJECT_ID=$(curl -sS "$GW/v1/projects" -H "$H_BOOT" | jq -r '.projects[] | select(.name=="demo-project") | .id')
+   curl -sS -X POST "$GW/v1/grants/agents" -H "$H_BOOT" -H 'content-type: application/json' \
+     -d "{\"userId\":\"$DANA_ID\",\"agentId\":\"$AGENT_ID\",\"allowedModes\":[\"execute\"]}" | jq '{id, userId, agentId}'
+   ```
+
+5. **Model card and sign-off (MRM is enforced).** Author the card, request Avery's sign-off, and have Avery decide in
+   his **Inbox** (Profile B). Give a reason; it is mandatory here because the request row names him.
+
+   ```bash
+   # pending execution
+   CARD_ID=$(curl -sS -X POST "$GW/v1/mrm/cards" -H "$H_BOOT" -H 'content-type: application/json' \
+     -d "{\"agentId\":\"$AGENT_ID\",\"intendedUse\":\"Demo: governed general-purpose assistant for the demo project\"}" | jq -r .card.id)
+   curl -sS -X POST "$GW/v1/mrm/cards/$CARD_ID/sign-off" -H "$H_BOOT" -H 'content-type: application/json' \
+     -d "{\"approverUserId\":\"$AVERY_ID\",\"validUntil\":\"$(date -u -d '+30 days' +%Y-%m-%dT%H:%M:%SZ)\"}" | jq '{approvalId}'
+   ```
+
+   Without this step every dispatch answers `409 mrm_approval_required`, which is the right answer for an unreviewed model.
+
+6. **Dispatch as Dana.** Check the project budget first: demo-project has a $0.20 monthly budget, and earlier demo
+   traffic bills it (`GET /v1/projects/$PROJECT_ID/costs`). Then:
+
+   ```bash
+   # pending execution
+   curl -sS -X POST "$GW/v1/agents/$AGENT_ID/invoke" -H "authorization: Bearer $RGL_KEY" -H 'content-type: application/json' \
+     -d "{\"mode\":\"execute\",\"input\":\"In one sentence: what does an AI gateway do?\",\"dispatch\":true,\"projectId\":\"$PROJECT_ID\",\"maxTokens\":512}" \
+     | jq '{model: .dispatch.model, costUsd: .dispatch.costUsd, text: .dispatch.outputText}'
+   ```
+
+   Expect the answer text and a non-null `costUsd`. The call is in the audit log and in the project's cost view.
+
+#### Agent: Claude's tool calls through the governed MCP proxy
+
+The persona is Dana. The server is the demo MCP server `repo-tools` (`demo:mcp`), with the seed's rules: her
+`search_code` is **denied** (her role's read grant is revoked for her), and her `write_file` is **queued for Avery**.
+Look up the server id:
+
+```bash
+SERVER_ID=$(curl -sS "$GW/v1/servers" -H "$H_BOOT" | jq -r '.servers[] | select(.name=="repo-tools") | .id')
+```
+
+**Path 1: Claude Code pointed at the gateway.** The gateway accepts the `rgl_` key only as
+`Authorization: Bearer` (the RFC 9728 metadata at `/.well-known/oauth-protected-resource/mcp/<id>` says the same). It
+speaks stateless Streamable HTTP: `POST` only, and `GET`/`DELETE` answer `405 Allow: POST`, which clients treat as "no
+server stream". In a terminal where `RGL_KEY`, `PROJECT_ID` and `SERVER_ID` are set:
+
+```bash
+# pending execution
+claude mcp add --transport http regulait-repo-tools "$GW/mcp/$SERVER_ID" \
+  --header "Authorization: Bearer $RGL_KEY" \
+  --header "x-regulait-project-id: $PROJECT_ID"
+claude mcp list        # expect: regulait-repo-tools … connected
+```
+
+`claude mcp add` stores the header values in the local Claude Code config. Remove the entry after the demo with
+`claude mcp remove regulait-repo-tools`, and revoke the key. Then ask Claude Code to "search the code for TODO with
+the repo-tools search_code tool", and then to "write docs/enforce-it.md with repo-tools write_file".
+
+**Path 2: the Messages API MCP connector.** Anthropic's servers call the gateway, so the URL must be publicly
+reachable through the tunnel (docs/deployment/TUNNEL.md). The connector sends `authorization_token` as
+`Authorization: Bearer`, which is how the gateway takes the `rgl_` key. It cannot set custom headers, so the project
+rides on the URL. The model call itself goes from this terminal straight to the Anthropic API with the demo key, so
+only the tool calls are governed and attributed by RegulAIt here; the model-path dispatch above is the governed model call.
+
+```bash
+# pending execution — needs ANTHROPIC_DEMO_KEY (step 2) and the tunnel up
+jq -n --arg url "$GW/mcp/$SERVER_ID?project=$PROJECT_ID" --arg tok "$RGL_KEY" '{
+  model: "claude-opus-5-5",
+  max_tokens: 2048,
+  mcp_servers: [{type: "url", url: $url, name: "repo-tools", authorization_token: $tok}],
+  tools: [{type: "mcp_toolset", mcp_server_name: "repo-tools"}],
+  messages: [{role: "user", content: "Use repo-tools search_code to search for TODO, then report exactly what the tool returned."}]
+}' | curl -sS https://api.anthropic.com/v1/messages \
+  -H "x-api-key: $ANTHROPIC_DEMO_KEY" -H 'anthropic-version: 2023-06-01' \
+  -H 'anthropic-beta: mcp-client-2025-11-20' -H 'content-type: application/json' --data-binary @- \
+  | jq '.content[] | select(.type=="mcp_tool_use" or .type=="mcp_tool_result")'
+unset ANTHROPIC_DEMO_KEY
+```
+
+**Expected output, both paths:**
+
+| Call | What Claude receives | Audit (`/ui/admin/audit`) |
+|---|---|---|
+| `search_code` | an error result: `Denied by policy: …` naming the rule (`default-deny`; her role's grant revoked for her) | a deny row with the rule chain |
+| `write_file` | an error result: `Approval required: approval '<id>' is pending sign-off by approver 'Avery …' (…). Retry after approval.` | the queued approval; the request is in Avery's **Inbox** |
+| `write_file`, retried after Avery approves | the demo server's answer, `committed … as commit demo01a` | the decision and the executed call |
+
+On the connector path the result arrives as an `mcp_tool_result` block with `is_error: true` and the same text. A
+`400 mcp_attribution_required` means the project is missing from the header or the URL. A `401` means the key is
+missing, expired or revoked. A `403 egress_blocked` on the model path means step 1 is missing.
+
+**Check it:** `demo:check` reports the beat as `E External model and agent`. It shows a WARN while the beat is not set
+up, and FAILs if the agent is unpriced or lacks its credential or egress entry. It reads no key and makes no model call.
+
+**Not verified in this repository** (verify at rehearsal): a real call to the Anthropic API with the demo key; the
+connector reaching the gateway through the Cloudflare edge (a WAF or bot rule there could block Anthropic's servers);
+and the exact rendering of the error results in the Claude Code UI.
+
+**Teardown:** revoke Dana's demo key if you minted one (`POST /v1/keys/<keyId>/revoke`), remove the Claude
+Code entry, delete the stored credential (`DELETE /v1/model-credentials/anthropic`), and remove the egress host in the
+UI. Disable the Anthropic key in the Console.
