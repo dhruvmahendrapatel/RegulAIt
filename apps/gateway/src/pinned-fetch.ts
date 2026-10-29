@@ -103,6 +103,17 @@ export interface PinnedTarget {
   tls?: PinnedTls;
 }
 
+/**
+ * A `RequestInit` with the one transport option this module adds. `decodeContentEncoding: false` returns the body as
+ * the server sent it: `accept-encoding: identity` is sent unless the caller set its own, nothing is decompressed, and
+ * `content-encoding` and `content-length` stay as received. For a caller that checks a checksum over the stored bytes
+ * (the cloud-discovery S3 reads: an object stored with `Content-Encoding: gzip` carries a checksum of the gzip bytes).
+ * Absent or true = decode, exactly as fetch does.
+ */
+export interface PinnedRequestInit extends RequestInit {
+  decodeContentEncoding?: boolean;
+}
+
 export interface PinnedTls {
   ca: string[];
   checkServerIdentity: (host: string, cert: import("node:tls").PeerCertificate) => Error | undefined;
@@ -205,7 +216,7 @@ export function resetPinnedAgents(): void {
 
 const SAFE_STATUS_TEXT = /^[\t\x20-\x7e\x80-\xff]*$/;
 
-function toResponse(res: http.IncomingMessage, url: string, method: string): Response {
+function toResponse(res: http.IncomingMessage, url: string, method: string, decode: boolean): Response {
   const headers = new Headers();
   for (const [name, value] of Object.entries(res.headers)) {
     if (value === undefined) continue;
@@ -214,9 +225,9 @@ function toResponse(res: http.IncomingMessage, url: string, method: string): Res
   }
 
   // Node's http client does not decode content-encoding; undici's fetch does,
-  // and every caller here was written against fetch. Keep the contract.
+  // and every caller here was written against fetch. Keep the contract, unless the caller asked for the raw bytes.
   let stream: NodeJS.ReadableStream = res;
-  const encoding = String(res.headers["content-encoding"] ?? "").toLowerCase().trim();
+  const encoding = decode ? String(res.headers["content-encoding"] ?? "").toLowerCase().trim() : "";
   if (encoding === "gzip" || encoding === "x-gzip") stream = res.pipe(createGunzip());
   else if (encoding === "deflate") stream = res.pipe(createInflate());
   else if (encoding === "br") stream = res.pipe(createBrotliDecompress());
@@ -257,7 +268,7 @@ function toResponse(res: http.IncomingMessage, url: string, method: string): Res
  * multi-address connect logic safe to use — nothing is written to a socket
  * until one is established.
  */
-export async function pinnedFetch(target: PinnedTarget, init?: RequestInit): Promise<Response> {
+export async function pinnedFetch(target: PinnedTarget, init?: PinnedRequestInit): Promise<Response> {
   // `Request` is the spec-correct normalizer for method/headers/body — it turns
   // string | URLSearchParams | Blob | FormData | stream into bytes and supplies
   // the matching content-type, so this module does not re-derive any of it.
@@ -275,7 +286,8 @@ export async function pinnedFetch(target: PinnedTarget, init?: RequestInit): Pro
   else if (!("content-length" in headers) && normalized.method !== "GET" && normalized.method !== "HEAD") {
     headers["content-length"] = "0";
   }
-  if (!("accept-encoding" in headers)) headers["accept-encoding"] = "gzip, deflate, br";
+  const decode = init?.decodeContentEncoding !== false;
+  if (!("accept-encoding" in headers)) headers["accept-encoding"] = decode ? "gzip, deflate, br" : "identity";
 
   // `addresses` is never empty for an allowed decision, but fall back to the
   // host so a literal-only target can never end up with an empty pin set.
@@ -304,7 +316,7 @@ export async function pinnedFetch(target: PinnedTarget, init?: RequestInit): Pro
       if (settled) return;
       settled = true;
       try {
-        resolve(toResponse(res, target.url, normalized.method));
+        resolve(toResponse(res, target.url, normalized.method, decode));
       } catch (err) {
         res.resume();
         reject(new TypeError("fetch failed", { cause: err }));

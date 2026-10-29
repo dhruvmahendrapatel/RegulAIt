@@ -106,6 +106,7 @@ interface Hit {
   method: string;
   url: string;
   body: string;
+  acceptEncoding: string;
 }
 
 const hits: Hit[] = [];
@@ -128,6 +129,7 @@ function handler(bind: string) {
         method: req.method ?? "",
         url: req.url ?? "",
         body: Buffer.concat(chunks).toString("utf8"),
+        acceptEncoding: String(req.headers["accept-encoding"] ?? ""),
       });
       const path = (req.url ?? "/").split("?")[0];
       if (path === "/redirect") {
@@ -137,7 +139,7 @@ function handler(bind: string) {
       }
       if (path === "/gzip") {
         const payload = gzipSync(Buffer.from(JSON.stringify({ served_by: bind, gz: true })));
-        res.writeHead(200, { "content-type": "application/json", "content-encoding": "gzip" });
+        res.writeHead(200, { "content-type": "application/json", "content-encoding": "gzip", "content-length": String(payload.length) });
         res.end(payload);
         return;
       }
@@ -469,6 +471,29 @@ describe("the guard's existing verdicts still hold on the pinned transport", () 
     const res = await guarded(`https://pinned.test:${tlsPort}/gzip`);
     expect(res.headers.get("content-encoding")).toBeNull();
     expect(await res.json()).toEqual({ served_by: BENIGN, gz: true });
+  });
+
+  it("decodeContentEncoding: false returns the stored bytes with both headers, and asks for identity (#453 c6487334834)", async () => {
+    const guarded = createGuardedFetch({
+      allowList: [allow("pinned.test")],
+      resolve: fixedResolver(BENIGN),
+    });
+    const res = await guarded(`https://pinned.test:${tlsPort}/gzip`, { decodeContentEncoding: false } as RequestInit);
+    const raw = Buffer.from(await res.arrayBuffer());
+    expect(hits.at(-1)?.acceptEncoding).toBe("identity");
+    expect(res.headers.get("content-encoding")).toBe("gzip");
+    expect(res.headers.get("content-length")).toBe(String(raw.length));
+    expect(raw.equals(gzipSync(Buffer.from(JSON.stringify({ served_by: BENIGN, gz: true }))))).toBe(true);
+
+    // a caller's own accept-encoding is sent as is
+    await (await guarded(`https://pinned.test:${tlsPort}/gzip`, { decodeContentEncoding: false, headers: { "accept-encoding": "gzip" } } as RequestInit)).arrayBuffer();
+    expect(hits.at(-1)?.acceptEncoding).toBe("gzip");
+
+    // the default is unchanged: fetch's own accept-encoding, and a decoded body
+    const decoded = await guarded(`https://pinned.test:${tlsPort}/gzip`);
+    expect(hits.at(-1)?.acceptEncoding).toBe("gzip, deflate, br");
+    expect(decoded.headers.get("content-encoding")).toBeNull();
+    expect(decoded.headers.get("content-length")).toBeNull();
   });
 });
 
