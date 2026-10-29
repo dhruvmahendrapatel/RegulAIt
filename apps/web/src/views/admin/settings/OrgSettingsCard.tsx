@@ -41,6 +41,8 @@ export function OrgSettingsCard(props: {
   keys: readonly string[];
   intro?: ReactNode;
   testId?: string;
+  /** each row's strict/relaxed explanation sits behind an (i) on its status pill instead of under the row */
+  helpInInfo?: boolean;
 }) {
   const specs = specsFor(props.keys);
   const settings = useQuery(orgSettingsQuery<OrgSettingsResponse>());
@@ -85,6 +87,7 @@ export function OrgSettingsCard(props: {
                 spec={spec}
                 current={stored[spec.key]}
                 locked={baseline.stale || flight.busy}
+                helpInInfo={props.helpInInfo}
                 onSave={save}
               />
             ))
@@ -110,6 +113,7 @@ function SettingRow(props: {
   spec: OrgSettingSpec;
   current: unknown;
   locked: boolean;
+  helpInInfo?: boolean;
   onSave: (body: Record<string, unknown>) => Promise<void>;
 }) {
   const { spec } = props;
@@ -125,7 +129,10 @@ function SettingRow(props: {
   const helpId = `${base}-help`;
   const problemId = `${base}-problem`;
   const showProblem = known && !parsed.ok;
-  const describedBy = showProblem ? `${helpId} ${problemId}` : helpId;
+  // with the explanation behind the (i) there is no visible help line to point at
+  const describedBy = props.helpInInfo ? (showProblem ? problemId : "") : showProblem ? `${helpId} ${problemId}` : helpId;
+  const help = props.helpInInfo ? <>{spec.strict} {spec.relaxed}</> : undefined;
+  const helpLabel = spec.label.toLowerCase();
   const set = (patch: Partial<Draft>) => setDraft((d) => ({ ...d, ...patch }));
 
   return (
@@ -148,11 +155,11 @@ function SettingRow(props: {
       <SettingControl spec={spec} id={base} draft={draft} set={set} disabled={disabled} known={known} describedBy={describedBy} />
       <div className={v.row}>
         {!known ? (
-          <Badge tone="warn">unknown</Badge>
+          <Badge tone="warn" info={help} infoLabel={helpLabel}>unknown</Badge>
         ) : spec.isRelaxed(stored) ? (
-          <Badge tone="warn">relaxed (audited)</Badge>
+          <Badge tone="warn" info={help} infoLabel={helpLabel}>relaxed (audited)</Badge>
         ) : (
-          <Badge tone="ok">strict</Badge>
+          <Badge tone="ok" info={help} infoLabel={helpLabel}>strict</Badge>
         )}
         <span className={v.faint}>
           Current: {describeValue(spec, stored)} · strict default: {describeValue(spec, spec.strictDefault)}
@@ -161,9 +168,11 @@ function SettingRow(props: {
           Review change
         </Button>
       </div>
-      <p className={v.faint} id={helpId}>
-        {spec.strict} {spec.relaxed}
-      </p>
+      {props.helpInInfo ? null : (
+        <p className={v.faint} id={helpId}>
+          {spec.strict} {spec.relaxed}
+        </p>
+      )}
       {showProblem && !parsed.ok ? (
         <p className={v.errLine} id={problemId}>
           {parsed.problem}
@@ -238,7 +247,7 @@ function SettingControl(props: {
       const options = c.kind === "enum" ? c.options : [{ value: "true", label: c.on }, { value: "false", label: c.off }];
       return (
         <Field label={spec.label}>
-          <Select id={id} disabled={disabled} value={draft.text} aria-describedby={describedBy} onChange={(e) => set({ text: e.target.value })}>
+          <Select id={id} disabled={disabled} value={draft.text} aria-describedby={describedBy || undefined} onChange={(e) => set({ text: e.target.value })}>
             {!known ? <option value="">Unknown: not reported</option> : null}
             {options.map((o) => (
               <option key={o.value} value={o.value}>
@@ -265,7 +274,7 @@ function SettingControl(props: {
               disabled={disabled || (c.kind === "int" && draft.none)}
               placeholder={known ? undefined : "Unknown: not reported"}
               value={draft.text}
-              aria-describedby={describedBy}
+              aria-describedby={describedBy || undefined}
               onChange={(e) => set({ text: e.target.value })}
             />
           </Field>
@@ -290,7 +299,7 @@ function SettingControl(props: {
                   type="checkbox"
                   disabled={disabled}
                   checked={draft.set.includes(o.value)}
-                  aria-describedby={describedBy}
+                  aria-describedby={describedBy || undefined}
                   onChange={(e) => set({ set: e.target.checked ? [...draft.set, o.value] : draft.set.filter((x) => x !== o.value) })}
                 />
                 <span>{o.label}</span>
@@ -313,7 +322,7 @@ function SettingControl(props: {
                   step={1}
                   disabled={disabled}
                   value={draft.map[m.value] ?? ""}
-                  aria-describedby={describedBy}
+                  aria-describedby={describedBy || undefined}
                   onChange={(e) => set({ map: { ...draft.map, [m.value]: e.target.value } })}
                 />
               </Field>

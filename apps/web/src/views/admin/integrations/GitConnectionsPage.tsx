@@ -40,11 +40,14 @@ export default function GitConnectionsPage() {
     <>
       <PageHeader
         title="Git connections"
-        sub="What git_operation stages execute against."
-        info={<p>What git_operation stages execute against. Templates reference a connection by name. Every listed kind has a real adapter — a kind without one is refused at creation, never discovered mid-workflow.</p>}
+        info={<p>What git_operation stages execute against. Templates reference a connection by name. Every listed kind has a real adapter — a kind without one is refused at creation, never discovered mid-workflow. The demo runs entirely on the mock provider — no external service is touched.</p>}
       />
       <div className={v.stack}>
-        <Card title="Add a connection">
+        <Card
+          title="Add a connection"
+          infoLabel="secrets handling"
+          info={<p>Tokens are AES-256-GCM encrypted at rest and never returned by any endpoint.</p>}
+        >
           <form
             className={a.formRow}
             onSubmit={(e) => {
@@ -136,10 +139,6 @@ export default function GitConnectionsPage() {
             }
           />
         </Card>
-        <p className={v.faint}>
-          Tokens are AES-256-GCM encrypted at rest and never returned by any endpoint. The demo runs
-          entirely on the mock provider — no external service is touched.
-        </p>
       </div>
     </>
   );

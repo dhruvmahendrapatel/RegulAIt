@@ -41,6 +41,7 @@ import {
   Card,
   EmptyState,
   Field,
+  InfoButton,
   Input,
   Select,
   Table,
@@ -515,33 +516,40 @@ export default function CostConsolidationPage() {
     <>
       <PageHeader
         title="Cross-vendor cost consolidation"
-        sub={
-          "One human's coding-assistant seats, raw API key and cloud AI spend, on one line — because per-seat " +
-          "SaaS spend is invoice-side, not call-side, and no gateway can meter a bill it never saw."
-        }
+        sub="One human's coding-assistant seats, raw API key and cloud AI spend, on one line."
+        info={<p>Per-seat SaaS spend is invoice-side, not call-side, and no gateway can meter a bill it never saw.</p>}
       />
       <div className={v.stack}>
         {/* --- THE HONESTY RULE. Leads the page. --------------------------- */}
         <Card title="Two kinds of number, never added">
           <div className={v.stack}>
+            <div className={v.row} role="group" aria-label="Legend">
+              <Badge tone="ok" infoLabel="metered" info={<><strong>metered</strong> means regulAIt saw the call and priced it.</>}>
+                Metered
+              </Badge>
+              <Badge
+                tone="warn"
+                infoLabel="imported"
+                info={
+                  <>
+                    <strong>imported</strong> means regulAIt was <em>told</em>, by a file you exported. Imported figures are{" "}
+                    <strong>reporting-only</strong>: they never enter a billing statement, a budget, a forecast, the optimizer or
+                    any enforcement path. We will not block someone&apos;s work on a number we could not verify.
+                  </>
+                }
+              >
+                Imported · customer-supplied
+              </Badge>
+            </div>
             <p>
-              <strong>metered</strong> means regulAIt saw the call and priced it.{" "}
-              <strong>imported</strong> means regulAIt was <em>told</em>, by a file you exported. Nothing
-              on this page adds them together, and{" "}
+              Nothing on this page adds them together, and{" "}
               <strong>no combined total exists to render</strong> — the API has no field for one.
-            </p>
-            <p className={v.dim}>{adapters.data?.basisStatement ?? "Loading the basis statement…"}</p>
-            <p className={v.faint}>{adapters.data?.posture}</p>
-            <p className={v.faint}>
-              Imported figures are <strong>reporting-only</strong>: they never enter a billing statement,
-              a budget, a forecast, the optimizer or any enforcement path. We will not block someone&apos;s
-              work on a number we could not verify.
             </p>
           </div>
         </Card>
 
         {/* --- import ------------------------------------------------------ */}
-        <Card title="Import a vendor export">
+        <Card title="Import a vendor export" info={adapters.data?.posture ? <p>{adapters.data.posture}</p> : undefined}>
           <QueryGate
             loading={adapters.isLoading}
             error={adapters.error}
@@ -588,11 +596,13 @@ export default function CostConsolidationPage() {
 
               {adapter && (
                 <div className={v.stack}>
-                  <div className={v.sectionTitle}>What this adapter cannot do</div>
-                  {/* VERBATIM. The adapter's own sentence, not a paraphrase. */}
-                  <p className={a.snippet} data-testid="ci-adapter-limits">
-                    {adapter.limits}
-                  </p>
+                  <div className={v.sectionTitle}>
+                    What this adapter cannot do{" "}
+                    {/* VERBATIM. The adapter's own sentence, not a paraphrase; the chips below stay visible. */}
+                    <InfoButton label="this adapter's limits">
+                      <span data-testid="ci-adapter-limits">{adapter.limits}</span>
+                    </InfoButton>
+                  </div>
                   <div className={v.row}>
                     <Badge tone={adapter.capabilities.amountFromFile ? "ok" : "warn"}>
                       {adapter.capabilities.amountFromFile
@@ -902,6 +912,8 @@ export default function CostConsolidationPage() {
         {/* --- ADR-0076: scheduled reconciliation --------------------------- */}
         <Card
           title="Reconciliation — the same vendor line, never counted twice"
+          infoLabel="reconciliation"
+          info={reconciliation.data?.posture ? <p>{reconciliation.data.posture}</p> : undefined}
           actions={
             <Button
               size="sm"
@@ -920,7 +932,6 @@ export default function CostConsolidationPage() {
             onRetry={() => void reconciliation.refetch()}
           >
             <div className={v.stack} data-testid="rc-card">
-              <p className={v.dim}>{reconciliation.data?.posture}</p>
               <div className={v.grid}>
                 <Stat value={reconciliation.data?.liveLines ?? 0} label="Live imported lines" />
                 <Stat
@@ -1005,14 +1016,17 @@ export default function CostConsolidationPage() {
         </Card>
 
         {/* --- identity mapping --------------------------------------------- */}
-        <Card title="Identity mapping — which vendor account is which person">
+        <Card
+          title="Identity mapping — which vendor account is which person"
+          infoLabel="identity mapping"
+          info={mappings.data?.posture ? <p>{mappings.data.posture}</p> : undefined}
+        >
           <QueryGate
             loading={mappings.isLoading}
             error={mappings.error}
             onRetry={() => void mappings.refetch()}
           >
             <div className={v.stack}>
-              <p className={v.dim}>{mappings.data?.posture}</p>
 
               <div className={v.sectionTitle}>Admin aliases (highest precedence)</div>
               <div className={a.formRow}>

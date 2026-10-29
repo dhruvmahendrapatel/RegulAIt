@@ -212,11 +212,15 @@ export function EnergyFactorsCard() {
       });
   const regions = (q.data?.factors ?? []).filter((f) => f.kind === "grid" && f.subject.toLowerCase() !== "default");
   return (
-    <Card title="Energy factors">
-      <div className={v.stack}>
-        <span className={v.faint}>
+    <Card
+      title="Energy factors"
+      info={
+        <p>
           {q.data?.notes.shipped ?? "regulAIt ships no energy factors."} {q.data?.notes.unknown ?? ""}
-        </span>
+        </p>
+      }
+    >
+      <div className={v.stack}>
         <Table
           rows={q.data?.factors ?? []}
           rowKey={(f) => f.id}
