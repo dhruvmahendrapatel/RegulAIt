@@ -42,7 +42,7 @@ export function OrgSettingsCard(props: {
   intro?: ReactNode;
   /** the card's explanation, behind the title (i) */
   info?: ReactNode;
-  /** each setting's strict/relaxed explanation sits behind an (i) beside its status pill instead of under the row */
+  /** each setting's strict/relaxed explanation sits behind an (i) beside its status pill instead of under the row; on unless a page passes false */
   helpInInfo?: boolean;
   testId?: string;
 }) {
@@ -90,7 +90,7 @@ export function OrgSettingsCard(props: {
                 current={stored[spec.key]}
                 locked={baseline.stale || flight.busy}
                 onSave={save}
-                helpInInfo={props.helpInInfo}
+                helpInInfo={props.helpInInfo ?? true}
               />
             ))
           ) : settings.data ? (
