@@ -545,3 +545,17 @@ the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
 - Why: with design-scan E1 (#565) on top of main, entry JS measures about 137,815 B, 85 B under the 137.9 kB ceiling
   (#565 review finding 1), so the next change touching the entry chunk would fail. The raise lands before the
   2026-10-29 freeze, so ADR-0198's freeze-week allowance (at most +1 kB of entry raises) is untouched.
+
+## Addendum / As built (2026-10-29) — all JS 1,043 → 1,046 kB (batch I-1, the (i) pass)
+
+The owner decided this raise on 2026-10-29:
+<https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6494584993>. It is the ADR-recorded exception
+the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
+
+- `all JS` from `1043 kB` to `1046 kB` (+3 kB). Entry JS stays at 138.5 kB (measured 137,765 B) and entry CSS at
+  10.7 kB (measured 10,493 B); the lazy chunk ceilings are unchanged.
+- Why: batch I-1 moves long explanatory prose on about 80 pages behind the kit's InfoButton. Merged on main `f4cb1dc4`,
+  total JS measures 1,044,565 B, about 1.6 kB over; the bytes are InfoButton markup in lazy page chunks. The remaining
+  ~1.4 kB is margin for review fixes.
+- Freeze week: ADR-0198 §2 covers entry raises only; this total-JS raise rests on the owner decision above, not on that
+  allowance. ADR-0198's post-demo reset applies to it.
