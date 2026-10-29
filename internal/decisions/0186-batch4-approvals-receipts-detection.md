@@ -953,3 +953,19 @@ ADR-0197 Q6 (owner, 2026-10-18): "recording a data-key custody attestation requi
 - No migration: the kind exists since 0203.
 - Tests (`data-key-custody.test.ts`, database): an API key is refused `step_up_required` and nothing is recorded; three
   wrong grants are refused unspent; the exact grant is spent once and audited with the kind.
+
+## Addendum — 2026-10-29: re2js 2.8.6 → 2.8.8 (GHSA-gg6h-894w-4m9c)
+
+The mentions of re2js 2.8.6 above (the measured alternatives, and the scan-plan derivation "pinned to re2js 2.8.6")
+are kept as written; they describe what was measured and built then. Since #589 (merged 2026-10-29) the pin is
+**2.8.8** in `packages/shared` and `apps/gateway`, and `scripts/vendor/convert-detection-content.mjs` refuses any
+version other than 2.8.8.
+
+- **Why:** GHSA-gg6h-894w-4m9c (high), quadratic-time matching with lookbehinds in re2js `>=2.2.0 <2.8.7`. It failed
+  the dependency audit and the image scans on every PR. Patched, not allow-listed.
+- **The derivation still holds.** Between 2.8.6 and 2.8.8 the opcodes (1–13), the `Inst` fields and the compiler's
+  emitted order are unchanged. `Inst.runes` became an `Int32Array`, which the scan-plan code only reads by length and
+  index. Regenerating the vendored detection content is byte-identical (`convert-detection-content.mjs --check`), and
+  the detection-content and Ajv-backed gateway tests pass (builder report and independent review on #589).
+- **Rule kept:** the converter stays pinned to one exact re2js version. Any later bump repeats this review of the
+  program layout before the guard moves.
