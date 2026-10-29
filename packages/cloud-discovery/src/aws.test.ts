@@ -250,6 +250,58 @@ describe("AwsCloudScanner through the real AWS SDK and a fake cloud", () => {
     expect(sent).toBeLessThanOrEqual(AWS_TRAIL_OBJECT_MAX_BYTES + 4 * 1024 * 1024);
   });
 
+  it("trail bucket: an object stored with Content-Encoding: gzip and a crc64nvme of the stored bytes is read (#453 c6487334834)", async () => {
+    // what S3 returns when the transport leaves the body undecoded: the gzip bytes, both headers, and a checksum of
+    // those bytes. The SDK validates the checksum; the adapter's capped gunzip is the only decompression.
+    const crc64nvme = (bytes: Uint8Array): Buffer => {
+      let crc = 0xffffffffffffffffn;
+      for (const b of bytes) {
+        crc ^= BigInt(b);
+        for (let i = 0; i < 8; i++) crc = crc & 1n ? (crc >> 1n) ^ 0x9a6c9329ac4bc9b5n : crc >> 1n;
+      }
+      const out = Buffer.alloc(8);
+      out.writeBigUInt64BE(crc ^ 0xffffffffffffffffn);
+      return out;
+    };
+    expect(crc64nvme(Buffer.from("123456789")).toString("hex")).toBe("ae8b14860a799888"); // the published check value
+    const prefix = `AWSLogs/${ACCOUNT}/CloudTrail/`;
+    const day = "2026/10/17/";
+    const record = { Records: [{ eventName: "InvokeAgent", eventSource: "bedrock.amazonaws.com", eventTime: "2026-10-17T08:00:00Z", awsRegion: "us-east-1", userIdentity: { arn: `arn:aws:iam::${ACCOUNT}:role/agent-caller` } }] };
+    const stored = gzipSync(Buffer.from(JSON.stringify(record)));
+    const listXml = (contents: string, prefixes = "") =>
+      xml(`<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>trail</Name><IsTruncated>false</IsTruncated>${contents}${prefixes}</ListBucketResult>`);
+    const cloud = fakeCloud([
+      (c) => {
+        if (!c.url.hostname.startsWith("trail.s3.")) return undefined;
+        const p = c.url.searchParams.get("prefix");
+        if (c.url.searchParams.get("list-type") === "2" && p === prefix) return listXml("", `<CommonPrefixes><Prefix>${prefix}us-east-1/</Prefix></CommonPrefixes>`);
+        if (c.url.searchParams.get("list-type") === "2" && p === `${prefix}us-east-1/${day}`) {
+          return listXml(`<Contents><Key>${prefix}us-east-1/${day}enc.json.gz</Key><Size>${stored.length}</Size></Contents>`);
+        }
+        if (c.url.searchParams.get("list-type") === "2") return listXml("");
+        return new Response(stored, {
+          headers: {
+            "content-type": "application/json",
+            "content-encoding": "gzip",
+            "content-length": String(stored.length),
+            "x-amz-checksum-crc64nvme": crc64nvme(stored).toString("base64"),
+            "x-amz-checksum-type": "FULL_OBJECT",
+          },
+        });
+      },
+      ...awsRoutes(),
+    ]);
+    const scanner = new AwsCloudScanner(
+      { accountId: ACCOUNT, regions: ["us-east-1"], trailBucket: { bucket: "trail", region: "us-east-1" } },
+      { fetch: cloud.fetch, credential: { mode: "aws_static", accessKeyId: synthetic("akid"), secretAccessKey: synthetic("sk") } },
+    );
+    const res = await scanner.scan({ ...ctx(), auditLookbackDays: 1 });
+    const cap = res.capabilities.find((x) => x.capability === "aws.cloudtrail.data_events");
+    expect(cap?.status).toBe("read");
+    expect(cap?.items).toBe(1);
+    expect(cap?.detail).not.toContain("skipped");
+  });
+
   it("assume-role mode sends the per-source external id", async () => {
     const cloud = fakeCloud(awsRoutes());
     const scanner = new AwsCloudScanner(

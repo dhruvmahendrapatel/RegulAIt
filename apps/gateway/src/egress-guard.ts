@@ -34,7 +34,7 @@
 
 import { BlockList, isIP, SocketAddress } from "node:net";
 import { lookup as dnsLookup } from "node:dns/promises";
-import { pinnedFetch, type PinnedTls } from "./pinned-fetch.js";
+import { pinnedFetch, type PinnedRequestInit, type PinnedTls } from "./pinned-fetch.js";
 import { timeouts } from "./timeouts.js";
 import { errMessage } from "./err-serializer.js";
 
@@ -766,7 +766,8 @@ export interface GuardedFetchOptions extends EgressCheckOptions {
  */
 export function createGuardedFetch(opts: GuardedFetchOptions): typeof fetch {
   const injected = opts.fetchImpl;
-  const guarded = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+  // `init.decodeContentEncoding` (see `PinnedRequestInit`) rides through to the transport untouched
+  const guarded = async (input: string | URL | Request, init?: PinnedRequestInit): Promise<Response> => {
     const rawUrl =
       typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     const decision = await checkEgress(rawUrl, opts);

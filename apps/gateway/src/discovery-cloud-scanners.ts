@@ -61,6 +61,7 @@ import {
 } from "@regulait/cloud-discovery";
 import { FEDERATION_AUDIENCES, DISCOVERY_READ_OUTCOMES_MAX, type DiscoveryReadOutcome, type DiscoverySourceKind } from "@regulait/shared";
 import type { ScanContext, ScanObservation, Scanner } from "./discovery-scanners.js";
+import type { PinnedRequestInit } from "./pinned-fetch.js";
 
 export interface CloudScannerOptions {
   /** TEST SEAM: a token supplier used instead of `ctx.federation.sourceToken` */
@@ -130,14 +131,16 @@ function parseJsonSecret(secret: string | null, what: string): Record<string, un
 /**
  * The worker's hooks around `ctx.fetch`: throttle first, honour backoff, and (for the scan fetch only) digest every
  * body. `digest: false` builds the credential fetch: token-exchange responses carry credentials and are never fed to
- * the digest (review of #404, finding 3).
+ * the digest (review of #404, finding 3). `rawBody: true` asks the transport not to decode `Content-Encoding`.
  */
-export function scannerFetch(ctx: Pick<ScanContext, "fetch" | "throttle" | "backoff" | "recordRaw">, opts: { digest?: boolean } = {}): typeof fetch {
+export function scannerFetch(ctx: Pick<ScanContext, "fetch" | "throttle" | "backoff" | "recordRaw">, opts: { digest?: boolean; rawBody?: boolean } = {}): typeof fetch {
   const digest = opts.digest ?? true;
   const wrapped = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    // `rawBody`: the body arrives exactly as stored, never content-decoded (see `PinnedRequestInit`)
+    const sent: PinnedRequestInit | undefined = opts.rawBody ? { ...init, decodeContentEncoding: false } : init;
     for (;;) {
       await ctx.throttle();
-      const res = await ctx.fetch(input, init);
+      const res = await ctx.fetch(input, sent);
       if ((res.status === 429 || res.status === 503) && (await ctx.backoff(res))) continue;
       if (digest) await digestBounded(res, ctx.recordRaw);
       return res;
@@ -380,7 +383,11 @@ export function cloudScanner(kind: "cloud_aws" | "cloud_gcp" | "cloud_azure", op
     kind,
     requiresCredential: true,
     run: async (ctx) => {
-      const adapter = buildCloudScanner(kind, ctx, scannerFetch(ctx), opts, scannerFetch(ctx, { digest: false }));
+      // AWS: the S3 reads must see the stored bytes. A CloudTrail object is stored with `Content-Encoding: gzip`, and
+      // the SDK checks its `x-amz-checksum-*` against the body it receives; decoded bytes fail that check, and the
+      // adapter's own capped gunzip is then the only decompression (#453 c6487334834)
+      const scanFetch = scannerFetch(ctx, kind === "cloud_aws" ? { rawBody: true } : {});
+      const adapter = buildCloudScanner(kind, ctx, scanFetch, opts, scannerFetch(ctx, { digest: false }));
       const res = await adapter.scan({
         now: new Date(),
         auditLookbackDays: DEFAULT_AUDIT_LOOKBACK_DAYS,
