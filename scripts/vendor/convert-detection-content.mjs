@@ -132,7 +132,7 @@ manifest('agt-mcp-heuristics','agt',heuristics.length,omittedAgt);
 //     match exactly; an unbounded rule falls back to one RE2 scan of the text when it has a hit.
 // The program layout is re2js's; the derivation is pinned to the exact version that defines it.
 const re2jsPackage = JSON.parse(readFileSync(path.join(path.dirname(createRequire(path.join(root, 'packages/shared/package.json')).resolve('re2js')), '..', 'package.json'), 'utf8'));
-if (re2jsPackage.version !== '2.8.6') throw Error(`Scan plans are derived from the re2js 2.8.6 program layout; review it for ${re2jsPackage.version}`);
+if (re2jsPackage.version !== '2.8.8') throw Error(`Scan plans are derived from the re2js 2.8.8 program layout; review it for ${re2jsPackage.version}`);
 const OP = { ALT: 1, ALT_MATCH: 2, CAPTURE: 3, EMPTY_WIDTH: 4, FAIL: 5, MATCH: 6, NOP: 7, RUNE: 8, RUNE1: 9, RUNE_ANY: 10, RUNE_ANY_NOT_NL: 11 };
 const PREFILTER_POSITIONS = 24, MAX_RUNE = 0x10ffff;
 function runeRanges(inst) {
