@@ -560,7 +560,7 @@ test("mcp servers: set a per-tool price override and see it persist (O10)", asyn
 
 test("git connections: seeded connection listed with provider hints", async () => {
   await nav("Git connections", "Git connections");
-  await expect(page.getByRole("cell", { name: "demo-git" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "demo-git", exact: true })).toBeVisible();
   await shot(page, "phase2-20-git-connections");
   track.assertClean("git connections");
 });
