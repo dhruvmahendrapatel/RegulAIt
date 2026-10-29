@@ -1096,21 +1096,29 @@ never run `down -v` anywhere else (§7.6, step 3).
 ### 7.9 The ABAP MCP server behind the proxy (owner, 2026-10-29, #453 c6508111468; ADR-0204)
 
 The ABAP MCP server is a separate product. Registered behind our MCP proxy, a live change in that system runs through
-governance. It checks its own API keys (or an OIDC JWT), so the gateway authenticates to it with a static upstream
-credential. Everything below is placeholders: the real URL and key are entered by the owner in the product, never in
-chat, the repo or a ticket.
+governance. It reads its API keys only from `Authorization: Bearer`, so the gateway authenticates to it with a static
+upstream credential under the Bearer scheme (the default). The full agreed configuration is in #453, in the master
+session's latest comment. Everything below is placeholders: the real host and key are entered by the owner in the
+product, never in chat, the repo or a ticket.
 
-1. **Register the server.** In `/ui`, **Integrations → MCP servers**, register it with name `<abap-mcp-name>` and URL
-   `https://<abap-mcp-host>/<mcp-path>`. If the host is on a private network, allow private ranges for that server
-   (a step-up). If it is on the public internet, add `<abap-mcp-host>` to the egress allow-list first.
-2. **Set the credential.** Select the server, then on the **Upstream credential** card:
-   - for one of its own API keys, choose **Key in a named header**, type the header the server reads it from
-     (`<api-key-header>`, as its documentation names it), and paste `<abap-api-key>`;
-   - for a bearer token, choose **Bearer token in Authorization** and paste `<abap-bearer-token>`.
-   Save, and confirm it's you when asked. The card then shows the header and the key's last four characters only.
-3. **Check it.** Sync the server's tools (open its tools, or make one governed read-only call). The server's own log
+1. **Allow the host.** Add `<abap-host>` to the egress allow-list (a public-internet URL needs an allow-host entry).
+2. **Register the server.** In `/ui`, **Integrations → MCP servers**: name `<abap-mcp-name>`, transport
+   `streamable_http`, URL `https://<abap-host>/mcp`.
+3. **Set the credential.** Select the server, then on the **Upstream credential** card choose **Bearer token in
+   Authorization** and paste an `rgk_<…>` key issued from the server's `admin` profile. Save, and confirm it's you when
+   asked. The card then shows the scheme and the key's last four characters only. (The named-header option exists, but
+   the demo does not use it.)
+4. **Identity to upstream: leave it `none`.** The server's OIDC verifier does not accept our EdDSA assertion.
+5. **Grants.** Grant the demo persona the tools `SAPWrite` and `SAPActivate`; everyone else stays denied by default.
+6. **Approval rule.** Require approval for any call to `SAPWrite` or `SAPActivate`, with the approver notified in Slack
+   and by email.
+7. **Check it.** Sync the server's tools (open its tools, or make one governed read-only call); the server's own log
    should show the request authenticated. A `mcp-upstream-credential-unavailable` refusal on the audit page means the
    gateway's data key differs from the one the key was saved under: set the credential again.
-4. **Do not** change the server's URL after setting the credential unless you mean to: a URL change clears it
-   (audited), and it must be set again.
-5. **Rotate or clear** on the same card. Clear is the secondary button and asks for a confirmation.
+8. **What to say.** SAP records a technical user, because principal propagation is off. The person is governed and
+   audited in RegulAIt: who asked, which tool, the approval and the outcome.
+9. **The refused case to show.** A write outside the allowed package produces the server's `safety_blocked` event and
+   never reaches SAP.
+10. **Do not** change the server's URL after setting the credential unless you mean to: a URL change clears it
+    (audited), and it must be set again. Rotate or clear on the same card; Clear is the secondary button and asks for a
+    confirmation.
