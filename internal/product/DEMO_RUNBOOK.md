@@ -1092,3 +1092,25 @@ never run `down -v` anywhere else (§7.6, step 3).
    instant. If the laptop runs short of memory, `docker compose stop` it after the check and `docker compose start` it
    at T-10 min. After the demo, `docker compose down -v` in `regulait-fallback` (after step 4), then
    `git worktree remove ../regulait-fallback` from the live checkout.
+
+### 7.9 The ABAP MCP server behind the proxy (owner, 2026-10-29, #453 c6508111468; ADR-0204)
+
+The ABAP MCP server is a separate product. Registered behind our MCP proxy, a live change in that system runs through
+governance. It checks its own API keys (or an OIDC JWT), so the gateway authenticates to it with a static upstream
+credential. Everything below is placeholders: the real URL and key are entered by the owner in the product, never in
+chat, the repo or a ticket.
+
+1. **Register the server.** In `/ui`, **Integrations → MCP servers**, register it with name `<abap-mcp-name>` and URL
+   `https://<abap-mcp-host>/<mcp-path>`. If the host is on a private network, allow private ranges for that server
+   (a step-up). If it is on the public internet, add `<abap-mcp-host>` to the egress allow-list first.
+2. **Set the credential.** Select the server, then on the **Upstream credential** card:
+   - for one of its own API keys, choose **Key in a named header**, type the header the server reads it from
+     (`<api-key-header>`, as its documentation names it), and paste `<abap-api-key>`;
+   - for a bearer token, choose **Bearer token in Authorization** and paste `<abap-bearer-token>`.
+   Save, and confirm it's you when asked. The card then shows the header and the key's last four characters only.
+3. **Check it.** Sync the server's tools (open its tools, or make one governed read-only call). The server's own log
+   should show the request authenticated. A `mcp-upstream-credential-unavailable` refusal on the audit page means the
+   gateway's data key differs from the one the key was saved under: set the credential again.
+4. **Do not** change the server's URL after setting the credential unless you mean to: a URL change clears it
+   (audited), and it must be set again.
+5. **Rotate or clear** on the same card. Clear is the secondary button and asks for a confirmation.
