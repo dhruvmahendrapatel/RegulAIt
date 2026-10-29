@@ -117,8 +117,8 @@ before 2026-11-03 that is exploitable on the demo path is fixed before the demo,
 
 ## Addendum — 2026-10-29: UX best practices are the default for every screen (owner)
 
-**Owner, 2026-10-29 (#453):** "I want the absolute best of the best … make sure we follow the best practices unless I
-ask." The owner shared three articles to read first:
+**Owner, 2026-10-29, in the master session** (recorded on #453 as c6487576721): "I want the absolute best of the best
+… make sure we follow the best practices unless I ask." The owner shared three articles to read first:
 - "10 UX Best Practices to Follow in 2026" (uxpilot.ai, 2026-02-09);
 - "UI UX Best Practices: 12 Principles for Better UX" (upslidedesignstudio.com);
 - "Designing for the User: Best Practices in UX/UI" (LinkedIn Pulse).

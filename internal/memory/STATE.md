@@ -27,12 +27,16 @@ roadmap: ../product/ROADMAP.md
   - c6485593621: the laptop database is wiped once and prepared with `demo:prepare --live`; done on 10-29 (c6486350055).
   - c6486079064: the fallback is a second sample-data compose stack on the laptop.
   - c6487111601: release #592.
-  - UX rule: the practices in DESIGN_GUIDELINES.md are the default unless the owner asks otherwise.
+  - c6487576721: the UX practices in DESIGN_GUIDELINES.md are the default unless the owner asks otherwise.
+  - c6487709029: the (i) pattern for long prose is approved; batch I-1 is being built today as one held PR.
 - **Admin MFA bug (c6484937215):** could not be reproduced, so it is not a code bug.
-- **Still open on the laptop:**
-  - admin and Morgan MFA enrolment;
-  - re-creating `live-github`;
-  - DEMO_REAL_ACCOUNTS steps 1b, 2 and 4;
+- **Laptop (c6487334834):** the AWS sandbox is applied, federation is on, and the first real AWS scan succeeded; `demo:check --live` is 24/0/0.
+- **Still open:**
+  - the git-pr beat (no way to replace the `live-github` token, c6486886476);
+  - the `endpoint_inventory` target validation (c6486986847);
+  - the CloudTrail data-events checksum error (c6487334834);
+  - whether Azure and GitLab are in scope;
+  - Slack and the Jira/ADO webhooks;
   - the fallback stack.
 
 **2026-10-26 (02:00 UTC) - the July AWS Organization is deleted; the demo moves to a laptop behind a Cloudflare

@@ -190,15 +190,21 @@ follow-ups, [session record](memory/sessions/2026-10-24-session-02.md).*
 These are the default on every screen. Depart from one only when the owner asks, and name the owner's comment in the
 PR body. Secure by default (ADR-0180), the freeze (ADR-0198) and the bundle ceilings (ADR-0196) still win. New and
 touched UI follows these now; existing screens are audited in a post-demo batch. Most rules extend one above, so the
-rule above still applies. *UX-26 unless marked. Review, unless an enforcement is named.*
+rule above still applies. *UX-26 unless marked; "(our reading)" marks a detail the articles do not state, chosen by
+the master session. Review, unless an enforcement is named.*
 
 **Know the user and the task**
-- Design each screen around the task the persona came to do (Ada the admin, Avery the governance reviewer, Dana the developer,
-  Morgan the security lead); state that task in the PR body for new screens.
+- Learn what users need before building: talk to people in the target roles and watch them work (interviews,
+  observation), not only assumptions; record what you learned in the PR or session record.
+- Design each screen around the task its user came to do (the demo personas are examples: Ada the admin, Avery the
+  governance reviewer, Dana the developer, Morgan the security lead); state that task in the PR body for new screens.
 - Ask for only what the task needs; every form field earns its place, and an optional field says so.
+- Cut steps: fewer clicks to the goal, save progress on long forms (a draft), and keyboard shortcuts for frequent
+  actions where they do not conflict with assistive technology.
 
 **Feedback and system status**
-- Respond to every action within 100 ms: the control changes state at once (pressed, busy) before the result arrives.
+- Respond to every action at once: the control changes state (hover, pressed, busy) before the result arrives
+  (within about 100 ms, our reading).
 - Match the indicator to the wait: under 1 s nothing extra; 1–3 s a spinner or busy state; 3–10 s a progress bar or
   step count; over 10 s an estimate, and let the user leave and come back (a background run with a status the user
   can find again). A skeleton that matches the final layout beats a spinner for a page or card load.
@@ -208,17 +214,18 @@ rule above still applies. *UX-26 unless marked. Review, unless an enforcement is
 **Prevent errors before they happen**
 - Constrain instead of rejecting: offer only valid choices (a date picker that greys out impossible dates, a select
   instead of free text for a known set), and say why a choice is unavailable.
-- Validate inline, on blur, next to the field, in plain words; keep what the user typed.
+- Validate inline, next to the field, in plain words (on blur rather than on every keystroke, our reading); keep what
+  the user typed.
 - Prefill likely values (the current project, the user's own team, the last-used filter), but never pre-select a
   permissive, sanctioning or relaxing outcome (ADR-0180; see States).
-- Prefer undo to confirmation where the action can be reversed; keep `ConfirmModal` for what cannot be undone, and name
-  the object and the consequence in it ("Delete connection live-jira? Its inbound secret stops working.").
+- Offer undo where the action can be reversed, and a confirmation for what cannot (preferring undo where both work is
+  our reading); keep `ConfirmModal` for the irreversible, and name the object and the consequence in it ("Delete connection live-jira? Its inbound secret stops working.").
 
 **Recognition over recall**
 - Show options rather than asking users to remember them: selects, typeahead with suggestions, recent items, and
   copyable ids (`IdChip`).
-- Reveal complexity progressively: the common path first, advanced settings behind a clearly labelled disclosure that
-  remembers its state.
+- Reveal complexity progressively: the common path first, advanced settings behind a clearly labelled disclosure (one
+  that remembers its state, our reading).
 - Use the conventions users already know (a trash icon deletes, Esc closes, a link navigates, a breadcrumb goes up);
   never repurpose one.
 
@@ -233,28 +240,31 @@ rule above still applies. *UX-26 unless marked. Review, unless an enforcement is
 - Offer search or a filter where a list can grow past one screen.
 
 **Readable type and calls to action**
-- Keep body text at the kit's base size or larger, line length at about 60–80 characters on reading surfaces, and line
-  height comfortable; use the type scale, never ad-hoc sizes.
-- Write every button as a verb that says what happens ("Approve request", "Run scan now"); never "OK", "Submit" or
-  "Click here". The result message uses the same verb ("Scan started").
+- Keep UI text at `--text-md` or larger and page prose at `--rg-body-size`, with comfortable line height and a line length
+  of about 60–80 characters on reading surfaces (our reading); use the type scale `--text-xs` to `--text-2xl`, never
+  ad-hoc sizes, and keep to the three brand faces (Brand) with few weights.
+- Write every button as a clear action that says what happens ("Approve request", "Run scan now"), and make the primary
+  one stand out; avoiding "OK", "Submit" and "Click here", and reusing the verb in the result ("Scan started"), is our
+  reading.
 
 **Touch and small screens**
 - Make primary and frequent controls at least 44 × 44 px under a coarse pointer, with room between them; 24 × 24 px
   (Accessibility) stays the floor everywhere. Keep primary actions within reach at phone width.
-- Design the phone layout first for any new screen, then enhance for wide screens; test on a real device or the
+- Design the phone layout first for any new screen, then enhance for wide screens; test on a real device, plus the
   390 px and 768 px harness widths.
 
 **Accessibility, beyond the rules above**
 - Give every meaningful image or icon-only control a text alternative; mark decorative ones hidden.
-- Test new screens with a screen reader (NVDA or VoiceOver) as well as axe, and give time-limited interactions a way to
-  extend.
+- Test new screens with a screen reader as well as axe (NVDA or VoiceOver, our reading), and give time-limited
+  interactions a way to extend.
 
 **Personal, but private**
 - Remember per-user working state where it saves effort (last filter, folded sections, the last-used project), in the
-  user's own storage or profile; never a credential, never across users, and always resettable.
+  user's own storage or profile; never a credential, never across users, and always resettable. Say what is
+  remembered and offer a clear way to turn it off.
 
 **Test with people**
-- Usability-test every new or redesigned core flow with about five people from the target personas before calling it
+- Usability-test every new or redesigned core flow with about five people in the target roles before calling it
   done, and record what changed as a result in the PR or session record. Hallway tests count; no third-party tracker,
   heatmap or analytics script is added to the product (air-gapped, ADR-0176).
 
