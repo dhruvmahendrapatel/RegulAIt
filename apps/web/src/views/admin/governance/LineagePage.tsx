@@ -88,7 +88,6 @@ export default function LineagePage() {
     <>
       <PageHeader
         title="Data lineage"
-        sub="What the gateway supplied to a dispatch, and what came back — supplied-inputs provenance, NOT intra-model attribution."
         info={<p>Which inputs the gateway SUPPLIED to a dispatch, and what that dispatch produced — chained across runs through the shared context store's versioned items. This is supplied-inputs provenance, NOT intra-model attribution: it does not claim which of those inputs influenced the output, because that is not observable from outside a model. Completeness is bounded by gateway visibility, node granularity, and the metadata-by-default posture.</p>}
       />
       <div className={v.stack}>
@@ -228,14 +227,30 @@ export default function LineagePage() {
         <QueryGate loading={overview.isLoading} error={overview.error} onRetry={() => void overview.refetch()}>
           <Card title="Graph census">
             <div className={v.stack}>
-              <div className={a.effectBanner}>
-                <strong>What is captured, and what is not.</strong> {overview.data?.captureNote}
-              </div>
-              <div className={v.faint}>
-                Content-level lineage is{" "}
-                <strong>{overview.data?.contentLevelLineageEnabled ? "ENABLED" : "off"}</strong> — the
-                default is metadata-only, preserving the control-plane/agent-plane boundary
-                (GOVERNANCE §8.4) and the BYOC &ldquo;content never leaves&rdquo; guarantee.
+              <div className={v.row}>
+                <Badge
+                  tone="warn"
+                  infoLabel="what is captured, and what is not"
+                  info={
+                    <p>
+                      <strong>What is captured, and what is not.</strong> {overview.data?.captureNote}
+                    </p>
+                  }
+                >
+                  Limited coverage
+                </Badge>
+                <Badge
+                  tone={overview.data?.contentLevelLineageEnabled ? "warn" : "ok"}
+                  infoLabel="content-level lineage"
+                  info={
+                    <p>
+                      The default is metadata-only, preserving the control-plane/agent-plane boundary and the BYOC
+                      &ldquo;content never leaves&rdquo; guarantee.
+                    </p>
+                  }
+                >
+                  Content-level lineage: {overview.data?.contentLevelLineageEnabled ? "ENABLED" : "off"}
+                </Badge>
               </div>
               <Table
                 rows={overview.data?.byProject ?? []}

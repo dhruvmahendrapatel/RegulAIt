@@ -212,17 +212,32 @@ export default function ChatOpsPage() {
     <>
       <PageHeader title="ChatOps approvals" sub="The Approvals Queue in Slack, Teams or Outlook — bound to the real human, never the bot." />
 
-      <Card title="How this is safe">
-        <p className={v.dim}>{connections.data?.posture ?? "Loading…"}</p>
-        <p className={v.faint}>
-          A chat tap is not a re-authenticated session. Inbound callbacks are verified against the workspace signing
-          secret over the exact raw body, inside a replay window, before anything else happens; the chat user id is then
-          mapped to a regulAIt human and the one decide path re-checks entitlement server-side.
-        </p>
-        <p className={v.faint}>
-          Outlook only delivers: the email carries the request summary (withheld when the approval is sensitive) and a
-          link to the approval in regulAIt. It is decided there, after signing in, never by replying to the email.
-        </p>
+      <Card
+        title="How this is safe"
+        info={
+          <>
+            <p>{connections.data?.posture ?? "Loading…"}</p>
+            <p>
+              Outlook only delivers: the email carries the request summary (withheld when the approval is sensitive) and a
+              link to the approval in regulAIt. It is decided there, after signing in, never by replying to the email.
+            </p>
+          </>
+        }
+      >
+        <div className={v.row}>
+          <Badge
+            tone="warn"
+            info={
+              <p>
+                A chat tap is not a re-authenticated session. Inbound callbacks are verified against the workspace signing
+                secret over the exact raw body, inside a replay window, before anything else happens; the chat user id is then
+                mapped to a regulAIt human and the one decide path re-checks entitlement server-side.
+              </p>
+            }
+          >
+            Not re-authenticated
+          </Badge>
+        </div>
       </Card>
 
       <Card title="Workspaces">
@@ -242,7 +257,7 @@ export default function ChatOpsPage() {
                     r.outboundSupported === false ? (
                       <span className={v.row}>
                         <code>{r.provider}</code>
-                        <Badge tone="warn" title="There is no outbound sender for this provider, so approval cards posted here are refused. Decide in the portal.">
+                        <Badge tone="warn" info={<p>There is no outbound sender for this provider, so approval cards posted here are refused. Decide in the portal.</p>}>
                           cannot send cards
                         </Badge>
                       </span>
@@ -322,12 +337,16 @@ export default function ChatOpsPage() {
       {(connections.data?.connections ?? []).filter((row) => row.provider === "outlook").map((row) =>
         <OutlookRecipients key={`${row.id}:${JSON.stringify(row.outlookRecipientAllowList)}`} connection={row} />)}
 
-      <Card title="Connect a workspace">
-        <p className={v.faint}>
-          The outbound bot token is NOT stored here — it stays in the connector you choose, in the same encrypted,
-          write-only credential store as every other secret. Only the inbound signing secret is new, because it is a
-          secret we verify with rather than one we present.
-        </p>
+      <Card
+        title="Connect a workspace"
+        info={
+          <p>
+            The outbound bot token is NOT stored here — it stays in the connector you choose, in the same encrypted,
+            write-only credential store as every other secret. Only the inbound signing secret is new, because it is a
+            secret we verify with rather than one we present.
+          </p>
+        }
+      >
         <Field label="Name">
           <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="acme-slack" />
         </Field>
@@ -482,8 +501,10 @@ export default function ChatOpsPage() {
       <PostApprovalCard connections={connections.data?.connections ?? []} />
       <BuilderRoutesCard />
 
-      <Card title="Chat ↔ regulAIt identity links">
-        <p className={v.faint}>{links.data?.posture ?? ""}</p>
+      <Card title="Chat ↔ regulAIt identity links" info={links.data?.posture ? <p>{links.data.posture}</p> : undefined}>
+        <div className={v.row}>
+          <Badge tone="warn">Unverified identity</Badge>
+        </div>
         <QueryGate loading={links.isLoading} error={links.error} onRetry={refresh}>
           <Table<IdentityLink>
             rows={links.data?.links ?? []}

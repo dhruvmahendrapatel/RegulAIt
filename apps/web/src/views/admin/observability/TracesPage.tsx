@@ -50,6 +50,7 @@ import {
   CodeBlock,
   EmptyState,
   Field,
+  InfoButton,
   Input,
   Select,
   Table,
@@ -255,12 +256,13 @@ export default function TracesPage() {
     <>
       <PageHeader
         title="Traces"
-        sub={
-          "One causal tree per governed call: an orchestration run, its nodes, every model turn, every " +
-          "tool call — and, the reason this exists, every governance decision that refused one. A " +
-          "refusal is a SPAN carrying its reason, not an absence. Nothing here is a second copy of the " +
-          "ledger: a span references the usage_events row its cost came from and the audit row its " +
-          "decision came from."
+        info={
+          <p>
+            One causal tree per governed call: an orchestration run, its nodes, every model turn, every tool call — and,
+            the reason this exists, every governance decision that refused one. A refusal is a SPAN carrying its reason,
+            not an absence. Nothing here is a second copy of the ledger: a span references the usage record its cost came
+            from and the audit row its decision came from.
+          </p>
         }
       />
       <div className={v.stack}>
@@ -392,13 +394,22 @@ function TracesView() {
                   />
                 </div>
                 {!config.data.otlp.configured && (
-                  <p className={v.dim}>
-                    No OTLP endpoint is configured, so regulAIt opens no outbound telemetry
-                    connection at all. <strong>That is the shipped state, not a fault</strong> —
-                    air-gapped is the primary deployment mode and traces are fully usable locally.
-                    Set <code>tracingOtlpEndpoint</code> in Organization settings to export; the
-                    host must be on the egress allow-list first.
-                  </p>
+                  <div className={v.row}>
+                    <Badge
+                      tone="neutral"
+                      info={
+                        <p>
+                          No OTLP endpoint is configured, so regulAIt opens no outbound telemetry
+                          connection at all. <strong>That is the shipped state, not a fault</strong> —
+                          air-gapped is the primary deployment mode and traces are fully usable locally.
+                          Set <code>tracingOtlpEndpoint</code> in Organization settings to export; the
+                          host must be on the egress allow-list first.
+                        </p>
+                      }
+                    >
+                      Export: not configured
+                    </Badge>
+                  </div>
                 )}
                 {config.data.otlp.configured && (
                   <>
@@ -473,21 +484,28 @@ function TracesView() {
                     ],
                     [
                       <Badge tone="danger">DENIED</Badge>,
-                      "OTel Unset — NOT an error. A governance refusal is this product " +
-                        "working, and the OTel spec reserves Error for an operation that " +
-                        "contains one. The reason and the rule ride regulait.reason and " +
-                        "regulait.rule.id, and every span carries regulait.outcome so a " +
-                        "refusal is one filter clause in any backend.",
+                      <>
+                        OTel Unset — NOT an error.{" "}
+                        <InfoButton label="the DENIED mapping">
+                          A governance refusal is this product working, and the OTel spec reserves Error for an
+                          operation that contains one. The reason and the rule ride regulait.reason and
+                          regulait.rule.id, and every span carries regulait.outcome so a refusal is one filter
+                          clause in any backend.
+                        </InfoButton>
+                      </>,
                     ],
                     [
                       <Badge tone="warn">ERROR</Badge>,
-                      "OTel Error, plus the standard error.type attribute — a real failure " +
-                        "still shows up on an error dashboard built by somebody who has " +
-                        "never heard of regulAIt.",
+                      <>
+                        OTel Error, plus the standard error.type attribute.{" "}
+                        <InfoButton label="the ERROR mapping">
+                          A real failure still shows up on an error dashboard built by somebody who has never heard of
+                          regulAIt.
+                        </InfoButton>
+                      </>,
                     ],
                   ]}
                 />
-                <p className={v.faint}>{config.data.limits}</p>
                 {config.data.standards && (
                   <p className={v.faint}>
                     Pinned conventions: OpenTelemetry semantic conventions{" "}
@@ -495,6 +513,13 @@ function TracesView() {
                     {config.data.standards["openInferenceSemanticConventions"]}.
                   </p>
                 )}
+              </div>
+            </Card>
+          )}
+          {config.data && (
+            <Card title="Details" contain foldable startCollapsed count={2} countNoun={["note", "notes"]}>
+              <div className={v.stack}>
+                <p className={v.faint}>{config.data.limits}</p>
                 <p className={v.faint}>{config.data.retention}</p>
               </div>
             </Card>
@@ -551,6 +576,7 @@ function TracesView() {
         {/* --- trace list ------------------------------------------------ */}
         <Card
           title="Traces"
+          info={list.data?.note ? <p>{list.data.note}</p> : undefined}
           actions={
             activeFilterCount(filters) > 0 ? (
               <Button size="sm" variant="ghost" onClick={() => setFilters(EMPTY_TRACE_FILTERS)}>
@@ -560,7 +586,6 @@ function TracesView() {
           }
         >
           <div className={v.stack}>
-            {list.data?.note && <p className={v.faint}>{list.data.note}</p>}
             <div className={a.formRow}>
               <Field label="Kind">
                 <Select value={filters.kind} onChange={(e) => setFilter("kind", e.target.value)}>
@@ -844,6 +869,8 @@ function TracesView() {
         {selected && (
           <Card
             title={`Trace tree — ${detail.data ? detail.data.trace.name : "loading…"}`}
+            infoLabel="this trace"
+            info={detail.data?.note ? <p>{detail.data.note}</p> : undefined}
             actions={
               <Button size="sm" variant="ghost" onClick={() => setSelected(null)}>
                 Close
@@ -1092,7 +1119,6 @@ function TracesView() {
                       );
                     })}
                   </div>
-                  <p className={v.faint}>{detail.data.note}</p>
                 </div>
               )}
             </QueryGate>

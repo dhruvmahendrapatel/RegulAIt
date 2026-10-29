@@ -172,9 +172,14 @@ test.describe("ADR-0066 virtual keys — the surface the ADR said did not exist"
 
   test("the ceiling is on the page, not in an ADR", async () => {
     await gotoPage();
-    await expect(page.getByText(/A virtual key only ever NARROWS/)).toBeVisible();
-    await expect(page.getByText(/A key issued by an admin is/)).toBeVisible();
-    await expect(page.getByText(/lifetime cap, not a monthly one|LIFETIME cap/)).toBeVisible();
+    // I-1: the ceiling sits behind the title (i), one click away
+    await page.getByRole("button", { name: "What is the Virtual keys page?" }).click();
+    await expect(page.getByRole("note")).toContainText("A virtual key only ever NARROWS");
+    await expect(page.getByRole("note")).toContainText("A key issued by an admin is");
+    await page.getByRole("button", { name: "Hide help for the Virtual keys page" }).click();
+    await expect(page.getByText("Lifetime budget (USD)", { exact: false }).first()).toBeVisible();
+    await page.getByRole("button", { name: "What is lifetime budget?" }).click();
+    await expect(page.getByRole("note")).toContainText(/LIFETIME cap/);
     await shot(page, "phase6-01-virtual-keys-ceiling");
     track.assertClean("virtual keys landing");
   });
