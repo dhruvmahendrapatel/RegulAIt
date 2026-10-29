@@ -3,7 +3,6 @@
  */
 import { expect, test, type Page, type Route } from "@playwright/test";
 
-const SHOTS = "/tmp/claude-0/-home-user/ded6cb3a-43af-5029-b67a-cd4793943c17/scratchpad/proposals/shots";
 const json = (route: Route, body: unknown, status = 200) =>
   route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 const ISO = "2026-10-20T10:00:00.000Z";
@@ -115,30 +114,30 @@ test.describe("G1 project archive", () => {
     await mockApi(page, projectsWorld({}));
     await page.goto("/ui/projects");
     await expect(page.getByRole("button", { name: /Active/ })).toBeVisible();
-    await page.screenshot({ path: `${SHOTS}/g1-projects-active.png`, fullPage: true });
+    await page.screenshot({ path: test.info().outputPath("g1-projects-active.png"), fullPage: true });
     await page.getByRole("button", { name: /^Archived/ }).click();
     await expect(page.getByText("Card disputes pilot")).toBeVisible();
-    await page.screenshot({ path: `${SHOTS}/g1-projects-archived-filter.png`, fullPage: true });
+    await page.screenshot({ path: test.info().outputPath("g1-projects-archived-filter.png"), fullPage: true });
   });
 
   test("header, confirm, archived state", async ({ page }) => {
     await mockApi(page, projectsWorld({}));
     await page.goto("/ui/projects/p-credit");
     await expect(page.getByRole("button", { name: "Archive project" })).toBeVisible();
-    await page.screenshot({ path: `${SHOTS}/g1-project-header.png` });
+    await page.screenshot({ path: test.info().outputPath("g1-project-header.png") });
     await page.getByRole("button", { name: "Archive project" }).click();
     const dialog = page.getByRole("dialog", { name: "Archive project “Credit operations”?" });
     await dialog.getByLabel("Reason").fill("Pilot ended; spend moves to team-17 support from November.");
-    await page.screenshot({ path: `${SHOTS}/g1-archive-confirm.png` });
+    await page.screenshot({ path: test.info().outputPath("g1-archive-confirm.png") });
     await dialog.getByRole("button", { name: "Archive project" }).click();
     await expect(dialog).toBeHidden();
     await expect(page.getByText("Archived", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Why this project is archived" }).click();
-    await page.screenshot({ path: `${SHOTS}/g1-project-archived.png`, fullPage: true });
+    await page.screenshot({ path: test.info().outputPath("g1-project-archived.png"), fullPage: true });
     await page.getByRole("button", { name: "Why this project is archived" }).click();
     await page.getByRole("button", { name: "Unarchive" }).click();
     await expect(page.getByRole("dialog", { name: /Unarchive project/ })).toContainText("You will be asked to confirm it's you.");
-    await page.screenshot({ path: `${SHOTS}/g1-unarchive-confirm.png` });
+    await page.screenshot({ path: test.info().outputPath("g1-unarchive-confirm.png") });
   });
 
   test("refusal: open approvals", async ({ page }) => {
@@ -157,7 +156,7 @@ test.describe("G1 project archive", () => {
     await dialog.getByLabel("Reason").fill("Pilot ended; spend moves to team-17 support.");
     await dialog.getByRole("button", { name: "Archive project" }).click();
     await expect(dialog.getByTestId("archive-refusal")).toContainText("This project still has 2 open approvals. Decide or withdraw them first.");
-    await page.screenshot({ path: `${SHOTS}/g1-archive-refused.png` });
+    await page.screenshot({ path: test.info().outputPath("g1-archive-refused.png") });
   });
 
   test("refusal: running work", async ({ page }) => {
@@ -171,7 +170,7 @@ test.describe("G1 project archive", () => {
     await dialog.getByLabel("Reason").fill("Pilot ended; spend moves to team-17 support.");
     await dialog.getByRole("button", { name: "Archive project" }).click();
     await expect(dialog.getByTestId("archive-refusal")).toContainText("1 workflow is still running");
-    await page.screenshot({ path: `${SHOTS}/g1-archive-refused-running.png` });
+    await page.screenshot({ path: test.info().outputPath("g1-archive-refused-running.png") });
   });
 });
 
@@ -223,14 +222,14 @@ test.describe("G10 rename roles and teams", () => {
     await mockApi(page, identityWorld());
     await page.goto("/ui/admin/roles");
     await expect(page.getByRole("button", { name: "Rename role approvers" })).toBeVisible();
-    await page.screenshot({ path: `${SHOTS}/g10-roles.png`, fullPage: true });
+    await page.screenshot({ path: test.info().outputPath("g10-roles.png"), fullPage: true });
 
     await page.getByRole("button", { name: "Rename role support-agent" }).click();
     const dialog = page.getByRole("dialog", { name: /Rename role/ });
     await dialog.getByLabel("Name").fill("approvers");
     await dialog.getByRole("button", { name: "Save" }).click();
     await expect(dialog).toContainText("A role called “approvers” already exists.");
-    await page.screenshot({ path: `${SHOTS}/g10-rename-dialog.png` });
+    await page.screenshot({ path: test.info().outputPath("g10-rename-dialog.png") });
     await dialog.getByRole("button", { name: "Cancel" }).click();
 
     await page.getByRole("button", { name: "Rename role credit-analyst" }).click();
@@ -239,17 +238,17 @@ test.describe("G10 rename roles and teams", () => {
     await d2.getByRole("button", { name: "Save" }).click();
     await expect(d2.getByTestId("rename-referenced")).toContainText("2 access policies and 1 routing rule");
     await d2.getByLabel("Reason (required, audited)").fill("Aligning names with the new credit review process.");
-    await page.screenshot({ path: `${SHOTS}/g10-rename-referenced.png` });
+    await page.screenshot({ path: test.info().outputPath("g10-rename-referenced.png") });
   });
 
   test("teams: list with Rename", async ({ page }) => {
     await mockApi(page, identityWorld());
     await page.goto("/ui/admin/teams");
     await expect(page.getByRole("button", { name: "Rename team team-17", exact: true })).toBeVisible();
-    await page.screenshot({ path: `${SHOTS}/g10-teams.png`, fullPage: true });
+    await page.screenshot({ path: test.info().outputPath("g10-teams.png"), fullPage: true });
     await page.getByRole("button", { name: "Rename team team-17 support" }).click();
     await page.getByRole("dialog", { name: /Rename team/ }).getByLabel("Name").fill("team-17 service desk");
-    await page.screenshot({ path: `${SHOTS}/g10-teams-rename-dialog.png` });
+    await page.screenshot({ path: test.info().outputPath("g10-teams-rename-dialog.png") });
     await page.getByRole("dialog", { name: /Rename team/ }).getByRole("button", { name: "Save" }).click();
     await expect(page.getByText("Team renamed")).toBeVisible();
   });
