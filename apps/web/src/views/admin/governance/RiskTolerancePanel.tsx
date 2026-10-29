@@ -102,6 +102,16 @@ export function RiskTolerancePanel() {
   return (
     <Card
       title="Risk tolerance (admin)"
+      info={
+        d ? (
+          <p>
+            You can set a different tolerance for a risk category or a review tier. A risk gets the stricter of its
+            category&apos;s and its tier&apos;s tolerance, and one you have not set counts as {d.strictDefault.maxBand},
+            so relaxing a risk needs both its category and its tier relaxed. Relaxing a tolerance is recorded in the
+            audit trail.
+          </p>
+        ) : undefined
+      }
       actions={d ? <Badge tone={d.source === "default" ? "ok" : "warn"}>{d.source === "default" ? "strict default" : "configured"}</Badge> : null}
     >
       <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
@@ -109,10 +119,7 @@ export function RiskTolerancePanel() {
           <div className={v.stack}>
             <p className={v.hint}>
               With nothing configured, any residual risk above {d.strictDefault.maxBand} needs a valid, time-limited
-              acceptance. You can set a different tolerance for a risk category or a review tier. A risk gets the
-              stricter of its category&apos;s and its tier&apos;s tolerance, and one you have not set counts as{" "}
-              {d.strictDefault.maxBand}, so relaxing a risk needs both its category and its tier relaxed. Relaxing a
-              tolerance is recorded in the audit trail.
+              acceptance.
             </p>
             <Table
               rows={rows}

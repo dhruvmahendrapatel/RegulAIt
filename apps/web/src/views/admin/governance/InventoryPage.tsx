@@ -187,7 +187,15 @@ export default function InventoryPage() {
     <>
       <PageHeader
         title="Agent inventory"
-        sub={`The standing dependency view: per registered agent, who holds a grant on it, what its runs actually touched, and which agents feed which — aggregated live from the grant tables and the run/usage/trace history (last ${days} days for windowed figures). GRANTED and OBSERVED are kept apart on purpose: one is what the entitlement rows allow, the other is what the ledgers recorded, and an unused permission is exactly the fact this page exists to make visible.`}
+        info={
+          <p>
+            The standing dependency view: per registered agent, who holds a grant on it, what its runs actually touched,
+            and which agents feed which — aggregated live from the grants and the run/usage/trace history (last {days}{" "}
+            days for windowed figures). GRANTED and OBSERVED are kept apart on purpose: one is what the entitlements
+            allow, the other is what the ledgers recorded, and an unused permission is exactly the fact this page exists
+            to make visible.
+          </p>
+        }
       />
       <div className={v.stack}>
         <QueryGate loading={list.isLoading} error={list.error} onRetry={() => void list.refetch()}>

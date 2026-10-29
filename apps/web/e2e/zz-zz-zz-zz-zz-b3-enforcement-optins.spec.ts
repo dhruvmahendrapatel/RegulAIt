@@ -114,7 +114,8 @@ test("the staleness-recertification controls render ON (ADR-0181) with threshold
   await expect(
     page.getByLabel("Drift threshold (regressions and changes since certification)"),
   ).toHaveValue("1");
-  await expect(page.getByText(/deepens that gate, it creates none of its own/)).toBeVisible();
+  await page.getByRole("button", { name: "What is how recertification works?" }).click();
+  await expect(page.getByRole("note").getByText(/deepens that gate, it creates none of its own/)).toBeVisible();
 });
 
 test("intent capture: a proposed use case's intended agents are editable in flight and feed the alignment comparison", async ({ page }) => {

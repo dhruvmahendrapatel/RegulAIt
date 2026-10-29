@@ -26,8 +26,12 @@ test("shows measured defaults and explains observational and missing-history lim
  await expect(page.getByLabel("MCP baseline days",{exact:true})).toHaveValue("14");
  await expect(page.getByLabel("Jailbreak finding threshold",{exact:true})).toHaveValue("3");
  await expect(page.getByLabel("Jailbreak observation hours",{exact:true})).toHaveValue("24");
- await expect(page.getByText(/Missing or ambiguous history holds an existing alert/)).toBeVisible();
- await expect(page.getByText(/Correlation does not establish cause or successful execution/)).toBeVisible();
+ // the card's own lead keeps the observational limit visible; each detector's detail sits behind its (i)
+ await expect(page.getByText(/they do not block calls or prove a jailbreak succeeded/)).toBeVisible();
+ await page.getByRole("button",{name:"What is Instructions changed after approval?"}).click();
+ await expect(page.getByRole("note").getByText(/Missing or ambiguous history holds an existing alert/)).toBeVisible();
+ await page.getByRole("button",{name:"What is Jailbreak correlation?"}).click();
+ await expect(page.getByRole("note").getByText(/Correlation does not establish cause or successful execution/)).toBeVisible();
  await page.screenshot({path:testInfo.outputPath("x24-monitor.png"),fullPage:true});
 });
 test("saves only changed thresholds through the existing audited settings route",async({page})=>{

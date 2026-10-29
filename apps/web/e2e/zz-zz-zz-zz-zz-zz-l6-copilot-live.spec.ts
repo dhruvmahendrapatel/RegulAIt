@@ -141,12 +141,13 @@ test("a proposal shows its consent state, and Apply exists only where consent do
   await expect(
     page.getByText("Proposals — recorded, approved by a human, then applied", { exact: true }),
   ).toBeVisible();
-  // the standing statement, rendered rather than documented: consent gates the
-  // apply, and the apply rides the public endpoint
-  await expect(
-    page.getByText(/Applying one is gated on the linked approval in the ordinary/),
-  ).toBeVisible();
-  await expect(page.getByText(/audited under\s+the applying admin's identity/)).toBeVisible();
+  // the standing statement, one click away in "How the copilot is governed": consent gates
+  // the apply, and the apply rides the public endpoint; the "Draft only" chip stays visible
+  await expect(page.getByText("Draft only", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "What is the Governance copilot page?" }).click();
+  const governed = page.getByRole("note");
+  await expect(governed.getByText(/Applying one is gated on the linked approval in the ordinary/)).toBeVisible();
+  await expect(governed.getByText(/audited under\s+the applying admin's identity/)).toBeVisible();
 });
 
 test("the model-judged knob ships OFF, and the recommendations page says so outright", async ({ page }) => {

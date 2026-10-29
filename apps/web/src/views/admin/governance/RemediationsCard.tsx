@@ -10,6 +10,7 @@ import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
 import { ago, humanize } from "../../../api/format";
 import { Badge, Card, Field, Select, Table, type Tone } from "../../../ui/kit";
+import { NewestNote } from "../../../ui/fold";
 import { QueryGate, useNameMaps } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
@@ -63,11 +64,16 @@ export function RemediationsCard() {
   });
   const who = (id: string | null) => (id ? (names.userName.get(id) ?? id) : "—");
   return (
-    <Card title="Remediation proposals — all alerts">
-      <p className={v.faint}>
-        Every remediation proposed from any alert, newest first (at most 200). Each waits for a different person to
-        approve it; nothing here applies a change.
-      </p>
+    <Card
+      title="Remediation proposals — all alerts"
+      info={
+        <p>
+          Every remediation proposed from any alert, newest first (at most 200). Each waits for a different person to
+          approve it; nothing here applies a change.
+        </p>
+      }
+      footer={<NewestNote shown={Array.isArray(list.data?.proposals) ? list.data.proposals.length : 0} limit={200} noun="remediations" />}
+    >
       <div className={a.formRow}>
         <Field label="Status">
           <Select value={status} onChange={(e) => setStatus(e.target.value as "" | RemediationStatus)}>
