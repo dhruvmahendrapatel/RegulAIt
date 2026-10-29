@@ -545,3 +545,18 @@ the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
 - Why: with design-scan E1 (#565) on top of main, entry JS measures about 137,815 B, 85 B under the 137.9 kB ceiling
   (#565 review finding 1), so the next change touching the entry chunk would fail. The raise lands before the
   2026-10-29 freeze, so ADR-0198's freeze-week allowance (at most +1 kB of entry raises) is untouched.
+
+## Addendum / As built (2026-10-29) — all JS to 1,048 kB (G2 and G11, add and delete on their own screens)
+
+The owner decided this raise on 2026-10-29:
+<https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6498510014>. It is the ADR-recorded exception the `--guard` rule requires, with two `CEILING_EXCEPTIONS` rows:
+one from `1043 kB` if this lands before batch I-1 (#597), one from `1046 kB` if it lands after.
+
+- `all JS` from `1043 kB` to `1048 kB` (before #597), or `all JS` from `1046 kB` to `1048 kB` (after it). Entry JS stays at 138.5 kB (measured 137,832 B on its own, 137,781 B with #597) and entry
+  CSS at 10.7 kB; the lazy chunk ceilings are unchanged.
+- Why: G2 (New project on Projects, Settings on the project page) and G11 (Retire, Close, Revoke and Abort as list row
+  actions) reuse existing forms and confirmations, moved into shared modules; the bytes are the new buttons, dialogs
+  and one new Abort confirmation in lazy page chunks. On main alone total JS measures 1,044,099 B; on a trial merge
+  with #597 it measures 1,047,532 B, against #597's 1,046 kB.
+- Freeze week: ADR-0198 §2 covers entry raises only; this total-JS raise rests on the owner decision above, not on that
+  allowance. ADR-0198's post-demo reset applies to it.
