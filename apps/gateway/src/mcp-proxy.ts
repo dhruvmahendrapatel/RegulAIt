@@ -2154,16 +2154,15 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
     return reply.send(row);
   });
 
-  // MCP Streamable HTTP: a client opens an optional server-to-client SSE stream
-  // with GET and may end a session with DELETE. This proxy is stateless (one
-  // transport per POST, no session id), so it offers neither, and the spec's
+  // MCP Streamable HTTP: after `initialize` a client opens an optional
+  // server-to-client SSE stream with GET. This proxy is stateless (one
+  // transport per POST, no session id), so it offers none, and the spec's
   // answer for that is 405 with `Allow: POST`. A 404 here made a conformant
-  // client report a transport error after every `initialize`. Auth still runs
-  // first (the app-level hook), so an unauthenticated probe gets its 401.
-  const methodNotAllowed = async (_req: unknown, reply: FastifyReply) =>
-    reply.status(405).header("allow", "POST").send({ error: "method_not_allowed", detail: "this MCP endpoint is POST-only (stateless Streamable HTTP)" });
-  app.get("/mcp/:serverId", methodNotAllowed);
-  app.delete("/mcp/:serverId", methodNotAllowed);
+  // client report a transport error after every `initialize`. (No DELETE: a
+  // client sends it only to end a session, and no session id is ever issued.)
+  // Auth still runs first (the app-level hook), so an anonymous probe gets 401.
+  app.get("/mcp/:serverId", async (_req, reply: FastifyReply) =>
+    reply.status(405).header("allow", "POST").send({ error: "method_not_allowed", detail: "this MCP endpoint is POST-only (stateless Streamable HTTP)" }));
 
   app.post("/mcp/:serverId", async (req, reply) => {
     const { serverId } = proxyParams.parse(req.params);

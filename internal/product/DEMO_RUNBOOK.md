@@ -1210,8 +1210,8 @@ SERVER_ID=$(curl -sS "$GW/v1/servers" -H "$H_BOOT" | jq -r '.servers[] | select(
 
 **Path 1: Claude Code pointed at the gateway.** The gateway accepts the `rgl_` key only as
 `Authorization: Bearer` (the RFC 9728 metadata at `/.well-known/oauth-protected-resource/mcp/<id>` says the same). It
-speaks stateless Streamable HTTP: `POST` only, and `GET`/`DELETE` answer `405 Allow: POST`, which clients treat as "no
-server stream". In a terminal where `RGL_KEY`, `PROJECT_ID` and `SERVER_ID` are set:
+speaks stateless Streamable HTTP: `POST` only, and `GET` answers `405 Allow: POST`, which clients treat as "no server
+stream". In a terminal where `RGL_KEY`, `PROJECT_ID` and `SERVER_ID` are set:
 
 ```bash
 # pending execution

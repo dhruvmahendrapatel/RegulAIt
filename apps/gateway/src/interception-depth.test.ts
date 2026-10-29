@@ -539,8 +539,8 @@ describe("O11: unattributed MCP calls are metered into the Unattributed bucket",
     }
   });
 
-  it("GET and DELETE on the MCP endpoint answer 405 Allow: POST (stateless Streamable HTTP), after auth", async () => {
-    for (const method of ["GET", "DELETE"] as const) {
+  it("GET on the MCP endpoint answers 405 Allow: POST (stateless Streamable HTTP), after auth", async () => {
+    for (const method of ["GET"] as const) {
       const res = await app.inject({ method, headers: devAuth, url: `/mcp/${mcpServerId}` });
       expect(res.statusCode).toBe(405);
       expect(res.headers["allow"]).toBe("POST");
