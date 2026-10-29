@@ -81,7 +81,7 @@ test("the use-case gate knob ships ENFORCE (ADR-0181), saves through the audited
 
   await page.goto("/ui/admin/organization");
   await expect(page.getByRole("heading", { name: "Organization", exact: true })).toBeVisible();
-  await expect(page.getByText("5b · AI use-case dispatch gate (ADR-0080)")).toBeVisible();
+  await expect(page.getByText("5b · AI use-case dispatch gate", { exact: true })).toBeVisible();
   const knob = page.getByLabel("Use-case dispatch gate");
   // ADR-0181: strict by default, asserted on the real form
   await expect(knob).toHaveValue("enforce");

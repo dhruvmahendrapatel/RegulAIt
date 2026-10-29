@@ -32,7 +32,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Select, Table } from "../../../ui/kit";
 import { KV, QueryGate, Stat, useAction } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
@@ -73,6 +73,16 @@ const METHODS = [
   { value: "offline", label: "Offline / physical safe" },
   { value: "other", label: "Other" },
 ];
+
+/** internal design-record references stay out of the console copy */
+const noRefs = (text: string) => text.replace(/\s*\(ADR-\d+\)/g, "");
+
+/** a gateway warning as a short visible line and the rest of its explanation */
+export function splitWarning(text: string): { head: string; rest: string } {
+  const clean = noRefs(text);
+  const at = clean.search(/\.\s+(?=[A-Z])/);
+  return at < 0 ? { head: clean, rest: "" } : { head: clean.slice(0, at + 1), rest: clean.slice(at + 1).trim() };
+}
 
 export default function DataKeyPage() {
   const act = useAction();
@@ -116,7 +126,17 @@ export default function DataKeyPage() {
       />
       <div className={v.stack}>
         <QueryGate loading={status.isLoading} error={status.error} onRetry={() => void status.refetch()}>
-          <Card title="This deployment's key">
+          <Card
+            title="This deployment's key"
+            info={
+              s?.derivation || s?.posture ? (
+                <>
+                  {s.derivation ? <p>{noRefs(s.derivation)}</p> : null}
+                  {s.posture ? <p>{noRefs(s.posture)}</p> : null}
+                </>
+              ) : undefined
+            }
+          >
             <div className={a.statRow}>
               <Stat
                 value={<code className={v.statCode}>{s?.recordedFingerprint ?? "—"}</code>}
@@ -144,7 +164,13 @@ export default function DataKeyPage() {
             {s && s.matches && !s.attested && (
               <EmptyState
                 title="Nobody has ever recorded that this key exists anywhere but this machine"
-                body="The key is not in the backup, by design. If this host is lost, a restore recovers every row and leaves every credential permanently undecryptable. Record the key out of band now — then say so below, so the absence stops being invisible."
+                body={
+                  <InfoButton label="an unattested key">
+                    The key is not in the backup, by design. If this host is lost, a restore recovers every row and leaves
+                    every credential permanently undecryptable. Record the key out of band now — then say so below, so the
+                    absence stops being invisible.
+                  </InfoButton>
+                }
               />
             )}
 
@@ -165,22 +191,35 @@ export default function DataKeyPage() {
                 ["Attestations on file", s?.attestationCount ?? 0],
               ]}
             />
-            {(s?.warnings ?? []).map((w) => (
-              <div key={w} className={v.faint}>
-                <Badge tone="warn">action</Badge> {w}
-              </div>
-            ))}
-            <div className={v.faint}>{s?.derivation}</div>
-            <div className={v.faint}>{s?.posture}</div>
+            {(s?.warnings ?? []).map((w) => {
+              const { head, rest } = splitWarning(w);
+              // the missing custody claim is the alarm this page exists for: a red line, its reason one click away
+              return w.startsWith("NO CUSTODY ATTESTATION") ? (
+                <div key={w} className={v.row}>
+                  <Badge tone="danger" infoLabel="the missing custody attestation" info={rest ? <p>{rest}</p> : undefined}>
+                    {head}
+                  </Badge>
+                </div>
+              ) : (
+                <div key={w} className={v.faint}>
+                  <Badge tone="warn">action</Badge> {head}
+                  {rest ? <InfoButton label="this action">{rest}</InfoButton> : null}
+                </div>
+              );
+            })}
           </Card>
 
-          <Card title="Attest custody">
-            <div className={v.faint}>
-              This records a <strong>claim</strong>, not a verification. regulAIt cannot reach into a password
-              manager, a KMS or a safe, and it will never tell you the key is safe because you ticked a box. What it
-              does guarantee is that the <em>absence</em> of this claim is visible — on the gateway boot line, on this
-              page, and in every backup run's own output and metric.
-            </div>
+          <Card
+            title="Attest custody"
+            info={
+              <p>
+                This records a <strong>claim</strong>, not a verification. regulAIt cannot reach into a password
+                manager, a KMS or a safe, and it will never tell you the key is safe because you ticked a box. What it
+                does guarantee is that the <em>absence</em> of this claim is visible — on the gateway boot line, on this
+                page, and in every backup run's own output and metric.
+              </p>
+            }
+          >
             <div className={a.formRow}>
               <Field label="Where is it stored?">
                 <Select value={method} onChange={(e) => setMethod(e.target.value)}>

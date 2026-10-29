@@ -152,7 +152,7 @@ export default function LicensingPage() {
             )}
           </Card>
 
-          <Card title="What still works, and what does not">
+          <Card title="What still works, and what does not" info={s?.posture ? <p>{s.posture}</p> : undefined}>
             {s && (
               <Table
                 rows={[
@@ -182,10 +182,22 @@ export default function LicensingPage() {
                 ]}
               />
             )}
-            <div className={v.faint}>{s?.posture}</div>
           </Card>
 
-          <Card title="Seats">
+          <Card
+            title="Seats"
+            info={
+              <>
+                {s?.seats.definition ? <p>{s.seats.definition}</p> : null}
+                <p>
+                  Seat enforcement is a <strong>growth</strong> gate, never a service gate. Going over cap — which
+                  happens legitimately when a smaller license is installed onto a larger estate — refuses the next
+                  provisioning and touches nobody who already exists. Nothing here can revoke, disable or degrade a
+                  user for a seat-count reason.
+                </p>
+              </>
+            }
+          >
             {s && (
               <>
                 <KV
@@ -207,18 +219,20 @@ export default function LicensingPage() {
                   ]}
                 />
                 <div className={v.faint}>{s.seats.reason}</div>
-                <div className={v.faint}>{s.seats.definition}</div>
-                <div className={v.faint}>
-                  Seat enforcement is a <strong>growth</strong> gate, never a service gate. Going over cap — which
-                  happens legitimately when a smaller license is installed onto a larger estate — refuses the next
-                  provisioning and touches nobody who already exists. Nothing here can revoke, disable or degrade a
-                  user for a seat-count reason.
-                </div>
               </>
             )}
           </Card>
 
-          <Card title="Tier features">
+          <Card
+            title="Tier features"
+            info={
+              <p>
+                Any flag absent from the license defaults <strong>closed</strong>, so an older license simply does not
+                unlock newer paid features rather than failing. A flag may cap how many model providers or PM adapters a
+                tier connects — never <em>which</em>: the license never encodes a preferred vendor at any layer.
+              </p>
+            }
+          >
             {s && (
               <Table
                 rows={Object.entries(s.features).map(([k, on]) => ({ k, on }))}
@@ -234,14 +248,19 @@ export default function LicensingPage() {
                 ]}
               />
             )}
-            <div className={v.faint}>
-              Any flag absent from the license defaults <strong>closed</strong>, so an older license simply does not
-              unlock newer paid features rather than failing. A flag may cap how many model providers or PM adapters a
-              tier connects — never <em>which</em>: the license never encodes a preferred vendor at any layer.
-            </div>
           </Card>
 
-          <Card title="Install a license">
+          <Card
+            title="Install a license"
+            info={
+              <p>
+                Verification is entirely local: the signature is checked against a public key already on this machine.
+                A license signed by a key this deployment does not pin is refused <strong>even if its signature is
+                internally valid</strong> — that is what pinning means. A tampered or forged artifact is refused
+                outright and never displaces the license already in force.
+              </p>
+            }
+          >
             <div className={v.stack}>
               <Field label="Signed artifact (the JSON scripts/sign-license.sh emits)">
                 <Textarea
@@ -278,12 +297,6 @@ export default function LicensingPage() {
                 >
                   Re-verify now
                 </Button>
-              </div>
-              <div className={v.faint}>
-                Verification is entirely local: the signature is checked against a public key already on this machine.
-                A license signed by a key this deployment does not pin is refused <strong>even if its signature is
-                internally valid</strong> — that is what pinning means. A tampered or forged artifact is refused
-                outright and never displaces the license already in force.
               </div>
               {s && (
                 <KV

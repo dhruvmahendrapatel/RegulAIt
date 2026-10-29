@@ -4,7 +4,7 @@ import { api } from "../../../api/client";
 import { putOrgSettings } from "../../../stepup/stepUp";
 import type { OrgSettingsResponse } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
-import { Button, Card, ConfirmModal, Field, Input, Table } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, Field, Input, Table } from "../../../ui/kit";
 import { QueryGate, readCurrentOrgSettings, reconfirmNeeded, StaleAfterWrite, useAction, useSettleAfterWrite, useSingleFlight } from "../adminKit";
 import v from "../../views.module.css";
 import { OrgSettingsCard } from "./OrgSettingsCard";
@@ -37,8 +37,7 @@ export default function RetentionPage() {
       </Card>
       {/* ADR-0021 A4 / B7c: per-deploy-mode audit retention overrides and shadow-canary evidence retention */}
       <OrgSettingsCard title="Audit and evidence retention" keys={["modeAuditRetention", "canaryObservationRetentionDays"]} testId="audit-evidence-retention" />
-      <Card title="Memory-store inventory">
-        <p>Counts and dates only; stored content is never loaded here. An evidence hold keeps incident records past their retention limit.</p>
+      <Card title="Memory-store inventory" info={<p>Counts and dates only; stored content is never loaded here. An evidence hold keeps incident records past their retention limit.</p>}>
         <Table<MemoryStore> rows={inventory.data?.stores ?? []} rowKey={(row) => row.kind}
           loading={inventory.isLoading} error={inventory.error} onRetry={() => void inventory.refetch()}
           columns={[
@@ -46,7 +45,11 @@ export default function RetentionPage() {
             { key: "rows", header: "Rows", render: (row) => row.rows.toLocaleString() },
             { key: "oldest", header: "Oldest record", render: (row) => fmtDateTime(row.oldestAt, "No records") },
             { key: "isolation", header: "Isolation", render: (row) => row.isolation },
-            { key: "retention", header: "Retention", render: (row) => row.retention.enforcedBy === null ? "No retention sweep implemented" : `${row.retention.value} ${row.retention.setting === "semanticCacheTtlSeconds" ? "seconds" : "days"}` },
+            { key: "retention", header: "Retention", render: (row) => row.retention.enforcedBy === null ? (
+              <Badge tone="warn" infoLabel="not enforced automatically" info={<p>No retention sweep is implemented for this store in this release, so nothing removes its records automatically.</p>}>
+                Not enforced automatically: no sweep runs in this release
+              </Badge>
+            ) : `${row.retention.value} ${row.retention.setting === "semanticCacheTtlSeconds" ? "seconds" : "days"}` },
             { key: "run", header: "Last successful sweep", render: (row) => row.retention.enforcedBy === null ? "Not applicable" : row.retention.lastRunAt ? fmtDateTime(row.retention.lastRunAt) : "No successful run recorded" },
             { key: "held", header: "Held past retention", render: (row) => row.held === null ? "Not measured" : row.held },
             { key: "owner", header: "Owner", render: () => "Organisation" },
@@ -166,10 +169,10 @@ function RetentionSettings({ settings }: { settings: Record<string, unknown> }) 
   const busy = act.busy || flight.busy || baseline.stale;
   return <form className={v.stack} onSubmit={(event) => { event.preventDefault(); void submit(); }}>
     {unavailable && <p role="alert">This gateway has not reported its retention settings. Refresh before changing them.</p>}
-    <Field label="Semantic cache lifetime (seconds)"><Input type="number" required min={1} max={2592000} step={1} value={ttl} onChange={(event) => setTtl(event.target.value)} disabled={busy || unavailable} /></Field>
-    <p>The default is 3,600 seconds. Extending it retains cached information longer; every change is audited.</p>
-    <Field label="Conversation retention (days)"><Input type="number" required min={1} max={2555} step={1} value={days} onChange={(event) => setDays(event.target.value)} disabled={busy || unavailable} /></Field>
-    <p>The strict default is 30 days since the last activity. More than 30 days relaxes that limit and is audited. Incident evidence holds still apply.</p>
+    <Field label="Semantic cache lifetime (seconds)" helpLabel="semantic cache lifetime" help={<p>Extending it retains cached information longer; every change is audited.</p>}><Input type="number" required min={1} max={2592000} step={1} value={ttl} onChange={(event) => setTtl(event.target.value)} disabled={busy || unavailable} /></Field>
+    <p className={v.faint}>Default 3,600 · 1–2,592,000 seconds.</p>
+    <Field label="Conversation retention (days)" helpLabel="conversation retention" help={<p>More than 30 days relaxes that limit and is audited. Incident evidence holds still apply.</p>}><Input type="number" required min={1} max={2555} step={1} value={days} onChange={(event) => setDays(event.target.value)} disabled={busy || unavailable} /></Field>
+    <p className={v.faint}>The strict default is 30 days since the last activity · 1–2,555 days.</p>
     <Button type="submit" variant="primary" disabled={busy || unavailable}>Save retention settings</Button>
     {act.error && <p role="alert">{act.error}</p>}
     {baseline.stale && <StaleAfterWrite onRetry={() => void baseline.settle()} />}
@@ -198,8 +201,7 @@ function MetricsPostureCard() {
   });
   const metrics = posture.data?.metrics;
   const measured = isMetricsPosture(metrics);
-  return <Card title="Metrics posture">
-    <p>Metrics are disabled by default. This gateway reports its deployment configuration; reachability and authentication through a proxy still need operator verification.</p>
+  return <Card title="Metrics posture" info={<p>Metrics are disabled by default. This gateway reports its deployment configuration; reachability and authentication through a proxy still need operator verification.</p>}>
     <QueryGate loading={posture.isLoading} error={posture.error} onRetry={() => void posture.refetch()}>
       {posture.data && (measured ? <>
         <p>Separate metrics listener: {metrics.separateListener === "off" ? "off" : metrics.separateListener === "loopback" ? "loopback only" : "non-loopback"}.</p>

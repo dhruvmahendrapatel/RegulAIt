@@ -10,7 +10,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { SetupStatusResponse, SetupStep } from "../../../api/types";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, Meter } from "../../../ui/kit";
+import { Badge, Button, Card, InfoButton, Meter } from "../../../ui/kit";
 import { QueryGate } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
@@ -125,6 +125,11 @@ function evidenceLine(s: SetupStep): string {
   }
 }
 
+function hasRealProvider(s: SetupStep): boolean {
+  const providers = ((s.evidence ?? {}) as Record<string, unknown>).providers;
+  return Array.isArray(providers) && providers.length > 0;
+}
+
 export default function GettingStartedPage() {
   const q = useQuery({
     queryKey: ["setup-status"],
@@ -179,6 +184,7 @@ export default function GettingStartedPage() {
                     <div className={v.grow}>
                       <div className={v.row}>
                         <strong style={{ fontSize: "var(--text-sm)" }}>{s.title}</strong>
+                        {m.why ? <InfoButton label={s.title}>{m.why}</InfoButton> : null}
                         {s.done ? (
                           <Badge tone="ok">done</Badge>
                         ) : blocked ? (
@@ -187,8 +193,14 @@ export default function GettingStartedPage() {
                           <Badge tone="warn">pending</Badge>
                         )}
                       </div>
-                      <div className={v.dim}>{m.why}</div>
-                      <div className={v.faint}>{evidenceLine(s)}</div>
+                      {/* mock-only is a capability limit, not a detail: it stays a visible warning */}
+                      {s.key === "model_provider" && !hasRealProvider(s) ? (
+                        <div className={v.row}>
+                          <Badge tone="warn">{evidenceLine(s)}</Badge>
+                        </div>
+                      ) : (
+                        <div className={v.faint}>{evidenceLine(s)}</div>
+                      )}
                       {blocked && (
                         <div className={v.faint}>
                           Blocked by: {(s.blockedBy ?? []).map((k) => k.replaceAll("_", " ")).join(", ")}
