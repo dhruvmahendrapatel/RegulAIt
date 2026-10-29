@@ -47,7 +47,7 @@ defaults:
 jobs:
   test:
     name: endpoint agent / test (linux)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -77,7 +77,7 @@ jobs:
 
   secret-rules:
     name: endpoint agent / key patterns match packages/shared
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -126,7 +126,7 @@ jobs:
 
   build:
     name: endpoint agent / build (6 targets, .deb, .rpm)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: test
     timeout-minutes: 20
     steps:
@@ -194,7 +194,7 @@ jobs:
     name: endpoint agent / OV Authenticode via cloud HSM (skips without secrets)
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     environment: release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: build
     timeout-minutes: 10
     steps:
@@ -216,7 +216,7 @@ jobs:
     name: endpoint agent / Linux package signing (skips without secrets)
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     environment: release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: build
     timeout-minutes: 10
     steps:

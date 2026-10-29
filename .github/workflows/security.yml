@@ -74,7 +74,7 @@ env:
 jobs:
   sast:
     name: SAST (CodeQL)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     # security-events: write lets the analyze step upload the SARIF to the
     # Security tab (issue #453: this job owns it; default setup stays off).
@@ -143,7 +143,7 @@ jobs:
 
   secrets:
     name: Secret scan (gitleaks)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -228,7 +228,7 @@ jobs:
 
   dependencies:
     name: Dependency audit (pnpm)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -268,7 +268,7 @@ jobs:
 
   image:
     name: Image scan and SBOMs (Trivy)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     services:
       # A throwaway local registry: cosign signs and verifies registry objects,
@@ -393,7 +393,7 @@ jobs:
     # Only main, and only an image that passed every other gate.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [sast, secrets, dependencies, image]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read
@@ -491,7 +491,7 @@ jobs:
   # builds, scans and (once on main) signs it.
   engines:
     name: Discover engine images
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       engines: ${{ steps.find.outputs.engines }}
@@ -529,7 +529,7 @@ jobs:
     name: Engine image scan and SBOM (${{ matrix.engine }})
     needs: [engines]
     if: needs.engines.outputs.engines != '[]'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
       # one engine's failure must not hide another engine's result
@@ -715,7 +715,7 @@ jobs:
     # that passed every other gate.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.engines.outputs.engines != '[]'
     needs: [sast, secrets, dependencies, engines, engine-image]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read

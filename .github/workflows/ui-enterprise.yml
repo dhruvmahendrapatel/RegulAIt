@@ -40,7 +40,7 @@ permissions:
 jobs:
   static:
     name: ui enterprise / tokens, baseline guard, bundle size
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -86,7 +86,7 @@ jobs:
 
   browsers:
     name: ui enterprise / ${{ matrix.browser }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -208,7 +208,7 @@ jobs:
 
   screenshots:
     name: ui enterprise / screenshot pack
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
