@@ -91,7 +91,7 @@ export default function WorkflowsPage() {
     <>
       <PageHeader
         title="Workflows"
-        sub="Governed change requests — intake to sign-off to build, checks, PR and merge."
+        info={<p>Governed change requests — intake to sign-off to build, checks, PR and merge.</p>}
       />
       <div className={v.stack}>
         <Card title="Start a change">
@@ -120,11 +120,10 @@ export default function WorkflowsPage() {
                 </span>
               </Field>
             )}
-            <Field label="Target system">
+            <Field label="Target system" help="The target system this change lands on — an assignment rule can route on it">
               <Input
                 placeholder="optional"
                 style={{ width: 130 }}
-                title="The target system this change lands on — an assignment rule can route on it"
                 value={targetSystem}
                 onChange={(e) => setTargetSystem(e.target.value)}
               />

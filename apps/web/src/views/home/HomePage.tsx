@@ -26,12 +26,14 @@ import {
   Card,
   EmptyState,
   ErrorState,
+  InfoButton,
   Meter,
   SkeletonBlock,
   StatusBadge,
   StatusDot,
 } from "../../ui/kit";
 import v from "../views.module.css";
+import h from "./home.module.css";
 import { TrustSnapshotCard } from "../admin/governance/TrustDashboardPage";
 import { GovernanceAlertsSnapshot } from "../admin/governance/GovernanceAlertsPage";
 
@@ -124,7 +126,17 @@ function OrientationCard() {
   };
   return (
     <Card
-      title={dismissed ? "Governance at a glance" : "Start here — what this console governs"}
+      title={dismissed ? "Governance at a glance" : "Start here"}
+      infoLabel="what this console governs"
+      info={
+        dismissed ? undefined : (
+          <p>
+            Every agent, connector and MCP call in this workspace passes through one gateway:
+            default-deny entitlements, human approvals, content guardrails, per-project cost
+            attribution and a full audit trail — enforced at the call, not reported after it.
+          </p>
+        )
+      }
       actions={
         <Button
           size="sm"
@@ -137,13 +149,6 @@ function OrientationCard() {
       }
     >
       <div className={v.stack}>
-        {!dismissed && (
-          <p className={v.dim} style={{ maxWidth: "70ch" }}>
-            Every agent, connector and MCP call in this workspace passes through one gateway:
-            default-deny entitlements, human approvals, content guardrails, per-project cost
-            attribution and a full audit trail — enforced at the call, not reported after it.
-          </p>
-        )}
         <div className={v.grid3}>
           <div className={v.stat}>
             <span className={v.statValue}>{pending}</span>
@@ -226,30 +231,29 @@ function SuiteLauncher() {
   return (
     <div>
       <h2 className={v.sectionTitle}>Products</h2>
-      <div className={v.tileGrid}>
+      <div className={h.tileGrid}>
         {SUITES.map((su) => {
           const n = stat(su.id);
           return (
-            <Link
-              key={su.id}
-              to={su.id === "workspace" ? "/chat" : suiteHome(su)}
-              className={v.tile}
-              data-testid={`suite-tile-${su.id}`}
-            >
-              <span className={v.tileHead}>
-                <span className={v.tileGlyph}>
+            // a div, not a link: the (i) is a button and may not sit inside an <a>;
+            // the name's link stretches over the whole tile (h.tileLink)
+            <div key={su.id} className={h.tile} data-testid={`suite-tile-${su.id}`}>
+              <span className={h.tileHead}>
+                <span className={h.tileGlyph}>
                   <SuiteGlyph suiteId={su.id} />
                 </span>
-                <span className={v.tileName}>{su.name}</span>
+                <Link to={su.id === "workspace" ? "/chat" : suiteHome(su)} className={`${h.tileName} ${h.tileLink}`}>
+                  {su.name}
+                </Link>
+                <InfoButton label={su.name}>{su.purpose}</InfoButton>
               </span>
-              <span className={v.tileDesc} title={su.purpose}>{su.purpose}</span>
               {n && (
-                <span className={v.tileStat}>
-                  <span className={v.tileStatValue}>{n.value}</span>
-                  <span className={v.tileStatLabel}>{n.label}</span>
+                <span className={h.tileStat}>
+                  <span className={h.tileStatValue}>{n.value}</span>
+                  <span className={h.tileStatLabel}>{n.label}</span>
                 </span>
               )}
-            </Link>
+            </div>
           );
         })}
       </div>
