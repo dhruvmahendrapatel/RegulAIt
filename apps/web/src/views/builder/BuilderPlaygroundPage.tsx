@@ -492,10 +492,12 @@ export default function BuilderPlaygroundPage() {
             <h2 className={p.paneTitle} id="pg-schema">
               Output schema
             </h2>
-            <p className={s.small} style={{ margin: 0 }}>
-              Optional JSON Schema. Where the provider supports it, the model is asked for this structure; either way the output is checked against it.
-            </p>
-            <Field label="JSON Schema" error={schema.ok ? null : schema.error}>
+            <Field
+              label="JSON Schema (optional)"
+              error={schema.ok ? null : schema.error}
+              helpLabel="schema checking"
+              help="Where the provider supports it, the model is asked for this structure; either way the output is checked against it."
+            >
               <Textarea className={p.jsonEditor} value={schemaText} onChange={(e) => setSchemaText(e.target.value)} spellCheck={false} placeholder='{"type": "object", "properties": {"summary": {"type": "string"}}}' />
             </Field>
           </section>
