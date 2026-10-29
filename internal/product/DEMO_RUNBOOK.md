@@ -170,8 +170,8 @@ were aiming at.
 > **Not on the live laptop (owner, 2026-10-29, #453 c6485593621).** Under ADR-0203 the owner's laptop is the live
 > instance, prepared from empty with `demo:prepare --live` (§7.6). This switch (`REGULAIT_DEMO_LICENSE=1`) is never set
 > there: on an empty database it runs the sample-data prep below, which writes the fictional dataset into the live
-> database. This subsection describes the sample-data stack only. Where that stack now runs is an open question for
-> the owner (§7.1, "Fallback").
+> database. This subsection describes the sample-data stack only. On the demo laptop it runs as the **fallback stack** from a
+> second checkout, with its own project, database and port (§7.8; owner, 2026-10-29, #453 c6486079064).
 
 When the whole stack runs under `docker compose` (no pnpm on the box), one switch gives you the
 **same prepared demo as §1 / `demo:prepare`**, discovery dataset included, with nothing else to run but the
@@ -572,12 +572,12 @@ point there rather than repeating commands nobody has run.
   - **Licence** (deep scan #39). `demo:setup` mints a 30-day demo licence with no grace and keeps any valid one. A LIVE
     database prepared from empty on 2026-10-29 holds a licence past 11-03; expiry would block expansion actions only.
     After the demo, re-mint when 7 days or less remain.
-- **Fallback: open question for the owner, see #453.** Until 10-29 the fallback was the sample-data stack (§1.3) on
-  the presenting laptop, prepared from empty under 18 hours before each run, with the seeded discovery dataset (ADR-0197
-  decision 7). After the 2026-10-29 wipe that stack **no longer exists on the laptop**, and nothing in this repository
-  says where it runs now. Every row and table below that says "FALLBACK" or "the fallback stack on the laptop" (§7.3,
-  §7.4, §7.5, and "11-01 run-through: where each beat runs") depends on this decision and is **blocked on it**. The
-  recording and the offline screenshot deck below are unaffected.
+- **Fallback: a second, sample-data compose stack on the laptop** (owner, 2026-10-29, #453 c6486079064). It runs
+  from a second checkout of the same commit, so it has its own compose project, database volume and `.env`, and it
+  publishes the gateway on `127.0.0.1:3100` instead of `3000`. It has no tunnel and is presented locally. It is
+  prepared with the §1.3 switch, which is set in that checkout only, and it never uses the `isolation`, `tunnel` or
+  `sso` profiles. Setup, the 18-hour re-prepare and the guard against wiping the wrong stack are in §7.8. Every row
+  below that says "FALLBACK" or "the fallback stack" means this stack, at `http://localhost:3100/ui`.
 - **Deploy gate:** `demo:gate` runs live from a terminal on the laptop (addendum, decision 2), inside the gateway
   container, with the environment `staging` (§7.6), and the T-24h captured output as the fallback. It is **pending
   execution** on the laptop. (On the AWS host the terminal was a Session Manager shell: superseded by ADR-0203.)
@@ -662,11 +662,11 @@ time. Rows marked *once* are done a single time for both. The recipes the rows n
 | T-24h | Screen recording of one real scan captured and played back once | pending execution |
 | T-24h | **Offline deck** opened on the presenting laptop with the network off: 31 slides (30 with `--no-gate`), S1 to G10 in script order | pending execution |
 | T-24h | **Gateway health on the laptop** (FS-37): `docker compose ps` shows the gateway **(healthy)**, and `cloudflared` and `caddy-tunnel` running (TUNNEL.md, Verify) | pending execution |
-| T-24h, under 18 h before the start | Fallback stack prepared from empty (§1.3): **blocked, open question for the owner** (§7.1, "Fallback"; #453). It no longer runs on the laptop after the 2026-10-29 wipe | blocked — owner decision |
+| T-24h, under 18 h before the start | Fallback stack prepared from empty in the second checkout (§7.8, steps 4–6), then `demo:check` PASS on `http://localhost:3100` | pending execution |
 | T-24h | F28: the live gateway has `REGULAIT_PUBLIC_URL` set to `https://regulait.<domain>` (TUNNEL.md step 4), so the Cloud federation card shows the issuer and does not say the public URL is not configured | pending execution |
 | T-24h | Neither demo budget alert has fired (AWS USD 40 and Azure USD 10, USD 50 in total; each alerts at 80%, USD 32 and USD 8, `internal/product/DEMO_REAL_ACCOUNTS.md`); planted usage still within budget (ADR-0197 decision 4) | pending execution |
 | Morning of each run | **Backup out of the window**: **superseded by ADR-0203** (the dev host's `regulait-pg-backup.timer` no longer exists; the laptop runs no backup timer, so nothing runs in the window) | superseded |
-| T-1h | Browsers: Profile A (Ada), Profile B (Avery) and Profile C (Morgan) on the live instance (`https://regulait.<domain>/ui`), all signed in; the fallback browser per the owner's fallback decision (§7.1); one spare browser installed | pending execution |
+| T-1h | Browsers: Profile A (Ada), Profile B (Avery) and Profile C (Morgan) on the live instance (`https://regulait.<domain>/ui`), all signed in; a fallback browser profile signed in on the fallback stack (`http://localhost:3100/ui`, §7.8); one spare browser installed | pending execution |
 | T-1h | **Idle limit** (deep scan #7, owner): a session ends after **30 idle minutes** (the strict default; it is not relaxed for the demo). The only keep-alive is the Inbox's 30-second poll, which pauses while a window is hidden. Profiles signed in at T-1h will have timed out by S3 unless they are refreshed at T-10 min | pending execution |
 | T-1h | A terminal open on the laptop in the repository checkout for G3, the G3 script in place, and `real-gate.txt` open in a viewer as its fallback (§7.6) | pending execution |
 | T-1h | Navigation pinned in every profile (**Pin navigation**) | pending execution |
@@ -685,9 +685,8 @@ time. Rows marked *once* are done a single time for both. The recipes the rows n
 | After | Teardown of the sandbox resources and the Azure deployment, tracked as a follow-up (ADR-0197 consequences): [DEMO_TEARDOWN.md](DEMO_TEARDOWN.md) | pending execution — post-demo, owner |
 
 
-**11-01 run-through: where each beat runs** (owner, 2026-10-23, #453). **Blocked on the fallback decision** (§7.1,
-"Fallback"; #453): every FALLBACK cell below assumed the sample-data stack on the laptop, which the 2026-10-29 wipe
-removed. LIVE is prepared once and never re-prepared.
+**11-01 run-through: where each beat runs** (owner, 2026-10-23, #453). FALLBACK is the second, sample-data stack on
+the laptop (§7.8, `http://localhost:3100/ui`). LIVE is prepared once and never re-prepared.
 On 11-01 every step that changes state runs on the FALLBACK laptop stack, so LIVE stays as prepared for 11-03. On
 11-03 every beat runs on LIVE as scripted.
 
@@ -720,7 +719,7 @@ fallback only. Re-run `demo:traffic` on LIVE at T-24h before 11-03 (Mon 11-02), 
 | Morgan's **Approve** asks for a code she cannot give | her authenticator was not enrolled after `demo:set-passwords` | switch to the fallback stack; never relax MFA live |
 | The remediation panel says **no workflow assigned** | an admin rule replaced the default assignment | link a workflow started another way, or switch to the fallback stack |
 | An alert, Inbox item or plan opens over a dimmed page that cannot be clicked | the window is 900 px wide or less, so the detail drawer is a modal | **Close** the panel, widen the window (or zoom out) and open it again |
-| The live instance does not load | the laptop, its network, the tunnel or Cloudflare | check `docker compose ps` and the tunnel's state in the dashboard (TUNNEL.md, Verify) only if it takes seconds; otherwise play the recording for S1-S2, then the screenshot deck. The fallback stack: open question for the owner (§7.1) |
+| The live instance does not load | the laptop, its network, the tunnel or Cloudflare | check `docker compose ps` and the tunnel's state in the dashboard (TUNNEL.md, Verify) only if it takes seconds; otherwise play the recording for S1-S2, then the screenshot deck. If only the tunnel is down and the laptop is fine, switch to the fallback stack (`http://localhost:3100/ui`, §7.8) |
 | The live instance's name does not resolve (a DNS error such as "server not found", not a TLS or 5xx error) | the venue's DNS filter blocks the name | switch as in the row above. (The `sslip.io` hosts-file workaround is superseded by ADR-0203: a hosts-file line cannot reach a tunnel, which has no public IP of its own) |
 | A screen is still loading after about 10 seconds | a slow or hung gateway or database: the UI has no request timeout, so a hang shows an endless loading state, not an error (deep scan #27) | do not wait or reload repeatedly: switch at once to the recording or the fallback stack at the same beat. A real error shows with **Retry**, and one press of **Retry** is fine |
 | A profile shows the sign-in page | the 30-minute idle limit ended its session (§7.3, T-10 min) | sign in again (Morgan: password and authenticator code); her **Approve** may then ask for the next code. Never relax the session limit live |
@@ -779,8 +778,8 @@ the seed, the dataset or the gate: Actions → `Demo journey` → Run workflow.
    acknowledging it leaves a warning"), not on the demo database. Pending execution.
 2. **The sample-data stack.** All of the above on a docker compose sample-data stack (§1.3), less than 18 hours before
    each run, with `REGULAIT_PUBLIC_URL` and the identity signing key set. CI used a Postgres service and node directly,
-   not compose. **Blocked: where this stack runs is an open question for the owner** (§7.1, "Fallback"; #453). It no
-   longer runs on the laptop after the 2026-10-29 wipe.
+   not compose. On the laptop it is the fallback stack in the second checkout (§7.8), with `REGULAIT_PUBLIC_URL` set to
+   `http://localhost:3100` (an `http` origin is accepted for localhost only). Pending execution.
 3. **`demo:gate` on the live laptop** (G3 live, and the T-24h `real-gate.txt` capture, §7.3), through the G3
    script of §7.6. Pending execution.
 
@@ -967,8 +966,7 @@ printf '#!/bin/sh\ncd %s && docker compose exec -T gateway node apps/gateway/dis
 
 **Open questions for the owner (#453).**
 
-- **Fallback.** The sample-data stack no longer runs on the laptop (§7.1, "Fallback"). Where, if anywhere, it runs for
-  11-01 and 11-03 is undecided; the rows that depend on it are marked blocked.
+- ~~**Fallback.**~~ **Decided** (owner, 2026-10-29, #453 c6486079064): a second, sample-data stack on the laptop (§7.8).
 - **HSTS.** TUNNEL.md step 3 puts `REGULAIT_HSTS=max-age=86400` in `.env`, but `docker-compose.yml` does not pass that
   name to the gateway, so the gateway sends no HSTS header and does not see the deployed signal (§7.1, "HSTS"). The
   owner saw a single `max-age=15552000; includeSubDomains` header from the Cloudflare zone (#453 c6485165280).
@@ -997,3 +995,66 @@ these exist on the laptop. `DEMO_TEARDOWN.md` still names the power schedule; it
   not push several PRs at once on 10-28 and 10-29.
 - **Native build memory (deep scan #53).** The gateway's `tsc` step runs out of memory at Node 22's default heap. Build
   with `NODE_OPTIONS=--max-old-space-size=3072` (the Dockerfile already does; README's build lines say so).
+
+### 7.8 The fallback stack on the laptop (owner, 2026-10-29, #453 c6486079064)
+
+The fallback is the sample-data stack of §1.3, run on the same laptop as the live instance but fully apart from it:
+
+| | Live stack | Fallback stack |
+|---|---|---|
+| Checkout | the repository checkout (§7.6) | a second checkout of the **same commit**, in a sibling folder named `regulait-fallback` |
+| Compose project | that folder's name | `regulait-fallback` (compose names a project after its folder) |
+| Database | the live volumes | its own `regulait-fallback_*` volumes |
+| `.env` | live values, **no** demo switch | `REGULAIT_DEMO_LICENSE=1` and `REGULAIT_PUBLIC_URL=http://localhost:3100` only |
+| Gateway port | `127.0.0.1:3000` | `127.0.0.1:3100` |
+| Profiles | `tunnel` | **none**: never `tunnel` (one tunnel per token), `sso`, or `isolation` (its volumes have fixed names shared by every project on the host) |
+| Reached at | `https://regulait.<domain>/ui` | `http://localhost:3100/ui`, on the laptop only |
+
+Run every fallback command from inside `regulait-fallback`. Never run a fallback command in the live checkout, and
+never run `down -v` anywhere else (§7.6, step 3).
+
+1. **The second checkout.** From the live checkout, at the commit the live stack runs:
+
+   ```bash
+   # pending execution — in the live checkout
+   git worktree add ../regulait-fallback HEAD
+   cd ../regulait-fallback
+   ```
+
+   A git worktree shares `.git/info/exclude` with the live checkout, so the `docker-compose.override.yml` line from
+   §7.6 step 2 already covers this folder. Confirm with `git check-ignore -q docker-compose.override.yml && echo ignored`.
+2. **Its `.env`.** Create `.env` in `regulait-fallback` with exactly these two lines, and nothing from the live `.env`
+   (no tunnel name or token, no live integration settings):
+
+   ```bash
+   # pending execution — in regulait-fallback
+   printf '%s\n' 'REGULAIT_DEMO_LICENSE=1' 'REGULAIT_PUBLIC_URL=http://localhost:3100' > .env
+   ```
+
+3. **Its port.** Write `docker-compose.override.yml` in `regulait-fallback` so the gateway publishes `3100` instead of
+   `3000`. The `!override` tag replaces the list instead of adding to it (Docker Compose 2.24.4 or later):
+
+   ```bash
+   # pending execution — in regulait-fallback
+   printf '%s\n' 'services:' '  gateway:' '    ports: !override' '      - "127.0.0.1:3100:3000"' > docker-compose.override.yml
+   docker compose config --quiet && docker compose config | grep -n '3100'   # must show the 3100 mapping only
+   ```
+
+4. **The wipe guard.** Before any `down -v` on this stack, check the folder and the project, and stop if either is
+   wrong:
+
+   ```bash
+   # pending execution — in regulait-fallback
+   [ "$(basename "$PWD")" = regulait-fallback ] && docker compose config --format json | grep -q '"name": "regulait-fallback"' && echo ok
+   ```
+
+5. **Prepare from empty** (under 18 hours before each run, ADR-0197 decision 7): after step 4 prints `ok`, run
+   `docker compose down -v`, then `docker compose up -d --build`. The §1.3 switch runs the sample-data prep on the empty
+   database. Then set the demo passwords and enrol the two admins' authenticators exactly as §1.3 describes (read
+   `http://localhost:3100` wherever §1.3 says `3000`), in a
+   **separate** browser profile at `http://localhost:3100/ui`, never in a live profile.
+6. **Check it:** `docker compose exec gateway node apps/gateway/dist/demo-check.js` must PASS against this stack.
+7. **On the day:** keep the fallback stack running from T-1h with its browser profile signed in, so switching is
+   instant. If the laptop runs short of memory, `docker compose stop` it after the check and `docker compose start` it
+   at T-10 min. After the demo, `docker compose down -v` in `regulait-fallback` (after step 4), then
+   `git worktree remove ../regulait-fallback` from the live checkout.

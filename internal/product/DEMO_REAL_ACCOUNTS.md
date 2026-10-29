@@ -361,6 +361,9 @@ every message the script prints is scrubbed of the values. Delete the file after
      Register them as described under Jira and Azure DevOps below.
    - To replace a GitHub, Jira or Azure DevOps token, delete that connection in the admin UI and re-run. The API has
      no route that replaces those tokens in place.
+   - A **kept** line on a freshly prepared database means an earlier run of this step, after the wipe, already
+     stored a token: `demo:prepare --live` creates none of these connections. If that token is wrong (a 403 from the
+     `--live-connections` check), delete the connection and re-run (laptop, 2026-10-29, #453 c6486350055).
 5. Run `pnpm --filter @regulait/gateway demo:check -- --live-connections`. This makes one read-only call per
    connection through the egress guard and reports PASS, WARN or FAIL per beat. No credential is printed.
 
@@ -465,7 +468,8 @@ Add these steps after the demo:
 - Revoke the GitHub token and the Azure DevOps PAT.
 - Revoke the Jira API token, and delete the Jira webhook and the Azure DevOps service hooks.
 - Uninstall the Slack app.
-- Delete the `live-*` connections in RegulAIt.
+- Delete the `live-*` connections in RegulAIt. This also revokes their inbound secrets, which were shown in a chat
+  transcript on 2026-10-29 (#453 c6486350055), so treat them as exposed until then.
 - Delete the secrets file and the inbound file.
 
 ## Teardown after the demo (pending execution)
