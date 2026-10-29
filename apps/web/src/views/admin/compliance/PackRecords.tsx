@@ -228,11 +228,14 @@ export function PackReportsCard(props: { packId?: string | null; packLabel?: str
           </Button>
         ) : undefined
       }
+      infoLabel="stored reports"
+      info={
+        <p>
+          Each evaluation stores the scorecard it produced, with the pack version and the exact projects it covered. A
+          stored report is a record of that moment, not a live figure.
+        </p>
+      }
     >
-      <p className={v.faint}>
-        Each evaluation stores the scorecard it produced, with the pack version and the exact projects it covered. A
-        stored report is a record of that moment, not a live figure.
-      </p>
       <QueryGate loading={reports.isLoading} error={reports.error} onRetry={() => void reports.refetch()}>
         <NewestNote shown={reports.data?.reports?.length ?? 0} limit={50} noun="reports" />
         <Table<PackReportSummary>

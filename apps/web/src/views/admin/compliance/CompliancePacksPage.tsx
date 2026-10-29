@@ -314,21 +314,30 @@ export default function CompliancePacksPage() {
         sub="Framework control mappings, evidenced from your own ledgers — an accelerator, not a certification."
       />
 
-      <Card title="What a pack is, and what it is not">
-        <p className={v.faint}>
-          A pack maps a framework's controls onto regulAIt configuration and counts the evidence this
-          deployment's own ledgers hold. It does not certify compliance and does not substitute for an
-          auditor or for counsel.
-        </p>
-        <p className={v.dim}>{packs.data?.disclaimer}</p>
-        <p className={v.dim}>{packs.data?.updatePolicy}</p>
+      <Card
+        title="What a pack is, and what it is not"
+        info={
+          <p>
+            A pack maps a framework's controls onto regulAIt configuration and counts the evidence this
+            deployment's own ledgers hold. It does not certify compliance and does not substitute for an
+            auditor or for counsel.
+          </p>
+        }
+      >
+        <div className={v.row}>
+          <Badge tone="warn" info={packs.data?.disclaimer ? <p>{packs.data.disclaimer}</p> : undefined}>
+            Mapping, not certification
+          </Badge>
+        </div>
       </Card>
 
+      {packs.data?.updatePolicy ? (
+        <Card title="Details" contain foldable startCollapsed count={1} countNoun={["note", "notes"]}>
+          <p className={v.dim}>{packs.data.updatePolicy}</p>
+        </Card>
+      ) : null}
+
       <Card title="Packs">
-        <p className={v.faint}>
-          Versioned rows, not a build artifact. A framework revision is a new version, activated — which
-          retires the previous one. Reports keep the version that produced them.
-        </p>
         <div className={v.row}>
           <Button disabled={act.busy} onClick={() => void seed()}>
             Install the launch packs
@@ -655,13 +664,17 @@ export default function CompliancePacksPage() {
         </Card>
       ) : null}
 
-      <Card title="Author a pack">
-        <p className={v.faint}>
-          A pack is data. Your own internal control framework is a first-class pack authored with the same
-          schema — no code change, no release. Collectors are a fixed vocabulary over ledgers that already
-          exist; a control needing a ledger regulAIt does not keep must be marked attestation-required
-          rather than silently reported as satisfied.
-        </p>
+      <Card
+        title="Author a pack"
+        info={
+          <p>
+            A pack is data. Your own internal control framework is a first-class pack authored with the same
+            schema — no code change, no release. Collectors are a fixed vocabulary over ledgers that already
+            exist; a control needing a ledger regulAIt does not keep must be marked attestation-required
+            rather than silently reported as satisfied.
+          </p>
+        }
+      >
         <Field label="Pack JSON" grow>
           <Textarea rows={14} value={draft} onChange={(e) => setDraft(e.target.value)} spellCheck={false} />
         </Field>

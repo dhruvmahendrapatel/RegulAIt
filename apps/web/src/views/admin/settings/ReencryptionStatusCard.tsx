@@ -11,7 +11,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
-import { Badge, Card, CodeBlock, EmptyState, Table, type Tone } from "../../../ui/kit";
+import { Badge, Card, CodeBlock, EmptyState, InfoButton, Table, type Tone } from "../../../ui/kit";
 import { KV, QueryGate } from "../adminKit";
 import v from "../../views.module.css";
 
@@ -129,9 +129,20 @@ export function ReencryptionStatusCard() {
                   ) : null}
                 </>
               ) : (
-                <EmptyState title="No re-encryption walk has run" body="A walk is needed only after the data key is rotated." />
+                <EmptyState
+                  title="No re-encryption walk has run"
+                  body={
+                    <>
+                      A walk is needed only after the data key is rotated.{" "}
+                      {/* the gateway's note opens with the same fact as the title: only its reason is kept */}
+                      <InfoButton label="the re-encryption walk">
+                        {q.data.note.replace(/^No re-encryption walk has ever run on this deployment\.\s*/, "")}
+                      </InfoButton>
+                    </>
+                  }
+                />
               )}
-              <p className={v.faint}>{q.data.note}</p>
+              {run ? <p className={v.faint}>{q.data.note}</p> : null}
               <div>
                 <span className={v.faint}>Run or resume from the gateway host:</span>
                 <CodeBlock>{q.data.resumeCommand}</CodeBlock>

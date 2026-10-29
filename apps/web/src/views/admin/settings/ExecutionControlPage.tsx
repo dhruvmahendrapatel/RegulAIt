@@ -30,7 +30,7 @@ import { lazy, Suspense, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Select, Table } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, Select, Table, type Tone } from "../../../ui/kit";
 import {
   QueryGate,
   ReasonModal,
@@ -148,6 +148,8 @@ export default function ExecutionControlPage() {
   const s = state.data;
   const restricted = s ? s.mode !== "normal" : false;
   const anythingStopped = restricted || (s?.haltedAgents.length ?? 0) > 0 || (s?.haltedTools.length ?? 0) > 0;
+  // a halted deployment reads danger, any other stop warn, nothing stopped ok
+  const survivesTone: Tone = s?.mode === "halted" ? "danger" : anythingStopped ? "warn" : "ok";
 
   const refresh = async () => {
     await state.refetch();
@@ -293,13 +295,39 @@ export default function ExecutionControlPage() {
                   </>
                 }
               />
-            ) : (
-              <div className={v.faint}>{s?.summary}</div>
-            )}
+            ) : null}
 
-            {/* The hesitation problem: say what survives, prominently. */}
-            <div className={v.faint}>{s?.note}</div>
-            <div className={v.faint}>{s?.scheduledSweepsNote}</div>
+            {/* The hesitation problem: say what survives, prominently — as chips whose tone follows the dial */}
+            {s && (
+              <div className={v.row}>
+                {!anythingStopped && (
+                  <Badge
+                    tone="ok"
+                    infoLabel="nothing stopped"
+                    info={
+                      <>
+                        <p>{s.summary.replace(/^Nothing is stopped\.\s*/, "")}</p>
+                        {s.meaning ? <p>{s.meaning}</p> : null}
+                      </>
+                    }
+                  >
+                    Nothing is stopped
+                  </Badge>
+                )}
+                <Badge
+                  tone={survivesTone}
+                  infoLabel="what keeps running"
+                  info={
+                    <>
+                      {s.note ? <p>{s.note}</p> : null}
+                      {s.scheduledSweepsNote ? <p>{s.scheduledSweepsNote}</p> : null}
+                    </>
+                  }
+                >
+                  Audit, approvals and governance sweeps keep running
+                </Badge>
+              </div>
+            )}
           </Card>
 
           {/* ── the dial ──────────────────────────────────────────────── */}
@@ -355,7 +383,16 @@ export default function ExecutionControlPage() {
             {/* require_approval cannot be set without naming who signs off —
                 the server refuses it, so the field lives beside the button */}
             <div className={a.formRow}>
-              <Field label="Approver for 'require approval' mode">
+              <Field
+                label="Approver for 'require approval' mode"
+                helpLabel="the approver"
+                help={
+                  <p>
+                    Required only for <strong>require approval</strong>: a queued approval names a
+                    person, and one nobody is named on is one nobody is accountable for deciding.
+                  </p>
+                }
+              >
                 <Select
                   aria-label="Approver for require-approval mode"
                   value={approver}
@@ -369,19 +406,19 @@ export default function ExecutionControlPage() {
                   ))}
                 </Select>
               </Field>
-              <span className={v.faint}>
-                Required only for <strong>require approval</strong>: a queued approval names a
-                person, and one nobody is named on is one nobody is accountable for deciding.
-              </span>
             </div>
           </Card>
 
           {/* ── stop one thing ────────────────────────────────────────── */}
-          <Card title="Stop one agent or one tool">
-            <div className={v.faint}>
-              The scope that lets you stop the thing that is actually wrong. A halted subject is
-              refused even while the deployment as a whole is normal.
-            </div>
+          <Card
+            title="Stop one agent or one tool"
+            info={
+              <p>
+                The scope that lets you stop the thing that is actually wrong. A halted subject is
+                refused even while the deployment as a whole is normal.
+              </p>
+            }
+          >
             <div className={a.formRow}>
               <Field label="Agent">
                 <Select

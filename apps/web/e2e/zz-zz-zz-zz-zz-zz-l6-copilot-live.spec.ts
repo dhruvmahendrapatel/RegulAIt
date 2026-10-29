@@ -154,7 +154,7 @@ test("the model-judged knob ships OFF, and the recommendations page says so outr
 
   await page.goto("/ui/admin/organization");
   await expect(page.getByRole("heading", { name: "Organization", exact: true })).toBeVisible();
-  await expect(page.getByText("5c · Model-judged access recommendations (ADR-0092)")).toBeVisible();
+  await expect(page.getByText("5c · Model-judged access recommendations", { exact: true })).toBeVisible();
   // DEFAULT-OFF is the honesty argument, asserted on the real form. Read only:
   // this spec never arms the judge, so no later run inherits one.
   await expect(page.getByLabel("Model-judged annotations")).toHaveValue("false");
