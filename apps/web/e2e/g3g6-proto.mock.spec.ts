@@ -4,7 +4,6 @@
  */
 import { expect, test, type Page, type Route } from "@playwright/test";
 
-const SHOTS = "/tmp/claude-0/-home-user/ded6cb3a-43af-5029-b67a-cd4793943c17/scratchpad/proposals/shots";
 const json = (route: Route, body: unknown, status = 200) =>
   route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 const ISO = "2026-10-20T10:00:00.000Z";
@@ -76,24 +75,24 @@ test("G3 connectors", async ({ page }) => {
   await page.goto("/ui/admin/connectors");
   const catalog = page.getByRole("row", { name: /legacy-crm/ });
   await expect(catalog).toBeVisible();
-  await page.screenshot({ path: `${SHOTS}/g3-connectors.png` });
+  await page.screenshot({ path: test.info().outputPath("g3-connectors.png") });
 
   await page.getByRole("button", { name: "Disable connector team-17-support-desk" }).click();
   const dlg = page.getByRole("dialog", { name: /Disable connector/ });
   await dlg.getByLabel("Reason").fill("Vendor contract under review; pause all calls.");
-  await page.screenshot({ path: `${SHOTS}/g3-disable-confirm.png` });
+  await page.screenshot({ path: test.info().outputPath("g3-disable-confirm.png") });
   await dlg.getByRole("button", { name: "Cancel" }).click();
 
   await page.getByRole("button", { name: "Enable connector legacy-crm" }).click();
   await expect(page.getByRole("dialog", { name: /Enable connector/ })).toBeVisible();
-  await page.screenshot({ path: `${SHOTS}/g3-enable-confirm.png` });
+  await page.screenshot({ path: test.info().outputPath("g3-enable-confirm.png") });
   await page.getByRole("dialog").getByRole("button", { name: "Cancel" }).click();
 
   await page.getByRole("button", { name: "Delete connector legacy-crm", exact: true }).click();
   const del = page.getByRole("dialog", { name: /Delete connector/ });
   await del.getByRole("button", { name: "Delete connector" }).click();
   await expect(del.getByTestId("delete-refusal")).toContainText("3 approvals and 1 chat connection");
-  await page.screenshot({ path: `${SHOTS}/g3-delete-refused.png` });
+  await page.screenshot({ path: test.info().outputPath("g3-delete-refused.png") });
 });
 
 // ---------------------------------------------------------------- G4
@@ -134,30 +133,30 @@ test("G4 MCP servers and registries", async ({ page }) => {
   });
   await page.goto("/ui/admin/mcp-servers");
   await expect(page.getByRole("link", { name: /doc-archive/ })).toBeVisible();
-  await page.screenshot({ path: `${SHOTS}/g4-servers.png` });
+  await page.screenshot({ path: test.info().outputPath("g4-servers.png") });
   // the registry table is wide: the row actions sit at its right edge
   await page.getByRole("button", { name: "Disable MCP server credit-ops-tools" }).scrollIntoViewIfNeeded();
-  await page.screenshot({ path: `${SHOTS}/g4-servers-actions.png` });
+  await page.screenshot({ path: test.info().outputPath("g4-servers-actions.png") });
 
   await page.getByRole("button", { name: "Disable MCP server credit-ops-tools" }).click();
   const dlg = page.getByRole("dialog", { name: /Disable MCP server/ });
   await dlg.getByLabel("Reason").fill("Suspected prompt injection in a tool description.");
-  await page.screenshot({ path: `${SHOTS}/g4-disable-confirm.png` });
+  await page.screenshot({ path: test.info().outputPath("g4-disable-confirm.png") });
   await dlg.getByRole("button", { name: "Cancel" }).click();
 
   await page.getByRole("button", { name: "Delete MCP server doc-archive", exact: true }).click();
   const del = page.getByRole("dialog", { name: /Delete MCP server/ });
   await del.getByRole("button", { name: "Delete MCP server" }).click();
   await expect(del.getByTestId("delete-refusal")).toContainText("2 approvals and 4 agent grants");
-  await page.screenshot({ path: `${SHOTS}/g4-delete-refused.png` });
+  await page.screenshot({ path: test.info().outputPath("g4-delete-refused.png") });
   await del.getByRole("button", { name: "Close" }).click();
 
   await page.goto("/ui/admin/mcp-servers?tab=registries");
   await expect(page.getByRole("row", { name: /old pilot catalogue/ })).toBeVisible();
-  await page.screenshot({ path: `${SHOTS}/g4-registries.png` });
+  await page.screenshot({ path: test.info().outputPath("g4-registries.png") });
   await page.getByRole("button", { name: "Delete registry old pilot catalogue" }).click();
   await expect(page.getByRole("dialog", { name: /Delete registry/ })).toBeVisible();
-  await page.screenshot({ path: `${SHOTS}/g4-registry-delete.png` });
+  await page.screenshot({ path: test.info().outputPath("g4-registry-delete.png") });
 });
 
 // ---------------------------------------------------------------- G5
@@ -177,24 +176,24 @@ test("G5 git connections", async ({ page }) => {
   await page.goto("/ui/admin/git-connections");
   await expect(page.getByRole("row", { name: /credit-ops-git/ })).toBeVisible();
   await page.getByRole("table").scrollIntoViewIfNeeded();
-  await page.screenshot({ path: `${SHOTS}/g5-git.png` });
+  await page.screenshot({ path: test.info().outputPath("g5-git.png") });
 
   await page.getByRole("button", { name: "Replace token: credit-ops-git" }).click();
   const rep = page.getByRole("dialog", { name: /Replace the token/ });
   await rep.getByLabel("New token").fill("example-token-value");
-  await page.screenshot({ path: `${SHOTS}/g5-replace-token.png` });
+  await page.screenshot({ path: test.info().outputPath("g5-replace-token.png") });
   await rep.getByRole("button", { name: "Replace token" }).click();
   await expect(page.getByText("Token replaced. Revoke the old token on the git host.")).toBeVisible();
-  await page.screenshot({ path: `${SHOTS}/g5-replace-token-done.png` });
+  await page.screenshot({ path: test.info().outputPath("g5-replace-token-done.png") });
 
   await page.getByRole("button", { name: "Edit credit-ops-git" }).click();
   const edit = page.getByRole("dialog", { name: /Edit git connection/ });
   await expect(edit).toBeVisible();
-  await page.screenshot({ path: `${SHOTS}/g5-edit.png` });
+  await page.screenshot({ path: test.info().outputPath("g5-edit.png") });
   await edit.getByLabel(/Base URL/).fill("https://git.example.test/api/v3");
   await edit.getByRole("button", { name: "Save" }).click();
   await expect(edit.getByTestId("edit-refusal")).toBeVisible();
-  await page.screenshot({ path: `${SHOTS}/g5-edit-refused.png` });
+  await page.screenshot({ path: test.info().outputPath("g5-edit-refused.png") });
 });
 
 // ---------------------------------------------------------------- G6
@@ -218,28 +217,28 @@ test("G6 PM connections", async ({ page }) => {
   await page.goto("/ui/admin/pm-connections");
   await expect(page.getByRole("row", { name: /credit-ops-pm/ })).toBeVisible();
   await page.getByRole("table").scrollIntoViewIfNeeded();
-  await page.screenshot({ path: `${SHOTS}/g6-pm.png` });
+  await page.screenshot({ path: test.info().outputPath("g6-pm.png") });
 
   await page.getByRole("button", { name: "Rotate webhook secret: team-17-support" }).click();
   const rot = page.getByRole("dialog", { name: /Rotate the webhook secret/ });
   await expect(rot).toBeVisible();
-  await page.screenshot({ path: `${SHOTS}/g6-rotate-confirm.png` });
+  await page.screenshot({ path: test.info().outputPath("g6-rotate-confirm.png") });
   await rot.getByRole("button", { name: "Cancel" }).click();
 
   await page.getByRole("button", { name: "Rotate webhook secret: credit-ops-pm" }).click();
   const rot2 = page.getByRole("dialog", { name: /Rotate the webhook secret/ });
   await rot2.getByRole("button", { name: "Rotate webhook secret" }).click();
   await expect(rot2.getByTestId("rotation-in-progress")).toBeVisible();
-  await page.screenshot({ path: `${SHOTS}/g6-rotation-in-progress.png` });
+  await page.screenshot({ path: test.info().outputPath("g6-rotation-in-progress.png") });
   await rot2.getByRole("button", { name: "Cancel" }).click();
 
   await page.getByRole("button", { name: "Rotate webhook secret: team-17-support" }).click();
   await page.getByRole("dialog", { name: /Rotate the webhook secret/ }).getByRole("button", { name: "Rotate webhook secret" }).click();
   await expect(page.getByTestId("revealed-secret")).toBeVisible();
   await page.evaluate(() => window.scrollTo(0, 0));
-  await page.screenshot({ path: `${SHOTS}/g6-rotate-reveal.png` });
+  await page.screenshot({ path: test.info().outputPath("g6-rotate-reveal.png") });
 
   await page.getByRole("button", { name: "Edit credit-ops-pm" }).click();
   await expect(page.getByRole("dialog", { name: /Edit PM connection/ })).toBeVisible();
-  await page.screenshot({ path: `${SHOTS}/g6-edit.png` });
+  await page.screenshot({ path: test.info().outputPath("g6-edit.png") });
 });
