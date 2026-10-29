@@ -131,6 +131,7 @@ export default function GitConnectionsPage() {
               {
                 key: "actions",
                 header: "",
+                srHeader: "Actions",
                 render: (c) => (
                   <RowActions
                     slot="0"
