@@ -124,6 +124,7 @@ export default function RegulatoryIntelligencePage() {
     <>
       <PageHeader
         title="Regulatory & policy intelligence"
+        sub={<Badge tone="neutral">Decision support, not legal advice</Badge>}
         info={<><p>A curated, source-linked timeline of obligations and proposals, joined to active packs, controls, evidence, and in-scope AI use cases.</p><p>This feed is decision support, not legal advice. Status and dates come from the linked primary sources; control and use-case impact is computed against this deployment.</p></>}
       />
       <div className={v.stack}>
