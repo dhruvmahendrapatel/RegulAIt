@@ -44,7 +44,7 @@ concurrency:
 jobs:
   build:
     name: build ${{ matrix.engine }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -66,7 +66,7 @@ jobs:
 
   rebuild:
     name: rebuild ${{ matrix.engine }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -91,7 +91,7 @@ jobs:
     needs: [build, rebuild]
     # report every engine, also when one of its builds failed
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
