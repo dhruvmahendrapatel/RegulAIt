@@ -114,3 +114,26 @@ before 2026-11-03 that is exploitable on the demo path is fixed before the demo,
   and web-vitals budgets run in CI (ADR-0196), and the full-scan lanes of 2026-10-24 added error states with Retry,
   pagination guards and loading states. A post-demo audit batch maps each guideline to its gaps.
 - Nothing here changes behaviour before 2026-11-03, except a security fix under ADR-0180.
+
+## Addendum — 2026-10-29: UX best practices are the default for every screen (owner)
+
+**Owner, 2026-10-29, in the master session** (recorded on #453 as c6487576721): "I want the absolute best of the best
+… make sure we follow the best practices unless I ask." The owner shared three articles to read first:
+- "10 UX Best Practices to Follow in 2026" (uxpilot.ai, 2026-02-09);
+- "UI UX Best Practices: 12 Principles for Better UX" (upslidedesignstudio.com);
+- "Designing for the User: Best Practices in UX/UI" (LinkedIn Pulse).
+
+The master session read all three and folded them into `internal/DESIGN_GUIDELINES.md`, in a new section, "UX best
+practices (owner, 2026-10-29)". Each practice is written as an imperative rule there, beside the rules it extends.
+
+- **Stronger than "wherever practical".** For UI work these practices are the default, not a guideline. A screen
+  departs from one only when the owner asks for that. The PR body names the owner's comment, and a skip is not
+  self-granted.
+- **Precedence is unchanged.**
+  - Secure by default (ADR-0180) still wins. For example, a "smart default" never pre-selects a permissive or
+    sanctioning outcome, and remembered state never holds a credential or crosses users.
+  - The freeze still wins until 2026-11-03 (ADR-0198). New and touched UI follows the practices now. Existing screens
+    are audited against them in a post-demo batch.
+  - The bundle ceilings and air-gapped constraints still win. No practice adds a CDN, an analytics tracker or a
+    third-party heatmap.
+- **Reviews.** A missed UX practice on new or touched UI is a review finding, not a nit.

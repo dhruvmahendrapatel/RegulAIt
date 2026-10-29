@@ -1,6 +1,6 @@
 ---
 phase: demo-prep-live-integrations-merged
-last_updated: 2026-10-26
+last_updated: 2026-10-29
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -20,6 +20,24 @@ roadmap: ../product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-29 (04:00 UTC) - the laptop is the live instance, with a second stack as its fallback; UX best practices are now the default ([ADR-0200 addendum](../decisions/0200-engineering-best-practice-guidelines.md)).**
+- **Merged and audited:** #588 (backlog P14–P17), #589 (re2js 2.8.8, patching GHSA-gg6h-894w-4m9c), #590 (the runbook for the laptop live host, with DEMO_RUNBOOK §7.8 for the fallback stack) and #592 (the ADR-0186 addendum).
+- **Owner decisions on #453:**
+  - c6485593621: the laptop database is wiped once and prepared with `demo:prepare --live`; done on 10-29 (c6486350055).
+  - c6486079064: the fallback is a second sample-data compose stack on the laptop.
+  - c6487111601: release #592.
+  - c6487576721: the UX practices in DESIGN_GUIDELINES.md are the default unless the owner asks otherwise.
+  - c6487709029: the (i) pattern for long prose is approved; batch I-1 is being built today as one held PR.
+- **Admin MFA bug (c6484937215):** could not be reproduced, so it is not a code bug.
+- **Laptop (c6487334834):** the AWS sandbox is applied, federation is on, and the first real AWS scan succeeded; `demo:check --live` is 24/0/0.
+- **Still open:**
+  - the git-pr beat (no way to replace the `live-github` token, c6486886476);
+  - the `endpoint_inventory` target validation (c6486986847);
+  - the CloudTrail data-events checksum error (c6487334834);
+  - whether Azure and GitLab are in scope;
+  - Slack and the Jira/ADO webhooks;
+  - the fallback stack.
 
 **2026-10-26 (02:00 UTC) - the July AWS Organization is deleted; the demo moves to a laptop behind a Cloudflare
 Tunnel ([ADR-0203](../decisions/0203-demo-hosting-after-aws-org-loss.md)).** The management account, `regulait-dev`, the
