@@ -215,7 +215,7 @@ test("roles: create a role and inspect a seeded role's grants + holders", async 
   await nav("Roles", "Roles");
   await page.getByLabel("Role name").fill("e2e-role");
   await page.getByRole("button", { name: "Create role" }).click();
-  await expect(page.getByRole("cell", { name: "e2e-role" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "e2e-role", exact: true })).toBeVisible();
 
   // open the seeded analyst role — holders and grants load
   const analystRow = page.locator("tbody tr[role='link']").filter({ hasText: "data-analyst" }).first();
