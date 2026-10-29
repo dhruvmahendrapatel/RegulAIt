@@ -127,7 +127,7 @@ export function useLifecycle(cfg: LifecycleConfig) {
       <ReasonModal
         open={disabling !== null}
         title={`Disable ${cfg.noun} “${disabling?.name}”?`}
-        body={<p style={{ margin: 0 }}>{cfg.disableBody}</p>}
+        body={<p className={v.flush}>{cfg.disableBody}</p>}
         danger
         minLength={10}
         confirmLabel={`Disable ${cfg.noun}`}
@@ -142,7 +142,7 @@ export function useLifecycle(cfg: LifecycleConfig) {
       <ConfirmModal
         open={enabling !== null}
         title={`Enable ${cfg.noun} “${enabling?.name}”?`}
-        body={<p style={{ margin: 0 }}>{cfg.enableBody}</p>}
+        body={<p className={v.flush}>{cfg.enableBody}</p>}
         confirmLabel={`Enable ${cfg.noun}`}
         onCancel={() => setEnabling(null)}
         onConfirm={() => {
@@ -204,9 +204,9 @@ export function useLifecycle(cfg: LifecycleConfig) {
         }
       >
         <div className={v.stack}>
-          <p style={{ margin: 0 }}>{cfg.deleteBody}</p>
+          <p className={v.flush}>{cfg.deleteBody}</p>
           {refusal && (
-            <p className={v.errLine} role="alert" data-testid="delete-refusal" style={{ margin: 0 }}>
+            <p className={`${v.errLine} ${v.flush}`} data-testid="delete-refusal">
               {refusal}
             </p>
           )}

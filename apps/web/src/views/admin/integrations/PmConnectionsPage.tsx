@@ -332,16 +332,16 @@ function RotateSecretDialog(props: { connection: PmConnection; onClose: () => vo
       }
     >
       <div className={v.stack}>
-        <p style={{ margin: 0 }}>
+        <p className={v.flush}>
           A new webhook secret is issued and shown once. The current secret keeps working for 24 hours, then events signed with it are refused.
           Register the new secret in the PM tool before then.
         </p>
         {inProgress && (
           <div className={v.stackTight} role="alert" data-testid="rotation-in-progress">
-            <p className={v.errLine} style={{ margin: 0 }}>
+            <p className={`${v.errLine} ${v.flush}`}>
               A rotation is already in progress. Wait until the previous secret expires, or rotate immediately.
             </p>
-            <p className={v.faint} style={{ margin: 0 }}>
+            <p className={`${v.faint} ${v.flush}`}>
               Rotating immediately ends both older secrets now: events the PM tool signs with them are refused until it has the new one.
             </p>
           </div>
@@ -397,7 +397,7 @@ function EditPmDialog(props: { connection: PmConnection; onClose: () => void }) 
         <Field label="Name">
           <Input value={c.name} readOnly aria-readonly />
         </Field>
-        <p className={v.faint} style={{ margin: 0 }}>
+        <p className={`${v.faint} ${v.flush}`}>
           The name is part of the webhook address and can't change.
         </p>
         <Field label="Project">
@@ -424,7 +424,7 @@ function EditPmDialog(props: { connection: PmConnection; onClose: () => void }) 
             ))}
           </Select>
         </Field>
-        <p className={v.faint} style={{ margin: 0 }}>
+        <p className={`${v.faint} ${v.flush}`}>
           A changed base URL is checked by the egress guard before it is saved. Every change is recorded in the audit log.
         </p>
         {act.error && (

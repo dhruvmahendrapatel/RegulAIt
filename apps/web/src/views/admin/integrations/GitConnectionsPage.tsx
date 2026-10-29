@@ -225,7 +225,7 @@ function ReplaceTokenDialog(props: { connection: GitConnection; onClose: () => v
       }
     >
       <div className={v.stack}>
-        <p style={{ margin: 0 }}>
+        <p className={v.flush}>
           The stored token is overwritten and the old one is destroyed here. Git stages use the new token from their next step. The old token
           still works on the git host until you revoke it there. The change is recorded in the audit log.
         </p>
@@ -301,7 +301,7 @@ function EditGitDialog(props: { connection: GitConnection; onClose: () => void }
         <Field label="Provider">
           <Input value={c.provider} readOnly aria-readonly />
         </Field>
-        <p className={v.faint} style={{ margin: 0 }}>
+        <p className={`${v.faint} ${v.flush}`}>
           The name can't change: workflow stages refer to it.
         </p>
         <Field label="Base URL (empty for the provider default)">
