@@ -306,7 +306,7 @@ export default function ExecutionControlPage() {
                     infoLabel="nothing stopped"
                     info={
                       <>
-                        <p>{s.summary.replace(/^Nothing is stopped\.\s*/, "")}</p>
+                        <p>{(s.summary ?? "").replace(/^Nothing is stopped\.\s*/, "")}</p>
                         {s.meaning ? <p>{s.meaning}</p> : null}
                       </>
                     }

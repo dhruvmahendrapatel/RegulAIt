@@ -135,9 +135,11 @@ export function ReencryptionStatusCard() {
                     <>
                       A walk is needed only after the data key is rotated.{" "}
                       {/* the gateway's note opens with the same fact as the title: only its reason is kept */}
-                      <InfoButton label="the re-encryption walk">
-                        {q.data.note.replace(/^No re-encryption walk has ever run on this deployment\.\s*/, "")}
-                      </InfoButton>
+                      {q.data.note ? (
+                        <InfoButton label="the re-encryption walk">
+                          {q.data.note.replace(/^No re-encryption walk has ever run on this deployment\.\s*/, "")}
+                        </InfoButton>
+                      ) : null}
                     </>
                   }
                 />

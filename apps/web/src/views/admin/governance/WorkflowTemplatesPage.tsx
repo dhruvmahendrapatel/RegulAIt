@@ -337,7 +337,7 @@ function GalleryCard() {
           {(gallery.data?.entries ?? []).map((entry) => {
             const demanded = entry.stageAnnotations.filter((x) => x.demandedByTags.length > 0);
             // one line visible; the rest of the description and the cascade detail sit behind the (i)
-            const [lead, ...restSentences] = entry.description.split(/(?<=\.)\s+(?=[A-Z])/);
+            const [lead, ...restSentences] = (entry.description ?? "").split(/(?<=\.)\s+(?=[A-Z])/);
             const more = [
               restSentences.join(" "),
               demanded.length > 0

@@ -164,13 +164,7 @@ export default function DataKeyPage() {
             {s && s.matches && !s.attested && (
               <EmptyState
                 title="Nobody has ever recorded that this key exists anywhere but this machine"
-                body={
-                  <InfoButton label="an unattested key">
-                    The key is not in the backup, by design. If this host is lost, a restore recovers every row and leaves
-                    every credential permanently undecryptable. Record the key out of band now — then say so below, so the
-                    absence stops being invisible.
-                  </InfoButton>
-                }
+                body="The key is not in the backup, by design. If this host is lost, a restore recovers every row and leaves every credential permanently undecryptable. Record the key out of band now — then say so below, so the absence stops being invisible."
               />
             )}
 

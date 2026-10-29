@@ -142,7 +142,7 @@ test.describe("U3: approval safeguards on Organization", () => {
     await page.goto("/ui/admin/organization");
     const card = page.getByTestId("org-approval-safeguards");
     const row = card.getByTestId("org-setting-approvalTtlHours");
-    await expect(row.getByLabel("Approved tool-call lifetime (hours)")).toHaveValue("72");
+    await expect(row.getByLabel("Approved tool-call lifetime (hours)", { exact: true })).toHaveValue("72");
     await expect(row.getByText("strict", { exact: true })).toBeVisible();
     await expectAxeClean(page, "approval safeguards", '[data-testid="org-approval-safeguards"]');
     const su = await requireStepUpOn(page, { method: "PUT", path: "/v1/org/settings", kind: "settings_relax" });
@@ -166,7 +166,7 @@ test.describe("U3: approval safeguards on Organization", () => {
     const st = await mockApi(page);
     await page.goto("/ui/admin/organization");
     const row = page.getByTestId("org-setting-approvalBulkMaxItems");
-    await row.getByLabel("Most approvals in one bulk action").fill("10");
+    await row.getByLabel("Most approvals in one bulk action", { exact: true }).fill("10");
     await row.getByRole("button", { name: "Review change" }).click();
     const dialog = page.getByRole("dialog", { name: "Change most approvals in one bulk action?" });
     await expect(dialog).toContainText("25 approvals → 10 approvals");
@@ -181,7 +181,7 @@ test.describe("U3: approval safeguards on Organization", () => {
     await mockApi(page);
     await page.goto("/ui/admin/organization");
     const row = page.getByTestId("org-setting-toolApprovalSensitiveQuorum");
-    const input = row.getByLabel("Approvers for calls on sensitive data");
+    const input = row.getByLabel("Approvers for calls on sensitive data", { exact: true });
     await input.fill("9");
     await expect(row.getByText("Enter a whole number from 1 to 5.")).toBeVisible();
     await expect(input).toHaveAttribute("aria-describedby", /org-setting-toolApprovalSensitiveQuorum-problem/);
@@ -195,7 +195,7 @@ test.describe("U3: unreadable settings are never prefilled", () => {
     await page.goto("/ui/admin/retention");
     const card = page.getByTestId("audit-evidence-retention");
     await expect(card.getByText("the settings could not be read").first()).toBeVisible();
-    await expect(card.getByLabel("Shadow-canary evidence retention (days)")).toHaveCount(0);
+    await expect(card.getByLabel("Shadow-canary evidence retention (days)", { exact: true })).toHaveCount(0);
   });
 
   test("a mistyped stored value is unknown, and its control is disabled", async ({ page }) => {
@@ -203,8 +203,8 @@ test.describe("U3: unreadable settings are never prefilled", () => {
     await page.goto("/ui/admin/retention");
     const row = page.getByTestId("org-setting-canaryObservationRetentionDays");
     await expect(row.getByText("unknown", { exact: true })).toBeVisible();
-    await expect(row.getByLabel("Shadow-canary evidence retention (days)")).toBeDisabled();
-    await expect(row.getByLabel("Shadow-canary evidence retention (days)")).toHaveValue("");
+    await expect(row.getByLabel("Shadow-canary evidence retention (days)", { exact: true })).toBeDisabled();
+    await expect(row.getByLabel("Shadow-canary evidence retention (days)", { exact: true })).toHaveValue("");
     await expect(row.getByRole("button", { name: "Review change" })).toBeDisabled();
   });
 });
