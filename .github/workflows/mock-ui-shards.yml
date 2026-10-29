@@ -37,7 +37,7 @@ permissions:
 jobs:
   shard:
     name: shard ${{ matrix.shard }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # MEASURED 2026-10-06 at 37c0de0, one worker, on a shared dev container
     # slower than a CI runner: shard 1 = 96 tests in 7.4 min, shard 2 = 88 in
     # 9.3 min, shard 3 = 83 in 6.2 min (23.0 min serial, all 267 passed; the
@@ -184,7 +184,7 @@ jobs:
     # runs when a shard failed too, so a red run still says whether the shards
     # covered the suite; it does not run on a cancelled (superseded) run
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0

@@ -45,7 +45,7 @@ permissions:
 
 jobs:
   changes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 3
     outputs:
       demo: ${{ steps.diff.outputs.demo }}
@@ -86,7 +86,7 @@ jobs:
     concurrency:
       group: demo-journey-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: true
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # 12, down from 30 (ADR-0183 2.4). Measured 2026-10-06 (ADR-0182, D4 specs):
     # the job reached 20m02s, of which the serial mocked suite was 16.0 min
     # (261 tests), so everything else — install, build, demo:prepare, the
@@ -303,7 +303,7 @@ jobs:
     concurrency:
       group: demo-live-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: true
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 12
 
     services:
@@ -440,7 +440,7 @@ jobs:
     concurrency:
       group: demo-rehearsal-${{ github.ref }}
       cancel-in-progress: true
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
 
     services:
@@ -590,7 +590,7 @@ jobs:
     concurrency:
       group: approval-review-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: true
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
 
     services:
