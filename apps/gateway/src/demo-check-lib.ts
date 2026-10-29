@@ -403,6 +403,8 @@ async function runDemoCheckRun(
     );
   }
 
+  out.push(...(await checkClaudeBeat((url) => call("GET", url, boot))));
+
   return out;
 }
 
@@ -867,4 +869,66 @@ export function formatDemoCheck(checks: DemoCheck[]): string {
   const n = (l: CheckLevel) => checks.filter((c) => c.level === l).length;
   lines.push("", `${n("PASS")} pass, ${n("WARN")} warn, ${n("FAIL")} fail`);
   return lines.join("\n");
+}
+
+/** the beat label of the "Claude as model and agent" readiness check (DEMO_RUNBOOK §7.9) */
+export const CLAUDE_BEAT = "E External model and agent";
+/** the API model id the owner named for this beat (10-29, #453) — configuration data */
+export const CLAUDE_BEAT_MODEL = "claude-opus-5-5";
+/** the compiled default host the anthropic adapter reaches (ANTHROPIC_DEFAULT_BASE's host) */
+export const CLAUDE_BEAT_EGRESS_HOST = "api.anthropic.com";
+
+/**
+ * Read-only readiness of the Claude beat. It is an OPTIONAL beat, so a deployment that has not set it up gets one
+ * WARN naming the runbook section, never a FAIL. What does FAIL is a half-built beat that would mislead on stage: an
+ * agent registered for the model with no token prices (its calls would read "Unpriced" in the cost view), or an agent
+ * with no platform credential or no egress entry behind it (its first call is a 403 or a 503). Spends nothing: no
+ * model call is made, and the key is never read (the credential list returns provider names only).
+ */
+export async function checkClaudeBeat(
+  get: (url: string) => Promise<{ status: number; body: Json }>,
+): Promise<DemoCheck[]> {
+  const out: DemoCheck[] = [];
+  const fix = "follow DEMO_RUNBOOK.md §7.9";
+  const agentsRes = await get("/v1/agents?limit=200");
+  if (agentsRes.status !== 200) {
+    return [{ beat: CLAUDE_BEAT, level: "FAIL", detail: `agents list ${agentsRes.status}` }];
+  }
+  const claude = ((agentsRes.body.agents ?? []) as Json[]).filter(
+    (a) => a.provider === "anthropic" && a.model === CLAUDE_BEAT_MODEL,
+  );
+  if (claude.length === 0) {
+    return [{ beat: CLAUDE_BEAT, level: "WARN", detail: `no anthropic agent for ${CLAUDE_BEAT_MODEL} — the beat is not set up`, fix }];
+  }
+  const unpriced = claude.filter((a) => a.costPerMTokIn == null || a.costPerMTokOut == null);
+  if (unpriced.length > 0) {
+    out.push({
+      beat: CLAUDE_BEAT,
+      level: "FAIL",
+      detail: `agent(s) ${unpriced.map((a) => `'${a.name}'`).join(", ")} have no token prices — every call would read Unpriced`,
+      fix: "PATCH /v1/agents/:agentId with costPerMTokIn and costPerMTokOut (§7.9 step 3)",
+    });
+  } else {
+    out.push({ beat: CLAUDE_BEAT, level: "PASS", detail: `${claude.length} priced agent(s) for ${CLAUDE_BEAT_MODEL}` });
+  }
+  const creds = await get("/v1/model-credentials");
+  const hasCred = ((creds.body.credentials ?? []) as Json[]).some((c) => c.provider === "anthropic");
+  out.push(
+    hasCred
+      ? { beat: CLAUDE_BEAT, level: "PASS", detail: "anthropic platform credential stored (encrypted; never read here)" }
+      : { beat: CLAUDE_BEAT, level: "FAIL", detail: `no anthropic platform credential (credentials list ${creds.status})`, fix },
+  );
+  const egress = await get("/v1/egress-allow-hosts");
+  const hasHost = ((egress.body.hosts ?? []) as Json[]).some((h) => h.host === CLAUDE_BEAT_EGRESS_HOST);
+  out.push(
+    hasHost
+      ? { beat: CLAUDE_BEAT, level: "PASS", detail: `${CLAUDE_BEAT_EGRESS_HOST} is on the egress allow-list` }
+      : {
+          beat: CLAUDE_BEAT,
+          level: "FAIL",
+          detail: `${CLAUDE_BEAT_EGRESS_HOST} is not on the egress allow-list — under the strict posture the first call is refused`,
+          fix,
+        },
+  );
+  return out;
 }
