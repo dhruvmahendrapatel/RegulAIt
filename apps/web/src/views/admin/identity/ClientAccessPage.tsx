@@ -23,6 +23,7 @@ import {
   ConfirmModal,
   EmptyState,
   Field,
+  InfoButton,
   Input,
   Select,
   Table,
@@ -122,10 +123,10 @@ function Loaded(props: { data: InterceptionSettingsResponse }) {
                 <Badge tone={posture.status === "enforced" ? "ok" : postureWarn ? "warn" : "info"}>
                   {posture.label ?? posture.status.replaceAll("_", " ")}
                 </Badge>
+                <InfoButton label="this rung">{posture.detail ?? rung.note}</InfoButton>
               </span>,
             ],
             ["Bypassable?", rung.bypass],
-            ["What that means", posture.detail ?? rung.note],
           ]}
         />
         {posture.status === "honor_system" && (
@@ -149,7 +150,17 @@ function Loaded(props: { data: InterceptionSettingsResponse }) {
       <EffectivePreviewCard />
       <ConfigGeneratorCard />
 
-      <Card title="Honest coverage">
+      <Card
+        title="Honest coverage"
+        info={
+          <p>
+            “Works with every IDE” would be a false claim. What is true: any client that accepts a custom
+            Anthropic- or OpenAI-compatible base URL can have its model calls governed here, and any
+            MCP-capable client can have its tool calls governed here. Those are two independent halves —
+            enabling one does not cover the other.
+          </p>
+        }
+      >
         <Table
           columns={[
             { key: "client", header: "Client", render: (r: (typeof COVERAGE)[number]) => r.client },
@@ -160,12 +171,6 @@ function Loaded(props: { data: InterceptionSettingsResponse }) {
           rows={COVERAGE}
           rowKey={(r) => r.client}
         />
-        <p className={v.faint}>
-          “Works with every IDE” would be a false claim. What is true: any client that accepts a custom
-          Anthropic- or OpenAI-compatible base URL can have its model calls governed here, and any
-          MCP-capable client can have its tool calls governed here. Those are two independent halves —
-          enabling one does not cover the other.
-        </p>
       </Card>
     </div>
   );
@@ -312,13 +317,17 @@ function ScopeRulesCard() {
   const tri = (val: string) => (val === "true" ? true : val === "false" ? false : undefined);
 
   return (
-    <Card title="Staged rollout — per-scope overrides">
-      <p className={v.dim}>
-        Pilot a compat surface with one user, project, or role instead of flipping the org-wide switch.
-        Precedence: <strong>user &gt; project &gt; role &gt; org</strong>; the first non-inherit value per
-        field wins. A rule that enables a surface grants NOTHING — every dispatch still passes the same
-        per-user entitlement check.
-      </p>
+    <Card
+      title="Staged rollout — per-scope overrides"
+      info={
+        <p>
+          Pilot a compat surface with one user, project, or role instead of flipping the org-wide switch.
+          Precedence: <strong>user &gt; project &gt; role &gt; org</strong>; the first non-inherit value per
+          field wins. A rule that enables a surface grants NOTHING — every dispatch still passes the same
+          per-user entitlement check.
+        </p>
+      }
+    >
       <form
         className={a.formRow}
         onSubmit={(e) => {
@@ -468,11 +477,15 @@ function EffectivePreviewCard() {
     s.level === "org" ? "org singleton" : `${s.level} rule (${s.ruleId.slice(0, 8)}…)`;
 
   return (
-    <Card title="Effective values — live preview">
-      <p className={v.dim}>
-        What would this user get right now? Runs the exact resolver the request gate uses, so the preview
-        cannot drift from enforcement.
-      </p>
+    <Card
+      title="Effective values — live preview"
+      info={
+        <p>
+          What would this user get right now? Runs the exact resolver the request gate uses, so the preview
+          cannot drift from enforcement.
+        </p>
+      }
+    >
       <form
         className={a.formRow}
         onSubmit={(e) => {
@@ -675,11 +688,15 @@ function ConfigGeneratorCard() {
   const base = window.location.origin;
 
   return (
-    <Card title="Connect a client">
-      <p className={v.dim}>
-        Generated from this page's own origin ({base}). The snippet uses a placeholder for the API key on
-        purpose — issue the developer their own key in Identity &amp; Access → Users, never paste yours.
-      </p>
+    <Card
+      title="Connect a client"
+      info={
+        <p>
+          Generated from this page's own origin ({base}). The snippet uses a placeholder for the API key on
+          purpose — issue the developer their own key in Identity &amp; Access → Users, never paste yours.
+        </p>
+      }
+    >
       <form
         className={a.formRow}
         onSubmit={(e) => {

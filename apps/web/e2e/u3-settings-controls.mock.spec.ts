@@ -241,6 +241,17 @@ test.describe("U3: each page carries its settings", () => {
     });
   }
 
+  test("API key lifetimes: choosing no default shows a visible \"Keys never expire\" pill; the why is behind an (i)", async ({ page }) => {
+    await mockApi(page);
+    await page.goto("/ui/admin/users");
+    const row = page.getByTestId("org-setting-apiKeyDefaultTtlDays");
+    await expect(row.getByText("Keys never expire", { exact: true })).toHaveCount(0);
+    await row.getByLabel("No default", { exact: true }).check();
+    await expect(row.getByText("Keys never expire", { exact: true })).toBeVisible();
+    await row.getByRole("button", { name: "What is no default?" }).click();
+    await expect(row.getByRole("note")).toContainText("Keys never expire unless the issuer sets one.");
+  });
+
   test("API key lifetimes: a refusal is shown under its row in the gateway's words", async ({ page }) => {
     const st = await mockApi(page, {
       putAnswers: [
@@ -255,7 +266,7 @@ test.describe("U3: each page carries its settings", () => {
     });
     await page.goto("/ui/admin/users");
     const row = page.getByTestId("org-setting-apiKeyDefaultTtlDays");
-    await row.getByLabel("Default API key lifetime (days)").fill("400");
+    await row.getByLabel("Default API key lifetime (days)", { exact: true }).fill("400");
     await row.getByRole("button", { name: "Review change" }).click();
     await page.getByRole("dialog", { name: "Change default api key lifetime (days)?" }).getByRole("button", { name: "Relax setting" }).click();
     await expect(row.getByRole("alert")).toContainText("cannot exceed apiKeyMaxTtlDays");

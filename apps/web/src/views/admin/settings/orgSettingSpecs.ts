@@ -30,7 +30,17 @@ export type Control =
   | { kind: "enum"; options: readonly Choice[] }
   | { kind: "boolean"; on: string; off: string }
   /** a whole number; `noneLabel` makes it nullable (null = no limit) */
-  | { kind: "int"; min: number; max: number; unit: string; noneLabel?: string }
+  | {
+      kind: "int";
+      min: number;
+      max: number;
+      unit: string;
+      noneLabel?: string;
+      /** behind an (i) beside the none option: what choosing it means */
+      noneInfo?: string;
+      /** a warn pill shown while the none option is chosen */
+      noneWarn?: string;
+    }
   | { kind: "decimal"; min: number; max: number; unit: string; step: number }
   /** a subset of a vocabulary, sent in vocabulary order */
   | { kind: "set"; options: readonly Choice[] }
@@ -566,7 +576,7 @@ export const CORE_SPECS: Readonly<Record<string, OrgSettingSpec>> = {
     strictDefault: 90,
     strict: "90 days: a key issued with no expiry of its own stops working 90 days after it was issued.",
     relaxed: "A longer default, or none, leaves keys nobody chose a lifetime for working for longer.",
-    control: { kind: "int", min: 1, max: 3650, unit: "days", noneLabel: "No default (keys never expire unless the issuer sets one)" },
+    control: { kind: "int", min: 1, max: 3650, unit: "days", noneLabel: "No default", noneInfo: "Keys never expire unless the issuer sets one.", noneWarn: "Keys never expire" },
     isRelaxed: atMost(90),
     looser: largerLooser,
   },
@@ -576,7 +586,7 @@ export const CORE_SPECS: Readonly<Record<string, OrgSettingSpec>> = {
     strictDefault: 365,
     strict: "365 days: a request for a longer lifetime, or for no expiry, is refused by name, never silently shortened.",
     relaxed: "A longer ceiling, or none, lets keys be issued that work for longer or forever.",
-    control: { kind: "int", min: 1, max: 3650, unit: "days", noneLabel: "No ceiling (a key may be issued that never expires)" },
+    control: { kind: "int", min: 1, max: 3650, unit: "days", noneLabel: "No ceiling", noneInfo: "A key may be issued that never expires.", noneWarn: "Keys never expire" },
     isRelaxed: atMost(365),
     looser: largerLooser,
   },
