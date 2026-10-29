@@ -494,6 +494,10 @@ export interface Project {
   budgetUsd?: number | null;
   spentUsd?: number;
   classifications?: string[];
+  /** G1 (prototype): set once an admin archives the project; spend and history stay readable */
+  archivedAt?: string | null;
+  archivedReason?: string | null;
+  archivedByName?: string | null;
 }
 
 export interface ProjectMember {

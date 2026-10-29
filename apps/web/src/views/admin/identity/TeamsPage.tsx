@@ -10,7 +10,8 @@ import { api, ApiError } from "../../../api/client";
 import { withStepUp } from "../../../stepup/stepUp";
 import type { Team } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, Input, Select, SkeletonBlock } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, Input, RowActions, Select, SkeletonBlock } from "../../../ui/kit";
+import { RenameModal } from "./RenameModal";
 import {
   ReasonModal,
   optionEls,
@@ -55,6 +56,7 @@ export default function TeamsPage() {
   const [memberUser, setMemberUser] = useState("");
   const [removeMember, setRemoveMember] = useState<{ team: Team; userId: string; name: string } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<Team | null>(null);
+  const [renameTarget, setRenameTarget] = useState<Team | null>(null);
   const [forceDelete, setForceDelete] = useState<{
     team: Team;
     contextItems: number;
@@ -209,9 +211,19 @@ export default function TeamsPage() {
                     ))}
                   </div>
                 </div>
-                <Button size="sm" variant="danger" onClick={() => setConfirmDelete(team)}>
-                  delete team
-                </Button>
+                <RowActions
+                  slot="0"
+                  secondary={
+                    <Button size="sm" aria-label={`Rename team ${team.name}`} onClick={() => setRenameTarget(team)}>
+                      Rename
+                    </Button>
+                  }
+                  rest={
+                    <Button size="sm" variant="danger" onClick={() => setConfirmDelete(team)}>
+                      delete team
+                    </Button>
+                  }
+                />
               </div>
             ))
           )}
@@ -222,6 +234,7 @@ export default function TeamsPage() {
         </Card>
       </div>
 
+      <RenameModal noun="team" target={renameTarget} onClose={() => setRenameTarget(null)} />
       <ConfirmModal
         open={removeMember !== null}
         title={`Remove ${removeMember?.name} from ${removeMember?.team.name}?`}

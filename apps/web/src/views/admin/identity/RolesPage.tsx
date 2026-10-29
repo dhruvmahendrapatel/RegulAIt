@@ -19,9 +19,11 @@ import {
   EmptyState,
   Field,
   Input,
+  RowActions,
   Select,
   Table,
 } from "../../../ui/kit";
+import { RenameModal } from "./RenameModal";
 import {
   QueryGate,
   ReasonModal,
@@ -55,6 +57,7 @@ export default function RolesPage() {
   const [activeRoleId, setActiveRoleId] = useState("");
 
   const [confirmDelete, setConfirmDelete] = useState<Role | null>(null);
+  const [renameTarget, setRenameTarget] = useState<Role | null>(null);
   const [forceDelete, setForceDelete] = useState<{ role: Role; holders: string[] } | null>(null);
 
   const deleteRole = async (role: Role) => {
@@ -151,16 +154,33 @@ export default function RolesPage() {
                 srHeader: "Actions",
                 align: "right",
                 render: (r) => (
-                  <Button
-                    size="sm"
-                    variant="danger"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setConfirmDelete(r);
-                    }}
-                  >
-                    delete
-                  </Button>
+                  <RowActions
+                    slot="0"
+                    secondary={
+                      <Button
+                        size="sm"
+                        aria-label={`Rename role ${r.name}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setRenameTarget(r);
+                        }}
+                      >
+                        Rename
+                      </Button>
+                    }
+                    rest={
+                      <Button
+                        size="sm"
+                        variant="danger"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setConfirmDelete(r);
+                        }}
+                      >
+                        delete
+                      </Button>
+                    }
+                  />
                 ),
               },
             ]}
@@ -187,6 +207,7 @@ export default function RolesPage() {
         )}
       </div>
 
+      <RenameModal noun="role" target={renameTarget} onClose={() => setRenameTarget(null)} />
       <ConfirmModal
         open={confirmDelete !== null}
         title={`Delete role “${confirmDelete?.name}”?`}
