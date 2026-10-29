@@ -2,17 +2,25 @@
  * Projects — shared, governed workspaces: budget vs spend at a glance,
  * classifications, and a click through to the detail (costs + membership).
  */
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api/client";
 import type { Project } from "../../api/types";
 import { fmtUsd } from "../../api/format";
 import { PageHeader } from "../../shell/AppShell";
-import { Badge, Card, EmptyState, ErrorState, Meter, SkeletonBlock } from "../../ui/kit";
+import { useSession } from "../../session/SessionContext";
+import { Badge, Button, Card, EmptyState, ErrorState, InfoButton, Meter, Modal, SkeletonBlock } from "../../ui/kit";
+import { ProjectCreateForm } from "./projectForms";
 import v from "../views.module.css";
 
 export default function ProjectsPage() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const { auth } = useSession();
+  // G2 (#453): creating a project is admin-only at the gateway, so only an admin sees the door
+  const isAdmin = Boolean(auth?.isAdmin);
+  const [creating, setCreating] = useState(false);
   const q = useQuery({
     queryKey: ["projects"],
     queryFn: () => api.get<{ projects: Project[] }>("/v1/projects"),
@@ -45,7 +53,36 @@ export default function ProjectsPage() {
       <PageHeader
         title="Projects"
         sub="Shared, governed workspaces — context every member sees, spend every member shares."
+        actions={
+          isAdmin ? (
+            <Button variant="primary" size="sm" onClick={() => setCreating(true)}>
+              New project
+            </Button>
+          ) : undefined
+        }
       />
+      <Modal
+        open={creating}
+        title="New project"
+        onClose={() => setCreating(false)}
+        wide
+        actions={<Button onClick={() => setCreating(false)}>Cancel</Button>}
+      >
+        <p className={v.faint}>
+          Classifications set the project&apos;s required workflows, PII mode and retention.{" "}
+          <InfoButton label="classifications">
+            Classifications come from the compliance profiles and cascade that framework&apos;s required workflows, PII
+            mode and retention onto everything the project governs — changing them later goes through the
+            reclassification review (Compliance profiles), never a plain edit.
+          </InfoButton>
+        </p>
+        <ProjectCreateForm
+          onDone={() => {
+            setCreating(false);
+            void queryClient.invalidateQueries({ queryKey: ["projects"] });
+          }}
+        />
+      </Modal>
       {projects.length === 0 ? (
         <Card>
           <EmptyState
