@@ -113,7 +113,7 @@ jobs:
   gate:
     # Read-only: it decides which engines publish, and nothing else. `publish`, `record` and `lock-pr` all need it.
     name: compare the image inputs with the lock
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -145,7 +145,7 @@ jobs:
     # that run must never push an image (security.yml's sign job uses the same guard). And only an engine the gate
     # names: unchanged inputs publish nothing. `record` needs this job, so it is skipped with it.
     if: github.ref == 'refs/heads/main' && needs.gate.outputs.any == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     # owner decision Q4: the owner protects this environment (required reviewer) before it signs anything
     environment: release
@@ -231,7 +231,7 @@ jobs:
   record:
     name: record the publish
     needs: publish
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -273,7 +273,7 @@ jobs:
     # no PR, and never merges, approves, marks ready or enables auto-merge. The master opens the draft HOLD PR.
     name: push the lock branch
     needs: record
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: write

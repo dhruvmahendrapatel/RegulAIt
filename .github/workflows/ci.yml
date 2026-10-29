@@ -170,7 +170,7 @@ jobs:
   #                        It keeps the job name branch protection requires.
   build-and-test-base:
     name: build-and-test / build, packages, static pre-flights
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # A blast-radius cap, not a target (see the arithmetic above). Without the
     # gateway suite this job is install + `pnpm -r build` + the package suites.
     timeout-minutes: 20
@@ -326,7 +326,7 @@ jobs:
 
   gateway-tests:
     name: gateway shard ${{ matrix.shard }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # A blast-radius cap, not a target: the slowest shard plus setup is well
     # under it (see the arithmetic above). If a shard nears it, add a shard to
     # the matrix rather than raising this — the coverage job checks any layout.
@@ -527,7 +527,7 @@ jobs:
     # runs when a shard failed too, so a red run still says whether the shards
     # covered the suite; it does not run on a cancelled (superseded) run
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -571,7 +571,7 @@ jobs:
   build-and-test:
     needs: [build-and-test-base, gateway-tests, gateway-coverage]
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
       - name: Every part of build-and-test passed
@@ -593,7 +593,7 @@ jobs:
     # Deliberately NOT `dorny/paths-filter` or `tj-actions/changed-files`: a
     # third-party action in the CI path is a supply-chain surface, and native
     # `paths:` filters are workflow-level only, not per-job.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -640,7 +640,7 @@ jobs:
   # (install + build dominate), on the same `pull_request` paths-ignore as the
   # rest of this workflow.
   spa-journeys:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # 12, down from 20 (ADR-0183 2.4): the serial mocked suite (~11.5 min on
     # 2026-10-05) moved to the sharded `spa-mock` job below, leaving ~4 min of
     # install, build and the four real-gateway journeys. A blast-radius cap.

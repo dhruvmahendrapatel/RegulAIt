@@ -44,7 +44,7 @@ concurrency:
 
 jobs:
   publish:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     # ADR-0184: keyless cosign signing needs the job's OIDC token; this job only
     permissions:
