@@ -490,6 +490,65 @@ describe("O11: unattributed MCP calls are metered into the Unattributed bucket",
     }
   });
 
+  it("?project= attributes like the header (the Messages API MCP connector cannot set custom headers)", async () => {
+    await setPosture({ requireMcpAttribution: true });
+    try {
+      // the connector's only knobs are the URL and a bearer token: the same
+      // project in the query string clears the strict attribution gate
+      const client = new Client({ name: "depth-client-query", version: "0.0.1" });
+      const transport = new StreamableHTTPClientTransport(
+        new URL(`${gatewayUrl}/mcp/${mcpServerId}?project=${budgetProjectId}`),
+        { requestInit: { headers: { authorization: `Bearer ${devKey}` } } },
+      );
+      // connect = initialize cleared the strict gate (unattributed, it is a 400)
+      await client.connect(transport);
+      // and the call is governed AS that project: the earlier tests in this
+      // block spent its $0.001 hard budget, so the project's own budget gate
+      // refuses it. Only an attributed call can meet a project budget.
+      await expect(client.callTool({ name: "depth_time", arguments: {} })).rejects.toThrow(
+        /project_budget_exceeded/,
+      );
+      await client.close();
+
+      const init = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } } };
+      const headers = { ...devAuth, "content-type": "application/json", accept: "application/json, text/event-stream" };
+      // header and query naming DIFFERENT projects: refused, never silently picked
+      const conflict = await app.inject({
+        method: "POST",
+        headers: { ...headers, [PROJECT_HEADER]: budgetProjectId },
+        url: `/mcp/${mcpServerId}?project=00000000-0000-4000-8000-000000000001`,
+        payload: init,
+      });
+      expect(conflict.statusCode).toBe(400);
+      expect(conflict.json().error).toBe("project_attribution_conflict");
+      // a malformed query project is the header's own 400
+      const malformed = await app.inject({ method: "POST", headers, url: `/mcp/${mcpServerId}?project=not-a-uuid`, payload: init });
+      expect(malformed.statusCode).toBe(400);
+      expect(malformed.json().error).toBe("invalid_project_id");
+      // a project the caller may not bill to is refused exactly as via the header
+      const foreign = await app.inject({
+        method: "POST",
+        headers,
+        url: `/mcp/${mcpServerId}?project=00000000-0000-4000-8000-000000000002`,
+        payload: init,
+      });
+      expect(foreign.statusCode).toBeGreaterThanOrEqual(400);
+      expect(foreign.statusCode).toBeLessThan(500);
+    } finally {
+      await setPosture({ requireMcpAttribution: false });
+    }
+  });
+
+  it("GET and DELETE on the MCP endpoint answer 405 Allow: POST (stateless Streamable HTTP), after auth", async () => {
+    for (const method of ["GET", "DELETE"] as const) {
+      const res = await app.inject({ method, headers: devAuth, url: `/mcp/${mcpServerId}` });
+      expect(res.statusCode).toBe(405);
+      expect(res.headers["allow"]).toBe("POST");
+      const anon = await app.inject({ method, url: `/mcp/${mcpServerId}` });
+      expect(anon.statusCode).toBe(401);
+    }
+  });
+
   it("with the toggle back off, unattributed calls run again (default behaviour)", async () => {
     const client = await mcpClient(devKey);
     const result = await client.callTool({ name: "depth_time", arguments: {} });
