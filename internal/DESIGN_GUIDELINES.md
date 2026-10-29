@@ -198,9 +198,9 @@ the master session. Review, unless an enforcement is named.*
   observation), not only assumptions; record what you learned in the PR or session record.
 - Design each screen around the task its user came to do (the demo personas are examples: Ada the admin, Avery the
   governance reviewer, Dana the developer, Morgan the security lead); state that task in the PR body for new screens.
-- Ask for only what the task needs; every form field earns its place, and an optional field says so.
+- Ask for only what the task needs; every form field earns its place (an optional field says so, our reading).
 - Cut steps: fewer clicks to the goal, save progress on long forms (a draft), and keyboard shortcuts for frequent
-  actions where they do not conflict with assistive technology.
+  actions (only where they do not conflict with assistive technology, our reading).
 
 **Feedback and system status**
 - Respond to every action at once: the control changes state (hover, pressed, busy) before the result arrives
@@ -213,13 +213,13 @@ the master session. Review, unless an enforcement is named.*
 
 **Prevent errors before they happen**
 - Constrain instead of rejecting: offer only valid choices (a date picker that greys out impossible dates, a select
-  instead of free text for a known set), and say why a choice is unavailable.
-- Validate inline, next to the field, in plain words (on blur rather than on every keystroke, our reading); keep what
-  the user typed.
+  instead of free text for a known set); saying why a choice is unavailable is our reading.
+- Validate inline, next to the field, in plain words (on blur rather than on every keystroke, and keeping what the user
+  typed, our reading).
 - Prefill likely values (the current project, the user's own team, the last-used filter), but never pre-select a
   permissive, sanctioning or relaxing outcome (ADR-0180; see States).
 - Offer undo where the action can be reversed, and a confirmation for what cannot (preferring undo where both work is
-  our reading); keep `ConfirmModal` for the irreversible, and name the object and the consequence in it ("Delete connection live-jira? Its inbound secret stops working.").
+  our reading); keep `ConfirmModal` for the irreversible (naming the object and the consequence in it is our reading) ("Delete connection live-jira? Its inbound secret stops working.").
 
 **Recognition over recall**
 - Show options rather than asking users to remember them: selects, typeahead with suggestions, recent items, and
@@ -231,13 +231,14 @@ the master session. Review, unless an enforcement is named.*
 
 **Simplicity, hierarchy and space**
 - For every element ask "does this help the task?"; then remove, hide until needed, shrink, or organise, in that order.
-- Give each view one clear visual hierarchy: one heading, one primary action (Layout), size and weight before colour.
+- Give each view one clear visual hierarchy: one heading, one primary action (Layout), using size, colour, spacing and contrast
+  (size and weight before colour is our reading).
 - Use whitespace from the spacing scale to group and separate; never fill space for its own sake.
 
 **Navigation**
 - Always show where the user is (the current nav item and the breadcrumb's last crumb marked current), where they can
   go, and how to get back; keep labels descriptive and menus short.
-- Offer search or a filter where a list can grow past one screen.
+- Offer search or a filter where a list can grow past one screen (our reading).
 
 **Readable type and calls to action**
 - Keep UI text at `--text-md` or larger and page prose at `--rg-body-size`, with comfortable line height and a line length
