@@ -4,8 +4,9 @@ For a **capability demo** driven by us, to a prospective customer. It is not a t
 nothing in it is production: every provider is a mock, every upstream is a loopback double, and every
 credential it mints is printed once and dies with the database.
 
-Sections 1-6 describe that local, seeded environment. **§7** adds what the 2026-11-01 demo needs on top: the hosted
-dev instance, the real-account discovery sources (read-only scans of a GitLab demo group, a non-production AWS sandbox
+Sections 1-6 describe that local, seeded environment. **§7** adds what the 2026-11-01 demo needs on top: the live
+instance (since [ADR-0203](../decisions/0203-demo-hosting-after-aws-org-loss.md), the owner's laptop behind a Cloudflare
+Tunnel; the hosted AWS dev instance no longer exists), the real-account discovery sources (read-only scans of a GitLab demo group, a non-production AWS sandbox
 account and an Azure subscription, plus an imported inventory export of a demo laptop, ADR-0197 and its 2026-10-24
 addendum), and the pre-demo checklist.
 
@@ -166,6 +167,12 @@ were aiming at.
 
 ### 1.3 Everything in Docker — the whole demo, prepared, in one switch (ADR-0174 amendment)
 
+> **Not on the live laptop (owner, 2026-10-29, #453 c6485593621).** Under ADR-0203 the owner's laptop is the live
+> instance, prepared from empty with `demo:prepare --live` (§7.6). This switch (`REGULAIT_DEMO_LICENSE=1`) is never set
+> there: on an empty database it runs the sample-data prep below, which writes the fictional dataset into the live
+> database. This subsection describes the sample-data stack only. Where that stack now runs is an open question for
+> the owner (§7.1, "Fallback").
+
 When the whole stack runs under `docker compose` (no pnpm on the box), one switch gives you the
 **same prepared demo as §1 / `demo:prepare`**, discovery dataset included, with nothing else to run but the
 password step:
@@ -181,7 +188,7 @@ password step:
 2. From the repo root, on an empty stack (the prep runs only on an empty database):
 
    ```bash
-   docker compose down -v          # laptop only; never on the dev host (§7.6)
+   docker compose down -v          # a sample-data stack only; never on the live laptop after its one wipe (§7.6)
    docker compose up -d --build
    docker compose logs -f gateway  # wait for "demo prep: complete in <n>s", then Ctrl+C
    ```
@@ -237,8 +244,8 @@ keeps everything) and the gateway run on every start. To prepare from scratch:
 step's own output, and the gateway **still starts**, so the UI and the log stay reachable. If the log instead says
 `*** DEMO PREP SKIPPED: this database was started but never fully prepared`, the database has users but never
 finished the prep (the start script's reader exits 4). Either way the prep cannot be finished in place, and a
-restart does not repair it: run `docker compose down -v`, then `up` again (laptop only: **never `down -v` on the dev
-host**, §7.6).
+restart does not repair it: run `docker compose down -v`, then `up` again (sample-data stack only: **never `down -v` on
+the live laptop** once `DEMO_REAL_ACCOUNTS.md` step 2 has created its sources, §7.6).
 
 **Re-checking later (deep scan #522, #28).** A bare `docker compose exec gateway node apps/gateway/dist/demo-check.js`
 FAILs "3 Evidence" (25 pass, 1 warn, 1 fail) even when the gateway has the export key: `docker-start.sh` exports the
@@ -500,10 +507,17 @@ been run is a guess — the `openssl rand -base64 32` line that used to be in §
 
 ---
 
-## 7. The 2026-11-01 demo: hosted dev instance and real-account discovery (ADR-0197)
+## 7. The 2026-11-01 demo: the live instance on the laptop and real-account discovery (ADR-0197, ADR-0203)
 
-This section is for `DEMO_SCRIPT_2026-11-01.md`. Sections 1-6 above still describe the local, seeded environment;
-the fallback stack below is prepared the same way.
+This section is for `DEMO_SCRIPT_2026-11-01.md`. Sections 1-6 above still describe the local, seeded environment.
+
+**Live host (ADR-0203; owner, 2026-10-29, #453 c6485593621).** The hosted AWS dev instance (EC2, `/opt/app`, Session
+Manager, user data, the `--profile tls` Caddy front door, the power schedule and the backup timer) was deleted with the
+July AWS Organization. The live instance is now **the owner's laptop**, running the Docker compose stack behind a
+Cloudflare Tunnel (`--profile tunnel`, [TUNNEL.md](../../docs/deployment/TUNNEL.md)) at `https://regulait.<domain>`.
+Its database is wiped once and prepared from empty with `demo:prepare --live`, so the laptop is the real-accounts demo
+and the sample-data walkthrough is no longer on it. Steps below that only applied to the AWS host are kept, marked
+**superseded by ADR-0203**, so that older references still resolve; do not run them.
 
 **Dates (owner, 2026-10-23, #453).** Two runs use this section: a full **internal run-through on Sun 2026-11-01,
 afternoon ET**, and the **external demo on Tue 2026-11-03**. The code freeze stays **Thu 2026-10-29**. Everything here
@@ -517,59 +531,56 @@ point there rather than repeating commands nobody has run.
 
 ### 7.1 What runs where
 
-- **Live instance:** the hosted dev instance over public HTTPS (ADR-0197 decision 1). The laptop is only a browser.
-  Its database carries the governance seed and the four real discovery sources (three network scanners and one
-  device inventory import source), and **only real findings**: what the real GitLab, AWS and Azure scans and the real
-  device's inventory export find (owner, 2026-10-19, ADR-0197 addendum decision 3, option A; device import: owner,
-  2026-10-24, ADR-0197 addendum of that date). **No endpoint agent on LIVE** (FS-1): `GET /v1/endpoint-agent/config`
-  answers 503 `collection_pack_unavailable` until the signing stage (ADR-0195 SD4g) exists, and the agent's compiled
-  keyring is empty, so a real agent never reaches the report stage. The agent stays on the fallback, where its
-  reports are seeded. No seeded discovery dataset. Prepare it from empty with `demo:prepare --live`: the same pipeline without
-  either `demo:shadow` phase, with `demo:intake --live` (the shipped signature catalogues, not the synthetic SaaS
-  export), ending in `demo:check --live`. That check FAILs on any trace of the fictional dataset, and on "1 Real
-  discovery sources" until one real source is enabled, so on a fresh database it ends with that one FAIL: add the
-  sources (§7.2) and re-run the check. CI runs both on an empty database (`demo.yml`, `demo-live`); on the dev instance
-  host this is **pending execution**. On that host every demo command runs inside the gateway container, after the
-  gateway environment of §7.6 is in place (the compose `db` publishes no port, and the host has no pnpm):
-
-  ```bash
-  # pending execution — on the dev host, in /opt/app, once, on an empty database, BEFORE DEMO_REAL_ACCOUNTS step 2
-  sudo docker compose exec gateway node apps/gateway/dist/demo-prepare.js --live
-  # after the sources exist and one is enabled (§7.2):
-  sudo docker compose exec gateway node apps/gateway/dist/demo-check.js --live
-  ```
-
+- **Live instance:** the owner's laptop, published at `https://regulait.<domain>` through the Cloudflare Tunnel
+  (ADR-0203 decision 1; it replaces ADR-0197 decision 1's hosted dev instance). The same laptop presents. It must be on
+  and online whenever a cloud fetches the federation issuer, at every scan, and for both runs, on the same network as
+  11-03 (ADR-0203 consequences). Its database carries the governance seed and the four real discovery sources (three
+  network scanners and one device inventory import source), and **only real findings**: what the real GitLab, AWS and
+  Azure scans and the real device's inventory export find (owner, 2026-10-19, ADR-0197 addendum decision 3, option A;
+  device import: owner, 2026-10-24, ADR-0197 addendum of that date). **No endpoint agent on LIVE** (FS-1): `GET
+  /v1/endpoint-agent/config` answers 503 `collection_pack_unavailable` until the signing stage (ADR-0195 SD4g) exists,
+  and the agent's compiled keyring is empty, so a real agent never reaches the report stage. No seeded discovery
+  dataset. Prepare it from empty with `demo:prepare --live`: the same pipeline without either `demo:shadow` phase,
+  with `demo:intake --live` (the shipped signature catalogues, not the synthetic SaaS export), ending in `demo:check
+  --live`. That check FAILs on any trace of the fictional dataset, and on "1 Real discovery sources" until one real
+  source is enabled, so on a fresh database it ends with that one FAIL: add the sources (§7.2) and re-run the check. CI
+  runs both on an empty database (`demo.yml`, `demo-live`); on the laptop this is **pending execution**. Every demo
+  command runs inside the gateway container (`docker compose exec gateway node apps/gateway/dist/<script>.js`), after
+  the live environment of §7.6 is in place: the compose `db` publishes no port, and the container's environment is the
+  one the gateway has. The full order (override, the one wipe, up, key, prepare, passwords, MFA, check) is §7.6.
   - **Once only** (deep scan #522, #15). Each AWS and Azure trust policy names its discovery source's id, so prepare
     LIVE **once, before** `DEMO_REAL_ACCOUNTS.md` step 2 creates the sources. Re-preparing later creates new source ids,
-    and every federated run fails until both stacks are re-applied. **Never `docker compose down -v` on the dev host**:
-    besides the database it deletes `caddy_data` (the ACME certificates; Let's Encrypt allows 5 duplicate certificates
-    a week), `install_secrets` and the object-store anchors. If the database must be emptied, stop `gateway` and `db`
-    and remove only the `pgdata` volume. Rehearse remediation on a different real finding, never by re-preparing.
+    and every federated run fails until both stacks are re-applied. **`docker compose --profile tunnel down -v` runs
+    exactly once on the laptop**, in §7.6 step 3, before any discovery source exists, and **never again** after
+    `DEMO_REAL_ACCOUNTS.md` step 2. Rehearse remediation on a different real finding, never by re-preparing.
   - **`staging`** (deep scan #4, owner decision): `demo:prepare --live` creates an audited mock deploy target named
     `demo-staging` (environment `staging`), so a remediation workflow may target that environment, and
     `demo:check --live` asserts it with the beat "1 Remediation environment" (PASS: "'staging' is an accepted
     remediation environment: deploy target 'demo-staging' (mock)"). Detection is unaffected.
-  - **Never the demo switch on the live box** (`REGULAIT_DEMO_LICENSE=1`). It runs the non-live intake and writes the
-    fictional dataset into the live database, which `demo:check --live` then FAILs ("1 Fictional dataset"), and the
-    audit is append-only, so it cannot be removed. The export key and licence keyring come from the override in §7.6.
-  - **HSTS** (deep scan #14). The dev host sets `REGULAIT_HSTS` (user data, ADR-0029 amendment), so the gateway treats
-    the box as deployed and refuses offline auto-pass. On LIVE the seeded pipeline and deploy workflows rest at
-    unreported checks, while on the fallback and in CI they reach blocked or rolled back. S3 is unaffected: its template
-    has no check stage. Do not open those pipelines on LIVE in Q&A. Keep HSTS as it is.
+  - **Never the demo switch on the live laptop** (`REGULAIT_DEMO_LICENSE=1`). It runs the non-live intake and writes
+    the fictional dataset into the live database, which `demo:check --live` then FAILs ("1 Fictional dataset"), and the
+    audit is append-only, so it cannot be removed. The export key and licence keyring come from the local override in
+    §7.6.
+  - **HSTS** (deep scan #14). On the AWS host user data set `REGULAIT_HSTS`, so the gateway treated the box as deployed
+    and refused offline auto-pass. **On the laptop this is an open question for the owner (§7.6, "Open questions"):**
+    `docker-compose.yml` does not pass `REGULAIT_HSTS` from `.env` to the gateway, so the `.env` line TUNNEL.md step 3
+    asks for does not reach it. Without that signal, a demo step that sets `REGULAIT_OFFLINE_CHECKS=1` for its own process
+    (the seed does, `apps/gateway/src/seed.ts`) may auto-pass checks that the AWS host left unreported
+    (`offlineAutoPassRefusal`, `apps/gateway/src/workflows.ts`), so the seeded pipeline and deploy workflows on LIVE may
+    not rest where they did on the AWS host. Not observed yet: look once after the prepare, and do not open those
+    pipelines on LIVE in Q&A. S3 is unaffected: its template has no check stage.
   - **Licence** (deep scan #39). `demo:setup` mints a 30-day demo licence with no grace and keeps any valid one. A LIVE
-    database prepared from empty on or after 2026-10-05 holds a licence past 11-03; expiry would block expansion
-    actions only. After the demo, re-mint when 7 days or less remain.
-- **Fallback:** the local docker compose stack on the presenting laptop (§1.3),
-  prepared from empty **less than 18 hours before each run** (owner, 2026-10-23: once for 11-01 and again for 11-03),
-  including the seeded discovery dataset (ADR-0197 decision 7). High alerts read *SLA due soon* 18 h after they are
-  raised and *SLA breached* from 24 h, so a fresher database keeps G5's chips on *on track*, as in the screenshot pack.
-  For a 14:00 ET start, prepare no earlier than 20:00 ET the evening before. It must pass `demo:check` with 0 fail;
-  compare the counts with the latest green `Demo journey` run (§1.3), not with a number written earlier. For the endpoint device to enrol, the stack needs
-  `REGULAIT_PUBLIC_URL` and the identity signing key (the `demo:check` hint says so). **Pending execution.**
-- **Deploy gate:** `demo:gate` runs live from a terminal on the dev instance host (addendum, decision 2), with the
-  T-24h captured output as the fallback. The host has no SSH (no key pair; only ports 80 and 443 are open), so the
-  terminal is a Session Manager shell. The command runs inside the gateway container, kept in a one-line script, with
-  the environment `staging` (§7.6). It is **pending execution** on that host.
+    database prepared from empty on 2026-10-29 holds a licence past 11-03; expiry would block expansion actions only.
+    After the demo, re-mint when 7 days or less remain.
+- **Fallback: open question for the owner, see #453.** Until 10-29 the fallback was the sample-data stack (§1.3) on
+  the presenting laptop, prepared from empty under 18 hours before each run, with the seeded discovery dataset (ADR-0197
+  decision 7). After the 2026-10-29 wipe that stack **no longer exists on the laptop**, and nothing in this repository
+  says where it runs now. Every row and table below that says "FALLBACK" or "the fallback stack on the laptop" (§7.3,
+  §7.4, §7.5, and "11-01 run-through: where each beat runs") depends on this decision and is **blocked on it**. The
+  recording and the offline screenshot deck below are unaffected.
+- **Deploy gate:** `demo:gate` runs live from a terminal on the laptop (addendum, decision 2), inside the gateway
+  container, with the environment `staging` (§7.6), and the T-24h captured output as the fallback. It is **pending
+  execution** on the laptop. (On the AWS host the terminal was a Session Manager shell: superseded by ADR-0203.)
 - **Recording:** a screen recording of one real scan, Discovery sources → Run now → Recent runs (open its folded
   header first: it starts folded on a first visit) → Shadow-AI discovery, captured from the live instance. Kept as a local file on the presenting laptop.
 
@@ -621,14 +632,14 @@ time. Rows marked *once* are done a single time for both. The recipes the rows n
 
 | When | Check | Status |
 |---|---|---|
-| Before Sun 10-25, *once* | **Power schedule off** (deep scan #2, owner): the owner applies `power_schedule_enabled = false` in `infra/environments/regulait-dev-app` and confirms that both EventBridge schedules, `regulait-dev-app-start` and `regulait-dev-app-stop`, read **DISABLED** (§7.6). By default the box runs only 08:00-20:00 ET Mon-Fri, so it would be off from Fri 10-30 20:00 to Mon 11-02 08:00. If the plan shows a `user_data` change, the apply stops and starts the box: run it outside rehearsal hours | pending execution — owner |
-| Before Thu 10-29, *once* | **Both hosts on post-#508 main** (deep scan #38, owner): update the dev host and the presenting laptop to `main` after #508 (Postgres and Keycloak pinned by digest), run `docker compose pull` while online, then prepare and check (LIVE: §7.1 once; laptop: a trial `demo:prepare`). Close long-running `psql` sessions on the dev host first: the first boot after an update builds an audit index concurrently and stops with `ConcurrentIndexBlockedError` if it cannot get its locks within 60 s (#43). **No `pull` during the freeze**; hold #521 until after the demo | pending execution — owner |
-| Before Thu 10-29, *once* | **Live gateway environment** (deep scan #6, owner): the export-signing key, its id and `REGULAIT_LICENSE_KEYRING` added to the dev host's `docker-compose.override.yml`, gateway recreated (§7.6). **Never the demo switch on the live box** | pending execution — owner |
+| Before Sun 10-25, *once* | **Power schedule off**: **superseded by ADR-0203** (the EC2 box and its EventBridge schedules no longer exist). Instead: keep the laptop on, awake and online for both runs and whenever a cloud must reach the issuer (`DEMO_REAL_ACCOUNTS.md` step 1a) | superseded |
+| Before Thu 10-29, *once* | **The laptop on post-#508 main** (deep scan #38, owner): update the laptop's checkout to `main` after #508 (Postgres and Keycloak pinned by digest) and run `docker compose pull` while online, before the §7.6 wipe. The first boot after an update builds an audit index concurrently and stops with `ConcurrentIndexBlockedError` if it cannot get its locks within 60 s (#43): close any `psql` session first. **No `pull` during the freeze**; hold #521 until after the demo. (The dev host half is superseded by ADR-0203.) | pending execution — owner |
+| Before Thu 10-29, *once* | **Live gateway environment** (deep scan #6, owner; #453 c6485593621): `REGULAIT_DEMO_LICENSE=1` removed from the laptop's `.env`, and the export-signing key, its id and `REGULAIT_LICENSE_KEYRING` in the laptop's git-ignored local `docker-compose.override.yml`, written before the wipe (§7.6 steps 1-2). **Never the demo switch on the live laptop** | pending execution — owner |
 | Before Thu 10-29, *once* | **Branch rule on main** (deep scan #51, owner): require `ci.yml`'s `build-and-test` check on `main` for the freeze, with an admin bypass for docs-only PRs; remove it after 11-03 | pending execution — owner |
-| *Once*, before `DEMO_REAL_ACCOUNTS.md` step 2 | `demo:prepare --live` on the dev host from empty, through `docker compose exec` (§7.1). It creates the mock deploy target `demo-staging` (environment `staging`) | pending execution — owner |
+| *Once*, before `DEMO_REAL_ACCOUNTS.md` step 2 | The one wipe (`docker compose --profile tunnel down -v`), then `demo:prepare --live` from empty, passwords, admin MFA and `demo:check --live` on the laptop, through `docker compose exec` (§7.6 steps 3-8). It creates the mock deploy target `demo-staging` (environment `staging`). Never `down -v` again after step 2 | pending execution — owner |
 | Now, then after the freeze dispatch | **Offline deck** (deep scan #20): rebuild it from the `demo-screens` artifact of run `39940181481` (artifact `12497390750`, kept until 11-22) with `node apps/web/e2e/fallback-deck.mjs --pack 2026-11-01 --dark --no-gate`. After the freeze-SHA dispatch below, rebuild it from that run's artifact with `--gate <path to real-gate.txt>` in place of `--no-gate` (31 slides) | pending execution |
 | Thu 10-29, *once* | **Freeze-SHA dispatches** (deep scan #21, owner): dispatch `demo.yml`, `ci.yml` and `ui-enterprise.yml` on `main` at the freeze SHA; record each run id and the SHA in §7.5. The 10-21 rehearsal's gate artifact expires 2026-10-28 15:06Z; the freeze dispatch replaces it | pending execution |
-| T-7d | **Power schedule still off**: both schedules still read **DISABLED** (§7.6) | pending execution — owner |
+| T-7d | **Power schedule still off**: **superseded by ADR-0203**. Instead: the laptop's sleep settings keep it awake while plugged in, and the tunnel shows **HEALTHY** (TUNNEL.md, Verify) | superseded |
 | T-7d | First real-account round trip done for each source: a run **succeeded**, **Reads** says *all read* or names what it could not read, findings appear | pending execution |
 | T-7d | **Device inventory import** (FS-1, owner 2026-10-24): the `endpoint_inventory` source exists and is enabled; the demo laptop's export has a **Dry run** that matches the planted AI apps and refuses nothing unexpected, then one **Import**; its run reads *succeeded* in **Recent runs** and the device finding (*Endpoint inventory*) is on `/ui/admin/shadow-ai` (§7.2). No endpoint agent is enrolled on LIVE | pending execution |
 | T-7d | **Audit anchor on LIVE** (scan Q12, owner 2026-10-24): signed in as Ada, `GET /v1/audit/verify` on the live instance; note whether the anchor reads tamper-resistant and that at least one anchor has been written. If not, brief the presenter for G8 with the §2 "graded down honestly" line (*"this install has no WORM medium, and rather than let me claim one, the product grades itself down"*) rather than avoiding the folded panels | pending execution |
@@ -643,38 +654,40 @@ time. Rows marked *once* are done a single time for both. The recipes the rows n
 | T-24h | **E. Enforce it** (FS-8, owner 2026-10-24 and #453 comment 6387779914): on the stack the beat runs on (FALLBACK before 11-01, LIVE before 11-03), `/ui/admin/simulation` as Ada answers Dana · `repo-tools` · `search_code` with **deny** and `write_file` with **require approval** naming Avery. Each question writes one advisory audit row and nothing else. The beat is a *simulated decision* on both dates; it does not need the demo MCP server, so there is no MCP-server check (DEMO_SCRIPT E) | pending execution |
 | T-24h | On the live database, the chosen finding has **no** remediation workflow yet and has **not** been registered as a use case (S3 and S4 each use it up: LIVE allows one workflow per finding, and one finding is one use case, ever; a second registration is refused 409). On 11-01 S3 and S4 run on the fallback, so the LIVE finding is chosen for 11-03. On the fallback, `gitlab:acme-bank-demo/credit-memo-assistant`'s workflow waits on Morgan (`demo:check` "1 Remediation plan" PASS); nobody approved it at rehearsal | pending execution |
 | T-24h | `staging` is accepted on the live instance: `demo:check --live` shows "1 Remediation environment" PASS | pending execution |
-| T-24h | **Re-run `demo:traffic` on LIVE, only that step** (deep scan #8, owner): the monitor counts off-stack serving and trace evaluation over **7 days** and resolves alerts that clear, so traffic made at prepare time no longer holds G3's second BLOCK line. Rehearse the re-run on a copy of the database first (once). Then, on LIVE: `sudo docker compose exec gateway node apps/gateway/dist/demo-traffic.js`, after the T-24h scans | pending execution |
+| T-24h | **Re-run `demo:traffic` on LIVE, only that step** (deep scan #8, owner): the monitor counts off-stack serving and trace evaluation over **7 days** and resolves alerts that clear, so traffic made at prepare time no longer holds G3's second BLOCK line. Rehearse the re-run on a copy of the database first (once). Then, on the laptop: `docker compose exec gateway node apps/gateway/dist/demo-traffic.js`, after the T-24h scans | pending execution |
 | T-24h | **Capture `real-gate.txt`** after that traffic re-run (deep scans #5, #8, #11): run the G3 script (§7.6) with `staging` and copy its output to `real-gate.txt` on the presenting laptop. Expect `DENY "Real-Time Fraud Detection Engine" (approved, EU AI Act tier high) → staging` with two `BLOCK open_high_alert` lines. Do **not** acknowledge the alerts on LIVE at this check | pending execution |
 | T-24h | **Signed export on LIVE** (deep scan #6, owner): `GET /v1/exports/signing-key` (signed in as Ada) reports `configured: true`, and one **Download signed bundle** on `/ui/admin/audit` as Ada succeeds | pending execution |
 | T-24h | **S4 model card still unsigned on LIVE** (owner, #453): the agent chosen for S4's **Link stack** shows **Not signed off** on its model card | pending execution |
 | T-24h | `demo:check --live` on the live instance (§7.1): 0 fail (no fictional-dataset trace, every real source listed with its last run) | pending execution |
 | T-24h | Screen recording of one real scan captured and played back once | pending execution |
 | T-24h | **Offline deck** opened on the presenting laptop with the network off: 31 slides (30 with `--no-gate`), S1 to G10 in script order | pending execution |
-| T-24h, under 18 h before the start | **Gateway health on the laptop** (FS-37): after the prep has finished, `docker compose ps` shows the gateway **(healthy)**. During the prep it can read *unhealthy* on a slow laptop (the healthcheck's `start_period` is 90 s and does not cover the in-container prep); that is cosmetic, but present only once it reads healthy | pending execution |
-| T-24h, under 18 h before the start | Fallback stack on the laptop prepared from empty (§1.3, with both `.env` lines); `demo:check` 0 fail, counts as in the latest green `Demo journey` run (re-check: §1.3); Ada, Avery and Morgan signed in there too, in a separate browser. Re-prepare it for 11-03: on 11-01 every state-changing beat runs on it (§7.3 "Between the runs") | pending execution |
-| T-24h | F28: the laptop stack's **running gateway** has `REGULAIT_PUBLIC_URL` set, not only the `demo:prepare` step (the Cloud federation card then does not say the public URL is not configured; CI sets it only on the prepare step, so the screenshot pack shows that line) | pending execution |
+| T-24h | **Gateway health on the laptop** (FS-37): `docker compose ps` shows the gateway **(healthy)**, and `cloudflared` and `caddy-tunnel` running (TUNNEL.md, Verify) | pending execution |
+| T-24h, under 18 h before the start | Fallback stack prepared from empty (§1.3): **blocked, open question for the owner** (§7.1, "Fallback"; #453). It no longer runs on the laptop after the 2026-10-29 wipe | blocked — owner decision |
+| T-24h | F28: the live gateway has `REGULAIT_PUBLIC_URL` set to `https://regulait.<domain>` (TUNNEL.md step 4), so the Cloud federation card shows the issuer and does not say the public URL is not configured | pending execution |
 | T-24h | Neither demo budget alert has fired (AWS USD 40 and Azure USD 10, USD 50 in total; each alerts at 80%, USD 32 and USD 8, `internal/product/DEMO_REAL_ACCOUNTS.md`); planted usage still within budget (ADR-0197 decision 4) | pending execution |
-| Morning of each run | **Backup out of the window** (deep scan #13, owner): the dev host's backup timer runs `pg_dump` daily at 17:00 UTC, which is 12:00 EST on both days. Run the backup by hand before the window, stop the timer, and start it again after the run (§7.6) | pending execution — owner |
-| T-1h | Browsers: Profile A (Ada), Profile B (Avery) and Profile C (Morgan) on the live instance, all signed in; the fallback browser signed in to the laptop stack; one spare browser installed | pending execution |
+| Morning of each run | **Backup out of the window**: **superseded by ADR-0203** (the dev host's `regulait-pg-backup.timer` no longer exists; the laptop runs no backup timer, so nothing runs in the window) | superseded |
+| T-1h | Browsers: Profile A (Ada), Profile B (Avery) and Profile C (Morgan) on the live instance (`https://regulait.<domain>/ui`), all signed in; the fallback browser per the owner's fallback decision (§7.1); one spare browser installed | pending execution |
 | T-1h | **Idle limit** (deep scan #7, owner): a session ends after **30 idle minutes** (the strict default; it is not relaxed for the demo). The only keep-alive is the Inbox's 30-second poll, which pauses while a window is hidden. Profiles signed in at T-1h will have timed out by S3 unless they are refreshed at T-10 min | pending execution |
-| T-1h | A Session Manager shell open on the dev host for G3, the G3 script in place, and `real-gate.txt` open in a viewer on the laptop as its fallback (§7.6) | pending execution |
+| T-1h | A terminal open on the laptop in the repository checkout for G3, the G3 script in place, and `real-gate.txt` open in a viewer as its fallback (§7.6) | pending execution |
 | T-1h | Navigation pinned in every profile (**Pin navigation**) | pending execution |
 | T-1h | In each presenting profile, and in the fallback browser on the laptop stack, open the folded sections the script uses once, so they are open on the day: **Recent runs** on Discovery sources (Ada). The fold is remembered per person, page and section in that browser and origin only, so a fresh profile starts with Recent runs, the Inbox's **Recently decided** and Usage events folded | pending execution |
 | T-1h | Every browser window at 1440 px wide or more, so the detail drawer (alerts, Inbox items, the remediation plan, the sign-off review) opens beside the page; at 900 px or less it is a modal that hides the page (DEMO_SCRIPT, "Detail drawer") | pending execution |
 | T-1h | **Theme** (deep scan #35): the same look in every profile, chosen for the room's projector. Light or dark is the ☾ / ☀ button in the top bar (**Switch to dark theme** / **Switch to light theme**); the palette is on **Account** (`/ui/account`) → **Appearance**. Both are kept per browser, so set them in every profile and in the fallback browser | pending execution |
 | T-1h | Ada's and Morgan's authenticators on the presenting phone; the phone charged and silenced | pending execution |
-| T-1h | The live instance answers over HTTPS from the venue network (open `/ui` in each profile). The hosts-file line of §7.6 is ready in case the `sslip.io` name does not resolve there | pending execution |
+| T-1h | The live instance answers over HTTPS from the venue network (open `/ui` in each profile) and the tunnel shows **HEALTHY**. (The `sslip.io` hosts-file line is superseded by ADR-0203: the name is on Cloudflare DNS.) | pending execution |
 | T-1h | **Presenter brief on SLA chips** (deep scan #13): on LIVE, prepared more than a week earlier, every open high and medium alert reads **SLA breached** (the G5 unowned-agent alert included), and the drawer adds that it was escalated to the admins. Say: "the product escalates overdue alerts". Acknowledging an alert does not stop its clock. Do not relax the SLAs, and do not re-prepare LIVE | pending execution |
 | T-10 min | **Sessions** (deep scan #7, owner): in every profile, the fallback browser included, sign in again or bring the window to the front so it is active. Keep the windows tiled and never fully covered, so each stays visible and its poll keeps running | pending execution |
-| T-5 min | **G3 shell** (deep scan #12, owner): reconnect the Session Manager shell (`aws ssm start-session`; the 20-minute idle default would close one opened at T-1h before G3) and check the G3 script is still there | pending execution |
+| T-5 min | **G3 terminal**: the laptop terminal is still open and the G3 script is still there. (Reconnecting a Session Manager shell is superseded by ADR-0203.) | pending execution |
 | 11-01 run-through | **State-changing beats on FALLBACK only** (owner, 2026-10-23, #453). LIVE is never re-prepared, so anything changed there on 11-01 stays for 11-03 (a re-detected alert keeps its acknowledged status, so an acknowledged G3 alert would turn 11-03's DENY into ALLOW; S3 and S4 each use up their finding, one finding is one use case, ever). On 11-01 these run on the **FALLBACK** laptop stack: G3 acknowledge then ALLOW, G5 resolve, S3 **Start and link** (Ada's live half on the second finding, FS-7), S4 register, and E (Enforce it). **LIVE read-only**: every other beat, plus G3's DENY gate. The per-beat marks are in DEMO_SCRIPT_2026-11-01 (each beat's "11-01 run-through" line) and in "11-01 run-through: where each beat runs" below | decided — owner |
 | Between the runs | **`demo:traffic` for 11-03**: re-run it on LIVE again at T-24h before 11-03 (Mon 11-02), after that day's scans, then capture a fresh `real-gate.txt`, so the monitor's 7-day window still holds G3's second BLOCK line on 11-03. The fallback is prepared again from empty, under 18 h before 11-03 | pending execution |
-| After 11-03 | **Power schedule back on** (owner): `power_schedule_enabled = true`, plan and apply (`DEMO_TEARDOWN.md` T8). Start the backup timer if it is still stopped | pending execution — post-demo, owner |
+| After 11-03 | **Power schedule back on**: **superseded by ADR-0203** (no EC2 box). Stop the tunnel when the demo is over (TUNNEL.md, "Stopping and rolling back") | superseded |
 | After 11-03 | **Remove the freeze branch rule** on `main` (deep scan #51, owner) | pending execution — post-demo, owner |
 | After | Teardown of the sandbox resources and the Azure deployment, tracked as a follow-up (ADR-0197 consequences): [DEMO_TEARDOWN.md](DEMO_TEARDOWN.md) | pending execution — post-demo, owner |
 
 
-**11-01 run-through: where each beat runs** (owner, 2026-10-23, #453). LIVE is prepared once and never re-prepared.
+**11-01 run-through: where each beat runs** (owner, 2026-10-23, #453). **Blocked on the fallback decision** (§7.1,
+"Fallback"; #453): every FALLBACK cell below assumed the sample-data stack on the laptop, which the 2026-10-29 wipe
+removed. LIVE is prepared once and never re-prepared.
 On 11-01 every step that changes state runs on the FALLBACK laptop stack, so LIVE stays as prepared for 11-03. On
 11-03 every beat runs on LIVE as scripted.
 
@@ -707,12 +720,12 @@ fallback only. Re-run `demo:traffic` on LIVE at T-24h before 11-03 (Mon 11-02), 
 | Morgan's **Approve** asks for a code she cannot give | her authenticator was not enrolled after `demo:set-passwords` | switch to the fallback stack; never relax MFA live |
 | The remediation panel says **no workflow assigned** | an admin rule replaced the default assignment | link a workflow started another way, or switch to the fallback stack |
 | An alert, Inbox item or plan opens over a dimmed page that cannot be clicked | the window is 900 px wide or less, so the detail drawer is a modal | **Close** the panel, widen the window (or zoom out) and open it again |
-| The live instance does not load | network or instance failure | play the recording for S1-S2, then the fallback stack on the laptop or the screenshot deck |
-| The live instance's name does not resolve (a DNS error such as "server not found", not a TLS or 5xx error) | the venue's DNS filter blocks `sslip.io`, or that wildcard DNS service is down | add the hosts-file line of §7.6 on the presenting laptop and reload; TLS stays valid because the name is unchanged. If it still fails, switch as in the row above |
+| The live instance does not load | the laptop, its network, the tunnel or Cloudflare | check `docker compose ps` and the tunnel's state in the dashboard (TUNNEL.md, Verify) only if it takes seconds; otherwise play the recording for S1-S2, then the screenshot deck. The fallback stack: open question for the owner (§7.1) |
+| The live instance's name does not resolve (a DNS error such as "server not found", not a TLS or 5xx error) | the venue's DNS filter blocks the name | switch as in the row above. (The `sslip.io` hosts-file workaround is superseded by ADR-0203: a hosts-file line cannot reach a tunnel, which has no public IP of its own) |
 | A screen is still loading after about 10 seconds | a slow or hung gateway or database: the UI has no request timeout, so a hang shows an endless loading state, not an error (deep scan #27) | do not wait or reload repeatedly: switch at once to the recording or the fallback stack at the same beat. A real error shows with **Retry**, and one press of **Retry** is fine |
 | A profile shows the sign-in page | the 30-minute idle limit ended its session (§7.3, T-10 min) | sign in again (Morgan: password and authenticator code); her **Approve** may then ask for the next code. Never relax the session limit live |
-| The G3 shell is gone or does not answer | Session Manager closed it on idle | open a new session and run the G3 script; if that takes more than a few seconds, show `real-gate.txt` and say it was captured from a real run (§7.6) |
-| **Download signed bundle** shows *"Download failed (409 — export-signing-key-absent)"* | the live gateway was recreated without the §7.6 override | say the export is refused rather than unsigned, and move on; fix the override after the demo. Never set the demo switch on the live box |
+| The G3 terminal is gone or does not answer | the terminal was closed, or Docker is not answering | open a new terminal in the checkout and run the G3 script; if that takes more than a few seconds, show `real-gate.txt` and say it was captured from a real run (§7.6) |
+| **Download signed bundle** shows *"Download failed (409 — export-signing-key-absent)"* | the live gateway was recreated without the §7.6 local override (or the key file was not made after the wipe) | say the export is refused rather than unsigned, and move on; fix the override after the demo. Never set the demo switch on the live laptop |
 
 ### 7.5 Fallback rehearsal record (ADR-0197 decision 7)
 
@@ -764,9 +777,11 @@ the seed, the dataset or the gate: Actions → `Demo journey` → Run workflow.
    decision, and nothing in this demo is production. CI covers the decision rule only in a
    gateway unit test (`apps/gateway/src/zz-adr0161-deploy-gate.test.ts`, "an open high alert on the use case blocks;
    acknowledging it leaves a warning"), not on the demo database. Pending execution.
-2. **The laptop stack.** All of the above on the docker compose stack on the presenting laptop (§1.3), less than 18 hours before each run, with `REGULAIT_PUBLIC_URL` and the identity signing key set (§7.1). CI used a Postgres service and node
-   directly, not compose. Pending execution.
-3. **`demo:gate` on the dev instance host** (G3 live, and the T-24h `real-gate.txt` capture, §7.3), through the G3
+2. **The sample-data stack.** All of the above on a docker compose sample-data stack (§1.3), less than 18 hours before
+   each run, with `REGULAIT_PUBLIC_URL` and the identity signing key set. CI used a Postgres service and node directly,
+   not compose. **Blocked: where this stack runs is an open question for the owner** (§7.1, "Fallback"; #453). It no
+   longer runs on the laptop after the 2026-10-29 wipe.
+3. **`demo:gate` on the live laptop** (G3 live, and the T-24h `real-gate.txt` capture, §7.3), through the G3
    script of §7.6. Pending execution.
 
 **Latest green run of the seeded path, for the expected counts.** `Demo journey` run
@@ -788,75 +803,157 @@ it on `main`. Also dispatch `ci.yml` on `main` once #510 merges, to warm the cac
 
 ### 7.6 Live host recipes (pending execution)
 
-Everything in this subsection is **pending execution**: written from the code on `main`, not yet run on the dev host.
-The owner runs each step. Real values (instance id, IP, account ids) stay in the owner's notes, never here.
+Everything in this subsection is **pending execution**: written from the code on `main`, not yet run on the laptop.
+The owner runs each step. The live host is the owner's laptop (ADR-0203); the order below is the owner decision of
+2026-10-29 (#453 c6485593621). Real values (the public name, account ids, keys, passwords) stay in the owner's notes,
+`.env` and the password manager, never here.
 
-**Power schedule (deep scan #2; owner decision).** In `infra/environments/regulait-dev-app`, set
-`power_schedule_enabled = false` in the git-ignored `terraform.tfvars`, then plan and apply. `false` keeps both
-schedules but disables them; nothing is destroyed and the Elastic IP is untouched. If the plan shows a `user_data`
-change, the apply also stops and starts the box: run it outside rehearsal hours. Then confirm both schedules:
+**Shell.** The tunnel token lives only in the PowerShell session of TUNNEL.md step 4. Run every step below in Git for
+Windows' bash **started from that session**, so it inherits the token: `& "$env:ProgramFiles\Git\bin\bash.exe"`, then
+`cd` to the repository checkout. In that bash, first run `export MSYS_NO_PATHCONV=1`: without it Git Bash rewrites
+container paths such as `/app/demo-license-keys` in `docker compose exec` arguments into Windows paths. On macOS or
+Linux, any bash in the checkout works, with the token set as TUNNEL.md describes.
 
-```bash
-# pending execution — owner
-aws scheduler get-schedule --group-name default --name regulait-dev-app-start --query State --output text   # DISABLED
-aws scheduler get-schedule --group-name default --name regulait-dev-app-stop  --query State --output text   # DISABLED
-```
+**Steps 1-8 run once, in this order, before `DEMO_REAL_ACCOUNTS.md` step 2.** Stop and report on any failure; do not
+improvise around it (c6485593621).
 
-Emergency fallback if the box is off on a run day: start it by hand (`aws ec2 start-instances --instance-ids
-<instance id>`, from `terraform output instance_id`) and allow a few minutes for the stack. After 11-03, set it back to
-`true` and apply (`DEMO_TEARDOWN.md` T8).
-
-**Live gateway environment (deep scan #6; owner decision).** The live gateway needs the export-signing key, its id
-and the licence keyring. Compose does not forward them, and user data sets only the data key, the bootstrap token and
-HSTS. **Never set `REGULAIT_DEMO_LICENSE=1` on the live box** (§7.1).
-
-1. Make the key. Either the demo key, inside the gateway container, on the named volume the gateway already mounts:
-
-   ```bash
-   # pending execution — on the dev host, in /opt/app
-   sudo docker compose exec -e REGULAIT_DEMO_KEY_DIR=/app/demo-license-keys/export-signing gateway node apps/gateway/dist/demo-export-key.js
-   ```
-
-   It prints the key's path and its fingerprint (what an auditor pins), never the key, and reuses the key on later
-   runs. It also writes a demo receipt key in the same folder: leave that unused, and do not set the receipt
-   variables, because the gateway keeps the receipt key it made on its first boot. Or make the key **off the host**,
-   as ADR-0116 and [`infra/export-keys/README.md`](../../infra/export-keys/README.md) describe, and mount it into the
-   gateway read-only; the path you then set is the path inside the container.
-2. Add three lines to the gateway's `environment:` in `/opt/app/docker-compose.override.yml`. That file was written by
-   user data and already holds the data key and the bootstrap token: edit it in place with an editor, and never print,
-   copy or commit it. With the demo key from step 1 the lines are:
-
-   ```yaml
-   services:
-     gateway:
-       environment:
-         # (the existing lines stay as they are)
-         REGULAIT_EXPORT_SIGNING_KEY: /app/demo-license-keys/export-signing/regulait-demo-export.key
-         REGULAIT_EXPORT_SIGNING_KEY_ID: regulait-demo-export
-         REGULAIT_LICENSE_KEYRING: /app/demo-license-keys
-   ```
-
-3. Check the file without printing it, then recreate the gateway:
+1. **`.env`: no demo switch.** Remove the `REGULAIT_DEMO_LICENSE=1` line from the laptop's `.env` with an editor (it
+   makes the container run the sample-data prep on an empty database, §7.1). Then check, without printing the file:
 
    ```bash
    # pending execution
-   cd /opt/app && sudo docker compose config --quiet && sudo docker compose --profile tls up -d gateway
+   grep -c '^REGULAIT_DEMO_LICENSE' .env    # 0
+   grep -c '^REGULAIT_PUBLIC_URL=https://' .env   # 1: the tunnel URL of TUNNEL.md step 4
    ```
 
-4. Then run `demo:prepare --live` and `demo:check --live` through `docker compose exec` (§7.1). `demo:setup` writes the
-   licence's public key to `/app/demo-license-keys`, the keyring the gateway now reads. Every `exec` process inherits
-   the same variables, so `demo:check` tests what the gateway really has.
-5. T-24h check (§7.3): signed in as Ada, `GET /v1/exports/signing-key` answers `configured: true` with key id
-   `regulait-demo-export`, and one **Download signed bundle** on `/ui/admin/audit` succeeds.
+2. **The local override.** Compose merges a `docker-compose.override.yml` next to `docker-compose.yml` into every
+   command. The repository's `.gitignore` does **not** list that name, so first make git ignore it on this checkout only
+   (`.git/info/exclude` is local and never committed), then confirm:
 
-**G3 terminal and script (deep scans #5, #11, #12; owner decisions).** The host has no SSH, so open a Session Manager
-shell from the presenting laptop: `aws ssm start-session --target <instance id>` (the CLI's Identity Center
-credentials last 10 hours, so no new sign-in is needed on the day). Session Manager closes a shell after 20 idle
-minutes by default, so reconnect at T-5 min. Keep the gate command in a one-line script, made once:
+   ```bash
+   # pending execution
+   test -e docker-compose.override.yml && echo "an override already exists: stop and report" || echo "none yet"
+   echo 'docker-compose.override.yml' >> .git/info/exclude
+   git check-ignore -q docker-compose.override.yml && echo ignored    # must print "ignored"
+   ```
+
+   Then write the file. The three export-signing and keyring lines are the ones c6485593621 names. The data key and
+   the bootstrap token are generated into the file and never shown: `docker-compose.yml` otherwise falls back to the
+   published development values (`REGULAIT_DATA_KEY` of 64 `a`, `REGULAIT_BOOTSTRAP_TOKEN=dev-bootstrap`), a full-admin
+   credential anyone with the repository knows (`apps/gateway/src/dev-secrets.ts`), and the AWS host's override held
+   real values for both. They must be in place before the wipe in step 3, because the data key encrypts the stored
+   credentials. If `.env` already sets either name to a real value, the override's value wins for the gateway.
+
+   ```bash
+   # pending execution — writes secrets into the file; prints nothing
+   ( umask 077
+     { printf '%s\n' 'services:' '  gateway:' '    environment:'
+       printf '      REGULAIT_DATA_KEY: "%s"\n' "$(openssl rand -hex 32)"
+       printf '      REGULAIT_BOOTSTRAP_TOKEN: "%s"\n' "$(openssl rand -hex 24)"
+       printf '%s\n' \
+         '      REGULAIT_EXPORT_SIGNING_KEY: /app/demo-license-keys/export-signing/regulait-demo-export.key' \
+         '      REGULAIT_EXPORT_SIGNING_KEY_ID: regulait-demo-export' \
+         '      REGULAIT_LICENSE_KEYRING: /app/demo-license-keys'
+     } > docker-compose.override.yml )
+   docker compose --profile tunnel config --quiet && echo "compose config ok"
+   git status --short docker-compose.override.yml    # prints nothing
+   ```
+
+   Never print, copy, paste or commit the file (`config` without `--quiet` prints it, and the tunnel token with it;
+   TUNNEL.md step 4). Losing it loses the data key: keep the laptop's checkout until the demo is over. Do not add the
+   receipt-key variables: with none set, the gateway's first boot makes its own receipt key (`docker-compose.yml`,
+   ADR-0189 R25).
+
+3. **The one wipe.** Allowed now only because no discovery source or trust policy exists yet:
+
+   ```bash
+   # pending execution — EXACTLY ONCE, and never again after DEMO_REAL_ACCOUNTS step 2
+   docker compose --profile tunnel down -v
+   ```
+
+   It deletes every compose volume: the database, the demo keyring volume, the install secrets and the audit-anchor
+   objects. `.env`, the override and the tunnel token (a shell variable) survive it.
+
+4. **Bring the stack up:**
+
+   ```bash
+   # pending execution
+   docker compose --profile tunnel up -d --build
+   docker compose ps    # gateway (healthy), cloudflared and caddy-tunnel running
+   docker compose logs gateway | grep -c "demo prep"    # 0: no sample-data prep ran
+   ```
+
+   A `demo prep` line means the switch is still set somewhere (the `.env` or the session): stop and report, before
+   any further step.
+
+5. **The export-signing key**, inside the gateway container, on the keyring volume step 3 recreated:
+
+   ```bash
+   # pending execution
+   docker compose exec -e REGULAIT_DEMO_KEY_DIR=/app/demo-license-keys/export-signing gateway node apps/gateway/dist/demo-export-key.js
+   ```
+
+   It prints the key's path and its fingerprint (what an auditor pins), never the key, and reuses the key on later
+   runs. It also writes a demo receipt key in the same folder: leave that unused. The gateway reads the key file at
+   each signed export (`resolveExportSigningKey`, `apps/gateway/src/export-bundle.ts`), so no restart is needed. Or
+   make the key **off the laptop**, as ADR-0116 and [`infra/export-keys/README.md`](../../infra/export-keys/README.md)
+   describe, mount it into the gateway read-only in the override, and set the path inside the container instead.
+
+6. **Live prep:**
+
+   ```bash
+   # pending execution
+   docker compose exec gateway node apps/gateway/dist/demo-prepare.js --live
+   ```
+
+   It runs seed → `demo:setup` → `demo:intake --live` → `demo:traffic` → `demo:check --live`
+   (`apps/gateway/src/demo-prepare-steps.ts`). `demo:setup` writes the licence's public key to `/app/demo-license-keys`,
+   the keyring the gateway reads through the override, and every `exec` process inherits the same variables, so
+   `demo:check` tests what the gateway really has. Expect exactly **one FAIL, "1 Real discovery sources"**, until a
+   source is enabled (§7.1). Any other FAIL: stop and report.
+
+7. **Passwords and admin MFA.** The password goes from a hidden prompt into one `docker compose exec` process and is
+   never on a command line or in a file (README, "Demo with your own password (Docker)"):
+
+   ```bash
+   # pending execution
+   printf 'Demo password: '; read -rs REGULAIT_DEMO_USER_PASSWORD; echo
+   export REGULAIT_DEMO_USER_PASSWORD
+   docker compose exec -e REGULAIT_DEMO_USER_PASSWORD gateway node apps/gateway/dist/demo-set-passwords.js
+   unset REGULAIT_DEMO_USER_PASSWORD
+   ```
+
+   It also clears the authenticators of the two admins, `admin` and `morgan`, and their lockouts (c6485284493). Then,
+   in a **new private browser window** (not an older tab), sign in at `https://regulait.<domain>/ui` as `admin` →
+   **Generate enrollment secret** → scan it on the presenting phone → activate. Repeat for `morgan` in another new
+   private window. If the "Two-step verification: enter the 6-digit code" screen appears instead of the enrolment
+   screen, stop and post the output of the audit query in #453 c6485284493 step 4.
+
+8. **Check:**
+
+   ```bash
+   # pending execution
+   docker compose exec gateway node apps/gateway/dist/demo-check.js --live
+   ```
+
+   On a database with no source yet, it ends with the same single FAIL as step 6. Continue with
+   `DEMO_REAL_ACCOUNTS.md` step 1b (federation on), step 2 (the four sources, created disabled; copy their ids) and
+   step 4 (the `demo-sandbox/aws` plan, shown to the owner before any apply). After one source is enabled
+   (`DEMO_REAL_ACCOUNTS.md` step 7), run step 8 again: 0 FAIL, and post the result on #453.
+
+**From here on, never `docker compose --profile tunnel down -v`** (§7.1, "Once only"). `docker compose --profile
+tunnel down`, `up -d` and `restart gateway` keep the volumes. If the gateway is recreated, the override comes with it;
+check it with `docker compose --profile tunnel config --quiet` before `docker compose --profile tunnel up -d gateway`.
+
+**T-24h signed-export check** (§7.3): signed in as Ada, `GET /v1/exports/signing-key` answers `configured: true` with
+key id `regulait-demo-export`, and one **Download signed bundle** on `/ui/admin/audit` succeeds.
+
+**G3 terminal and script (deep scans #5, #11, #12; owner decisions).** A terminal on the laptop, in the checkout, in
+the bash described under **Shell**. Keep the gate command in a one-line script outside the checkout, made once:
 
 ```bash
-# pending execution — on the dev host, once
-printf '%s\n' '#!/bin/sh' 'cd /opt/app && sudo docker compose exec -T gateway node apps/gateway/dist/demo-gate.js "Real-Time Fraud Detection Engine" staging "${1:-demo-build}"' > ~/g3.sh && chmod +x ~/g3.sh
+# pending execution — in the checkout, once
+printf '#!/bin/sh\ncd %s && docker compose exec -T gateway node apps/gateway/dist/demo-gate.js "Real-Time Fraud Detection Engine" staging "${1:-demo-build}"\n' "'$PWD'" > ~/g3.sh && chmod +x ~/g3.sh
 ```
 
 - Run it as `~/g3.sh <ref>`. It runs inside the gateway container, so it uses the container's build and migrations,
@@ -865,36 +962,26 @@ printf '%s\n' '#!/bin/sh' 'cd /opt/app && sudo docker compose exec -T gateway no
 - Expected output: the `$ regulait gate deploy … --env staging --ref <ref>` line and a blank line, then `DENY  "Real-Time Fraud Detection Engine" (approved, EU AI Act tier high) → staging`, two
   `BLOCK open_high_alert` lines, then `assurance: …`. After the two alerts are acknowledged (DEMO_SCRIPT G3): `ALLOW`
   with two `WARN acknowledged_high_alert` lines.
-- T-24h capture: `~/g3.sh t24h > ~/real-gate.txt; cat ~/real-gate.txt`, then copy the text into `real-gate.txt` on the
-  presenting laptop. It holds the decision lines only, no secret. Keep it open in a viewer during the demo as G3's
-  fallback.
+- T-24h capture: `~/g3.sh t24h > ~/real-gate.txt; cat ~/real-gate.txt`. It holds the decision lines only, no secret.
+  Keep it open in a viewer during the demo as G3's fallback.
 
-**Hosts-file line (deep scan #16).** The live URL and the federation issuer are `<a-b-c-d>.sslip.io` names, which rely
-on a public wildcard DNS service. If the venue's DNS cannot resolve the name (§7.4), map it to the Elastic IP on the
-presenting laptop: the line is `<elastic ip>  <a-b-c-d>.sslip.io`, the same IP written with dots, in `/etc/hosts`
-(macOS, Linux; with sudo) or `C:\Windows\System32\drivers\etc\hosts` (Windows; as administrator). TLS stays valid
-because the name does not change. It fixes only this laptop's browser; the clouds' fetch of the issuer is not affected,
-and no scan runs live. Remove the line after the demo. Keep it written down, not applied, until it is needed.
+**Open questions for the owner (#453).**
 
-**Backup timer (deep scan #13; owner decision).** The dev host's backup timer (`regulait-pg-backup.timer`) runs
-`pg_dump` daily at 17:00 UTC, which is 12:00 EST on 11-01 and on 11-03. With the power schedule off it runs every day.
-Keep it out of both demo windows:
+- **Fallback.** The sample-data stack no longer runs on the laptop (§7.1, "Fallback"). Where, if anywhere, it runs for
+  11-01 and 11-03 is undecided; the rows that depend on it are marked blocked.
+- **HSTS.** TUNNEL.md step 3 puts `REGULAIT_HSTS=max-age=86400` in `.env`, but `docker-compose.yml` does not pass that
+  name to the gateway, so the gateway sends no HSTS header and does not see the deployed signal (§7.1, "HSTS"). The
+  owner saw a single `max-age=15552000; includeSubDomains` header from the Cloudflare zone (#453 c6485165280).
+  Adding `REGULAIT_HSTS` to the override would make two layers set it unless the zone setting is turned off, and with
+  it set the gateway refuses to boot on the published development secrets (step 2 replaces them). Not changed here.
 
-```bash
-# pending execution — on the dev host, the morning of each run, well before the window
-sudo /usr/local/sbin/regulait-pg-backup.sh --run      # a fresh backup now
-sudo systemctl stop regulait-pg-backup.timer          # nothing runs during the run
-# after the run:
-sudo systemctl start regulait-pg-backup.timer         # Persistent=true runs the missed backup at once
-```
-
-`stop` does not disable the timer, so a reboot also re-arms it. See `docs/ops/DB_BACKUP.md` for the status commands.
-
-**Updating the hosts (deep scan #38, #43; owner decision).** Before 10-29, update the dev host and the laptop to
-`main` after #508, and run `docker compose pull` while online, so the digest-pinned Postgres and Keycloak images are
-present. On the dev host, close any long `psql` session before restarting the stack: the first boot after an update
-builds an audit index concurrently and stops with `ConcurrentIndexBlockedError` if it cannot get its locks within
-60 s. Then prepare and check. Do not pull again during the freeze.
+**Superseded by ADR-0203 (the AWS dev host; kept for the record, do not run).** The power schedule
+(`power_schedule_enabled` in `infra/environments/regulait-dev-app`, the `regulait-dev-app-start` and
+`regulait-dev-app-stop` EventBridge schedules, starting the instance by hand with `aws ec2 start-instances`), the
+gateway override in `/opt/app/docker-compose.override.yml` written by user data and recreated with `sudo docker compose
+--profile tls up -d gateway`, the Session Manager shell (`aws ssm start-session`) for G3, the `sslip.io` hosts-file
+line mapped to the Elastic IP, and the backup timer (`regulait-pg-backup.timer`, `docs/ops/DB_BACKUP.md`). None of
+these exist on the laptop. `DEMO_TEARDOWN.md` still names the power schedule; it is not changed here.
 
 ### 7.7 Freeze notes (owner decisions of 2026-10-23, #453)
 
