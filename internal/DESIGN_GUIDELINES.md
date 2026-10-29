@@ -16,6 +16,7 @@ Sources, in short form:
 | ADR-0200 | [Engineering best-practice guidelines](decisions/0200-engineering-best-practice-guidelines.md) |
 | Scan | The 2026-10-24 design scan: lane PRs #552 (U5, kit and shell), #553 (U3), #554 (U2), #555 (U1, Shadow AI) and #556 (U4); owner triage on #453 (comment 6385378784); [session record](memory/sessions/2026-10-24-session-02.md) |
 | X7 | Owner rule of 2026-10-19 on row actions, recorded at `RowActions` in [kit.tsx](../apps/web/src/ui/kit.tsx) |
+| UX-26 | Owner rule of 2026-10-29: the UX best practices are the default for every screen unless the owner asks otherwise ([ADR-0200 addendum](decisions/0200-engineering-best-practice-guidelines.md)). Read from three owner-shared articles: uxpilot.ai "10 UX Best Practices to Follow in 2026", upslidedesignstudio.com "12 Principles for Better UX", and the LinkedIn Pulse "Designing for the User" |
 
 "Enforced by" names the test or script that fails when the rule is broken. Where it says **review**, nothing automated
 enforces the rule yet; reviewers check it by hand.
@@ -183,6 +184,79 @@ follow-ups, [session record](memory/sessions/2026-10-24-session-02.md).*
 - Compress images, minify, defer non-critical scripts, remove unused dependencies, and show loading skeletons.
   *ADR-0200 #11, #14, #19–#21.*
 - Run Lighthouse locally against the production build of the main screens. *ADR-0200 #27.*
+
+## UX best practices (owner, 2026-10-29)
+
+These are the default on every screen. Depart from one only when the owner asks, and name the owner's comment in the
+PR body. Secure by default (ADR-0180), the freeze (ADR-0198) and the bundle ceilings (ADR-0196) still win. New and
+touched UI follows these now; existing screens are audited in a post-demo batch. Most rules extend one above, so the
+rule above still applies. *UX-26 unless marked. Review, unless an enforcement is named.*
+
+**Know the user and the task**
+- Design each screen around the task the persona came to do (Ada the admin, Avery the governance reviewer, Dana the developer,
+  Morgan the security lead); state that task in the PR body for new screens.
+- Ask for only what the task needs; every form field earns its place, and an optional field says so.
+
+**Feedback and system status**
+- Respond to every action within 100 ms: the control changes state at once (pressed, busy) before the result arrives.
+- Match the indicator to the wait: under 1 s nothing extra; 1–3 s a spinner or busy state; 3–10 s a progress bar or
+  step count; over 10 s an estimate, and let the user leave and come back (a background run with a status the user
+  can find again). A skeleton that matches the final layout beats a spinner for a page or card load.
+- Confirm every outcome where the user is looking: success in a toast, a refusal inline (`RefusalNotice`), an error
+  with what went wrong and the next step. Never leave a click with no visible result.
+
+**Prevent errors before they happen**
+- Constrain instead of rejecting: offer only valid choices (a date picker that greys out impossible dates, a select
+  instead of free text for a known set), and say why a choice is unavailable.
+- Validate inline, on blur, next to the field, in plain words; keep what the user typed.
+- Prefill likely values (the current project, the user's own team, the last-used filter), but never pre-select a
+  permissive, sanctioning or relaxing outcome (ADR-0180; see States).
+- Prefer undo to confirmation where the action can be reversed; keep `ConfirmModal` for what cannot be undone, and name
+  the object and the consequence in it ("Delete connection live-jira? Its inbound secret stops working.").
+
+**Recognition over recall**
+- Show options rather than asking users to remember them: selects, typeahead with suggestions, recent items, and
+  copyable ids (`IdChip`).
+- Reveal complexity progressively: the common path first, advanced settings behind a clearly labelled disclosure that
+  remembers its state.
+- Use the conventions users already know (a trash icon deletes, Esc closes, a link navigates, a breadcrumb goes up);
+  never repurpose one.
+
+**Simplicity, hierarchy and space**
+- For every element ask "does this help the task?"; then remove, hide until needed, shrink, or organise, in that order.
+- Give each view one clear visual hierarchy: one heading, one primary action (Layout), size and weight before colour.
+- Use whitespace from the spacing scale to group and separate; never fill space for its own sake.
+
+**Navigation**
+- Always show where the user is (the current nav item and the breadcrumb's last crumb marked current), where they can
+  go, and how to get back; keep labels descriptive and menus short.
+- Offer search or a filter where a list can grow past one screen.
+
+**Readable type and calls to action**
+- Keep body text at the kit's base size or larger, line length at about 60–80 characters on reading surfaces, and line
+  height comfortable; use the type scale, never ad-hoc sizes.
+- Write every button as a verb that says what happens ("Approve request", "Run scan now"); never "OK", "Submit" or
+  "Click here". The result message uses the same verb ("Scan started").
+
+**Touch and small screens**
+- Make primary and frequent controls at least 44 × 44 px under a coarse pointer, with room between them; 24 × 24 px
+  (Accessibility) stays the floor everywhere. Keep primary actions within reach at phone width.
+- Design the phone layout first for any new screen, then enhance for wide screens; test on a real device or the
+  390 px and 768 px harness widths.
+
+**Accessibility, beyond the rules above**
+- Give every meaningful image or icon-only control a text alternative; mark decorative ones hidden.
+- Test new screens with a screen reader (NVDA or VoiceOver) as well as axe, and give time-limited interactions a way to
+  extend.
+
+**Personal, but private**
+- Remember per-user working state where it saves effort (last filter, folded sections, the last-used project), in the
+  user's own storage or profile; never a credential, never across users, and always resettable.
+
+**Test with people**
+- Usability-test every new or redesigned core flow with about five people from the target personas before calling it
+  done, and record what changed as a result in the PR or session record. Hallway tests count; no third-party tracker,
+  heatmap or analytics script is added to the product (air-gapped, ADR-0176).
 
 ## Security in the UI
 

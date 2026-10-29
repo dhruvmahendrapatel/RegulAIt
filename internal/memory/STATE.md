@@ -1,6 +1,6 @@
 ---
 phase: demo-prep-live-integrations-merged
-last_updated: 2026-10-26
+last_updated: 2026-10-29
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -20,6 +20,20 @@ roadmap: ../product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-29 (04:00 UTC) - the laptop is the live instance, with a second stack as its fallback; UX best practices are now the default ([ADR-0200 addendum](../decisions/0200-engineering-best-practice-guidelines.md)).**
+- **Merged and audited:** #588 (backlog P14–P17), #589 (re2js 2.8.8, patching GHSA-gg6h-894w-4m9c), #590 (the runbook for the laptop live host, with DEMO_RUNBOOK §7.8 for the fallback stack) and #592 (the ADR-0186 addendum).
+- **Owner decisions on #453:**
+  - c6485593621: the laptop database is wiped once and prepared with `demo:prepare --live`; done on 10-29 (c6486350055).
+  - c6486079064: the fallback is a second sample-data compose stack on the laptop.
+  - c6487111601: release #592.
+  - UX rule: the practices in DESIGN_GUIDELINES.md are the default unless the owner asks otherwise.
+- **Admin MFA bug (c6484937215):** could not be reproduced, so it is not a code bug.
+- **Still open on the laptop:**
+  - admin and Morgan MFA enrolment;
+  - re-creating `live-github`;
+  - DEMO_REAL_ACCOUNTS steps 1b, 2 and 4;
+  - the fallback stack.
 
 **2026-10-26 (02:00 UTC) - the July AWS Organization is deleted; the demo moves to a laptop behind a Cloudflare
 Tunnel ([ADR-0203](../decisions/0203-demo-hosting-after-aws-org-loss.md)).** The management account, `regulait-dev`, the
