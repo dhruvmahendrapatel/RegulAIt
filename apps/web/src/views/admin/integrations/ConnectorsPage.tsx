@@ -21,6 +21,7 @@ import {
   useUsers,
   userOpts,
 } from "../adminKit";
+import { DisabledBadge, countsText, useLifecycle } from "./LifecycleActions";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -77,6 +78,22 @@ export function credentialJsonHint(kind: string | null | undefined): string | nu
 export default function ConnectorsPage() {
   const connectors = useConnectors();
   const users = useUsers();
+  // #453 prototype: Disable (reason) → Delete; Enable is stepped up
+  const life = useLifecycle({
+    noun: "connector",
+    base: "/v1/connectors",
+    disableBody:
+      "Every governed call to this connector is refused from now on, including calls already waiting for approval. Grants and history are kept. You can enable it again.",
+    enableBody: "Governed calls to this connector are allowed again under its grants. You will be asked to confirm it's you.",
+    deleteBody:
+      "Its grants, revocations and stored credential are destroyed. Usage and audit history are kept. The removal is recorded in the audit log.",
+    inUseCode: "connector_in_use",
+    inUseText: (p) =>
+      `It can't be deleted while ${countsText([
+        [p.approvals as number, "approval", "approvals"],
+        [p.chatopsConnections as number, "chat connection", "chat connections"],
+      ])} refer to it. Approvals are audit evidence.`,
+  });
 
   return (
     <>
@@ -90,7 +107,17 @@ export default function ConnectorsPage() {
         <Card flush title="Catalog">
           <Table<Connector>
             columns={[
-              { key: "name", header: "Name", sort: (c) => c.name, render: (c) => c.name },
+              {
+                key: "name",
+                header: "Name",
+                sort: (c) => c.name,
+                render: (c) => (
+                  <span className={v.row} style={{ gap: "var(--s1)" }}>
+                    {c.name}
+                    <DisabledBadge row={c} noun="connector" />
+                  </span>
+                ),
+              },
               { key: "kind", header: "Kind", sort: (c) => c.kind, render: (c) => c.kind },
               {
                 key: "providerKind",
@@ -106,6 +133,7 @@ export default function ConnectorsPage() {
               },
               { key: "baseUrl", header: "Base URL", render: (c) => c.baseUrl ?? "—" },
               { key: "ownership", header: "Ownership", render: (c) => c.ownership ?? "Not reported" },
+              { key: "actions", header: "", srHeader: "Actions", render: (c) => life.actions(c) },
             ]}
             rows={connectors.data?.connectors ?? []}
             rowKey={(c) => c.id}
@@ -125,6 +153,7 @@ export default function ConnectorsPage() {
 
         <EntitlementCard users={users} />
       </div>
+      {life.dialogs}
     </>
   );
 }

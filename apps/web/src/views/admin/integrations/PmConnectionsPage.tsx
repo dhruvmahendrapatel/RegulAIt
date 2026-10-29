@@ -6,15 +6,30 @@
  */
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { api } from "../../../api/client";
+import { ApiError, api } from "../../../api/client";
 import type { PmConnection } from "../../../api/adminTypes";
-import { ago } from "../../../api/format";
+import { ago, fmtAt } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, RowActions, Select, Table } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Modal, RowActions, Select, Table } from "../../../ui/kit";
 import { RefusalNotice } from "../../../ui/RefusalNotice";
 import { RevealCard, useAction, type RevealedSecret } from "../adminKit";
+import { useToast } from "../../../ui/toast";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+
+/** "30 Oct, 15:10" — the end of a rotation's grace window, in the reader's time */
+const graceEnd = (iso: string) => {
+  const d = new Date(iso);
+  const day = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short" }).format(d);
+  const time = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false }).format(d);
+  return `${day}, ${time}`;
+};
+
+const DRIFT = [
+  { v: "manual", l: "Manual: record drift, change nothing (default)" },
+  { v: "prefer_regulait", l: "Prefer regulAIt: put regulAIt's state back in the PM tool" },
+  { v: "prefer_pm", l: "Prefer the PM tool: adopt its state on the link (the run itself never moves)" },
+];
 
 const PROVIDERS = [
   { v: "mock", l: "mock (demo — touches nothing real)" },
@@ -35,6 +50,9 @@ export default function PmConnectionsPage() {
 
   const [reveal, setReveal] = useState<RevealedSecret | null>(null);
   const [deleting, setDeleting] = useState<PmConnection | null>(null);
+  // #453 prototype: rotate the inbound webhook secret with a 24-hour grace window; edit in place
+  const [rotating, setRotating] = useState<PmConnection | null>(null);
+  const [editing, setEditing] = useState<PmConnection | null>(null);
   const [f, setF] = useState({ name: "", provider: "mock", project: "", baseUrl: "", apiVersion: "", token: "" });
   const set = (k: keyof typeof f, val: string) => setF((s) => ({ ...s, [k]: val }));
   const needsBase = ["jira", "azure_devops", "generic_webhook"].includes(f.provider);
@@ -145,7 +163,19 @@ export default function PmConnectionsPage() {
         <Card flush title="Connections">
           <Table<PmConnection>
             columns={[
-              { key: "name", header: "Name", sort: (c) => c.name, render: (c) => c.name },
+              {
+                key: "name",
+                header: "Name",
+                sort: (c) => c.name,
+                render: (c) => (
+                  <span className={v.row} style={{ gap: "var(--s1)" }}>
+                    {c.name}
+                    {c.previousSecretValidUntil && new Date(c.previousSecretValidUntil) > new Date() && (
+                      <Badge tone="warn">previous secret valid until {graceEnd(c.previousSecretValidUntil)}</Badge>
+                    )}
+                  </span>
+                ),
+              },
               {
                 key: "provider",
                 header: "Provider",
@@ -166,7 +196,18 @@ export default function PmConnectionsPage() {
                 srHeader: "Actions",
                 render: (c) => (
                   <RowActions
-                    slot="0"
+                    slot="12rem"
+                    stacked
+                    primary={
+                      <Button size="sm" variant="primary" aria-label={`Rotate webhook secret: ${c.name}`} disabled={act.busy} onClick={() => setRotating(c)}>
+                        Rotate webhook secret
+                      </Button>
+                    }
+                    secondary={
+                      <Button size="sm" aria-label={`Edit ${c.name}`} disabled={act.busy} onClick={() => setEditing(c)}>
+                        Edit
+                      </Button>
+                    }
                     rest={
                       <Button size="sm" variant="danger" disabled={act.busy} onClick={() => setDeleting(c)}>
                         Delete connection
@@ -213,6 +254,185 @@ export default function PmConnectionsPage() {
             );
         }}
       />
+      {rotating && (
+        <RotateSecretDialog
+          connection={rotating}
+          onClose={() => setRotating(null)}
+          onRotated={(r) => {
+            setRotating(null);
+            setReveal(r);
+          }}
+        />
+      )}
+      {editing && <EditPmDialog connection={editing} onClose={() => setEditing(null)} />}
     </>
+  );
+}
+
+interface RotateResult {
+  webhookSecret: string;
+  /** when the previous secret stops working; null for an immediate rotation */
+  previousValidUntil: string | null;
+}
+
+function RotateSecretDialog(props: { connection: PmConnection; onClose: () => void; onRotated: (r: RevealedSecret) => void }) {
+  const act = useAction();
+  const { toast } = useToast();
+  const c = props.connection;
+  const [inProgress, setInProgress] = useState(false);
+  const rotate = (immediate: boolean) => {
+    let out: RotateResult | null = null;
+    void act
+      .run(async () => {
+        try {
+          out = await api.post<RotateResult>(`/v1/pm/connections/${encodeURIComponent(c.name)}/webhook-secret/rotate`, immediate ? { immediate: true } : {});
+        } catch (e) {
+          // a second rotation inside the grace window is answered here, with the way out beside it
+          if (e instanceof ApiError && e.status === 409 && e.payload?.error === "rotation_in_progress") {
+            setInProgress(true);
+            return;
+          }
+          throw e;
+        }
+      }, null)
+      .then(() => {
+        const r = out as RotateResult | null;
+        if (!r) return;
+        toast("New webhook secret issued. Copy it now: it is shown once.", "success");
+        props.onRotated({
+          title: "New webhook secret",
+          secret: r.webhookSecret,
+          note: r.previousValidUntil
+            ? `The previous secret stops working on ${fmtAt(r.previousValidUntil)}.`
+            : "The previous secret has stopped working.",
+        });
+      });
+  };
+  return (
+    <Modal
+      open
+      title={`Rotate the webhook secret for “${c.name}”?`}
+      onClose={props.onClose}
+      actions={
+        inProgress ? (
+          <>
+            <Button onClick={props.onClose}>Cancel</Button>
+            <Button variant="danger" disabled={act.busy} onClick={() => rotate(true)}>
+              Rotate immediately
+            </Button>
+          </>
+        ) : (
+          <>
+            <Button onClick={props.onClose}>Cancel</Button>
+            <Button variant="primary" disabled={act.busy} onClick={() => rotate(false)}>
+              Rotate webhook secret
+            </Button>
+          </>
+        )
+      }
+    >
+      <div className={v.stack}>
+        <p style={{ margin: 0 }}>
+          A new webhook secret is issued and shown once. The current secret keeps working for 24 hours, then events signed with it are refused.
+          Register the new secret in the PM tool before then.
+        </p>
+        {inProgress && (
+          <div className={v.stackTight} role="alert" data-testid="rotation-in-progress">
+            <p className={v.errLine} style={{ margin: 0 }}>
+              A rotation is already in progress. Wait until the previous secret expires, or rotate immediately.
+            </p>
+            <p className={v.faint} style={{ margin: 0 }}>
+              Rotating immediately ends both older secrets now: events the PM tool signs with them are refused until it has the new one.
+            </p>
+          </div>
+        )}
+        {act.error && !inProgress && (
+          <div className={v.errLine} role="alert">
+            {act.error}
+          </div>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
+function EditPmDialog(props: { connection: PmConnection; onClose: () => void }) {
+  const act = useAction();
+  const c = props.connection;
+  const [f, setF] = useState({
+    project: c.project,
+    baseUrl: c.baseUrl ?? "",
+    apiVersion: c.apiVersion ? String(c.apiVersion) : "",
+    driftResolution: c.driftResolution ?? "manual",
+  });
+  const set = (k: keyof typeof f, val: string) => setF((s) => ({ ...s, [k]: val }));
+  const save = () =>
+    void act
+      .run(
+        () =>
+          api.patch(`/v1/pm/connections/${encodeURIComponent(c.name)}`, {
+            project: f.project,
+            baseUrl: f.baseUrl || null,
+            ...(c.provider === "jira" ? { apiVersion: f.apiVersion ? Number(f.apiVersion) : null } : {}),
+            driftResolution: f.driftResolution,
+          }),
+        `PM connection “${c.name}” updated`,
+      )
+      .then((ok) => ok && props.onClose());
+  return (
+    <Modal
+      open
+      title={`Edit PM connection “${c.name}”`}
+      onClose={props.onClose}
+      actions={
+        <>
+          <Button onClick={props.onClose}>Cancel</Button>
+          <Button variant="primary" disabled={act.busy || !f.project} onClick={save}>
+            Save
+          </Button>
+        </>
+      }
+    >
+      <div className={v.stack}>
+        <Field label="Name">
+          <Input value={c.name} readOnly aria-readonly />
+        </Field>
+        <p className={v.faint} style={{ margin: 0 }}>
+          The name is part of the webhook address and can't change.
+        </p>
+        <Field label="Project">
+          <Input required autoFocus value={f.project} onChange={(e) => set("project", e.target.value)} />
+        </Field>
+        <Field label="Base URL">
+          <Input value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)} placeholder="https://…" />
+        </Field>
+        {c.provider === "jira" && (
+          <Field label="API version">
+            <Select value={f.apiVersion} onChange={(e) => set("apiVersion", e.target.value)}>
+              <option value="">v2 (default, plain text)</option>
+              <option value="3">v3 + ADF rich text</option>
+              <option value="2">v2 (legacy plain text)</option>
+            </Select>
+          </Field>
+        )}
+        <Field label="When the PM tool and regulAIt disagree">
+          <Select value={f.driftResolution} onChange={(e) => set("driftResolution", e.target.value)}>
+            {DRIFT.map((d) => (
+              <option key={d.v} value={d.v}>
+                {d.l}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <p className={v.faint} style={{ margin: 0 }}>
+          A changed base URL is checked by the egress guard before it is saved. Every change is recorded in the audit log.
+        </p>
+        {act.error && (
+          <div className={v.errLine} role="alert">
+            {act.error}
+          </div>
+        )}
+      </div>
+    </Modal>
   );
 }

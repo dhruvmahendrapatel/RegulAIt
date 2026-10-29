@@ -383,6 +383,11 @@ export interface Connector {
   createdAt?: string;
   ownerUserId?: string | null;
   ownership?: "owned" | "unowned" | "orphaned";
+  /** #453 prototype: a disabled object refuses every governed call; null/absent = enabled */
+  enabled?: boolean;
+  disabledReason?: string | null;
+  disabledAt?: string | null;
+  disabledBy?: string | null;
 }
 
 export interface ConnectorCredentialInfo {
@@ -392,6 +397,11 @@ export interface ConnectorCredentialInfo {
 export interface McpServer {
   id: string;
   name: string;
+  /** #453 prototype: a disabled object refuses every governed call; null/absent = enabled */
+  enabled?: boolean;
+  disabledReason?: string | null;
+  disabledAt?: string | null;
+  disabledBy?: string | null;
   url: string;
   /** PILLAR 5: the server's FLAT list price per allowed tool call. Null =
    * unpriced (cost stays an honest null, never invented). */
@@ -441,6 +451,10 @@ export interface PmConnection {
   project: string;
   baseUrl: string | null;
   apiVersion?: number | null;
+  /** #453 prototype: how inbound drift is resolved (manual = detect only) */
+  driftResolution?: "manual" | "prefer_regulait" | "prefer_pm";
+  /** #453 prototype: while a rotation's grace window is open, when the previous webhook secret stops working */
+  previousSecretValidUntil?: string | null;
   createdAt: string;
 }
 
