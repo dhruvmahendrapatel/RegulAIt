@@ -255,7 +255,9 @@ test.describe("ADR-0186 A: passkeys and step-up", () => {
  await mockApi(page,{admin:false,methods:["passkey"]});
  await page.route("**/v1/users/u-ben/model-credentials",route=>json(route,{credentials:[]}));
  await page.goto("/ui/account?section=keys");
- const link=page.getByRole("main").getByRole("link",{name:"Spend & savings",exact:true});await expect(link).toBeVisible();
+ // the Spend link sits in the (i) beside the key form: open it, then check the link the same way
+ await page.getByRole("button",{name:"What is which key serves your requests?"}).click();
+ const link=page.getByRole("note").getByRole("link",{name:"Spend & savings",exact:true});await expect(link).toBeVisible();
  for(const theme of ["light","dark"]){
  await page.evaluate(theme=>document.documentElement.setAttribute("data-theme",theme),theme);
  await expect(link).toHaveCSS("text-decoration-line","underline");
