@@ -288,6 +288,8 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   // ADR-0195 SD2b (migration 0205): the PKCS#8 private half of a live RS256 federation signing key (destroyed when
   // the key is retired or revoked); the re-encryption walk updates it by `id` while the key is live
   { table: "federation_signing_keys", column: "private_key_ciphertext", what: "federation signing private keys" },
+  // ADR-0204 (migration 0214): the static credential an admin attached to an MCP server (sent upstream, never returned)
+  { table: "mcp_server_upstream_credentials", column: "secret_ciphertext", what: "MCP server upstream credentials" },
 ];
 
 export interface CiphertextProbe {
