@@ -51,6 +51,8 @@ export function ListPreview<T>(props: {
   /** a fixed sentence in place of the read's own error */
   errorMessage?: string;
   info?: ReactNode;
+  /** a standing warning the full list carried, kept on the overview above the rows */
+  note?: ReactNode;
   /** each time the first rows arrive (the page may name things from them) */
   onRows?: (rows: T[]) => void;
 }) {
@@ -90,6 +92,7 @@ export function ListPreview<T>(props: {
       }
     >
       <div className={d.preview} data-preview={props.endpoint}>
+        {props.note}
         <Table<T>
           columns={props.columns}
           rows={main!.data?.items.slice(0, PREVIEW_ROWS)}
