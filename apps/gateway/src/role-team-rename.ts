@@ -166,9 +166,15 @@ async function rename(db: Db, req: FastifyRequest, reply: FastifyReply, args: Re
     const [locked] = await tx.select().from(table).where(eq(table.id, id)).for("update");
     if (!locked || locked.name !== from) return null;
     if (nameChanges && !sameRefs(refs, await findNameReferences(tx, noun, from))) return null;
-    const patch: Record<string, unknown> = { name: to };
-    if (noun === "role" && args.description !== undefined) patch.description = args.description;
-    const [updated] = await tx.update(table).set(patch).where(eq(table.id, id)).returning();
+    // one literal write per table, so the rule-write guard can see exactly which table each one touches
+    const [updated] =
+      noun === "role"
+        ? await tx
+            .update(roles)
+            .set({ name: to, ...(args.description !== undefined ? { description: args.description } : {}) })
+            .where(eq(roles.id, id))
+            .returning()
+        : await tx.update(teams).set({ name: to }).where(eq(teams.id, id)).returning();
     await tx.insert(auditLog).values({
       userId: actor ?? NIL_USER,
       objectType: noun,
