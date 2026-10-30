@@ -36,7 +36,7 @@ weights and formulae are RegulAIt's own policy semantics, which rule 4 reserves 
    | Adversarial resilience | 15 | attacks resisted, worst case | (1 − upper bound of the ASR 95% interval) × 100, halved if no run in the window |
    | Access hygiene | 15 | agents with an active owner | owned share − 10 per SoD violator and per lapsed campaign, floored at 0 |
    | Answer quality | 10 | latest groundedness pass rate | pass rate × 100; no run in the window scores 0 |
-   | Audit integrity | 10 | anchoring, as observed | 100 tamper-resistant, 50 rewritable, 0 not anchored |
+   | Audit integrity | 10 | anchoring | 100 tamper-resistant, 50 rewritable, 0 not anchored |
    | Spend control | 10 | budgeted projects within budget | within ÷ budgeted; no budget scores 0 |
 
    The weights sum to 100 and are constants, shown verbatim on the page. No admin setting changes them, so two

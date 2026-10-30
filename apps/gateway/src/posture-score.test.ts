@@ -172,6 +172,6 @@ describe("posture estimate (ADR-0214)", () => {
     }
     // the disclaimer says what the estimate is NOT; nothing else may use the words
     const text = JSON.stringify({ ...s, disclaimer: "" }).toLowerCase();
-    expect(text).not.toMatch(/\bcompliant\b|\bcertified\b|\bcompliance verdict\b/);
+    expect(text).not.toMatch(/\bcompliant\b|\bcertified\b|\bcompliance verdict\b|\bobserved\b|\bimmutable\b|live oversight|agents monitored/i);
   });
 });

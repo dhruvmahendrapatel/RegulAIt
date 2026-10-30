@@ -299,7 +299,7 @@ function audit(d: PostureScoreInput): Draft {
       raw,
       inputs: [
         { label: "Anchors written", value: String(a.anchors) },
-        { label: "Anchor storage, as observed", value: a.sink ? (tamper ? "tamper-resistant" : "rewritable") : "none configured" },
+        { label: "Anchor storage", value: a.sink ? (tamper ? "tamper-resistant" : "rewritable") : "none configured" },
       ],
       formula: "100 when anchors reach tamper-resistant storage, 50 when anchored to rewritable storage, 0 when not anchored.",
       link: { to: "/admin/audit", label: "Open the audit log" },
