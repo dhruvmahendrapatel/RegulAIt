@@ -82,7 +82,7 @@ import {
   profileVersionFacts,
   retiredTagRefusal,
   retiredTagsAmong,
-} from "./compliance-profile-lifecycle.js";
+} from "./compliance-profile-facts.js";
 
 type ProjectRow = typeof projects.$inferSelect;
 

@@ -74,7 +74,7 @@ import { recordSchedulerFailure, recordSchedulerSuccess } from "./scheduler-heal
 import { ExternalEffectBlockedError, runExternalWrite } from "./external-effects.js";
 import { errMessage } from "./err-serializer.js";
 import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
-import { retiredTagRefusal, retiredTagsAmong } from "./compliance-profile-lifecycle.js";
+import { retiredTagRefusal, retiredTagsAmong } from "./compliance-profile-facts.js";
 
 type InfraResourceRow = typeof infraResources.$inferSelect;
 type InfraPolicyRow = typeof infraPolicies.$inferSelect;
