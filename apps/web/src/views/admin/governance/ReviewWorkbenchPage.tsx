@@ -27,6 +27,7 @@ import { api } from "../../../api/client";
 import { withStepUp } from "../../../stepup/stepUp";
 import type { Approval } from "../../../api/types";
 import { ago } from "../../../api/format";
+import { pendingCapNote, pendingQueueQuery, pendingRows } from "../../../api/approvalQueue";
 import { useSession } from "../../../session/SessionContext";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Select, Table, Textarea } from "../../../ui/kit";
@@ -108,10 +109,9 @@ export default function ReviewWorkbenchPage() {
     queryKey: ["admin", "approval-workload"],
     queryFn: () => api.get<{ workload: WorkloadRow[]; note: string }>("/v1/approvals/workload"),
   });
-  const queue = useQuery({
-    queryKey: ["approvals"],
-    queryFn: () => api.get<{ approvals: QueueRow[] }>("/v1/approvals"),
-  });
+  // the pending queue, oldest first and filtered by the server: an unfiltered read is capped at 100 rows newest
+  // first, so newer decided rows would push older pending ones out of triage
+  const queue = useQuery(pendingQueueQuery<QueueRow>());
 
   // policy draft
   const [pName, setPName] = useState("");
@@ -144,7 +144,8 @@ export default function ReviewWorkbenchPage() {
     await Promise.all([policies.refetch(), rules.refetch(), workload.refetch(), queue.refetch()]);
   };
 
-  const pending = (queue.data?.approvals ?? []).filter((r) => r.status === "pending");
+  const pending = pendingRows(queue.data);
+  const capNote = pendingCapNote(queue.data, pending.length);
   const selectedRows = pending.filter((row) => selected[row.id]);
   const selectedIds = selectedRows.map((row) => row.id);
   const needsActionReview = () => selectedRows.filter((row) => row.objectType === "mcp_tool" &&
@@ -469,6 +470,7 @@ export default function ReviewWorkbenchPage() {
 
           {/* ---------------- triage ---------------- */}
           <Card title="Triage">
+            {capNote && <p className={v.faint} data-testid="workbench-cap-note">{capNote}</p>}
             {pending.length === 0 ? (
               <EmptyState title="Nothing pending" body="The queue is empty." />
             ) : (

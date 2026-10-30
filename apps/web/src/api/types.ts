@@ -658,6 +658,23 @@ export interface UsageEventsResponse {
   };
 }
 
+/** `GET /v1/usage-events/summary` — spend aggregated by the server over a window, same scoping as the ledger */
+export interface UsageSummaryResponse {
+  groupBy: "agent" | "connector";
+  userId: string | null;
+  /** the half-open window `[from, to)`; `defaulted` when the caller gave no `from` */
+  window: { from: string; to: string; defaulted: boolean };
+  groups: Array<{
+    agentId?: string | null;
+    connectorId?: string | null;
+    name?: string | null;
+    operation?: string | null;
+    costUsd: number;
+    events: number;
+  }>;
+  totals: { events: number; costUsd: number };
+}
+
 export interface SetupStep {
   key: string;
   title: string;

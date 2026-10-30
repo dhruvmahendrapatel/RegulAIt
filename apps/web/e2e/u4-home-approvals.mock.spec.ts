@@ -1,6 +1,6 @@
 /**
  * Lane U4 (FS-44, FS-45, shell-home-account-03 Home part), against a mocked gateway:
- *  - Home's pending figures count from the server-filtered queue (/v1/approvals?status=pending), not from the
+ *  - Home's pending figures count from the server-filtered queue (/v1/approvals?status=pending&order=asc), not from the
  *    full list, which the gateway caps at 100 rows;
  *  - each pending row is a real link to the inbox, reachable from the keyboard (FS-44);
  *  - an unexpected setup-status body never prints "undefined" (FS-45);
@@ -62,7 +62,8 @@ test.describe("lane U4: Home pending approvals", () => {
     await expect(stat).toHaveText(/^3\s*decisions waiting on a human$/);
     await expect(page.getByTestId("suite-tile-approvals-audit")).toContainText("3waiting on a human");
     await expect(page.getByTestId("suite-tile-settings")).toContainText("2/5setup steps done");
-    expect(seen).toContain("/v1/approvals?status=pending");
+    // the server-filtered queue, oldest first: the same read the Inbox and the nav badge share
+    expect(seen).toContain("/v1/approvals?status=pending&order=asc");
     await expectAxeClean(page, "home (admin)");
   });
 

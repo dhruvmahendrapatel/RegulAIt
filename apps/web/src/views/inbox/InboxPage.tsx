@@ -11,6 +11,7 @@ import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, api } from "../../api/client";
 import type { Approval, WorkflowDetailResponse } from "../../api/types";
 import { ago, approvalStageLabel, humanize, plural } from "../../api/format";
+import { decidedQueueQuery, decidedRows, pendingCapNote, pendingQueueQuery, pendingRows, queueTotal } from "../../api/approvalQueue";
 import { QuestionnaireView } from "../admin/governance/UseCaseQuestionnaire";
 import { drawerEvidenceState, mergeGateParts } from "./inboxEvidence";
 import { useSession } from "../../session/SessionContext";
@@ -76,10 +77,10 @@ export default function InboxPage() {
   const decidedFrom = useRef<{ id: string; index: number } | null>(null);
   const list = useRef<HTMLDivElement>(null);
 
-  const q = useQuery({
-    queryKey: ["approvals"],
-    queryFn: () => api.get<{ approvals: Approval[] }>("/v1/approvals"),
-  });
+  // the pending queue, oldest first, filtered by the server; "Recently decided" is its own query, so decided rows
+  // can never push a pending one out of the capped page
+  const q = useQuery(pendingQueueQuery());
+  const decidedQ = useQuery(decidedQueueQuery());
   // ADR-0173 batch 2c (Q): annotation items waiting on me as a named reviewer.
   // Content-free; the card shows only when there is something to review.
   const annotations = useQuery({
@@ -90,10 +91,10 @@ export default function InboxPage() {
   const annotationItems = Array.isArray(annotations.data?.items) ? annotations.data.items : [];
   // A15: a failed annotation read is said, not shown as "nothing waiting"; a 403/404 (no annotation access) stays quiet
   const annotationsFailed = annotations.isError && !(annotations.error instanceof ApiError && (annotations.error.status === 403 || annotations.error.status === 404));
-  const approvals = q.data?.approvals ?? [];
-  const pending = approvals.filter((a) => a.status === "pending");
-  const decidedAll = approvals.filter((a) => a.status !== "pending");
-  const decidedTotal = decidedAll.length;
+  const pending = pendingRows(q.data);
+  const capNote = pendingCapNote(q.data, pending.length);
+  const decidedAll = decidedRows(decidedQ.data);
+  const decidedTotal = queueTotal(decidedQ.data, decidedAll.length);
   const decided = decidedAll.slice(0, 12);
   // L1: a decided item leaves the list, taking its drawer and the Review button that opened it, so focus moves to
   // the next item's Review button (the one before it when it was last), or to the page heading when none is left
@@ -291,6 +292,7 @@ export default function InboxPage() {
       />
       <div className={v.stack}>
         <Card>
+          {capNote && <p className={v.faint} data-testid="inbox-cap-note">{capNote}</p>}
           <div ref={list}>
           {pending.length === 0 ? (
             <EmptyState
@@ -383,6 +385,12 @@ export default function InboxPage() {
           <p className={v.errLine} role="alert" data-testid="inbox-annotations-failed">
             Annotation reviews could not be loaded.{" "}
             <Button size="sm" onClick={() => void annotations.refetch()}>Retry</Button>
+          </p>
+        )}
+        {decidedQ.isError && (
+          <p className={v.errLine} role="alert" data-testid="inbox-decided-failed">
+            Recently decided items could not be loaded.{" "}
+            <Button size="sm" onClick={() => void decidedQ.refetch()}>Retry</Button>
           </p>
         )}
         {decided.length > 0 && (

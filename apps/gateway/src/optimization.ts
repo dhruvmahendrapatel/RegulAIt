@@ -1,8 +1,9 @@
 import type { FastifyInstance } from "fastify";
-import { costEvents, count, desc, eq, sql, usageEvents, type Db, type SQL } from "@regulait/db";
+import { and, connectors, costEvents, count, desc, eq, gte, lt, sql, usageEvents, type Db, type SQL } from "@regulait/db";
 import { z } from "zod";
 import { streamUsageEventsCsv } from "./projects.js";
 import { resolveCsvWindow } from "./csv-export.js";
+import { USAGE_SUMMARY_DEFAULT_DAYS, usageSummaryQuery } from "./list-queries.js";
 
 const listQuery = z.object({
   userId: z.string().uuid().optional(),
@@ -90,5 +91,66 @@ export function registerOptimizationRoutes(app: FastifyInstance, db: Db) {
     ]);
 
     return { events, totals };
+  });
+
+  // PILLAR 5 breakdowns, aggregated IN THE DATABASE over a stated window — so
+  // "spend by agent" and "spend by connector" cover every event in the window,
+  // never a client-side sum over the newest page of `/v1/usage-events`.
+  // Same entitlement scoping as `/v1/usage-events`: a non-admin's `userId` is
+  // forced to self (the query string is not trusted); an admin may name one
+  // user or omit it for the organisation; a bootstrap operator with no user
+  // identity is refused, as there.
+  app.get("/v1/usage-events/summary", async (req, reply) => {
+    const q = usageSummaryQuery.parse(req.query);
+    const userId = req.authCtx.isAdmin ? q.userId : req.authCtx.userId;
+    if (!req.authCtx.isAdmin && !userId) {
+      return reply.status(403).send({ error: "bootstrap_has_no_usage_history" });
+    }
+    const to = q.to ?? new Date();
+    const from = q.from ?? new Date(to.getTime() - USAGE_SUMMARY_DEFAULT_DAYS * 86_400_000);
+    if (from >= to) return reply.status(400).send({ error: "invalid_window", detail: "`from` must be before `to`" });
+    const scope = and(
+      ...(userId ? [eq(usageEvents.userId, userId)] : []),
+      gte(usageEvents.at, from),
+      lt(usageEvents.at, to),
+      eq(usageEvents.objectType, q.groupBy),
+    );
+    const costUsd = sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8`;
+    const events = sql<number>`count(*)::int`;
+    // agent rows only for `agent` and connector rows only for `connector`: the
+    // two price models are not comparable, and an MCP tool call is neither
+    const groups =
+      q.groupBy === "agent"
+        ? await db
+            .select({ agentId: usageEvents.agentId, costUsd, events })
+            .from(usageEvents)
+            .where(scope)
+            .groupBy(usageEvents.agentId)
+            .orderBy(desc(costUsd))
+        : await db
+            .select({
+              connectorId: usageEvents.connectorId,
+              name: connectors.name,
+              operation: usageEvents.operation,
+              costUsd,
+              events,
+            })
+            .from(usageEvents)
+            .leftJoin(connectors, eq(usageEvents.connectorId, connectors.id))
+            .where(scope)
+            .groupBy(usageEvents.connectorId, connectors.name, usageEvents.operation)
+            .orderBy(desc(costUsd));
+    const totals = { events: 0, costUsd: 0 };
+    for (const g of groups as ReadonlyArray<{ events: number; costUsd: number }>) {
+      totals.events += g.events;
+      totals.costUsd += g.costUsd;
+    }
+    return {
+      groupBy: q.groupBy,
+      userId: userId ?? null,
+      window: { from: from.toISOString(), to: to.toISOString(), defaulted: !q.from },
+      groups,
+      totals,
+    };
   });
 }
