@@ -225,18 +225,14 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
   await test.step("S1 discovery sources", async () => {
     await ada.goto("/ui/admin/shadow-ai/discovery-sources");
     await expect(ada.getByRole("heading", { name: "Discovery sources" })).toBeVisible();
-    // W2: with the one endpoint agent source, its device table shows without a click, counted in words
-    await expect(ada.getByText(/^1 device, 0 revoked, /)).toBeVisible();
+    // W2: with the one endpoint agent source, its devices preview shows without a click, counted in its heading
+    await expect(ada.getByRole("heading", { level: 2, name: /^Endpoint devices 1 device/ })).toBeVisible();
     await expect(ada.getByText("Users (self-reported)", { exact: true })).toBeVisible();
     await expect(ada.getByText(/^psn:[0-9a-f]+$/).first()).toBeVisible();
-    // X6b (#474): Recent runs is a secondary section, folded on a first visit; the script has the presenter open it
-    const recentRuns = ada.getByRole("button", { name: /^Recent runs/ });
-    await expect(recentRuns).toHaveAttribute("aria-expanded", "false");
-    await recentRuns.click();
-    await expect(recentRuns).toHaveAttribute("aria-expanded", "true");
-    await capture(ada, ADA, "ds-s1-discovery-sources", { dark: true, notes: ["Recent runs opened from its fold header (X6b; folded on a first visit)"] });
+    // P3 (#453): Recent runs is a preview of the newest runs, its failures counted in its heading; every run is on its own page
+    await expect(ada.getByRole("heading", { level: 2, name: /^Recent runs/ })).toBeVisible();
+    await capture(ada, ADA, "ds-s1-discovery-sources", { dark: true, notes: ["Recent runs, tokens and devices previewed; each full list on its own page (P3)"] });
   });
-
   let pseudonymHref: string | null = null;
   await test.step("S2 findings, sightings, coverage", async () => {
     await ada.goto("/ui/admin/shadow-ai");

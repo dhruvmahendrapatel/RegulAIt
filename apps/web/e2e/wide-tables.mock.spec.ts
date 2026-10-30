@@ -136,7 +136,8 @@ async function overflow(card: Locator): Promise<number> {
 
 const TABLES = [
   { name: "Inventory", url: "/ui/admin/shadow-ai", card: "Inventory" },
-  { name: "Recent runs", url: "/ui/admin/shadow-ai/discovery-sources", card: "Recent runs" },
+  // P3: every run is on the runs page; the overview previews the newest (its fit is checked below)
+  { name: "Recent runs", url: "/ui/admin/shadow-ai/discovery-sources/runs", card: "Runs" },
   { name: "Audit entries", url: "/ui/admin/audit", card: "Entries" },
   { name: "Use-case audit trail", url: `/ui/admin/audit?objectType=ai_use_case&objectId=${USE_CASE}`, card: "Entries" },
 ];
@@ -149,6 +150,17 @@ for (const width of [1440, 1024, 390]) {
       expect(await overflow(await openCard(page, t.card))).toBe(0);
     });
   }
+}
+
+/** the overview's preview of the newest runs (its heading carries the count, so it is found by its list) */
+const runsPreview = (page: Page) => page.getByTestId("preview-discovery-runs").locator("xpath=ancestor::section[@data-rg-card][1]");
+
+for (const width of [1440, 1024, 390]) {
+  test(`the Recent runs preview fits its card at ${width} px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.goto("/ui/admin/shadow-ai/discovery-sources");
+    expect(await overflow(runsPreview(page))).toBe(0);
+  });
 }
 
 async function openDrawer(page: Page) {
@@ -234,7 +246,7 @@ test("Audit entries on a phone: every value is a labelled line under Event, and 
 
 test("Recent runs takes the full width, with Reveal a pseudonym in its own row below", async ({ page }) => {
   await page.goto("/ui/admin/shadow-ai/discovery-sources");
-  const runsCard = await openCard(page, "Recent runs");
+  const runsCard = runsPreview(page);
   const reveal = page.locator("section[data-rg-card]").filter({ has: page.getByText("Reveal a pseudonym", { exact: true }) });
   const [a, b] = [(await runsCard.boundingBox())!, (await reveal.boundingBox())!];
   expect(Math.abs(a.width - b.width)).toBeLessThanOrEqual(1);
@@ -265,12 +277,12 @@ test("Inventory at 1024 px folds at md: Evidence and Seen under Subject, Confide
   expect(Math.abs(label! - value!)).toBeLessThanOrEqual(4);
 });
 
-test("Recent runs at 1024 px, opened from collapsed, folds at md with every value labelled and no overflow", async ({ page }) => {
+test("Recent runs at 1024 px, on its own page, folds at md with every value labelled and no overflow", async ({ page }) => {
   await page.setViewportSize({ width: 1024, height: 1000 });
-  await page.goto("/ui/admin/shadow-ai/discovery-sources");
-  const card = cardOf(page, "Recent runs");
+  await page.goto("/ui/admin/shadow-ai/discovery-sources/runs");
+  const card = cardOf(page, "Runs");
   // ADR-0219: the card pages under the list control instead of folding, so its table is there from the start
-  await openCard(page, "Recent runs");
+  await openCard(page, "Runs");
   await expect(card.locator("[data-fold-step]")).toHaveAttribute("data-fold-step", "md");
   expect(await overflow(card)).toBe(0);
   expect(await heads(card)).toEqual(["Source · Queued", "Status · Reads", "Findings · Observed / matched", "Catalogue gaps"]);
@@ -280,8 +292,8 @@ test("Recent runs at 1024 px, opened from collapsed, folds at md with every valu
 
 test("Recent runs on a phone: Findings, Catalogue gaps and the md folds sit under Source, each labelled", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 1000 });
-  await page.goto("/ui/admin/shadow-ai/discovery-sources");
-  const card = await openCard(page, "Recent runs");
+  await page.goto("/ui/admin/shadow-ai/discovery-sources/runs");
+  const card = await openCard(page, "Runs");
   await expect(card.locator("[data-fold-step]")).toHaveAttribute("data-fold-step", "sm");
   expect(await heads(card)).toEqual(["Source · Queued · Observed / matched · Findings · Catalogue gaps", "Status · Reads"]);
   await foldLabels(card.locator("tbody tr").first(), { when: "Queued", counts: "Observed / matched", findings: "Findings", gaps: "Catalogue gaps" });

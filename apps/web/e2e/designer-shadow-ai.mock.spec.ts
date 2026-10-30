@@ -287,7 +287,8 @@ test("X6b (L2): a status filter asks the server, and the list says how many it s
 
 // the KEEP_VISIBLE refusal (a form or warning never folds) is probed in kit-contain.mock.spec.ts
 test("ADR-0219: Recent runs is a paged list with its own page size, remembered in this browser", async ({ page }) => {
-  await page.goto("/ui/admin/shadow-ai/discovery-sources");
+  // P3: the full list is on its own page; the overview previews the newest runs
+  await page.goto("/ui/admin/shadow-ai/discovery-sources/runs");
   const runs = page.locator('[data-list="discovery-runs"]');
   await expect(runs.getByLabel("Rows per page")).toHaveValue("10");
   await runs.getByLabel("Rows per page").selectOption("100");

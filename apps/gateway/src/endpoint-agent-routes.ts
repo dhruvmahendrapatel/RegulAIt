@@ -1053,7 +1053,20 @@ export function registerEndpointAgentRoutes(app: FastifyInstance, db: Db, opts: 
         const q = req.query as Record<string, unknown>;
         z.object({}).strict().parse(filterParams(q));
         const page = parseListPage(ENROLMENT_TOKENS_LIST, q);
-        return reply.send(await runListPage(db, ENROLMENT_TOKENS_LIST, tokensReader, eq(endpointEnrolmentTokens.sourceId, source.id), page));
+        const where = eq(endpointEnrolmentTokens.sourceId, source.id);
+        const [out, [sum]] = await Promise.all([
+          runListPage(db, ENROLMENT_TOKENS_LIST, tokensReader, where, page),
+          // P3: the state figures across every token of the source, so a preview's heading counts what needs attention
+          db
+            .select({
+              tokens: sqlL<number>`count(*)::int`,
+              revoked: sqlL<number>`count(*) filter (where ${endpointEnrolmentTokens.revokedAt} is not null)::int`,
+              expired: sqlL<number>`count(*) filter (where ${endpointEnrolmentTokens.revokedAt} is null and ${endpointEnrolmentTokens.expiresAt} <= now())::int`,
+            })
+            .from(endpointEnrolmentTokens)
+            .where(where),
+        ]);
+        return reply.send({ ...out, summary: { tokens: Number(sum?.tokens ?? 0), expired: Number(sum?.expired ?? 0), revoked: Number(sum?.revoked ?? 0) } });
       } catch (e) {
         return sendListError(reply, e);
       }

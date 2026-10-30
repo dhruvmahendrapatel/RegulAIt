@@ -91,6 +91,9 @@ const ReviewWorkbenchPage = screen(() => import("./screens/admin-approvals-audit
 const AuditLogPage = screen(() => import("./screens/admin-approvals-audit"), "AuditLogPage");
 const ShadowAiPage = screen(() => import("./screens/admin-ai-governance"), "ShadowAiPage");
 const DiscoverySourcesPage = screen(() => import("./screens/admin-ai-governance"), "DiscoverySourcesPage");
+const DiscoveryRunsPage = screen(() => import("./screens/admin-discovery-lists"), "DiscoveryRunsPage");
+const EnrolmentTokensPage = screen(() => import("./screens/admin-discovery-lists"), "EnrolmentTokensPage");
+const EndpointDevicesPage = screen(() => import("./screens/admin-discovery-lists"), "EndpointDevicesPage");
 const CopilotPage = screen(() => import("./screens/admin-overview"), "CopilotPage");
 const ChatOpsPage = screen(() => import("./screens/admin-approvals-audit"), "ChatOpsPage");
 const LineagePage = screen(() => import("./screens/admin-approvals-audit"), "LineagePage");
@@ -297,6 +300,10 @@ function ApplicationRoutes() {
                 <Route path="shadow-ai" element={<ShadowAiPage />} />
                 {/* ADR-0195 SD0 */}
                 <Route path="shadow-ai/discovery-sources" element={<DiscoverySourcesPage />} />
+                {/* P3 (#453): its full lists, each on its own page */}
+                <Route path="shadow-ai/discovery-sources/runs" element={<DiscoveryRunsPage />} />
+                <Route path="shadow-ai/discovery-sources/tokens" element={<EnrolmentTokensPage />} />
+                <Route path="shadow-ai/discovery-sources/devices" element={<EndpointDevicesPage />} />
                 {/* ADR-0056 */}
                 <Route path="copilot" element={<CopilotPage />} />
                 {/* ADR-0061 */}
