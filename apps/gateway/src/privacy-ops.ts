@@ -23,10 +23,11 @@
  *    dispatch has no record to permit it, so personal data in one is refused (default-deny). An input with no
  *    personal data is untouched. The cascade's PII mode still decides first: `block` refuses before this rung runs.
  *
- * Open source first (ADR-0176): node's HMAC and HKDF, zod, drizzle and the existing step-up and audit helpers. No
- * permissively licensed record-of-processing or DSR library fits a governance gateway's audit and enforcement model
- * (the ones found are standalone SaaS apps or form builders), so the workflow is ours; detection is the existing
- * detector. What is ours is the policy: which categories a project may process, and when a dispatch is refused.
+ * Open source first (ADR-0176): node's HMAC and HKDF, zod, drizzle and the existing step-up and audit helpers. The
+ * record-of-processing and DSR tools found (hosted products, a standalone MCP server, and Fides, an Apache-2.0 Python
+ * service with its own database) run as separate services rather than inside the gateway's transaction and audit
+ * model, so the workflow is ours; detection is the existing detector. What is ours is the policy: which categories a
+ * project may process, and when a dispatch is refused.
  */
 import { createHmac, hkdfSync } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
