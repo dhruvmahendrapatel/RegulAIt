@@ -44,6 +44,7 @@ import { computeCardStaleness } from "./mrm-autofill.js";
 import { runEvalSuite } from "./evals.js";
 import { runRedTeamSuite } from "./redteam.js";
 import { preDispatchProjectGate } from "./projects.js";
+import { errMessage } from "./err-serializer.js";
 import { SCORING_SEMANTICS_VERSION, type RedTeamAttackClass } from "@regulait/shared";
 
 /** the audit row's subject when the suite's last runner is gone (the same sentinel the MRM routes use) */
@@ -250,7 +251,7 @@ export async function runMrmAutoRetestSweep(db: Db, dataKey: string | undefined,
       try {
         finish = await runSuite(db, dataKey, card, suite, { mrmRetest: { cardId: card.id, retestId: claimed.id } });
       } catch (err) {
-        finish = { status: "refused", reason: `the runner failed: ${err instanceof Error ? err.message : String(err)}` };
+        finish = { status: "refused", reason: `the runner failed: ${errMessage(err)}` };
       }
       const [done] = await db.transaction(async (tx) => {
         // a request created while the suite ran attached this row already; one still unattached joins a pending one

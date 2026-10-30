@@ -279,7 +279,7 @@ afterAll(async () => {
   if (created.usage.length) await db.delete(usageEvents).where(inArray(usageEvents.id, created.usage));
   if (projectId) {
     await db.update(evalRuns).set({ projectId: null }).where(eq(evalRuns.projectId, projectId));
-    await db.execute(sql`DELETE FROM approvals WHERE object_type = 'project_budget' AND object_id = ${projectId}`).catch(() => undefined);
+    await db.delete(approvals).where(eq(approvals.projectId, projectId));
     await db.delete(projects).where(eq(projects.id, projectId)).catch(() => undefined);
   }
   await app.close();
