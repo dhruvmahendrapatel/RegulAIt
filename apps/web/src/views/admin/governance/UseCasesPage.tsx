@@ -192,7 +192,7 @@ export default function UseCasesPage() {
                       render: (row) => (
                         <RowActions
                           slot="5rem"
-                          primary={
+                          secondary={
                             row.status !== "retired" && (
                               <Button
                                 size="sm"

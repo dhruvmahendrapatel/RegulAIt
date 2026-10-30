@@ -205,7 +205,7 @@ export default function WorkflowsPage() {
                   render: (i) => (
                     <RowActions
                       slot="5rem"
-                      primary={
+                      secondary={
                         auth?.userId && canAbort(i.status) && (
                           <Button
                             size="sm"
@@ -243,18 +243,12 @@ export default function WorkflowsPage() {
       </div>
       {aborting && (
         <AbortWorkflowDialog
+          id={aborting.id}
           name={aborting.change?.description || "this workflow"}
-          onCancel={() => setAborting(null)}
-          onConfirm={() => {
-            const id = aborting.id;
+          onClose={() => setAborting(null)}
+          onAborted={() => {
             setAborting(null);
-            abortInstance(id).then(
-              () => {
-                toast("Workflow aborted", "success");
-                void queryClient.invalidateQueries({ queryKey: ["workflows"] });
-              },
-              (e: unknown) => toast(e instanceof Error ? e.message : String(e), "error"),
-            );
+            void queryClient.invalidateQueries({ queryKey: ["workflows"] });
           }}
         />
       )}

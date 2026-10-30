@@ -60,7 +60,7 @@ test("an admin edits a project's settings from its own page, with no project pic
   const dialog = page.getByRole("dialog", { name: /Settings — team-17 support/ });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByLabel("Project")).toHaveCount(0);
-  await dialog.getByLabel("Cost center").fill("CC-0042");
+  await dialog.getByLabel("Cost centre").fill("CC-0042");
   await dialog.getByRole("button", { name: "Save changes" }).click();
   await expect(dialog).toBeHidden();
   expect(api.patches).toEqual([{ path: "/v1/projects/p1", body: { costCenter: "CC-0042" } }]);

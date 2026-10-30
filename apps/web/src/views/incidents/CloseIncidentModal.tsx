@@ -9,7 +9,8 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../api/client";
 import { plural } from "../../api/format";
-import { Button, Field, Modal, Textarea } from "../../ui/kit";
+import { Button, Field, Modal, SkeletonBlock, Textarea } from "../../ui/kit";
+import { RefusalNotice } from "../../ui/RefusalNotice";
 import { useAction } from "../admin/adminKit";
 import v from "../views.module.css";
 import type { IncidentDetail } from "./incidentModel";
@@ -74,10 +75,14 @@ export function CloseIncidentModal(props: { open: boolean; d: IncidentDetail; on
           <Textarea value={lessons} onChange={(e) => setLessons(e.target.value)} rows={3} maxLength={8000} />
         </Field>
         <p className={v.faint}>A closed incident is final. Both texts are kept with the record and in its export.</p>
-        {act.error && (
-          <div className={v.errLine} role="alert">
-            {act.error}
-          </div>
+        {act.guidance ? (
+          <RefusalNotice guidance={act.guidance} />
+        ) : (
+          act.error && (
+            <div className={v.errLine} role="alert">
+              {act.error}
+            </div>
+          )
         )}
       </div>
     </Modal>
@@ -95,6 +100,15 @@ export function CloseIncidentFromList(props: { id: string; onClose: () => void; 
         </div>
       </Modal>
     );
-  if (!q.data) return null;
+  // answer the click at once: the dialog opens busy while the detail it judges is read
+  if (!q.data)
+    return (
+      <Modal open title="Close incident" onClose={props.onClose} actions={<Button onClick={props.onClose}>Cancel</Button>}>
+        <div aria-busy="true">
+          <p className={v.faint}>Loading the incident…</p>
+          <SkeletonBlock lines={3} />
+        </div>
+      </Modal>
+    );
   return <CloseIncidentModal open d={q.data} onClose={props.onClose} onSaved={props.onSaved} />;
 }

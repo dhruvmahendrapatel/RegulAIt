@@ -64,7 +64,7 @@ export function ProjectCreateForm(props: { onDone?: () => void }) {
         <Field label="Name">
           <Input required value={f.name} onChange={(e) => set("name", e.target.value)} />
         </Field>
-        <Field label="Cost center">
+        <Field label="Cost centre">
           <Input value={f.costCenter} onChange={(e) => set("costCenter", e.target.value)} placeholder="for example CC-0042" />
         </Field>
         <Field label="Budget USD">
@@ -78,7 +78,6 @@ export function ProjectCreateForm(props: { onDone?: () => void }) {
         <Field label="Budget period">
           <Select value={f.budgetPeriod} onChange={(e) => set("budgetPeriod", e.target.value)}>
             <option value="">none (lifetime)</option>
-            <option value="none">none (lifetime)</option>
             <option value="monthly">monthly (calendar month)</option>
           </Select>
         </Field>
@@ -179,7 +178,7 @@ export function ProjectEditForm(props: {
         <Field label="New name">
           <Input value={f.name} onChange={(e) => set("name", e.target.value)} placeholder={props.current?.name ?? "leave unchanged"} />
         </Field>
-        <Field label="Cost center">
+        <Field label="Cost centre">
           <Input value={f.costCenter} onChange={(e) => set("costCenter", e.target.value)} placeholder="leave unchanged" />
         </Field>
         <Field label="Budget USD">

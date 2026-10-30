@@ -6,6 +6,7 @@
 import { useState, type ReactNode } from "react";
 import { api } from "../../../api/client";
 import { Button, Field, Input, Modal } from "../../../ui/kit";
+import { RefusalNotice } from "../../../ui/RefusalNotice";
 import { useAction } from "../adminKit";
 import v from "../../views.module.css";
 
@@ -36,6 +37,15 @@ export function RetireUseCaseForm(props: { id: string; act: Action; onRetired: (
         </Button>
         {props.extra}
       </div>
+      {act.guidance ? (
+        <RefusalNotice guidance={act.guidance} />
+      ) : (
+        act.error && (
+          <div className={v.errLine} role="alert">
+            {act.error}
+          </div>
+        )
+      )}
     </div>
   );
 }

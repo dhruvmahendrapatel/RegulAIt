@@ -118,6 +118,8 @@ const capFirst = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 export function UseCasePreviewDrawer(props: { id: string; row: UseCaseRow | undefined; onClose: () => void; onChanged: () => Promise<unknown> }) {
   const agents = useAgents();
   const act = useAction();
+  // its own action, so the retire form's inline refusal never shows another action's error
+  const retireAct = useAction();
   const detail = useQuery({
     queryKey: ["admin", "use-case", props.id],
     queryFn: () => api.get<UseCaseDetail>(`/v1/use-cases/${props.id}`),
@@ -396,7 +398,7 @@ export function UseCasePreviewDrawer(props: { id: string; row: UseCaseRow | unde
             {u.status !== "retired" && (
               <details className={`${r.section} ${r.details}`}>
                 <summary>Retire this use case</summary>
-                <RetireUseCaseForm key={u.id} id={u.id} act={act} onRetired={refresh} />
+                <RetireUseCaseForm key={u.id} id={u.id} act={retireAct} onRetired={refresh} />
               </details>
             )}
             {u.status === "retired" && (
