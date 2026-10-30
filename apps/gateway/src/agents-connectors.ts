@@ -154,6 +154,7 @@ import {
   type ConversationContext,
 } from "./conversations.js";
 import { ownerChangeGate, resolveRegistrationOwner, withOwnership } from "./ownership.js";
+import { withLifecycle } from "./integration-lifecycle.js";
 import { CHANGED_CONCURRENTLY, checkStepUp, requireStepUp } from "./step-up.js";
 import {
   prepareConversationContext,
@@ -5120,7 +5121,7 @@ export function registerAgentConnectorRoutes(
     return reply.status(201).send(row);
   });
 
-  app.get("/v1/connectors", async () => ({ connectors: await withOwnership(db, await db.select().from(connectors)) }));
+  app.get("/v1/connectors", async () => ({ connectors: await withLifecycle(db, await withOwnership(db, await db.select().from(connectors))) }));
 
   // --- connector credentials (admin-only via the global gate) ---
   // One platform credential per connector, encrypted at rest, never returned —
@@ -5197,11 +5198,30 @@ export function registerAgentConnectorRoutes(
       tokenCiphertext: encryptSecret(opts.dataKey, body.token),
       baseUrl: body.baseUrl ?? null,
     };
-    const [row] = await db
-      .insert(connectorCredentials)
-      .values(values)
-      .onConflictDoUpdate({ target: connectorCredentials.connectorId, set: values })
-      .returning(connectorCredCols);
+    // ADR-0207 (G3): saving a credential is on the trail, in the same transaction as the write (never the secret)
+    const row = await db.transaction(async (tx) => {
+      const [existing] = await tx
+        .select({ id: connectorCredentials.id })
+        .from(connectorCredentials)
+        .where(eq(connectorCredentials.connectorId, connectorId))
+        .for("update");
+      const [r] = await tx
+        .insert(connectorCredentials)
+        .values(values)
+        .onConflictDoUpdate({ target: connectorCredentials.connectorId, set: values })
+        .returning(connectorCredCols);
+      await tx.insert(auditLog).values({
+        userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+        objectType: "connector",
+        objectId: connectorId,
+        detail: { phase: "credential", change: existing ? "replaced" : "set", name: connector.name, baseUrl: values.baseUrl, receiptClass: "configuration" },
+        effect: "allow",
+        ruleId: "connector-credential-saved",
+        ruleChain: [],
+        reason: `connector '${connector.name}': credential ${existing ? "replaced; the previous secret was destroyed" : "set"}`,
+      });
+      return r;
+    });
     return reply.status(201).send(row);
   });
 
@@ -5217,10 +5237,26 @@ export function registerAgentConnectorRoutes(
 
   app.delete("/v1/connectors/:connectorId/credential", async (req, reply) => {
     const { connectorId } = connectorIdParam.parse(req.params);
-    const deleted = await db
-      .delete(connectorCredentials)
-      .where(eq(connectorCredentials.connectorId, connectorId))
-      .returning({ id: connectorCredentials.id });
+    // ADR-0207 (G3): removing a credential is on the trail, in the same transaction as the delete
+    const deleted = await db.transaction(async (tx) => {
+      const rows = await tx
+        .delete(connectorCredentials)
+        .where(eq(connectorCredentials.connectorId, connectorId))
+        .returning({ id: connectorCredentials.id });
+      if (rows.length === 0) return rows;
+      const [c] = await tx.select({ name: connectors.name }).from(connectors).where(eq(connectors.id, connectorId));
+      await tx.insert(auditLog).values({
+        userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+        objectType: "connector",
+        objectId: connectorId,
+        detail: { phase: "credential", change: "removed", name: c?.name ?? null, receiptClass: "configuration" },
+        effect: "allow",
+        ruleId: "connector-credential-removed",
+        ruleChain: [],
+        reason: `connector '${c?.name ?? connectorId}': credential removed; its stored secret was destroyed`,
+      });
+      return rows;
+    });
     if (deleted.length === 0) return reply.status(404).send({ error: "unknown_credential" });
     return { removed: true };
   });
