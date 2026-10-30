@@ -540,6 +540,10 @@ T-5 min; at the FALLBACK rehearsal a laptop terminal on the FALLBACK checkout):
   the same call is retried, and only now does it run, bound to the exact arguments he approved. Every step is in the
   ledger."
 - **Never say** that the write reached a real repository, opened a PR or updated a Jira or Azure DevOps item.
+- **Audited demo relaxation** (owner, #453 c6521685462; DEMO_RUNBOOK §7.3, row E): for this demo we run one approver
+  with a plain sign-off. The product defaults are two approvers for a sensitive-data project and a passkey signature,
+  and the newest `org-settings-updated` rows in `/ui/admin/audit` show the change as RELAXED. If asked, say so: "for
+  this demo project we run one approver; the audit log shows that we relaxed it, and who did".
 - **If a third-party call is slow.** Only the chat post leaves the box; the MCP calls go to the demo server on the
   host. If the Slack line is slow or prints `NOT posted`: "The request is in Avery's Inbox either way; chat is a mirror,
   never the only copy," and approve in the Inbox. The command waits up to five minutes
@@ -581,7 +585,8 @@ It records each question as an audit row marked advisory (not counted against ra
 - **Never say**, on the simulated fallback, that the call "was blocked" or "was queued", or that a call was made: on screen and
   aloud it is a *simulated decision*, the real policy engine evaluating a proposed call.
 - **Data:** on both stacks the governance `seed` gives Dana the role grant, the `search_code` revocation and the `write_file` approval
-  rule naming Avery; `demo:check` does not assert them. The live path also needs `demo:mcp` running and an enabled
+  rule naming Avery; `demo:check` does not assert them, but its **E Enforce it** row FAILs while the audited relaxation
+  above is missing (the write would be refused at queue time). The live path also needs `demo:mcp` running and an enabled
   Slack ChatOps connection on the stack (pending execution at the first rehearsal).
 
 ### G3. Deploy gate — 2 minutes (10-05 beat 2C; 1.5 until 2026-10-24, FS-49)
