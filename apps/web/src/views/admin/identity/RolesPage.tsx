@@ -4,7 +4,7 @@
  * Deleting a held role answers 409 with the holders named; force-delete
  * requires a recorded, audited reason.
  */
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api, ApiError } from "../../../api/client";
 import { withStepUp } from "../../../stepup/stepUp";
@@ -23,7 +23,6 @@ import {
   Select,
   Table,
 } from "../../../ui/kit";
-import { RenameModal } from "./RenameModal";
 import {
   QueryGate,
   ReasonModal,
@@ -43,6 +42,9 @@ import {
 } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+
+// G10 (ADR-0206): the rename dialog is its own chunk, loaded when an admin opens it
+const RenameModal = lazy(() => import("./RenameModal").then((m) => ({ default: m.RenameModal })));
 
 export default function RolesPage() {
   const roles = useRoles();
@@ -207,7 +209,11 @@ export default function RolesPage() {
         )}
       </div>
 
-      <RenameModal noun="role" target={renameTarget} onClose={() => setRenameTarget(null)} />
+      {renameTarget && (
+        <Suspense fallback={null}>
+          <RenameModal noun="role" target={renameTarget} onClose={() => setRenameTarget(null)} />
+        </Suspense>
+      )}
       <ConfirmModal
         open={confirmDelete !== null}
         title={`Delete role “${confirmDelete?.name}”?`}

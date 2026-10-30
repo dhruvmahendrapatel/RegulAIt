@@ -5,13 +5,12 @@
  * context answers 409 with what blocks; force-delete requires a recorded
  * reason and provenance survives.
  */
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { api, ApiError } from "../../../api/client";
 import { withStepUp } from "../../../stepup/stepUp";
 import type { Team } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, Input, RowActions, Select, SkeletonBlock } from "../../../ui/kit";
-import { RenameModal } from "./RenameModal";
 import {
   ReasonModal,
   optionEls,
@@ -24,6 +23,9 @@ import {
 } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+
+// G10 (ADR-0206): the rename dialog is its own chunk, loaded when an admin opens it
+const RenameModal = lazy(() => import("./RenameModal").then((m) => ({ default: m.RenameModal })));
 
 async function deleteWithBody(path: string, body: unknown): Promise<void> {
   const res = await fetch(path, {
@@ -229,7 +231,11 @@ export default function TeamsPage() {
         </Card>
       </div>
 
-      <RenameModal noun="team" target={renameTarget} onClose={() => setRenameTarget(null)} />
+      {renameTarget && (
+        <Suspense fallback={null}>
+          <RenameModal noun="team" target={renameTarget} onClose={() => setRenameTarget(null)} />
+        </Suspense>
+      )}
       <ConfirmModal
         open={removeMember !== null}
         title={`Remove ${removeMember?.name} from ${removeMember?.team.name}?`}

@@ -1,5 +1,5 @@
 /**
- * G10 (prototype): rename a role or a team.
+ * G10 (ADR-0206): rename a role or a team (PATCH /v1/roles/:id, /v1/teams/:id).
  *
  * A plain rename saves with no confirmation. Two refusals are shown in place:
  * the name is taken (a field error), or the old name is matched BY NAME in

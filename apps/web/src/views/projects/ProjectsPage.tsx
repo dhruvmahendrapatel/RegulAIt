@@ -5,13 +5,12 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "../../api/client";
-import type { Project } from "../../api/types";
 import { fmtDay, fmtUsd } from "../../api/format";
 import { PageHeader } from "../../shell/AppShell";
 import { useSession } from "../../session/SessionContext";
 import { Badge, Button, Card, EmptyState, ErrorState, InfoButton, Meter, Modal, SkeletonBlock } from "../../ui/kit";
 import { ProjectCreateForm } from "./projectForms";
+import { projectsWithArchivedQuery } from "./projectChrome";
 import r from "../admin/governance/registry.module.css";
 import v from "../views.module.css";
 
@@ -26,10 +25,7 @@ export default function ProjectsPage() {
   // G2 (#453): creating a project is admin-only at the gateway, so only an admin sees the door
   const isAdmin = Boolean(auth?.isAdmin);
   const [creating, setCreating] = useState(false);
-  const q = useQuery({
-    queryKey: ["projects"],
-    queryFn: () => api.get<{ projects: Project[] }>("/v1/projects"),
-  });
+  const q = useQuery(projectsWithArchivedQuery);
 
   if (q.isLoading) {
     return (

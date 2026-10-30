@@ -1,5 +1,8 @@
 /**
- * #453 prototype screenshots — G1 project archive and G10 rename roles/teams (mocked gateway, routes do not exist yet).
+ * ADR-0206 — G1 project archive and G10 rename roles and teams, against a mocked gateway that answers the way the
+ * real routes do (zz-adr0206-archive-rename.test.ts covers the routes themselves): the archived projects behind their
+ * chip (`GET /v1/projects?archived=include`), the archive dialog listing the pinned engine keys from
+ * `/archive-impact`, the 409 refusals, unarchive's step-up prompt, and the rename refusals.
  */
 import { expect, test, type Page, type Route } from "@playwright/test";
 
@@ -55,6 +58,21 @@ function projectsWorld(opts: { archiveReply?: { status: number; body: unknown };
   };
   const handler: Handler = (p, method, body) => {
     if (p === "/v1/projects" && method === "GET") return { body: { projects: [credit, support, legacy] } };
+    if (p === "/v1/projects/p-credit/archive-impact")
+      return {
+        body: {
+          projectId: "p-credit",
+          archived: Boolean(credit.archivedAt),
+          pinnedEngineKeys: [{ id: "vk_9C2E", name: "engine run · eval suite", engineRunId: "er_51", expiresAt: "2026-11-05T10:00:00.000Z" }],
+          pinnedEngineKeyCount: 1,
+          openApprovals: [],
+          openApprovalCount: 0,
+          runningWork: [],
+          runningWorkCount: 0,
+          openDelegations: [],
+          openDelegationCount: 0,
+        },
+      };
     if (p === "/v1/projects/p-credit/members")
       return {
         body: {
@@ -127,6 +145,8 @@ test.describe("G1 project archive", () => {
     await page.screenshot({ path: test.info().outputPath("g1-project-header.png") });
     await page.getByRole("button", { name: "Archive project" }).click();
     const dialog = page.getByRole("dialog", { name: "Archive project “Credit operations”?" });
+    await expect(dialog.getByTestId("archive-pinned-keys")).toContainText("1 engine key pinned to this project will stop working");
+    await expect(dialog.getByTestId("archive-pinned-keys")).toContainText("vk_9C2E");
     await dialog.getByLabel("Reason").fill("Pilot ended; spend moves to team-17 support from November.");
     await page.screenshot({ path: test.info().outputPath("g1-archive-confirm.png") });
     await dialog.getByRole("button", { name: "Archive project" }).click();
@@ -172,6 +192,33 @@ test.describe("G1 project archive", () => {
     await expect(dialog.getByTestId("archive-refusal")).toContainText("1 workflow is still running");
     await page.screenshot({ path: test.info().outputPath("g1-archive-refused-running.png") });
   });
+});
+
+test("G1 refusal: live delegations", async ({ page }) => {
+  await mockApi(
+    page,
+    projectsWorld({
+      archiveReply: { status: 409, body: { error: "project_has_open_delegations", delegations: [{ id: "dg_44" }], count: 1 } },
+    }),
+  );
+  await page.goto("/ui/projects/p-credit");
+  await page.getByRole("button", { name: "Archive project" }).click();
+  const dialog = page.getByRole("dialog", { name: /Archive project/ });
+  await dialog.getByLabel("Reason").fill("Pilot ended; spend moves to team-17 support.");
+  await dialog.getByRole("button", { name: "Archive project" }).click();
+  await expect(dialog.getByTestId("archive-refusal")).toContainText("This project still has 1 live delegation. Revoke it first.");
+});
+
+test("G1 the projects list asks for archived projects too", async ({ page }) => {
+  const asked: string[] = [];
+  page.on("request", (r) => {
+    const u = new URL(r.url());
+    if (u.pathname === "/v1/projects") asked.push(u.search);
+  });
+  await mockApi(page, projectsWorld({}));
+  await page.goto("/ui/projects");
+  await expect(page.getByText("Credit operations")).toBeVisible();
+  expect(asked).toContain("?archived=include");
 });
 
 // ---------------------------------------------------------------- G10
