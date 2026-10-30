@@ -65,6 +65,8 @@ import {
   SIGNATURE_ECOSYSTEM_PATTERN,
   SIGNATURE_OSES,
   UPLOAD_FED_SOURCE_KINDS,
+  DISCOVERY_SOURCE_KINDS,
+  familySwitchProblem,
   isArtifactSignatureKind,
   isEnvName,
   keyMatchesSignature,
@@ -267,12 +269,16 @@ const scopeSummary = (s: Pick<DiscoverySourceRow, "kind" | "target" | "scope">) 
 
 /** enqueue a run for every enabled source whose schedule is due; returns the queued run ids */
 export async function enqueueDueDiscoveryRuns(db: Db): Promise<Array<{ runId: string; sourceId: string }>> {
+  // ADR-0218: a kind whose family is switched off is never queued (constants from the closed kind list, not input)
+  const { families } = await loadDiscoverySettings(db);
+  const switchedOff = DISCOVERY_SOURCE_KINDS.filter((k) => familySwitchProblem(k, families) !== null);
   const res = await db.execute<{ id: string; source_id: string }>(sql`
     WITH due AS (
       UPDATE discovery_sources
          SET next_run_at = now() + make_interval(secs => schedule_interval_seconds)
        WHERE enabled AND (next_run_at IS NULL OR next_run_at <= now())
          AND NOT (kind = ANY (${sql.raw(`ARRAY[${UPLOAD_FED_SOURCE_KINDS.map((k) => `'${k}'`).join(", ") || "''"}]::text[]`)}))
+         AND NOT (kind = ANY (${sql.raw(`ARRAY[${switchedOff.map((k) => `'${k}'`).join(", ") || "''"}]::text[]`)}))
        RETURNING id, version, kind
     )
     INSERT INTO discovery_runs (source_id, trigger, status, source_version, kind)
@@ -606,6 +612,9 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
   const [source] = await db.select().from(discoverySources).where(eq(discoverySources.id, run.sourceId));
   if (!source) return fail("source_missing", "the source was deleted");
   if (!source.enabled) return fail("source_disabled", "the source was disabled before the run started");
+  // ADR-0218: a run of a family switched off after it was queued stops here, before any credential is read
+  const familyOff = familySwitchProblem(source.kind, (await loadDiscoverySettings(db)).families);
+  if (familyOff) return fail("family_disabled", familyOff);
   const scanner = opts.registry.get(source.kind);
   if (!scanner) return fail("scanner_not_built", `no scanner is built for ${source.kind} yet (ADR-0195 ${DISCOVERY_KIND_SPECS[source.kind].slice})`);
 

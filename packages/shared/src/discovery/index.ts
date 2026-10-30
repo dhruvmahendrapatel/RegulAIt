@@ -26,6 +26,10 @@ export const DISCOVERY_SOURCE_KINDS = [
   "endpoint_osquery",
   "endpoint_inventory",
   "endpoint_agent",
+  // ADR-0218 (P9): the wider sources, each family behind its own default-off org switch
+  "saas_inventory_api",
+  "idp_entra",
+  "ml_mlflow",
 ] as const;
 export type DiscoverySourceKind = (typeof DISCOVERY_SOURCE_KINDS)[number];
 
@@ -37,20 +41,53 @@ export const DISCOVERY_EVIDENCE_KINDS = [
   "endpoint_osquery",
   "endpoint_inventory",
   "endpoint_agent",
+  // ADR-0218: a SaaS app inventory read, an identity-provider app consent, a standalone ML platform's inventory
+  "saas_inventory",
+  "idp_app_grant",
+  "ml_platform_inventory",
 ] as const;
 export type DiscoveryEvidenceKind = (typeof DISCOVERY_EVIDENCE_KINDS)[number];
 
 /** what a finding of each source family is about, in `shadow_ai_findings.subject_kind` terms */
-export type DiscoverySubjectKind = "repo" | "cloud_resource" | "cloud_principal" | "device";
+export type DiscoverySubjectKind = "repo" | "cloud_resource" | "cloud_principal" | "device" | "saas_app" | "system";
+
+export const DISCOVERY_SOURCE_FAMILIES = ["repo", "cloud", "endpoint", "saas", "identity", "ml_platform"] as const;
+export type DiscoverySourceFamily = (typeof DISCOVERY_SOURCE_FAMILIES)[number];
+
+/**
+ * ADR-0218: the source families added after ADR-0195, each behind a default-off org switch
+ * (`discovery_settings.<family>_sources_enabled`). Turning one on is a `settings_relax` step-up; turning it off is
+ * free and stops every run of that family at once (the worker and the routes refuse it). The ADR-0195 families
+ * (repo, cloud, endpoint) have no switch: each of their sources is already off until an admin enables it.
+ */
+export const DISCOVERY_GATED_FAMILIES = ["saas", "identity", "ml_platform"] as const;
+export type DiscoveryGatedFamily = (typeof DISCOVERY_GATED_FAMILIES)[number];
+export const isGatedFamily = (f: DiscoverySourceFamily): f is DiscoveryGatedFamily =>
+  (DISCOVERY_GATED_FAMILIES as readonly string[]).includes(f);
+/** the switch states, all off by default */
+export type DiscoveryFamilySwitches = Readonly<Record<DiscoveryGatedFamily, boolean>>;
+export const DISCOVERY_FAMILY_SWITCHES_DEFAULT: DiscoveryFamilySwitches = Object.freeze({ saas: false, identity: false, ml_platform: false });
+export const DISCOVERY_FAMILY_LABELS: Readonly<Record<DiscoveryGatedFamily, string>> = Object.freeze({
+  saas: "SaaS app inventories",
+  identity: "Identity-provider app consents",
+  ml_platform: "Standalone ML platforms",
+});
+
+/** null when a source of this kind may be created, enabled or run under these switches; else why not */
+export function familySwitchProblem(kind: DiscoverySourceKind, switches: DiscoveryFamilySwitches): string | null {
+  const family = DISCOVERY_KIND_SPECS[kind].family;
+  if (!isGatedFamily(family) || switches[family]) return null;
+  return `${DISCOVERY_FAMILY_LABELS[family]} are switched off for this organisation; an admin turns them on under Discovery sources, Settings (confirmed with a step-up)`;
+}
 
 export interface DiscoveryKindSpec {
-  family: "repo" | "cloud" | "endpoint";
+  family: DiscoverySourceFamily;
   /** the evidence kinds a scanner of this kind may report under; anything else is refused */
   evidenceKinds: readonly DiscoveryEvidenceKind[];
   /** the subject kinds a scanner of this kind may report; anything else is refused */
   subjectKinds: readonly DiscoverySubjectKind[];
   /** the slice that builds its scanner (ADR-0195 "Slices") */
-  slice: "SD1" | "SD2" | "SD3" | "SD4";
+  slice: "SD1" | "SD2" | "SD3" | "SD4" | "P9";
   label: string;
   /** fed by uploads, not by a schedule: the worker never queues a scheduled run for it, and the UI asks no schedule */
   uploadFed?: boolean;
@@ -81,6 +118,10 @@ export const DISCOVERY_KIND_SPECS: Readonly<Record<DiscoverySourceKind, Discover
   endpoint_inventory: { family: "endpoint", evidenceKinds: ["endpoint_inventory"], subjectKinds: ["device"], slice: "SD3", label: "MDM or EDR inventory (no agent)", uploadFed: true },
   // SD4b: fed by the agents' signed uploads (endpoint-agent-routes.ts); RegulAIt never contacts a device, so never scheduled
   endpoint_agent: { family: "endpoint", evidenceKinds: ["endpoint_agent"], subjectKinds: ["device"], slice: "SD4", label: "regulAIt endpoint agent", uploadFed: true },
+  // ADR-0218 (P9)
+  saas_inventory_api: { family: "saas", evidenceKinds: ["saas_inventory"], subjectKinds: ["saas_app"], slice: "P9", label: "SaaS app inventory (JSON API)" },
+  idp_entra: { family: "identity", evidenceKinds: ["idp_app_grant"], subjectKinds: ["saas_app"], slice: "P9", label: "Microsoft Entra ID app consents" },
+  ml_mlflow: { family: "ml_platform", evidenceKinds: ["ml_platform_inventory"], subjectKinds: ["system"], slice: "P9", label: "MLflow-compatible ML platform" },
 });
 
 /** federated (short-lived, the default, free) or static (a stored secret: a `settings_relax` step-up) */
@@ -119,7 +160,7 @@ export const DISCOVERY_ENDPOINT_RETENTION_MAX_DAYS = 3650;
 export const DISCOVERY_RUN_MAX_ATTEMPTS = 3;
 
 /** the pseudonymised kinds of person a scanner may name (ADR-0195 decision 20) */
-export const DISCOVERY_PSEUDONYM_KINDS = ["device_user", "commit_author", "cloud_principal", "device"] as const;
+export const DISCOVERY_PSEUDONYM_KINDS = ["device_user", "commit_author", "cloud_principal", "device", "idp_user"] as const;
 export type DiscoveryPseudonymKind = (typeof DISCOVERY_PSEUDONYM_KINDS)[number];
 /** a pseudonym as shown in findings: `psn:` + 24 hex characters of the per-tenant HMAC */
 export const DISCOVERY_PSEUDONYM_PREFIX = "psn:";
@@ -134,6 +175,8 @@ export const DISCOVERY_STEP_UP_KEYS = Object.freeze({
   warningAge: "discoveryCredentialWarningAgeDays",
   /** lengthening the endpoint evidence retention */
   retention: "discoveryEndpointRetentionDays",
+  /** ADR-0218: turning a wider-source family on (bound to the families being turned on) */
+  families: "discoveryWiderSourceFamilies",
 });
 // revealing a pseudonymised name is NOT a settings relaxation: it is the `pseudonym_reveal` step-up kind
 
@@ -170,7 +213,7 @@ export interface ActiveDiscoverySource {
  */
 export function activeDiscoveryPosture(active: readonly ActiveDiscoverySource[]): string {
   if (active.length === 0) {
-    return "No active discovery source is enabled, so nothing is scanned: regulAIt reaches out to no repository, cloud account or device.";
+    return "No active discovery source is enabled, so nothing is scanned: regulAIt reaches out to no repository, cloud account, identity provider, SaaS inventory, ML platform or device.";
   }
   const shown = active.slice(0, 20).map((a) => `${a.name} (${DISCOVERY_KIND_SPECS[a.kind].label})`);
   const more = active.length > shown.length ? `, and ${active.length - shown.length} more` : "";
@@ -190,7 +233,7 @@ export function activeDiscoveryPosture(active: readonly ActiveDiscoverySource[])
  * only identifiers of a known form are accepted, and anything that could carry
  * a secret is refused.
  */
-export type PublicConfigShape = "numeric_id" | "guid" | "aws_role_arn" | "gcp_id" | "gcp_sa_email" | "https_url";
+export type PublicConfigShape = "numeric_id" | "guid" | "aws_role_arn" | "gcp_id" | "gcp_sa_email" | "https_url" | "header_name";
 
 const SHAPE_PATTERNS: Readonly<Record<Exclude<PublicConfigShape, "https_url">, RegExp>> = {
   numeric_id: /^[0-9]{1,20}$/,
@@ -198,6 +241,8 @@ const SHAPE_PATTERNS: Readonly<Record<Exclude<PublicConfigShape, "https_url">, R
   aws_role_arn: /^arn:aws[a-z-]{0,20}:iam::[0-9]{12}:role\/[A-Za-z0-9+=,.@_/-]{1,512}$/,
   gcp_id: /^[a-z][a-z0-9-]{3,62}$/,
   gcp_sa_email: /^[a-z][a-z0-9-]{4,29}@[a-z][a-z0-9-]{4,29}\.iam\.gserviceaccount\.com$/,
+  // ADR-0218: the HTTP header a static API token is sent in (a header name, never a value)
+  header_name: /^[A-Za-z][A-Za-z0-9-]{0,63}$/,
 };
 
 export function publicConfigShapeOk(shape: PublicConfigShape, value: string): boolean {
@@ -254,6 +299,14 @@ export const DISCOVERY_PUBLIC_CONFIG: Readonly<Record<DiscoverySourceKind, Reado
   endpoint_osquery: { federated: {}, static: {} },
   endpoint_inventory: { federated: {}, static: {} },
   endpoint_agent: { federated: {}, static: {} },
+  // ADR-0218: a SaaS inventory API and an MLflow-compatible platform take a stored read-only token only (neither
+  // accepts an external OIDC token); `authHeader` names the header it goes in (default Authorization: Bearer)
+  saas_inventory_api: { federated: {}, static: { authHeader: { shape: "header_name", required: false } } },
+  idp_entra: {
+    federated: { tenantId: { shape: "guid", required: true }, clientId: { shape: "guid", required: true } },
+    static: { tenantId: { shape: "guid", required: true }, clientId: { shape: "guid", required: true } },
+  },
+  ml_mlflow: { federated: {}, static: { authHeader: { shape: "header_name", required: false } } },
 });
 
 /** null when `config` is exactly an allowed, well-formed public config for this kind and mode; else the problem */
@@ -306,7 +359,7 @@ export function credentialTargetMatch(
     const home = domain.slice(0, -SUFFIX.length);
     return want && home.length > 0 && !home.includes(".") && home === want ? "match" : "unverifiable";
   }
-  if ((kind === "cloud_azure" || kind === "repo_azure_devops") && config.tenantId) {
+  if ((kind === "cloud_azure" || kind === "repo_azure_devops" || kind === "idp_entra") && config.tenantId) {
     const want = t("tenantId");
     if (!want) return "unverifiable";
     return config.tenantId.toLowerCase() === want ? "match" : "mismatch";

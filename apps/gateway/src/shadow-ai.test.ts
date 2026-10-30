@@ -123,10 +123,10 @@ describe("the signature catalogue is data, not code", () => {
     const list = await get("/v1/shadow-ai/catalogue");
     expect(list.statusCode).toBe(200);
     const body = list.json();
-    // the default signatures plus the discovery slices' artifact seed rows (ADR-0195 SD2: cloud_ai_service)
+    // the default signatures plus the discovery slices' artifact seed rows (ADR-0195 SD2: cloud_ai_service; ADR-0218: ml_platform_asset)
     expect(body.total).toBe(SHIPPED_SIGNATURE_SEED.length);
     expect(SHIPPED_SIGNATURE_SEED.length).toBeGreaterThan(DEFAULT_AI_SIGNATURES.length);
-    const cloudRows = body.signatures.filter((s: { kind: string }) => s.kind === "cloud_ai_service") as Array<{ replacementNote: string | null; note: string | null }>;
+    const cloudRows = body.signatures.filter((s: { kind: string }) => s.kind === "cloud_ai_service" || s.kind === "ml_platform_asset") as Array<{ replacementNote: string | null; note: string | null }>;
     expect(cloudRows.length).toBe(SHIPPED_SIGNATURE_SEED.length - DEFAULT_AI_SIGNATURES.length);
     // the seed's replacement note and documentation reference are carried into the row
     expect(cloudRows.every((r) => !!r.replacementNote && (r.note ?? "").startsWith("documented at https://"))).toBe(true);
