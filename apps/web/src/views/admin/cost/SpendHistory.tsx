@@ -1,19 +1,18 @@
 /**
  * Batch U4 — the spend monitor's records past the overview's newest 25:
  *
- *  - every anomaly signal, filtered by project and status with the route's own
- *    limit (`GET /v1/spend/anomalies?projectId=&status=&limit=`); a non-admin
- *    gets only their projects' signals, narrowed by the gateway;
+ *  - every anomaly signal, filtered by project and status and paged by the
+ *    shared list control (`GET /v1/spend/anomalies?projectId=&status=`); a
+ *    non-admin gets only their projects' signals, narrowed by the gateway;
  *  - every decided future change, filtered by project (`GET /v1/spend/scheduled-changes?projectId=`).
  *
  * Both load when opened ("Show all"), not with the page. Acting on a signal or
  * a change stays on the cards above.
  */
-import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { api } from "../../../api/client";
+import { useMemo, useState } from "react";
+import { DataList } from "../../../ui/DataList";
 import { ago, fmtAt, fmtUsd } from "../../../api/format";
-import { Badge, Button, EmptyState, Field, Select, Table } from "../../../ui/kit";
+import { Badge, Button, EmptyState, Field, Select } from "../../../ui/kit";
 import { optionEls, projectOpts, useProjects } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
@@ -40,8 +39,6 @@ interface ScheduledChange {
   reason: string;
 }
 
-const LIMITS = [50, 100, 200] as const;
-
 function useProjectName() {
   const projects = useProjects();
   const names = new Map((projects.data?.projects ?? []).map((p) => [p.id, p.name]));
@@ -52,14 +49,9 @@ export function AnomalyHistory() {
   const [open, setOpen] = useState(false);
   const [projectId, setProjectId] = useState("");
   const [status, setStatus] = useState("");
-  const [limit, setLimit] = useState<number>(LIMITS[0]);
   const { projects, name } = useProjectName();
-  const params = new URLSearchParams({ limit: String(limit), ...(projectId ? { projectId } : {}), ...(status ? { status } : {}) });
-  const q = useQuery({
-    queryKey: ["admin", "spend-anomalies-all", projectId, status, limit],
-    enabled: open,
-    queryFn: () => api.get<{ anomalies: Anomaly[]; note: string }>(`/v1/spend/anomalies?${params.toString()}`),
-  });
+  const filters = useMemo(() => ({ projectId: projectId || undefined, status: status || undefined }), [projectId, status]);
+  const [note, setNote] = useState<string | null>(null);
   if (!open)
     return (
       <div>
@@ -82,35 +74,32 @@ export function AnomalyHistory() {
             {optionEls(["open", "acknowledged", "dismissed"].map((s) => ({ v: s, l: s })), "every status")}
           </Select>
         </Field>
-        <Field label="Show at most">
-          <Select value={String(limit)} onChange={(e) => setLimit(Number(e.target.value))}>
-            {LIMITS.map((n) => (
-              <option key={n} value={n}>
-                {n}
-              </option>
-            ))}
-          </Select>
-        </Field>
       </div>
-      <Table<Anomaly>
-        rows={q.data?.anomalies}
-        loading={q.isLoading}
-        error={q.error}
-        onRetry={() => void q.refetch()}
+      <DataList<Anomaly & { projectName?: string | null }>
+        listId="spend-anomalies"
+        noun="anomaly signals"
+        endpoint="/v1/spend/anomalies"
+        exportPath="/v1/spend/anomalies/export.xlsx"
+        queryKey={["admin", "spend-anomalies-all", "list"]}
+        legacyKey="anomalies"
+        filters={filters}
+        defaultSort={{ key: "d", dir: "desc" }}
+        onRows={(_rows, raw) => setNote(typeof raw.note === "string" ? raw.note : null)}
         rowKey={(r) => r.id}
         empty={<EmptyState title="No signals match" />}
         columns={[
-          { key: "p", header: "Project", render: (r) => name(r.projectId) },
-          { key: "s", header: "Signal", render: (r) => r.signal },
-          { key: "o", header: "Observed", render: (r) => r.observed },
-          { key: "sc", header: "Score vs threshold", render: (r) => (r.score == null ? "—" : `${r.score} vs ${r.threshold}`) },
-          { key: "a", header: "Action", render: (r) => (r.approvalId ? <Badge tone="warn">approval raised</Badge> : <Badge tone="info">alert only</Badge>) },
-          { key: "st", header: "Status", render: (r) => <span title={r.decisionReason ?? undefined}>{r.status}</span> },
-          { key: "d", header: "Detected", render: (r) => ago(r.detectedAt) },
+          { key: "p", header: "Project", main: true, sortable: true, render: (r) => r.projectName ?? name(r.projectId) },
+          { key: "s", header: "Signal", main: true, sortable: true, render: (r) => r.signal },
+          { key: "o", header: "Observed", main: true, sortable: true, render: (r) => r.observed },
+          { key: "sc", header: "Score vs threshold", main: true, sortable: true, render: (r) => (r.score == null ? "—" : `${r.score} vs ${r.threshold}`) },
+          { key: "a", header: "Action", main: true, sortable: true, required: "Whether an approval was raised is always shown", render: (r) => (r.approvalId ? <Badge tone="warn">approval raised</Badge> : <Badge tone="info">alert only</Badge>) },
+          { key: "st", header: "Status", main: true, sortable: true, required: "Status is always shown", render: (r) => <span title={r.decisionReason ?? undefined}>{r.status}</span> },
+          { key: "d", header: "Detected", main: true, sortable: true, render: (r) => ago(r.detectedAt) },
+          { key: "m", header: "Method", sortable: true, render: (r) => r.method },
+          { key: "x", header: "Explanation", render: (r) => r.explanation },
         ]}
       />
-      {(q.data?.anomalies?.length ?? 0) >= limit && <p className={v.faint}>Showing the newest {limit}. Narrow by project or status, or raise the limit.</p>}
-      {q.data && <p className={v.faint}>{q.data.note}</p>}
+      {note && <p className={v.faint}>{note}</p>}
     </section>
   );
 }
@@ -119,12 +108,7 @@ export function ScheduledChangeHistory() {
   const [open, setOpen] = useState(false);
   const [projectId, setProjectId] = useState("");
   const { projects, name } = useProjectName();
-  const q = useQuery({
-    queryKey: ["admin", "spend-scheduled-changes-all", projectId],
-    enabled: open,
-    queryFn: () =>
-      api.get<{ scheduledChanges: ScheduledChange[] }>(`/v1/spend/scheduled-changes${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`),
-  });
+  const changeFilters = useMemo(() => ({ projectId: projectId || undefined }), [projectId]);
   if (!open)
     return (
       <div>
@@ -143,18 +127,23 @@ export function ScheduledChangeHistory() {
           </Select>
         </Field>
       </div>
-      <Table<ScheduledChange>
-        rows={q.data?.scheduledChanges}
-        loading={q.isLoading}
-        error={q.error}
-        onRetry={() => void q.refetch()}
+      <DataList<ScheduledChange & { projectName?: string | null; createdAt?: string }>
+        listId="spend-scheduled-changes"
+        noun="decided changes"
+        endpoint="/v1/spend/scheduled-changes"
+        exportPath="/v1/spend/scheduled-changes/export.xlsx"
+        queryKey={["admin", "spend-scheduled-changes-all", "list"]}
+        legacyKey="scheduledChanges"
+        filters={changeFilters}
+        defaultSort={{ key: "e", dir: "desc" }}
         rowKey={(c) => c.id}
         empty={<EmptyState title="No decided changes match" />}
         columns={[
-          { key: "p", header: "Project", render: (c) => name(c.projectId) },
-          { key: "d", header: "Delta", align: "right", render: (c) => fmtUsd(c.deltaUsd) },
-          { key: "e", header: "Effective", render: (c) => fmtAt(c.effectiveAt) },
-          { key: "r", header: "Reason", render: (c) => c.reason },
+          { key: "p", header: "Project", main: true, sortable: true, render: (c) => c.projectName ?? name(c.projectId) },
+          { key: "d", header: "Delta", main: true, sortable: true, align: "right", render: (c) => fmtUsd(c.deltaUsd) },
+          { key: "e", header: "Effective", main: true, sortable: true, render: (c) => fmtAt(c.effectiveAt) },
+          { key: "r", header: "Reason", main: true, sortable: true, render: (c) => c.reason },
+          { key: "c", header: "Decided", sortable: true, render: (c) => (c.createdAt ? ago(c.createdAt) : "—") },
         ]}
       />
     </section>

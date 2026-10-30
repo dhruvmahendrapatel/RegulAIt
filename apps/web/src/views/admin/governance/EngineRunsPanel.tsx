@@ -16,14 +16,14 @@
  *  - **No raw model text.** Only the structured fields `engineRunItemView`
  *    copies are rendered; the raw report is never fetched (no route serves it).
  */
-import { useState, type ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import { ApiError, api } from "../../../api/client";
 import { UUID_RE, ago, fmtUsd } from "../../../api/format";
 import { Badge, Button, Card, ConfirmModal, EmptyState, Field, IdChip, Input, Meter, Select, SeverityBadge, Table } from "../../../ui/kit";
 import { KV, OutcomePanel, agentOpts, optionEls, projectOpts, useAgents, useApiAction, useProjects, useUserPicker, userOpts } from "../adminKit";
-import { NewestNote } from "../../../ui/fold";
+import { DataList } from "../../../ui/DataList";
 import { EngineProvenanceChip, EngineRunStatusBadge, EngineVerdictBadge } from "./EngineRunBadges";
 import { EngineSchedulesCard } from "../integrations/EngineSchedulesCard";
 import {
@@ -61,6 +61,7 @@ export const engineRunKeys = {
 /** polling while something is live: the detail every 5 s, the list every 10 s */
 const DETAIL_POLL_MS = 5_000;
 const LIST_POLL_MS = 10_000;
+const AGENT_RUNS = { targetKind: "agent" } as const;
 
 const EMPTY_FORM: RunFormInput = {
   engineId: "",
@@ -84,11 +85,16 @@ export function EngineRunsPanel(props: { surface: EngineSurface }) {
     queryKey: engineRunKeys.engines,
     queryFn: () => api.get<{ engines: EngineInfo[]; taxonomyVersion: number }>("/v1/engines"),
   });
-  const runs = useQuery({
-    queryKey: engineRunKeys.runs,
-    queryFn: () => api.get<{ runs: EngineRun[] }>("/v1/engine-runs?limit=100"),
-    refetchInterval: (q) => ((q.state.data?.runs ?? []).some((r) => isLiveStatus(r.status)) ? LIST_POLL_MS : false),
-  });
+  // the list polls every 10 s while a run on screen is still live
+  const qc = useQueryClient();
+  const [listLive, setListLive] = useState(false);
+  const onRunRows = useCallback((rows: EngineRun[]) => setListLive(rows.some((r) => isLiveStatus(r.status))), []);
+  useEffect(() => {
+    if (!listLive) return;
+    const t = window.setInterval(() => void qc.invalidateQueries({ queryKey: engineRunKeys.runs }), LIST_POLL_MS);
+    return () => window.clearInterval(t);
+  }, [listLive, qc]);
+  const refreshRuns = () => qc.invalidateQueries({ queryKey: engineRunKeys.runs });
   // B5W-05: the open run lives in the URL (`?run=<id>`), so it can be linked,
   // reloaded and walked with Back/Forward; other query fields are kept
   const [params, setParams] = useSearchParams();
@@ -115,7 +121,6 @@ export function EngineRunsPanel(props: { surface: EngineSurface }) {
   const engineById = new Map((engines.data?.engines ?? []).map((e) => [e.id, e]));
   const agentName = new Map((agents.data?.agents ?? []).map((x) => [x.id, x.name]));
   const projectName = new Map((projects.data?.projects ?? []).map((p) => [p.id, p.name]));
-  const agentRuns = (runs.data?.runs ?? []).filter((r) => r.targetKind !== "artifact");
   const problem = runFormProblem(form);
   const chosen = engineById.get(form.engineId);
 
@@ -127,7 +132,7 @@ export function EngineRunsPanel(props: { surface: EngineSurface }) {
     if (out) {
       setStarted(out);
       setSelectedRun(out.run.id);
-      await runs.refetch();
+      await refreshRuns();
     }
   };
 
@@ -248,32 +253,42 @@ export function EngineRunsPanel(props: { surface: EngineSurface }) {
       />
 
       <Card title="Engine runs" contain>
-        <NewestNote shown={runs.data?.runs?.length ?? 0} limit={100} noun="runs" />
-        <Table
-          rows={agentRuns}
-          loading={runs.isLoading}
-          error={runs.error}
-          onRetry={() => void runs.refetch()}
+        <DataList<EngineRun>
+          listId="engine-runs"
+          noun="engine runs"
+          endpoint="/v1/engine-runs"
+          exportPath="/v1/engine-runs/export.xlsx"
+          queryKey={[...engineRunKeys.runs, "list"]}
+          legacyKey="runs"
+          count="estimate"
+          // the model-artifact scans are listed on their own tab
+          filters={AGENT_RUNS}
+          defaultSort={{ key: "when", dir: "desc" }}
+          onRows={onRunRows}
           rowKey={(r) => r.id}
           onRowClick={(r) => setSelectedRun(r.id)}
           rowLabel={(r) => `Engine run ${r.engineId}, ${r.status.replaceAll("_", " ")}, id ${r.id}`}
           empty={<EmptyState title="No engine runs yet" body="Start one above once an engine is enabled." />}
           columns={[
-            { key: "engine", header: "Engine", render: (r) => `${engineById.get(r.engineId)?.displayName ?? r.engineId} ${r.engineVersion}` },
-            { key: "status", header: "Status", render: (r) => <EngineRunStatusBadge status={r.status} /> },
+            { key: "engine", header: "Engine", main: true, sortable: true, render: (r) => `${engineById.get(r.engineId)?.displayName ?? r.engineId} ${r.engineVersion}` },
+            { key: "status", header: "Status", main: true, sortable: true, required: "Status is always shown", render: (r) => <EngineRunStatusBadge status={r.status} /> },
             {
               key: "verdict",
               header: "Verdict",
+              main: true,
+              sortable: true,
+              required: "The verdict is always shown",
               render: (r) => {
                 const vd = runVerdict(r);
                 return vd ? <EngineVerdictBadge verdict={vd} /> : <span className={v.faint}>no result yet</span>;
               },
             },
-            { key: "target", header: "Target", render: (r) => (r.targetAgentId ? (agentName.get(r.targetAgentId) ?? r.targetAgentId.slice(0, 8)) : "—") },
-            { key: "sets", header: "Sets", render: (r) => (r.config?.sets ?? []).join(", ") || "—" },
-            { key: "trigger", header: "Trigger", render: (r) => r.trigger },
-            { key: "cost", header: "Cost", render: (r) => fmtUsd(r.costUsd) },
-            { key: "when", header: "Created", render: (r) => ago(r.createdAt) },
+            { key: "target", header: "Target", main: true, sortable: true, render: (r) => (r.targetAgentId ? (agentName.get(r.targetAgentId) ?? r.targetAgentId.slice(0, 8)) : "—") },
+            { key: "sets", header: "Sets", sortable: true, render: (r) => (r.config?.sets ?? []).join(", ") || "—" },
+            { key: "trigger", header: "Trigger", sortable: true, render: (r) => r.trigger },
+            { key: "cost", header: "Cost", main: true, sortable: true, render: (r) => fmtUsd(r.costUsd) },
+            { key: "when", header: "Created", main: true, sortable: true, render: (r) => ago(r.createdAt) },
+            { key: "id", header: "Run id", sortable: true, render: (r) => <IdChip id={r.id} /> },
           ]}
         />
       </Card>
@@ -345,7 +360,7 @@ export function EngineRunsPanel(props: { surface: EngineSurface }) {
             .run(() => api.post(`/v1/engine-runs/${selectedRun}/cancel`, reason ? { reason } : {}), "Engine run cancelled; its key is revoked")
             .then(async () => {
               await detail.refetch();
-              await runs.refetch();
+              await refreshRuns();
             });
         }}
       />

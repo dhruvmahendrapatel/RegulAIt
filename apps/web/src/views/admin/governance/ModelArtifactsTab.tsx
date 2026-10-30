@@ -18,12 +18,13 @@
  *    sent, shows progress, and can be cancelled; the gateway's own refusals
  *    (413, 503, 415, and anything else) are shown as they arrive.
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { withStepUp } from "../../../stepup/stepUp";
 import { ago } from "../../../api/format";
 import { Badge, Button, Card, ConfirmModal, EmptyState, Field, IdChip, SeverityBadge, Table } from "../../../ui/kit";
+import { DataList } from "../../../ui/DataList";
 import { useToast } from "../../../ui/toast";
 import v from "../../views.module.css";
 import m from "./modelArtifacts.module.css";
@@ -57,7 +58,6 @@ import {
 /** every key here sits under ["admin"], so the admin kit's invalidation refreshes it */
 const KEY = ["admin", "model-artifacts"] as const;
 /** the list shows at most this many rows, each with its scans */
-const SHOWN = 50;
 
 interface EngineLite {
   id: string;
@@ -86,8 +86,9 @@ export default function ModelArtifactsTab(props: {
   const retentionKnown = typeof declaredRetention === "number" && declaredRetention > 0;
   const retentionDays = retentionKnown ? declaredRetention : DEFAULT_RETENTION_DAYS;
 
-  const artifacts = useQuery({ queryKey: [...KEY, "list"], queryFn: () => api.get<{ artifacts: ModelArtifact[] }>("/v1/model-artifacts") });
-  const rows = useMemo(() => (artifacts.data?.artifacts ?? []).slice(0, SHOWN), [artifacts.data]);
+  // the rows on screen (the shared list control pages them on the server); each reads its own scans
+  const [rows, setRows] = useState<ModelArtifact[]>([]);
+  const onRows = useCallback((r: ModelArtifact[]) => setRows(r), []);
   const details = useQueries({
     queries: rows.map((a) => ({
       queryKey: [...KEY, "detail", a.id],
@@ -119,7 +120,14 @@ export default function ModelArtifactsTab(props: {
     wasLive.current = now;
   }, [liveRunOf, qc]);
 
-  const selected = props.selected ? (artifacts.data?.artifacts ?? []).find((a) => a.id === props.selected) ?? null : null;
+  // the open artifact is read by id, so one on another page (or linked from a model card) still opens
+  const openOne = useQuery({
+    queryKey: [...KEY, "detail", props.selected ?? ""],
+    enabled: Boolean(props.selected),
+    retry: false,
+    queryFn: () => api.get<{ artifact: ModelArtifact; scans: ArtifactScan[] }>(`/v1/model-artifacts/${props.selected}`),
+  });
+  const selected = props.selected ? (openOne.data?.artifact ?? null) : null;
 
   return (
     <div className={v.stack}>
@@ -137,18 +145,25 @@ export default function ModelArtifactsTab(props: {
           Only a verified safetensors file can be clean. A pickle or any other executable format is never clean, whatever
           the scan finds: loading it can run code. Not scanned and inconclusive are not clean.
         </p>
-        <Table<ModelArtifact>
-          rows={rows}
-          loading={artifacts.isLoading}
-          error={artifacts.error}
-          onRetry={() => void artifacts.refetch()}
+        <DataList<ModelArtifact>
+          listId="model-artifacts"
+          noun="model artifacts"
+          endpoint="/v1/model-artifacts"
+          exportPath="/v1/model-artifacts/export.xlsx"
+          queryKey={[...KEY, "list"]}
+          legacyKey="artifacts"
+          defaultSort={{ key: "at", dir: "desc" }}
+          onRows={onRows}
           rowKey={(a) => a.id}
           empty={<EmptyState title="No model artifacts" body="Upload a model file to scan it before it is admitted." />}
           columns={[
-            { key: "name", header: "File name", render: (a) => a.filename },
+            { key: "name", header: "File name", main: true, sortable: true, render: (a) => a.filename },
             {
               key: "format",
               header: "Format (from content)",
+              main: true,
+              sortable: true,
+              required: "Whether a format can run code is always shown",
               render: (a) => (
                 <span className={m.status}>
                   <span>{formatName(a.format)}</span>
@@ -156,11 +171,14 @@ export default function ModelArtifactsTab(props: {
                 </span>
               ),
             },
-            { key: "size", header: "Size", align: "right", render: (a) => formatBytes(a.sizeBytes) },
-            { key: "at", header: "Uploaded", render: (a) => ago(a.createdAt) },
+            { key: "size", header: "Size", main: true, sortable: true, align: "right", render: (a) => formatBytes(a.sizeBytes) },
+            { key: "at", header: "Uploaded", main: true, sortable: true, render: (a) => ago(a.createdAt) },
             {
               key: "scan",
               header: "Scan",
+              main: true,
+              sortable: true,
+              required: "The scan status is always shown",
               render: (a) => {
                 const live = liveRunOf.get(a.id);
                 const d = scansOf.get(a.id);
@@ -172,6 +190,7 @@ export default function ModelArtifactsTab(props: {
             },
             {
               key: "open",
+              action: true,
               header: "",
               srHeader: "Actions",
               align: "right",
@@ -183,14 +202,9 @@ export default function ModelArtifactsTab(props: {
             },
           ]}
         />
-        {(artifacts.data?.artifacts.length ?? 0) > SHOWN && (
-          <p className={v.dim}>
-            Showing the newest {SHOWN} of {artifacts.data!.artifacts.length}.
-          </p>
-        )}
       </Card>
 
-      {props.selected && !selected && !artifacts.isLoading && (
+      {props.selected && !selected && !openOne.isLoading && (
         <Card title="Artifact">
           <div className={v.errLine} role="alert">
             This artifact isn't in your list. It may not exist, or it may have been uploaded by someone else.

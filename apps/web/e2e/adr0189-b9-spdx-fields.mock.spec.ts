@@ -138,7 +138,7 @@ async function setup(page: Page, opts: { isAdmin?: boolean; seed?: Partial<Recor
   const evalRow = { id: EVAL_DS, name: "golden", version: 2, note: null, scorerKind: "contains", scorerConfig: {}, caseCount: 1, runCount: 0, frozen: false, createdAt: iso(90) };
   await page.route("**/v1/evals/scorers", (route) => json(route, { scorers: [{ id: "contains", deterministic: true, modelBacked: false, summary: "Contains.", limits: "Lexical." }], note: "Scorers." }));
   await page.route("**/v1/evals/scoring-semantics", (route) => json(route, { current: 2, versions: [{ version: 2, adr: "ADR-0072", summary: "Current." }], evalRuns: [], stalePinnedBaselines: [], note: "Semantics." }));
-  await page.route("**/v1/evals/datasets", (route) => json(route, { datasets: [evalRow], note: "Datasets freeze." }));
+  await page.route(/\/v1\/evals\/datasets(\?|$)/, (route) => json(route, { datasets: [evalRow], note: "Datasets freeze." }));
   await page.route(`**/v1/evals/datasets/${EVAL_DS}`, (route) => json(route, { dataset: evalRow, cases: [{ id: "c1", input: "What is the status?", expected: "ok", scorerKind: null, tags: [] }], frozen: false }));
   await page.route(/\/v1\/evals\/runs\?/, (route) => json(route, { runs: [] }));
   // the training dataset page

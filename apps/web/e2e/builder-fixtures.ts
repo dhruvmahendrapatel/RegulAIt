@@ -562,8 +562,11 @@ export async function installBuilderMock(page: Page, opts: MockOptions = {}): Pr
     if (b === "/threads" && method === "GET") {
       const status = url.searchParams.get("status") ?? "all";
       const agentId = url.searchParams.get("agentId");
+      // ADR-0219: the inbox search runs on the server (title, agent name, last message), case-insensitively
+      const q = (url.searchParams.get("q") ?? "").toLowerCase();
+      const hit = (t: Json) => !q || [t.title, t.agentName, t.lastMessagePreview].some((x) => String(x ?? "").toLowerCase().includes(q));
       return json(route, {
-        threads: st.threads.filter((t) => (status === "all" || t.status === status) && (!agentId || t.agentId === agentId)),
+        threads: st.threads.filter((t) => (status === "all" || t.status === status) && (!agentId || t.agentId === agentId) && hit(t)),
       });
     }
     if ((m = /^\/threads\/([^/]+)$/.exec(b))) {

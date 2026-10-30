@@ -6,7 +6,8 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
-import type { CostEventsResponse } from "../../../api/adminTypes";
+import type { CostEvent, CostEventsResponse } from "../../../api/adminTypes";
+import { DataList } from "../../../ui/DataList";
 import type { UsageEventsResponse } from "../../../api/types";
 import { fmtUsd } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
@@ -38,10 +39,7 @@ export default function OptimizationPage() {
   const totalTokensSaved = totals.reduce((acc, t) => acc + (t.estimatedTokensSaved ?? 0), 0);
   const measured = usage.data?.totals ?? {};
 
-  const costRows = useMemo(
-    () => (cost.data?.events ?? []).map((e, i) => ({ ...e, rowKey: e.id ?? `${e.at}-${i}` })),
-    [cost.data],
-  );
+  const costFilters = useMemo(() => ({ userId: userId || undefined }), [userId]);
   const usageRows = useMemo(
     () => (usage.data?.events ?? []).map((e, i) => ({ ...e, rowKey: `${e.at}-${i}` })),
     [usage.data],
@@ -123,39 +121,27 @@ export default function OptimizationPage() {
         </Card>
 
         <Card title="Cost events — the raw optimization ledger" contain>
-          <Table
-            columns={[
-              {
-                key: "at",
-                header: "At",
-                sort: (e: (typeof costRows)[number]) => e.at,
-                render: (e) => <span className={v.mono}>{String(e.at).slice(0, 19).replace("T", " ")}</span>,
-              },
-              {
-                key: "user",
-                header: "User",
-                render: (e) => names.userName.get(String(e.userId)) ?? "—",
-              },
-              { key: "technique", header: "Technique", render: (e) => <Badge tone="info">{e.technique}</Badge> },
-              {
-                key: "tokens",
-                header: "Tokens saved",
-                align: "right",
-                render: (e) => e.estimatedTokensSaved?.toLocaleString() ?? "—",
-              },
-              {
-                key: "usd",
-                header: "Est. saved",
-                align: "right",
-                render: (e) => <span className={v.num}>{fmtUsd(e.estimatedCostSavedUsd)}</span>,
-              },
-            ]}
-            rows={costRows}
-            rowKey={(e) => e.rowKey}
-            loading={cost.isLoading}
-            error={cost.error}
-            onRetry={() => void cost.refetch()}
+          <DataList<CostEvent & { userName?: string | null }>
+            listId="cost-events"
+            noun="cost events"
+            endpoint="/v1/cost-events"
+            exportPath="/v1/cost-events/export.xlsx"
+            queryKey={["admin", "cost-events", "list"]}
+            legacyKey="events"
+            count="estimate"
+            filters={costFilters}
+            defaultSort={{ key: "at", dir: "desc" }}
+            rowKey={(e) => String(e.id)}
             empty={<EmptyState title="No cost events" />}
+            columns={[
+              { key: "at", header: "At", main: true, sortable: true, render: (e) => <span className={v.mono}>{String(e.at).slice(0, 19).replace("T", " ")}</span> },
+              { key: "user", header: "User", main: true, sortable: true, render: (e) => e.userName ?? names.userName.get(String(e.userId)) ?? "—" },
+              { key: "technique", header: "Technique", main: true, sortable: true, render: (e) => <Badge tone="info">{e.technique}</Badge> },
+              { key: "tokens", header: "Tokens saved", main: true, sortable: true, align: "right", render: (e) => e.estimatedTokensSaved?.toLocaleString() ?? "—" },
+              { key: "usd", header: "Est. saved", main: true, sortable: true, align: "right", render: (e) => <span className={v.num}>{fmtUsd(e.estimatedCostSavedUsd)}</span> },
+              { key: "object", header: "Object", sortable: true, render: (e) => String((e as { objectType?: string }).objectType ?? "—") },
+              { key: "basis", header: "Estimation basis", sortable: true, render: (e) => String((e as { estimationBasis?: string }).estimationBasis ?? "—") },
+            ]}
           />
         </Card>
 

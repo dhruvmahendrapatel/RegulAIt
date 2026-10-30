@@ -147,7 +147,7 @@
       "ts-spacing-literal": 6
     },
     "apps/web/src/views/builder/BuilderInboxPage.tsx": {
-      "ts-spacing-literal": 4
+      "ts-spacing-literal": 1
     },
     "apps/web/src/views/builder/BuilderIntegrationsPage.tsx": {
       "ts-spacing-literal": 7
