@@ -197,8 +197,9 @@ describe("G3 connectors: disable, enable, delete", () => {
     const id = await mkConnector("c-cred");
     await app.inject({ method: "POST", headers: adminAuth, url: `/v1/connectors/${id}/credential`, payload: { token: "first-secret-value" } });
     await app.inject({ method: "POST", headers: adminAuth, url: `/v1/connectors/${id}/credential`, payload: { token: "second-secret-value" } });
-    const saved = await auditRows(id, "connector-credential-saved");
-    expect(saved.map((r) => (r.detail as { change: string }).change).sort()).toEqual(["replaced", "set"]);
+    // the save audit is main's (connector-create-audit.test.ts): one stored, then one replaced
+    expect(await auditRows(id, "connector-credential-stored")).toHaveLength(1);
+    expect(await auditRows(id, "connector-credential-replaced")).toHaveLength(1);
     const del = await app.inject({ method: "DELETE", headers: adminAuth, url: `/v1/connectors/${id}/credential` });
     expect(del.statusCode).toBe(200);
     expect(await db.select().from(connectorCredentials).where(eq(connectorCredentials.connectorId, id))).toHaveLength(0);

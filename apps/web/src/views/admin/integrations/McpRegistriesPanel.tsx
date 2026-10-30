@@ -20,6 +20,7 @@ import { ApiError, api } from "../../../api/client";
 import { ago, fmtAt } from "../../../api/format";
 import { Badge, Button, Card, ConfirmModal, EmptyState, Field, IdChip, Input, Modal, RowActions, Select, Table } from "../../../ui/kit";
 import { useAction } from "../adminKit";
+import { McpServerNextSteps } from "./McpServerAdmission";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import {
   EMPTY_REGISTRY_DRAFT,
@@ -459,6 +460,7 @@ function RegistryEntriesCard(props: { registry: McpRegistry }) {
           {imported.toolsCreated} tools and {imported.grantsCreated} grants. Grant it on the Servers tab before anyone can use it.
         </p>
       )}
+      {imported && <McpServerNextSteps />}
       <ConfirmModal
         open={importing !== null}
         title={`Import ${importing?.upstreamName ?? "this entry"}?`}

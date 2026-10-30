@@ -641,7 +641,18 @@ export interface CostEventsResponse {
 
 // ---- compliance / infra --------------------------------------------------
 
-export interface ComplianceProfile {
+/** the compliance profile floors the profiles page's form does not edit; an update carries them over unchanged */
+export interface ComplianceProfileCarriedFloors {
+  maxProjectBudgetUsd?: number | null;
+  budgetEnforcement?: "block" | "warn_only" | null;
+  guardrailModes?: Record<string, string> | null;
+  redteamGatingClasses?: string[] | null;
+  redteamMinTrials?: number | null;
+  redteamFailOnSeverity?: "low" | "medium" | "high" | "critical" | null;
+  minIsolationClass?: "hardened_container" | "user_space_kernel" | "microvm" | null;
+}
+
+export interface ComplianceProfile extends ComplianceProfileCarriedFloors {
   id?: string;
   tag: string;
   requiredTemplateIds: string[] | null;
