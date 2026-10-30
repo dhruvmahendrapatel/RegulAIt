@@ -6,6 +6,7 @@
  */
 import {
   Children,
+  Fragment,
   cloneElement,
   forwardRef,
   isValidElement,
@@ -962,6 +963,13 @@ export type TableProps<T> = {
   onRetry?: () => void;
   onRowClick?: (row: T) => void;
   rowLabel?: (row: T) => string;
+  /**
+   * I-2: rows that expand in place. The kit adds a first column whose button carries `aria-expanded` and
+   * `aria-controls`, and renders `render(row)` in a full-width row under it, as a region named after `label(row)`.
+   * Opening from the button moves focus into that region, so a screen reader reads the detail; Esc inside it closes
+   * the row and returns focus to the button. A mouse click anywhere on the row (not on a control) toggles it too.
+   */
+  expand?: { open: (row: T) => boolean; toggle: (row: T) => void; label: (row: T) => string; render: (row: T) => ReactNode };
 };
 
 export function Table<T>(props: TableProps<T>) {
@@ -987,6 +995,17 @@ export function Table<T>(props: TableProps<T>) {
     }
   };
   const shown = props.columns.filter((c) => !c.hidden);
+  const ex = props.expand;
+  const exId = useId();
+  const detailId = (row: T) => `${exId}-x-${props.rowKey(row).replace(/[^\w-]/g, "_")}`;
+  // the row opened from its button: its region takes focus once rendered
+  const focusOpened = useRef<string | null>(null);
+  useEffect(() => {
+    if (focusOpened.current == null) return;
+    document.getElementById(focusOpened.current)?.focus();
+    focusOpened.current = null;
+  });
+  const cols = shown.length + (ex ? 1 : 0);
 
   return (
     <div className={s.tableWrap}>
@@ -994,6 +1013,7 @@ export function Table<T>(props: TableProps<T>) {
       <table className={s.table} aria-busy={props.loading || undefined}>
         <thead>
           <tr>
+            {ex && <th aria-label="Details" className={s.thToggle} />}
             {shown.map((c) => {
               const sortable = Boolean(c.sort);
               const active = sortKey === c.key;
@@ -1025,6 +1045,7 @@ export function Table<T>(props: TableProps<T>) {
           {props.loading
             ? [0, 1, 2].map((i) => (
                 <tr key={`sk-${i}`}>
+                  {ex && <td />}
                   {shown.map((c) => (
                     <td key={c.key}>
                       <Skeleton width={`${55 + ((i * 17) % 35)}%`} />
@@ -1034,14 +1055,24 @@ export function Table<T>(props: TableProps<T>) {
               ))
             : sorted.map((row) => {
                 const clickable = Boolean(props.onRowClick);
+                const open = ex?.open(row) ?? false;
+                const did = ex ? detailId(row) : "";
                 return (
+                  <Fragment key={props.rowKey(row)}>
                   <tr
-                    key={props.rowKey(row)}
-                    className={clickable ? s.rowClickable : undefined}
+                    className={clickable ? s.rowClickable : ex ? s.rowExpandable : undefined}
                     tabIndex={clickable ? 0 : undefined}
                     role={clickable ? "link" : undefined}
                     aria-label={clickable ? props.rowLabel?.(row) : undefined}
-                    onClick={clickable ? () => props.onRowClick!(row) : undefined}
+                    onClick={
+                      clickable
+                        ? () => props.onRowClick!(row)
+                        : ex
+                          ? (e) => {
+                              if (!(e.target as HTMLElement).closest("button,a,input,select,textarea,label")) ex.toggle(row);
+                            }
+                          : undefined
+                    }
                     onKeyDown={
                       clickable
                         ? (e) => {
@@ -1053,12 +1084,55 @@ export function Table<T>(props: TableProps<T>) {
                         : undefined
                     }
                   >
+                    {ex && (
+                      <td>
+                        <button
+                          type="button"
+                          id={`${did}-b`}
+                          className={s.rowToggle}
+                          aria-expanded={open}
+                          aria-controls={did}
+                          aria-label={`Details: ${ex.label(row)}`}
+                          onClick={() => {
+                            if (!open) focusOpened.current = `${did}-r`;
+                            ex.toggle(row);
+                          }}
+                        >
+                          <span aria-hidden>{open ? "▾" : "▸"}</span>
+                        </button>
+                      </td>
+                    )}
                     {shown.map((c) => (
                       <td key={c.key} style={{ textAlign: c.align ?? "left" }}>
                         {c.render(row)}
                       </td>
                     ))}
                   </tr>
+                  {ex && (
+                    // always in the DOM, so the button's aria-controls never dangles; empty and hidden while closed
+                    <tr id={did} className={s.rowExpanded} hidden={!open}>
+                      <td colSpan={cols}>
+                        {open && (
+                          <div
+                            id={`${did}-r`}
+                            role="region"
+                            aria-label={`Details: ${ex.label(row)}`}
+                            tabIndex={-1}
+                            className={s.rowDetail}
+                            onKeyDown={(e) => {
+                              if (e.key !== "Escape") return;
+                              e.stopPropagation();
+                              ex.toggle(row);
+                              document.getElementById(`${did}-b`)?.focus();
+                            }}
+                          >
+                            {ex.render(row)}
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                 );
               })}
           {!props.loading && sorted.length > 0 && props.error != null && (
@@ -1066,7 +1140,7 @@ export function Table<T>(props: TableProps<T>) {
             // transient 500 would be worse — but a failed REFETCH must not be
             // silent either: the list is stale and the reader has to know.
             <tr>
-              <td colSpan={shown.length} className={s.tableStale} role="alert">
+              <td colSpan={cols} className={s.tableStale} role="alert">
                 <StatusDot tone="danger" />
                 <span>
                   Couldn't refresh this list — {props.error instanceof Error ? props.error.message : String(props.error)}.
@@ -1082,7 +1156,7 @@ export function Table<T>(props: TableProps<T>) {
           )}
           {!props.loading && sorted.length === 0 && props.error != null && (
             <tr>
-              <td colSpan={shown.length}>
+              <td colSpan={cols}>
                 <ErrorState
                   title="Couldn't load this list"
                   message={props.error instanceof Error ? props.error.message : String(props.error)}
@@ -1094,7 +1168,7 @@ export function Table<T>(props: TableProps<T>) {
           )}
           {!props.loading && sorted.length === 0 && props.error == null && (
             <tr>
-              <td colSpan={shown.length}>{props.empty ?? <EmptyState title="Nothing here yet" />}</td>
+              <td colSpan={cols}>{props.empty ?? <EmptyState title="Nothing here yet" />}</td>
             </tr>
           )}
         </tbody>

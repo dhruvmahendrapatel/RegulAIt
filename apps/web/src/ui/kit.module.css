@@ -803,3 +803,41 @@ a.barLabel {
   line-clamp: 2;
   overflow: hidden;
 }
+
+/* I-2: a table whose rows expand in place (Table `expand`): the toggle, and the full-width row under an open row */
+.thToggle,
+.rowToggle {
+  inline-size: var(--s5);
+}
+.rowExpandable {
+  cursor: pointer;
+}
+.rowToggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-inline-size: 24px;
+  min-block-size: 24px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font: inherit;
+}
+.rowToggle:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.rowToggle:focus-visible,
+.rowDetail:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.rowExpanded > td {
+  padding: var(--s2) var(--s3) var(--s3);
+  background: var(--surface-2);
+}
+.table tbody tr.rowExpanded:hover td {
+  background: var(--surface-2);
+}
