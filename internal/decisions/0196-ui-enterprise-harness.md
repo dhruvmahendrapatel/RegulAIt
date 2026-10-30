@@ -602,19 +602,13 @@ the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
 - Freeze week: ADR-0198 §2 covers entry raises only; this raise rests on the owner decision above. ADR-0198's post-demo
   reset applies to it.
 
-## Addendum / As built (2026-10-30) — all JS 1,050 → 1,057 kB (the shared list control, ADR-0219)
+## Addendum / As built (2026-10-30) — all JS 1,050 → 1,060 kB (post-demo backlog lanes)
 
-The owner capped all JS at 1,060 kB, shared between the lanes, on 2026-10-30:
-<https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6522492997>. This is the ADR-recorded exception
-the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row, and it stays under that cap.
+The owner decided this raise on 2026-10-30, together with unparking the G-lanes and starting the backlog lanes:
+<https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6522492997>. It is the ADR-recorded exception the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
 
-- `all JS` from `1050 kB` to `1057 kB` (+7 kB). Entry JS stays at 138.5 kB and entry CSS at 10.7 kB; the lazy chunk
-  ceilings are unchanged.
-- Why: main alone already measured 1,050,176 B against the 1,050 kB ceiling on 2026-10-30. The list control (ADR-0219)
-  adds one lazy chunk, `DataList` (4.7 kB gzip JS, 0.9 kB CSS, shared by the Runs, Incidents and Users chunks and loaded
-  only with them), plus the column definitions in those three page chunks. Gzip bytes, size-limit 14.2.0, on this
-  branch: entry JS 137,869 (main 137,783: the kit `Table` gains an optional server `sort` prop), entry CSS 10,493
-  (unchanged), all JS 1,056,104 (main 1,050,176). The Excel file is built by the gateway, so no spreadsheet code
-  reaches the browser.
-- Freeze week: ADR-0198 §2 covers entry raises only; this raise rests on the owner decision above. ADR-0198's post-demo
-  reset applies to it.
+- `all JS` from `1050 kB` to `1060 kB` (+10 kB), one shared ceiling for every lane in flight. Entry JS stays at 138.5 kB
+  and entry CSS at 10.7 kB; the lazy chunk ceilings are unchanged, and new screens are lazy-loaded.
+- Why: one lane alone measures 1,049,965 B against the 1,050,000 B ceiling, which leaves no room for the other lanes.
+  Raising the ceiling once on main stops each lane from editing the same line.
+- A lane that would take total JS over 1,060 kB stops and goes back to the owner.
