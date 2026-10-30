@@ -1,35 +1,23 @@
 /**
- * PROTOTYPE (#453 G7) — Edit profile: a wide dialog prefilled with every field a
- * compliance profile carries, then a review step that shows what changes, which
- * of the changes loosen a floor, what the change reaches, and who reviews it.
- * Nothing applies on submit: it creates the next version, pending a reviewer.
+ * ADR-0208 (G7) — Edit profile: a wide dialog prefilled with every field a compliance profile carries, then a review
+ * step that shows what changes, which of the changes loosen a floor, what the change reaches, and who reviews it.
+ * Nothing applies on submit: it proposes the next version, which applies only when the named reviewer approves it
+ * (POST /v1/compliance/profiles/:id/versions). A change that loosens a floor asks the author to confirm it's them.
  */
 import { useState } from "react";
 import { api } from "../../../api/client";
-import type { ComplianceProfile, WorkflowTemplate } from "../../../api/adminTypes";
+import type { ComplianceProfileRecord, WorkflowTemplate } from "../../../api/adminTypes";
 import { useSession } from "../../../session/SessionContext";
+import { withStepUp } from "../../../stepup/stepUp";
 import { Badge, Button, Field, Input, Modal, Select, Table, Textarea } from "../../../ui/kit";
 import { optionEls, useAction, useUsers } from "../adminKit";
+import { reachSentence } from "./profileReach";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
 export const DETECTORS = ["pii", "prompt_injection", "jailbreak", "toxicity", "semantic_dlp"] as const;
 export const ATTACK_CLASSES = ["prompt_injection", "jailbreak", "data_exfiltration", "pii_leak", "tool_abuse", "excessive_agency"] as const;
 type Detector = (typeof DETECTORS)[number];
-
-export interface ProfileRecord extends ComplianceProfile {
-  version?: number;
-  status?: "active" | "retired";
-  retiredAt?: string | null;
-  maxProjectBudgetUsd?: number | null;
-  budgetEnforcement?: "block" | "warn_only" | null;
-  guardrailModes?: Partial<Record<Detector, "off" | "log" | "warn" | "block">> | null;
-  redteamGatingClasses?: string[] | null;
-  redteamMinTrials?: number | null;
-  redteamFailOnSeverity?: "low" | "medium" | "high" | "critical" | null;
-  minIsolationClass?: "hardened_container" | "user_space_kernel" | "microvm" | null;
-  usage?: { projects: string[]; teams: string[]; resources: string[] };
-}
 
 type Form = {
   requiredTemplateIds: string[];
@@ -48,7 +36,7 @@ type Form = {
 };
 
 const s = (n: number | null | undefined) => (n == null ? "" : String(n));
-const toForm = (p: ProfileRecord): Form => ({
+const toForm = (p: ComplianceProfileRecord): Form => ({
   requiredTemplateIds: p.requiredTemplateIds ?? [],
   mcpDefaultMode: p.mcpDefaultMode,
   piiMode: p.piiMode,
@@ -119,18 +107,9 @@ export function diffProfile(now: Form, next: Form, tplName: (id: string) => stri
   return rows;
 }
 
-const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
-const andList = (xs: string[]) => (xs.length <= 1 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`);
-export const reachSentence = (u: ProfileRecord["usage"]) =>
-  andList([
-    plural(u?.projects.length ?? 0, "project", "projects"),
-    plural(u?.teams.length ?? 0, "team", "teams"),
-    plural(u?.resources.length ?? 0, "infrastructure resource", "infrastructure resources"),
-  ]);
-
 const multi = (e: React.ChangeEvent<HTMLSelectElement>) => Array.from(e.target.selectedOptions).map((o) => o.value);
 
-export function ProfileEditModal(props: { profile: ProfileRecord; templates: WorkflowTemplate[]; onClose: () => void }) {
+export function ProfileEditModal(props: { profile: ComplianceProfileRecord; templates: WorkflowTemplate[]; onClose: () => void }) {
   const p = props.profile;
   const initial = toForm(p);
   const [f, setF] = useState<Form>(initial);
@@ -145,8 +124,9 @@ export function ProfileEditModal(props: { profile: ProfileRecord; templates: Wor
   const tplName = (id: string) => props.templates.find((t) => t.id === id)?.name ?? id.slice(0, 8);
   const rows = diffProfile(initial, f, tplName);
   const loosens = rows.some((r) => r.effect === "loosens");
-  const nextVersion = (p.version ?? 1) + 1;
-  const reviewers = (users.data?.users ?? []).filter((u) => u.id !== auth?.userId && !u.disabledAt);
+  const nextVersion = p.version + 1;
+  // the server accepts an active administrator other than the author
+  const reviewers = (users.data?.users ?? []).filter((u) => u.id !== auth?.userId && !u.disabledAt && u.isAdmin);
   const reviewerName = reviewers.find((u) => u.id === reviewer)?.displayName ?? "the reviewer";
 
   const send = () => {
@@ -156,7 +136,10 @@ export function ProfileEditModal(props: { profile: ProfileRecord; templates: Wor
     void act
       .run(
         () =>
-          api.post<{ pending: boolean; approvalId: string }>(`/v1/compliance/profiles/${p.id}/versions`, {
+          withStepUp((h) =>
+            api.postWithHeaders<{ pending: boolean; approvalId: string }>(
+              `/v1/compliance/profiles/${p.id}/versions`,
+              {
             requiredTemplateIds: f.requiredTemplateIds,
             mcpDefaultMode: f.mcpDefaultMode,
             piiMode: f.piiMode,
@@ -170,9 +153,12 @@ export function ProfileEditModal(props: { profile: ProfileRecord; templates: Wor
             redteamMinTrials: num(f.redteamMinTrials),
             redteamFailOnSeverity: f.redteamFailOnSeverity || null,
             minIsolationClass: f.minIsolationClass || null,
-            reviewerUserId: reviewer,
-            reason: reason.trim(),
-          }),
+                reviewerUserId: reviewer,
+                reason: reason.trim(),
+              },
+              h,
+            ),
+          ),
         `Sent to ${reviewerName} for review`,
       )
       .then((ok) => ok && props.onClose());
@@ -205,7 +191,7 @@ export function ProfileEditModal(props: { profile: ProfileRecord; templates: Wor
       {step === "form" ? (
         <div className={v.stack} data-testid="g7-edit-form">
           <p className={`${v.dim} ${v.flush}`}>
-            Prefilled from version {p.version ?? 1}. Saving creates version {nextVersion}; it applies only after a reviewer approves it.
+            Prefilled from version {p.version}. Saving creates version {nextVersion}; it applies only after a reviewer approves it.
           </p>
           <div className={v.sectionTitle}>Workflows and data</div>
           <div className={a.formRow}>

@@ -592,6 +592,8 @@ describe("6. the covered / NOT-covered inventory", () => {
     "vendor_account_aliases.reason",
     "vendor_domain_rules.reason",
     "workflow_templates.retired_reason",
+    // ADR-0208 (migration 0223)
+    "compliance_profiles.retired_reason",
     // ADR-0182 (D4, migration 0162): every new free-text column of the
     // accountability records (feedback bodies are ciphertext, not prose)
     "decision_regression_cases.label",

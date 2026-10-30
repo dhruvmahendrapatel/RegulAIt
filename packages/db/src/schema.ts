@@ -3395,6 +3395,12 @@ export const complianceProfiles = pgTable("compliance_profiles", {
    * `guardrailModes`), so a tag can only raise the requirement. NULL = no isolation opinion. */
   minIsolationClass: text("min_isolation_class", { enum: ["hardened_container", "user_space_kernel", "microvm"] }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  /** ADR-0208 (migration 0223): a retired profile is read-only — no new version, no new carrier. Retire is refused
+   * while any project, pending project, team or infra resource carries the tag. DB CHECK ties retired_* to status. */
+  status: text("status", { enum: ["active", "retired"] }).notNull().default("active"),
+  retiredAt: timestamp("retired_at", { withTimezone: true }),
+  retiredReason: text("retired_reason"),
+  retiredByUserId: uuid("retired_by_user_id").references(() => users.id, { onDelete: "set null" }),
 });
 
 // PILLAR 4 (§9, ADR-0011): teams and Shared-Project membership. Membership

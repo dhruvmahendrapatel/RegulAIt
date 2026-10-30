@@ -14,6 +14,7 @@ import type {
   AdminProject,
   AdminUser,
   ComplianceProfile,
+  ComplianceProfileRecord,
   Connector,
   CustomModelProvider,
   EgressAllowHost,
@@ -164,7 +165,7 @@ export const useEgressAllowHosts = () =>
 export const useComplianceProfiles = () =>
   useQuery({
     queryKey: adminKeys.profiles,
-    queryFn: () => api.get<{ profiles: ComplianceProfile[] }>("/v1/compliance/profiles"),
+    queryFn: () => api.get<{ profiles: ComplianceProfileRecord[] }>("/v1/compliance/profiles"),
   });
 export const useServerTools = (serverId: string | null | undefined) =>
   useQuery({

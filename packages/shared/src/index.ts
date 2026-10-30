@@ -2040,6 +2040,19 @@ export const reclassifySchema = z.object({
   reviewerUserId: z.string().uuid().optional(),
 });
 
+// ADR-0208 (G7): a profile edit is a proposed VERSION, applied only when the named reviewer approves it. Every
+// versioned field is optional: an omitted field keeps its current value, an explicit null removes it (a loosening).
+export const proposeComplianceProfileVersionSchema = upsertComplianceProfileSchema.omit({ tag: true }).extend({
+  /** the admin who reviews the diff; never the author */
+  reviewerUserId: z.string().uuid(),
+  reason: z.string().trim().min(10).max(2000),
+});
+
+// ADR-0208 (G7): retiring a profile (step-up; refused while anything carries the tag)
+export const retireComplianceProfileSchema = z.object({
+  reason: z.string().trim().min(10).max(2000),
+});
+
 export const addTeamMemberSchema = z.object({ userId: z.string().uuid() });
 
 export const addProjectMemberSchema = z.object({

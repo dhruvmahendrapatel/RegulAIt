@@ -627,7 +627,18 @@ export interface CostEventsResponse {
 
 // ---- compliance / infra --------------------------------------------------
 
-export interface ComplianceProfile {
+/** the compliance profile floors the profiles page's form does not edit; an update carries them over unchanged */
+export interface ComplianceProfileCarriedFloors {
+  maxProjectBudgetUsd?: number | null;
+  budgetEnforcement?: "block" | "warn_only" | null;
+  guardrailModes?: Record<string, string> | null;
+  redteamGatingClasses?: string[] | null;
+  redteamMinTrials?: number | null;
+  redteamFailOnSeverity?: "low" | "medium" | "high" | "critical" | null;
+  minIsolationClass?: "hardened_container" | "user_space_kernel" | "microvm" | null;
+}
+
+export interface ComplianceProfile extends ComplianceProfileCarriedFloors {
   id?: string;
   tag: string;
   requiredTemplateIds: string[] | null;
@@ -636,6 +647,25 @@ export interface ComplianceProfile {
   piiMode: "block" | "warn" | "log";
   backupRetentionDays: number | null;
   patchCadenceDays: number | null;
+}
+
+/** ADR-0208 (G7): who carries a profile's tag today, by name */
+export interface ComplianceProfileUsage {
+  projects: string[];
+  pendingProjects: string[];
+  teams: string[];
+  resources: string[];
+}
+
+/** ADR-0208 (G7): a profile as GET /v1/compliance/profiles lists it — its active version, lifecycle and reach */
+export interface ComplianceProfileRecord extends ComplianceProfile {
+  id: string;
+  version: number;
+  status: "active" | "retired";
+  retiredAt: string | null;
+  retiredReason: string | null;
+  usage: ComplianceProfileUsage;
+  pendingReview: { approvalId: string; version: number; reviewerUserId: string } | null;
 }
 
 export interface ProjectCompliance {
