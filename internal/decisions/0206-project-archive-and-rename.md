@@ -87,6 +87,8 @@ team could not be renamed.
 - Gateway: `project-archive.ts`, `role-team-rename.ts`, and the archived check in `projects.ts`
   (`preDispatchProjectGate`, `applyProjectPatch`, the member, context and classification routes).
   Tests: `zz-adr0206-archive-rename.test.ts`.
+- `projects.archived_reason` is registered with the ADR-0102 prose scrub (`packages/db/src/prose-scrub.ts`), so a
+  credential pasted into an archive reason is stored redacted, as in the audit row.
 - Web: the archive dialogs (`ProjectArchiveDialogs.tsx`) and the rename dialog are lazily loaded chunks; the projects
   list and pages read `?archived=include`. Mock spec: `e2e/g1-g10-lifecycle.mock.spec.ts`.
 - Bundle: all JS 1,050 → 1,055 kB (ADR-0196 addendum, citing #453 comment 6522492997); entry ceilings unchanged.

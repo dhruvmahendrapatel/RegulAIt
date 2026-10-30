@@ -201,6 +201,20 @@ describe("G1 project archive (ADR-0206)", () => {
     expect(ok.statusCode, ok.body).toBe(200);
   });
 
+  it("a credential pasted into the reason is stored redacted (ADR-0102 prose scrub)", async () => {
+    const id = await createProject("scrub");
+    const res = await app.inject({
+      method: "POST",
+      url: `/v1/projects/${id}/archive`,
+      headers: adminAuth,
+      payload: { reason: "Retired; old key was AKIAIOSFODNN7EXAMPLE, rotated" },
+    });
+    expect(res.statusCode, res.body).toBe(200);
+    const [row] = await db.select().from(projects).where(eq(projects.id, id));
+    expect(row!.archivedReason).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    expect(row!.archivedReason).toMatch(/\[redacted:aws_key:20:[0-9a-f]{12}\]/);
+  });
+
   describe("an archived project", () => {
     let id: string;
     let keyId: string;
