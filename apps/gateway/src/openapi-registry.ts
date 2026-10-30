@@ -781,6 +781,9 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // ADR-0195 SD2b: the cloud federation issuer
   "GET /federation/.well-known/openid-configuration": "internal",
   "GET /federation/.well-known/jwks.json": "internal",
+  // ADR-0210: the OIDC-profile MCP identity assertion issuer
+  "GET /mcp-identity/.well-known/openid-configuration": "internal",
+  "GET /mcp-identity/.well-known/jwks.json": "internal",
   "GET /v1/discovery/federation": "internal",
   "POST /v1/discovery/federation/keys": "internal",
   "POST /v1/discovery/federation/keys/:kid/activate": "internal",
@@ -2067,6 +2070,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "PUT /v1/governance/alerts/:alertId/owner": "reports",
   "POST /v1/governance/alerts/:alertId/ticket": "reports",  // --- ADR-0188 (batch 6 item 1) S1: 501 stubs until their slices land
   "GET /.well-known/jwks.json": "identity",
+  "GET /mcp-identity/.well-known/openid-configuration": "identity",
+  "GET /mcp-identity/.well-known/jwks.json": "identity",
   "POST /oauth/token": "identity",
   "POST /oauth/token/revocation": "identity",
   "POST /oauth/token/introspection": "identity",
