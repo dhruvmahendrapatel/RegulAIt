@@ -138,6 +138,7 @@ test("the posture page carries the campaigns line", async ({ page }) => {
   // exactly the campaign the previous test ran — this spec is the only
   // writer of campaign rows in the suite
   await expect(page.getByText(/1 campaign\(s\): 0 open, 1 completed, 0 expired-incomplete/)).toBeVisible();
-  // the honesty note survives to the DOM
-  await expect(page.getByText(/nothing\s+auto-decides on expiry/)).toBeVisible();
+  // the honesty note survives, behind the card's (i)
+  await page.getByRole("button", { name: "What is Grant certification?" }).click();
+  await expect(page.getByRole("note")).toContainText(/nothing\s+auto-decides on expiry/);
 });

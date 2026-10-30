@@ -209,17 +209,24 @@ test.describe("ADR-0182 A12: the AI incident register", () => {
     await expect(row).toContainText("serious");
     await expect(row).toContainText("Article 26(5)");
     await expect(row).toContainText("overdue");
-    await expect(page.getByText(DISCLAIMER).first()).toBeVisible();
+    // the clock caveat: a short visible qualifier, the full sentence in the Next clock (i)
+    await expect(page.getByText("Clocks are reminders, not legal advice.", { exact: false })).toBeVisible();
+    await page.getByRole("button", { name: "What is Next clock?" }).click();
+    await expect(page.getByRole("note")).toContainText(DISCLAIMER);
+    await page.keyboard.press("Escape");
 
     const settingsCard = page.locator("section[data-rg-card]").filter({ hasText: "Incident settings" }).first();
-    await expect(settingsCard).toContainText("Strict default — Enforce");
-    await expect(settingsCard.getByText("relaxed", { exact: true })).toHaveCount(0);
+    await expect(settingsCard.getByText("Strict default", { exact: true })).toHaveCount(3);
+    await settingsCard.getByRole("button", { name: "What is Incident deploy gate?" }).click();
+    await expect(page.getByRole("note")).toContainText("Strict default — Enforce");
+    await page.keyboard.press("Escape");
+    await expect(settingsCard.getByText("Relaxed", { exact: true })).toHaveCount(0);
     await expectAxeClean(page, "incident register");
 
-    await settingsCard.getByLabel("Incident deploy gate").selectOption("warn");
+    await settingsCard.getByLabel("Incident deploy gate", { exact: true }).selectOption("warn");
     await expect.poll(() => cap.settings.length).toBe(1);
     expect(cap.settings[0]).toEqual({ incidentGateMode: "warn" });
-    await expect(settingsCard.getByText("relaxed", { exact: true })).toHaveCount(1);
+    await expect(settingsCard.getByText("Relaxed", { exact: true })).toHaveCount(1);
   });
 
   test("D5 runs-projects-19: on a phone the register folds into the Incident column instead of clipping", async ({ page }) => {
@@ -381,7 +388,7 @@ test("ADR-0186 A: relaxing an incident setting asks to confirm it's you and rese
   const su = await requireStepUpOn(page, { method: "PUT", path: "/v1/org/settings", kind: "settings_relax" });
   await page.goto("/ui/incidents");
   const settingsCard = page.locator("section[data-rg-card]").filter({ hasText: "Incident settings" }).first();
-  await settingsCard.getByLabel("Incident deploy gate").selectOption("warn");
+  await settingsCard.getByLabel("Incident deploy gate", { exact: true }).selectOption("warn");
   await confirmStepUp(page);
   await su.expectResentOnce();
   expect(su.attempts[0]!.body).toEqual({ incidentGateMode: "warn" });

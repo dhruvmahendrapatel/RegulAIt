@@ -216,29 +216,37 @@ test.describe("ADR-0182 A13: feedback and appeal", () => {
     const state = await mockGateway(page, { me: RILEY });
     await page.goto("/ui/feedback");
     const card = page.locator("section", { has: page.getByText("Feedback settings (admin)", { exact: true }) });
-    await expect(card).toContainText("Off: only signed-in users can report a problem or appeal a decision.");
-    await expect(card.getByText("strict default", { exact: true })).toHaveCount(4);
-    // F27: the intro starts at the card's left edge, under the title, not in a narrow centred column
-    const intro = card.getByText(/^Every setting starts at its strict value\./);
-    const [title, para] = await Promise.all([card.getByText("Feedback settings (admin)", { exact: true }).boundingBox(), intro.boundingBox()]);
-    expect(Math.abs(para!.x - title!.x)).toBeLessThanOrEqual(1);
+    await expect(card.getByText("Strict default", { exact: true })).toHaveCount(4);
+    // each setting's explanation is its (i); the card's lead-in is the title's (i)
+    await card.getByRole("button", { name: "What is Public signed feedback links?" }).click();
+    await expect(page.getByRole("note")).toContainText("Off: only signed-in users can report a problem or appeal a decision.");
+    await page.keyboard.press("Escape");
+    await card.getByRole("button", { name: "What is Feedback settings (admin)?" }).click();
+    await expect(page.getByRole("note")).toContainText("Every setting starts at its strict value.");
+    await page.keyboard.press("Escape");
+    // the hint needed to fill a field stays visible
+    await expect(card.getByText("strict default 72 · allowed 1–168")).toBeVisible();
     await expectAxeClean(page, "feedback settings (admin)");
-    await card.getByLabel("Feedback acknowledgement time (hours)").fill("200");
+    await card.getByLabel("Feedback acknowledgement time (hours)", { exact: true }).fill("200");
     await expect(card.getByRole("alert")).toContainText("outside its allowed range");
     await expect(card.getByRole("button", { name: "Save feedback settings" })).toBeDisabled();
-    await card.getByLabel("Feedback acknowledgement time (hours)").fill("96");
+    await card.getByLabel("Feedback acknowledgement time (hours)", { exact: true }).fill("96");
     await card.getByRole("button", { name: "Save feedback settings" }).click();
     await expect.poll(() => state.settingsPuts.length).toBe(1);
     expect(state.settingsPuts[0]).toEqual({ feedbackAckSlaHours: 96 });
-    await expect(card.getByText("relaxed", { exact: true })).toHaveCount(1);
-    await expect(card).toContainText("A longer time (up to 168 hours) lets a report wait longer before anyone is alerted.");
+    await expect(card.getByText("Relaxed", { exact: true })).toHaveCount(1);
+    await card.getByRole("button", { name: "What is Feedback acknowledgement time (hours)?" }).click();
+    await expect(page.getByRole("note")).toContainText("A longer time (up to 168 hours) lets a report wait longer before anyone is alerted.");
+    await page.keyboard.press("Escape");
     // D4 DFX2 (D4G-03): a SHORTER retention is a relaxation too (it deletes complaint evidence sooner)
-    await card.getByLabel("Feedback body retention (days)").fill("90");
+    await card.getByLabel("Feedback body retention (days)", { exact: true }).fill("90");
     await card.getByRole("button", { name: "Save feedback settings" }).click();
     await expect.poll(() => state.settingsPuts.length).toBe(2);
     expect(state.settingsPuts[1]).toEqual({ feedbackRetentionDays: 90 });
-    await expect(card.getByText("relaxed", { exact: true })).toHaveCount(2);
-    await expect(card).toContainText("a shorter one (down to 30 days) deletes complaints and appeals sooner");
+    await expect(card.getByText("Relaxed", { exact: true })).toHaveCount(2);
+    await card.getByRole("button", { name: "What is Feedback body retention (days)?" }).click();
+    await expect(page.getByRole("note")).toContainText("a shorter one (down to 30 days) deletes complaints and appeals sooner");
+    await page.keyboard.press("Escape");
   });
 
   test("a resolved item shows its resolution note, or says it cannot be opened (D4 DFX2: notes are encrypted)", async ({ page }) => {
@@ -400,7 +408,7 @@ test("ADR-0186 A: relaxing a feedback setting asks to confirm it's you and resen
   const su = await requireStepUpOn(page, { method: "PUT", path: "/v1/org/settings", kind: "settings_relax" });
   await page.goto("/ui/feedback");
   const card = page.locator("section", { has: page.getByText("Feedback settings (admin)", { exact: true }) });
-  await card.getByLabel("Feedback acknowledgement time (hours)").fill("96");
+  await card.getByLabel("Feedback acknowledgement time (hours)", { exact: true }).fill("96");
   await card.getByRole("button", { name: "Save feedback settings" }).click();
   await confirmStepUp(page);
   await su.expectResentOnce();

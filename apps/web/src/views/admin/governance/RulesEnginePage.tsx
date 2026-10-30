@@ -380,28 +380,35 @@ export default function RulesEnginePage() {
     <>
       <PageHeader
         title="Rules engine"
-        sub="Rules targeting a user, a role, a team, or the whole fleet."
         info={<p>A rule targets one user, an assigned role, a team, or the whole fleet — on one server or all of them. Every governed call evaluates them in the same fixed precedence the Simulation view visualizes.</p>}
       />
       <div className={v.stack}>
         <ShadowCanaryCard />
 
-        <Card title="Deploy-mode scoping (ADR-0027 A4)">
-          <div className={v.faint}>
-            Every rule below carries a <strong>deploy-mode scope</strong>, editable inline on its row. A
-            mode-scoped restriction applies only to calls whose attributed project has in-flight workflow
+        <Card
+          title="Deploy-mode scoping"
+          info={
+            <>
+              <p>
+                A mode-scoped restriction applies only to calls whose attributed project has in-flight workflow
             instances landing on a deploy target of that mode. The context is derived server-side — never
             client-asserted — and an unattributed call (or one with no in-flight deploy-bound work) never
             matches a mode-scoped rule. Mode scoping only narrows WHICH restrictions apply; it can never
             mint an allow. Every change here is audited.
-          </div>
-          <div className={v.faint} style={{ marginTop: "var(--s1)" }} data-testid="deploy-mode-versioning-note">
-            <strong>ADR-0074:</strong> deploy-mode is an <em>enforcing</em> field. If a rule has been
+              </p>
+              <p data-testid="deploy-mode-versioning-note">
+            Deploy-mode is an <em>enforcing</em> field. If a rule has been
             versioned, changing it here <strong>mints a new version and activates it</strong> — writing the
             row alone would have shown you the new scope while dispatch went on serving the old one. If the
             rule has no versions, nothing is minted and the write behaves exactly as it always did. If the
             rule has versions but none is active, the edit is <strong>refused</strong> with a 409 naming the
             activate endpoint, rather than guessing which version your change applies to.
+              </p>
+            </>
+          }
+        >
+          <div className={v.faint}>
+            Every rule below carries a <strong>deploy-mode scope</strong>, editable inline on its row.
           </div>
         </Card>
 
@@ -410,13 +417,6 @@ export default function RulesEnginePage() {
               active members of the approver role, never the caller; a delegator
               and their delegate count once. A pool that can never reach the
               quorum is refused by the gateway (quorum_unsatisfiable), verbatim. */}
-          <p className={v.faint} data-testid="approval-rule-quorum-note">
-            <strong>Approvers needed</strong> is how many <em>different</em> people must approve a matching call. They
-            come from the named approver plus the active members of the <strong>approver role</strong> — never the
-            person making the call, and a delegator and their delegate count once. A rule whose pool can never reach
-            its number is refused. Calls on a project with an in-app-only data classification always need at least the
-            organisation&apos;s sensitive-data number (two by default).
-          </p>
           <RuleForm
             users={uOpts}
             roles={rOpts}
@@ -434,7 +434,20 @@ export default function RulesEnginePage() {
                     {optionEls(uOpts, "— select —")}
                   </Select>
                 </Field>
-                <Field label="Approvers needed">
+                <Field
+                  label="Approvers needed"
+                  helpLabel="the approver count"
+                  help={
+                    <span data-testid="approval-rule-quorum-note">
+                      <strong>Approvers needed</strong> is how many <em>different</em> people must approve a matching
+                      call. They come from the named approver plus the active members of the{" "}
+                      <strong>approver role</strong> — never the person making the call, and a delegator and their
+                      delegate count once. A rule whose pool can never reach its number is refused. Calls on a project
+                      with an in-app-only data classification always need at least the organisation&apos;s
+                      sensitive-data number (two by default).
+                    </span>
+                  }
+                >
                   <Select
                     aria-label="Approvers needed"
                     value={extraState.quorum ?? "1"}
@@ -741,8 +754,11 @@ function ShadowCanaryCard() {
   const rows = canaries.data?.canaries ?? [];
 
   return (
-    <Card title="Rule versions — shadow canaries (ADR-0073)">
-      <div className={v.faint}>
+    <Card
+      title="Rule versions — shadow canaries"
+      attention={<Badge tone="info">Shadow only, never enforces</Badge>}
+      info={
+        <p>
         A rule version canary <strong>never enforces</strong>. The <strong>active</strong> version alone
         decides, and the candidate is evaluated in parallel on a deterministic sample of decisions purely
         to record what it <em>would</em> have decided — because a partially-enforced deny would
@@ -751,7 +767,9 @@ function ShadowCanaryCard() {
         the sample and never a fleet-wide total. A non-zero <strong>failed</strong> means the candidate's
         evaluation threw on that decision: the served answer was unaffected and that comparison did not
         happen, so <strong>diverged</strong> is not complete while failures exist.
-      </div>
+        </p>
+      }
+    >
       <Table<CanaryRow>
         columns={[
           { key: "type", header: "Artifact", render: (r) => <span className={v.mono}>{r.artifactType}</span> },
@@ -768,7 +786,8 @@ function ShadowCanaryCard() {
             render: (r) => (
               <Badge
                 tone={r.canaryMode === "inert" ? "danger" : r.canaryMode === "shadow" ? "warn" : "ok"}
-                title={
+                infoLabel={`${r.canaryMode} mode`}
+                info={
                   r.canaryMode === "inert"
                     ? "nothing resolves this artifact type — the canary changes nothing and measures nothing"
                     : r.canaryMode === "shadow"
@@ -800,13 +819,14 @@ function ShadowCanaryCard() {
             align: "right",
             render: (r) =>
               r.artifactDeleted ? (
-                <Badge tone="danger" title="the artifact these versions describe no longer exists">
+                <Badge tone="danger" info="the artifact these versions describe no longer exists">
                   artifact deleted
                 </Badge>
               ) : r.baselineMoved ? (
                 <Badge
                   tone="warn"
-                  title="the active version moved while this canary was running — these observations compared against a baseline that is no longer current and are NOT in the counts to the left"
+                  infoLabel="stale baseline observations"
+                  info="the active version moved while this canary was running — these observations compared against a baseline that is no longer current and are NOT in the counts to the left"
                   data-testid={`canary-stale-${r.artifactId}`}
                 >
                   {r.staleBaselineObservations}

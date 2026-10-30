@@ -218,10 +218,16 @@ export default function CredentialsPage() {
                   {
                     key: "used",
                     header: "Last used",
+                    info: (
+                      <>
+                        “not recorded”: nothing records when this type is used. A last use found on the usage ledger is
+                        from the last {inv?.ledgerWindowDays ?? inv?.linkWindowDays ?? 90} days.
+                      </>
+                    ),
                     sort: (r) => r.lastUsedAt ?? "",
                     render: (r) =>
                       r.lastUsedSignal === "none" ? (
-                        <span className={v.faint} title="nothing records when this type is used">
+                        <span className={v.faint}>
                           not recorded
                         </span>
                       ) : r.lastUsedAt ? (
@@ -233,10 +239,11 @@ export default function CredentialsPage() {
                   {
                     key: "expires",
                     header: "Expires",
+                    info: <>“not tracked”: held for a third party, which sets its lifetime.</>,
                     sort: (r) => r.expiresAt ?? "",
                     render: (r) =>
                       r.expirySignal === "not_tracked" ? (
-                        <span className={v.faint} title="held for a third party, which sets its lifetime">
+                        <span className={v.faint}>
                           not tracked
                         </span>
                       ) : r.expiresAt ? (
@@ -248,9 +255,10 @@ export default function CredentialsPage() {
                   {
                     key: "rotation",
                     header: "Since last set",
+                    info: <>* no set date was recorded for this secret before the inventory existed; the age counts from creation.</>,
                     sort: (r) => r.ageSinceRotationDays,
                     render: (r) => (
-                      <span title={r.rotationSignal === "since_created" ? "no set date recorded before this inventory existed; counted from creation" : undefined}>
+                      <span>
                         {r.ageSinceRotationDays} d{r.rotationSignal === "since_created" ? "*" : ""}
                       </span>
                     ),
@@ -258,6 +266,7 @@ export default function CredentialsPage() {
                   {
                     key: "links",
                     header: "Linked",
+                    info: <>Linked projects and agents come from the last {inv?.linkWindowDays ?? 90} days of the usage ledger.</>,
                     render: (r) =>
                       r.linkedAgents.length + r.linkedProjects.length === 0 ? (
                         <span className={v.faint}>—</span>
@@ -277,9 +286,15 @@ export default function CredentialsPage() {
                       ) : (
                         <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
                           {r.flags.map((f) => (
-                            <Badge key={f} tone={FLAG_TONE[f]} title={r.flagReasons[f]}>
-                              {inv?.flagLabels[f] ?? f}
-                            </Badge>
+                            <span key={f} className={v.rowTight}>
+                              <Badge
+                                tone={FLAG_TONE[f]}
+                                info={r.flagReasons[f] ? <>{r.flagReasons[f]}</> : undefined}
+                                infoLabel={`${inv?.flagLabels[f] ?? f} on ${r.name}`}
+                              >
+                                {inv?.flagLabels[f] ?? f}
+                              </Badge>
+                            </span>
                           ))}
                         </div>
                       ),
@@ -303,11 +318,6 @@ export default function CredentialsPage() {
                   Next page
                 </Button>
               </nav>
-              <span className={v.faint}>
-                * no set date was recorded for this secret before the inventory existed; the age counts from creation.
-                Linked projects and agents come from the last {inv?.linkWindowDays ?? 90} days of the usage ledger; a
-                last use found on the ledger, from the last {inv?.ledgerWindowDays ?? inv?.linkWindowDays ?? 90} days.
-              </span>
             </div>
           </Card>
           <Card title="What this inventory cannot see">

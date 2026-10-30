@@ -26,7 +26,7 @@ import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import type { McpServer, McpTool } from "../../../api/adminTypes";
 import { fmtUsd } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, IdChip, Input, Select, Table, Tabs, tabIds } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, IdChip, InfoButton, Input, Select, Table, Tabs, tabIds } from "../../../ui/kit";
 import {
   RemoveButton,
   optionEls,
@@ -66,7 +66,6 @@ export default function McpServersPage() {
     <>
       <PageHeader
         title="MCP servers"
-        sub="The servers the governed MCP proxy fronts, and their tool inventory."
         info={<p>Register the servers the governed MCP proxy fronts, build their tool inventory (with per-tool call pricing), and hand out tool-level allow-list grants — default-deny has nothing to govern until a server exists.</p>}
       />
       <Tabs
@@ -210,7 +209,16 @@ function McpEntitlementCard(props: { users: ReturnType<typeof useUsers>; servers
     }, null);
 
   return (
-    <Card title="Per-user entitlement">
+    <Card
+      title="Per-user entitlement"
+      info={
+        <p>
+          This is the effective allow-list the MCP proxy enforces, including grants that arrive
+          through a role. A role-granted row cannot be deleted here — it is not this user's grant —
+          so the row says where it comes from instead of offering a control that would fail.
+        </p>
+      }
+    >
       <form
         className={a.formRow}
         onSubmit={(e) => {
@@ -309,11 +317,6 @@ function McpEntitlementCard(props: { users: ReturnType<typeof useUsers>; servers
           }
         />
       )}
-      <p className={v.faint}>
-        This is the effective allow-list the MCP proxy enforces, including grants that arrive
-        through a role. A role-granted row cannot be deleted here — it is not this user's grant —
-        so the row says where it comes from instead of offering a control that would fail.
-      </p>
     </Card>
   );
 }
@@ -390,19 +393,24 @@ function RegisterServerForm() {
         <Input required value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://mcp.internal/repo" />
       </Field>
       }
-      {transport !== "stdio" && <Field label="Private ranges (ADR-0043)">
+      {transport !== "stdio" && <Field
+        label="Private ranges"
+        helpLabel="private-range resolution"
+        help="May this server's URL resolve into private LAN space (RFC1918 / loopback)? 'inherit' follows the org default. Link-local / instance metadata is never opened; a public-internet URL always needs an egress allow entry."
+      >
         <Select
           value={privateRanges}
           onChange={(e) => setPrivateRanges(e.target.value)}
-          title="May this server's URL resolve into private LAN space (RFC1918 / loopback)? 'inherit' follows the org default. Link-local / instance metadata is never opened; a public-internet URL always needs an egress allow entry."
         >
           {PRIVATE_RANGE_OPTS}
         </Select>
       </Field>}
-      <p>Registration is audited and grants nobody access. The transport cannot be changed after registration; enable any non-default transport through the audited coverage controls first.</p>
       <Button type="submit" variant="primary" disabled={act.busy}>
         Register
       </Button>
+      <InfoButton label="what adding a server grants">
+        Registration is audited and grants nobody access. The transport cannot be changed after registration; enable any non-default transport through the audited coverage controls first.
+      </InfoButton>
       {act.error && (
         <span className={v.errLine} role="alert">
           {act.error}
@@ -473,7 +481,17 @@ function ToolsCard(props: { server: McpServer }) {
   const tools = useServerTools(props.server.id);
   const flat = props.server.pricePerCallUsd ?? null;
   return (
-    <Card title={`Tools on ${props.server.name}`}>
+    <Card
+      title={`Tools on ${props.server.name}`}
+      infoLabel="tool pricing"
+      info={
+        <p>
+          A per-tool price <strong>overrides</strong> the server flat rate for that tool only (tool-first, server-flat
+          fallback); clearing the field restores inheritance. A tool with no override and no server rate
+          stays unpriced — its calls are metered at a null cost rather than a guessed one.
+        </p>
+      }
+    >
       <p className={v.faint} style={{ marginTop: 0 }}>
         Server flat rate:{" "}
         {flat == null ? (
@@ -481,9 +499,6 @@ function ToolsCard(props: { server: McpServer }) {
         ) : (
           <strong>{fmtUsd(flat)} / call</strong>
         )}
-        . A per-tool price <strong>overrides</strong> it for that tool only (tool-first, server-flat
-        fallback); clearing the field restores inheritance. A tool with no override and no server rate
-        stays unpriced — its calls are metered at a null cost rather than a guessed one.
       </p>
       <Table<McpTool>
         columns={[
@@ -590,7 +605,16 @@ function RegisterToolCard(props: { servers: McpServer[] }) {
   const [kind, setKind] = useState("read");
   const [description, setDescription] = useState("");
   return (
-    <Card title="Tool inventory">
+    <Card
+      title="Tool inventory"
+      info={
+        <p>
+          Registered here, or auto-discovered on first proxy use. Pick a server in the registry above to list
+          what it already has. The read/write kind is what server-wide read-only grants and compliance
+          read_only mode key on.
+        </p>
+      }
+    >
       <form
         className={a.formRow}
         onSubmit={(e) => {
@@ -639,11 +663,6 @@ function RegisterToolCard(props: { servers: McpServer[] }) {
           </span>
         )}
       </form>
-      <p className={v.faint}>
-        Registered here, or auto-discovered on first proxy use. Pick a server in the registry above to list
-        what it already has. The read/write kind is what server-wide read-only grants and compliance
-        read_only mode key on.
-      </p>
     </Card>
   );
 }

@@ -171,7 +171,7 @@ UI: `apps/web/src/views/admin/governance/DiscoverySourcesPage.tsx`, `FederationC
   - Page header **Discovery sources**: *"Where regulAIt may scan, read-only, for shadow-AI use. Every source is off
     until you enable it."*
   - A three-step strip: **Connect read-only** (*n of n sources enabled*), **Scan on a schedule** (*n recent runs*),
-    **Findings land in Shadow AI** (**Open the findings**).
+    **Findings land in Shadow-AI discovery** (**Open the findings**).
   - **Active discovery** card: the posture sentence, which names each enabled source, for example *"Active discovery
     scans n enabled sources, read-only: … Nothing outside those sources is scanned."* (the count and names are the
     live data).
@@ -262,7 +262,7 @@ UI: `ShadowAiPage.tsx`, `DiscoverySightings.tsx`, `discoverySourcesModel.ts` (`s
     lead and bring it into governance."* On the right, **Discovery sources** and **Import evidence**.
   - Tabs: **Findings · n** (open by default), **Coverage**, **Import evidence**, **Detection catalogue**, **Import
     history**.
-  - On **Findings**, the callout **What this can see.**, verbatim from the product: *"Discovery has analyzed n of 4
+  - On **Findings**, the callout **What this can see.**, verbatim from the product: *"Discovery has analysed n of 4
     evidence classes. Active discovery scans n enabled sources, read-only: … Every finding below derives from
     evidence you supplied or from a source an admin enabled, so this inventory reduces shadow AI — it does not prove
     its absence. …"*, ending with the link **See coverage**.
@@ -383,14 +383,14 @@ UI: `ShadowRemediationPanel.tsx`, `apps/web/src/views/workflows/WorkflowDetailPa
 - **Action — Ada, the workflow** (`/ui/workflows`, open the new workflow):
   1. The workflow's title is the full change description (finding F8). The **Plan only** card, badge **planning**:
      *"this change is in forced planning — nothing builds from it yet."* Click **Finish planning**.
-  2. The **Submit shadow AI remediation plan** card: paste the plan text prepared at T-24h from
+  2. The **Submit shadow-AI remediation plan** card: paste the plan text prepared at T-24h from
      `DEMO_PRESENTER_NOTES_2026-11-01.md` (it names the chosen repository; the panel has no copy button, FS-47), then
      **Submit for sign-off**.
   3. The card now reads **waiting for sign-off** — *"awaiting … — it is in their inbox"*.
 - **Action — Morgan** (Profile C, `/ui/inbox`): the row with the **Sign-off** chip and the workflow's title (the
   long *"Pull … into governance — shadow-AI finding …"* text, finding F8). Click its **Review**: the item opens in
   the panel on the right, with *"Workflow · requested by Ada Admin"* and the submitted plan folded under
-  *Submitted: Shadow AI remediation plan (v1)* (open it to show the plan). The pinned foot has **Reason (optional)**,
+  *Submitted: Shadow-AI remediation plan (v1)* (open it to show the plan). The pinned foot has **Reason (optional)**,
   **Deny** and **Approve**. Press **Approve** (her authenticator code if asked). The item leaves the list and the
   count drops by one (*n waiting on you*). **Recently decided**, at the foot of the Inbox, starts folded
   (the **Recently decided** header, title and count); the beat does not need it, so leave it folded. Back in Profile A, reload the workflow: status **completed**, all four
@@ -462,7 +462,7 @@ the day.
 **Sat 10-31:** LIVE (S4's use case).
 
 - **URL:** **Open the use-case workspace** after submit → `/ui/admin/governance/use-cases/<id>`.
-- **Screen** (`ds-g1b`): the dark header band with *AI use cases / <name>*, the **AI USE CASE** label, and the chips
+- **Screen** (`ds-g1b`): the dark header band with the breadcrumb *AI Governance / AI registry / <name>*, the **AI USE CASE** label, and the chips
   **Status**, **EU AI Act** tier, **Approval valid until** (once approved) and **Owner**; **Open intake** on the
   right. Status **under review** right after submit. The **Overview** tab holds the **Lifecycle tracker** (*Proposed
   → Under review → Approved → Monitoring*, then the activity table) and, once approved, **Conditions of approval**
@@ -629,8 +629,8 @@ It records each question as an audit row marked advisory (not counted against ra
 
 - **URL:** `/ui/admin/governance/trust` (breadcrumb *Overview / Trust & evidence*). The page has no tabs: point at
   the weakest bars in **Evidence coverage by dimension** (on FALLBACK, **Safety 0%** and **Reliability 60%**), then
-  click the **Security** tile in **Dimension drilldown** (it opens on **Bias**): its badge (*measured* or
-  *unmeasured*) and the **Open · Mitigating · Accepted · Closed** counts.
+  click the **Security** tile in **Dimension drilldown** (it opens on **Bias**): its badge (*Measured* or
+  *Unmeasured*) and the **Open · Mitigating · Accepted · Closed** counts.
 
 ### G5. Alerts and remediation — Ada, then Avery — 2 minutes (10-05 beat 3B)
 **Sat 10-31:** LIVE (changes state; FALLBACK on failure).
@@ -641,7 +641,7 @@ It records each question as an audit row marked advisory (not counted against ra
 - **Action:** click the unowned-agent alert's row: it opens in the panel on the right (`ds-g5b`; at 900 px and
   below, a modal over the page, `ds-g5c`). Type the **Acknowledgement note — required and audited** in the pinned
   foot, then **Acknowledge** (it stays disabled until the note is typed). In the panel's body, under **Remediation**,
-  *"Make Dana Developer the owner of …"*: choose **Avery** in **Independent approver** → **Propose…**. Avery opens
+  *"Make Dana Developer the owner of …"*: choose **Avery** in **Independent approver** → **Propose for approval**. Avery opens
   the item in `/ui/inbox` (*Governance remediation · …*) with **Review**; the panel should read *"No evidence attached
   to this request."* (the evidence is the alert itself; **to confirm at rehearsal**, not in the pack) and Avery
   presses **Approve** in its pinned foot. Ada reloads:
@@ -652,9 +652,9 @@ It records each question as an audit row marked advisory (not counted against ra
 - **SLA chips** (deep scan #13): an alert's SLA chip moves with the clock, and acknowledging it does not stop it. High
   alerts read *SLA due soon* from 18 h and *SLA breached* from 24 h; medium alerts at 54 h and 72 h. On LIVE, prepared
   on 10-29 (about two days before the demo), every open high alert reads **SLA breached**, the unowned-agent alert
-  included, and the panel adds that it was escalated to the admins; open medium alerts read *on track* or *SLA due
+  included, and the panel adds that it was escalated to the admins; open medium alerts read *SLA on track* or *SLA due
   soon*, not breached (check at T-1h). If anyone looks at it, say: "the product escalates overdue
-  alerts". The fallback is prepared less than 18 h before the run, so its chips read *on track*, as in the pack.
+  alerts". The fallback is prepared less than 18 h before the run, so its chips read *SLA on track*, as in the pack.
 - **Say (added for v3):** "Same rule as the shadow-AI plan: the platform runs only the approved action, and the
   approver is someone else. Approving the fix re-ran the monitor, so the alert resolved from evidence, not by hand."
 - **Say (added 2026-10-24, scan G5 sentence):** on the **Acknowledged** tab, point at G3's off-stack alert: "That
@@ -738,11 +738,11 @@ UI: `apps/web/src/views/admin/governance/ContentTrustPage.tsx`.
   The **Write floor** card (badge *only trusted content drives writes*), the **Source tiers** table (**Source · Kind ·
   Tier · Last set · Change**), and **Provenance evidence** (**Recorded · Source · Tier · Classification · Digest ·
   Delivered · Transformed · Anchor**).
-- **Action:** point at a source reading **untrusted**, then at one provenance record's digests. Do not change a tier
+- **Action:** point at a source reading **Untrusted**, then at one provenance record's digests. Do not change a tier
   live (each change is a step-up).
 - **Say:** "Detecting an injection is not enough. Here, text from a source below the write floor cannot make an agent
   change anything: the write is refused. Every governed result is recorded by its digests, never its content."
-- **Data:** on FALLBACK, the connector *acme-policy-library* is **trusted**, and Dana's two reads of it
+- **Data:** on FALLBACK, the connector *acme-policy-library* is **Trusted**, and Dana's two reads of it
   (*lending-policy*, *complaints-handling-policy*) are provenance records (`demo:check` asserts both). On LIVE, the
   provenance records are whatever the governance seed and the day's traffic made; if the evidence card is empty, the
   beat is the tier table alone.

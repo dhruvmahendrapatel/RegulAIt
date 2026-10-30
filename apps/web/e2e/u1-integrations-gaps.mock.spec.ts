@@ -294,7 +294,7 @@ test.describe("MCP servers — admission clear and tools/list preview", () => {
     const form = page.getByRole("form", { name: "Register an MCP server" });
     await form.getByLabel("Name").fill("lan-tools", { timeout: 30_000 });
     await form.getByLabel("URL").fill("http://10.0.0.5/mcp");
-    await form.getByLabel("Private ranges (ADR-0043)").selectOption("true");
+    await form.getByLabel("Private ranges", { exact: true }).selectOption("true");
     await form.getByRole("button", { name: "Register" }).click();
     await confirmStepUp(page);
     await reg.expectResentOnce();

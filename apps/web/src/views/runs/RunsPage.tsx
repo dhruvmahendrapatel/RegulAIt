@@ -292,14 +292,15 @@ export default function RunsPage() {
 
   return (
     <>
-      <PageHeader title="Runs" sub="Multi-agent task graphs — planned, governed, metered." />
+      <PageHeader title="Runs" info={<p>Multi-agent task graphs — planned, governed, metered.</p>} />
       <div className={v.stack}>
         <Card title="Plan a run">
           {agents.length === 0 && !agentsQ.isLoading ? (
-            <EmptyState
-              title="No agents granted"
-              body="Ask an admin to grant your account an agent before planning a run."
-            />
+            // the refusal stays visible, as one line
+            <div className={v.row}>
+              <Badge tone="warn">No agents granted</Badge>
+              <span className={v.dim}>Ask an admin to grant your account an agent before planning a run.</span>
+            </div>
           ) : (
             <>
               {/* PILLAR 7 — describe the goal, a lead agent drafts the graph.

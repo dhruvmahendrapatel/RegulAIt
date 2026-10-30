@@ -14,11 +14,11 @@
  *  as a default or an empty list.
  */
 import { lazy, Suspense, useEffect, useId, useMemo, useState } from "react";
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../../api/client";
 import { ago, fmtAt, fmtDateTime } from "../../../../api/format";
 import { api as stepUpApi, withStepUp } from "../../../../stepup/stepUp";
-import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Modal, Select, Table } from "../../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Modal, RowActions, Select, Table } from "../../../../ui/kit";
 import { useAction } from "../../adminKit";
 import {
   assignableProfiles,
@@ -31,6 +31,7 @@ import {
   BACKEND_CLASSES,
   BACKENDS,
   classText,
+  executorActs,
   executorReading,
   MISMATCH_TEXT,
   parseAssignment,
@@ -69,6 +70,7 @@ import {
   type RegisterDraft,
   type UnrecordedRefusal,
 } from "./isolationModel";
+import { RevokeDialog, executorCall, revokeExecutor } from "./RevokeExecutor";
 // loaded on first Manage: the Engines page does not pay for the lifecycle surface until it is used
 const ExecutorDetail = lazy(() => import("./ExecutorDetail").then((m) => ({ default: m.ExecutorDetail })));
 import v from "../../../views.module.css";
@@ -618,6 +620,10 @@ const rowKey = (r: ExecutorRow) => ("unreadable" in r ? `unreadable-${r.index}` 
 function ExecutorsCard() {
   const [registering, setRegistering] = useState(false);
   const [managing, setManaging] = useState<string | null>(null);
+  // G11: the row's Revoke, with the detail's own typed-name confirmation
+  const [revoking, setRevoking] = useState<Executor | null>(null);
+  const qc = useQueryClient();
+  const act = useAction();
   const q = useQuery({ queryKey: isolationKeys.executors, retry: false, refetchInterval: 60_000, queryFn: () => api.get<unknown>("/v1/executors") });
   // re-judge on this screen so a report never stays green past its expiry
   const [now, setNow] = useState(() => Date.now());
@@ -711,17 +717,49 @@ function ExecutorsCard() {
                 align: "right",
                 render: (r) =>
                   "unreadable" in r ? null : (
-                    <Button size="sm" variant="ghost" aria-label={`Manage executor ${r.name}`} aria-pressed={managing === r.id} onClick={() => setManaging(managing === r.id ? null : r.id)}>
-                      Manage
-                    </Button>
+                    <RowActions
+                      slot="5rem"
+                      primary={
+                        <Button size="sm" variant="ghost" aria-label={`Manage executor ${r.name}`} aria-pressed={managing === r.id} onClick={() => setManaging(managing === r.id ? null : r.id)}>
+                          Manage
+                        </Button>
+                      }
+                      // offered only where the gateway would accept it: a revoked executor has nothing left to revoke
+                      secondary={
+                        executorActs(r).revoke.ok && (
+                          <Button size="sm" variant="danger" aria-label={`Revoke executor ${r.name}`} disabled={act.busy} onClick={() => setRevoking(r)}>
+                            Revoke
+                          </Button>
+                        )
+                      }
+                    />
                   ),
               },
             ]}
             empty={<EmptyState title="No executors registered" body="With no executor, every isolable call is refused (no_executor). Nothing runs with weaker isolation instead." />}
           />
         )}
+        {act.error && (
+          <p className={v.errLine} role="alert">
+            {act.error}
+          </p>
+        )}
       </div>
       {registering && <RegisterExecutorDialog onClose={() => setRegistering(false)} />}
+      {revoking && (
+        <RevokeDialog
+          name={revoking.name}
+          onCancel={() => setRevoking(null)}
+          onConfirm={() => {
+            const { id, name } = revoking;
+            setRevoking(null);
+            void act.run(async () => {
+              await executorCall(() => revokeExecutor(id));
+              await qc.invalidateQueries({ queryKey: ["admin", "isolation"] });
+            }, `${name} revoked`);
+          }}
+        />
+      )}
     </Card>
     {managing && (
       <Suspense fallback={<p role="status">Loading the executor…</p>}>

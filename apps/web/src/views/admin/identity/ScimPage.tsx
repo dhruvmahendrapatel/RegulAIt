@@ -69,7 +69,20 @@ export default function ScimPage() {
       <div className={v.stack}>
         {reveal && <RevealCard reveal={reveal} onDismiss={() => setReveal(null)} />}
 
-        <Card title="Issue a SCIM token — plaintext returned exactly once, sha256 at rest">
+        <Card
+          title="Issue a SCIM token — plaintext returned exactly once, sha256 at rest"
+          infoLabel="SCIM tokens"
+          info={
+            <p>
+              SCIM authenticates on this token and on nothing else — a browser session or a user API key
+              is refused at <span className={v.mono}>/scim/v2</span>, because provisioning is a separate
+              trust path from being a person. Requests are rate-limited per token and answer{" "}
+              <span className={v.mono}>429</span> with <span className={v.mono}>Retry-After</span> when a
+              connector runs away. Every create, update, deactivate, reactivate and membership change is
+              audited with this integration named as the actor.
+            </p>
+          }
+        >
           <form
             className={a.formRow}
             onSubmit={(e) => {
@@ -101,11 +114,12 @@ export default function ScimPage() {
               {
                 key: "used",
                 header: "Last sync",
+                info: <>“never”: no SCIM request has ever presented this token.</>,
                 render: (t) =>
                   t.lastUsedAt ? (
                     ago(t.lastUsedAt)
                   ) : (
-                    <span className={v.faint} title="no SCIM request has ever presented this token">
+                    <span className={v.faint}>
                       never
                     </span>
                   ),
@@ -146,34 +160,31 @@ export default function ScimPage() {
               />
             }
           />
-          <p className={v.faint}>
-            SCIM authenticates on this token and on nothing else — a browser session or a user API key
-            is refused at <span className={v.mono}>/scim/v2</span>, because provisioning is a separate
-            trust path from being a person. Requests are rate-limited per token and answer{" "}
-            <span className={v.mono}>429</span> with <span className={v.mono}>Retry-After</span> when a
-            connector runs away. Every create, update, deactivate, reactivate and membership change is
-            audited with this integration named as the actor.
-          </p>
         </Card>
 
         <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
           {q.data && <StatusCard status={q.data} />}
         </QueryGate>
 
-        <Card title="Point your IdP at this deployment">
+        <Card
+          title="Point your IdP at this deployment"
+          infoLabel="the setup guide"
+          info={
+            <p>
+              Authentication is an OAuth bearer token — paste the value shown once above. Supported:{" "}
+              <span className={v.mono}>/Users</span> (create, read, filter by{" "}
+              <span className={v.mono}>userName eq</span> / <span className={v.mono}>emails eq</span> /{" "}
+              <span className={v.mono}>externalId eq</span>, PATCH, PUT, DELETE) and{" "}
+              <span className={v.mono}>/Groups</span> (full CRUD with membership reconciliation). Not
+              supported, deliberately: password provisioning (accounts arrive with no password and sign in
+              via SSO, or get an admin one-time password), admin rights (never an IdP-assertable attribute),
+              the local username identifier, and the full RFC 7644 filter grammar — an unsupported filter is
+              refused with a SCIM error rather than answered with the wrong result set.
+            </p>
+          }
+        >
           <p className={v.faint}>Base URL for the provisioning connector:</p>
           <CodeBlock>{`${window.location.origin}/scim/v2`}</CodeBlock>
-          <p className={v.faint}>
-            Authentication is an OAuth bearer token — paste the value shown once above. Supported:{" "}
-            <span className={v.mono}>/Users</span> (create, read, filter by{" "}
-            <span className={v.mono}>userName eq</span> / <span className={v.mono}>emails eq</span> /{" "}
-            <span className={v.mono}>externalId eq</span>, PATCH, PUT, DELETE) and{" "}
-            <span className={v.mono}>/Groups</span> (full CRUD with membership reconciliation). Not
-            supported, deliberately: password provisioning (accounts arrive with no password and sign in
-            via SSO, or get an admin one-time password), admin rights (never an IdP-assertable attribute),
-            the local username identifier, and the full RFC 7644 filter grammar — an unsupported filter is
-            refused with a SCIM error rather than answered with the wrong result set.
-          </p>
         </Card>
       </div>
 
@@ -217,7 +228,20 @@ export default function ScimPage() {
 function StatusCard(props: { status: ScimStatus }) {
   const s = props.status;
   return (
-    <Card title="Sync status">
+    <Card
+      title="Sync status"
+      info={
+        <p>
+          <strong>An unmapped group grants nothing.</strong> Membership is recorded here as the IdP
+          asserts it, and on its own that is all it does. It becomes entitlement only where an admin
+          has explicitly mapped that group to a role on the{" "}
+          <Link to="/admin/group-mappings">Group → role mapping</Link> screen — default-deny, with no
+          “default role for unmapped groups” setting anywhere. And no mapping, of any group, can
+          confer the platform admin bit: it is not a role, so an IdP cannot become a
+          privilege-escalation path by asserting that someone is in a group called “admins”.
+        </p>
+      }
+    >
       <KV
         rows={[
           ["Active tokens", String(s.activeTokens)],
@@ -254,15 +278,6 @@ function StatusCard(props: { status: ScimStatus }) {
           ],
         ]}
       />
-      <p className={v.faint}>
-        <strong>An unmapped group grants nothing.</strong> Membership is recorded here as the IdP
-        asserts it, and on its own that is all it does. It becomes entitlement only where an admin
-        has explicitly mapped that group to a role on the{" "}
-        <Link to="/admin/group-mappings">Group → role mapping</Link> screen — default-deny, with no
-        “default role for unmapped groups” setting anywhere. And no mapping, of any group, can
-        confer the platform admin bit: <code>isAdmin</code> is not a role, so an IdP cannot become a
-        privilege-escalation path by asserting that someone is in a group called “admins”.
-      </p>
     </Card>
   );
 }

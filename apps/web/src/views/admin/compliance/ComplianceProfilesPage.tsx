@@ -173,7 +173,16 @@ function UpsertProfileCard(props: {
   // retired (or unknown) templates the profile still requires stay required: they show disabled and the Select keeps them
   const keptIds = f.requiredTemplateIds.filter((id) => !activeIds.has(id));
   return (
-    <Card title="Define or update a profile (upsert by tag)">
+    <Card
+      title="Define or update a profile (upsert by tag)"
+      info={
+        <p>
+          Posting an existing tag updates the profile in place — every classified project immediately
+          inherits the new cascade. Retention floors compose longest-wins across profiles; patch cadence
+          composes shortest-wins.
+        </p>
+      }
+    >
       <form
         className={a.formRow}
         onSubmit={(e) => {
@@ -277,11 +286,6 @@ function UpsertProfileCard(props: {
           Typing an existing tag loads its stored values in place of anything entered before.
         </p>
       )}
-      <p className={v.faint}>
-        Posting an existing tag updates the profile in place — every classified project immediately
-        inherits the new cascade. Retention floors compose longest-wins across profiles; patch cadence
-        composes shortest-wins.
-      </p>
     </Card>
   );
 }

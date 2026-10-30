@@ -141,12 +141,13 @@ test("a proposal shows its consent state, and Apply exists only where consent do
   await expect(
     page.getByText("Proposals — recorded, approved by a human, then applied", { exact: true }),
   ).toBeVisible();
-  // the standing statement, rendered rather than documented: consent gates the
-  // apply, and the apply rides the public endpoint
-  await expect(
-    page.getByText(/Applying one is gated on the linked approval in the ordinary/),
-  ).toBeVisible();
-  await expect(page.getByText(/audited under\s+the applying admin's identity/)).toBeVisible();
+  // the standing statement, one click away in "How the copilot is governed": consent gates
+  // the apply, and the apply rides the public endpoint; the "Draft only" chip stays visible
+  await expect(page.getByText("Draft only", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "What is the Governance copilot page?" }).click();
+  const governed = page.getByRole("note");
+  await expect(governed.getByText(/Applying one is gated on the linked approval in the ordinary/)).toBeVisible();
+  await expect(governed.getByText(/audited under\s+the applying admin's identity/)).toBeVisible();
 });
 
 test("the model-judged knob ships OFF, and the recommendations page says so outright", async ({ page }) => {
@@ -154,7 +155,7 @@ test("the model-judged knob ships OFF, and the recommendations page says so outr
 
   await page.goto("/ui/admin/organization");
   await expect(page.getByRole("heading", { name: "Organization", exact: true })).toBeVisible();
-  await expect(page.getByText("5c · Model-judged access recommendations (ADR-0092)")).toBeVisible();
+  await expect(page.getByText("5c · Model-judged access recommendations", { exact: true })).toBeVisible();
   // DEFAULT-OFF is the honesty argument, asserted on the real form. Read only:
   // this spec never arms the judge, so no later run inherits one.
   await expect(page.getByLabel("Model-judged annotations")).toHaveValue("false");

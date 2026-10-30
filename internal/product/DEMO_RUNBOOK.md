@@ -216,8 +216,9 @@ password step:
 
      The seed runs with `--seed-demo --open-assurance-window` and mints (or keeps) the 30-day ephemeral licence that
      says "NOT A PRODUCTION DEPLOYMENT"; only its public key is written, to the same volume. `demo:check` should end
-     **26 pass, 1 warn, 0 fail** (the WARN is `3 Monitor`, listing the active alerts; run `39940181481`, 2026-10-23,
-     and the 10-21 rehearsal agree), followed by `demo prep: complete in <n>s`. If a later green `Demo journey` run
+     **26 pass, 2 warn, 0 fail**: one WARN is `3 Monitor`, listing the active alerts (run `39940181481`, 2026-10-23,
+     and the 10-21 rehearsal agree); the other is `E External model and agent` until §7.10 is set up (a clean
+     `demo:prepare` on `main` at 71e80b1, 2026-10-30). The last line is `demo prep: complete in <n>s`. If a later green `Demo journey` run
      shows different counts, trust the run;
    - the **gateway**, with `REGULAIT_OFFLINE_CHECKS=1` and the export key set (as §1 step 5).
 
@@ -676,7 +677,7 @@ the customer demo on Sat 10-31 (owner, 2026-10-29, #453 c6508111468). Rows marke
 | T-1h | **Theme** (deep scan #35): the same look in every profile, chosen for the room's projector. Light or dark is the ☾ / ☀ button in the top bar (**Switch to dark theme** / **Switch to light theme**); the palette is on **Account** (`/ui/account`) → **Appearance**. Both are kept per browser, so set them in every profile and in the fallback browser | pending execution |
 | T-1h | Ada's and Morgan's authenticators on the presenting phone; the phone charged and silenced | pending execution |
 | T-1h | The live instance answers over HTTPS from the venue network (open `/ui` in each profile) and the tunnel shows **HEALTHY**. (The `sslip.io` hosts-file line is superseded by ADR-0203: the name is on Cloudflare DNS.) | pending execution |
-| T-1h | **Presenter brief on SLA chips** (deep scan #13): on LIVE, prepared on 10-29 (about two days before the demo), every open high alert reads **SLA breached** (the G5 unowned-agent alert included) and the drawer adds that it was escalated to the admins; open medium alerts read *on track* or *SLA due soon* (due soon from 54 h, breached at 72 h), so check them at this row. Say: "the product escalates overdue alerts". Acknowledging an alert does not stop its clock. Do not relax the SLAs, and do not re-prepare LIVE | pending execution |
+| T-1h | **Presenter brief on SLA chips** (deep scan #13): on LIVE, prepared on 10-29 (about two days before the demo), every open high alert reads **SLA breached** (the G5 unowned-agent alert included) and the drawer adds that it was escalated to the admins; open medium alerts read *SLA on track* or *SLA due soon* (due soon from 54 h, breached at 72 h), so check them at this row. Say: "the product escalates overdue alerts". Acknowledging an alert does not stop its clock. Do not relax the SLAs, and do not re-prepare LIVE | pending execution |
 | T-10 min | **Sessions** (deep scan #7, owner): in every profile, the fallback browser included, sign in again or bring the window to the front so it is active. Keep the windows tiled and never fully covered, so each stays visible and its poll keeps running | pending execution |
 | T-5 min | **G3 terminal**: the laptop terminal is still open and the G3 script is still there. (Reconnecting a Session Manager shell is superseded by ADR-0203.) | pending execution |
 | Sat 10-31 | **Every beat on LIVE, once** (owner, 2026-10-29, #453 c6508111468; it replaces the 11-01 run-through row of 2026-10-23). LIVE is never re-prepared, so a state-changing step (G3 acknowledge then ALLOW, G5 resolve, S3 **Start and link**, S4 register, G1/G2 on S4's use case, E) runs on it only once: at the demo. Rehearse those steps on the **FALLBACK** stack only; FALLBACK stays the failure fallback. The per-beat marks are in DEMO_SCRIPT_2026-11-01 (each beat's "Sat 10-31" line) and in "Sat 10-31: where each beat runs" below | decided — owner |

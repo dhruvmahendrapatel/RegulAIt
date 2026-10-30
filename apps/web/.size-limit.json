@@ -30,6 +30,6 @@
     "name": "all JS",
     "path": "dist/assets/*.js",
     "gzip": true,
-    "limit": "1044 kB"
+    "limit": "1050 kB"
   }
 ]

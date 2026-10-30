@@ -808,7 +808,9 @@ test("shadow-ai-05: a psn: link lands on the prefilled Pseudonym field, in view 
 
 test("FS-6: the posture paragraph's link is underlined, not told apart by colour alone", async ({ page }) => {
   await page.goto("/ui/admin/shadow-ai/discovery-sources");
-  const link = page.getByRole("link", { name: "Shadow-AI discovery", exact: true }).and(page.locator("p a"));
+  // the posture paragraph sits behind the Active discovery (i)
+  await page.getByRole("button", { name: "What is Active discovery?" }).click();
+  const link = page.getByRole("note").getByRole("link", { name: "Shadow-AI discovery", exact: true }).and(page.locator("p a"));
   await expect(link).toHaveCSS("text-decoration-line", "underline");
 });
 

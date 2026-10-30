@@ -337,13 +337,15 @@ export default function RegulAItLlmPage() {
     <>
       <PageHeader
         title="regulAIt-LLM"
-        sub={
-          "Build a model out of your own data, under the same governance every bought model already has: " +
-          "the corpus is scanned for personal data BEFORE it is accepted, each version freezes the moment " +
-          "a job trains on it, the job runs under your own entitlement and its cost lands in the one " +
-          "ledger, an expensive one goes to the Approvals Queue, and the model that comes out gets a " +
-          "model card and is subject to the MRM gate. What this is NOT is a claim to train frontier " +
-          "models — read each backend's stated limits before you pick one."
+        sub="Build a model out of your own data, under the same governance every bought model already has."
+        info={
+          <p>
+            The corpus is scanned for personal data BEFORE it is accepted, each version freezes the moment
+            a job trains on it, the job runs under your own entitlement and its cost lands in the one
+            ledger, an expensive one goes to the Approvals Queue, and the model that comes out gets a
+            model card and is subject to the MRM gate. What this is NOT is a claim to train frontier
+            models — read each backend's stated limits before you pick one.
+          </p>
         }
       />
       <div className={v.stack}>
@@ -356,10 +358,11 @@ export default function RegulAItLlmPage() {
           }}
         >
           {/* ---------------- backends ---------------- */}
-          <Card title="Training backends, and what each one cannot do">
-            <div className={v.faint} style={{ marginBottom: "var(--s2)" }}>
-              {backends.data?.note}
-            </div>
+          <Card
+            title="Training backends, and what each one cannot do"
+            info={backends.data?.note ? <p>{backends.data.note}</p> : undefined}
+            infoLabel="training backends"
+          >
             <div className={v.row} style={{ marginBottom: "var(--s2)" }}>
               <Stat
                 value={backends.data?.enabled ? "on" : "off"}
@@ -431,11 +434,15 @@ export default function RegulAItLlmPage() {
           </Card>
 
           {/* ---------------- upload ---------------- */}
-          <Card title="Upload training data">
-            <div className={v.faint} style={{ marginBottom: "var(--s2)" }}>
-              {datasets.data?.note} Every row is scanned for personal data and credential material before
-              the dataset exists — under the <code>block</code> mode nothing is stored at all.
-            </div>
+          <Card
+            title="Upload training data"
+            info={
+              <p>
+                {datasets.data?.note} Every row is scanned for personal data and credential material before
+                the dataset exists — under the <code>block</code> mode nothing is stored at all.
+              </p>
+            }
+          >
             <form
               className={v.stack}
               onSubmit={(e) => {
@@ -515,11 +522,11 @@ export default function RegulAItLlmPage() {
           </Card>
 
           {/* ---------------- datasets ---------------- */}
-          <Card title="Datasets">
+          <Card title="Datasets" info={<p>A custom model needs a fixed, versioned corpus to learn from.</p>}>
             {(datasets.data?.datasets ?? []).length === 0 ? (
               <EmptyState
                 title="No training data yet"
-                body="A custom model needs a fixed, versioned corpus to learn from. Upload one above — it will be scanned before it is stored."
+                body="Upload one above — it will be scanned before it is stored."
               />
             ) : (
               <Table
@@ -905,10 +912,7 @@ export default function RegulAItLlmPage() {
           </Card>
 
           {/* ---------------- artifacts ---------------- */}
-          <Card title="Model artifacts">
-            <div className={v.faint} style={{ marginBottom: "var(--s2)" }}>
-              {artifacts.data?.note}
-            </div>
+          <Card title="Model artifacts" info={artifacts.data?.note ? <p>{artifacts.data.note}</p> : undefined}>
             <Table
               rows={artifacts.data?.artifacts ?? []}
               rowKey={(r) => r.id}
