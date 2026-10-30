@@ -909,15 +909,15 @@ export async function refuseIfFeatureNotLicensed(
 
 /** the honest list of wired enforcement points; the Licensing page shows it verbatim */
 export const LICENSE_ENFORCEMENT_POINTS_WIRED: readonly string[] = [
-  "user.provision",
-  "agent.create",
-  "connector.create",
-  "mcp_server.create",
-  "pm_connection.create",
+  "Seats (adding a user)",
+  "Agents (adding an agent)",
+  "Connectors (adding a connector)",
+  "MCP servers (registering a server)",
+  "Project trackers (connecting a tracker)",
   "SSO (adding a SAML provider)",
   "SCIM (issuing a SCIM token)",
   "Compliance packs (activating a pack)",
-  "feature.advanced_orchestration (run.decompose)",
+  "Advanced orchestration (splitting a run into tasks)",
   "Air-gapped mode (adding an air-gapped deploy target)",
   "Custom model providers (connecting a provider)",
 ];

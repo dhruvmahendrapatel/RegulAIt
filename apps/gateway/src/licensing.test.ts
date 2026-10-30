@@ -918,15 +918,15 @@ describe("ADR-0052 — admin gating, disclosure and audit", () => {
     expect(s.schedulerPresent).toBe(false);
     expect(s.keyring.pinnedKeyIds).toContain(KEY_ID);
     expect(s.enforcementPointsWired).toEqual([
-      "user.provision",
-      "agent.create",
-      "connector.create",
-      "mcp_server.create",
-      "pm_connection.create",
+      "Seats (adding a user)",
+      "Agents (adding an agent)",
+      "Connectors (adding a connector)",
+      "MCP servers (registering a server)",
+      "Project trackers (connecting a tracker)",
       "SSO (adding a SAML provider)",
       "SCIM (issuing a SCIM token)",
       "Compliance packs (activating a pack)",
-      "feature.advanced_orchestration (run.decompose)",
+      "Advanced orchestration (splitting a run into tasks)",
       "Air-gapped mode (adding an air-gapped deploy target)",
       "Custom model providers (connecting a provider)",
     ]);

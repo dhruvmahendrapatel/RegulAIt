@@ -110,8 +110,8 @@ export type LicenseActionClass = (typeof LICENSE_ACTION_CLASSES)[number];
 export interface ClassifiedAction {
   /** the machine key `classifyAction` matches on; never reworded */
   action: string;
-  /** plain-language name the console shows in place of `action`, where one is set */
-  label?: string;
+  /** plain-language name the console shows in place of `action` (every row has one) */
+  label: string;
   class: LicenseActionClass;
   why: string;
 }
@@ -120,33 +120,35 @@ export const LICENSE_ACTION_INVENTORY: ClassifiedAction[] = [
   // --- governance / safety: FAIL OPEN. Never gated by a commercial state. ---
   {
     action: "policy.evaluate",
+    label: "Evaluate a policy",
     class: "governance",
     why: "the gate itself; if it stops, previously-gated agents become UN-gated",
   },
   {
     action: "entitlement.check",
+    label: "Check an entitlement",
     class: "governance",
     why: "the per-user access decision — the thing the product exists to do",
   },
-  { action: "approval.decide", class: "governance", why: "a pending approval must still be decidable" },
-  { action: "guardrail.evaluate", class: "governance", why: "PII/injection enforcement is not a paid feature" },
-  { action: "audit.write", class: "governance", why: "an audit trail that stops on a date is a compliance failure" },
-  { action: "usage.meter", class: "governance", why: "metering is unconditional and feeds the renewal itself" },
-  { action: "agent.dispatch", class: "governance", why: "existing committed footprint keeps working, fully governed" },
-  { action: "user.deactivate", class: "governance", why: "offboarding must never be blocked by a billing state" },
+  { action: "approval.decide", label: "Decide an approval", class: "governance", why: "a pending approval must still be decidable" },
+  { action: "guardrail.evaluate", label: "Run a guardrail", class: "governance", why: "PII/injection enforcement is not a paid feature" },
+  { action: "audit.write", label: "Write to the audit trail", class: "governance", why: "an audit trail that stops on a date is a compliance failure" },
+  { action: "usage.meter", label: "Meter usage", class: "governance", why: "metering is unconditional and feeds the renewal itself" },
+  { action: "agent.dispatch", label: "Run an existing agent", class: "governance", why: "existing committed footprint keeps working, fully governed" },
+  { action: "user.deactivate", label: "Deactivate a user", class: "governance", why: "offboarding must never be blocked by a billing state" },
   // --- expansion: FAIL CLOSED past expiry. Growing the footprint. ---
-  { action: "user.provision", class: "expansion", why: "a new entitled user is a new seat" },
-  { action: "user.reactivate", class: "expansion", why: "re-consumes a seat, so it is growth" },
-  { action: "agent.create", class: "expansion", why: "a newly governed object is a wider footprint" },
-  { action: "connector.create", class: "expansion", why: "a new connected system is a wider footprint" },
+  { action: "user.provision", label: "Add a user", class: "expansion", why: "a new entitled user is a new seat" },
+  { action: "user.reactivate", label: "Reactivate a user", class: "expansion", why: "re-consumes a seat, so it is growth" },
+  { action: "agent.create", label: "Add an agent", class: "expansion", why: "a newly governed object is a wider footprint" },
+  { action: "connector.create", label: "Add a connector", class: "expansion", why: "a new connected system is a wider footprint" },
   { action: "mcp_server.create", label: "Register an MCP server", class: "expansion", why: "a new tool surface is a wider footprint" },
   { action: "model_provider.connect", label: "Connect a model provider", class: "expansion", why: "a new provider is a wider footprint" },
   { action: "pm_connection.create", label: "Connect a project tracker", class: "expansion", why: "a new integrated system is a wider footprint" },
-  { action: "feature.tier_gated", class: "expansion", why: "tier flags are exactly what is being paid for" },
+  { action: "feature.tier_gated", label: "Use a tier-gated feature", class: "expansion", why: "tier flags are exactly what is being paid for" },
   // --- read: always permitted, in EVERY state including a hard stop. ---
-  { action: "console.read", class: "read", why: "a deployment that cannot be read cannot be renewed" },
-  { action: "audit.read", class: "read", why: "evidence retrieval must survive any commercial state" },
-  { action: "report.read", class: "read", why: "the record is the customer's, not ours to withhold" },
+  { action: "console.read", label: "Read the console", class: "read", why: "a deployment that cannot be read cannot be renewed" },
+  { action: "audit.read", label: "Read the audit trail", class: "read", why: "evidence retrieval must survive any commercial state" },
+  { action: "report.read", label: "Read a report", class: "read", why: "the record is the customer's, not ours to withhold" },
 ];
 
 export function classifyAction(action: string): LicenseActionClass {

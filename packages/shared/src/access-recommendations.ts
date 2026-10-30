@@ -125,9 +125,9 @@ export const ACCESS_RECOMMENDATION_RULES_V1: readonly AccessRecommendationRule[]
     severity: "review-suggested",
     rationaleTemplate:
       "{object} has {ownershipProblem}, so nobody is accountable for reviewing this grant — " +
-      "the ADR-0089 ownership flag is '{flag}'",
+      "the agent's ownership flag is '{flag}'",
     limits:
-      "orphan detection sees only this deployment's own user rows (ADR-0089): an owner who " +
+      "orphan detection sees only this deployment's own users: an owner who " +
       "left but was never deactivated here still reads as owned.",
   },
   {
@@ -135,11 +135,10 @@ export const ACCESS_RECOMMENDATION_RULES_V1: readonly AccessRecommendationRule[]
     title: "grants on retired agents (dispatch already refuses; the row is dead weight)",
     severity: "informational",
     rationaleTemplate:
-      "{object} was retired {retiredAgo} ({reason}) — dispatch has refused it since (409 " +
-      "agent_retired), so this grant row confers nothing and is dead weight in the entitlement " +
-      "ledger",
+      "{object} was retired {retiredAgo} ({reason}) — every call to it has been refused since, " +
+      "so this grant confers nothing and is dead weight in the entitlement ledger",
     limits:
-      "informational because the exposure is already closed by the ADR-0089 lifecycle gate; " +
+      "informational because the exposure is already closed by the agent lifecycle gate; " +
       "removing the row is hygiene, not risk reduction.",
   },
   {
@@ -148,10 +147,10 @@ export const ACCESS_RECOMMENDATION_RULES_V1: readonly AccessRecommendationRule[]
     severity: "review-suggested",
     rationaleTemplate:
       "{object} is granted to {holders} holder(s) yet named by NO approved use case — the " +
-      "ADR-0089 overreach flag: access exists that the use-case register does not stand behind",
+      "overreach flag: access exists that the use-case register does not stand behind",
     limits:
-      "compares grants to APPROVED register intent, never to traffic (ADR-0089's never-blend " +
-      "rule): an overreaching agent may be legitimately mid-registration, and the flag is " +
+      "compares grants to APPROVED register intent, never to traffic (the two are never " +
+      "blended): an overreaching agent may be legitimately mid-registration, and the flag is " +
       "deliberately coarse — any grant on an agent no approved use case names.",
   },
   {
@@ -160,9 +159,10 @@ export const ACCESS_RECOMMENDATION_RULES_V1: readonly AccessRecommendationRule[]
     severity: "review-suggested",
     rationaleTemplate:
       "{violator} holds both sides of SoD rule '{ruleName}' ({ruleReason}): {holdsA} and " +
-      "{holdsB} — surfaced by ADR-0091's read-time sweep, never auto-revoked",
+      "{holdsB} — surfaced by the separation-of-duties check, never auto-revoked",
     limits:
-      "re-surfaces ADR-0091's violators verbatim: mint-time enforcement already prevents NEW " +
+      "re-surfaces the separation-of-duties check's violators verbatim: enforcement at grant " +
+      "time already prevents NEW " +
       "co-holdings; these are pre-existing or IdP-acquired ones, and resolution is a human act.",
   },
   {
@@ -171,10 +171,10 @@ export const ACCESS_RECOMMENDATION_RULES_V1: readonly AccessRecommendationRule[]
     severity: "review-suggested",
     rationaleTemplate: "{holder} {holderProblem} — this direct grant on {object} has no active human behind it",
     limits:
-      "the users table records no last-login timestamp, so 'never authenticated' is computed " +
-      "from what IS recorded: no auth session was ever minted for the user (session rows are " +
-      "revoked, never deleted), no API key of theirs was ever used, and no usage row names " +
-      "them. Deactivated holders' grants are already inert at the auth wall (ADR-0022) — " +
+      "no last-login time is recorded for users, so 'never authenticated' is worked out " +
+      "from what IS recorded: the user never signed in (sign-in sessions are revoked, never " +
+      "deleted), no API key of theirs was ever used, and the usage ledger never names " +
+      "them. Deactivated holders' grants are already inert at sign-in — " +
       "flagged here because inert standing access is still standing access.",
   },
 ] as const;
