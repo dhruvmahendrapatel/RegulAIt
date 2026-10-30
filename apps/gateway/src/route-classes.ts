@@ -171,6 +171,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // the Streamable HTTP GET probe answers 405 to any authenticated caller
   "GET /mcp/:serverId",
   "POST /v1/agents/:agentId/invoke",
+  // ADR-0219 (P10): any person may ASK; executeGovernedA2aCall decides on their own grant (default-deny)
+  "POST /v1/a2a/agents/:agentId/messages",
   // ADR-0168 amendment item 6 — agent stewardship. The gate is "an admin OR
   // this agent's CURRENT steward", checked inside the handler (403
   // not_agent_steward for anyone else): a steward who is not an admin must be

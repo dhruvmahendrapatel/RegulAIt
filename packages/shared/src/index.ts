@@ -2247,6 +2247,8 @@ export const updateOrgSettingsSchema = z
      * MCP URLs work with zero ceremony (a relaxation, stepped up and audited).
      * IMDS/link-local stays unconditionally blocked either way. */
     mcpPrivateRangesDefault: z.boolean().optional(),
+    /** ADR-0219 (P10): calls to remote agents over A2A. Strict false; true relaxes it (settings_relax step-up). */
+    a2aEnabled: z.boolean().optional(),
     /** ADR-0097: the MCP ADMISSION posture ('enforce' is the strict default since ADR-0181). 'off' = no manifest
      * scan runs at all and behaviour is byte-identical to pre-0097. 'log' =
      * every manifest sync is scanned and the verdict/findings are recorded on

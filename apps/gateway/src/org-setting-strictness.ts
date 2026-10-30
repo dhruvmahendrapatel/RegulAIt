@@ -265,6 +265,8 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   envFallbackProviders: fromStored(["anthropic", "openai", "google", "xai"], addsAny),
   customModelProvidersEnabled: notEqual(false),
   mcpPrivateRangesDefault: notEqual(false),
+  // ADR-0219 (P10): turning on calls to remote A2A agents opens a new egress path and a new callable
+  a2aEnabled: notEqual(false),
   mcpAdmissionMode: notEqual("enforce"),
   minReleaseAgeDays: atLeast(7),
   credentialUnusedDays: atMost(90),
