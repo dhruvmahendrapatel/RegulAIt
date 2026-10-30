@@ -1443,6 +1443,13 @@
       "when": 1785163000000,
       "tag": "0228_oidc_identity_assertion",
       "breakpoints": true
+    },
+    {
+      "idx": 230,
+      "version": "7",
+      "when": 1785165000000,
+      "tag": "0230_gateway_modality_pricing_model_rate_limits",
+      "breakpoints": true
     }
   ]
 }
