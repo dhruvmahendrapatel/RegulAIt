@@ -1,5 +1,5 @@
 {
-  "lockSha256": "99debbe1c88df4e3eaafe80579d89d9fdf271192f489394cd8fd4789824ccb14",
+  "lockSha256": "00dfa7c3e6eb07e39d2cca6376c30eb3053c8f972e06e26cfb68d939a8075167",
   "packages": [
     {
       "name": "@fastify/ajv-compiler",
@@ -388,34 +388,34 @@
     },
     {
       "name": "fast-uri",
-      "version": "3.1.8",
+      "version": "3.1.9",
       "location": "node_modules/ajv/node_modules/fast-uri",
       "licence": "BSD-3-Clause",
       "optional": false,
-      "resolved": "https://registry.npmjs.org/fast-uri/-/fast-uri-3.1.8.tgz",
-      "integrity": "sha512-GZMtZUTNRpOVIECoXwLNZS5xUGE+mVNbTB8h/7Rwh2TFWcBQiPzTgyZi05BF9UMZKkLJv8XBRJTlU7zg8+ZfMg==",
+      "resolved": "https://registry.npmjs.org/fast-uri/-/fast-uri-3.1.9.tgz",
+      "integrity": "sha512-hS/0Wt3Ya043oKXs0sIxrMpKQITXhMLIrVAKKXi4gozGC9v7YRWVnXIZzjNPTO02M9BdxLCWqK1yRXgNziVyJQ==",
       "noticeSource": "LICENSE",
       "noticeSha256": "b010b0dfdfdb23d7396e03b82cd4621fc9bb8f95d6b0aea70b9c24e12074c786"
     },
     {
       "name": "fast-uri",
-      "version": "4.2.1",
+      "version": "4.2.3",
       "location": "node_modules/fast-uri",
       "licence": "BSD-3-Clause",
       "optional": false,
-      "resolved": "https://registry.npmjs.org/fast-uri/-/fast-uri-4.2.1.tgz",
-      "integrity": "sha512-TmHQgewjHtMq1E5QKA0tOE0yeYGQs25KZC/ziJpubRtWI15W92e6vPFydWOeZBVROSHBYw/QhD9d5OefdD6LDg==",
+      "resolved": "https://registry.npmjs.org/fast-uri/-/fast-uri-4.2.3.tgz",
+      "integrity": "sha512-I1PXwP5eAhlNlcdpjt9CgB59op2ZvZfxw+BkqGFVIUOgNpCVTcTqp3HhTX7brxj5vsip+nSY4nTvff+eIA76hg==",
       "noticeSource": "LICENSE",
       "noticeSha256": "b010b0dfdfdb23d7396e03b82cd4621fc9bb8f95d6b0aea70b9c24e12074c786"
     },
     {
       "name": "fastify",
-      "version": "5.12.5",
+      "version": "5.12.6",
       "location": "node_modules/fastify",
       "licence": "MIT",
       "optional": false,
-      "resolved": "https://registry.npmjs.org/fastify/-/fastify-5.12.5.tgz",
-      "integrity": "sha512-OB2k1dlxs5/NAABqeKV2FUHkSD2BbENsCak8yULVcymn3fHIPDVa9TI3SDnJSWYSllZmSYuZXy2gTnsT+Sut1A==",
+      "resolved": "https://registry.npmjs.org/fastify/-/fastify-5.12.6.tgz",
+      "integrity": "sha512-XeErl1DDsxdbhE9RPRJ05iNnfMhHRHHewVNNAJXaGTOaCY4wHb6rEizphhgzBq5YQe4JyqQWPpGd+hLh2PXXJA==",
       "noticeSource": "LICENSE",
       "noticeSha256": "23c91863859171455a536380991b4160fee4e19e2d8dc353ecf7143cc4e53ca2"
     },
