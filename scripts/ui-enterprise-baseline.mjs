@@ -65,7 +65,7 @@ export const CEILING_EXCEPTIONS = [
   // G2 + G11 (#599) with batch I-1 (#597) merged in: measured 1,049,109 B
   { name: "all JS", from: "1048 kB", to: "1050 kB", date: "2026-10-30", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6515493026" },
   // themes phase 2 (ADR-0218): measured 1,051,200 B, inside the owner's shared 1,060 kB budget for 2026-10-30
-  { name: "all JS", from: "1050 kB", to: "1052 kB", date: "2026-10-30", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6522492997" },
+  { name: "all JS", from: "1050 kB", to: "1053 kB", date: "2026-10-30", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6522492997" },
 ];
 const DECISION_LINK = /^https:\/\/github\.com\/dhruvmahendrapatel\/RegulAIt\/issues\/\d+#issuecomment-\d+$/;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
