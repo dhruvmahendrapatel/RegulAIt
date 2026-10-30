@@ -775,6 +775,13 @@ export const mcpServers = pgTable("mcp_servers", {
    * servers); turning it on is a stepped-up, audited relaxation, reset by a url move. Only while
    * `identityPropagation` is `signed_assertion` (CHECK `mcp_servers_disclose_agent_ids_check`). */
   discloseAgentWorkloadIds: boolean("disclose_agent_workload_ids").notNull().default(false),
+  /** ADR-0210 (migration 0228): how an opted-in server receives its assertion. `regulait_header` (the default) is the S8
+   * EdDSA assertion in its own header; `oidc_bearer` is an ES256 assertion under the `/mcp-identity` issuer, with
+   * `identity_assertion_scope` as its `scope` claim, in `Authorization: Bearer`. Turning it on (or changing the scope)
+   * is a stepped-up, audited relaxation, reset by a url move. Only while `identityPropagation` is `signed_assertion`,
+   * and never beside an ADR-0204 Bearer credential (refused by both writers under the server row's lock). */
+  identityAssertionProfile: text("identity_assertion_profile", { enum: ["regulait_header", "oidc_bearer"] }).notNull().default("regulait_header"),
+  identityAssertionScope: text("identity_assertion_scope"),
   /** ADR-0043 (migration 0049): may this server's URL resolve into ordinary
    * private LAN space (RFC1918 / loopback / ULA)? NULL = inherit the org
    * default (org_settings.mcpPrivateRangesDefault, false by default since
@@ -901,6 +908,10 @@ export const mcpServers = pgTable("mcp_servers", {
   check("mcp_servers_transport_check", sql`${t.transport} IN ('streamable_http', 'sse', 'stdio')`),
   check("mcp_servers_execution_profile_check", sql`${t.executionProfileId} IS NULL OR ${t.transport} = 'stdio'`),
   check("mcp_servers_disclose_agent_ids_check", sql`NOT ${t.discloseAgentWorkloadIds} OR ${t.identityPropagation} = 'signed_assertion'`),
+  check(
+    "mcp_servers_identity_assertion_profile_check",
+    sql`(${t.identityAssertionProfile} = 'regulait_header' AND ${t.identityAssertionScope} IS NULL) OR (${t.identityAssertionProfile} = 'oidc_bearer' AND ${t.identityPropagation} = 'signed_assertion' AND length(${t.identityAssertionScope}) BETWEEN 1 AND 512 AND ${t.identityAssertionScope} ~ '^[\\x21\\x23-\\x5B\\x5D-\\x7E]+( [\\x21\\x23-\\x5B\\x5D-\\x7E]+)*$')`,
+  ),
   check(
     "mcp_servers_transport_shape",
     sql`(${t.transport} = 'stdio' AND ${t.url} = 'stdio:' || ${t.name} AND ${t.stdioCommand} IS NOT NULL AND ${t.stdioArgs} IS NOT NULL AND jsonb_typeof(${t.stdioArgs}) = 'array' AND ${t.stdioCommandDigest} IS NOT NULL) OR (${t.transport} <> 'stdio' AND ${t.url} NOT LIKE 'stdio:%' AND ${t.stdioCommand} IS NULL AND ${t.stdioArgs} IS NULL AND ${t.stdioCommandDigest} IS NULL)`,
@@ -13458,8 +13469,11 @@ export const identitySigningKeys = pgTable(
   "identity_signing_keys",
   {
     kid: text("kid").primaryKey(),
-    algorithm: text("algorithm", { enum: ["Ed25519"] }).notNull().default("Ed25519"),
-    publicJwk: jsonb("public_jwk").$type<{ kty: "OKP"; crv: "Ed25519"; x: string; kid?: string }>().notNull(),
+    // ADR-0210 (migration 0228): ES256 keys sign only the OIDC-profile MCP identity assertion
+    algorithm: text("algorithm", { enum: ["Ed25519", "ES256"] }).notNull().default("Ed25519"),
+    publicJwk: jsonb("public_jwk")
+      .$type<{ kty: "OKP"; crv: "Ed25519"; x: string; kid?: string } | { kty: "EC"; crv: "P-256"; x: string; y: string; kid?: string }>()
+      .notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     activatedAt: timestamp("activated_at", { withTimezone: true }),
     retiredAt: timestamp("retired_at", { withTimezone: true }),
@@ -13467,17 +13481,18 @@ export const identitySigningKeys = pgTable(
   },
   (t) => [
     check("identity_signing_keys_kid_check", sql`${t.kid} ~ '^[A-Za-z0-9._:-]{1,128}$'`),
-    check("identity_signing_keys_algorithm_check", sql`${t.algorithm} = 'Ed25519'`),
+    check("identity_signing_keys_algorithm_check", sql`${t.algorithm} IN ('Ed25519', 'ES256')`),
     check(
       "identity_signing_keys_public_only_check",
-      sql`COALESCE(jsonb_typeof(${t.publicJwk}) = 'object' AND ${t.publicJwk} ->> 'kty' = 'OKP' AND ${t.publicJwk} ->> 'crv' = 'Ed25519' AND jsonb_typeof(${t.publicJwk} -> 'x') = 'string' AND NOT (${t.publicJwk} ?| ARRAY['d', 'p', 'q', 'dp', 'dq', 'qi', 'oth', 'k']), false)`,
+      sql`COALESCE(jsonb_typeof(${t.publicJwk}) = 'object' AND ((${t.algorithm} = 'Ed25519' AND ${t.publicJwk} ->> 'kty' = 'OKP' AND ${t.publicJwk} ->> 'crv' = 'Ed25519' AND jsonb_typeof(${t.publicJwk} -> 'x') = 'string') OR (${t.algorithm} = 'ES256' AND ${t.publicJwk} ->> 'kty' = 'EC' AND ${t.publicJwk} ->> 'crv' = 'P-256' AND jsonb_typeof(${t.publicJwk} -> 'x') = 'string' AND jsonb_typeof(${t.publicJwk} -> 'y') = 'string')) AND NOT (${t.publicJwk} ?| ARRAY['d', 'p', 'q', 'dp', 'dq', 'qi', 'oth', 'k']), false)`,
     ),
     check(
       "identity_signing_keys_order_check",
       sql`(${t.activatedAt} IS NULL OR ${t.activatedAt} >= ${t.createdAt}) AND (${t.retiredAt} IS NULL OR (${t.activatedAt} IS NOT NULL AND ${t.retiredAt} >= ${t.activatedAt})) AND (${t.revokedAt} IS NULL OR ${t.revokedAt} >= ${t.createdAt})`,
     ),
+    // ADR-0210: one active signer PER ALGORITHM
     uniqueIndex("identity_signing_keys_one_active_uq")
-      .on(sql`(true)`)
+      .on(t.algorithm)
       .where(sql`${t.activatedAt} IS NOT NULL AND ${t.retiredAt} IS NULL AND ${t.revokedAt} IS NULL`),
   ],
 );
