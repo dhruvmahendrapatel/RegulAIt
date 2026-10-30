@@ -250,7 +250,9 @@ test.describe("ADR-0173 2c: traces as the evidence spine", () => {
     await expect(tags).not.toContainText("release=2026.10");
     expect(sentTo(st, "DELETE", `/v1/traces/${T1}/tags/release`)).toHaveLength(1);
 
-    // the export profile rides the export call
+    // the export profile rides the export call (I-2: on the Export tab; the status row above the tabs stays)
+    await page.getByRole("tab", { name: "Export", exact: true }).click();
+    await expect(page.getByRole("group", { name: "Tracing status" }).getByText("Export: configured", { exact: true })).toBeVisible();
     await page.getByLabel("Export profile", { exact: true }).selectOption("openinference");
     await page.getByRole("button", { name: "Dry run" }).click();
     await expect.poll(() => sentTo(st, "POST", "/v1/tracing/export")).toEqual([{ dryRun: true, limit: 25, profile: "openinference" }]);

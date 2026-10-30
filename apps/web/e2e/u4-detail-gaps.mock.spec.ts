@@ -476,11 +476,14 @@ test.describe("U4: billing details and history", () => {
       [`GET /v1/billing/statements/${U(83)}`]: { status: 403, body: { error: "billing_scope_not_entitled" } },
     });
     await page.goto("/ui/admin/billing");
+    // I-2: with no period yet the stepper opens on Period; the rate cards and the statements are their own steps
+    await page.getByRole("list", { name: "Billing set-up" }).getByRole("button", { name: /Rate card/ }).click();
     await page.getByRole("button", { name: "Open rate card standard v1" }).first().click();
     let dialog = page.getByRole("dialog", { name: "Rate card standard v1" });
     await expect(dialog.getByRole("cell", { name: "per_1m_input_tokens" })).toBeVisible();
     await expectAxeClean(page, "rate card dialog", '[role="dialog"]');
     await dialog.getByRole("button", { name: "Close" }).click();
+    await page.getByRole("list", { name: "Billing set-up" }).getByRole("button", { name: /Statement/ }).click();
     await page.getByRole("button", { name: "Open statement v2" }).click();
     dialog = page.getByRole("dialog", { name: "Statement v2" });
     await expect(dialog.getByText("Not a tax invoice.")).toBeVisible();
