@@ -67,7 +67,7 @@ export function hasModalityData(m: ModalityTokenCounts | null | undefined): m is
 
 export function priceDispatchUsage(
   prices: ModalityPrices,
-  usage: { inputTokens: number; outputTokens: number; modality?: ModalityTokenCounts | null },
+  usage: { inputTokens: number; outputTokens: number; modality?: ModalityTokenCounts | null | undefined },
 ): PricedDispatch {
   const totalIn = nonNegative(usage.inputTokens);
   const totalOut = nonNegative(usage.outputTokens);
