@@ -470,6 +470,7 @@ import {
   registerOrgSettingsRoutes,
   startAuditPruneScheduler,
 } from "./org-settings.js";
+import { registerModelRateLimitRoutes } from "./model-rate-limits.js";
 // ADR-0202 decision 4 — the per-beat simulated fallback for the hosted demo (admin-only, audited)
 import { registerDemoBeatRoutes } from "./demo-beats.js";
 // ADR-0185 G5 — request metrics (a no-op seam until the meter lands)
@@ -5557,6 +5558,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // GET/PUT routes are admin-only (deliberately NOT in NON_ADMIN_ROUTES); the
   // audit auto-prune scheduler is OFF by default and unref'd, stopped on close.
   registerOrgSettingsRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0212 (P12 b/c): model rate limits, their org opt-in, and per-modality agent prices
+  registerModelRateLimitRoutes(app, db);
   // ADR-0202 decision 4 — the demo beats' simulated fallback; admin-only (not in NON_ADMIN_ROUTES), audited
   registerDemoBeatRoutes(app, db);
   registerPosturePresetRoutes(app, db, { sink: anchorSink, bootstrapConfigured: Boolean(opts.bootstrapToken) });
