@@ -94,6 +94,7 @@ import {
   setAgentSystemPromptSchema,
   updateAgentConfigSchema,
   setExpectedServedModelSchema,
+  priceDispatchUsage,
 } from "@regulait/shared";
 import type { PiiHit } from "@regulait/shared";
 import { guardrailWithheldMarker, guardrailCategoryList } from "@regulait/shared";
@@ -155,6 +156,7 @@ import {
 } from "./conversations.js";
 import { ownerChangeGate, resolveRegistrationOwner, withOwnership } from "./ownership.js";
 import { CHANGED_CONCURRENTLY, checkStepUp, requireStepUp } from "./step-up.js";
+import { checkModelRateLimit } from "./model-rate-limits.js";
 import {
   prepareConversationContext,
   type PreparedConversationContext,
@@ -1390,6 +1392,18 @@ async function dispatchAttempt(
         };
   }
 
+  // ADR-0212 (P12 c) — THE MODEL RATE LIMIT. In this one shared core so every
+  // dispatch path inherits it, after the lifecycle gate and before any provider
+  // work: a refusal costs no tokens and writes no usage row (it is audited).
+  // Off until an admin opts in, so by default this is one indexed read.
+  const modelLimit = await checkModelRateLimit(db, {
+    userId,
+    agentId: served.id,
+    agentName: served.name,
+    projectId: args.projectId ?? null,
+  });
+  if (modelLimit) return modelLimit;
+
   // ADR-0066 §2/§3 — THE VIRTUAL-KEY CEILING. Placed FIRST, before the MRM
   // gate and before any provider work, for the same reason every gate below is
   // where it is: a refusal here must cost nothing — no tokens, no usage row, no
@@ -2220,12 +2234,11 @@ async function dispatchAttempt(
 
   // Pillar 5 actuals: measured tokens × the served agent's list price. An
   // unpriced agent yields null — a measured token count never becomes an
-  // invented dollar figure.
-  const costUsd =
-    served.costPerMTokIn != null && served.costPerMTokOut != null
-      ? (result.usage.inputTokens / 1e6) * served.costPerMTokIn +
-        (result.usage.outputTokens / 1e6) * served.costPerMTokOut
-      : null;
+  // invented dollar figure. ADR-0212 (P12 b): when the provider reports image or
+  // audio tokens, each modality is priced at its own list price (falling back to
+  // the text price); with no modality data this is the text-only formula, unchanged.
+  const priced = priceDispatchUsage(served, result.usage);
+  const costUsd = priced.costUsd;
   // The measured version of routing's savings claim: what the baseline agent
   // would have cost at the SAME measured token volumes, minus what we paid.
   // B1.5 F1: never priced when a MOCK served against a NON-mock baseline — a
@@ -2233,16 +2246,11 @@ async function dispatchAttempt(
   // saved on work nobody did (the request was not actually served by a model).
   // Mock-vs-mock stays measured: both sides are the same demo economy, so the
   // counterfactual is honest there.
-  const measuredCostSavedUsd =
-    costUsd != null &&
-    baseline &&
-    baseline.costPerMTokIn != null &&
-    baseline.costPerMTokOut != null &&
-    !(served.provider === "mock" && baseline.provider !== "mock")
-      ? (result.usage.inputTokens / 1e6) * baseline.costPerMTokIn +
-        (result.usage.outputTokens / 1e6) * baseline.costPerMTokOut -
-        costUsd
+  const baselineCostUsd =
+    costUsd != null && baseline && !(served.provider === "mock" && baseline.provider !== "mock")
+      ? priceDispatchUsage(baseline, result.usage).costUsd
       : null;
+  const measuredCostSavedUsd = costUsd != null && baselineCostUsd != null ? baselineCostUsd - costUsd : null;
 
   // §8.4 OUTPUT check: the call already ran, so a block here is BILL-AND-
   // WITHHOLD — the usage row below records the honest spend, but the output
@@ -2356,6 +2364,8 @@ async function dispatchAttempt(
     outputTokens: result.usage.outputTokens,
     costUsd,
     measuredCostSavedUsd,
+    // ADR-0212 (P12 b): the text/image/audio split; NULL without modality data
+    modalityUsage: priced.modality,
     stopReason: result.stopReason,
     refusal: result.refusal,
     providerMessageId: result.providerMessageId,

@@ -212,6 +212,9 @@ beforeAll(async () => {
   await db.execute(sql`UPDATE org_settings SET step_up_mode = 'required',
     step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management"]'::jsonb
     WHERE id = ${ORG_SETTINGS_ID}`);
+  // pillar-6 routing would move calls between the three identically priced agents; this suite
+  // needs each call served by the agent it names (a model limit binds the agent that serves)
+  await db.execute(sql`UPDATE org_settings SET routing_enabled = false WHERE id = ${ORG_SETTINGS_ID}`);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
   restoreGates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
