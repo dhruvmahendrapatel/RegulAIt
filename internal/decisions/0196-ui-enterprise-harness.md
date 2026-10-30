@@ -545,3 +545,15 @@ the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
 - Why: with design-scan E1 (#565) on top of main, entry JS measures about 137,815 B, 85 B under the 137.9 kB ceiling
   (#565 review finding 1), so the next change touching the entry chunk would fail. The raise lands before the
   2026-10-29 freeze, so ADR-0198's freeze-week allowance (at most +1 kB of entry raises) is untouched.
+
+## Addendum / As built (2026-10-30) — all JS 1,043 → 1,044 kB (#602)
+
+The owner allowed all-JS raises up to 1,050 kB on 2026-10-30, each PR setting only the ceiling it needs:
+<https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6515493026>. It is the ADR-recorded exception
+the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
+
+- `all JS` from `1043 kB` to `1044 kB`. Entry JS stays at 138.5 kB and entry CSS at 10.7 kB; the lazy chunks are unchanged.
+- Why: main measures 1,042,941 B, 59 B under 1,043 kB. #602 (the compliance profile form keeps the floors it does not
+  show, resets off a loaded tag, waits for the profiles list) measures 1,043,653 B in the lazy admin chunk.
+- The existing 1,043 → 1,048 kB rows on #597/#599 (c6498510014) are untouched; whichever PR lands last carries the
+  final value, at most 1,050 kB.
