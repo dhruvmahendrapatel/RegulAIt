@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -167,7 +167,17 @@ const proxyHeaders = z.object({
 });
 // OPTIMIZATION §8: an optional declared intent for lazy tool-loading. MCP's
 // tools/list carries no request text, so the signal rides on the proxy URL.
-const proxyQuery = z.object({ intent: z.string().max(2000).optional() });
+//
+// `project` is the attribution header's twin for a client that cannot set a
+// custom header: the Messages API MCP connector takes only a URL and an
+// authorization token. It is an identifier, not a credential, and it goes
+// through exactly the same `assertProjectAttribution` check as the header. A
+// request carrying both must name the same project (400 otherwise), so the
+// query string can never quietly override what the transport header says.
+const proxyQuery = z.object({
+  intent: z.string().max(2000).optional(),
+  project: z.string().uuid().optional(),
+});
 
 // Tools without an explicit readOnlyHint are treated as writes — the
 // conservative default under §3's read/write distinction.
@@ -2144,9 +2154,28 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
     return reply.send(row);
   });
 
+  // MCP Streamable HTTP: after `initialize` a client opens an optional
+  // server-to-client SSE stream with GET. This proxy is stateless (one
+  // transport per POST, no session id), so it offers none, and the spec's
+  // answer for that is 405 with `Allow: POST`. A 404 here made a conformant
+  // client report a transport error after every `initialize`. (No DELETE: a
+  // client sends it only to end a session, and no session id is ever issued.)
+  // Auth still runs first (the app-level hook), so an anonymous probe gets 401.
+  app.get("/mcp/:serverId", async (_req, reply: FastifyReply) =>
+    reply.status(405).header("allow", "POST").send({ error: "method_not_allowed", detail: "this MCP endpoint is POST-only (stateless Streamable HTTP)" }));
+
   app.post("/mcp/:serverId", async (req, reply) => {
     const { serverId } = proxyParams.parse(req.params);
-    const { intent } = proxyQuery.parse(req.query);
+    const queryParse = proxyQuery.safeParse(req.query);
+    if (!queryParse.success) {
+      // a malformed ?project= is the header's own 400; anything else keeps the
+      // route's ordinary validation error
+      if (queryParse.error.issues.some((i) => i.path[0] === "project")) {
+        return reply.status(400).send({ error: "invalid_project_id" });
+      }
+      throw queryParse.error;
+    }
+    const { intent, project: queryProject } = queryParse.data;
 
     // Identity comes from the app-level auth hook (API key). The bootstrap
     // token has no user identity, so it cannot call tools.
@@ -2170,7 +2199,14 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
     if (!headerParse.success) {
       return reply.status(400).send({ error: "invalid_project_id" });
     }
-    projectId = headerParse.data[PROJECT_HEADER] ?? null;
+    const headerProject = headerParse.data[PROJECT_HEADER] ?? null;
+    if (headerProject && queryProject && headerProject !== queryProject) {
+      return reply.status(400).send({
+        error: "project_attribution_conflict",
+        detail: `the ${PROJECT_HEADER} header and the ?project= query parameter name different projects`,
+      });
+    }
+    projectId = headerProject ?? queryProject ?? null;
     if (projectId) {
       const attribution = await assertProjectAttribution(
         db,

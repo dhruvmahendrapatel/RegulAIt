@@ -88,6 +88,7 @@ export const MACHINE_ONLY = new Map([
   ["POST /v1/messages", "data plane: Anthropic-compatible proxy (ADR-0024); called by vendor SDKs, governed per call"],
   ["GET /v1/models", "data plane: OpenAI-compatible model list for vendor SDKs"],
   ["POST /mcp/:serverId", "data plane: the governed MCP proxy endpoint MCP clients connect to"],
+  ["GET /mcp/:serverId", "protocol plumbing: the Streamable HTTP SSE probe MCP clients send after initialize; answers 405 Allow: POST"],
   ["GET /v1/prompts/resolve", "data plane: runtimes and SDKs resolve a prompt@tag reference at call time"],
   ["POST /v1/connectors/:connectorId/invoke", "data plane: an agent runtime invokes a connector through the governance gate"],
   ["POST /v1/authz/check", "data plane: the policy decision point external enforcement points call (ADR-0053)"],
