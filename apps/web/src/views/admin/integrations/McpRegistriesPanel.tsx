@@ -79,7 +79,7 @@ export function McpRegistriesPanel() {
   const [browsing, setBrowsing] = useState<string | null>(null);
   const [lastSync, setLastSync] = useState<RegistrySyncResult | null>(null);
   const sync = useAction();
-  // #453 prototype: a registry is deleted only once it is disabled (no scheduled pull in flight)
+  // ADR-0207 (G4): a registry is deleted only once it is disabled (no scheduled pull in flight)
   const remove = useAction();
   const [deleting, setDeleting] = useState<McpRegistry | null>(null);
   const registries = list.data?.registries ?? [];

@@ -383,7 +383,7 @@ export interface Connector {
   createdAt?: string;
   ownerUserId?: string | null;
   ownership?: "owned" | "unowned" | "orphaned";
-  /** #453 prototype: a disabled object refuses every governed call; null/absent = enabled */
+  /** ADR-0207: a disabled object refuses every governed call; `disabledBy` is the email of who disabled it */
   enabled?: boolean;
   disabledReason?: string | null;
   disabledAt?: string | null;
@@ -397,7 +397,7 @@ export interface ConnectorCredentialInfo {
 export interface McpServer {
   id: string;
   name: string;
-  /** #453 prototype: a disabled object refuses every governed call; null/absent = enabled */
+  /** ADR-0207: a disabled object refuses every governed call; `disabledBy` is the email of who disabled it */
   enabled?: boolean;
   disabledReason?: string | null;
   disabledAt?: string | null;
@@ -451,9 +451,9 @@ export interface PmConnection {
   project: string;
   baseUrl: string | null;
   apiVersion?: number | null;
-  /** #453 prototype: how inbound drift is resolved (manual = detect only) */
+  /** how inbound drift is resolved (manual = detect only) */
   driftResolution?: "manual" | "prefer_regulait" | "prefer_pm";
-  /** #453 prototype: while a rotation's grace window is open, when the previous webhook secret stops working */
+  /** ADR-0207: while a rotation's grace window is open, when the previous webhook secret stops working */
   previousSecretValidUntil?: string | null;
   createdAt: string;
 }

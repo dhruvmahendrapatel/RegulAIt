@@ -4,18 +4,21 @@
  * real adapter; per-provider credential hints tell the admin exactly which
  * token to mint.
  */
-import { useState } from "react";
+import { Suspense, lazy, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ApiError, api } from "../../../api/client";
+import { api } from "../../../api/client";
 import type { GitConnection } from "../../../api/adminTypes";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Modal, RowActions, Select, Table } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, RowActions, Select, Table } from "../../../ui/kit";
 import { RefusalNotice } from "../../../ui/RefusalNotice";
 import { useAction } from "../adminKit";
-import { useToast } from "../../../ui/toast";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+
+// ADR-0207: the edit and token dialogs load only when one is opened
+const ReplaceTokenDialog = lazy(() => import("./IntegrationEditDialogs").then((m) => ({ default: m.ReplaceTokenDialog })));
+const EditGitDialog = lazy(() => import("./IntegrationEditDialogs").then((m) => ({ default: m.EditGitDialog })));
 
 const PROVIDERS: Array<{ v: string; l: string; hint: string; needsBase?: string }> = [
   { v: "mock", l: "mock (demo — touches nothing real)", hint: "No token semantics — any placeholder works. Exercises the full flow against an in-memory repo." },
@@ -38,7 +41,7 @@ export default function GitConnectionsPage() {
   const [token, setToken] = useState("");
   const selected = PROVIDERS.find((p) => p.v === provider)!;
   const [deleting, setDeleting] = useState<GitConnection | null>(null);
-  // #453 prototype: replace the token in place, edit the base URL (the name is referenced by stages)
+  // ADR-0207 (G5): replace the token in place, edit the base URL (the name is referenced by stages)
   const [replacing, setReplacing] = useState<GitConnection | null>(null);
   const [editing, setEditing] = useState<GitConnection | null>(null);
 
@@ -192,132 +195,10 @@ export default function GitConnectionsPage() {
             );
         }}
       />
-      {replacing && <ReplaceTokenDialog connection={replacing} onClose={() => setReplacing(null)} />}
-      {editing && <EditGitDialog connection={editing} onClose={() => setEditing(null)} />}
+      <Suspense fallback={null}>
+        {replacing && <ReplaceTokenDialog kind="git" connection={replacing} onClose={() => setReplacing(null)} />}
+        {editing && <EditGitDialog connection={editing} onClose={() => setEditing(null)} />}
+      </Suspense>
     </>
-  );
-}
-
-function ReplaceTokenDialog(props: { connection: GitConnection; onClose: () => void }) {
-  const act = useAction();
-  const [token, setToken] = useState("");
-  const c = props.connection;
-  const save = () =>
-    void act
-      .run(
-        () => api.post(`/v1/git/connections/${encodeURIComponent(c.name)}/token`, { token }),
-        "Token replaced. Revoke the old token on the git host.",
-      )
-      .then((ok) => ok && props.onClose());
-  return (
-    <Modal
-      open
-      title={`Replace the token for “${c.name}”?`}
-      onClose={props.onClose}
-      actions={
-        <>
-          <Button onClick={props.onClose}>Cancel</Button>
-          <Button variant="primary" disabled={act.busy || !token} onClick={save}>
-            Replace token
-          </Button>
-        </>
-      }
-    >
-      <div className={v.stack}>
-        <p className={v.flush}>
-          The stored token is overwritten and the old one is destroyed here. Git stages use the new token from their next step. The old token
-          still works on the git host until you revoke it there. The change is recorded in the audit log.
-        </p>
-        <Field label="New token">
-          <Input
-            type="password"
-            value={token}
-            onChange={(e) => setToken(e.target.value)}
-            placeholder="never shown again"
-            autoComplete="off"
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && token) save();
-            }}
-          />
-        </Field>
-        {act.error && (
-          <div className={v.errLine} role="alert">
-            {act.error}
-          </div>
-        )}
-      </div>
-    </Modal>
-  );
-}
-
-function EditGitDialog(props: { connection: GitConnection; onClose: () => void }) {
-  const act = useAction();
-  const c = props.connection;
-  const [baseUrl, setBaseUrl] = useState(c.baseUrl ?? "");
-  const [refusal, setRefusal] = useState<string | null>(null);
-  const { toast } = useToast();
-  const save = () => {
-    setRefusal(null);
-    let saved = false;
-    void act
-      .run(async () => {
-        try {
-          await api.patch(`/v1/git/connections/${encodeURIComponent(c.name)}`, { baseUrl: baseUrl || null });
-          saved = true;
-        } catch (e) {
-          // the egress refusal is answered in the dialog, where the URL is
-          if (e instanceof ApiError && e.status === 422 && e.payload?.error === "egress_blocked") {
-            setRefusal("That host isn't on the egress allow-list.");
-            return;
-          }
-          throw e;
-        }
-      }, null)
-      .then(() => {
-        if (!saved) return;
-        toast(`Git connection “${c.name}” updated`, "success");
-        props.onClose();
-      });
-  };
-  return (
-    <Modal
-      open
-      title={`Edit git connection “${c.name}”`}
-      onClose={props.onClose}
-      actions={
-        <>
-          <Button onClick={props.onClose}>Cancel</Button>
-          <Button variant="primary" disabled={act.busy} onClick={save}>
-            Save
-          </Button>
-        </>
-      }
-    >
-      <div className={v.stack}>
-        <Field label="Name">
-          <Input value={c.name} readOnly aria-readonly />
-        </Field>
-        <Field label="Provider">
-          <Input value={c.provider} readOnly aria-readonly />
-        </Field>
-        <p className={`${v.faint} ${v.flush}`}>
-          The name can't change: workflow stages refer to it.
-        </p>
-        <Field label="Base URL (empty for the provider default)">
-          <Input autoFocus value={baseUrl} onChange={(e) => (setBaseUrl(e.target.value), setRefusal(null))} placeholder="https://…" />
-        </Field>
-        {refusal ? (
-          <div className={v.errLine} role="alert" data-testid="edit-refusal">
-            {refusal}
-          </div>
-        ) : (
-          act.error && (
-            <div className={v.errLine} role="alert">
-              {act.error}
-            </div>
-          )
-        )}
-      </div>
-    </Modal>
   );
 }

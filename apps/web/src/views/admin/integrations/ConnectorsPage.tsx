@@ -8,6 +8,7 @@ import { useState } from "react";
 import { IntegrationOwnership } from "./IntegrationOwnership";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
+import { api as stepUpApi } from "../../../stepup/stepUp";
 import type { Connector, ConnectorCredentialInfo } from "../../../api/adminTypes";
 import { ago, fmtUsd } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
@@ -78,10 +79,12 @@ export function credentialJsonHint(kind: string | null | undefined): string | nu
 export default function ConnectorsPage() {
   const connectors = useConnectors();
   const users = useUsers();
-  // #453 prototype: Disable (reason) → Delete; Enable is stepped up
+  // ADR-0207 (G3): Disable (reason) → Delete; Enable is stepped up
   const life = useLifecycle({
     noun: "connector",
-    base: "/v1/connectors",
+    disable: (id, reason) => api.post(`/v1/connectors/${encodeURIComponent(id)}/enabled`, { enabled: false, reason }),
+    enable: (id, h) => stepUpApi.post(`/v1/connectors/${encodeURIComponent(id)}/enabled`, { enabled: true }, h),
+    remove: (id) => api.del(`/v1/connectors/${encodeURIComponent(id)}`),
     disableBody:
       "Every governed call to this connector is refused from now on, including calls already waiting for approval. Grants and history are kept. You can enable it again.",
     enableBody: "Governed calls to this connector are allowed again under its grants. You will be asked to confirm it's you.",

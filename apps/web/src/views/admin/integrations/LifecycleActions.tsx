@@ -1,13 +1,14 @@
 /**
- * #453 prototype — Disable / Enable / Delete for an integration row (connectors, MCP servers).
+ * ADR-0207 (G3, G4) — Disable / Enable / Delete for an integration row (connectors, MCP servers).
  *
  * The order is fixed: a live object is disabled first (reason required, audited), and only a
  * disabled one can be deleted. Enabling again is a relaxation and is stepped up. A delete the
  * gateway refuses because audit evidence still refers to the object is explained in the dialog.
+ * Each page passes its own calls, so every route is named literally where it is called.
  */
 import { useState, type ReactNode } from "react";
-import { ApiError, api } from "../../../api/client";
-import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
+import { ApiError } from "../../../api/client";
+import { withStepUp } from "../../../stepup/stepUp";
 import { fmtAt } from "../../../api/format";
 import { Badge, Button, ConfirmModal, InfoButton, Modal, RowActions } from "../../../ui/kit";
 import { ReasonModal, useAction } from "../adminKit";
@@ -46,8 +47,12 @@ export function DisabledBadge(props: { row: LifecycleRow; noun: string }) {
 export interface LifecycleConfig {
   /** "connector", "MCP server" */
   noun: string;
-  /** the collection path, e.g. /v1/connectors */
-  base: string;
+  /** `POST …/:id/enabled` with `{ enabled: false, reason }` */
+  disable: (id: string, reason: string) => Promise<unknown>;
+  /** `POST …/:id/enabled` with `{ enabled: true }`, carrying the step-up headers */
+  enable: (id: string, stepUpHeaders: Record<string, string>) => Promise<unknown>;
+  /** `DELETE …/:id` */
+  remove: (id: string) => Promise<unknown>;
   disableBody: ReactNode;
   enableBody: ReactNode;
   deleteBody: ReactNode;
@@ -67,9 +72,9 @@ export function useLifecycle(cfg: LifecycleConfig) {
   const [deleting, setDeleting] = useState<LifecycleRow | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
-  const path = (r: LifecycleRow) => `${cfg.base}/${encodeURIComponent(r.id)}`;
 
-  const actions = (r: LifecycleRow) => {
+  /** `primary`: the page's own first action (an Edit), shown before Disable / Enable */
+  const actions = (r: LifecycleRow, primary?: ReactNode) => {
     const off = r.enabled === false;
     return (
       // the row may be clickable (MCP servers open their tools); a button here acts, never opens the row
@@ -77,6 +82,7 @@ export function useLifecycle(cfg: LifecycleConfig) {
         <RowActions
           slot={LIFECYCLE_SLOT}
           stacked={cfg.stacked}
+          {...(primary ? { primary } : {})}
           secondary={
             off ? (
               <Button size="sm" aria-label={`Enable ${cfg.noun} ${r.name}`} disabled={act.busy} onClick={() => setEnabling(r)}>
@@ -136,7 +142,7 @@ export function useLifecycle(cfg: LifecycleConfig) {
         onConfirm={(reason) => {
           const r = disabling;
           setDisabling(null);
-          if (r) void act.run(() => api.post(`${path(r)}/enabled`, { enabled: false, reason }), `${cap(cfg.noun)} “${r.name}” disabled`);
+          if (r) void act.run(() => cfg.disable(r.id, reason), `${cap(cfg.noun)} “${r.name}” disabled`);
         }}
       />
       <ConfirmModal
@@ -151,7 +157,7 @@ export function useLifecycle(cfg: LifecycleConfig) {
           // enabling is a relaxation: the gateway asks for a step-up, answered by the shared dialog
           if (r)
             void act.run(
-              () => withStepUp((h) => stepUpApi.post(`${path(r)}/enabled`, { enabled: true }, h)),
+              () => withStepUp((h) => cfg.enable(r.id, h)),
               `${cap(cfg.noun)} “${r.name}” enabled`,
             );
         }}
@@ -177,7 +183,7 @@ export function useLifecycle(cfg: LifecycleConfig) {
                   void act
                     .run(async () => {
                       try {
-                        await api.del(path(r));
+                        await cfg.remove(r.id);
                         deleted = true;
                       } catch (e) {
                         // the refusal the person reads is the dialog's own sentence, not a toast
