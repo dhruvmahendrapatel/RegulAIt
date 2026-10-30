@@ -14403,3 +14403,129 @@ export const demoBeatFallbacks = pgTable(
   (t) => [check("demo_beat_fallbacks_beat_id_check", sql`${t.beatId} ~ '^[a-z][a-z0-9-]{1,63}$'`)],
 );
 export type DemoBeatFallbackRow = typeof demoBeatFallbacks.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0223 (migration 0244) — drift and explainability for classical (non-LLM) models. Aggregates only: bin edges
+// and counts, category labels and counts, one importance value per feature. Written only by
+// `apps/gateway/src/classical-drift.ts`, each write in the same transaction as its audit row.
+// ---------------------------------------------------------------------------
+
+/** one row, absent until first saved; absent = OFF (ADR-0180) */
+export const modelDriftSettings = pgTable(
+  "model_drift_settings",
+  {
+    id: text("id").primaryKey().default("singleton"),
+    enabled: boolean("enabled").notNull().default(false),
+    maxReportsPerHour: integer("max_reports_per_hour").notNull().default(12),
+    minSamples: integer("min_samples").notNull().default(100),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("model_drift_settings_singleton_check", sql`${t.id} = 'singleton'`),
+    check("model_drift_settings_rate_check", sql`${t.maxReportsPerHour} BETWEEN 1 AND 120`),
+    check("model_drift_settings_min_samples_check", sql`${t.minSamples} BETWEEN 1 AND 1000000`),
+  ],
+);
+export type ModelDriftSettingsRow = typeof modelDriftSettings.$inferSelect;
+
+/** one reference feature distribution for one model card, with its alert thresholds (strict defaults) */
+export const modelDriftMonitors = pgTable(
+  "model_drift_monitors",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    cardId: uuid("card_id")
+      .notNull()
+      .references(() => modelCards.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    reference: jsonb("reference").$type<unknown[]>().notNull(),
+    referenceSha256: text("reference_sha256").notNull(),
+    featureCount: integer("feature_count").notNull(),
+    referenceSamples: integer("reference_samples").notNull(),
+    psiWarn: doublePrecision("psi_warn").notNull().default(0.1),
+    psiAlert: doublePrecision("psi_alert").notNull().default(0.25),
+    ksAlert: doublePrecision("ks_alert").notNull().default(0.1),
+    jsAlert: doublePrecision("js_alert").notNull().default(0.05),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("model_drift_monitors_name_check", sql`char_length(btrim(${t.name})) BETWEEN 1 AND 120`),
+    check("model_drift_monitors_reference_check", sql`jsonb_typeof(${t.reference}) = 'array'`),
+    check("model_drift_monitors_sha_check", sql`${t.referenceSha256} ~ '^[0-9a-f]{64}$'`),
+    check("model_drift_monitors_features_check", sql`${t.featureCount} BETWEEN 1 AND 200`),
+    check("model_drift_monitors_samples_check", sql`${t.referenceSamples} > 0`),
+    check(
+      "model_drift_monitors_thresholds_check",
+      sql`${t.psiWarn} > 0 AND ${t.psiAlert} >= ${t.psiWarn} AND ${t.psiAlert} <= 10 AND ${t.ksAlert} > 0 AND ${t.ksAlert} <= 1 AND ${t.jsAlert} > 0 AND ${t.jsAlert} <= 0.7`,
+    ),
+    unique("model_drift_monitors_card_name_uq").on(t.cardId, t.name),
+  ],
+);
+export type ModelDriftMonitorRow = typeof modelDriftMonitors.$inferSelect;
+
+export const MODEL_DRIFT_REPORT_SOURCES = ["push", "upload"] as const;
+export const MODEL_DRIFT_STATUSES = ["within", "warn", "drift", "insufficient"] as const;
+/** one production summary against a monitor, with the statistics the gateway computed from it */
+export const modelDriftReports = pgTable(
+  "model_drift_reports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    monitorId: uuid("monitor_id")
+      .notNull()
+      .references(() => modelDriftMonitors.id, { onDelete: "cascade" }),
+    source: text("source", { enum: MODEL_DRIFT_REPORT_SOURCES }).notNull(),
+    windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
+    windowEnd: timestamp("window_end", { withTimezone: true }).notNull(),
+    sampleCount: integer("sample_count").notNull(),
+    summary: jsonb("summary").$type<unknown[]>().notNull(),
+    summarySha256: text("summary_sha256").notNull(),
+    results: jsonb("results").$type<unknown[]>().notNull(),
+    status: text("status", { enum: MODEL_DRIFT_STATUSES }).notNull(),
+    driftedFeatures: integer("drifted_features").notNull(),
+    submittedBy: uuid("submitted_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("model_drift_reports_source_check", sql`${t.source} IN ('push', 'upload')`),
+    check("model_drift_reports_window_check", sql`${t.windowEnd} > ${t.windowStart}`),
+    check("model_drift_reports_samples_check", sql`${t.sampleCount} > 0`),
+    check("model_drift_reports_summary_check", sql`jsonb_typeof(${t.summary}) = 'array' AND jsonb_typeof(${t.results}) = 'array'`),
+    check("model_drift_reports_sha_check", sql`${t.summarySha256} ~ '^[0-9a-f]{64}$'`),
+    check("model_drift_reports_status_check", sql`${t.status} IN ('within', 'warn', 'drift', 'insufficient')`),
+    check("model_drift_reports_drifted_check", sql`${t.driftedFeatures} >= 0`),
+    index("model_drift_reports_monitor_idx").on(t.monitorId, t.createdAt.desc(), t.id.desc()),
+  ],
+);
+export type ModelDriftReportRow = typeof modelDriftReports.$inferSelect;
+
+export const MODEL_EXPLAINABILITY_KINDS = ["global_importance", "shap_summary"] as const;
+/** global feature importance or a SHAP summary from the customer's pipeline, recorded as evidence on a card */
+export const modelExplainabilityArtefacts = pgTable(
+  "model_explainability_artefacts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    cardId: uuid("card_id")
+      .notNull()
+      .references(() => modelCards.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: MODEL_EXPLAINABILITY_KINDS }).notNull(),
+    method: text("method").notNull(),
+    importances: jsonb("importances").$type<Array<{ feature: string; value: number }>>().notNull(),
+    featureCount: integer("feature_count").notNull(),
+    payloadSha256: text("payload_sha256").notNull(),
+    note: text("note"),
+    submittedBy: uuid("submitted_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("model_explainability_artefacts_kind_check", sql`${t.kind} IN ('global_importance', 'shap_summary')`),
+    check("model_explainability_artefacts_method_check", sql`char_length(btrim(${t.method})) BETWEEN 1 AND 120`),
+    check("model_explainability_artefacts_importances_check", sql`jsonb_typeof(${t.importances}) = 'array'`),
+    check("model_explainability_artefacts_features_check", sql`${t.featureCount} BETWEEN 1 AND 500`),
+    check("model_explainability_artefacts_sha_check", sql`${t.payloadSha256} ~ '^[0-9a-f]{64}$'`),
+    check("model_explainability_artefacts_note_check", sql`${t.note} IS NULL OR char_length(${t.note}) <= 2000`),
+    index("model_explainability_artefacts_card_idx").on(t.cardId, t.createdAt.desc()),
+  ],
+);
+export type ModelExplainabilityArtefactRow = typeof modelExplainabilityArtefacts.$inferSelect;

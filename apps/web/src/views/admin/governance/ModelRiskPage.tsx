@@ -46,6 +46,8 @@ import { ModelCardEditButton } from "./ModelCardEditButton";
 
 // ADR-0189 B6: an agent's model card shows that agent's AI BOM (R25: a card approval snapshots its agent)
 const AiBomPanel = lazy(() => import("./BomEvidencePanel").then((m) => ({ default: m.AiBomPanel })));
+// P13b: drift and explainability for classical models, its own chunk
+const ClassicalDriftPanel = lazy(() => import("./ClassicalDriftPanel"));
 
 type CardState = "unsigned" | "pending" | "approved" | "expiring" | "expired" | "revoked";
 
@@ -238,8 +240,9 @@ export default function ModelRiskPage() {
   const [newClaims, setNewClaims] = useState("");
   const [newRefs, setNewRefs] = useState("");
   const [openCard, setOpenCard] = useState<string | null>(null);
-  // the card whose AI BOM tab is open (a different card opens on its own tab)
-  const [bomCardId, setBomCardId] = useState<string | null>(null);
+  // the card whose AI BOM or drift tab is open (a different card opens on its own tab)
+  const [cardTab, setCardTab] = useState<{ id: string; tab: "ai-bom" | "drift" } | null>(null);
+  const tabFor = (id: string): "card" | "ai-bom" | "drift" => (cardTab?.id === id ? cardTab.tab : "card");
   // ADR-0086 — the DETAIL read is the one that fills itself from the ledgers;
   // it is fetched per open card (the list read stays cheap on purpose)
   const cardDetail = useQuery({
@@ -624,32 +627,37 @@ export default function ModelRiskPage() {
                   </span>
                 </div>
 
-                {detail.agentId && (
-                  <Tabs
-                    tabs={[
-                      { id: "card", label: "Model card" },
-                      { id: "ai-bom", label: "AI BOM" },
-                    ]}
-                    active={bomCardId === detail.id ? "ai-bom" : "card"}
-                    onChange={(tab) => setBomCardId(tab === "ai-bom" ? detail.id : null)}
-                    idPrefix={`mrm-${detail.id}`}
-                  />
-                )}
-                {detail.agentId && bomCardId === detail.id && (
+                <Tabs
+                  tabs={[
+                    { id: "card", label: "Model card" },
+                    ...(detail.agentId ? [{ id: "ai-bom", label: "AI BOM" }] : []),
+                    { id: "drift", label: "Drift and explainability" },
+                  ]}
+                  active={tabFor(detail.id)}
+                  onChange={(tab) => setCardTab(tab === "ai-bom" || tab === "drift" ? { id: detail.id, tab } : null)}
+                  idPrefix={`mrm-${detail.id}`}
+                />
+                {detail.agentId && tabFor(detail.id) === "ai-bom" && (
                   <div role="tabpanel" id={tabIds(`mrm-${detail.id}`, "ai-bom").panel} aria-labelledby={tabIds(`mrm-${detail.id}`, "ai-bom").tab}>
                     <Suspense fallback={<p role="status">Loading the AI BOM…</p>}>
                       <AiBomPanel key={detail.agentId} subject={{ kind: "agent", id: detail.agentId }} />
                     </Suspense>
                   </div>
                 )}
-                {/* the card itself stays mounted (its forms keep their state) and is hidden; .stack would override [hidden].
-                    With an agent it is the "Model card" tab's panel; a custom-provider card has no tabs. */}
+                {tabFor(detail.id) === "drift" && (
+                  <div role="tabpanel" id={tabIds(`mrm-${detail.id}`, "drift").panel} aria-labelledby={tabIds(`mrm-${detail.id}`, "drift").tab}>
+                    <Suspense fallback={<p role="status">Loading drift and explainability…</p>}>
+                      <ClassicalDriftPanel key={detail.id} cardId={detail.id} />
+                    </Suspense>
+                  </div>
+                )}
+                {/* the card itself stays mounted (its forms keep their state) and is hidden; .stack would override [hidden] */}
                 <div
-                  className={detail.agentId && bomCardId === detail.id ? undefined : v.stack}
-                  hidden={Boolean(detail.agentId) && bomCardId === detail.id}
-                  {...(detail.agentId
-                    ? { role: "tabpanel", id: tabIds(`mrm-${detail.id}`, "card").panel, "aria-labelledby": tabIds(`mrm-${detail.id}`, "card").tab }
-                    : {})}
+                  className={tabFor(detail.id) === "card" ? v.stack : undefined}
+                  hidden={tabFor(detail.id) !== "card"}
+                  role="tabpanel"
+                  id={tabIds(`mrm-${detail.id}`, "card").panel}
+                  aria-labelledby={tabIds(`mrm-${detail.id}`, "card").tab}
                 >
 
                 {/* ADR-0086 — staleness first: a certified card whose world

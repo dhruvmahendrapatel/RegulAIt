@@ -240,6 +240,16 @@ export const MONITOR_RULES = {
       "One person reached the jailbreak-finding threshold within the window (monitorJailbreakThreshold, " +
       "monitorJailbreakWindowHours) and then made a tool call that was allowed (ADR-0186 M).",
   },
+  // --- ADR-0223 (P13b): classical-model drift --------------------------------
+  classical_model_drift: {
+    label: "Classical model drift above threshold",
+    severity: "high",
+    description:
+      "The latest production summary submitted for a classical model's drift monitor (ADR-0223) moved past an " +
+      "alert threshold against its registered reference distribution: population stability index, " +
+      "Kolmogorov-Smirnov distance or Jensen-Shannon divergence on at least one feature. A summary with too few " +
+      "samples neither raises nor resolves the episode.",
+  },
 } as const satisfies Record<string, { label: string; severity: MonitorSeverity; description: string }>;
 export type MonitorRuleId = keyof typeof MONITOR_RULES;
 export const MONITOR_RULE_IDS = Object.keys(MONITOR_RULES) as MonitorRuleId[];
@@ -453,7 +463,13 @@ export interface MonitorInput {
    * `monitor-detection-rules.ts` (same shape as `assurance`); an absent rule key
    * = not evaluated */
   detection?: Partial<Record<DetectionMonitorRuleId, MonitorAssuranceInput>>;
+  /** ADR-0223 — `classical_model_drift`, fed by the gateway's `classical-drift.ts`;
+   * absent = not evaluated */
+  modelDrift?: MonitorAssuranceInput;
 }
+
+/** ADR-0223 — the one classical-model drift rule (its input is `modelDrift`) */
+export const MODEL_DRIFT_MONITOR_RULE_ID = "classical_model_drift" as const satisfies MonitorRuleId;
 
 /** ADR-0182 (ADR-0175 batch D4) — the four accountability rules. Their
  * evaluation is owned by the slices (A12 incidents, A13 feedback, A14
@@ -844,6 +860,11 @@ export function evaluateMonitorRules(input: MonitorInput): MonitorFinding[] {
     for (const b of input.detection?.[ruleId]?.breaches ?? []) {
       out.push({ ruleId, subjectKey: b.subjectKey, severity: b.severity ?? sev(ruleId), title: b.title, detail: b.detail });
     }
+  }
+  // ADR-0223 — classical-model drift, the same way
+  for (const b of input.modelDrift?.breaches ?? []) {
+    const ruleId = MODEL_DRIFT_MONITOR_RULE_ID;
+    out.push({ ruleId, subjectKey: b.subjectKey, severity: b.severity ?? sev(ruleId), title: b.title, detail: b.detail });
   }
 
   for (const r of input.risks) {
