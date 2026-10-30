@@ -63,18 +63,21 @@ export async function carriersForTags(db: Pick<Db, "execute">, tags: string[]): 
     tags.map((t) => sql`${t}`),
     sql`, `,
   );
-  const grouped = (table: string, column: string) =>
+  // the table, column and filter names are constants of this function, never caller input
+  const grouped = (table: string, column: string, onlyActive: boolean) =>
     sql`SELECT tg.tag AS tag, (array_agg(x.name ORDER BY x.name))[1:${CARRIER_NAMES_MAX}] AS names
           FROM ${sql.raw(`"${table}"`)} x, jsonb_array_elements_text(COALESCE(x.${sql.raw(`"${column}"`)}, '[]'::jsonb)) AS tg(tag)
          WHERE jsonb_typeof(COALESCE(x.${sql.raw(`"${column}"`)}, '[]'::jsonb)) = 'array' AND tg.tag IN (${list})
+           ${onlyActive ? sql`AND x.status = 'active'` : sql``}
          GROUP BY tg.tag`;
-  const kinds: Array<[keyof ProfileCarriers, string, string]> = [
-    ["projects", "projects", "classifications"],
-    ["pendingProjects", "projects", "pending_classifications"],
-    ["teams", "teams", "default_classifications"],
-    ["resources", "infra_resources", "classifications"],
+  // a retired infra resource (ADR-0208 G8) is no longer monitored, so it no longer carries a tag
+  const kinds: Array<[keyof ProfileCarriers, string, string, boolean]> = [
+    ["projects", "projects", "classifications", false],
+    ["pendingProjects", "projects", "pending_classifications", false],
+    ["teams", "teams", "default_classifications", false],
+    ["resources", "infra_resources", "classifications", true],
   ];
-  const results = await Promise.all(kinds.map(([, table, column]) => db.execute(grouped(table, column))));
+  const results = await Promise.all(kinds.map(([, table, column, onlyActive]) => db.execute(grouped(table, column, onlyActive))));
   kinds.forEach(([kind], i) => {
     for (const row of results[i]!.rows as Array<{ tag: string; names: string[] | null }>) {
       out.get(row.tag)![kind] = row.names ?? [];

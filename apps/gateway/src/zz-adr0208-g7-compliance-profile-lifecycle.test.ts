@@ -348,6 +348,13 @@ describe("G7 retire", () => {
     expect(classify.json()).toMatchObject({ error: "compliance_profile_retired", tags: [t] });
     const team = await app.inject({ method: "POST", headers: AUTH, url: "/v1/teams", payload: { name: `${t}-team`, defaultClassifications: [t] } });
     expect(team.json().error).toBe("compliance_profile_retired");
+    const res = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/infra/resources",
+      payload: { kind: "control_plane", name: `${t}-res`, classifications: [t] },
+    });
+    expect(res.json().error).toBe("compliance_profile_retired");
     const listedRow = await listed(t);
     expect(listedRow).toMatchObject({ status: "retired", retiredReason: payload.reason });
   });

@@ -74,6 +74,7 @@ import { recordSchedulerFailure, recordSchedulerSuccess } from "./scheduler-heal
 import { ExternalEffectBlockedError, runExternalWrite } from "./external-effects.js";
 import { errMessage } from "./err-serializer.js";
 import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
+import { retiredTagRefusal, retiredTagsAmong } from "./compliance-profile-lifecycle.js";
 
 type InfraResourceRow = typeof infraResources.$inferSelect;
 type InfraPolicyRow = typeof infraPolicies.$inferSelect;
@@ -1451,6 +1452,9 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
 
   app.post("/v1/infra/resources", async (req, reply) => {
     const body = createInfraResourceSchema.parse(req.body);
+    // ADR-0208 G7: a retired compliance profile takes no new carrier
+    const retiredTags = await retiredTagsAmong(db, body.classifications ?? []);
+    if (retiredTags.length > 0) return reply.status(409).send(retiredTagRefusal(retiredTags));
     const actorId = await resolveActor(db, req.authCtx.userId);
     try {
       const row = await db.transaction(async (tx) => {
@@ -1493,6 +1497,9 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
     if (!before) return reply.status(404).send({ error: "unknown_resource" });
     if (before.status !== "active") return reply.status(409).send(resourceRetired(before));
     const nextTags = body.classifications ? [...new Set(body.classifications)] : undefined;
+    // ADR-0208 G7: a tag the resource does not hold yet may not name a retired compliance profile
+    const retiredTags = await retiredTagsAmong(db, (nextTags ?? []).filter((t) => !(before.classifications ?? []).includes(t)));
+    if (retiredTags.length > 0) return reply.status(409).send(retiredTagRefusal(retiredTags));
     const dropped = nextTags ? (before.classifications ?? []).filter((t) => !nextTags.includes(t)) : [];
     if (dropped.length > 0) {
       const ok = await requireStepUp(db, req, reply, {
