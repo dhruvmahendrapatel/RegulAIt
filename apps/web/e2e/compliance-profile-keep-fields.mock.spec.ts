@@ -164,3 +164,27 @@ test("a retired template the profile requires stays required when the Select is 
   await expect.poll(() => api.posts.length).toBe(1);
   expect(api.posts[0].requiredTemplateIds).toEqual(["tpl-old", "tpl-new"]);
 });
+
+test("saving stays off while the profiles query is paused offline", async ({ page }) => {
+  // capture TanStack's offline listener so the test can take the app offline once it has signed in
+  await page.addInitScript(() => {
+    const add = window.addEventListener.bind(window);
+    window.addEventListener = ((type: string, fn: EventListenerOrEventListenerObject, opts?: boolean | AddEventListenerOptions) => {
+      if (type === "offline") (window as unknown as { goOffline: () => void }).goOffline = () => window.dispatchEvent(new Event("offline"));
+      return add(type, fn, opts);
+    }) as typeof window.addEventListener;
+  });
+  const api = await mockApi(page);
+  await page.goto("/ui/admin/compliance/__none");
+  await page.waitForFunction(() => typeof (window as unknown as { goOffline?: () => void }).goOffline === "function");
+  await page.evaluate(() => {
+    (window as unknown as { goOffline: () => void }).goOffline();
+    history.pushState({}, "", "/ui/admin/compliance");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  });
+  const card = form(page);
+  await card.getByLabel("Tag", { exact: true }).fill("hipaa");
+  await expect(card.getByRole("button", { name: "Save profile" })).toBeDisabled();
+  await expect(card.getByText("Loading the existing profiles")).toBeVisible();
+  expect(api.posts).toHaveLength(0);
+});

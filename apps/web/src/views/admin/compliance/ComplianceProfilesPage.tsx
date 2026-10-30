@@ -95,7 +95,7 @@ export default function ComplianceProfilesPage() {
         <UpsertProfileCard
           templates={templates.data?.templates ?? []}
           profiles={profiles.data?.profiles ?? []}
-          profilesLoading={profiles.isLoading}
+          profilesLoading={profiles.data === undefined && !profiles.error}
           profilesFailed={!!profiles.error}
         />
         <CascadePreviewCard />
