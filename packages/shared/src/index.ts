@@ -4743,3 +4743,4 @@ export * from "./endpoint-discovery/index.js";
 export * from "./provenance/index.js";
 // ADR-0204: a static upstream credential per MCP server (header refusals, the write contract, the read view)
 export * from "./mcp-upstream-credential.js";
+export * from "./library-lifecycle.js";

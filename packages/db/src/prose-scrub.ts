@@ -153,7 +153,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.vendorAccountAliases, ["reason"]],
   [s.vendorDomainRules, ["reason"]],
   // --- model risk, evals, red team ---
-  [s.evalDatasets, ["note"]],
+  // ADR-0208 G9 (migration 0225): the retire reason
+  [s.evalDatasets, ["note", "retiredReason"]],
   [s.evalRuns, ["gateReason", "note"]],
   // ADR-0115 — `error` joins `judgeRationale` here, and it is the SAME argument
   // ADR-0102 already made for `trace_spans.status_reason`: this column takes
@@ -183,7 +184,7 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.modelCards, ["note"]],
   [s.modelCardApprovals, ["decisionReason"]],
   [s.modelCardEvidence, ["note"]],
-  [s.redteamLibraries, ["note"]],
+  [s.redteamLibraries, ["note", "retiredReason"]],
   [s.redteamProbes, ["note"]],
   [s.redteamRuns, ["gateReason", "note"]],
   [s.trainingDatasets, ["note"]],
@@ -195,6 +196,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.aiEndpointSignatures, ["replacementNote", "note"]],
   [s.aiUseCases, ["retiredReason"]],
   [s.aiVendors, ["retiredReason"]],
+  // ADR-0208 G9 (migration 0225): a campaign's cancel reason
+  [s.grantCertificationCampaigns, ["cancelledReason"]],
   [s.aiRisks, ["acceptanceNote"]],
   // ADR-0157 / ADR-0159 — an alert acknowledgement is operator prose; a
   // remediation's rationale embeds risk and agent titles a person typed.

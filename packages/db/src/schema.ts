@@ -5347,9 +5347,18 @@ export const evalDatasets = pgTable(
     scorerConfig: jsonb("scorer_config").$type<Record<string, unknown>>().notNull().default({}),
     createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    /** ADR-0208 G9 (migration 0225): retired BY NAME — every version of the name carries the stamp. A retired
+     * dataset takes no new run, version, case, gate binding or automation rule; its runs stay readable. */
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+    retiredReason: text("retired_reason"),
+    retiredByUserId: uuid("retired_by_user_id").references(() => users.id, { onDelete: "set null" }),
   },
   (t) => [
     check("eval_datasets_version_check", sql`${t.version} >= 1`),
+    check(
+      "eval_datasets_retired_check",
+      sql`(${t.retiredAt} IS NULL) = (${t.retiredReason} IS NULL) AND (${t.retiredReason} IS NULL OR length(btrim(${t.retiredReason})) > 0)`,
+    ),
     check(
       "eval_datasets_scorer_kind_check",
       sql`${t.scorerKind} IN (${EVAL_SCORER_KINDS_SQL})`,
@@ -7637,7 +7646,9 @@ export const redteamLibraries = pgTable(
     name: text("name").notNull(),
     version: integer("version").notNull().default(1),
     note: text("note"),
-    status: text("status", { enum: ["draft", "published"] })
+    /** ADR-0208 G9 (migration 0225): `retired` — one version stops being run (new runs and the sweep); its runs
+     * and findings stay readable */
+    status: text("status", { enum: ["draft", "published", "retired"] })
       .notNull()
       .default("draft"),
     /** the eval dataset this library version was materialized into. NULL until
@@ -7655,8 +7666,18 @@ export const redteamLibraries = pgTable(
     publishedAt: timestamp("published_at", { withTimezone: true }),
     createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+    retiredReason: text("retired_reason"),
+    retiredByUserId: uuid("retired_by_user_id").references(() => users.id, { onDelete: "set null" }),
   },
-  (t) => [uniqueIndex("redteam_libraries_name_version_uq").on(t.name, t.version)],
+  (t) => [
+    uniqueIndex("redteam_libraries_name_version_uq").on(t.name, t.version),
+    check("redteam_libraries_status_ck", sql`${t.status} IN ('draft', 'published', 'retired')`),
+    check(
+      "redteam_libraries_retired_check",
+      sql`(${t.status} = 'retired') = (${t.retiredAt} IS NOT NULL) AND (${t.retiredAt} IS NULL) = (${t.retiredReason} IS NULL) AND (${t.retiredReason} IS NULL OR length(btrim(${t.retiredReason})) > 0)`,
+    ),
+  ],
 );
 
 /** One adversarial probe: the prompt, the class it attacks, how bad a defeat
@@ -10218,12 +10239,16 @@ export const grantCertificationCampaigns = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
     dueAt: timestamp("due_at", { withTimezone: true }).notNull(),
-    /** stored status is only ever open|completed; 'expired-incomplete' is computed on read */
-    status: text("status", { enum: ["open", "completed"] })
+    /** stored status is open|completed|cancelled (ADR-0208 G9); 'expired-incomplete' is computed on read */
+    status: text("status", { enum: ["open", "completed", "cancelled"] })
       .notNull()
       .default("open"),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    /** ADR-0208 G9 (migration 0225): cancelled by an admin, with the reason; pending reviews were withdrawn */
+    cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+    cancelledReason: text("cancelled_reason"),
+    cancelledByUserId: uuid("cancelled_by_user_id").references(() => users.id, { onDelete: "set null" }),
   },
   (t) => [
     check("grant_cert_campaigns_name_check", sql`length(btrim(${t.name})) > 0`),
@@ -10234,6 +10259,11 @@ export const grantCertificationCampaigns = pgTable(
     check(
       "grant_cert_campaigns_completed_check",
       sql`(${t.status} = 'completed') = (${t.completedAt} IS NOT NULL)`,
+    ),
+    check("grant_cert_campaigns_status_check", sql`${t.status} IN ('open', 'completed', 'cancelled')`),
+    check(
+      "grant_cert_campaigns_cancelled_check",
+      sql`(${t.status} = 'cancelled') = (${t.cancelledAt} IS NOT NULL) AND (${t.cancelledAt} IS NULL) = (${t.cancelledReason} IS NULL) AND (${t.cancelledReason} IS NULL OR length(btrim(${t.cancelledReason})) > 0)`,
     ),
     index("grant_cert_campaigns_status_idx").on(t.status),
   ],
@@ -13075,10 +13105,13 @@ export const engineSchedules = pgTable(
     lastSkip: text("last_skip"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    /** ADR-0208 G9 (migration 0225): soft delete — gone from listings, never started from again */
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    deletedByUserId: uuid("deleted_by_user_id").references(() => users.id, { onDelete: "set null" }),
   },
   (t) => [
     check("engine_schedules_interval_check", sql`${t.intervalHours} BETWEEN 1 AND 720`),
-    index("engine_schedules_due_idx").on(t.nextRunAt).where(sql`${t.enabled}`),
+    index("engine_schedules_due_idx").on(t.nextRunAt).where(sql`${t.enabled} AND ${t.deletedAt} IS NULL`),
   ],
 );
 

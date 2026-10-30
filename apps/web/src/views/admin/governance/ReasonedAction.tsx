@@ -1,10 +1,10 @@
 /**
- * PROTOTYPE (#453 G9) — a button that opens a ReasonModal stating the consequence,
- * posts the reason, and renders a refusal the person must resolve INSIDE the dialog
+ * ADR-0208 G9 — a button that opens a ReasonModal stating the consequence,
+ * sends the reason through the caller's `submit`, and renders a refusal the person must resolve INSIDE the dialog
  * (the dialog stays open), rather than as a toast that disappears.
  */
 import { useState, type ReactNode } from "react";
-import { ApiError, api, type ApiErrorPayload } from "../../../api/client";
+import { ApiError, type ApiErrorPayload } from "../../../api/client";
 import { Button } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
 import { ReasonModal, useAdminInvalidate } from "../adminKit";
@@ -16,7 +16,11 @@ export function ReasonedAction(props: {
   title: string;
   body: ReactNode;
   confirmLabel?: string;
-  path: string;
+  /** the dialog's dismiss button; defaults to "Cancel" (say what is kept when the action itself is a cancel) */
+  cancelLabel?: string;
+  /** the call, with the typed reason. Written at the caller as `api.post(\`/v1/…\`, { reason })` so the route census
+   * (scripts/preflight-ui-route-census.mjs) sees the screen call it. */
+  submit: (reason: string) => Promise<unknown>;
   done: string;
   /** turn a known refusal into what the person does next; null = not this one */
   refusal?: (code: string, payload: ApiErrorPayload) => ReactNode | null;
@@ -47,6 +51,7 @@ export function ReasonedAction(props: {
         minLength={10}
         title={props.title}
         confirmLabel={props.confirmLabel ?? props.label}
+        {...(props.cancelLabel ? { cancelLabel: props.cancelLabel } : {})}
         body={
           <>
             {props.body}
@@ -65,7 +70,7 @@ export function ReasonedAction(props: {
           setRefused(null);
           void (async () => {
             try {
-              await api.post(props.path, { reason });
+              await props.submit(reason);
               setOpen(false);
               toast(props.done, "success");
               invalidate();

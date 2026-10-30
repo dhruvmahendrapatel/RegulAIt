@@ -19,7 +19,10 @@ import { useAction } from "../adminKit";
 import {
   SCHEDULE_INTERVAL_LIMITS,
   SCHEDULE_REFUSALS,
+  parseIntervalHours,
   scheduleBody,
+  scheduleDeletable,
+  scheduleEditable,
   scheduleRequestSummary,
   scheduleToggle,
   type EngineSchedule,
@@ -49,14 +52,16 @@ export function EngineSchedulesCard(props: {
 }) {
   const { auth } = useSession();
   const me = auth?.userId ?? null;
+  const isAdmin = auth?.isAdmin === true;
   const list = useQuery({ queryKey: engineScheduleKeys.list, queryFn: () => api.get<{ schedules: EngineSchedule[] }>("/v1/engine-schedules") });
   const create = useAction();
   const toggle = useAction();
   const [interval, setIntervalHours] = useState("24");
   const [problem, setProblem] = useState<string | null>(null);
   const [turningOn, setTurningOn] = useState<EngineSchedule | null>(null);
-  // PROTOTYPE (#453 G9): Edit (interval) and Delete schedule
+  // ADR-0208 G9: the owner edits the interval; the owner or an admin deletes (soft, audited)
   const [editing, setEditing] = useState<EngineSchedule | null>(null);
+  const [editProblem, setEditProblem] = useState<string | null>(null);
   const [editHours, setEditHours] = useState("");
   const [deleting, setDeleting] = useState<EngineSchedule | null>(null);
   const edit = useAction();
@@ -164,8 +169,11 @@ export function EngineSchedulesCard(props: {
                   <Button
                     size="sm"
                     aria-label={`Edit schedule every ${s.intervalHours} h`}
+                    disabled={!scheduleEditable(s, me)}
+                    title={scheduleEditable(s, me) ? undefined : "Only the person this schedule runs as can change how often it runs."}
                     onClick={() => {
                       setEditHours(String(s.intervalHours));
+                      setEditProblem(null);
                       setEditing(s);
                     }}
                   >
@@ -178,9 +186,11 @@ export function EngineSchedulesCard(props: {
                   </span>
                 }
                 rest={
-                  <Button size="sm" variant="ghost" aria-label={`Delete schedule every ${s.intervalHours} h`} onClick={() => setDeleting(s)}>
-                    Delete schedule
-                  </Button>
+                  scheduleDeletable(s, me, isAdmin) ? (
+                    <Button size="sm" variant="ghost" aria-label={`Delete schedule every ${s.intervalHours} h`} onClick={() => setDeleting(s)}>
+                      Delete schedule
+                    </Button>
+                  ) : null
                 }
               />
             ),
@@ -205,8 +215,14 @@ export function EngineSchedulesCard(props: {
               onClick={() => {
                 const s = editing;
                 if (!s) return;
+                const hours = parseIntervalHours(editHours);
+                if (hours === null) {
+                  setEditProblem(`The interval must be a whole number of hours from ${SCHEDULE_INTERVAL_LIMITS.min} to ${SCHEDULE_INTERVAL_LIMITS.max}.`);
+                  return;
+                }
+                setEditProblem(null);
                 void edit
-                  .run(() => scheduleCall(() => api.patch(`/v1/engine-schedules/${s.id}`, { intervalHours: Number(editHours) })), `Schedule now runs every ${editHours} h; the next run moves to match`)
+                  .run(() => scheduleCall(() => api.patch(`/v1/engine-schedules/${s.id}`, { intervalHours: hours })), `Schedule now runs every ${hours} h; the next run moves to match`)
                   .then((ok) => ok && setEditing(null));
               }}
             >
@@ -218,7 +234,12 @@ export function EngineSchedulesCard(props: {
         <Field label="Every (hours)">
           <Input type="number" min={SCHEDULE_INTERVAL_LIMITS.min} max={SCHEDULE_INTERVAL_LIMITS.max} step={1} value={editHours} onChange={(e) => setEditHours(e.target.value)} />
         </Field>
-        <p className={v.faint}>Runs more often spend more. Each run is still checked before it starts.</p>
+        <p className={v.faint}>Runs more often spend more. Each run is still checked before it starts. A run already in progress keeps going.</p>
+        {(editProblem ?? edit.error) && (
+          <p className={v.errLine} role="alert">
+            {editProblem ?? edit.error}
+          </p>
+        )}
       </Modal>
       <ConfirmModal
         open={deleting !== null}

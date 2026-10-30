@@ -69,13 +69,15 @@ interface CampaignDetail {
   dueAt: string;
   status: CampaignStatus;
   completedAt: string | null;
+  /** ADR-0208 G9: who cancelled it, when and why; null unless cancelled */
+  cancellation: { at: string; reason: string | null; byUserId: string | null } | null;
   notes: { scope: string; snapshot: string; expiry: string };
   items: CampaignItem[];
 }
 
 const statusTone = (s: CampaignStatus): Tone =>
   s === "completed" ? "ok" : s === "expired-incomplete" ? "danger" : s === "cancelled" ? "neutral" : "info";
-// PROTOTYPE (#453 G9): status chips
+// ADR-0208 G9: status chips (a cancelled campaign is read-only)
 const CHIPS: Array<[CampaignStatus, string]> = [
   ["open", "Open"],
   ["completed", "Completed"],
@@ -315,8 +317,14 @@ export default function CampaignsPage() {
                               asked to confirm it's you.
                             </p>
                           }
-                          path={`/v1/certification-campaigns/${d.id}/cancel`}
+                          cancelLabel="Keep campaign"
+                          submit={(reason) => api.post(`/v1/certification-campaigns/${d.id}/cancel`, { reason })}
                           done={`Campaign “${d.name}” cancelled; ${undecided} reviews withdrawn`}
+                          refusal={(code, payload) =>
+                            code === "campaign_not_open"
+                              ? `This campaign is no longer open (it reads ‘${String(payload.status ?? "closed")}’), so it cannot be cancelled. Refresh the page.`
+                              : null
+                          }
                         />
                       );
                     })()}
@@ -330,7 +338,7 @@ export default function CampaignsPage() {
                     <Badge tone={statusTone(d.status)}>{d.status}</Badge>{" "}
                     <span className={v.faint}>
                       {d.status === "cancelled"
-                        ? "cancelled — undecided reviews were withdrawn and those grants stay unattested; decisions already made stand"
+                        ? `cancelled${d.cancellation ? ` ${ago(d.cancellation.at)}` : ""} — undecided reviews were withdrawn and those grants stay unattested; decisions already made stand${d.cancellation?.reason ? `. Reason: ${d.cancellation.reason}` : ""}`
                         : d.status === "expired-incomplete"
                         ? "past due with undecided items — they stay undecided forever; this is a posture fact, open a new campaign to review these grants"
                         : d.status === "completed"

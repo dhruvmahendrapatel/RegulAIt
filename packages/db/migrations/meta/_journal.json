@@ -1450,6 +1450,13 @@
       "when": 1785159000000,
       "tag": "0224_infra_lifecycle",
       "breakpoints": true
+    },
+    {
+      "idx": 225,
+      "version": "7",
+      "when": 1785160000000,
+      "tag": "0225_library_lifecycle",
+      "breakpoints": true
     }
   ]
 }
