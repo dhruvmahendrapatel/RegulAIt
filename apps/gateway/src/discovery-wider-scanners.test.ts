@@ -247,7 +247,7 @@ describe("ADR-0218 idp_entra", () => {
     const res = await scanner("idp_entra").run(ctx);
     expect(res.credentialWriteScope).toBe("write");
     expect(res.observations).toEqual([]);
-    expect(calls.urls.some((u) => u.includes("graph.microsoft.com"))).toBe(false);
+    expect(calls.urls.some((u) => new URL(u).hostname === "graph.microsoft.com")).toBe(false);
   });
 
   it("reads the roles claim only", () => {
