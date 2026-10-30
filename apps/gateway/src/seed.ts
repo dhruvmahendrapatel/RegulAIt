@@ -30,6 +30,7 @@ import { demoKeyExpiresAt, revokeScriptKeys, SEED_PERSONA_KEY_TTL_DAYS, seedStri
 import { DEMO_SECURITY_LEAD, enrolAdminsTotp, type AdminTotpEnrolment } from "./demo-identity.js"; // ADR-0181 (FX2): seedAdminMfa
 import { ensureDemoModelCards } from "./demo-strict-governance.js";
 import { openAssuranceGuardrailWindow, seedStrictData } from "./seed-strict-data.js";
+import { applyDemoERelaxation } from "./demo-relax-e-lib.js";
 import { assuranceAgentNames } from "./demo-intake-seed-lib.js"; // B4S-06: --open-assurance-window
 import * as sharedForFixtures from "@regulait/shared";
 import type { DemoIntakeFixtures } from "@regulait/shared";
@@ -323,6 +324,7 @@ if (process.argv.includes("--open-assurance-window")) {
 // ADR-0181 (FX2): Ada enrols TOTP before any key is minted for her — an
 // un-enrolled admin's key is refused, and none is issued (seedAdminMfa below)
 await seedDemoEgressAllow(); // before Ada enrols: adding an allow entry is a stepped-up relaxation (B4S-06, ADR-0034)
+await seedDemoBeatERelaxation(); // before Ada enrols: relaxing a setting is a stepped-up relaxation (B4S-06)
 const [adminMfa, morganMfa] = await seedAdminMfa([adminId, morganId]);
 
 const keys: Record<string, string> = {};
@@ -1741,6 +1743,28 @@ async function seedDemoEgressAllow(): Promise<void> {
         "credential no longer passes the step-up (B4S-06). Add them as an admin under Custom LLM providers > Egress allow-list.",
     );
   }
+}
+
+// Beat E's audited demo-data relaxation (owner, #453 c6521685462; demo-relax-e-lib.ts): the sensitive-data approval
+// quorum to 1 and approval signing off, through PUT /v1/org/settings, so Dana's write_file queues for Avery instead of
+// being refused at queue time. Product defaults stay strict. Once an admin can step up the bootstrap credential is
+// refused; the step then says to run `demo:relax-e` as Ada, and the seed carries on (as the egress entries above do).
+async function seedDemoBeatERelaxation(): Promise<void> {
+  const r = await applyDemoERelaxation(
+    async (method, url, headers, body) => {
+      const res = await app.inject({ method, url, headers, ...(body !== undefined ? { payload: body as object } : {}) });
+      let json: Json = {};
+      try {
+        json = res.json() as Json;
+      } catch {
+        /* the status is the fact */
+      }
+      return { status: res.statusCode, body: json };
+    },
+    { headers: AUTH },
+  );
+  for (const line of r.lines) console.log(`  ${line}`);
+  if (r.status === "refused" || r.status === "failed") throw new Error(`beat E relaxation: ${r.lines.join(" ")}`);
 }
 
 async function seedStrictAdmission(): Promise<void> {
