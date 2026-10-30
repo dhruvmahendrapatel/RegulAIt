@@ -3,6 +3,9 @@ import {
   DELIBERATELY_API_ONLY,
   expandLiteralUnions,
   findAddGaps,
+  findRemoveGaps,
+  KNOWN_REMOVE_GAPS,
+  NO_REMOVE_BY_DESIGN,
   fiveOhOneResponders,
   literalUnionOf,
   notBuiltRoutes,
@@ -127,5 +130,56 @@ describe("affordance census: a templated collection segment does not reach unrel
     expect(segmentMatch("/v1/agents/:x/owner", untyped)).toBe(false);
     // `/v1/grants/${kind}/${id}`: the collection is literal, the kind segment is a wildcard
     expect(segmentMatch("/v1/grants/agents/:x", new Set(["/v1/grants/:x/:x"]))).toBe(true);
+  });
+});
+
+describe("remove parity (#453 G12): a collection the API can create into must have a way out", () => {
+  const base = {
+    posted: new Set(["/v1/things"]),
+    gotten: new Set(["/v1/things"]),
+    served: new Set(),
+    mutations: new Set(["/v1/things"]),
+  };
+
+  it("flags a listed, creatable collection with no delete and no retire route (the Projects shape)", () => {
+    expect(findRemoveGaps(base)).toEqual(["/v1/things"]);
+  });
+
+  it("accepts a DELETE on the item, including one written with a different parameter name", () => {
+    expect(findRemoveGaps({ ...base, served: new Set(["/v1/things/:x"]) })).toEqual([]);
+  });
+
+  it("accepts a retire-style verb on the item, and only those verbs", () => {
+    for (const verb of ["retire", "archive", "disable", "lifecycle", "abort"]) {
+      expect(findRemoveGaps({ ...base, mutations: new Set([...base.mutations, `/v1/things/:x/${verb}`]) })).toEqual([]);
+    }
+    for (const verb of ["sync", "halt", "invoke", "rename"]) {
+      expect(findRemoveGaps({ ...base, mutations: new Set([...base.mutations, `/v1/things/:x/${verb}`]) })).toEqual(["/v1/things"]);
+    }
+  });
+
+  it("accepts a singleton cleared by a DELETE on its own path (a credential)", () => {
+    const one = { ...base, posted: new Set(["/v1/c/:x/credential"]), gotten: new Set(["/v1/c/:x/credential"]) };
+    expect(findRemoveGaps({ ...one, served: new Set(["/v1/c/:x/credential"]) })).toEqual([]);
+  });
+
+  it("ignores item actions (POST on an id), unlisted POSTs, and 501 stubs", () => {
+    expect(findRemoveGaps({ ...base, posted: new Set(["/v1/things/:x"]) })).toEqual([]);
+    expect(findRemoveGaps({ ...base, gotten: new Set() })).toEqual([]);
+    expect(findRemoveGaps({ ...base, notBuilt: new Set(["POST /v1/things"]) })).toEqual([]);
+  });
+
+  it("gives every exemption a reason, and never lists a route in both maps", () => {
+    for (const m of [NO_REMOVE_BY_DESIGN, KNOWN_REMOVE_GAPS]) {
+      for (const [route, why] of m) {
+        expect(route).toMatch(/^\/v1\//);
+        expect(why.length).toBeGreaterThan(20);
+      }
+    }
+    for (const r of KNOWN_REMOVE_GAPS.keys()) expect(NO_REMOVE_BY_DESIGN.has(r)).toBe(false);
+  });
+
+  it("ties every known gap to the #453 gap that tracks it, or says it is not yet proposed", () => {
+    for (const why of KNOWN_REMOVE_GAPS.values()) expect(why).toMatch(/^(G\d+ |not yet proposed)/);
   });
 });
