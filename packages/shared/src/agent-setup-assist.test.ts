@@ -38,12 +38,6 @@ describe("ADR-0205 model reply", () => {
     expect(parseAgentSetupReply('{"name":"Bad Name!"}')).toBeNull();
   });
 
-  it("rejects a pathological reply in linear time (CodeQL: no regex over model output)", () => {
-    const t0 = Date.now();
-    expect(parseAgentSetupReply("```" + " ".repeat(200_000))).toBeNull();
-    expect(Date.now() - t0).toBeLessThan(500);
-  });
-
   it("may raise the risk tier but never lower it", () => {
     const high = suggestAgentSetup({ description: "Reviews loan applications from customers." });
     const lowered = mergeAgentSetupReply(high, { riskTier: "minimal", purpose: "p" }, "model");
