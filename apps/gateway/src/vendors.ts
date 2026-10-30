@@ -49,9 +49,12 @@
  * a person. And there is no SLA/renewal scheduler: re-assessment cadence is
  * the customer's own process.
  */
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   aiVendors,
+  getTableColumns,
+  sql,
+  type SQL,
   and,
   auditLog,
   compliancePackControls,
@@ -77,6 +80,18 @@ import {
   updateVendorSchema,
 } from "@regulait/shared";
 import { z } from "zod";
+import {
+  filterParams,
+  parseListExport,
+  parseListPage,
+  runListPage,
+  sendListError,
+  sendListExport,
+  wantsListContract,
+  type ListReader,
+  type ListSpec,
+} from "./list-contract.js";
+import { userNameSql } from "./delegations-list.js";
 import {
   createWorkflowTemplateValidated,
   startWorkflowInstanceWithTemplates,
@@ -305,6 +320,41 @@ export interface VendorRouteOptions {
   dataKey?: string;
 }
 
+type VendorListRow = AiVendorRow & { ownerName: string | null };
+const vendorsFilterQuery = z
+  .object({
+    status: z.enum(["proposed", "under_assessment", "approved", "rejected", "retired"]).optional(),
+    category: z.enum(["model_provider", "ai_feature_vendor", "data_processor", "integration"]).optional(),
+  })
+  .strict();
+const VENDOR_STATUS_ORDER = sql`case ${aiVendors.status} when 'proposed' then 1 when 'under_assessment' then 2 when 'approved' then 3 when 'rejected' then 4 when 'retired' then 5 end`;
+/** ADR-0219: the vendor registry under the shared list contract */
+export const VENDORS_LIST: ListSpec<VendorListRow> = {
+  id: "vendors",
+  sorts: {
+    name: { expr: sql`lower(${aiVendors.name})` },
+    status: { expr: VENDOR_STATUS_ORDER },
+    category: { expr: aiVendors.category },
+    attest: { expr: sql`jsonb_array_length(${aiVendors.packAttestations})` },
+    owner: { expr: sql`lower(${userNameSql(aiVendors.ownerUserId)})` },
+    created: { expr: aiVendors.createdAt, keysetAt: aiVendors.createdAt },
+    decided: { expr: aiVendors.decidedAt },
+  },
+  columns: {
+    name: { label: "Vendor", value: (r) => r.name },
+    status: { label: "Status", value: (r) => r.status.replace(/_/g, " ") },
+    category: { label: "Category", value: (r) => r.category.replace(/_/g, " ") },
+    attest: { label: "Attestations", value: (r) => r.packAttestations.length },
+    owner: { label: "Owner", value: (r) => r.ownerName ?? r.ownerUserId },
+    created: { label: "Proposed", value: (r) => r.createdAt },
+    decided: { label: "Decided", value: (r) => r.decidedAt },
+    description: { label: "Description", value: (r) => r.description },
+  },
+  filters: ["status", "category"],
+  defaultSort: { col: "created", dir: "desc" },
+  idCol: aiVendors.id,
+};
+
 export function registerVendorRoutes(
   app: FastifyInstance,
   db: Db,
@@ -395,7 +445,56 @@ export function registerVendorRoutes(
 
   // List: fleet for admins, own proposals for everyone else — the exact
   // GET /v1/use-cases scoping shape.
+  // ADR-0219: the one predicate for the list, its count and the Excel export —
+  // the fleet for an admin, an owner's own vendors otherwise. null = no caller.
+  const vendorsScope = (req: FastifyRequest, f: z.infer<typeof vendorsFilterQuery>): SQL | undefined | null => {
+    const conds: SQL[] = [];
+    if (f.status) conds.push(eq(aiVendors.status, f.status));
+    if (f.category) conds.push(eq(aiVendors.category, f.category));
+    if (!req.authCtx.isAdmin) {
+      if (!req.authCtx.userId) return null;
+      conds.push(eq(aiVendors.ownerUserId, req.authCtx.userId));
+    }
+    return conds.length ? and(...conds) : undefined;
+  };
+  const vendorsReader: ListReader<VendorListRow> = {
+    fetch: (q) =>
+      db
+        .select({ ...getTableColumns(aiVendors), ownerName: userNameSql(aiVendors.ownerUserId), _cursorAt: q.cursorAt })
+        .from(aiVendors)
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset),
+    countable: (where) => db.select({ one: sql`1` }).from(aiVendors).where(where),
+    idOf: (r) => r.id,
+  };
+  app.get("/v1/vendors/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const filters = vendorsFilterQuery.parse(filterParams(q));
+      const ex = parseListExport(VENDORS_LIST, q);
+      const where = vendorsScope(req, filters);
+      if (where === null) return reply.status(403).send({ error: "bootstrap_has_no_vendors" });
+      await sendListExport(db, req, reply, VENDORS_LIST, vendorsReader, where, ex, filters);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
   app.get("/v1/vendors", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      try {
+        const q = req.query as Record<string, unknown>;
+        const filters = vendorsFilterQuery.parse(filterParams(q));
+        const page = parseListPage(VENDORS_LIST, q);
+        const where = vendorsScope(req, filters);
+        if (where === null) return reply.status(403).send({ error: "bootstrap_has_no_vendors" });
+        return { ...(await runListPage(db, VENDORS_LIST, vendorsReader, where, page)), disclaimer: AI_VENDOR_ATTESTATION_DISCLAIMER };
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
     const { status } = z
       .object({
         status: z

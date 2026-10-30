@@ -73,6 +73,17 @@ import {
   type OffStackServing,
 } from "@regulait/shared";
 import { computeDependencyGraph } from "./dependency-graph.js";
+import {
+  filterParams,
+  parseListExport,
+  parseListPage,
+  runListPage,
+  sendListError,
+  sendListExport,
+  wantsListContract,
+  type ListReader,
+  type ListSpec,
+} from "./list-contract.js";
 import { computeTrustDashboard } from "./trust-dashboard.js";
 import { ownershipFlagFor } from "./inventory.js";
 import { TRACE_EVAL_WINDOW_DAYS, traceSummaryForAgents } from "./trace-evaluation.js";
@@ -812,48 +823,46 @@ const listQuery = z.object({
   status: z.enum(["active", "open", "acknowledged", "resolved", "all"]).default("active"),
   limit: z.coerce.number().int().min(1).max(500).default(200),
 });
+const alertsFilterQuery = z.object({ status: z.enum(["active", "open", "acknowledged", "resolved", "all"]).optional() }).strict();
+type AlertListRow = { id: string; ruleLabel: string; severity: string; status: string; subject: unknown; title: string; firstDetectedAt: string; lastDetectedAt: string; acknowledgedAt: string | null; acknowledgedBy: { id: string; name: string | null } | null; owner?: { name?: string | null } | null; dueAt?: string | null; sla?: string };
+const ALERT_SEVERITY_ORDER = sql`case ${governanceAlerts.severity} when 'critical' then 4 when 'high' then 3 when 'medium' then 2 when 'low' then 1 else 0 end`;
+const ALERT_STATUS_ORDER = sql`case ${governanceAlerts.status} when 'open' then 1 when 'acknowledged' then 2 when 'resolved' then 3 end`;
+const alertDate = (v: string | null | undefined) => (v ? new Date(v) : null);
+/** ADR-0219: the governance alerts list under the shared list contract */
+export const ALERTS_LIST: ListSpec<AlertListRow> = {
+  id: "governance-alerts",
+  sorts: {
+    severity: { expr: ALERT_SEVERITY_ORDER },
+    status: { expr: ALERT_STATUS_ORDER },
+    title: { expr: sql`lower(${governanceAlerts.title})` },
+    rule: { expr: governanceAlerts.ruleId },
+    lastSeen: { expr: governanceAlerts.lastDetectedAt, keysetAt: governanceAlerts.lastDetectedAt },
+    firstSeen: { expr: governanceAlerts.firstDetectedAt, keysetAt: governanceAlerts.firstDetectedAt },
+    acknowledged: { expr: governanceAlerts.acknowledgedAt },
+  },
+  columns: {
+    severity: { label: "Severity", value: (r) => r.severity },
+    status: { label: "Status", value: (r) => r.status },
+    title: { label: "Alert", value: (r) => r.title },
+    rule: { label: "Rule", value: (r) => r.ruleLabel },
+    lastSeen: { label: "Last seen", value: (r) => alertDate(r.lastDetectedAt) },
+    firstSeen: { label: "First seen", value: (r) => alertDate(r.firstDetectedAt) },
+    owner: { label: "Owner", value: (r) => (r.owner === undefined ? null : r.owner ? (r.owner.name ?? "a user") : "unowned") },
+    due: { label: "Due", value: (r) => alertDate(r.dueAt) },
+    acknowledged: { label: "Acknowledged", value: (r) => alertDate(r.acknowledgedAt) },
+  },
+  filters: ["status"],
+  defaultSort: { col: "lastSeen", dir: "desc" },
+  idCol: governanceAlerts.id,
+};
 const idParam = z.object({ alertId: z.string().uuid() });
 const ackBody = z.object({ note: z.string().trim().min(1).max(500) }).strict();
 
 export function registerGovernanceMonitorRoutes(app: FastifyInstance, db: Db): void {
   /** admin-only via the default gate */
-  app.get("/v1/governance/alerts", async (req) => {
-    const q = listQuery.parse(req.query);
-    const where =
-      q.status === "all"
-        ? undefined
-        : q.status === "active"
-          ? ne(governanceAlerts.status, "resolved")
-          : eq(governanceAlerts.status, q.status);
-    const rows = await db
-      .select({
-        a: governanceAlerts,
-        ackName: users.displayName,
-        ackEmail: users.email,
-      })
-      .from(governanceAlerts)
-      .leftJoin(users, eq(users.id, governanceAlerts.acknowledgedByUserId))
-      .where(where)
-      .orderBy(
-        sql`case ${governanceAlerts.severity} when 'high' then 0 when 'medium' then 1 else 2 end`,
-        desc(governanceAlerts.lastDetectedAt),
-      )
-      .limit(q.limit);
-
-    const counts = { open: 0, acknowledged: 0, resolved: 0 };
-    for (const c of await db
-      .select({ status: governanceAlerts.status, n: count() })
-      .from(governanceAlerts)
-      .groupBy(governanceAlerts.status)) {
-      counts[c.status] = Number(c.n);
-    }
-    const [last] = await db
-      .select({ at: auditLog.at })
-      .from(auditLog)
-      .where(eq(auditLog.ruleId, MONITOR_AUDIT_RULE_IDS.evaluated))
-      .orderBy(desc(auditLog.at))
-      .limit(1);
-
+  type AlertRowIn = { a: typeof governanceAlerts.$inferSelect; ackName: string | null; ackEmail: string | null };
+  /** each row as the alerts list shows it: the subject's current label, the rule, and the owner and SLA state */
+  const decorateAlerts = async (rows: AlertRowIn[]) => {
     // labels for subjects, current as of now (a renamed agent shows its new name)
     const labels = new Map<string, string>();
     if (rows.length) {
@@ -898,8 +907,7 @@ export function registerGovernanceMonitorRoutes(app: FastifyInstance, db: Db): v
 
     // ADR-0182 S5 (PF-14): each episode's owner, SLA state and work item
     const ownership = await alertOwnershipViews(db, rows.map((r) => r.a));
-    return {
-      alerts: rows.map(({ a, ackName, ackEmail }) => ({
+    return rows.map(({ a, ackName, ackEmail }) => ({
         id: a.id,
         ruleId: a.ruleId,
         ruleLabel: (MONITOR_RULES as Record<string, { label: string }>)[a.ruleId]?.label ?? a.ruleId,
@@ -917,9 +925,100 @@ export function registerGovernanceMonitorRoutes(app: FastifyInstance, db: Db): v
         ackNote: a.ackNote,
         resolvedAt: a.resolvedAt?.toISOString() ?? null,
         ...ownership.get(a.id),
-      })),
-      counts,
-      lastEvaluatedAt: last?.at?.toISOString() ?? null,
+    }));
+  };
+  const alertsStatusWhere = (status: z.infer<typeof alertsFilterQuery>["status"]) =>
+    status === "all" || status === undefined
+      ? undefined
+      : status === "active"
+        ? ne(governanceAlerts.status, "resolved")
+        : eq(governanceAlerts.status, status);
+  const alertsCounts = async () => {
+    const counts = { open: 0, acknowledged: 0, resolved: 0 };
+    for (const c of await db
+      .select({ status: governanceAlerts.status, n: count() })
+      .from(governanceAlerts)
+      .groupBy(governanceAlerts.status)) {
+      counts[c.status] = Number(c.n);
+    }
+    return counts;
+  };
+  const alertsLastEvaluated = async () => {
+    const [last] = await db
+      .select({ at: auditLog.at })
+      .from(auditLog)
+      .where(eq(auditLog.ruleId, MONITOR_AUDIT_RULE_IDS.evaluated))
+      .orderBy(desc(auditLog.at))
+      .limit(1);
+    return last?.at?.toISOString() ?? null;
+  };
+  const alertsReader: ListReader<AlertListRow> = {
+    fetch: async (q) => {
+      const rows = await db
+        .select({ a: governanceAlerts, ackName: users.displayName, ackEmail: users.email, _cursorAt: q.cursorAt })
+        .from(governanceAlerts)
+        .leftJoin(users, eq(users.id, governanceAlerts.acknowledgedByUserId))
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset);
+      const views = await decorateAlerts(rows);
+      return views.map((v, i) => ({ ...v, _cursorAt: rows[i]!._cursorAt }));
+    },
+    countable: (where) => db.select({ one: sql`1` }).from(governanceAlerts).where(where),
+    idOf: (r) => r.id,
+  };
+
+  // ADR-0219: with any of sort/dir/cursor/offset/count the list answers the
+  // shared contract (with the counts, last evaluation and rules beside it);
+  // with none of them, exactly the response it always gave. Admin only.
+  app.get("/v1/governance/alerts/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const filters = alertsFilterQuery.parse(filterParams(q));
+      const ex = parseListExport(ALERTS_LIST, q);
+      await sendListExport(db, req, reply, ALERTS_LIST, alertsReader, alertsStatusWhere(filters.status), ex, filters);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+  app.get("/v1/governance/alerts", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      try {
+        const q = req.query as Record<string, unknown>;
+        const filters = alertsFilterQuery.parse(filterParams(q));
+        const page = parseListPage(ALERTS_LIST, q);
+        const [out, counts, lastEvaluatedAt] = await Promise.all([
+          runListPage(db, ALERTS_LIST, alertsReader, alertsStatusWhere(filters.status), page),
+          alertsCounts(),
+          alertsLastEvaluated(),
+        ]);
+        return { ...out, counts, lastEvaluatedAt, rules: MONITOR_RULE_IDS.map((id) => ({ id, ...MONITOR_RULES[id] })) };
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
+    const q = listQuery.parse(req.query);
+    const where = alertsStatusWhere(q.status);
+    const rows = await db
+      .select({
+        a: governanceAlerts,
+        ackName: users.displayName,
+        ackEmail: users.email,
+      })
+      .from(governanceAlerts)
+      .leftJoin(users, eq(users.id, governanceAlerts.acknowledgedByUserId))
+      .where(where)
+      .orderBy(
+        sql`case ${governanceAlerts.severity} when 'high' then 0 when 'medium' then 1 else 2 end`,
+        desc(governanceAlerts.lastDetectedAt),
+      )
+      .limit(q.limit);
+    return {
+      alerts: await decorateAlerts(rows),
+      counts: await alertsCounts(),
+      lastEvaluatedAt: await alertsLastEvaluated(),
       rules: MONITOR_RULE_IDS.map((id) => ({ id, ...MONITOR_RULES[id] })),
     };
   });

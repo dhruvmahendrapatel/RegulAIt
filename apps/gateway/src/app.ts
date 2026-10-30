@@ -276,8 +276,11 @@ import {
   sendListError,
   sendListExport,
   wantsListContract,
+  type ListReader,
+  type ListSpec,
 } from "./list-contract.js";
 import { USERS_LIST, usersFilterQuery, usersReader, usersWhere } from "./users-list.js";
+import { DELEGATIONS_LIST, delegationsFilterQuery, delegationsReader, delegationsWhere, userNameSql } from "./delegations-list.js";
 import { evaluateIpEnvelope } from "./net-policy.js";
 import { activeDelegatorsFor, activeDelegationFrom } from "./delegations.js";
 
@@ -650,6 +653,32 @@ function unknownAuditObjectType(q: AuditFilterInput): { error: string; detail: s
     detail: "objectType is not an object type the audit log records; omit it to read every object type",
   };
 }
+
+/** ADR-0219: the audit trail under the shared list contract (the screen's columns; the full CSV export is unchanged) */
+type AuditListRow = { id: string; at: Date; userId: string; userName: string | null; objectType: string | null; objectId: string | null; effect: string; ruleId: string; reason: string | null; deployMode: string | null };
+const AUDIT_LIST: ListSpec<AuditListRow> = {
+  id: "audit-log",
+  sorts: {
+    at: { expr: auditLog.at, keysetAt: auditLog.at },
+    user: { expr: sql`lower(${userNameSql(auditLog.userId)})` },
+    event: { expr: sql`coalesce(${auditLog.objectType}, '') || ' ' || ${auditLog.ruleId}` },
+    effect: { expr: auditLog.effect },
+    deployMode: { expr: sql`coalesce(${auditLog.deployMode}, 'unknown')` },
+  },
+  columns: {
+    at: { label: "At", value: (r) => r.at },
+    user: { label: "User", value: (r) => r.userName ?? r.userId },
+    event: { label: "Event", value: (r) => `${r.objectType ? `${r.objectType}: ` : ""}${r.ruleId}` },
+    effect: { label: "Effect", value: (r) => r.effect.replace(/_/g, " ") },
+    deployMode: { label: "Deploy mode", value: (r) => r.deployMode ?? "not recorded" },
+    reason: { label: "Reason", value: (r) => r.reason },
+    objectId: { label: "Object id", value: (r) => r.objectId },
+    id: { label: "Audit id", value: (r) => r.id },
+  },
+  filters: ["id", "userId", "deployMode", "objectType", "objectId", "effect", "from", "to"],
+  defaultSort: { col: "at", dir: "desc" },
+  idCol: auditLog.id,
+};
 
 /** the screen read adds paging on top of the shared filter set */
 const auditQuery = auditFilterQuery.extend({
@@ -3681,7 +3710,31 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     return reply.status(201).send(row);
   });
 
-  app.get("/v1/delegations", async () => {
+  // ADR-0219: with any of sort/dir/cursor/offset/count it answers the shared
+  // list contract (delegations-list.ts) with a status filter; with none of
+  // them, exactly the response below. Admin only, like the export.
+  app.get("/v1/delegations/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const filters = delegationsFilterQuery.parse(filterParams(q));
+      const ex = parseListExport(DELEGATIONS_LIST, q);
+      await sendListExport(db, req, reply, DELEGATIONS_LIST, delegationsReader(db), delegationsWhere(filters), ex, filters);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+  app.get("/v1/delegations", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      try {
+        const q = req.query as Record<string, unknown>;
+        const filters = delegationsFilterQuery.parse(filterParams(q));
+        const page = parseListPage(DELEGATIONS_LIST, q);
+        return await runListPage(db, DELEGATIONS_LIST, delegationsReader(db), delegationsWhere(filters), page);
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
     const rows = await db.select().from(approvalDelegations);
     const ids = [...new Set(rows.flatMap((r) => [r.fromUserId, r.toUserId]))];
     const userRows = ids.length
@@ -5728,7 +5781,51 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // filters on from/to/objectType/objectId/effect as well as userId and deployMode —
   // all through the SAME auditFilters() the CSV export uses. Callers that pass
   // nothing get EXACTLY the old behaviour: the newest 100 rows under `entries`.
+  // ADR-0219: the audit trail under the shared list contract. The trail already pages by a keyset `cursor`, so here
+  // the switch is any of sort/dir/offset/count (a caller paging with `cursor` alone keeps the old response); the
+  // default sort is the same (at DESC, id DESC) keyset, so the contract's cursor is the same cursor.
+  const auditListReader: ListReader<AuditListRow> = {
+    fetch: (q) =>
+      db
+        .select({ ...auditLogColumns, userName: userNameSql(auditLog.userId), _cursorAt: q.cursorAt })
+        .from(auditLog)
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset),
+    countable: (where) => db.select({ one: sql`1` }).from(auditLog).where(where),
+    idOf: (r) => r.id,
+  };
+  const auditListWhere = (q: AuditFilterInput): SQL | undefined => {
+    const filters = auditFilters(q, q.from ?? null, q.to ?? null);
+    return filters.length ? and(...filters) : undefined;
+  };
+  app.get("/v1/audit/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const filters = auditFilterQuery.strict().parse(filterParams(q));
+      const unknownType = unknownAuditObjectType(filters);
+      if (unknownType) return reply.status(400).send(unknownType);
+      const ex = parseListExport(AUDIT_LIST, q);
+      await sendListExport(db, req, reply, AUDIT_LIST, auditListReader, auditListWhere(filters), ex, filters);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
   app.get("/v1/audit", async (req, reply) => {
+    const raw = (req.query ?? {}) as Record<string, unknown>;
+    if (["sort", "dir", "offset", "count"].some((k) => raw[k] !== undefined)) {
+      try {
+        const filters = auditFilterQuery.strict().parse(filterParams(raw));
+        const unknownType = unknownAuditObjectType(filters);
+        if (unknownType) return reply.status(400).send(unknownType);
+        const page = parseListPage(AUDIT_LIST, raw);
+        return await runListPage(db, AUDIT_LIST, auditListReader, auditListWhere(filters), page);
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
     const q = auditQuery.parse(req.query);
     const unknownType = unknownAuditObjectType(q);
     if (unknownType) return reply.status(400).send(unknownType);

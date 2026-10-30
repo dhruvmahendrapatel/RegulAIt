@@ -70,6 +70,18 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
+  filterParams,
+  parseListExport,
+  parseListPage,
+  runListPage,
+  sendListError,
+  sendListExport,
+  wantsListContract,
+  type ListReader,
+  type ListSpec,
+} from "./list-contract.js";
+import { count as countL, getTableColumns, sql as sqlL, type SQL as SQLL } from "@regulait/db";
+import {
   agents,
   aiEndpointSignatures,
   aiUseCases,
@@ -204,6 +216,77 @@ export const SHADOW_AI_RULE_IDS = {
 } as const;
 
 const SEVERITY_RANK: Record<ShadowAiSeverity, number> = { low: 0, medium: 1, high: 2, critical: 3 };
+
+// ---- ADR-0219: the inventory and the import history under the shared list contract
+const findingsFilterQuery = z
+  .object({
+    severity: z.enum(["low", "medium", "high", "critical"]).optional(),
+    disposition: z.enum(SHADOW_AI_DISPOSITIONS).optional(),
+    /** the page's status chips: open, confirmed, or closed (sanctioned, false positive, remediated) */
+    status: z.enum(["open", "confirmed", "closed"]).optional(),
+  })
+  .strict();
+const findingStatusGroup = (d: string): "open" | "confirmed" | "closed" => (d === "open" ? "open" : d === "confirmed" ? "confirmed" : "closed");
+/** how many "seen again" findings the summary names (the count is always the true one) */
+const SEEN_AGAIN_LISTED = 50;
+type FindingListRow = typeof shadowAiFindings.$inferSelect & {
+  replacementAgent: { id: string; name: string } | null;
+  linkedUseCase: { id: string; name: string } | null;
+  dispositionStale: boolean;
+};
+const FINDING_SEVERITY_ORDER = sqlL`case ${shadowAiFindings.severity} when 'critical' then 4 when 'high' then 3 when 'medium' then 2 when 'low' then 1 end`;
+const FINDING_CONFIDENCE_ORDER = sqlL`case ${shadowAiFindings.confidence} when 'high' then 3 when 'medium' then 2 when 'low' then 1 end`;
+export const SHADOW_FINDINGS_LIST: ListSpec<FindingListRow> = {
+  id: "shadow-ai-findings",
+  sorts: {
+    severity: { expr: FINDING_SEVERITY_ORDER },
+    subject: { expr: sqlL`lower(${shadowAiFindings.subject})` },
+    sources: { expr: sqlL`jsonb_array_length(${shadowAiFindings.signalSources})` },
+    confidence: { expr: FINDING_CONFIDENCE_ORDER },
+    observations: { expr: shadowAiFindings.lastSeenAt, keysetAt: shadowAiFindings.lastSeenAt },
+    disposition: { expr: shadowAiFindings.disposition },
+    provider: { expr: shadowAiFindings.provider },
+    firstSeen: { expr: shadowAiFindings.firstSeenAt, keysetAt: shadowAiFindings.firstSeenAt },
+  },
+  columns: {
+    severity: { label: "Severity", value: (r) => r.severity },
+    subject: { label: "Subject", value: (r) => r.subject },
+    sources: { label: "Evidence", value: (r) => r.signalSources.join(", ") },
+    confidence: { label: "Confidence", value: (r) => r.confidence },
+    observations: { label: "Seen", value: (r) => `${r.observationCount} time(s), last ${r.lastSeenAt.toISOString()}` },
+    disposition: { label: "Status", value: (r) => `${r.disposition.replace(/_/g, " ")}${r.dispositionStale ? ", seen again" : ""}` },
+    provider: { label: "Provider", value: (r) => r.provider },
+    firstSeen: { label: "First seen", value: (r) => r.firstSeenAt },
+    useCase: { label: "Registered as", value: (r) => r.linkedUseCase?.name ?? null },
+  },
+  filters: ["severity", "disposition", "status"],
+  defaultSort: { col: "severity", dir: "desc" },
+  idCol: shadowAiFindings.id,
+};
+const importsFilterQuery = z.object({ status: z.enum(["planned", "applied", "refused"]).optional() }).strict();
+export const SHADOW_IMPORTS_LIST: ListSpec<typeof shadowAiImports.$inferSelect> = {
+  id: "shadow-ai-imports",
+  sorts: {
+    when: { expr: shadowAiImports.createdAt, keysetAt: shadowAiImports.createdAt },
+    kind: { expr: shadowAiImports.kind },
+    mode: { expr: shadowAiImports.mode },
+    status: { expr: shadowAiImports.status },
+    rows: { expr: shadowAiImports.rowCount },
+    outcome: { expr: sqlL`lower(${shadowAiImports.reason})` },
+  },
+  columns: {
+    when: { label: "When", value: (r) => r.createdAt },
+    kind: { label: "Kind", value: (r) => r.kind.replace(/_/g, " ") },
+    mode: { label: "Mode", value: (r) => (r.mode === "dry_run" ? "Dry run" : "Applied") },
+    status: { label: "Status", value: (r) => r.status },
+    rows: { label: "Rows", value: (r) => r.rowCount },
+    outcome: { label: "Outcome", value: (r) => r.reason },
+    source: { label: "Source", value: (r) => r.source },
+  },
+  filters: ["status"],
+  defaultSort: { col: "when", dir: "desc" },
+  idCol: shadowAiImports.id,
+};
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 
 const dispositionSchema = z
@@ -1264,7 +1347,44 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
     });
   });
 
-  app.get("/v1/shadow-ai/imports", async () => {
+  const importsReader: ListReader<typeof shadowAiImports.$inferSelect> = {
+    fetch: (q) =>
+      db
+        .select({ ...getTableColumns(shadowAiImports), _cursorAt: q.cursorAt })
+        .from(shadowAiImports)
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset),
+    countable: (where) => db.select({ one: sqlL`1` }).from(shadowAiImports).where(where),
+    idOf: (r) => r.id,
+  };
+  const importsWhere = (f: z.infer<typeof importsFilterQuery>): SQLL | undefined =>
+    f.status ? eq(shadowAiImports.status, f.status) : undefined;
+  // ADR-0219: with any of sort/dir/cursor/offset/count the import history answers the shared list contract; with
+  // none of them, exactly the response it always gave (the newest 200). Admin only.
+  app.get("/v1/shadow-ai/imports/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const filters = importsFilterQuery.parse(filterParams(q));
+      const ex = parseListExport(SHADOW_IMPORTS_LIST, q);
+      await sendListExport(db, req, reply, SHADOW_IMPORTS_LIST, importsReader, importsWhere(filters), ex, filters);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+  app.get("/v1/shadow-ai/imports", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      try {
+        const q = req.query as Record<string, unknown>;
+        const filters = importsFilterQuery.parse(filterParams(q));
+        const page = parseListPage(SHADOW_IMPORTS_LIST, q);
+        return await runListPage(db, SHADOW_IMPORTS_LIST, importsReader, importsWhere(filters), page);
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
     const rows = await db.select().from(shadowAiImports).orderBy(desc(shadowAiImports.createdAt)).limit(200);
     return { imports: rows };
   });
@@ -1273,22 +1393,9 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
   // THE INVENTORY
   // =======================================================================
 
-  app.get("/v1/shadow-ai/findings", async (req) => {
-    const q = z
-      .object({
-        severity: z.enum(["low", "medium", "high", "critical"]).optional(),
-        disposition: z.enum(SHADOW_AI_DISPOSITIONS).optional(),
-      })
-      .parse(req.query ?? {});
-
-    const conditions = [
-      ...(q.severity ? [eq(shadowAiFindings.severity, q.severity)] : []),
-      ...(q.disposition ? [eq(shadowAiFindings.disposition, q.disposition)] : []),
-    ];
-    const rows = await (conditions.length > 0
-      ? db.select().from(shadowAiFindings).where(and(...conditions))
-      : db.select().from(shadowAiFindings));
-
+  type FindingRow = typeof shadowAiFindings.$inferSelect;
+  /** each finding with its governed replacement and the use case it was registered as */
+  const decorateFindings = async (rows: FindingRow[]) => {
     // resolve the GOVERNED REPLACEMENT — the whole point of a finding being
     // actionable rather than a complaint
     const agentIds = [...new Set(rows.map((r) => r.replacementAgentId).filter((x): x is string => Boolean(x)))];
@@ -1304,7 +1411,18 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
           .from(aiUseCases).where(inArray(aiUseCases.discoveryFindingId, findingIds))
       : [];
     const useCaseByFinding = new Map(linkedRows.map((u) => [u.findingId, { id: u.id, name: u.name, status: u.status }]));
-
+    return rows.map((r) => ({
+      ...r,
+      replacementAgent: r.replacementAgentId ? (agentById.get(r.replacementAgentId) ?? null) : null,
+      linkedUseCase: useCaseByFinding.get(r.id) ?? null,
+      /** a finding closed as remediated/false-positive that has been OBSERVED
+       * AGAIN since the judgement. Surfaced rather than silently re-opened:
+       * the judgement was a human act and only a human should undo it. */
+      dispositionStale:
+        r.disposition !== "open" && r.dispositionAt !== null && r.lastSeenAt > r.dispositionAt,
+    }));
+  };
+  const findingsCoverage = async () => {
     const importRows = await db
       .select({ kind: shadowAiImports.kind, rowCount: shadowAiImports.rowCount, createdAt: shadowAiImports.createdAt })
       .from(shadowAiImports)
@@ -1320,6 +1438,104 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
       if (!cur.lastImportedAt || at > cur.lastImportedAt) cur.lastImportedAt = at;
       byKind.set(r.kind, cur);
     }
+    return coverageScorecard([...byKind.values()], await activeDiscoverySources(db));
+  };
+  const FINDINGS_POSTURE =
+    "Detection is a signal, not proof of misuse. An SDK dependency is a capability, not a violation; an endpoint " +
+    "hit may be a sanctioned integration. Every row is a lead for human triage — hence the disposition states.";
+  const findingsReader: ListReader<FindingListRow> = {
+    fetch: async (q) => {
+      const rows = await db
+        .select({ f: shadowAiFindings, _cursorAt: q.cursorAt })
+        .from(shadowAiFindings)
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset);
+      const views = await decorateFindings(rows.map((r) => r.f));
+      return views.map((v, i) => ({ ...v, _cursorAt: rows[i]!._cursorAt }));
+    },
+    countable: (where) => db.select({ one: sqlL`1` }).from(shadowAiFindings).where(where),
+    idOf: (r) => r.id,
+  };
+  /** the figures above the inventory, across every finding (not only the page on screen) */
+  const findingsSummary = async () => {
+    const STALE = sqlL`(${shadowAiFindings.disposition} <> 'open' and ${shadowAiFindings.dispositionAt} is not null and ${shadowAiFindings.lastSeenAt} > ${shadowAiFindings.dispositionAt})`;
+    const [bySev, byDisp, stale] = await Promise.all([
+      db.select({ k: shadowAiFindings.severity, n: countL() }).from(shadowAiFindings).groupBy(shadowAiFindings.severity),
+      db
+        .select({ k: shadowAiFindings.disposition, critical: sqlL<number>`count(*) filter (where ${shadowAiFindings.severity} = 'critical')::int`, n: countL() })
+        .from(shadowAiFindings)
+        .groupBy(shadowAiFindings.disposition),
+      db.select({ id: shadowAiFindings.id, subject: shadowAiFindings.subject }).from(shadowAiFindings).where(STALE).orderBy(desc(shadowAiFindings.lastSeenAt)).limit(SEEN_AGAIN_LISTED),
+    ]);
+    const bySeverity: Record<string, number> = { critical: 0, high: 0, medium: 0, low: 0 };
+    for (const r of bySev) bySeverity[r.k] = Number(r.n);
+    const statusCounts: Record<string, number> = { all: 0, open: 0, confirmed: 0, closed: 0 };
+    let criticalOpen = 0;
+    for (const r of byDisp) {
+      const g = findingStatusGroup(r.k);
+      statusCounts.all! += Number(r.n);
+      statusCounts[g] = (statusCounts[g] ?? 0) + Number(r.n);
+      if (g !== "closed") criticalOpen += Number(r.critical);
+    }
+    const [staleTotal] = await db.select({ n: countL() }).from(shadowAiFindings).where(STALE);
+    return { bySeverity, statusCounts, criticalOpen, seenAgain: stale, seenAgainTotal: Number(staleTotal?.n ?? 0) };
+  };
+  const findingsWhere = (f: z.infer<typeof findingsFilterQuery>): SQLL | undefined => {
+    const conds: SQLL[] = [];
+    if (f.severity) conds.push(eq(shadowAiFindings.severity, f.severity));
+    if (f.disposition) conds.push(eq(shadowAiFindings.disposition, f.disposition));
+    if (f.status === "open") conds.push(eq(shadowAiFindings.disposition, "open"));
+    if (f.status === "confirmed") conds.push(eq(shadowAiFindings.disposition, "confirmed"));
+    if (f.status === "closed") conds.push(sqlL`${shadowAiFindings.disposition} not in ('open', 'confirmed')`);
+    return conds.length ? and(...conds) : undefined;
+  };
+
+  // ADR-0219: with any of sort/dir/cursor/offset/count the inventory answers the shared list contract, with the
+  // status filter on the server and the page's figures (`summary`), coverage and posture beside the page; with none
+  // of them, exactly the response it always gave. Admin only. The export holds no raw evidence: the evidence kinds only.
+  app.get("/v1/shadow-ai/findings/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const filters = findingsFilterQuery.parse(filterParams(q));
+      const ex = parseListExport(SHADOW_FINDINGS_LIST, q);
+      await sendListExport(db, req, reply, SHADOW_FINDINGS_LIST, findingsReader, findingsWhere(filters), ex, filters);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+  app.get("/v1/shadow-ai/findings", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      try {
+        const q = req.query as Record<string, unknown>;
+        const filters = findingsFilterQuery.parse(filterParams(q));
+        const page = parseListPage(SHADOW_FINDINGS_LIST, q);
+        const [out, summary, coverage] = await Promise.all([
+          runListPage(db, SHADOW_FINDINGS_LIST, findingsReader, findingsWhere(filters), page),
+          findingsSummary(),
+          findingsCoverage(),
+        ]);
+        return { ...out, summary, coverage, posture: FINDINGS_POSTURE };
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
+    const q = z
+      .object({
+        severity: z.enum(["low", "medium", "high", "critical"]).optional(),
+        disposition: z.enum(SHADOW_AI_DISPOSITIONS).optional(),
+      })
+      .parse(req.query ?? {});
+
+    const conditions = [
+      ...(q.severity ? [eq(shadowAiFindings.severity, q.severity)] : []),
+      ...(q.disposition ? [eq(shadowAiFindings.disposition, q.disposition)] : []),
+    ];
+    const rows = await (conditions.length > 0
+      ? db.select().from(shadowAiFindings).where(and(...conditions))
+      : db.select().from(shadowAiFindings));
 
     const sorted = [...rows].sort(
       (a, b) =>
@@ -1327,20 +1543,9 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
     );
 
     return {
-      findings: sorted.map((r) => ({
-        ...r,
-        replacementAgent: r.replacementAgentId ? (agentById.get(r.replacementAgentId) ?? null) : null,
-        linkedUseCase: useCaseByFinding.get(r.id) ?? null,
-        /** a finding closed as remediated/false-positive that has been OBSERVED
-         * AGAIN since the judgement. Surfaced rather than silently re-opened:
-         * the judgement was a human act and only a human should undo it. */
-        dispositionStale:
-          r.disposition !== "open" && r.dispositionAt !== null && r.lastSeenAt > r.dispositionAt,
-      })),
-      coverage: coverageScorecard([...byKind.values()], await activeDiscoverySources(db)),
-      posture:
-        "Detection is a signal, not proof of misuse. An SDK dependency is a capability, not a violation; an endpoint " +
-        "hit may be a sanctioned integration. Every row is a lead for human triage — hence the disposition states.",
+      findings: await decorateFindings(sorted),
+      coverage: await findingsCoverage(),
+      posture: FINDINGS_POSTURE,
     };
   });
 

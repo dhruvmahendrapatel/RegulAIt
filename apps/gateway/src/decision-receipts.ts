@@ -1,5 +1,7 @@
 import { createHash, sign, type KeyObject } from "node:crypto";
 import type { FastifyInstance } from "fastify";
+import { z } from "zod";
+import { filterParams, parseListExport, parseListPage, runListPage, sendListError, sendListExport, type ListReader, type ListSpec } from "./list-contract.js";
 import { and, asc, auditLog, decisionCaptureStatus, decisionReceipts, desc, eq, gt, gte, inArray, isNotNull, isNull, loadAuditChainBoundary, lte, receiptSigningKeys, schedulerJobs, sql, type Db } from "@regulait/db";
 import { auditChainVersionAt, auditContentHashFor, auditRowHash, auditRowVersionProblem, isDecisionReceiptPayload, isDecisionReceiptPayloadV1, isReceiptBundle, RECEIPT_EMITTER_SUPPORTS_V2, RECEIPT_GENESIS_PREV, RECEIPT_OBJECT_TYPES, RECEIPT_PAYLOAD_VERSION, RECEIPT_PAYLOAD_VERSION_V2, receiptCanonicalBytes, receiptPayloadHash, receiptVersionForAuditSeq, type AnyDecisionReceiptPayload, type DecisionReceiptPayloadV2, verifyReceiptBundle, type DecisionReceiptPayload, type ReceiptPublicKey, type ReceiptSigningState, type SignedDecisionReceipt } from "@regulait/shared";
 import { loadOrgSettings } from "./org-settings.js";
@@ -200,9 +202,73 @@ function integer(value: unknown, fallback: number): number | null {
   const n = Number(value);
   return Number.isSafeInteger(n) ? n : null;
 }
+// ---- ADR-0219: the receipts list (a receipt carries no reason or detail text; the file carries no signature)
+type ReceiptListRow = SignedDecisionReceipt;
+const receiptsFilterQuery = z.object({ fromSeq: z.coerce.number().int().min(1).max(Number.MAX_SAFE_INTEGER).default(1) }).strict();
+const rp = (r: ReceiptListRow) => (r.payload && typeof r.payload === "object" ? (r.payload as unknown as Record<string, unknown>) : {});
+const rd = (r: ReceiptListRow) => {
+  const d = rp(r).decision;
+  return (d && typeof d === "object" ? d : {}) as Record<string, unknown>;
+};
+const rs = (v: unknown) => (typeof v === "string" && v !== "" ? v : null);
+export const RECEIPTS_LIST: ListSpec<ReceiptListRow> = {
+  id: "decision-receipts",
+  sorts: {
+    seq: { expr: decisionReceipts.receiptSeq },
+    at: { expr: sql`(${decisionReceipts.payload}->'decision'->>'at')` },
+    effect: { expr: sql`(${decisionReceipts.payload}->'decision'->>'effect')` },
+    object: { expr: sql`(${decisionReceipts.payload}->'decision'->>'objectType')` },
+    rule: { expr: sql`coalesce(${decisionReceipts.payload}->'decision'->>'ruleId', ${decisionReceipts.payload}->'decision'->>'ruleIdHash')` },
+    v: { expr: sql`(${decisionReceipts.payload}->>'v')` },
+  },
+  columns: {
+    seq: { label: "Sequence", value: (r) => r.receiptSeq },
+    at: { label: "Decided", value: (r) => rs(rd(r).at) },
+    effect: { label: "Effect", value: (r) => rs(rd(r).effect) },
+    object: { label: "Object", value: (r) => rs(rd(r).objectType) },
+    rule: { label: "Rule", value: (r) => rs(rd(r).ruleId) ?? (rs(rd(r).ruleIdHash) ? `sha256:${rs(rd(r).ruleIdHash)}` : null) },
+    v: { label: "Version", value: (r) => (typeof rp(r).v === "number" ? `v${rp(r).v as number}` : null) },
+  },
+  filters: ["fromSeq"],
+  defaultSort: { col: "seq", dir: "asc" },
+  idCol: decisionReceipts.receiptSeq,
+};
+
 export function registerDecisionReceiptRoutes(app: FastifyInstance, db: Db, _opts: { dataKey?: string } = {}): void {
+  // ADR-0219: the receipts list under the shared list contract. The list pages by `fromSeq`, so the switch is any of
+  // sort/dir/offset/count/cursor; `fromSeq` stays a filter. Every page is audited, as the list always was.
+  const receiptsReader: ListReader<ReceiptListRow> = {
+    fetch: async (q) => {
+      const rows = await db.select().from(decisionReceipts).where(q.where).orderBy(...q.orderBy).limit(q.limit).offset(q.offset);
+      return rows.map(envelope);
+    },
+    countable: (where) => db.select({ one: sql`1` }).from(decisionReceipts).where(where),
+    idOf: (r) => String(r.receiptSeq),
+  };
+  app.get("/v1/receipts/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const f = receiptsFilterQuery.parse(filterParams(q));
+      const ex = parseListExport(RECEIPTS_LIST, q);
+      await sendListExport(db, req, reply, RECEIPTS_LIST, receiptsReader, gte(decisionReceipts.receiptSeq, f.fromSeq), ex, f);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
   app.get("/v1/receipts", async (req, reply) => {
     const q = req.query as Record<string, unknown>;
+    if (["sort", "dir", "offset", "count", "cursor"].some((k) => q[k] !== undefined)) {
+      try {
+        const f = receiptsFilterQuery.parse(filterParams(q));
+        const page = parseListPage(RECEIPTS_LIST, q);
+        const out = await runListPage(db, RECEIPTS_LIST, receiptsReader, gte(decisionReceipts.receiptSeq, f.fromSeq), page);
+        await db.insert(auditLog).values({userId:req.authCtx.userId??"00000000-0000-0000-0000-000000000000",objectType:"decision_receipt",effect:"allow",ruleId:"decision-receipts-listed",ruleChain:[],reason:"Decision receipt envelopes listed",detail:{fromSeq:f.fromSeq,limit:page.limit,offset:page.offset,sort:page.sort,dir:page.dir,rows:out.items.length}});
+        return out;
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
     const from = integer(q.fromSeq, 1), limit = integer(q.limit, 100);
     if (from === null || limit === null || limit > 500) return reply.status(400).send({ error: "invalid_receipt_range" });
     const rows=await db.select().from(decisionReceipts).where(gte(decisionReceipts.receiptSeq,from)).orderBy(asc(decisionReceipts.receiptSeq)).limit(limit);

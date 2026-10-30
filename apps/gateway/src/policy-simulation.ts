@@ -60,7 +60,19 @@
  *   candidate policy actually reads a project-derived attribute.
  */
 import { z } from "zod";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
+import {
+  filterParams,
+  parseListExport,
+  parseListPage,
+  runListPage,
+  sendListError,
+  sendListExport,
+  wantsListContract,
+  type ListReader,
+  type ListSpec,
+} from "./list-contract.js";
+import { getTableColumns as colsL, sql as sqlL, type SQL as SQLL } from "@regulait/db";
 import { CHANGED_CONCURRENTLY, relaxedAgainst, requireRelaxStepUp } from "./step-up.js";
 import {
   configVersions,
@@ -1538,7 +1550,61 @@ export function registerPolicySimulationRoutes(app: FastifyInstance, db: Db): vo
    * named users/projects/tools and the scope itself stay on the detail route,
    * where the scope check guards them.
    */
+  // ADR-0219: the one predicate for the preview history, its count and its Excel export. A non-admin sees what they
+  // ran, and a wider preview only when every user it scoped is someone they may see (the read below, in SQL).
+  const simulationsScope = async (req: FastifyRequest, f: z.infer<typeof simulationsFilterQuery>): Promise<SQLL | undefined | null> => {
+    const callerId = req.authCtx.userId ?? null;
+    if (!req.authCtx.isAdmin && !callerId) return null;
+    const conds: SQLL[] = [];
+    if (f.policyVersionId) conds.push(eq(policySimulations.policyVersionId, f.policyVersionId));
+    if (!req.authCtx.isAdmin) {
+      const visible = await visibleSubjectsFor(db, callerId!);
+      conds.push(
+        sqlL`(${policySimulations.requestedByUserId} = ${callerId} or (${policySimulations.scopeUserIds} is not null and ${policySimulations.scopeUserIds} <@ ${JSON.stringify(visible)}::jsonb))`,
+      );
+    }
+    return conds.length ? and(...conds) : undefined;
+  };
+  const simulationsReader: ListReader<SimulationListRow> = {
+    fetch: async (q) => {
+      const rows = await db
+        .select({ ...colsL(policySimulations), _cursorAt: q.cursorAt })
+        .from(policySimulations)
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset);
+      return rows.map(({ blastRadius: _radius, scopeUserIds: _scope, ...summary }) => summary);
+    },
+    countable: (where) => db.select({ one: sqlL`1` }).from(policySimulations).where(where),
+    idOf: (r) => r.id,
+  };
+  app.get("/v1/policy-simulations/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const filters = simulationsFilterQuery.parse(filterParams(q));
+      const ex = parseListExport(SIMULATIONS_LIST, q);
+      const where = await simulationsScope(req, filters);
+      if (where === null) return reply.status(403).send({ error: "simulation_scope_denied" });
+      await sendListExport(db, req, reply, SIMULATIONS_LIST, simulationsReader, where, ex, filters);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
   app.get("/v1/policy-simulations", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      try {
+        const q = req.query as Record<string, unknown>;
+        const filters = simulationsFilterQuery.parse(filterParams(q));
+        const page = parseListPage(SIMULATIONS_LIST, q);
+        const where = await simulationsScope(req, filters);
+        if (where === null) return reply.status(403).send({ error: "simulation_scope_denied" });
+        return { ...(await runListPage(db, SIMULATIONS_LIST, simulationsReader, where, page)), fidelity: REPLAY_FIDELITY_DISCLOSURE };
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
     const q = z
       .object({
         policyVersionId: z.string().uuid().optional(),
@@ -1681,3 +1747,31 @@ export function registerPolicySimulationRoutes(app: FastifyInstance, db: Db): vo
     return { settings: row };
   });
 }
+
+// ---- ADR-0219: the preview history under the shared list contract (never the blast radius or the scope)
+const simulationsFilterQuery = z.object({ policyVersionId: z.string().uuid().optional() }).strict();
+type SimulationListRow = Omit<typeof policySimulations.$inferSelect, "blastRadius" | "scopeUserIds">;
+export const SIMULATIONS_LIST: ListSpec<SimulationListRow> = {
+  id: "policy-simulations",
+  sorts: {
+    p: { expr: sqlL`lower(${policySimulations.policyName})` },
+    win: { expr: policySimulations.windowDays },
+    considered: { expr: policySimulations.considered },
+    blocked: { expr: policySimulations.newlyDenied },
+    users: { expr: policySimulations.affectedUsers },
+    approval: { expr: policySimulations.newlyApprovalRequired },
+    at: { expr: policySimulations.createdAt, keysetAt: policySimulations.createdAt },
+  },
+  columns: {
+    p: { label: "Policy", value: (r) => `${r.policyName} v${r.policyVersion}` },
+    win: { label: "Window", value: (r) => `${r.windowDays}d` },
+    considered: { label: "Calls examined", value: (r) => r.considered },
+    blocked: { label: "Newly blocked", value: (r) => r.newlyDenied },
+    users: { label: "Users", value: (r) => r.affectedUsers },
+    approval: { label: "Newly needs approval", value: (r) => r.newlyApprovalRequired },
+    at: { label: "Previewed", value: (r) => r.createdAt },
+  },
+  filters: ["policyVersionId"],
+  defaultSort: { col: "at", dir: "desc" },
+  idCol: policySimulations.id,
+};

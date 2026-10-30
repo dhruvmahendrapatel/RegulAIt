@@ -38,11 +38,24 @@
  */
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
+import {
+  filterParams,
+  parseListExport,
+  parseListPage,
+  runListPage,
+  sendListError,
+  sendListExport,
+  wantsListContract,
+  type ListReader,
+  type ListSpec,
+} from "./list-contract.js";
 import { CHANGED_CONCURRENTLY, relaxedAgainst, requireRelaxStepUp } from "./step-up.js";
 
 /** ADR-0181 strict values of the MRM toggles (the column defaults) */
 const MRM_STRICT = { mrmEnforced: true, mrmStalenessRecertEnabled: true, mrmStalenessRecertThreshold: 1 } as const;
 import {
+  sql,
+  type SQL,
   agents,
   and,
   approvals,
@@ -538,6 +551,61 @@ export async function runMrmExpirySweep(
 const idParam = z.object({ id: z.string().uuid() });
 const evidenceParam = z.object({ id: z.string().uuid(), evidenceId: z.string().uuid() });
 
+/** ADR-0219: the model card's subject name, as the list shows it (an agent's or a custom provider's) */
+const CARD_SUBJECT = sql<string | null>`coalesce((select ${agents.name} from ${agents} where ${agents.id} = ${modelCards.agentId}), (select ${customModelProviders.name} from ${customModelProviders} where ${customModelProviders.id} = ${modelCards.customProviderId}))`;
+/** the newest sign-off record's expiry: what "Expires" counts down to */
+const CARD_EXPIRY = sql`(select ${modelCardApprovals.validUntil} from ${modelCardApprovals} where ${modelCardApprovals.cardId} = ${modelCards.id} order by ${modelCardApprovals.requestedAt} desc limit 1)`;
+const CARD_EVIDENCE = sql`(select count(*) from ${modelCardEvidence} where ${modelCardEvidence.cardId} = ${modelCards.id})`;
+type CardListRow = Awaited<ReturnType<typeof cardView>> & { subjectKind: string; subjectName: string | null; subjectModel: string | null };
+export const MODEL_CARDS_LIST: ListSpec<CardListRow> = {
+  id: "model-cards",
+  sorts: {
+    subject: { expr: sql`lower(${CARD_SUBJECT})` },
+    use: { expr: sql`lower(${modelCards.intendedUse})` },
+    evidence: { expr: CARD_EVIDENCE },
+    expiry: { expr: CARD_EXPIRY },
+    created: { expr: modelCards.createdAt, keysetAt: modelCards.createdAt },
+    updated: { expr: modelCards.updatedAt, keysetAt: modelCards.updatedAt },
+  },
+  columns: {
+    subject: { label: "Model", value: (r) => r.subjectName ?? r.agentId ?? r.customProviderId },
+    use: { label: "Intended use", value: (r) => r.intendedUse },
+    state: { label: "State", value: (r) => r.state },
+    complete: { label: "Card", value: (r) => (r.completeness.complete ? "complete" : `missing ${r.completeness.missing.length}`) },
+    evidence: { label: "Evidence", value: (r) => r.evidence.length },
+    expiry: { label: "Expires", value: (r) => (r.daysUntilExpiry === null ? null : `${r.daysUntilExpiry}d`) },
+    created: { label: "Created", value: (r) => r.createdAt },
+    updated: { label: "Updated", value: (r) => r.updatedAt },
+  },
+  filters: [],
+  defaultSort: { col: "created", dir: "desc" },
+  idCol: modelCards.id,
+};
+type ExpiringListRow = ModelCardApprovalRow & { effectiveStatus: string; daysUntilExpiry: number | null; intendedUse: string | null };
+export const MRM_EXPIRING_LIST: ListSpec<ExpiringListRow> = {
+  id: "model-card-expiring",
+  sorts: {
+    use: { expr: sql`lower(${modelCards.intendedUse})` },
+    state: { expr: sql`(${modelCardApprovals.status} = 'expired' or ${modelCardApprovals.validUntil} <= now())` },
+    until: { expr: modelCardApprovals.validUntil },
+    days: { expr: modelCardApprovals.validUntil },
+    requested: { expr: modelCardApprovals.requestedAt, keysetAt: modelCardApprovals.requestedAt },
+  },
+  columns: {
+    use: { label: "Intended use", value: (r) => r.intendedUse ?? r.cardId },
+    state: { label: "State", value: (r) => r.effectiveStatus },
+    until: { label: "Valid until", value: (r) => r.validUntil },
+    days: { label: "Days", value: (r) => r.daysUntilExpiry },
+    requested: { label: "Requested", value: (r) => r.requestedAt },
+  },
+  filters: [],
+  defaultSort: { col: "until", dir: "asc" },
+  idCol: modelCardApprovals.id,
+};
+/** a lapsed sign-off, or one that lapses inside the warn window (what `/v1/mrm/expiring` lists) */
+const expiringWhere = (warnDays: number): SQL =>
+  sql`(${modelCardApprovals.status} = 'expired' or (${modelCardApprovals.status} = 'approved' and ${modelCardApprovals.validUntil} is not null and ${modelCardApprovals.validUntil} < now() + make_interval(days => ${warnDays + 1})))`;
+
 async function cardView(db: Db, card: ModelCardRow, now: Date, warnDays: number) {
   const chain = await db
     .select()
@@ -715,11 +783,58 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
    * evidence routes and the sweeps are outside: none of them calls `cardView`
    * or reads `eval_results`.
    */
+  const cardsReader = (warnDays: number): ListReader<CardListRow> => ({
+    fetch: async (q) => {
+      const rows = await db
+        .select({ c: modelCards, subjectName: CARD_SUBJECT, subjectModel: sql<string | null>`(select ${agents.model} from ${agents} where ${agents.id} = ${modelCards.agentId})`, _cursorAt: q.cursorAt })
+        .from(modelCards)
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset);
+      const now = new Date();
+      const out = [];
+      for (const r of rows) {
+        const view = await cardView(db, r.c, now, warnDays);
+        out.push({ ...view, subjectKind: r.c.agentId ? "agent" : "custom_provider", subjectName: r.subjectName, subjectModel: r.subjectModel, _cursorAt: r._cursorAt });
+      }
+      return out;
+    },
+    countable: (where) => db.select({ one: sql`1` }).from(modelCards).where(where),
+    idOf: (r) => r.id,
+  });
+  // ADR-0219: the Excel export sits outside the presentation scope below: that scope rewrites a non-JSON body as
+  // text, which would break a binary file, and no exported column carries an eval run's quoted claims
+  app.get("/v1/mrm/cards/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      z.object({}).strict().parse(filterParams(q));
+      const ex = parseListExport(MODEL_CARDS_LIST, q);
+      const org = await loadOrgSettings(db);
+      await sendListExport(db, req, reply, MODEL_CARDS_LIST, cardsReader(org.mrmExpiryWarnDays), undefined, ex, {});
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+
   app.register(async (scope) => {
     installPresentationScrub(scope);
 
 
-    scope.get("/v1/mrm/cards", async () => {
+    scope.get("/v1/mrm/cards", async (req, reply) => {
+      // ADR-0219: with any of sort/dir/cursor/offset/count, one page under the shared list contract
+      if (wantsListContract(req.query)) {
+        try {
+          const q = req.query as Record<string, unknown>;
+          z.object({}).strict().parse(filterParams(q));
+          const page = parseListPage(MODEL_CARDS_LIST, q);
+          const org = await loadOrgSettings(db);
+          return { ...(await runListPage(db, MODEL_CARDS_LIST, cardsReader(org.mrmExpiryWarnDays), undefined, page)), enforced: org.mrmEnforced };
+        } catch (e) {
+          return sendListError(reply, e);
+        }
+      }
       const org = await loadOrgSettings(db);
       const now = new Date();
       const rows = await db.select().from(modelCards).orderBy(desc(modelCards.createdAt));
@@ -1202,7 +1317,53 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
 
   /** the expiring/lapsed worklist — what ADR-0045 wants surfaced as WORK ahead
    * of the outage, rather than discovered at the moment of the refusal */
-  app.get("/v1/mrm/expiring", async () => {
+  const expiringReader: ListReader<ExpiringListRow> = {
+    fetch: async (q) => {
+      const rows = await db
+        .select({ a: modelCardApprovals, intendedUse: modelCards.intendedUse, _cursorAt: q.cursorAt })
+        .from(modelCardApprovals)
+        .leftJoin(modelCards, eq(modelCards.id, modelCardApprovals.cardId))
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset);
+      const now = new Date();
+      return rows.map((r) => ({
+        ...r.a,
+        effectiveStatus: effectiveApprovalStatus(r.a, now),
+        daysUntilExpiry: daysUntilExpiry(r.a, now),
+        intendedUse: r.intendedUse ?? null,
+        _cursorAt: r._cursorAt,
+      }));
+    },
+    countable: (where) => db.select({ one: sql`1` }).from(modelCardApprovals).leftJoin(modelCards, eq(modelCards.id, modelCardApprovals.cardId)).where(where),
+    idOf: (r) => r.id,
+  };
+  app.get("/v1/mrm/expiring/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      z.object({}).strict().parse(filterParams(q));
+      const ex = parseListExport(MRM_EXPIRING_LIST, q);
+      const org = await loadOrgSettings(db);
+      await sendListExport(db, req, reply, MRM_EXPIRING_LIST, expiringReader, expiringWhere(org.mrmExpiryWarnDays), ex, {});
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+  app.get("/v1/mrm/expiring", async (req, reply) => {
+    // ADR-0219: with any of sort/dir/cursor/offset/count, one page under the shared list contract
+    if (wantsListContract(req.query)) {
+      try {
+        const q = req.query as Record<string, unknown>;
+        z.object({}).strict().parse(filterParams(q));
+        const page = parseListPage(MRM_EXPIRING_LIST, q);
+        const org = await loadOrgSettings(db);
+        return { ...(await runListPage(db, MRM_EXPIRING_LIST, expiringReader, expiringWhere(org.mrmExpiryWarnDays), page)), warnDays: org.mrmExpiryWarnDays };
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
     const org = await loadOrgSettings(db);
     const now = new Date();
     const rows = await db

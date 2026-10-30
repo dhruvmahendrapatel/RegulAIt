@@ -60,8 +60,23 @@ import { assertAiBomSignoffPossible, prepareAiBomSignoff, runAiBomSignoffs, type
 import { AiBomError } from "./ai-bom.js";
 import { checkStepUp, isStepUpPrompt } from "./step-up.js";
 import { syncVendorForInstance } from "./vendors.js";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
+  filterParams,
+  parseListExport,
+  parseListPage,
+  runListPage,
+  sendListError,
+  sendListExport,
+  wantsListContract,
+  type ListReader,
+  type ListSpec,
+} from "./list-contract.js";
+import { userNameSql } from "./delegations-list.js";
+import { likeLiteral } from "./users-list.js";
+import {
+  getTableColumns,
+  type SQL,
   agents,
   aiRisks,
   aiUseCases,
@@ -1496,6 +1511,74 @@ async function riskViewsFor(db: Db, useCaseId: string) {
   }));
 }
 
+// ---- ADR-0219: the AI registry under the shared list contract ---------------
+const UC_OPEN_CONDITIONS = sql<number>`(select count(*)::int from ${useCaseConditions} where ${useCaseConditions.useCaseId} = ${aiUseCases.id} and ${useCaseConditions.status} = 'open')`;
+/** the owner choices offered beside the list (by name) */
+const UC_OWNER_CHOICES = 500;
+const useCasesFilterQuery = z
+  .object({
+    /** matches the name, the purpose or the owner's name, case-insensitively; % and _ are literal */
+    q: z.string().trim().max(200).optional(),
+    status: z.enum(["all", "in_review", "recertification", "proposed", "under_review", "needs_info", "approved", "rejected", "retired"]).optional(),
+    tier: z.enum(["all", "prohibited", "high", "limited", "minimal", "unscreened", "high_or_prohibited"]).optional(),
+    owner: z.string().uuid().optional(),
+  })
+  .strict();
+function useCasesWhere(scope: SQL | undefined, f: z.infer<typeof useCasesFilterQuery>): SQL | undefined {
+  const conds: SQL[] = scope ? [scope] : [];
+  if (f.status === "recertification") conds.push(sql`${aiUseCases.recertification} and ${aiUseCases.status} = 'under_review'`);
+  else if (f.status === "in_review") conds.push(sql`${aiUseCases.status} in ('proposed', 'under_review', 'needs_info')`);
+  else if (f.status && f.status !== "all") conds.push(eq(aiUseCases.status, f.status));
+  if (f.tier === "unscreened") conds.push(sql`${aiUseCases.euAiActTier} is null`);
+  else if (f.tier === "high_or_prohibited") conds.push(sql`${aiUseCases.euAiActTier} in ('high', 'prohibited')`);
+  else if (f.tier && f.tier !== "all") conds.push(eq(aiUseCases.euAiActTier, f.tier));
+  if (f.owner) conds.push(eq(aiUseCases.ownerUserId, f.owner));
+  if (f.q) {
+    const pattern = likeLiteral(f.q);
+    conds.push(sql`(${aiUseCases.name} ilike ${pattern} or ${aiUseCases.description} ilike ${pattern} or coalesce(${userNameSql(aiUseCases.ownerUserId)}, '') ilike ${pattern})`);
+  }
+  return conds.length ? and(...conds) : undefined;
+}
+type UseCaseListRow = Omit<AiUseCaseRow, "intakeAnswers"> & {
+  ownerName: string | null;
+  openConditions: number;
+  approvalExpired: boolean;
+  recertificationDueAt: string | null;
+};
+const UC_STATUS_ORDER = sql`case when ${aiUseCases.recertification} and ${aiUseCases.status} = 'under_review' then 3 else case ${aiUseCases.status} when 'proposed' then 1 when 'under_review' then 2 when 'needs_info' then 4 when 'approved' then 5 when 'rejected' then 6 when 'retired' then 7 end end`;
+const UC_TIER_ORDER = sql`case ${aiUseCases.euAiActTier} when 'prohibited' then 0 when 'high' then 1 when 'limited' then 2 when 'minimal' then 3 end`;
+const ucStatusLabel = (r: UseCaseListRow) =>
+  r.recertification && r.status === "under_review" ? "Re-review" : r.status === "needs_info" ? "Needs information" : r.status.replace(/_/g, " ");
+export const USE_CASES_LIST: ListSpec<UseCaseListRow> = {
+  id: "use-cases",
+  sorts: {
+    name: { expr: sql`lower(${aiUseCases.name})` },
+    status: { expr: UC_STATUS_ORDER },
+    tier: { expr: UC_TIER_ORDER },
+    owner: { expr: sql`lower(${userNameSql(aiUseCases.ownerUserId)})` },
+    created: { expr: aiUseCases.createdAt, keysetAt: aiUseCases.createdAt },
+    validUntil: { expr: aiUseCases.approvedUntil },
+    conditions: { expr: UC_OPEN_CONDITIONS },
+    sensitivity: { expr: aiUseCases.dataSensitivity },
+    decided: { expr: aiUseCases.decidedAt },
+  },
+  columns: {
+    name: { label: "Name", value: (r) => r.name },
+    status: { label: "Status", value: ucStatusLabel },
+    tier: { label: "Tier", value: (r) => r.euAiActTier ?? "not screened" },
+    owner: { label: "Owner", value: (r) => r.ownerName ?? "Unnamed" },
+    created: { label: "Created", value: (r) => r.createdAt },
+    validUntil: { label: "Valid until", value: (r) => (r.approvedUntil ? `${r.approvalExpired ? "Expired " : ""}${r.approvedUntil.toISOString().slice(0, 10)}` : null) },
+    conditions: { label: "Open conditions", value: (r) => r.openConditions },
+    sensitivity: { label: "Data sensitivity", value: (r) => r.dataSensitivity },
+    decided: { label: "Decided", value: (r) => r.decidedAt },
+    description: { label: "Purpose", value: (r) => r.description },
+  },
+  filters: ["q", "status", "tier", "owner"],
+  defaultSort: { col: "created", dir: "desc" },
+  idCol: aiUseCases.id,
+};
+
 function approvalExpired(row: AiUseCaseRow, now: Date): boolean {
   return row.status === "approved" && !!row.approvedUntil && row.approvedUntil.getTime() <= now.getTime();
 }
@@ -2304,9 +2387,97 @@ export function registerUseCaseRoutes(
     return reply.status(201).send({ ...outcome.body, ...(aiBomSnapshotWarning ? { aiBomSnapshotWarning } : {}) });
   });
 
+  // ADR-0219: the registry under the shared list contract. The registry's filters (search, status chip, tier,
+  // owner) run on the server, and the headline and chip counts and the owner choices come with every page, across
+  // the caller's whole scope (fleet for an admin, own use cases otherwise), so they never count the page on screen.
+  const useCasesScope = (req: FastifyRequest): SQL | undefined | null => {
+    if (req.authCtx.isAdmin) return undefined;
+    if (!req.authCtx.userId) return null;
+    return eq(aiUseCases.ownerUserId, req.authCtx.userId);
+  };
+  const useCasesReader: ListReader<UseCaseListRow> = {
+    fetch: async (q) => {
+      const { intakeAnswers: _answers, ...cols } = getTableColumns(aiUseCases);
+      const rows = await db
+        .select({ ...cols, ownerName: userNameSql(aiUseCases.ownerUserId), openConditions: UC_OPEN_CONDITIONS, _cursorAt: q.cursorAt })
+        .from(aiUseCases)
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset);
+      const now = new Date();
+      return rows.map((r) => ({
+        ...r,
+        openConditions: Number(r.openConditions),
+        approvalExpired: approvalExpired(r as unknown as AiUseCaseRow, now),
+        recertificationDueAt: recertificationDueAt(r),
+      }));
+    },
+    countable: (where) => db.select({ one: sql`1` }).from(aiUseCases).where(where),
+    idOf: (r) => r.id,
+  };
+  const useCasesSummary = async (scope: SQL | undefined) => {
+    const IN_REVIEW = sql`${aiUseCases.status} in ('proposed', 'under_review', 'needs_info')`;
+    const HIGH = sql`${aiUseCases.euAiActTier} in ('high', 'prohibited')`;
+    const [[c], byStatus, owners] = await Promise.all([
+      db
+        .select({
+          total: sql<number>`count(*)::int`,
+          underReview: sql<number>`count(*) filter (where ${IN_REVIEW})::int`,
+          approved: sql<number>`count(*) filter (where ${aiUseCases.status} = 'approved')::int`,
+          highTier: sql<number>`count(*) filter (where ${HIGH})::int`,
+          recertification: sql<number>`count(*) filter (where ${aiUseCases.recertification} and ${aiUseCases.status} = 'under_review')::int`,
+        })
+        .from(aiUseCases)
+        .where(scope),
+      db.select({ status: aiUseCases.status, n: sql<number>`count(*)::int` }).from(aiUseCases).where(scope).groupBy(aiUseCases.status),
+      db
+        .selectDistinct({ id: aiUseCases.ownerUserId, name: userNameSql(aiUseCases.ownerUserId) })
+        .from(aiUseCases)
+        .where(scope)
+        .limit(UC_OWNER_CHOICES),
+    ]);
+    const statusCounts: Record<string, number> = { all: c?.total ?? 0, in_review: c?.underReview ?? 0, recertification: c?.recertification ?? 0 };
+    for (const r of byStatus) statusCounts[r.status] = Number(r.n);
+    return {
+      headline: { total: c?.total ?? 0, underReview: c?.underReview ?? 0, approved: c?.approved ?? 0, highTier: c?.highTier ?? 0 },
+      statusCounts,
+      owners: owners.map((o) => ({ id: o.id, name: o.name ?? "Unnamed owner" })).sort((a, b) => a.name.localeCompare(b.name)),
+    };
+  };
+  app.get("/v1/use-cases/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const filters = useCasesFilterQuery.parse(filterParams(q));
+      const ex = parseListExport(USE_CASES_LIST, q);
+      const scope = useCasesScope(req);
+      if (scope === null) return reply.status(403).send({ error: "bootstrap_has_no_use_cases" });
+      await sendListExport(db, req, reply, USE_CASES_LIST, useCasesReader, useCasesWhere(scope, filters), ex, filters);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+
   // List: fleet for admins, own proposals for everyone else — the same
   // scoping shape as GET /v1/workflows/instances.
   app.get("/v1/use-cases", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      try {
+        const q = req.query as Record<string, unknown>;
+        const filters = useCasesFilterQuery.parse(filterParams(q));
+        const page = parseListPage(USE_CASES_LIST, q);
+        const scope = useCasesScope(req);
+        if (scope === null) return reply.status(403).send({ error: "bootstrap_has_no_use_cases" });
+        const [out, summary] = await Promise.all([
+          runListPage(db, USE_CASES_LIST, useCasesReader, useCasesWhere(scope, filters), page),
+          useCasesSummary(scope),
+        ]);
+        return { ...out, summary };
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
     const { status } = z
       .object({
         status: z.enum(["proposed", "under_review", "needs_info", "approved", "rejected", "retired"]).optional(),

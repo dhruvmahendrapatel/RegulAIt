@@ -59,6 +59,19 @@
  */
 import type { FastifyInstance } from "fastify";
 import {
+  filterParams,
+  parseListExport,
+  parseListPage,
+  runListPage,
+  sendListError,
+  sendListExport,
+  wantsListContract,
+  type ListReader,
+  type ListSpec,
+} from "./list-contract.js";
+import { sql as sqlL, type SQL as SQLL } from "@regulait/db";
+import { userNameSql } from "./delegations-list.js";
+import {
   agentGrants,
   agentRevocations,
   agents,
@@ -396,6 +409,50 @@ export async function buildAgentHolderIndex(db: Db): Promise<AgentHolderIndex> {
 // Routes
 // ---------------------------------------------------------------------------
 
+// ---- ADR-0219: the registered agents under the shared list contract. Sortable by what the agents table holds; the
+// read-time figures (dispatches, coverage, links) are computed per page and say they cannot be sorted.
+const inventoryFilterQuery = z.object({ lifecycle: z.enum(["proposed", "under_review", "active", "deprecated", "suspended", "retired"]).optional() }).strict();
+type InventoryListRowT = {
+  id: string; name: string; provider: string; model: string | null; tier: number; enabled: boolean;
+  owner: { userId: string; name: string | null; deactivated: boolean } | null;
+  ownership: unknown;
+  lifecycle: { status: string };
+  modelCard: { cards: number; liveApproved: boolean };
+  granted: { effectiveHolders: number };
+  observed: { dispatchesInWindow: number; costUsdInWindow: number; lastDispatchAt: string | null };
+  coverage: { redteamRunsInWindow: number; evalRunsInWindow: number };
+  links: { useCases: number; openRisks: number };
+};
+export const INVENTORY_AGENTS_LIST: ListSpec<InventoryListRowT> = {
+  id: "inventory-agents",
+  sorts: {
+    name: { expr: sqlL`lower(${agents.name})` },
+    provider: { expr: agents.provider },
+    model: { expr: sqlL`lower(${agents.model})` },
+    tier: { expr: agents.tier },
+    enabled: { expr: agents.enabled },
+    lifecycle: { expr: agents.lifecycleStatus },
+    owner: { expr: sqlL`lower(${userNameSql(agents.ownerUserId)})` },
+  },
+  columns: {
+    name: { label: "Agent", value: (r) => r.name },
+    provider: { label: "Provider", value: (r) => r.provider },
+    model: { label: "Model", value: (r) => r.model },
+    tier: { label: "Tier", value: (r) => r.tier },
+    enabled: { label: "Enabled", value: (r) => r.enabled },
+    lifecycle: { label: "Lifecycle", value: (r) => r.lifecycle.status.replace(/_/g, " ") },
+    owner: { label: "Owner", value: (r) => (r.owner ? `${r.owner.name ?? r.owner.userId}${r.owner.deactivated ? " (deactivated)" : ""}` : "no owner") },
+    holders: { label: "Effective holders", value: (r) => r.granted.effectiveHolders },
+    dispatches: { label: "Dispatches in window", value: (r) => r.observed.dispatchesInWindow },
+    cost: { label: "Cost in window (USD)", value: (r) => r.observed.costUsdInWindow },
+    card: { label: "Model card", value: (r) => (r.modelCard.liveApproved ? "approved" : r.modelCard.cards ? "not approved" : "none") },
+    risks: { label: "Open risks", value: (r) => r.links.openRisks },
+  },
+  filters: ["lifecycle"],
+  defaultSort: { col: "name", dir: "asc" },
+  idCol: agents.id,
+};
+
 export function registerInventoryRoutes(app: FastifyInstance, db: Db): void {
   /**
    * ADR-0185 I9 — THE MEMORY-STORE INVENTORY: where the gateway keeps what
@@ -412,7 +469,8 @@ export function registerInventoryRoutes(app: FastifyInstance, db: Db): void {
    * inventory names users, grants and org-wide run history, the same class of
    * record as the audit log.
    */
-  app.get("/v1/inventory/agents", async () => {
+  /** the inventory rows for these agents (and, for the legacy read, the SoD section) */
+  const inventoryFor = async (pageAgents: Array<typeof agents.$inferSelect>, withSod: boolean) => {
     const now = new Date();
     const windowStart = new Date(now.getTime() - INVENTORY_WINDOW_DAYS * 24 * 60 * 60 * 1000);
 
@@ -434,7 +492,7 @@ export function registerInventoryRoutes(app: FastifyInstance, db: Db): void {
       riskRows,
       feedEdges,
     ] = await Promise.all([
-      db.select().from(agents).orderBy(agents.name),
+      Promise.resolve(pageAgents),
       db.select({ id: customModelProviders.id, name: customModelProviders.name }).from(customModelProviders),
       db.select({ provider: modelCredentials.provider }).from(modelCredentials),
       db
@@ -567,7 +625,7 @@ export function registerInventoryRoutes(app: FastifyInstance, db: Db): void {
     // ADR-0091: SoD rules + current violators, computed live at read time —
     // a rule created after the fact REPORTS here (and in posture); it never
     // auto-revokes anybody.
-    const sod = await sodInventorySection(db);
+    const sod = withSod ? await sodInventorySection(db) : null;
 
     return {
       window: { start: windowStart.toISOString(), end: now.toISOString(), days: INVENTORY_WINDOW_DAYS },
@@ -667,6 +725,50 @@ export function registerInventoryRoutes(app: FastifyInstance, db: Db): void {
         };
       }),
     };
+  };
+  type InventoryRow = Awaited<ReturnType<typeof inventoryFor>>["agents"][number];
+  const inventoryReader: ListReader<InventoryRow> = {
+    fetch: async (q) => {
+      const rows = await db.select({ a: agents, _cursorAt: q.cursorAt }).from(agents).where(q.where).orderBy(...q.orderBy).limit(q.limit).offset(q.offset);
+      const out = await inventoryFor(rows.map((r) => r.a), false);
+      return out.agents.map((v, i) => ({ ...v, _cursorAt: rows[i]!._cursorAt }));
+    },
+    countable: (where) => db.select({ one: sqlL`1` }).from(agents).where(where),
+    idOf: (r) => r.id,
+  };
+  const inventoryWhere = (f: z.infer<typeof inventoryFilterQuery>): SQLL | undefined =>
+    f.lifecycle ? eq(agents.lifecycleStatus, f.lifecycle) : undefined;
+  // ADR-0219: with any of sort/dir/cursor/offset/count the registered agents answer the shared list contract (the
+  // window and notes beside the page; the SoD section stays on the legacy read and its own card); admin only.
+  app.get("/v1/inventory/agents/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const filters = inventoryFilterQuery.parse(filterParams(q));
+      const ex = parseListExport(INVENTORY_AGENTS_LIST, q);
+      await sendListExport(db, req, reply, INVENTORY_AGENTS_LIST, inventoryReader, inventoryWhere(filters), ex, filters);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+  app.get("/v1/inventory/agents", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      try {
+        const q = req.query as Record<string, unknown>;
+        const filters = inventoryFilterQuery.parse(filterParams(q));
+        const page = parseListPage(INVENTORY_AGENTS_LIST, q);
+        const now = new Date();
+        const out = await runListPage(db, INVENTORY_AGENTS_LIST, inventoryReader, inventoryWhere(filters), page);
+        return {
+          ...out,
+          window: { start: new Date(now.getTime() - INVENTORY_WINDOW_DAYS * 86_400_000).toISOString(), end: now.toISOString(), days: INVENTORY_WINDOW_DAYS },
+          notes: INVENTORY_NOTES,
+        };
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
+    return inventoryFor(await db.select().from(agents).orderBy(agents.name), true);
   });
 
   /**

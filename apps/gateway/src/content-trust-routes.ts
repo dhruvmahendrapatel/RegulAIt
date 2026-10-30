@@ -22,6 +22,18 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
+  filterParams,
+  parseListExport,
+  parseListPage,
+  runListPage,
+  sendListError,
+  sendListExport,
+  wantsListContract,
+  type ListReader,
+  type ListSpec,
+} from "./list-contract.js";
+import { sql as sqlL, type SQL as SQLL } from "@regulait/db";
+import {
   and,
   auditLog,
   connectors,
@@ -50,6 +62,45 @@ const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 const sourceParam = z.object({ sourceKind: z.enum(CONTENT_SOURCE_KINDS), sourceId: z.string().uuid() });
 const setTierBody = z.object({ tier: z.enum(CONTENT_TRUST_TIERS) }).strict();
 const setFloorBody = z.object({ writeFloor: z.enum(CONTENT_TRUST_WRITE_FLOORS) }).strict();
+const recordsFilterQuery = z.object({ contextId: z.string().regex(CONTENT_CONTEXT_ID_PATTERN).optional() }).strict();
+type ProvenanceListRow = {
+  id: string;
+  createdAt: string;
+  sourceKind: string;
+  sourceDetail: string | null;
+  trustTier: string;
+  classification: string;
+  digestAlg: string;
+  upstreamDigest: string | null;
+  deliveredDigest: string | null;
+  anchor: { anchorSeq: number; tsaStatus: string } | null;
+};
+const PROVENANCE_TIER_ORDER = sqlL`case ${contentProvenanceRecords.trustTier} when 'trusted' then 1 when 'internal' then 2 when 'external' then 3 when 'untrusted' then 4 else 5 end`;
+export const PROVENANCE_LIST: ListSpec<ProvenanceListRow> = {
+  id: "content-provenance",
+  sorts: {
+    at: { expr: contentProvenanceRecords.createdAt, keysetAt: contentProvenanceRecords.createdAt },
+    source: { expr: sqlL`${contentProvenanceRecords.sourceKind} || coalesce(lower(${contentProvenanceRecords.sourceDetail}), '')` },
+    tier: { expr: PROVENANCE_TIER_ORDER },
+    class: { expr: contentProvenanceRecords.classification },
+    digest: { expr: contentProvenanceRecords.digestAlg },
+    delivered: { expr: contentProvenanceRecords.deliveredDigest },
+    changed: { expr: sqlL`(case when ${contentProvenanceRecords.upstreamDigest} is null or ${contentProvenanceRecords.deliveredDigest} is null then null when ${contentProvenanceRecords.upstreamDigest} = ${contentProvenanceRecords.deliveredDigest} then 0 else 1 end)` },
+  },
+  columns: {
+    at: { label: "Recorded", value: (r) => new Date(r.createdAt) },
+    source: { label: "Source", value: (r) => `${r.sourceKind === "mcp_server" ? "MCP" : "Connector"} ${r.sourceDetail ?? ""}`.trim() },
+    tier: { label: "Tier", value: (r) => r.trustTier.replace(/_/g, " ") },
+    class: { label: "Classification", value: (r) => r.classification.replace(/_/g, " ") },
+    digest: { label: "Digest", value: (r) => r.digestAlg },
+    delivered: { label: "Delivered", value: (r) => r.deliveredDigest },
+    changed: { label: "Transformed", value: (r) => (r.upstreamDigest && r.deliveredDigest ? (r.upstreamDigest === r.deliveredDigest ? "No" : "Yes") : "Unknown") },
+    anchor: { label: "Anchor", value: (r) => (r.anchor ? `#${r.anchor.anchorSeq}, timestamp ${r.anchor.tsaStatus}` : "Not yet anchored") },
+  },
+  filters: ["contextId"],
+  defaultSort: { col: "at", dir: "desc" },
+  idCol: contentProvenanceRecords.id,
+};
 const recordsQuery = z
   .object({
     contextId: z.string().regex(CONTENT_CONTEXT_ID_PATTERN).optional(),
@@ -202,18 +253,9 @@ export function registerContentTrustRoutes(app: FastifyInstance, db: Db): void {
     return reply.send({ writeFloor: next, changed: true });
   });
 
-  app.get("/v1/content-provenance/records", async (req, reply) => {
-    const q = recordsQuery.safeParse(req.query ?? {});
-    if (!q.success) return reply.status(400).send(invalid(q.error));
-    const rows = await db
-      .select()
-      .from(contentProvenanceRecords)
-      .where(q.data.contextId ? eq(contentProvenanceRecords.contextId, q.data.contextId) : undefined)
-      .orderBy(desc(contentProvenanceRecords.createdAt))
-      .limit(q.data.limit);
+  const recordsView = async (rows: Array<typeof contentProvenanceRecords.$inferSelect>) => {
     const anchors = await coveringAnchors(db, rows.map((r) => r.auditId));
-    return {
-      records: rows.map((r) => ({
+    return rows.map((r) => ({
         id: r.id,
         auditId: r.auditId,
         decisionAuditId: r.decisionAuditId,
@@ -231,7 +273,57 @@ export function registerContentTrustRoutes(app: FastifyInstance, db: Db): void {
         createdAt: r.createdAt.toISOString(),
         /** null until an anchor covers the audit row; then its RFC 3161 state (`granted` carries a token) */
         anchor: anchors.get(r.auditId) ?? null,
-      })),
-    };
+      }));
+  };
+  const recordsReader: ListReader<ProvenanceListRow> = {
+    fetch: async (q) => {
+      const rows = await db
+        .select({ r: contentProvenanceRecords, _cursorAt: q.cursorAt })
+        .from(contentProvenanceRecords)
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset);
+      const views = await recordsView(rows.map((r) => r.r));
+      return views.map((v, i) => ({ ...v, _cursorAt: rows[i]!._cursorAt }));
+    },
+    countable: (where) => db.select({ one: sqlL`1` }).from(contentProvenanceRecords).where(where),
+    idOf: (r) => r.id,
+  };
+  const recordsWhere = (f: z.infer<typeof recordsFilterQuery>): SQLL | undefined =>
+    f.contextId ? eq(contentProvenanceRecords.contextId, f.contextId) : undefined;
+  // ADR-0219: with any of sort/dir/cursor/offset/count it answers the shared list contract; admin only. The file
+  // holds exactly the digests the list shows (content digests, never a key).
+  app.get("/v1/content-provenance/records/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const filters = recordsFilterQuery.parse(filterParams(q));
+      const ex = parseListExport(PROVENANCE_LIST, q);
+      await sendListExport(db, req, reply, PROVENANCE_LIST, recordsReader, recordsWhere(filters), ex, filters);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+  app.get("/v1/content-provenance/records", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      try {
+        const q = req.query as Record<string, unknown>;
+        const filters = recordsFilterQuery.parse(filterParams(q));
+        const page = parseListPage(PROVENANCE_LIST, q);
+        return await runListPage(db, PROVENANCE_LIST, recordsReader, recordsWhere(filters), page);
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
+    const q = recordsQuery.safeParse(req.query ?? {});
+    if (!q.success) return reply.status(400).send(invalid(q.error));
+    const rows = await db
+      .select()
+      .from(contentProvenanceRecords)
+      .where(q.data.contextId ? eq(contentProvenanceRecords.contextId, q.data.contextId) : undefined)
+      .orderBy(desc(contentProvenanceRecords.createdAt))
+      .limit(q.data.limit);
+    return { records: await recordsView(rows) };
   });
 }

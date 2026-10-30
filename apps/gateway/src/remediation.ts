@@ -34,6 +34,20 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
+  filterParams,
+  parseListExport,
+  parseListPage,
+  runListPage,
+  sendListError,
+  sendListExport,
+  wantsListContract,
+  type ListReader,
+  type ListSpec,
+} from "./list-contract.js";
+import { userNameSql } from "./delegations-list.js";
+import {
+  getTableColumns,
+  type SQL,
   agents,
   aiRiskControls,
   aiRisks,
@@ -331,6 +345,57 @@ export async function applyRemediationDecision(
 // routes
 // ---------------------------------------------------------------------------
 
+type RemediationListRow = ReturnType<typeof serialize> & { proposedByName: string | null; decidedByName: string | null };
+const remediationsFilterQuery = z.object({ status: z.enum(REMEDIATION_STATUSES).optional() }).strict();
+const remediationsWhere = (f: z.infer<typeof remediationsFilterQuery>): SQL | undefined =>
+  f.status ? eq(remediationProposals.status, f.status) : undefined;
+const remediationsReader = (db: Db): ListReader<RemediationListRow> => ({
+  fetch: async (q) => {
+    const rows = await db
+      .select({
+        p: getTableColumns(remediationProposals),
+        proposedByName: userNameSql(remediationProposals.proposedByUserId),
+        decidedByName: userNameSql(remediationProposals.decidedByUserId),
+        _cursorAt: q.cursorAt,
+      })
+      .from(remediationProposals)
+      .where(q.where)
+      .orderBy(...q.orderBy)
+      .limit(q.limit)
+      .offset(q.offset);
+    return rows.map((r) => ({ ...serialize(r.p), proposedByName: r.proposedByName, decidedByName: r.decidedByName, _cursorAt: r._cursorAt }));
+  },
+  countable: (where) => db.select({ one: sql`1` }).from(remediationProposals).where(where),
+  idOf: (r) => r.id,
+});
+const isoOrNull = (v: string | null) => (v ? new Date(v) : null);
+/** ADR-0219: every remediation proposal across all alerts, under the shared list contract */
+export const REMEDIATIONS_LIST: ListSpec<RemediationListRow> = {
+  id: "remediations",
+  sorts: {
+    title: { expr: sql`lower(${remediationProposals.title})` },
+    kind: { expr: remediationProposals.kind },
+    status: { expr: remediationProposals.status },
+    proposed: { expr: remediationProposals.createdAt, keysetAt: remediationProposals.createdAt },
+    decided: { expr: remediationProposals.decidedAt },
+    proposer: { expr: sql`lower(${userNameSql(remediationProposals.proposedByUserId)})` },
+  },
+  columns: {
+    title: { label: "Remediation", value: (r) => r.title },
+    kind: { label: "Kind", value: (r) => r.kind.replace(/_/g, " ") },
+    status: { label: "Status", value: (r) => r.status.replace(/_/g, " ") },
+    proposed: { label: "Proposed", value: (r) => isoOrNull(r.createdAt) },
+    proposer: { label: "Proposed by", value: (r) => r.proposedByName ?? r.proposedByUserId },
+    decided: { label: "Decided", value: (r) => isoOrNull(r.decidedAt) },
+    decider: { label: "Decided by", value: (r) => r.decidedByName ?? r.decidedByUserId },
+    rationale: { label: "Rationale", value: (r) => r.rationale },
+    alert: { label: "Alert id", value: (r) => r.alertId },
+  },
+  filters: ["status"],
+  defaultSort: { col: "proposed", dir: "desc" },
+  idCol: remediationProposals.id,
+};
+
 export function registerRemediationRoutes(app: FastifyInstance, db: Db): void {
   app.get("/v1/governance/alerts/:alertId/remediation", async (req, reply) => {
     const { alertId } = alertParam.parse(req.params);
@@ -472,7 +537,30 @@ export function registerRemediationRoutes(app: FastifyInstance, db: Db): void {
     return reply.status(201).send(serialize(created));
   });
 
-  app.get("/v1/governance/remediations", async (req) => {
+  // ADR-0219: with any of sort/dir/cursor/offset/count it answers the shared
+  // list contract; with none of them, exactly the response below. Admin only.
+  app.get("/v1/governance/remediations/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const filters = remediationsFilterQuery.parse(filterParams(q));
+      const ex = parseListExport(REMEDIATIONS_LIST, q);
+      await sendListExport(db, req, reply, REMEDIATIONS_LIST, remediationsReader(db), remediationsWhere(filters), ex, filters);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+  app.get("/v1/governance/remediations", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      try {
+        const q = req.query as Record<string, unknown>;
+        const filters = remediationsFilterQuery.parse(filterParams(q));
+        const page = parseListPage(REMEDIATIONS_LIST, q);
+        return await runListPage(db, REMEDIATIONS_LIST, remediationsReader(db), remediationsWhere(filters), page);
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
     const q = z.object({ status: z.enum(REMEDIATION_STATUSES).optional() }).parse(req.query);
     const rows = await db
       .select()

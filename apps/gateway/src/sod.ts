@@ -53,6 +53,19 @@
  */
 import type { FastifyInstance } from "fastify";
 import {
+  filterParams,
+  parseListExport,
+  parseListPage,
+  runListPage,
+  sendListError,
+  sendListExport,
+  wantsListContract,
+  type ListReader,
+  type ListSpec,
+} from "./list-contract.js";
+import { userNameSql } from "./delegations-list.js";
+import { sql as sqlL, type SQL as SQLL } from "@regulait/db";
+import {
   AGENT_LIFECYCLE_STATUSES,
   SOD_MINT_KINDS,
   SOD_PATTERN_DIMENSIONS,
@@ -1578,7 +1591,64 @@ export function registerSodRoutes(app: FastifyInstance, db: Db): void {
     });
   });
 
-  app.get("/v1/sod/overrides", async () => {
+  const overridesReader: ListReader<SodOverrideListRow> = {
+    fetch: async (q) => {
+      const rows = await db
+        .select({
+          r: sodOverrideRequests,
+          ruleName: sqlL<string | null>`(select ${sodRules.name} from ${sodRules} where ${sodRules.id} = ${sodOverrideRequests.ruleId})`,
+          requesterName: userNameSql(sodOverrideRequests.requestedByUserId),
+          deciderName: userNameSql(sodOverrideRequests.decidedByUserId),
+          _cursorAt: q.cursorAt,
+        })
+        .from(sodOverrideRequests)
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset);
+      return rows.map(({ r, ruleName, requesterName, deciderName, _cursorAt }) => ({
+        id: r.id,
+        ruleId: r.ruleId,
+        ruleName,
+        mintKind: r.mintKind,
+        label: r.label,
+        conflict: r.conflictDetail,
+        requestedBy: { userId: r.requestedByUserId, name: requesterName },
+        approvalId: r.approvalId,
+        status: r.status,
+        decidedBy: r.decidedByUserId ? { userId: r.decidedByUserId, name: deciderName } : null,
+        decidedAt: r.decidedAt ? r.decidedAt.toISOString() : null,
+        minted: r.mintDetail ?? null,
+        createdAt: r.createdAt.toISOString(),
+        _cursorAt,
+      }));
+    },
+    countable: (where) => db.select({ one: sqlL`1` }).from(sodOverrideRequests).where(where),
+    idOf: (r) => r.id,
+  };
+  // ADR-0219: with any of sort/dir/cursor/offset/count it answers the shared list contract; admin only
+  app.get("/v1/sod/overrides/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const filters = sodOverridesFilterQuery.parse(filterParams(q));
+      const ex = parseListExport(SOD_OVERRIDES_LIST, q);
+      await sendListExport(db, req, reply, SOD_OVERRIDES_LIST, overridesReader, sodOverridesWhere(filters), ex, filters);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+  app.get("/v1/sod/overrides", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      try {
+        const q = req.query as Record<string, unknown>;
+        const filters = sodOverridesFilterQuery.parse(filterParams(q));
+        const page = parseListPage(SOD_OVERRIDES_LIST, q);
+        return { ...(await runListPage(db, SOD_OVERRIDES_LIST, overridesReader, sodOverridesWhere(filters), page)), notes: SOD_NOTES };
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
     const requests = await db.select().from(sodOverrideRequests).orderBy(sodOverrideRequests.createdAt);
     const ruleIds = [...new Set(requests.map((r) => r.ruleId))];
     const ruleRows = ruleIds.length
@@ -1620,3 +1690,47 @@ export function registerSodRoutes(app: FastifyInstance, db: Db): void {
     };
   });
 }
+
+// ---- ADR-0219: override requests under the shared list contract ------------
+interface SodOverrideListRow {
+  id: string;
+  ruleId: string;
+  ruleName: string | null;
+  mintKind: string;
+  label: string;
+  conflict: unknown;
+  requestedBy: { userId: string; name: string | null };
+  approvalId: string | null;
+  status: string;
+  decidedBy: { userId: string; name: string | null } | null;
+  decidedAt: string | null;
+  minted: unknown;
+  createdAt: string;
+}
+const sodOverridesFilterQuery = z.object({ status: z.enum(["pending", "approved", "denied"]).optional() }).strict();
+const sodOverridesWhere = (f: z.infer<typeof sodOverridesFilterQuery>): SQLL | undefined => (f.status ? eq(sodOverrideRequests.status, f.status) : undefined);
+export const SOD_OVERRIDES_LIST: ListSpec<SodOverrideListRow> = {
+  id: "sod-overrides",
+  sorts: {
+    label: { expr: sqlL`lower(${sodOverrideRequests.label})` },
+    rule: { expr: sqlL`lower((select ${sodRules.name} from ${sodRules} where ${sodRules.id} = ${sodOverrideRequests.ruleId}))` },
+    kind: { expr: sodOverrideRequests.mintKind },
+    status: { expr: sodOverrideRequests.status },
+    when: { expr: sodOverrideRequests.createdAt, keysetAt: sodOverrideRequests.createdAt },
+    requester: { expr: sqlL`lower(${userNameSql(sodOverrideRequests.requestedByUserId)})` },
+    decided: { expr: sodOverrideRequests.decidedAt },
+  },
+  columns: {
+    label: { label: "Request", value: (r) => r.label },
+    rule: { label: "Overrides rule", value: (r) => r.ruleName },
+    kind: { label: "Mint", value: (r) => r.mintKind.replace(/_/g, " ") },
+    status: { label: "Status", value: (r) => r.status },
+    when: { label: "Requested", value: (r) => new Date(r.createdAt) },
+    requester: { label: "Requested by", value: (r) => r.requestedBy.name ?? r.requestedBy.userId },
+    decider: { label: "Decided by", value: (r) => (r.decidedBy ? (r.decidedBy.name ?? r.decidedBy.userId) : null) },
+    decided: { label: "Decided", value: (r) => (r.decidedAt ? new Date(r.decidedAt) : null) },
+  },
+  filters: ["status"],
+  defaultSort: { col: "when", dir: "desc" },
+  idCol: sodOverrideRequests.id,
+};
