@@ -181,6 +181,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.modelCards, ["note"]],
   [s.modelCardApprovals, ["decisionReason"]],
   [s.modelCardEvidence, ["note"]],
+  // ADR-0223: an explainability artefact's free-text note on a model card
+  [s.modelExplainabilityArtefacts, ["note"]],
   [s.redteamLibraries, ["note"]],
   [s.redteamProbes, ["note"]],
   [s.redteamRuns, ["gateReason", "note"]],
