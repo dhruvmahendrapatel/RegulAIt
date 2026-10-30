@@ -40,6 +40,7 @@ const DECISION_WRITERS = [
   "guardrails.ts",
   "mcp-identity-assertion.ts", // ADR-0188 S8: an opted-in server's call refused because no identity assertion can be made
   "mcp-protocol.ts", // MCP protocol methods
+  "model-supply-chain.ts", // ADR-0216: a dispatch refused because a cited model file fails the supply-chain check
   "mcp-proxy.ts", // MCP tool calls (governed-evaluate.ts decides; its callers write the decision row)
   "outbound-audience.ts",
   "playground.ts",
