@@ -613,17 +613,14 @@ The owner decided this raise on 2026-10-30, together with unparking the G-lanes 
   Raising the ceiling once on main stops each lane from editing the same line.
 - A lane that would take total JS over 1,060 kB stops and goes back to the owner.
 
-## Addendum / As built (2026-10-30) — all JS 1,060 → 1,071 kB (P3 long-page split, operations and cost)
+## Addendum / As built (2026-10-30) — all JS 1,060 → 1,150 kB (the post-demo backlog as a whole)
 
-The owner capped total JS at 1,075 kB across every lane in flight on 2026-10-30:
-<https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6529802888>. This is the ADR-recorded exception the
-`--guard` rule requires, with one `CEILING_EXCEPTIONS` row, and it stays inside that cap.
+The owner decided this raise on 2026-10-30: <https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6531626139>. It is the ADR-recorded exception the `--guard` rule requires, with
+one `CEILING_EXCEPTIONS` row.
 
-- `all JS` from `1060 kB` to `1071 kB` (+11 kB), the smallest whole kB over what the branch measures. Entry JS stays at
-  138.5 kB and entry CSS at 10.7 kB; the lazy chunk ceilings are unchanged.
-- Why: the long cost-consolidation, Engines, MCP servers, cost and Infrastructure pages keep a five-row preview of each
-  record list and move the full list to its own page. Those pages are new lazy chunks (one per parent page), and the
-  modules they share with their parent (the isolation panel, the registries panel, the infrastructure ledgers) are split
-  into their own chunks so a list page never loads its whole parent. Measured with the same lockfile: 1,058,266 B on the P2 batch C base, 1,070,513 B on this branch.
-- Main has since raised the shared ceiling to 1,150 kB (comment 6531626139); when this branch meets main, main's ceiling
-  and row stand and this row is dropped.
+- `all JS` from `1060 kB` to `1150 kB` (+90 kB), one shared ceiling for the remaining backlog lanes. Entry JS stays at
+  138.5 kB and entry CSS at 10.7 kB; the lazy chunk ceilings are unchanged, and every new screen is lazy-loaded, so
+  first-load cost is still bounded by the entry ceilings.
+- Why: main already measures 1,050,176 B, the supplier portal lane alone adds about 13.8 kB, and about ten more UI lanes
+  are queued. A raise per lane would make every lane edit the same line.
+- Lanes keep reporting their all-JS bytes; crossing 1,150 kB goes back to the owner.
