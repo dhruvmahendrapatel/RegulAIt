@@ -91,8 +91,9 @@ async function axe(page: Page) {
   expect(result.violations).toEqual([]);
 }
 
+// P3 (#453 c6527514889): project isolation is on the Engines page's Isolation tab
 async function openEngines(page: Page) {
-  await page.goto("/ui/admin/engines");
+  await page.goto("/ui/admin/engines?tab=isolation");
   await expect(page.getByRole("heading", { name: "Engines", exact: true, level: 1 })).toBeVisible();
 }
 

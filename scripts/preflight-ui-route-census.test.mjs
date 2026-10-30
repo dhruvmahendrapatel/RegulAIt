@@ -360,7 +360,7 @@ describe("route census: KNOWN_UI_GAPS only shrinks", () => {
     expect(KNOWN_UI_GAPS.size).toBe(KNOWN_UI_GAPS_MAX);
     expect(MACHINE_ONLY.size).toBe(43); // GET /v1/receipts/keys left: the posture page lists the keys to retire them; ADR-0195 SD4b added the endpoint agent channel; SD2b added the federation issuer's discovery document and JWKS; #453 c6508111468 added the MCP Streamable HTTP GET probe (405)
     expect(SUPERSEDED.size).toBe(14);
-    expect(INDIRECT_UI_CALLS.size).toBe(57); // ADR-0219: the list exports DataList downloads from the path its page passes, and (P2 batch C) the list routes it reads page by page
+    expect(INDIRECT_UI_CALLS.size).toBe(56); // ADR-0219: the list exports DataList downloads from the path its page passes, and (P2 batch C) the list routes it reads page by page; P3 ops: GET /v1/cost-imports is now called directly (the overview counts refused imports)
     for (const [key, g] of KNOWN_UI_GAPS) {
       expect(g.does, key).toBeTruthy();
       expect(g.tracking, key).toBeTruthy();

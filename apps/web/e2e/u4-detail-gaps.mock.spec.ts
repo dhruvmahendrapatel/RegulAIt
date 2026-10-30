@@ -204,12 +204,14 @@ test.describe("U4: imported cost batch", () => {
       },
       [`GET /v1/cost-imports/${U(41)}`]: { status: 404, body: { error: "unknown_import" } },
     });
-    await page.goto("/ui/admin/cost-consolidation");
+    // P3: the full import history (with Open) is on its own page; the overview keeps a preview
+    await page.goto("/ui/admin/cost-consolidation/imports");
     await page.getByRole("button", { name: /Open the acme-ai import/ }).first().click();
     const dialog = page.getByRole("dialog", { name: "Imported cost batch" });
     await expect(dialog.getByText("IMPORTED cost is what a vendor file says.")).toBeVisible();
     await expect(dialog.getByText("ghost@vendor.test")).toBeVisible();
-    await expect(dialog.getByText("unattributed")).toBeVisible();
+    await expect(dialog.getByText("unattributed", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("Imported lines · 2 lines · 1 unattributed")).toBeVisible();
     await expectAxeClean(page, "import batch dialog", '[role="dialog"]');
     await dialog.getByRole("button", { name: "Close" }).click();
     await page.getByRole("button", { name: /Open the acme-ai import/ }).nth(1).click();
@@ -421,7 +423,8 @@ test.describe("U4: initiative detail", () => {
       "GET /v1/energy/factors": { factors: [], region: null, notes: { shipped: "none shipped", unknown: "unknown" } },
       [`GET /v1/initiatives/${U(20)}`]: { initiative: { id: U(20), name: "Platform", costCenter: "CC-1", createdAt: T }, projects: [{ id: U(30), name: "Atlas", spentUsd: 0 }, { id: U(31), name: "Beacon", spentUsd: 12.5 }], projectCount: 2, spentUsd: 12.5 },
     });
-    await page.goto("/ui/admin/cost");
+    // P3: initiatives are on the cost dashboard's set-up tab
+    await page.goto("/ui/admin/cost?tab=setup");
     await page.getByRole("button", { name: "Open initiative Platform" }).click();
     const dialog = page.getByRole("dialog", { name: "Initiative — Platform" });
     await expect(dialog.getByRole("link", { name: "Beacon" })).toBeVisible();

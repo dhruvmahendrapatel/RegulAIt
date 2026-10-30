@@ -33,17 +33,18 @@
  *    the dialog closes.
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, api } from "../../../api/client";
 import { ago, fmtAt, fmtUsd, plural } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
-import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, Input, Modal, Table } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, Input, Modal, Table, Tabs, tabIds } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
-import { KV, QueryGate } from "../adminKit";
+import { KV, QueryGate, orgSettingsQuery } from "../adminKit";
+import { EDITABLE_KEYS, SETTING_DEFAULTS, settingRelaxed, settingsComplete, settingsFromEnvelope } from "./isolation/isolationModel";
 import { EngineStatusBadge } from "./EngineStatusBadge";
-import { IsolationPanel } from "./isolation/IsolationPanel";
+import { IsolationPanel, useIsolationAttention } from "./isolation/IsolationPanel";
 import { IsolationSettingsCard } from "./isolation/IsolationSettings";
 import { OrgSettingsCard } from "../settings/OrgSettingsCard";
 import {
@@ -160,6 +161,36 @@ export default function EnginesPage() {
     );
   }, [engines.data]);
   const now = Date.now();
+  // P3 (#453 c6527514889): the engines, their isolation and the run settings as three tabs. The Isolation tab's label
+  // counts what it holds that needs attention (quarantined executors, refused placements), so nothing waits behind a click.
+  const [params, setParams] = useSearchParams();
+  const tab = params.get("tab") === "isolation" ? "isolation" : params.get("tab") === "settings" ? "settings" : "engines";
+  const panel = tabIds("engines", tab);
+  const setTab = (id: string) =>
+    setParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (id === "engines") next.delete("tab");
+      else next.set("tab", id);
+      return next;
+    });
+  const isolationAttention = useIsolationAttention();
+  // the Run settings tab counts relaxed isolation settings, or says the settings are unmeasured
+  const org = useQuery(orgSettingsQuery());
+  const stored = org.data === undefined ? undefined : settingsFromEnvelope(org.data);
+  const settingsNote =
+    stored === undefined
+      ? null
+      : !settingsComplete(stored)
+        ? "unmeasured"
+        : (() => {
+            const n = EDITABLE_KEYS.filter((k) => settingRelaxed(k, stored[k] as string | number, SETTING_DEFAULTS[k])).length;
+            return n > 0 ? `${n} relaxed` : null;
+          })();
+  const tabs = [
+    { id: "engines", label: "Engines" },
+    { id: "isolation", label: ["Isolation", ...isolationAttention.map((x) => `${x.count.toLocaleString("en-GB")} ${x.label}`)].join(" · ") },
+    { id: "settings", label: settingsNote ? `Run settings · ${settingsNote}` : "Run settings" },
+  ];
 
   /**
    * `accepted` is the build the person ticked the acknowledgement for — always the
@@ -217,49 +248,62 @@ export default function EnginesPage() {
           </p>
         }
       />
-      <div className={v.stack}>
-        <QueryGate loading={engines.isLoading} error={engines.error} onRetry={() => void engines.refetch()}>
-          {engines.data?.runnerIssuer && !engines.data.runnerIssuer.configured && (
-            // ADR-0188 S7: without the issuer no runner can authenticate; say why rather than show runners offline
-            <Card title="Issuer not configured">
-              <p>
-                <Badge tone="danger">Runners cannot authenticate</Badge> {engines.data.runnerIssuer.note}
-              </p>
-            </Card>
-          )}
-          {list.length === 0 ? (
-            <Card>
-              <EmptyState title="No engines are registered" body="The gateway reported no engine rows. Engines arrive with the gateway's migrations; nothing can run until they exist." />
-            </Card>
-          ) : (
-            list.map((engine) => (
-              <EngineCard
-                key={engine.id}
-                engine={engine}
-                now={now}
-                busy={act.busy}
-                error={act.error?.engineId === engine.id ? act.error.message : null}
-                selfTestRan={selfTestRan[engine.id] ?? null}
-                onModal={setModal}
-              />
-            ))
-          )}
-          <ContentSetsCard query={content} taxonomyVersion={engines.data?.taxonomyVersion ?? null} />
-        </QueryGate>
-        {/* ADR-0190 I9: isolation lives under Engines (ADR-0177 §3, no new navigation group) */}
-        <IsolationPanel />
-        <IsolationSettingsCard />
-        {/* ADR-0187: engine run limits and the model artifact storage quotas (decision 127) */}
-        <OrgSettingsCard
-          title="Engine run limits"
-          keys={["engineMaxRunTimeoutMinutes", "engineDefaultRunBudgetUsd", "engineRunApprovalThresholdUsd", "engineRawReportRetentionDays", "engineSensitiveSetApproval"]}
-          testId="engine-run-limits"
-        />
-        <OrgSettingsCard
-          title="Model artifact storage quotas"
-          keys={["modelArtifactUploaderQuotaMegabytes", "modelArtifactUploaderQuotaCount", "modelArtifactOrgQuotaMegabytes", "modelArtifactOrgQuotaCount"]}
-          testId="model-artifact-quotas"
-        />
+      <Tabs tabs={tabs} active={tab} idPrefix="engines" label="Engines sections" onChange={setTab} />
+      <div role="tabpanel" id={panel.panel} aria-labelledby={panel.tab} className={v.stack}>
+        {tab === "engines" && (
+          <>
+            <QueryGate loading={engines.isLoading} error={engines.error} onRetry={() => void engines.refetch()}>
+              {engines.data?.runnerIssuer && !engines.data.runnerIssuer.configured && (
+                // ADR-0188 S7: without the issuer no runner can authenticate; say why rather than show runners offline
+                <Card title="Issuer not configured">
+                  <p>
+                    <Badge tone="danger">Runners cannot authenticate</Badge> {engines.data.runnerIssuer.note}
+                  </p>
+                </Card>
+              )}
+              {list.length === 0 ? (
+                <Card>
+                  <EmptyState title="No engines are registered" body="The gateway reported no engine rows. Engines arrive with the gateway's migrations; nothing can run until they exist." />
+                </Card>
+              ) : (
+                list.map((engine) => (
+                  <EngineCard
+                    key={engine.id}
+                    engine={engine}
+                    now={now}
+                    busy={act.busy}
+                    error={act.error?.engineId === engine.id ? act.error.message : null}
+                    selfTestRan={selfTestRan[engine.id] ?? null}
+                    onModal={setModal}
+                  />
+                ))
+              )}
+              <ContentSetsCard query={content} taxonomyVersion={engines.data?.taxonomyVersion ?? null} />
+            </QueryGate>
+          </>
+        )}
+        {tab === "isolation" && (
+          <>
+            {/* ADR-0190 I9: isolation lives under Engines (ADR-0177 §3, no new navigation group) */}
+            <IsolationPanel />
+          </>
+        )}
+        {tab === "settings" && (
+          <>
+            <IsolationSettingsCard />
+            {/* ADR-0187: engine run limits and the model artifact storage quotas (decision 127) */}
+            <OrgSettingsCard
+              title="Engine run limits"
+              keys={["engineMaxRunTimeoutMinutes", "engineDefaultRunBudgetUsd", "engineRunApprovalThresholdUsd", "engineRawReportRetentionDays", "engineSensitiveSetApproval"]}
+              testId="engine-run-limits"
+            />
+            <OrgSettingsCard
+              title="Model artifact storage quotas"
+              keys={["modelArtifactUploaderQuotaMegabytes", "modelArtifactUploaderQuotaCount", "modelArtifactOrgQuotaMegabytes", "modelArtifactOrgQuotaCount"]}
+              testId="model-artifact-quotas"
+            />
+          </>
+        )}
       </div>
 
       <ConfirmModal

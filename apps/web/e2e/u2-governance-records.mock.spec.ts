@@ -542,7 +542,8 @@ test.describe("U2: governance records", () => {
     await expect(history).toContainText("gw-2");
     await expectAxeClean(page, "scheduler history", "[data-testid='scheduler-history-approval-sla']");
 
-    await page.goto("/ui/admin/infrastructure");
+    // P3: the full certificate ledger, with each row's rotation history, is on its own page
+    await page.goto("/ui/admin/infrastructure/certificates");
     await page.getByRole("button", { name: "Rotation history of gw.example.test" }).click();
     const rotations = card(page, "Rotation history — gw.example.test");
     await expect(rotations).toContainText("01 → 02");

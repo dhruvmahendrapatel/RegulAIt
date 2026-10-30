@@ -213,8 +213,9 @@ async function axe(page: Page) {
   expect(result.violations).toEqual([]);
 }
 
-async function openEngines(page: Page) {
-  await page.goto("/ui/admin/engines");
+// P3 (#453 c6527514889): the Engines page is three tabs; isolation is its own tab and the run settings another
+async function openEngines(page: Page, tab: "engines" | "isolation" | "settings" = "isolation") {
+  await page.goto(tab === "engines" ? "/ui/admin/engines" : `/ui/admin/engines?tab=${tab}`);
   await expect(page.getByRole("heading", { name: "Engines", exact: true, level: 1 })).toBeVisible();
 }
 
@@ -228,16 +229,15 @@ test("Engines: profiles and placements are live, executors show the gateway's ve
   await expect(profileRow("team-loose")).toContainText("minClass");
   await expect(profileRow("team-old").getByText("Retired", { exact: true })).toBeVisible();
   const placement = (text: string) => page.getByRole("row").filter({ hasText: text });
+  // the tab keeps the newest five decisions; what needs attention is counted in the heading and the tab's label
   await expect(placement("set by the project's data sensitivity").getByText("Refused", { exact: true })).toBeVisible();
   await expect(placement("set by the project's data sensitivity")).toContainText("class_below_required");
   await expect(placement("on gvisor-a").getByText("Placed", { exact: true })).toBeVisible();
-  await expect(page.getByText("Refused before any placement", { exact: true })).toBeVisible();
-  await expect(page.getByText("· the fact sensitivity did not resolve")).toBeVisible();
+  await expect(page.getByText("Placement decisions · 2 decisions · 1 refused · 1 refused before placement", { exact: true })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /^Isolation · 1 quarantined · 1 unreadable · 2 refused/ })).toBeVisible();
   await expect(page.getByText(/answers 501/)).toHaveCount(0);
-  for (const code of ["no_executor", "attestation_stale", "class_below_required", "executor_quarantined", "profile_retired", "policy_unresolved", "execution_profile_mismatch"])
-    await expect(page.locator("dt code").filter({ hasText: new RegExp(`^${code}$`) })).toBeVisible();
-
   const cell = (name: string) => page.getByRole("row").filter({ hasText: name });
+
   await expect(cell("gvisor-fresh").getByText("Fresh report", { exact: true })).toBeVisible();
   await expect(cell("gvisor-fresh")).toContainText("Software-attested L2 · User-space kernel sandbox");
   await expect(cell("gvisor-no-report").getByText("No fresh report", { exact: true })).toBeVisible();
@@ -252,6 +252,19 @@ test("Engines: profiles and placements are live, executors show the gateway's ve
   await axe(page);
   await page.evaluate(() => {
     document.documentElement.dataset.theme = "dark";
+  });
+  await axe(page);
+
+  // every decision, the refusals decided before a placement, and each refusal reason, on the decisions' own page
+  await page.getByRole("link", { name: "View all placement decisions" }).click();
+  await expect(page).toHaveURL(/\/ui\/admin\/engines\/placements$/);
+  await expect(placement("set by the project's data sensitivity").getByText("Refused", { exact: true })).toBeVisible();
+  await expect(page.getByText("Refused before any placement", { exact: true })).toBeVisible();
+  await expect(page.getByText("· the fact sensitivity did not resolve")).toBeVisible();
+  for (const code of ["no_executor", "attestation_stale", "class_below_required", "executor_quarantined", "profile_retired", "policy_unresolved", "execution_profile_mismatch"])
+    await expect(page.locator("dt code").filter({ hasText: new RegExp(`^${code}$`) })).toBeVisible();
+  await page.evaluate(() => {
+    document.documentElement.dataset.theme = "light";
   });
   await axe(page);
 });
@@ -299,7 +312,7 @@ test("Engines: a malformed executor list is unreadable, never an empty fleet, an
 test("settings: enforcement is fixed and never sent; only the edited floor is sent; a relaxation is confirmed and resent once with step-up", async ({ page }) => {
   const m = await setup(page);
   const su = await requireStepUpOn(page, { method: "PUT", path: "/v1/org/settings", kind: "settings_relax" });
-  await openEngines(page);
+  await openEngines(page, "settings");
   await expect(page.getByText("Always on", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Enforce isolation", { exact: true })).toHaveCount(0);
   await expect(floor(page)).toHaveValue("user_space_kernel");
@@ -323,7 +336,7 @@ test("settings: enforcement is fixed and never sent; only the edited floor is se
 
 test("settings: a stored change during confirmation is reviewed again; a failed current read writes nothing", async ({ page }) => {
   const m = await setup(page);
-  await openEngines(page);
+  await openEngines(page, "settings");
   await floor(page).selectOption("hardened_container");
   await save(page).click();
   m.stored = { ...strict, isolationFloorPublic: "microvm" };
@@ -340,7 +353,7 @@ test("settings: a stored change during confirmation is reviewed again; a failed 
 
 test("settings: a failed read after a write locks the form", async ({ page }) => {
   const m = await setup(page);
-  await openEngines(page);
+  await openEngines(page, "settings");
   // tightening: no confirmation, no step-up
   await page.getByLabel("Executor attestation lifetime (minutes)", { exact: true }).fill("60");
   m.failReadsAfterWrite = true;
@@ -366,8 +379,10 @@ for (const [label, envelope] of MALFORMED_ENVELOPES) {
   test(`settings: ${label} keeps Engines usable and every isolation control unmeasured`, async ({ page }) => {
     const m = await setup(page);
     m.envelope = envelope;
-    await openEngines(page);
+    await openEngines(page, "engines");
     await expect(page.getByTestId("engine-promptfoo").getByText("On — self-test passed")).toBeVisible();
+    // the settings tab says it is unmeasured in its label, before anyone opens it
+    await page.getByRole("tab", { name: "Run settings · unmeasured" }).click();
     await expect(page.getByText(/Isolation settings are unmeasured: the gateway has not reported all eight values/)).toBeVisible();
     await expect(save(page)).toBeDisabled();
     const controls = save(page).locator("xpath=ancestor::form").locator("input, select");
@@ -518,6 +533,7 @@ test("Engines: a custom profile gets a new version or is retired; the shipped re
   await expect(retire).toHaveCount(0);
   expect(m.retired).toEqual(["team-loose"]);
 
+  await page.goto("/ui/admin/engines/placements");
   await page.getByRole("button", { name: "Evidence for placement pl-1", exact: true }).click();
   const evidence = page.getByTestId("placement-evidence");
   await expect(evidence).toContainText("a-pl-1");

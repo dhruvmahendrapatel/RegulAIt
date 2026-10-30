@@ -20,7 +20,8 @@ import { ApiError, api } from "../../../api/client";
 import { ago, fmtAt } from "../../../api/format";
 import { Badge, Button, Card, ConfirmModal, EmptyState, Field, IdChip, Input, Modal, Select, Table } from "../../../ui/kit";
 import { useAction } from "../adminKit";
-import { DataList } from "../../../ui/DataList";
+import { DataList, type DataColumn } from "../../../ui/DataList";
+import { ListPreview } from "../../../ui/ListPreview";
 import { McpServerNextSteps } from "./McpServerAdmission";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import {
@@ -166,7 +167,7 @@ export function McpRegistriesPanel() {
           </div>
         )}
       </Card>
-      {browsed && <RegistryEntriesCard key={browsed.id} registry={browsed} />}
+      {browsed && <RegistryEntriesPreview key={browsed.id} registry={browsed} />}
       {editing && <EditRegistryDialog registry={editing} onClose={() => setEditing(null)} />}
     </div>
   );
@@ -329,7 +330,77 @@ function EditRegistryDialog(props: { registry: McpRegistry; onClose: () => void 
   );
 }
 
-function RegistryEntriesCard(props: { registry: McpRegistry }) {
+/** a catalogue's columns, in screen order, without the row's Import action */
+const ENTRY_COLUMNS: Array<DataColumn<McpRegistryEntry>> = [
+      {
+        key: "name",
+        header: "Entry",
+        main: true,
+        sortable: true,
+        render: (e) => (
+          <span>
+            <span className={v.mono}>{e.upstreamName}</span> <span className={v.faint}>v{e.upstreamVersion}</span>
+            {e.title && <div>{e.title}</div>}
+          </span>
+        ),
+      },
+      {
+        key: "kind",
+        header: "Kind",
+        main: true,
+        sortable: true,
+        render: (e) => (e.kind === "remote" ? <Badge tone="info">remote · {e.remoteTransport ?? "transport not reported"}</Badge> : <Badge tone="neutral">catalogue only</Badge>),
+      },
+      { key: "endpoint", header: "Endpoint", main: true, sortable: true, render: (e) => (e.remoteUrl ? <span className={v.mono}>{e.remoteUrl}</span> : <span className={v.faint}>none listed</span>) },
+      {
+        key: "state",
+        header: "State",
+        main: true,
+        sortable: true,
+        required: "Conflicts, moved endpoints and imports are always shown",
+        render: (e) => (
+          <span className={v.stackTight}>
+            {e.upstreamStatus && e.upstreamStatus !== "active" && <Badge tone="warn">{e.upstreamStatus}</Badge>}
+            {e.missingSince && <Badge tone="warn">no longer listed</Badge>}
+            {e.conflictReason && <Badge tone="danger">{e.conflictReason === "name_taken" ? "name taken" : "URL taken"}</Badge>}
+            {e.remoteUrlDrift && (
+              <span title="The upstream endpoint moved after import. The local server URL is not rewritten.">
+                <Badge tone="warn">endpoint moved</Badge>
+              </span>
+            )}
+            {e.serverId && (
+              <span>
+                <Badge tone="ok">imported</Badge> <IdChip id={e.serverId} />
+              </span>
+            )}
+          </span>
+        ),
+      },
+      { key: "lastSeen", header: "Last seen", sortable: true, render: (e) => (e.lastSeenAt ? ago(e.lastSeenAt) : "—") },
+];
+
+export const entriesPath = (registryId: string) => `/admin/mcp-servers/registries/${encodeURIComponent(registryId)}/entries`;
+
+/** P3 (#453 c6527514889): the registries tab keeps five catalogue rows and a count; the catalogue has its own page */
+function RegistryEntriesPreview(props: { registry: McpRegistry }) {
+  return (
+    <ListPreview<McpRegistryEntry>
+      title={`Catalogue: ${props.registry.name}`}
+      noun="catalogue entries"
+      endpoint={`/v1/mcp-registries/${props.registry.id}/entries`}
+      legacyKey="entries"
+      queryKey={[...mcpRegistryKeys.entries(props.registry.id), "list"]}
+      sort={{ key: "name", dir: "asc" }}
+      columns={ENTRY_COLUMNS.filter((c) => c.main)}
+      rowKey={(e) => e.id}
+      viewAll={entriesPath(props.registry.id)}
+      info={<p>What this registry says exists. A row here is not a server. Import one from the full catalogue.</p>}
+      empty={<EmptyState title="The catalogue is empty" body="Sync the registry to pull its listing. A disabled registry can still be synced by hand." />}
+    />
+  );
+}
+
+export function RegistryEntriesCard(props: { registry: McpRegistry }) {
   const act = useAction();
   // the search runs on the server, a moment after typing stops
   const [search, setSearch] = useState("");
@@ -338,7 +409,8 @@ function RegistryEntriesCard(props: { registry: McpRegistry }) {
     const t = window.setTimeout(() => setQ(search.trim()), 300);
     return () => window.clearTimeout(t);
   }, [search]);
-  const filters = useMemo(() => ({ q: q || undefined }), [q]);
+  const [kind, setKind] = useState("");
+  const filters = useMemo(() => ({ q: q || undefined, kind: kind || undefined }), [q, kind]);
   const [importing, setImporting] = useState<McpRegistryEntry | null>(null);
   const [imported, setImported] = useState<RegistryImportResult | null>(null);
   return (
@@ -347,9 +419,18 @@ function RegistryEntriesCard(props: { registry: McpRegistry }) {
         What this registry says exists. A row here is not a server. Importing one creates a single MCP server, unscanned, with no tools and no
         grants: nobody can call it until an admin grants it, and its first connect is scanned for admission.
       </p>
-      <Field label="Search the catalogue">
-        <Input type="search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Name, title or endpoint" />
-      </Field>
+      <div className={v.row}>
+        <Field label="Search the catalogue">
+          <Input type="search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Name, title or endpoint" />
+        </Field>
+        <Field label="Kind">
+          <Select value={kind} onChange={(e) => setKind(e.target.value)}>
+            <option value="">any kind</option>
+            <option value="remote">remote</option>
+            <option value="catalogue_only">catalogue only</option>
+          </Select>
+        </Field>
+      </div>
       <DataList<McpRegistryEntry>
         listId="mcp-registry-entries"
         noun="catalogue entries"
@@ -361,57 +442,14 @@ function RegistryEntriesCard(props: { registry: McpRegistry }) {
         defaultSort={{ key: "name", dir: "asc" }}
         rowKey={(e) => e.id}
         empty={
-          q ? (
+          q || kind ? (
             <EmptyState title="No entries match" body="Try a different search." />
           ) : (
             <EmptyState title="The catalogue is empty" body="Sync the registry to pull its listing. A disabled registry can still be synced by hand." />
           )
         }
         columns={[
-          {
-            key: "name",
-            header: "Entry",
-            main: true,
-            sortable: true,
-            render: (e) => (
-              <span>
-                <span className={v.mono}>{e.upstreamName}</span> <span className={v.faint}>v{e.upstreamVersion}</span>
-                {e.title && <div>{e.title}</div>}
-              </span>
-            ),
-          },
-          {
-            key: "kind",
-            header: "Kind",
-            main: true,
-            sortable: true,
-            render: (e) => (e.kind === "remote" ? <Badge tone="info">remote · {e.remoteTransport ?? "transport not reported"}</Badge> : <Badge tone="neutral">catalogue only</Badge>),
-          },
-          { key: "endpoint", header: "Endpoint", main: true, sortable: true, render: (e) => (e.remoteUrl ? <span className={v.mono}>{e.remoteUrl}</span> : <span className={v.faint}>none listed</span>) },
-          {
-            key: "state",
-            header: "State",
-            main: true,
-            sortable: true,
-            required: "Conflicts, moved endpoints and imports are always shown",
-            render: (e) => (
-              <span className={v.stackTight}>
-                {e.upstreamStatus && e.upstreamStatus !== "active" && <Badge tone="warn">{e.upstreamStatus}</Badge>}
-                {e.missingSince && <Badge tone="warn">no longer listed</Badge>}
-                {e.conflictReason && <Badge tone="danger">{e.conflictReason === "name_taken" ? "name taken" : "URL taken"}</Badge>}
-                {e.remoteUrlDrift && (
-                  <span title="The upstream endpoint moved after import. The local server URL is not rewritten.">
-                    <Badge tone="warn">endpoint moved</Badge>
-                  </span>
-                )}
-                {e.serverId && (
-                  <span>
-                    <Badge tone="ok">imported</Badge> <IdChip id={e.serverId} />
-                  </span>
-                )}
-              </span>
-            ),
-          },
+          ...ENTRY_COLUMNS.slice(0, 4),
           {
             key: "import",
             header: "Import",
@@ -426,7 +464,7 @@ function RegistryEntriesCard(props: { registry: McpRegistry }) {
               );
             },
           },
-          { key: "lastSeen", header: "Last seen", sortable: true, render: (e) => (e.lastSeenAt ? ago(e.lastSeenAt) : "—") },
+          ...ENTRY_COLUMNS.slice(4),
         ]}
       />
       {act.error && (
