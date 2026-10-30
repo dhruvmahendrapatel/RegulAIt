@@ -130,7 +130,8 @@ test.describe("ADR-0168: one registry, one way in", () => {
     await page.goto("/ui/admin/use-cases");
     await expect(page.getByRole("heading", { level: 1, name: "AI registry" })).toBeVisible();
     const table = page.getByRole("table");
-    await expect(table.locator("thead th")).toHaveText(["Name", "Status", "Tier", "Owner", "Created", "Valid until", "Open conditions"]);
+    // G11: the last column holds the row's actions (Retire), named for screen readers only
+    await expect(table.locator("thead th")).toHaveText(["Name", "Status", "Tier", "Owner", "Created", "Valid until", "Open conditions", ""]);
     // nothing on the registry creates a use case: no form, no propose button
     await expect(page.getByRole("button", { name: /Propose/ })).toHaveCount(0);
     await expect(page.getByRole("main").locator("form")).toHaveCount(0);
@@ -141,7 +142,7 @@ test.describe("ADR-0168: one registry, one way in", () => {
     // valid until: a date after approval, an expired approval called out, a dash before; open conditions counted
     const approved = table.getByRole("link", { name: /^Support ticket summarizer, Approved/ });
     await expect(approved).toContainText("20 Aug 2027");
-    await expect(approved.getByRole("cell").last()).toHaveText("2");
+    await expect(approved.getByRole("cell").nth(6)).toHaveText("2");
     await expect(table.getByRole("link", { name: /^Fraud scoring model/ })).toContainText("Expired 1 Sept 2026");
     await expect(table.getByRole("link", { name: /^Meeting notes drafter/ }).getByRole("cell").nth(5)).toHaveText("—");
     await checkScreen(page, "Registry", "registry");
