@@ -370,6 +370,8 @@ export async function supplyChainDispatchGate(
       objectId: ctx.agentId,
       detail: {
         phase: "dispatch",
+        // a governed call refused at the gateway: a decision, signed into the receipt stream (ADR-0186 decision 30)
+        receiptClass: "decision",
         agentId: ctx.agentId,
         agentName: ctx.agentName,
         blocks: blocks.map((b) => ({ artifactId: b.artifactId, sha256: b.sha256, cardId: b.cardId, conditions: b.conditions })),

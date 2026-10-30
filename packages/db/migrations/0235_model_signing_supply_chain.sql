@@ -51,6 +51,12 @@ DROP TRIGGER IF EXISTS "model_signing_keys_guard" ON "model_signing_keys";
 CREATE TRIGGER "model_signing_keys_guard" BEFORE UPDATE OR DELETE ON "model_signing_keys"
   FOR EACH ROW EXECUTE FUNCTION "model_signing_keys_guard"();
 --> statement-breakpoint
+-- a TRUNCATE skips every row trigger: refused that way too (0185's pattern)
+DROP TRIGGER IF EXISTS "model_signing_keys_no_truncate" ON public."model_signing_keys";
+--> statement-breakpoint
+CREATE TRIGGER "model_signing_keys_no_truncate" BEFORE TRUNCATE ON public."model_signing_keys"
+  FOR EACH STATEMENT EXECUTE FUNCTION public.regulait_refuse_truncate();
+--> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "model_artifact_signatures" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
   "artifact_id" uuid NOT NULL REFERENCES "model_artifacts"("id") ON DELETE CASCADE,
@@ -127,3 +133,9 @@ DROP TRIGGER IF EXISTS "model_artifact_supply_chain_relaxations_guard" ON "model
 --> statement-breakpoint
 CREATE TRIGGER "model_artifact_supply_chain_relaxations_guard" BEFORE UPDATE ON "model_artifact_supply_chain_relaxations"
   FOR EACH ROW EXECUTE FUNCTION "model_artifact_supply_chain_relaxations_guard"();
+--> statement-breakpoint
+-- a TRUNCATE skips every row trigger: refused that way too (0185's pattern)
+DROP TRIGGER IF EXISTS "model_artifact_supply_chain_relaxations_no_truncate" ON public."model_artifact_supply_chain_relaxations";
+--> statement-breakpoint
+CREATE TRIGGER "model_artifact_supply_chain_relaxations_no_truncate" BEFORE TRUNCATE ON public."model_artifact_supply_chain_relaxations"
+  FOR EACH STATEMENT EXECUTE FUNCTION public.regulait_refuse_truncate();
