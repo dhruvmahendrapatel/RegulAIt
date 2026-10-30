@@ -47,6 +47,8 @@ export default defineConfig({
       "/auth": "http://localhost:3000",
       "/admin": "http://localhost:3000",
       "/app": "http://localhost:3000",
+      // ADR-0221: the supplier portal's own API
+      "/supplier": "http://localhost:3000",
     },
   },
 });

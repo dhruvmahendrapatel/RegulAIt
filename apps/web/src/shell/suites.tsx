@@ -154,6 +154,9 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // our data. Everything the vendor supplies is an attestation —
       // labelled, attributed, never blended into computed evidence.
       { label: "Vendors", to: "/admin/vendors" },
+      // ADR-0221 — the supplier portal's switch (shipped off) and the custom
+      // questionnaires a supplier answers beside the framework's controls
+      { label: "Supplier questionnaires", to: "/admin/vendors/questionnaires" },
       // ADR-0081 — the RISK layer over the measurements: evals, red-team and
       // guardrails MEASURE; the register links each measurement to a named
       // risk scenario, an owner, the mitigating control we actually enforce,
