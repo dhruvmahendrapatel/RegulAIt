@@ -357,6 +357,7 @@ test.describe("G11 row actions", () => {
     await dialog.getByRole("button", { name: "Abort workflow" }).click();
     await expect(dialog.getByRole("alert")).toBeVisible();
     await expect(dialog).toBeVisible();
+    await expect(page.getByText("Workflow aborted")).toHaveCount(0);
     expect(api.writes).toHaveLength(1);
   });
 });

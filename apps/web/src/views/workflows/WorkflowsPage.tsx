@@ -24,7 +24,7 @@ import {
 } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
 import { useSession } from "../../session/SessionContext";
-import { AbortWorkflowDialog, abortInstance, canAbort } from "./workflowAbort";
+import { AbortWorkflowDialog, canAbort } from "./workflowAbort";
 import v from "../views.module.css";
 
 export default function WorkflowsPage() {
