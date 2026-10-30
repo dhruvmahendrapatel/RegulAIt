@@ -51,6 +51,7 @@
  */
 import type { FastifyInstance } from "fastify";
 import {
+  agents,
   aiVendors,
   and,
   auditLog,
@@ -60,6 +61,10 @@ import {
   desc,
   eq,
   inArray,
+  ne,
+  orgSettings,
+  ORG_SETTINGS_ID,
+  sql,
   users,
   workflowArtifacts,
   workflowInstances,
@@ -71,12 +76,22 @@ import {
 import type { InstanceState, WorkflowDefinition } from "@regulait/workflow-kernel";
 import {
   AI_VENDOR_ATTESTATION_DISCLAIMER,
+  buildVendorDraftPrompt,
+  composeDraftQuestionnaire,
   createVendorSchema,
+  parseVendorDraft,
+  suggestVendorAnswers,
+  vendorDraftRequestSchema,
+  vendorDraftSources,
+  type VendorDraftGrounding,
+  type VendorDraftSection,
   recordVendorAttestationSchema,
   retireVendorSchema,
   updateVendorSchema,
 } from "@regulait/shared";
 import { z } from "zod";
+import { executeGovernedDispatch } from "./agents-connectors.js";
+import { agentDecision, featureDefaultModel } from "./copilot.js";
 import {
   createWorkflowTemplateValidated,
   startWorkflowInstanceWithTemplates,
@@ -94,8 +109,10 @@ export const VENDOR_QUESTIONNAIRE_OUTPUT = "vendor_assessment_questionnaire";
 
 /**
  * The assessment questionnaire — an honest BLANK form the assessor fills
- * with VENDOR-SUPPLIED answers. Nothing is pre-filled by a model, and the
- * form says on its face that every answer is the vendor's claim.
+ * with VENDOR-SUPPLIED answers. Nothing is pre-filled; since ADR-0213 a person
+ * may ask for drafted answers, each labelled with its sources, which count only
+ * once they submit the form. The form says on its face that every answer is
+ * the vendor's claim.
  */
 export const VENDOR_QUESTIONNAIRE_TEMPLATE = `# Vendor AI assessment questionnaire
 
@@ -103,7 +120,8 @@ export const VENDOR_QUESTIONNAIRE_TEMPLATE = `# Vendor AI assessment questionnai
 > as the assessment instance's \`${VENDOR_QUESTIONNAIRE_OUTPUT}\` artifact. It
 > becomes the versioned record the sign-off decision is made on. Everything
 > below is a vendor attestation — a claim the vendor supplied — not something
-> this platform measured or verified. Nothing is pre-filled by a model.
+> this platform measured or verified. Nothing is pre-filled: a drafted answer
+> is labelled with its sources and counts only once you submit it.
 
 ## 1. What AI the vendor runs
 Which models/AI systems does the vendor operate or embed, and for what
@@ -698,6 +716,226 @@ export function registerVendorRoutes(
       attestation,
       disclaimer: AI_VENDOR_ATTESTATION_DISCLAIMER,
     });
+  });
+
+  // ADR-0213 (backlog P6) — DRAFT the questionnaire answers. Suggestion-only,
+  // the ADR-0149 pattern: a deterministic draft from what the platform already
+  // holds, and an optional model draft through the one governed dispatch. It
+  // writes nothing but one audit row (counts and outcome, never supplier text);
+  // the questionnaire is still submitted by a person through the workflow
+  // artifact endpoint, and an attestation is still recorded by a person through
+  // POST /v1/vendors/:vendorId/attestations.
+  app.post("/v1/vendors/:vendorId/questionnaire/draft", async (req, reply) => {
+    const { vendorId } = vendorIdParam.parse(req.params);
+    const userId = req.authCtx.userId;
+    if (!userId) {
+      return reply.status(403).send({
+        error: "vendor_draft_requires_identity",
+        detail: "the drafter works on behalf of a person; a token with no user identity cannot ask for drafts",
+      });
+    }
+    const body = vendorDraftRequestSchema.parse(req.body ?? {});
+    const [settings] = await db
+      .select({ enabled: orgSettings.vendorDraftAssistEnabled })
+      .from(orgSettings)
+      .where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    if (!settings?.enabled) {
+      return reply.status(409).send({
+        error: "vendor_draft_disabled",
+        detail:
+          "drafted questionnaire answers are off for this organisation — an admin can turn them on in " +
+          "Settings → Organization; until then the questionnaire is filled by hand",
+      });
+    }
+    const [row] = await db.select().from(aiVendors).where(eq(aiVendors.id, vendorId));
+    if (!row) return reply.status(404).send({ error: "not_found" });
+    const isAdmin = req.authCtx.isAdmin;
+    if (!isAdmin && userId !== row.ownerUserId) {
+      return reply.status(403).send({
+        error: "forbidden",
+        detail: "questionnaire drafts are for the vendor's owner and for admins",
+      });
+    }
+    if (row.status !== "proposed" && row.status !== "under_assessment") {
+      return reply.status(409).send({
+        error: "vendor_not_editable",
+        detail: `a ${row.status} vendor is a decided record — its questionnaire is not drafted again`,
+      });
+    }
+
+    // GROUNDING. Earlier records of the same vendor (re-assessment is a new
+    // proposal), only those the caller may see: object-level authorisation
+    // applies to what grounds a draft as much as to what it returns.
+    const earlier = await db
+      .select()
+      .from(aiVendors)
+      .where(
+        and(
+          ne(aiVendors.id, row.id),
+          sql`lower(${aiVendors.name}) = lower(${row.name})`,
+          ...(isAdmin ? [] : [eq(aiVendors.ownerUserId, userId)]),
+        ),
+      )
+      .orderBy(desc(aiVendors.createdAt))
+      .limit(10);
+    const priorAttestations = [row, ...earlier]
+      .flatMap((v) => v.packAttestations)
+      .sort((x, y) => (x.recordedAt < y.recordedAt ? 1 : -1))
+      .slice(0, 20)
+      .map((a) => ({
+        framework: a.framework,
+        controlRef: a.controlRef,
+        statement: a.statement,
+        evidenceRef: a.evidenceRef,
+        recordedAt: a.recordedAt,
+        questionnaireVersion: a.questionnaireVersion,
+      }));
+    const earlierInstances = earlier.map((v) => v.workflowInstanceId).filter((id): id is string => !!id);
+    const [priorArtifact] = earlierInstances.length
+      ? await db
+          .select({ version: workflowArtifacts.version, content: workflowArtifacts.content })
+          .from(workflowArtifacts)
+          .where(
+            and(
+              inArray(workflowArtifacts.instanceId, earlierInstances),
+              eq(workflowArtifacts.output, VENDOR_QUESTIONNAIRE_OUTPUT),
+            ),
+          )
+          .orderBy(desc(workflowArtifacts.createdAt))
+          .limit(1)
+      : [];
+    const [agentCount] = row.linkedAgentProviders.length
+      ? await db
+          .select({ n: sql<number>`count(*)::int` })
+          .from(agents)
+          .where(inArray(agents.provider, row.linkedAgentProviders))
+      : [{ n: 0 }];
+    const customProviders = row.linkedCustomProviderIds.length
+      ? await db
+          .select({ name: customModelProviders.name })
+          .from(customModelProviders)
+          .where(inArray(customModelProviders.id, row.linkedCustomProviderIds))
+      : [];
+    const grounding: VendorDraftGrounding = {
+      vendor: {
+        name: row.name,
+        description: row.description,
+        category: row.category,
+        linkedAgentProviders: row.linkedAgentProviders,
+      },
+      orgEvidence: { agentCount: agentCount?.n ?? 0, customProviderNames: customProviders.map((c) => c.name) },
+      priorAttestations,
+      priorQuestionnaire: priorArtifact ?? null,
+      supplierDocuments: body.supplierDocuments,
+    };
+    const sources = vendorDraftSources(grounding);
+    let sections: VendorDraftSection[] = suggestVendorAnswers(grounding, VENDOR_QUESTIONNAIRE_TEMPLATE);
+
+    type ModelDraft =
+      | { status: "not_requested" }
+      | { status: "refused" | "failed" | "unparseable"; reason: string }
+      | { status: "drafted"; source: "model" | "mock"; agentId: string; sections: string[] };
+    let model: ModelDraft = { status: "not_requested" };
+    if (body.useModel) {
+      // supplier material is commercial-confidential by default
+      const gate = { feature: "vendor_draft" as const, dataClass: "confidential" as const };
+      const [named] = body.agentId ? await db.select().from(agents).where(eq(agents.id, body.agentId)) : [];
+      const agent = named ?? (body.agentId ? undefined : await featureDefaultModel(db, userId, gate));
+      if (!agent) {
+        model = {
+          status: "refused",
+          reason: body.agentId
+            ? "the named model connection does not exist"
+            : "no model connection is available to you for vendor questionnaire drafts — ask an admin to set a default in Model policy, or choose one",
+        };
+      } else {
+        const decision = await agentDecision(db, userId, agent, gate);
+        if (decision.effect !== "allow") {
+          await db.insert(auditLog).values({
+            userId,
+            objectType: "agent",
+            objectId: agent.id,
+            detail: { surface: "vendor_draft", agentName: agent.name, dataClass: gate.dataClass, receiptClass: "decision" },
+            effect: "deny",
+            ruleId: decision.ruleId,
+            ruleChain: decision.ruleChain,
+            reason: decision.reason,
+          });
+          model = { status: "refused", reason: decision.reason };
+        } else {
+          // a direct call the person asked for: decided as the person, no agent principal acts
+          const outcome = await executeGovernedDispatch(db, opts.dataKey, {
+            userId,
+            served: agent,
+            requestedAgentId: agent.id,
+            baseline: null,
+            input: buildVendorDraftPrompt(grounding, sources),
+            maxTokens: 4096,
+            projectId: body.projectId ?? null,
+            modelFeature: gate,
+            detail: { purpose: "vendor-draft", vendorId: row.id },
+          });
+          if (!outcome.ok) {
+            model = { status: "failed", reason: `${outcome.error}${outcome.detail ? ` — ${outcome.detail}` : ""}` };
+          } else {
+            const parsed = parseVendorDraft(outcome.result.outputText, sources);
+            if (!parsed) {
+              model = {
+                status: "unparseable",
+                reason: "the model reply was not cited answers in the requested JSON; the record-based draft is shown instead",
+              };
+            } else {
+              const source = agent.provider === "mock" ? ("mock" as const) : ("model" as const);
+              const byId = new Map(sources.map((s) => [s.id, s]));
+              sections = sections.map((s) => {
+                const d = parsed[s.id];
+                if (!d) return s;
+                return {
+                  ...s,
+                  text: d.text,
+                  source,
+                  cites: d.cites.map((id) => byId.get(id)!).map((c) => ({ id: c.id, kind: c.kind, label: c.label })),
+                };
+              });
+              model = { status: "drafted", source, agentId: agent.id, sections: Object.keys(parsed) };
+            }
+          }
+        }
+      }
+    }
+
+    // one audit row per draft: counts and outcome, never supplier text
+    await db.insert(auditLog).values({
+      userId,
+      objectType: "ai_vendor",
+      objectId: row.id,
+      detail: {
+        phase: "questionnaire-drafted",
+        supplierDocuments: body.supplierDocuments.length,
+        priorAttestations: priorAttestations.length,
+        priorQuestionnaire: priorArtifact?.version ?? null,
+        drafted: sections.filter((s) => s.source !== "none").map((s) => `${s.id}:${s.source}`),
+        model: model.status,
+      },
+      effect: "allow",
+      ruleId: "vendor-questionnaire-drafted",
+      ruleChain: [],
+      reason:
+        `questionnaire answers drafted for vendor '${row.name}' ` +
+        `(${sections.filter((s) => s.source !== "none").length} of ${sections.length} sections); nothing was submitted or recorded`,
+    });
+
+    return {
+      sections,
+      sources: sources.map((s) => ({ id: s.id, kind: s.kind, label: s.label })),
+      model,
+      draft: composeDraftQuestionnaire(VENDOR_QUESTIONNAIRE_TEMPLATE, sections),
+      submitted: false,
+      disclaimer:
+        "Drafts only. Nothing is submitted until you submit the questionnaire, and nothing becomes an " +
+        "attestation until you record it. Each answer names the sources it was drafted from; a " +
+        "model-drafted answer may be wrong. " + AI_VENDOR_ATTESTATION_DISCLAIMER,
+    };
   });
 
   // Retire: admin-only (default route class), reason required and audited.

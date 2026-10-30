@@ -105,8 +105,8 @@ test.describe("ADR-0173: model policy", () => {
     await page.goto("/ui/admin/model-policy");
     await expect(page.getByRole("heading", { level: 1, name: "Model policy" })).toBeVisible();
     const matrix = page.getByRole("table", { name: "Allowed models per feature" });
-    // the binding column + one per feature (ADR-0173 batch 2b added the eighth, "playground")
-    await expect(matrix.getByRole("columnheader")).toHaveCount(9);
+    // the binding column + one per feature (ADR-0173 batch 2b added "playground", ADR-0213 "vendor_draft")
+    await expect(matrix.getByRole("columnheader")).toHaveCount(10);
     await expect(matrix.getByRole("columnheader").last()).toContainText("Prompt playground");
     // unrestricted: no per-binding checkboxes yet, "any" everywhere
     await expect(matrix.getByRole("checkbox", { name: "Allow claude-opus for Chat" })).toHaveCount(0);

@@ -275,6 +275,8 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   dispatchAttributionRequired: notEqual(true),
   recommendationJudgeEnabled: exempt("adds a model-judged annotation to the deterministic findings; it refuses and allows nothing"),
   recommendationJudgeAgentId: exempt("names the judge of the annotation above; it refuses and allows nothing"),
+  // ADR-0213: turning the vendor questionnaire drafter on sends supplier material to a model
+  vendorDraftAssistEnabled: notEqual(false),
 
   // --- budgets and approvals ------------------------------------------------
   budgetEnforcement: notEqual("block"),

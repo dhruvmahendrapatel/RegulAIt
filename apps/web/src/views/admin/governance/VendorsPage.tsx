@@ -27,6 +27,7 @@ import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea, type Tone } from "../../../ui/kit";
 import { QueryGate, useAction, useCustomProviders } from "../adminKit";
 import { EditVendorButton, vendorEditBlocked } from "../editForms";
+import { VendorDraftPanel } from "./VendorDraftPanel";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -319,10 +320,11 @@ export default function VendorsPage() {
                     <Card title="Assessment questionnaire — record the vendor's answers and submit">
                       <div className={v.stack}>
                         <div className={v.faint}>
-                          Every answer below is the vendor&apos;s claim, recorded by you — nothing is pre-filled by a
-                          model and nothing is verified by this platform. Submitting stores it as the instance&apos;s
-                          versioned artifact and sends the vendor to assessment review.
+                          Every answer below is the vendor&apos;s claim, recorded by you — nothing is verified by this
+                          platform, and a drafted answer counts only once you submit it. Submitting stores it as the
+                          instance&apos;s versioned artifact and sends the vendor to assessment review.
                         </div>
+                        <VendorDraftPanel vendorId={d.vendor.id} onUseDraft={setAnswers} />
                         <Textarea
                           rows={14}
                           value={answers || d.questionnaireTemplate || ""}

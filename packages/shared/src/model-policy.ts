@@ -25,6 +25,8 @@ export const MODEL_POLICY_FEATURES = [
   "builder",
   "copilot",
   "intake_assist",
+  // ADR-0213: drafting vendor questionnaire answers
+  "vendor_draft",
   "evals",
   "orchestration",
   "compat",
@@ -39,6 +41,7 @@ export const MODEL_POLICY_FEATURE_LABELS: Record<ModelPolicyFeature, string> = {
   builder: "Agent builder",
   copilot: "Governance copilot",
   intake_assist: "Intake assistant",
+  vendor_draft: "Vendor questionnaire drafts",
   evals: "Evaluations",
   orchestration: "Orchestration",
   compat: "Compatible APIs",
