@@ -277,6 +277,15 @@ function ProjectRollup(props: { projectId: string; projectName: string }) {
               />
             </div>
             <div>
+              <div className={v.sectionTitle}>Model spend by modality</div>
+              <BarChart
+                items={modalityBars(c.byModality)}
+                valueKey="costUsd"
+                label={(i) => String(i.label)}
+                title="Model spend by modality"
+              />
+            </div>
+            <div>
               <div className={v.sectionTitle}>Spend by MCP tool</div>
               <BarChart
                 items={(c.byMcpTool ?? []) as Array<Record<string, unknown>>}
@@ -301,6 +310,18 @@ function ProjectRollup(props: { projectId: string; projectName: string }) {
       )}
     </Card>
   );
+}
+
+const MODALITY_LABEL = { text: "Text", image: "Image", audio: "Audio" } as const;
+
+/** the modality bars: the measured split, then spend the provider reported no split for, never folded into text */
+export function modalityBars(m: ProjectCosts["byModality"]): Array<Record<string, unknown>> {
+  if (!m) return [];
+  const rows: Array<Record<string, unknown>> = m.split
+    .filter((r) => r.costUsd > 0 || r.inputTokens > 0 || r.outputTokens > 0)
+    .map((r) => ({ label: MODALITY_LABEL[r.modality], costUsd: r.costUsd }));
+  if (m.notSplit.events > 0) rows.push({ label: "No split reported by the provider", costUsd: m.notSplit.costUsd });
+  return rows;
 }
 
 // ---- unattributed bucket --------------------------------------------------

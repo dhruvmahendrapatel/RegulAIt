@@ -4,7 +4,7 @@
  * rate limits. The scope select drives which target select is live, so the
  * posted body always matches the chosen discriminant.
  */
-import { useState, type ReactNode } from "react";
+import { lazy, Suspense, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type {
@@ -38,6 +38,9 @@ import a from "../admin.module.css";
 import v from "../../views.module.css";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { APPROVAL_QUORUM_CHOICES, approvalRuleBody, approvalRuleQuorumPatch } from "./approvalRuleForm";
+
+// per-model limits sit in the Rate limits card; loaded on demand like every new screen part
+const ModelRateLimits = lazy(() => import("./ModelRateLimits").then((m) => ({ default: m.ModelRateLimits })));
 
 interface Subject {
   scope: "user" | "role" | "team" | "fleet";
@@ -607,6 +610,9 @@ export default function RulesEnginePage() {
             onRetry={() => void rateLimits.refetch()}
             empty={<EmptyState title="No rate limits" />}
           />
+          <Suspense fallback={null}>
+            <ModelRateLimits users={uOpts} roles={rOpts} teams={tOpts} targetName={(r) => targetOf(r as RuleBase)} />
+          </Suspense>
         </Card>
       </div>
     </>

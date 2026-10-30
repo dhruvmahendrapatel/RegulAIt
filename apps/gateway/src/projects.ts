@@ -55,6 +55,8 @@ import {
   updateProjectSchema,
   upsertComplianceProfileSchema,
   type PiiHit,
+  MODALITIES,
+  type Modality,
 } from "@regulait/shared";
 import { z } from "zod";
 import {
@@ -115,6 +117,10 @@ export const USAGE_CSV_HEADER = [
   "costUsd",
   "measuredCostSavedUsd",
   "projectId",
+  // ADR-0212 (P12 b): the modality split for chargeback; empty when the provider reported none
+  "textCostUsd",
+  "imageCostUsd",
+  "audioCostUsd",
 ] as const;
 
 /** one already-escaped usage_events data line (no terminator) */
@@ -132,6 +138,9 @@ export function usageEventRow(r: typeof usageEvents.$inferSelect): string {
     r.costUsd,
     r.measuredCostSavedUsd,
     r.projectId,
+    r.modalityUsage?.text.costUsd,
+    r.modalityUsage?.image.costUsd,
+    r.modalityUsage?.audio.costUsd,
   ]
     .map(csvField)
     .join(",");
@@ -165,6 +174,7 @@ export const usageEventColumns = {
   refusal: usageEvents.refusal,
   providerMessageId: usageEvents.providerMessageId,
   projectId: usageEvents.projectId,
+  modalityUsage: usageEvents.modalityUsage,
   detail: usageEvents.detail,
 } as const;
 
@@ -2402,7 +2412,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     // unexplained gap between the total and agent+connector.
     const mcpWhere = and(where, eq(usageEvents.objectType, "mcp_tool"));
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 3600 * 1000);
-    const [[measured], byUser, byAgent, byConnector, byMcpTool, byTeam, estimated, [recent]] =
+    const [[measured], byUser, byAgent, byConnector, byMcpTool, byTeam, estimated, [recent], modalityRows] =
       await Promise.all([
       db
         .select({
@@ -2498,7 +2508,36 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         .select({ costUsd: sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8` })
         .from(usageEvents)
         .where(and(where, gte(usageEvents.at, sevenDaysAgo))),
+      // ADR-0212 (P12 b): the modality split. Rows whose provider reported no modality
+      // data are summed apart as `notSplit` rather than guessed into "text".
+      db
+        .select({
+          split: sql<boolean>`${usageEvents.modalityUsage} IS NOT NULL`,
+          events: count(),
+          costUsd: sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8`,
+          ...Object.fromEntries(
+            MODALITIES.flatMap((m) => [
+              [`${m}In`, sql<number>`coalesce(sum((${usageEvents.modalityUsage}->${m}->>'inputTokens')::bigint), 0)::float8`],
+              [`${m}Out`, sql<number>`coalesce(sum((${usageEvents.modalityUsage}->${m}->>'outputTokens')::bigint), 0)::float8`],
+              [`${m}Cost`, sql<number>`coalesce(sum((${usageEvents.modalityUsage}->${m}->>'costUsd')::float8), 0)::float8`],
+            ]),
+          ) as Record<`${Modality}${"In" | "Out" | "Cost"}`, SQL<number>>,
+        })
+        .from(usageEvents)
+        .where(agentWhere)
+        .groupBy(sql`${usageEvents.modalityUsage} IS NOT NULL`),
     ]);
+    const splitRow = modalityRows.find((r) => r.split);
+    const unsplitRow = modalityRows.find((r) => !r.split);
+    const byModality = {
+      split: MODALITIES.map((m) => ({
+        modality: m,
+        inputTokens: Number(splitRow?.[`${m}In`] ?? 0),
+        outputTokens: Number(splitRow?.[`${m}Out`] ?? 0),
+        costUsd: Number(splitRow?.[`${m}Cost`] ?? 0),
+      })),
+      notSplit: { events: Number(unsplitRow?.events ?? 0), costUsd: Number(unsplitRow?.costUsd ?? 0) },
+    };
 
     const spentUsd = measured?.costUsd ?? 0;
     // budget window: under a 'monthly' budget the gauge reads only the current
@@ -2543,6 +2582,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       byConnector,
       byMcpTool,
       byTeam,
+      byModality,
       estimatedSavings: estimated,
       budget: {
         budgetUsd: project.budgetUsd,
