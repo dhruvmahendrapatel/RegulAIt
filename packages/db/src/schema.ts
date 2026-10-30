@@ -152,6 +152,7 @@ import {
   CONTENT_SOURCE_KINDS,
   CONTENT_TRUST_TIERS,
   CONTENT_TRUST_WRITE_FLOORS,
+  type ModalitySplit,
 } from "@regulait/shared";
 import {
   type AnyPgColumn,
@@ -1882,6 +1883,35 @@ export const rateLimits = pgTable(
   ],
 );
 
+// ADR-0212 (P12 c, migration 0230): a rate limit keyed on the MODEL — the agent
+// registry entry that serves a dispatch — beside the user/role/team/fleet subject.
+// Its own table rather than a column on rate_limits, so the MCP tool path's loads,
+// versioning and kernel stay byte-identical. Usage is counted from usage_events
+// agent rows at dispatch time, per subject (a role/team/fleet limit still counts
+// each user separately, as rate_limits does).
+export const modelRateLimits = pgTable(
+  "model_rate_limits",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scope: text("scope", { enum: ["user", "role", "team", "fleet"] }).notNull().default("user"),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    roleId: uuid("role_id").references(() => roles.id, { onDelete: "cascade" }),
+    teamId: uuid("team_id").references(() => teams.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    maxCalls: integer("max_calls").notNull(),
+    windowSeconds: integer("window_seconds").notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("model_rate_limits_agent_idx").on(t.agentId),
+    check("model_rate_limits_max_calls_check", sql`${t.maxCalls} BETWEEN 1 AND 1000000`),
+    check("model_rate_limits_window_check", sql`${t.windowSeconds} BETWEEN 1 AND 2592000`),
+  ],
+);
+
 // §6 Approvals Queue: one pending entry per paused call. Approved entries are
 // consumed by exactly one retried call. The audit log remains the permanent
 // record; queue rows may cascade away with their user/server.
@@ -2342,6 +2372,14 @@ export const agents = pgTable("agents", {
   // optimizer will never route toward (or estimate savings against) it.
   costPerMTokIn: doublePrecision("cost_per_mtok_in"),
   costPerMTokOut: doublePrecision("cost_per_mtok_out"),
+  // ADR-0212 (P12 b, migration 0230): per-modality list prices per million tokens.
+  // null = that modality is priced at the text price above (so an agent with none
+  // costs exactly what it did before). Written only by PUT
+  // /v1/agents/:agentId/modality-pricing (admin, audited in the same transaction).
+  costPerMTokImageIn: doublePrecision("cost_per_mtok_image_in"),
+  costPerMTokImageOut: doublePrecision("cost_per_mtok_image_out"),
+  costPerMTokAudioIn: doublePrecision("cost_per_mtok_audio_in"),
+  costPerMTokAudioOut: doublePrecision("cost_per_mtok_audio_out"),
   // MODEL DISPATCH: provider-native model id this registry entry executes as
   // (e.g. claude-opus-5). null = decision/routing-only, not dispatchable.
   model: text("model"),
@@ -3170,6 +3208,10 @@ export const usageEvents = pgTable(
      * agent_config candidate never serves (ADR-0073's invariant). */
     agentConfigVersionId: uuid("agent_config_version_id"),
     agentConfigVersion: integer("agent_config_version"),
+    /** ADR-0212 (P12 b, migration 0230): the text/image/audio split of this row's
+     * tokens and cost. NULL = the provider reported no modality data (every
+     * pre-0230 row, every connector/MCP row) — never inferred. */
+    modalityUsage: jsonb("modality_usage").$type<ModalitySplit | null>(),
     detail: jsonb("detail"),
     /** ADR-0188 (migration 0180): the agent principal and delegation grant this spend was made under (NULL = a human's own call) */
     actorIdentityId: uuid("actor_identity_id"),
@@ -3191,6 +3233,12 @@ export const usageEvents = pgTable(
     // ADR-0175 A7 review fix (migration 0142): the inventory's windowed
     // connector reads; partial, since only connector rows carry one
     index("usage_events_connector_at_idx").on(t.connectorId, t.at).where(sql`${t.connectorId} IS NOT NULL`),
+    // ADR-0212 (migration 0230): the model rate limit's dispatch-time count
+    index("usage_events_user_agent_at_idx").on(t.userId, t.agentId, t.at).where(sql`${t.objectType} = 'agent'`),
+    check(
+      "usage_events_modality_usage_ck",
+      sql`${t.modalityUsage} IS NULL OR (jsonb_typeof(${t.modalityUsage}) = 'object' AND ${t.modalityUsage} ?& ARRAY['text', 'image', 'audio'])`,
+    ),
   ],
 );
 
@@ -4205,6 +4253,9 @@ export const orgSettings = pgTable(
      * strict separation of duties: creating delegations is refused and
      * existing windows stop applying immediately. An admin may turn it on. */
     approvalDelegationEnabled: boolean("approval_delegation_enabled").notNull().default(false),
+    /** ADR-0212 (P12 c, migration 0230): model rate limits are enforced only once an
+     * admin opts in (step-up, audited) through PUT /v1/rules/model-rate-limits/enforcement */
+    modelRateLimitsEnabled: boolean("model_rate_limits_enabled").notNull().default(false),
     /** ADR-0022 (portal defect fix): the org's default infra-remediation
      * approver. Persisted so the Infrastructure page's approver pick survives
      * reloads and admins; each propose call still names its approver
