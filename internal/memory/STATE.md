@@ -21,6 +21,17 @@ roadmap: ../product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-29 - the customer demo moves to one date, Saturday 2026-10-31 (owner, #453 c6508111468).**
+- **Date:** the internal run-through on Sun 11-01 and the external demo on Tue 11-03 are dropped; there is one run, on
+  10-31. LIVE is never re-prepared, so every beat, state-changing ones included, runs on LIVE once, at the demo; the
+  FALLBACK laptop stack stays the failure fallback and the only place to rehearse a state-changing step. T-24h is Fri
+  10-30. Recorded as addenda on [ADR-0202](../decisions/0202-live-integrations-hosted-demo.md) and
+  [ADR-0203](../decisions/0203-demo-hosting-after-aws-org-loss.md), and in DEMO_SCRIPT_2026-11-01 (the name is history),
+  DEMO_RUNBOOK §7 and the presenter notes, talk track and Q&A headers.
+- **Two freeze exceptions approved:** (a) Claude through the Anthropic API, as the model and the agent, pointed at our
+  MCP endpoint; (b) the ABAP MCP server behind our MCP proxy, so a live SAP change runs through governance. Other PRs
+  build them.
+
 **2026-10-29 (04:00 UTC) - the laptop is the live instance, with a second stack as its fallback; UX best practices are now the default ([ADR-0200 addendum](../decisions/0200-engineering-best-practice-guidelines.md)).**
 - **Merged and audited:** #588 (backlog P14–P17), #589 (re2js 2.8.8, patching GHSA-gg6h-894w-4m9c), #590 (the runbook for the laptop live host, with DEMO_RUNBOOK §7.8 for the fallback stack) and #592 (the ADR-0186 addendum).
 - **Owner decisions on #453:**

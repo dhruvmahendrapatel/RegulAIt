@@ -81,6 +81,7 @@ import {
   AGENT_ENTITLEMENT_MODES,
   CONNECTOR_GRANT_MODES,
   IDENTITY_PROPAGATION_MODES,
+  MCP_UPSTREAM_CREDENTIAL_SCHEMES,
   WORKLOAD_CLIENT_AUTH_METHODS_DEFAULT,
   WORKLOAD_IDENTITY_KINDS,
   WORKLOAD_IDENTITY_STATUSES,
@@ -905,6 +906,38 @@ export const mcpServers = pgTable("mcp_servers", {
     sql`(${t.transport} = 'stdio' AND ${t.url} = 'stdio:' || ${t.name} AND ${t.stdioCommand} IS NOT NULL AND ${t.stdioArgs} IS NOT NULL AND jsonb_typeof(${t.stdioArgs}) = 'array' AND ${t.stdioCommandDigest} IS NOT NULL) OR (${t.transport} <> 'stdio' AND ${t.url} NOT LIKE 'stdio:%' AND ${t.stdioCommand} IS NULL AND ${t.stdioArgs} IS NULL AND ${t.stdioCommandDigest} IS NULL)`,
   ),
 ]);
+
+/**
+ * ADR-0204 (migration 0214) — the static credential the gateway sends to ONE MCP server, as `Authorization: Bearer`
+ * or in a header the admin names. Its own table (like `connector_credentials`) so no read of `mcp_servers` can carry
+ * the ciphertext. No row = nothing sent (the default). Written only by the admin routes (settings_relax step-up) and
+ * deleted by a url move, each with its audit row in the same transaction; the header CHECK repeats the gateway's
+ * reserved-header refusals. `secretSetAt` is stamped on the database clock by `regulait_stamp_secret_set`.
+ */
+export const mcpServerUpstreamCredentials = pgTable(
+  "mcp_server_upstream_credentials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    serverId: uuid("server_id")
+      .notNull()
+      .references(() => mcpServers.id, { onDelete: "cascade" }),
+    scheme: text("scheme", { enum: MCP_UPSTREAM_CREDENTIAL_SCHEMES }).notNull(),
+    /** lowercased; `authorization` exactly when the scheme is `bearer` */
+    headerName: text("header_name").notNull(),
+    secretCiphertext: text("secret_ciphertext").notNull(),
+    /** the only part of the secret any read shows */
+    secretLast4: text("secret_last4").notNull(),
+    setBy: uuid("set_by").references(() => users.id, { onDelete: "set null" }),
+    secretSetAt: timestamp("secret_set_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("mcp_server_upstream_credentials_server_uq").on(t.serverId),
+    check("mcp_server_upstream_credentials_scheme_check", sql`${t.scheme} IN ('bearer', 'header')`),
+    check("mcp_server_upstream_credentials_last4_check", sql`char_length(${t.secretLast4}) = 4`),
+  ],
+);
+export type McpServerUpstreamCredentialRow = typeof mcpServerUpstreamCredentials.$inferSelect;
 
 /**
  * ADR-0101 — an upstream MCP registry an operator configured. A fresh install
