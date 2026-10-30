@@ -45,6 +45,8 @@ import {
 } from "@regulait/db";
 import { z } from "zod";
 import { hashToken } from "./token-hash.js";
+import { wantsListContract, type ListReader, type ListSpec } from "./list-contract.js";
+import { answerListExport, answerListPage } from "./identity-lists.js";
 
 export { VIRTUAL_KEY_PREFIX };
 
@@ -422,6 +424,135 @@ function publicKey(row: VirtualKeyRow) {
   };
 }
 
+// ---- ADR-0219: the two lists on this surface, under the shared list contract -------
+//
+// The issued keys: what `publicKey()` projects, plus the owner's email; never the token or its hash (the hash is
+// read with the row and dropped by `publicKey()` before anything leaves). Key usage: the `usage_events` rows that
+// reference one key, newest first.
+
+export type VirtualKeyListRow = ReturnType<typeof publicKey> & { ownerEmail: string | null };
+
+const vkStateSql = sql<string>`case when ${virtualKeys.revokedAt} is not null then 'revoked' when ${virtualKeys.expiresAt} is not null and ${virtualKeys.expiresAt} <= now() then 'expired' else 'active' end`;
+const vkState = (k: VirtualKeyListRow) => (k.revokedAt ? "revoked" : k.active ? "active" : "expired");
+
+const vkListFilters = z.object({ state: z.enum(["active", "expired", "revoked"]).optional() }).strict();
+
+const vkListReader = (db: Db): ListReader<VirtualKeyListRow> => ({
+  fetch: async (q) => {
+    const rows = await db
+      .select({ vk: virtualKeys, ownerEmail: users.email, _cursorAt: q.cursorAt })
+      .from(virtualKeys)
+      .leftJoin(users, eq(users.id, virtualKeys.userId))
+      .where(q.where)
+      .orderBy(...q.orderBy)
+      .limit(q.limit)
+      .offset(q.offset);
+    return rows.map((r) => ({ ...publicKey(r.vk), ownerEmail: r.ownerEmail, _cursorAt: r._cursorAt }));
+  },
+  countable: (where) => db.select({ one: sql`1` }).from(virtualKeys).where(where),
+  idOf: (r) => r.id,
+});
+
+export const VIRTUAL_KEYS_LIST: ListSpec<VirtualKeyListRow> = {
+  id: "virtual-keys",
+  sorts: {
+    name: { expr: sql`lower(${virtualKeys.name})` },
+    owner: { expr: sql`lower(${users.email})` },
+    state: { expr: vkStateSql },
+    budget: { expr: virtualKeys.budgetUsd },
+    spent: { expr: virtualKeys.spentUsd },
+    remaining: { expr: sql`greatest(0, ${virtualKeys.budgetUsd} - ${virtualKeys.spentUsd})` },
+    expires: { expr: virtualKeys.expiresAt },
+    used: { expr: virtualKeys.lastUsedAt },
+    created: { expr: virtualKeys.createdAt, keysetAt: virtualKeys.createdAt },
+  },
+  columns: {
+    name: { label: "Key", value: (k) => k.name },
+    owner: { label: "Owner (the ceiling)", value: (k) => k.ownerEmail ?? k.userId },
+    state: { label: "State", value: vkState },
+    allow: { label: "Narrowed to", value: (k) => (k.allowedModels === null ? "owner's entitlements only" : k.allowedModels.length === 0 ? "nothing" : k.allowedModels.join(", ")) },
+    budget: { label: "Lifetime budget", value: (k) => k.budgetUsd ?? "no cap" },
+    spent: { label: "Spent (enforcement counter)", value: (k) => k.spentUsd },
+    remaining: { label: "Remaining", value: (k) => k.budgetRemainingUsd ?? "no cap" },
+    expires: { label: "Expires", value: (k) => k.expiresAt ?? "never" },
+    used: { label: "Last used", value: (k) => k.lastUsedAt ?? "never" },
+    created: { label: "Issued", value: (k) => k.createdAt },
+  },
+  filters: ["state"],
+  defaultSort: { col: "created", dir: "desc" },
+  idCol: virtualKeys.id,
+};
+
+/** ADR-0022 visibility, for the page, the count and the export alike: an admin sees every key, anyone else their own */
+function vkScope(isAdmin: boolean, userId: string | null | undefined, f: z.infer<typeof vkListFilters>) {
+  const conds = [
+    isAdmin ? undefined : userId ? eq(virtualKeys.userId, userId) : sql`false`,
+    f.state ? sql`${vkStateSql} = ${f.state}` : undefined,
+  ].filter((c) => c !== undefined);
+  return conds.length ? and(...conds) : undefined;
+}
+
+type UsageRow = Pick<typeof usageEvents.$inferSelect, "id" | "at" | "provider" | "model" | "servedModel" | "operation" | "inputTokens" | "outputTokens" | "costUsd" | "stopReason" | "refusal">;
+
+const usageReader = (db: Db): ListReader<UsageRow> => ({
+  fetch: (q) =>
+    db
+      .select({
+        id: usageEvents.id,
+        at: usageEvents.at,
+        provider: usageEvents.provider,
+        model: usageEvents.model,
+        servedModel: usageEvents.servedModel,
+        operation: usageEvents.operation,
+        inputTokens: usageEvents.inputTokens,
+        outputTokens: usageEvents.outputTokens,
+        costUsd: usageEvents.costUsd,
+        stopReason: usageEvents.stopReason,
+        refusal: usageEvents.refusal,
+        _cursorAt: q.cursorAt,
+      })
+      .from(usageEvents)
+      .where(q.where)
+      .orderBy(...q.orderBy)
+      .limit(q.limit)
+      .offset(q.offset),
+  countable: (where) => db.select({ one: sql`1` }).from(usageEvents).where(where),
+  idOf: (r) => r.id,
+});
+
+const usageFilters = z.object({ priced: z.enum(["true", "false"]).optional() }).strict();
+const usageWhere = (keyId: string, f: z.infer<typeof usageFilters>) =>
+  and(
+    eq(usageEvents.virtualKeyId, keyId),
+    ...(f.priced === "true" ? [sql`${usageEvents.costUsd} is not null`] : f.priced === "false" ? [isNull(usageEvents.costUsd)] : []),
+  );
+
+export const VIRTUAL_KEY_USAGE_LIST: ListSpec<UsageRow> = {
+  id: "virtual-key-usage",
+  sorts: {
+    at: { expr: usageEvents.at, keysetAt: usageEvents.at },
+    provider: { expr: usageEvents.provider },
+    model: { expr: sql`lower(coalesce(${usageEvents.servedModel}, ${usageEvents.model}))` },
+    operation: { expr: usageEvents.operation },
+    input: { expr: usageEvents.inputTokens },
+    output: { expr: usageEvents.outputTokens },
+    cost: { expr: usageEvents.costUsd },
+  },
+  columns: {
+    at: { label: "When", value: (e) => e.at },
+    provider: { label: "Provider", value: (e) => e.provider },
+    model: { label: "Model", value: (e) => e.servedModel ?? e.model },
+    operation: { label: "Operation", value: (e) => e.operation },
+    input: { label: "Input tokens", value: (e) => e.inputTokens },
+    output: { label: "Output tokens", value: (e) => e.outputTokens },
+    cost: { label: "Cost", value: (e) => e.costUsd ?? "unpriced" },
+    outcome: { label: "Outcome", value: (e) => (e.refusal ? "refused" : e.stopReason) },
+  },
+  filters: ["priced"],
+  defaultSort: { col: "at", dir: "desc" },
+  idCol: usageEvents.id,
+};
+
 export function registerVirtualKeyRoutes(app: FastifyInstance, db: Db) {
   // ---- POST /v1/virtual-keys ------------------------------------------------
   app.post("/v1/virtual-keys", async (req, reply) => {
@@ -529,7 +660,15 @@ export function registerVirtualKeyRoutes(app: FastifyInstance, db: Db) {
   });
 
   // ---- GET /v1/virtual-keys -------------------------------------------------
+  // ADR-0219: the Excel export of the same list, under the same visibility
+  app.get("/v1/virtual-keys/export.xlsx", async (req, reply) =>
+    answerListExport(db, req, reply, VIRTUAL_KEYS_LIST, vkListReader(db), vkListFilters, (f) => vkScope(req.authCtx.isAdmin, req.authCtx.userId, f)),
+  );
   app.get("/v1/virtual-keys", async (req, reply) => {
+    // ADR-0219: with any of sort/dir/cursor/offset/count, the shared list contract under the same visibility
+    if (wantsListContract(req.query)) {
+      return answerListPage(db, req, reply, VIRTUAL_KEYS_LIST, vkListReader(db), vkListFilters, (f) => vkScope(req.authCtx.isAdmin, req.authCtx.userId, f));
+    }
     // ADR-0022 visibility: a non-admin sees their OWN keys and no one else's.
     const rows = req.authCtx.isAdmin
       ? await db.select().from(virtualKeys).orderBy(desc(virtualKeys.createdAt))
@@ -546,13 +685,25 @@ export function registerVirtualKeyRoutes(app: FastifyInstance, db: Db) {
   // ---- GET /v1/virtual-keys/:keyId/usage -----------------------------------
   // Per-key spend, read straight off the ONE ledger rather than off the
   // enforcement counter, so the two can be compared instead of assumed equal.
+  //
+  // ADR-0219: with any of sort/dir/cursor/offset/count it answers the shared list contract over the key's ledger
+  // rows, newest first by default; with none of them, exactly the totals below. The export is the same list.
+  const visibleKey = async (keyId: string, req: { authCtx: { isAdmin: boolean; userId?: string | null } }) => {
+    const [row] = await db.select().from(virtualKeys).where(eq(virtualKeys.id, keyId));
+    // invisible rather than 403 — a non-owner learns nothing about it
+    return row && (req.authCtx.isAdmin || row.userId === req.authCtx.userId) ? row : null;
+  };
+  app.get("/v1/virtual-keys/:keyId/usage/export.xlsx", async (req, reply) => {
+    const { keyId } = keyIdParam.parse(req.params);
+    if (!(await visibleKey(keyId, req))) return reply.status(404).send({ error: "virtual_key_not_found" });
+    return answerListExport(db, req, reply, VIRTUAL_KEY_USAGE_LIST, usageReader(db), usageFilters, (f) => usageWhere(keyId, f), { keyId });
+  });
   app.get("/v1/virtual-keys/:keyId/usage", async (req, reply) => {
     const { keyId } = keyIdParam.parse(req.params);
-    const [row] = await db.select().from(virtualKeys).where(eq(virtualKeys.id, keyId));
+    const row = await visibleKey(keyId, req);
     if (!row) return reply.status(404).send({ error: "virtual_key_not_found" });
-    if (!req.authCtx.isAdmin && row.userId !== req.authCtx.userId) {
-      // invisible rather than 403 — a non-owner learns nothing about it
-      return reply.status(404).send({ error: "virtual_key_not_found" });
+    if (wantsListContract(req.query)) {
+      return answerListPage(db, req, reply, VIRTUAL_KEY_USAGE_LIST, usageReader(db), usageFilters, (f) => usageWhere(keyId, f));
     }
     const events = await db
       .select()

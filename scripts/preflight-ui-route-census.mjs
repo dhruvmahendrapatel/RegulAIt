@@ -163,6 +163,22 @@ export const INDIRECT_UI_CALLS = new Map([
     ["GET /v1/runs/export.xlsx", "apps/web/src/views/runs/RunsPage.tsx"],
     ["GET /v1/incidents/export.xlsx", "apps/web/src/views/incidents/IncidentsPage.tsx"],
     ["GET /v1/users/export.xlsx", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    // ADR-0219 P2 batch B: the identity and access lists
+    ["GET /v1/users/:userId/sessions/export.xlsx", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    ["GET /v1/revocations/export.xlsx", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    ["GET /v1/users/:userId/revocations/agents/export.xlsx", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    ["GET /v1/users/:userId/revocations/connectors/export.xlsx", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    ["GET /v1/keys/export.xlsx", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    ["GET /v1/roles/:roleId/assignments/export.xlsx", "apps/web/src/views/admin/identity/RolesPage.tsx"],
+    ["GET /v1/teams/export.xlsx", "apps/web/src/views/admin/identity/TeamsPage.tsx"],
+    ["GET /v1/virtual-keys/export.xlsx", "apps/web/src/views/admin/identity/VirtualKeysPage.tsx"],
+    ["GET /v1/virtual-keys/:keyId/usage/export.xlsx", "apps/web/src/views/admin/identity/VirtualKeysPage.tsx"],
+    ["GET /v1/admin/credentials/export.xlsx", "apps/web/src/views/admin/identity/CredentialsPage.tsx"],
+    ["GET /v1/workload-identities/export.xlsx", "apps/web/src/views/admin/identity/WorkloadIdentitiesPage.tsx"],
+    ["GET /v1/auth/link-requests/export.xlsx", "apps/web/src/views/admin/identity/SsoPage.tsx"],
+    ["GET /v1/chatops/identity-links/export.xlsx", "apps/web/src/views/admin/governance/ChatOpsPage.tsx"],
+    ["GET /v1/agents/export.xlsx", "apps/web/src/views/admin/integrations/AgentsPage.tsx"],
+    ["GET /v1/licenses/verifications/export.xlsx", "apps/web/src/views/admin/settings/LicensingPage.tsx"],
   ].map(([r, page]) => [
     r,
     {
@@ -170,6 +186,27 @@ export const INDIRECT_UI_CALLS = new Map([
       evidence: "exportUrl(props.exportPath",
       pathIn: page,
       reason: "the page passes the export path to DataList, whose Download Excel button fetches it",
+    },
+  ]),
+  // ADR-0219 P2 batch B: the shared list control reads the list from the path its page hands it (`endpoint`)
+  ...[
+    ["GET /v1/auth/link-requests", "apps/web/src/views/admin/identity/SsoPage.tsx"],
+    ["GET /v1/keys", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    ["GET /v1/licenses/verifications", "apps/web/src/views/admin/settings/LicensingPage.tsx"],
+    ["GET /v1/admin/credentials", "apps/web/src/views/admin/identity/CredentialsPage.tsx"],
+    ["GET /v1/revocations", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    ["GET /v1/roles/:roleId/assignments", "apps/web/src/views/admin/identity/RolesPage.tsx"],
+    ["GET /v1/chatops/identity-links", "apps/web/src/views/admin/governance/ChatOpsPage.tsx"],
+    ["GET /v1/users/:userId/revocations/agents", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    ["GET /v1/users/:userId/revocations/connectors", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+    ["GET /v1/virtual-keys", "apps/web/src/views/admin/identity/VirtualKeysPage.tsx"],
+  ].map(([r, page]) => [
+    r,
+    {
+      file: "apps/web/src/ui/DataList.tsx",
+      evidence: "pageUrl(endpoint",
+      pathIn: page,
+      reason: "the page passes the list path to DataList, which reads each page of it",
     },
   ]),
   [

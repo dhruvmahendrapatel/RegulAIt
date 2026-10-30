@@ -234,14 +234,16 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
       "409 `mfa_enrollment_required` when the organization requires MFA for the target user and they have not " +
       "enrolled TOTP: no key is issued (audited; ADR-0181). A lifetime beyond the org ceiling is refused by name (audited).",
   },
-  "GET /v1/keys": { summary: "List API keys (metadata only — never the token)." },
+  "GET /v1/keys": { summary: "List API keys (metadata only — never the token). With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0219), with `userId` and `state` filters." },
+  "GET /v1/keys/export.xlsx": { summary: "The API keys list as an Excel file: names, holders, dates and state, never a token, hash or prefix. Admin only; audited." },
   "POST /v1/keys/:keyId/revoke": { summary: "Revoke an API key immediately." },
 
   "GET /v1/roles": { summary: "List roles." },
   "POST /v1/roles": { summary: "Create a role.", body: createRoleSchema },
   "DELETE /v1/roles/:roleId": { summary: "Delete a role and every grant it carried." },
   "GET /v1/roles/:roleId/grants": { summary: "Every grant a role confers — tools, servers, agents and connectors." },
-  "GET /v1/roles/:roleId/assignments": { summary: "The users currently holding a role." },
+  "GET /v1/roles/:roleId/assignments": { summary: "The users currently holding a role. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0219)." },
+  "GET /v1/roles/:roleId/assignments/export.xlsx": { summary: "A role's holders as an Excel file. Admin only; audited." },
   "POST /v1/users/:userId/roles": { summary: "Assign a role to a user.", body: assignRoleSchema },
   "DELETE /v1/users/:userId/roles/:roleId": { summary: "Remove a role assignment." },
   "GET /v1/users/:userId/agents": { summary: "The agents this user is entitled to dispatch." },
@@ -323,7 +325,10 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
 
   "POST /v1/agents/:agentId/invoke": { summary: "Dispatch an agent. Governed, metered and audited like every other gateway call.", body: invokeAgentSchema },
   "POST /v1/connectors/:connectorId/invoke": { summary: "Invoke a connector.", body: invokeConnectorSchema },
-  "GET /v1/agents": { summary: "Registered agents/models. Bounded: `limit` (default 1000, max 5000)." },
+  "GET /v1/agents": { summary: "Registered agents/models. Bounded: `limit` (default 1000, max 5000). With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0219), with `q`, `id` and `enabled` filters and an honest total." },
+  "GET /v1/virtual-keys": { summary: "Virtual keys the caller may see (an admin every key, anyone else their own); never a token. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0219)." },
+  "GET /v1/virtual-keys/:keyId/usage": { summary: "A virtual key's spend from the usage ledger. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0219) over the ledger rows that reference the key, newest first." },
+  "GET /v1/agents/export.xlsx": { summary: "The agent catalog as an Excel file (the system prompt by its length only). Admin only; audited." },
   "GET /v1/connectors": { summary: "Registered connectors." },
   "GET /v1/servers": { summary: "Registered MCP servers." },
 

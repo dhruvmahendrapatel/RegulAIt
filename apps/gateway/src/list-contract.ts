@@ -131,7 +131,14 @@ export interface ListPage {
   count: "exact" | "estimate" | null;
 }
 
-function resolveSort<Row>(spec: ListSpec<Row>, sort: string | undefined, dir: SortDir | undefined) {
+/** what parsing a page or an export needs of a spec: a SQL `ListSpec` or a `MemoryListSpec` */
+export interface SortableSpec {
+  id: string;
+  sorts: Record<string, { keysetAt?: unknown }>;
+  defaultSort: { col: string; dir: SortDir };
+}
+
+function resolveSort(spec: SortableSpec, sort: string | undefined, dir: SortDir | undefined) {
   const col = sort ?? spec.defaultSort.col;
   // an own-property check, so `__proto__` or `constructor` is an unknown column too
   if (!Object.prototype.hasOwnProperty.call(spec.sorts, col)) {
@@ -141,7 +148,7 @@ function resolveSort<Row>(spec: ListSpec<Row>, sort: string | undefined, dir: So
 }
 
 /** parse the paging and sort params; throws ListQueryError (→ 400) or a ZodError (→ 400) */
-export function parseListPage<Row>(spec: ListSpec<Row>, query: Record<string, unknown>): ListPage {
+export function parseListPage(spec: SortableSpec, query: Record<string, unknown>): ListPage {
   const p = pageSchema.parse(pick(query, LIST_CONTRACT_KEYS));
   if (p.cursor !== undefined && p.offset !== undefined) {
     throw new ListQueryError("cursor_and_offset", "send either cursor or offset, not both");
@@ -316,7 +323,7 @@ export interface ExportRequest {
   dir: SortDir;
 }
 
-export function parseListExport<Row>(spec: ListSpec<Row>, query: Record<string, unknown>): ExportRequest {
+export function parseListExport<Row>(spec: SortableSpec & { columns: Record<string, ExportColumn<Row>> }, query: Record<string, unknown>): ExportRequest {
   const p = exportSchema.parse(pick(query, ["columns", "sort", "dir"]));
   const columns = p.columns.split(",").map((c) => c.trim());
   if (columns.length > 64) throw new ListQueryError("too_many_columns", "at most 64 columns");
@@ -377,6 +384,21 @@ export async function sendListExport<Row>(
       : { ...page, cursor: null, offset: out.nextOffset! };
   }
 
+  return finishListExport(db, req, reply, spec, rows, ex, truncated, max, filterSummary);
+}
+
+/** the audit row, then the file: shared by the SQL and the in-memory exports */
+async function finishListExport<Row>(
+  db: Db,
+  req: FastifyRequest,
+  reply: FastifyReply,
+  spec: { id: string; columns: Record<string, ExportColumn<Row>> },
+  rows: Row[],
+  ex: ExportRequest,
+  truncated: boolean,
+  max: number,
+  filterSummary: Record<string, unknown>,
+): Promise<ExportOutcome> {
   await db.insert(auditLog).values({
     userId: req.authCtx.userId ?? NIL_USER,
     objectType: "audit_export",
@@ -432,4 +454,75 @@ function cell(v: XlsxCell) {
 function sheetName(id: string): string {
   const s = id.replace(/[^A-Za-z0-9 _-]/g, " ").trim();
   return (s.charAt(0).toUpperCase() + s.slice(1)).slice(0, 31) || "List";
+}
+
+
+// ---- lists built in memory ---------------------------------------------------
+
+/**
+ * A list whose rows are computed in the gateway rather than read by one SELECT (the credential inventory joins
+ * several stores and derives its flags in code). The same contract on the wire: the same params, the same response,
+ * the same allow-lists and the same audited export; only the sort runs over the computed rows instead of in SQL.
+ * Offset paging only (`keysetAt` is never set, so a cursor is refused as for any non-date sort).
+ */
+export type MemorySortValue = string | number | boolean | Date | null | undefined;
+export interface MemoryListSpec<Row> {
+  id: string;
+  /** column id → the value it sorts by (strings compare as given: lower-case them for a case-blind order) */
+  sorts: Record<string, { value: (row: Row) => MemorySortValue; keysetAt?: undefined }>;
+  columns: Record<string, ExportColumn<Row>>;
+  filters: readonly string[];
+  defaultSort: { col: string; dir: SortDir };
+  /** the stable tie-breaker */
+  idOf: (row: Row) => string;
+}
+
+const norm = (v: MemorySortValue): string | number | null =>
+  v === null || v === undefined ? null : v instanceof Date ? v.getTime() : typeof v === "boolean" ? (v ? 1 : 0) : v;
+
+/** the rows in the requested order: nulls last in either direction, then the id in the same direction */
+export function sortInMemory<Row>(spec: MemoryListSpec<Row>, rows: readonly Row[], sort: string, dir: SortDir): Row[] {
+  const value = spec.sorts[sort]!.value;
+  const d = dir === "asc" ? 1 : -1;
+  const keyed = rows.map((row) => ({ row, v: norm(value(row)), id: spec.idOf(row) }));
+  keyed.sort((a, b) => {
+    if (a.v !== b.v) {
+      if (a.v === null) return 1;
+      if (b.v === null) return -1;
+      return (a.v < b.v ? -1 : 1) * d;
+    }
+    return a.id === b.id ? 0 : (a.id < b.id ? -1 : 1) * d;
+  });
+  return keyed.map((k) => k.row);
+}
+
+/** one page of an in-memory list under the contract */
+export function runMemoryListPage<Row>(spec: MemoryListSpec<Row>, rows: readonly Row[], page: ListPage): ListResult<Row> {
+  const sorted = sortInMemory(spec, rows, page.sort, page.dir);
+  const items = sorted.slice(page.offset, page.offset + page.limit);
+  const more = sorted.length > page.offset + page.limit;
+  const estimate = page.count === "estimate" && sorted.length > COUNT_ESTIMATE_CAP;
+  return {
+    items,
+    nextCursor: null,
+    nextOffset: more ? page.offset + page.limit : null,
+    total: page.count === null ? null : estimate ? COUNT_ESTIMATE_CAP : sorted.length,
+    totalIsEstimate: estimate,
+  };
+}
+
+/** the Excel export of an in-memory list: the same ceiling, audit row and file as `sendListExport` */
+export async function sendMemoryListExport<Row>(
+  db: Db,
+  req: FastifyRequest,
+  reply: FastifyReply,
+  spec: MemoryListSpec<Row>,
+  rows: readonly Row[],
+  ex: ExportRequest,
+  filterSummary: Record<string, unknown>,
+): Promise<ExportOutcome> {
+  const max = listExportMaxRows();
+  const sorted = sortInMemory(spec, rows, ex.sort, ex.dir);
+  const truncated = sorted.length > max;
+  return finishListExport(db, req, reply, spec, truncated ? sorted.slice(0, max) : sorted, ex, truncated, max, filterSummary);
 }

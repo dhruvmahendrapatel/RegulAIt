@@ -191,6 +191,19 @@ function inventoryPage(alerting: boolean, many: boolean, search: URLSearchParams
       (!type || c.type === type) &&
       (!flag || (flag === "none" ? (c.flags as string[]).length === 0 : (c.flags as string[]).includes(flag))),
   );
+  const { credentials: _all, ...summary } = inv;
+  // ADR-0219: the list control asks with sort/dir/count and reads the shared list contract beside the summary
+  if (search.get("sort")) {
+    return {
+      ...summary,
+      counts: { ...inv.counts, total: all.length },
+      items: matched.slice(offset, offset + limit),
+      nextCursor: null,
+      nextOffset: offset + limit < matched.length ? offset + limit : null,
+      total: search.get("count") ? matched.length : null,
+      totalIsEstimate: false,
+    };
+  }
   return {
     ...inv,
     counts: { ...inv.counts, total: all.length },
@@ -285,23 +298,27 @@ test.describe("ADR-0175 A7: the credential inventory", () => {
     await expect(table.locator("tbody tr")).toHaveCount(2);
   });
 
-  test("pages through a large inventory, a hundred at a time, filtered on the server", async ({ page }) => {
+  test("pages through a large inventory with the shared list control, filtered on the server", async ({ page }) => {
     const state = await mockApi(page, { many: true });
     await page.goto("/ui/admin/credentials");
-    const table = page.getByRole("table").first();
-    await expect(page.getByText("Showing 1–100 of 150")).toBeVisible();
+    const list = page.locator('[data-list="credentials"]');
+    const table = list.getByRole("table");
+    const status = list.getByTestId("list-status");
+    await expect(status).toHaveText("1–10 of 150");
+    await list.getByLabel("Rows per page").selectOption("100");
+    await expect(status).toHaveText("1–100 of 150");
     await expect(table.locator("tbody tr")).toHaveCount(100);
-    await expect(page.getByRole("button", { name: "Previous page" })).toBeDisabled();
-    await page.getByRole("button", { name: "Next page" }).click();
-    await expect(page.getByText("Showing 101–150 of 150")).toBeVisible();
+    await expect(list.getByRole("button", { name: "Previous", exact: true })).toHaveAttribute("aria-disabled", "true");
+    await list.getByRole("button", { name: "Next", exact: true }).click();
+    await expect(status).toHaveText("101–150 of 150");
     await expect(table.locator("tbody tr")).toHaveCount(50);
-    await expect(page.getByRole("button", { name: "Next page" })).toBeDisabled();
-    expect(state.credentialQueries.some((q) => q.includes("offset=100") && q.includes("limit=100"))).toBe(true);
+    await expect(list.getByRole("button", { name: "Next", exact: true })).toHaveAttribute("aria-disabled", "true");
+    expect(state.credentialQueries.some((q) => q.includes("offset=100") && q.includes("limit=100") && q.includes("sort=flags"))).toBe(true);
     // a filter goes to the server and starts again at the first page
     await page.getByLabel("Filter by flag").selectOption("unused");
-    await expect(page.getByText("Showing 1–1 of 1")).toBeVisible();
+    await expect(status).toHaveText("1–1 of 1");
     expect(state.credentialQueries.at(-1)).toContain("flag=unused");
-    expect(state.credentialQueries.at(-1)).toContain("offset=0");
+    expect(state.credentialQueries.at(-1)).not.toContain("offset=");
   });
 
   test("alerts are observe-only until an admin turns them on", async ({ page }) => {

@@ -155,7 +155,7 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * Registered agents/models. Bounded: `limit` (default 1000, max 5000).
+ * Registered agents/models. Bounded: `limit` (default 1000, max 5000). With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0219), with `q`, `id` and `enabled` filters and an honest total.
  * @stability public-stable — auth: admin
    */
   getV1Agents<T = unknown>(options?: RequestOptions): Promise<T> {
@@ -319,7 +319,7 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * List API keys (metadata only — never the token).
+ * List API keys (metadata only — never the token). With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0219), with `userId` and `state` filters.
  * @stability public-stable — auth: admin
    */
   getV1Keys<T = unknown>(options?: RequestOptions): Promise<T> {
@@ -465,7 +465,7 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * The users currently holding a role.
+ * The users currently holding a role. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0219).
  * @stability public-stable — auth: admin
    */
   getV1RolesByRoleIdAssignments<T = unknown>(roleId: string, options?: RequestOptions): Promise<T> {
@@ -645,7 +645,7 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * GET /v1/virtual-keys
+ * Virtual keys the caller may see (an admin every key, anyone else their own); never a token. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0219).
  * @stability public-beta — auth: user
    */
   getV1VirtualKeys<T = unknown>(options?: RequestOptions): Promise<T> {
@@ -679,7 +679,7 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * GET /v1/virtual-keys/:keyId/usage
+ * A virtual key's spend from the usage ledger. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0219) over the ledger rows that reference the key, newest first.
  * @stability public-beta — auth: user
    */
   getV1VirtualKeysByKeyIdUsage<T = unknown>(keyId: string, options?: RequestOptions): Promise<T> {

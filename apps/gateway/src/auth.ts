@@ -865,6 +865,19 @@ export {
 } from "./totp.js";
 import { generateTotpSecret, otpauthUri, verifyTotp } from "./totp.js";
 import { errMessage } from "./err-serializer.js";
+import { wantsListContract } from "./list-contract.js";
+import {
+  LINK_REQUESTS_LIST,
+  SESSIONS_LIST,
+  answerListExport,
+  answerListPage,
+  linkRequestsFilterQuery,
+  linkRequestsReader,
+  linkRequestsWhere,
+  sessionsFilterQuery,
+  sessionsReader,
+  sessionsWhere,
+} from "./identity-lists.js";
 
 // --- audit helper -----------------------------------------------------------
 
@@ -2683,7 +2696,15 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
 
   // ---- ADR-0174 §5: admin review of link requests (default admin gate) -----
 
-  app.get("/v1/auth/link-requests", async (req) => {
+  // ADR-0219: the shared list contract with any of sort/dir/cursor/offset/count (the same `status` filter, pending
+  // by default, and no 200-row cap); with none of them, exactly the response below.
+  app.get("/v1/auth/link-requests/export.xlsx", async (req, reply) =>
+    answerListExport(db, req, reply, LINK_REQUESTS_LIST, linkRequestsReader(db), linkRequestsFilterQuery, linkRequestsWhere),
+  );
+  app.get("/v1/auth/link-requests", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      return answerListPage(db, req, reply, LINK_REQUESTS_LIST, linkRequestsReader(db), linkRequestsFilterQuery, linkRequestsWhere);
+    }
     const { status } = z
       .object({ status: z.enum(["pending", "linked", "approved", "denied", "all"]).optional() })
       .parse(req.query);
@@ -3061,8 +3082,23 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
 
   const revokeReasonSchema = z.object({ reason: z.string().trim().min(1).max(500).optional() });
 
-  app.get("/v1/users/:userId/sessions", async (req) => {
+  // ADR-0219: the shared list contract with any of sort/dir/cursor/offset/count (a `status` filter); with none of
+  // them, exactly the response below. Every page read and every export is audited, as the whole-list read is.
+  app.get("/v1/users/:userId/sessions/export.xlsx", async (req, reply) => {
     const { userId } = userIdParam.parse(req.params);
+    return answerListExport(db, req, reply, SESSIONS_LIST, sessionsReader(db), sessionsFilterQuery, (f) => sessionsWhere(userId, f), { userId });
+  });
+  app.get("/v1/users/:userId/sessions", async (req, reply) => {
+    const { userId } = userIdParam.parse(req.params);
+    if (wantsListContract(req.query)) {
+      const out = await answerListPage(db, req, reply, SESSIONS_LIST, sessionsReader(db), sessionsFilterQuery, (f) => sessionsWhere(userId, f));
+      if (reply.sent) return reply;
+      const page = out as { items: unknown[] };
+      await auditAuth(db, req.authCtx.userId, userId, "session-list-viewed", "allow",
+        `admin viewed the session list for user ${userId} (a page of ${page.items.length} session(s))`,
+        { phase: "session-list", via: "admin", count: page.items.length, paged: true });
+      return out;
+    }
     const rows = await db
       .select({
         id: authSessions.id,

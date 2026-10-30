@@ -73,6 +73,7 @@ import {
   type WorkloadIdentityView,
 } from "@regulait/shared";
 import { requireStepUp, type StepUpCheckArgs } from "./step-up.js";
+import { parseListExport, parseListPage, runListPage, sendListError, sendListExport, type ListReader, type ListSpec } from "./list-contract.js";
 
 const SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000000";
 const idParam = z.object({ identityId: z.string().uuid() });
@@ -606,13 +607,107 @@ export async function getWorkloadIdentity(db: Db, identityId: string): Promise<W
   return { ...view(r), activeCredentialCount: creds?.n ?? 0, liveDelegationGrantCount: live?.n ?? 0 };
 }
 
+// ---- ADR-0219: the identity list under the shared list contract ----------------
+//
+// The legacy read pages by an id `cursor` with `limit` up to 200; only `sort`, `dir`, `offset` or `count` switch it
+// to the contract, whose `cursor` is the contract's keyset cursor. Rows are `view()` plus the stewards' names, so the
+// list and its export name people rather than ids. No credential or key material is on an identity row.
+
+export type WorkloadIdentityListRow = WorkloadIdentityView & { stewardNames: string | null };
+
+const stewardNamesSql = sql<string | null>`(select string_agg(coalesce(nullif(u.display_name, ''), u.email), ', ' order by lower(coalesce(nullif(u.display_name, ''), u.email))) from users u where u.id = any("workload_identities"."sponsor_user_ids"))`;
+
+const identityContractFilters = listWorkloadIdentitiesQuerySchema.omit({ limit: true, cursor: true }).strict();
+const IDENTITY_CONTRACT_KEYS = ["limit", "cursor", "offset", "sort", "dir", "count", "columns"];
+
+export function wantsIdentityListContract(q: unknown): boolean {
+  return !!q && typeof q === "object" && ["sort", "dir", "offset", "count"].some((k) => (q as Record<string, unknown>)[k] !== undefined);
+}
+
+function identityFilters(q: Record<string, unknown>) {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(q)) if (!IDENTITY_CONTRACT_KEYS.includes(k)) out[k] = v;
+  return identityContractFilters.parse(out);
+}
+
+function identityWhere(f: z.infer<typeof identityContractFilters>) {
+  const conds = [
+    f.kind ? eq(workloadIdentities.kind, f.kind) : undefined,
+    f.status ? eq(workloadIdentities.status, f.status) : undefined,
+    f.sponsorUserId ? sql`${f.sponsorUserId}::uuid = ANY (${workloadIdentities.sponsorUserIds})` : undefined,
+  ].filter((c) => c !== undefined);
+  return conds.length ? and(...conds) : undefined;
+}
+
+const identityReader = (db: Db): ListReader<WorkloadIdentityListRow> => ({
+  fetch: async (q) => {
+    const rows = await db
+      .select({ r: workloadIdentities, stewardNames: stewardNamesSql, _cursorAt: q.cursorAt })
+      .from(workloadIdentities)
+      .where(q.where)
+      .orderBy(...q.orderBy)
+      .limit(q.limit)
+      .offset(q.offset);
+    return rows.map((x) => ({ ...view(x.r), stewardNames: x.stewardNames, _cursorAt: x._cursorAt }));
+  },
+  countable: (where) => db.select({ one: sql`1` }).from(workloadIdentities).where(where),
+  idOf: (r) => r.id,
+});
+
+export const WORKLOAD_IDENTITIES_LIST: ListSpec<WorkloadIdentityListRow> = {
+  id: "workload-identities",
+  sorts: {
+    identifier: { expr: sql`lower(${workloadIdentities.identifier})` },
+    kind: { expr: workloadIdentities.kind },
+    stewards: { expr: sql`lower(${stewardNamesSql})` },
+    environments: { expr: sql`array_to_string(${workloadIdentities.environments}, ',')` },
+    status: { expr: workloadIdentities.status },
+    created: { expr: workloadIdentities.createdAt, keysetAt: workloadIdentities.createdAt },
+    updated: { expr: workloadIdentities.updatedAt, keysetAt: workloadIdentities.updatedAt },
+  },
+  columns: {
+    identifier: { label: "Identifier", value: (i) => i.identifier },
+    kind: { label: "Kind", value: (i) => i.kind },
+    stewards: { label: "Stewards", value: (i) => i.stewardNames ?? "No steward recorded" },
+    environments: { label: "Environments", value: (i) => i.environments.join(", ") || "None allowed" },
+    status: { label: "Status", value: (i) => i.status },
+    created: { label: "Created", value: (i) => new Date(i.createdAt) },
+    updated: { label: "Updated", value: (i) => new Date(i.updatedAt) },
+  },
+  filters: ["kind", "status", "sponsorUserId"],
+  defaultSort: { col: "created", dir: "desc" },
+  idCol: workloadIdentities.id,
+};
+
 /** the route handlers S4 builds (registered by `identity-routes.ts`, which keeps the auth classes and the rest) */
 export function workloadIdentityAdminHandlers(db: Db) {
   return {
     list: async (req: FastifyRequest, reply: FastifyReply) => {
+      if (wantsIdentityListContract(req.query)) {
+        try {
+          const raw = req.query as Record<string, unknown>;
+          const f = identityFilters(raw);
+          const page = parseListPage(WORKLOAD_IDENTITIES_LIST, raw);
+          return reply.send(await runListPage(db, WORKLOAD_IDENTITIES_LIST, identityReader(db), identityWhere(f), page));
+        } catch (e) {
+          return sendListError(reply, e);
+        }
+      }
       const q = listWorkloadIdentitiesQuerySchema.safeParse(req.query ?? {});
       if (!q.success) return reply.status(400).send({ error: "invalid_query", detail: q.error.issues.map((i) => i.message).join("; ") });
       return reply.send(await listWorkloadIdentities(db, q.data));
+    },
+    /** ADR-0219: the identity list as an Excel file, admin-only like the list */
+    exportList: async (req: FastifyRequest, reply: FastifyReply) => {
+      try {
+        const raw = req.query as Record<string, unknown>;
+        const f = identityFilters(raw);
+        const ex = parseListExport(WORKLOAD_IDENTITIES_LIST, raw);
+        await sendListExport(db, req, reply, WORKLOAD_IDENTITIES_LIST, identityReader(db), identityWhere(f), ex, f);
+        return reply;
+      } catch (e) {
+        return sendListError(reply, e);
+      }
     },
     get: async (req: FastifyRequest, reply: FastifyReply) => {
       const { identityId } = idParam.parse(req.params);

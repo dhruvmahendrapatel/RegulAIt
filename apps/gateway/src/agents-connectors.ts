@@ -226,6 +226,8 @@ import {
 } from "./tracing.js";
 // ADR-0185 G5 — the decision counter (a no-op seam until the meter lands)
 import { recordDecision } from "./metrics.js";
+import { wantsListContract } from "./list-contract.js";
+import { AGENTS_LIST, agentsFilterQuery, agentsReader, agentsWhere, answerListExport, answerListPage } from "./identity-lists.js";
 
 const userIdParam = z.object({ userId: z.string().uuid() });
 const agentIdParam = z.object({ agentId: z.string().uuid() });
@@ -3379,7 +3381,15 @@ export function registerAgentConnectorRoutes(
   });
 
   // REL-10: bounded — `limit` (default LIST_DEFAULT_LIMIT, max LIST_MAX_LIMIT)
-  app.get("/v1/agents", async (req) => {
+  //
+  // ADR-0219: with any of sort/dir/cursor/offset/count it answers the shared list contract (a name or model search,
+  // one agent by id for a deep link, an enabled filter) with an honest total in place of the silent bound; with none
+  // of them, exactly the response below.
+  app.get("/v1/agents/export.xlsx", async (req, reply) =>
+    answerListExport(db, req, reply, AGENTS_LIST, agentsReader(db), agentsFilterQuery, agentsWhere),
+  );
+  app.get("/v1/agents", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, AGENTS_LIST, agentsReader(db), agentsFilterQuery, agentsWhere);
     const { limit } = listLimitQuery.parse(req.query);
     // ADR-0168 amendment item 6: each row carries its stewardship view
     // (stewardName, successorName, orphaned, reviewOverdue, cadence) computed

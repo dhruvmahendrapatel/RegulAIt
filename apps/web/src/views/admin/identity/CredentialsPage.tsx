@@ -19,12 +19,11 @@
  */
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
-import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, type Tone } from "../../../ui/kit";
-import { QueryGate, useAction } from "../adminKit";
+import { Badge, Button, Card, EmptyState, Field, Input, Select, type Tone } from "../../../ui/kit";
+import { DataList, type DataColumn } from "../../../ui/DataList";
+import { useAction } from "../adminKit";
 import v from "../../views.module.css";
 import { putOrgSettings } from "../../../stepup/stepUp";
 
@@ -76,9 +75,9 @@ export interface CredentialInventory {
   counts: { total: number; flagged: number; byFlag: Record<Flag, number> };
   /** what turning alerts on would raise from this inventory now */
   alertPreview?: { episodes: number; credentials: number };
-  /** the filtered list's size and this page's place in it */
-  page: { total: number; limit: number; offset: number };
-  credentials: CredentialRow[];
+  /** the legacy response: the filtered list's size and this page's place in it */
+  page?: { total: number; limit: number; offset: number };
+  credentials?: CredentialRow[];
 }
 
 const FLAG_TONE: Record<Flag, Tone> = {
@@ -89,29 +88,134 @@ const FLAG_TONE: Record<Flag, Tone> = {
   over_scoped: "warn",
 };
 const ALL = "__all__";
-/** rows per page; the server filters and pages (max 500) */
-const PAGE_SIZE = 100;
 const day = (iso: string | null) => (iso ? iso.slice(0, 10) : "");
+
+/** ADR-0219: the inventory's columns; the ids and sortable ones match the gateway's CREDENTIALS_LIST */
+function credentialColumns(inv: CredentialInventory | null): Array<DataColumn<CredentialRow>> {
+  return [
+    {
+      key: "name",
+      header: "Credential",
+      main: true,
+      sortable: true,
+      render: (r) => (
+        <div className={v.stackTight}>
+          <Link to={r.manageAt} aria-label={`Manage ${r.typeLabel} ${r.name}`}>
+            {r.name}
+          </Link>
+          <span className={v.faint}>
+            {r.typeLabel}
+            {r.status !== "active" ? ` · ${r.status}` : ""}
+          </span>
+        </div>
+      ),
+    },
+    {
+      key: "owner",
+      header: "Owner / creator",
+      main: true,
+      sortable: true,
+      render: (r) =>
+        r.ownerUserId ? (
+          <span>
+            {r.ownerName ?? r.ownerUserId}
+            {r.ownerKind === "creator" ? <span className={v.faint}> (creator)</span> : null}
+            {r.ownerDisabled ? (
+              <>
+                {" "}
+                <Badge tone="danger">deactivated</Badge>
+              </>
+            ) : null}
+          </span>
+        ) : (
+          <span className={v.faint}>integration (no person)</span>
+        ),
+    },
+    { key: "type", header: "Type", sortable: true, render: (r) => r.typeLabel },
+    { key: "status", header: "Status", sortable: true, render: (r) => r.status },
+    { key: "scope", header: "Scope", sortable: true, render: (r) => <span className={v.dim}>{r.scope}</span> },
+    { key: "created", header: "Created", main: true, sortable: true, render: (r) => day(r.createdAt) },
+    {
+      key: "used",
+      header: "Last used",
+      main: true,
+      sortable: true,
+      info: (
+        <>
+          “not recorded”: nothing records when this type is used. A last use found on the usage ledger is from the last{" "}
+          {inv?.ledgerWindowDays ?? inv?.linkWindowDays ?? 90} days.
+        </>
+      ),
+      render: (r) =>
+        r.lastUsedSignal === "none" ? <span className={v.faint}>not recorded</span> : r.lastUsedAt ? ago(r.lastUsedAt) : "never",
+    },
+    {
+      key: "expires",
+      header: "Expires",
+      main: true,
+      sortable: true,
+      info: <>“not tracked”: held for a third party, which sets its lifetime.</>,
+      render: (r) =>
+        r.expirySignal === "not_tracked" ? <span className={v.faint}>not tracked</span> : r.expiresAt ? day(r.expiresAt) : "never",
+    },
+    {
+      key: "rotation",
+      header: "Since last set",
+      sortable: true,
+      info: <>* no set date was recorded for this secret before the inventory existed; the age counts from creation.</>,
+      render: (r) => (
+        <span>
+          {r.ageSinceRotationDays} d{r.rotationSignal === "since_created" ? "*" : ""}
+        </span>
+      ),
+    },
+    {
+      key: "links",
+      header: "Linked",
+      main: true,
+      info: <>Linked projects and agents come from the last {inv?.linkWindowDays ?? 90} days of the usage ledger.</>,
+      render: (r) =>
+        r.linkedAgents.length + r.linkedProjects.length === 0 ? (
+          <span className={v.faint}>—</span>
+        ) : (
+          <span className={v.dim}>
+            {[...r.linkedAgents.map((a) => a.name), ...r.linkedProjects.map((p) => `project ${p.name}`)].join(", ")}
+          </span>
+        ),
+    },
+    {
+      key: "flags",
+      header: "Flags",
+      main: true,
+      sortable: true,
+      required: "Flags are warnings, so they are always shown",
+      render: (r) =>
+        r.flags.length === 0 ? (
+          <span className={v.faint}>none</span>
+        ) : (
+          <div className={v.rowTight}>
+            {r.flags.map((f) => (
+              <Badge
+                key={f}
+                tone={FLAG_TONE[f]}
+                info={r.flagReasons[f] ? <>{r.flagReasons[f]}</> : undefined}
+                infoLabel={`${inv?.flagLabels[f] ?? f} on ${r.name}`}
+              >
+                {inv?.flagLabels[f] ?? f}
+              </Badge>
+            ))}
+          </div>
+        ),
+    },
+  ];
+}
 
 export default function CredentialsPage() {
   const [type, setType] = useState(ALL);
   const [flag, setFlag] = useState(ALL);
-  const [offset, setOffset] = useState(0);
-  const search = useMemo(() => {
-    const p = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) });
-    if (type !== ALL) p.set("type", type);
-    if (flag !== ALL) p.set("flag", flag);
-    return p.toString();
-  }, [type, flag, offset]);
-  const q = useQuery({
-    queryKey: ["admin", "credentials", search],
-    queryFn: () => api.get<CredentialInventory>(`/v1/admin/credentials?${search}`),
-    // keep the last page on screen while the next one loads
-    placeholderData: (prev) => prev,
-  });
-  const inv = q.data;
-  const rows = inv?.credentials ?? [];
-  const page = inv?.page ?? { total: rows.length, limit: PAGE_SIZE, offset };
+  // the inventory's summary (counts, types, flag labels) arrives beside each page
+  const [inv, setInv] = useState<CredentialInventory | null>(null);
+  const filters = useMemo(() => ({ type: type !== ALL ? type : undefined, flag: flag !== ALL ? flag : undefined }), [type, flag]);
   const noSignal = (inv?.types ?? []).filter((t) => t.lastUsed === "none");
 
   return (
@@ -130,221 +234,74 @@ export default function CredentialsPage() {
         }
       />
       <div className={v.stack}>
-        <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
-          {inv && <AlertingCard inv={inv} />}
-          <Card title={`Inventory · ${inv?.counts.total ?? 0} credentials, ${inv?.counts.flagged ?? 0} flagged`}>
-            <div className={v.stack}>
-              <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
-                <Field label="Type">
-                  <Select
-                    value={type}
-                    onChange={(e) => {
-                      setType(e.target.value);
-                      setOffset(0);
-                    }}
-                    aria-label="Filter by credential type"
-                  >
-                    <option value={ALL}>All types</option>
-                    {(inv?.types ?? [])
-                      .filter((t) => t.count > 0)
-                      .map((t) => (
-                        <option key={t.type} value={t.type}>
-                          {t.label} ({t.count})
-                        </option>
-                      ))}
-                  </Select>
-                </Field>
-                <Field label="Flag">
-                  <Select
-                    value={flag}
-                    onChange={(e) => {
-                      setFlag(e.target.value);
-                      setOffset(0);
-                    }}
-                    aria-label="Filter by flag"
-                  >
-                    <option value={ALL}>Any</option>
-                    {(Object.keys(inv?.flagLabels ?? {}) as Flag[]).map((f) => (
-                      <option key={f} value={f}>
-                        {inv!.flagLabels[f]} ({inv!.counts.byFlag[f] ?? 0})
+        {inv && <AlertingCard inv={inv} />}
+        <Card title={`Inventory · ${inv?.counts.total ?? 0} credentials, ${inv?.counts.flagged ?? 0} flagged`}>
+          <div className={v.stack}>
+            <div className={v.row}>
+              <Field label="Type">
+                <Select value={type} onChange={(e) => setType(e.target.value)} aria-label="Filter by credential type">
+                  <option value={ALL}>All types</option>
+                  {(inv?.types ?? [])
+                    .filter((t) => t.count > 0)
+                    .map((t) => (
+                      <option key={t.type} value={t.type}>
+                        {t.label} ({t.count})
                       </option>
                     ))}
-                    <option value="none">No flag</option>
-                  </Select>
-                </Field>
-              </div>
-              <Table
-                rows={rows}
-                rowKey={(r) => r.id}
-                empty={<EmptyState title="No credentials match" body="Change the filters, or store a credential on its integration page." />}
-                columns={[
-                  {
-                    key: "name",
-                    header: "Credential",
-                    sort: (r) => r.name.toLowerCase(),
-                    render: (r) => (
-                      <div className={v.stackTight}>
-                        <Link to={r.manageAt} aria-label={`Manage ${r.typeLabel} ${r.name}`}>
-                          {r.name}
-                        </Link>
-                        <span className={v.faint}>
-                          {r.typeLabel}
-                          {r.status !== "active" ? ` · ${r.status}` : ""}
-                        </span>
-                      </div>
-                    ),
-                  },
-                  {
-                    key: "owner",
-                    header: "Owner / creator",
-                    render: (r) =>
-                      r.ownerUserId ? (
-                        <span>
-                          {r.ownerName ?? r.ownerUserId}
-                          {r.ownerKind === "creator" ? <span className={v.faint}> (creator)</span> : null}
-                          {r.ownerDisabled ? (
-                            <>
-                              {" "}
-                              <Badge tone="danger">deactivated</Badge>
-                            </>
-                          ) : null}
-                        </span>
-                      ) : (
-                        <span className={v.faint}>integration (no person)</span>
-                      ),
-                  },
-                  { key: "scope", header: "Scope", render: (r) => <span className={v.dim}>{r.scope}</span> },
-                  { key: "created", header: "Created", sort: (r) => r.createdAt, render: (r) => day(r.createdAt) },
-                  {
-                    key: "used",
-                    header: "Last used",
-                    info: (
-                      <>
-                        “not recorded”: nothing records when this type is used. A last use found on the usage ledger is
-                        from the last {inv?.ledgerWindowDays ?? inv?.linkWindowDays ?? 90} days.
-                      </>
-                    ),
-                    sort: (r) => r.lastUsedAt ?? "",
-                    render: (r) =>
-                      r.lastUsedSignal === "none" ? (
-                        <span className={v.faint}>
-                          not recorded
-                        </span>
-                      ) : r.lastUsedAt ? (
-                        ago(r.lastUsedAt)
-                      ) : (
-                        "never"
-                      ),
-                  },
-                  {
-                    key: "expires",
-                    header: "Expires",
-                    info: <>“not tracked”: held for a third party, which sets its lifetime.</>,
-                    sort: (r) => r.expiresAt ?? "",
-                    render: (r) =>
-                      r.expirySignal === "not_tracked" ? (
-                        <span className={v.faint}>
-                          not tracked
-                        </span>
-                      ) : r.expiresAt ? (
-                        day(r.expiresAt)
-                      ) : (
-                        "never"
-                      ),
-                  },
-                  {
-                    key: "rotation",
-                    header: "Since last set",
-                    info: <>* no set date was recorded for this secret before the inventory existed; the age counts from creation.</>,
-                    sort: (r) => r.ageSinceRotationDays,
-                    render: (r) => (
-                      <span>
-                        {r.ageSinceRotationDays} d{r.rotationSignal === "since_created" ? "*" : ""}
-                      </span>
-                    ),
-                  },
-                  {
-                    key: "links",
-                    header: "Linked",
-                    info: <>Linked projects and agents come from the last {inv?.linkWindowDays ?? 90} days of the usage ledger.</>,
-                    render: (r) =>
-                      r.linkedAgents.length + r.linkedProjects.length === 0 ? (
-                        <span className={v.faint}>—</span>
-                      ) : (
-                        <span className={v.dim}>
-                          {[...r.linkedAgents.map((a) => a.name), ...r.linkedProjects.map((p) => `project ${p.name}`)].join(", ")}
-                        </span>
-                      ),
-                  },
-                  {
-                    key: "flags",
-                    header: "Flags",
-                    sort: (r) => r.flags.length,
-                    render: (r) =>
-                      r.flags.length === 0 ? (
-                        <span className={v.faint}>none</span>
-                      ) : (
-                        <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                          {r.flags.map((f) => (
-                            <span key={f} className={v.rowTight}>
-                              <Badge
-                                tone={FLAG_TONE[f]}
-                                info={r.flagReasons[f] ? <>{r.flagReasons[f]}</> : undefined}
-                                infoLabel={`${inv?.flagLabels[f] ?? f} on ${r.name}`}
-                              >
-                                {inv?.flagLabels[f] ?? f}
-                              </Badge>
-                            </span>
-                          ))}
-                        </div>
-                      ),
-                  },
-                ]}
-              />
-              <nav aria-label="Credential pages" style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                <span className={v.dim}>
-                  {page.total === 0
-                    ? "No credentials match"
-                    : `Showing ${page.offset + 1}–${Math.min(page.offset + rows.length, page.total)} of ${page.total}`}
-                </span>
-                <Button size="sm" disabled={page.offset === 0 || q.isFetching} onClick={() => setOffset(Math.max(0, page.offset - page.limit))}>
-                  Previous page
-                </Button>
-                <Button
-                  size="sm"
-                  disabled={page.offset + page.limit >= page.total || q.isFetching}
-                  onClick={() => setOffset(page.offset + page.limit)}
-                >
-                  Next page
-                </Button>
-              </nav>
-            </div>
-          </Card>
-          <Card title="What this inventory cannot see">
-            <div className={v.stack}>
-              <div>
-                <div className={v.sectionTitle}>No last-used signal</div>
-                <ul>
-                  {noSignal.map((t) => (
-                    <li key={t.type}>
-                      <strong>{t.label}</strong>: {t.lastUsedNote}. Never flagged unused.
-                    </li>
+                </Select>
+              </Field>
+              <Field label="Flag">
+                <Select value={flag} onChange={(e) => setFlag(e.target.value)} aria-label="Filter by flag">
+                  <option value={ALL}>Any</option>
+                  {(Object.keys(inv?.flagLabels ?? {}) as Flag[]).map((f) => (
+                    <option key={f} value={f}>
+                      {inv!.flagLabels[f]} ({inv!.counts.byFlag[f] ?? 0})
+                    </option>
                   ))}
-                </ul>
-              </div>
-              <div>
-                <div className={v.sectionTitle}>Held outside the database</div>
-                <ul>
-                  {(inv?.notStored ?? []).map((n) => (
-                    <li key={n.what}>
-                      <strong>{n.what}</strong>: {n.why}.
-                    </li>
-                  ))}
-                </ul>
-              </div>
+                  <option value="none">No flag</option>
+                </Select>
+              </Field>
             </div>
-          </Card>
-        </QueryGate>
+            <DataList<CredentialRow>
+              listId="credentials"
+              noun="credentials"
+              endpoint="/v1/admin/credentials"
+              exportPath="/v1/admin/credentials/export.xlsx"
+              queryKey={["admin", "credentials", "list"]}
+              legacyKey="credentials"
+              filters={filters}
+              defaultSort={{ key: "flags", dir: "desc" }}
+              columns={credentialColumns(inv)}
+              rowKey={(r) => r.id}
+              onRows={(_rows, raw) => setInv(raw as unknown as CredentialInventory)}
+              empty={<EmptyState title="No credentials match" body="Change the filters, or store a credential on its integration page." />}
+            />
+          </div>
+        </Card>
+        <Card title="What this inventory cannot see">
+          <div className={v.stack}>
+            <div>
+              <div className={v.sectionTitle}>No last-used signal</div>
+              <ul>
+                {noSignal.map((t) => (
+                  <li key={t.type}>
+                    <strong>{t.label}</strong>: {t.lastUsedNote}. Never flagged unused.
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <div>
+              <div className={v.sectionTitle}>Held outside the database</div>
+              <ul>
+                {(inv?.notStored ?? []).map((n) => (
+                  <li key={n.what}>
+                    <strong>{n.what}</strong>: {n.why}.
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        </Card>
       </div>
     </>
   );

@@ -27,10 +27,11 @@
  * `RegulAItLlmPage.tsx` and `TracesPage.tsx`.
  */
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago, fmtDateTime, fmtUsd, shortId } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
+import { DataList } from "../../../ui/DataList";
 import {
   Badge,
   Button,
@@ -78,6 +79,23 @@ interface VirtualKey {
   createdAt: string;
   lastUsedAt: string | null;
   active: boolean;
+  /** ADR-0219: the owner's email, joined by the list contract */
+  ownerEmail?: string | null;
+}
+
+/** one ledger row that references a key (ADR-0219 list contract) */
+interface KeyUsageEvent {
+  id: string;
+  at: string;
+  provider: string | null;
+  model: string | null;
+  servedModel: string | null;
+  operation: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  costUsd: number | null;
+  stopReason: string | null;
+  refusal: boolean;
 }
 
 interface KeyUsage {
@@ -121,10 +139,12 @@ export default function VirtualKeysPage() {
   const agents = useAgents();
   const names = useNameMaps();
 
-  const keys = useQuery({
-    queryKey: ["admin", "virtual-keys"],
-    queryFn: () => api.get<{ keys: VirtualKey[] }>("/v1/virtual-keys"),
-  });
+  const qc = useQueryClient();
+  // the issued-keys list and the open key's spend both read under this prefix
+  const refreshKeys = () => {
+    void qc.invalidateQueries({ queryKey: ["admin", "virtual-keys"] });
+    void qc.invalidateQueries({ queryKey: ["admin", "virtual-key-usage"] });
+  };
   const credentials = useQuery({
     queryKey: ["admin", "model-credentials"],
     queryFn: () => api.get<{ credentials: ModelCredential[] }>("/v1/model-credentials"),
@@ -170,7 +190,6 @@ export default function VirtualKeysPage() {
     [agents.data],
   );
 
-  const rows = keys.data?.keys ?? [];
 
   const openEdit = (k: VirtualKey) => {
     setEditing(k);
@@ -210,7 +229,7 @@ export default function VirtualKeysPage() {
     setExpiresAt("");
     setCredentialId("");
     setRestrict(false);
-    void keys.refetch();
+    refreshKeys();
   };
 
   const saveEdit = async () => {
@@ -226,7 +245,7 @@ export default function VirtualKeysPage() {
     );
     if (ok) {
       setEditing(null);
-      void keys.refetch();
+      refreshKeys();
     }
   };
 
@@ -238,7 +257,7 @@ export default function VirtualKeysPage() {
       () => api.del<VirtualKey>(`/v1/virtual-keys/${target.id}`),
       `Key '${target.name}' revoked — it authenticates nothing from this moment on.`,
     );
-    if (ok) void keys.refetch();
+    if (ok) refreshKeys();
   };
 
   return (
@@ -405,20 +424,27 @@ export default function VirtualKeysPage() {
 
         {/* --- the keys --------------------------------------------------- */}
         <Card title="Issued keys">
-          <QueryGate loading={keys.isLoading} error={keys.error} onRetry={() => void keys.refetch()}>
-            {rows.length === 0 ? (
+          <DataList<VirtualKey>
+            listId="virtual-keys"
+            noun="virtual keys"
+            endpoint="/v1/virtual-keys"
+            exportPath="/v1/virtual-keys/export.xlsx"
+            queryKey={["admin", "virtual-keys", "list"]}
+            legacyKey="keys"
+            defaultSort={{ key: "created", dir: "desc" }}
+            rowKey={(k) => k.id}
+            empty={
               <EmptyState
                 title="No virtual keys yet"
                 body="Issue one above to hand a developer a credential that narrows — rather than sharing the vendor key."
               />
-            ) : (
-              <Table<VirtualKey>
-                rows={rows}
-                rowKey={(k) => k.id}
-                columns={[
+            }
+            columns={[
                   {
                     key: "name",
                     header: "Key",
+                    main: true,
+                    sortable: true,
                     render: (k) => (
                       <Button size="sm" variant="ghost" onClick={() => setSelected(k.id)}>
                         {k.name}
@@ -428,11 +454,16 @@ export default function VirtualKeysPage() {
                   {
                     key: "owner",
                     header: "Owner (the ceiling)",
-                    render: (k) => names.userEmail.get(k.userId) ?? shortId(k.userId),
+                    main: true,
+                    sortable: true,
+                    render: (k) => k.ownerEmail ?? names.userEmail.get(k.userId) ?? shortId(k.userId),
                   },
                   {
                     key: "state",
                     header: "State",
+                    main: true,
+                    sortable: true,
+                    required: "State is always shown",
                     render: (k) => {
                       const st = keyState(k);
                       return <Badge tone={st.tone}>{st.word}</Badge>;
@@ -441,6 +472,7 @@ export default function VirtualKeysPage() {
                   {
                     key: "allow",
                     header: "Narrowed to",
+                    main: true,
                     render: (k) =>
                       k.allowedModels === null ? (
                         <span className={v.faint}>owner&apos;s entitlements only</span>
@@ -455,6 +487,8 @@ export default function VirtualKeysPage() {
                   {
                     key: "budget",
                     header: "Lifetime budget",
+                    main: true,
+                    sortable: true,
                     render: (k) =>
                       k.budgetUsd === null ? (
                         <span className={v.faint}>no cap</span>
@@ -465,11 +499,15 @@ export default function VirtualKeysPage() {
                   {
                     key: "spent",
                     header: "Spent (enforcement counter)",
+                    main: true,
+                    sortable: true,
                     render: (k) => <span className={v.num}>{fmtUsd(k.spentUsd)}</span>,
                   },
                   {
                     key: "remaining",
                     header: "Remaining",
+                    sortable: true,
+                    required: "An exhausted budget is a warning, so it is always shown",
                     render: (k) =>
                       k.budgetRemainingUsd === null ? (
                         <span className={v.faint}>n/a — no cap</span>
@@ -482,18 +520,21 @@ export default function VirtualKeysPage() {
                   {
                     key: "expires",
                     header: "Expires",
+                    sortable: true,
                     render: (k) =>
                       k.expiresAt ? fmtDateTime(k.expiresAt) : <span className={v.faint}>never</span>,
                   },
                   {
                     key: "used",
                     header: "Last used",
+                    sortable: true,
                     render: (k) => (k.lastUsedAt ? ago(k.lastUsedAt) : <span className={v.faint}>never</span>),
                   },
                   {
                     key: "act",
                     header: "",
                     srHeader: "Actions",
+                    action: true,
                     infoLabel: "revoking a key",
                     info: (
                       <>
@@ -519,10 +560,8 @@ export default function VirtualKeysPage() {
                       </span>
                     ),
                   },
-                ]}
-              />
-            )}
-          </QueryGate>
+            ]}
+          />
         </Card>
 
         {/* --- per-key spend, both numbers ------------------------------- */}
@@ -597,6 +636,36 @@ export default function VirtualKeysPage() {
                     The token itself is not here and cannot be. Only its sha256 was ever stored, and no
                     endpoint returns it — if it was lost, revoke this key and issue another.
                   </p>
+                  <div className={v.sectionTitle}>Calls on this key</div>
+                  <DataList<KeyUsageEvent>
+                    listId="virtual-key-usage"
+                    noun="calls"
+                    endpoint={`/v1/virtual-keys/${usage.data.key.id}/usage`}
+                    exportPath={`/v1/virtual-keys/${usage.data.key.id}/usage/export.xlsx`}
+                    queryKey={["admin", "virtual-key-usage", usage.data.key.id, "list"]}
+                    legacyKey="events"
+                    defaultSort={{ key: "at", dir: "desc" }}
+                    rowKey={(e) => e.id}
+                    empty={<EmptyState title="No calls yet" body="Nothing on the ledger references this key." />}
+                    columns={[
+                      { key: "at", header: "When", main: true, sortable: true, render: (e) => fmtDateTime(e.at) },
+                      { key: "provider", header: "Provider", main: true, sortable: true, render: (e) => e.provider ?? "—" },
+                      { key: "model", header: "Model", main: true, sortable: true, render: (e) => <span className={v.mono}>{e.servedModel ?? e.model ?? "—"}</span> },
+                      { key: "input", header: "Input tokens", main: true, sortable: true, align: "right", render: (e) => <span className={v.num}>{e.inputTokens ?? "—"}</span> },
+                      { key: "output", header: "Output tokens", main: true, sortable: true, align: "right", render: (e) => <span className={v.num}>{e.outputTokens ?? "—"}</span> },
+                      {
+                        key: "cost",
+                        header: "Cost",
+                        main: true,
+                        sortable: true,
+                        align: "right",
+                        required: "An unpriced call is a warning, so cost is always shown",
+                        render: (e) => (e.costUsd === null ? <Badge tone="warn">unpriced</Badge> : <span className={v.num}>{fmtUsd(e.costUsd)}</span>),
+                      },
+                      { key: "operation", header: "Operation", sortable: true, render: (e) => e.operation ?? "—" },
+                      { key: "outcome", header: "Outcome", render: (e) => (e.refusal ? <Badge tone="danger">refused</Badge> : (e.stopReason ?? "—")) },
+                    ]}
+                  />
                 </div>
               )}
             </QueryGate>

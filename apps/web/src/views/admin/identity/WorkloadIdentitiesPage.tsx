@@ -15,7 +15,7 @@
  * dialog) behind a confirmation that states the consequence.
  */
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, InfoButton, Input, Modal, Select, SkeletonBlock, Table, Textarea } from "../../../ui/kit";
@@ -30,7 +30,6 @@ import {
   getWorkloadIdentity,
   listIdentityCredentials,
   listRunDelegationTree,
-  listWorkloadIdentities,
   replaceIdentityGrants,
   revokeDelegationGrant,
   revokeIdentityCredential,
@@ -93,6 +92,10 @@ import { SpiffeBundleEndpointsCard } from "./SpiffeBundleEndpoints";
 import s from "./workloadIdentities.module.css";
 import { OrgSettingsCard } from "../settings/OrgSettingsCard";
 import { fmtDateTime } from "../../../api/format";
+import { DataList } from "../../../ui/DataList";
+
+/** ADR-0219: an identity row under the list contract, with its stewards' names joined by the gateway */
+type WorkloadIdentityRow = WorkloadIdentityView & { stewardNames?: string | null };
 
 const dateLabel = (value: string | null) => fmtDateTime(value, "Unmeasured");
 
@@ -165,23 +168,14 @@ export default function WorkloadIdentitiesPage() {
   const [creating, setCreating] = useState(false);
   const [addingCredential, setAddingCredential] = useState<WorkloadIdentityDetailView | null>(null);
 
-  const identities = useInfiniteQuery({
-    queryKey: workloadIdentityKeys.list,
-    queryFn: ({ pageParam }) => listWorkloadIdentities(pageParam),
-    initialPageParam: null as string | null,
-    getNextPageParam: (last) => last.nextCursor ?? undefined,
-  });
-  const rows = useMemo(() => identities.data?.pages.flatMap((p) => p.items), [identities.data]);
+  // the identities read so far, so the delegation tree can name the actors it shows
+  const [seen, setSeen] = useState<WorkloadIdentityView[]>([]);
   const people = useUserPicker();
   const userName = useMemo(
     () => new Map((people.data?.users ?? []).map((u) => [u.id, u.displayName || u.email])),
     [people.data],
   );
   const personLabel = (id: string) => userName.get(id) ?? (people.isPending ? "Loading…" : `Not loaded (${id})`);
-
-  useEffect(() => {
-    if (selectedId && rows && !rows.some((r) => r.id === selectedId)) setSelectedId(null);
-  }, [rows, selectedId]);
 
   const ask = (c: Confirmation) => {
     write.setFailure(null);
@@ -216,20 +210,18 @@ export default function WorkloadIdentitiesPage() {
         {write.failure && (
           <ErrorState title="Change not recorded" message={write.failure} onRetry={() => write.setFailure(null)} />
         )}
-        <Card
-          title="Identities"
-          actions={
-            <Button disabled={write.busy || identities.isFetching} onClick={() => void identities.refetch()}>
-              Refresh identities
-            </Button>
-          }
-        >
-          <Table<WorkloadIdentityView>
-            rows={rows}
-            loading={identities.isPending}
-            error={identities.error ? new Error("Workload identities could not be read. No empty or active state is inferred.") : undefined}
-            onRetry={() => void identities.refetch()}
+        <Card title="Identities">
+          <DataList<WorkloadIdentityRow>
+            listId="workload-identities"
+            noun="workload identities"
+            endpoint="/v1/workload-identities"
+            exportPath="/v1/workload-identities/export.xlsx"
+            queryKey={workloadIdentityKeys.list}
+            legacyKey="items"
+            errorMessage="Workload identities could not be read. No empty or active state is inferred."
+            defaultSort={{ key: "created", dir: "desc" }}
             rowKey={(i) => i.id}
+            onRows={(page) => setSeen((prev) => [...prev.filter((p) => !page.some((r) => r.id === p.id)), ...page])}
             empty={
               <EmptyState
                 title="No workload identities"
@@ -237,14 +229,23 @@ export default function WorkloadIdentitiesPage() {
               />
             }
             columns={[
-              { key: "identifier", header: "Identifier", render: (i) => <span className={s.identifier}>{i.identifier}</span> },
-              { key: "kind", header: "Kind", render: (i) => workloadKindLabels[i.kind] ?? i.kind },
-              { key: "stewards", header: "Stewards", render: (i) => i.sponsorUserIds.map(personLabel).join(", ") || "No steward recorded" },
-              { key: "environments", header: "Environments", render: (i) => i.environments.join(", ") || "None allowed" },
-              { key: "status", header: "Status", render: (i) => <StatusBadge status={i.status} /> },
+              { key: "identifier", header: "Identifier", main: true, sortable: true, render: (i) => <span className={s.identifier}>{i.identifier}</span> },
+              { key: "kind", header: "Kind", main: true, sortable: true, render: (i) => workloadKindLabels[i.kind] ?? i.kind },
+              {
+                key: "stewards",
+                header: "Stewards",
+                main: true,
+                sortable: true,
+                render: (i) => i.stewardNames ?? (i.sponsorUserIds.map(personLabel).join(", ") || "No steward recorded"),
+              },
+              { key: "environments", header: "Environments", main: true, sortable: true, render: (i) => i.environments.join(", ") || "None allowed" },
+              { key: "status", header: "Status", main: true, sortable: true, required: "Status is always shown", render: (i) => <StatusBadge status={i.status} /> },
+              { key: "created", header: "Created", sortable: true, render: (i) => fmtDateTime(i.createdAt) },
+              { key: "updated", header: "Updated", sortable: true, render: (i) => fmtDateTime(i.updatedAt) },
               {
                 key: "manage",
                 header: "Manage",
+                action: true,
                 render: (i) => (
                   <Button size="sm" aria-label={`Manage ${i.identifier}`} aria-pressed={selectedId === i.id} onClick={() => setSelectedId(i.id)}>
                     Manage
@@ -253,11 +254,6 @@ export default function WorkloadIdentitiesPage() {
               },
             ]}
           />
-          {identities.hasNextPage && (
-            <Button disabled={identities.isFetchingNextPage} onClick={() => void identities.fetchNextPage()}>
-              {identities.isFetchingNextPage ? "Loading more…" : "Load more identities"}
-            </Button>
-          )}
           {people.data && !people.data.complete && (
             <p>Only the first page of people was loaded, so some stewards show as “Not loaded”. That is not a statement that they are inactive.</p>
           )}
@@ -330,7 +326,7 @@ export default function WorkloadIdentitiesPage() {
         {/* ADR-0188 S9 follow-up: where a domain's bundle is fetched from (off until set) */}
         <SpiffeBundleEndpointsCard busy={write.busy} ask={ask} />
 
-        <RunDelegationTree busy={write.busy} personLabel={personLabel} identities={rows} ask={ask} />
+        <RunDelegationTree busy={write.busy} personLabel={personLabel} identities={seen} ask={ask} />
       </div>
 
       {editing && (

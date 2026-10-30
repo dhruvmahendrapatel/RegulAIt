@@ -7,7 +7,7 @@
  * sso_only switch below counts them together, so an admin who could only see
  * one of them would be reasoning about the lockout guard with half the facts.
  */
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { LinkRequest, OidcProvider, OrgSettingsResponse, SamlProvider } from "../../../api/adminTypes";
@@ -32,6 +32,7 @@ import v from "../../views.module.css";
 import { putOrgSettings, withStepUp } from "../../../stepup/stepUp";
 import { OrgSettingsCard } from "../settings/OrgSettingsCard";
 import { fmtDateTime } from "../../../api/format";
+import { DataList } from "../../../ui/DataList";
 
 export default function SsoPage() {
   return (
@@ -796,11 +797,8 @@ function SessionsPolicyForm(props: { settings: Record<string, unknown> }) {
  */
 function LinkRequestsCard() {
   const act = useAction();
-  const q = useQuery({
-    queryKey: ["admin", "link-requests"],
-    queryFn: () => api.get<{ requests: LinkRequest[] }>("/v1/auth/link-requests"),
-  });
-  const rows = q.data?.requests ?? [];
+  const [status, setStatus] = useState("pending");
+  const filters = useMemo(() => ({ status }), [status]);
   return (
     <Card title="Account-link requests">
       {act.error && (
@@ -808,35 +806,70 @@ function LinkRequestsCard() {
           {act.error}
         </div>
       )}
-      <Table<LinkRequest>
+      <Field label="Show">
+        <Select value={status} onChange={(e) => setStatus(e.target.value)}>
+          <option value="pending">pending</option>
+          <option value="approved">approved</option>
+          <option value="linked">linked</option>
+          <option value="denied">denied</option>
+          <option value="all">all</option>
+        </Select>
+      </Field>
+      <DataList<LinkRequest>
+        listId="link-requests"
+        noun="link requests"
+        endpoint="/v1/auth/link-requests"
+        exportPath="/v1/auth/link-requests/export.xlsx"
+        queryKey={["admin", "link-requests", "list"]}
+        legacyKey="requests"
+        filters={filters}
+        defaultSort={{ key: "when", dir: "desc" }}
         columns={[
           {
             key: "account",
             header: "Existing account",
+            main: true,
+            sortable: true,
             render: (r) => (
               <span>
                 {r.userDisplayName} <span className={v.faint}>{r.userEmail}</span>
               </span>
             ),
           },
-          { key: "provider", header: "Identity provider", render: (r) => `${r.provider} (${r.protocol.toUpperCase()})` },
-          { key: "email", header: "Asserted email", render: (r) => <span className={v.mono}>{r.email}</span> },
-          { key: "mfa", header: "MFA", render: (r) => (r.idpMfa ? <Badge tone="ok">asserted</Badge> : <Badge>not asserted</Badge>) },
-          { key: "when", header: "Requested", render: (r) => fmtDateTime(r.createdAt) },
+          { key: "provider", header: "Identity provider", main: true, sortable: true, render: (r) => `${r.provider} (${r.protocol.toUpperCase()})` },
+          { key: "email", header: "Asserted email", main: true, sortable: true, render: (r) => <span className={v.mono}>{r.email}</span> },
+          {
+            key: "mfa",
+            header: "MFA",
+            main: true,
+            sortable: true,
+            required: "Whether the identity provider asserted MFA is a warning, so it is always shown",
+            render: (r) => (r.idpMfa ? <Badge tone="ok">asserted</Badge> : <Badge>not asserted</Badge>),
+          },
+          { key: "when", header: "Requested", main: true, sortable: true, render: (r) => fmtDateTime(r.createdAt) },
           {
             key: "approvals",
             header: "Approvals",
+            main: true,
+            sortable: true,
             render: (r) => `${r.approvals ?? 0} of ${r.requiredApprovals ?? 1}`,
           },
+          {
+            key: "status",
+            header: "Status",
+            sortable: true,
+            required: "Status is always shown",
+            render: (r) => (r.expired ? <Badge tone="warn">expired</Badge> : <Badge>{r.status ?? "pending"}</Badge>),
+          },
+          { key: "expires", header: "Expires", sortable: true, render: (r) => (r.expiresAt ? fmtDateTime(r.expiresAt) : "—") },
           {
             key: "actions",
             header: "",
             srHeader: "Actions",
             align: "right",
+            action: true,
             render: (r) =>
-              r.expired ? (
-                <Badge tone="warn">expired</Badge>
-              ) : (
+              r.expired || (r.status && r.status !== "pending") ? null : (
                 <span className={v.rowTight}>
                   <Button
                     size="sm"
@@ -867,14 +900,10 @@ function LinkRequestsCard() {
               ),
           },
         ]}
-        rows={rows}
         rowKey={(r) => r.id}
-        loading={q.isLoading}
-        error={q.error}
-        onRetry={() => void q.refetch()}
         empty={
           <EmptyState
-            title="No pending link requests"
+            title={status === "pending" ? "No pending link requests" : "No link requests"}
             body="When someone signs in with an identity provider whose email matches an account that has its own password, the link waits here (or for them to prove the account) — it is never made silently."
           />
         }

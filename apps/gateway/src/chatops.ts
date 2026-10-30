@@ -148,6 +148,8 @@ import { verifyTeamsBotToken } from "./teams-bot-auth.js";
 import { registerAlertSlaCourier } from "./alert-ownership.js";
 import { errMessage } from "./err-serializer.js";
 import { SharedRateLimitStore } from "./rate-limit-store.js";
+import { wantsListContract } from "./list-contract.js";
+import { CHAT_LINKS_LIST, answerListExport, answerListPage, chatLinksFilterQuery, chatLinksReader, chatLinksWhere } from "./identity-lists.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -369,6 +371,11 @@ const linkSchema = z
   .strict();
 
 const postSchema = z.object({ connectionName: z.string().min(1).max(200).optional(), channel: z.string().max(200).optional() }).strict();
+
+const IDENTITY_LINK_POSTURE =
+  "A chat user id is an ASSERTION delivered by the bot's connection. It becomes a RegulAIt human only through " +
+  "one of these admin-created rows. `emailVerifiedSource: admin_asserted` means this deployment had no " +
+  "federated identity to bind to — visibly weaker than `idp`, rather than a verification we did not perform.";
 
 export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOpsRouteOptions): void {
   // The clock is NOT injectable. The replay window is exercised by signing a
@@ -677,7 +684,15 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
   // Admin: the identity link — the trust artifact
   // =======================================================================
 
-  app.get("/v1/chatops/identity-links", async () => {
+  // ADR-0219: with any of sort/dir/cursor/offset/count, the shared list contract (the workspace name joined,
+  // a verification filter); with none of them, exactly the response below.
+  app.get("/v1/chatops/identity-links/export.xlsx", async (req, reply) =>
+    answerListExport(db, req, reply, CHAT_LINKS_LIST, chatLinksReader(db), chatLinksFilterQuery, chatLinksWhere),
+  );
+  app.get("/v1/chatops/identity-links", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      return answerListPage(db, req, reply, CHAT_LINKS_LIST, chatLinksReader(db), chatLinksFilterQuery, chatLinksWhere, { posture: IDENTITY_LINK_POSTURE });
+    }
     const rows = await db
       .select({
         id: chatIdentityLinks.id,
@@ -689,13 +704,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         createdAt: chatIdentityLinks.createdAt,
       })
       .from(chatIdentityLinks);
-    return {
-      links: rows,
-      posture:
-        "A chat user id is an ASSERTION delivered by the bot's connection. It becomes a RegulAIt human only through " +
-        "one of these admin-created rows. `emailVerifiedSource: admin_asserted` means this deployment had no " +
-        "federated identity to bind to — visibly weaker than `idp`, rather than a verification we did not perform.",
-    };
+    return { links: rows, posture: IDENTITY_LINK_POSTURE };
   });
 
   app.post("/v1/chatops/identity-links", async (req, reply) => {

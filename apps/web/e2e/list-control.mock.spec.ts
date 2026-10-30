@@ -147,10 +147,13 @@ const PAGES = [
   { name: "Users", path: "/ui/admin/users", endpoint: "/v1/users", noun: "users", total: "23", exact: 23, optional: "Username", optionalId: "username", hide: "Sign-in", hideId: "signIn", required: "Status", sortHeader: "Email", sortId: "email" },
 ] as const;
 
-const status = (page: Page) => page.getByTestId("list-status");
+// a page can hold more than one list (Users also lists API keys): every locator is scoped to the list under test
+let LIST_ID = "";
+const scope = (page: Page) => page.locator(`[data-list="${LIST_ID}"]`);
+const status = (page: Page) => scope(page).getByTestId("list-status");
 const lastList = (cap: Capture, endpoint: string) => [...cap.lists].reverse().find((u) => u.pathname === endpoint)!;
 const headers = async (page: Page) =>
-  (await page.locator("[data-list] table thead th").allInnerTexts()).map((t) => t.replace(/[▲▼]/g, "").trim()).filter(Boolean);
+  (await scope(page).locator("table thead th").allInnerTexts()).map((t) => t.replace(/[▲▼]/g, "").trim()).filter(Boolean);
 
 const THEMES = ["light", "dark"] as const;
 async function expectAxeClean(page: Page, label: string) {
@@ -168,17 +171,20 @@ async function expectAxeClean(page: Page, label: string) {
 
 for (const P of PAGES) {
   test.describe(`list control on ${P.name}`, () => {
+    test.beforeEach(() => {
+      LIST_ID = P.noun;
+    });
     test("page sizes 10, 50, 100 and All; All loads 500 at a time; Previous and Next", async ({ page }) => {
       const cap = await mockApi(page);
       await page.goto(P.path);
       await expect(status(page)).toHaveText(`1–10 of ${P.total}`);
       expect(lastList(cap, P.endpoint).searchParams.get("limit")).toBe("10");
-      await expect(page.locator("[data-list] tbody tr")).toHaveCount(10);
-      await page.getByRole("button", { name: "Next", exact: true }).click();
+      await expect(scope(page).locator("tbody tr")).toHaveCount(10);
+      await scope(page).getByRole("button", { name: "Next", exact: true }).click();
       await expect(status(page)).toHaveText(`11–20 of ${P.total}`);
-      await page.getByRole("button", { name: "Previous", exact: true }).click();
+      await scope(page).getByRole("button", { name: "Previous", exact: true }).click();
       await expect(status(page)).toHaveText(`1–10 of ${P.total}`);
-      const size = page.getByLabel("Rows per page");
+      const size = scope(page).getByLabel("Rows per page");
       for (const n of [50, 100]) {
         await size.selectOption(String(n));
         const shown = Math.min(n, P.exact);
@@ -190,30 +196,30 @@ for (const P of PAGES) {
         await expect(status(page)).toHaveText(`Loaded 500 of ${P.total}`);
         expect(lastList(cap, P.endpoint).searchParams.get("limit")).toBe("500");
         // scrolling the end of the list into view loads the next chunk
-        await page.getByRole("button", { name: "Load next 500" }).scrollIntoViewIfNeeded();
+        await scope(page).getByRole("button", { name: "Load next 500" }).scrollIntoViewIfNeeded();
         await expect(status(page)).toHaveText(`Loaded 1,000 of ${P.total}`);
         // the visible button is the fallback
         await page.evaluate(() => window.scrollTo(0, 0));
-        await page.getByRole("button", { name: "Load next 500" }).click();
+        await scope(page).getByRole("button", { name: "Load next 500" }).click();
         await expect(status(page)).toHaveText("Loaded 1,284 of 1,284");
-        await expect(page.locator("[data-list] tbody tr")).toHaveCount(1_284);
+        await expect(scope(page).locator("tbody tr")).toHaveCount(1_284);
         const chunks = cap.lists.filter((u) => u.pathname === P.endpoint && u.searchParams.get("limit") === "500");
         expect(chunks.length).toBeGreaterThanOrEqual(3);
         expect(chunks.some((u) => u.searchParams.get("cursor"))).toBe(true);
       } else {
         await expect(status(page)).toHaveText(`Loaded ${P.exact} of ${P.exact}`);
       }
-      await expect(page.getByRole("button", { name: "Load next 500" })).toHaveCount(0);
+      await expect(scope(page).getByRole("button", { name: "Load next 500" })).toHaveCount(0);
     });
 
     test("the size is remembered in this browser after a reload", async ({ page }) => {
       const cap = await mockApi(page);
       await page.goto(P.path);
-      await page.getByLabel("Rows per page").selectOption("50");
+      await scope(page).getByLabel("Rows per page").selectOption("50");
       await expect(status(page)).toContainText("1–");
       expect(await page.evaluate((k) => localStorage.getItem(k), `regulait.list.${P.noun}.size`)).toBe("50");
       await page.reload();
-      await expect(page.getByLabel("Rows per page")).toHaveValue("50");
+      await expect(scope(page).getByLabel("Rows per page")).toHaveValue("50");
       await expect(status(page)).toContainText("1–");
       expect(lastList(cap, P.endpoint).searchParams.get("limit")).toBe("50");
     });
@@ -222,7 +228,7 @@ for (const P of PAGES) {
       const cap = await mockApi(page);
       await page.goto(P.path);
       await expect(status(page)).toContainText("1–10");
-      const th = page.locator("[data-list] thead th").filter({ has: page.getByRole("button", { name: P.sortHeader, exact: true }) });
+      const th = scope(page).locator("thead th").filter({ has: page.getByRole("button", { name: P.sortHeader, exact: true }) });
       await th.getByRole("button", { name: P.sortHeader, exact: true }).click();
       await expect.poll(() => lastList(cap, P.endpoint).searchParams.get("sort")).toBe(P.sortId);
       expect(lastList(cap, P.endpoint).searchParams.get("dir")).toBe("asc");
@@ -232,7 +238,7 @@ for (const P of PAGES) {
       await expect(th).toHaveAttribute("aria-sort", "descending");
       // the first row is the server's answer for the whole list, not a re-sort of the page
       const first = contract(P.endpoint, new URLSearchParams({ limit: "10", sort: P.sortId, dir: "desc" })).items[0]!;
-      await expect(page.locator("[data-list] tbody tr").first()).toContainText(String(pick(first, LISTS[P.endpoint]!.field[P.sortId]!)));
+      await expect(scope(page).locator("tbody tr").first()).toContainText(String(pick(first, LISTS[P.endpoint]!.field[P.sortId]!)));
     });
 
     test("the gear hides and shows a column; a required one stays; the choice persists; Excel asks for the screen's columns in order", async ({ page }) => {
@@ -241,7 +247,7 @@ for (const P of PAGES) {
       await expect(status(page)).toContainText("1–10");
       expect(await headers(page)).toContain(P.hide);
       expect(await headers(page)).not.toContain(P.optional);
-      const gear = page.getByRole("button", { name: `Choose columns for ${P.noun}` });
+      const gear = scope(page).getByRole("button", { name: `Choose columns for ${P.noun}` });
       await gear.click();
       const dialog = page.getByRole("dialog", { name: `Columns for ${P.noun}` });
       await expect(dialog).toBeVisible();
@@ -269,7 +275,7 @@ for (const P of PAGES) {
       await expect(status(page)).toContainText("1–10");
       expect(await headers(page)).toEqual(after);
 
-      await page.getByRole("button", { name: "Download Excel" }).click();
+      await scope(page).getByRole("button", { name: "Download Excel" }).click();
       await expect.poll(() => cap.exports.length).toBe(1);
       const ex = cap.exports[0]!;
       expect(ex.pathname).toBe(`${P.endpoint}/export.xlsx`);
@@ -286,11 +292,11 @@ for (const P of PAGES) {
       const cap = await mockApi(page);
       await page.goto(P.path);
       await expect(status(page)).toContainText("1–10");
-      await page.getByRole("button", { name: "Next", exact: true }).click();
+      await scope(page).getByRole("button", { name: "Next", exact: true }).click();
       await expect(status(page)).toContainText("11–20");
       const before = cap.lists.filter((u) => u.pathname === P.endpoint).length;
       const last = lastList(cap, P.endpoint).search;
-      await page.getByRole("button", { name: `Refresh ${P.noun}` }).click();
+      await scope(page).getByRole("button", { name: `Refresh ${P.noun}` }).click();
       await expect.poll(() => cap.lists.filter((u) => u.pathname === P.endpoint).length).toBe(before + 1);
       expect(lastList(cap, P.endpoint).search).toBe(last);
       await expect(status(page)).toContainText("11–20");
@@ -302,13 +308,13 @@ for (const P of PAGES) {
       await expect(status(page)).toContainText("1–10");
       await expectAxeClean(page, `${P.name} list`);
       // page size
-      const size = page.getByLabel("Rows per page");
+      const size = scope(page).getByLabel("Rows per page");
       await tabTo(page, size);
       await page.keyboard.press("ArrowDown");
       await expect(size).toHaveValue("50");
       await expect.poll(() => lastList(cap, P.endpoint).searchParams.get("limit")).toBe("50");
       // refresh, with its tip shown on focus
-      const refresh = page.getByRole("button", { name: `Refresh ${P.noun}` });
+      const refresh = scope(page).getByRole("button", { name: `Refresh ${P.noun}` });
       const n = cap.lists.length;
       await activate(page, refresh);
       await expect(page.getByRole("tooltip", { name: `Refresh ${P.noun}` })).toBeVisible();
@@ -317,7 +323,7 @@ for (const P of PAGES) {
       await expect(page.getByRole("tooltip", { name: `Refresh ${P.noun}` })).toBeHidden();
       await expect(refresh).toBeFocused();
       // the column picker: Space toggles, Escape closes, focus returns to the gear
-      const gear = page.getByRole("button", { name: `Choose columns for ${P.noun}` });
+      const gear = scope(page).getByRole("button", { name: `Choose columns for ${P.noun}` });
       await activate(page, gear);
       const dialog = page.getByRole("dialog", { name: `Columns for ${P.noun}` });
       await expect(dialog).toBeVisible();
@@ -333,15 +339,15 @@ for (const P of PAGES) {
       await escapeToTrigger(page, dialog, gear);
       expect(await headers(page)).toContain(P.optional);
       // sort from the header button
-      const sortBtn = page.locator("[data-list] thead").getByRole("button", { name: P.sortHeader, exact: true });
+      const sortBtn = scope(page).locator("thead").getByRole("button", { name: P.sortHeader, exact: true });
       await activate(page, sortBtn);
       await expect.poll(() => lastList(cap, P.endpoint).searchParams.get("sort")).toBe(P.sortId);
       // Next, then the download
       if (P.exact > 50) {
-        await activate(page, page.getByRole("button", { name: "Next", exact: true }));
+        await activate(page, scope(page).getByRole("button", { name: "Next", exact: true }));
         await expect(status(page)).toContainText("51–");
       }
-      await activate(page, page.getByRole("button", { name: "Download Excel" }));
+      await activate(page, scope(page).getByRole("button", { name: "Download Excel" }));
       await expect.poll(() => cap.exports.length).toBe(1);
       expect(cap.exports[0]!.searchParams.get("columns")!.split(",")).toContain(P.optionalId);
     });

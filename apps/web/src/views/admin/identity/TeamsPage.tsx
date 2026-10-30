@@ -5,14 +5,17 @@
  * context answers 409 with what blocks; force-delete requires a recorded
  * reason and provenance survives.
  */
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../../../api/client";
 import { withStepUp } from "../../../stepup/stepUp";
 import type { Team } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, Input, Select, SkeletonBlock } from "../../../ui/kit";
+import { ago } from "../../../api/format";
+import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Select } from "../../../ui/kit";
+import { DataList } from "../../../ui/DataList";
 import {
   ReasonModal,
+  adminKeys,
   optionEls,
   teamOpts,
   useAction,
@@ -62,6 +65,14 @@ export default function TeamsPage() {
   } | null>(null);
 
   const tagList = (profiles.data?.profiles ?? []).map((p) => p.tag);
+  // ADR-0219: the search runs on the server, a moment after typing stops
+  const [search, setSearch] = useState("");
+  const [q, setQ] = useState("");
+  useEffect(() => {
+    const t = window.setTimeout(() => setQ(search.trim()), 300);
+    return () => window.clearTimeout(t);
+  }, [search]);
+  const filters = useMemo(() => ({ q: q || undefined }), [q]);
 
   const deleteTeam = async (team: Team) => {
     try {
@@ -165,34 +176,48 @@ export default function TeamsPage() {
           )}
         </Card>
 
-        <Card title="Teams & members">
-          {teams.isLoading ? (
-            <SkeletonBlock lines={3} />
-          ) : teams.error && !teams.data ? (
-            <ErrorState
-              title="Couldn't load the teams"
-              message={teams.error instanceof Error ? teams.error.message : String(teams.error)}
-              access={(teams.error as { status?: number }).status === 403}
-              onRetry={() => void teams.refetch()}
-            />
-          ) : (teams.data?.teams ?? []).length === 0 ? (
-            <EmptyState title="No teams yet" body="Create the first team above." />
-          ) : (
-            (teams.data?.teams ?? []).map((team) => (
-              <div key={team.id} className={v.listRow}>
-                <div className={v.grow}>
-                  <div className={v.row}>
-                    <strong>{team.name}</strong>
-                    {(team.defaultClassifications ?? []).map((c) => (
-                      <Badge key={c} tone="info">
-                        {c}
-                      </Badge>
-                    ))}
-                  </div>
-                  <div className={v.rowTight} style={{ marginTop: "var(--s0)" }}>
-                    {(team.members ?? []).length === 0 && (
-                      <span className={v.faint}>no members</span>
-                    )}
+        <Card title="Teams & members" flush>
+          <div className={a.formRow} style={{ padding: "var(--s1) var(--s2) 0" }}>
+            <Field label="Search teams">
+              <Input type="search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Team name" />
+            </Field>
+          </div>
+          <DataList<Team>
+            listId="teams"
+            noun="teams"
+            endpoint="/v1/teams"
+            exportPath="/v1/teams/export.xlsx"
+            queryKey={[...adminKeys.teams, "list"]}
+            legacyKey="teams"
+            filters={filters}
+            defaultSort={{ key: "name", dir: "asc" }}
+            columns={[
+              { key: "name", header: "Team", main: true, sortable: true, render: (team) => <strong>{team.name}</strong> },
+              {
+                key: "classifications",
+                header: "Default classifications",
+                main: true,
+                render: (team) =>
+                  (team.defaultClassifications ?? []).length === 0 ? (
+                    <span className={v.faint}>none</span>
+                  ) : (
+                    <span className={v.rowTight}>
+                      {(team.defaultClassifications ?? []).map((c) => (
+                        <Badge key={c} tone="info">
+                          {c}
+                        </Badge>
+                      ))}
+                    </span>
+                  ),
+              },
+              { key: "memberCount", header: "Members", main: true, sortable: true, align: "right", render: (team) => team.memberCount ?? (team.members ?? []).length },
+              {
+                key: "members",
+                header: "Member names",
+                main: true,
+                render: (team) => (
+                  <div className={v.rowTight}>
+                    {(team.members ?? []).length === 0 && <span className={v.faint}>no members</span>}
                     {(team.members ?? []).map((m) => (
                       <span key={m.userId} className={a.pill}>
                         {m.name}
@@ -207,13 +232,27 @@ export default function TeamsPage() {
                       </span>
                     ))}
                   </div>
-                </div>
-                <Button size="sm" variant="danger" onClick={() => setConfirmDelete(team)}>
-                  delete team
-                </Button>
-              </div>
-            ))
-          )}
+                ),
+              },
+              { key: "created", header: "Created", sortable: true, render: (team) => (team.createdAt ? ago(team.createdAt) : "—") },
+              {
+                key: "actions",
+                header: "",
+                srHeader: "Actions",
+                align: "right",
+                action: true,
+                render: (team) => (
+                  <Button size="sm" variant="danger" onClick={() => setConfirmDelete(team)}>
+                    delete team
+                  </Button>
+                ),
+              },
+            ]}
+            rowKey={(team) => team.id}
+            empty={
+              q ? <EmptyState title="No teams match" body="Nothing matches this search." /> : <EmptyState title="No teams yet" body="Create the first team above." />
+            }
+          />
         </Card>
       </div>
 

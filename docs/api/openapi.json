@@ -487,7 +487,7 @@
     "/v1/keys": {
       "get": {
         "operationId": "getV1Keys",
-        "summary": "List API keys (metadata only — never the token).",
+        "summary": "List API keys (metadata only — never the token). With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0219), with `userId` and `state` filters.",
         "tags": [
           "keys"
         ],
@@ -900,7 +900,7 @@
     "/v1/roles/{roleId}/assignments": {
       "get": {
         "operationId": "getV1RolesByRoleIdAssignments",
-        "summary": "The users currently holding a role.",
+        "summary": "The users currently holding a role. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0219).",
         "tags": [
           "roles"
         ],
@@ -1755,7 +1755,7 @@
     "/v1/agents": {
       "get": {
         "operationId": "getV1Agents",
-        "summary": "Registered agents/models. Bounded: `limit` (default 1000, max 5000).",
+        "summary": "Registered agents/models. Bounded: `limit` (default 1000, max 5000). With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0219), with `q`, `id` and `enabled` filters and an honest total.",
         "tags": [
           "agents"
         ],
@@ -3051,7 +3051,7 @@
       },
       "get": {
         "operationId": "getV1VirtualKeys",
-        "summary": "GET /v1/virtual-keys",
+        "summary": "Virtual keys the caller may see (an admin every key, anyone else their own); never a token. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0219).",
         "tags": [
           "virtual-keys"
         ],
@@ -3085,7 +3085,7 @@
     "/v1/virtual-keys/{keyId}/usage": {
       "get": {
         "operationId": "getV1VirtualKeysByKeyIdUsage",
-        "summary": "GET /v1/virtual-keys/:keyId/usage",
+        "summary": "A virtual key's spend from the usage ledger. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0219) over the ledger rows that reference the key, newest first.",
         "tags": [
           "virtual-keys"
         ],
