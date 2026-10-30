@@ -275,6 +275,8 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   dispatchAttributionRequired: notEqual(true),
   recommendationJudgeEnabled: exempt("adds a model-judged annotation to the deterministic findings; it refuses and allows nothing"),
   recommendationJudgeAgentId: exempt("names the judge of the annotation above; it refuses and allows nothing"),
+  // ADR-0215: off = the framework-import and feed-import routes refuse; on lets an admin propose and accept imports
+  frameworkImportsEnabled: notEqual(false),
 
   // --- budgets and approvals ------------------------------------------------
   budgetEnforcement: notEqual("block"),
