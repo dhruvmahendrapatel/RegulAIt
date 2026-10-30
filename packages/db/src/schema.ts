@@ -1125,6 +1125,9 @@ export const auditLog = pgTable(
         // ADR-0202 decision 4: an admin switching one demo beat between live and
         // its simulated fallback (demo_beat_fallbacks). Plain text column.
         "demo_beat",
+        // ADR-0224 (P13 c): records of processing and data-subject requests. Plain text column.
+        "processing_record",
+        "data_subject_request",
         // A4 (ADR-0027): an admin set/clear of the deploy-mode scope on a
         // pillar-1 restriction rule. Plain text column — no DDL needed.
         "restriction_rule",
@@ -4631,6 +4634,14 @@ export const orgSettings = pgTable(
      * no fallback to another connection (ADR-0180). */
     alertTicketConnectionId: uuid("alert_ticket_connection_id").references(() => pmConnections.id, { onDelete: "set null" }),
 
+    // --- ADR-0224 (P13 c, migration 0245): privacy operations ------------
+    /** Shipped OFF (owner, 10-30). When on, personal data the PII detector finds in a governed dispatch must be a
+     * category an active record of processing permits for the dispatch's project, or the dispatch is refused 409
+     * `processing_not_permitted` (privacy-ops.ts). Turning it off again is an audited relaxation with a step-up. */
+    privacyOpsEnabled: boolean("privacy_ops_enabled").notNull().default(false),
+    /** days from a data-subject request's receipt to its due date; 30 is the strict default, shorter is stricter */
+    dsrSlaDays: integer("dsr_sla_days").notNull().default(30),
+
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -4696,6 +4707,7 @@ export const orgSettings = pgTable(
     check("org_settings_feedback_retention_check", sql`${t.feedbackRetentionDays} BETWEEN 30 AND 2555`),
     check("org_settings_literacy_gate_mode_check", sql`${t.literacyGateMode} IN ('off', 'warn', 'enforce')`),
     check("org_settings_literacy_validity_check", sql`${t.literacyDefaultValidityDays} BETWEEN 30 AND 730`),
+    check("org_settings_dsr_sla_days_check", sql`${t.dsrSlaDays} BETWEEN 1 AND 90`),
     check(
       "org_settings_alert_sla_hours_check",
       sql`jsonb_typeof(${t.alertSlaHours}) = 'object' AND jsonb_typeof(${t.alertSlaHours} -> 'high') = 'number' AND jsonb_typeof(${t.alertSlaHours} -> 'medium') = 'number' AND jsonb_typeof(${t.alertSlaHours} -> 'low') = 'number' AND (${t.alertSlaHours} ->> 'high')::numeric BETWEEN 1 AND 720 AND (${t.alertSlaHours} ->> 'medium')::numeric BETWEEN 1 AND 720 AND (${t.alertSlaHours} ->> 'low')::numeric BETWEEN 1 AND 720`,
@@ -14403,3 +14415,119 @@ export const demoBeatFallbacks = pgTable(
   (t) => [check("demo_beat_fallbacks_beat_id_check", sql`${t.beatId} ~ '^[a-z][a-z0-9-]{1,63}$'`)],
 );
 export type DemoBeatFallbackRow = typeof demoBeatFallbacks.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0224 (P13 c, migrations 0245–0246) — privacy operations
+// ---------------------------------------------------------------------------
+
+/**
+ * A record of processing for an AI system: why personal data is processed (purpose), on what lawful basis, which data
+ * categories, for how long, and who receives it. Linked to a project, a use case, or both. An ACTIVE record is what
+ * the gateway's processing limit reads (privacy-ops.ts): its `data_categories` are the detector categories personal
+ * data in a dispatch attributed to the linked project may carry. Written only through `/v1/privacy/processing-records`
+ * (admin; a widening write needs a `settings_relax` step-up), each write audited in its transaction.
+ */
+export const processingRecords = pgTable(
+  "processing_records",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    purpose: text("purpose").notNull(),
+    lawfulBasis: text("lawful_basis").notNull(),
+    dataCategories: jsonb("data_categories").$type<string[]>().notNull().default([]),
+    retentionDays: integer("retention_days").notNull(),
+    recipients: jsonb("recipients").$type<string[]>().notNull().default([]),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "cascade" }),
+    useCaseId: uuid("use_case_id").references(() => aiUseCases.id, { onDelete: "cascade" }),
+    status: text("status").notNull().default("active"),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("processing_records_project_idx").on(t.projectId).where(sql`${t.status} = 'active'`),
+    index("processing_records_use_case_idx").on(t.useCaseId).where(sql`${t.status} = 'active'`),
+    check("processing_records_link_check", sql`${t.projectId} IS NOT NULL OR ${t.useCaseId} IS NOT NULL`),
+    check("processing_records_status_check", sql`${t.status} IN ('active', 'retired')`),
+    check(
+      "processing_records_lawful_basis_check",
+      sql`${t.lawfulBasis} IN ('consent', 'contract', 'legal_obligation', 'vital_interests', 'public_task', 'legitimate_interests')`,
+    ),
+    check("processing_records_retention_check", sql`${t.retentionDays} BETWEEN 1 AND 36500`),
+    check("processing_records_categories_check", sql`jsonb_typeof(${t.dataCategories}) = 'array'`),
+    check("processing_records_recipients_check", sql`jsonb_typeof(${t.recipients}) = 'array'`),
+  ],
+);
+export type ProcessingRecordRow = typeof processingRecords.$inferSelect;
+
+/**
+ * A data-subject request (access, erasure, objection). It holds NO personal data: `subject_digest` is an HMAC of the
+ * normalised identifier under a key derived from the data key, so a request can be matched again when an admin types
+ * the identifier to locate the subject, and cannot be reversed. `located` holds per-store counts, never content.
+ */
+export const dataSubjectRequests = pgTable(
+  "data_subject_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kind: text("kind").notNull(),
+    identifierKind: text("identifier_kind").notNull(),
+    subjectDigest: text("subject_digest").notNull(),
+    reference: text("reference"),
+    processingRecordId: uuid("processing_record_id").references(() => processingRecords.id, { onDelete: "set null" }),
+    status: text("status").notNull().default("received"),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+    dueAt: timestamp("due_at", { withTimezone: true }).notNull(),
+    located: jsonb("located").$type<unknown[]>(),
+    locatedAt: timestamp("located_at", { withTimezone: true }),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    closeNote: text("close_note"),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("data_subject_requests_open_due_idx").on(t.dueAt).where(sql`${t.status} IN ('received', 'in_progress')`),
+    check("data_subject_requests_kind_check", sql`${t.kind} IN ('access', 'erasure', 'objection')`),
+    check("data_subject_requests_identifier_kind_check", sql`${t.identifierKind} IN ('email', 'phone')`),
+    check(
+      "data_subject_requests_status_check",
+      sql`${t.status} IN ('received', 'in_progress', 'completed', 'rejected')`,
+    ),
+    check("data_subject_requests_digest_check", sql`${t.subjectDigest} ~ '^[0-9a-f]{64}$'`),
+    check("data_subject_requests_due_check", sql`${t.dueAt} > ${t.receivedAt}`),
+    check(
+      "data_subject_requests_closed_check",
+      sql`(${t.status} IN ('completed', 'rejected')) = (${t.closedAt} IS NOT NULL)`,
+    ),
+  ],
+);
+export type DataSubjectRequestRow = typeof dataSubjectRequests.$inferSelect;
+
+/**
+ * The tombstone an erasure leaves where it may not delete. The audit trail is tamper-evident (hash-chained, ADR-0067),
+ * so erasing a subject never edits or deletes an audit row: each row the erasure covered is listed here with the date
+ * its retention rule lets it be pruned, and the row stays until then. One row per request and store.
+ */
+export const dataSubjectTombstones = pgTable(
+  "data_subject_tombstones",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    requestId: uuid("request_id")
+      .notNull()
+      .references(() => dataSubjectRequests.id, { onDelete: "cascade" }),
+    store: text("store").notNull(),
+    rowIds: jsonb("row_ids").$type<string[]>().notNull().default([]),
+    rowCount: integer("row_count").notNull(),
+    retainedUntil: timestamp("retained_until", { withTimezone: true }),
+    reason: text("reason").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("data_subject_tombstones_request_store_uq").on(t.requestId, t.store),
+    check(
+      "data_subject_tombstones_store_check",
+      sql`${t.store} IN ('accounts', 'conversations', 'project_context', 'audit_trail')`,
+    ),
+    check("data_subject_tombstones_count_check", sql`${t.rowCount} >= 0`),
+  ],
+);
+export type DataSubjectTombstoneRow = typeof dataSubjectTombstones.$inferSelect;

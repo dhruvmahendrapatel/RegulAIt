@@ -118,6 +118,7 @@ import {
   useCaseDispatchGate,
   type DispatchUseCaseGate,
 } from "./use-case-gate.js";
+import { privacyDispatchGate } from "./privacy-ops.js";
 // ADR-0079: pillar 2 §2 stage 2 — the invoke→instance join point and the
 // plan-only refusal it makes possible.
 import { guardInstanceAttributedCall } from "./plan-only.js";
@@ -1610,6 +1611,30 @@ async function dispatchAttempt(
       sink.auditLogId = piiRow?.id ?? null;
       return { ok: false, status: 403, error: "pii_blocked", detail: reason, pii };
     }
+  }
+
+  // ADR-0224 (P13 c) — THE PROCESSING LIMIT, directly after the PII-mode rung
+  // and before any provider work: personal data the same detector finds must
+  // be a category an active record of processing permits for the attributed
+  // project, or the dispatch is refused 409 `processing_not_permitted`,
+  // audited with categories only. Behind `org_settings.privacy_ops_enabled`
+  // (shipped off); off, it is one settings read. A cascade `block` already
+  // refused above, so this decides only what warn/log let through.
+  const privacyRefusal = await privacyDispatchGate(db, {
+    userId,
+    agentId: served.id,
+    agentName: served.name,
+    projectId: args.projectId ?? null,
+    input: args.input,
+  });
+  if (privacyRefusal) {
+    sink.auditLogId = privacyRefusal.auditLogId;
+    return {
+      ok: false,
+      status: privacyRefusal.status,
+      error: privacyRefusal.error,
+      detail: privacyRefusal.detail,
+    };
   }
 
   // ADR-0042 GUARDRAIL ENGINE (pillar 1/3). The SAME interception point and the

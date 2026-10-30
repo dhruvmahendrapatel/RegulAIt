@@ -358,6 +358,7 @@ export interface BuildAppOptions {
 import { z } from "zod";
 import { boundTargetsForApprovals, registerMcpProxy } from "./mcp-proxy.js";
 import { clearUpstreamCredentialOnUrlMove, registerMcpUpstreamCredentialRoutes } from "./mcp-upstream-credential.js";
+import { registerPrivacyOpsRoutes } from "./privacy-ops.js";
 import { ExternalEffectBlockedError } from "./external-effects.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
 import { registerCustomProviderRoutes } from "./custom-providers.js";
@@ -5684,6 +5685,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0187 B5-M: model-artifact upload, list and view (own uploads; an admin sees all), and the
   // runner's artifact stream (the runner's self token, live lease only)
   registerModelArtifactRoutes(app, db, opts.artifactStore === undefined ? {} : { artifactStore: opts.artifactStore });
+  // ADR-0224 (P13 c): records of processing and data-subject requests (admin-only, the default gate)
+  registerPrivacyOpsRoutes(app, db, { dataKey: opts.dataKey });
 
   // ADR-0031 item 2: the audit read surface used to be hard-capped at 100 rows
   // with a userId filter (plus PR #79's deployMode) and nothing else — for a

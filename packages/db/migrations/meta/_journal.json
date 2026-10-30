@@ -1436,6 +1436,20 @@
       "when": 1785149000000,
       "tag": "0214_mcp_upstream_credential",
       "breakpoints": true
+    },
+    {
+      "idx": 245,
+      "version": "7",
+      "when": 1785180000000,
+      "tag": "0245_privacy_ops_records",
+      "breakpoints": true
+    },
+    {
+      "idx": 246,
+      "version": "7",
+      "when": 1785181000000,
+      "tag": "0246_privacy_ops_requests",
+      "breakpoints": true
     }
   ]
 }
