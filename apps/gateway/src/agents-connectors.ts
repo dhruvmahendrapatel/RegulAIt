@@ -231,6 +231,8 @@ import { recordDecision } from "./metrics.js";
 const userIdParam = z.object({ userId: z.string().uuid() });
 const agentIdParam = z.object({ agentId: z.string().uuid() });
 const connectorIdParam = z.object({ connectorId: z.string().uuid() });
+// the audit actor when a connector write has no user identity (the bootstrap token), as in workflows.ts and pm.ts
+const CONNECTOR_SYSTEM_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
 export type AgentRow = typeof agents.$inferSelect;
 
@@ -5141,7 +5143,21 @@ export function registerAgentConnectorRoutes(
     }
     const owner = await resolveRegistrationOwner(db, { actorUserId: req.authCtx.userId, requested: (req.body as { ownerUserId?: unknown } | null)?.ownerUserId });
     if (!owner.ok) return reply.status(owner.status).send(owner.body);
-    const [row] = await db.insert(connectors).values({ ...body, ownerUserId: owner.ownerUserId }).returning();
+    // #453 follow-up: a new connected system is on the record, in the same transaction as the row
+    const row = await db.transaction(async (tx) => {
+      const [created] = await tx.insert(connectors).values({ ...body, ownerUserId: owner.ownerUserId }).returning();
+      await tx.insert(auditLog).values({
+        userId: req.authCtx.userId ?? CONNECTOR_SYSTEM_IDENTITY,
+        objectType: "connector",
+        objectId: created!.id,
+        detail: { phase: "created", name: created!.name, kind: created!.kind, providerKind: created!.providerKind ?? null, baseUrl: created!.baseUrl ?? null, receiptClass: "configuration" },
+        effect: "allow",
+        ruleId: "connector-created",
+        ruleChain: [],
+        reason: `connector '${created!.name}' (${created!.providerKind ?? created!.kind}) created`,
+      });
+      return created!;
+    });
     return reply.status(201).send(row);
   });
 
@@ -5222,11 +5238,29 @@ export function registerAgentConnectorRoutes(
       tokenCiphertext: encryptSecret(opts.dataKey, body.token),
       baseUrl: body.baseUrl ?? null,
     };
-    const [row] = await db
-      .insert(connectorCredentials)
-      .values(values)
-      .onConflictDoUpdate({ target: connectorCredentials.connectorId, set: values })
-      .returning(connectorCredCols);
+    const row = await db.transaction(async (tx) => {
+      const [prior] = await tx
+        .select({ id: connectorCredentials.id })
+        .from(connectorCredentials)
+        .where(eq(connectorCredentials.connectorId, connectorId));
+      const [stored] = await tx
+        .insert(connectorCredentials)
+        .values(values)
+        .onConflictDoUpdate({ target: connectorCredentials.connectorId, set: values })
+        .returning(connectorCredCols);
+      // never the token: that one was stored or replaced, its baseUrl, and by whom
+      await tx.insert(auditLog).values({
+        userId: req.authCtx.userId ?? CONNECTOR_SYSTEM_IDENTITY,
+        objectType: "connector",
+        objectId: connectorId,
+        detail: { phase: prior ? "credential_replaced" : "credential_stored", name: connector.name, baseUrl: values.baseUrl, receiptClass: "configuration" },
+        effect: "allow",
+        ruleId: prior ? "connector-credential-replaced" : "connector-credential-stored",
+        ruleChain: [],
+        reason: `connector '${connector.name}' credential ${prior ? "replaced" : "stored"}`,
+      });
+      return stored!;
+    });
     return reply.status(201).send(row);
   });
 
@@ -5242,10 +5276,25 @@ export function registerAgentConnectorRoutes(
 
   app.delete("/v1/connectors/:connectorId/credential", async (req, reply) => {
     const { connectorId } = connectorIdParam.parse(req.params);
-    const deleted = await db
-      .delete(connectorCredentials)
-      .where(eq(connectorCredentials.connectorId, connectorId))
-      .returning({ id: connectorCredentials.id });
+    const deleted = await db.transaction(async (tx) => {
+      const rows = await tx
+        .delete(connectorCredentials)
+        .where(eq(connectorCredentials.connectorId, connectorId))
+        .returning({ id: connectorCredentials.id });
+      if (rows.length > 0) {
+        await tx.insert(auditLog).values({
+          userId: req.authCtx.userId ?? CONNECTOR_SYSTEM_IDENTITY,
+          objectType: "connector",
+          objectId: connectorId,
+          detail: { phase: "credential_removed", receiptClass: "configuration" },
+          effect: "allow",
+          ruleId: "connector-credential-removed",
+          ruleChain: [],
+          reason: `connector credential removed`,
+        });
+      }
+      return rows;
+    });
     if (deleted.length === 0) return reply.status(404).send({ error: "unknown_credential" });
     return { removed: true };
   });
