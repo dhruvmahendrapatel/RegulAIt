@@ -27,7 +27,7 @@ import v from "../../views.module.css";
 import { CertRotationsCard } from "./CertRotations";
 import { putOrgSettings } from "../../../stepup/stepUp";
 import { OrgSettingsCard } from "../settings/OrgSettingsCard";
-import { PolicyActions, ResourceActions, type ResourceRecord } from "./InfraRowActions";
+import { PolicyActions, ResourceActions } from "./InfraRowActions";
 
 const SEV_TONE: Record<string, Tone> = { critical: "danger", high: "danger", medium: "warn", low: "ok" };
 const STATUS_TONE: Record<string, Tone> = {
@@ -160,7 +160,7 @@ export default function InfrastructurePage() {
         <RegisterResourceCard />
 
         <Card flush title="Resources — with cascade-derived floors">
-          <Table<ResourceRecord>
+          <Table<InfraResource>
             columns={[
               {
                 key: "name",
@@ -587,9 +587,12 @@ function PolicyCard(props: { resources: InfraResource[]; policies: InfraPolicy[]
     autoRemediateMaxSeverity: "",
   });
   const set = (k: keyof typeof f, val: string) => setF((s) => ({ ...s, [k]: val }));
-  const rOpts = props.resources.map((r) => ({ v: r.id, l: `${r.name} · ${r.kind}` }));
-  const scopeLabel = (resourceId: string | null) =>
-    resourceId ? (rOpts.find((o) => o.v === resourceId)?.l ?? "resource") : "fleet-wide";
+  // a retired resource takes no new policy (ADR-0208 G8), so only active ones are offered
+  const rOpts = props.resources.filter((r) => r.status === "active").map((r) => ({ v: r.id, l: `${r.name} · ${r.kind}` }));
+  const nameOf = new Map(props.resources.map((r) => [r.id, r.name]));
+  const scopeLabel = (resourceId: string | null) => (resourceId ? (nameOf.get(resourceId) ?? "resource") : "fleet-wide");
+  // the fallback a policy retirement states: the ACTIVE fleet policy
+  const fleet = props.policies.find((x) => x.resourceId == null && x.status === "active");
   return (
     <Card title="Operational policies">
       <form
@@ -642,7 +645,16 @@ function PolicyCard(props: { resources: InfraResource[]; policies: InfraPolicy[]
       </form>
       <Table<InfraPolicy>
         columns={[
-          { key: "scope", header: "Scope", render: (p) => scopeLabel(p.resourceId) },
+          {
+            key: "scope",
+            header: "Scope",
+            render: (p) => (
+              <span className={v.row}>
+                {scopeLabel(p.resourceId)}
+                {p.status === "retired" && <Badge tone="neutral">retired</Badge>}
+              </span>
+            ),
+          },
           { key: "patch", header: "Patch cadence (d)", align: "right", render: (p) => p.patchCadenceDays ?? "—" },
           { key: "cert", header: "Cert window (d)", align: "right", render: (p) => p.certRotationDaysBeforeExpiry ?? "—" },
           { key: "schedule", header: "Backup schedule", render: (p) => p.backupSchedule ?? "—" },
@@ -652,12 +664,12 @@ function PolicyCard(props: { resources: InfraResource[]; policies: InfraPolicy[]
             key: "actions",
             header: "Actions",
             render: (p) => (
-              <PolicyActions policy={p} fleet={props.policies.find((x) => x.resourceId == null)} resourceName={p.resourceId ? (props.resources.find((r) => r.id === p.resourceId)?.name ?? "resource") : "fleet-wide"} />
+              <PolicyActions policy={p} fleet={fleet} resourceName={scopeLabel(p.resourceId)} />
             ),
           },
         ]}
         rows={props.policies}
-        rowKey={(p) => p.id ?? `${p.resourceId ?? "fleet"}`}
+        rowKey={(p) => p.id}
         loading={props.loading}
         empty={<EmptyState title="No policies set" />}
       />

@@ -616,6 +616,9 @@ describe("6. the covered / NOT-covered inventory", () => {
     "webauthn_credentials.revoke_reason",
     // ADR-0202 decision 4 (migration 0213)
     "demo_beat_fallbacks.reason",
+    // ADR-0208 G8 (migration 0224)
+    "infra_resources.retired_reason",
+    "infra_policies.retired_reason",
   ];
 
   it("covers exactly the enumerated columns — the ADR's list is this list", () => {
