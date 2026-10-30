@@ -121,7 +121,8 @@ export function registerAgentSetupAssistRoutes(app: FastifyInstance, db: Db, opt
       userId,
       objectType: "agent",
       objectId: null,
-      detail: { phase: "agent-setup-assist", riskTier: draft.riskTier.value, model: model.status },
+      // advisory, like an evaluate: no decision was made and nothing was applied, so it is not a receipt
+      detail: { phase: "agent-setup-assist", riskTier: draft.riskTier.value, model: model.status, receiptClass: "excluded" },
       effect: "allow",
       ruleId: "agent-setup-assisted",
       ruleChain: [],
