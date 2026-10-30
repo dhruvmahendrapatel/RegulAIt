@@ -67,6 +67,7 @@ import {
   type ModelCardRow,
 } from "@regulait/db";
 import { scanView } from "./model-artifacts.js";
+import { supplyChainDispatchGate, supplyChainSignOffGate } from "./model-supply-chain.js";
 import {
   ARTIFACT_SCAN_CHIP,
   SCORING_SEMANTICS_VERSION,
@@ -204,6 +205,10 @@ export async function mrmDispatchGate(
   ctx: MrmGateContext,
   now: Date = new Date(),
 ): Promise<{ status: number; error: string; detail: string } | null> {
+  // ADR-0216: the supply-chain rung comes first and does not depend on the MRM toggle (secure by default): a model
+  // built from a file that is unsigned, unscanned or in an unsafe format is refused unless an admin relaxed that file
+  const supplyChain = await supplyChainDispatchGate(db, ctx, now);
+  if (supplyChain) return supplyChain;
   const org = await loadOrgSettings(db);
   if (!org.mrmEnforced) return null;
 
@@ -946,6 +951,9 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
       .from(users)
       .where(eq(users.id, body.approverUserId));
     if (!approver) return reply.status(404).send({ error: "unknown_approver" });
+    // ADR-0216: a card citing a file that fails the supply-chain check is not signed off (audited, risk opened)
+    const supplyChain = await supplyChainSignOffGate(db, card, req.authCtx.userId ?? NO_IDENTITY);
+    if (supplyChain) return reply.status(supplyChain.status).send(supplyChain);
 
     const now = new Date();
     const chain = await db

@@ -768,6 +768,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/model-artifacts/:artifactId",
   // ADR-0187 decision 127: the uploader deletes their own (an admin any), with a step-up, checked in-handler
   "DELETE /v1/model-artifacts/:artifactId",
+  // ADR-0216: the uploader attaches a signature to their own artifact (an admin to any), checked in-handler
+  "POST /v1/model-artifacts/:artifactId/signature",
 
   // ADR-0188 (batch 6 item 1) — the public identity surface (auth-exempt above
   // too): the JWKS and the token endpoint family.

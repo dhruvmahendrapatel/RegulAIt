@@ -70,6 +70,7 @@ import {
   gte,
   inArray,
   lt,
+  modelArtifacts,
   modelCards,
   projects,
   redteamRuns,
@@ -97,6 +98,7 @@ import {
 import { z } from "zod";
 import { runCollector, type CollectorContext } from "./compliance-packs.js";
 import { acceptorRefusal, recordRiskAcceptanceTx } from "./risk-tolerance.js";
+import { supplyChainStates } from "./model-supply-chain.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 const riskIdParam = z.object({ riskId: z.string().uuid() });
@@ -197,7 +199,7 @@ export interface RiskEvidenceBlock {
  */
 export async function resolveRiskEvidence(
   db: Db,
-  risk: Pick<AiRiskRow, "category" | "projectId" | "agentId" | "vendorId">,
+  risk: Pick<AiRiskRow, "category" | "projectId" | "agentId" | "vendorId"> & { modelArtifactId?: string | null },
   now: Date = new Date(),
 ): Promise<RiskEvidenceBlock> {
   const periodEnd = now;
@@ -640,6 +642,44 @@ export async function resolveRiskEvidence(
             "audit_log rows in the window with effect='deny' and rule_id 'guardrail-blocked' — " +
             "every guardrail block the gateway actually performed",
           measured: { blocks },
+        });
+        break;
+      }
+
+      case "model_supply_chain": {
+        // ADR-0216: STATE evidence (each artifact assessed now, signatures re-verified against the keys in force)
+        // beside EVENT evidence (the blocks the gateway performed in the window). Scoped to the artifact that opened
+        // the risk when it names one; otherwise the newest 500 artifacts, said so.
+        const ARTIFACT_LIMIT = 500;
+        const rows = await db
+          .select()
+          .from(modelArtifacts)
+          .where(risk.modelArtifactId ? eq(modelArtifacts.id, risk.modelArtifactId) : undefined)
+          .orderBy(desc(modelArtifacts.createdAt))
+          .limit(ARTIFACT_LIMIT);
+        const states = [...(await supplyChainStates(db, rows, periodEnd)).values()];
+        const failingBy = { unsigned: 0, unscanned: 0, unsafe_format: 0 };
+        for (const st of states) for (const c of st.assessment.uncovered) failingBy[c] += 1;
+        const blocks = await runCollector(db, "audit_decisions", ctx({ effect: "deny", ruleIdPrefix: "model-supply-chain-blocked" }));
+        entries.push({
+          resolver,
+          kind: "measured",
+          source: "model_artifacts",
+          queried:
+            "model artifacts" +
+            (risk.modelArtifactId ? " (the file that opened this risk)" : `, org-wide (the newest ${ARTIFACT_LIMIT})`) +
+            " assessed now: newest signature re-verified against the trusted signing keys, completed scans and format; " +
+            "plus audit_log rows in the window with effect='deny' and rule_id 'model-supply-chain-blocked'",
+          measured: {
+            artifacts: states.length,
+            passing: states.filter((st) => st.assessment.passes).length,
+            blocked: states.filter((st) => !st.assessment.passes).length,
+            relaxed: states.filter((st) => st.assessment.relaxed).length,
+            signatureVerified: states.filter((st) => st.signature.status === "verified").length,
+            failingByCondition: failingBy,
+            blocksInWindow: blocks,
+          },
+          note: !risk.modelArtifactId && rows.length === 0 ? "no model artifact uploaded — nothing to assess, not proof none is used" : undefined,
         });
         break;
       }

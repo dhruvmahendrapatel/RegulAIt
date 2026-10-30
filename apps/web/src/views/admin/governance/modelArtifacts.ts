@@ -18,6 +18,7 @@
  */
 import { apiErrorFrom, ApiError, CSRF_HEADER, type ApiErrorPayload } from "../../../api/client";
 import { fmtDay } from "../../../api/format";
+import type { SupplyChainState } from "./supplyChain";
 
 export type ArtifactScanVerdict = "clean" | "no_known_unsafe" | "unsafe" | "unknown" | "not_run";
 
@@ -34,6 +35,8 @@ export interface ModelArtifact {
   projectId: string | null;
   uploadedByUserId: string | null;
   createdAt: string;
+  /** ADR-0216: the supply-chain check, decided by the gateway on this read */
+  supplyChain?: SupplyChainState;
 }
 
 export interface ArtifactScanFinding {

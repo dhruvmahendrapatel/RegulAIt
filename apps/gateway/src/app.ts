@@ -504,6 +504,7 @@ import { registerEngineRoutes, type EngineOptions } from "./engines.js";
 import { applyEngineRunApprovalDecision, lockEngineRunOfApprovalTx, registerEngineRunRoutes } from "./engine-runs.js";
 import { registerEngineRunnerScopeHook, engineCredentialRoutes } from "./engine-runner-auth.js";
 import { registerModelArtifactRoutes, type ArtifactStore } from "./model-artifacts.js";
+import { registerModelSupplyChainRoutes } from "./model-supply-chain.js";
 import { schedulerJobRegistry } from "./scheduler-jobs.js";
 import { registerDataKeyRoutes } from "./data-key.js";
 import { registerDataKeyReencryptionRoutes } from "./data-key-reencrypt.js";
@@ -5656,6 +5657,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0187 B5-M: model-artifact upload, list and view (own uploads; an admin sees all), and the
   // runner's artifact stream (the runner's self token, live lease only)
   registerModelArtifactRoutes(app, db, opts.artifactStore === undefined ? {} : { artifactStore: opts.artifactStore });
+  // ADR-0216: signing keys (admin), signatures (uploader or admin), supply-chain relaxations (admin, step-up)
+  registerModelSupplyChainRoutes(app, db);
 
   // ADR-0031 item 2: the audit read surface used to be hard-capped at 100 rows
   // with a userId filter (plus PR #79's deployMode) and nothing else — for a

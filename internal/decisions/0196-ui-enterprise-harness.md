@@ -601,3 +601,17 @@ the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
   carried on their own.
 - Freeze week: ADR-0198 §2 covers entry raises only; this raise rests on the owner decision above. ADR-0198's post-demo
   reset applies to it.
+
+## Addendum / As built (2026-10-30) — all JS 1,050 → 1,052 kB (backlog lane P14 + P15, ADR-0216)
+
+The owner capped all JS at 1,060 kB, shared by every backlog lane, on 2026-10-30:
+<https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6522850568>. This lane takes only what it
+measured, with one `CEILING_EXCEPTIONS` row.
+
+- `all JS` from `1050 kB` to `1052 kB` (+2 kB). Entry JS stays at 138.5 kB and entry CSS at 10.7 kB; the lazy chunk
+  ceilings are unchanged.
+- Why: the model artifacts tab's supply-chain section and the trusted signing keys card add 2,376 B gzipped
+  (1,049,109 B on main, 1,051,485 B with this lane). They sit in the already lazy-loaded model risk chunk; entry JS
+  moves by 6 B.
+- Other lanes raising the same line merge on top of this row (M-104): the master measures the combined tree.
+

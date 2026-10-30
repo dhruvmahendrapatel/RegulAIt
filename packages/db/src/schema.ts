@@ -1543,6 +1543,8 @@ export const auditLog = pgTable(
         "engine_run",
         "engine_schedule",
         "model_artifact",
+        // ADR-0216: a model signing key (added, revoked). Plain text column — no DDL.
+        "model_signing_key",
         // ADR-0188 (batch 6 item 1) S3: the issuer's signing keys (activate,
         // rotate, revoke; `object_id` NULL, the kid in `detail`) and
         // delegation grants (cascade revocation). Plain text column — no DDL.
@@ -9949,6 +9951,8 @@ export const AI_RISK_CATEGORIES = [
   /** ADR-0147 (migration 0123): the bias and safety trust dimensions */
   "bias_fairness",
   "unsafe_output",
+  /** ADR-0216 (migration 0236): a model file that is unsigned, unscanned or in an unsafe format */
+  "supply_chain",
 ] as const;
 export type AiRiskCategory = (typeof AI_RISK_CATEGORIES)[number];
 
@@ -9992,10 +9996,16 @@ export const aiRisks = pgTable(
      * linked controls operate — same three-level scale, both or neither */
     residualLikelihood: text("residual_likelihood", { enum: AI_RISK_LEVELS }),
     residualImpact: text("residual_impact", { enum: AI_RISK_LEVELS }),
+    /** ADR-0216 (migration 0236): the model artifact whose failing supply-chain check opened this risk */
+    modelArtifactId: uuid("model_artifact_id").references((): AnyPgColumn => modelArtifacts.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    check("ai_risks_model_artifact_category_check", sql`${t.modelArtifactId} IS NULL OR ${t.category} = 'supply_chain'`),
+    uniqueIndex("ai_risks_supply_chain_artifact_open_unique")
+      .on(t.modelArtifactId)
+      .where(sql`${t.modelArtifactId} IS NOT NULL AND ${t.status} <> 'closed'`),
     check("ai_risks_title_check", sql`length(btrim(${t.title})) > 0`),
     check(
       "ai_risks_acceptance_check",
@@ -13195,6 +13205,108 @@ export const artifactScans = pgTable(
     uniqueIndex("artifact_scans_engine_run_unique").on(t.engineRunId).where(sql`${t.engineRunId} IS NOT NULL`),
   ],
 );
+
+// ===========================================================================
+// ADR-0216 (P14 + P15, migration 0235) — model-file signatures and the supply-chain block.
+// ===========================================================================
+
+export const MODEL_SIGNING_ALGORITHMS = ["ecdsa_p256_sha256"] as const;
+export const MODEL_SIGNATURE_STATUSES = ["verified", "failed"] as const;
+export const MODEL_SIGNATURE_PHASES = ["upload", "attach"] as const;
+
+/** A trust root for key-based model signatures. Public keys only; never deleted, only revoked (guard trigger). */
+export const modelSigningKeys = pgTable(
+  "model_signing_keys",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    algorithm: text("algorithm", { enum: MODEL_SIGNING_ALGORITHMS }).notNull(),
+    publicKeyPem: text("public_key_pem").notNull(),
+    /** sha256 (hex) of the PEM, as the signing format writes it into the bundle */
+    keyHint: text("key_hint").notNull(),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedByUserId: uuid("revoked_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    check("model_signing_keys_name_check", sql`length(btrim(${t.name})) BETWEEN 1 AND 120`),
+    check("model_signing_keys_algorithm_check", sql`${t.algorithm} IN ('ecdsa_p256_sha256')`),
+    check("model_signing_keys_hint_check", sql`${t.keyHint} ~ '^[0-9a-f]{64}$'`),
+    check("model_signing_keys_pem_check", sql`length(${t.publicKeyPem}) BETWEEN 1 AND 4096`),
+    uniqueIndex("model_signing_keys_hint_unique").on(t.keyHint),
+  ],
+);
+export type ModelSigningKeyRow = typeof modelSigningKeys.$inferSelect;
+
+/** Every signature presented for a model artifact, with the gateway's verdict; the newest is the artifact's. */
+export const modelArtifactSignatures = pgTable(
+  "model_artifact_signatures",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    artifactId: uuid("artifact_id")
+      .notNull()
+      .references(() => modelArtifacts.id, { onDelete: "cascade" }),
+    artifactSha256: text("artifact_sha256").notNull(),
+    bundle: jsonb("bundle").$type<Record<string, unknown>>().notNull(),
+    status: text("status", { enum: MODEL_SIGNATURE_STATUSES }).notNull(),
+    failure: text("failure"),
+    signingKeyId: uuid("signing_key_id").references(() => modelSigningKeys.id, { onDelete: "restrict" }),
+    keyHint: text("key_hint"),
+    signedName: text("signed_name"),
+    resourceName: text("resource_name"),
+    phase: text("phase", { enum: MODEL_SIGNATURE_PHASES }).notNull(),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("model_artifact_signatures_sha256_check", sql`${t.artifactSha256} ~ '^[0-9a-f]{64}$'`),
+    check("model_artifact_signatures_status_check", sql`${t.status} IN ('verified', 'failed')`),
+    check(
+      "model_artifact_signatures_failure_check",
+      sql`(${t.status} = 'verified' AND ${t.failure} IS NULL AND ${t.signingKeyId} IS NOT NULL) OR (${t.status} = 'failed' AND ${t.failure} ~ '^[a-z][a-z0-9_]{0,63}$')`,
+    ),
+    check("model_artifact_signatures_hint_check", sql`${t.keyHint} IS NULL OR ${t.keyHint} ~ '^[0-9a-f]{64}$'`),
+    check("model_artifact_signatures_phase_check", sql`${t.phase} IN ('upload', 'attach')`),
+    index("model_artifact_signatures_artifact_idx").on(t.artifactId, t.createdAt),
+    index("model_artifact_signatures_key_idx").on(t.signingKeyId),
+  ],
+);
+export type ModelArtifactSignatureRow = typeof modelArtifactSignatures.$inferSelect;
+
+/** An admin's per-artifact relaxation of named failing conditions: a reason and at most 30 days (ADR-0180). */
+export const modelArtifactSupplyChainRelaxations = pgTable(
+  "model_artifact_supply_chain_relaxations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    artifactId: uuid("artifact_id")
+      .notNull()
+      .references(() => modelArtifacts.id, { onDelete: "cascade" }),
+    artifactSha256: text("artifact_sha256").notNull(),
+    conditions: text("conditions").array().notNull(),
+    reason: text("reason").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    clearedAt: timestamp("cleared_at", { withTimezone: true }),
+    clearedByUserId: uuid("cleared_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    check("model_artifact_supply_chain_relaxations_sha256_check", sql`${t.artifactSha256} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "model_artifact_supply_chain_relaxations_conditions_check",
+      sql`cardinality(${t.conditions}) BETWEEN 1 AND 3 AND ${t.conditions} <@ ARRAY['unsigned', 'unscanned', 'unsafe_format']::text[]`,
+    ),
+    check("model_artifact_supply_chain_relaxations_reason_check", sql`length(btrim(${t.reason})) BETWEEN 1 AND 1000`),
+    check(
+      "model_artifact_supply_chain_relaxations_expiry_check",
+      sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} <= ${t.createdAt} + interval '30 days'`,
+    ),
+    check("model_artifact_supply_chain_relaxations_cleared_check", sql`${t.clearedByUserId} IS NULL OR ${t.clearedAt} IS NOT NULL`),
+    uniqueIndex("model_artifact_supply_chain_relaxations_active_unique").on(t.artifactId).where(sql`${t.clearedAt} IS NULL`),
+  ],
+);
+export type ModelArtifactSupplyChainRelaxationRow = typeof modelArtifactSupplyChainRelaxations.$inferSelect;
 
 // ===========================================================================
 // ADR-0188 (batch 6 item 1, migration 0180) — per-agent and workload identity,

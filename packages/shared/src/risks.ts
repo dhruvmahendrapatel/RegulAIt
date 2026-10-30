@@ -90,6 +90,12 @@ export const AI_RISK_CATEGORIES = [
    * evidenced by the output-safety guardrail configuration (toxicity /
    * jailbreak at block) and the guardrail block trail (ADR-0042) */
   "unsafe_output",
+  /** ADR-0216: a model file behind a governed model is unsigned, unscanned or
+   * in an unsafe (executable) format — evidenced by the model artifacts'
+   * signature and scan records and the supply-chain block trail. A risk in
+   * this category is opened automatically when a failing artifact blocks a
+   * model, one per artifact. */
+  "supply_chain",
 ] as const;
 export type AiRiskCategory = (typeof AI_RISK_CATEGORIES)[number];
 
@@ -158,6 +164,10 @@ export const RISK_EVIDENCE_RESOLVERS = [
   /** ADR-0147: `audit_log` deny rows with rule id `guardrail-blocked` in the
    * window — the guardrail blocks the gateway actually performed */
   "guardrail_blocks",
+  /** ADR-0216: `model_artifacts` by supply-chain state (signature verified,
+   * scanned, safe format), relaxations in force, and `audit_log` deny rows
+   * with rule id `model-supply-chain-blocked` in the window */
+  "model_supply_chain",
   /** NOT MEASURED BY ANY LEDGER. The register says so outright. */
   "none",
 ] as const;
@@ -183,6 +193,7 @@ export const RISK_CATEGORY_EVIDENCE: Readonly<
   third_party_ai: ["vendor_assessments"],
   bias_fairness: ["model_card_fairness"],
   unsafe_output: ["output_safety_config", "guardrail_blocks"],
+  supply_chain: ["model_supply_chain"],
 };
 
 /**
@@ -215,6 +226,7 @@ export const RISK_CATEGORY_DIMENSION: Readonly<Record<AiRiskCategory, TrustDimen
   hallucination: "reliability",
   scope_drift: "reliability",
   unsafe_output: "safety",
+  supply_chain: "security",
   shadow_ai: "compliance",
   third_party_ai: "compliance",
   budget_overrun: "compliance",
@@ -549,6 +561,24 @@ export const DEFAULT_RISK_LIBRARY: RiskLibraryEntry[] = [
       "the output is withheld before release. Evidence: how many guardrail configs hold these " +
       "detectors at block, and how many blocks the gateway actually performed in the window.",
     evidenceResolvers: ["output_safety_config", "guardrail_blocks"],
+  },
+  {
+    key: "supply-chain-unverifiable-model-file",
+    title: "A model is built from a file whose origin or contents cannot be verified",
+    description:
+      "A model file arrives without a valid signature from a trusted key, without a completed " +
+      "scan, or in a format that can run code when it is loaded, and a governed model is built " +
+      "from it.",
+    category: "supply_chain",
+    likelihood: "medium",
+    impact: "high",
+    mitigatingControl:
+      "Model files are checked for a signature in the open model-signing format against keys an " +
+      "admin configures, and for a completed scan and a non-executable format. A file that fails " +
+      "blocks every model whose card cites it, at dispatch and at sign-off, until it passes or an " +
+      "admin relaxes it for a stated reason and a limited time. Evidence: artifacts by state and " +
+      "the blocks the gateway performed in the window.",
+    evidenceResolvers: ["model_supply_chain"],
   },
 ];
 
