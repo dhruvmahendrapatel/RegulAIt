@@ -62,6 +62,8 @@ export const CEILING_EXCEPTIONS = [
   // G2 + G11 (#453): one raise to 1048 kB, landing either before #597 (from 1043) or after it (from 1046)
   { name: "all JS", from: "1043 kB", to: "1048 kB", date: "2026-10-29", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6498510014" },
   { name: "all JS", from: "1046 kB", to: "1048 kB", date: "2026-10-29", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6498510014" },
+  // G2 + G11 (#599) with batch I-1 (#597) merged in: measured 1,049,109 B
+  { name: "all JS", from: "1048 kB", to: "1050 kB", date: "2026-10-30", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6515493026" },
 ];
 const DECISION_LINK = /^https:\/\/github\.com\/dhruvmahendrapatel\/RegulAIt\/issues\/\d+#issuecomment-\d+$/;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;

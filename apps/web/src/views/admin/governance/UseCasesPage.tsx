@@ -14,9 +14,10 @@ import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Input, Select, Table } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Input, RowActions, Select, Table } from "../../../ui/kit";
 import { QueryGate } from "../adminKit";
 import { UseCasePreviewDrawer } from "./UseCasePreviewDrawer";
+import { RetireUseCaseDialog } from "./RetireUseCase";
 import {
   NO_FILTERS,
   applyFilters,
@@ -62,6 +63,8 @@ export default function UseCasesPage() {
     [rows],
   );
   const [openId, setOpenId] = useState<string | null>(null);
+  // G11: the row's Retire opens the drawer's own retire form in a dialog
+  const [retiring, setRetiring] = useState<UseCaseRow | null>(null);
   // the row that opened the preview gets focus back when it closes
   const opener = useRef<HTMLElement | null>(null);
   const set = (patch: Partial<RegistryFilters>) => setFilters((f) => ({ ...f, ...patch }));
@@ -181,6 +184,32 @@ export default function UseCasesPage() {
                       sort: (row) => row.openConditions ?? -1,
                       render: (row) => (row.openConditions ? <Badge tone="warn">{row.openConditions}</Badge> : <span className={v.faint}>{row.openConditions === 0 ? "0" : "—"}</span>),
                     },
+                    {
+                      key: "actions",
+                      header: "",
+                      srHeader: "Actions",
+                      align: "right",
+                      render: (row) => (
+                        <RowActions
+                          slot="5rem"
+                          secondary={
+                            row.status !== "retired" && (
+                              <Button
+                                size="sm"
+                                variant="danger"
+                                aria-label={`Retire ${row.name}`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setRetiring(row);
+                                }}
+                              >
+                                Retire
+                              </Button>
+                            )
+                          }
+                        />
+                      ),
+                    },
                   ]}
                 />
               </>
@@ -188,6 +217,7 @@ export default function UseCasesPage() {
           </Card>
         </QueryGate>
       </div>
+      {retiring && <RetireUseCaseDialog id={retiring.id} name={retiring.name} onClose={() => setRetiring(null)} onRetired={() => list.refetch()} />}
       {openId && <UseCasePreviewDrawer id={openId} row={rows.find((row) => row.id === openId)} onClose={closePreview} onChanged={() => list.refetch()} />}
     </>
   );
