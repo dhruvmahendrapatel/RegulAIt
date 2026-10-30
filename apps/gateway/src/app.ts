@@ -2412,9 +2412,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     return { tools: await db.select().from(mcpTools).where(eq(mcpTools.serverId, serverId)) };
   });
 
+  /** MCP add flow (owner 2026-10-30): a write that names a server which does not exist is refused by name (404
+   * `unknown_server`, nothing saved) rather than by the foreign key's bare 400 `invalid_reference` */
+  const refuseUnknownServer = async (serverId: string, reply: FastifyReply) => {
+    const [found] = await db.select({ id: mcpServers.id }).from(mcpServers).where(eq(mcpServers.id, serverId));
+    if (found) return false;
+    await reply.status(404).send({ error: "unknown_server", detail: `no MCP server has id ${serverId}. Nothing was saved.` });
+    return true;
+  };
+
   app.post("/v1/servers/:serverId/tools", async (req, reply) => {
     const { serverId } = uuidParam.parse(req.params);
     const body = createToolSchema.parse(req.body);
+    if (await refuseUnknownServer(serverId, reply)) return reply;
     const [row] = await db
       .insert(mcpTools)
       .values({ serverId, name: body.name, kind: body.kind, description: body.description ?? null })
@@ -2424,6 +2434,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   app.post("/v1/grants/tools", async (req, reply) => {
     const body = createToolGrantSchema.parse(req.body);
+    if (await refuseUnknownServer(body.serverId, reply)) return reply;
     // ADR-0091: the SoD mint gate — refused 409 by name, audited, no row
     const sod = await refuseSodMint(
       db,
@@ -2455,6 +2466,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   app.post("/v1/grants/servers", async (req, reply) => {
     const body = createServerGrantSchema.parse(req.body);
     if (!body.readOnlyAll) return reply.status(400).send(INERT_SERVER_GRANT);
+    if (await refuseUnknownServer(body.serverId, reply)) return reply;
     // ADR-0091: the SoD mint gate
     const sod = await refuseSodMint(
       db,
@@ -2462,7 +2474,23 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
-    const [row] = await db.insert(serverGrants).values(body).returning();
+    // a server read-only grant relaxes this person's default deny on every read tool, present and future, so it is
+    // on the trail in the same transaction as the row, exactly like a tool grant (PR #181 review)
+    const row = await db.transaction(async (tx) => {
+      const [inserted] = await tx.insert(serverGrants).values(body).returning();
+      await tx.insert(auditLog).values({
+        userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+        serverId: body.serverId,
+        objectType: "user",
+        objectId: body.userId,
+        detail: { grantId: inserted!.id, granteeUserId: body.userId, serverId: body.serverId, readOnlyAll: true },
+        effect: "allow",
+        ruleId: "mcp-server-grant-created",
+        ruleChain: [],
+        reason: `direct grant of every read tool on MCP server ${body.serverId} to user ${body.userId}`,
+      });
+      return inserted!;
+    });
     return reply.status(201).send(row);
   });
 
