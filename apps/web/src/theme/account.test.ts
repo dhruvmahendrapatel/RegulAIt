@@ -74,4 +74,12 @@ describe("carrying a phase-1 browser choice to the account", () => {
     expect(put).not.toHaveBeenCalled();
     expect(painted).toEqual(["palette:graphite", "mode:light"]);
   });
+
+  it("saves nothing while a sign-in gate is open, and carries once it is passed", () => {
+    localStorage.setItem("regulait.palette", "orchid");
+    adoptAccountAppearance(account(), { canSave: false });
+    expect(put).not.toHaveBeenCalled();
+    adoptAccountAppearance(account());
+    expect(put).toHaveBeenCalledWith("/auth/appearance", { palette: "orchid" });
+  });
 });

@@ -15,8 +15,9 @@ let toAccount = false;
 const isMode = (m: unknown): m is ThemeMode => m === "light" || m === "dark" || m === "system";
 
 /** paint what the account says: the effective palette (the organisation's lock applied) and the saved mode, if any */
-export function adoptAccountAppearance(a: AccountAppearance): void {
-  toAccount = a.saved;
+export function adoptAccountAppearance(a: AccountAppearance, opts: { canSave?: boolean } = {}): void {
+  const canSave = opts.canSave ?? true;
+  toAccount = a.saved && canSave;
   if (!a.saved) {
     // no account (the bootstrap operator): this browser's choice stands, unless the organisation's lock rules it out
     const own = currentPalette();
@@ -24,7 +25,8 @@ export function adoptAccountAppearance(a: AccountAppearance): void {
       void setPalette(a.org.defaultPalette);
     return;
   }
-  const carried = carryBrowserChoice(a);
+  // behind a sign-in gate nothing can be saved yet: paint the account's view and carry once the gate is passed
+  const carried = canSave ? carryBrowserChoice(a) : null;
   if (carried) {
     void saveAppearance(carried).catch(() => undefined);
     return; // the page already shows this browser's choice, and it is now the account's too
