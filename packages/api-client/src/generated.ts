@@ -547,7 +547,7 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * Spend by agent or by connector, aggregated over every usage event in a window (default: the last 30 days). Same scoping as the usage ledger: a non-admin sees only their own events.
+ * Spend by agent, connector, MCP tool, project or UTC day, aggregated over every usage event in a window (default: the last 30 days). Same scoping as the usage ledger: a non-admin sees only their own events.
  * @stability public-beta — auth: user
    */
   getV1UsageEventsSummary<T = unknown>(options?: RequestOptions): Promise<T> {

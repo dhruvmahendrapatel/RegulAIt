@@ -2496,7 +2496,7 @@
     "/v1/usage-events/summary": {
       "get": {
         "operationId": "getV1UsageEventsSummary",
-        "summary": "Spend by agent or by connector, aggregated over every usage event in a window (default: the last 30 days). Same scoping as the usage ledger: a non-admin sees only their own events.",
+        "summary": "Spend by agent, connector, MCP tool, project or UTC day, aggregated over every usage event in a window (default: the last 30 days). Same scoping as the usage ledger: a non-admin sees only their own events.",
         "tags": [
           "usage-events"
         ],
@@ -2517,7 +2517,10 @@
               "type": "string",
               "enum": [
                 "agent",
-                "connector"
+                "connector",
+                "mcp_tool",
+                "project",
+                "day"
               ]
             }
           },
@@ -2558,7 +2561,7 @@
             "description": "Rate limited. Retry after the `retry-after` header."
           },
           "2XX": {
-            "description": "`window` echoes the half-open `[from, to)` range applied (`defaulted` when `from` was omitted); `groups` are sorted by cost; `totals` is the sum over `groups`."
+            "description": "`window` echoes the half-open `[from, to)` range applied (`defaulted` when `from` was omitted); `groups` are sorted by cost (`day` by date); `totals` is the sum over `groups`. `ledger` is the whole window across every object type, with `byObjectType` and `other` (what no typed breakdown names), so the agent, connector and MCP tool breakdowns plus `other` add up to `ledger`."
           }
         }
       }

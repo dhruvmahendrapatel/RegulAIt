@@ -42,8 +42,11 @@ const userIds: string[] = [];
 const AGENT_A = randomUUID();
 const AGENT_B = randomUUID();
 const CONNECTOR = randomUUID();
+// usage_events.project_id carries no FK, so synthetic ids keep this file self-contained
+const PROJECT_1 = randomUUID();
+const PROJECT_2 = randomUUID();
 
-type Ev = { userId: string; objectType: string; agentId?: string; connectorId?: string; operation?: string; costUsd: number; at: Date };
+type Ev = { userId: string; objectType: string; agentId?: string; connectorId?: string; operation?: string; projectId?: string | null; costUsd: number; at: Date };
 const inserted: Ev[] = [];
 
 const makeUser = async (label: string) => {
@@ -80,6 +83,7 @@ beforeAll(async () => {
       userId: dana.id,
       objectType: "agent",
       agentId: i % 3 === 0 ? AGENT_B : AGENT_A,
+      projectId: i % 4 === 0 ? null : i % 4 === 1 ? PROJECT_1 : PROJECT_2,
       costUsd: 0.01 + (i % 7) * 0.001,
       at: new Date(now - (i % 25) * DAY - 60_000),
     });
@@ -98,7 +102,10 @@ beforeAll(async () => {
   // outside the default window: must not count
   evs.push({ userId: dana.id, objectType: "agent", agentId: AGENT_A, costUsd: 5, at: new Date(now - 45 * DAY) });
   // an MCP tool call: neither an agent nor a connector row
-  evs.push({ userId: dana.id, objectType: "mcp_tool", operation: "lookup", costUsd: 3, at: new Date(now - DAY) });
+  evs.push({ userId: dana.id, objectType: "mcp_tool", operation: "lookup", projectId: PROJECT_1, costUsd: 3, at: new Date(now - DAY) });
+  evs.push({ userId: dana.id, objectType: "mcp_tool", operation: "search_docs", costUsd: 0.5, at: new Date(now - 2 * DAY) });
+  // a ledger object type no typed breakdown names: it must land in `ledger.other`, never vanish
+  evs.push({ userId: dana.id, objectType: "training_job", costUsd: 11, at: new Date(now - 3 * DAY) });
   // Eli's own spend on the same agent: must never reach Dana, nor Dana's reach Eli
   evs.push({ userId: eli.id, objectType: "agent", agentId: AGENT_A, costUsd: 7, at: new Date(now - DAY) });
   await db.insert(usageEvents).values(evs);
@@ -114,12 +121,12 @@ afterAll(async () => {
   await db.$client.end();
 });
 
-/** the expected sums, straight from what this file inserted */
-const expected = (userId: string, objectType: string, from: number, to: number) => {
+/** the expected sums, straight from what this file inserted (`objectType` null = every object type) */
+const expected = (userId: string, objectType: string | null, from: number, to: number, keyOf?: (e: Ev) => string) => {
   const m = new Map<string, { costUsd: number; events: number }>();
   for (const e of inserted) {
-    if (e.userId !== userId || e.objectType !== objectType || e.at.getTime() < from || e.at.getTime() >= to) continue;
-    const k = objectType === "agent" ? (e.agentId ?? "") : `${e.connectorId}:${e.operation}`;
+    if (e.userId !== userId || (objectType !== null && e.objectType !== objectType) || e.at.getTime() < from || e.at.getTime() >= to) continue;
+    const k = keyOf ? keyOf(e) : objectType === "agent" ? (e.agentId ?? "") : `${e.connectorId}:${e.operation}`;
     const cur = m.get(k) ?? { costUsd: 0, events: 0 };
     m.set(k, { costUsd: cur.costUsd + e.costUsd, events: cur.events + 1 });
   }
@@ -194,10 +201,68 @@ describe("GET /v1/usage-events/summary", () => {
     expect(res.json().totals.events).toBe(1);
   });
 
+  const sumAll = (m: Map<string, { costUsd: number; events: number }>) =>
+    [...m.values()].reduce((a, w) => ({ costUsd: a.costUsd + w.costUsd, events: a.events + w.events }), { costUsd: 0, events: 0 });
+
+  it("groupBy=project covers every event of every object type in the window, unattributed included", async () => {
+    const body = (await get(dana.auth, "?groupBy=project")).json();
+    const from = Date.parse(body.window.from);
+    const to = Date.parse(body.window.to);
+    const want = expected(dana.id, null, from, to, (e) => e.projectId ?? "");
+    expect(body.groups).toHaveLength(want.size);
+    for (const g of body.groups as Array<{ projectId: string | null; costUsd: number; events: number }>) {
+      const w = want.get(g.projectId ?? "")!;
+      expect(g.events).toBe(w.events);
+      near(g.costUsd, w.costUsd);
+    }
+    // 260 agent + 30 connector + 2 MCP + 1 training job: far more than the old 200-row page
+    expect(body.totals.events).toBe(293);
+    near(body.totals.costUsd, sumAll(want).costUsd);
+    expect(body.groups.some((g: { projectId: string | null }) => g.projectId === null)).toBe(true);
+  });
+
+  it("groupBy=day is a daily UTC series whose days sum to the window", async () => {
+    const to = new Date();
+    const from = new Date(Date.UTC(to.getUTCFullYear(), to.getUTCMonth(), to.getUTCDate()) - 29 * DAY);
+    const body = (await get(dana.auth, `?groupBy=day&from=${from.toISOString()}&to=${to.toISOString()}`)).json();
+    const want = expected(dana.id, null, from.getTime(), to.getTime(), (e) => e.at.toISOString().slice(0, 10));
+    const days = (body.groups as Array<{ day: string }>).map((g) => g.day);
+    expect(days).toEqual([...want.keys()].sort());
+    for (const g of body.groups as Array<{ day: string; costUsd: number; events: number }>) {
+      expect(g.events).toBe(want.get(g.day)!.events);
+      near(g.costUsd, want.get(g.day)!.costUsd);
+    }
+    expect(body.totals.events).toBe(sumAll(want).events);
+    expect(body.totals.events).toBeGreaterThan(200);
+  });
+
+  it("groupBy=mcp_tool names MCP tool spend, which carries no agent", async () => {
+    const body = (await get(dana.auth, "?groupBy=mcp_tool")).json();
+    const byTool = new Map((body.groups as Array<{ toolName: string; costUsd: number }>).map((g) => [g.toolName, g.costUsd]));
+    near(byTool.get("lookup")!, 3);
+    near(byTool.get("search_docs")!, 0.5);
+    expect(body.totals.events).toBe(2);
+  });
+
+  it("agent + connector + MCP tool + other add up to the whole window's ledger", async () => {
+    const [agent, connector, mcp] = await Promise.all(
+      ["agent", "connector", "mcp_tool"].map(async (g) => (await get(dana.auth, `?groupBy=${g}`)).json()),
+    );
+    const ledger = agent.ledger;
+    const want = sumAll(expected(dana.id, null, Date.parse(agent.window.from), Date.parse(agent.window.to), () => "all"));
+    expect(ledger.events).toBe(want.events);
+    near(ledger.costUsd, want.costUsd);
+    // the training job is the only thing no typed breakdown names
+    expect(ledger.other.events).toBe(1);
+    near(ledger.other.costUsd, 11);
+    expect(agent.totals.events + connector.totals.events + mcp.totals.events + ledger.other.events).toBe(ledger.events);
+    near(agent.totals.costUsd + connector.totals.costUsd + mcp.totals.costUsd + ledger.other.costUsd, ledger.costUsd);
+  });
+
   it("refuses a bad groupBy, a missing groupBy and an inverted window", async () => {
     const to = new Date();
     const from = new Date(to.getTime() + DAY);
-    for (const q of ["?groupBy=project", "", `?groupBy=agent&from=${from.toISOString()}&to=${to.toISOString()}`]) {
+    for (const q of ["?groupBy=model", "", `?groupBy=agent&from=${from.toISOString()}&to=${to.toISOString()}`]) {
       const res = await get(dana.auth, q);
       expect(res.statusCode, q).toBe(400);
     }

@@ -33,12 +33,24 @@ import {
   SkeletonBlock,
   Table,
   Tabs,
+  type BarItem,
 } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
 import v from "../views.module.css";
 import s from "./spend.module.css";
 import { MyConsolidatedSpendCard } from "./MyConsolidatedSpendCard";
-import { RECENT_ROWS, agentBars, connectorBars, summaryWindowLabel } from "./spendSummary";
+import {
+  CHART_DAYS,
+  RECENT_ROWS,
+  agentBars,
+  chartFrom,
+  connectorBars,
+  daySeries,
+  ledgerSplit,
+  mcpToolBars,
+  projectGroups,
+  summaryWindowLabel,
+} from "./spendSummary";
 
 interface MyConnector {
   connectorId: string;
@@ -60,7 +72,6 @@ interface Row {
   detail?: { credentialSource?: string } | null;
 }
 
-const DAYS = 14;
 export default function SpendPage() {
   const { auth } = useSession();
   const { toast } = useToast();
@@ -87,6 +98,24 @@ export default function SpendPage() {
     queryKey: ["my-usage-summary", "connector", userId],
     enabled: Boolean(userId),
     queryFn: () => api.get<UsageSummaryResponse>(`/v1/usage-events/summary?groupBy=connector${mine}`),
+  });
+  const byMcpQ = useQuery({
+    queryKey: ["my-usage-summary", "mcp_tool", userId],
+    enabled: Boolean(userId),
+    queryFn: () => api.get<UsageSummaryResponse>(`/v1/usage-events/summary?groupBy=mcp_tool${mine}`),
+  });
+  const byProjectQ = useQuery({
+    queryKey: ["my-usage-summary", "project", userId],
+    enabled: Boolean(userId),
+    queryFn: () => api.get<UsageSummaryResponse>(`/v1/usage-events/summary?groupBy=project${mine}`),
+  });
+  // the chart's window starts at UTC midnight CHART_DAYS - 1 days ago; fixed per mount so the key is stable
+  const [dayFrom] = useState(chartFrom);
+  const byDayQ = useQuery({
+    queryKey: ["my-usage-summary", "day", userId, dayFrom],
+    enabled: Boolean(userId),
+    queryFn: () =>
+      api.get<UsageSummaryResponse>(`/v1/usage-events/summary?groupBy=day&from=${encodeURIComponent(dayFrom)}${mine}`),
   });
   const costQ = useQuery({
     queryKey: ["my-cost-events", userId],
@@ -135,30 +164,14 @@ export default function SpendPage() {
   const agentWindow = summaryWindowLabel(byAgentQ.data?.window);
   const connectorWindow = summaryWindowLabel(byConnectorQ.data?.window);
 
-  const byProject = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const e of events) {
-      m.set(e.projectId ?? "", (m.get(e.projectId ?? "") ?? 0) + (e.costUsd ?? 0));
-    }
-    return [...m].map(([k, value]) => ({ key: k || "unattributed", id: k, value }))
-      .sort((a, b) => b.value - a.value);
-  }, [events]);
-
-  // spend per calendar day, last 14 days — empty days render as empty, never
+  const byMcpTool = useMemo(() => mcpToolBars(byMcpQ.data), [byMcpQ.data]);
+  const mcpWindow = summaryWindowLabel(byMcpQ.data?.window);
+  const byProject = useMemo(() => projectGroups(byProjectQ.data), [byProjectQ.data]);
+  const projectWindow = summaryWindowLabel(byProjectQ.data?.window);
+  // spend per UTC day, from the server over the whole chart window — empty days render as empty, never
   // dropped, so a gap in your activity reads as a gap and not as a shorter axis
-  const byDay = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const e of events) {
-      const day = String(e.at).slice(0, 10);
-      m.set(day, (m.get(day) ?? 0) + (e.costUsd ?? 0));
-    }
-    const out: Array<{ day: string; value: number }> = [];
-    for (let i = DAYS - 1; i >= 0; i--) {
-      const d = new Date(Date.now() - i * 86_400_000).toISOString().slice(0, 10);
-      out.push({ day: d, value: m.get(d) ?? 0 });
-    }
-    return out;
-  }, [events]);
+  const byDay = useMemo(() => daySeries(byDayQ.data), [byDayQ.data]);
+  const split = ledgerSplit(byAgentQ.data, byConnectorQ.data, byMcpQ.data);
 
   const rows: Row[] = useMemo(
     () =>
@@ -292,12 +305,20 @@ export default function SpendPage() {
 
         {tab === "spend" ? (
           <>
-            <Card title={`Spend over the last ${DAYS} days`}>
-              {totals.events ? (
+            <Card title={`Spend over the last ${CHART_DAYS} days`}>
+              {byDayQ.isLoading ? (
+                <SkeletonBlock lines={3} />
+              ) : byDayQ.isError ? (
+                <ErrorState
+                  message={(byDayQ.error as { message?: string } | null)?.message ?? "unknown error"}
+                  onRetry={() => void byDayQ.refetch()}
+                />
+              ) : byDayQ.data?.totals?.events ? (
                 <>
                   <DayChart days={byDay} />
-                  <div className={v.faint} style={{ marginTop: "var(--s1)" }}>
-                    Days with no metered call render empty rather than being dropped — a quiet day
+                  <div className={v.faint} style={{ marginTop: "var(--s1)" }} data-testid="spend-day-window">
+                    Every metered call in the last {CHART_DAYS} UTC days, summed by the server ·{" "}
+                    {plural(byDayQ.data.totals.events, "call")}. Days with no metered call render empty rather than being dropped — a quiet day
                     is a real day. Unpriced calls (no list price for the model) count as $0 here and
                     are named as unpriced in the table below.
                   </div>
@@ -316,8 +337,10 @@ export default function SpendPage() {
             </Card>
 
             <div className={v.grid2}>
-              <Card title="Spend by project">
-                <BarList
+              <Card title={`Spend by project · ${projectWindow}`}>
+                <SummaryBars
+                  q={byProjectQ}
+                  testId="spend-by-project-window"
                   items={byProject.map((p) => ({
                     key: p.key,
                     value: p.value,
@@ -334,7 +357,6 @@ export default function SpendPage() {
                       </>
                     ),
                   }))}
-                  format={fmtUsd}
                   empty={
                     <EmptyState
                       title="Nothing attributed yet"
@@ -367,12 +389,29 @@ export default function SpendPage() {
               />
             </Card>
 
+            <Card title={`Spend by MCP tool · ${mcpWindow}`}>
+              <SummaryBars
+                q={byMcpQ}
+                items={byMcpTool}
+                testId="spend-by-mcp-window"
+                empty={<EmptyState title="No metered MCP tool calls" body={`No MCP tool call of yours was metered in the ${mcpWindow}.`} />}
+              />
+              {split && (
+                // the breakdowns are the server's sums over one window, so with "other" they add up to its ledger
+                <div className={v.faint} style={{ marginTop: "var(--s1)" }} data-testid="spend-ledger-split">
+                  {mcpWindow}: agents {fmtUsd(split.agents)} + connectors {fmtUsd(split.connectors)} + MCP tools{" "}
+                  {fmtUsd(split.mcpTools)} + other {fmtUsd(split.other)}
+                  {split.otherTypes.length ? ` (${split.otherTypes.join(", ")})` : ""} = {fmtUsd(split.total)}
+                </div>
+              )}
+            </Card>
+
             {/* ADR-0055 / ADR-0076: the self-scoped consolidated view (metered and imported, never summed) */}
             {userId ? <MyConsolidatedSpendCard userId={userId} /> : null}
 
             <Card title={`Recent invocations · newest ${RECENT_ROWS}`} contain flush>
               <p className={v.faint} style={{ padding: "var(--s1) var(--s2) 0" }} data-testid="spend-recent-note">
-                The newest {RECENT_ROWS} agent calls only. The by-agent and by-connector totals above cover every call in
+                The newest {RECENT_ROWS} agent calls only. The chart and the spend breakdowns above cover every call in
                 their window.
               </p>
               <Table<Row>
@@ -532,7 +571,7 @@ export default function SpendPage() {
 /** a server-aggregated breakdown: loading, refused, or the bars with the window they cover */
 function SummaryBars(props: {
   q: { isLoading: boolean; isError: boolean; error: unknown; data?: UsageSummaryResponse; refetch: () => unknown };
-  items: Array<{ key: string; label: string; value: number }>;
+  items: BarItem[];
   testId: string;
   empty: ReactNode;
 }) {

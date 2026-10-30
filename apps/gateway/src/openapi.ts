@@ -277,12 +277,15 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
   "GET /v1/usage-events": { summary: "The raw usage ledger, one row per governed call (priced or not)." },
   "GET /v1/usage-events/summary": {
     summary:
-      "Spend by agent or by connector, aggregated over every usage event in a window (default: the last 30 days). " +
+      "Spend by agent, connector, MCP tool, project or UTC day, aggregated over every usage event in a window " +
+      "(default: the last 30 days). " +
       "Same scoping as the usage ledger: a non-admin sees only their own events.",
     query: usageSummaryQuery,
     responseNote:
       "`window` echoes the half-open `[from, to)` range applied (`defaulted` when `from` was omitted); `groups` are " +
-      "sorted by cost; `totals` is the sum over `groups`.",
+      "sorted by cost (`day` by date); `totals` is the sum over `groups`. `ledger` is the whole window across every " +
+      "object type, with `byObjectType` and `other` (what no typed breakdown names), so the agent, connector and " +
+      "MCP tool breakdowns plus `other` add up to `ledger`.",
   },
 
   "GET /v1/workflows/instances": { summary: "Workflow instances." },

@@ -121,21 +121,43 @@ test.describe("the pending queue keeps every pending approval", () => {
 
 test.describe("Spend totals cover the whole window", () => {
   const usageEvent = { at: minutesAgo(1), objectType: "agent", agentId: AGENT, model: "mock-balanced", inputTokens: 10, outputTokens: 20, costUsd: 0.01, projectId: null };
-  const summary = (groupBy: "agent" | "connector") => ({
-    groupBy,
-    userId: ME,
-    window: { from: "2026-09-30T12:00:00.000Z", to: "2026-10-30T12:00:00.000Z", defaulted: true },
-    groups:
-      groupBy === "agent"
-        ? [{ agentId: AGENT, costUsd: 42.5, events: 3_120 }]
-        : [{ connectorId: CONNECTOR, name: "Search API", operation: "search", costUsd: 1.25, events: 640 }],
-    totals: groupBy === "agent" ? { events: 3_120, costUsd: 42.5 } : { events: 640, costUsd: 1.25 },
-  });
+  const TODAY = new Date().toISOString().slice(0, 10);
+  const PROJECT = "00000000-0000-4000-8000-0000000000b1";
+  const GROUPS: Record<string, unknown[]> = {
+    agent: [{ agentId: AGENT, costUsd: 42.5, events: 3_120 }],
+    connector: [{ connectorId: CONNECTOR, name: "Search API", operation: "search", costUsd: 1.25, events: 640 }],
+    mcp_tool: [{ toolName: "lookup_ticket", costUsd: 3, events: 75 }],
+    project: [{ projectId: PROJECT, costUsd: 30, events: 2_000 }, { projectId: null, costUsd: 27.75, events: 1_836 }],
+    day: [{ day: TODAY, costUsd: 9.5, events: 410 }],
+  };
+  // the window's ledger: agent 42.5 + connector 1.25 + MCP 3 + other 11 (a training job) = 57.75
+  const LEDGER = {
+    events: 3_836,
+    costUsd: 57.75,
+    byObjectType: [
+      { objectType: "agent", events: 3_120, costUsd: 42.5 },
+      { objectType: "connector", events: 640, costUsd: 1.25 },
+      { objectType: "mcp_tool", events: 75, costUsd: 3 },
+      { objectType: "training_job", events: 1, costUsd: 11 },
+    ],
+    other: { events: 1, costUsd: 11 },
+  };
+  const summary = (groupBy: string) => {
+    const groups = (GROUPS[groupBy] ?? []) as Array<{ costUsd: number; events: number }>;
+    return {
+      groupBy,
+      userId: ME,
+      window: { from: "2026-09-30T12:00:00.000Z", to: "2026-10-30T12:00:00.000Z", defaulted: groupBy !== "day" },
+      groups,
+      totals: { events: groups.reduce((a, g) => a + g.events, 0), costUsd: groups.reduce((a, g) => a + g.costUsd, 0) },
+      ledger: LEDGER,
+    };
+  };
 
   test("by-agent and by-connector come from the server's aggregate, labelled with the window", async ({ page }) => {
     const seen = await mockApi(page, (p, url, route) => {
       if (p === "/v1/usage-events") return json(route, { events: [usageEvent], totals: { events: 3_760, costUsd: 43.75 } });
-      if (p === "/v1/usage-events/summary") return json(route, summary(url.searchParams.get("groupBy") as "agent" | "connector"));
+      if (p === "/v1/usage-events/summary") return json(route, summary(url.searchParams.get("groupBy") ?? ""));
       if (p === "/v1/cost-events") return json(route, { events: [], totals: [] });
       if (p === `/v1/users/${ME}/agents`) return json(route, { agents: [{ agentId: AGENT, name: "Claude assistant" }] });
       if (p === `/v1/users/${ME}/connectors`) return json(route, { connectors: [] });
@@ -151,11 +173,25 @@ test.describe("Spend totals cover the whole window", () => {
     const byConnector = page.locator("[data-rg-card]").filter({ hasText: "Spend by connector · last 30 days" });
     await expect(byConnector).toContainText("Search API · search");
     await expect(byConnector).toContainText("$1.25");
+    // by project, the daily chart and MCP tools come from the server too
+    const byProject = page.locator("[data-rg-card]").filter({ hasText: "Spend by project · last 30 days" });
+    await expect(byProject).toContainText("$30");
+    await expect(byProject).toContainText("unattributed");
+    await expect(page.getByTestId("spend-day-window")).toContainText("410 calls");
+    await expect(page.getByRole("img", { name: "Daily spend, last 14 days" }).locator(`[title="${TODAY} · $9.5"]`)).toHaveCount(1);
+    const byMcp = page.locator("[data-rg-card]").filter({ hasText: "Spend by MCP tool · last 30 days" });
+    await expect(byMcp).toContainText("lookup_ticket");
+    await expect(page.getByTestId("spend-ledger-split")).toHaveText(
+      "last 30 days: agents $42.5 + connectors $1.25 + MCP tools $3 + other $11 (training_job) = $57.75",
+    );
     await expect(page.getByText("Recent invocations · newest 50")).toBeVisible();
     await expect(page.getByTestId("spend-recent-note")).toContainText("The newest 50 agent calls only");
     // self-scoped, as the ledger read is
     expect(seen).toContain(`/v1/usage-events/summary?groupBy=agent&userId=${ME}`);
     expect(seen).toContain(`/v1/usage-events/summary?groupBy=connector&userId=${ME}`);
+    expect(seen).toContain(`/v1/usage-events/summary?groupBy=mcp_tool&userId=${ME}`);
+    expect(seen).toContain(`/v1/usage-events/summary?groupBy=project&userId=${ME}`);
+    expect(seen.some((u) => u.startsWith("/v1/usage-events/summary?groupBy=day&from=") && u.endsWith(`&userId=${ME}`))).toBe(true);
     await expectAxeClean(page, "spend with server totals");
   });
 

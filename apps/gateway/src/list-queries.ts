@@ -32,10 +32,11 @@ export const USAGE_SUMMARY_DEFAULT_DAYS = 30;
 /**
  * `GET /v1/usage-events/summary`. Same `userId` rule as `/v1/usage-events`
  * (forced to self for a non-admin). The window is half-open, `[from, to)`.
+ * `day` is a daily series keyed by UTC date (days with no event are absent).
  */
 export const usageSummaryQuery = z
   .object({
-    groupBy: z.enum(["agent", "connector"]),
+    groupBy: z.enum(["agent", "connector", "mcp_tool", "project", "day"]),
     userId: z.string().uuid().optional(),
     from: z.coerce.date().optional(),
     to: z.coerce.date().optional(),

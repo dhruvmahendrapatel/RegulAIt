@@ -601,3 +601,17 @@ the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
   carried on their own.
 - Freeze week: ADR-0198 §2 covers entry raises only; this raise rests on the owner decision above. ADR-0198's post-demo
   reset applies to it.
+
+## Addendum / As built (2026-10-30) — all JS 1,050 → 1,052 kB (#636, Inbox pending queue and Spend totals)
+
+The owner decided this raise on 2026-10-30:
+<https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6522492997>. It is the ADR-recorded exception
+the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
+
+- `all JS` from `1050 kB` to `1052 kB` (+2 kB), the smallest whole kB that fits. Entry JS stays at 138.5 kB and entry
+  CSS at 10.7 kB; the lazy chunk ceilings are unchanged.
+- Why: main was already over the 1,050 kB ceiling before #636 (1,050,176 B measured on `origin/main`, 176 B over).
+  #636 adds the shared pending-queue read and the Spend page's server-aggregated breakdowns (project, day, agent,
+  connector, MCP tool); with it, total JS measures 1,051,596 B.
+- Freeze week: ADR-0198 §2 covers entry raises only; this raise rests on the owner decision above. ADR-0198's post-demo
+  reset applies to it.
