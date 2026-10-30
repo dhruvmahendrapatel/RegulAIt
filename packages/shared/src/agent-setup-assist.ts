@@ -146,14 +146,13 @@ export type AgentSetupModelReply = z.infer<typeof modelReplySchema>;
 
 /** parse the model's reply; null when it is not the requested JSON object */
 export function parseAgentSetupReply(text: string): AgentSetupModelReply | null {
-  const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(text);
-  const body = (fenced?.[1] ?? text).trim();
-  const start = body.indexOf("{");
-  const end = body.lastIndexOf("}");
+  // first "{" to last "}": skips any prose or code fence around the object, with no regex over model output
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
   if (start < 0 || end <= start) return null;
   let raw: unknown;
   try {
-    raw = JSON.parse(body.slice(start, end + 1));
+    raw = JSON.parse(text.slice(start, end + 1));
   } catch {
     return null;
   }
