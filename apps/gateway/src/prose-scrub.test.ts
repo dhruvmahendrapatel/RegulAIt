@@ -631,6 +631,8 @@ describe("6. the covered / NOT-covered inventory", () => {
       "engine_run_items.not_run_reason",
       // ADR-0190 I3: a CHECK-constrained five-member decline code
       "execution_offers.decline_reason",
+      // ADR-0222: a CHECK-constrained two-member purge code
+      "fairness_datasets.purge_reason",
       "mcp_registry_entries.conflict_reason",
       "migration_audit_outbox.reason",
       "risk_acceptances.compensating_controls",
