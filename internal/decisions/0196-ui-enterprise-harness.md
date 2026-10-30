@@ -601,3 +601,14 @@ the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
   carried on their own.
 - Freeze week: ADR-0198 §2 covers entry raises only; this raise rests on the owner decision above. ADR-0198's post-demo
   reset applies to it.
+
+## Addendum / As built (2026-10-30) — all JS 1,050 → 1,054 kB (P5 framework imports)
+
+The owner set the all-JS cap for the competitor-gap lanes on 2026-10-30: "All JS is capped at 1,060 kB, shared by
+every lane" (<https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6522850568>). This raise stays
+inside that cap, with one `CEILING_EXCEPTIONS` row.
+
+- `all JS` from `1050 kB` to `1054 kB` (+4 kB). Entry JS stays at 138.5 kB and entry CSS at 10.7 kB; the lazy chunk
+  ceilings are unchanged.
+- Why: the two lazy-loaded P5 pages (Framework imports, Regulatory feed sources) bring total JS to 1,052,912 B. About
+  6 kB of the 1,060 kB cap is left for the other wave-1 lanes.
