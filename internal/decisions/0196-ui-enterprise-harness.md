@@ -601,3 +601,16 @@ the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
   carried on their own.
 - Freeze week: ADR-0198 §2 covers entry raises only; this raise rests on the owner decision above. ADR-0198's post-demo
   reset applies to it.
+
+## Addendum / As built (2026-10-30) — all JS 1,050 → 1,055 kB (G1 project archive and G10 rename, #604)
+
+The owner decided this raise on 2026-10-30, allowing the all-JS ceiling to rise to at most 1,060 kB for the unparked
+lifecycle sets (#604 to #606) while the entry ceilings stay unchanged:
+<https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6522492997>. It is the ADR-recorded exception
+the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
+
+- `all JS` from `1050 kB` to `1055 kB` (+5 kB). Entry JS stays at 138.5 kB and entry CSS at 10.7 kB; the lazy chunk
+  ceilings are unchanged.
+- Why: with main merged into #604, total JS measures 1,053,590 B. The archive dialogs and the rename dialog are their
+  own lazily loaded chunks, so the entry measures 137.83 kB.
+- Headroom: 5 kB of the owner's 10 kB stays for #605 and #606 (M-104). Their raises chain from this row's `to`.

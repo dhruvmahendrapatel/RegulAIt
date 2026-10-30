@@ -64,6 +64,8 @@ export const CEILING_EXCEPTIONS = [
   { name: "all JS", from: "1046 kB", to: "1048 kB", date: "2026-10-29", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6498510014" },
   // G2 + G11 (#599) with batch I-1 (#597) merged in: measured 1,049,109 B
   { name: "all JS", from: "1048 kB", to: "1050 kB", date: "2026-10-30", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6515493026" },
+  // G1 + G10 (#604, ADR-0206): measured 1,053,590 B; the owner allows up to 1,060 kB across #604 to #606
+  { name: "all JS", from: "1050 kB", to: "1055 kB", date: "2026-10-30", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6522492997" },
 ];
 const DECISION_LINK = /^https:\/\/github\.com\/dhruvmahendrapatel\/RegulAIt\/issues\/\d+#issuecomment-\d+$/;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
