@@ -77,10 +77,11 @@ describe("the record-based draft", () => {
     expect(by.data_shared!.source).toBe("none");
   });
 
-  it("splits a long run of spaces after a heading marker quickly (linear, no backtracking)", () => {
-    const started = Date.now();
-    splitQuestionnaire(`## ${" ".repeat(200_000)}x\n`.repeat(5));
-    expect(Date.now() - started).toBeLessThan(1_000);
+  // the CodeQL ReDoS shape: a heading marker followed by a long run of spaces. The split is a string
+  // test now, so this returns at once; vitest's per-test timeout is the bound, not a wall-clock assertion
+  it("splits a long run of spaces after a heading marker (no regex on this input)", () => {
+    expect(splitQuestionnaire(`## ${" ".repeat(200_000)}x\n`.repeat(5))).toEqual({});
+    expect(splitQuestionnaire(`## ${" ".repeat(200_000)}3. Subprocessors\nAnswer`)).toEqual({ subprocessors: "Answer" });
   });
 
   it("splits a questionnaire by its headings and ignores unknown ones", () => {
