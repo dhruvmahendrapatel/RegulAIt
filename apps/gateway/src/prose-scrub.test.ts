@@ -592,6 +592,10 @@ describe("6. the covered / NOT-covered inventory", () => {
     "vendor_account_aliases.reason",
     "vendor_domain_rules.reason",
     "workflow_templates.retired_reason",
+    // ADR-0208 G9 (migration 0225): retire and cancel reasons of the libraries
+    "eval_datasets.retired_reason",
+    "redteam_libraries.retired_reason",
+    "grant_certification_campaigns.cancelled_reason",
     // ADR-0182 (D4, migration 0162): every new free-text column of the
     // accountability records (feedback bodies are ciphertext, not prose)
     "decision_regression_cases.label",
