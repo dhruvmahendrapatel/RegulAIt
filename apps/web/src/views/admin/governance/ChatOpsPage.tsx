@@ -100,7 +100,16 @@ export function chatOpsConnectionBody(input: {
         ...(botOpenidMetadataUrl?.trim() ? { botOpenidMetadataUrl: botOpenidMetadataUrl.trim() } : {}),
       }
     : {};
-  return { ...rest, ...(signingSecret || !appId ? { signingSecret } : {}), ...bot };
+  // an empty secret is omitted, so a workspace that needs one gets the API's
+  // `signing_secret_required` refusal rather than a field-length error
+  return { ...rest, ...(signingSecret ? { signingSecret } : {}), ...bot };
+}
+
+/** A workspace posts through a connector of its own provider kind (the API
+ * refuses any other with `connector_kind_mismatch`), so only those are offered:
+ * picking another would first overwrite that connector's stored credential. */
+export function chatOpsConnectorsFor<C extends { providerKind?: string | null }>(connectors: C[], provider: string): C[] {
+  return connectors.filter((c) => c.providerKind === provider);
 }
 
 /**
@@ -351,7 +360,7 @@ export default function ChatOpsPage() {
           <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="acme-slack" />
         </Field>
         <Field label="Provider">
-          <Select value={provider} onChange={(e) => setProvider(e.target.value)}>
+          <Select value={provider} onChange={(e) => { setProvider(e.target.value); setConnectorId(""); }}>
             {CHATOPS_PROVIDERS.map((p) => (
               <option key={p} value={p} disabled={!chatOpsProviderRegistrable(p)}>
                 {chatOpsProviderLabel(p)}
@@ -367,13 +376,18 @@ export default function ChatOpsPage() {
         <Field label={sendOnly ? "Connector (holds the app registration)" : "Connector (holds the bot token)"}>
           <Select value={connectorId} onChange={(e) => setConnectorId(e.target.value)}>
             <option value="">select…</option>
-            {(connectors.data?.connectors ?? []).map((c) => (
+            {chatOpsConnectorsFor(connectors.data?.connectors ?? [], provider).map((c) => (
               <option key={c.id} value={c.id}>
                 {c.name}
               </option>
             ))}
           </Select>
         </Field>
+        {connectors.data && chatOpsConnectorsFor(connectors.data.connectors ?? [], provider).length === 0 ? (
+          <p className={v.faint} data-testid="chatops-no-connector">
+            No connector has provider kind {provider} yet. Add one on the Connectors page first.
+          </p>
+        ) : null}
         {sendOnly ? (
           <>
             <p className={v.faint}>
