@@ -40,7 +40,9 @@ approvals.
 4. **Nothing applies itself.** In the console, "Use this draft in the form" fills the name, tier and system prompt of the
    Register form. The agent exists only when the admin presses Register (`POST /v1/agents`, unchanged). The admin applies
    grants, approvals, budget and the model card on their existing cards; the draft shows these as recommendations.
-5. **Lazy-loaded UI.** The assistant panel is its own chunk, so the entry bundle does not grow.
+5. **Kept out of the entry bundle.** The panel ships in the lazy `screens/admin-integrations` route chunk, with the
+   rest of the Agents page. Giving it its own chunk cost about 670 B of all-JS for chunk overhead, which the all-JS
+   ceiling did not have room for.
 
 ## Open source first (ADR-0176)
 

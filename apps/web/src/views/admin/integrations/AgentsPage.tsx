@@ -11,7 +11,7 @@ import { api } from "../../../api/client";
 import type { AdminAgent, CustomModelProvider, UserAgentPolicyView } from "../../../api/adminTypes";
 import { fmtUsd } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, SkeletonBlock, Table, Textarea } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea } from "../../../ui/kit";
 import {
   KV,
   RemoveButton,
@@ -24,6 +24,8 @@ import {
   userOpts,
 } from "../adminKit";
 import { StewardshipCard } from "./AgentStewardship";
+// ADR-0205: part of this lazy route chunk (screens/admin-integrations), so the entry bundle carries none of it
+import AgentSetupAssistant from "./AgentSetupAssistant";
 import { ExpectedServedModelCard } from "./ExpectedServedModelCard";
 import { ProviderMark, ProviderTiles } from "../../../ui/ModelPicker";
 import { providerLabel } from "../../models/modelBindings";
@@ -33,8 +35,6 @@ import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 
 const CLEAR = "__clear__";
 
-// ADR-0205: the setup assistant loads only when an admin opens it (entry-bundle budget)
-const AgentSetupAssistant = lazy(() => import("./AgentSetupAssistant"));
 const AiBomPanel = lazy(() => import("../governance/BomEvidencePanel").then((m) => ({ default: m.AiBomPanel })));
 
 export default function AgentsPage() {
@@ -249,14 +249,12 @@ function RegisterAgentCard() {
         </Button>
       </div>
       {assistOpen && (
-        <Suspense fallback={<SkeletonBlock lines={2} />}>
-          <AgentSetupAssistant
-            onUse={(d) =>
-              // fills the form only; the agent exists once the admin presses Register
-              setF((previous) => ({ ...previous, name: d.name.value, tier: String(d.tier.value), systemPrompt: d.systemPrompt.value }))
-            }
-          />
-        </Suspense>
+        <AgentSetupAssistant
+          onUse={(d) =>
+            // fills the form only; the agent exists once the admin presses Register
+            setF((previous) => ({ ...previous, name: d.name.value, tier: String(d.tier.value), systemPrompt: d.systemPrompt.value }))
+          }
+        />
       )}
       <form
         className={v.stack}

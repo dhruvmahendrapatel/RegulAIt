@@ -1,9 +1,9 @@
 /**
- * ADR-0205 — the agent setup assistant on the Register an agent card. Lazy
- * loaded, so the entry bundle carries none of it.
+ * ADR-0205 — the agent setup assistant on the Register an agent card. It ships
+ * in the lazy admin-integrations route chunk, so the entry bundle carries none of it.
  *
  * The admin describes the agent; the gateway returns a draft (rules always, a
- * governed model draft when asked). "Use this draft" only fills the register
+ * governed model draft when asked). "Use this draft in the form" only fills the register
  * form: nothing is saved until the admin presses Register. Grants, approvals,
  * budget and the model card are shown as recommendations for their own cards.
  * The assistant is off until an admin turns it on (a step-up, audited).
