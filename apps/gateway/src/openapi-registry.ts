@@ -252,6 +252,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/evals/datasets/:id/cases": "internal",
   "DELETE /v1/evals/datasets/:id/cases/:caseId": "internal",
   "POST /v1/evals/datasets/:id/versions": "internal",
+  "POST /v1/evals/datasets/:id/retire": "internal",
   "GET /v1/evals/runs": "internal",
   "POST /v1/evals/runs": "public-beta",
   "GET /v1/evals/runs/:id": "internal",
@@ -462,6 +463,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/engine-schedules": "internal",
   "GET /v1/engine-schedules": "internal",
   "PATCH /v1/engine-schedules/:scheduleId": "internal",
+  "DELETE /v1/engine-schedules/:scheduleId": "internal",
   "POST /v1/model-artifacts": "internal",
   "GET /v1/model-artifacts": "internal",
   "GET /v1/model-artifacts/:artifactId": "internal",
@@ -505,6 +507,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // (never to the grant's holder).
   "POST /v1/certification-campaigns/expiry-sweep": "internal",
   "POST /v1/certification-campaigns/:campaignId/items/:itemId/reassign": "internal",
+  "POST /v1/certification-campaigns/:campaignId/cancel": "internal",
   // ADR-0090 — the two direct MCP grant deletes that never existed (every
   // other grant kind already had a removal endpoint); internal like their
   // agent/connector twins' write surfaces.
@@ -548,6 +551,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/redteam/libraries/:id": "internal",
   "POST /v1/redteam/libraries/:id/probes": "internal",
   "POST /v1/redteam/libraries/:id/publish": "internal",
+  "POST /v1/redteam/libraries/:id/retire": "internal",
   "POST /v1/redteam/libraries/:id/versions": "internal",
   "GET /v1/redteam/runs": "internal",
   "POST /v1/redteam/runs": "internal",
@@ -1351,6 +1355,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/evals/datasets/:id/cases": "evals",
   "DELETE /v1/evals/datasets/:id/cases/:caseId": "evals",
   "POST /v1/evals/datasets/:id/versions": "evals",
+  "POST /v1/evals/datasets/:id/retire": "evals",
   "GET /v1/evals/runs": "evals",
   "POST /v1/evals/runs": "evals",
   "GET /v1/evals/runs/:id": "evals",
@@ -1385,6 +1390,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/certification-campaigns/:campaignId": "certification",
   "POST /v1/certification-campaigns/expiry-sweep": "certification",
   "POST /v1/certification-campaigns/:campaignId/items/:itemId/reassign": "certification",
+  "POST /v1/certification-campaigns/:campaignId/cancel": "certification",
   // ADR-0091 — toxic-combination SoD rules + override escalations
   "POST /v1/sod/rules": "sod",
   "GET /v1/sod/rules": "sod",
@@ -1563,6 +1569,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/engine-schedules": "engines",
   "GET /v1/engine-schedules": "engines",
   "PATCH /v1/engine-schedules/:scheduleId": "engines",
+  "DELETE /v1/engine-schedules/:scheduleId": "engines",
   "POST /v1/model-artifacts": "engines",
   "GET /v1/model-artifacts": "engines",
   "GET /v1/model-artifacts/:artifactId": "engines",
@@ -1618,6 +1625,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/redteam/libraries/:id": "redteam",
   "POST /v1/redteam/libraries/:id/probes": "redteam",
   "POST /v1/redteam/libraries/:id/publish": "redteam",
+  "POST /v1/redteam/libraries/:id/retire": "redteam",
   "POST /v1/redteam/libraries/:id/versions": "redteam",
   "GET /v1/redteam/runs": "redteam",
   "POST /v1/redteam/runs": "redteam",
