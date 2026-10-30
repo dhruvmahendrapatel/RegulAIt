@@ -562,6 +562,9 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /auth/sessions",
   "POST /auth/sessions/:sessionId/revoke",
   "POST /auth/sessions/revoke-others",
+  // ADR-0218: a person's OWN palette and mode — the row is keyed by the caller's user id alone (no id in the
+  // path or body), like change-password above. Whether a palette is allowed is the org's lock, read in the handler.
+  "PUT /auth/appearance",
   "GET /auth/oidc/providers",
   "GET /auth/oidc/:providerId/start",
   "GET /auth/oidc/callback",

@@ -339,6 +339,12 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   tracingOtlpHeaders: exempt("the collector's credential, stored enveloped; where it may go is the egress guard's decision"),
   tracingOtlpServiceName: exempt("a label on exported spans"),
 
+  // --- appearance (ADR-0218) -------------------------------------------------
+  themeDefaultPalette: exempt("a colour palette; it changes how the console looks and protects nothing"),
+  themeLocked: exempt(
+    "pins everyone to the default palette (High contrast always stays open); a presentation setting, not a protection",
+  ),
+
   // --- sign-in (ADR-0025 / ADR-0181) ----------------------------------------
   passwordMinLength: atLeast(12),
   passwordRequireClasses: atLeast(IDENTITY.passwordRequireClasses),

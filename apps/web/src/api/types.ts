@@ -36,6 +36,22 @@ export interface AuthMeResponse {
    * posture a fresh org_settings row has. Reading one's username is never
    * gated; this governs the edit affordance only. */
   usernameSelfService?: boolean;
+  /** ADR-0218: the palette and mode saved to this account, and the organisation default and lock. Absent on an older
+   * gateway, which reads as "kept in this browser" (the phase 1 behaviour). */
+  appearance?: AccountAppearance;
+}
+
+/** ADR-0218: what `/auth/me` and `PUT /auth/appearance` say about this person's theme */
+export interface AccountAppearance {
+  /** the saved palette; null = none saved (the organisation default applies) */
+  palette: string | null;
+  /** the saved mode; null = none saved (this browser decides) */
+  mode: "light" | "dark" | "system" | null;
+  /** the palette to paint now: the saved one unless the organisation's lock overrides it */
+  effectivePalette: string;
+  org: { defaultPalette: string; locked: boolean };
+  /** false = no account to save to (the bootstrap operator): the choice stays in this browser */
+  saved: boolean;
 }
 
 /**

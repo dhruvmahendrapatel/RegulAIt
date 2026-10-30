@@ -75,6 +75,7 @@ import { z } from "zod";
 import * as oidc from "openid-client";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { loadOrgSettings } from "./org-settings.js";
+import { appearanceFor } from "./appearance.js";
 import { evaluateIpEnvelope } from "./net-policy.js";
 import { deviceLabel } from "./device-label.js";
 import { checkEgress, createGuardedFetch, type EgressDenied } from "./egress-guard.js";
@@ -1615,6 +1616,8 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
        * default org posture) = admin-managed; the UI shows the value
        * read-only rather than offering an edit that would 403. */
       usernameSelfService: org.usernameSelfService,
+      /** ADR-0218: the palette and mode saved to this account, and the organisation default and lock */
+      appearance: await appearanceFor(db, userId, org),
     };
   });
 

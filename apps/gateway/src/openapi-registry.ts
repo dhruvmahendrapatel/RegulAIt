@@ -59,6 +59,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /auth/totp/disable": "internal",
   "POST /auth/totp/enroll": "internal",
   "POST /auth/username": "internal",
+  "PUT /auth/appearance": "internal",
   "GET /health": "public-stable",
   // ADR-0097 — RFC 9728 protected-resource metadata. `public-stable` because
   // the RFC pins the path and the shape; the CONTENTS are derived from what
@@ -1183,6 +1184,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /auth/totp/disable": "auth",
   "POST /auth/totp/enroll": "auth",
   "POST /auth/username": "auth",
+  "PUT /auth/appearance": "auth",
   "GET /health": "health",
   "GET /.well-known/oauth-protected-resource": "mcp-proxy",
   "GET /.well-known/oauth-protected-resource/mcp/:serverId": "mcp-proxy",

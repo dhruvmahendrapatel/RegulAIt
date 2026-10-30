@@ -142,6 +142,19 @@ export function SessionProvider(props: { children: ReactNode }) {
     return () => setUnauthorizedHandler(null);
   }, [refresh, forgetSession]);
 
+  // ADR-0218: repaint in the account's palette and mode (the organisation's lock applied); loaded on demand
+  const appearance = auth?.appearance;
+  const accountTheme = useRef<typeof import("../theme/account") | null>(null);
+  useEffect(() => {
+    if (!appearance) return accountTheme.current?.forgetAccountAppearance();
+    void import("../theme/account")
+      .then((m) => {
+        accountTheme.current = m;
+        m.adoptAccountAppearance(appearance);
+      })
+      .catch(() => undefined);
+  }, [appearance]);
+
   const value = useMemo(
     () => ({ auth, me, refresh, signOut, applyAuth }),
     [auth, me, refresh, signOut, applyAuth],
