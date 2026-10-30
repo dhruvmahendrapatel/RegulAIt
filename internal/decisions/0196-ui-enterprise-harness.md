@@ -602,17 +602,13 @@ the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
 - Freeze week: ADR-0198 §2 covers entry raises only; this raise rests on the owner decision above. ADR-0198's post-demo
   reset applies to it.
 
-## Addendum / As built (2026-10-30) — all JS 1,050 → 1,056 kB (G3–G6 lifecycle, #605)
+## Addendum / As built (2026-10-30) — all JS 1,050 → 1,060 kB (post-demo backlog lanes)
 
-The owner decided on 2026-10-30 that the unparked lifecycle sets (#604–#606) may raise the all-JS ceiling to at most
-1,060 kB, with a dated `CEILING_EXCEPTIONS` row and this addendum, and that the entry JS and entry CSS ceilings stay
-unchanged: <https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6522492997>. It is the ADR-recorded
-exception the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
+The owner decided this raise on 2026-10-30, together with unparking the G-lanes and starting the backlog lanes:
+<https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6522492997>. It is the ADR-recorded exception the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
 
-- `all JS` from `1050 kB` to `1056 kB` (+6 kB), the smallest whole-kB ceiling above the measurement and below the
-  1,060 kB the owner allowed. Entry JS stays at 138.5 kB and entry CSS at 10.7 kB; the lazy chunk ceilings are unchanged.
-- Why: with main merged in, the G3–G6 lifecycle actions (ADR-0207: disable, enable and delete for connectors and MCP
-  servers, registry delete, MCP server edit, git and PM edit and token replacement, PM webhook-secret rotation) measure
-  1,055,791 B (1,054,654 B before main's 2026-10-30 afternoon merges). The edit, token and rotation dialogs are already a lazily loaded chunk; the row actions themselves are
-  in the integrations page chunk.
-- The other lifecycle lanes (#604, #606) raise from whatever main holds when they merge; each brings its own row.
+- `all JS` from `1050 kB` to `1060 kB` (+10 kB), one shared ceiling for every lane in flight. Entry JS stays at 138.5 kB
+  and entry CSS at 10.7 kB; the lazy chunk ceilings are unchanged, and new screens are lazy-loaded.
+- Why: one lane alone measures 1,049,965 B against the 1,050,000 B ceiling, which leaves no room for the other lanes.
+  Raising the ceiling once on main stops each lane from editing the same line.
+- A lane that would take total JS over 1,060 kB stops and goes back to the owner.
