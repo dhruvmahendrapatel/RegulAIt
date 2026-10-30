@@ -368,7 +368,6 @@ const notFoundBody = { error: "not_found" } as const;
  *   GET    /v1/trust/publications                         admin
  *   POST   /v1/trust/publications/from-control            admin (a draft)
  *   POST   /v1/trust/publications/from-use-case           admin (a draft AI system card)
- *   GET    /v1/trust/publications/:publicationId          admin
  *   PATCH  /v1/trust/publications/:publicationId          admin (drafts only)
  *   DELETE /v1/trust/publications/:publicationId          admin (drafts only)
  *   POST   /v1/trust/publications/:publicationId/publish  admin + step-up
@@ -481,13 +480,6 @@ export function registerTrustPagesRoutes(app: FastifyInstance, db: Db): void {
     }
     const p = await insertDraft(req, "ai_card", `use_case:${body.useCaseId}`, draft.title, draft.content);
     return reply.status(201).send(adminView(p));
-  });
-
-  app.get("/v1/trust/publications/:publicationId", async (req, reply) => {
-    const { publicationId } = idParams.parse(req.params);
-    const p = await loadPublication(reply, publicationId);
-    if (!p) return reply;
-    return adminView(p);
   });
 
   app.patch("/v1/trust/publications/:publicationId", async (req, reply) => {

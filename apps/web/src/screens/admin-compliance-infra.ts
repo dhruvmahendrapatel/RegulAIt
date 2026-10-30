@@ -2,3 +2,5 @@
 export { default as CompliancePacksPage } from "../views/admin/compliance/CompliancePacksPage";
 export { default as ComplianceProfilesPage } from "../views/admin/compliance/ComplianceProfilesPage";
 export { default as InfrastructurePage } from "../views/admin/compliance/InfrastructurePage";
+// ADR-0225 (P13 d): Trust publishing sits beside Compliance packs
+export { default as TrustPublishingPage } from "../views/trust/TrustPublishingPage";
