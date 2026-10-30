@@ -1,5 +1,5 @@
-# ADR-0220: the hash-locked closure of requirements.in. Regenerate with:
-#   uv pip compile requirements.in --generate-hashes --python-version 3.12 --python-platform x86_64-manylinux_2_28 \
+# ADR-0220: the hash-locked closure of direct-requirements.txt. Regenerate with:
+#   uv pip compile direct-requirements.txt --generate-hashes --python-version 3.12 --python-platform x86_64-manylinux_2_28 \
 #     --index-url https://pypi.org/simple --extra-index-url https://download.pytorch.org/whl/cpu \
 #     --index-strategy unsafe-best-match --no-header -o requirements.txt   (then restore this header)
 annotated-doc==0.0.5 \
@@ -845,7 +845,7 @@ preshed==3.0.13 \
 presidio-analyzer==2.2.366 \
     --hash=sha256:0a83b224765cc3e796cd51aff60c62c75d8be60e8ed21aa08099da78ffbd62bf \
     --hash=sha256:ae5f29b92d3751521ecc6e5d59b93167381488692c371f9816af72681d3592a9
-    # via -r requirements.in
+    # via -r direct-requirements.txt
 protobuf==7.36.2 \
     --hash=sha256:497d0463ff3316681da6c0b9e8d06cb465d61abce00b613ab42226175644d1bb \
     --hash=sha256:89f23aa53c24553a2416fd4fd1ec06f74fa42b14b546d8883128813f775bbfd2 \
@@ -855,7 +855,7 @@ protobuf==7.36.2 \
     --hash=sha256:cbc70b17ee27e28894c7fee8bb04be1abead49e936bc70eb60052531eee2079e \
     --hash=sha256:e11e1f0180583a2af89db6a2ecd9e8dc40aa6d2988ca175bfd0e6d12ea72d74e \
     --hash=sha256:f4fee11ec330d238b34a05c9b675f693c20415d1c5bd7d5320cc2f8a798eb9cf
-    # via -r requirements.in
+    # via -r direct-requirements.txt
 pydantic==2.14.2 \
     --hash=sha256:7efbf7507b937931cd32a5755acb00ea1cf5ccb1d4e8067a5850d5069e382118 \
     --hash=sha256:fb7b2db6cefe8414dd612edeede49c4c433acb0432b0f92b95024e45f66c505d
@@ -1258,7 +1258,7 @@ safetensors==0.8.0 \
     --hash=sha256:fcdd41ec4628fee5799f807c73c353629130fbd942aa23d83c623dd6c9d52d78 \
     --hash=sha256:fd6f3f93c9a0a7cc2788ee63fb763353d4bd2e89b0751bc78fcf7dda00bea774
     # via
-    #   -r requirements.in
+    #   -r direct-requirements.txt
     #   transformers
 sentencepiece==0.2.2 \
     --hash=sha256:046b15ea22d8042e2e173561d464ec3b64a9c2081324df70ebce7bf7ebb3e497 \
@@ -1318,7 +1318,7 @@ sentencepiece==0.2.2 \
     --hash=sha256:f7c06c751c19d923435a54bff4f7e66e728fad160e8da28254f133abc9725820 \
     --hash=sha256:fa9f5ef0e2a82233dd0b8b32ea3f5710e0c44afbc07ed3620219f32601e56090 \
     --hash=sha256:fd523c4992041faa5c2b3cde62253d11a96c30d73a34afe48a486e8e2254cd1c
-    # via -r requirements.in
+    # via -r direct-requirements.txt
 setuptools==84.2.1 \
     --hash=sha256:3ff8b3b5492a0aa66960f4419365a86b84e013070d4313e4d4a6894f5d64d6bc \
     --hash=sha256:ca140b45d5325a9478f880e351484f62fef15f336462e449ca0c03c873d589c2
@@ -1384,7 +1384,7 @@ spacy==3.8.18 \
     --hash=sha256:f81338f47e6cb03c96713dcdc815de0fcc5b8b8fb65e1e2bb8b874a7ad71a257 \
     --hash=sha256:feba1ee7f17019724f521353c2b98e4c506b368eaf5ef26709904ebb9cdf306e
     # via
-    #   -r requirements.in
+    #   -r direct-requirements.txt
     #   presidio-analyzer
 spacy-legacy==3.0.12 \
     --hash=sha256:476e3bd0d05f8c339ed60f40986c07387c0a71479245d6d0f4298dbd52cda55f \
@@ -1586,7 +1586,7 @@ torch==2.15.0+cpu \
     --hash=sha256:ef810702df4dd70fe1b8ebee9e7394c6491f779841571a71433829e44927eaa5 \
     --hash=sha256:f089c94912c955269a20e5fee6b6a371209b610849c9ece26e908a748d87a723 \
     --hash=sha256:fe17318e964a6eb4b1380fd6dcd5405264af3e54b10bce7abcce5fa701a3f049
-    # via -r requirements.in
+    # via -r direct-requirements.txt
 tqdm==4.70.1 \
     --hash=sha256:c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73 \
     --hash=sha256:cefd0eca11b2a37a3aee776544d4f4ae913f02688135b5556b8788dfa474afc4
@@ -1597,7 +1597,7 @@ tqdm==4.70.1 \
 transformers==5.22.1 \
     --hash=sha256:bed9fd76d6f43b4a1a9fc5d0c565ace7c77edbd029784f8cbcdf772cb5e924d8 \
     --hash=sha256:c940b4bf98de4f568723895f330ba1460a398bd83061b93b70238c3fe32e4389
-    # via -r requirements.in
+    # via -r direct-requirements.txt
 truststore==0.10.5 \
     --hash=sha256:30d36967ccaded5cbb38d602c433f53600036c79d502f4533a49b60a03bbefcd \
     --hash=sha256:9aaaedaefaf06d8b206278cf8b5012bc897f485a874503501e12d776df78951c

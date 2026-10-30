@@ -1,7 +1,7 @@
 # Third-party content in the trained-detector image (ADR-0220, ADR-0176)
 
 Everything below is pinned: the Python closure by version and sha256 in `requirements.txt` (generated from
-`requirements.in` with `uv pip compile --generate-hashes`, linux x86_64, CPython 3.12), the model files by repository
+`direct-requirements.txt` with `uv pip compile --generate-hashes`, linux x86_64, CPython 3.12), the model files by repository
 revision and sha256 in `models.lock.json`. Nothing is downloaded at run time.
 
 ## Search record (open source first, ADR-0176)
