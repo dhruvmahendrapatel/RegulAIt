@@ -794,6 +794,8 @@ export async function downloadCsv(
   onError: (msg: string) => void,
   /** optional: the refusal in the caller's words (it knows the route's codes) */
   describe?: (status: number, body: { error?: string; detail?: string } | null) => string | null,
+  /** optional: read the successful response's headers (e.g. an export's disclosed row limit) */
+  onOk?: (res: Response) => void,
 ): Promise<boolean> {
   let res: Response;
   try {
@@ -809,6 +811,7 @@ export async function downloadCsv(
     onError(describe?.(res.status, body) ?? `Download failed (${res.status}${body?.error ? ` — ${body.error}` : ""})`);
     return false;
   }
+  onOk?.(res);
   let blob: Blob;
   try {
     blob = await res.blob();

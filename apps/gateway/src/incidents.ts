@@ -159,6 +159,17 @@ import { haltAgentInTx } from "./execution-control.js";
 import { lockEvidenceHoldsExclusive } from "./agent-evidence-hold.js";
 import { settingTransitions } from "./setting-transitions.js";
 import { stepUpRefusal } from "./step-up.js";
+import {
+  filterParams,
+  parseListExport,
+  parseListPage,
+  runListPage,
+  sendListError,
+  sendListExport,
+  wantsListContract,
+  type ListReader,
+  type ListSpec,
+} from "./list-contract.js";
 import { buildExportBundle, resolveExportSigningKey } from "./export-bundle.js";
 import { resolveLicense } from "./licensing.js";
 import { securityHeaders } from "./security-headers.js";
@@ -1205,15 +1216,77 @@ function timelineCsv(events: Array<{ at: string; kind: string; actorUserId: stri
 const idParam = z.object({ incidentId: z.string() });
 const actionParam = z.object({ incidentId: z.string(), actionId: z.string() });
 const notificationParam = z.object({ incidentId: z.string(), notificationId: z.string() });
-const listQuery = z
+const listFilters = z
   .object({
     status: z.enum(["open", "contained", "resolved", "closed", "active"]).optional(),
     severity: z.enum(["low", "medium", "high", "critical"]).optional(),
     serious: z.enum(["true", "false"]).optional(),
     useCaseId: z.string().uuid().optional(),
-    limit: z.coerce.number().int().min(1).max(500).default(200),
   })
   .strict();
+const listQuery = listFilters.extend({ limit: z.coerce.number().int().min(1).max(500).default(200) }).strict();
+
+/** one register row as the list returns it (ADR-0219 export reads the same shape) */
+interface IncidentListRow {
+  id: string;
+  ref: string;
+  title: string;
+  severity: string;
+  status: string;
+  serious: boolean;
+  detectionSource: string;
+  awareAt: string;
+  ownerUserId: string | null;
+  ownerName: string | null;
+  useCaseId: string | null;
+  useCaseName: string | null;
+  createdAt: string;
+  closedAt: string | null;
+  clocks: { total: number; open: number; overdue: number; nextDue: { paragraph: string; dueAt: string; urgency: string } | null };
+  actions: { open: number; overdue: number };
+}
+const SEVERITY_ORDER = sql`case ${aiIncidents.severity} when 'critical' then 4 when 'high' then 3 when 'medium' then 2 when 'low' then 1 end`;
+const STATUS_ORDER = sql`case ${aiIncidents.status} when 'open' then 1 when 'contained' then 2 when 'resolved' then 3 when 'closed' then 4 end`;
+const NEXT_CLOCK_DUE = sql`(select min(${aiIncidentNotifications.dueAt}) from ${aiIncidentNotifications} where ${aiIncidentNotifications.incidentId} = ${aiIncidents.id} and ${aiIncidentNotifications.status} in ('pending', 'sent_initial'))`;
+const OPEN_ACTIONS = sql`(select count(*) from ${aiIncidentActions} where ${aiIncidentActions.incidentId} = ${aiIncidents.id} and ${aiIncidentActions.status} = 'open')`;
+const OWNER_NAME = sql`(select lower(coalesce(nullif(${users.displayName}, ''), ${users.email})) from ${users} where ${users.id} = ${aiIncidents.ownerUserId})`;
+const isoDate = (v: string | null) => (v ? new Date(v) : null);
+/** ADR-0219: the incident register under the shared list contract */
+export const INCIDENTS_LIST: ListSpec<IncidentListRow> = {
+  id: "incidents",
+  sorts: {
+    ref: { expr: aiIncidents.ref },
+    sev: { expr: SEVERITY_ORDER },
+    status: { expr: STATUS_ORDER },
+    uc: { expr: sql`lower(${aiUseCases.name})` },
+    owner: { expr: OWNER_NAME },
+    clock: { expr: NEXT_CLOCK_DUE },
+    actions: { expr: OPEN_ACTIONS },
+    aware: { expr: aiIncidents.awareAt, keysetAt: aiIncidents.awareAt },
+    created: { expr: aiIncidents.createdAt, keysetAt: aiIncidents.createdAt },
+    detection: { expr: aiIncidents.detectionSource },
+    closed: { expr: aiIncidents.closedAt },
+  },
+  columns: {
+    ref: { label: "Incident", value: (r) => `${r.ref} ${r.title}` },
+    sev: { label: "Severity", value: (r) => (r.serious ? `${r.severity}, serious` : r.severity) },
+    status: { label: "Status", value: (r) => r.status },
+    uc: { label: "Use case", value: (r) => r.useCaseName },
+    owner: { label: "Owner", value: (r) => r.ownerName ?? "unassigned" },
+    clock: {
+      label: "Next clock",
+      value: (r) => (r.clocks.nextDue ? `${r.clocks.nextDue.paragraph}, ${r.clocks.nextDue.urgency}, due ${r.clocks.nextDue.dueAt}` : r.clocks.total ? "all final" : "none"),
+    },
+    actions: { label: "Actions", value: (r) => `${r.actions.open} open${r.actions.overdue ? `, ${r.actions.overdue} overdue` : ""}` },
+    aware: { label: "Aware", value: (r) => isoDate(r.awareAt) },
+    created: { label: "Reported", value: (r) => isoDate(r.createdAt) },
+    detection: { label: "Detected by", value: (r) => r.detectionSource },
+    closed: { label: "Closed", value: (r) => isoDate(r.closedAt) },
+  },
+  filters: ["status", "severity", "serious", "useCaseId"],
+  defaultSort: { col: "created", dir: "desc" },
+  idCol: aiIncidents.id,
+};
 const exportQuery = z.object({ format: z.enum(["bundle", "csv"]).default("bundle") }).strict();
 
 function send(reply: FastifyReply, e: unknown) {
@@ -1240,12 +1313,13 @@ function send(reply: FastifyReply, e: unknown) {
  */
 export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { dataKey?: string | undefined } = {}): void {
   // ---- list ---------------------------------------------------------------
-  app.get("/v1/incidents", async (req, reply) => {
-    const q = listQuery.parse(req.query ?? {});
+  // ADR-0219: the one predicate for the list, its count and the Excel export —
+  // the readers `accessTo` names, then the filters. null = a caller who may see none.
+  const incidentsScope = (req: FastifyRequest, q: z.infer<typeof listFilters>) => {
     const actor = actorOf(req);
     const conds = [];
     if (!actor.isAdmin) {
-      if (!actor.userId) return { incidents: [], scope: "none", disclaimer: INCIDENT_CLOCK_DISCLAIMER };
+      if (!actor.userId) return null;
       const me = actor.userId;
       const ownedUseCases = db.select({ id: aiUseCases.id }).from(aiUseCases).where(eq(aiUseCases.ownerUserId, me));
       // the same readers as `accessTo`: owner, reporter (D4A-07a), use-case
@@ -1258,7 +1332,10 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
     if (q.severity) conds.push(eq(aiIncidents.severity, q.severity));
     if (q.serious) conds.push(eq(aiIncidents.serious, q.serious === "true"));
     if (q.useCaseId) conds.push(eq(aiIncidents.useCaseId, q.useCaseId));
-    const rows = await db
+    return conds.length ? and(...conds) : undefined;
+  };
+  const incidentsBase = (cursorAt: SQL<string | null>) =>
+    db
       .select({
         id: aiIncidents.id,
         ref: aiIncidents.ref,
@@ -1274,12 +1351,12 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
         useCaseName: aiUseCases.name,
         createdAt: aiIncidents.createdAt,
         closedAt: aiIncidents.closedAt,
+        _cursorAt: cursorAt,
       })
       .from(aiIncidents)
-      .leftJoin(aiUseCases, eq(aiUseCases.id, aiIncidents.useCaseId))
-      .where(conds.length ? and(...conds) : undefined)
-      .orderBy(desc(aiIncidents.createdAt))
-      .limit(q.limit);
+      .leftJoin(aiUseCases, eq(aiUseCases.id, aiIncidents.useCaseId));
+  /** each row with its next clock, open actions and owner name, as the register shows it */
+  const enrichIncidents = async <R extends { id: string; ownerUserId: string | null; awareAt: Date; createdAt: Date; closedAt: Date | null }>(rows: R[]) => {
     const ids = rows.map((r) => r.id);
     const [clocks, actions] = ids.length
       ? await Promise.all([
@@ -1295,29 +1372,73 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
       : [[], []];
     const names = await namesOf(db, rows.map((r) => r.ownerUserId));
     const now = new Date();
+    return rows.map((r) => {
+      const mine = clocks.filter((c) => c.incidentId === r.id);
+      const open = mine.filter((c) => c.status === "pending" || c.status === "sent_initial").sort((a, b) => a.dueAt.getTime() - b.dueAt.getTime());
+      const next = open[0] ?? null;
+      const acts = actions.filter((a) => a.incidentId === r.id && a.status === "open");
+      return {
+        ...r,
+        awareAt: r.awareAt.toISOString(),
+        createdAt: r.createdAt.toISOString(),
+        closedAt: iso(r.closedAt),
+        ownerName: r.ownerUserId ? (names.get(r.ownerUserId) ?? null) : null,
+        clocks: {
+          total: mine.length,
+          open: open.length,
+          overdue: open.filter((c) => c.dueAt.getTime() <= now.getTime()).length,
+          nextDue: next
+            ? { clockId: next.clockId, paragraph: incidentClockById(next.clockId)?.paragraph ?? next.clockId, dueAt: next.dueAt.toISOString(), urgency: incidentClockUrgency(next, now) }
+            : null,
+        },
+        actions: { open: acts.length, overdue: acts.filter((a) => a.dueAt !== null && a.dueAt.getTime() < now.getTime()).length },
+      };
+    });
+  };
+  const incidentsReader: ListReader<IncidentListRow> = {
+    fetch: async (q) => {
+      const rows = await incidentsBase(q.cursorAt).where(q.where).orderBy(...q.orderBy).limit(q.limit).offset(q.offset);
+      return enrichIncidents(rows) as Promise<Array<IncidentListRow & { _cursorAt?: string | null }>>;
+    },
+    countable: (where) => db.select({ one: sql`1` }).from(aiIncidents).leftJoin(aiUseCases, eq(aiUseCases.id, aiIncidents.useCaseId)).where(where),
+    idOf: (r) => r.id,
+  };
+
+  app.get("/v1/incidents/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const filters = listFilters.parse(filterParams(q));
+      const ex = parseListExport(INCIDENTS_LIST, q);
+      const where = incidentsScope(req, filters);
+      // a caller who may see no incident gets an empty file, as the list answers an empty page
+      await sendListExport(db, req, reply, INCIDENTS_LIST, incidentsReader, where === null ? sql`false` : where, ex, filters);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+
+  app.get("/v1/incidents", async (req, reply) => {
+    const actor = actorOf(req);
+    if (wantsListContract(req.query)) {
+      try {
+        const q = (req.query ?? {}) as Record<string, unknown>;
+        const filters = listFilters.parse(filterParams(q));
+        const page = parseListPage(INCIDENTS_LIST, q);
+        const where = incidentsScope(req, filters);
+        const out = await runListPage(db, INCIDENTS_LIST, incidentsReader, where === null ? sql`false` : where, page);
+        return { ...out, scope: actor.isAdmin ? "all" : where === null ? "none" : "visible", disclaimer: INCIDENT_CLOCK_DISCLAIMER };
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
+    const q = listQuery.parse(req.query ?? {});
+    const where = incidentsScope(req, q);
+    if (where === null) return { incidents: [], scope: "none", disclaimer: INCIDENT_CLOCK_DISCLAIMER };
+    const rows = await incidentsBase(sql<string | null>`null`).where(where).orderBy(desc(aiIncidents.createdAt)).limit(q.limit);
+    const enriched = await enrichIncidents(rows.map(({ _cursorAt: _drop, ...r }) => r));
     return {
-      incidents: rows.map((r) => {
-        const mine = clocks.filter((c) => c.incidentId === r.id);
-        const open = mine.filter((c) => c.status === "pending" || c.status === "sent_initial").sort((a, b) => a.dueAt.getTime() - b.dueAt.getTime());
-        const next = open[0] ?? null;
-        const acts = actions.filter((a) => a.incidentId === r.id && a.status === "open");
-        return {
-          ...r,
-          awareAt: r.awareAt.toISOString(),
-          createdAt: r.createdAt.toISOString(),
-          closedAt: iso(r.closedAt),
-          ownerName: r.ownerUserId ? (names.get(r.ownerUserId) ?? null) : null,
-          clocks: {
-            total: mine.length,
-            open: open.length,
-            overdue: open.filter((c) => c.dueAt.getTime() <= now.getTime()).length,
-            nextDue: next
-              ? { clockId: next.clockId, paragraph: incidentClockById(next.clockId)?.paragraph ?? next.clockId, dueAt: next.dueAt.toISOString(), urgency: incidentClockUrgency(next, now) }
-              : null,
-          },
-          actions: { open: acts.length, overdue: acts.filter((a) => a.dueAt !== null && a.dueAt.getTime() < now.getTime()).length },
-        };
-      }),
+      incidents: enriched,
       scope: actor.isAdmin ? "all" : "visible",
       disclaimer: INCIDENT_CLOCK_DISCLAIMER,
     };

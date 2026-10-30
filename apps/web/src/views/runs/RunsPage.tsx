@@ -34,14 +34,15 @@ import {
   Button,
   Card,
   EmptyState,
-  ErrorState,
   Field,
+  IdChip,
   Input,
   Select,
   StatusBadge,
   Table,
   Textarea,
 } from "../../ui/kit";
+import { DataList, type DataColumn } from "../../ui/DataList";
 import { useToast } from "../../ui/toast";
 import v from "../views.module.css";
 
@@ -135,6 +136,49 @@ export const RUN_TEMPLATES: Array<{ id: string; label: string; nodes: TemplateNo
   },
 ];
 
+const runProgress = (r: RunSummary) => {
+  const st = r.state?.nodeStatuses ?? {};
+  return { total: Object.keys(st).length, done: Object.values(st).filter((x) => x === "done").length };
+};
+
+/** ADR-0219: the runs list's columns; the ids and sortable ones match the gateway's RUNS_LIST */
+export const RUN_COLUMNS: Array<DataColumn<RunSummary>> = [
+  { key: "name", header: "Run", main: true, sortable: true, render: (r) => <span style={{ fontWeight: 550 }}>{r.name}</span> },
+  { key: "status", header: "Status", main: true, sortable: true, required: "Status is always shown", render: (r) => <StatusBadge status={r.status} /> },
+  {
+    key: "progress",
+    header: "Progress",
+    main: true,
+    align: "right",
+    render: (r) => {
+      const p = runProgress(r);
+      return (
+        <span className={v.num}>
+          {p.done}/{p.total} nodes
+        </span>
+      );
+    },
+  },
+  {
+    key: "spend",
+    header: "Measured spend",
+    main: true,
+    sortable: true,
+    align: "right",
+    render: (r) => <span className={v.num}>{fmtUsd(r.budget?.measuredSpentUsd ?? 0)}</span>,
+  },
+  { key: "created", header: "Created", main: true, sortable: true, render: (r) => <span className={v.faint}>{ago(r.createdAt)}</span> },
+  {
+    key: "cap",
+    header: "Budget cap",
+    sortable: true,
+    align: "right",
+    render: (r) => (r.budget?.capUsd == null ? <span className={v.faint}>—</span> : <span className={v.num}>{fmtUsd(r.budget.capUsd)}</span>),
+  },
+  { key: "project", header: "Project", sortable: true, render: (r) => (r.projectId ? <IdChip id={r.projectId} /> : <span className={v.faint}>—</span>) },
+  { key: "id", header: "Run id", sortable: true, render: (r) => <IdChip id={r.id} /> },
+];
+
 export default function RunsPage() {
   const { auth } = useSession();
   const { toast } = useToast();
@@ -142,10 +186,8 @@ export default function RunsPage() {
   const queryClient = useQueryClient();
   const userId = auth?.userId ?? null;
 
-  const runsQ = useQuery({
-    queryKey: ["runs"],
-    queryFn: () => api.get<{ runs: RunSummary[] }>("/v1/runs"),
-  });
+  const [statusFilter, setStatusFilter] = useState("");
+  const runFilters = useMemo(() => ({ status: statusFilter || undefined }), [statusFilter]);
   const agentsQ = useQuery({
     queryKey: ["my-agents", userId],
     enabled: Boolean(userId),
@@ -410,70 +452,42 @@ export default function RunsPage() {
         </Card>
 
         <Card title="Your runs" flush>
-          {runsQ.isError ? (
-            <ErrorState
-              message={(runsQ.error as Error).message}
-              onRetry={() => void runsQ.refetch()}
-            />
-          ) : (
-            <Table
-              columns={[
-                {
-                  key: "name",
-                  header: "Run",
-                  render: (r: RunSummary) => <span style={{ fontWeight: 550 }}>{r.name}</span>,
-                  sort: (r) => r.name.toLowerCase(),
-                },
-                {
-                  key: "status",
-                  header: "Status",
-                  render: (r) => <StatusBadge status={r.status} />,
-                  sort: (r) => r.status,
-                },
-                {
-                  key: "progress",
-                  header: "Progress",
-                  align: "right",
-                  render: (r) => {
-                    const st = r.state?.nodeStatuses ?? {};
-                    const total = Object.keys(st).length;
-                    const done = Object.values(st).filter((x) => x === "done").length;
-                    return (
-                      <span className={v.num}>
-                        {done}/{total} nodes
-                      </span>
-                    );
-                  },
-                },
-                {
-                  key: "spend",
-                  header: "Measured spend",
-                  align: "right",
-                  render: (r) => <span className={v.num}>{fmtUsd(r.budget?.measuredSpentUsd ?? 0)}</span>,
-                  sort: (r) => r.budget?.measuredSpentUsd ?? 0,
-                },
-                {
-                  key: "created",
-                  header: "Created",
-                  render: (r) => <span className={v.faint}>{ago(r.createdAt)}</span>,
-                  sort: (r) => r.createdAt,
-                },
-              ]}
-              rows={runsQ.data?.runs}
-              rowKey={(r) => r.id}
-              loading={runsQ.isLoading}
-              error={runsQ.error}
-              onRetry={() => void runsQ.refetch()}
-              onRowClick={(r) => navigate(`/runs/${r.id}`)}
-              rowLabel={(r) => `Open run ${r.name}`}
-              empty={
+          <div className={v.row} style={{ padding: "var(--s1) var(--s2) 0" }}>
+            <Field label="Status">
+              <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+                <option value="">Any</option>
+                <option value="planned">Planned</option>
+                <option value="running">Running</option>
+                <option value="completed">Completed</option>
+                <option value="aborted">Aborted</option>
+              </Select>
+            </Field>
+          </div>
+          <DataList<RunSummary>
+            listId="runs"
+            noun="runs"
+            endpoint="/v1/runs"
+            exportPath="/v1/runs/export.xlsx"
+            queryKey={["runs", "list"]}
+            legacyKey="runs"
+            count="estimate"
+            filters={runFilters}
+            defaultSort={{ key: "created", dir: "desc" }}
+            columns={RUN_COLUMNS}
+            rowKey={(r) => r.id}
+            onRowClick={(r) => navigate(`/runs/${r.id}`)}
+            rowLabel={(r) => `Open run ${r.name}`}
+            empty={
+              statusFilter ? (
+                <EmptyState title="No runs match" body="No run has this status. Choose another status or Any." />
+              ) : (
                 <EmptyState
                   title="No runs yet"
                   body="Plan one above — independent branches dispatch in parallel, every node under your entitlements and budget."
                 />
-              }
-            />
-          )}
+              )
+            }
+          />
         </Card>
       </div>
     </>

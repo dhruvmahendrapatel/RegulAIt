@@ -1,0 +1,170 @@
+/* The shared list control (DataList.tsx, ADR-0219). Tokens only: spacing from the --s scale, colour from --rg-* and
+   the kit aliases. */
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  min-width: 0;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1);
+  padding: var(--s1) var(--s2) 0;
+}
+
+.grow {
+  flex: 1 1 auto;
+}
+
+.sizeLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+}
+
+.sizeSelect {
+  inline-size: auto;
+}
+
+.status {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.tipWrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.iconBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* 32 px: above the 24 px floor; 44 px under a coarse pointer below */
+  inline-size: 2rem;
+  block-size: 2rem;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.iconBtn svg {
+  inline-size: 1rem;
+  block-size: 1rem;
+  stroke: currentColor;
+}
+.iconBtn:hover {
+  color: var(--rg-signal);
+  background: var(--rg-signal-tint);
+}
+.iconBtn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.iconBtn[aria-busy="true"] svg {
+  opacity: 0.6;
+}
+@media (pointer: coarse) {
+  .iconBtn {
+    inline-size: 2.75rem;
+    block-size: 2.75rem;
+  }
+}
+
+/* the tip shows on hover and on keyboard focus alike, and Escape hides it (tipQuiet) without moving focus */
+.tip {
+  position: absolute;
+  z-index: 40;
+  inset-block-start: calc(100% + var(--s0));
+  inset-inline-end: 0;
+  inline-size: max-content;
+  max-inline-size: 16rem;
+  padding: var(--s0) var(--s1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--text);
+  box-shadow: var(--rg-shadow-lg);
+  font-size: var(--text-xs);
+  pointer-events: none;
+  visibility: hidden;
+}
+.tipWrap:hover .tip,
+.tipWrap:focus-within .tip {
+  visibility: visible;
+}
+.tipQuiet .tip,
+.tipQuiet:hover .tip,
+.tipQuiet:focus-within .tip {
+  visibility: hidden;
+}
+
+.capNote {
+  margin: 0 var(--s2);
+  font-size: var(--text-sm);
+  color: var(--text);
+}
+
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--s1);
+  padding: 0 var(--s2) var(--s1);
+  min-block-size: var(--s1);
+}
+
+.pickerNote {
+  margin: 0 0 var(--s1);
+}
+
+.pickerList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s0);
+}
+
+.pickerRow {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  min-block-size: 2rem;
+}
+
+.pickerBox {
+  inline-size: 1.125rem;
+  block-size: 1.125rem;
+  margin: 0;
+  flex: none;
+}
+.pickerBox:focus-visible {
+  outline: 2px solid var(--rg-signal-ring);
+  outline-offset: 2px;
+}
+
+.pickerLabel {
+  flex: 1 1 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--s1);
+  color: var(--text);
+}
+
+.pickerWhy {
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+}

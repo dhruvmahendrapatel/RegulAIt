@@ -1,4 +1,15 @@
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import {
+  filterParams,
+  parseListExport,
+  parseListPage,
+  runListPage,
+  sendListError,
+  sendListExport,
+  wantsListContract,
+  type ListReader,
+  type ListSpec,
+} from "./list-contract.js";
 import {
   agentGrants,
   agents,
@@ -9,6 +20,7 @@ import {
   costEvents,
   desc,
   eq,
+  getTableColumns,
   inArray,
   mcpTools,
   orchestrationRunEvents,
@@ -1701,6 +1713,48 @@ export const ORCHESTRATION_FEATURE: ModelPolicyGate = { feature: "orchestration"
  */
 /** REL-10: the list bounds for GET /v1/runs */
 export const RUNS_LIST_DEFAULT_LIMIT = 200;
+
+type RunStatus = "planned" | "running" | "completed" | "aborted";
+const runsFilterQuery = z.object({ status: z.enum(["planned", "running", "completed", "aborted"]).optional() }).strict();
+const jsonNum = (key: string) =>
+  sql`case when jsonb_typeof(${orchestrationRuns.budget}->${key}) = 'number' then (${orchestrationRuns.budget}->>${key})::numeric end`;
+const budgetNum = (r: RunRow, key: "measuredSpentUsd" | "capUsd"): number | null => {
+  const v = (r.budget as Record<string, unknown> | null)?.[key];
+  return typeof v === "number" ? v : null;
+};
+/** ADR-0219: the runs list under the shared contract (sortable columns, export columns, default sort) */
+export const RUNS_LIST: ListSpec<RunRow> = {
+  id: "runs",
+  sorts: {
+    name: { expr: sql`lower(${orchestrationRuns.name})` },
+    status: { expr: orchestrationRuns.status },
+    spend: { expr: sql`coalesce(${jsonNum("measuredSpentUsd")}, 0)` },
+    created: { expr: orchestrationRuns.createdAt, keysetAt: orchestrationRuns.createdAt },
+    cap: { expr: jsonNum("capUsd") },
+    project: { expr: orchestrationRuns.projectId },
+    id: { expr: orchestrationRuns.id },
+  },
+  columns: {
+    name: { label: "Run", value: (r) => r.name },
+    status: { label: "Status", value: (r) => r.status },
+    progress: {
+      label: "Progress",
+      value: (r) => {
+        const st = ((r.state as { nodeStatuses?: Record<string, string> } | null)?.nodeStatuses ?? {}) as Record<string, string>;
+        const total = Object.keys(st).length;
+        return `${Object.values(st).filter((x) => x === "done").length}/${total} nodes`;
+      },
+    },
+    spend: { label: "Measured spend", value: (r) => budgetNum(r, "measuredSpentUsd") ?? 0 },
+    created: { label: "Created", value: (r) => r.createdAt },
+    cap: { label: "Budget cap", value: (r) => budgetNum(r, "capUsd") },
+    project: { label: "Project", value: (r) => r.projectId },
+    id: { label: "Run id", value: (r) => r.id },
+  },
+  filters: ["status"],
+  defaultSort: { col: "created", dir: "desc" },
+  idCol: orchestrationRuns.id,
+};
 export const RUNS_LIST_MAX_LIMIT = 1_000;
 
 export async function chargeRunEstimate(dbx: DbOrTx, runId: string, deltaUsd: number): Promise<void> {
@@ -2972,7 +3026,58 @@ export function registerOrchestrationRoutes(
   // and the list used to be the whole table on every open of the Runs page.
   // Newest first, `limit` (default RUNS_LIST_DEFAULT_LIMIT, max
   // RUNS_LIST_MAX_LIMIT); `status` narrows before the cap applies.
+  //
+  // ADR-0219: with any of sort/dir/cursor/offset/count it answers the shared
+  // list contract instead (list-contract.ts); with none of them, exactly the
+  // response it always gave. The scope below is the one predicate for the
+  // list, its count and the Excel export.
+  const runsScope = (req: FastifyRequest, status: RunStatus | undefined) => {
+    const conditions = [];
+    if (status) conditions.push(eq(orchestrationRuns.status, status));
+    if (!req.authCtx.isAdmin) {
+      if (!req.authCtx.userId) return null;
+      conditions.push(eq(orchestrationRuns.initiatingUserId, req.authCtx.userId));
+    }
+    return conditions.length ? and(...conditions) : undefined;
+  };
+  const runsReader: ListReader<RunRow> = {
+    fetch: (q) =>
+      db
+        .select({ ...getTableColumns(orchestrationRuns), _cursorAt: q.cursorAt })
+        .from(orchestrationRuns)
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset),
+    countable: (where) => db.select({ one: sql`1` }).from(orchestrationRuns).where(where),
+    idOf: (r) => r.id,
+  };
+  app.get("/v1/runs/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const { status } = runsFilterQuery.parse(filterParams(q));
+      const ex = parseListExport(RUNS_LIST, q);
+      const where = runsScope(req, status);
+      if (where === null) return reply.status(403).send({ error: "bootstrap_has_no_runs" });
+      await sendListExport(db, req, reply, RUNS_LIST, runsReader, where, ex, { ...(status ? { status } : {}) });
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
   app.get("/v1/runs", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      try {
+        const q = req.query as Record<string, unknown>;
+        const { status } = runsFilterQuery.parse(filterParams(q));
+        const page = parseListPage(RUNS_LIST, q);
+        const where = runsScope(req, status);
+        if (where === null) return reply.status(403).send({ error: "bootstrap_has_no_runs" });
+        return await runListPage(db, RUNS_LIST, runsReader, where, page);
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
     const { status, limit } = z
       .object({
         status: z.enum(["planned", "running", "completed", "aborted"]).optional(),

@@ -6,7 +6,7 @@
  * reveal, revoke), and the per-user overrides (MCP / agent / connector
  * revocations) that beat every grant.
  */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
@@ -35,13 +35,17 @@ import {
   EmptyState,
   Field,
   Input,
+  IdChip,
   Select,
   Table,
   Tabs,
 } from "../../../ui/kit";
+import { DataList, type DataColumn } from "../../../ui/DataList";
+import { normalisePage } from "../../../ui/listState";
 import {
   QueryGate,
   ReasonModal,
+  adminKeys,
   RevealCard,
   agentOpts,
   connectorOpts,
@@ -58,9 +62,64 @@ import {
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
+/** ADR-0219: the users list's columns; the ids and sortable ones match the gateway's USERS_LIST */
+export const USER_COLUMNS: Array<DataColumn<AdminUser>> = [
+  {
+    key: "name",
+    header: "Name",
+    main: true,
+    sortable: true,
+    render: (u) => <span className={u.disabledAt ? v.faint : undefined}>{u.displayName || "—"}</span>,
+  },
+  { key: "email", header: "Email", main: true, sortable: true, render: (u) => u.email },
+  { key: "role", header: "Role", main: true, sortable: true, render: (u) => (u.isAdmin ? <Badge tone="primary">admin</Badge> : <Badge>member</Badge>) },
+  {
+    key: "signIn",
+    header: "Sign-in",
+    main: true,
+    render: (u) => (u.hasPassword ? (u.mustChangePassword ? "one-time pw" : "password") : "no password"),
+  },
+  { key: "mfa", header: "MFA", main: true, sortable: true, render: (u) => (u.totpEnabled ? "TOTP" : "—") },
+  {
+    key: "status",
+    header: "Status",
+    main: true,
+    sortable: true,
+    required: "Status is always shown",
+    render: (u) => (u.disabledAt ? <Badge tone="danger">disabled</Badge> : <Badge tone="ok">active</Badge>),
+  },
+  { key: "created", header: "Created", main: true, sortable: true, render: (u) => ago(u.createdAt) },
+  { key: "username", header: "Username", sortable: true, render: (u) => u.username ?? <span className={v.faint}>—</span> },
+  { key: "id", header: "User id", render: (u) => <IdChip id={u.id} /> },
+];
+
+/** the active admins, for the last-admin guard: a count from the server, not from the page on screen */
+function useActiveAdmins() {
+  return useQuery({
+    queryKey: [...adminKeys.users, "active-admins"],
+    queryFn: async () => {
+      const page = normalisePage<AdminUser>(await api.get<unknown>("/v1/users?limit=10&count=exact&role=admin&status=active&sort=created"), "users");
+      // an older gateway answers the whole list with no total: count it as before
+      return page.total ?? page.items.filter((u) => u.isAdmin && !u.disabledAt).length;
+    },
+  });
+}
+
 export default function UsersPage() {
-  const users = useUsers();
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [pageRows, setPageRows] = useState<AdminUser[]>([]);
+  const [picked, setPicked] = useState<AdminUser | null>(null);
+  const selectedId = picked?.id ?? null;
+  const admins = useActiveAdmins();
+  const [search, setSearch] = useState("");
+  const [q, setQ] = useState("");
+  const [role, setRole] = useState("");
+  const [status, setStatus] = useState("");
+  // the search runs on the server, a moment after typing stops
+  useEffect(() => {
+    const t = window.setTimeout(() => setQ(search.trim()), 300);
+    return () => window.clearTimeout(t);
+  }, [search]);
+  const filters = useMemo(() => ({ q: q || undefined, role: role || undefined, status: status || undefined }), [q, role, status]);
   const [reveal, setReveal] = useState<RevealedSecret | null>(null);
   const create = useAction();
   const act = useAction();
@@ -77,9 +136,9 @@ export default function UsersPage() {
   } | null>(null);
   const [mfaClearFor, setMfaClearFor] = useState<AdminUser | null>(null);
 
-  const rows = users.data?.users ?? [];
-  const activeAdmins = rows.filter((u) => u.isAdmin && !u.disabledAt).length;
-  const selected = rows.find((u) => u.id === selectedId) ?? null;
+  const activeAdmins = admins.data ?? 0;
+  // the selected person as last loaded: fresh from the page on screen, kept when they page out of view
+  const selected = (selectedId ? pageRows.find((u) => u.id === selectedId) : null) ?? picked;
 
   const issuePassword = async (u: AdminUser, force: boolean) => {
     await act.run(async () => {
@@ -167,48 +226,46 @@ export default function UsersPage() {
         </Card>
 
         <Card flush>
-          <Table<AdminUser>
-            columns={[
-              {
-                key: "name",
-                header: "Name",
-                sort: (u) => u.displayName || u.email,
-                render: (u) => (
-                  <span className={u.disabledAt ? v.faint : undefined}>{u.displayName || "—"}</span>
-                ),
-              },
-              { key: "email", header: "Email", sort: (u) => u.email, render: (u) => u.email },
-              {
-                key: "role",
-                header: "Role",
-                sort: (u) => (u.isAdmin ? 0 : 1),
-                render: (u) =>
-                  u.isAdmin ? <Badge tone="primary">admin</Badge> : <Badge>member</Badge>,
-              },
-              {
-                key: "signIn",
-                header: "Sign-in",
-                render: (u) =>
-                  u.hasPassword ? (u.mustChangePassword ? "one-time pw" : "password") : "no password",
-              },
-              { key: "mfa", header: "MFA", render: (u) => (u.totpEnabled ? "TOTP" : "—") },
-              {
-                key: "status",
-                header: "Status",
-                sort: (u) => (u.disabledAt ? 1 : 0),
-                render: (u) =>
-                  u.disabledAt ? <Badge tone="danger">disabled</Badge> : <Badge tone="ok">active</Badge>,
-              },
-              { key: "created", header: "Created", sort: (u) => u.createdAt, render: (u) => ago(u.createdAt) },
-            ]}
-            rows={rows}
+          <div className={a.formRow} style={{ padding: "var(--s1) var(--s2) 0" }}>
+            <Field label="Search">
+              <Input type="search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Name, email or username" />
+            </Field>
+            <Field label="Role">
+              <Select value={role} onChange={(e) => setRole(e.target.value)}>
+                <option value="">Any</option>
+                <option value="admin">admin</option>
+                <option value="member">member</option>
+              </Select>
+            </Field>
+            <Field label="Status">
+              <Select value={status} onChange={(e) => setStatus(e.target.value)}>
+                <option value="">Any</option>
+                <option value="active">active</option>
+                <option value="disabled">disabled</option>
+              </Select>
+            </Field>
+          </div>
+          <DataList<AdminUser>
+            listId="users"
+            noun="users"
+            endpoint="/v1/users"
+            exportPath="/v1/users/export.xlsx"
+            queryKey={[...adminKeys.users, "list"]}
+            legacyKey="users"
+            filters={filters}
+            defaultSort={{ key: "created", dir: "asc" }}
+            columns={USER_COLUMNS}
             rowKey={(u) => u.id}
-            loading={users.isLoading}
-            error={users.error}
-            onRetry={() => void users.refetch()}
-            onRowClick={(u) => setSelectedId(u.id === selectedId ? null : u.id)}
+            onRowClick={(u) => setPicked(u.id === selectedId ? null : u)}
             rowLabel={(u) => `Manage ${u.displayName || u.email}`}
-            empty={<EmptyState title="No users yet" body="Create the first developer account above." />}
+            onRows={(rows) => setPageRows(rows)}
+            empty={
+              q || role || status ? (
+                <EmptyState title="No users match" body="Nothing matches this search and these filters." />
+              ) : (
+                <EmptyState title="No users yet" body="Create the first developer account above." />
+              )
+            }
           />
         </Card>
 
