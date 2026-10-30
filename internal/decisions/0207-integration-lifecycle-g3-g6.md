@@ -107,7 +107,7 @@ same transaction as their write. A refusal has its own code. No response or audi
 - 0219–0221 are hand-written (never `drizzle-kit generate`), with journal `when` = 1785149000000 + (N − 214) × 1,000,000.
   0222 is left unused. The two `disabled_reason` columns are registered in `prose-scrub.ts` (ADR-0102).
 - The UI calls each route literally (so the route census and affordance parity see them), and the edit, token and
-  rotation dialogs load lazily from one module. All JS rises from 1,050 kB to 1,055 kB (ADR-0196 addendum, citing
+  rotation dialogs load lazily from one module. All JS rises from 1,050 kB to 1,056 kB (ADR-0196 addendum, citing
   c6522492997); entry ceilings are unchanged.
 - Open source first (ADR-0176): no library fits a governance lifecycle rule; these routes reuse Fastify, drizzle, zod
   and the existing step-up, egress and audit helpers.
