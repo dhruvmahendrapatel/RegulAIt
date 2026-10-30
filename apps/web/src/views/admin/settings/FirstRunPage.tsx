@@ -30,7 +30,7 @@ import { api } from "../../../api/client";
 import { withStepUp } from "../../../stepup/stepUp";
 import { humanize } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, Field, Meter, Select, Textarea } from "../../../ui/kit";
+import { Badge, Button, Card, Field, InfoButton, Meter, Select, Textarea } from "../../../ui/kit";
 import { QueryGate } from "../adminKit";
 import v from "../../views.module.css";
 import { GroupRoleImportCard, ImportHistoryCard } from "./OnboardingImportsCards";
@@ -154,15 +154,15 @@ export default function FirstRunPage() {
                   {d.satisfiedCount} / {d.totalCount} verified live
                 </Badge>
                 {d.resumeAt && <Badge tone="warn">Resume at: {d.steps.find((s) => s.key === d.resumeAt)?.title ?? humanize(d.resumeAt)}</Badge>}
+                <InfoButton label="the two progress numbers">
+                  Two numbers, deliberately. The first is what an admin recorded; the second is what the
+                  deployment currently says when asked. A step marked done whose provider was later removed
+                  shows as drift rather than staying green.
+                </InfoButton>
               </div>
               <div style={{ margin: "var(--s2) 0" }}>
                 <Meter value={d.satisfiedCount} max={d.totalCount} label="verified setup progress" />
               </div>
-              <p className={v.faint}>
-                Two numbers, deliberately. The first is what an admin recorded; the second is what the
-                deployment currently says when asked. A step marked done whose provider was later removed
-                shows as drift rather than staying green.
-              </p>
             </Card>
 
             {d.steps.map((s) => {
@@ -174,14 +174,14 @@ export default function FirstRunPage() {
                 <Card key={s.key}>
                   <div className={v.row}>
                     <strong style={{ fontSize: "var(--text-sm)" }}>{s.title}</strong>
+                    {s.why ? <InfoButton label={s.title}>{s.why}</InfoButton> : null}
                     <Badge tone={tone(s)}>{humanize(s.status)}</Badge>
                     <Badge tone={s.satisfied ? "ok" : "neutral"}>
                       {s.satisfied ? "Verified live" : "Not verified"}
                     </Badge>
-                    {s.drift && <Badge tone="danger" title="Recorded done, but the deployment no longer satisfies it">Drift</Badge>}
+                    {s.drift && <Badge tone="danger" infoLabel="drift" info={<p>Recorded done, but the deployment no longer satisfies it.</p>}>Drift</Badge>}
                     {blocked && <Badge tone="warn">Blocked by {s.blockedBy.map(titleOf).join(", ")}</Badge>}
                   </div>
-                  <div className={v.dim}>{s.why}</div>
                   {lines.length > 0 && (
                     <ul className={v.faint} style={{ margin: 0, paddingLeft: "var(--s3)" }} data-testid="step-evidence">
                       {lines.map((line) => (

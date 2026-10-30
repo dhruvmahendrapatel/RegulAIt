@@ -92,9 +92,6 @@
     "apps/web/src/views/admin/integrations/AgentsPage.tsx": {
       "ts-spacing-literal": 2
     },
-    "apps/web/src/views/admin/integrations/EngineSchedulesCard.tsx": {
-      "ts-spacing-literal": 1
-    },
     "apps/web/src/views/admin/integrations/EnginesPage.tsx": {
       "ts-spacing-literal": 2
     },
@@ -111,7 +108,7 @@
       "ts-spacing-literal": 4
     },
     "apps/web/src/views/admin/integrations/customProviders.module.css": {
-      "declaration-property-unit-disallowed-list": 6
+      "declaration-property-unit-disallowed-list": 5
     },
     "apps/web/src/views/admin/llm/RegulAItLlmPage.tsx": {
       "ts-spacing-literal": 2
@@ -156,7 +153,7 @@
       "ts-spacing-literal": 7
     },
     "apps/web/src/views/builder/BuilderPlaygroundPage.tsx": {
-      "ts-spacing-literal": 14
+      "ts-spacing-literal": 13
     },
     "apps/web/src/views/builder/BuilderPromptDetailPage.tsx": {
       "ts-spacing-literal": 22

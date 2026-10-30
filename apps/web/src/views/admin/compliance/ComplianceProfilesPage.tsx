@@ -109,7 +109,16 @@ function UpsertProfileCard(props: { templates: WorkflowTemplate[] }) {
   const set = (k: keyof typeof f, val: string | string[]) => setF((s) => ({ ...s, [k]: val }));
   const tplOpts = props.templates.filter((t) => !t.retiredAt);
   return (
-    <Card title="Define or update a profile (upsert by tag)">
+    <Card
+      title="Define or update a profile (upsert by tag)"
+      info={
+        <p>
+          Posting an existing tag updates the profile in place — every classified project immediately
+          inherits the new cascade. Retention floors compose longest-wins across profiles; patch cadence
+          composes shortest-wins.
+        </p>
+      }
+    >
       <form
         className={a.formRow}
         onSubmit={(e) => {
@@ -184,11 +193,6 @@ function UpsertProfileCard(props: { templates: WorkflowTemplate[] }) {
           </span>
         )}
       </form>
-      <p className={v.faint}>
-        Posting an existing tag updates the profile in place — every classified project immediately
-        inherits the new cascade. Retention floors compose longest-wins across profiles; patch cadence
-        composes shortest-wins.
-      </p>
     </Card>
   );
 }

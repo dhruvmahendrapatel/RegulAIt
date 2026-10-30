@@ -25,7 +25,7 @@ import { resyncOutcomeText, resyncRefusalText, resyncUseCase } from "./useCaseRe
 import { api } from "../../../api/client";
 import { fmtUsd, ago, plural } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, InfoButton } from "../../../ui/kit";
 import { QueryGate } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
@@ -131,16 +131,21 @@ interface PostureDoc {
 
 const pct = (x: number | null | undefined) => (x == null ? "—" : `${Math.round(x * 100)}%`);
 
-/** headline figure + its plain-language line — the board-shaped unit */
-function Headline(props: { value: React.ReactNode; label: string; line: React.ReactNode }) {
+/** headline figure + label — the board-shaped unit; its plain-language line is the label's (i), and the operator
+ * detail link and any honesty chip stay visible */
+function Headline(props: { value: React.ReactNode; label: string; line: React.ReactNode; link: React.ReactNode; chip?: React.ReactNode }) {
   return (
     <Card>
       <div className={v.stack}>
         <div>
           <div className={p.headline}>{props.value}</div>
-          <div className={v.statLabel}>{props.label}</div>
+          <div className={v.statLabel}>
+            {props.label}
+            <InfoButton label={props.label}>{props.line}</InfoButton>
+          </div>
         </div>
-        <div className={p.oneLiner}>{props.line}</div>
+        {props.chip ? <div>{props.chip}</div> : null}
+        <div className={p.oneLiner}>{props.link}</div>
       </div>
     </Card>
   );
@@ -315,7 +320,6 @@ export default function PosturePage() {
     <>
       <PageHeader
         title="Posture"
-        sub="The one-page executive read of what the operator pages hold."
         info={<p>The one-page executive read of everything the operator pages hold: pack coverage, open risks, red-team posture, spend vs budget, governance activity, audit anchoring and the use-case pipeline. Every number is computed from the real ledgers at the moment this page loads — nothing is a stored rollup — and where a ledger is empty the page says unmeasured, never zero-implies-good. Print this page for the meeting: the browser's print view drops the app chrome.</p>}
         actions={
           <span className={p.noPrint}>
@@ -343,24 +347,26 @@ export default function PosturePage() {
                 }
                 line={
                   d.packs.active.length === 0 ? (
-                    <>No compliance pack is active, so control coverage is unmeasured here — not satisfied. <SectionLink to="/admin/compliance-packs" /></>
+                    <>No compliance pack is active, so control coverage is unmeasured here — not satisfied.</>
                   ) : (
-                    <>Share of mapped controls with current ledger evidence or a live attestation — a coverage count, never a compliance verdict. <SectionLink to="/admin/compliance-packs" /></>
+                    <>Share of mapped controls with current ledger evidence or a live attestation — a coverage count, never a compliance verdict.</>
                   )
                 }
+                link={<SectionLink to="/admin/compliance-packs" />}
               />
               <Headline
                 value={d.risks.open + d.risks.mitigating}
                 label="open + mitigating risks"
                 line={
                   <>
-                    {d.risks.open} open, {d.risks.mitigating} being mitigated, {d.risks.accepted} formally accepted.{" "}
+                    {d.risks.open} open, {d.risks.mitigating} being mitigated, {d.risks.accepted} formally accepted.
                     {d.risks.attestationOnly > 0 && (
-                      <>{d.risks.attestationOnly} rest on attestation only — no ledger measures them.{" "}</>
+                      <> {d.risks.attestationOnly} rest on attestation only — no ledger measures them.</>
                     )}
-                    <SectionLink to="/admin/risks" />
                   </>
                 }
+                chip={d.risks.attestationOnly > 0 ? <Badge>{`${d.risks.attestationOnly} attestation only`}</Badge> : null}
+                link={<SectionLink to="/admin/risks" />}
               />
               <Headline
                 value={d.redteam.measured && d.redteam.latest ? pct(d.redteam.latest.asr) : "unmeasured"}
@@ -371,14 +377,13 @@ export default function PosturePage() {
                       Against '{d.redteam.latest.agentName}' {ago(d.redteam.latest.startedAt)}: {pct(d.redteam.latest.asr)} of{" "}
                       {d.redteam.latest.asrTrials} trials succeeded (95% interval {pct(d.redteam.latest.asrLower)}–{pct(d.redteam.latest.asrUpper)},
                       quality: {d.redteam.latest.measurementQuality ?? "unlabelled"}); the platform itself stopped{" "}
-                      {plural(d.redteam.latest.platformHeld, "induced call")}. <SectionLink to="/admin/redteam" />
+                      {plural(d.redteam.latest.platformHeld, "induced call")}.
                     </>
                   ) : (
-                    <>
-                      {d.redteam.note}. An untested surface is unmeasured, not resisted. <SectionLink to="/admin/redteam" />
-                    </>
+                    <>{d.redteam.note}. An untested surface is unmeasured, not resisted.</>
                   )
                 }
+                link={<SectionLink to="/admin/redteam" />}
               />
               <Headline
                 value={fmtUsd(d.spend.totalCostUsd)}
@@ -386,24 +391,28 @@ export default function PosturePage() {
                 line={
                   <>
                     {d.spend.events.toLocaleString()} metered calls; {plural(d.spend.overBudgetProjects, "project")} over budget;{" "}
-                    {fmtUsd(d.spend.unattributedCostUsd)} unattributed. List-price estimate, stated as such.{" "}
-                    <SectionLink to="/admin/cost" />
+                    {fmtUsd(d.spend.unattributedCostUsd)} unattributed. List-price estimate, stated as such.
                   </>
                 }
+                chip={<Badge tone="warn">Estimate</Badge>}
+                link={<SectionLink to="/admin/cost" />}
               />
             </div>
 
             {/* ---------------- trends ---------------- */}
             <div className={v.grid2}>
-              <Card title={`Daily AI spend — last 14 days (estimate)`}>
+              <Card
+                title={<>Daily AI spend — last 14 days <Badge tone="warn">Estimate</Badge></>}
+                infoLabel="Daily AI spend"
+                info={<p>{d.spend.disclaimer}</p>}
+              >
                 <ColumnTrend
                   points={fillDailyWindow(d.spend.dailyTrend, 14, (day) => ({ day, costUsd: 0 })).map((x) => ({ label: x.day.slice(5), value: x.costUsd }))}
                   title="Daily spend, last 14 days"
                   format={fmtUsd}
                 />
-                <div className={v.faint}>{d.spend.disclaimer}</div>
               </Card>
-              <Card title="Attack-success rate — last runs, oldest to newest">
+              <Card title="Attack-success rate — last runs, oldest to newest" infoLabel="Attack-success rate" info={<p>{d.redteam.note}</p>}>
                 {d.redteam.trend.length === 0 ? (
                   <EmptyState title="Unmeasured" body="No red-team run has produced a measured rate — an untested surface, not a resisted one." />
                 ) : (
@@ -416,7 +425,6 @@ export default function PosturePage() {
                     format={(x) => pct(x)}
                   />
                 )}
-                <div className={v.faint}>{d.redteam.note}</div>
               </Card>
             </div>
 
@@ -434,7 +442,11 @@ export default function PosturePage() {
                   </div>
                 </div>
               </Card>
-              <Card title="Audit-trail anchoring" actions={<SectionLink to="/admin/audit" label="chain integrity →" />}>
+              <Card
+                title="Audit-trail anchoring"
+                info={<p>{d.auditChain.disclosure}</p>}
+                actions={<SectionLink to="/admin/audit" label="chain integrity →" />}
+              >
                 <div className={v.stack}>
                   <div>
                     {d.auditChain.sink ? (
@@ -449,10 +461,13 @@ export default function PosturePage() {
                       {d.auditChain.latestAnchorAt ? `, latest ${ago(d.auditChain.latestAnchorAt)}` : ""}
                     </span>
                   </div>
-                  <div className={p.oneLiner}>{d.auditChain.disclosure}</div>
                 </div>
               </Card>
-              <Card title="Evaluations & groundedness" actions={<SectionLink to="/admin/evals" label="evaluations →" />}>
+              <Card
+                title="Evaluations & groundedness"
+                info={d.evals.groundedness.note ? <p>{d.evals.groundedness.note}.</p> : undefined}
+                actions={<SectionLink to="/admin/evals" label="evaluations →" />}
+              >
                 <div className={p.oneLiner}>
                   {d.evals.runsInWindow === 0 ? (
                     <>No eval run in the window — model quality is unmeasured here, not assumed.</>
@@ -466,10 +481,9 @@ export default function PosturePage() {
                       .
                     </>
                   )}
-                  {d.evals.groundedness.note && <> {d.evals.groundedness.note}.</>}
                 </div>
               </Card>
-              <Card title="Agent ownership" actions={<SectionLink to="/admin/inventory" label="agent inventory →" />}>
+              <Card title="Agent ownership" info={<p>{d.agentOwnership.note}</p>} actions={<SectionLink to="/admin/inventory" label="agent inventory →" />}>
                 <div className={v.stack}>
                   <div className={p.oneLiner}>
                     {d.agentOwnership.total === 0 ? (
@@ -489,10 +503,9 @@ export default function PosturePage() {
                       {d.agentOwnership.orphaned > 0 && <Badge tone="danger">{d.agentOwnership.orphaned} orphaned</Badge>}
                     </div>
                   )}
-                  <div className={v.faint}>{d.agentOwnership.note}</div>
                 </div>
               </Card>
-              <Card title="Grant certification" actions={<SectionLink to="/admin/certification" label="campaigns →" />}>
+              <Card title="Grant certification" info={<p>{d.certificationCampaigns.note}</p>} actions={<SectionLink to="/admin/certification" label="campaigns →" />}>
                 <div className={v.stack}>
                   <div className={p.oneLiner}>
                     {d.certificationCampaigns.total === 0 ? (
@@ -510,10 +523,9 @@ export default function PosturePage() {
                       <Badge tone="danger">{d.certificationCampaigns.expiredIncomplete} expired-incomplete</Badge>
                     </div>
                   )}
-                  <div className={v.faint}>{d.certificationCampaigns.note}</div>
                 </div>
               </Card>
-              <Card title="Separation of duties" actions={<SectionLink to="/admin/sod" label="SoD rules →" />}>
+              <Card title="Separation of duties" info={<p>{d.sod.note}</p>} actions={<SectionLink to="/admin/sod" label="SoD rules →" />}>
                 <div className={v.stack}>
                   <div className={p.oneLiner}>
                     {d.sod.rules === 0 ? (
@@ -530,11 +542,11 @@ export default function PosturePage() {
                       <Badge tone="danger">{plural(d.sod.currentViolations, "violation")}</Badge>
                     </div>
                   )}
-                  <div className={v.faint}>{d.sod.note}</div>
                 </div>
               </Card>
               <Card
                 title="Access recommendations"
+                info={<p>{d.accessRecommendations.note}</p>}
                 actions={<SectionLink to="/admin/recommendations" label="recommendations →" />}
               >
                 <div className={v.stack}>
@@ -556,7 +568,6 @@ export default function PosturePage() {
                       <>{plural(d.accessRecommendations.totalNotAssessable, "grant")} not assessable.</>
                     )}
                   </div>
-                  <div className={v.faint}>{d.accessRecommendations.note}</div>
                 </div>
               </Card>
               <Card title="AI use-case pipeline" actions={<SectionLink to="/admin/use-cases" label="use cases →" />}>
@@ -598,7 +609,11 @@ export default function PosturePage() {
 
             {/* ---------------- pack detail lines ---------------- */}
             {d.packs.active.length > 0 && (
-              <Card title="Compliance packs — coverage statements" actions={<SectionLink to="/admin/compliance-packs" label="packs →" />}>
+              <Card
+                title="Compliance packs — coverage statements"
+                info={<p>{d.packs.note}</p>}
+                actions={<SectionLink to="/admin/compliance-packs" label="packs →" />}
+              >
                 <div className={v.stack}>
                   {d.packs.active.map((pk) => (
                     <div key={pk.packId}>
@@ -609,7 +624,6 @@ export default function PosturePage() {
                       <div className={p.oneLiner}>{pk.statement}</div>
                     </div>
                   ))}
-                  <div className={v.faint}>{d.packs.note}</div>
                 </div>
               </Card>
             )}

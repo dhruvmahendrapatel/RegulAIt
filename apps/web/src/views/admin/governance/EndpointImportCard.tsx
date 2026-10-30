@@ -101,13 +101,17 @@ export function EndpointImportCard({ sources, onDone }: { sources: readonly Disc
   };
 
   return (
-    <Card title="Import endpoint evidence">
-      <div className={v.stack}>
-        <p className={v.faint}>
+    <Card
+      title="Import endpoint evidence"
+      info={
+        <p>
           Upload results of the regulAIt osquery query pack, or a software inventory exported from your MDM or EDR, into an enabled endpoint source.
           regulAIt never contacts a device. Device names and users are kept only as pseudonyms, and endpoint evidence follows the endpoint retention
           setting below. Findings appear only for rows that match an enabled signature in your catalogue.
         </p>
+      }
+    >
+      <div className={v.stack}>
         <div className={v.row}>
           <Button size="sm" disabled={act.busy} onClick={seed}>Install endpoint signatures</Button>
         </div>

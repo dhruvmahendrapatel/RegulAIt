@@ -181,18 +181,22 @@ export function AbacSimulateCard() {
     setProblem(null);
     setForm((f) => ({ ...f, [k]: value }));
   };
-  const ids = { intro: useId(), at: useId(), problem: useId() };
+  const ids = { at: useId(), problem: useId() };
 
   return (
-    <Card title="Simulate a request against the active policies">
-      <p className={v.faint} id={ids.intro}>
-        Answers what the ABAC layer would decide for one hypothetical call. Nothing is executed and nothing is queued.
-        The environment and deploy mode come from the project you name, exactly as enforcement derives them; they
-        cannot be typed in.
-      </p>
+    <Card
+      title="Simulate a request against the active policies"
+      infoLabel="the ABAC simulator"
+      info={
+        <p>
+          Answers what the ABAC layer would decide for one hypothetical call. Nothing is executed and nothing is
+          queued. The environment and deploy mode come from the project you name, exactly as enforcement derives them;
+          they cannot be typed in.
+        </p>
+      }
+    >
       <form
         aria-label="Simulate an ABAC request"
-        aria-describedby={ids.intro}
         className={a.formRow}
         onSubmit={(e) => {
           e.preventDefault();
@@ -241,7 +245,11 @@ export function AbacSimulateCard() {
             {optionEls(projectOpts(projects.data?.projects), "— no project —")}
           </Select>
         </Field>
-        <Field label="At (optional, your local time)">
+        <Field
+          label="At (optional, your local time)"
+          helpLabel="the hypothetical time"
+          help="A hypothetical time is a simulation input only; enforcement never accepts a caller's clock."
+        >
           <Input type="datetime-local" value={form.at} aria-describedby={ids.at} onChange={(e) => set("at", e.target.value)} />
         </Field>
         <Field label="Session origin (optional)">
@@ -259,8 +267,7 @@ export function AbacSimulateCard() {
         </Button>
       </form>
       <p className={v.faint} id={ids.at}>
-        Leave the time empty to evaluate at the current moment. A hypothetical time is a simulation input only;
-        enforcement never accepts a caller's clock.
+        Leave the time empty to evaluate at the current moment.
       </p>
       {problem && (
         <p className={v.errLine} role="alert" id={ids.problem}>
@@ -314,6 +321,12 @@ export function AbacSuiteCard() {
   return (
     <Card
       title="Tests of every active policy"
+      info={
+        <p>
+          The same runner CI calls. Each active policy is tested at the version that is enforcing now; a policy with no
+          stored cases reports zero of zero.
+        </p>
+      }
       actions={
         <Button
           size="sm"
@@ -330,10 +343,6 @@ export function AbacSuiteCard() {
         </Button>
       }
     >
-      <p className={v.faint}>
-        The same runner CI calls. Each active policy is tested at the version that is enforcing now; a policy with no
-        stored cases reports zero of zero.
-      </p>
       {act.error && (
         <p className={v.errLine} role="alert">
           {act.error}

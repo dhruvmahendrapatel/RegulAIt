@@ -50,7 +50,6 @@ export default function CostDashboardPage() {
     <>
       <PageHeader
         title="Cost dashboard"
-        sub="Per-project AI spend, attributed at the point of every gateway call."
         info={<p>Real-time per-project AI spend attribution applied at the point of every gateway call — budget-vs-actual, forecast, showback, chargeback. Built into the gateway, not bolted on.</p>}
       />
       <div className={v.stack}>
@@ -390,7 +389,16 @@ function CreateProjectCard() {
   const set = (k: keyof typeof f, val: string | string[]) => setF((s) => ({ ...s, [k]: val }));
   const tagList = (profiles.data?.profiles ?? []).map((p) => p.tag);
   return (
-    <Card title="Create a project">
+    <Card
+      title="Create a project"
+      info={
+        <p>
+          Classifications come from the compliance profiles and cascade that framework's required workflows, PII mode and
+          retention onto everything the project governs — changing them later goes through the
+          reclassification review (Compliance profiles), never a plain edit.
+        </p>
+      }
+    >
       <form
         className={a.formRow}
         onSubmit={(e) => {
@@ -472,12 +480,7 @@ function CreateProjectCard() {
           </span>
         )}
       </form>
-      <p className={v.faint}>
-        A budget only exists together with its named budget approver — set both or neither. Classifications
-        come from the compliance profiles and cascade that framework's required workflows, PII mode and
-        retention onto everything the project governs — changing them later goes through the
-        reclassification review (Compliance profiles), never a plain edit.
-      </p>
+      <p className={v.faint}>A budget only exists together with its named budget approver — set both or neither.</p>
     </Card>
   );
 }
@@ -504,7 +507,15 @@ function EditProjectCard(props: { projects: AdminProject[]; initiatives: Initiat
     ...props.initiatives.map((i) => ({ v: i.id, l: i.name })),
   ];
   return (
-    <Card title="Edit a project — budget, approver, arbiter, cost center, name">
+    <Card
+      title="Edit a project — budget, approver, arbiter, cost center, name"
+      info={
+        <p>
+          The API holds the invariant against the merged result. Classifications are absent on purpose:
+          reclassification is a governed diff-then-approve change with its own flow.
+        </p>
+      }
+    >
       <form
         className={a.formRow}
         onSubmit={(e) => {
@@ -572,11 +583,7 @@ function EditProjectCard(props: { projects: AdminProject[]; initiatives: Initiat
           </span>
         )}
       </form>
-      <p className={v.faint}>
-        Only the fields you fill in change. A budget still requires a named approver after the edit — the
-        API holds the invariant against the merged result. Classifications are absent on purpose:
-        reclassification is a governed diff-then-approve change with its own flow.
-      </p>
+      <p className={v.faint}>Only the fields you fill in change. A budget still requires a named approver after the edit.</p>
     </Card>
   );
 }
@@ -588,7 +595,16 @@ function InitiativesCard(props: { initiatives: Initiative[]; loading: boolean })
   // Batch U4: the initiative opened for its child projects and their spend
   const [openId, setOpenId] = useState<string | null>(null);
   return (
-    <Card title="Initiatives — cross-team rollup">
+    <Card
+      title="Initiatives — cross-team rollup"
+      info={
+        <p>
+          An initiative is a flat, reporting-only grouping of projects for cross-team cost attribution — no
+          initiative-level budget or enforcement; each project keeps its own budget and governance. Group a
+          project under one on the edit form above.
+        </p>
+      }
+    >
       <form
         className={a.formRow}
         onSubmit={(e) => {
@@ -676,11 +692,6 @@ function InitiativesCard(props: { initiatives: Initiative[]; loading: boolean })
         loading={props.loading}
         empty={<EmptyState title="No initiatives" />}
       />
-      <p className={v.faint}>
-        An initiative is a flat, reporting-only grouping of projects for cross-team cost attribution — no
-        initiative-level budget or enforcement; each project keeps its own budget and governance. Group a
-        project under one on the edit form above.
-      </p>
       {openId && <InitiativeDetail key={openId} initiativeId={openId} onClose={() => setOpenId(null)} />}
     </Card>
   );

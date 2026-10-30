@@ -58,14 +58,17 @@ export default function MonitoringPage() {
     <>
       <PageHeader
         title="Monitoring"
-        sub={
-          "Key risk indicators over traces: volume, error rate, p50/p99 latency, cost and annotation feedback, for " +
-          "the fleet, an agent or a project. A threshold you set here raises a governance alert when it is crossed."
+        info={
+          <p>
+            Key risk indicators over traces: volume, error rate, p50/p99 latency, cost and annotation feedback, for the
+            fleet, an agent or a project. A threshold you set here raises a governance alert when it is crossed.
+          </p>
         }
       />
       <div className={v.stack}>
         <Card
           title="Key risk indicators"
+          info={kris.data?.note ? <p>{kris.data.note}</p> : undefined}
           actions={
             <Button size="sm" onClick={() => setEditing("new")}>
               New KRI
@@ -82,7 +85,6 @@ export default function MonitoringPage() {
                 ))}
               </ul>
             )}
-            {kris.data?.note && <p className={v.faint}>{kris.data.note}</p>}
           </QueryGate>
         </Card>
         {editing && <KriEditor kri={editing === "new" ? null : editing} onClose={() => setEditing(null)} />}

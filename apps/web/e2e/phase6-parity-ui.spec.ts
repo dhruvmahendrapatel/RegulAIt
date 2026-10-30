@@ -172,9 +172,14 @@ test.describe("ADR-0066 virtual keys — the surface the ADR said did not exist"
 
   test("the ceiling is on the page, not in an ADR", async () => {
     await gotoPage();
-    await expect(page.getByText(/A virtual key only ever NARROWS/)).toBeVisible();
-    await expect(page.getByText(/A key issued by an admin is/)).toBeVisible();
-    await expect(page.getByText(/lifetime cap, not a monthly one|LIFETIME cap/)).toBeVisible();
+    // I-1: the ceiling sits behind the title (i), one click away
+    await page.getByRole("button", { name: "What is the Virtual keys page?" }).click();
+    await expect(page.getByRole("note")).toContainText("A virtual key only ever NARROWS");
+    await expect(page.getByRole("note")).toContainText("A key issued by an admin is");
+    await page.getByRole("button", { name: "Hide help for the Virtual keys page" }).click();
+    await expect(page.getByText("Lifetime budget (USD)", { exact: false }).first()).toBeVisible();
+    await page.getByRole("button", { name: "What is lifetime budget?" }).click();
+    await expect(page.getByRole("note")).toContainText(/LIFETIME cap/);
     await shot(page, "phase6-01-virtual-keys-ceiling");
     track.assertClean("virtual keys landing");
   });
@@ -308,16 +313,23 @@ test.describe("ADR-0069 cross-vendor cost consolidation — metered and imported
   test("the honesty rule leads the page, and each adapter's limits are verbatim", async () => {
     await gotoPage();
     await expect(page.getByText(/no combined total exists to render/)).toBeVisible();
-    await expect(page.getByText(/reporting-only/)).toBeVisible();
+    await expect(page.getByText("Imported · customer-supplied", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "What is imported?" }).click();
+    await expect(page.getByRole("note")).toContainText("reporting-only");
+    await page.getByRole("button", { name: "Hide help for imported" }).click();
 
-    // the adapter's OWN sentence, from the registry, on screen
+    // the adapter's OWN sentence, from the registry, behind the (i) beside "What this adapter cannot do"
+    await page.getByRole("button", { name: "What is this adapter's limits?" }).click();
     const limits = page.getByTestId("ci-adapter-limits");
     await expect(limits).toContainText("it does not understand your vendor's semantics");
     await expect(limits).toContainText("Header inference refuses on ambiguity");
 
+    await page.getByRole("button", { name: "Hide help for this adapter's limits" }).click();
+
     // switching adapter switches the sentence — it is read from the registry,
     // not hard-coded on the page
     await page.getByTestId("ci-adapter").selectOption("seat_roster");
+    await page.getByRole("button", { name: "What is this adapter's limits?" }).click();
     await expect(page.getByTestId("ci-adapter-limits")).not.toContainText(
       "it does not understand your vendor's semantics",
     );
@@ -616,7 +628,7 @@ test.describe("ADR-0072 — an operator can SEE which baselines are stranded", (
     });
     await expect(card.getByText("Current semantics", { exact: true })).toBeVisible();
     await expect(card.getByText("Pinned baselines that are stranded", { exact: true })).toBeVisible();
-    await expect(card.getByRole("cell", { name: "ADR-0072", exact: true })).toBeVisible();
+    await expect(card.getByRole("columnheader", { name: "What a score MEANT" })).toBeVisible();
     await expect(card.getByText(/PLATFORM HOLD/)).toBeVisible();
     await shot(page, "phase6-16-scoring-semantics");
     track.assertClean("scoring semantics");

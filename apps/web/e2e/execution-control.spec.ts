@@ -83,7 +83,7 @@ async function openExecutionControl() {
 
 test("1: the page loads and says, plainly, that nothing is stopped", async () => {
   await openExecutionControl();
-  await expect(page.getByText("Nothing is stopped.")).toBeVisible();
+  await expect(page.getByText("Nothing is stopped", { exact: true })).toBeVisible();
   // the four positions are all offered, with what each one does
   for (const label of ["Normal", "Read-only", "Require approval", "Halt everything"]) {
     await expect(page.getByText(label, { exact: true }).first()).toBeVisible();
@@ -168,9 +168,9 @@ test("5: both are lifted, and the page returns to nothing stopped", async () => 
   await page.getByLabel("Reason").fill("advisory withdrawn, tool retested clean");
   await page.getByRole("button", { name: "Lift halt" }).last().click();
   // lifting a tool halt is a relaxation too
-  await settleWithStepUp(page, page.getByText("Nothing is stopped."));
+  await settleWithStepUp(page, page.getByText("Nothing is stopped", { exact: true }));
 
-  await expect(page.getByText("Nothing is stopped.")).toBeVisible();
+  await expect(page.getByText("Nothing is stopped", { exact: true })).toBeVisible();
   await shot(page, "execution-control-restored");
   track.assertClean("lift everything");
 });

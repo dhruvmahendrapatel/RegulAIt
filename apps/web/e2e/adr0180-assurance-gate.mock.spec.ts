@@ -71,7 +71,8 @@ test.describe("ADR-0180: the continuous-assurance gate setting", () => {
     const select = card.getByLabel("Continuous-assurance gate");
     await expect(select).toHaveValue("enforce");
     await expect(card.getByRole("option", { name: /enforce — hold the release \(strict default\)/ })).toBeAttached();
-    await expect(card).toContainText("The strict default is enforce");
+    await card.getByRole("button", { name: "What is the assurance gate?" }).click();
+    await expect(card.getByRole("note")).toContainText("The strict default is enforce");
     await expectAxeClean(page, "organization settings with the assurance gate");
 
     await select.selectOption("warn");

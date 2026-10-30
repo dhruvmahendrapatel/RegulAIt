@@ -637,12 +637,23 @@ export function BarChart(props: {
 
 // ---- stat tile ------------------------------------------------------------
 
-export function Stat(props: { value: ReactNode; label: ReactNode }) {
+export function Stat(props: {
+  value: ReactNode;
+  label: ReactNode;
+  /** the tile's definition, behind an (i) beside the label instead of a caption under it */
+  info?: ReactNode;
+  infoLabel?: string;
+}) {
   return (
     <Card>
       <div className={v.stat}>
         <div className={v.statValue}>{props.value}</div>
-        <div className={v.statLabel}>{props.label}</div>
+        <div className={v.statLabel}>
+          {props.label}
+          {props.info != null && (
+            <InfoButton label={props.infoLabel ?? (typeof props.label === "string" ? props.label : "this figure")}>{props.info}</InfoButton>
+          )}
+        </div>
       </div>
     </Card>
   );

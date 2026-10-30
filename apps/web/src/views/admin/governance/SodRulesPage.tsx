@@ -25,7 +25,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Select, Table, type Tone } from "../../../ui/kit";
 import {
   QueryGate,
   agentOpts,
@@ -293,7 +293,6 @@ export default function SodRulesPage() {
     <>
       <PageHeader
         title="SoD rules"
-        sub="Toxic capability combinations, and who may hold them anyway."
         info={<p>Toxic capability combinations — sets of 2..8 gateway capabilities (agents, connectors, MCP tools/servers — concrete objects or enumerable patterns by agent lifecycle status, provider kind, or connector mode) no single identity may hold together in full. Enforced where grants are minted: a grant, role grant or role assignment that would complete the whole set is refused by name; any subset short of it is allowed. Creating a rule never revokes anybody — existing violators are listed here and resolved through certification campaigns or revocation. A refused mint can be escalated to the one approvals queue for an arm's-length override.</p>}
       />
       <div className={v.stack}>
@@ -363,21 +362,22 @@ export default function SodRulesPage() {
               <Button type="submit" disabled={act.busy}>
                 Create rule
               </Button>{" "}
-              <span className={v.faint}>
-                2–8 sides; the rule refuses only an identity that would hold ALL of them — any subset short of the
-                full set is allowed. Patterns match by enumerable dimension only and resolve at check time.
-              </span>
+              <span className={v.faint}>2–8 sides</span>{" "}
+              <InfoButton label="sides">
+                The rule refuses only an identity that would hold ALL of them — any subset short of the full set is
+                allowed. Patterns match by enumerable dimension only and resolve at check time.
+              </InfoButton>
             </div>
           </form>
         </Card>
 
         {/* ---------------- rules ---------------- */}
         <QueryGate loading={rules.isLoading} error={rules.error} onRetry={() => void rules.refetch()}>
-          <Card title="Rules">
+          <Card title="Rules" info={rules.data ? <p>{rules.data.notes.enforcement}</p> : undefined}>
             {(rules.data?.rules ?? []).length === 0 ? (
               <EmptyState
                 title="No SoD rule is defined"
-                body="No capability combination is declared toxic — the posture page states this fact outright until one exists."
+                body="No capability combination is declared toxic. Declare one above."
               />
             ) : (
               <Table
@@ -461,7 +461,6 @@ export default function SodRulesPage() {
                 ]}
               />
             )}
-            {rules.data && <div className={v.faint}>{rules.data.notes.enforcement}</div>}
           </Card>
         </QueryGate>
 
@@ -522,7 +521,16 @@ export default function SodRulesPage() {
                   </Select>
                 </Field>
               )}
-              <Field label="Arm's-length approver">
+              <Field
+                label="Arm's-length approver"
+                help={
+                  <>
+                    The conflict is re-computed server-side — a mint no enabled rule refuses cannot be escalated. The
+                    requester can never approve their own escalation, not through delegation and not with an admin
+                    override: the bar is keyed on who actually signs.
+                  </>
+                }
+              >
                 <Select required value={escApproverId} onChange={(e) => setEscApproverId(e.target.value)}>
                   {optionEls(uOpts, "— select —")}
                 </Select>
@@ -539,11 +547,6 @@ export default function SodRulesPage() {
                 {escalate.error}
               </span>
             )}
-            <p className={v.faint}>
-              The conflict is re-computed server-side — a mint no enabled rule refuses cannot be escalated. The
-              requester can never approve their own escalation, not through delegation and not with an admin
-              override: the bar is keyed on who actually signs.
-            </p>
           </form>
         </Card>
 

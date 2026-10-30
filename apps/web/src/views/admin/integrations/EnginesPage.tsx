@@ -207,9 +207,9 @@ export default function EnginesPage() {
     <>
       <PageHeader
         title="Engines"
-        sub="Sidecar engines for red-teaming and model scanning: what each one is, whether it may run, and the runners that serve it."
         info={
           <p>
+            Sidecar engines for red-teaming and model scanning: what each one is, whether it may run, and the runners that serve it.
             Every engine is off until an administrator enables it. Enabling needs a passing self-test from the last 24 hours
             (the runner&apos;s own report from inside its container: image digest, version, each usage-data switch, and an
             egress probe that must fail) and your confirmation that it&apos;s you. Runs are started on the Red-teaming,
@@ -426,6 +426,9 @@ function EngineCard(props: {
   const reduced = e.airGappedReducedSet.length > 0 ? e.airGappedReducedSet : (posture?.airGappedReducedSet ?? []);
   const unverified = e.unverified.length > 0 ? e.unverified : (posture?.unverified ?? []);
   const overdue = e.reCheckBy !== null && e.reCheckBy < new Date(props.now).toISOString().slice(0, 10);
+  // I-1: the attestation detail folds away; the two warnings in it stay visible as chips
+  const licenceGap = unverified.find((u) => u.startsWith("transitive licences"));
+  const telemetryGap = unverified.find((u) => u.includes("disabled-telemetry path"));
   const titleId = `engine-${e.id}-title`;
   return (
     <section aria-labelledby={titleId} data-testid={`engine-${e.id}`}>
@@ -480,7 +483,17 @@ function EngineCard(props: {
               ["Kind", e.kind === "redteam" ? "Red-teaming" : e.kind === "model_scan" ? "Model artifact scanning" : e.kind],
               ["Image digest", e.imageDigest ? <code title={e.imageDigest}>{shortDigest(e.imageDigest)}</code> : <span>none (not built)</span>],
               ["Signature", e.signature === "not_built" ? <Badge>not built</Badge> : e.signature === "unverified" ? <Badge tone="warn">unverified</Badge> : <Badge>{e.signature}</Badge>],
-              ["Licence", e.licence],
+              [
+                "Licence",
+                <span>
+                  {e.licence}{" "}
+                  {licenceGap && (
+                    <Badge tone="warn" info={licenceGap} infoLabel="the transitive licence gap">
+                      transitive licences unverified
+                    </Badge>
+                  )}
+                </span>,
+              ],
               ["Maintainers", e.maintainerCount === null ? <Badge tone="warn">not counted (unverified)</Badge> : String(e.maintainerCount)],
               ["Owner and ownership changes", <span className={v.faint}>not reported by the gateway yet</span>],
               ["Model access", e.needsModelAccess ? "Calls models through the gateway with a run-scoped key, pinned to the run's project" : "None (it reads uploaded artifacts only)"],
@@ -509,6 +522,13 @@ function EngineCard(props: {
           </Section>
 
           <Section title="Usage-data posture">
+            {telemetryGap && (
+              <p>
+                <Badge tone="warn" info={telemetryGap} infoLabel="the telemetry path warning">
+                  disabled-telemetry path still attempts a request
+                </Badge>
+              </p>
+            )}
             {posture && Object.keys(posture.switches).length > 0 ? (
               <ul aria-label={`${e.displayName} usage-data switches`}>
                 {Object.entries(posture.switches).map(([name, value]) => (
@@ -530,7 +550,8 @@ function EngineCard(props: {
           </Section>
 
           {unverified.length > 0 && (
-            <Section title="Not yet verified">
+            <details>
+              <summary>Attestation details: {plural(unverified.length, "item")} not yet verified</summary>
               <ul>
                 {unverified.map((u) => (
                   <li key={u} className={v.dim}>
@@ -538,7 +559,7 @@ function EngineCard(props: {
                   </li>
                 ))}
               </ul>
-            </Section>
+            </details>
           )}
 
           <details>
@@ -574,7 +595,14 @@ function Section(props: { title: string; children: ReactNode }) {
 
 function SelfTestBlock(props: { engine: Engine }) {
   const t = props.engine.selfTest;
-  if (!t) return <p className={v.faint}>No self-test is recorded. Nothing about this engine&apos;s runtime has been measured yet.</p>;
+  if (!t)
+    return (
+      <p>
+        <Badge tone="warn" infoLabel="the missing self-test" info="No self-test is recorded. Nothing about this engine's runtime has been measured yet.">
+          No self-test recorded
+        </Badge>
+      </p>
+    );
   return (
     <div className={v.stackTight}>
       <p>
@@ -598,7 +626,14 @@ function SelfTestBlock(props: { engine: Engine }) {
 
 function EgressBlock(props: { egress: EngineSelfTest["egress"]; at: string | null }) {
   const readings = egressReadings(props.egress);
-  if (!readings) return <p className={v.faint}>No egress probe is recorded, so egress has not been shown to be blocked.</p>;
+  if (!readings)
+    return (
+      <p>
+        <Badge tone="warn" infoLabel="the missing egress probe" info="No egress probe is recorded, so egress has not been shown to be blocked.">
+          No egress probe recorded
+        </Badge>
+      </p>
+    );
   return (
     <div className={v.stackTight}>
       <p className={v.faint}>Last egress probe{props.at ? `, ${ago(props.at)}` : ""}: every reading must say blocked.</p>
@@ -617,10 +652,11 @@ function RunnersTable(props: { engine: Engine; now: number; busy: boolean; onRev
   const e = props.engine;
   if (e.runners.length === 0) {
     return (
-      <EmptyState
-        title="No live runner"
-        body="Nothing can lease this engine's runs. Mint an enrolment token and start a runner from the signed image with it."
-      />
+      <p>
+        <Badge tone="warn" infoLabel="the missing runner" info="Nothing can lease this engine's runs. Mint an enrolment token and start a runner from the signed image with it.">
+          No live runner
+        </Badge>
+      </p>
     );
   }
   return (

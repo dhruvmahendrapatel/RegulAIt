@@ -222,7 +222,7 @@ test.describe("ADR-0034 custom LLM providers — the admin surface", () => {
   const setLocalAllowEntry = async (opts: { privateRanges: boolean; plaintext: boolean }) => {
     await page.getByTestId("allow-host-input").fill("127.0.0.1");
     await page.getByTestId("allow-host-note").fill("e2e local OpenAI-compatible endpoint");
-    const priv = page.getByLabel("Allow private ranges");
+    const priv = page.getByLabel("Allow private ranges", { exact: true });
     const plain = page.getByLabel("Allow plaintext HTTP", { exact: true });
     if ((await priv.isChecked()) !== opts.privateRanges) await priv.setChecked(opts.privateRanges);
     if ((await plain.isChecked()) !== opts.plaintext) await plain.setChecked(opts.plaintext);
@@ -246,7 +246,7 @@ test.describe("ADR-0034 custom LLM providers — the admin surface", () => {
   const fillRegister = async (opts: { name: string; url: string; plaintext: boolean }) => {
     await page.getByTestId("provider-name").fill(opts.name);
     await page.getByTestId("provider-base-url").fill(opts.url);
-    const plain = page.getByLabel("Allow plaintext HTTP (provider half)");
+    const plain = page.getByLabel("Allow plaintext HTTP (provider half)", { exact: true });
     if ((await plain.isChecked()) !== opts.plaintext) await plain.setChecked(opts.plaintext);
   };
 

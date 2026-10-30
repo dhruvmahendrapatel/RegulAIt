@@ -38,6 +38,7 @@ import {
   EmptyState,
   ErrorState,
   Field,
+  InfoButton,
   Input,
   Select,
   SkeletonBlock,
@@ -558,7 +559,7 @@ export default function ChatPage() {
   if (agentsQ.isLoading || convosQ.isLoading) {
     return (
       <>
-        <PageHeader title="Chat" sub="Every message goes through governance, routing and metered dispatch." />
+        <PageHeader title="Chat" />
         <Card>
           <SkeletonBlock lines={5} />
         </Card>
@@ -592,7 +593,6 @@ export default function ChatPage() {
     <>
       <PageHeader
         title="Chat"
-        sub="Every message goes through governance, routing and metered dispatch."
         info={<p>Every message goes through governance, routing and metered dispatch — the trace shows what actually happened. Conversations remember: each turn carries the whole thread.</p>}
       />
       <div className={s.split}>
@@ -671,9 +671,9 @@ export default function ChatPage() {
                   onRetry={() => void agentsQ.refetch()}
                 />
               ) : noAgents ? (
-                <span className={v.dim}>
-                  No agents are granted to your account — ask an admin to grant you one.
-                </span>
+                <Badge tone="warn" info={<p>No agents are granted to your account — ask an admin to grant you one.</p>}>
+                  No agent access
+                </Badge>
               ) : (
                 <ModelPicker
                   label="Agent"
@@ -839,8 +839,11 @@ export default function ChatPage() {
                 )}
               </div>
               <div className={v.faint} style={{ marginTop: "var(--s0)" }}>
-                Attach images &amp; PDFs (a vision-capable agent reads them), or text/code files
-                (fed as reference). Up to {maxAttach} files · {fmtBytes(maxBytes)} each.
+                Up to {maxAttach} files · {fmtBytes(maxBytes)} each
+                <InfoButton label="attachments">
+                  Attach images &amp; PDFs (a vision-capable agent reads them), or text/code files
+                  (fed as reference).
+                </InfoButton>
               </div>
             </div>
           </Card>

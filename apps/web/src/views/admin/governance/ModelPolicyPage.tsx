@@ -19,7 +19,7 @@ import { api } from "../../../api/client";
 import type { AdminAgent } from "../../../api/adminTypes";
 import { providerLabel } from "../../models/modelBindings";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Select } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, InfoButton, Select } from "../../../ui/kit";
 import { ProviderMark } from "../../../ui/ModelPicker";
 import { OutcomePanel, QueryGate, useAgents, useApiAction } from "../adminKit";
 import {
@@ -142,7 +142,11 @@ function PolicyEditor(props: { policy: ModelPolicyView; bindings: AdminAgent[] }
             <thead>
               <tr>
                 <th scope="col" className={m.corner}>
-                  Model
+                  Model{" "}
+                  <InfoButton label="the allow-list matrix">
+                    A checked box allows the model; the round button makes it the feature&apos;s default. &ldquo;any&rdquo;
+                    means the feature is unrestricted.
+                  </InfoButton>
                 </th>
                 {MODEL_POLICY_FEATURES.map((f) => (
                   <th key={f} scope="col" className={m.featureHead}>
@@ -242,10 +246,6 @@ function PolicyEditor(props: { policy: ModelPolicyView; bindings: AdminAgent[] }
             ))}
           </table>
         </div>
-        <p className={v.hint}>
-          A checked box allows the model; the round button makes it the feature&apos;s default. &ldquo;any&rdquo; means
-          the feature is unrestricted.
-        </p>
       </Card>
 
       <ClassRules draft={draft} setDraft={setDraft} bindings={props.bindings} groups={groups} />
@@ -289,11 +289,13 @@ function ClassRules(props: {
 
   return (
     <Card>
-      <h2 className={v.sectionTitle}>Rules for sensitive data</h2>
-      <p className={v.hint}>
-        Narrow a feature further for data of one class. Applied where the feature knows the class of what it sends; it can
-        never allow a model the feature itself forbids.
-      </p>
+      <div className={v.row}>
+        <h2 className={v.sectionTitle}>Rules for sensitive data</h2>
+        <InfoButton label="rules for sensitive data">
+          Narrow a feature further for data of one class. Applied where the feature knows the class of what it sends; it
+          can never allow a model the feature itself forbids.
+        </InfoButton>
+      </div>
       {draft.classes.length > 0 ? (
         <ul className={m.classList} aria-label="Data-class rules">
           {draft.classes.map((c) => (

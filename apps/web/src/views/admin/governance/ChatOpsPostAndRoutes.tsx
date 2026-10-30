@@ -65,12 +65,16 @@ export function PostApprovalCard(props: { connections: ChatConnectionOption[] })
   const rows = pending.data?.approvals ?? [];
   const label = (a: Approval) => `${a.toolName ?? a.objectType}${a.projectName ? ` · ${a.projectName}` : ""} · requested ${ago(a.requestedAt)}`;
   return (
-    <Card title="Post an approval to chat">
-      <div className={v.stack} data-testid="chatops-post-approval">
-        <p className={v.faint}>
+    <Card
+      title="Post an approval to chat"
+      info={
+        <p>
           Mirror one pending approval into a workspace channel. With no workspace chosen, the oldest enabled workspace is used.
           A fenced approval is posted as a link only, and email is never decidable.
         </p>
+      }
+    >
+      <div className={v.stack} data-testid="chatops-post-approval">
         <QueryGate loading={pending.isLoading} error={pending.error} onRetry={() => void pending.refetch()}>
           {rows.length === 0 ? (
             <EmptyState title="No pending approvals" body="An approval waiting for a decision can be posted here." />
@@ -143,9 +147,8 @@ export function BuilderRoutesCard() {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const routes = q.data?.routes ?? [];
   return (
-    <Card title="Builder agent channel routes">
+    <Card title="Builder agent channel routes" info={q.data?.posture ? <p>{q.data.posture}</p> : undefined}>
       <div className={v.stack} data-testid="chatops-builder-routes">
-        <p className={v.faint}>{q.data?.posture ?? ""}</p>
         <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
           <Table<BuilderRoute>
             rows={routes}
