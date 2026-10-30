@@ -108,7 +108,10 @@ export const LICENSE_ACTION_CLASSES = ["read", "governance", "expansion"] as con
 export type LicenseActionClass = (typeof LICENSE_ACTION_CLASSES)[number];
 
 export interface ClassifiedAction {
+  /** the machine key `classifyAction` matches on; never reworded */
   action: string;
+  /** plain-language name the console shows in place of `action`, where one is set */
+  label?: string;
   class: LicenseActionClass;
   why: string;
 }
@@ -123,12 +126,12 @@ export const LICENSE_ACTION_INVENTORY: ClassifiedAction[] = [
   {
     action: "entitlement.check",
     class: "governance",
-    why: "pillar 1's per-user decision — the thing the product exists to do",
+    why: "the per-user access decision — the thing the product exists to do",
   },
   { action: "approval.decide", class: "governance", why: "a pending approval must still be decidable" },
   { action: "guardrail.evaluate", class: "governance", why: "PII/injection enforcement is not a paid feature" },
   { action: "audit.write", class: "governance", why: "an audit trail that stops on a date is a compliance failure" },
-  { action: "usage.meter", class: "governance", why: "metering is unconditional (ADR-0024) and feeds the renewal itself" },
+  { action: "usage.meter", class: "governance", why: "metering is unconditional and feeds the renewal itself" },
   { action: "agent.dispatch", class: "governance", why: "existing committed footprint keeps working, fully governed" },
   { action: "user.deactivate", class: "governance", why: "offboarding must never be blocked by a billing state" },
   // --- expansion: FAIL CLOSED past expiry. Growing the footprint. ---
@@ -136,9 +139,9 @@ export const LICENSE_ACTION_INVENTORY: ClassifiedAction[] = [
   { action: "user.reactivate", class: "expansion", why: "re-consumes a seat, so it is growth" },
   { action: "agent.create", class: "expansion", why: "a newly governed object is a wider footprint" },
   { action: "connector.create", class: "expansion", why: "a new connected system is a wider footprint" },
-  { action: "mcp_server.create", class: "expansion", why: "a new tool surface is a wider footprint" },
-  { action: "model_provider.connect", class: "expansion", why: "a new provider is a wider footprint" },
-  { action: "pm_connection.create", class: "expansion", why: "a new integrated system is a wider footprint" },
+  { action: "mcp_server.create", label: "Register an MCP server", class: "expansion", why: "a new tool surface is a wider footprint" },
+  { action: "model_provider.connect", label: "Connect a model provider", class: "expansion", why: "a new provider is a wider footprint" },
+  { action: "pm_connection.create", label: "Connect a project tracker", class: "expansion", why: "a new integrated system is a wider footprint" },
   { action: "feature.tier_gated", class: "expansion", why: "tier flags are exactly what is being paid for" },
   // --- read: always permitted, in EVERY state including a hard stop. ---
   { action: "console.read", class: "read", why: "a deployment that cannot be read cannot be renewed" },

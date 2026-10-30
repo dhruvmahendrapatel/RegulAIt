@@ -1751,6 +1751,16 @@ export async function datasetIsFrozen(db: Db, dataset: EvalDatasetRow): Promise<
 // ADR-0044 §5 — THE DRIFT SWEEP
 // ---------------------------------------------------------------------------
 
+/** the `note` GET /v1/evals/scorers serves; the Evals page shows it verbatim */
+export const EVAL_SCORERS_NOTE =
+  "Ten of the thirteen scorers are pure functions — same output, same score, no cost, no variance. " +
+  "Three (llm_as_judge, groundedness_judge, answer_relevance_judge) are governed model calls: they " +
+  "cost tokens, they vary run to run, and the judge is itself an agent that can regress. Build a " +
+  "BLOCKING gate on the deterministic ones and treat a judge as corroboration. A run that uses a " +
+  "model-backed scorer is refused when no judge agent is named — " +
+  "these metrics never silently degrade to the lexical estimate under the judged name, because a " +
+  "hallucination rate that was estimated must never be reported as measured.";
+
 export const EVAL_DRIFT_SWEEP_NOTE =
   "The sweep re-runs every PINNED BASELINE pair (dataset version × agent) as the user who pinned it — " +
   "so it never exceeds that person's entitlements and never mints an identity of its own. A pair whose " +
@@ -2057,14 +2067,7 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
         "written — the deterministic (lexical) metrics never route externally, and nothing ever " +
         "silently substitutes one method for another.",
     },
-    note:
-      "Ten of the thirteen scorers are pure functions — same output, same score, no cost, no variance. " +
-      "Three (llm_as_judge, groundedness_judge, answer_relevance_judge) are governed model calls: they " +
-      "cost tokens, they vary run to run, and the judge is itself an agent that can regress. Build a " +
-      "BLOCKING gate on the deterministic ones and treat a judge as corroboration. ADR-0067: a run whose " +
-      "cases use a model-backed scorer is REFUSED with 422 when no dispatchable judge agent is named — " +
-      "these metrics never silently degrade to the lexical estimate under the judged name, because a " +
-      "hallucination rate that was estimated must never be reported as measured.",
+    note: EVAL_SCORERS_NOTE,
     groundedness: {
       deterministic: ["claim_support", "context_precision", "context_recall", "answer_relevance"],
       modelBacked: ["groundedness_judge", "answer_relevance_judge"],

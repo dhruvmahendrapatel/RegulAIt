@@ -113,7 +113,7 @@ export const ACCESS_RECOMMENDATION_RULES_V1: readonly AccessRecommendationRule[]
       "dispatch or governed call by {holder} touched {object} in the window (last governed use: " +
       "{lastUse})",
     limits:
-      "reads the pillar-5 usage ledger: EXECUTED governed calls only. Denied attempts are not " +
+      "reads the usage ledger: governed calls that ran. Denied attempts are not " +
       "use, activity that never crossed this gateway is invisible (though it also never " +
       "exercised a gateway grant), and the window is a parameter, not a truth about need. A " +
       "role-bundled grant with no current assignee is not assessable — no holder exists to " +

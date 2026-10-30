@@ -159,7 +159,7 @@ export const MIN_FORECAST_ELAPSED_FRACTION = 0.1;
 
 export const FORECAST_DISCLAIMER =
   "A FORECAST IS NOT A COMMITMENT. This is a deterministic extrapolation of measured history " +
-  "(usage_events, priced at published list price per GOVERNANCE_LAYER_SPEC §10.4). It models no " +
+  "(the usage ledger, priced at the provider's published list price). It models no " +
   "day-of-week or seasonal effect, no undeclared future change, and no step change it has not " +
   "already observed. Treat the confidence interval as the honest width of the answer, not the " +
   "point estimate as the answer.";
