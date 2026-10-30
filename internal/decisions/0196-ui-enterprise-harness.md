@@ -601,3 +601,14 @@ the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
   carried on their own.
 - Freeze week: ADR-0198 §2 covers entry raises only; this raise rests on the owner decision above. ADR-0198's post-demo
   reset applies to it.
+
+## Addendum / As built (2026-10-30) — all JS 1,050 → 1,053 kB on backlog lane P12 (b, c)
+
+The owner capped all JS at 1,060 kB for the backlog lanes, shared by every lane, on 2026-10-30:
+<https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6522850568>.
+
+- `all JS` from `1050 kB` to `1053 kB` (+3 kB). Entry JS stays at 138.5 kB and entry CSS at 10.7 kB; the lazy chunk
+  ceilings are unchanged.
+- Why: the lane measured 1,051,643 B. It adds the per-model limits to the Rules page's Rate limits card (a lazy chunk,
+  1,862 B gzipped), the modality price fields on the Models page and the modality bar on the cost dashboard.
+- The total stays inside the owner's 1,060 kB cap; later lanes share what is left.
