@@ -35,6 +35,7 @@
 import { azureCredential as entraCredential } from "@regulait/cloud-discovery";
 import { DISCOVERY_READ_OUTCOMES_MAX, type DiscoveryReadOutcome, type DiscoveryReadStatus } from "@regulait/shared";
 import { dedupedSecretSink, scannerFetch } from "./discovery-cloud-scanners.js";
+import { errMessage } from "./err-serializer.js";
 import type { ScanContext, ScanObservation, ScanResult, Scanner } from "./discovery-scanners.js";
 
 /** a configuration problem a run can name without leaking anything */
@@ -341,7 +342,8 @@ async function runEntra(ctx: ScanContext): Promise<ScanResult> {
     if (!tok?.token) throw new Error("no token");
     accessToken = tok.token;
   } catch (err) {
-    const code = /AADSTS[0-9]{5,7}/.exec(err instanceof Error ? err.message : String(err))?.[0];
+    // only the AADSTS code is kept from the error text (as discovery-git-federation.ts does)
+    const code = /AADSTS[0-9]{5,7}/.exec(errMessage(err))?.[0];
     throw new WiderSourceConfigError(`idp_entra: the Entra token request failed${code ? ` (${code})` : ""}`);
   }
   onSecret(accessToken);
