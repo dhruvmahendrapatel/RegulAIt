@@ -181,6 +181,8 @@ const BY_ROUTE: Record<string, keyof typeof G> = {
   "/admin/compliance": "shield",
   "/admin/compliance-packs": "box",
   "/admin/infrastructure": "server",
+  "/admin/privacy/processing": "lock",
+  "/admin/privacy/requests": "inbox",
   "/admin/organization": "building",
   "/admin/retention": "history",
   "/admin/licensing": "ticket",
