@@ -139,15 +139,10 @@ export default function ComplianceProfilesPage() {
                     <RowActions
                       slot="8rem"
                       primary={
-                        p.pendingReview ? (
-                          <Button size="sm" disabled aria-label={`Edit profile ${p.tag}`} title="A change is waiting for review; it is decided in Approvals">
-                            Edit profile
-                          </Button>
-                        ) : (
-                          <Button size="sm" variant="primary" aria-label={`Edit profile ${p.tag}`} onClick={() => setEditing(p)}>
-                            Edit profile
-                          </Button>
-                        )
+                        // one review at a time: a pending change is decided in Approvals first
+                        <Button size="sm" variant="primary" disabled={!!p.pendingReview} aria-label={`Edit profile ${p.tag}`} onClick={() => setEditing(p)}>
+                          Edit profile
+                        </Button>
                       }
                       rest={
                         carrierCount(p.usage) > 0 ? (
@@ -180,12 +175,8 @@ export default function ComplianceProfilesPage() {
             onRetry={() => void profiles.refetch()}
             empty={
               <EmptyState
-                title={filter === "retired" ? "No retired profiles" : "No compliance profiles"}
-                body={
-                  filter === "retired"
-                    ? "A retired profile appears here, read-only, with its history."
-                    : "Define the first framework below — its tag then becomes assignable to projects, teams and infra resources."
-                }
+                title={`No ${filter} profiles`}
+                body="Define a framework below; its tag then becomes assignable to projects, teams and infra resources."
               />
             }
           />
