@@ -230,6 +230,9 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.webauthnCredentials, ["label", "revokeReason"]],
   // ADR-0202 decision 4 (migration 0213): an admin's reason for switching a demo beat to or from its fallback
   [s.demoBeatFallbacks, ["reason"]],
+  // ADR-0224 (migration 0246): an admin's note closing a data-subject request, and an erasure tombstone's reason
+  [s.dataSubjectRequests, ["closeNote"]],
+  [s.dataSubjectTombstones, ["reason"]],
   // --- machine-written free text that quotes an error, and ADR-0111's
   //     EXPORTED OBSERVABILITY COPY ---
   //

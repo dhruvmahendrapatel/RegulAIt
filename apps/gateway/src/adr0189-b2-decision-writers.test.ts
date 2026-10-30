@@ -43,6 +43,7 @@ const DECISION_WRITERS = [
   "mcp-proxy.ts", // MCP tool calls (governed-evaluate.ts decides; its callers write the decision row)
   "outbound-audience.ts",
   "playground.ts",
+  "privacy-ops.ts", // ADR-0224: the processing limit's dispatch refusal
   "redteam.ts",
   "use-case-gate.ts",
   "use-cases.ts",
