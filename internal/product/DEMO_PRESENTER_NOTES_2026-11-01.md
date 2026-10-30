@@ -14,7 +14,7 @@ identifier and no real host, account, tenant or person.
 
 ---
 
-## S3 — the remediation plan (Submit shadow AI remediation plan card)
+## S3 — the remediation plan (Submit shadow-AI remediation plan card)
 
 The card's box takes the plan as text. The panel renders the plan's steps as list items and has no copy button, so
 paste from here (FS-47). The plan names the repository it is about.
