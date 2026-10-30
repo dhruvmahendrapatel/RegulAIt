@@ -486,6 +486,7 @@ import {
   approvingPrincipals,
   decidedByViewerCondition,
   poolVisibilityCondition,
+  previewToolApprovalQueue,
   registerApprovalSigningRoutes,
 } from "./approval-signatures.js";
 import { registerDecisionReceiptRoutes } from "./decision-receipts.js";
@@ -3384,7 +3385,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
     // Full governed evaluation, but decision-only: unlike the proxy path this
     // endpoint never creates queue entries or consumes approvals.
-    const { decision } = await governedEvaluate(
+    const { decision: evaluated, matchedApprovalRuleIds } = await governedEvaluate(
       db,
       body.userId,
       body.serverId,
@@ -3403,6 +3404,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       undefined,
       { actor: null }, // ADR-0188 S4: the person's own decision; agent paths decide with their delegation grant in the governed core
     );
+    // ADR-0186 A — the queue-time quorum and signature-mode check, run read-only:
+    // a `require_approval` the queue would refuse (no pool can ever sign it)
+    // previews as that same deny, so the preview and the gateway agree.
+    const decision = await previewToolApprovalQueue(db, {
+      callerUserId: body.userId,
+      decision: evaluated,
+      matchedApprovalRuleIds: matchedApprovalRuleIds ?? [],
+      projectId: null,
+      toolName: body.toolName,
+    });
 
     // ADR-0127 — MARKED ADVISORY. This route answers "what would you decide"
     // and executes nothing, but it wrote an `allow` row indistinguishable from
