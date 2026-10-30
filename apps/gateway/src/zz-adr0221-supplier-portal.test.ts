@@ -250,6 +250,10 @@ describe("links and sessions", () => {
     const withKey = await app.inject({ method: "GET", url: "/supplier/v1/assessment", headers: admin.auth, remoteAddress: freshIp() });
     expect(withKey.statusCode).toBe(401);
     expect(withKey.json()).toEqual(SUPPLIER_SESSION_REFUSAL);
+    // the large-body route refuses before reading the body when there is no supplier cookie
+    const anon = await app.inject({ method: "POST", url: "/supplier/v1/submissions", headers: { ...CSRF, ...admin.auth }, payload: { target: {}, statement: "x".repeat(100_000) }, remoteAddress: freshIp() });
+    expect(anon.statusCode).toBe(401);
+    expect(anon.json()).toEqual(SUPPLIER_SESSION_REFUSAL);
     for (const url of ["/v1/vendors", `/v1/vendors/${v.id}/supplier-submissions`, "/auth/me"]) {
       const res = await app.inject({ method: "GET", url, headers: { cookie } });
       expect(res.statusCode, url).toBe(401);

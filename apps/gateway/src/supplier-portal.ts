@@ -988,7 +988,21 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
     });
   });
 
-  app.post(`${SUPPLIER_API_PREFIX}/submissions`, { bodyLimit: Math.ceil(L.fileMaxBytes / 3) * 4 + 64 * 1024 }, async (req, reply) => {
+  // the one route with a large body: refuse before the body is read when the portal is off or no supplier cookie of
+  // the right shape is present, so an anonymous caller cannot make the gateway parse 2.8 MB for nothing
+  async function beforeBody(req: FastifyRequest, reply: FastifyReply) {
+    const settings = await loadOrgSettings(db);
+    if (!settings.supplierPortalEnabled) return reply.status(404).send(notFoundBody(req.method, req.url));
+    const token = readCookie(req.headers.cookie, SUPPLIER_SESSION_COOKIE);
+    if (!token || !SUPPLIER_SESSION_TOKEN_RE.test(token)) {
+      return reply.status(401).header("set-cookie", clearCookie(req)).send(SUPPLIER_SESSION_REFUSAL);
+    }
+  }
+
+  app.post(
+    `${SUPPLIER_API_PREFIX}/submissions`,
+    { bodyLimit: Math.ceil(L.fileMaxBytes / 3) * 4 + 64 * 1024, onRequest: beforeBody },
+    async (req, reply) => {
     if (!(await gate(req, reply))) return reply;
     if (!(await csrf(req, reply))) return reply;
     const row = await supplierSession(req, reply);
@@ -1104,5 +1118,6 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
       return s!;
     });
     return reply.status(201).send(submissionView(saved));
-  });
+    },
+  );
 }
