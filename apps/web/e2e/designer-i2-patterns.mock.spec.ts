@@ -276,6 +276,31 @@ test.describe("I-2: Red-teaming shows one empty state while nothing exists", () 
     await page.getByRole("button", { name: "Start your own library" }).click();
     await expect(page.getByRole("tab", { name: "Libraries (0)" })).toHaveAttribute("aria-selected", "true");
   });
+
+  test("a response without its list still renders the page, never the crash screen", async ({ page }) => {
+    await mockApi(page, {
+      "GET /v1/redteam/attack-classes": {
+        attackClasses: [{ id: "prompt_injection", summary: "s", limits: "l" }],
+        disclosure: "A green run means no probe in this library version succeeded.",
+        scheduling: { schedulerEnabled: false, posture: "off", note: "" },
+      },
+      "GET /v1/redteam/libraries": {},
+      "GET /v1/redteam/runs": {},
+      "GET /v1/agents": { agents: [] },
+      "GET /v1/projects": { projects: [] },
+    });
+    await page.goto("/ui/admin/redteam");
+    await expect(page.getByRole("heading", { name: "Red-teaming", level: 1 })).toBeVisible();
+    await expect(page.getByText("Nothing has been probed yet", { exact: true })).toBeVisible();
+    await expect(page.getByText(/Something went wrong/)).toHaveCount(0);
+    await expect(page.getByRole("tablist", { name: "Red-teaming" }).getByRole("tab")).toHaveText([
+      "Overview",
+      "Libraries",
+      "Runs",
+      "Engines",
+      "Attack classes",
+    ]);
+  });
 });
 
 // ---------------------------------------------------------------------------

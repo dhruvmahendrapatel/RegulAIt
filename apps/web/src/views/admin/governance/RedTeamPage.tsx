@@ -225,8 +225,8 @@ export default function RedTeamPage() {
             idPrefix="redteam"
             tabs={[
               { id: "overview", label: "Overview" },
-              { id: "libraries", label: libraries.data ? `Libraries (${libraries.data.libraries.length})` : "Libraries" },
-              { id: "runs", label: runs.data ? `Runs (${runs.data.runs.length})` : "Runs" },
+              { id: "libraries", label: libraries.data?.libraries ? `Libraries (${libraries.data.libraries.length})` : "Libraries" },
+              { id: "runs", label: runs.data?.runs ? `Runs (${runs.data.runs.length})` : "Runs" },
               { id: "engines", label: "Engines" },
               { id: "classes", label: "Attack classes" },
             ]}
@@ -244,7 +244,7 @@ export default function RedTeamPage() {
               />
             ) : !runs.data ? (
               <SkeletonBlock />
-            ) : (libraries.data?.libraries.length ?? 0) === 0 && runs.data.runs.length === 0 ? (
+            ) : (libraries.data?.libraries?.length ?? 0) === 0 && (runs.data.runs?.length ?? 0) === 0 ? (
               <Card title="Get started">
                 <EmptyState
                   title="Nothing has been probed yet"
