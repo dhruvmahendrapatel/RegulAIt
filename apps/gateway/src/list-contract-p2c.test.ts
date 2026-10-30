@@ -176,8 +176,8 @@ beforeAll(async () => {
   const fp = (await get("/v1/security/data-key", adminAuth)).json().fingerprint as string;
   expect(fp).toBeTruthy();
   ids.fingerprint = fp;
-  await q(`insert into data_key_attestations (fingerprint, attested_by_label, method, attested_at) select '${fp}', 'Ada Admin', '${DATA_KEY_ATTESTATION_METHODS[0]}', ${ago()} from ${gs}`);
-  await q(`insert into onboarding_imports (kind, mode, status, payload_sha256, plan, rule_id, reason, row_count, created_at) select 'users', 'dry_run', 'planned', 'x', '{}', 'r', 'Import ' || g, g, ${ago()} from ${gs}`);
+  await q(`insert into data_key_attestations (fingerprint, attested_by_label, method, attested_at) select '${fp}', 'Ada Admin lc2c-${RUN}', '${DATA_KEY_ATTESTATION_METHODS[0]}', ${ago()} from ${gs}`);
+  await q(`insert into onboarding_imports (kind, mode, status, payload_sha256, plan, rule_id, reason, row_count, created_at) select 'users', 'dry_run', 'planned', 'lc2c-${RUN}', '{}', 'r', 'Import ' || g, g, ${ago()} from ${gs}`);
   ids.trainingDataset = await one(`insert into training_datasets (name) values ('lc2c ${RUN}') returning id`);
   await q(`insert into training_jobs (name, dataset_id, dataset_version, backend, method, created_at) select 'Job ' || g, '${ids.trainingDataset}', 1, 'mock', 'retrieval_index', ${ago()} from ${gs}`);
   await q(`insert into model_artifacts (sha256, size_bytes, format, filename, storage_key, uploaded_by_user_id, created_at)
@@ -187,6 +187,52 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
+  // take the fixtures back out, so a later suite that reads a whole table (reconciliation, the engine lease) sees
+  // only its own rows; executor attestations are append-only by design and stay
+  const A = ids.admin;
+  const M = ids.member;
+  const users = `('${A}', '${M}')`;
+  const cleanup = [
+    `delete from workflow_instances where initiator_user_id in ${users}`,
+    `delete from builder_threads where agent_id = '${ids.agent}'`,
+    `delete from builder_agents where id = '${ids.agent}'`,
+    `delete from eval_runs where dataset_id = '${ids.dataset}'`,
+    `delete from eval_datasets where name like 'lc2c-${RUN}-%'`,
+    `delete from engine_runs where run_as_user_id in ${users}`,
+    `delete from engine_schedules where run_as_user_id in ${users}`,
+    `delete from webhook_deliveries where subscription_id = '${ids.webhook}'`,
+    `delete from webhook_subscriptions where id = '${ids.webhook}'`,
+    `delete from mcp_registry_entries where registry_id = '${ids.registry}'`,
+    `delete from mcp_registries where id = '${ids.registry}'`,
+    `delete from cost_events where user_id in ${users}`,
+    `delete from imported_cost_lines where batch_id in (select id from cost_import_batches where vendor = 'lc2c ${RUN}')`,
+    `delete from cost_import_batches where vendor = 'lc2c ${RUN}'`,
+    `delete from billing_statements where period_id = '${ids.period}'`,
+    `delete from billing_periods where id = '${ids.period}'`,
+    `delete from report_runs where definition_id = '${ids.definition}'`,
+    `delete from report_definitions where id = '${ids.definition}'`,
+    `delete from spend_anomalies where project_id = '${ids.project}'`,
+    `delete from spend_scheduled_changes where project_id = '${ids.project}'`,
+    `delete from projects where id = '${ids.project}'`,
+    `delete from compliance_pack_reports where pack_id = '${ids.pack}'`,
+    `delete from compliance_packs where id = '${ids.pack}'`,
+    ...["infra_findings", "cert_inventory", "patch_records", "backup_runs"].map(
+      (t) => `delete from ${t} where resource_id in (select id from infra_resources where name like 'lc2c-${RUN}-%')`,
+    ),
+    `delete from infra_resources where name like 'lc2c-${RUN}-%'`,
+    `delete from scheduler_runs where job_name = '${ids.job}'`,
+    `delete from scheduler_jobs where name = '${ids.job}'`,
+    `delete from data_key_attestations where attested_by_label = 'Ada Admin lc2c-${RUN}'`,
+    `delete from onboarding_imports where payload_sha256 = 'lc2c-${RUN}'`,
+    `delete from training_jobs where dataset_id = '${ids.trainingDataset}'`,
+    `delete from training_datasets where id = '${ids.trainingDataset}'`,
+    `delete from model_artifacts where uploaded_by_user_id in ${users}`,
+    `delete from builder_skills where name like 'skill-${RUN}-%'`,
+    `delete from mcp_servers where name like 'lc2c-${RUN}-%'`,
+  ];
+  const kept: string[] = [];
+  for (const stmt of cleanup) await q(stmt).catch(() => kept.push(stmt.split(" where ")[0]!));
+  if (kept.length) console.warn(`lc2c fixtures kept by a guard: ${kept.join("; ")}`);
   await restoreStepUp?.();
   await restoreMfa?.();
 });
