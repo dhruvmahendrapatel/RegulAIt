@@ -1,17 +1,14 @@
 /**
  * ADR-0159 — every remediation proposal across all alerts
- * (`GET /v1/governance/remediations`), newest first, filterable by status.
+ * (`GET /v1/governance/remediations`), under the shared list control (ADR-0219), filterable by status.
  * A proposal is approval-gated: this list says where each one stands and
  * links to the approval that decides it; it never applies anything itself.
  */
-import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { api } from "../../../api/client";
 import { ago, humanize } from "../../../api/format";
-import { Badge, Card, Field, Select, Table, type Tone } from "../../../ui/kit";
-import { NewestNote } from "../../../ui/fold";
-import { QueryGate, useNameMaps } from "../adminKit";
+import { Badge, Card, Field, Select, type Tone } from "../../../ui/kit";
+import { DataList, type DataColumn } from "../../../ui/DataList";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
@@ -54,69 +51,83 @@ export const remediationApprovalHref = (status: string) =>
 export const remediationTone = (status: string): Tone =>
   status === "applied" ? "ok" : status === "pending_approval" ? "info" : status === "denied" || status === "failed" ? "danger" : "warn";
 
+export type OrgRemediationRow = OrgRemediation & { proposedByName?: string | null; decidedByName?: string | null };
+
+/** ADR-0219: the remediations list's columns; the ids and sortable ones match the gateway's REMEDIATIONS_LIST */
+export const REMEDIATION_COLUMNS: Array<DataColumn<OrgRemediationRow>> = [
+  { key: "title", header: "Remediation", main: true, sortable: true, render: (r) => <span>{r.title}</span> },
+  { key: "kind", header: "Kind", main: true, sortable: true, render: (r) => <span title={r.kind}>{humanize(r.kind)}</span> },
+  {
+    key: "status",
+    header: "Status",
+    main: true,
+    sortable: true,
+    required: "Status is always shown",
+    render: (r) => <Badge tone={remediationTone(r.status)}>{statusWords(r.status)}</Badge>,
+  },
+  { key: "proposed", header: "Proposed", main: true, sortable: true, render: (r) => `${r.proposedByName ?? r.proposedByUserId} · ${ago(r.createdAt)}` },
+  {
+    key: "decided",
+    header: "Decided",
+    main: true,
+    sortable: true,
+    render: (r) => (r.decidedAt ? `${r.decidedByName ?? r.decidedByUserId ?? "—"} · ${ago(r.decidedAt)}` : <span className={v.faint}>not yet</span>),
+  },
+  { key: "rationale", header: "Rationale", render: (r) => r.rationale },
+  {
+    key: "links",
+    // FS-42: a named column for assistive tech, hidden on screen
+    header: <span className={s.srOnly}>Actions</span>,
+    srHeader: "Actions",
+    align: "right",
+    action: true,
+    render: (r) =>
+      r.approvalId ? (
+        <Link to={remediationApprovalHref(r.status)} aria-label={`Open approval: ${r.title}`}>
+          Open approval
+        </Link>
+      ) : null,
+  },
+];
+
 export function RemediationsCard() {
   const [status, setStatus] = useState<"" | RemediationStatus>("");
-  const names = useNameMaps();
-  const list = useQuery({
-    queryKey: ["admin", "governance-remediations", status],
-    queryFn: () =>
-      api.get<{ proposals: OrgRemediation[] }>(`/v1/governance/remediations${status ? `?status=${status}` : ""}`),
-  });
-  const who = (id: string | null) => (id ? (names.userName.get(id) ?? id) : "—");
+  const filters = useMemo(() => ({ status: status || undefined }), [status]);
   return (
     <Card
       title="Remediation proposals — all alerts"
       info={
         <p>
-          Every remediation proposed from any alert, newest first (at most 200). Each waits for a different person to
-          approve it; nothing here applies a change.
+          Every remediation proposed from any alert. Each waits for a different person to approve it; nothing here
+          applies a change.
         </p>
       }
-      footer={<NewestNote shown={Array.isArray(list.data?.proposals) ? list.data.proposals.length : 0} limit={200} noun="remediations" />}
     >
       <div className={a.formRow}>
         <Field label="Status">
           <Select value={status} onChange={(e) => setStatus(e.target.value as "" | RemediationStatus)}>
             <option value="">Any status</option>
-            {REMEDIATION_STATUSES.map((s) => (
-              <option key={s} value={s}>
-                {statusWords(s)}
+            {REMEDIATION_STATUSES.map((st) => (
+              <option key={st} value={st}>
+                {statusWords(st)}
               </option>
             ))}
           </Select>
         </Field>
       </div>
-      <QueryGate loading={list.isLoading} error={list.error} onRetry={() => void list.refetch()}>
-        <Table<OrgRemediation>
-          rows={Array.isArray(list.data?.proposals) ? list.data.proposals : []}
-          rowKey={(r) => r.id}
-          empty={<span className={v.faint}>{status ? `No remediations with status “${statusWords(status).toLowerCase()}”.` : "No remediation has been proposed from any alert."}</span>}
-          columns={[
-            { key: "title", header: "Remediation", render: (r) => <span>{r.title}</span> },
-            { key: "kind", header: "Kind", render: (r) => <span title={r.kind}>{humanize(r.kind)}</span> },
-            { key: "status", header: "Status", render: (r) => <Badge tone={remediationTone(r.status)}>{statusWords(r.status)}</Badge> },
-            { key: "proposed", header: "Proposed", render: (r) => `${who(r.proposedByUserId)} · ${ago(r.createdAt)}`, sort: (r) => r.createdAt },
-            {
-              key: "decided",
-              header: "Decided",
-              render: (r) => (r.decidedAt ? `${who(r.decidedByUserId)} · ${ago(r.decidedAt)}` : <span className={v.faint}>not yet</span>),
-            },
-            {
-              key: "links",
-              // FS-42: a named column for assistive tech, hidden on screen
-              header: <span className={s.srOnly}>Actions</span>,
-              align: "right",
-              render: (r) => (
-                r.approvalId ? (
-                  <Link to={remediationApprovalHref(r.status)} aria-label={`Open approval: ${r.title}`}>
-                    Open approval
-                  </Link>
-                ) : null
-              ),
-            },
-          ]}
-        />
-      </QueryGate>
+      <DataList<OrgRemediationRow>
+        listId="remediations"
+        noun="remediations"
+        endpoint="/v1/governance/remediations"
+        exportPath="/v1/governance/remediations/export.xlsx"
+        queryKey={["admin", "governance-remediations"]}
+        legacyKey="proposals"
+        filters={filters}
+        defaultSort={{ key: "proposed", dir: "desc" }}
+        columns={REMEDIATION_COLUMNS}
+        rowKey={(r) => r.id}
+        empty={<span className={v.faint}>{status ? `No remediations with status “${statusWords(status).toLowerCase()}”.` : "No remediation has been proposed from any alert."}</span>}
+      />
     </Card>
   );
 }

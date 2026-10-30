@@ -415,41 +415,45 @@ const inventoryFilterQuery = z.object({ lifecycle: z.enum(["proposed", "under_re
 type InventoryListRowT = {
   id: string; name: string; provider: string; model: string | null; tier: number; enabled: boolean;
   owner: { userId: string; name: string | null; deactivated: boolean } | null;
-  ownership: unknown;
   lifecycle: { status: string };
+  alignment: { status?: string } | null;
+  credential: { source: string };
   modelCard: { cards: number; liveApproved: boolean };
-  granted: { effectiveHolders: number };
-  observed: { dispatchesInWindow: number; costUsdInWindow: number; lastDispatchAt: string | null };
-  coverage: { redteamRunsInWindow: number; evalRunsInWindow: number };
-  links: { useCases: number; openRisks: number };
+  granted: { effectiveHolders: number; grantingRoles: string[]; revokedUsers: number };
+  observed: { dispatchesInWindow: number; lastDispatchAt: string | null; feedsOut: number; feedsIn: number };
+  coverage: { everProbed: boolean; evalRunsInWindow: number; latestAsr: { asr: number | null; asrTrials: number } | null };
+  links: { useCases: number; risks: number; openRisks: number };
 };
 export const INVENTORY_AGENTS_LIST: ListSpec<InventoryListRowT> = {
   id: "inventory-agents",
   sorts: {
-    name: { expr: sqlL`lower(${agents.name})` },
-    provider: { expr: agents.provider },
-    model: { expr: sqlL`lower(${agents.model})` },
-    tier: { expr: agents.tier },
-    enabled: { expr: agents.enabled },
-    lifecycle: { expr: agents.lifecycleStatus },
+    agent: { expr: sqlL`lower(${agents.name})` },
+    model: { expr: sqlL`${agents.provider} || ' ' || coalesce(lower(${agents.model}), '')` },
     owner: { expr: sqlL`lower(${userNameSql(agents.ownerUserId)})` },
+    lifecycle: { expr: agents.lifecycleStatus },
+    tier: { expr: agents.tier },
   },
   columns: {
-    name: { label: "Agent", value: (r) => r.name },
-    provider: { label: "Provider", value: (r) => r.provider },
-    model: { label: "Model", value: (r) => r.model },
+    agent: { label: "Agent", value: (r) => `${r.name}${r.enabled ? "" : " (disabled)"}` },
+    model: { label: "Model / credential", value: (r) => `${r.provider}${r.model ? ` · ${r.model}` : ""} · ${r.credential.source}` },
+    owner: {
+      label: "Owner / lifecycle",
+      value: (r) => `${r.owner ? `${r.owner.name ?? r.owner.userId}${r.owner.deactivated ? " (deactivated)" : ""}` : "no owner"} · ${r.lifecycle.status.replace(/_/g, " ")}`,
+    },
+    alignment: { label: "Intent alignment", value: (r) => (r.alignment && typeof r.alignment.status === "string" ? r.alignment.status.replace(/_/g, " ") : null) },
+    card: { label: "Model card", value: (r) => (r.modelCard.cards === 0 ? "none" : r.modelCard.liveApproved ? "live sign-off" : "no live sign-off") },
+    granted: { label: "Granted (may)", value: (r) => `${r.granted.effectiveHolders} holder(s)${r.granted.grantingRoles.length ? `, roles: ${r.granted.grantingRoles.join(", ")}` : ""}${r.granted.revokedUsers ? `, ${r.granted.revokedUsers} revoked` : ""}` },
+    observed: { label: "Observed (did)", value: (r) => `${r.observed.dispatchesInWindow} dispatch(es)${r.observed.lastDispatchAt ? `, last ${r.observed.lastDispatchAt}` : ", never observed"}` },
+    feeds: { label: "Feeds", value: (r) => `${r.observed.feedsOut} out, ${r.observed.feedsIn} in` },
+    coverage: {
+      label: "Probed / evaled",
+      value: (r) => (r.coverage.everProbed ? `${r.coverage.latestAsr ? `ASR ${r.coverage.latestAsr.asr == null ? "unknown" : `${Math.round(r.coverage.latestAsr.asr * 100)}%`} / ${r.coverage.latestAsr.asrTrials} trials, ` : ""}${r.coverage.evalRunsInWindow} eval(s)` : "never probed"),
+    },
+    links: { label: "Use cases / risks", value: (r) => `${r.links.useCases} · ${r.links.risks}${r.links.openRisks ? ` (${r.links.openRisks} open)` : ""}` },
     tier: { label: "Tier", value: (r) => r.tier },
-    enabled: { label: "Enabled", value: (r) => r.enabled },
-    lifecycle: { label: "Lifecycle", value: (r) => r.lifecycle.status.replace(/_/g, " ") },
-    owner: { label: "Owner", value: (r) => (r.owner ? `${r.owner.name ?? r.owner.userId}${r.owner.deactivated ? " (deactivated)" : ""}` : "no owner") },
-    holders: { label: "Effective holders", value: (r) => r.granted.effectiveHolders },
-    dispatches: { label: "Dispatches in window", value: (r) => r.observed.dispatchesInWindow },
-    cost: { label: "Cost in window (USD)", value: (r) => r.observed.costUsdInWindow },
-    card: { label: "Model card", value: (r) => (r.modelCard.liveApproved ? "approved" : r.modelCard.cards ? "not approved" : "none") },
-    risks: { label: "Open risks", value: (r) => r.links.openRisks },
   },
   filters: ["lifecycle"],
-  defaultSort: { col: "name", dir: "asc" },
+  defaultSort: { col: "agent", dir: "asc" },
   idCol: agents.id,
 };
 

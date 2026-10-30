@@ -24,13 +24,14 @@
  *    to routing, and the gateway's refusal is rendered verbatim below.
  */
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { useSession } from "../../../session/SessionContext";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, type Tone } from "../../../ui/kit";
 import { QueryGate, useAction } from "../adminKit";
+import { DataList, type DataColumn } from "../../../ui/DataList";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -88,17 +89,35 @@ const SCOPE_LABELS: Record<ScopeKind, string> = {
  * visible before committing */
 const FORM_SCOPES: ScopeKind[] = ["all", "agent_lifecycle", "agent_owner", "user"];
 
+/** ADR-0219: the campaigns list's columns; the ids and sortable ones match the gateway's CAMPAIGNS_LIST */
+const CAMPAIGN_COLUMNS: Array<DataColumn<CampaignListRow>> = [
+  { key: "name", header: "Campaign", main: true, sortable: true, render: (r) => r.name },
+  { key: "status", header: "Status", main: true, sortable: true, required: "Status is always shown", render: (r) => <Badge tone={statusTone(r.status)}>{r.status}</Badge> },
+  { key: "scope", header: "Scope", main: true, sortable: true, render: (r) => SCOPE_LABELS[r.scope.kind] },
+  {
+    key: "progress",
+    header: "Items",
+    main: true,
+    sortable: true,
+    render: (r) => (
+      <>
+        {r.items.total} — {r.items.keep} keep, {r.items.revoke} revoke,{" "}
+        {r.items.undecided > 0 ? <strong>{r.items.undecided} undecided</strong> : "0 undecided"}
+      </>
+    ),
+  },
+  { key: "due", header: "Due", main: true, sortable: true, render: (r) => ago(r.dueAt) },
+  { key: "opened", header: "Opened by", main: true, sortable: true, render: (r) => r.openedBy.name ?? r.openedBy.userId },
+  { key: "created", header: "Opened", sortable: true, render: (r) => ago(r.createdAt) },
+];
+
 export default function CampaignsPage() {
   const act = useAction();
   const reassignAct = useAction();
   const { auth } = useSession();
   const myUserId = auth?.userId ?? null;
 
-  const list = useQuery({
-    queryKey: ["admin", "certification"],
-    queryFn: () =>
-      api.get<{ campaigns: CampaignListRow[]; notes: { scope: string } }>("/v1/certification-campaigns"),
-  });
+  const queryClient = useQueryClient();
   const usersQ = useQuery({
     queryKey: ["admin", "certification", "users"],
     queryFn: () => api.get<{ users: Array<{ id: string; email: string; displayName: string | null }> }>("/v1/users"),
@@ -129,7 +148,7 @@ export default function CampaignsPage() {
   });
 
   const refreshAll = async () => {
-    await Promise.all([list.refetch(), openId ? detail.refetch() : Promise.resolve(null)]);
+    await Promise.all([queryClient.invalidateQueries({ queryKey: ["admin", "certification"] }), openId ? detail.refetch() : Promise.resolve(null)]);
   };
   const d = detail.data;
 
@@ -231,43 +250,22 @@ export default function CampaignsPage() {
         </Card>
 
         {/* ---------------- list ---------------- */}
-        <QueryGate loading={list.isLoading} error={list.error} onRetry={() => void list.refetch()}>
-          <Card title="Campaigns">
-            {(list.data?.campaigns ?? []).length === 0 ? (
-              <EmptyState
-                title="No certification campaign has ever been run"
-                body="Gateway grants have never been re-attested. Open one above."
-              />
-            ) : (
-              <Table
-                rows={list.data?.campaigns ?? []}
-                rowKey={(r) => r.id}
-                onRowClick={(r) => setOpenId(openId === r.id ? null : r.id)}
-                columns={[
-                  { key: "name", header: "Campaign", render: (r) => r.name },
-                  {
-                    key: "status",
-                    header: "Status",
-                    render: (r) => <Badge tone={statusTone(r.status)}>{r.status}</Badge>,
-                  },
-                  { key: "scope", header: "Scope", render: (r) => SCOPE_LABELS[r.scope.kind] },
-                  {
-                    key: "progress",
-                    header: "Items",
-                    render: (r) => (
-                      <>
-                        {r.items.total} — {r.items.keep} keep, {r.items.revoke} revoke,{" "}
-                        {r.items.undecided > 0 ? <strong>{r.items.undecided} undecided</strong> : "0 undecided"}
-                      </>
-                    ),
-                  },
-                  { key: "due", header: "Due", render: (r) => ago(r.dueAt) },
-                  { key: "opened", header: "Opened by", render: (r) => r.openedBy.name ?? r.openedBy.userId },
-                ]}
-              />
-            )}
-          </Card>
-        </QueryGate>
+        <Card title="Campaigns" flush>
+          <DataList<CampaignListRow>
+            listId="certification-campaigns"
+            noun="campaigns"
+            endpoint="/v1/certification-campaigns"
+            exportPath="/v1/certification-campaigns/export.xlsx"
+            queryKey={["admin", "certification", "list"]}
+            legacyKey="campaigns"
+            defaultSort={{ key: "created", dir: "desc" }}
+            columns={CAMPAIGN_COLUMNS}
+            rowKey={(r) => r.id}
+            onRowClick={(r) => setOpenId(openId === r.id ? null : r.id)}
+            rowLabel={(r) => `Open campaign ${r.name}`}
+            empty={<EmptyState title="No certification campaign has ever been run" body="Gateway grants have never been re-attested. Open one above." />}
+          />
+        </Card>
 
         {/* ---------------- detail ---------------- */}
         {openId && (
@@ -288,16 +286,24 @@ export default function CampaignsPage() {
                           : `due ${ago(d.dueAt)} — undecided items after that stay undecided forever`}
                     </span>
                   </div>
-                  <Table
-                    rows={d.items}
+                  <DataList<CampaignItem>
+                    listId="certification-items"
+                    noun="campaign items"
+                    endpoint={`/v1/certification-campaigns/${d.id}/items`}
+                    exportPath={`/v1/certification-campaigns/${d.id}/items/export.xlsx`}
+                    queryKey={["admin", "certification", "items", d.id]}
+                    legacyKey="items"
+                    defaultSort={{ key: "holder", dir: "asc" }}
                     rowKey={(r) => r.id}
                     columns={[
-                      { key: "holder", header: "Holder", render: (r) => r.holder.label },
-                      { key: "object", header: "Grant", render: (r) => r.object.label },
-                      { key: "kind", header: "Kind", render: (r) => r.grantKind.replace(/_/g, " ") },
+                      { key: "holder", main: true, sortable: true, header: "Holder", render: (r) => r.holder.label },
+                      { key: "object", main: true, sortable: true, header: "Grant", render: (r) => r.object.label },
+                      { key: "kind", main: true, sortable: true, header: "Kind", render: (r) => r.grantKind.replace(/_/g, " ") },
                       {
                         key: "reviewer",
                         header: "Reviewer",
+                        main: true,
+                        sortable: true,
                         render: (r) => (
                           <>
                             {r.reviewer.name ?? r.reviewer.userId}
@@ -313,6 +319,9 @@ export default function CampaignsPage() {
                       {
                         key: "decision",
                         header: "Decision",
+                        main: true,
+                        sortable: true,
+                        required: "The decision is always shown",
                         render: (r) =>
                           r.decision ? (
                             <>

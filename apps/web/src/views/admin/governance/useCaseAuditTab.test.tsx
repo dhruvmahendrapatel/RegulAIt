@@ -22,8 +22,26 @@ describe("use-case Audit tab, full-trail link (#465 L2)", () => {
   it("links an admin to this use case's own trail", () => {
     const html = render(true);
     expect(html).toContain(`href="/admin/audit?objectType=ai_use_case&amp;objectId=${ID}"`);
-    expect(html).toContain("Open this use case&#x27;s full audit trail");
+    expect(html).toContain("View all of this use case&#x27;s audit trail");
+    expect(html).toContain("View all →");
     expect(html).not.toContain("use-case-audit-admin-only");
+  });
+
+  it("is a preview: at most five rows, with the count of every row", () => {
+    const many = Array.from({ length: 20 }, (_, i) => ({ ...rows[0], id: i + 1 }));
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <AuditTab rows={many as never} total={57} useCaseId={ID} isAdmin />
+      </MemoryRouter>,
+    );
+    expect(html.match(/<tr>/g)?.length).toBe(1 + 5);
+    expect(html).toContain("Showing the newest 5 of 57 rows.");
+    const capped = renderToStaticMarkup(
+      <MemoryRouter>
+        <AuditTab rows={many as never} total={undefined} useCaseId={ID} isAdmin />
+      </MemoryRouter>,
+    );
+    expect(capped).toContain("Showing the newest 5 of 20+ rows.");
   });
 
   it("tells a non-admin the full trail needs an administrator, with no link into the audit log", () => {

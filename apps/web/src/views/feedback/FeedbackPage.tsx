@@ -8,9 +8,8 @@
  * lists what the signed-in person submitted (status only). Admins also get the
  * feedback settings here (ADR-0182 main-session decision 1).
  */
-import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { api } from "../../api/client";
+import { useCallback, useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { PageHeader } from "../../shell/AppShell";
 import { useSession } from "../../session/SessionContext";
 import { Card, EmptyState, Field, Select, Tabs, tabIds } from "../../ui/kit";
@@ -25,12 +24,11 @@ export default function FeedbackPage() {
   const [scope, setScope] = useState<Scope>("queue");
   const [status, setStatus] = useState<"open" | "resolved" | "all">("open");
   const [openId, setOpenId] = useState<string | null>(null);
-  const q = useQuery({
-    queryKey: ["feedback", "list", scope, status],
-    queryFn: () => api.get<{ items: FeedbackItem[] }>(`/v1/feedback?scope=${scope}&status=${status}`),
-  });
-  const items = q.data?.items;
-  const overdue = (items ?? []).filter((i) => i.sla.chip === "breached").length;
+  const queryClient = useQueryClient();
+  const filters = useMemo(() => ({ scope, status }), [scope, status]);
+  // the server counts the overdue items across every matching item, not only the page on screen
+  const [overdue, setOverdue] = useState(0);
+  const onRows = useCallback((_rows: FeedbackItem[], raw: Record<string, unknown>) => setOverdue(typeof raw.overdue === "number" ? raw.overdue : 0), []);
   const panel = tabIds("feedback", scope);
 
   return (
@@ -77,10 +75,10 @@ export default function FeedbackPage() {
                 </p>
               )}
               <FeedbackList
-                rows={items}
-                loading={q.isLoading}
-                error={q.error}
-                onRetry={() => void q.refetch()}
+                listId={scope === "queue" ? "feedback" : "feedback-sent"}
+                filters={filters}
+                queryKey={["feedback", "list"]}
+                onRows={onRows}
                 onOpen={scope === "queue" ? (r) => setOpenId(r.id) : undefined}
                 empty={
                   <EmptyState
@@ -102,7 +100,7 @@ export default function FeedbackPage() {
         id={openId}
         onClose={() => {
           setOpenId(null);
-          void q.refetch();
+          void queryClient.invalidateQueries({ queryKey: ["feedback", "list"] });
         }}
       />
     </>

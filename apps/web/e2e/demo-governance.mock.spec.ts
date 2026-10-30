@@ -492,8 +492,10 @@ test("use-case Audit tab never shows the capped row count as the total (M1)", as
   const tab = page.getByRole("tab", { name: /^Audit/ });
   await expect(tab).toHaveText("Audit 20+");
   await tab.click();
-  await expect(page.getByTestId("use-case-audit-partial")).toContainText("older rows may exist");
-  await expect(page.getByRole("link", { name: "Open this use case's full audit trail" })).toBeVisible();
+  // a preview: the newest five rows and the count, which says the cap is a lower bound
+  await expect(page.getByTestId("use-case-audit-partial")).toHaveText("Showing the newest 5 of 20+ rows.");
+  await expect(page.getByRole("tabpanel").getByRole("row")).toHaveCount(6);
+  await expect(page.getByRole("link", { name: "View all of this use case's audit trail" })).toBeVisible();
 });
 
 test("use-case Audit tab shows the true total and deep-links to that use case's own trail (owner decision 2026-10-20)", async ({ page }) => {
@@ -509,8 +511,8 @@ test("use-case Audit tab shows the true total and deep-links to that use case's 
   const tab = page.getByRole("tab", { name: /^Audit/ });
   await expect(tab).toHaveText("Audit 57");
   await tab.click();
-  await expect(page.getByTestId("use-case-audit-partial")).toHaveText("Showing the newest 20 of 57 rows. This use case's full audit trail, and its CSV export, hold every row.");
-  const link = page.getByRole("link", { name: "Open this use case's full audit trail" });
+  await expect(page.getByTestId("use-case-audit-partial")).toHaveText("Showing the newest 5 of 57 rows.");
+  const link = page.getByRole("link", { name: "View all of this use case's audit trail" });
   await expect(link).toHaveAttribute("href", `/ui/admin/audit?objectType=ai_use_case&objectId=${ID}`);
   await link.click();
   await expect(page.getByTestId("audit-only-object")).toContainText(`Showing the audit trail of one AI use case, ${ID}.`);
@@ -559,12 +561,12 @@ test("the audit page never sends an object type no console link opens (owner dec
   await expect(page).not.toHaveURL(/objectType=/);
 });
 
-test("use-case Audit tab under the cap shows the exact count and no partial notice (M1)", async ({ page }) => {
+test("use-case Audit tab under the cap shows the exact count, never a capped one (M1)", async ({ page }) => {
   await page.goto(`/ui/admin/governance/use-cases/${ID}`);
   const tab = page.getByRole("tab", { name: /^Audit/ });
   await expect(tab).toHaveText("Audit 1");
   await tab.click();
-  await expect(page.getByTestId("use-case-audit-partial")).toHaveCount(0);
+  await expect(page.getByTestId("use-case-audit-partial")).toHaveText("Showing all 1 row.");
 });
 
 test("trust coverage view is remembered across a reload (L3)", async ({ page }) => {

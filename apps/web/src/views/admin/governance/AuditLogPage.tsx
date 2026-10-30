@@ -1,7 +1,7 @@
 /**
  * Audit log — the single trail every pillar writes into. Filterable by user
- * and by A4's deploy-mode dimension, full-trail CSV export (the screen shows
- * the latest 100 rows), and the §8.4 retention floor + governed prune (owned
+ * and by A4's deploy-mode dimension, full-trail CSV export (the screen pages
+ * through every row under the shared list control, ADR-0219), and the §8.4 retention floor + governed prune (owned
  * confirm, itself audited).
  *
  * DEPLOY-MODE HONESTY (ADR-0027 §2a). `deploy_mode` is written only by
@@ -20,7 +20,7 @@ import ev from "./auditLog.module.css";
 import { AnchorTimestampsPanel } from "./AnchorTimestampsPanel";
 import { AUDIT_OBJECT_LINK_TYPES } from "./auditObjectLinks";
 import { lazy, Suspense, useMemo, useState } from "react";
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
 import type { AuditEntry } from "../../../api/types";
@@ -29,6 +29,7 @@ import type { AuditRetention } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, InfoButton, Select, Table, type Tone } from "../../../ui/kit";
 import { FoldTable } from "../../../ui/fold";
+import { DataList } from "../../../ui/DataList";
 import { useToast } from "../../../ui/toast";
 import { downloadCsv, optionEls, useAction, useUsers, userOpts } from "../adminKit";
 import a from "../admin.module.css";
@@ -115,28 +116,22 @@ export default function AuditLogPage() {
     queryKey: ["admin", "audit-retention"],
     queryFn: () => api.get<AuditRetention>("/v1/audit/retention"),
   });
-  // Cursor-paged: the server hands back 100 rows and a cursor for the older
-  // ones. The table used to stop at the first page with no sign that 306
-  // older rows existed (UIA-02); now it says how many are shown and loads
-  // older pages on request.
-  const audit = useInfiniteQuery({
-    queryKey: ["admin", "audit", onlyRow, onlyObject?.type ?? null, onlyObject?.id ?? null, userId, deployMode],
-    queryFn: ({ pageParam }) =>
-      api.get<AuditPage>(`/v1/audit${qs}${pageParam ? `${qs ? "&" : "?"}cursor=${encodeURIComponent(pageParam)}` : ""}`),
-    initialPageParam: null as string | null,
-    getNextPageParam: (last) => (last.hasMore && last.nextCursor ? last.nextCursor : null),
-  });
-
+  // ADR-0219: the trail pages on the server under the shared list control. Its default sort is the same
+  // (at DESC, id DESC) keyset the trail always paged by, so "Next" walks the same cursor; the count is bounded
+  // ("of 1,000+") because the trail grows a row per governed call.
+  const auditFilters = useMemo(
+    () => ({
+      id: onlyRow ?? undefined,
+      objectType: onlyObject?.type,
+      objectId: onlyObject?.id,
+      userId: userId || undefined,
+      deployMode: deployMode || undefined,
+    }),
+    [onlyRow, onlyObject?.type, onlyObject?.id, userId, deployMode],
+  );
   const nameOf = useMemo(
     () => new Map((users.data?.users ?? []).map((u) => [u.id, u.displayName || u.email])),
     [users.data],
-  );
-  const rows = useMemo(
-    () =>
-      (audit.data?.pages ?? [])
-        .flatMap((p) => p.entries ?? [])
-        .map((e, i) => ({ ...e, rowKey: e.id ?? `${e.at}-${i}` })),
-    [audit.data],
   );
   const ret = retention.data;
   // the same reads the folded panels make (same query keys, so one request each), for the summaries' state
@@ -183,23 +178,6 @@ export default function AuditLogPage() {
         <Card
           title="Entries"
           contain
-          // M2: the header says how much of the trail is loaded, and the paging line sits outside the scroll box
-          count={rows.length > 0 ? rows.length : undefined}
-          countNoun={audit.hasNextPage ? ["newest row loaded, older rows exist", "newest rows loaded, older rows exist"] : ["row", "rows"]}
-          footer={rows.length > 0 && (
-            <div className={v.row} data-testid="audit-paging">
-              <span className={v.dim}>
-                {audit.hasNextPage
-                  ? `Showing the newest ${plural(rows.length, "row")} — older rows exist`
-                  : `Showing all ${plural(rows.length, "row")}`}
-              </span>
-              {audit.hasNextPage && (
-                <Button size="sm" disabled={audit.isFetchingNextPage} onClick={() => void audit.fetchNextPage()}>
-                  {audit.isFetchingNextPage ? "Loading…" : "Load older"}
-                </Button>
-              )}
-            </div>
-          )}
           actions={
             <div className={a.formRow}>
               <Field label="Filter by user">
@@ -250,20 +228,34 @@ export default function AuditLogPage() {
               </Button>
             </p>
           )}
-          <FoldTable<AuditEntry & { rowKey: string }>
+          <DataList<AuditEntry>
+            listId="audit-log"
+            noun="audit rows"
+            endpoint="/v1/audit"
+            exportPath="/v1/audit/export.xlsx"
+            queryKey={["admin", "audit"]}
+            legacyKey="entries"
+            count="estimate"
+            filters={auditFilters}
+            defaultSort={{ key: "at", dir: "desc" }}
+            table={FoldTable}
+            rowKey={(e) => e.id ?? `${e.at}-${e.ruleId}`}
             columns={[
               // F25 (#453): below 1000 px of table width, User folds under At and Deploy mode under Effect; on a phone
               // every value is a labelled line under Event
               {
                 key: "at",
                 header: "At",
+                main: true,
+                sortable: true,
                 fold: { sm: "event" },
-                sort: (e) => e.at,
                 render: (e) => <span className={v.mono} style={{ whiteSpace: "nowrap" }}>{fmtAt(e.at)}</span>,
               },
               {
                 key: "user",
                 header: "User",
+                main: true,
+                sortable: true,
                 fold: { md: "at", sm: "event" },
                 render: (e) => <span style={{ whiteSpace: "nowrap" }}>{actorLabel(e.userId, nameOf)}</span>,
               },
@@ -271,7 +263,8 @@ export default function AuditLogPage() {
                 // the event: the rule, with the object it touched as a faint line above it, so the event can wrap
                 key: "event",
                 header: "Event",
-                sort: (e) => `${e.objectType ?? ""} ${e.ruleId}`,
+                main: true,
+                sortable: true,
                 render: (e) => (
                   <span>
                     {e.objectType ? <span className={v.faint} style={{ display: "block" }}>{humanize(e.objectType)}</span> : null}
@@ -282,8 +275,10 @@ export default function AuditLogPage() {
               {
                 key: "effect",
                 header: "Effect",
+                main: true,
+                sortable: true,
+                required: "A deny or a held action is always shown",
                 fold: { sm: "event" },
-                sort: (e) => e.effect,
                 // the expected outcome is plain text; only a deny or a held action is tagged
                 render: (e) => e.effect === "allow"
                   ? <span className={v.dim}>allow</span>
@@ -292,9 +287,10 @@ export default function AuditLogPage() {
               {
                 key: "deployMode",
                 header: "Deploy mode",
+                main: true,
+                sortable: true,
                 fold: { md: "effect", sm: "event" },
                 info: <p>&ldquo;Not recorded&rdquo; means no deploy mode was recorded, because the action is not deploy-scoped or predates deploy modes. It is never back-filled.</p>,
-                sort: (e) => e.deployMode ?? "unknown",
                 render: (e) =>
                   e.deployMode ? (
                     <span>{modeLabel(e.deployMode)}</span>
@@ -302,10 +298,11 @@ export default function AuditLogPage() {
                     <span className={v.dim} style={{ whiteSpace: "nowrap" }}>Not recorded</span>
                   ),
               },
-              { key: "reason", header: "Reason", fold: { sm: "event" }, render: (e) => <ReasonCell reason={e.reason} /> },
+              { key: "reason", header: "Reason", main: true, fold: { sm: "event" }, render: (e) => <ReasonCell reason={e.reason} /> },
               {
                 key: "bom",
                 header: "Evidence",
+                action: true,
                 fold: { sm: "event" },
                 render: (e) =>
                   e.id && e.objectType && RECEIPT_OBJECT_TYPES.has(e.objectType) ? (
@@ -315,11 +312,6 @@ export default function AuditLogPage() {
                   ) : null,
               },
             ]}
-            rows={rows}
-            rowKey={(e) => e.rowKey}
-            loading={audit.isLoading}
-            error={audit.error}
-            onRetry={() => void (audit.isFetchNextPageError ? audit.fetchNextPage() : audit.refetch())}
             empty={
               <EmptyState
                 title="No audit rows match"

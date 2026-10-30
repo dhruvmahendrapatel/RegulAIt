@@ -4,27 +4,20 @@
  * Audit log page beside the receipt status, export and verify controls.
  *
  * Both reads are audited by the gateway, so neither runs on page load: the
- * list is fetched when the person asks for a page, and a receipt when they
+ * list (under the shared list control, ADR-0219) is fetched when the person asks for it, and a receipt when they
  * open one. A receipt carries no reason or detail text (ADR-0186 R), so the
  * dialog shows exactly the signed payload and says so.
  */
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { fmtAt, UUID_RE } from "../../../api/format";
-import { Badge, Button, CodeBlock, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
+import { Badge, Button, CodeBlock, EmptyState, Field, Input } from "../../../ui/kit";
+import { DataList, type DataColumn } from "../../../ui/DataList";
 import { KV } from "../adminKit";
 import { DetailDialog } from "../DetailDialog";
 import { refusalWords } from "../detailModel";
-import {
-  RECEIPT_PAGE_SIZES,
-  RECEIPT_REFUSALS,
-  nextFromSeq,
-  parseFromSeq,
-  receiptRow,
-  type ReceiptEnvelope,
-  type ReceiptRow,
-} from "./receiptsModel";
+import { RECEIPT_REFUSALS, parseFromSeq, receiptRow, type ReceiptEnvelope } from "./receiptsModel";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -89,23 +82,49 @@ export function ReceiptDialog(props: { auditId: string; onClose: () => void }) {
   );
 }
 
+/** ADR-0219: the receipts list's columns; the ids and sortable ones match the gateway's RECEIPTS_LIST */
+function receiptColumns(open: (auditId: string) => void): Array<DataColumn<ReceiptEnvelope>> {
+  return [
+    { key: "seq", header: "Sequence", main: true, sortable: true, render: (e) => <span className={v.num}>{e.receiptSeq}</span> },
+    { key: "at", header: "Decided", main: true, sortable: true, render: (e) => { const r = receiptRow(e); return r.at ? fmtAt(r.at) : "—"; } },
+    {
+      key: "effect",
+      header: "Effect",
+      main: true,
+      sortable: true,
+      required: "The decision's effect is always shown",
+      render: (e) => { const r = receiptRow(e); return r.effect ? <Badge tone={effectTone(r.effect)}>{r.effect}</Badge> : "—"; },
+    },
+    { key: "object", header: "Object", main: true, sortable: true, render: (e) => receiptRow(e).objectType ?? "—" },
+    { key: "rule", header: "Rule", main: true, sortable: true, render: (e) => { const r = receiptRow(e); return r.ruleId ? <code>{r.ruleId}</code> : "—"; } },
+    { key: "v", header: "Version", main: true, sortable: true, render: (e) => { const r = receiptRow(e); return r.version === null ? "—" : `v${r.version}`; } },
+    {
+      key: "open",
+      header: "",
+      srHeader: "Actions",
+      align: "right",
+      action: true,
+      render: (e) => {
+        const r = receiptRow(e);
+        return r.auditId ? (
+          <Button size="sm" aria-label={`Open receipt ${r.receiptSeq}`} onClick={() => open(r.auditId!)}>
+            Open
+          </Button>
+        ) : null;
+      },
+    },
+  ];
+}
+
 export function DecisionReceiptsBrowser() {
   const [fromText, setFromText] = useState("1");
-  const [limit, setLimit] = useState<number>(RECEIPT_PAGE_SIZES[0]);
-  const [page, setPage] = useState<{ from: number; limit: number } | null>(null);
+  const [from, setFrom] = useState<number | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [openAudit, setOpenAudit] = useState<string | null>(null);
   const [auditDraft, setAuditDraft] = useState("");
   const [auditError, setAuditError] = useState<string | null>(null);
-
-  const list = useQuery({
-    queryKey: ["admin", "decision-receipts", page?.from, page?.limit],
-    enabled: page !== null,
-    retry: false,
-    queryFn: () => api.get<{ receipts: ReceiptEnvelope[] }>(`/v1/receipts?fromSeq=${page!.from}&limit=${page!.limit}`),
-  });
-  const rows = (list.data?.receipts ?? []).map(receiptRow);
-  const next = page && list.data ? nextFromSeq(list.data.receipts, page.limit) : null;
+  const filters = useMemo(() => ({ fromSeq: from === null ? undefined : String(from) }), [from]);
+  const columns = useMemo(() => receiptColumns(setOpenAudit), []);
 
   return (
     <div className={v.stack}>
@@ -114,31 +133,20 @@ export function DecisionReceiptsBrowser() {
         className={a.formRow}
         onSubmit={(event) => {
           event.preventDefault();
-          const from = parseFromSeq(fromText);
-          if (from === null) {
+          const parsed = parseFromSeq(fromText);
+          if (parsed === null) {
             setFormError("Enter a first receipt sequence of 1 or more (a whole number).");
             return;
           }
           setFormError(null);
-          setPage({ from, limit });
+          setFrom(parsed);
         }}
       >
         <Field label="Start at receipt sequence">
           <Input inputMode="numeric" value={fromText} onChange={(event) => setFromText(event.target.value)} aria-describedby="receipt-list-help" />
         </Field>
-        <Field label="Receipts per page">
-          <Select value={String(limit)} onChange={(event) => setLimit(Number(event.target.value))}>
-            {RECEIPT_PAGE_SIZES.map((n) => (
-              <option key={n} value={n}>
-                {n}
-              </option>
-            ))}
-          </Select>
-        </Field>
         <Field label="&nbsp;">
-          <Button type="submit" disabled={list.isFetching}>
-            Show receipts
-          </Button>
+          <Button type="submit">Show receipts</Button>
         </Field>
       </form>
       <p id="receipt-list-help" className={v.faint}>
@@ -149,81 +157,25 @@ export function DecisionReceiptsBrowser() {
           {formError}
         </p>
       )}
-      {page && (
-        <div aria-live="polite" className={v.stack}>
-          {list.isLoading ? (
-            <p role="status" className={v.faint}>
-              Loading receipts from sequence {page.from}…
-            </p>
-          ) : list.isError ? (
-            (() => {
-              const w = refusalWords("receipt list", list.error, RECEIPT_REFUSALS);
-              return (
-                <div role="alert" className={v.stack}>
-                  <strong>{w.title}</strong>
-                  <p>{w.body}</p>
-                  {w.retry && (
-                    <div>
-                      <Button size="sm" onClick={() => void list.refetch()}>
-                        Retry
-                      </Button>
-                    </div>
-                  )}
-                </div>
-              );
-            })()
-          ) : (
-            <>
-              <Table<ReceiptRow>
-                rows={rows}
-                rowKey={(r) => String(r.receiptSeq)}
-                empty={
-                  <EmptyState
-                    title={`No receipts from sequence ${page.from}`}
-                    body="Nothing has been signed at or after this sequence yet. The status above says whether signing is on and how many decisions await it."
-                  />
-                }
-                columns={[
-                  { key: "seq", header: "Sequence", render: (r) => <span className={v.num}>{r.receiptSeq}</span> },
-                  { key: "at", header: "Decided", render: (r) => (r.at ? fmtAt(r.at) : "—") },
-                  { key: "effect", header: "Effect", render: (r) => (r.effect ? <Badge tone={effectTone(r.effect)}>{r.effect}</Badge> : "—") },
-                  { key: "object", header: "Object", render: (r) => r.objectType ?? "—" },
-                  { key: "rule", header: "Rule", render: (r) => (r.ruleId ? <code>{r.ruleId}</code> : "—") },
-                  { key: "v", header: "Version", render: (r) => (r.version === null ? "—" : `v${r.version}`) },
-                  {
-                    key: "open",
-                    header: "",
-                    srHeader: "Actions",
-                    align: "right",
-                    render: (r) =>
-                      r.auditId ? (
-                        <Button size="sm" aria-label={`Open receipt ${r.receiptSeq}`} onClick={() => setOpenAudit(r.auditId)}>
-                          Open
-                        </Button>
-                      ) : null,
-                  },
-                ]}
-              />
-              <div className={v.row}>
-                <span className={v.faint}>
-                  {rows.length === 0
-                    ? ""
-                    : `Showing sequences ${rows[0]!.receiptSeq}–${rows[rows.length - 1]!.receiptSeq}.`}
-                </span>
-                {page.from > 1 && (
-                  <Button size="sm" onClick={() => setPage({ from: Math.max(1, page.from - page.limit), limit: page.limit })}>
-                    Previous page
-                  </Button>
-                )}
-                {next !== null && (
-                  <Button size="sm" onClick={() => setPage({ from: next, limit: page.limit })}>
-                    Next page
-                  </Button>
-                )}
-              </div>
-            </>
-          )}
-        </div>
+      {from !== null && (
+        <DataList<ReceiptEnvelope>
+          listId="decision-receipts"
+          noun="receipts"
+          endpoint="/v1/receipts"
+          exportPath="/v1/receipts/export.xlsx"
+          queryKey={["admin", "decision-receipts"]}
+          legacyKey="receipts"
+          filters={filters}
+          defaultSort={{ key: "seq", dir: "asc" }}
+          columns={columns}
+          rowKey={(e) => String(e.receiptSeq)}
+          empty={
+            <EmptyState
+              title={`No receipts from sequence ${from}`}
+              body="Nothing has been signed at or after this sequence yet. The status above says whether signing is on and how many decisions await it."
+            />
+          }
+        />
       )}
       <form
         className={a.formRow}

@@ -8,11 +8,11 @@
  * enrolments; revoking the devices it enrolled is a separate, unchecked choice.
  */
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { fmtDateTime } from "../../../api/format";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
-import { Badge, Button, Card, CodeBlock, ConfirmModal, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
+import { Badge, Button, Card, CodeBlock, ConfirmModal, EmptyState, Field, Input, Select } from "../../../ui/kit";
+import { DataList } from "../../../ui/DataList";
 import { plural } from "../../../api/format";
 import { useAction } from "../adminKit";
 import v from "../../views.module.css";
@@ -75,16 +75,8 @@ export function EndpointAgentCard({ sources }: { sources: readonly DiscoverySour
   const [alsoDevices, setAlsoDevices] = useState(false);
   const chosen = targets.find((s) => s.id === sourceId) ?? null;
 
-  const tokens = useQuery({
-    queryKey: ["admin", "discovery", "enrolment-tokens", sourceId],
-    enabled: !!chosen,
-    queryFn: () => api.get<{ tokens: TokenView[] }>(`/v1/discovery/sources/${sourceId}/enrolment-tokens`),
-  });
-  const devices = useQuery({
-    queryKey: ["admin", "discovery", "endpoint-devices", sourceId],
-    enabled: !!chosen,
-    queryFn: () => api.get<DevicesView>(`/v1/discovery/sources/${sourceId}/endpoint-devices`),
-  });
+  // ADR-0219: tokens and devices page on the server; the device figures come with each page, across the source
+  const [deviceSummary, setDeviceSummary] = useState<DevicesView["summary"] | null>(null);
 
   const issue = () => {
     if (!chosen) return setError("Choose an endpoint agent source.");
@@ -100,7 +92,7 @@ export function EndpointAgentCard({ sources }: { sources: readonly DiscoverySour
       const out = await withStepUp((h) => stepUpApi.post<{ token: TokenView; enrolFile: Record<string, string> }>(`/v1/discovery/sources/${chosen.id}/enrolment-tokens`, body, h));
       setEnrolFile(JSON.stringify(out.enrolFile, null, 2));
       setLabel("");
-      await tokens.refetch();
+      // the action's own refresh reloads the token and device lists (their query keys sit under "admin")
       return `Enrolment token '${out.token.label}' issued`;
     });
   };
@@ -114,12 +106,9 @@ export function EndpointAgentCard({ sources }: { sources: readonly DiscoverySour
     void act.run(async () => {
       if (r.kind === "token") {
         const out = await api.post<{ devicesRevoked?: number }>(`/v1/discovery/enrolment-tokens/${r.row.id}/revoke`, { revokeDevices });
-        await tokens.refetch();
-        if (revokeDevices) await devices.refetch();
         return revokeDevices ? `Enrolment token '${r.row.label}' revoked with ${plural(out.devicesRevoked ?? 0, "device")}` : `Enrolment token '${r.row.label}' revoked`;
       }
       const out = await api.post<{ identitiesRevoked: number }>(`/v1/discovery/endpoint-devices/${r.row.id}/revoke`, {});
-      await devices.refetch();
       return `Device ${r.row.devicePseudonym} revoked (${plural(out.identitiesRevoked, "agent identity", "agent identities")})`;
     });
   };
@@ -176,20 +165,27 @@ export function EndpointAgentCard({ sources }: { sources: readonly DiscoverySour
                     <CodeBlock>{enrolFile}</CodeBlock>
                   </div>
                 )}
-                <Table<TokenView>
-                  rows={tokens.data?.tokens}
-                  loading={tokens.isPending}
-                  error={tokens.error}
-                  onRetry={() => void tokens.refetch()}
+                <DataList<TokenView>
+                  key={`tokens-${sourceId}`}
+                  listId="enrolment-tokens"
+                  noun="enrolment tokens"
+                  endpoint={`/v1/discovery/sources/${sourceId}/enrolment-tokens`}
+                  exportPath={`/v1/discovery/sources/${sourceId}/enrolment-tokens/export.xlsx`}
+                  queryKey={["admin", "discovery", "enrolment-tokens", sourceId]}
+                  legacyKey="tokens"
+                  defaultSort={{ key: "created", dir: "desc" }}
                   rowKey={(t) => t.id}
                   empty={<EmptyState title="No enrolment token" body="Issue one above to enrol devices." />}
                   columns={[
-                    { key: "label", header: "Token", render: (t) => t.label },
-                    { key: "devices", header: "Devices", render: (t) => `${t.devicesEnrolled} / ${t.deviceCap}` },
-                    { key: "expires", header: "Expires", render: (t) => when(t.expiresAt) },
+                    { key: "label", header: "Token", main: true, sortable: true, render: (t) => t.label },
+                    { key: "devices", header: "Devices", main: true, sortable: true, render: (t) => `${t.devicesEnrolled} / ${t.deviceCap}` },
+                    { key: "expires", header: "Expires", main: true, sortable: true, render: (t) => when(t.expiresAt) },
                     {
                       key: "state",
                       header: "State",
+                      main: true,
+                      sortable: true,
+                      required: "A token's state is always shown",
                       render: (t) =>
                         t.revokedAt ? (
                           <Badge tone="neutral">revoked</Badge>
@@ -199,28 +195,35 @@ export function EndpointAgentCard({ sources }: { sources: readonly DiscoverySour
                           </Button>
                         ),
                     },
+                    { key: "active", header: "Devices active", sortable: true, render: (t) => t.devicesActive ?? "—" },
+                    { key: "created", header: "Issued", sortable: true, render: (t) => when(t.createdAt) },
                   ]}
                 />
-                {devices.data ? (
+                {deviceSummary ? (
                   <p className={v.faint}>
-                    {`${plural(devices.data.summary.devices, "device")}, ${devices.data.summary.revoked} revoked, ${plural(devices.data.summary.softwareKeys, "agent identity", "agent identities")} with a software key (no key hardware on the device).`}
+                    {`${plural(deviceSummary.devices, "device")}, ${deviceSummary.revoked} revoked, ${plural(deviceSummary.softwareKeys, "agent identity", "agent identities")} with a software key (no key hardware on the device).`}
                   </p>
-                ) : devices.isPending ? (
-                  <p className={v.faint} role="status">Loading devices…</p>
                 ) : null}
-                <Table<DeviceView>
-                  rows={devices.data?.devices}
-                  loading={devices.isPending}
-                  error={devices.error}
-                  onRetry={() => void devices.refetch()}
+                <DataList<DeviceView>
+                  key={`devices-${sourceId}`}
+                  listId="endpoint-devices"
+                  noun="devices"
+                  endpoint={`/v1/discovery/sources/${sourceId}/endpoint-devices`}
+                  exportPath={`/v1/discovery/sources/${sourceId}/endpoint-devices/export.xlsx`}
+                  queryKey={["admin", "discovery", "endpoint-devices", sourceId]}
+                  legacyKey="devices"
+                  defaultSort={{ key: "created", dir: "desc" }}
                   rowKey={(d) => d.id}
+                  onRows={(_rows, raw) => setDeviceSummary((raw.summary as DevicesView["summary"] | undefined) ?? null)}
                   empty={<EmptyState title="No device has enrolled" body="Devices appear here once their install step redeems an enrolment token." />}
                   columns={[
-                    { key: "device", header: "Device", render: (d) => <span className={v.mono}>{d.devicePseudonym}</span> },
-                    { key: "platform", header: "Platform", render: (d) => `${d.os}/${d.arch}, agent ${d.agentVersion}` },
+                    { key: "device", header: "Device", main: true, sortable: true, render: (d) => <span className={v.mono}>{d.devicePseudonym}</span> },
+                    { key: "platform", header: "Platform", main: true, sortable: true, render: (d) => `${d.os}/${d.arch}, agent ${d.agentVersion}` },
                     {
                       key: "users",
                       header: "Users (self-reported)",
+                      main: true,
+                      required: "A software key is a warning and is always shown",
                       render: (d) =>
                         d.identities.length === 0
                           ? "none registered"
@@ -231,10 +234,13 @@ export function EndpointAgentCard({ sources }: { sources: readonly DiscoverySour
                               </div>
                             )),
                     },
-                    { key: "last", header: "Last report", render: (d) => when(d.lastReportAt) },
+                    { key: "last", header: "Last report", main: true, sortable: true, render: (d) => when(d.lastReportAt) },
                     {
                       key: "state",
                       header: "State",
+                      main: true,
+                      sortable: true,
+                      required: "A device's state is always shown",
                       render: (d) =>
                         d.revokedAt ? (
                           <Badge tone="neutral">revoked</Badge>
@@ -244,6 +250,7 @@ export function EndpointAgentCard({ sources }: { sources: readonly DiscoverySour
                           </Button>
                         ),
                     },
+                    { key: "identities", header: "Identities", sortable: true, render: (d) => `${d.identitiesRegistered} / ${d.identityCap}` },
                   ]}
                 />
               </>

@@ -15,7 +15,7 @@
  *    scope has been verified.
  */
 import { useEffect, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
 import { fmtDateTime, humanize, plural } from "../../../api/format";
@@ -24,6 +24,7 @@ import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, RowActions, Select, Table, Textarea } from "../../../ui/kit";
 import { FoldTable } from "../../../ui/fold";
+import { DataList } from "../../../ui/DataList";
 import { QueryGate, Stat, useAction } from "../adminKit";
 import v from "../../views.module.css";
 import FederationCard from "./FederationCard";
@@ -47,8 +48,6 @@ import {
 } from "./discoverySourcesModel";
 
 const nowrap = { whiteSpace: "nowrap" } as const;
-/** the page size the Recent runs query asks for (`limit=50`, kept inline in the path) */
-const RUNS_LIMIT = 50;
 const RUN_TONE = { queued: "neutral", running: "info", succeeded: "ok", failed: "danger" } as const;
 
 interface SourceForm {
@@ -71,18 +70,25 @@ interface CredentialForm {
 
 export default function DiscoverySourcesPage() {
   const act = useAction();
+  const queryClient = useQueryClient();
   const scanners = useQuery({ queryKey: ["admin", "discovery", "scanners"], queryFn: () => api.get<{ kinds: ScannerKindView[] }>("/v1/discovery/scanners") });
   const sources = useQuery({
     queryKey: ["admin", "discovery", "sources"],
     queryFn: () => api.get<{ sources: DiscoverySourceView[]; posture: DiscoveryPostureView }>("/v1/discovery/sources"),
   });
-  const runs = useQuery({ queryKey: ["admin", "discovery", "runs"], queryFn: () => api.get<{ runs: DiscoveryRunView[] }>("/v1/discovery/runs?limit=50") });
+  // ADR-0219: the runs page on the server; one small page carries the total and the failed count across every run
+  const runs = useQuery({
+    queryKey: ["admin", "discovery", "runs", "summary"],
+    queryFn: () => api.get<{ items: DiscoveryRunView[]; total: number | null; totalIsEstimate: boolean; failed?: number }>("/v1/discovery/runs?limit=10&count=estimate&sort=when&dir=desc"),
+  });
+  const runTotal = runs.data?.total ?? null;
+  const runTotalText = runTotal === null ? "—" : runs.data?.totalIsEstimate ? `${runTotal.toLocaleString("en-GB")}+ recent runs` : plural(runTotal, "recent run");
   // X6b: a collapsed "Recent runs" still says when a scan failed
-  const failedRuns = (runs.data?.runs ?? []).filter((r) => r.status === "failed").length;
+  const failedRuns = runs.data?.failed ?? 0;
   // A15: the Recent runs fold header (and its count) waits for the runs read, so a pending or failed read never says
   // "0 runs"; until then the table shows its skeleton, or the error with Retry
   const runsFold = runs.data
-    ? ({ contain: true, foldable: true, startCollapsed: true, count: runs.data.runs.length } as const)
+    ? ({ contain: true, foldable: true, startCollapsed: true, count: runTotal ?? 0 } as const)
     : ({ contain: true } as const);
   const settings = useQuery({ queryKey: ["admin", "discovery", "settings"], queryFn: () => api.get<DiscoverySettingsView>("/v1/discovery/settings") });
 
@@ -113,7 +119,7 @@ export default function DiscoverySourcesPage() {
   const posture = sources.data?.posture;
   const list = sources.data?.sources ?? [];
   const refetchAll = async () => {
-    await Promise.all([sources.refetch(), runs.refetch(), settings.refetch()]);
+    await Promise.all([sources.refetch(), queryClient.invalidateQueries({ queryKey: ["admin", "discovery", "runs"] }), settings.refetch()]);
   };
 
   const submitSource = () => {
@@ -232,7 +238,7 @@ export default function DiscoverySourcesPage() {
             </li>
             <li>
               <span className={ds.stepNo} aria-hidden="true">2</span>
-              <span><strong>Scan on a schedule</strong><span className={v.faint}>{runs.data ? (runs.data.runs.length >= RUNS_LIMIT ? `${RUNS_LIMIT}+ recent runs` : plural(runs.data.runs.length, "recent run")) : "—"}</span></span>
+              <span><strong>Scan on a schedule</strong><span className={v.faint}>{runTotalText}</span></span>
             </li>
             <li>
               <span className={ds.stepNo} aria-hidden="true">3</span>
@@ -468,23 +474,27 @@ export default function DiscoverySourcesPage() {
             {...runsFold}
             // the folding card mounts fresh once the runs are read, so it starts collapsed (a fold reads its start once)
             key={runs.data ? "runs" : "runs-pending"}
-            // L4: the list is the latest RUNS_LIMIT runs; a full page means older runs exist
-            countIsLimit={(runs.data?.runs.length ?? 0) >= RUNS_LIMIT}
+            countIsLimit={runs.data?.totalIsEstimate ?? false}
             countNoun={["run", "runs"]}
             attention={failedRuns > 0 ? <Badge tone="danger">{failedRuns} failed</Badge> : undefined}
           >
-            <FoldTable<DiscoveryRunView>
-              rows={runs.data?.runs}
-              loading={runs.isPending}
-              error={runs.error}
-              onRetry={() => void runs.refetch()}
+            <DataList<DiscoveryRunView>
+              listId="discovery-runs"
+              noun="runs"
+              endpoint="/v1/discovery/runs"
+              exportPath="/v1/discovery/runs/export.xlsx"
+              queryKey={["admin", "discovery", "runs", "list"]}
+              legacyKey="runs"
+              count="estimate"
+              defaultSort={{ key: "when", dir: "desc" }}
+              table={FoldTable}
               rowKey={(r) => r.id}
               empty={<EmptyState title="No scan has run" body="Runs appear here once an enabled source is scanned." />}
               columns={[
                 // below 1000 px of table width, Queued folds under Source, Observed / matched under Findings and Reads
                 // under Status; on a phone Findings and Catalogue gaps fold under Source too
-                { key: "source", header: "Source", render: (r) => list.find((s) => s.id === r.sourceId)?.name ?? r.sourceId },
-                { key: "status", header: "Status", render: (r) => (
+                { key: "source", main: true, sortable: true, header: "Source", render: (r) => list.find((s) => s.id === r.sourceId)?.name ?? r.sourceId },
+                { key: "status", main: true, sortable: true, required: "Status, and a failed scan, are always shown", header: "Status", render: (r) => (
                   <>
                     <Badge tone={RUN_TONE[r.status]}>{r.status}</Badge>
                     {/* A20: the reason in words, the code as secondary text under it */}
@@ -496,12 +506,14 @@ export default function DiscoverySourcesPage() {
                     )}
                   </>
                 ) },
-                { key: "when", header: "Queued", fold: { md: "source" }, render: (r) => <><span style={nowrap}>{fmtDateTime(r.createdAt)}</span><div className={v.faint}>{r.trigger === "schedule" ? "Scheduled" : "Manual"} · attempt {r.attempt}</div></> },
-                { key: "counts", header: "Observed / matched", fold: { md: "findings" }, render: (r) => `${r.observed} / ${r.matched}` },
-                { key: "findings", header: "Findings", fold: { sm: "source" }, render: (r) => `${r.findingsCreated} new, ${r.findingsUpdated} updated` },
+                { key: "when", main: true, sortable: true, header: "Queued", fold: { md: "source" }, render: (r) => <><span style={nowrap}>{fmtDateTime(r.createdAt)}</span><div className={v.faint}>{r.trigger === "schedule" ? "Scheduled" : "Manual"} · attempt {r.attempt}</div></> },
+                { key: "counts", main: true, sortable: true, header: "Observed / matched", fold: { md: "findings" }, render: (r) => `${r.observed} / ${r.matched}` },
+                { key: "findings", main: true, sortable: true, header: "Findings", fold: { sm: "source" }, render: (r) => `${r.findingsCreated} new, ${r.findingsUpdated} updated` },
                 {
                   key: "gaps",
                   header: "Catalogue gaps",
+                  main: true,
+                  sortable: true,
                   fold: { sm: "source" },
                   render: (r) =>
                     r.catalogueGaps.length ? (

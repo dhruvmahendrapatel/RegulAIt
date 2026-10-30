@@ -9,11 +9,12 @@
  *    provider or deployer is an admin's relaxation and needs a reason
  *    (`PUT /v1/use-cases/:id/eu-ai-act-role`, audited with its transition).
  */
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
-import { Badge, Button, Card, EmptyState, Field, Select, SeverityBadge, Table } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, Select, SeverityBadge } from "../../../ui/kit";
+import { DataList, type DataColumn } from "../../../ui/DataList";
 import { useSession } from "../../../session/SessionContext";
 import { ReasonModal, useAction } from "../adminKit";
 import v from "../../views.module.css";
@@ -89,13 +90,51 @@ function RoleControl(props: { useCaseId: string }) {
   );
 }
 
+type UseCaseIncidentRow = IncidentListResponse["incidents"][number];
+/** ADR-0219: a use case's incidents through the register's own list contract (the ids match INCIDENTS_LIST) */
+const USE_CASE_INCIDENT_COLUMNS: Array<DataColumn<UseCaseIncidentRow>> = [
+  { key: "ref", header: "Incident", main: true, sortable: true, render: (r) => <Link to={`/incidents/${r.id}`}>{`${r.ref} · ${r.title}`}</Link> },
+  {
+    key: "sev",
+    header: "Severity",
+    main: true,
+    sortable: true,
+    required: "Severity is always shown",
+    render: (r) => (
+      <span style={{ display: "inline-flex", gap: "var(--s0)" }}>
+        <SeverityBadge severity={r.severity} />
+        {r.serious && <Badge tone="danger">serious</Badge>}
+      </span>
+    ),
+  },
+  { key: "status", header: "Status", main: true, sortable: true, required: "Status is always shown", render: (r) => <Badge tone={STATUS_TONE[r.status]}>{r.status}</Badge> },
+  {
+    key: "clock",
+    header: "Next clock",
+    main: true,
+    sortable: true,
+    required: "The next notification clock is always shown",
+    render: (r) =>
+      r.clocks.nextDue ? (
+        <span>
+          <Badge tone={URGENCY_TONE[r.clocks.nextDue.urgency]}>{URGENCY_LABEL[r.clocks.nextDue.urgency]}</Badge>{" "}
+          <span className={v.faint}>
+            {r.clocks.nextDue.paragraph} · due {utc(r.clocks.nextDue.dueAt)}
+          </span>
+        </span>
+      ) : (
+        <span className={v.faint}>{r.clocks.total ? "all final" : "none"}</span>
+      ),
+  },
+  { key: "owner", header: "Owner", main: true, sortable: true, render: (r) => r.ownerName ?? <span className={v.faint}>unassigned</span> },
+  { key: "created", header: "Reported", sortable: true, render: (r) => utc(r.createdAt) },
+  { key: "aware", header: "Aware", sortable: true, render: (r) => utc(r.awareAt) },
+];
+
 export function IncidentsTab(props: { useCaseId: string }) {
   const navigate = useNavigate();
   const [reporting, setReporting] = useState(false);
-  const list = useQuery({
-    queryKey: ["incidents", "use-case", props.useCaseId],
-    queryFn: () => api.get<IncidentListResponse>(`/v1/incidents?useCaseId=${props.useCaseId}`),
-  });
+  const filters = useMemo(() => ({ useCaseId: props.useCaseId }), [props.useCaseId]);
   return (
     <Card
       title="Incidents"
@@ -109,42 +148,18 @@ export function IncidentsTab(props: { useCaseId: string }) {
         <p className={v.faint}>
           A serious, high or critical incident holds this use case&apos;s deploy gate until it is closed; marking it resolved does not release it. {CLOCK_DISCLAIMER}
         </p>
-        <Table
-          rows={list.data?.incidents ?? []}
-          loading={list.isLoading}
-          error={list.error}
-          onRetry={() => void list.refetch()}
+        <DataList<UseCaseIncidentRow>
+          listId="use-case-incidents"
+          noun="incidents"
+          endpoint="/v1/incidents"
+          exportPath="/v1/incidents/export.xlsx"
+          queryKey={["incidents", "use-case", props.useCaseId]}
+          legacyKey="incidents"
+          filters={filters}
+          defaultSort={{ key: "created", dir: "desc" }}
+          columns={USE_CASE_INCIDENT_COLUMNS}
           rowKey={(r) => r.id}
           empty={<EmptyState title="No incidents" body="No incident on this use case that you can see." />}
-          columns={[
-            { key: "ref", header: "Incident", render: (r) => <Link to={`/incidents/${r.id}`}>{`${r.ref} · ${r.title}`}</Link> },
-            {
-              key: "sev",
-              header: "Severity",
-              render: (r) => (
-                <span style={{ display: "inline-flex", gap: "var(--s0)" }}>
-                  <SeverityBadge severity={r.severity} />
-                  {r.serious && <Badge tone="danger">serious</Badge>}
-                </span>
-              ),
-            },
-            { key: "status", header: "Status", render: (r) => <Badge tone={STATUS_TONE[r.status]}>{r.status}</Badge> },
-            {
-              key: "clock",
-              header: "Next clock",
-              render: (r) =>
-                r.clocks.nextDue ? (
-                  <span>
-                    <Badge tone={URGENCY_TONE[r.clocks.nextDue.urgency]}>{URGENCY_LABEL[r.clocks.nextDue.urgency]}</Badge>{" "}
-                    <span className={v.faint}>
-                      {r.clocks.nextDue.paragraph} · due {utc(r.clocks.nextDue.dueAt)}
-                    </span>
-                  </span>
-                ) : (
-                  <span className={v.faint}>{r.clocks.total ? "all final" : "none"}</span>
-                ),
-            },
-          ]}
         />
         <RoleControl useCaseId={props.useCaseId} />
       </div>

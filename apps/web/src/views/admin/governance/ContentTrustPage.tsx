@@ -6,7 +6,7 @@
  * source below the write floor is refused. Every tier change (up or down) and every floor change asks the admin to
  * confirm it is them (a `settings_relax` step-up) and is audited.
  *
- * The evidence card lists the newest provenance records: the label and both digests (what upstream returned, what
+ * The evidence card lists the provenance records under the shared list control (ADR-0219): the label and both digests (what upstream returned, what
  * was delivered) of each governed result, never its content, with the audit anchor that covers it.
  */
 import { useState } from "react";
@@ -16,6 +16,7 @@ import { PageHeader } from "../../../shell/AppShell";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { Badge, Button, Card, Field, IdChip, Select, Table, type Column } from "../../../ui/kit";
 import { QueryGate, useAction } from "../adminKit";
+import { DataList, type DataColumn } from "../../../ui/DataList";
 import {
   CONTENT_TRUST_TIERS,
   CONTENT_TRUST_WRITE_FLOORS,
@@ -199,43 +200,48 @@ function TierEditor(props: { source: ContentTrustSource; onSaved: () => void }) 
   );
 }
 
+/** ADR-0219: the provenance records' columns; the ids and sortable ones match the gateway's PROVENANCE_LIST */
+const RECORD_COLUMNS: Array<DataColumn<ContentProvenanceRecordView>> = [
+  { key: "at", header: "Recorded", main: true, sortable: true, render: (r) => ago(r.createdAt) },
+  {
+    key: "source",
+    header: "Source",
+    main: true,
+    sortable: true,
+    render: (r) => `${r.sourceKind === "mcp_server" ? "MCP" : "Connector"} ${r.sourceDetail ?? ""}`.trim(),
+  },
+  { key: "tier", header: "Tier", main: true, sortable: true, required: "The trust tier is always shown", render: (r) => <Badge tone={tierTone(r.trustTier)}>{humanize(r.trustTier)}</Badge> },
+  { key: "class", header: "Classification", main: true, sortable: true, render: (r) => humanize(r.classification) },
+  { key: "digest", header: "Digest", main: true, sortable: true, render: (r) => DIGEST_COPY[r.digestAlg] },
+  {
+    key: "delivered",
+    header: "Delivered",
+    sortable: true,
+    render: (r) => (
+      // the kit chip copies the full digest; a missing one says so
+      r.deliveredDigest ? <IdChip id={r.deliveredDigest} /> : <span className={v.faint}>{shortDigest(null)}</span>
+    ),
+  },
+  {
+    key: "changed",
+    header: "Transformed",
+    main: true,
+    sortable: true,
+    render: (r) => (r.upstreamDigest && r.deliveredDigest ? (r.upstreamDigest === r.deliveredDigest ? "No" : "Yes") : "Unknown"),
+  },
+  {
+    key: "anchor",
+    header: "Anchor",
+    main: true,
+    render: (r) => (r.anchor ? `#${r.anchor.anchorSeq}, timestamp ${humanize(r.anchor.tsaStatus).toLowerCase()}` : "Not yet anchored"),
+  },
+];
+
 function RecordsCard() {
-  const records = useQuery({
-    queryKey: RECORDS_KEY,
-    queryFn: () => stepUpApi.get<{ records: ContentProvenanceRecordView[] }>("/v1/content-provenance/records?limit=50"),
-  });
-  const columns: Array<Column<ContentProvenanceRecordView>> = [
-    { key: "at", header: "Recorded", render: (r) => ago(r.createdAt), sort: (r) => r.createdAt },
-    {
-      key: "source",
-      header: "Source",
-      render: (r) => `${r.sourceKind === "mcp_server" ? "MCP" : "Connector"} ${r.sourceDetail ?? ""}`.trim(),
-    },
-    { key: "tier", header: "Tier", render: (r) => <Badge tone={tierTone(r.trustTier)}>{humanize(r.trustTier)}</Badge> },
-    { key: "class", header: "Classification", render: (r) => humanize(r.classification) },
-    { key: "digest", header: "Digest", render: (r) => DIGEST_COPY[r.digestAlg] },
-    {
-      key: "delivered",
-      header: "Delivered",
-      render: (r) => (
-        // the kit chip copies the full digest; a missing one says so
-        r.deliveredDigest ? <IdChip id={r.deliveredDigest} /> : <span className={v.faint}>{shortDigest(null)}</span>
-      ),
-    },
-    {
-      key: "changed",
-      header: "Transformed",
-      render: (r) => (r.upstreamDigest && r.deliveredDigest ? (r.upstreamDigest === r.deliveredDigest ? "No" : "Yes") : "Unknown"),
-    },
-    {
-      key: "anchor",
-      header: "Anchor",
-      render: (r) => (r.anchor ? `#${r.anchor.anchorSeq}, timestamp ${humanize(r.anchor.tsaStatus).toLowerCase()}` : "Not yet anchored"),
-    },
-  ];
   return (
     <Card
       title="Provenance evidence"
+      flush
       info={
         <p>
           Content scanned clean has a plain SHA-256; content with PII, or never scanned, has a keyed digest under this
@@ -243,14 +249,17 @@ function RecordsCard() {
         </p>
       }
     >
-      <p className={v.faint}>The newest 50 records.</p>
-      <Table
-        columns={columns}
-        rows={records.data?.records}
+      <DataList<ContentProvenanceRecordView>
+        listId="content-provenance"
+        noun="provenance records"
+        endpoint="/v1/content-provenance/records"
+        exportPath="/v1/content-provenance/records/export.xlsx"
+        queryKey={RECORDS_KEY}
+        legacyKey="records"
+        count="estimate"
+        defaultSort={{ key: "at", dir: "desc" }}
+        columns={RECORD_COLUMNS}
         rowKey={(r) => r.id}
-        loading={records.isLoading}
-        error={records.error}
-        onRetry={() => void records.refetch()}
         empty="No governed results have been recorded yet."
       />
     </Card>

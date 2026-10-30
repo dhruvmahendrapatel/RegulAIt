@@ -18,13 +18,14 @@
  *    the framework's active compliance pack; nothing here writes into the
  *    org's own attestations or reports.
  */
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea, type Tone } from "../../../ui/kit";
+import { DataList, type DataColumn } from "../../../ui/DataList";
 import { QueryGate, useAction, useCustomProviders } from "../adminKit";
 import { EditVendorButton, vendorEditBlocked } from "../editForms";
 import a from "../admin.module.css";
@@ -94,15 +95,43 @@ const CATEGORY_LABELS: Record<string, string> = {
   integration: "integration",
 };
 
+/** ADR-0219: the vendor registry's columns; the ids and sortable ones match the gateway's VENDORS_LIST */
+export const VENDOR_COLUMNS: Array<DataColumn<VendorRow>> = [
+  { key: "name", header: "Vendor", main: true, sortable: true, render: (r) => r.name },
+  {
+    key: "status",
+    header: "Status",
+    main: true,
+    sortable: true,
+    required: "Status is always shown",
+    render: (r) => <Badge tone={statusTone(r.status)}>{r.status.replace(/_/g, " ")}</Badge>,
+  },
+  { key: "category", header: "Category", main: true, sortable: true, render: (r) => CATEGORY_LABELS[r.category] ?? r.category },
+  {
+    key: "attest",
+    header: "Attestations",
+    main: true,
+    sortable: true,
+    render: (r) => (r.packAttestations.length ? `${r.packAttestations.length} recorded` : <span className={v.faint}>none</span>),
+  },
+  { key: "owner", header: "Owner", main: true, sortable: true, render: (r) => r.ownerName ?? r.ownerUserId },
+  { key: "created", header: "Proposed", main: true, sortable: true, render: (r) => ago(r.createdAt) },
+  { key: "decided", header: "Decided", sortable: true, render: (r) => (r.decidedAt ? ago(r.decidedAt) : <span className={v.faint}>not yet</span>) },
+  { key: "description", header: "Description", render: (r) => r.description },
+];
+
 export default function VendorsPage() {
   const act = useAction();
   const customProviders = useCustomProviders();
   const [searchParams] = useSearchParams();
 
-  const list = useQuery({
-    queryKey: ["admin", "vendors"],
-    queryFn: () => api.get<{ vendors: VendorRow[]; disclaimer: string }>("/v1/vendors"),
-  });
+  const queryClient = useQueryClient();
+  const [statusFilter, setStatusFilter] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("");
+  const vendorFilters = useMemo(
+    () => ({ status: statusFilter || undefined, category: categoryFilter || undefined }),
+    [statusFilter, categoryFilter],
+  );
   const packs = useQuery({
     queryKey: ["admin", "vendors", "packs"],
     queryFn: () =>
@@ -136,7 +165,7 @@ export default function VendorsPage() {
   const [retireReason, setRetireReason] = useState("");
 
   const refreshAll = async () => {
-    await Promise.all([list.refetch(), openId ? detail.refetch() : Promise.resolve(null)]);
+    await Promise.all([queryClient.invalidateQueries({ queryKey: ["admin", "vendors", "list"] }), openId ? detail.refetch() : Promise.resolve(null)]);
   };
   const d = detail.data;
 
@@ -194,43 +223,54 @@ export default function VendorsPage() {
         </Card>
 
         {/* ---------------- registry ---------------- */}
-        <QueryGate loading={list.isLoading} error={list.error} onRetry={() => void list.refetch()}>
-          <Card title="Registry">
-            {(list.data?.vendors ?? []).length === 0 ? (
-              <EmptyState
-                title="No vendors yet"
-                body="Propose one above — third-party AI risk starts being legible when the third party is a governed object."
-              />
-            ) : (
-              <Table
-                rows={list.data?.vendors ?? []}
-                rowKey={(r) => r.id}
-                onRowClick={(r) => setOpenId(openId === r.id ? null : r.id)}
-                columns={[
-                  { key: "name", header: "Vendor", render: (r) => r.name },
-                  {
-                    key: "status",
-                    header: "Status",
-                    render: (r) => <Badge tone={statusTone(r.status)}>{r.status.replace(/_/g, " ")}</Badge>,
-                  },
-                  { key: "category", header: "Category", render: (r) => CATEGORY_LABELS[r.category] ?? r.category },
-                  {
-                    key: "attest",
-                    header: "Attestations",
-                    render: (r) =>
-                      r.packAttestations.length ? (
-                        `${r.packAttestations.length} recorded`
-                      ) : (
-                        <span className={v.faint}>none</span>
-                      ),
-                  },
-                  { key: "owner", header: "Owner", render: (r) => r.ownerName ?? r.ownerUserId },
-                  { key: "created", header: "Proposed", render: (r) => ago(r.createdAt) },
-                ]}
-              />
-            )}
-          </Card>
-        </QueryGate>
+        <Card title="Registry" flush>
+          <div className={a.formRow} style={{ padding: "var(--s1) var(--s2) 0" }}>
+            <Field label="Status">
+              <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+                <option value="">Any</option>
+                {(["proposed", "under_assessment", "approved", "rejected", "retired"] as const).map((st) => (
+                  <option key={st} value={st}>
+                    {st.replace(/_/g, " ")}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="Category">
+              <Select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)}>
+                <option value="">Any</option>
+                {Object.entries(CATEGORY_LABELS).map(([k, l]) => (
+                  <option key={k} value={k}>
+                    {l}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </div>
+          <DataList<VendorRow>
+            listId="vendors"
+            noun="vendors"
+            endpoint="/v1/vendors"
+            exportPath="/v1/vendors/export.xlsx"
+            queryKey={["admin", "vendors", "list"]}
+            legacyKey="vendors"
+            filters={vendorFilters}
+            defaultSort={{ key: "created", dir: "desc" }}
+            columns={VENDOR_COLUMNS}
+            rowKey={(r) => r.id}
+            onRowClick={(r) => setOpenId(openId === r.id ? null : r.id)}
+            rowLabel={(r) => `Open vendor ${r.name}`}
+            empty={
+              statusFilter || categoryFilter ? (
+                <EmptyState title="No vendors match" body="No vendor has this status and category. Choose Any to see them all." />
+              ) : (
+                <EmptyState
+                  title="No vendors yet"
+                  body="Propose one above — third-party AI risk starts being legible when the third party is a governed object."
+                />
+              )
+            }
+          />
+        </Card>
 
         {/* ---------------- detail ---------------- */}
         {openId && (

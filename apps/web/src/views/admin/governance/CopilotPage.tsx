@@ -36,12 +36,13 @@
  *    verbatim where it is not.
  */
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Input, Table } from "../../../ui/kit";
 import { QueryGate, Stat, useAction, useApiAction } from "../adminKit";
+import { DataList } from "../../../ui/DataList";
 import { CopilotProposalForm } from "./CopilotProposalForm";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
@@ -104,10 +105,9 @@ interface ProposalRow {
   approvalId: string | null;
   appliedAt: string | null;
   appliedResult: Record<string, unknown> | null;
-}
-interface ApprovalRow {
-  id: string;
-  status: string;
+  createdAt?: string;
+  /** ADR-0219: the linked approval's state, read from the one queue by the gateway */
+  approvalStatus?: string | null;
 }
 interface QueryRow {
   id: string;
@@ -119,10 +119,7 @@ interface QueryRow {
 
 export default function CopilotPage() {
   const tools = useQuery({ queryKey: ["copilot", "tools"], queryFn: () => api.get<ToolsResponse>("/v1/copilot/tools") });
-  const history = useQuery({
-    queryKey: ["copilot", "queries"],
-    queryFn: () => api.get<{ queries: QueryRow[] }>("/v1/copilot/queries"),
-  });
+  const queryClient = useQueryClient();
   const act = useAction();
   // ADR-0096: the ask path's whole product can be a REFUSAL carrying structure
   // (the candidates it could not resolve, the objects a name was ambiguous
@@ -130,24 +127,14 @@ export default function CopilotPage() {
   // error to one string, which would throw exactly that away.
   const askAct = useApiAction();
 
-  const proposals = useQuery({
-    queryKey: ["copilot", "proposals"],
-    queryFn: () => api.get<{ proposals: ProposalRow[] }>("/v1/copilot/proposals"),
-  });
-  // the approval STATE each proposal rests on, read from the ONE queue — the
-  // page never infers consent, it renders the queue's own answer
-  const approvalList = useQuery({
-    queryKey: ["copilot", "approvals"],
-    queryFn: () => api.get<{ approvals: ApprovalRow[] }>("/v1/approvals"),
-  });
-
   const [question, setQuestion] = useState("Who accessed PII last quarter?");
   const [answer, setAnswer] = useState<AskResponse | null>(null);
   const [applied, setApplied] = useState<Record<string, string>>({});
 
   const statusOf = (p: ProposalRow): string => {
     if (!p.approvalId) return "no approval";
-    return approvalList.data?.approvals.find((a) => a.id === p.approvalId)?.status ?? "unknown";
+    // the gateway reads it from the one queue with each page of proposals
+    return p.approvalStatus ?? "unknown";
   };
 
   const applyProposal = (p: ProposalRow) =>
@@ -157,7 +144,7 @@ export default function CopilotPage() {
         {},
       );
       setApplied((prev) => ({ ...prev, [p.id]: JSON.stringify(res.applied) }));
-      await proposals.refetch();
+      await queryClient.invalidateQueries({ queryKey: ["copilot", "proposals"] });
     }, "Applied through the same public endpoint an admin would use, under your own identity");
 
   const ask = async () => {
@@ -170,7 +157,7 @@ export default function CopilotPage() {
     );
     if (res) {
       setAnswer(res);
-      void history.refetch();
+      void queryClient.invalidateQueries({ queryKey: ["copilot", "queries"] });
     }
   };
 
@@ -420,26 +407,31 @@ export default function CopilotPage() {
         queryId={answer?.query.id ?? null}
         question={answer?.query.question ?? question}
         onProposed={() => {
-          void proposals.refetch();
-          void approvalList.refetch();
+          void queryClient.invalidateQueries({ queryKey: ["copilot", "proposals"] });
         }}
       />
 
       <Card title="Proposals — recorded, approved by a human, then applied">
 
-        <QueryGate loading={proposals.isLoading} error={proposals.error} onRetry={() => void proposals.refetch()}>
-          {(proposals.data?.proposals ?? []).length === 0 ? (
-            <EmptyState title="No proposals yet" body="Ask a question, then propose a change from its evidence." />
-          ) : (
-            <Table<ProposalRow>
-              rows={proposals.data?.proposals ?? []}
+            <DataList<ProposalRow>
+              listId="copilot-proposals"
+              noun="proposals"
+              endpoint="/v1/copilot/proposals"
+              exportPath="/v1/copilot/proposals/export.xlsx"
+              queryKey={["copilot", "proposals"]}
+              legacyKey="proposals"
+              defaultSort={{ key: "at", dir: "desc" }}
               rowKey={(p) => p.id}
+              empty={<EmptyState title="No proposals yet" body="Ask a question, then propose a change from its evidence." />}
               columns={[
-                { key: "t", header: "Proposal", render: (p) => p.title },
-                { key: "k", header: "Kind", render: (p) => <code>{p.kind}</code> },
+                { key: "t", header: "Proposal", main: true, sortable: true, render: (p) => p.title },
+                { key: "k", header: "Kind", main: true, sortable: true, render: (p) => <code>{p.kind}</code> },
                 {
                   key: "s",
                   header: "Consent",
+                  main: true,
+                  sortable: true,
+                  required: "Consent is always shown",
                   render: (p) => {
                     const st = statusOf(p);
                     return (
@@ -450,6 +442,8 @@ export default function CopilotPage() {
                 {
                   key: "a",
                   header: "Applied",
+                  main: true,
+                  sortable: true,
                   render: (p) =>
                     p.appliedAt ? (
                       <>
@@ -460,10 +454,12 @@ export default function CopilotPage() {
                       <span className={v.faint}>—</span>
                     ),
                 },
+                { key: "at", header: "Proposed", sortable: true, render: (p) => (p.createdAt ? ago(p.createdAt) : "—") },
                 {
                   key: "do",
                   header: "",
                   srHeader: "Actions",
+                  action: true,
                   render: (p) =>
                     p.appliedAt ? (
                       <span className={v.faint}>{applied[p.id] ?? "applied once; applying is not repeatable"}</span>
@@ -479,32 +475,34 @@ export default function CopilotPage() {
                 },
               ]}
             />
-          )}
-        </QueryGate>
       </Card>
 
       <Card title="Your recent questions">
-        <QueryGate loading={history.isLoading} error={history.error} onRetry={() => void history.refetch()}>
-          {(history.data?.queries ?? []).length === 0 ? (
-            <EmptyState title="Nothing asked yet" body="Ask a governance question above." />
-          ) : (
-            <Table<QueryRow>
-              rows={history.data?.queries ?? []}
+            <DataList<QueryRow>
+              listId="copilot-questions"
+              noun="questions"
+              endpoint="/v1/copilot/queries"
+              exportPath="/v1/copilot/queries/export.xlsx"
+              queryKey={["copilot", "queries"]}
+              legacyKey="queries"
+              defaultSort={{ key: "at", dir: "desc" }}
               rowKey={(q) => q.id}
+              empty={<EmptyState title="Nothing asked yet" body="Ask a governance question above." />}
               columns={[
-                { key: "q", header: "Question", render: (q) => q.question },
-                { key: "g", header: "Generation", render: (q) => <Badge tone="neutral">{q.generation}</Badge> },
+                { key: "q", header: "Question", main: true, sortable: true, render: (q) => q.question },
+                { key: "g", header: "Generation", main: true, sortable: true, render: (q) => <Badge tone="neutral">{q.generation}</Badge> },
                 {
                   key: "gr",
                   header: "Guardrail",
+                  main: true,
+                  sortable: true,
+                  required: "A guardrail action is always shown",
                   render: (q) =>
                     q.guardrailAction ? <Badge tone="warn">{q.guardrailAction}</Badge> : <span className={v.faint}>—</span>,
                 },
-                { key: "at", header: "Asked", render: (q) => ago(q.createdAt) },
+                { key: "at", header: "Asked", main: true, sortable: true, render: (q) => ago(q.createdAt) },
               ]}
             />
-          )}
-        </QueryGate>
       </Card>
     </>
   );

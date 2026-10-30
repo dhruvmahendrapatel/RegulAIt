@@ -397,7 +397,7 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
     await ada.getByRole("tab", { name: /^Audit\b/ }).click();
     await expect(ada.getByText("Recent use-case audit evidence")).toBeVisible();
     await capture(ada, ADA, "ds-g1c-use-case-audit");
-    await ada.getByRole("link", { name: "Open this use case's full audit trail" }).click();
+    await ada.getByRole("link", { name: "View all of this use case's audit trail" }).click();
     await expect(ada.getByTestId("audit-only-object")).toBeVisible();
     await capture(ada, ADA, "ds-g1d-use-case-audit-trail");
   });
