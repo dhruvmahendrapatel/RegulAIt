@@ -9,6 +9,7 @@ export { default as RegulatoryIntelligencePage } from "../views/admin/governance
 export { default as ReviewPolicyPage } from "../views/admin/governance/ReviewPolicyPage";
 export { default as RisksPage } from "../views/admin/governance/RisksPage";
 export { default as ShadowAiPage } from "../views/admin/governance/ShadowAiPage";
+export { default as SupplierQuestionnairesPage } from "../views/admin/governance/SupplierQuestionnairesPage";
 export { default as UseCaseOverviewPage } from "../views/admin/governance/UseCaseOverviewPage";
 export { default as UseCasesPage } from "../views/admin/governance/UseCasesPage";
 export { default as VendorsPage } from "../views/admin/governance/VendorsPage";

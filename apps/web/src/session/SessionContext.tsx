@@ -44,6 +44,11 @@ const SessionContext = createContext<SessionState>({
   applyAuth: () => {},
 });
 
+/** the supplier portal's page (served under /ui), where the platform session is never probed */
+export function isSupplierPortalPath(pathname: string): boolean {
+  return /^\/ui\/supplier\/?$/.test(pathname);
+}
+
 export function useSession() {
   return useContext(SessionContext);
 }
@@ -138,6 +143,9 @@ export function SessionProvider(props: { children: ReactNode }) {
       forgetSession();
       setAuth(null);
     });
+    // ADR-0221: the supplier portal is for someone with no platform account; it never asks who is signed in to the
+    // platform, so a supplier's browser sends no platform request at all (the page has no route into the app)
+    if (isSupplierPortalPath(window.location.pathname)) return () => setUnauthorizedHandler(null);
     void refresh();
     return () => setUnauthorizedHandler(null);
   }, [refresh, forgetSession]);

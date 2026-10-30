@@ -18,17 +18,20 @@
  *    the framework's active compliance pack; nothing here writes into the
  *    org's own attestations or reports.
  */
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, Input, Select, SkeletonBlock, Table, Textarea, type Tone } from "../../../ui/kit";
 import { QueryGate, useAction, useCustomProviders } from "../adminKit";
 import { EditVendorButton, vendorEditBlocked } from "../editForms";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+
+// ADR-0221: the supplier portal's grants, links and review, loaded only when a vendor is opened
+const SupplierAccessPanel = lazy(() => import("./SupplierAccessPanel"));
 
 type VendorStatus = "proposed" | "under_assessment" | "approved" | "rejected" | "retired";
 
@@ -442,6 +445,22 @@ export default function VendorsPage() {
                         ))}
                     </div>
                   </Card>
+
+                  {/* supplier access (ADR-0221): beside the checklist the supplier's accepted answers land in */}
+                  <Suspense
+                    fallback={
+                      <Card title="Supplier access">
+                        <SkeletonBlock lines={3} />
+                      </Card>
+                    }
+                  >
+                    <SupplierAccessPanel
+                      vendorId={d.vendor.id}
+                      vendorName={d.vendor.name}
+                      vendorStatus={d.vendor.status}
+                      frameworks={activeFrameworks}
+                    />
+                  </Suspense>
 
                   {/* retire (admin) */}
                   {d.vendor.status !== "retired" && (
