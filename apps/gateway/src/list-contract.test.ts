@@ -45,7 +45,7 @@ const get = (url: string, headers: Record<string, string> = AUTH) => app.inject(
 /** the first sheet of an .xlsx as rows of cell text (shared strings resolved, numbers as numbers) */
 function readXlsx(buf: Buffer): Array<Array<string | number | null>> {
   const files = unzipSync(new Uint8Array(buf));
-  const shared = files["xl/sharedStrings.xml"] ? [...strFromU8(files["xl/sharedStrings.xml"]).matchAll(/<si>(.*?)<\/si>/gs)].map((m) => decodeXml(m[1]!.replace(/<[^>]+>/g, ""))) : [];
+  const shared = files["xl/sharedStrings.xml"] ? [...strFromU8(files["xl/sharedStrings.xml"]).matchAll(/<si>(.*?)<\/si>/gs)].map((m) => decodeXml([...m[1]!.matchAll(/<t(?:\s[^>]*)?>(.*?)<\/t>/gs)].map((t) => t[1]!).join(""))) : [];
   const sheet = strFromU8(files["xl/worksheets/sheet1.xml"]!);
   return [...sheet.matchAll(/<row[^>]*>(.*?)<\/row>/gs)].map((row) => {
     const out: Array<string | number | null> = [];
