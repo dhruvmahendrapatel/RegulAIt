@@ -1218,6 +1218,8 @@ export const auditLog = pgTable(
         // "no unreviewed model reaches production data" an audited property
         // rather than a slide. Plain text column — no DDL needed.
         "model_card",
+        // ADR-0222 (P13(a)): an uploaded fairness evaluation dataset (its runs audit as the model card they measure)
+        "fairness_dataset",
         // ADR-0046: an admin creating or deleting an approval ROUTING RULE.
         // Authoring one changes whose queue every matching approval lands in
         // from that moment on, so it is a governed act in its own right. The
@@ -4631,6 +4633,14 @@ export const orgSettings = pgTable(
      * no fallback to another connection (ADR-0180). */
     alertTicketConnectionId: uuid("alert_ticket_connection_id").references(() => pmConnections.id, { onDelete: "set null" }),
 
+    /** ADR-0222 (P13(a), migration 0243): fairness testing. Off by default — turning it on starts storing
+     * sensitive attributes, so it needs the `settings_relax` step-up. */
+    fairnessTestingEnabled: boolean("fairness_testing_enabled").notNull().default(false),
+    /** ADR-0222: a failing or inconclusive latest run holds the card's sign-off and dispatch (strict true) */
+    fairnessBlockOnFail: boolean("fairness_block_on_fail").notNull().default(true),
+    /** ADR-0222: an uploaded evaluation dataset's rows are deleted this many days after upload (strict 30) */
+    fairnessDatasetRetentionDays: integer("fairness_dataset_retention_days").notNull().default(30),
+
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -4808,6 +4818,10 @@ export const orgSettings = pgTable(
     check(
       "org_settings_executor_attestation_max_age_minutes_check",
       sql`${t.executorAttestationMaxAgeMinutes} BETWEEN 60 AND 1440`,
+    ),
+    check(
+      "org_settings_fairness_dataset_retention_days_check",
+      sql`${t.fairnessDatasetRetentionDays} BETWEEN 1 AND 365`,
     ),
   ],
 );
@@ -5741,6 +5755,86 @@ export const modelCardEvidence = pgTable(
       .where(sql`${t.evalRunId} IS NOT NULL`),
   ],
 );
+
+// ---------------------------------------------------------------------------
+// ADR-0222 (P13(a), migration 0243) — FAIRNESS TESTING.
+//
+// A labelled evaluation dataset an admin uploads (true label, the model's
+// prediction and the protected attributes, nothing else is kept), and the
+// fairness runs computed on it against one model card. The rows are enveloped
+// under the data key and deleted at the retention date; the metadata row, its
+// sha256 and every run that cites it stay for the audit trail.
+// ---------------------------------------------------------------------------
+
+export const FAIRNESS_RUN_OUTCOMES = ["pass", "flag", "fail", "inconclusive"] as const;
+
+export const fairnessDatasets = pgTable(
+  "fairness_datasets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    description: text("description"),
+    labelColumn: text("label_column").notNull(),
+    predictionColumn: text("prediction_column").notNull(),
+    favourableLabel: text("favourable_label").notNull(),
+    /** the protected attribute columns, in upload order */
+    protectedAttributes: jsonb("protected_attributes").$type<string[]>().notNull(),
+    rowCount: integer("row_count").notNull(),
+    /** the uploaded CSV's size and sha256 (the sha256 outlives the rows) */
+    csvBytes: integer("csv_bytes").notNull(),
+    csvSha256: text("csv_sha256").notNull(),
+    /** the kept columns only, as JSON, under the data key; null once deleted */
+    rowsCiphertext: text("rows_ciphertext"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    /** when the rows were deleted, and why (`retention` or `deleted`) */
+    purgedAt: timestamp("purged_at", { withTimezone: true }),
+    purgeReason: text("purge_reason"),
+    uploadedByUserId: uuid("uploaded_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("fairness_datasets_row_count_check", sql`${t.rowCount} BETWEEN 1 AND 100000`),
+    check("fairness_datasets_csv_bytes_check", sql`${t.csvBytes} BETWEEN 1 AND 5242880`),
+    check(
+      "fairness_datasets_purge_check",
+      sql`(${t.purgedAt} IS NULL AND ${t.purgeReason} IS NULL AND ${t.rowsCiphertext} IS NOT NULL) OR (${t.purgedAt} IS NOT NULL AND ${t.purgeReason} IN ('retention','deleted') AND ${t.rowsCiphertext} IS NULL)`,
+    ),
+    index("fairness_datasets_expires_idx").on(t.expiresAt).where(sql`${t.rowsCiphertext} IS NOT NULL`),
+  ],
+);
+
+export const fairnessRuns = pgTable(
+  "fairness_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    cardId: uuid("card_id")
+      .notNull()
+      .references(() => modelCards.id, { onDelete: "cascade" }),
+    /** RESTRICT: a dataset row is never deleted, only its ciphertext */
+    datasetId: uuid("dataset_id")
+      .notNull()
+      .references(() => fairnessDatasets.id, { onDelete: "restrict" }),
+    /** the dataset's sha256 at run time, so the run names the exact bytes it measured */
+    datasetSha256: text("dataset_sha256").notNull(),
+    metricsVersion: text("metrics_version").notNull(),
+    thresholds: jsonb("thresholds").notNull(),
+    minGroupSize: integer("min_group_size").notNull(),
+    /** per attribute: group counts and rates, and each metric's value (aggregates only, never a row) */
+    result: jsonb("result").notNull(),
+    outcome: text("outcome", { enum: FAIRNESS_RUN_OUTCOMES }).notNull(),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("fairness_runs_outcome_check", sql`${t.outcome} IN ('pass','flag','fail','inconclusive')`),
+    check("fairness_runs_min_group_size_check", sql`${t.minGroupSize} BETWEEN 1 AND 10000`),
+    index("fairness_runs_card_created_idx").on(t.cardId, t.createdAt),
+    index("fairness_runs_dataset_idx").on(t.datasetId),
+  ],
+);
+
+export type FairnessDatasetRow = typeof fairnessDatasets.$inferSelect;
+export type FairnessRunRow = typeof fairnessRuns.$inferSelect;
 
 export type ModelCardRow = typeof modelCards.$inferSelect;
 export type ModelCardApprovalRow = typeof modelCardApprovals.$inferSelect;

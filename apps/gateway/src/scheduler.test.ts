@@ -801,6 +801,8 @@ describe("every sweep is registered", () => {
         // ADR-0188 S9 follow-up: fetches due SPIFFE bundle endpoints; driven end to end in
         // zz-adr0188-s9b-spiffe-fetch-jwt-svid.test.ts (with no endpoint set it fetches nothing)
         SCHEDULER_JOB_NAMES.spiffeBundleRefresh,
+        // ADR-0222 (P13(a)): fairness dataset rows past retention; driven end to end in zz-adr0222-fairness.test.ts
+        SCHEDULER_JOB_NAMES.fairnessDatasetRetentionSweep,
       ].sort(),
     );
     const discovery = registry.get(SCHEDULER_JOB_NAMES.discoveryScanSweep)!;
