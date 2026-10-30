@@ -12,6 +12,7 @@
  *  - The per-monitor hourly cap is enforced in the database.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { LightMyRequestResponse } from "fastify";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -76,8 +77,8 @@ const drifted = {
   ],
 };
 
-const put = (payload: unknown) => app.inject({ method: "PUT", url: "/v1/model-drift/settings", headers: KEY, payload });
-const report = (payload: unknown, monitor = monitorId) =>
+const put = (payload: object): Promise<LightMyRequestResponse> => app.inject({ method: "PUT", url: "/v1/model-drift/settings", headers: KEY, payload });
+const report = (payload: object, monitor = monitorId): Promise<LightMyRequestResponse> =>
   app.inject({ method: "POST", url: `/v1/model-drift/monitors/${monitor}/reports`, headers: KEY, payload });
 const openDriftAlerts = () =>
   db
