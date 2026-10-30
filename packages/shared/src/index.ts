@@ -18,6 +18,7 @@ import { APPROVAL_SCOPES } from "./approval-binding.js";
 import { INTERNATIONAL_PII_CATEGORIES } from "./pii-international.js";
 // ADR-0182 (D4): the accountability settings are spread into updateOrgSettingsSchema below.
 import { accountabilityOrgSettingsFields } from "./accountability.js";
+import { trustPagesOrgSettingsFields } from "./trust-pages.js";
 // ADR-0185 (batch 3): the retention / MCP settings are spread into updateOrgSettingsSchema, and the
 // transport and stdio vocabularies shape the server create/update bodies below.
 import { batch3OrgSettingsFields, MCP_UPSTREAM_TRANSPORTS, mcpStdioSpecSchema } from "./batch3.js";
@@ -2452,6 +2453,8 @@ export const updateOrgSettingsSchema = z
     ...bomOrgSettingsFields,
     // ADR-0190 (batch 6 item 3): isolation enforcement, the class floors and the executor attestation lifetime
     ...isolationOrgSettingsFields,
+    // ADR-0225 (P13 d): the public trust pages and auditor access, shipped off
+    ...trustPagesOrgSettingsFields,
     /** ADR-0039 self-lockout guard (mirrors the sso_only guard): saving
      * enforce_continuous with an allow-list that excludes the caller's own
      * current IP is refused (409) unless this explicit confirm rides along.
@@ -4645,6 +4648,8 @@ export { GUARDRAIL_FALLBACK_MODE } from "./guardrails.js";
 // A11 decision-regression, A12 incident-clocks + incidents, A13 feedback,
 // A14 ai-literacy, S5 alert-ownership + isaca-pack.
 export * from "./accountability.js";
+// ADR-0225 (P13 d): outward trust pages
+export * from "./trust-pages.js";
 export * from "./decision-regression.js";
 export * from "./incident-clocks.js";
 export * from "./incidents.js";

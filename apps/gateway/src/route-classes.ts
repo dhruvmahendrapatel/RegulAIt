@@ -134,6 +134,15 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // rate-limited per token and address, and GET returns only the use case's
   // public name. Listed in NON_ADMIN_ROUTES too, so it is `public`.
   "/v1/feedback/l/:token",
+  // ADR-0225 (P13 d) — the PUBLIC trust centre and the auditor portal. Both answer 404 while
+  // `trust_pages_enabled` is off (the shipped default) and are rate-limited per address. The trust centre is
+  // read-only and serves only what an admin published. The auditor routes authenticate IN-ROUTE: a single-use
+  // link token (only its SHA-256 stored, at most 72 hours) opens a session cookie (HttpOnly, SameSite=Strict,
+  // Path=/v1/auditor, at most an hour); the reads are scoped to the grant's selected items and every view is
+  // audited. Listed in NON_ADMIN_ROUTES too, so they are `public`.
+  "/v1/trust-center",
+  "/v1/auditor/session",
+  "/v1/auditor/items/:slug",
   // ADR-0037 — SCIM is a SEPARATE TRUST PATH, and this exemption is what
   // makes that true rather than aspirational. These routes must never
   // authenticate via a human session cookie or a user's API key: they
@@ -712,6 +721,15 @@ export const NON_ADMIN_ROUTES = new Set([
   "DELETE /v1/use-cases/:useCaseId/feedback-links/:linkId",
   "POST /v1/feedback/l/:token",
   "GET /v1/feedback/l/:token",
+  //
+  // --- ADR-0225 (P13 d): the public trust pages ---------------------------------
+  // Everything under /v1/trust/* (drafting, publishing, the heading, auditor grants) is DELIBERATELY ABSENT, so
+  // ADMIN-ONLY. These are the public reads and the auditor portal (also in AUTH_EXEMPT_ROUTES above).
+  "GET /v1/trust-center",
+  "POST /v1/auditor/session",
+  "GET /v1/auditor/session",
+  "DELETE /v1/auditor/session",
+  "GET /v1/auditor/items/:slug",
   //
   // --- A14: AI literacy and acceptable use ------------------------------------
   // A person lists what applies to them, acknowledges for THEMSELVES only (the
