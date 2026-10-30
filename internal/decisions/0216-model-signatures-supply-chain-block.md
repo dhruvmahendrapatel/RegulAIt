@@ -83,7 +83,7 @@ never opens a risk entry, and the register has no supply-chain category (PENDING
 - UI: Model risk → Model artifacts gains a Supply chain column, a supply-chain section in the artifact detail (the
   requirements stated at the point of decision, attach a signature, an admin's relaxation) and a Trusted signing keys
   card for admins. The risk register gains the category.
-- Bundle: +2,376 B gzipped, all in the lazy model risk chunk; `all JS` ceiling 1,050 → 1,053 kB (1,052,208 B with main's #602) under the owner's
-  1,060 kB lane cap (ADR-0196 addendum, one `CEILING_EXCEPTIONS` row).
+- Bundle: +2,376 B gzipped, all in the lazy model risk chunk; it fits under the shared 1,150 kB `all JS` ceiling main
+  now carries (ADR-0196 addenda), so this lane raises no ceiling.
 - `AI_RISK_CATEGORIES` is a shared contract: the db enum, the CHECK, the shared vocabulary, the dimension map, the
   intake suggestions, the scenario library and the register's filter are updated together.
