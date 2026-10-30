@@ -1,5 +1,5 @@
 # ADR-0222: regenerates fairness-golden.json with fairlearn 0.13.0 (test-time only; never shipped).
-# Run: pip install fairlearn==0.13.0 && python3 -I fairness-golden.py > fairness-golden.json
+# Run: pip install fairlearn==0.13.0 && python3 -I fairness-golden-gen.py > fairness-golden.json
 import json, random
 import fairlearn
 from fairlearn.metrics import demographic_parity_difference as dpd, demographic_parity_ratio as dpr, equalized_odds_difference as eod, equal_opportunity_difference as eop

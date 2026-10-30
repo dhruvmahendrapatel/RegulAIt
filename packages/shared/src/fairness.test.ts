@@ -2,7 +2,7 @@
  * ADR-0222 — the fairness metrics, pinned against fairlearn.
  *
  * `__fixtures__/fairness-golden.json` holds 240 synthetic rows and the values
- * fairlearn 0.13.0 computed on them (`__fixtures__/fairness-golden.py`
+ * fairlearn 0.13.0 computed on them (`__fixtures__/fairness-golden-gen.py`
  * regenerates it). If a formula here drifts from the library's definition,
  * the golden case fails rather than a customer's report silently changing.
  */
