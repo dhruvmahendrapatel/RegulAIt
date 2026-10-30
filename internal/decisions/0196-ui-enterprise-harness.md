@@ -602,16 +602,17 @@ the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
 - Freeze week: ADR-0198 §2 covers entry raises only; this raise rests on the owner decision above. ADR-0198's post-demo
   reset applies to it.
 
-## Addendum / As built (2026-10-30) — all JS 1,050 → 1,054 kB (batch I-2, five layout patterns)
+## Addendum / As built (2026-10-30) — all JS 1,050 → 1,055 kB (batch I-2, five layout patterns)
 
 The owner capped all JS at 1,060 kB for every lane on 2026-10-30:
 <https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6522492997>. This raise stays inside that cap and
 is the ADR-recorded exception the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
 
-- `all JS` from `1050 kB` to `1054 kB` (+4 kB). Entry JS stays at 138.5 kB and entry CSS at 10.7 kB; the lazy chunk
+- `all JS` from `1050 kB` to `1055 kB` (+5 kB). Entry JS stays at 138.5 kB and entry CSS at 10.7 kB; the lazy chunk
   ceilings are unchanged.
 - Why: batch I-2 (#453, owner approval 6526119530) puts tabs on Traces, Red-teaming and Enforcement posture, a stepper
-  on Billing, and an expandable register table on Risks. Total JS measures 1,053,758 B against 1,049,780 B on main;
+  on Billing, and an expandable register table on Risks. Total JS measured 1,053,758 B against 1,049,780 B on main
+  as of #602, and 1,054,273 B once #608 and #609 were merged in;
   most of the growth is the Enforcement posture control matrix and its tab labels (about 1.2 kB), and the kit `Table`
   expandable rows (about 0.4 kB, in the entry chunk, which stays under its ceiling).
 - Freeze week: ADR-0198 §2 covers entry raises only; this raise rests on the owner decision above. ADR-0198's post-demo
