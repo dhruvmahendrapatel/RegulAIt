@@ -55,6 +55,7 @@ import {
   ConfirmModal,
   EmptyState,
   Field,
+  InfoButton,
   Input,
   Modal,
   Select,
@@ -445,7 +446,6 @@ export default function CustomProvidersPage() {
     <>
       <PageHeader
         title="Custom LLM providers"
-        sub="Any provider-compatible endpoint, governed like the rest."
         info={<p>Any endpoint that speaks one of the supported provider API shapes — a local model server, a cloud-hosted model service, a model proxy, an internal gateway. An admin-typed URL is an SSRF primitive, so every destination is default-deny: allow-list the host, register (disabled), pass a connection test, then enable. This page explains the rules; the gateway enforces them and its refusals are shown here word for word.</p>}
       />
       <div className={v.stack}>
@@ -457,10 +457,20 @@ export default function CustomProvidersPage() {
                 <span className={c.panelCode}>customModelProvidersEnabled = false</span>
               </div>
               <div className={c.panelReason}>
-                Nothing below is broken — the org master switch is off, so the gateway refuses registration
-                and enablement, and every custom-provider dispatch stops with a 409 before any request
-                leaves the box. Existing rows are still listed and still editable. Turn the capability back
-                on under <strong>Settings → Organization → Custom LLM providers</strong>.
+                <Badge
+                  tone="danger"
+                  infoLabel="the master switch"
+                  info={
+                    <>
+                      Nothing below is broken — the org master switch is off, so the gateway refuses registration
+                      and enablement, and every custom-provider dispatch stops with a 409 before any request
+                      leaves the box. Existing rows are still listed and still editable.
+                    </>
+                  }
+                >
+                  Master switch off
+                </Badge>{" "}
+                Turn it back on under <strong>Settings → Organization → Custom LLM providers</strong>.
               </div>
             </div>
           </Card>
@@ -471,17 +481,18 @@ export default function CustomProvidersPage() {
             <LifecycleStep
               n={1}
               title="Allow-list, then register"
-              text="A destination has to be granted before it can be named, and registering NEVER enables: a new provider is stored disabled, whatever else you set."
+              info="A destination has to be granted before it can be named, and registering NEVER enables: a new provider is stored disabled, whatever else you set."
             />
             <LifecycleStep
               n={2}
               title="Pass a connection test"
-              text="A real dispatch through the egress guard, in the dialect the endpoint claims. An open TCP port is not a connection test. Only a PASS is recorded."
+              info="A real dispatch through the egress guard, in the dialect the endpoint claims. An open TCP port is not a connection test. Only a PASS is recorded."
             />
             <LifecycleStep
               n={3}
               title="Enable"
-              text="Refused while no test has passed. Later moving the endpoint URL or the plaintext flag disables the provider and clears the test — the gate re-arms."
+              text="Refused while no test has passed."
+              info="Later moving the endpoint URL or the plaintext flag disables the provider and clears the test — the gate re-arms."
             />
           </div>
         </Card>
@@ -508,15 +519,18 @@ export default function CustomProvidersPage() {
   );
 }
 
-function LifecycleStep(props: { n: number; title: string; text: string }) {
+function LifecycleStep(props: { n: number; title: string; text?: string; info: string }) {
   return (
     <div className={c.step}>
       {/* not aria-hidden: the ordinal IS the content here — this is a
           sequence, and "step 2 of 3" is the thing being taught. */}
       <span className={c.stepNum}>{props.n}</span>
       <div className={c.stepBody}>
-        <div className={c.stepTitle}>{props.title}</div>
-        <div className={c.stepText}>{props.text}</div>
+        <div className={c.stepTitle}>
+          {props.title} <InfoButton label={`step ${props.n}, ${props.title.toLowerCase()}`}>{props.info}</InfoButton>
+        </div>
+        {/* the visible reason a step refuses stays on screen; only the rationale is behind the (i) */}
+        {props.text != null && <div className={c.stepText}>{props.text}</div>}
       </div>
     </div>
   );
@@ -759,23 +773,21 @@ function OptIn(props: {
   label: string;
   help: string;
 }) {
-  const helpId = `${props.id}-help`;
+  // The label says what the box relaxes, in the warning tone of its block; the
+  // long consequence sits behind the (i) beside it.
   return (
     <div className={c.optIn}>
       <input
         type="checkbox"
         id={props.id}
         checked={props.checked}
-        aria-describedby={helpId}
         onChange={(e) => props.onChange(e.target.checked)}
       />
       <span className={c.optInText}>
         <label className={c.optInLabel} htmlFor={props.id}>
           {props.label}
-        </label>
-        <span className={c.optInHelp} id={helpId}>
-          {props.help}
-        </span>
+        </label>{" "}
+        <InfoButton label={props.label}>{props.help}</InfoButton>
       </span>
     </div>
   );

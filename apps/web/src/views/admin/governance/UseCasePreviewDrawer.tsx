@@ -14,9 +14,10 @@ import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago, fmtAt, frameworkLabel, humanize, plural, shortId } from "../../../api/format";
-import { Badge, Button, Field, Input, Select } from "../../../ui/kit";
+import { Badge, Button, Field, Select } from "../../../ui/kit";
 import { useAction, useAgents } from "../adminKit";
 import { QuestionnaireView } from "./UseCaseQuestionnaire";
+import { RetireUseCaseForm } from "./RetireUseCase";
 import type { UseCaseResubmission } from "../../../api/types";
 import {
   fmtDay,
@@ -117,19 +118,19 @@ const capFirst = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 export function UseCasePreviewDrawer(props: { id: string; row: UseCaseRow | undefined; onClose: () => void; onChanged: () => Promise<unknown> }) {
   const agents = useAgents();
   const act = useAction();
+  // its own action, so the retire form's inline refusal never shows another action's error
+  const retireAct = useAction();
   const detail = useQuery({
     queryKey: ["admin", "use-case", props.id],
     queryFn: () => api.get<UseCaseDetail>(`/v1/use-cases/${props.id}`),
   });
   const [intentDraft, setIntentDraft] = useState<string[] | null>(null);
-  const [retireReason, setRetireReason] = useState("");
   const heading = useRef<HTMLHeadingElement>(null);
   const { onClose } = props;
 
   // a new record in the same drawer starts from its own stored intent
   useEffect(() => {
     setIntentDraft(null);
-    setRetireReason("");
     heading.current?.focus();
   }, [props.id]);
   useEffect(() => {
@@ -397,27 +398,7 @@ export function UseCasePreviewDrawer(props: { id: string; row: UseCaseRow | unde
             {u.status !== "retired" && (
               <details className={`${r.section} ${r.details}`}>
                 <summary>Retire this use case</summary>
-                <div className={v.stack}>
-                  <Field label="Reason for retiring (recorded in the audit log)">
-                    <Input value={retireReason} onChange={(e) => setRetireReason(e.target.value)} placeholder="Superseded by a narrower use case" />
-                  </Field>
-                  <div>
-                    <Button
-                      variant="danger"
-                      size="sm"
-                      disabled={act.busy || !retireReason.trim()}
-                      onClick={() =>
-                        void act.run(async () => {
-                          await api.post(`/v1/use-cases/${u.id}/retire`, { reason: retireReason.trim() });
-                          setRetireReason("");
-                          await refresh();
-                        }, "Use case retired")
-                      }
-                    >
-                      Retire use case
-                    </Button>
-                  </div>
-                </div>
+                <RetireUseCaseForm key={u.id} id={u.id} act={retireAct} onRetired={refresh} />
               </details>
             )}
             {u.status === "retired" && (

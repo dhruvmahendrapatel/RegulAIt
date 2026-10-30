@@ -95,13 +95,16 @@ export default function PasskeysCard() {
           {passkeys.length > 0 ? <Badge tone="ok">{passkeys.length} active</Badge> : <Badge>none</Badge>}
         </span>
       }
-    >
-      <div className={v.stack}>
-        <div className={v.dim}>
+      infoLabel="passkeys"
+      info={
+        <p>
           A passkey lets you confirm it's you with your device's fingerprint, face, PIN or security key. regulAIt asks
           for it before sensitive actions, such as loosening a security setting or changing who owns something, and
           when you sign a tool-call approval.
-        </div>
+        </p>
+      }
+    >
+      <div className={v.stack}>
         {!rpConfigured && (
           <div className={v.errLine} role="alert">
             Passkeys aren't available yet: an administrator has to set this deployment's public address first.

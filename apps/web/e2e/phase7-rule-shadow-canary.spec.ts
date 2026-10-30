@@ -144,8 +144,11 @@ test.describe("ADR-0073 — a rule canary measures without enforcing, and the sc
   test("the page states the invariant: a rule canary never enforces, and % is a SAMPLING rate", async () => {
     await gotoPage();
     await expect(page.getByText(/never enforces/)).toBeVisible();
-    await expect(page.getByText(/sampling rate/)).toBeVisible();
-    await expect(page.getByText(/count within\s+the sample|count within the sample/)).toBeVisible();
+    // the full invariant sits behind the card's (i); the "never enforces" chip stays visible
+    await page.getByRole("button", { name: "What is Rule versions — shadow canaries?" }).click();
+    const invariant = page.getByRole("note");
+    await expect(invariant.getByText(/sampling rate/)).toBeVisible();
+    await expect(invariant.getByText(/count within\s+the sample|count within the sample/)).toBeVisible();
     await shot(page, "phase7-01-rules-shadow-canary-invariant");
     track.assertClean("rules engine landing");
   });
@@ -292,6 +295,7 @@ test.describe("ADR-0074 — a deploy-mode edit on a versioned rule mints a versi
   test("the page states what an enforcing edit does to a versioned rule", async () => {
     await page.goto("/ui/admin/rules");
     await expect(page.getByRole("heading", { name: "Rules engine", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "What is Deploy-mode scoping?" }).click();
     const note = page.getByTestId("deploy-mode-versioning-note");
     await expect(note).toBeVisible();
     await expect(note).toContainText("mints a new version and activates it");

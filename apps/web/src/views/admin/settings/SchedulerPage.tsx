@@ -79,6 +79,19 @@ interface SchedulerStatus {
   note: string;
 }
 
+/**
+ * Customer copy carries no design-record ids: the gateway's job descriptions and
+ * note still cite them ("ADR-0185 I3: deletes …", "(ADR-0181)", "ADR-0126's
+ * breaker"), so they are dropped here before the text is shown.
+ */
+export function withoutRefs(text: string): string {
+  const out = text
+    .replace(/^(?:ADR|AER)-\d+[^:.]*[:.]\s*/, "")
+    .replace(/\s*\((?:ADR|PF|AER)-\d+[^)]*\)/g, "")
+    .replace(/\b(?:ADR|AER)-\d+'s\s+/g, "the ");
+  return out.charAt(0).toUpperCase() + out.slice(1);
+}
+
 function cadence(seconds: number): string {
   if (seconds % 86400 === 0) return `every ${seconds / 86400}d`;
   if (seconds % 3600 === 0) return `every ${seconds / 3600}h`;
@@ -174,8 +187,22 @@ export default function SchedulerPage() {
               />
             )}
 
-            <div className={v.faint}>{s?.posture}</div>
-            <div className={v.faint}>{s?.note}</div>
+            {s && (
+              <div className={v.row}>
+                <Badge
+                  tone={s.enabled ? "ok" : "warn"}
+                  infoLabel={s.enabled ? "Scheduler on" : "Scheduler off"}
+                  info={
+                    <>
+                      {s.posture ? <p>{withoutRefs(s.posture)}</p> : null}
+                      {s.note ? <p>{withoutRefs(s.note)}</p> : null}
+                    </>
+                  }
+                >
+                  {s.enabled ? "Scheduler on" : "Scheduler off"}
+                </Badge>
+              </div>
+            )}
           </Card>
 
           <BootSchedulerHealth />
@@ -186,12 +213,11 @@ export default function SchedulerPage() {
             </Card>
           ) : (
             jobs.map((job) => (
-              <Card key={job.name} title={job.name}>
-                <div className={v.faint}>{job.description}</div>
+              <Card key={job.name} title={job.name} info={job.description ? <p>{withoutRefs(job.description)}</p> : undefined}>
                 <div className={a.statRow}>
                   <Stat
                     value={<Badge tone={job.enabled ? "ok" : "warn"}>{job.enabled ? "enabled" : "disabled"}</Badge>}
-                    label={job.adr ?? "job"}
+                    label="job"
                   />
                   <Stat value={cadence(job.intervalSeconds)} label="cadence" />
                   <Stat

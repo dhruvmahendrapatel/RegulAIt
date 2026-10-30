@@ -104,7 +104,6 @@ export default function ModelsPage() {
     <>
       <PageHeader
         title="Models"
-        sub="Every model you may use, what it takes to call it, and a governed way to try it."
         info={
           <p>
             Each tile is a governed model binding from the agent registry. Readiness says whether a call would

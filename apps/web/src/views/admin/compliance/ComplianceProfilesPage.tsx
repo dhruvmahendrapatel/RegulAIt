@@ -215,7 +215,16 @@ function UpsertProfileCard(props: { templates: WorkflowTemplate[] }) {
   const set = (k: keyof typeof f, val: string | string[]) => setF((s) => ({ ...s, [k]: val }));
   const tplOpts = props.templates.filter((t) => !t.retiredAt);
   return (
-    <Card title="New profile">
+    <Card
+      title="New profile"
+      info={
+        <p>
+          Creates a new tag at version 1, strict by default (MCP read only, PII blocked). A tag that already
+          exists is refused: change it with Edit profile on its row, which creates the next version and waits
+          for a reviewer. Retention floors compose longest-wins across profiles; patch cadence shortest-wins.
+        </p>
+      }
+    >
       <form
         className={a.formRow}
         onSubmit={(e) => {
@@ -290,11 +299,6 @@ function UpsertProfileCard(props: { templates: WorkflowTemplate[] }) {
           </span>
         )}
       </form>
-      <p className={v.faint}>
-        Creates a new tag at version 1, strict by default (MCP read only, PII blocked). A tag that already
-        exists is refused: change it with Edit profile on its row, which creates the next version and waits
-        for a reviewer. Retention floors compose longest-wins across profiles; patch cadence shortest-wins.
-      </p>
     </Card>
   );
 }

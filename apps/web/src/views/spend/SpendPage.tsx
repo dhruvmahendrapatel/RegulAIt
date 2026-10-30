@@ -29,6 +29,7 @@ import {
   Card,
   EmptyState,
   ErrorState,
+  InfoButton,
   SkeletonBlock,
   Table,
   Tabs,
@@ -229,19 +230,26 @@ export default function SpendPage() {
     <>
       <PageHeader
         title="Spend & savings"
-        sub={
-          <>
+        info={
+          <p>
             Your own measured spend, and what the optimization layer saved on your behalf — the
             same ledgers the admin dashboard rolls up, scoped to you.
-            {auth?.isAdmin && (
-              <>
-                {" "}
-                <Badge tone="info">your own numbers only</Badge> You are an admin, so this page
-                asks for your user id explicitly; the organisation-wide rollup is the{" "}
-                <Link to="/admin/cost">Cost dashboard</Link>.
-              </>
-            )}
-          </>
+          </p>
+        }
+        sub={
+          auth?.isAdmin ? (
+            <Badge
+              tone="info"
+              info={
+                <>
+                  You are an admin, so this page asks for your user id explicitly; the organisation-wide
+                  rollup is the <Link to="/admin/cost">Cost dashboard</Link>.
+                </>
+              }
+            >
+              your own numbers only
+            </Badge>
+          ) : undefined
         }
         actions={
           <Button
@@ -330,7 +338,13 @@ export default function SpendPage() {
                     label: p.id ? (
                       <Link to={`/projects/${p.id}`}>{projectName.get(p.id) ?? p.id.slice(0, 8) + "…"}</Link>
                     ) : (
-                      "unattributed"
+                      <>
+                        unattributed
+                        <InfoButton label="unattributed">
+                          “unattributed” is a real bucket, not a rounding error — calls that arrived
+                          without a project id. Open a project for its budget, forecast and showback.
+                        </InfoButton>
+                      </>
                     ),
                   }))}
                   format={fmtUsd}
@@ -341,10 +355,6 @@ export default function SpendPage() {
                     />
                   }
                 />
-                <div className={v.faint} style={{ marginTop: "var(--s1)" }}>
-                  “unattributed” is a real bucket, not a rounding error — calls that arrived
-                  without a project id. Open a project for its budget, forecast and showback.
-                </div>
               </Card>
               <Card title="Spend by agent">
                 <BarList items={byAgent} format={fmtUsd} />

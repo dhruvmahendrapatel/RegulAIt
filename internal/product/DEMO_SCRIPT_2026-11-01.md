@@ -3,9 +3,15 @@
 **Decision record:** ADR-0197 (decisions 1-9 and the addendum of 2026-10-18, afternoon). The 2026-10-05 script (`DEMO_SCRIPT_2026-10-05.md`) stays as it was;
 this file replaces it for the 2026-11-01 demo.
 
-**Dates (owner, 2026-10-23, #453):** this script is used twice. A full **internal run-through on Sun 2026-11-01,
-afternoon ET**, and the **external demo on Tue 2026-11-03**. The code freeze stays 2026-10-29. The file keeps its
-name. Every preparation step in `DEMO_RUNBOOK.md` §7.3 is done for each run.
+> **New date (owner, 2026-10-29, #453 comment 6508111468): the customer demo is Saturday 2026-10-31, once.** There is
+> no internal run-through on Sun 11-01 and no external demo on Tue 11-03 any more. The file keeps its name; the name is
+> history. Two freeze exceptions are approved for this date (built by other PRs): Claude through the Anthropic API as
+> the model and the agent, pointed at our MCP endpoint, and the ABAP MCP server behind our MCP proxy, so a live SAP
+> change runs through governance.
+
+**Dates:** first planned as a run-through on Sun 2026-11-01 and an external demo on Tue 2026-11-03 (owner, 2026-10-23,
+#453); since 2026-10-29 it is one run on **Sat 2026-10-31**. The code freeze stays 2026-10-29. Every preparation step
+in `DEMO_RUNBOOK.md` §7.3 is done once, for that run.
 
 **Objective:** one journey in three acts.
 1. **Find it.** RegulAIt scans a GitLab group, an AWS sandbox account and an Azure subscription, read-only, imports a
@@ -52,7 +58,7 @@ right-hand column of the timing table.
     through an `endpoint_inventory` source (`DEMO_RUNBOOK.md` §7.2).
   - **FALLBACK**: the seeded discovery dataset `demo:prepare` creates (`DEMO_SHADOW_DISCOVERY` in
     `packages/shared/src/demo-intake/shadow-discovery.ts`, loaded by `apps/gateway/src/demo-shadow-seed-lib.ts`),
-    on the **local docker compose stack on the presenting laptop**, prepared less than 18 hours before each run
+    on the **local docker compose stack on the presenting laptop**, prepared less than 18 hours before the run
     (addendum, decision 4; owner, 2026-10-23).
     The fallback specifics below are read from that code; whether they look right on screen is still checked at
     rehearsal.
@@ -65,19 +71,19 @@ right-hand column of the timing table.
 
 ## Timing
 
-| # | Beat | Persona | Minutes | Clock | 11-01 run-through |
+| # | Beat | Persona | Minutes | Clock | Sat 10-31 |
 |---|---|---|---|---|---|
 | 0 | Opening: what we will show | — | 1.0 | 1.0 | LIVE read-only |
 | S1 | Discovery sources | Ada | 2.5 | 3.5 | LIVE read-only (no **Run now**, no federation toggle, no import) |
 | S2 | Findings, sightings, coverage | Ada | 2.5 | 6.0 | LIVE read-only |
-| S3 | Remediation plan → workflow → second approver | Ada, Morgan | 3.5 | 9.5 | FALLBACK (plus Ada's live half on a second finding, FS-7) |
-| S4 | Register as use case (intake) | Ada | 3.0 | 12.5 | FALLBACK |
-| G1 | The use-case record and risks | Ada | 1.5 | 14.0 | FALLBACK (S4's use case) |
-| G2 | Independent review | Avery | 2.0 | 16.0 | FALLBACK (S4's use case) |
-| E | Enforce it: a live governed deny, an approval in the Inbox and Slack, the call after approval, the audit rows | Ada, Avery | 2.0 | 18.0 | live call: FALLBACK stack on 11-01, LIVE on 11-03; simulated fallback: the Simulation page |
-| G3 | Deploy gate (terminal on the dev instance host) | Ada | 2.0 | 20.0 | DENY: LIVE read-only; acknowledge then ALLOW: FALLBACK |
+| S3 | Remediation plan → workflow → second approver | Ada, Morgan | 3.5 | 9.5 | LIVE (changes state) |
+| S4 | Register as use case (intake) | Ada | 3.0 | 12.5 | LIVE (changes state) |
+| G1 | The use-case record and risks | Ada | 1.5 | 14.0 | LIVE (S4's use case) |
+| G2 | Independent review | Avery | 2.0 | 16.0 | LIVE (S4's use case) |
+| E | Enforce it: a live governed deny, an approval in the Inbox and Slack, the call after approval, the audit rows | Ada, Avery | 2.0 | 18.0 | live call on LIVE; simulated fallback: the Simulation page |
+| G3 | Deploy gate (laptop terminal) | Ada | 2.0 | 20.0 | LIVE: DENY, acknowledge, then ALLOW (changes state) |
 | G4 | Trust dashboard | Ada | 1.0 | 21.0 | LIVE read-only |
-| G5 | Alerts and remediation | Ada, Avery | 2.0 | 23.0 | FALLBACK |
+| G5 | Alerts and remediation | Ada, Avery | 2.0 | 23.0 | LIVE (changes state) |
 | G7 | Regulatory intelligence | Ada | 0.5 | 23.5 | LIVE read-only |
 | G8 | Evidence | Ada | 1.0 | 24.5 | LIVE read-only |
 | — | Close | — | 0.5 | 25.0 | — |
@@ -91,12 +97,14 @@ the card, with no **Expand** on stage, and **Recent runs** is opened at T-1h (it
 as the scan judged 2.0 generous. The scan also notes the table has no slack
 for three profile switches and one terminal: plan for 28-30 minutes and use the cutting order below.
 
-**11-01 run-through (owner, #453).** LIVE is prepared once and never re-prepared, so on 11-01 every step that
-changes state runs on the **FALLBACK** laptop stack: G3's acknowledgements then ALLOW, G5 resolve, S3 **Start and
-link** (on the second finding, FS-7), S4 register (and G1/G2, which work on S4's new use case), and E. LIVE shows
-only the read-only beats and G3's DENY, so it stays as prepared for 11-03. On 11-03 every beat runs on LIVE as
-written, E included: E is a live governed call on both dates (ADR-0202), on the FALLBACK stack on 11-01 and on LIVE on 11-03, and runs on its simulated fallback on the Simulation page if lane L's switch is on. The same marks are
-in `DEMO_RUNBOOK.md` §7.3.
+**Saturday 10-31, one run (owner, 2026-10-29, #453 c6508111468).** LIVE is prepared once and never re-prepared, and
+the steps that change state (G3's acknowledgements then ALLOW, G5 resolve, S3 **Start and link**, S4 register, G1/G2
+on S4's new use case, and E) can each run only once on it. The two-date plan kept them off LIVE at the 11-01
+run-through for that reason. With one date there is no later run to spoil, so every beat runs on LIVE as written, E
+included: E is a live governed call (ADR-0202) and runs on its simulated fallback on the Simulation page if lane L's
+switch is on. The **FALLBACK** laptop stack stays what it always was: the failure fallback, switched to when a LIVE
+beat fails. Never rehearse a state-changing step on LIVE before the demo; rehearse it on FALLBACK only. The same marks
+are in `DEMO_RUNBOOK.md` §7.3.
 
 **Cutting order when behind:** G7, then **E. Enforce it** (second, owner 2026-10-24), then G4's drill-down, then S1's
 federation card, then G1's **Add risk**. Never cut S3 or G2: separation of duties is the point of both.
@@ -117,8 +125,8 @@ The full checklist, with what is still pending execution, is in `DEMO_RUNBOOK.md
   dark is the ☾ / ☀ button in the top bar (**Switch to dark theme** / **Switch to light theme**), and the palette is
   on **Account** (`/ui/account`) → **Appearance**; both are kept per browser, so set them in every profile. The
   fallback: the laptop's local stack running, the same three personas signed in to it in a separate browser so the
-  sessions never mix. A Session Manager shell open on the dev instance host for G3 (the host has no SSH), with the G3
-  script ready and `real-gate.txt` open on the laptop (`DEMO_RUNBOOK.md` §7.6). The recording open in a local player.
+  sessions never mix. A laptop terminal open in the LIVE checkout for G3 and E (ADR-0203), with `~/g3.sh` and `~/enforce.sh`
+  ready and `real-gate.txt` open on the laptop (`DEMO_RUNBOOK.md` §7.6). The recording open in a local player.
 - **Sessions end after 30 idle minutes** (the strict default, not relaxed for the demo). A window that is minimised or
   fully covered does not keep its session alive. So at **T-10 min**, in every profile and in the fallback browser,
   sign in again or bring the window to the front, and keep the windows tiled, never fully covered. At **T-5 min**,
@@ -153,7 +161,7 @@ The full checklist, with what is still pending execution, is in `DEMO_RUNBOOK.md
 ## Act 1 — Find it
 
 ### S1. Discovery sources — Ada — 2.5 minutes
-**11-01 run-through:** LIVE read-only.
+**Sat 10-31:** LIVE read-only.
 
 UI: `apps/web/src/views/admin/governance/DiscoverySourcesPage.tsx`, `FederationCard.tsx`, `EndpointAgentCard.tsx`.
 
@@ -163,7 +171,7 @@ UI: `apps/web/src/views/admin/governance/DiscoverySourcesPage.tsx`, `FederationC
   - Page header **Discovery sources**: *"Where regulAIt may scan, read-only, for shadow-AI use. Every source is off
     until you enable it."*
   - A three-step strip: **Connect read-only** (*n of n sources enabled*), **Scan on a schedule** (*n recent runs*),
-    **Findings land in Shadow AI** (**Open the findings**).
+    **Findings land in Shadow-AI discovery** (**Open the findings**).
   - **Active discovery** card: the posture sentence, which names each enabled source, for example *"Active discovery
     scans n enabled sources, read-only: … Nothing outside those sources is scanned."* (the count and names are the
     live data).
@@ -243,7 +251,7 @@ UI: `apps/web/src/views/admin/governance/DiscoverySourcesPage.tsx`, `FederationC
   only.
 
 ### S2. Findings, sightings and coverage — Ada — 2.5 minutes
-**11-01 run-through:** LIVE read-only.
+**Sat 10-31:** LIVE read-only.
 
 UI: `ShadowAiPage.tsx`, `DiscoverySightings.tsx`, `discoverySourcesModel.ts` (`sightingLines`).
 
@@ -254,7 +262,7 @@ UI: `ShadowAiPage.tsx`, `DiscoverySightings.tsx`, `discoverySourcesModel.ts` (`s
     lead and bring it into governance."* On the right, **Discovery sources** and **Import evidence**.
   - Tabs: **Findings · n** (open by default), **Coverage**, **Import evidence**, **Detection catalogue**, **Import
     history**.
-  - On **Findings**, the callout **What this can see.**, verbatim from the product: *"Discovery has analyzed n of 4
+  - On **Findings**, the callout **What this can see.**, verbatim from the product: *"Discovery has analysed n of 4
     evidence classes. Active discovery scans n enabled sources, read-only: … Every finding below derives from
     evidence you supplied or from a source an admin enabled, so this inventory reduces shadow AI — it does not prove
     its absence. …"*, ending with the link **See coverage**.
@@ -320,7 +328,7 @@ UI: `ShadowAiPage.tsx`, `DiscoverySightings.tsx`, `discoverySourcesModel.ts` (`s
   its first rows only).
 
 ### S3. Remediation plan → workflow → second approver — Ada, then Morgan — 3.5 minutes
-**11-01 run-through:** FALLBACK.
+**Sat 10-31:** LIVE (changes state; FALLBACK on failure).
 
 UI: `ShadowRemediationPanel.tsx`, `apps/web/src/views/workflows/WorkflowDetailPage.tsx`,
 `apps/web/src/views/inbox/InboxPage.tsx`; gateway `apps/gateway/src/shadow-ai-remediation.ts`.
@@ -336,16 +344,15 @@ UI: `ShadowRemediationPanel.tsx`, `apps/web/src/views/workflows/WorkflowDetailPa
     and open the workflow at **waiting for sign-off**: the panel shows the workflow id as plain text, not a link, so
     go to **Workflows** (`/ui/workflows`) and open the row whose title starts *"Pull
     gitlab:acme-bank-demo/credit-memo-assistant"*. Then go straight to Morgan.
-  - **11-01 only, after Morgan's Approve (FS-7, owner 2026-10-24):** walk Ada's live half once on the FALLBACK, on the
-    second repository finding, `gitlab:acme-bank-demo/support-ticket-triage`, which has no workflow yet: **Plan
-    remediation** → environment `staging` (the fallback's deploy target `acme-staging`) → **Start and link** →
-    **Finish planning** → paste the plan text from `DEMO_PRESENTER_NOTES_2026-11-01.md` ("11-01, FALLBACK, second
-    finding") → **Submit for sign-off** → Morgan's second **Review** and **Approve**. This is the only rehearsal of the
-    clicks Ada makes live on 11-03; it adds about two minutes to the 11-01 clock and is not part of the 11-03 script.
-    The fallback is prepared again from empty before 11-03, so the finding is free again then.
-  - **Run-through and demo:** LIVE allows one remediation workflow per finding, and LIVE is never re-prepared. So on
-    the 11-01 run-through S3 runs on **FALLBACK** only (owner, #453), and the LIVE finding chosen at T-24h before 11-03
-    stays unused until the demo.
+  - **Rehearsal of Ada's live half (FS-7, owner 2026-10-24):** this was an 11-01-only step; with one date it moves to
+    the FALLBACK rehearsal before 10-31, on the second repository finding,
+    `gitlab:acme-bank-demo/support-ticket-triage`, which has no workflow yet: **Plan remediation** → environment
+    `staging` (the fallback's deploy target `acme-staging`) → **Start and link** → **Finish planning** → paste the plan
+    text from `DEMO_PRESENTER_NOTES_2026-11-01.md` ("FALLBACK rehearsal, second finding") → **Submit for sign-off** →
+    Morgan's second **Review** and **Approve**. It is not part of the 10-31 script. If the fallback is prepared again
+    from empty afterwards, the finding is free again.
+  - **Demo:** LIVE allows one remediation workflow per finding, and LIVE is never re-prepared. So the LIVE finding
+    chosen at T-24h stays unused until the demo on 10-31.
 - **Action — Ada, the plan** (`/ui/admin/shadow-ai`):
   1. On the chosen row, in **Next step**, click **Plan remediation**. The **Remediation plan** panel opens on the
      right (`ds-s3a`, `ds-s3b`): the subject as its title, the provider and confidence badges, and **no governed
@@ -376,14 +383,14 @@ UI: `ShadowRemediationPanel.tsx`, `apps/web/src/views/workflows/WorkflowDetailPa
 - **Action — Ada, the workflow** (`/ui/workflows`, open the new workflow):
   1. The workflow's title is the full change description (finding F8). The **Plan only** card, badge **planning**:
      *"this change is in forced planning — nothing builds from it yet."* Click **Finish planning**.
-  2. The **Submit shadow AI remediation plan** card: paste the plan text prepared at T-24h from
+  2. The **Submit shadow-AI remediation plan** card: paste the plan text prepared at T-24h from
      `DEMO_PRESENTER_NOTES_2026-11-01.md` (it names the chosen repository; the panel has no copy button, FS-47), then
      **Submit for sign-off**.
   3. The card now reads **waiting for sign-off** — *"awaiting … — it is in their inbox"*.
 - **Action — Morgan** (Profile C, `/ui/inbox`): the row with the **Sign-off** chip and the workflow's title (the
   long *"Pull … into governance — shadow-AI finding …"* text, finding F8). Click its **Review**: the item opens in
   the panel on the right, with *"Workflow · requested by Ada Admin"* and the submitted plan folded under
-  *Submitted: Shadow AI remediation plan (v1)* (open it to show the plan). The pinned foot has **Reason (optional)**,
+  *Submitted: Shadow-AI remediation plan (v1)* (open it to show the plan). The pinned foot has **Reason (optional)**,
   **Deny** and **Approve**. Press **Approve** (her authenticator code if asked). The item leaves the list and the
   count drops by one (*n waiting on you*). **Recently decided**, at the foot of the Inbox, starts folded
   (the **Recently decided** header, title and count); the beat does not need it, so leave it folded. Back in Profile A, reload the workflow: status **completed**, all four
@@ -404,14 +411,14 @@ UI: `ShadowRemediationPanel.tsx`, `apps/web/src/views/workflows/WorkflowDetailPa
   rehearsal, or prepare the fallback database again afterwards.
 - **Rehearsal:** the seeder drives the start, **Finish planning** and the artifact submission through the real routes,
   and `demo:check` asserts the result waits on Morgan. Ada's clicks in the UI and Morgan's **Approve** have not been
-  walked end to end on the demo data: **pending execution** at the first rehearsal. On 11-01 Ada's clicks are walked
-  on the second finding (FS-7, above).
+  walked end to end on the demo data: **pending execution** at the first rehearsal. Ada's clicks are walked on
+  the FALLBACK's second finding before 10-31 (FS-7, above).
 - **If the start is refused:** `second_approver_unavailable` means no other admin exists (Morgan missing or
   deactivated); *"no workflow assigned"* means an admin's own assignment rule replaced the default; a refused
   environment means the typed one is not configured. Switch to the FALLBACK database.
 
 ### S4. Register as use case — Ada — 3 minutes
-**11-01 run-through:** FALLBACK.
+**Sat 10-31:** LIVE (changes state; FALLBACK on failure).
 
 UI: `IntakeWizardPage.tsx` (the 10-05 beat 1B, unchanged).
 
@@ -440,8 +447,8 @@ UI: `IntakeWizardPage.tsx` (the 10-05 beat 1B, unchanged).
 - **One finding, one use case, ever.** The record keeps the finding it came from, and a second registration from the
   same finding is refused (409, *"this shadow-AI finding is already registered as the AI use case '…'; a finding is
   registered once"*). The finding's row then shows *"Registered as <use case>"* (a link) instead of **Register as use
-  case**. So S4 uses up its finding: on LIVE, the 11-03 finding must not have been registered before.
-- **LIVE / FALLBACK:** the same; only the prefilled name differs. On the 11-01 run-through, S4 runs on **FALLBACK**.
+  case**. So S4 uses up its finding: on LIVE, the 10-31 finding must not have been registered before.
+- **LIVE / FALLBACK:** the same; only the prefilled name differs. On 10-31, S4 runs on **LIVE**; never register it there before.
 
 ---
 
@@ -452,10 +459,10 @@ These are the 10-05 beats, on the same seeded governance data. The **Say** lines
 the day.
 
 ### G1. The use-case record and risks — Ada — 1.5 minutes (10-05 beat 2A)
-**11-01 run-through:** FALLBACK (S4's use case).
+**Sat 10-31:** LIVE (S4's use case).
 
 - **URL:** **Open the use-case workspace** after submit → `/ui/admin/governance/use-cases/<id>`.
-- **Screen** (`ds-g1b`): the dark header band with *AI use cases / <name>*, the **AI USE CASE** label, and the chips
+- **Screen** (`ds-g1b`): the dark header band with the breadcrumb *AI Governance / AI registry / <name>*, the **AI USE CASE** label, and the chips
   **Status**, **EU AI Act** tier, **Approval valid until** (once approved) and **Owner**; **Open intake** on the
   right. Status **under review** right after submit. The **Overview** tab holds the **Lifecycle tracker** (*Proposed
   → Under review → Approved → Monitoring*, then the activity table) and, once approved, **Conditions of approval**
@@ -477,7 +484,7 @@ the day.
 - **Say (added):** "the record remembers where it was found."
 
 ### G2. Independent review — Avery — 2 minutes (10-05 beat 2B)
-**11-01 run-through:** FALLBACK (S4's use case).
+**Sat 10-31:** LIVE (S4's use case).
 
 - **URL:** `/ui/inbox` (Profile B): *AI use case sign-off · Govern <subject> — requested by Ada Admin* → **Review**.
 - **Action:** the row's **Review** opens **Review use case sign-off** (caption *Open task*) as a panel on the right
@@ -494,15 +501,15 @@ the day.
   chip in the header, and **Conditions of approval** with **Mark met** on the **Overview** tab.
 
 ### E. Enforce it — Ada, Avery — 2 minutes (added 2026-10-24; live since ADR-0202)
-**11-01 run-through:** a live governed call on the FALLBACK laptop stack (it changes state, so it stays off LIVE,
-as every such step does on 11-01). **11-03:** a live governed call on LIVE. Live is the default on both dates (ADR-0202
+**Sat 10-31:** a live governed call on LIVE (it changes state, so it runs once, at the demo; rehearse it on the
+FALLBACK laptop stack only). Live is the default (ADR-0202
 decision 1, which supersedes #453 comment 6387779914 for this beat); the beat's *simulated fallback* is the
 simulated decision below, chosen by lane L's per-beat switch for `enforce-it`.
 
 The beat shows one governed call denied with its rule named, one queued for a named approver and mirrored to chat,
 the approval, the call executing only after it, and the audit rows. It is second in the cutting order.
 
-Code: `apps/gateway/src/demo-enforce-lib.ts` (`demo:enforce`: on the dev host `~/enforce.sh`, on the laptop
+Code: `apps/gateway/src/demo-enforce-lib.ts` (`demo:enforce`: on 10-31 `~/enforce.sh` in the laptop terminal against LIVE, ADR-0203; at the FALLBACK rehearsal
 `pnpm --filter @regulait/gateway demo:enforce`), the gateway's
 own MCP route `POST /mcp/:serverId` and ChatOps route `POST /v1/chatops/approvals/:id/post`; UI: Avery's **Inbox**,
 `AuditLogPage.tsx`, and on the fallback `SimulationPage.tsx`. Seed: `apps/gateway/src/seed.ts` (Dana's role grant on
@@ -515,16 +522,16 @@ executed write is the demo server's answer (`committed … as commit demo01a`), 
 The existing wiring does not link a bare tool-call approval to a workflow PR or a PM work item (pm-sync mirrors
 workflow-stage and run decisions only), so this beat shows no PR and no Jira or Azure DevOps update; never say it does.
 
-**Live flow, with timings** (profiles: Ada in A, Avery in B; on 11-03 the host shell reconnected at T-5 min, as for
-G3; on 11-01 a laptop terminal):
+**Live flow, with timings** (profiles: Ada in A, Avery in B; on 10-31 the laptop terminal used for G3, checked at
+T-5 min; at the FALLBACK rehearsal a laptop terminal on the FALLBACK checkout):
 
 | Time | Where | What happens | What is on screen |
 |---|---|---|---|
-| 0:00-0:15 | host shell | `~/enforce.sh` | `LIVE  Dana Developer calls repo-tools …`, then `tools/list` without `search_code` |
-| 0:15-0:30 | host shell | Dana's `search_code` | `DENIED  Denied by policy: …` and the `audit:` line: rule `default-deny`, her role's `role-server-read-only-all` grant **REVOKED** for her |
-| 0:30-0:45 | host shell, then Slack | Dana's `write_file` | `QUEUED … pending sign-off by approver 'Avery …'`, `notify posted to slack …` (and one line per other enabled channel, email included once lane E's channel is configured). Show the card in Slack |
+| 0:00-0:15 | laptop terminal | `~/enforce.sh` | `LIVE  Dana Developer calls repo-tools …`, then `tools/list` without `search_code` |
+| 0:15-0:30 | laptop terminal | Dana's `search_code` | `DENIED  Denied by policy: …` and the `audit:` line: rule `default-deny`, her role's `role-server-read-only-all` grant **REVOKED** for her |
+| 0:30-0:45 | laptop terminal, then Slack | Dana's `write_file` | `QUEUED … pending sign-off by approver 'Avery …'`, `notify posted to slack …` (and one line per other enabled channel, email included once lane E's channel is configured). Show the card in Slack |
 | 0:45-1:15 | Profile B, **Inbox** | Avery opens the request and presses **Approve**, pasting the note from the presenter notes | the request leaves the queue |
-| 1:15-1:30 | host shell | the command sees the decision and retries the same call | `write_file  APPROVED and EXECUTED  committed docs/enforce-it.md …` |
+| 1:15-1:30 | laptop terminal | the command sees the decision and retries the same call | `write_file  APPROVED and EXECUTED  committed docs/enforce-it.md …` |
 | 1:30-2:00 | Profile A, `/ui/admin/audit` | the newest rows | the deny with its rule chain, the queued approval, the chat post, Avery's decision, the executed call |
 
 - **Say:** "Dana's own key, the real MCP protocol, the real gateway. Her search is refused, and the ledger names why:
@@ -578,16 +585,16 @@ It records each question as an audit row marked advisory (not counted against ra
   Slack ChatOps connection on the stack (pending execution at the first rehearsal).
 
 ### G3. Deploy gate — 2 minutes (10-05 beat 2C; 1.5 until 2026-10-24, FS-49)
-**11-01 run-through:** DENY (step 1) LIVE read-only; acknowledge and ALLOW (steps 2-3) FALLBACK.
+**Sat 10-31:** all three steps on LIVE (acknowledge and ALLOW change state; FALLBACK on failure).
 
 - **Expected:** `DENY` with two **BLOCK open_high_alert** lines for *Real-Time Fraud Detection Engine*, then `ALLOW`
   with two **WARN acknowledged_high_alert** lines after the alerts are acknowledged. The environment is `staging`,
   never `production` (owner, #522 #11): the gate only records it, and nothing in this demo is production.
-- **Where it runs.** `demo:gate` reads the database directly, and the laptop is only a browser (ADR-0197 decision 1),
-  so it runs **live on the dev instance host**, in a Session Manager shell (the host has no SSH), inside the gateway
+- **Where it runs.** `demo:gate` reads the database directly, and the live stack runs on the laptop (ADR-0203, which
+  supersedes the dev instance host), so it runs **live in a laptop terminal** in the LIVE checkout, inside the gateway
   container: `docker compose exec -T gateway node apps/gateway/dist/demo-gate.js "Real-Time Fraud Detection Engine"
-  staging <ref>`, kept in the one-line script `~/g3.sh` (`DEMO_RUNBOOK.md` §7.6). The shell was reconnected at
-  T-5 min. **Pending execution** on that host.
+  staging <ref>`, kept in the one-line script `~/g3.sh` (`DEMO_RUNBOOK.md` §7.6). The terminal was checked at
+  T-5 min. **Pending execution** on the laptop.
 - **Action:**
   1. In the shell: `~/g3.sh demo-1`. The printout reads `$ regulait gate deploy --use-case "Real-Time Fraud Detection
      Engine" --env staging --ref demo-1`, then `DENY  "Real-Time Fraud Detection Engine" (approved, EU AI Act tier
@@ -605,28 +612,28 @@ It records each question as an audit row marked advisory (not counted against ra
   3. Back in the shell: `~/g3.sh demo-2`. Expect `ALLOW` with two **WARN acknowledged_high_alert** lines.
 - **Say:** "The pipeline asks the gate, and the gate answers from live governance state: two open high alerts block
   it. Acknowledging them is a person's audited decision, and the gate still lists them as warnings."
-- **On LIVE:** run `demo:traffic` again at T-24h before each run (owner, #522 #8): the monitor counts the off-stack
+- **On LIVE:** run `demo:traffic` again at T-24h before the run (owner, #522 #8): the monitor counts the off-stack
   call over 7 days, so traffic made at preparation would no longer hold the second BLOCK line. Capture
   `real-gate.txt` after that re-run (`DEMO_RUNBOOK.md` §7.3).
-- **Run-through and demo:** an acknowledged alert stays acknowledged, so an acknowledgement on LIVE on 11-01 would turn
-  11-03's first run into ALLOW. On 11-01, run step 1 (DENY) on LIVE, then steps 2-3 on the **FALLBACK** stack (owner,
-  #453): acknowledge in the fallback browser, and run the gate there with
+- **Rehearsal and demo:** an acknowledged alert stays acknowledged, so an acknowledgement on LIVE before 10-31 would
+  turn the demo's first run into ALLOW. Rehearse steps 2-3 on the **FALLBACK** stack only: acknowledge in the fallback
+  browser, and run the gate there with
   `docker compose exec -T gateway node apps/gateway/dist/demo-gate.js "Real-Time Fraud Detection Engine" staging demo-2`
-  from the repo root on the laptop. Never acknowledge these alerts on LIVE before 11-03.
+  from the repo root on the laptop. Never acknowledge these alerts on LIVE before the demo on 10-31.
 - **Fallback:** if the shell is gone or slow, show `real-gate.txt` (the T-24h capture, open on the laptop). Say plainly
   it was captured from a real run. The ALLOW half is rehearsed on the fallback database at T-7d (`DEMO_RUNBOOK.md`
   §7.5, owner step 1).
 
 ### G4. Trust dashboard — Ada — 1 minute (10-05 beat 3A; 0.5 moved to G3 on 2026-10-24)
-**11-01 run-through:** LIVE read-only.
+**Sat 10-31:** LIVE read-only.
 
 - **URL:** `/ui/admin/governance/trust` (breadcrumb *Overview / Trust & evidence*). The page has no tabs: point at
   the weakest bars in **Evidence coverage by dimension** (on FALLBACK, **Safety 0%** and **Reliability 60%**), then
-  click the **Security** tile in **Dimension drilldown** (it opens on **Bias**): its badge (*measured* or
-  *unmeasured*) and the **Open · Mitigating · Accepted · Closed** counts.
+  click the **Security** tile in **Dimension drilldown** (it opens on **Bias**): its badge (*Measured* or
+  *Unmeasured*) and the **Open · Mitigating · Accepted · Closed** counts.
 
 ### G5. Alerts and remediation — Ada, then Avery — 2 minutes (10-05 beat 3B)
-**11-01 run-through:** FALLBACK.
+**Sat 10-31:** LIVE (changes state; FALLBACK on failure).
 
 - **URL:** `/ui/admin/governance/alerts` → **Evaluate now**. The tabs **Active · Acknowledged · Resolved** sit
   above the **Alerts** card, whose title is a fold header (the **Alerts** title and its count, open by default). Click the alert
@@ -634,7 +641,7 @@ It records each question as an audit row marked advisory (not counted against ra
 - **Action:** click the unowned-agent alert's row: it opens in the panel on the right (`ds-g5b`; at 900 px and
   below, a modal over the page, `ds-g5c`). Type the **Acknowledgement note — required and audited** in the pinned
   foot, then **Acknowledge** (it stays disabled until the note is typed). In the panel's body, under **Remediation**,
-  *"Make Dana Developer the owner of …"*: choose **Avery** in **Independent approver** → **Propose…**. Avery opens
+  *"Make Dana Developer the owner of …"*: choose **Avery** in **Independent approver** → **Propose for approval**. Avery opens
   the item in `/ui/inbox` (*Governance remediation · …*) with **Review**; the panel should read *"No evidence attached
   to this request."* (the evidence is the alert itself; **to confirm at rehearsal**, not in the pack) and Avery
   presses **Approve** in its pinned foot. Ada reloads:
@@ -644,9 +651,10 @@ It records each question as an audit row marked advisory (not counted against ra
   **Active**: check at rehearsal.
 - **SLA chips** (deep scan #13): an alert's SLA chip moves with the clock, and acknowledging it does not stop it. High
   alerts read *SLA due soon* from 18 h and *SLA breached* from 24 h; medium alerts at 54 h and 72 h. On LIVE, prepared
-  more than a week earlier, every open high and medium alert reads **SLA breached**, the unowned-agent alert included,
-  and the panel adds that it was escalated to the admins. If anyone looks at it, say: "the product escalates overdue
-  alerts". The fallback is prepared less than 18 h before the run, so its chips read *on track*, as in the pack.
+  on 10-29 (about two days before the demo), every open high alert reads **SLA breached**, the unowned-agent alert
+  included, and the panel adds that it was escalated to the admins; open medium alerts read *SLA on track* or *SLA due
+  soon*, not breached (check at T-1h). If anyone looks at it, say: "the product escalates overdue
+  alerts". The fallback is prepared less than 18 h before the run, so its chips read *SLA on track*, as in the pack.
 - **Say (added for v3):** "Same rule as the shadow-AI plan: the platform runs only the approved action, and the
   approver is someone else. Approving the fix re-ran the monitor, so the alert resolved from evidence, not by hand."
 - **Say (added 2026-10-24, scan G5 sentence):** on the **Acknowledged** tab, point at G3's off-stack alert: "That
@@ -654,18 +662,18 @@ It records each question as an audit row marked advisory (not counted against ra
   governance read the same ledger." (`agents-connectors.ts`, measured cost per call; ADR-0164.)
 
 ### G6. Dependency graph — optional, 0.5 minutes (10-05 beat 3C; moved out of the 25 minutes on 2026-10-24)
-**11-01 run-through:** LIVE read-only.
+**Sat 10-31:** LIVE read-only.
 
 - **URL:** `/ui/admin/governance/graph`. One path to a vendor's HIGH risk.
 
 ### G7. Regulatory intelligence — 0.5 minutes (10-05 beat 3D)
-**11-01 run-through:** LIVE read-only.
+**Sat 10-31:** LIVE read-only.
 
 - **URL:** `/ui/admin/governance/regulatory`. One entry: the Digital Omnibus date move. Say it in words, as the
   entry's own text gives it: the Annex III high-risk obligations now apply from 2 December 2027.
 
 ### G8. Evidence — Ada — 1 minute (10-05 beat 3E)
-**11-01 run-through:** LIVE read-only.
+**Sat 10-31:** LIVE read-only.
 
 - **URL:** `/ui/admin/audit` → **Download signed bundle** (top right, beside **Download CSV**). The page (`ds-g8`):
   **Chain integrity** (*Not verified yet*, **Verify chain**), then **Entries**, newest first (every column, the
@@ -699,7 +707,7 @@ It records each question as an audit row marked advisory (not counted against ra
 ## Optional beats (only if ahead of the clock)
 
 ### G9. Accountability records — 1.5 minutes (10-05 beat 3F)
-**11-01 run-through:** LIVE read-only.
+**Sat 10-31:** LIVE read-only.
 
 The 10-05 beat, with work in progress on both screens (`demo:intake` seeds it; `demo:check` beat
 "3 Incidents and feedback"). The beat FAILs when an item routed to Ada is past its resolution SLA (resolve it, then
@@ -722,7 +730,7 @@ re-run `demo:intake`), and WARNs when open incidents or feedback sit on the Real
 - The use case's **Decision records** tab, unchanged.
 
 ### G10. Content trust — Ada — 1.5 minutes (ADR-0193)
-**11-01 run-through:** LIVE read-only.
+**Sat 10-31:** LIVE read-only.
 
 UI: `apps/web/src/views/admin/governance/ContentTrustPage.tsx`.
 - **URL:** `/ui/admin/content-trust` (navigation: **Content trust**).
@@ -730,11 +738,11 @@ UI: `apps/web/src/views/admin/governance/ContentTrustPage.tsx`.
   The **Write floor** card (badge *only trusted content drives writes*), the **Source tiers** table (**Source · Kind ·
   Tier · Last set · Change**), and **Provenance evidence** (**Recorded · Source · Tier · Classification · Digest ·
   Delivered · Transformed · Anchor**).
-- **Action:** point at a source reading **untrusted**, then at one provenance record's digests. Do not change a tier
+- **Action:** point at a source reading **Untrusted**, then at one provenance record's digests. Do not change a tier
   live (each change is a step-up).
 - **Say:** "Detecting an injection is not enough. Here, text from a source below the write floor cannot make an agent
   change anything: the write is refused. Every governed result is recorded by its digests, never its content."
-- **Data:** on FALLBACK, the connector *acme-policy-library* is **trusted**, and Dana's two reads of it
+- **Data:** on FALLBACK, the connector *acme-policy-library* is **Trusted**, and Dana's two reads of it
   (*lending-policy*, *complaints-handling-policy*) are provenance records (`demo:check` asserts both). On LIVE, the
   provenance records are whatever the governance seed and the day's traffic made; if the evidence card is empty, the
   beat is the tier table alone.

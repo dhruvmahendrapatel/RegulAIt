@@ -46,7 +46,15 @@ export function ExpectedServedModelCard(props: { agents: AdminAgent[] }) {
         : `Expected served model set to ${body.expectedServedModel}`,
     );
   return (
-    <Card title="Expected served model — drift baseline">
+    <Card
+      title="Expected served model — drift baseline"
+      info={
+        <p>
+          Use this only when the endpoint's configured id is a deployment name that reports a different underlying model. A change is refused while an
+          incident evidence hold covers the agent, and every change is audited with both values.
+        </p>
+      }
+    >
       <form
         className={a.formRow}
         onSubmit={(e) => {
@@ -88,9 +96,7 @@ export function ExpectedServedModelCard(props: { agents: AdminAgent[] }) {
           ? stored
             ? `Now: drift is measured against ${stored}. The configured model id is ${agent.model ?? "not set"}.`
             : `Now: drift is measured against the configured model id (${agent.model ?? "not set"}), the strict default.`
-          : "Pick an agent to see what its served-model drift is measured against."}{" "}
-        Use this only when the endpoint's configured id is a deployment name that reports a different underlying model. A change is refused while an
-        incident evidence hold covers the agent, and every change is audited with both values.
+          : "Pick an agent to see what its served-model drift is measured against."}
       </p>
       <ConfirmModal
         open={confirm !== null}

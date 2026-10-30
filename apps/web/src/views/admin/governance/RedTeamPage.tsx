@@ -191,7 +191,6 @@ export default function RedTeamPage() {
     <>
       <PageHeader
         title="Red-teaming"
-        sub="Adversarial probes, through the same governed path as real traffic."
         info={<p>Adversarial probes run through the SAME governed dispatch as real traffic — entitlements, guardrails, metering and audit all apply — so a run measures the guardrail-plus-model system as deployed. A published attack library is an ordinary evaluation dataset, so a regression blocks promotion through the existing automated-check gate rather than a second mechanism.</p>}
       />
       <div className={v.stack}>
@@ -203,18 +202,23 @@ export default function RedTeamPage() {
             void libraries.refetch();
           }}
         >
-          <Card title="What a green run does and does not mean">
-            <div style={{ marginBottom: "var(--s2)" }}>{classes.data?.disclosure}</div>
+          <Card
+            title="What a green run does and does not mean"
+            infoLabel="a green run"
+            info={classes.data?.disclosure ? <p>{classes.data.disclosure}</p> : undefined}
+          >
+            <div style={{ marginBottom: "var(--s2)" }}>A green run: no probe got through, not proof of safety.</div>
             {classes.data?.scheduling && (
-              <>
-                <div className={v.row}>
-                  <Badge tone={classes.data.scheduling.schedulerEnabled ? "ok" : "neutral"}>
-                    continuous sweep: {classes.data.scheduling.schedulerEnabled ? "on" : "off"}
-                  </Badge>
-                  <span className={v.dim}>{classes.data.scheduling.posture}</span>
-                </div>
-                <div className={v.faint}>{classes.data.scheduling.note}</div>
-              </>
+              <div className={v.row}>
+                <Badge
+                  tone={classes.data.scheduling.schedulerEnabled ? "ok" : "neutral"}
+                  infoLabel="the continuous sweep"
+                  info={classes.data.scheduling.note || undefined}
+                >
+                  continuous sweep: {classes.data.scheduling.schedulerEnabled ? "on" : "off"}
+                </Badge>
+                <span className={v.dim}>{classes.data.scheduling.posture}</span>
+              </div>
             )}
           </Card>
 
@@ -237,10 +241,7 @@ export default function RedTeamPage() {
             />
           </Card>
 
-          <Card title="Attack libraries">
-            <div className={v.faint} style={{ marginBottom: "var(--s2)" }}>
-              {libraries.data?.note}
-            </div>
+          <Card title="Attack libraries" info={libraries.data?.note ? <p>{libraries.data.note}</p> : undefined}>
             <div className={a.formRow} style={{ marginBottom: "var(--s2)" }}>
               <Button
                 onClick={() =>
@@ -278,7 +279,18 @@ export default function RedTeamPage() {
                 }, "Library created as a DRAFT — add probes, then publish to freeze it");
               }}
             >
-              <Field label="Start your own library" grow>
+              <Field
+                label="Start your own library"
+                grow
+                helpLabel="a draft library"
+                help={
+                  <>
+                    A new library starts as a <strong>draft</strong>: editable, and not selectable for a run. Publishing
+                    freezes it, because a result stamped with a library version is meaningless if the library can move
+                    underneath it — after that, editing mints the next version.
+                  </>
+                }
+              >
                 <Input
                   required
                   maxLength={120}
@@ -299,11 +311,6 @@ export default function RedTeamPage() {
                 Create draft
               </Button>
             </form>
-            <p className={v.faint}>
-              A new library starts as a <strong>draft</strong>: editable, and not selectable for a run.
-              Publishing freezes it, because a result stamped with a library version is meaningless if
-              the library can move underneath it — after that, editing mints the next version.
-            </p>
             <Table
               rows={libraries.data?.libraries ?? []}
               rowKey={(r) => r.id}

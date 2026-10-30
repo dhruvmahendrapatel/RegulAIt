@@ -617,7 +617,7 @@ test("compliance profiles: upsert a profile + live cascade preview", async () =>
   await nav("Compliance profiles", "Compliance profiles");
   await expect(page.getByRole("cell", { name: /^hipaa\b/ })).toBeVisible();
 
-  await page.getByLabel("Tag").fill("e2e-framework");
+  await page.getByLabel("Tag", { exact: true }).fill("e2e-framework");
   await page.getByLabel("Audit retention days (blank = none)").fill("30");
   // G7 (#453): this card creates profiles only; an existing tag is changed through Edit profile and review
   await page.getByRole("button", { name: "Create profile" }).click();

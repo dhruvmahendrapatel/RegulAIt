@@ -92,16 +92,25 @@ export default function AbacPoliciesPage() {
     <>
       <PageHeader
         title="ABAC policies"
-        sub="Attribute-conditional policy that can narrow a decision, never widen it."
         info={<p>Attribute-conditional policy, evaluated inside the same kernel and recorded in the same audit trail as every RBAC decision. A policy can only DENY or PAUSE a call the entitlement model already allows — it can never grant one, and with no active policy the kernel decides exactly as it did before.</p>}
       />
       <div className={v.stack}>
         <Card title="Write a policy">
-          <div className={v.faint} style={{ marginBottom: "var(--s2)" }}>
-            {activeCount === 0
-              ? "No policy is active. Every governed call is decided by the entitlement model alone — exactly as it was before this feature existed."
-              : `${activeCount} active ${activeCount === 1 ? "policy" : "policies"}. Each one can only further restrict a call the entitlement model allows.`}
-            {policies.data?.engine ? ` Engine: ${policies.data.engine}.` : ""}
+          <div className={v.row} style={{ marginBottom: "var(--s2)" }}>
+            {activeCount === 0 ? (
+              <Badge tone="neutral" info="Every governed call is decided by the entitlement model alone — exactly as it was before this feature existed.">
+                No active policy
+              </Badge>
+            ) : (
+              <Badge
+                tone="ok"
+                infoLabel="active policies"
+                info="Each one can only further restrict a call the entitlement model allows."
+              >
+                {`${activeCount} active ${activeCount === 1 ? "policy" : "policies"}`}
+              </Badge>
+            )}
+            {policies.data?.engine ? <span className={v.faint}>Engine: {policies.data.engine}</span> : null}
           </div>
           <form
             className={v.stack}
@@ -315,12 +324,17 @@ export default function AbacPoliciesPage() {
         <AbacSimulateCard />
         <AbacSuiteCard />
 
-        <Card title="The attribute schema a policy may reference">
-          <p className={v.faint}>
-            Anything not declared here is a validation error at write time — never a policy that
-            silently matches nothing. Times are read in the zone the policy declares, not this
-            server's.
-          </p>
+        <Card
+          title="The attribute schema a policy may reference"
+          infoLabel="the attribute schema"
+          info={
+            <p>
+              Anything not declared here is a validation error at write time — never a policy that
+              silently matches nothing. Times are read in the zone the policy declares, not this
+              server's.
+            </p>
+          }
+        >
           <CodeBlock maxHeight="320px">{schema.data?.schemaText ?? "loading…"}</CodeBlock>
         </Card>
       </div>
@@ -362,11 +376,16 @@ function PolicyDetail(props: { policyId: string; currentSchema: string | null })
       error={detail.error}
       onRetry={() => void detail.refetch()}
     >
-      <Card title={`Versions — ${detail.data?.policy.name ?? ""}`}>
-        <p className={v.faint}>
-          Editing a policy adds a version; it never overwrites one. Rolling back is activating an
-          older version, so the version you rolled away from is still here and still re-activatable.
-        </p>
+      <Card
+        title={`Versions — ${detail.data?.policy.name ?? ""}`}
+        infoLabel="policy versions"
+        info={
+          <p>
+            Editing a policy adds a version; it never overwrites one. Rolling back is activating an
+            older version, so the version you rolled away from is still here and still re-activatable.
+          </p>
+        }
+      >
         <Table
           rows={versions}
           rowKey={(x) => x.id}

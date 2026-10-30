@@ -41,7 +41,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Table } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, InfoButton, Table } from "../../../ui/kit";
 import { QueryGate, Stat, useAction } from "../adminKit";
 import { BomPostureCard, type ReceiptSigningKeyPosture } from "./BomPostureCard";
 import { OrgSettingsCard } from "./OrgSettingsCard";
@@ -163,8 +163,7 @@ export default function EnforcementPosturePage() {
     <>
       <PageHeader
         title="Enforcement posture"
-        sub="What is enforcing in this deployment right now. Every enforcement control below ships strict (ADR-0181); a relaxed one is an audited admin decision."
-        info={<p>What is enforcing in this deployment right now — and, per control, what turning it on would start refusing. Since ADR-0181 every enforcement control below ships at its strict value, except the WORM audit anchor, which needs a bucket only the operator can supply. An admin may relax a settable control, and that relaxation is audited old → new, so a relaxed posture is always a decision somebody took deliberately rather than one the deployment arrived with. The environment-backed rows (database TLS, the scheduler, the audit anchor) are set by the operator, not here. The optimisation group (the semantic cache) ships off: it changes answers, and turning it on is a cost decision.</p>}
+        info={<p>What is enforcing in this deployment right now — and, per control, what turning it on would start refusing. Every enforcement control below ships at its strict value, except the WORM audit anchor, which needs a bucket only the operator can supply. An admin may relax a settable control, and that relaxation is audited old → new, so a relaxed posture is always a decision somebody took deliberately rather than one the deployment arrived with. The environment-backed rows (database TLS, the scheduler, the audit anchor) are set by the operator, not here. The optimisation group (the semantic cache) ships off: it changes answers, and turning it on is a cost decision.</p>}
       />
       <div className={v.stack}>
         <QueryGate
@@ -234,24 +233,35 @@ export default function EnforcementPosturePage() {
             {/* ADR-0181: TLS to Postgres is the default; running without it is
                 an explicit, visible relaxation (REGULAIT_DATABASE_SSL=disable). */}
             {dbTls === "relaxed" && (
-              <EmptyState
-                title="database TLS: relaxed"
-                body={
-                  "REGULAIT_DATABASE_SSL=disable is set, so the gateway talks to Postgres in plaintext. " +
-                  "That is acceptable only for a database on the same host (the local demo, docker-compose). " +
-                  "Unset it, or set require, for any other deployment; the gateway also says so loudly at boot."
-                }
-              />
+              <div className={v.row}>
+                <Badge
+                  tone="danger"
+                  info={
+                    <p>
+                      REGULAIT_DATABASE_SSL=disable is set, so the gateway talks to Postgres in plaintext. That is
+                      acceptable only for a database on the same host (the local demo, docker-compose). Unset it, or set
+                      require, for any other deployment; the gateway also says so loudly at boot.
+                    </p>
+                  }
+                >
+                  DB TLS: disabled
+                </Badge>
+              </div>
             )}
 
             {blocked.length > 0 && (
               <EmptyState
                 title={`${blocked.length} control(s) cannot be reached from this screen`}
                 body={
-                  `${blocked.join(", ")} — these are resolved from the process environment at start-up. ` +
-                  "An API call cannot set an environment variable, so they are reported with their " +
-                  "OBSERVED state and are never counted as hardened on our say-so. The overall verdict " +
-                  "above stays 'not hardened' while they are unmet, even once every settable control is on."
+                  <>
+                    {blocked.join(", ")}{" "}
+                    <InfoButton label="controls set by the deployment">
+                      These are resolved from the process environment at start-up. An API call cannot set an
+                      environment variable, so they are reported with their OBSERVED state and are never counted as
+                      hardened on our say-so. The overall verdict above stays 'not hardened' while they are unmet, even
+                      once every settable control is on.
+                    </InfoButton>
+                  </>
                 }
               />
             )}
@@ -260,12 +270,20 @@ export default function EnforcementPosturePage() {
               <Button size="sm" onClick={harden} disabled={act.busy}>
                 Harden enforcement controls
               </Button>
-            </div>
-            <div className={v.faint}>
-              Applying is idempotent and audited under its own rule id, so the trail distinguishes
-              "an admin edited one dial" from "an admin applied the preset". It changes what this
-              deployment REFUSES, immediately and with no dry run — read the last column before
-              using it on an installation carrying real traffic.
+              <Badge
+                tone="warn"
+                infoLabel="hardening"
+                info={
+                  <p>
+                    Applying is idempotent and audited under its own rule id, so the trail distinguishes
+                    "an admin edited one dial" from "an admin applied the preset". It changes what this
+                    deployment REFUSES, immediately and with no dry run — read the last column before
+                    using it on an installation carrying real traffic.
+                  </p>
+                }
+              >
+                Takes effect immediately · no dry run
+              </Badge>
             </div>
             {act.error && <div className={v.errLine}>{act.error}</div>}
           </Card>
@@ -278,12 +296,16 @@ export default function EnforcementPosturePage() {
             />
           </Card>
 
-          <Card title="Optimisation">
-            <div className={v.faint}>
-              Shown separately, and deliberately left out of the button above: these change what the
-              platform SPENDS and how it answers, not what it refuses. Hardening a regulated
-              deployment is not the same request as serving more answers from cache.
-            </div>
+          <Card
+            title="Optimisation"
+            info={
+              <p>
+                Shown separately, and deliberately left out of the button above: these change what the
+                platform SPENDS and how it answers, not what it refuses. Hardening a regulated
+                deployment is not the same request as serving more answers from cache.
+              </p>
+            }
+          >
             <Table
               rows={optimisation}
               rowKey={(c) => c.key}

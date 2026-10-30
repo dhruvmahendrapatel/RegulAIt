@@ -89,13 +89,16 @@ export function StewardshipCard(props: {
   const open = rows.find((a) => a.id === openId);
 
   return (
-    <Card flush title="Stewardship">
-      <div className={st.toolbar}>
-        <p className={st.intro}>
+    <Card
+      flush
+      title="Stewardship"
+      info={
+        <p>
           Every agent needs a steward who answers for it, a successor who takes over when the steward leaves, and a
           regular review.
         </p>
-      </div>
+      }
+    >
       <div className={st.toolbar}>
         <div className={st.chips} role="group" aria-label="Stewardship filter">
           {FILTERS.map((f) => (

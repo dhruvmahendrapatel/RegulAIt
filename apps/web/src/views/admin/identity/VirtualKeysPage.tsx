@@ -245,15 +245,13 @@ export default function VirtualKeysPage() {
     <>
       <PageHeader
         title="Virtual keys"
-        sub={
-          "A credential regulAIt mints and hands to a developer INSTEAD of the vendor key we hold. It carries an " +
-          "owning user, an optional model allow-list, an optional lifetime budget and an optional expiry."
-        }
-      />
-      <div className={v.stack}>
-        {/* --- THE CEILING. First thing on the page, deliberately. ------- */}
-        <Card title="What a virtual key can and cannot do">
-          <div className={v.stack}>
+        sub="A credential regulAIt mints and hands to a developer INSTEAD of the vendor key we hold."
+        info={
+          <>
+            <p>
+              It carries an owning user, an optional model allow-list, an optional lifetime budget and an optional
+              expiry.
+            </p>
             <p>
               <strong>A virtual key only ever NARROWS.</strong> A call on it is allowed when — and only
               when — the <em>owning user</em> is entitled to the served agent by the policy kernel,{" "}
@@ -261,7 +259,7 @@ export default function VirtualKeysPage() {
               exhausted. Listing a model on a key does not grant it: a key naming a model its owner was
               never granted still denies.
             </p>
-            <p className={v.dim}>
+            <p>
               A virtual key is not an identity. It reaches the dispatch surfaces (
               <code>/v1/chat/completions</code>, <code>/v1/messages</code>, <code>GET /v1/models</code>,{" "}
               <code>/v1/agents/:id/invoke</code>, <code>GET /v1/me</code>) and nothing else, whatever its
@@ -269,14 +267,10 @@ export default function VirtualKeysPage() {
               unreachable on it, and it cannot be exchanged for a session at <code>/auth/login-with-key</code>.
               A key issued by an admin is <strong>not</strong> an admin.
             </p>
-            <p className={v.faint}>
-              The budget is a LIFETIME cap, not a monthly one — there is no per-period reset; rotate the
-              key. The first crossing is allowed (measured cost is only knowable after the call returns)
-              and every call after it is refused with a 402 naming the figure.
-            </p>
-          </div>
-        </Card>
-
+          </>
+        }
+      />
+      <div className={v.stack}>
         {reveal && <RevealCard reveal={reveal} onDismiss={() => setReveal(null)} />}
 
         {/* --- issue ----------------------------------------------------- */}
@@ -303,7 +297,18 @@ export default function VirtualKeysPage() {
             </div>
 
             <div className={v.row}>
-              <Field label="Lifetime budget (USD) — blank means no per-key cap" error={budgetError}>
+              <Field
+                label="Lifetime budget (USD) — blank means no per-key cap"
+                error={budgetError}
+                helpLabel="lifetime budget"
+                help={
+                  <>
+                    The budget is a LIFETIME cap, not a monthly one — there is no per-period reset; rotate the
+                    key. The first crossing is allowed (measured cost is only knowable after the call returns)
+                    and every call after it is refused with a 402 naming the figure.
+                  </>
+                }
+              >
                 <Input
                   type="number"
                   min="0"
@@ -440,7 +445,7 @@ export default function VirtualKeysPage() {
                       k.allowedModels === null ? (
                         <span className={v.faint}>owner&apos;s entitlements only</span>
                       ) : k.allowedModels.length === 0 ? (
-                        <Badge tone="danger" title="an empty allow-list admits nothing">
+                        <Badge tone="danger" infoLabel="an empty allow-list" info="An empty allow-list admits nothing.">
                           nothing
                         </Badge>
                       ) : (
@@ -449,7 +454,7 @@ export default function VirtualKeysPage() {
                   },
                   {
                     key: "budget",
-                    header: "Budget",
+                    header: "Lifetime budget",
                     render: (k) =>
                       k.budgetUsd === null ? (
                         <span className={v.faint}>no cap</span>
@@ -489,6 +494,13 @@ export default function VirtualKeysPage() {
                     key: "act",
                     header: "",
                     srHeader: "Actions",
+                    infoLabel: "revoking a key",
+                    info: (
+                      <>
+                        Revoking never deletes: the usage records and the audit trail still have to resolve the id, so
+                        a revoked key stays listed with its history intact.
+                      </>
+                    ),
                     render: (k) => (
                       <span className={v.row}>
                         <Button size="sm" onClick={() => openEdit(k)} data-testid={`vk-edit-${k.name}`}>
@@ -511,10 +523,6 @@ export default function VirtualKeysPage() {
               />
             )}
           </QueryGate>
-          <p className={v.faint}>
-            Revoking never deletes: the <code>usage_events</code> rows and the audit trail still have to
-            resolve the id, so a revoked key stays listed with its history intact.
-          </p>
         </Card>
 
         {/* --- per-key spend, both numbers ------------------------------- */}

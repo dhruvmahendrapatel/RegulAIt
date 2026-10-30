@@ -9,7 +9,7 @@
  * The evidence card lists the newest provenance records: the label and both digests (what upstream returned, what
  * was delivered) of each governed result, never its content, with the audit anchor that covers it.
  */
-import { useId, useState } from "react";
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ago, humanize } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
@@ -73,7 +73,6 @@ export default function ContentTrustPage() {
 function WriteFloorCard(props: { floor: ContentTrustWriteFloor; onSaved: () => void }) {
   const act = useAction();
   const [floor, setFloor] = useState<ContentTrustWriteFloor>(props.floor);
-  const note = useId();
   const save = () =>
     void act
       .run(
@@ -87,24 +86,28 @@ function WriteFloorCard(props: { floor: ContentTrustWriteFloor; onSaved: () => v
     <Card title="Write floor">
       <form
         aria-label="Write floor"
-        aria-describedby={note}
         className={v.stack}
         onSubmit={(e) => {
           e.preventDefault();
           save();
         }}
       >
-        <p className={v.faint} id={note}>
-          The lowest tier whose content may drive a write. Trusted is the default; relaxing it to standard lets standard
-          sources' content drive writes too. Untrusted content can never drive a write. Changing it asks you to confirm it
-          is you, and it is audited.
-        </p>
         <div className={v.row}>
           <Badge tone={props.floor === "trusted" ? "ok" : "warn"}>
             {props.floor === "trusted" ? "only trusted content drives writes" : "standard content drives writes (relaxed)"}
           </Badge>
         </div>
-        <Field label="Write floor">
+        <Field
+          label="Write floor"
+          helpLabel="the write floor setting"
+          help={
+            <>
+              The lowest tier whose content may drive a write. Trusted is the default; relaxing it to standard lets
+              standard sources' content drive writes too. Untrusted content can never drive a write. Changing it asks you
+              to confirm it is you, and it is audited.
+            </>
+          }
+        >
           <Select value={floor} onChange={(e) => setFloor(e.target.value as ContentTrustWriteFloor)}>
             {CONTENT_TRUST_WRITE_FLOORS.map((f) => (
               <option key={f} value={f}>
@@ -231,11 +234,16 @@ function RecordsCard() {
     },
   ];
   return (
-    <Card title="Provenance evidence">
-      <p className={v.faint}>
-        The newest 50 records. Content scanned clean has a plain SHA-256; content with PII, or never scanned, has a keyed
-        digest under this deployment's own key, so it cannot be matched by guessing.
-      </p>
+    <Card
+      title="Provenance evidence"
+      info={
+        <p>
+          Content scanned clean has a plain SHA-256; content with PII, or never scanned, has a keyed digest under this
+          deployment's own key, so it cannot be matched by guessing.
+        </p>
+      }
+    >
+      <p className={v.faint}>The newest 50 records.</p>
       <Table
         columns={columns}
         rows={records.data?.records}

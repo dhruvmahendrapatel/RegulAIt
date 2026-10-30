@@ -20,7 +20,7 @@ import type {
 } from "../../../api/adminTypes";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Select, Table, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, Field, InfoButton, Input, Select, Table, type Tone } from "../../../ui/kit";
 import { Stat, optionEls, useAction, useComplianceProfiles, useUsers, userOpts } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
@@ -149,10 +149,10 @@ export default function InfrastructurePage() {
               >
                 Scan now
               </Button>
-              <span className={v.faint}>
+              <InfoButton label="scanning">
                 Scanning detects findings idempotently, then auto-remediates any that a policy permits
                 (audited) — everything else waits for a governed remediation.
-              </span>
+              </InfoButton>
             </div>
           </div>
         </Card>
@@ -559,10 +559,19 @@ function RegisterResourceCard() {
           </span>
         )}
       </form>
-      <p className={v.faint}>
-        Only 'mock' executes today (keyless, deterministic); aws/azure/gcp are interface-ready and 501 on
-        scan. Classifications cascade §8.3 backup-retention / patch-cadence floors onto the resource.
-      </p>
+      <div className={v.row}>
+        <Badge
+          tone="warn"
+          info={
+            <p>
+              Only 'mock' executes today (keyless, deterministic); aws/azure/gcp are interface-ready and 501 on
+              scan. Classifications cascade backup-retention / patch-cadence floors onto the resource.
+            </p>
+          }
+        >
+          Mock executor only
+        </Badge>
+      </div>
     </Card>
   );
 }
@@ -597,7 +606,7 @@ function PolicyCard(props: { resources: InfraResource[]; policies: InfraPolicy[]
           void act.run(() => api.post("/v1/infra/policies", body), "Policy saved");
         }}
       >
-        <Field label="Resource (blank = fleet-wide)">
+        <Field label="Resource (blank = fleet-wide)" helpLabel="resource scope" help={<p>A resource-scoped policy overrides the fleet-wide default.</p>}>
           <Select value={f.resourceId} onChange={(e) => set("resourceId", e.target.value)}>
             {optionEls(rOpts, "— fleet-wide default —")}
           </Select>
@@ -614,7 +623,7 @@ function PolicyCard(props: { resources: InfraResource[]; policies: InfraPolicy[]
         <Field label="Backup retention days">
           <Input type="number" value={f.backupRetentionDays} onChange={(e) => set("backupRetentionDays", e.target.value)} />
         </Field>
-        <Field label="Auto-remediate ceiling">
+        <Field label="Auto-remediate ceiling" help={<p>The auto-remediate ceiling cannot be 'critical' — every critical finding is always approval-gated.</p>}>
           <Select value={f.autoRemediateMaxSeverity} onChange={(e) => set("autoRemediateMaxSeverity", e.target.value)}>
             <option value="">— never auto-remediate —</option>
             <option value="low">low</option>
@@ -631,10 +640,6 @@ function PolicyCard(props: { resources: InfraResource[]; policies: InfraPolicy[]
           </span>
         )}
       </form>
-      <p className={v.faint}>
-        The auto-remediate ceiling cannot be 'critical' — every critical finding is always approval-gated.
-        A resource-scoped policy overrides the fleet-wide default.
-      </p>
       <Table<InfraPolicy>
         columns={[
           { key: "scope", header: "Scope", render: (p) => scopeLabel(p.resourceId) },

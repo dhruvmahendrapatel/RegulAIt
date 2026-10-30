@@ -300,7 +300,6 @@ export default function EvalsPage() {
     <>
       <PageHeader
         title="Evaluations"
-        sub="Golden datasets and scored runs — what the workflow check gate blocks on."
         info={<p>Golden datasets, scored runs, and the baseline comparison the workflow check gate blocks on. Every eval dispatch goes through the same governed core as any other call — entitlements, budget, PII and guardrails all apply, and the spend lands in the one usage ledger. An eval is not a bypass.</p>}
       />
       <Tabs tabs={TABS} active={tab} onChange={setTab} />
@@ -322,7 +321,18 @@ export default function EvalsPage() {
         {/* ADR-0044: the drift view the page opens on */}
         <EvalsSummaryCard onOpenRun={setSelectedRun} />
         {/* ------- ADR-0072: what the numbers MEAN, and what is stranded ---- */}
-        <Card title="Scoring semantics — which stored measurements are still comparable">
+        <Card
+          title="Scoring semantics — which stored measurements are still comparable"
+          infoLabel="scoring semantics"
+          info={
+            semantics.data ? (
+              <>
+                <p>Scoring corrected on 7 August 2026.</p>
+                <p>{semantics.data.note}</p>
+              </>
+            ) : undefined
+          }
+        >
           <QueryGate
             loading={semantics.isLoading}
             error={semantics.error}
@@ -330,8 +340,6 @@ export default function EvalsPage() {
           >
             {semantics.data && (
               <div className={v.stack}>
-                <p className={v.dim}>{semantics.data.note}</p>
-
                 <div className={a.statRow}>
                   <Stat value={`v${semantics.data.current}`} label="Current semantics" />
                   {semantics.data.evalRuns.map((r) => (
@@ -366,7 +374,6 @@ export default function EvalsPage() {
                         </Badge>
                       ),
                     },
-                    { key: "adr", header: "Decided in", render: (r) => <code>{r.adr}</code> },
                     { key: "summary", header: "What a score MEANT", render: (r) => <span className={v.dim}>{r.summary}</span> },
                   ]}
                 />
@@ -417,10 +424,11 @@ export default function EvalsPage() {
           }}
         >
           {/* ---------------- scorers ---------------- */}
-          <Card title="Scorers, and what each one cannot do">
-            <div className={v.faint} style={{ marginBottom: "var(--s2)" }}>
-              {scorers.data?.note}
-            </div>
+          <Card
+            title="Scorers, and what each one cannot do"
+            infoLabel="scorers"
+            info={scorers.data?.note ? <p>{scorers.data.note}</p> : undefined}
+          >
             <Table
               rows={scorers.data?.scorers ?? []}
               rowKey={(r) => r.id}
@@ -476,10 +484,10 @@ export default function EvalsPage() {
           </Card>
 
           {/* ---------------- datasets ---------------- */}
-          <Card title="Golden datasets">
-            <div className={v.faint} style={{ marginBottom: "var(--s2)" }}>
-              {datasets.data?.note}
-            </div>
+          <Card
+            title="Golden datasets"
+            info={datasets.data?.note ? <p>{datasets.data.note}</p> : undefined}
+          >
             <form
               className={a.formRow}
               onSubmit={(e) => {

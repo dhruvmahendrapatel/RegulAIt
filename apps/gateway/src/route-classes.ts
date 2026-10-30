@@ -168,6 +168,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/approvals/:approvalId/decide",
   "GET /v1/users/:userId/servers/:serverId/tools",
   "POST /mcp/:serverId",
+  // the Streamable HTTP GET probe answers 405 to any authenticated caller
+  "GET /mcp/:serverId",
   "POST /v1/agents/:agentId/invoke",
   // ADR-0168 amendment item 6 — agent stewardship. The gate is "an admin OR
   // this agent's CURRENT steward", checked inside the handler (403

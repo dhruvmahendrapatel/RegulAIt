@@ -38,6 +38,7 @@ import {
   ConfirmModal,
   EmptyState,
   Field,
+  InfoButton,
   Input,
   Select,
   SkeletonBlock,
@@ -177,13 +178,16 @@ export default function ModelKeysCard() {
           {custodyEnforced && <Badge tone="warn">key custody enforced</Badge>}
         </span>
       }
+      infoLabel="your model keys"
+      info={
+        <p>
+          Bring your own provider key so your requests run on your account instead of the
+          organisation&apos;s. A key is encrypted at rest the moment it arrives and is never
+          returned by any endpoint — not to you, not to an admin — so this page can only ever show
+          which providers you have a key for.
+        </p>
+      }
     >
-      <div className={v.dim} style={{ marginBottom: "var(--s2)" }}>
-        Bring your own provider key so your requests run on your account instead of the
-        organisation&apos;s. A key is encrypted at rest the moment it arrives and is never
-        returned by any endpoint — not to you, not to an admin — so this page can only ever show
-        which providers you have a key for.
-      </div>
 
       {custodyEnforced && <CustodyNotice isAdmin={Boolean(auth?.isAdmin)} />}
 
@@ -283,11 +287,13 @@ export default function ModelKeysCard() {
             </div>
           )}
           <div className={v.faint} style={{ marginTop: "var(--s1)" }}>
-            Saving the same provider twice rotates the stored key in place. Your own key takes
-            precedence over the organisation&apos;s for your requests — unless your organisation
-            enforces key custody, in which case stored keys stay inert. Which credential actually
-            served any given call is recorded per call: see the <em>Key used</em> column on{" "}
-            <Link to="/spend" style={{ textDecoration: "underline" }}>Spend &amp; savings</Link>.
+            Saving the same provider twice rotates the stored key in place.{" "}
+            <InfoButton label="which key serves your requests">
+              Your own key takes precedence over the organisation&apos;s for your requests — unless your organisation
+              enforces key custody, in which case stored keys stay inert. Which credential actually served any given
+              call is recorded per call: see the <em>Key used</em> column on{" "}
+              <Link to="/spend" style={{ textDecoration: "underline" }}>Spend &amp; savings</Link>.
+            </InfoButton>
           </div>
         </>
       )}

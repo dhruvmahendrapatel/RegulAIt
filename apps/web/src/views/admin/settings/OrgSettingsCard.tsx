@@ -20,7 +20,7 @@ import { useId, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { OrgSettingsResponse } from "../../../api/adminTypes";
 import { putOrgSettings } from "../../../stepup/stepUp";
-import { Badge, Button, Card, Field, Fieldset, Input, Modal, Select } from "../../../ui/kit";
+import { Badge, Button, Card, Field, Fieldset, InfoButton, Input, Modal, Select } from "../../../ui/kit";
 import { adminKeys, orgSettingsQuery, QueryGate, StaleAfterWrite, useAction, useSettleAfterWrite, useSingleFlight } from "../adminKit";
 import v from "../../views.module.css";
 import {
@@ -40,6 +40,10 @@ export function OrgSettingsCard(props: {
   /** the org-settings keys this card edits, in display order */
   keys: readonly string[];
   intro?: ReactNode;
+  /** the card's explanation, behind the title (i) */
+  info?: ReactNode;
+  /** each setting's strict/relaxed explanation sits behind an (i) beside its status pill instead of under the row; on unless a page passes false */
+  helpInInfo?: boolean;
   testId?: string;
 }) {
   const specs = specsFor(props.keys);
@@ -71,7 +75,7 @@ export function OrgSettingsCard(props: {
       ? (settings.data.settings as unknown as Record<string, unknown>)
       : null;
   return (
-    <Card title={props.title}>
+    <Card title={props.title} info={props.info}>
       <div className={v.stack} data-testid={props.testId}>
         {props.intro}
         <p className={v.faint}>
@@ -86,6 +90,7 @@ export function OrgSettingsCard(props: {
                 current={stored[spec.key]}
                 locked={baseline.stale || flight.busy}
                 onSave={save}
+                helpInInfo={props.helpInInfo ?? true}
               />
             ))
           ) : settings.data ? (
@@ -111,6 +116,7 @@ function SettingRow(props: {
   current: unknown;
   locked: boolean;
   onSave: (body: Record<string, unknown>) => Promise<void>;
+  helpInInfo?: boolean;
 }) {
   const { spec } = props;
   const act = useAction();
@@ -125,7 +131,9 @@ function SettingRow(props: {
   const helpId = `${base}-help`;
   const problemId = `${base}-problem`;
   const showProblem = known && !parsed.ok;
-  const describedBy = showProblem ? `${helpId} ${problemId}` : helpId;
+  const describedBy = props.helpInInfo
+    ? showProblem ? problemId : undefined
+    : showProblem ? `${helpId} ${problemId}` : helpId;
   const set = (patch: Partial<Draft>) => setDraft((d) => ({ ...d, ...patch }));
 
   return (
@@ -154,6 +162,11 @@ function SettingRow(props: {
         ) : (
           <Badge tone="ok">strict</Badge>
         )}
+        {props.helpInInfo ? (
+          <InfoButton label={spec.label}>
+            {spec.strict} {spec.relaxed}
+          </InfoButton>
+        ) : null}
         <span className={v.faint}>
           Current: {describeValue(spec, stored)} · strict default: {describeValue(spec, spec.strictDefault)}
         </span>
@@ -161,9 +174,11 @@ function SettingRow(props: {
           Review change
         </Button>
       </div>
-      <p className={v.faint} id={helpId}>
-        {spec.strict} {spec.relaxed}
-      </p>
+      {props.helpInInfo ? null : (
+        <p className={v.faint} id={helpId}>
+          {spec.strict} {spec.relaxed}
+        </p>
+      )}
       {showProblem && !parsed.ok ? (
         <p className={v.errLine} id={problemId}>
           {parsed.problem}
@@ -227,7 +242,7 @@ function SettingControl(props: {
   set: (patch: Partial<Draft>) => void;
   disabled: boolean;
   known: boolean;
-  describedBy: string;
+  describedBy: string | undefined;
 }) {
   const { spec, id, draft, set, disabled, known, describedBy } = props;
   const c = spec.control;
@@ -275,6 +290,8 @@ function SettingControl(props: {
               <span>{c.noneLabel}</span>
             </label>
           ) : null}
+          {c.kind === "int" && c.noneLabel && c.noneInfo ? <InfoButton label={c.noneLabel.toLowerCase()}>{c.noneInfo}</InfoButton> : null}
+          {c.kind === "int" && c.noneWarn && draft.none ? <Badge tone="warn">{c.noneWarn}</Badge> : null}
         </div>
       );
     case "set":

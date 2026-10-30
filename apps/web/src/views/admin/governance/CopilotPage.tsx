@@ -178,18 +178,52 @@ export default function CopilotPage() {
     <>
       <PageHeader
         title="Governance copilot"
-        sub="Ask the audit trail in plain language — scoped to what you may read, and unable to change anything."
+        sub={
+          <span className={v.row}>
+            <Badge tone="ok">Scoped to your access</Badge>
+            <Badge tone="info">Draft only</Badge>
+            {/* the badge states only what the server said: no list, no claim either way */}
+            {!Array.isArray(tools.data?.mutatingTools) ? null : tools.data.mutatingTools.length === 0 ? (
+              <Badge tone="ok">No write tools</Badge>
+            ) : (
+              <Badge tone="danger">Write tools: {tools.data.mutatingTools.join(", ")}</Badge>
+            )}
+          </span>
+        }
+        info={
+          <>
+            <p>
+              <strong>How the copilot is governed.</strong> The copilot is a governed tenant of this platform, not a
+              privileged component. It reads only what you may read, its model calls are metered and audited like any
+              other agent's, and it has no mutating tools: its only route to a change is a proposal that opens an
+              ordinary approval.
+            </p>
+            {tools.data?.scopeCaveat ? <p>{tools.data.scopeCaveat}</p> : null}
+            {tools.data?.decisionSupport ? <p>{tools.data.decisionSupport}</p> : null}
+            <p>
+              Mutating tools:{" "}
+              {!Array.isArray(tools.data?.mutatingTools)
+                ? "not reported"
+                : tools.data.mutatingTools.length === 0
+                  ? "none"
+                  : tools.data.mutatingTools.join(", ")}
+              .{" "}
+              {tools.data?.note}
+            </p>
+            <p>
+              A proposal must rest on a recorded query of <strong>your own</strong> — the gateway refuses one built on
+              another user&rsquo;s evidence, because that evidence was retrieved under that user&rsquo;s entitlement
+              scope and reusing it here would launder a wider read into your hands.
+            </p>
+            <p>
+              A proposal changes nothing by existing. Applying one is gated on the linked approval in the ordinary
+              Approvals Queue, and executes through the same public endpoint an admin would use by hand — audited under
+              the applying admin's identity, never the copilot's. A kind with no such endpoint refuses by name rather
+              than writing the change directly.
+            </p>
+          </>
+        }
       />
-
-      <Card title="What it is, and what it cannot be">
-        <p className={v.faint}>
-          The copilot is a governed tenant of this platform, not a privileged component. It reads only
-          what you may read, its model calls are metered and audited like any other agent's, and it has
-          no mutating tools: its only route to a change is a proposal that opens an ordinary approval.
-        </p>
-        <p className={v.dim}>{tools.data?.scopeCaveat}</p>
-        <p className={v.dim}>{tools.data?.decisionSupport}</p>
-      </Card>
 
       <Card title="Ask">
         <Field label="Question" grow>
@@ -271,6 +305,13 @@ export default function CopilotPage() {
               )}
               {answer.plan.fallback ? <Badge tone="warn">question not matched</Badge> : null}
               {answer.narrationDiscarded ? <Badge tone="danger">narration discarded</Badge> : null}
+              <Badge
+                tone="info"
+                infoLabel="Decision support, not a determination"
+                info={tools.data?.decisionSupport ?? "The copilot supports a decision; a person makes it."}
+              >
+                Decision support, not a determination
+              </Badge>
             </div>
             {answer.narrationDiscarded ? (
               <p className={v.errLine}>
@@ -369,10 +410,6 @@ export default function CopilotPage() {
               },
             ]}
           />
-          <p className={v.faint}>
-            Mutating tools: {(tools.data?.mutatingTools ?? []).length === 0 ? "none" : tools.data?.mutatingTools.join(", ")}.{" "}
-            {tools.data?.note}
-          </p>
         </QueryGate>
       </Card>
 
@@ -389,12 +426,6 @@ export default function CopilotPage() {
       />
 
       <Card title="Proposals — recorded, approved by a human, then applied">
-        <p className={v.faint}>
-          A proposal changes nothing by existing. Applying one is gated on the linked approval in the ordinary
-          Approvals Queue, and executes through the same public endpoint an admin would use by hand — audited under
-          the applying admin's identity, never the copilot's. A kind with no such endpoint refuses by name rather
-          than writing the change directly.
-        </p>
 
         <QueryGate loading={proposals.isLoading} error={proposals.error} onRetry={() => void proposals.refetch()}>
           {(proposals.data?.proposals ?? []).length === 0 ? (

@@ -208,6 +208,7 @@ test("the posture page carries the SoD line — including the violation the over
   // writer of sod_rules rows in the suite; the approved override left its
   // holder as a live (surfaced, never auto-revoked) violation
   await expect(page.getByText(/1 SoD rule\(s\), 1 enabled — 1 current\s+violation\(s\)\./)).toBeVisible();
-  // the honesty note survives to the DOM
-  await expect(page.getByText(/never auto-revoked/).first()).toBeVisible();
+  // the honesty note survives, behind the card's (i)
+  await page.getByRole("button", { name: "What is Separation of duties?" }).click();
+  await expect(page.getByRole("note")).toContainText(/never auto-revoked/);
 });

@@ -258,7 +258,7 @@ test.describe("ADR-0182 A14: AI literacy", () => {
     await mockApi(page, { admin: false });
     await page.goto("/ui/feedback");
     await page.getByRole("button", { name: "Not now" }).click();
-    await expect(page.getByRole("status").filter({ hasText: "to acknowledge" })).toContainText("AI tool calls through regulAIt are refused");
+    await expect(page.getByRole("status").filter({ hasText: "to acknowledge" })).toContainText("AI tool calls refused");
     await page.goto("/ui/account?section=ai-policies");
     await expect(page.locator("section[data-rg-card]").filter({ hasText: "Before you continue" })).toHaveCount(0);
     const card = page.locator("section[data-rg-card]").filter({ hasText: "AI policies" }).first();
@@ -423,7 +423,7 @@ test("X14 keyboard: postponing acknowledgement focuses the page and announces th
   await activate(page, gate.getByRole("button", { name: "Not now", exact: true }));
   await expect(gate).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Feedback and appeals", level: 1 })).toBeFocused();
-  await expect(page.getByRole("status").filter({ hasText: "to acknowledge" })).toContainText("AI tool calls through regulAIt are refused");
+  await expect(page.getByRole("status").filter({ hasText: "to acknowledge" })).toContainText("AI tool calls refused");
 });
 
 // ADR-0186 A: the write goes through withStepUp — refused, confirmed in the dialog, the SAME PUT resent once

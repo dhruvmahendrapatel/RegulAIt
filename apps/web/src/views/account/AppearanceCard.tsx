@@ -22,11 +22,11 @@ export default function AppearanceCard() {
     void loadPaletteSheet().catch(() => undefined);
   }, []);
   return (
-    <Card title="Appearance">
-      <p className={a.lead}>
-        Choose how regulAIt looks for you. This changes colours only: risk colours, words and layout stay the same.
-        The choice is kept in this browser.
-      </p>
+    <Card
+      title="Appearance"
+      info={<p>This changes colours only: risk colours, words and layout stay the same.</p>}
+    >
+      <p className={a.lead}>The choice is kept in this browser.</p>
       <fieldset className={a.group}>
         <legend className={a.legend}>Theme</legend>
         <div className={a.themes}>
