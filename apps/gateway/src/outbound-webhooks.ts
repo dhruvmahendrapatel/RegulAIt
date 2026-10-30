@@ -41,7 +41,10 @@ import crypto from "node:crypto";
 import type { FastifyBaseLogger, FastifyInstance } from "fastify";
 import { z } from "zod";
 import { Webhook } from "standardwebhooks";
+import { wantsListContract, type ListSpec } from "./list-contract.js";
+import { answerListExport, answerListPage, type ContractList } from "./list-contract-route.js";
 import {
+  getTableColumns,
   and,
   auditLog,
   desc,
@@ -671,7 +674,38 @@ export function registerOutboundWebhookRoutes(
     return { ok: out.ok, responseCode: out.responseCode, error: out.error, delivery: publicDelivery(logged!) };
   });
 
+  // ADR-0219: with any of sort/dir/cursor/offset/count one webhook's
+  // deliveries answer the shared list contract (every delivery, a total);
+  // with none of them, exactly the newest-`limit` response below. The
+  // payload is never in the Excel file: the list does not show it.
+  const deliveriesList: ContractList<ReturnType<typeof publicDelivery>, { status?: string }> = {
+    spec: WEBHOOK_DELIVERIES_LIST,
+    filters: z.object({ status: z.string().min(1).max(32).optional() }).strict(),
+    reader: {
+      fetch: async (q) => {
+        const rows = await db
+          .select({ ...getTableColumns(webhookDeliveries), _cursorAt: q.cursorAt })
+          .from(webhookDeliveries)
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset);
+        return rows.map((r) => ({ ...publicDelivery(r), _cursorAt: r._cursorAt }));
+      },
+      countable: (where) => db.select({ one: sql`1` }).from(webhookDeliveries).where(where),
+      idOf: (r) => r.id,
+    },
+    where: async (req, f) => {
+      const { subscriptionId } = subParam.parse(req.params);
+      const [row] = await db.select({ id: webhookSubscriptions.id }).from(webhookSubscriptions).where(eq(webhookSubscriptions.id, subscriptionId));
+      if (!row) return null;
+      return and(eq(webhookDeliveries.subscriptionId, subscriptionId), f.status ? eq(webhookDeliveries.status, f.status as never) : undefined);
+    },
+    refusal: { status: 404, body: { error: "unknown_webhook" } },
+  };
+  app.get("/v1/webhooks/:subscriptionId/deliveries/export.xlsx", async (req, reply) => answerListExport(db, req, reply, deliveriesList));
   app.get("/v1/webhooks/:subscriptionId/deliveries", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, deliveriesList);
     const { subscriptionId } = subParam.parse(req.params);
     const q = z.object({ limit: z.coerce.number().int().min(1).max(200).default(50) }).parse(req.query);
     const [row] = await db.select({ id: webhookSubscriptions.id }).from(webhookSubscriptions).where(eq(webhookSubscriptions.id, subscriptionId));
@@ -709,3 +743,33 @@ export function registerOutboundWebhookRoutes(
     return out;
   });
 }
+
+/** ADR-0219: one webhook's deliveries under the shared list contract (never the payload) */
+export const WEBHOOK_DELIVERIES_LIST: ListSpec<ReturnType<typeof publicDelivery>> = {
+  id: "webhook-deliveries",
+  sorts: {
+    event: { expr: webhookDeliveries.event },
+    status: { expr: webhookDeliveries.status },
+    attempts: { expr: webhookDeliveries.attempts },
+    code: { expr: webhookDeliveries.responseCode },
+    when: { expr: webhookDeliveries.createdAt, keysetAt: webhookDeliveries.createdAt },
+    lastTry: { expr: webhookDeliveries.lastAttemptAt },
+    delivered: { expr: webhookDeliveries.deliveredAt },
+    error: { expr: webhookDeliveries.lastError },
+    message: { expr: webhookDeliveries.messageId },
+  },
+  columns: {
+    event: { label: "Event", value: (r) => r.event },
+    status: { label: "Status", value: (r) => r.status },
+    attempts: { label: "Attempts", value: (r) => `${r.attempts} of ${r.maxAttempts}` },
+    code: { label: "Response", value: (r) => r.responseCode },
+    when: { label: "Created", value: (r) => new Date(r.createdAt) },
+    lastTry: { label: "Last try", value: (r) => (r.lastAttemptAt ? new Date(r.lastAttemptAt) : null) },
+    delivered: { label: "Delivered", value: (r) => (r.deliveredAt ? new Date(r.deliveredAt) : null) },
+    error: { label: "Error", value: (r) => r.lastError },
+    message: { label: "Message id", value: (r) => r.messageId },
+  },
+  filters: ["status"],
+  defaultSort: { col: "when", dir: "desc" },
+  idCol: webhookDeliveries.id,
+};

@@ -3,7 +3,10 @@ import { errFields, errLine, errMessage } from "./err-serializer.js";
 import type { FastifyInstance } from "fastify";
 // ADR-0187: loaded lazily where used (engine-runs.ts reaches back into this module)
 import type { EngineCheckOutcome } from "./engine-runs.js";
+import { wantsListContract, type ListReader, type ListSpec } from "./list-contract.js";
+import { answerListExport, answerListPage, type ContractList } from "./list-contract-route.js";
 import {
+  getTableColumns,
   and,
   approvals,
   auditLog,
@@ -3763,25 +3766,42 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
   });
 
   // …and the list view: fleet for admins, own instances for everyone else.
-  app.get("/v1/workflows/instances", async (req, reply) => {
-    const { status } = z.object({ status: z.string().optional() }).parse(req.query);
-    const conditions = [];
-    if (status) conditions.push(eq(workflowInstances.status, status));
-    if (!req.authCtx.isAdmin) {
-      if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_has_no_instances" });
-      conditions.push(eq(workflowInstances.initiatorUserId, req.authCtx.userId));
-    }
-    const rows = await db
-      .select()
-      .from(workflowInstances)
-      .where(conditions.length ? and(...conditions) : undefined)
-      .orderBy(desc(workflowInstances.createdAt))
-      .limit(100);
-    // The distinct changeTypes any assignment rule actually routes — derived
-    // from the same rules the admin list endpoint returns, but exposed here
-    // because this endpoint is the one non-admins can read. The /app intake
-    // form offers exactly these, so a requester can never type a changeType
-    // that dead-ends in no_workflow_matches_change.
+  //
+  // ADR-0219: with any of sort/dir/cursor/offset/count it answers the shared
+  // list contract (every row, a total, server sort) beside the intake form's
+  // changeTypes and routes; with none of them, exactly the response below
+  // (the Home preview's newest 100). The scope is the one predicate for the
+  // list, its count and the Excel export.
+  const workflowsList: ContractList<WorkflowInstanceRow, { status?: string }> = {
+    spec: WORKFLOWS_LIST,
+    filters: z.object({ status: z.string().min(1).max(64).optional() }).strict(),
+    reader: {
+      fetch: (q) =>
+        db
+          .select({ ...getTableColumns(workflowInstances), _cursorAt: q.cursorAt })
+          .from(workflowInstances)
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset),
+      countable: (where) => db.select({ one: sql`1` }).from(workflowInstances).where(where),
+      idOf: (r) => r.id,
+    } satisfies ListReader<WorkflowInstanceRow>,
+    where: (req, f) => {
+      const conditions = [];
+      if (f.status) conditions.push(eq(workflowInstances.status, f.status));
+      if (!req.authCtx.isAdmin) {
+        if (!req.authCtx.userId) return null;
+        conditions.push(eq(workflowInstances.initiatorUserId, req.authCtx.userId));
+      }
+      return conditions.length ? and(...conditions) : undefined;
+    },
+    refusal: { status: 403, body: { error: "bootstrap_has_no_instances" } },
+    extra: () => intakeRoutes(),
+  };
+  app.get("/v1/workflows/instances/export.xlsx", async (req, reply) => answerListExport(db, req, reply, workflowsList));
+  /** the distinct changeTypes any assignment rule routes, and their template names (see below) */
+  const intakeRoutes = async () => {
     const [ruleRows, tplRows] = await Promise.all([
       db
         .select({
@@ -3816,6 +3836,64 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       changeType: t,
       templates: [...(routesByType.get(t) ?? [])].sort(),
     }));
+    return { changeTypes, routes };
+  };
+  app.get("/v1/workflows/instances", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, workflowsList);
+    const { status } = z.object({ status: z.string().optional() }).parse(req.query);
+    const conditions = [];
+    if (status) conditions.push(eq(workflowInstances.status, status));
+    if (!req.authCtx.isAdmin) {
+      if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_has_no_instances" });
+      conditions.push(eq(workflowInstances.initiatorUserId, req.authCtx.userId));
+    }
+    const rows = await db
+      .select()
+      .from(workflowInstances)
+      .where(conditions.length ? and(...conditions) : undefined)
+      .orderBy(desc(workflowInstances.createdAt))
+      .limit(100);
+    // The distinct changeTypes any assignment rule actually routes — derived
+    // from the same rules the admin list endpoint returns, but exposed here
+    // because this endpoint is the one non-admins can read. The /app intake
+    // form offers exactly these, so a requester can never type a changeType
+    // that dead-ends in no_workflow_matches_change.
+    const { changeTypes, routes } = await intakeRoutes();
     return { instances: rows, changeTypes, routes };
   });
 }
+
+type WorkflowInstanceRow = typeof workflowInstances.$inferSelect;
+const changeText = (r: WorkflowInstanceRow, key: "description" | "changeType" | "environment" | "targetSystem"): string | null => {
+  const v = (r.change as Record<string, unknown> | null)?.[key];
+  return typeof v === "string" ? v : null;
+};
+/** ADR-0219: the change-requests list under the shared contract; the ids match the Workflows page's columns */
+export const WORKFLOWS_LIST: ListSpec<WorkflowInstanceRow> = {
+  id: "workflows",
+  sorts: {
+    change: { expr: sql`lower(${workflowInstances.change}->>'description')` },
+    status: { expr: workflowInstances.status },
+    type: { expr: sql`${workflowInstances.change}->>'changeType'` },
+    created: { expr: workflowInstances.createdAt, keysetAt: workflowInstances.createdAt },
+    updated: { expr: workflowInstances.updatedAt, keysetAt: workflowInstances.updatedAt },
+    environment: { expr: sql`${workflowInstances.change}->>'environment'` },
+    target: { expr: sql`${workflowInstances.change}->>'targetSystem'` },
+    project: { expr: workflowInstances.projectId },
+    id: { expr: workflowInstances.id },
+  },
+  columns: {
+    change: { label: "Change", value: (r) => changeText(r, "description") },
+    status: { label: "Status", value: (r) => r.status },
+    type: { label: "Type", value: (r) => changeText(r, "changeType") },
+    created: { label: "Created", value: (r) => r.createdAt },
+    updated: { label: "Last change", value: (r) => r.updatedAt },
+    environment: { label: "Environment", value: (r) => changeText(r, "environment") },
+    target: { label: "Target system", value: (r) => changeText(r, "targetSystem") },
+    project: { label: "Project", value: (r) => r.projectId },
+    id: { label: "Workflow id", value: (r) => r.id },
+  },
+  filters: ["status"],
+  defaultSort: { col: "created", dir: "desc" },
+  idCol: workflowInstances.id,
+};

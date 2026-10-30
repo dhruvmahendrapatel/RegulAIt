@@ -61,6 +61,8 @@
  */
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
+import { wantsListContract, type ListSpec } from "./list-contract.js";
+import { answerListExport, answerListPage, regenerableBy, type ContractList } from "./list-contract-route.js";
 import {
   and,
   auditLog,
@@ -694,7 +696,41 @@ export function registerBillingRoutes(app: FastifyInstance, db: Db): void {
     });
   });
 
-  app.get("/v1/billing/statements", async (req) => {
+  // ADR-0219: with any of sort/dir/cursor/offset/count the statements list
+  // answers the shared list contract; with none of them, exactly the response
+  // below (the overview's newest 25). A non-admin's narrowing is the same
+  // rule, moved into the WHERE so the page, the total and the export agree.
+  const statementsList: ContractList<StatementListRow, { periodId?: string; status?: string }> = {
+    spec: BILLING_STATEMENTS_LIST,
+    filters: z.object({ periodId: z.string().uuid().optional(), status: z.string().min(1).max(32).optional() }).strict(),
+    reader: {
+      fetch: (q) =>
+        db
+          .select({ ...STATEMENT_LIST_COLUMNS, periodStart: STATEMENT_PERIOD_START, _cursorAt: q.cursorAt })
+          .from(billingStatements)
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset),
+      countable: (where) => db.select({ one: sql`1` }).from(billingStatements).where(where),
+      idOf: (r) => r.id,
+    },
+    where: async (req, f) => {
+      const conds = [
+        f.periodId ? eq(billingStatements.periodId, f.periodId) : undefined,
+        f.status ? eq(billingStatements.status, f.status as never) : undefined,
+      ];
+      if (!req.authCtx.isAdmin) {
+        const mine = await callerProjectIds(db, req.authCtx.userId ?? null);
+        conds.push(regenerableBy(billingStatements.entitlementScope, billingStatements.effectiveProjectIds, mine));
+      }
+      return and(...conds);
+    },
+    extra: () => ({ disclaimer: BILLING_DISCLAIMER }),
+  };
+  app.get("/v1/billing/statements/export.xlsx", async (req, reply) => answerListExport(db, req, reply, statementsList));
+  app.get("/v1/billing/statements", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, statementsList);
     const q = z
       .object({
         periodId: z.string().uuid().optional(),
@@ -1007,3 +1043,63 @@ export function registerBillingRoutes(app: FastifyInstance, db: Db): void {
     };
   });
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0219: billing statements under the shared list contract
+// ---------------------------------------------------------------------------
+
+const STATEMENT_LIST_COLUMNS = {
+  id: billingStatements.id,
+  periodId: billingStatements.periodId,
+  version: billingStatements.version,
+  status: billingStatements.status,
+  ratingMode: billingStatements.ratingMode,
+  rateCardName: billingStatements.rateCardName,
+  rateCardVersion: billingStatements.rateCardVersion,
+  entitlementScope: billingStatements.entitlementScope,
+  effectiveProjectIds: billingStatements.effectiveProjectIds,
+  coversFullScope: billingStatements.coversFullScope,
+  derivedThroughAt: billingStatements.derivedThroughAt,
+  sourceUsageEventCount: billingStatements.sourceUsageEventCount,
+  unpricedEventCount: billingStatements.unpricedEventCount,
+  seatCount: billingStatements.seatCount,
+  usageSubtotalUsd: billingStatements.usageSubtotalUsd,
+  seatSubtotalUsd: billingStatements.seatSubtotalUsd,
+  totalUsd: billingStatements.totalUsd,
+  generatedAt: billingStatements.generatedAt,
+  issuedAt: billingStatements.issuedAt,
+};
+const STATEMENT_PERIOD_START = sql<Date | null>`(select ${billingPeriods.periodStart} from ${billingPeriods} where ${billingPeriods.id} = ${billingStatements.periodId})`;
+type StatementListRow = Pick<BillingStatementRow, keyof typeof STATEMENT_LIST_COLUMNS> & { periodStart: Date | string | null };
+const asDate = (d: Date | string | null) => (d === null ? null : d instanceof Date ? d : new Date(d));
+
+export const BILLING_STATEMENTS_LIST: ListSpec<StatementListRow> = {
+  id: "billing-statements",
+  sorts: {
+    p: { expr: STATEMENT_PERIOD_START },
+    v: { expr: billingStatements.version },
+    st: { expr: billingStatements.status },
+    rc: { expr: sql`lower(${billingStatements.rateCardName})` },
+    t: { expr: billingStatements.totalUsd },
+    u: { expr: billingStatements.unpricedEventCount },
+    g: { expr: billingStatements.generatedAt, keysetAt: billingStatements.generatedAt },
+    issued: { expr: billingStatements.issuedAt },
+    rating: { expr: billingStatements.ratingMode },
+    scope: { expr: billingStatements.coversFullScope },
+  },
+  columns: {
+    p: { label: "Period start", value: (r) => asDate(r.periodStart) },
+    v: { label: "Version", value: (r) => r.version },
+    st: { label: "Status", value: (r) => r.status },
+    rc: { label: "Rate card", value: (r) => `${r.rateCardName} v${r.rateCardVersion}` },
+    t: { label: "Total", value: (r) => r.totalUsd },
+    u: { label: "Unpriced", value: (r) => r.unpricedEventCount },
+    g: { label: "Cut", value: (r) => r.generatedAt },
+    issued: { label: "Issued", value: (r) => r.issuedAt },
+    rating: { label: "Rating", value: (r) => r.ratingMode },
+    scope: { label: "Covers full scope", value: (r) => r.coversFullScope },
+  },
+  filters: ["periodId", "status"],
+  defaultSort: { col: "g", dir: "desc" },
+  idCol: billingStatements.id,
+};

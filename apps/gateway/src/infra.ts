@@ -21,7 +21,10 @@
  */
 
 import type { FastifyInstance } from "fastify";
+import { wantsListContract, type ListReader, type ListSpec } from "./list-contract.js";
+import { answerListExport, answerListPage, type ContractList } from "./list-contract-route.js";
 import {
+  getTableColumns,
   and,
   approvals,
   asc,
@@ -1263,8 +1266,91 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
   const stopBackupVerifyScheduler = startBackupVerifyScheduler(db);
   app.addHook("onClose", async () => stopBackupVerifyScheduler());
 
+  // ADR-0219: with any of sort/dir/cursor/offset/count each of the five
+  // ledgers (resources, findings, certificates, patches, backups) answers the
+  // shared list contract (every row, a total, server sort); with none of
+  // them, exactly the whole-ledger responses below. Admin-only, as before.
+  const noFilters = z.object({}).strict() as unknown as z.ZodType<Record<string, never>>;
+  const ledger = <Row,>(spec: ListSpec<Row>, reader: ListReader<Row>): ContractList<Row, Record<string, never>> => ({
+    spec,
+    reader,
+    filters: noFilters,
+    where: () => undefined,
+  });
+  const resourcesList = ledger<InfraResourceListRow>(INFRA_RESOURCES_LIST, {
+    fetch: async (q) => {
+      const [rows, policies] = await Promise.all([
+        db
+          .select({ ...getTableColumns(infraResources), _cursorAt: q.cursorAt })
+          .from(infraResources)
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset),
+        db.select().from(infraPolicies),
+      ]);
+      return Promise.all(rows.map(async (r) => ({ ...r, effectivePolicy: await effectiveInfraPolicy(db, r, policies) })));
+    },
+    countable: (where) => db.select({ one: sql`1` }).from(infraResources).where(where),
+    idOf: (r) => r.id,
+  });
+  const findingsList = ledger(INFRA_FINDINGS_LIST, {
+    fetch: (q) =>
+      db
+        .select({ ...getTableColumns(infraFindings), resourceName: FINDING_RESOURCE_NAME, resourceKind: FINDING_RESOURCE_KIND, _cursorAt: q.cursorAt })
+        .from(infraFindings)
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset),
+    countable: (where) => db.select({ one: sql`1` }).from(infraFindings).where(where),
+    idOf: (r) => r.id,
+  });
+  const certsList = ledger(INFRA_CERTS_LIST, {
+    fetch: (q) =>
+      db
+        .select({ ...getTableColumns(certInventory), resourceName: resourceNameOf(certInventory.resourceId), _cursorAt: q.cursorAt })
+        .from(certInventory)
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset),
+    countable: (where) => db.select({ one: sql`1` }).from(certInventory).where(where),
+    idOf: (r) => r.id,
+  });
+  const patchesList = ledger(INFRA_PATCHES_LIST, {
+    fetch: (q) =>
+      db
+        .select({ ...getTableColumns(patchRecords), resourceName: resourceNameOf(patchRecords.resourceId), _cursorAt: q.cursorAt })
+        .from(patchRecords)
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset),
+    countable: (where) => db.select({ one: sql`1` }).from(patchRecords).where(where),
+    idOf: (r) => r.id,
+  });
+  const backupsList = ledger(INFRA_BACKUPS_LIST, {
+    fetch: (q) =>
+      db
+        .select({ ...getTableColumns(backupRuns), resourceName: resourceNameOf(backupRuns.resourceId), _cursorAt: q.cursorAt })
+        .from(backupRuns)
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset),
+    countable: (where) => db.select({ one: sql`1` }).from(backupRuns).where(where),
+    idOf: (r) => r.id,
+  });
+  app.get("/v1/infra/resources/export.xlsx", async (req, reply) => answerListExport(db, req, reply, resourcesList));
+  app.get("/v1/infra/findings/export.xlsx", async (req, reply) => answerListExport(db, req, reply, findingsList));
+  app.get("/v1/infra/certs/export.xlsx", async (req, reply) => answerListExport(db, req, reply, certsList));
+  app.get("/v1/infra/patches/export.xlsx", async (req, reply) => answerListExport(db, req, reply, patchesList));
+  app.get("/v1/infra/backups/export.xlsx", async (req, reply) => answerListExport(db, req, reply, backupsList));
+
   // --- resources ---------------------------------------------------------
-  app.get("/v1/infra/resources", async () => {
+  app.get("/v1/infra/resources", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, resourcesList);
     const [resources, policies] = await Promise.all([
       db.select().from(infraResources).orderBy(desc(infraResources.createdAt)),
       db.select().from(infraPolicies),
@@ -1317,7 +1403,8 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
   });
 
   // --- findings (posture inbox) -----------------------------------------
-  app.get("/v1/infra/findings", async () => {
+  app.get("/v1/infra/findings", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, findingsList);
     const [findings, resources] = await Promise.all([
       db.select().from(infraFindings),
       db.select({ id: infraResources.id, name: infraResources.name, kind: infraResources.kind }).from(infraResources),
@@ -1466,7 +1553,8 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
   // thin wrappers funnelling into the ONE governed approval path above.
 
   // --- certificates -----------------------------------------------------
-  app.get("/v1/infra/certs", async () => {
+  app.get("/v1/infra/certs", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, certsList);
     const [certs, resources] = await Promise.all([
       db.select().from(certInventory).orderBy(desc(certInventory.createdAt)),
       db.select({ id: infraResources.id, name: infraResources.name }).from(infraResources),
@@ -1536,7 +1624,8 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
   });
 
   // --- CVE patches ------------------------------------------------------
-  app.get("/v1/infra/patches", async () => {
+  app.get("/v1/infra/patches", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, patchesList);
     const [patches, resources] = await Promise.all([
       db.select().from(patchRecords).orderBy(desc(patchRecords.createdAt)),
       db.select({ id: infraResources.id, name: infraResources.name }).from(infraResources),
@@ -1567,7 +1656,8 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
   });
 
   // --- backups ----------------------------------------------------------
-  app.get("/v1/infra/backups", async () => {
+  app.get("/v1/infra/backups", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, backupsList);
     const [runs, resources] = await Promise.all([
       db.select().from(backupRuns).orderBy(desc(backupRuns.createdAt)),
       db.select({ id: infraResources.id, name: infraResources.name }).from(infraResources),
@@ -1597,3 +1687,152 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
     return reply.status(202).send({ pending: true, approvalId });
   });
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0219: the five infrastructure ledgers under the shared list contract
+// ---------------------------------------------------------------------------
+
+type InfraResourceListRow = InfraResourceRow & { effectivePolicy: Awaited<ReturnType<typeof effectiveInfraPolicy>> };
+const resourceNameOf = (col: typeof infraFindings.resourceId | typeof certInventory.resourceId | typeof patchRecords.resourceId | typeof backupRuns.resourceId) =>
+  sql<string | null>`(select ${infraResources.name} from ${infraResources} where ${infraResources.id} = ${col})`;
+const FINDING_RESOURCE_NAME = resourceNameOf(infraFindings.resourceId);
+const FINDING_RESOURCE_KIND = sql<string | null>`(select ${infraResources.kind} from ${infraResources} where ${infraResources.id} = ${infraFindings.resourceId})`;
+/** worst first when sorted descending: critical 4, high 3, medium 2, low 1 */
+const severityRankSql = (col: typeof infraFindings.severity | typeof patchRecords.severity) =>
+  sql`case ${col} when 'critical' then 4 when 'high' then 3 when 'medium' then 2 when 'low' then 1 end`;
+const isoDay = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : null);
+
+export const INFRA_RESOURCES_LIST: ListSpec<InfraResourceListRow> = {
+  id: "infra-resources",
+  sorts: {
+    name: { expr: sql`lower(${infraResources.name})` },
+    kind: { expr: infraResources.kind },
+    provider: { expr: infraResources.provider },
+    classifications: { expr: sql`${infraResources.classifications}::text` },
+    created: { expr: infraResources.createdAt, keysetAt: infraResources.createdAt },
+  },
+  columns: {
+    name: { label: "Name", value: (r) => r.name },
+    kind: { label: "Kind", value: (r) => r.kind },
+    provider: { label: "Provider", value: (r) => r.provider },
+    classifications: { label: "Classifications", value: (r) => (r.classifications ?? []).join(", ") || null },
+    auto: { label: "Auto ceiling", value: (r) => r.effectivePolicy?.autoRemediateMaxSeverity ?? "never" },
+    backupFloor: { label: "Backup floor (d)", value: (r) => r.effectivePolicy?.backupRetentionDaysFloor ?? null },
+    patchCeiling: { label: "Patch ceiling (d)", value: (r) => r.effectivePolicy?.patchCadenceDaysCeiling ?? null },
+    created: { label: "Registered", value: (r) => r.createdAt },
+  },
+  filters: [],
+  defaultSort: { col: "created", dir: "desc" },
+  idCol: infraResources.id,
+};
+
+type FindingListRow = typeof infraFindings.$inferSelect & { resourceName: string | null; resourceKind: string | null };
+export const INFRA_FINDINGS_LIST: ListSpec<FindingListRow> = {
+  id: "infra-findings",
+  sorts: {
+    resource: { expr: sql`lower(${FINDING_RESOURCE_NAME})` },
+    kind: { expr: infraFindings.kind },
+    severity: { expr: severityRankSql(infraFindings.severity) },
+    status: { expr: infraFindings.status },
+    summary: { expr: sql`${infraFindings.detail}->>'summary'` },
+    detected: { expr: infraFindings.detectedAt, keysetAt: infraFindings.detectedAt },
+  },
+  columns: {
+    resource: { label: "Governs", value: (r) => r.resourceName },
+    kind: { label: "Kind", value: (r) => r.kind },
+    severity: { label: "Severity", value: (r) => r.severity },
+    status: { label: "Status", value: (r) => r.status.replaceAll("_", " ") },
+    summary: { label: "Summary", value: (r) => (typeof r.detail?.summary === "string" ? r.detail.summary : null) },
+    detected: { label: "Detected", value: (r) => r.detectedAt },
+  },
+  filters: [],
+  // worst first, then the most recent detection (the old in-memory order)
+  defaultSort: { col: "severity", dir: "desc" },
+  idCol: infraFindings.id,
+};
+
+type CertListRow = typeof certInventory.$inferSelect & { resourceName: string | null };
+export const INFRA_CERTS_LIST: ListSpec<CertListRow> = {
+  id: "infra-certs",
+  sorts: {
+    resource: { expr: sql`lower(${resourceNameOf(certInventory.resourceId)})` },
+    cn: { expr: sql`lower(${certInventory.commonName})` },
+    notAfter: { expr: certInventory.notAfter, keysetAt: certInventory.notAfter },
+    status: { expr: certInventory.status },
+    serial: { expr: certInventory.serial },
+    issuer: { expr: certInventory.issuer },
+    rotated: { expr: certInventory.lastRotatedAt },
+    created: { expr: certInventory.createdAt, keysetAt: certInventory.createdAt },
+  },
+  columns: {
+    resource: { label: "Governs", value: (r) => r.resourceName },
+    cn: { label: "Common name", value: (r) => r.commonName },
+    notAfter: { label: "Not after", value: (r) => isoDay(r.notAfter) },
+    status: { label: "Status", value: (r) => r.status },
+    serial: { label: "Serial", value: (r) => r.serial },
+    issuer: { label: "Issuer", value: (r) => r.issuer },
+    rotated: { label: "Last rotated", value: (r) => r.lastRotatedAt },
+    created: { label: "Tracked since", value: (r) => r.createdAt },
+  },
+  filters: [],
+  defaultSort: { col: "created", dir: "desc" },
+  idCol: certInventory.id,
+};
+
+type PatchListRow = typeof patchRecords.$inferSelect & { resourceName: string | null };
+export const INFRA_PATCHES_LIST: ListSpec<PatchListRow> = {
+  id: "infra-patches",
+  sorts: {
+    resource: { expr: sql`lower(${resourceNameOf(patchRecords.resourceId)})` },
+    cve: { expr: patchRecords.cve },
+    severity: { expr: severityRankSql(patchRecords.severity) },
+    package: { expr: patchRecords.package },
+    fixed: { expr: patchRecords.fixedVersion },
+    status: { expr: patchRecords.status },
+    installed: { expr: patchRecords.installedVersion },
+    cvss: { expr: patchRecords.cvss },
+    created: { expr: patchRecords.createdAt, keysetAt: patchRecords.createdAt },
+  },
+  columns: {
+    resource: { label: "Governs", value: (r) => r.resourceName },
+    cve: { label: "CVE", value: (r) => r.cve },
+    severity: { label: "Severity", value: (r) => r.severity },
+    package: { label: "Package", value: (r) => r.package },
+    fixed: { label: "Fixed version", value: (r) => r.fixedVersion },
+    status: { label: "Status", value: (r) => r.status },
+    installed: { label: "Installed version", value: (r) => r.installedVersion },
+    cvss: { label: "CVSS", value: (r) => (r.cvss === null ? null : Number(r.cvss)) },
+    created: { label: "Tracked since", value: (r) => r.createdAt },
+  },
+  filters: [],
+  defaultSort: { col: "created", dir: "desc" },
+  idCol: patchRecords.id,
+};
+
+type BackupListRow = typeof backupRuns.$inferSelect & { resourceName: string | null };
+export const INFRA_BACKUPS_LIST: ListSpec<BackupListRow> = {
+  id: "infra-backups",
+  sorts: {
+    resource: { expr: sql`lower(${resourceNameOf(backupRuns.resourceId)})` },
+    kind: { expr: backupRuns.kind },
+    status: { expr: backupRuns.status },
+    retention: { expr: backupRuns.retentionUntil },
+    started: { expr: backupRuns.startedAt },
+    finished: { expr: backupRuns.finishedAt },
+    size: { expr: backupRuns.sizeBytes },
+    created: { expr: backupRuns.createdAt, keysetAt: backupRuns.createdAt },
+  },
+  columns: {
+    resource: { label: "Governs", value: (r) => r.resourceName },
+    kind: { label: "Kind", value: (r) => r.kind },
+    status: { label: "Status", value: (r) => r.status },
+    retention: { label: "Retention until", value: (r) => isoDay(r.retentionUntil) },
+    started: { label: "Started", value: (r) => r.startedAt },
+    finished: { label: "Finished", value: (r) => r.finishedAt },
+    size: { label: "Size (bytes)", value: (r) => r.sizeBytes },
+    created: { label: "Recorded", value: (r) => r.createdAt },
+  },
+  filters: [],
+  defaultSort: { col: "created", dir: "desc" },
+  idCol: backupRuns.id,
+};

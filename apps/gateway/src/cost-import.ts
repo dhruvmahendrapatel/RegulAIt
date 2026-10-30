@@ -77,7 +77,10 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
+import { wantsListContract, type ListSpec } from "./list-contract.js";
+import { answerListExport, answerListPage, type ContractList } from "./list-contract-route.js";
 import {
+  getTableColumns,
   and,
   auditLog,
   complianceProfiles,
@@ -682,12 +685,65 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
     });
   });
 
-  app.get("/v1/cost-imports", async () => {
+  // ADR-0219: with any of sort/dir/cursor/offset/count the import history and
+  // one batch's lines answer the shared list contract (every batch, every
+  // line, a total); with none of them, exactly the responses below. Neither
+  // export carries the stored refusals, scan findings or account keys: the
+  // lists do not show them.
+  const importsList: ContractList<typeof costImportBatches.$inferSelect, { status?: string; vendor?: string }> = {
+    spec: COST_IMPORTS_LIST,
+    filters: z.object({ status: z.enum(["planned", "applied", "refused", "revoked"]).optional(), vendor: z.string().min(1).max(200).optional() }).strict(),
+    reader: {
+      fetch: (q) =>
+        db
+          .select({ ...getTableColumns(costImportBatches), _cursorAt: q.cursorAt })
+          .from(costImportBatches)
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset),
+      countable: (where) => db.select({ one: sql`1` }).from(costImportBatches).where(where),
+      idOf: (r) => r.id,
+    },
+    where: (_req, f) =>
+      and(f.status ? eq(costImportBatches.status, f.status as never) : undefined, f.vendor ? eq(costImportBatches.vendor, f.vendor) : undefined),
+    extra: () => ({ basisStatement: IMPORTED_BASIS_STATEMENT }),
+  };
+  app.get("/v1/cost-imports/export.xlsx", async (req, reply) => answerListExport(db, req, reply, importsList));
+  const linesList: ContractList<ImportLineListRow, Record<string, never>> = {
+    spec: COST_IMPORT_LINES_LIST,
+    filters: z.object({}).strict() as unknown as z.ZodType<Record<string, never>>,
+    reader: {
+      fetch: (q) =>
+        db
+          .select({ ...getTableColumns(importedCostLines), resolvedUserName: LINE_USER_NAME, _cursorAt: q.cursorAt })
+          .from(importedCostLines)
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset),
+      countable: (where) => db.select({ one: sql`1` }).from(importedCostLines).where(where),
+      idOf: (r) => r.id,
+    },
+    where: async (req) => {
+      const p = z.object({ importId: z.string().uuid() }).safeParse(req.params);
+      if (!p.success) return null;
+      const [batch] = await db.select({ id: costImportBatches.id }).from(costImportBatches).where(eq(costImportBatches.id, p.data.importId));
+      return batch ? eq(importedCostLines.batchId, batch.id) : null;
+    },
+    refusal: { status: 404, body: { error: "unknown_import" } },
+    extra: () => ({ basisStatement: IMPORTED_BASIS_STATEMENT }),
+  };
+  app.get("/v1/cost-imports/:importId/export.xlsx", async (req, reply) => answerListExport(db, req, reply, linesList));
+
+  app.get("/v1/cost-imports", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, importsList);
     const rows = await db.select().from(costImportBatches).orderBy(desc(costImportBatches.createdAt)).limit(200);
     return { imports: rows, basisStatement: IMPORTED_BASIS_STATEMENT };
   });
 
   app.get("/v1/cost-imports/:importId", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, linesList);
     const { importId } = z.object({ importId: z.string().uuid() }).parse(req.params);
     const [batch] = await db.select().from(costImportBatches).where(eq(costImportBatches.id, importId));
     if (!batch) return reply.status(404).send({ error: "unknown_import" });
@@ -1460,3 +1516,71 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
     return result;
   });
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0219: import history and one batch's lines under the shared list contract
+// ---------------------------------------------------------------------------
+
+export const COST_IMPORTS_LIST: ListSpec<typeof costImportBatches.$inferSelect> = {
+  id: "cost-imports",
+  sorts: {
+    when: { expr: costImportBatches.createdAt, keysetAt: costImportBatches.createdAt },
+    adapter: { expr: costImportBatches.adapter },
+    vendor: { expr: sql`lower(${costImportBatches.vendor})` },
+    mode: { expr: costImportBatches.mode },
+    status: { expr: costImportBatches.status },
+    rows: { expr: costImportBatches.rowsParsed },
+    usd: { expr: costImportBatches.totalUsd },
+    reason: { expr: costImportBatches.reason },
+    period: { expr: costImportBatches.periodStart },
+    format: { expr: costImportBatches.format },
+  },
+  columns: {
+    when: { label: "When", value: (r) => r.createdAt },
+    adapter: { label: "Adapter", value: (r) => r.adapter },
+    vendor: { label: "Vendor", value: (r) => r.vendor },
+    mode: { label: "Mode", value: (r) => r.mode },
+    status: { label: "Status", value: (r) => r.status },
+    rows: { label: "Parsed / accepted / refused", value: (r) => `${r.rowsParsed} / ${r.rowsAccepted} / ${r.rowsRefused}` },
+    usd: { label: "Imported", value: (r) => r.totalUsd },
+    reason: { label: "Outcome", value: (r) => r.reason },
+    period: { label: "Period start", value: (r) => r.periodStart },
+    format: { label: "Format", value: (r) => r.format },
+  },
+  filters: ["status", "vendor"],
+  defaultSort: { col: "when", dir: "desc" },
+  idCol: costImportBatches.id,
+};
+
+type ImportLineListRow = typeof importedCostLines.$inferSelect & { resolvedUserName: string | null };
+const LINE_USER_NAME = sql<string | null>`(select coalesce(nullif(${users.displayName}, ''), ${users.email}) from ${users} where ${users.id} = ${importedCostLines.resolvedUserId})`;
+const METHOD_WORDS: Record<string, string> = { exact_email: "exact email", admin_alias: "admin alias", domain_rule: "domain rule", unresolved: "unattributed" };
+
+export const COST_IMPORT_LINES_LIST: ListSpec<ImportLineListRow> = {
+  id: "cost-import-lines",
+  sorts: {
+    row: { expr: importedCostLines.sourceRow },
+    acct: { expr: importedCostLines.accountRef },
+    who: { expr: sql`lower(${LINE_USER_NAME})` },
+    svc: { expr: sql`coalesce(${importedCostLines.service}, ${importedCostLines.description})` },
+    kind: { expr: importedCostLines.billingKind },
+    amt: { expr: importedCostLines.amount },
+    cc: { expr: importedCostLines.costCenter },
+    period: { expr: importedCostLines.periodStart, keysetAt: importedCostLines.periodStart },
+    method: { expr: importedCostLines.resolutionMethod },
+  },
+  columns: {
+    row: { label: "File line", value: (r) => r.sourceRow },
+    acct: { label: "Vendor account", value: (r) => r.accountRef },
+    who: { label: "Attributed to", value: (r) => (r.resolvedUserId ? (r.resolvedUserName ?? r.resolvedUserId) : "unattributed") },
+    svc: { label: "Service", value: (r) => r.service ?? r.description },
+    kind: { label: "Kind", value: (r) => r.billingKind },
+    amt: { label: "Imported amount", value: (r) => (r.currency === "USD" ? r.amount : `${r.amount} ${r.currency}`) },
+    cc: { label: "Cost center", value: (r) => r.costCenter },
+    period: { label: "Period start", value: (r) => r.periodStart },
+    method: { label: "Matched by", value: (r) => METHOD_WORDS[r.resolutionMethod] ?? r.resolutionMethod },
+  },
+  filters: [],
+  defaultSort: { col: "row", dir: "asc" },
+  idCol: importedCostLines.id,
+};

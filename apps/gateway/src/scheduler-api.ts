@@ -23,6 +23,9 @@
  */
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
+import { wantsListContract, type ListSpec } from "./list-contract.js";
+import { answerListExport, answerListPage, type ContractList } from "./list-contract-route.js";
+import { getTableColumns, sql } from "@regulait/db";
 import {
   desc,
   eq,
@@ -95,7 +98,37 @@ export function registerSchedulerRoutes(app: FastifyInstance, db: Db, opts: Sche
   });
 
   /** one job's history — the ledger that answers "and what did it do?" */
+  // ADR-0219: with any of sort/dir/cursor/offset/count one job's run ledger
+  // answers the shared list contract (every pass, a total); with none of
+  // them, exactly the newest-`limit` response below.
+  const jobRunsList: ContractList<typeof schedulerRuns.$inferSelect, { outcome?: string }> = {
+    spec: SCHEDULER_RUNS_LIST,
+    filters: z.object({ outcome: z.string().min(1).max(32).optional() }).strict(),
+    reader: {
+      fetch: (q) =>
+        db
+          .select({ ...getTableColumns(schedulerRuns), _cursorAt: q.cursorAt })
+          .from(schedulerRuns)
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset),
+      countable: (where) => db.select({ one: sql`1` }).from(schedulerRuns).where(where),
+      idOf: (r) => r.id,
+    },
+    where: async (req, f) => {
+      const p = nameParam.safeParse(req.params);
+      if (!p.success) return null;
+      const [job] = await db.select({ name: schedulerJobs.name }).from(schedulerJobs).where(eq(schedulerJobs.name, p.data.name));
+      if (!job) return null;
+      return f.outcome ? sql`${eq(schedulerRuns.jobName, job.name)} and ${eq(schedulerRuns.outcome, f.outcome as never)}` : eq(schedulerRuns.jobName, job.name);
+    },
+    refusal: { status: 404, body: { error: "unknown_scheduler_job" } },
+    extra: (req) => ({ registered: opts.registry.has(nameParam.parse(req.params).name) }),
+  };
+  app.get("/v1/scheduler/jobs/:name/runs/export.xlsx", async (req, reply) => answerListExport(db, req, reply, jobRunsList));
   app.get("/v1/scheduler/jobs/:name/runs", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, jobRunsList);
     const { name } = nameParam.parse(req.params);
     const q = z.object({ limit: z.coerce.number().int().min(1).max(200).default(50) }).parse(req.query ?? {});
     const [job] = await db.select().from(schedulerJobs).where(eq(schedulerJobs.name, name));
@@ -183,3 +216,31 @@ export function registerSchedulerRoutes(app: FastifyInstance, db: Db, opts: Sche
     return { ...outcome, note: "This ran the same function the schedule runs, under the same lease." };
   });
 }
+
+/** ADR-0219: one scheduler job's run ledger under the shared list contract (never its detail blob) */
+export const SCHEDULER_RUNS_LIST: ListSpec<typeof schedulerRuns.$inferSelect> = {
+  id: "scheduler-runs",
+  sorts: {
+    started: { expr: schedulerRuns.startedAt, keysetAt: schedulerRuns.startedAt },
+    outcome: { expr: schedulerRuns.outcome },
+    trigger: { expr: schedulerRuns.trigger },
+    items: { expr: schedulerRuns.itemsProcessed },
+    ms: { expr: schedulerRuns.durationMs },
+    instance: { expr: schedulerRuns.instanceId },
+    err: { expr: schedulerRuns.error },
+    finished: { expr: schedulerRuns.finishedAt },
+  },
+  columns: {
+    started: { label: "Started", value: (r) => r.startedAt },
+    outcome: { label: "Outcome", value: (r) => r.outcome },
+    trigger: { label: "Trigger", value: (r) => r.trigger },
+    items: { label: "Items", value: (r) => r.itemsProcessed },
+    ms: { label: "Duration (ms)", value: (r) => r.durationMs },
+    instance: { label: "Ran on", value: (r) => r.instanceId },
+    err: { label: "Error", value: (r) => r.error },
+    finished: { label: "Finished", value: (r) => r.finishedAt },
+  },
+  filters: ["outcome"],
+  defaultSort: { col: "started", dir: "desc" },
+  idCol: schedulerRuns.id,
+};
