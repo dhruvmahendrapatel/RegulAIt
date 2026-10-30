@@ -149,6 +149,9 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // that acceptance still valid?" A high eval score is an input to that
       // decision, never a substitute for it.
       { label: "Model risk", to: "/admin/model-risk" },
+      // ADR-0222 (P13(a)) — measured group fairness on a labelled dataset, as a result on a model card; a failing
+      // latest test holds that card. Beside Model risk because it feeds that gate.
+      { label: "Fairness testing", to: "/admin/model-risk/fairness" },
       // ADR-0084 — the THIRD-PARTY front door beside the first-party one:
       // use cases govern OUR use of AI; this governs a vendor's AI reaching
       // our data. Everything the vendor supplies is an attestation —

@@ -27,7 +27,14 @@ import type { ApiErrorPayload } from "./client";
 
 export interface RefusalGuidance {
   /** the gateway refusal this answers */
-  code: "mfa_enrollment_required" | "ai-literacy-not-current" | "step_up_unavailable" | "custom_provider_disabled";
+  code:
+    | "mfa_enrollment_required"
+    | "ai-literacy-not-current"
+    | "step_up_unavailable"
+    | "custom_provider_disabled"
+    // ADR-0222 (P13(a))
+    | "fairness_test_failed"
+    | "fairness_testing_off";
   /** what happened and what to do next, in words */
   message: string;
   /** the in-app route that resolves it */
@@ -79,6 +86,21 @@ export const REFUSAL_GUIDANCE = {
       "app on the Account page (or a passkey, once your organization offers them), then try again.",
     to: "/account?section=mfa",
     linkLabel: "Set up a way to confirm it's you",
+  },
+  // ADR-0222 (P13(a)): the model card's latest fairness test failed or was inconclusive, and blocking is on
+  fairnessTestFailed: {
+    code: "fairness_test_failed",
+    message:
+      "This model card can't be sent for sign-off: its latest fairness test failed or was inconclusive. Run a test that " +
+      "passes on the Fairness testing page, then send it again.",
+    to: "/admin/model-risk/fairness",
+    linkLabel: "Open Fairness testing",
+  },
+  fairnessTestingOff: {
+    code: "fairness_testing_off",
+    message: "Fairness testing is turned off for this organisation. Turn it on in the fairness testing settings first.",
+    to: "/admin/model-risk/fairness",
+    linkLabel: "Open the fairness testing settings",
   },
   customProviderDisabled: {
     code: "custom_provider_disabled",
@@ -155,6 +177,8 @@ export function refusalGuidance(status: number, payload: ApiErrorPayload | null 
     if (status === 403) return payload.credential === "api_key" ? REFUSAL_GUIDANCE.apiKeyMfa : REFUSAL_GUIDANCE.sessionMfa;
   }
   if (code === "custom_provider_disabled" && status === 409) return REFUSAL_GUIDANCE.customProviderDisabled;
+  if (code === "fairness_test_failed" && status === 409) return REFUSAL_GUIDANCE.fairnessTestFailed;
+  if (code === "fairness_testing_off" && status === 409) return REFUSAL_GUIDANCE.fairnessTestingOff;
   return null;
 }
 
