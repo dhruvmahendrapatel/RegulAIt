@@ -47,8 +47,9 @@ each opt-in per organisation, falling back in a fail-closed way, and logging no 
    (`^[a-z][a-z0-9_]{0,39}$`, such as an entity type); anything else is dropped unread. Scorer error text, which can
    echo a reply body, is never logged or audited.
 8. **A reference service, not built in CI.** `agents/trained-detectors/` is a standard-library HTTP service with
-   Presidio and spaCy `en_core_web_sm` (MIT) for PII, `protectai/deberta-v3-base-prompt-injection-v2` (Apache-2.0) and
-   `unitary/toxic-bert` (Apache-2.0), CPU PyTorch and Transformers. Model files are pinned by revision and sha256 and
+   Presidio and a small spaCy English pipeline (MIT) for PII, a DeBERTa-v3 injection classifier (Apache-2.0) and a
+   BERT multi-label toxicity classifier (Apache-2.0), on CPU PyTorch and Transformers; the exact models, revisions and
+   hashes are in its `models.lock.json` and `THIRD_PARTY.md`. Model files are pinned by revision and sha256 and
    downloaded only at build time; the runtime sets the offline flags and loads with `local_files_only`. The image is
    about 2 GB, so CI tests the gateway wiring against a stand-in service and the service's pure core with fake models.
    Licences, the search record, and the transitive packages outside the ADR-0176 list (certifi and tqdm under MPL-2.0,
@@ -68,7 +69,7 @@ each opt-in per organisation, falling back in a fail-closed way, and logging no 
 
 ## Follow-ups
 
-- Groundedness: HHEM-2.1-Open (Apache-2.0) loads custom modelling code that needs its own review, and runtime
+- Groundedness: the permissively licensed (Apache-2.0) candidate model loads custom modelling code that needs its own review, and runtime
   groundedness needs retrieval context the dispatch path does not carry. Until then groundedness stays an evaluation
   metric (the existing `groundedness_judge` kind, which any external scorer may serve).
 - An ONNX Runtime build to shrink the image, and a CI job that builds it.

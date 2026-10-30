@@ -12,8 +12,9 @@ What was looked for, and why these were chosen:
   token-classification model because it pairs a trained NER model (names, places) with checksum-validated recognisers
   (cards, IBANs, national identifiers) and reports entity types, which become counts in the audit log. Considered:
   `dslim/bert-base-NER` (MIT, names/places only), GLiNER PII variants (Apache-2.0, heavier, less mature).
-- **Prompt-injection classifier:** `protectai/deberta-v3-base-prompt-injection-v2` (Apache-2.0). Considered and
-  rejected: Meta Prompt Guard (Llama community licence, not on the ADR-0176 list).
+- **Prompt-injection classifier:** `protectai/deberta-v3-base-prompt-injection-v2` (Apache-2.0), a DeBERTa-v3
+  fine-tune. Considered and rejected: prompt-guard models published under community licences that are not on the
+  ADR-0176 list.
 - **Harm classifier:** `unitary/toxic-bert` (Apache-2.0; the Detoxify "original" model, six labels: toxic,
   severe_toxic, obscene, threat, insult, identity_hate). Considered: RoBERTa toxicity models under OpenRAIL-style
   licences (not on the list).
