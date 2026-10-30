@@ -614,6 +614,10 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/servers": "public-stable",
   "POST /v1/servers": "internal",
   "PATCH /v1/servers/:serverId": "internal",
+  // ADR-0204: a server's static upstream credential (admin-only; the secret is write-only)
+  "GET /v1/servers/:serverId/upstream-credential": "internal",
+  "PUT /v1/servers/:serverId/upstream-credential": "internal",
+  "DELETE /v1/servers/:serverId/upstream-credential": "internal",
   "GET /v1/servers/:serverId/tools": "internal",
   "POST /v1/servers/:serverId/tools": "internal",
   // ADR-0097 — the MCP admission review surface
@@ -1677,6 +1681,9 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/servers": "servers",
   "POST /v1/servers": "servers",
   "PATCH /v1/servers/:serverId": "servers",
+  "GET /v1/servers/:serverId/upstream-credential": "servers",
+  "PUT /v1/servers/:serverId/upstream-credential": "servers",
+  "DELETE /v1/servers/:serverId/upstream-credential": "servers",
   "GET /v1/servers/:serverId/tools": "servers",
   "POST /v1/servers/:serverId/tools": "servers",
   "GET /v1/mcp/admission": "servers",

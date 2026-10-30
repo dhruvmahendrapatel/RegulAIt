@@ -1092,3 +1092,33 @@ never run `down -v` anywhere else (§7.6, step 3).
    instant. If the laptop runs short of memory, `docker compose stop` it after the check and `docker compose start` it
    at T-10 min. After the demo, `docker compose down -v` in `regulait-fallback` (after step 4), then
    `git worktree remove ../regulait-fallback` from the live checkout.
+
+### 7.9 The ABAP MCP server behind the proxy (owner, 2026-10-29, #453 c6508111468; ADR-0204)
+
+The ABAP MCP server is a separate product. Registered behind our MCP proxy, a live change in that system runs through
+governance. It reads its API keys only from `Authorization: Bearer`, so the gateway authenticates to it with a static
+upstream credential under the Bearer scheme (the default). The full agreed configuration is in #453, in the master
+session's latest comment. Everything below is placeholders: the real host and key are entered by the owner in the
+product, never in chat, the repo or a ticket.
+
+1. **Allow the host.** Add `<abap-host>` to the egress allow-list (a public-internet URL needs an allow-host entry).
+2. **Register the server.** In `/ui`, **Integrations → MCP servers**: name `<abap-mcp-name>`, transport
+   `streamable_http`, URL `https://<abap-host>/mcp`.
+3. **Set the credential.** Select the server, then on the **Upstream credential** card choose **Bearer token in
+   Authorization** and paste an `rgk_<…>` key issued from the server's `admin` profile. Save, and confirm it's you when
+   asked. The card then shows the scheme and the key's last four characters only. (The named-header option exists, but
+   the demo does not use it.)
+4. **Identity to upstream: leave it `none`.** The server's OIDC verifier does not accept our EdDSA assertion.
+5. **Grants.** Grant the demo persona the tools `SAPWrite` and `SAPActivate`; everyone else stays denied by default.
+6. **Approval rule.** Require approval for any call to `SAPWrite` or `SAPActivate`, with the approver notified in Slack
+   and by email.
+7. **Check it.** Sync the server's tools (open its tools, or make one governed read-only call); the server's own log
+   should show the request authenticated. A `mcp-upstream-credential-unavailable` refusal on the audit page means the
+   gateway's data key differs from the one the key was saved under: set the credential again.
+8. **What to say.** SAP records a technical user, because principal propagation is off. The person is governed and
+   audited in RegulAIt: who asked, which tool, the approval and the outcome.
+9. **The refused case to show.** A write outside the allowed package produces the server's `safety_blocked` event and
+   never reaches SAP.
+10. **Do not** change the server's URL after setting the credential unless you mean to: a URL change clears it
+    (audited), and it must be set again. Rotate or clear on the same card; Clear is the secondary button and asks for a
+    confirmation.
