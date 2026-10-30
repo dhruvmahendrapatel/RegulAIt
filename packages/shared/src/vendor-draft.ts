@@ -118,10 +118,10 @@ export function splitQuestionnaire(content: string): Partial<Record<VendorQuesti
     buf = [];
   };
   for (const line of lines) {
-    const m = /^##\s+(.*)$/.exec(line);
-    if (m) {
+    // a string test, not a regex: section headings come from caller-supplied text
+    if (line.startsWith("## ")) {
       flush();
-      const heading = m[1]!.trim();
+      const heading = line.slice(3).trim();
       current = VENDOR_QUESTIONNAIRE_SECTIONS.find((s) => s.heading === heading)?.id ?? null;
       continue;
     }
@@ -247,7 +247,7 @@ export function buildVendorDraftPrompt(g: VendorDraftGrounding, sources: VendorD
     `Section ids: ${VENDOR_QUESTIONNAIRE_SECTIONS.map((s) => `${s.id} (${s.heading})`).join("; ")}.`,
     `Vendor: ${g.vendor.name}`,
     "",
-    ...sources.map((s) => `<source id="${s.id}" kind="${s.kind}">\n${s.text.replace(/<\/?source[^>]*>/gi, "")}\n</source>`),
+    ...sources.map((s) => `<source id="${s.id}" kind="${s.kind}">\n${s.text.replace(/<(?=\/?source)/gi, "&lt;")}\n</source>`),
   ].join("\n");
 }
 
