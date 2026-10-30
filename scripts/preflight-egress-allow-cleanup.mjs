@@ -112,6 +112,10 @@ const METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
  */
 export const SCRATCH_DB_FILES = new Map([
   [
+    "demo-relax-e-enforce.test.ts",
+    "beforeAll builds the app on the SCRATCH database it creates (the seed's first-admin window); afterAll drops it with dropScratchDatabase",
+  ],
+  [
     "zz-adr0181-sc-strict-defaults.test.ts",
     "the allow entry is POSTed to an app built on the FRESH scratch database; afterAll drops FRESH_DB and UPGRADE_DB",
   ],
