@@ -19,6 +19,7 @@
  *    is rendered verbatim: an operator or cron drives runs, and a missed
  *    schedule is silent.
  */
+import { withStepUp } from "../../../stepup/stepUp";
 import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
@@ -350,7 +351,7 @@ export default function RedTeamPage() {
                           <p className={v.flush}>This draft can no longer be edited or published. Its probes stay readable.</p>
                         )
                       }
-                      submit={(reason) => api.post(`/v1/redteam/libraries/${selectedLibrary}/retire`, { reason })}
+                      submit={(reason) => withStepUp((h) => api.postWithHeaders(`/v1/redteam/libraries/${selectedLibrary}/retire`, { reason }, h))}
                       done={`${libDetail.data.library.name} v${libDetail.data.library.version} retired`}
                       refusal={(code) =>
                         code === "redteam_run_in_progress" ? "A run of this version is still in progress. Retire it once the run finishes." : null

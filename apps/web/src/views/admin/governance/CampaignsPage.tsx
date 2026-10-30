@@ -23,6 +23,7 @@
  *    NEVER to the grant's holder: the decider-keyed self-review bar extends
  *    to routing, and the gateway's refusal is rendered verbatim below.
  */
+import { withStepUp } from "../../../stepup/stepUp";
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
@@ -318,7 +319,7 @@ export default function CampaignsPage() {
                             </p>
                           }
                           cancelLabel="Keep campaign"
-                          submit={(reason) => api.post(`/v1/certification-campaigns/${d.id}/cancel`, { reason })}
+                          submit={(reason) => withStepUp((h) => api.postWithHeaders(`/v1/certification-campaigns/${d.id}/cancel`, { reason }, h))}
                           done={`Campaign “${d.name}” cancelled; ${undecided} reviews withdrawn`}
                           refusal={(code, payload) =>
                             code === "campaign_not_open"

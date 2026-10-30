@@ -1,4 +1,4 @@
-/** PROTOTYPE (#453 G7–G9): the shared mocked shell for the after-demo screenshots. Throwaway. */
+/** ADR-0208 (G7–G9): the shared mocked shell for the lifecycle mock specs (compliance profiles, infrastructure, libraries). */
 import type { Page, Route } from "@playwright/test";
 
 export const ISO = "2026-10-29T10:00:00.000Z";

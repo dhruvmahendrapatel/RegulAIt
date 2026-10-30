@@ -601,3 +601,19 @@ the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
   carried on their own.
 - Freeze week: ADR-0198 §2 covers entry raises only; this raise rests on the owner decision above. ADR-0198's post-demo
   reset applies to it.
+
+## Addendum / As built (2026-10-30) — all JS 1,050 → 1,060 kB (G7–G9 lifecycle screens, ADR-0208)
+
+The owner decided this raise on 2026-10-30 when unparking the G1–G10 lifecycle sets:
+<https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6522492997> ("the all-JS ceiling may rise to at
+most 1,060 kB, with a dated `CEILING_EXCEPTIONS` row and an ADR-0196 addendum citing this comment; the entry JS and
+entry CSS ceilings stay unchanged"). It is the ADR-recorded exception the `--guard` rule requires, with one
+`CEILING_EXCEPTIONS` row.
+
+- `all JS` from `1050 kB` to `1060 kB` (+10 kB), the owner's maximum. Entry JS stays at 138.5 kB and entry CSS at
+  10.7 kB; the lazy chunk ceilings are unchanged.
+- Why: PR #606 wires the G7 (compliance profiles), G8 (infrastructure) and G9 (libraries) screens to their ADR-0208
+  routes. The new code sits in admin chunks that already load lazily, and the profile edit dialog is its own lazy chunk,
+  so the entry is untouched (137.91 kB). Total JS measures 1,059.52 kB with size-limit (main: about 1,049.7 kB).
+- The other lanes unparked by the same decision (#604, #605) share this one cap; whichever lands later must find savings
+  rather than raise it further without a new owner decision.
