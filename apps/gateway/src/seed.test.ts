@@ -29,6 +29,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { DEMO_E_RELAXATIONS, DEMO_E_RELAX_AUDIT_RULE_ID } from "./demo-relax-e-lib.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -267,5 +268,17 @@ describe("seed script", () => {
     expect(adminUser.totpEnabled).toBe(true);
     expect(signIn.json()).toMatchObject({ mfaRequired: true });
     expect(typeof signIn.json().pendingToken).toBe("string");
+  });
+
+  it("beat E: relaxes the sensitive quorum and approval signing once, through the audited settings route", async () => {
+    // owner, #453 c6521685462: the demo data, not the product defaults (demo-relax-e-lib.ts)
+    const settings = (await app!.inject({ method: "GET", url: "/v1/org/settings", headers: { authorization: "Bearer seed-test-boot" } })).json().settings;
+    expect(settings).toMatchObject(DEMO_E_RELAXATIONS);
+    const rows = await scratch.select().from(auditLog).where(eq(auditLog.ruleId, DEMO_E_RELAX_AUDIT_RULE_ID));
+    const relaxations = rows.filter((r) => ((r.detail as { relaxed?: string[] }).relaxed ?? []).includes("approvalSignatureMode"));
+    // two seed runs, one write: the second run finds them relaxed and writes nothing
+    expect(relaxations).toHaveLength(1);
+    expect((relaxations[0]!.detail as { relaxed: string[] }).relaxed).toEqual(expect.arrayContaining(["toolApprovalSensitiveQuorum", "approvalSignatureMode"]));
+    expect(seedRuns[1]!.stdout).toContain("beat E: already relaxed");
   });
 });

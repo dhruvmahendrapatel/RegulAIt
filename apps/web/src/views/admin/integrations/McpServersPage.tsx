@@ -18,7 +18,7 @@ import { McpCoverage, StdioArguments } from "./Batch3Mcp";
 import { IntegrationOwnership } from "./IntegrationOwnership";
 import { ExecutionProfileSelector, PersonStdioRelaxationControl } from "./isolation/IsolationPanel";
 import { McpRegistriesPanel } from "./McpRegistriesPanel";
-import { McpAdmissionClearButton, McpVisibleToolsCard } from "./McpServerAdmission";
+import { McpAdmissionClearButton, McpServerNextSteps, McpVisibleToolsCard } from "./McpServerAdmission";
 import { IdentityPropagationCell, McpIdentityAssertionCard } from "./McpIdentityPropagation";
 import { McpUpstreamCredentialCard } from "./McpUpstreamCredential";
 import { api } from "../../../api/client";
@@ -98,6 +98,7 @@ function McpServersTab() {
       <div className={v.stack}>
         <Card title="Server registry">
           <RegisterServerForm />
+          <McpServerNextSteps />
           <Table<McpServer>
             columns={[
               { key: "name", header: "Name", sort: (s) => s.name, render: (s) => s.name },
@@ -388,7 +389,7 @@ function RegisterServerForm() {
         <Field label="Closure image digest"><Input required pattern="sha256:[0-9a-f]{64}" value={image} onChange={(event) => setImage(event.target.value)} disabled={act.busy} placeholder="sha256:…" /></Field>
         <Field label="Entry point in the image"><Input required pattern="/.*" value={command} onChange={(event) => setCommand(event.target.value)} disabled={act.busy} placeholder="/srv/mcp/server.js" /></Field>
         <StdioArguments args={args} onChange={setArgs} disabled={act.busy} />
-        <p>Stdio must be enabled above. The server never runs on the gateway: it runs from the closure image (built from the regulAIt stdio base, pinned by its digest) inside a sandbox an executor starts, only after the executor proves the isolation the call requires. Without such an executor every call is refused. Registration requires admission approval.</p>
+        <p>Stdio must first be enabled below, under MCP protocol coverage. The server never runs on the gateway: it runs from the closure image (built from the regulAIt stdio base, pinned by its digest) inside a sandbox an executor starts, only after the executor proves the isolation the call requires. Without such an executor every call is refused. Registration requires admission approval.</p>
       </> : <Field label="URL" grow>
         <Input required value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://mcp.internal/repo" />
       </Field>
@@ -409,7 +410,7 @@ function RegisterServerForm() {
         Register
       </Button>
       <InfoButton label="what adding a server grants">
-        Registration is audited and grants nobody access. The transport cannot be changed after registration; enable any non-default transport through the audited coverage controls first.
+        Registration is audited and grants nobody access. The transport cannot be changed after registration; enable any non-default transport (SSE, stdio) first, under MCP protocol coverage below; it is audited.
       </InfoButton>
       {act.error && (
         <span className={v.errLine} role="alert">
