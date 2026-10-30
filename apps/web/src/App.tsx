@@ -122,6 +122,14 @@ const RetentionPage = screen(() => import("./screens/admin-settings"), "Retentio
 const GettingStartedPage = screen(() => import("./screens/admin-settings"), "GettingStartedPage");
 const FirstRunPage = screen(() => import("./screens/admin-settings"), "FirstRunPage");
 const LicensingPage = screen(() => import("./screens/admin-settings"), "LicensingPage");
+// P3 (#453 c6527514889): the identity-and-access long pages' full lists, each on its own route, in one chunk of their own
+const WorkloadIdentitiesListPage = screen(() => import("./screens/admin-identity-lists"), "WorkloadIdentitiesListPage");
+const GrantProposalsPage = screen(() => import("./screens/admin-identity-lists"), "GrantProposalsPage");
+const LinkRequestsPage = screen(() => import("./screens/admin-identity-lists"), "LinkRequestsPage");
+const ChatIdentityLinksPage = screen(() => import("./screens/admin-identity-lists"), "ChatIdentityLinksPage");
+const AgentCatalogPage = screen(() => import("./screens/admin-identity-lists"), "AgentCatalogPage");
+const AgentStewardshipPage = screen(() => import("./screens/admin-identity-lists"), "AgentStewardshipPage");
+const LicenceVerificationsPage = screen(() => import("./screens/admin-identity-lists"), "LicenceVerificationsPage");
 const DataKeyPage = screen(() => import("./screens/admin-settings"), "DataKeyPage");
 const SchedulerPage = screen(() => import("./screens/admin-settings"), "SchedulerPage");
 const EnforcementPosturePage = screen(() => import("./screens/admin-settings"), "EnforcementPosturePage");
@@ -235,6 +243,7 @@ function ApplicationRoutes() {
                 <Route path="teams" element={<TeamsPage />} />
                 <Route path="client-access" element={<ClientAccessPage />} />
                 <Route path="sso" element={<SsoPage />} />
+                <Route path="sso/link-requests" element={<LinkRequestsPage />} />
                 <Route path="provisioning" element={<ScimPage />} />
                 <Route path="group-mappings" element={<GroupMappingsPage />} />
                 {/* ADR-0066 */}
@@ -245,6 +254,8 @@ function ApplicationRoutes() {
                     (suites.tsx) until creating/revoking an identity and binding a
                     credential stop answering 501 — see the page's header comment */}
                 <Route path="workload-identities" element={<WorkloadIdentitiesPage />} />
+                <Route path="workload-identities/identities" element={<WorkloadIdentitiesListPage />} />
+                <Route path="workload-identities/:identityId/proposals" element={<GrantProposalsPage />} />
                 <Route path="rules" element={<RulesEnginePage />} />
                 <Route path="simulation" element={<SimulationPage />} />
                 <Route path="abac-policies" element={<AbacPoliciesPage />} />
@@ -301,8 +312,11 @@ function ApplicationRoutes() {
                 <Route path="copilot" element={<CopilotPage />} />
                 {/* ADR-0061 */}
                 <Route path="chatops" element={<ChatOpsPage />} />
+                <Route path="chatops/identity-links" element={<ChatIdentityLinksPage />} />
                 <Route path="workflow-templates" element={<WorkflowTemplatesPage />} />
                 <Route path="agents" element={<AgentsPage />} />
+                <Route path="agents/catalog" element={<AgentCatalogPage />} />
+                <Route path="agents/stewardship" element={<AgentStewardshipPage />} />
                 <Route path="model-credentials" element={<ModelCredentialsPage />} />
                 <Route path="custom-providers" element={<CustomProvidersPage />} />
                 {/* ADR-0088 */}
@@ -330,6 +344,7 @@ function ApplicationRoutes() {
                 <Route path="organization" element={<OrganizationPage />} />
                 <Route path="retention" element={<RetentionPage />} />
                 <Route path="licensing" element={<LicensingPage />} />
+                <Route path="licensing/verifications" element={<LicenceVerificationsPage />} />
                 {/* ADR-0063 */}
                 <Route path="data-key" element={<DataKeyPage />} />
                 {/* ADR-0064 */}

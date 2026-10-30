@@ -5,14 +5,14 @@
  * agent grants, the per-user agent policy (default, cost ceiling, routing,
  * run budget), and the per-user entitlement view.
  */
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
-import { Link, useLocation } from "react-router-dom";
+import { useState } from "react";
+import { Link, Navigate, useLocation } from "react-router-dom";
 import { api } from "../../../api/client";
 import type { AdminAgent, CustomModelProvider, UserAgentPolicyView } from "../../../api/adminTypes";
 import { fmtUsd } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea } from "../../../ui/kit";
-import { DataList } from "../../../ui/DataList";
+import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Tabs, Textarea, tabIds } from "../../../ui/kit";
+import { ListPreview } from "../../../ui/ListPreview";
 import {
   KV,
   RemoveButton,
@@ -25,61 +25,27 @@ import {
   useUsers,
   userOpts,
 } from "../adminKit";
-import { StewardshipCard } from "./AgentStewardship";
+import { StewardshipPreview } from "./AgentStewardship";
 import { ExpectedServedModelCard } from "./ExpectedServedModelCard";
-import { ProviderMark, ProviderTiles } from "../../../ui/ModelPicker";
+import { ProviderTiles } from "../../../ui/ModelPicker";
 import { providerLabel } from "../../models/modelBindings";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 
 const CLEAR = "__clear__";
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-const AiBomPanel = lazy(() => import("../governance/BomEvidencePanel").then((m) => ({ default: m.AiBomPanel })));
 
 export default function AgentsPage() {
   const agents = useAgents();
   const users = useUsers();
-  const customProviders = useCustomProviders();
-  const act = useAction();
-  // ADR-0189 B6: the agent whose AI BOM is open below the catalog
-  const [bomAgentId, setBomAgentId] = useState<string | null>(null);
-
-  // `#agent-<id>` deep links (dependency graph, governance alerts): once the
-  // list has loaded, scroll that agent's row into view and mark it, so the
-  // link lands on the agent rather than at the top of the catalog
-  //
-  // ADR-0219: the catalog pages on the server, so a deep link narrows it to that agent (the server's own `id`
-  // filter) until the reader asks for the whole catalog again
+  const [tab, setTab] = useState("register");
+  // `#agent-<id>` deep links (dependency graph, governance alerts) land on the agent in the full catalog
   const { hash } = useLocation();
-  const linkedAgentId = hash.startsWith("#agent-") ? hash.slice("#agent-".length) : null;
-  const [showAll, setShowAll] = useState(false);
-  const [search, setSearch] = useState("");
-  const [q, setQ] = useState("");
-  useEffect(() => {
-    const t = window.setTimeout(() => setQ(search.trim()), 300);
-    return () => window.clearTimeout(t);
-  }, [search]);
-  const narrowed = linkedAgentId && UUID.test(linkedAgentId) && !showAll ? linkedAgentId : null;
-  const catalogFilters = useMemo(() => (narrowed ? { id: narrowed } : { q: q || undefined }), [narrowed, q]);
-  const [catalogRows, setCatalogRows] = useState<AdminAgent[] | null>(null);
-  const bomAgent =
-    (catalogRows ?? []).find((x) => x.id === bomAgentId) ?? (agents.data?.agents ?? []).find((x) => x.id === bomAgentId) ?? null;
-  useEffect(() => {
-    if (!linkedAgentId || !catalogRows) return;
-    document.getElementById(`agent-${linkedAgentId}`)?.scrollIntoView({ block: "center" });
-  }, [linkedAgentId, catalogRows]);
+  if (hash.startsWith("#agent-")) return <Navigate to={`/admin/agents/catalog${hash}`} replace />;
 
   const aOpts = agentOpts(agents.data?.agents);
   const uOpts = userOpts(users.data?.users);
-  // ADR-0034: an agent bound to a custom endpoint shows WHICH endpoint, not
-  // just the word "custom" — two agents can both be provider 'custom' and go
-  // to two different hosts.
-  const endpointName = new Map(
-    (customProviders.data?.providers ?? []).map((p) => [p.id, p.name] as const),
-  );
-
   return (
     <>
       <PageHeader
@@ -87,166 +53,86 @@ export default function AgentsPage() {
         info={<p>The global catalog is decoupled from entitlement: registering an agent grants nobody anything. Pricing feeds the cost meters; the tier feeds cost-aware routing.</p>}
       />
       <div className={v.stack}>
-        <StewardshipCard
-          agents={agents.data?.agents}
-          users={users.data?.users}
-          loading={agents.isLoading}
-          failed={!!agents.error && !agents.data}
+        {/* P3: stewardship is a preview (what needs attention counted in its heading); the full list has its own page */}
+        <StewardshipPreview agents={agents.data?.agents} loading={agents.isLoading} failed={!!agents.error && !agents.data} />
+        {/* P3: the catalog is a preview; the full catalog, its deep links, AI BOMs and enable/disable have their own page */}
+        <ListPreview<AdminAgent>
+          title="Catalog"
+          noun="agents"
+          endpoint="/v1/agents"
+          legacyKey="agents"
+          queryKey={[...adminKeys.agents, "catalog"]}
+          sort={{ key: "name", dir: "asc" }}
+          attention={[{ label: "disabled", filters: { enabled: "false" } }]}
+          columns={[
+            { key: "name", header: "Name", render: (x) => x.name },
+            { key: "provider", header: "Provider", render: (x) => x.provider },
+            { key: "model", header: "Model", render: (x) => (x.model ? <span className={v.mono}>{x.model}</span> : "—") },
+            {
+              key: "price",
+              header: "$/MTok in → out",
+              align: "right",
+              render: (x) =>
+                x.costPerMTokIn == null && x.costPerMTokOut == null ? <span className={v.faint}>unpriced</span> : `${fmtUsd(x.costPerMTokIn)} → ${fmtUsd(x.costPerMTokOut)}`,
+            },
+            { key: "enabled", header: "Status", render: (x) => (x.enabled ? <Badge tone="ok">enabled</Badge> : <Badge tone="danger">disabled</Badge>) },
+          ]}
+          rowKey={(x) => x.id}
+          viewAll="/admin/agents/catalog"
+          empty={<EmptyState title="No agents registered" body="Register the first agent in the Register tab." />}
         />
-        <Card flush title="Catalog">
-          <div className={a.formRow} style={{ padding: "var(--s1) var(--s2) 0" }}>
-            {narrowed ? (
+
+        {/* P3: the catalog's settings are in tabs */}
+        <Tabs
+          tabs={[
+            { id: "register", label: "Register" },
+            { id: "pricing", label: "Pricing & prompts" },
+            { id: "fallbacks", label: "Fallbacks" },
+            { id: "access", label: "Grants & policy" },
+          ]}
+          active={tab}
+          onChange={setTab}
+          idPrefix="agents"
+          label="Agent settings"
+        />
+        {/* every panel stays mounted (hidden when not selected), so a half-written registration or price survives a tab switch */}
+        {(
+          [
+            ["register", <RegisterAgentCard key="register" />],
+            [
+              "pricing",
               <>
-                <span className={v.dim}>Showing the linked agent only.</span>
-                <Button size="sm" onClick={() => setShowAll(true)}>
-                  Show the whole catalog
-                </Button>
-              </>
-            ) : (
-              <Field label="Search agents">
-                <Input type="search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Name or model" />
-              </Field>
-            )}
+                <ModelPricingCard agents={agents.data?.agents ?? []} />
+                <ExpectedServedModelCard agents={agents.data?.agents ?? []} />
+                <SystemPromptCard agents={agents.data?.agents ?? []} />
+              </>,
+            ],
+            ["fallbacks", <FallbackChainCard key="fallbacks" agents={agents.data?.agents ?? []} />],
+            [
+              "access",
+              <>
+                <Card title="Grant an agent">
+                  <GrantForm uOpts={uOpts} aOpts={aOpts} />
+                </Card>
+                <PolicyCard uOpts={uOpts} aOpts={aOpts} />
+                <EntitlementCard uOpts={uOpts} agents={agents.data?.agents ?? []} />
+              </>,
+            ],
+          ] as const
+        ).map(([id, body]) => (
+          <div
+            key={id}
+            role="tabpanel"
+            id={tabIds("agents", id).panel}
+            aria-labelledby={tabIds("agents", id).tab}
+            hidden={tab !== id}
+            // the stack's display would otherwise override the hidden attribute
+            style={tab !== id ? { display: "none" } : undefined}
+            className={v.stack}
+          >
+            {body}
           </div>
-          <DataList<AdminAgent>
-            listId="agents"
-            noun="agents"
-            endpoint="/v1/agents"
-            exportPath="/v1/agents/export.xlsx"
-            queryKey={[...adminKeys.agents, "catalog"]}
-            legacyKey="agents"
-            filters={catalogFilters}
-            defaultSort={{ key: "name", dir: "asc" }}
-            onRows={(rows) => setCatalogRows(rows)}
-            columns={[
-              { key: "name", header: "Name", main: true, sortable: true, render: (x) => (
-                  <span id={`agent-${x.id}`}>
-                    {x.name}
-                    {x.id === linkedAgentId ? <> <Badge tone="info">linked</Badge></> : null}
-                  </span>
-                ) },
-              {
-                key: "provider",
-                header: "Provider",
-                main: true,
-                sortable: true,
-                render: (x) => (
-                  <ProviderMark provider={x.provider} label={providerLabel(x.provider)}>
-                    {x.provider === "custom" ? (
-                      <span>
-                        custom ·{" "}
-                        <span className={v.mono}>
-                          {x.customProviderId ? (endpointName.get(x.customProviderId) ?? x.customProviderId) : "—"}
-                        </span>
-                      </span>
-                    ) : (
-                      x.provider
-                    )}
-                  </ProviderMark>
-                ),
-              },
-              { key: "tier", header: "Tier", align: "right", main: true, sortable: true, render: (x) => x.tier },
-              {
-                key: "model",
-                header: "Model",
-                main: true,
-                sortable: true,
-                render: (x) => (x.model ? <span className={v.mono}>{x.model}</span> : "—"),
-              },
-              {
-                key: "price",
-                header: "$/MTok in → out",
-                main: true,
-                sortable: true,
-                align: "right",
-                render: (x) =>
-                  x.costPerMTokIn == null && x.costPerMTokOut == null ? (
-                    <span
-                      className={v.faint}
-                      title="No price is recorded. Spend is metered in real tokens with costUsd null, and the optimizer neither routes toward this agent nor claims savings against it."
-                    >
-                      unpriced
-                    </span>
-                  ) : (
-                    `${fmtUsd(x.costPerMTokIn)} → ${fmtUsd(x.costPerMTokOut)}`
-                  ),
-              },
-              {
-                key: "prompt",
-                header: "System prompt",
-                render: (x) => (x.systemPrompt ? `set (${x.systemPrompt.length} chars)` : "—"),
-              },
-              {
-                key: "enabled",
-                header: "Status",
-                main: true,
-                sortable: true,
-                required: "Status is always shown",
-                render: (x) => (x.enabled ? <Badge tone="ok">enabled</Badge> : <Badge tone="danger">disabled</Badge>),
-              },
-              {
-                // ADR-0189 B6: the agent's signed AI BOM snapshots, drift and gaps
-                key: "ai-bom",
-                header: "Evidence",
-                action: true,
-                render: (x) => (
-                  <Button size="sm" variant="ghost" aria-label={`AI BOM for ${x.name}`} aria-pressed={bomAgentId === x.id} onClick={() => setBomAgentId(bomAgentId === x.id ? null : x.id)}>
-                    AI BOM
-                  </Button>
-                ),
-              },
-              {
-                key: "actions",
-                header: "",
-                srHeader: "Actions",
-                action: true,
-                align: "right",
-                render: (x) => (
-                  <Button
-                    size="sm"
-                    onClick={() =>
-                      void act.run(
-                        () => withStepUp((h) => stepUpApi.post(`/v1/agents/${x.id}/enabled`, { enabled: !x.enabled }, h)),
-                        x.enabled ? "Agent disabled" : "Agent enabled",
-                      )
-                    }
-                  >
-                    {x.enabled ? "disable" : "enable"}
-                  </Button>
-                ),
-              },
-            ]}
-            rowKey={(x) => x.id}
-            empty={<EmptyState title="No agents registered" body="Register the first agent below." />}
-          />
-        </Card>
-
-        {bomAgent && (
-          <section aria-label={`AI BOM for ${bomAgent.name}`} className={v.stack}>
-            <div className={v.row}>
-              <span className={v.sectionTitle}>AI BOM: {bomAgent.name}</span>
-              <Button size="sm" variant="ghost" onClick={() => setBomAgentId(null)}>
-                Close
-              </Button>
-            </div>
-            <Suspense fallback={<p role="status">Loading the AI BOM…</p>}>
-              <AiBomPanel key={bomAgent.id} subject={{ kind: "agent", id: bomAgent.id }} />
-            </Suspense>
-          </section>
-        )}
-
-        <RegisterAgentCard />
-        <ModelPricingCard agents={agents.data?.agents ?? []} />
-        <ExpectedServedModelCard agents={agents.data?.agents ?? []} />
-        <SystemPromptCard agents={agents.data?.agents ?? []} />
-        <FallbackChainCard agents={agents.data?.agents ?? []} />
-
-        <Card title="Grant an agent">
-          <GrantForm uOpts={uOpts} aOpts={aOpts} />
-        </Card>
-
-        <PolicyCard uOpts={uOpts} aOpts={aOpts} />
-        <EntitlementCard uOpts={uOpts} agents={agents.data?.agents ?? []} />
+        ))}
       </div>
     </>
   );

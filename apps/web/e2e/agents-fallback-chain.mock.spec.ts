@@ -105,6 +105,8 @@ test.describe("ADR-0179 UX-AG-1: the fallback chain is saved explicitly", () => 
   test("add, reorder and cancel send nothing; Save chain sends one PUT with the ordered ids", async ({ page }) => {
     const { puts } = await mockApi(page);
     await page.goto("/ui/admin/agents");
+    // P3: the fallback chains have their own tab
+    await page.getByRole("tab", { name: "Fallbacks" }).click();
     const card = chainCard(page);
     const primary = card.getByLabel("Primary agent");
     await primary.selectOption(OPUS);
@@ -163,6 +165,8 @@ test.describe("ADR-0179 UX-AG-1: the fallback chain is saved explicitly", () => 
   test("a refused save keeps the draft and shows the gateway's reason", async ({ page }) => {
     const { puts } = await mockApi(page, { putStatus: 400 });
     await page.goto("/ui/admin/agents");
+    // P3: the fallback chains have their own tab
+    await page.getByRole("tab", { name: "Fallbacks" }).click();
     const card = chainCard(page);
     await card.getByLabel("Primary agent").selectOption(OPUS);
     await expect(order(page)).toHaveText(["grok"]);
@@ -180,6 +184,8 @@ test.describe("ADR-0179 UX-AG-5: a role grant links to the Roles page", () => {
   test("the unavailable Remove's reason carries a working link to the Roles page", async ({ page }) => {
     await mockApi(page);
     await page.goto("/ui/admin/agents");
+    // P3: grants, policy and entitlements have their own tab
+    await page.getByRole("tab", { name: "Grants & policy" }).click();
     const card = page.locator("section").filter({ has: page.getByText("Per-user entitlement", { exact: true }) }).first();
     await card.getByLabel("User").selectOption("dana");
     await card.getByRole("button", { name: "View" }).click();

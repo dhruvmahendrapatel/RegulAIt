@@ -65,6 +65,8 @@ export const CEILING_EXCEPTIONS = [
   // G2 + G11 (#599) with batch I-1 (#597) merged in: measured 1,049,109 B
   { name: "all JS", from: "1048 kB", to: "1050 kB", date: "2026-10-30", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6515493026" },  // post-demo backlog lanes (#453): one shared raise; new screens stay lazy-loaded
   { name: "all JS", from: "1050 kB", to: "1060 kB", date: "2026-10-30", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6522492997" },
+  // P3 batch B (identity-and-access long pages: previews and seven list pages in one lazy chunk), inside the owner's 1,075 kB cap: measured 1,066,290 B
+  { name: "all JS", from: "1060 kB", to: "1067 kB", date: "2026-10-30", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6529802888" },
 ];
 const DECISION_LINK = /^https:\/\/github\.com\/dhruvmahendrapatel\/RegulAIt\/issues\/\d+#issuecomment-\d+$/;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;

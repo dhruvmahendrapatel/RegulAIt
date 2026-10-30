@@ -181,9 +181,9 @@ async function mockApi(page: Page): Promise<Capture> {
 
 const PAGES = [
   { name: "Teams", path: "/ui/admin/teams", endpoint: "/v1/teams", listId: "teams", noun: "teams", total: 37, hide: "Member names", hideId: "members", optional: "Created", optionalId: "created", sortHeader: "Members", sortId: "memberCount", required: null },
-  { name: "Agents", path: "/ui/admin/agents", endpoint: "/v1/agents", listId: "agents", noun: "agents", total: 31, hide: "Model", hideId: "model", optional: "System prompt", optionalId: "prompt", sortHeader: "Tier", sortId: "tier", required: "Status" },
+  { name: "Agents", path: "/ui/admin/agents/catalog", endpoint: "/v1/agents", listId: "agents", noun: "agents", total: 31, hide: "Model", hideId: "model", optional: "System prompt", optionalId: "prompt", sortHeader: "Tier", sortId: "tier", required: "Status" },
   { name: "Credentials", path: "/ui/admin/credentials", endpoint: "/v1/admin/credentials", listId: "credentials", noun: "credentials", total: 28, hide: "Owner / creator", hideId: "owner", optional: "Scope", optionalId: "scope", sortHeader: "Credential", sortId: "name", required: "Flags" },
-  { name: "Licensing", path: "/ui/admin/licensing", endpoint: "/v1/licenses/verifications", listId: "licence-verifications", noun: "verifications", total: 45, hide: "Reason", hideId: "reason", optional: null, optionalId: null, sortHeader: "Rule", sortId: "rule", required: "Status" },
+  { name: "Licensing", path: "/ui/admin/licensing/verifications", endpoint: "/v1/licenses/verifications", listId: "licence-verifications", noun: "verifications", total: 45, hide: "Reason", hideId: "reason", optional: null, optionalId: null, sortHeader: "Rule", sortId: "rule", required: "Status" },
 ] as const;
 
 const lastList = (cap: Capture, endpoint: string) => [...cap.lists].reverse().find((u) => u.pathname === endpoint)!;
@@ -213,7 +213,7 @@ for (const P of PAGES) {
       await expect(list.locator("tbody tr")).toHaveCount(10);
       await list.getByRole("button", { name: "Next", exact: true }).click();
       await expect(status).toHaveText(`11–20 of ${P.total}`);
-      expect(lastList(cap, P.endpoint).searchParams.get("offset")).toBe("10");
+      expect(lastList(cap, P.endpoint).searchParams.get("offset"), lastList(cap, P.endpoint).search).toBe("10");
       await list.getByLabel("Rows per page").selectOption("50");
       await expect(status).toHaveText(`1–${P.total} of ${P.total}`);
       expect(lastList(cap, P.endpoint).searchParams.get("limit")).toBe("50");

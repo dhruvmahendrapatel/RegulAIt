@@ -612,3 +612,20 @@ The owner decided this raise on 2026-10-30, together with unparking the G-lanes 
 - Why: one lane alone measures 1,049,965 B against the 1,050,000 B ceiling, which leaves no room for the other lanes.
   Raising the ceiling once on main stops each lane from editing the same line.
 - A lane that would take total JS over 1,060 kB stops and goes back to the owner.
+
+## Addendum / As built (2026-10-30) — all JS 1,060 → 1,067 kB (P3 batch B: identity-and-access long pages)
+
+The owner capped all JS at 1,075 kB in total across every lane on 2026-10-30:
+<https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6529802888>. This is the ADR-recorded exception
+the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row, and it stays under that cap.
+
+- `all JS` from `1060 kB` to `1067 kB` (+7 kB). Entry JS stays at 138.5 kB and entry CSS at 10.7 kB; the lazy chunk
+  ceilings are unchanged.
+- Why: the P3 split of the workload identities, SSO, agents, ChatOps and licensing pages adds a preview component
+  (`ListPreview`) and seven list pages with their own routes (identities, grant proposals, account-link requests,
+  ChatOps identity links, the agent catalog, agent stewardship, the licence verification trail). They load together in
+  one lazy chunk (`screens/admin-identity-lists.ts`); one chunk per page measured 1,068,966 B, the grouped chunk
+  1,066,290 B (gzip, size-limit 14.2.0), against 1,057,827 B for the P2 branch it builds on. Part of the growth is the
+  split itself: the page modules the new pages share with their parents become shared chunks.
+- Freeze week: ADR-0198 §2 covers entry raises only; this raise rests on the owner decision above. ADR-0198's post-demo
+  reset applies to it.

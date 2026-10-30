@@ -772,6 +772,8 @@ test.describe("Agents — expected served model (ADR-0175)", () => {
       facts: (b) => ({ op: "agent_expected_served_model", agentId: AGENT.id, expectedServedModel: (b as Json).expectedServedModel }),
     });
     await page.goto("/ui/admin/agents");
+    // P3: pricing, the served-model baseline and prompts have their own tab
+    await page.getByRole("tab", { name: "Pricing & prompts" }).click();
     const card = page.locator("section").filter({ has: page.getByText("Expected served model — drift baseline", { exact: true }) });
     await card.getByLabel("Agent", { exact: true }).selectOption(AGENT.id, { timeout: 30_000 });
     await expect(card).toContainText("the strict default");
@@ -813,6 +815,8 @@ test.describe("Workload identities — signing keys and grant detail (ADR-0188)"
       ["GET", /^\/v1\/delegation-grants\/([^/]+)$/, () => ({ body: { ...ROOT, allocation: null, childAllocations: [{ id: U(50), parentGrantId: ROOT.id, childGrantId: U(41), amountMicros: 60_000_000, drawnMicros: 10_000_000, releasedMicros: 0, status: "open", createdAt: ISO, closedAt: null }] } })],
     ]);
     await page.goto("/ui/admin/workload-identities");
+    // P3: signing keys and SPIFFE trust have their own tab
+    await page.getByRole("tab", { name: /^Signing & trust/ }).click();
     await expect(page.getByText("Issuer signing keys", { exact: true })).toBeVisible({ timeout: 30_000 });
     return calls;
   }
@@ -845,6 +849,8 @@ test.describe("Workload identities — signing keys and grant detail (ADR-0188)"
     await page.getByRole("dialog", { name: "Rotate the issuer signing key?" }).getByRole("button", { name: "Rotate key" }).click();
     await expect(page.getByText("More than one configured key is available. Name the one to activate.").first()).toBeVisible();
 
+    // the run delegation tree is on the Delegation tab
+    await page.getByRole("tab", { name: "Delegation" }).click();
     await page.getByLabel("Run ID").fill(RUN);
     await page.getByRole("button", { name: "Load delegation tree" }).click();
     await page.getByRole("button", { name: /^Details of the grant for / }).click();

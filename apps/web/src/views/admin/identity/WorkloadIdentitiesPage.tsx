@@ -18,7 +18,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, InfoButton, Input, Modal, Select, SkeletonBlock, Table, Textarea } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, InfoButton, Input, Modal, Select, SkeletonBlock, Table, Tabs, Textarea, tabIds } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
 import { useAgents, useConnectors, useRoles, useServers, useServerTools, useUserPicker } from "../adminKit";
 import {
@@ -29,11 +29,15 @@ import {
   getIdentityPickerSources,
   getWorkloadIdentity,
   listIdentityCredentials,
+  listSpiffeBundleEndpoints,
+  listSpiffeTrustBundles,
   listRunDelegationTree,
   replaceIdentityGrants,
   revokeDelegationGrant,
   revokeIdentityCredential,
   revokeWorkloadIdentity,
+  spiffeBundleKeys,
+  spiffeEndpointKeys,
   updateWorkloadIdentity,
   workloadIdentityKeys,
 } from "./workloadIdentityApi";
@@ -91,8 +95,10 @@ import { SpiffeTrustBundlesCard } from "./SpiffeTrustBundles";
 import { SpiffeBundleEndpointsCard } from "./SpiffeBundleEndpoints";
 import s from "./workloadIdentities.module.css";
 import { OrgSettingsCard } from "../settings/OrgSettingsCard";
+import { useSettingsToReview } from "../settings/orgSettingsReview";
 import { fmtDateTime } from "../../../api/format";
-import { DataList } from "../../../ui/DataList";
+import { ListPreview, PREVIEW_ROWS, previewHeading } from "../../../ui/ListPreview";
+import { Link, useSearchParams } from "react-router-dom";
 
 /** ADR-0219: an identity row under the list contract, with its stewards' names joined by the gateway */
 type WorkloadIdentityRow = WorkloadIdentityView & { stewardNames?: string | null };
@@ -121,7 +127,7 @@ function Unavailable(props: { label: string; reason: ReactNode; size?: "sm" }) {
   );
 }
 
-interface Confirmation {
+export interface Confirmation {
   title: string;
   body: ReactNode;
   label: string;
@@ -131,7 +137,7 @@ interface Confirmation {
 }
 
 /** one write at a time; a refusal becomes a sentence, never a success */
-function useIdentityWrite() {
+export function useIdentityWrite() {
   const qc = useQueryClient();
   const { toast } = useToast();
   const [busy, setBusy] = useState(false);
@@ -159,9 +165,24 @@ function useIdentityWrite() {
   return { busy, failure, setFailure, run };
 }
 
+/** the identity and delegation org settings this page edits (its Settings tab counts the relaxed ones) */
+const IDENTITY_SETTING_KEYS = [
+  "agentEntitlementMode",
+  "delegatedTokenTtlSeconds",
+  "delegationMaxDepth",
+  "workloadClientAuthMethods",
+  "dpopNonceRequired",
+  "workloadKeyMaxAgeDays",
+  "delegationUncappedRootAllowed",
+  "delegationRootDefaultCapMicros",
+  "delegationRootMaxLifetimeSeconds",
+];
+
 export default function WorkloadIdentitiesPage() {
   const write = useIdentityWrite();
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // the full list's Manage links back here with ?identity=<id>
+  const [params] = useSearchParams();
+  const [selectedId, setSelectedId] = useState<string | null>(() => params.get("identity"));
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [editing, setEditing] = useState<WorkloadIdentityDetailView | null>(null);
   const [addingGrant, setAddingGrant] = useState<{ identity: WorkloadIdentityDetailView; set: AgentGrantsView } | null>(null);
@@ -181,6 +202,14 @@ export default function WorkloadIdentitiesPage() {
     write.setFailure(null);
     setConfirmation(c);
   };
+
+  const [tab, setTab] = useState("delegation");
+  const settingsToReview = useSettingsToReview(IDENTITY_SETTING_KEYS);
+  // what the trust tab would show as needing review, read with the cards' own query keys (one fetch, shared)
+  const bundles = useQuery({ queryKey: spiffeBundleKeys.list, queryFn: listSpiffeTrustBundles });
+  const endpoints = useQuery({ queryKey: spiffeEndpointKeys.list, queryFn: listSpiffeBundleEndpoints });
+  const trustToReview =
+    (bundles.data?.legacyEnvironmentIgnored ? 1 : 0) + (endpoints.data?.items ?? []).filter((x) => x.enabled && x.lastErrorCode).length;
 
   return (
     <>
@@ -210,54 +239,48 @@ export default function WorkloadIdentitiesPage() {
         {write.failure && (
           <ErrorState title="Change not recorded" message={write.failure} onRetry={() => write.setFailure(null)} />
         )}
-        <Card title="Identities">
-          <DataList<WorkloadIdentityRow>
-            listId="workload-identities"
-            noun="workload identities"
-            endpoint="/v1/workload-identities"
-            exportPath="/v1/workload-identities/export.xlsx"
-            queryKey={workloadIdentityKeys.list}
-            legacyKey="items"
-            errorMessage="Workload identities could not be read. No empty or active state is inferred."
-            defaultSort={{ key: "created", dir: "desc" }}
-            rowKey={(i) => i.id}
-            onRows={(page) => setSeen((prev) => [...prev.filter((p) => !page.some((r) => r.id === p.id)), ...page])}
-            empty={
-              <EmptyState
-                title="No workload identities"
-                body="No agent has an identity of its own yet. Nothing is granted to an agent by default."
-              />
-            }
-            columns={[
-              { key: "identifier", header: "Identifier", main: true, sortable: true, render: (i) => <span className={s.identifier}>{i.identifier}</span> },
-              { key: "kind", header: "Kind", main: true, sortable: true, render: (i) => workloadKindLabels[i.kind] ?? i.kind },
-              {
-                key: "stewards",
-                header: "Stewards",
-                main: true,
-                sortable: true,
-                render: (i) => i.stewardNames ?? (i.sponsorUserIds.map(personLabel).join(", ") || "No steward recorded"),
-              },
-              { key: "environments", header: "Environments", main: true, sortable: true, render: (i) => i.environments.join(", ") || "None allowed" },
-              { key: "status", header: "Status", main: true, sortable: true, required: "Status is always shown", render: (i) => <StatusBadge status={i.status} /> },
-              { key: "created", header: "Created", sortable: true, render: (i) => fmtDateTime(i.createdAt) },
-              { key: "updated", header: "Updated", sortable: true, render: (i) => fmtDateTime(i.updatedAt) },
-              {
-                key: "manage",
-                header: "Manage",
-                action: true,
-                render: (i) => (
-                  <Button size="sm" aria-label={`Manage ${i.identifier}`} aria-pressed={selectedId === i.id} onClick={() => setSelectedId(i.id)}>
-                    Manage
-                  </Button>
-                ),
-              },
-            ]}
-          />
-          {people.data && !people.data.complete && (
-            <p>Only the first page of people was loaded, so some stewards show as “Not loaded”. That is not a statement that they are inactive.</p>
-          )}
-        </Card>
+        {/* P3: the growing list is a preview; the full list has its own page */}
+        <ListPreview<WorkloadIdentityRow>
+          title="Identities"
+          noun="identities"
+          endpoint="/v1/workload-identities"
+          legacyKey="items"
+          queryKey={[...workloadIdentityKeys.list]}
+          sort={{ key: "created", dir: "desc" }}
+          attention={[
+            { label: "suspended", filters: { status: "suspended" } },
+            { label: "revoked", filters: { status: "revoked" } },
+          ]}
+          errorMessage="Workload identities could not be read. No empty or active state is inferred."
+          columns={[
+            { key: "identifier", header: "Identifier", render: (i) => <span className={s.identifier}>{i.identifier}</span> },
+            { key: "kind", header: "Kind", render: (i) => workloadKindLabels[i.kind] ?? i.kind },
+            { key: "stewards", header: "Stewards", render: (i) => i.stewardNames ?? (i.sponsorUserIds.map(personLabel).join(", ") || "No steward recorded") },
+            { key: "environments", header: "Environments", render: (i) => i.environments.join(", ") || "None allowed" },
+            { key: "status", header: "Status", render: (i) => <StatusBadge status={i.status} /> },
+            {
+              key: "manage",
+              header: "Manage",
+              render: (i) => (
+                <Button size="sm" aria-label={`Manage ${i.identifier}`} aria-pressed={selectedId === i.id} onClick={() => setSelectedId(i.id)}>
+                  Manage
+                </Button>
+              ),
+            },
+          ]}
+          rowKey={(i) => i.id}
+          onRows={(page) => setSeen((prev) => [...prev.filter((p) => !page.some((r) => r.id === p.id)), ...page])}
+          viewAll="/admin/workload-identities/identities"
+          empty={
+            <EmptyState
+              title="No workload identities"
+              body="No agent has an identity of its own yet. Nothing is granted to an agent by default."
+            />
+          }
+        />
+        {people.data && !people.data.complete && (
+          <p>Only the first page of people was loaded, so some stewards show as “Not loaded”. That is not a statement that they are inactive.</p>
+        )}
 
         {selectedId && (
           <SelectedIdentity
@@ -271,6 +294,21 @@ export default function WorkloadIdentitiesPage() {
           />
         )}
 
+        {/* P3: the settings are in tabs; delegation (and its warnings) opens first, and the trust tab counts what needs review */}
+        <Tabs
+          tabs={[
+            { id: "delegation", label: "Delegation" },
+            { id: "settings", label: settingsToReview > 0 ? `Settings · ${settingsToReview} to review` : "Settings" },
+            { id: "trust", label: trustToReview > 0 ? `Signing & trust · ${trustToReview} to review` : "Signing & trust" },
+          ]}
+          active={tab}
+          onChange={setTab}
+          idPrefix="identity-settings"
+          label="Identity settings"
+        />
+        <div role="tabpanel" id={tabIds("identity-settings", tab).panel} aria-labelledby={tabIds("identity-settings", tab).tab} className={s.stack}>
+          {tab === "delegation" ? (
+            <>
         <Card
           title="Delegation safeguards"
           info={
@@ -301,24 +339,14 @@ export default function WorkloadIdentitiesPage() {
           </div>
         </Card>
 
-        {/* ADR-0188 decision 10: least privilege, token lifetime, chain depth, workload sign-in and the root-grant limits */}
-        <OrgSettingsCard
-          title="Agent identity and delegation settings"
-          keys={[
-            "agentEntitlementMode",
-            "delegatedTokenTtlSeconds",
-            "delegationMaxDepth",
-            "workloadClientAuthMethods",
-            "dpopNonceRequired",
-            "workloadKeyMaxAgeDays",
-            "delegationUncappedRootAllowed",
-            "delegationRootDefaultCapMicros",
-            "delegationRootMaxLifetimeSeconds",
-          ]}
-          testId="identity-delegation-settings"
-          helpInInfo
-        />
 
+        <RunDelegationTree busy={write.busy} personLabel={personLabel} identities={seen} ask={ask} />
+            </>
+          ) : tab === "settings" ? (
+            // ADR-0188 decision 10: least privilege, token lifetime, chain depth, workload sign-in and the root-grant limits
+            <OrgSettingsCard title="Agent identity and delegation settings" keys={IDENTITY_SETTING_KEYS} testId="identity-delegation-settings" helpInInfo />
+          ) : (
+            <>
         <IssuerSigningKeysCard busy={write.busy} ask={ask} />
 
         {/* ADR-0188 S9: the SPIFFE trust bundles, in audited storage */}
@@ -326,7 +354,9 @@ export default function WorkloadIdentitiesPage() {
         {/* ADR-0188 S9 follow-up: where a domain's bundle is fetched from (off until set) */}
         <SpiffeBundleEndpointsCard busy={write.busy} ask={ask} />
 
-        <RunDelegationTree busy={write.busy} personLabel={personLabel} identities={seen} ask={ask} />
+            </>
+          )}
+        </div>
       </div>
 
       {editing && (
@@ -420,30 +450,39 @@ export default function WorkloadIdentitiesPage() {
           }}
         />
       )}
-      <ConfirmModal
-        open={!!confirmation}
-        title={confirmation?.title ?? "Confirm identity change"}
-        body={
-          <>
-            <p>{confirmation?.body}</p>
-            <p>You will be asked to confirm it&apos;s you; the change is recorded in the audit log.</p>
-          </>
-        }
-        danger={confirmation?.danger ?? true}
-        confirmLabel={confirmation?.label}
-        onCancel={() => setConfirmation(null)}
-        onConfirm={() => {
-          const c = confirmation;
-          setConfirmation(null);
-          if (c) void write.run(c.run, c.okMessage);
-        }}
-      />
-      {write.busy && <p role="status">Waiting for identity verification and the recorded change…</p>}
+      <IdentityConfirm confirmation={confirmation} onClose={() => setConfirmation(null)} write={write} />
     </>
   );
 }
 
-function StatusBadge({ status }: { status: string }) {
+/** the confirmation every identity write passes through, then the write itself (one at a time) */
+export function IdentityConfirm(props: { confirmation: Confirmation | null; onClose: () => void; write: ReturnType<typeof useIdentityWrite> }) {
+  const c = props.confirmation;
+  return (
+    <>
+      <ConfirmModal
+        open={!!c}
+        title={c?.title ?? "Confirm identity change"}
+        body={
+          <>
+            <p>{c?.body}</p>
+            <p>You will be asked to confirm it&apos;s you; the change is recorded in the audit log.</p>
+          </>
+        }
+        danger={c?.danger ?? true}
+        confirmLabel={c?.label}
+        onCancel={props.onClose}
+        onConfirm={() => {
+          props.onClose();
+          if (c) void props.write.run(c.run, c.okMessage);
+        }}
+      />
+      {props.write.busy && <p role="status">Waiting for identity verification and the recorded change…</p>}
+    </>
+  );
+}
+
+export function StatusBadge({ status }: { status: string }) {
   return <Badge tone={status === "active" ? "ok" : status === "revoked" ? "danger" : "warn"}>{status}</Badge>;
 }
 
@@ -633,6 +672,7 @@ function SelectedIdentity(props: {
       )}
       {active && grants.data && (
         <GrantProposals
+          preview
           identity={identity}
           busy={props.busy}
           targetName={(id) => {
@@ -1170,8 +1210,14 @@ function IdentityCredentials(props: {
  * (security review Medium 3): only allowed calls and the agent's own allow-list refusals are evidence; a proposal that
  * never ran (refusal only) is never pre-selected, and is added only by ticking it.
  */
-function GrantProposals(props: { identity: WorkloadIdentityDetailView; busy: boolean; targetName: (id: string) => string; ask: (c: Confirmation) => void }) {
-  const [requested, setRequested] = useState(false);
+/**
+ * P3: on the overview this is a preview (read on request, at most five rows, the count and how many no steward holds
+ * in the heading, and a link to the proposals' own page); on that page (`preview` false) it is the full list with
+ * the selection and Accept.
+ */
+export function GrantProposals(props: { identity: WorkloadIdentityDetailView; busy: boolean; targetName: (id: string) => string; ask: (c: Confirmation) => void; preview?: boolean }) {
+  // the full page is itself the request: reaching it reads the proposals
+  const [requested, setRequested] = useState(!props.preview);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const proposals = useQuery({
     queryKey: workloadIdentityKeys.proposals(props.identity.id),
@@ -1193,7 +1239,15 @@ function GrantProposals(props: { identity: WorkloadIdentityDetailView; busy: boo
   return (
     <>
       <div className={s.heading}>
-        <h2>Proposed grants from observed use</h2>
+        <h2>
+          Proposed grants from observed use
+          {data ? ` · ${previewHeading(data.proposals.length, "proposals", [{ label: "not held by a steward", count: data.proposals.filter((p) => !p.heldByStewards).length }])}` : ""}
+        </h2>
+        {props.preview && data && (
+          <Link to={`/admin/workload-identities/${encodeURIComponent(props.identity.id)}/proposals`} aria-label="View all proposals and accept">
+            View all and accept →
+          </Link>
+        )}
         <Button disabled={props.busy || proposals.isFetching} onClick={() => (requested ? void proposals.refetch() : setRequested(true))}>
           {requested ? "Refresh proposals" : "Propose grants from observed use"}
         </Button>
@@ -1210,14 +1264,14 @@ function GrantProposals(props: { identity: WorkloadIdentityDetailView; busy: boo
       ) : (
         <>
           <Table<IdentityGrantProposal>
-            rows={data.proposals}
+            rows={props.preview ? data.proposals.slice(0, PREVIEW_ROWS) : data.proposals}
             rowKey={proposalKey}
             empty={<EmptyState title="Nothing to propose" body="Every call observed in the window is already covered by this identity's own grants." />}
             columns={[
-              {
+              ...(props.preview ? [] : [{
                 key: "include",
                 header: "Include",
-                render: (p) =>
+                render: (p: IdentityGrantProposal) =>
                   p.heldByStewards ? (
                     <input
                       type="checkbox"
@@ -1228,7 +1282,7 @@ function GrantProposals(props: { identity: WorkloadIdentityDetailView; busy: boo
                   ) : (
                     "Not available"
                   ),
-              },
+              }]),
               { key: "grant", header: "Grant", render: (p) => proposalLabel(p.grant) },
               { key: "target", header: "Target", render: (p) => props.targetName(proposalTargetId(p.grant)) },
               {
@@ -1250,7 +1304,9 @@ function GrantProposals(props: { identity: WorkloadIdentityDetailView; busy: boo
           />
           {data.unproposable > 0 && <p>{data.unproposable} observed call(s) cannot become an own grant (for example a connector call that named no object).</p>}
           {data.truncated && <p>Only the most recent proposals are shown.</p>}
-          {chosen.length === 0 ? (
+          {props.preview ? (
+            <p>Selecting and accepting proposals happens on their own page.</p>
+          ) : chosen.length === 0 ? (
             <Unavailable label="Accept proposals" reason="No proposal is selected, so accepting would change nothing." />
           ) : (
             <Button

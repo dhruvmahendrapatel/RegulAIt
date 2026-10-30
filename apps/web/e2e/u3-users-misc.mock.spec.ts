@@ -318,6 +318,8 @@ test.describe("U3: ChatOps", () => {
         ++n === 1 ? { status: 502, body: { error: "chatops_post_failed", upstreamStatus: 401, detail: "slack refused the post: invalid_auth" } } : { messageId: U(91), redacted: true, decidable: false, messageRef: "1.2" },
     });
     await page.goto("/ui/admin/chatops");
+    // P3: posting and routes have their own tab
+    await page.getByRole("tab", { name: "Posting & routes" }).click();
     const card = page.getByTestId("chatops-post-approval");
     await card.getByLabel("Approval").selectOption(U(90));
     await card.getByLabel("Workspace", { exact: true }).selectOption("eng-slack");
@@ -346,6 +348,7 @@ test.describe("U3: ChatOps", () => {
           : { channelId: U(95), agentId: U(96), provider: "slack", connectionId: CONN.id, externalChannelId: b.externalChannelId },
     });
     await page.goto("/ui/admin/chatops");
+    await page.getByRole("tab", { name: "Posting & routes" }).click();
     const card = page.getByTestId("chatops-builder-routes");
     await expect(card.getByText("connection-wide", { exact: true })).toBeVisible();
     await card.getByLabel("Channel for Helpdesk (empty = connection-wide)").fill("C0123");

@@ -210,9 +210,10 @@ test.describe("U3: unreadable settings are never prefilled", () => {
 });
 
 test.describe("U3: each page carries its settings", () => {
-  const PAGES: Array<{ path: string; card: string; keys: string[] }> = [
+  // P3: a page that keeps its settings in tabs names the tab that holds the card
+  const PAGES: Array<{ path: string; card: string; keys: string[]; tab?: RegExp }> = [
     { path: "/ui/admin/organization", card: "org-pii-international", keys: ["piiInternationalCategories"] },
-    { path: "/ui/admin/sso", card: "sso-step-up-settings", keys: ["stepUpMode", "stepUpMaxAgeSeconds", "stepUpActions"] },
+    { path: "/ui/admin/sso", card: "sso-step-up-settings", keys: ["stepUpMode", "stepUpMaxAgeSeconds", "stepUpActions"], tab: /^Sessions & step-up/ },
     { path: "/ui/admin/enforcement-posture", card: "evidence-detection-settings", keys: ["decisionReceiptsMode", "auditAnchorTimestampMode", "vendoredDetectionPacks", "outboundCredentialAudience"] },
     { path: "/ui/admin/retention", card: "audit-evidence-retention", keys: ["modeAuditRetention", "canaryObservationRetentionDays"] },
     { path: "/ui/admin/admission", card: "mcp-admission-mode", keys: ["mcpAdmissionMode"] },
@@ -223,6 +224,7 @@ test.describe("U3: each page carries its settings", () => {
     {
       path: "/ui/admin/workload-identities",
       card: "identity-delegation-settings",
+      tab: /^Settings/,
       keys: ["agentEntitlementMode", "delegatedTokenTtlSeconds", "delegationMaxDepth", "workloadClientAuthMethods", "dpopNonceRequired", "workloadKeyMaxAgeDays", "delegationUncappedRootAllowed", "delegationRootDefaultCapMicros", "delegationRootMaxLifetimeSeconds"],
     },
     { path: "/ui/admin/model-risk", card: "mrm-expiry-warn", keys: ["mrmExpiryWarnDays"] },
@@ -231,6 +233,7 @@ test.describe("U3: each page carries its settings", () => {
     test(`${pg.path}: ${pg.card}`, async ({ page }) => {
       await mockApi(page);
       await page.goto(pg.path);
+      if (pg.tab) await page.getByRole("tab", { name: pg.tab }).click();
       const card = page.getByTestId(pg.card);
       for (const key of pg.keys) {
         const row = card.getByTestId(`org-setting-${key}`);
@@ -276,6 +279,7 @@ test.describe("U3: each page carries its settings", () => {
   test("step-up actions: unticking one is a relaxation; the list is sent in vocabulary order", async ({ page }) => {
     const st = await mockApi(page);
     await page.goto("/ui/admin/sso");
+    await page.getByRole("tab", { name: /^Sessions & step-up/ }).click();
     const row = page.getByTestId("org-setting-stepUpActions");
     await row.getByLabel("Managing passkeys").uncheck();
     await row.getByRole("button", { name: "Review change" }).click();
