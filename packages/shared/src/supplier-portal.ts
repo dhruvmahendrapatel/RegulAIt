@@ -28,6 +28,15 @@ export const SUPPLIER_PORTAL_LIMITS = Object.freeze({
 /** the cookie a spent sign-in link becomes; HttpOnly, Secure, SameSite=Strict, scoped to the supplier API path */
 export const SUPPLIER_SESSION_COOKIE = "regulait_supplier";
 export const SUPPLIER_API_PREFIX = "/supplier/v1";
+/** the supplier routes: auth-exempt and non-admin for the platform hooks (route-classes.ts), authenticated in-route
+ * on the supplier cookie only. A supplier session reaches nothing else. */
+export const SUPPLIER_ROUTES = [
+  "POST /supplier/v1/session",
+  "POST /supplier/v1/session/end",
+  "GET /supplier/v1/assessment",
+  "POST /supplier/v1/submissions",
+] as const;
+export const SUPPLIER_ROUTE_PATHS: readonly string[] = [...new Set(SUPPLIER_ROUTES.map((r) => r.split(" ")[1]!))];
 /** the plaintext prefixes of the two supplier tokens; only their sha256 is stored */
 export const SUPPLIER_INVITE_TOKEN_PREFIX = "rglsi_";
 export const SUPPLIER_SESSION_TOKEN_PREFIX = "rglss_";

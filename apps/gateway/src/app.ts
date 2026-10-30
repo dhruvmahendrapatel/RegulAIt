@@ -319,6 +319,8 @@ export interface BuildAppOptions {
    * environment (see rate-limit.ts); this override exists so a test can pin
    * tiny windows without touching process.env. */
   rateLimit?: Partial<RateLimitConfig>;
+  /** ADR-0221: the supplier portal's upload scan hook; none by default (files are stored as `not_scanned`) */
+  supplierFileScanner?: SupplierFileScanner;
   /** ADR-0167 (CFG-02): Fastify's logger option. `false` (the default here)
    * keeps the ~100 test files that construct apps silent; `startGateway`
    * passes a redacting pino config resolved from the environment, so the
@@ -445,6 +447,7 @@ import {
   reviewRoleIdsFor,
 } from "./review-policy.js";
 import { registerVendorRoutes, syncVendorForInstance } from "./vendors.js";
+import { registerSupplierPortalRoutes, type SupplierFileScanner } from "./supplier-portal.js";
 // ADR-0081 — the AI risk register (gap L2): evidence computed from the real
 // ledgers at read time; acceptance is an audited record.
 import { registerRiskRoutes } from "./risks.js";
@@ -5435,6 +5438,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // rails it copies. Propose/list/detail/edit/attest are non-admin
   // (owner-or-admin in-handler); RETIRE stays admin through the default gate.
   registerVendorRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0221 (P4) — the supplier portal beside the vendor registry it answers. Admin routes go through the default
+  // gate; the supplier routes are exempt and authenticate in-route (route-classes.ts).
+  registerSupplierPortalRoutes(app, db, { dataKey: opts.dataKey, fileScanner: opts.supplierFileScanner });
   // ADR-0081 — the AI risk register beside the use-case registry it can
   // reference. Register/list/detail/edit/transition are non-admin
   // (owner-or-admin in-handler, exactly the use-case scoping); ACCEPTANCE is

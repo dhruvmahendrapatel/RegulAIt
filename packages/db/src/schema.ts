@@ -1518,6 +1518,11 @@ export const auditLog = pgTable(
         "ai_incident",
         "use_case_feedback",
         "feedback_link",
+        // ADR-0221 (P4): the supplier portal — a grant and its links and sessions, an answer a supplier submitted,
+        // and a custom questionnaire version. Plain text column — no DDL needed.
+        "supplier_access",
+        "supplier_submission",
+        "supplier_questionnaire",
         "ai_policy_document",
         "ai_policy_acknowledgement",
         // ADR-0185 I3: memory retention. A conversation purged by the sweep or
