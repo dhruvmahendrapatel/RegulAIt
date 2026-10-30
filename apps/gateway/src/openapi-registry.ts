@@ -1686,6 +1686,9 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/servers": "servers",
   "POST /v1/servers": "servers",
   "PATCH /v1/servers/:serverId": "servers",
+  // ADR-0210: the OIDC-profile MCP identity assertion issuer (an MCP server setting, not an ADR-0188 identity route)
+  "GET /mcp-identity/.well-known/openid-configuration": "servers",
+  "GET /mcp-identity/.well-known/jwks.json": "servers",
   "GET /v1/servers/:serverId/upstream-credential": "servers",
   "PUT /v1/servers/:serverId/upstream-credential": "servers",
   "DELETE /v1/servers/:serverId/upstream-credential": "servers",
@@ -2070,8 +2073,6 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "PUT /v1/governance/alerts/:alertId/owner": "reports",
   "POST /v1/governance/alerts/:alertId/ticket": "reports",  // --- ADR-0188 (batch 6 item 1) S1: 501 stubs until their slices land
   "GET /.well-known/jwks.json": "identity",
-  "GET /mcp-identity/.well-known/openid-configuration": "identity",
-  "GET /mcp-identity/.well-known/jwks.json": "identity",
   "POST /oauth/token": "identity",
   "POST /oauth/token/revocation": "identity",
   "POST /oauth/token/introspection": "identity",
