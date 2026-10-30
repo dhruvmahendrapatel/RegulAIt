@@ -13,7 +13,7 @@ import { useState, type ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../api/client";
-import { humanize, plural } from "../../api/format";
+import { humanize } from "../../api/format";
 import type { DirectoryUser } from "../../api/types";
 import { PageHeader } from "../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Fieldset, Input, Modal, Select, SeverityBadge, Table, Textarea } from "../../ui/kit";
@@ -42,6 +42,7 @@ import {
   type IncidentClock,
   type IncidentDetail,
 } from "./incidentModel";
+import { CloseIncidentModal } from "./CloseIncidentModal";
 
 const ROW = { display: "flex", gap: "var(--s2)", alignItems: "center", minHeight: 32 } as const;
 const BOX = { width: 18, height: 18, margin: 0, flex: "none" } as const;
@@ -167,76 +168,6 @@ function EditModal(props: { open: boolean; d: IncidentDetail; onClose: () => voi
             </Field>
           )}
         </Fieldset>
-        {act.error && (
-          <div className={v.errLine} role="alert">
-            {act.error}
-          </div>
-        )}
-      </div>
-    </Modal>
-  );
-}
-
-function CloseModal(props: { open: boolean; d: IncidentDetail; onClose: () => void; onSaved: () => void }) {
-  const act = useAction();
-  const [rootCause, setRootCause] = useState(props.d.incident.rootCause ?? "");
-  const [lessons, setLessons] = useState(props.d.incident.lessonsLearned ?? "");
-  const openClocks = props.d.notifications.filter((n) => n.status === "pending" || n.status === "sent_initial");
-  const openActions = props.d.actions.filter((x) => x.status === "open");
-  const adminOnly = !props.d.permissions.canClose;
-  return (
-    <Modal
-      open={props.open}
-      wide
-      title={`Close ${props.d.incident.ref}`}
-      onClose={props.onClose}
-      actions={
-        <>
-          <Button onClick={props.onClose}>Cancel</Button>
-          <Button
-            variant="primary"
-            disabled={act.busy || adminOnly || !rootCause.trim() || !lessons.trim() || openClocks.length > 0 || openActions.length > 0}
-            onClick={() =>
-              void act
-                .run(() => api.post(`/v1/incidents/${props.d.incident.id}/close`, { rootCause: rootCause.trim(), lessonsLearned: lessons.trim() }), `${props.d.incident.ref} closed`)
-                .then((ok) => {
-                  if (ok) {
-                    props.onSaved();
-                    props.onClose();
-                  }
-                })
-            }
-          >
-            Close incident
-          </Button>
-        </>
-      }
-    >
-      <div className={v.stack}>
-        {adminOnly && (
-          <div className={v.errLine} role="alert">
-            Closing a serious, high or critical incident releases the use case&apos;s deploy gate, so an admin closes it. You may mark it resolved
-            (Edit), which releases nothing.
-          </div>
-        )}
-        {openClocks.length > 0 && (
-          <div className={v.errLine} role="alert">
-            {plural(openClocks.length, "notification clock")} {openClocks.length === 1 ? "is" : "are"} not final: record the complete report, or an admin marks them not required or tolled
-            with a reason.
-          </div>
-        )}
-        {openActions.length > 0 && (
-          <div className={v.errLine} role="alert">
-            {plural(openActions.length, "corrective action")} {openActions.length === 1 ? "is" : "are"} still open: mark each done with its evidence, or cancel it with a reason.
-          </div>
-        )}
-        <Field label="Root cause">
-          <Textarea value={rootCause} onChange={(e) => setRootCause(e.target.value)} rows={3} maxLength={8000} />
-        </Field>
-        <Field label="Lessons learned">
-          <Textarea value={lessons} onChange={(e) => setLessons(e.target.value)} rows={3} maxLength={8000} />
-        </Field>
-        <p className={v.faint}>A closed incident is final. Both texts are kept with the record and in its export.</p>
         {act.error && (
           <div className={v.errLine} role="alert">
             {act.error}
@@ -797,7 +728,7 @@ export default function IncidentDetailPage() {
       {d && (
         <>
           <EditModal open={editing} d={d} onClose={() => setEditing(false)} onSaved={refetch} />
-          <CloseModal open={closing} d={d} onClose={() => setClosing(false)} onSaved={refetch} />
+          <CloseIncidentModal open={closing} d={d} onClose={() => setClosing(false)} onSaved={refetch} />
           <ContainModal open={containing} d={d} onClose={() => setContaining(false)} onSaved={refetch} />
         </>
       )}

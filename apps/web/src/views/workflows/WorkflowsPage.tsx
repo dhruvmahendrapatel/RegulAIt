@@ -7,7 +7,7 @@ import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
-import type { Project, WorkflowListResponse } from "../../api/types";
+import type { Project, WorkflowInstanceSummary, WorkflowListResponse } from "../../api/types";
 import { ago, humanize } from "../../api/format";
 import { PageHeader } from "../../shell/AppShell";
 import {
@@ -17,17 +17,23 @@ import {
   ErrorState,
   Field,
   Input,
+  RowActions,
   Select,
   StatusBadge,
   Table,
 } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
+import { useSession } from "../../session/SessionContext";
+import { AbortWorkflowDialog, canAbort } from "./workflowAbort";
 import v from "../views.module.css";
 
 export default function WorkflowsPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  // the list holds only what the reader may drive (their own, or every one for an admin); a bootstrap credential drives none
+  const { auth } = useSession();
+  const [aborting, setAborting] = useState<WorkflowInstanceSummary | null>(null);
 
   const q = useQuery({
     queryKey: ["workflows"],
@@ -190,6 +196,32 @@ export default function WorkflowsPage() {
                   render: (i) => <span className={v.faint}>{ago(i.createdAt)}</span>,
                   sort: (i) => i.createdAt,
                 },
+                {
+                  key: "actions",
+                  header: "",
+                  srHeader: "Actions",
+                  align: "right",
+                  render: (i) => (
+                    <RowActions
+                      slot="5rem"
+                      secondary={
+                        auth?.userId && canAbort(i.status) && (
+                          <Button
+                            size="sm"
+                            variant="danger"
+                            aria-label={`Abort ${i.change?.description ?? i.id}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setAborting(i);
+                            }}
+                          >
+                            Abort
+                          </Button>
+                        )
+                      }
+                    />
+                  ),
+                },
               ]}
               rows={q.data?.instances}
               rowKey={(i) => i.id}
@@ -208,6 +240,17 @@ export default function WorkflowsPage() {
           )}
         </Card>
       </div>
+      {aborting && (
+        <AbortWorkflowDialog
+          id={aborting.id}
+          name={aborting.change?.description || "this workflow"}
+          onClose={() => setAborting(null)}
+          onAborted={() => {
+            setAborting(null);
+            void queryClient.invalidateQueries({ queryKey: ["workflows"] });
+          }}
+        />
+      )}
     </>
   );
 }
