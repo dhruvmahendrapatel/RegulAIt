@@ -4616,6 +4616,8 @@ export const orgSettings = pgTable(
     feedbackResolveSlaDays: integer("feedback_resolve_sla_days").notNull().default(30),
     /** A13: after this many days a feedback body and contact are deleted (the resolution record stays) */
     feedbackRetentionDays: integer("feedback_retention_days").notNull().default(365),
+    /** ADR-0221 (migration 0241): the supplier portal — built, shipped OFF; turning it on is a relaxation */
+    supplierPortalEnabled: boolean("supplier_portal_enabled").notNull().default(false),
     /** A14: a human-originated governed call by a person not current on an applicable published document is refused */
     literacyGateMode: text("literacy_gate_mode", { enum: ACCOUNTABILITY_GATE_MODES }).notNull().default("enforce"),
     literacyDefaultValidityDays: integer("literacy_default_validity_days").notNull().default(365),
@@ -9857,6 +9859,9 @@ export interface AiVendorPackAttestation {
   recordedAt: string;
   /** which version of the assessment questionnaire the answer came from */
   questionnaireVersion: number;
+  /** ADR-0221: set when the claim came through the supplier portal. The supplier SUBMITTED it; the
+   * user in `recordedByUserId` reviewed it and recorded it. Absent on every answer typed in by a user. */
+  submittedBySupplier?: { accessId: string; email: string; submissionId: string; submittedAt: string };
 }
 
 export const aiVendors = pgTable(
@@ -14403,3 +14408,170 @@ export const demoBeatFallbacks = pgTable(
   (t) => [check("demo_beat_fallbacks_beat_id_check", sql`${t.beatId} ~ '^[a-z][a-z0-9-]{1,63}$'`)],
 );
 export type DemoBeatFallbackRow = typeof demoBeatFallbacks.$inferSelect;
+
+/**
+ * ADR-0221 (migrations 0241-0242, PENDING P4) — the supplier portal. A supplier signs in through a single-use link
+ * and answers ONE vendor's ONE assessment; every answer is held for a reviewer, who accepts it into the vendor's
+ * ADR-0084 attestations or rejects it. Tokens are stored as sha256 only; timestamps are on the database clock.
+ */
+export interface SupplierQuestion {
+  /** stable within the questionnaire, `^[a-z0-9][a-z0-9_-]{0,63}$` */
+  id: string;
+  prompt: string;
+  help: string;
+  required: boolean;
+  /** whether the supplier may (not must) attach one evidence file */
+  allowFile: boolean;
+  /** an answer accepted by a reviewer becomes an attestation against this control, when set */
+  controlRef: string | null;
+}
+
+export const supplierQuestionnaires = pgTable(
+  "supplier_questionnaires",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    version: integer("version").notNull(),
+    description: text("description").notNull().default(""),
+    questions: jsonb("questions").$type<SupplierQuestion[]>().notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+  },
+  (t) => [
+    unique("supplier_questionnaires_name_version_uq").on(t.name, t.version),
+    check("supplier_questionnaires_name_check", sql`char_length(${t.name}) BETWEEN 1 AND 120`),
+    check("supplier_questionnaires_description_check", sql`char_length(${t.description}) <= 2000`),
+    check("supplier_questionnaires_version_check", sql`${t.version} >= 1`),
+    check(
+      "supplier_questionnaires_questions_check",
+      sql`jsonb_typeof(${t.questions}) = 'array' AND jsonb_array_length(${t.questions}) BETWEEN 1 AND 100`,
+    ),
+  ],
+);
+export type SupplierQuestionnaireRow = typeof supplierQuestionnaires.$inferSelect;
+
+export const supplierAccess = pgTable(
+  "supplier_access",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    vendorId: uuid("vendor_id")
+      .notNull()
+      .references(() => aiVendors.id, { onDelete: "cascade" }),
+    workflowInstanceId: uuid("workflow_instance_id")
+      .notNull()
+      .references(() => workflowInstances.id, { onDelete: "cascade" }),
+    framework: text("framework").notNull(),
+    questionnaireId: uuid("questionnaire_id").references(() => supplierQuestionnaires.id, { onDelete: "restrict" }),
+    supplierEmail: text("supplier_email").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: uuid("revoked_by").references(() => users.id, { onDelete: "set null" }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "supplier_access_email_check",
+      sql`char_length(${t.supplierEmail}) BETWEEN 3 AND 254 AND ${t.supplierEmail} = lower(${t.supplierEmail}) AND ${t.supplierEmail} ~ '^[^@[:space:]]+@[^@[:space:]]+$'`,
+    ),
+    check("supplier_access_framework_check", sql`char_length(${t.framework}) BETWEEN 1 AND 120`),
+    check(
+      "supplier_access_ttl_check",
+      sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} - ${t.createdAt} <= interval '30 days'`,
+    ),
+    index("supplier_access_vendor_idx").on(t.vendorId),
+  ],
+);
+export type SupplierAccessRow = typeof supplierAccess.$inferSelect;
+
+export const supplierInvitations = pgTable(
+  "supplier_invitations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accessId: uuid("access_id")
+      .notNull()
+      .references(() => supplierAccess.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("supplier_invitations_token_hash_uq").on(t.tokenHash),
+    check("supplier_invitations_token_hash_check", sql`${t.tokenHash} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "supplier_invitations_ttl_check",
+      sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} - ${t.createdAt} <= interval '72 hours'`,
+    ),
+    index("supplier_invitations_access_idx").on(t.accessId),
+  ],
+);
+export type SupplierInvitationRow = typeof supplierInvitations.$inferSelect;
+
+export const supplierSessions = pgTable(
+  "supplier_sessions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accessId: uuid("access_id")
+      .notNull()
+      .references(() => supplierAccess.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (t) => [
+    unique("supplier_sessions_token_hash_uq").on(t.tokenHash),
+    check("supplier_sessions_token_hash_check", sql`${t.tokenHash} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "supplier_sessions_ttl_check",
+      sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} - ${t.createdAt} <= interval '8 hours'`,
+    ),
+    index("supplier_sessions_access_idx").on(t.accessId),
+  ],
+);
+export type SupplierSessionRow = typeof supplierSessions.$inferSelect;
+
+export const supplierSubmissions = pgTable(
+  "supplier_submissions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accessId: uuid("access_id")
+      .notNull()
+      .references(() => supplierAccess.id, { onDelete: "cascade" }),
+    vendorId: uuid("vendor_id")
+      .notNull()
+      .references(() => aiVendors.id, { onDelete: "cascade" }),
+    kind: text("kind").$type<"control" | "question">().notNull(),
+    controlRef: text("control_ref"),
+    questionnaireId: uuid("questionnaire_id").references(() => supplierQuestionnaires.id, { onDelete: "restrict" }),
+    questionId: text("question_id"),
+    statement: text("statement").notNull(),
+    fileName: text("file_name"),
+    fileContentType: text("file_content_type"),
+    fileSize: integer("file_size"),
+    fileSha256: text("file_sha256"),
+    /** a data-key envelope (CIPHERTEXT_COLUMNS); returned only by the admin download route */
+    fileCiphertext: text("file_ciphertext"),
+    scanStatus: text("scan_status").$type<"not_scanned" | "clean">(),
+    status: text("status").$type<"submitted" | "accepted" | "rejected">().notNull().default("submitted"),
+    decidedBy: uuid("decided_by").references(() => users.id, { onDelete: "set null" }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    decisionReason: text("decision_reason"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "supplier_submissions_kind_check",
+      sql`(${t.kind} = 'control' AND ${t.controlRef} IS NOT NULL AND ${t.questionId} IS NULL AND ${t.questionnaireId} IS NULL) OR (${t.kind} = 'question' AND ${t.questionId} IS NOT NULL AND ${t.questionnaireId} IS NOT NULL)`,
+    ),
+    check("supplier_submissions_status_check", sql`${t.status} IN ('submitted', 'accepted', 'rejected')`),
+    index("supplier_submissions_vendor_idx").on(t.vendorId, t.createdAt),
+    index("supplier_submissions_access_idx").on(t.accessId),
+  ],
+);
+export type SupplierSubmissionRow = typeof supplierSubmissions.$inferSelect;

@@ -1436,6 +1436,20 @@
       "when": 1785149000000,
       "tag": "0214_mcp_upstream_credential",
       "breakpoints": true
+    },
+    {
+      "idx": 241,
+      "version": "7",
+      "when": 1785176000000,
+      "tag": "0241_supplier_portal_access",
+      "breakpoints": true
+    },
+    {
+      "idx": 242,
+      "version": "7",
+      "when": 1785177000000,
+      "tag": "0242_supplier_submissions",
+      "breakpoints": true
     }
   ]
 }
