@@ -37,17 +37,21 @@
  *    harden action. An admin hardening a regulated deployment is not thereby
  *    asking to serve more answers from cache.
  */
+import { useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
+import { plural } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, InfoButton, Table } from "../../../ui/kit";
-import { QueryGate, Stat, useAction } from "../adminKit";
-import { BomPostureCard, type ReceiptSigningKeyPosture } from "./BomPostureCard";
+import { Badge, Button, Card, EmptyState, InfoButton, Table, Tabs, tabIds, type Tone } from "../../../ui/kit";
+import { QueryGate, orgSettingsQuery, useAction } from "../adminKit";
+import { BomPostureCard, receiptKeysQuery, type ReceiptSigningKeyPosture } from "./BomPostureCard";
+import { bomUnresolved, discoveryUnresolved, isolationUnresolved, orgSettingsUnresolved, tabLabel } from "./postureTabs";
 import { OrgSettingsCard } from "./OrgSettingsCard";
 import { IsolationSettingsCard } from "../integrations/isolation/IsolationSettings";
 import { DiscoveryPostureCard } from "../governance/DiscoveryPostureCard";
 import type { DiscoveryPostureView } from "../governance/discoverySourcesModel";
+import ds from "../governance/discoverySources.module.css";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -104,12 +108,81 @@ function renderValue(value: unknown): string {
   return JSON.stringify(value);
 }
 
+const EVIDENCE_KEYS = ["decisionReceiptsMode", "auditAnchorTimestampMode", "vendoredDetectionPacks", "outboundCredentialAudience"] as const;
+
+// I-2: the control matrix — a readable name, where the value comes from, and what fixes it
+const CONTROL_LABEL: Record<string, string> = {
+  defaultPiiMode: "Personal-data guardrail",
+  mcpAdmissionMode: "MCP admission scanning",
+  useCaseGateMode: "Use-case gate",
+  mrmEnforced: "Model risk management",
+  dispatchAttributionRequired: "Dispatch attribution",
+  semanticCachePolicy: "Semantic cache",
+  auditAnchorTamperResistant: "Write-once audit anchor",
+  schedulerEnabled: "In-process scheduler",
+  databaseTls: "Database TLS",
+};
+interface MatrixRow {
+  key: string;
+  label: string;
+  group: string;
+  state: { tone: Tone; text: string };
+  source: string;
+  fix: ReactNode;
+  current: string;
+  hardened: string;
+  refuses: string;
+}
+function controlRow(c: PostureControl): MatrixRow {
+  const tlsOff = c.key === "databaseTls" && !c.satisfied;
+  const state: MatrixRow["state"] = c.satisfied
+    ? { tone: "ok", text: c.group === "optimisation" ? "on" : "enforcing" }
+    : tlsOff
+      ? { tone: "danger", text: "disabled" }
+      : c.settable
+        ? { tone: c.group === "optimisation" ? "neutral" : "warn", text: c.group === "optimisation" ? "off" : "not enforcing" }
+        : { tone: "info", text: "needs a deployment change" };
+  const fix = c.satisfied ? (
+    <span className={v.faint}>Nothing to do</span>
+  ) : tlsOff ? (
+    <strong>Unset REGULAIT_DATABASE_SSL, or set it to require, and restart the gateway.</strong>
+  ) : !c.settable ? (
+    <span>Set it in the process environment and restart.</span>
+  ) : c.group === "optimisation" ? (
+    <span>
+      Optional, a cost decision, on the <Link to="/admin/organization">Organization</Link> page
+    </span>
+  ) : (
+    <span>
+      Use Harden enforcement controls, or set it on the <Link to="/admin/organization">Organization</Link> page
+    </span>
+  );
+  return {
+    key: c.key,
+    label: CONTROL_LABEL[c.key] ?? c.key,
+    group: c.group === "optimisation" ? "Optimisation" : "Enforcement",
+    state,
+    source: c.settable ? "Organisation setting" : "Deployment environment",
+    fix,
+    current: renderValue(c.current),
+    hardened: renderValue(c.hardened),
+    refuses: c.refuses,
+  };
+}
+
 export default function EnforcementPosturePage() {
+  const [tab, setTab] = useState("evidence");
   const act = useAction();
   const posture = useQuery({
     queryKey: ["admin", "posture"],
     queryFn: () => api.get<PostureReport>("/v1/org/posture"),
   });
+
+  // the tab labels read the same cache entries the cards render from
+  const settings = useQuery(orgSettingsQuery());
+  const keys = useQuery(receiptKeysQuery());
+  const settingsRead = { data: settings.data, failed: settings.isError };
+  const keysRead = { data: keys.data, failed: keys.isError };
 
   const report = posture.data;
   const controls = report?.controls ?? [];
@@ -125,39 +198,6 @@ export default function EnforcementPosturePage() {
       await posture.refetch();
     }, "Enforcement controls hardened");
 
-  const columns = (refusesHeader: string) => [
-    {
-      key: "control",
-      header: "Control",
-      render: (c: PostureControl) => (
-        <span className={v.row}>
-          <span className={v.mono}>{c.key}</span>
-          {!c.settable && <Badge tone="neutral">set by deployment</Badge>}
-        </span>
-      ),
-    },
-    { key: "current", header: "Current", render: (c: PostureControl) => renderValue(c.current) },
-    { key: "hardened", header: "Hardened", render: (c: PostureControl) => renderValue(c.hardened) },
-    {
-      key: "state",
-      header: "State",
-      render: (c: PostureControl) =>
-        c.satisfied ? (
-          <Badge tone="ok">enforcing</Badge>
-        ) : c.settable ? (
-          <Badge tone="warn">not enforcing</Badge>
-        ) : (
-          /* An environment-backed control is not a switch somebody forgot to
-             flip — it is a property of the install. */
-          <Badge tone="info">needs a deployment change</Badge>
-        ),
-    },
-    {
-      key: "refuses",
-      header: refusesHeader,
-      render: (c: PostureControl) => <span className={v.faint}>{c.refuses}</span>,
-    },
-  ];
 
   return (
     <>
@@ -171,165 +211,186 @@ export default function EnforcementPosturePage() {
           error={posture.error}
           onRetry={() => void posture.refetch()}
         >
-          <Card title="This deployment">
-            <div className={a.statRow}>
-              <Stat
-                value={
-                  <Badge tone={report?.hardened ? "ok" : "warn"}>
-                    {report?.hardened ? "hardened" : "not hardened"}
-                  </Badge>
-                }
-                label="overall"
-              />
-              <Stat
-                value={
-                  <Badge tone={report?.execution.restricted ? "danger" : "ok"}>
-                    {report?.execution.mode.replace("_", "-") ?? "—"}
-                  </Badge>
-                }
-                label="execution"
-              />
-              <Stat
-                value={
-                  <Badge tone={dbTls === "required" ? "ok" : "danger"}>{dbTls ?? "—"}</Badge>
-                }
-                label="database TLS"
-              />
-              <Stat
-                value={`${report?.summary.enforcementSatisfied ?? 0} of ${report?.summary.enforcementTotal ?? 0}`}
-                label="enforcement controls on"
-              />
-              <Stat
-                value={`${report?.summary.optimisationSatisfied ?? 0} of ${report?.summary.optimisationTotal ?? 0}`}
-                label="optimisation controls on"
-              />
-            </div>
-
-            {/*
-              ADR-0124 — THE FIRST THING ON THE PAGE WHEN IT IS TRUE.
-              An operator opening this screen mid-incident needs "execution is
-              stopped" before anything else, and the reason beside it. When
-              nothing is stopped this renders nothing at all: a permanent
-              "not halted" banner is noise that trains people to ignore the
-              place the real one will appear.
-            */}
-            {report?.execution.restricted && (
-              <EmptyState
-                title={`Execution is RESTRICTED — ${report.execution.mode.replace("_", "-")}`}
-                body={
-                  <>
-                    <p>{report.execution.reason ?? "(no reason recorded)"}</p>
-                    <p className={v.faint}>
-                      {report.execution.note}
-                      {report.execution.setAt ? ` Set ${report.execution.setAt}.` : ""}
-                    </p>
-                  </>
-                }
-                // the page that can actually DO something about it
-                action={<Link to="/admin/execution">Open execution control</Link>}
-              />
+          {/* I-2: the verdict line, then the one finding that must not be missed */}
+          <div className={v.row} role="group" aria-label="This deployment">
+            <Badge tone={report?.hardened ? "ok" : "warn"}>{report?.hardened ? "Hardened" : "Not hardened"}</Badge>
+            <Badge tone={report?.execution.restricted ? "danger" : "ok"}>
+              {`Execution: ${report?.execution.mode.replace("_", "-") ?? "—"}`}
+            </Badge>
+            <Badge tone="neutral">{`Enforcement ${report?.summary.enforcementSatisfied ?? 0} of ${report?.summary.enforcementTotal ?? 0} on`}</Badge>
+            <Badge tone="neutral">{`Optimisation ${report?.summary.optimisationSatisfied ?? 0} of ${report?.summary.optimisationTotal ?? 0} on`}</Badge>
+            {dbTls !== "relaxed" && (
+              <Badge tone={dbTls === "required" ? "ok" : "danger"}>{`DB TLS: ${dbTls ?? "not reported"}`}</Badge>
             )}
+          </div>
 
-            {/* ADR-0181: TLS to Postgres is the default; running without it is
-                an explicit, visible relaxation (REGULAIT_DATABASE_SSL=disable). */}
-            {dbTls === "relaxed" && (
-              <div className={v.row}>
-                <Badge
-                  tone="danger"
-                  info={
-                    <p>
-                      REGULAIT_DATABASE_SSL=disable is set, so the gateway talks to Postgres in plaintext. That is
-                      acceptable only for a database on the same host (the local demo, docker-compose). Unset it, or set
-                      require, for any other deployment; the gateway also says so loudly at boot.
-                    </p>
-                  }
-                >
-                  DB TLS: disabled
-                </Badge>
-              </div>
-            )}
+          {report?.execution.restricted && (
+            <EmptyState
+              title={`Execution is RESTRICTED — ${report.execution.mode.replace("_", "-")}`}
+              body={
+                <>
+                  <p>{report.execution.reason ?? "(no reason recorded)"}</p>
+                  <p className={v.faint}>
+                    {report.execution.note}
+                    {report.execution.setAt ? ` Set ${report.execution.setAt}.` : ""}
+                  </p>
+                </>
+              }
+              action={<Link to="/admin/execution">Open execution control</Link>}
+            />
+          )}
 
-            {blocked.length > 0 && (
-              <EmptyState
-                title={`${blocked.length} control(s) cannot be reached from this screen`}
-                body={
-                  <>
-                    {blocked.join(", ")}{" "}
-                    <InfoButton label="controls set by the deployment">
-                      These are resolved from the process environment at start-up. An API call cannot set an
-                      environment variable, so they are reported with their OBSERVED state and are never counted as
-                      hardened on our say-so. The overall verdict above stays 'not hardened' while they are unmet, even
-                      once every settable control is on.
-                    </InfoButton>
-                  </>
-                }
-              />
-            )}
-
-            <div className={a.formRow}>
-              <Button size="sm" onClick={harden} disabled={act.busy}>
-                Harden enforcement controls
-              </Button>
+          {dbTls === "relaxed" && (
+            <div className={`${a.effectBanner} ${a.effectBannerDeny}`} role="alert">
               <Badge
-                tone="warn"
-                infoLabel="hardening"
+                tone="danger"
                 info={
                   <p>
-                    Applying is idempotent and audited under its own rule id, so the trail distinguishes
-                    "an admin edited one dial" from "an admin applied the preset". It changes what this
-                    deployment REFUSES, immediately and with no dry run — read the last column before
-                    using it on an installation carrying real traffic.
+                    REGULAIT_DATABASE_SSL=disable is set, so the gateway talks to Postgres in plaintext. That is
+                    acceptable only for a database on the same host (the local demo, docker-compose). Unset it, or set
+                    require, for any other deployment; the gateway also says so loudly at boot.
                   </p>
                 }
               >
-                Takes effect immediately · no dry run
+                DB TLS: disabled
               </Badge>
+              <span>
+                The gateway talks to Postgres in plaintext. That is acceptable only for a database on the same host.{" "}
+                <strong>Fix: unset REGULAIT_DATABASE_SSL, or set it to require, and restart.</strong>
+              </span>
             </div>
-            {act.error && <div className={v.errLine}>{act.error}</div>}
-          </Card>
-
-          <Card title="Enforcement">
-            <Table
-              rows={enforcement}
-              rowKey={(c) => c.key}
-              columns={columns("What turning it on refuses")}
-            />
-          </Card>
+          )}
 
           <Card
-            title="Optimisation"
+            title="Control matrix"
             info={
               <p>
-                Shown separately, and deliberately left out of the button above: these change what the
-                platform SPENDS and how it answers, not what it refuses. Hardening a regulated
-                deployment is not the same request as serving more answers from cache.
+                Every enforcement control ships at its strict value. A settable control relaxed by an admin is audited
+                old to new; a deployment-environment control is reported with its observed state and is never counted as
+                hardened on our say-so. The optimisation rows change what the platform spends and how it answers, not
+                what it refuses, so the harden button leaves them alone.
               </p>
             }
+            actions={
+              <div className={v.row}>
+                <Badge
+                  tone="warn"
+                  infoLabel="hardening"
+                  info={
+                    <p>
+                      Applying is idempotent and audited. It changes what this deployment refuses, immediately and with
+                      no dry run: read the last column first on an installation carrying real traffic.
+                    </p>
+                  }
+                >
+                  Takes effect immediately · no dry run
+                </Badge>
+                <Button size="sm" onClick={harden} disabled={act.busy}>
+                  Harden enforcement controls
+                </Button>
+              </div>
+            }
           >
-            <Table
-              rows={optimisation}
-              rowKey={(c) => c.key}
-              columns={columns("What turning it on changes")}
-            />
+            {/* inlineLinks: a link inside a Fix sentence is underlined, so it is not told apart by colour alone */}
+            <div className={`${v.stack} ${ds.inlineLinks}`}>
+              <Table<MatrixRow>
+                rows={[...enforcement, ...optimisation].map(controlRow)}
+                rowKey={(r) => r.key}
+                columns={[
+                  {
+                    key: "control",
+                    header: "Control",
+                    render: (r) => (
+                      <span className={v.stackTight}>
+                        <strong>{r.label}</strong>
+                        <span className={v.faint}>
+                          {r.group} · <span className={v.mono}>{r.key}</span>
+                        </span>
+                      </span>
+                    ),
+                  },
+                  {
+                    key: "state",
+                    header: "State",
+                    render: (r) => (
+                      <span className={v.stackTight}>
+                        <Badge tone={r.state.tone}>{r.state.text}</Badge>
+                        <span className={v.faint}>
+                          now <span className={v.mono}>{r.current}</span> · hardened <span className={v.mono}>{r.hardened}</span>
+                        </span>
+                      </span>
+                    ),
+                  },
+                  { key: "source", header: "Source", render: (r) => <span className={v.dim}>{r.source}</span> },
+                  { key: "fix", header: "Fix", render: (r) => r.fix },
+                  {
+                    key: "refuses",
+                    header: "What turning it on refuses or changes",
+                    render: (r) => <span className={v.faint}>{r.refuses}</span>,
+                  },
+                ]}
+              />
+              {blocked.length > 0 && (
+                <p>
+                  {`${plural(blocked.length, "control")} set by the deployment cannot be changed from this screen (${blocked.map((k) => CONTROL_LABEL[k] ?? k).join(", ")}), so the verdict stays "not hardened" until ${blocked.length === 1 ? "it is" : "they are"} met.`}{" "}
+                  <InfoButton label="controls set by the deployment">
+                    These are resolved from the process environment at start-up. An API call cannot set an environment
+                    variable, so they are reported with their observed state and are never counted as hardened on our
+                    say-so.
+                  </InfoButton>
+                </p>
+              )}
+              {act.error && <div className={v.errLine}>{act.error}</div>}
+            </div>
           </Card>
 
-          {/* ADR-0186 R / S / V: receipts, anchor timestamps, vendored detection content, outbound credential audience */}
-          <OrgSettingsCard
-            title="Evidence and detection"
-            keys={["decisionReceiptsMode", "auditAnchorTimestampMode", "vendoredDetectionPacks", "outboundCredentialAudience"]}
-            testId="evidence-detection-settings"
+          {/* I-2 (owner amendment): each tab names what is unresolved inside it, so a tab never hides a warning */}
+          <Tabs
+            label="More posture settings"
+            idPrefix="posture"
+            tabs={[
+              { id: "evidence", label: tabLabel("Evidence and detection", orgSettingsUnresolved(EVIDENCE_KEYS, settingsRead)) },
+              { id: "bom", label: tabLabel("BOM evidence", bomUnresolved(settingsRead, report?.receiptSigningKey, keysRead)) },
+              { id: "isolation", label: tabLabel("Isolation", isolationUnresolved(settingsRead)) },
+              { id: "discovery", label: tabLabel("Discovery", report ? discoveryUnresolved(report.discovery) : null) },
+            ]}
+            active={tab}
+            onChange={setTab}
           />
-
+          {/* every panel stays mounted (hidden when not selected), so an unsaved draft in one card survives a save in another */}
+          {/* ADR-0186 R / S / V: receipts, anchor timestamps, vendored detection content, outbound credential audience */}
+          <PosturePanel id="evidence" tab={tab}>
+            <OrgSettingsCard title="Evidence and detection" keys={EVIDENCE_KEYS} testId="evidence-detection-settings" />
+          </PosturePanel>
           {/* ADR-0189 §7 / §10: the receipt key and the BOM settings */}
-          <BomPostureCard receiptKey={report?.receiptSigningKey} />
-
+          <PosturePanel id="bom" tab={tab}>
+            <BomPostureCard receiptKey={report?.receiptSigningKey} />
+          </PosturePanel>
           {/* ADR-0190 decision 11 (owner decision A, enforce-only): the isolation settings, the same card as under Engines */}
-          <IsolationSettingsCard />
-
+          <PosturePanel id="isolation" tab={tab}>
+            <IsolationSettingsCard />
+          </PosturePanel>
           {/* ADR-0195 SD0: sources enabled, static credentials, stale credentials, write scope unverified */}
-          <DiscoveryPostureCard posture={report?.discovery} />
+          <PosturePanel id="discovery" tab={tab}>
+            {report?.discovery ? (
+              <DiscoveryPostureCard posture={report.discovery} />
+            ) : (
+              <Card title="Shadow-AI active discovery">
+                <p role="status">This gateway did not report its discovery posture, so it is unknown.</p>
+              </Card>
+            )}
+          </PosturePanel>
         </QueryGate>
       </div>
     </>
+  );
+}
+
+function PosturePanel(props: { id: string; tab: string; children: ReactNode }) {
+  const ids = tabIds("posture", props.id);
+  return (
+    <div role="tabpanel" id={ids.panel} aria-labelledby={ids.tab} hidden={props.tab !== props.id}>
+      {props.children}
+    </div>
   );
 }

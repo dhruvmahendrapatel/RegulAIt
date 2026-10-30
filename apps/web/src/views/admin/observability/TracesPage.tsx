@@ -49,12 +49,14 @@ import {
   Card,
   CodeBlock,
   EmptyState,
+  ErrorState,
   Field,
   InfoButton,
   Input,
   Select,
   Table,
   Tabs,
+  tabIds,
   type Tone,
 } from "../../../ui/kit";
 import { KV, QueryGate, Stat, agentOpts, optionEls, useAction, useAgents } from "../adminKit";
@@ -66,6 +68,7 @@ import t from "./traces.module.css";
 // automation-rules UI replaces (the file, not this line).
 import TracesAutomationsTab from "./TracesAutomationsTab";
 import TracesEvaluationTab from "./TracesEvaluationTab";
+import { RetentionHoldsCard } from "./RetentionHoldsCard";
 import {
   EMPTY_TRACE_FILTERS,
   activeFilterCount,
@@ -266,22 +269,103 @@ export default function TracesPage() {
         }
       />
       <div className={v.stack}>
+        {/* I-2: the page's standing facts stay above the tabs, so no tab hides them */}
+        <TraceStatusChips onOpen={setTab} />
         <Tabs
+          label="Traces"
+          idPrefix="traces"
           tabs={[
             { id: "traces", label: "Traces" },
+            { id: "export", label: "Export" },
+            { id: "retention", label: "Retention" },
             { id: "automations", label: "Automations" },
             { id: "evaluation", label: "Evaluation" },
           ]}
           active={tab}
           onChange={setTab}
         />
-        {tab === "automations" ? <TracesAutomationsTab /> : tab === "evaluation" ? <TracesEvaluationTab /> : <TracesView />}
+        <div role="tabpanel" id={tabIds("traces", tab).panel} aria-labelledby={tabIds("traces", tab).tab}>
+          {tab === "automations" ? (
+            <TracesAutomationsTab />
+          ) : tab === "evaluation" ? (
+            <TracesEvaluationTab />
+          ) : tab === "retention" ? (
+            <TracesRetention />
+          ) : (
+            <TracesView section={tab === "export" ? "export" : "traces"} />
+          )}
+        </div>
       </div>
     </>
   );
 }
 
-function TracesView() {
+const tracingConfigQuery = () => ({
+  queryKey: ["admin", "tracing-config"],
+  queryFn: () => api.get<TracingConfig>("/v1/tracing/config"),
+});
+
+/** I-2: recording and export status, one line above the tabs, so no tab hides them */
+function TraceStatusChips(props: { onOpen: (tab: string) => void }) {
+  const config = useQuery(tracingConfigQuery());
+  const c = config.data;
+  if (config.error && !c) {
+    return (
+      <ErrorState
+        title="Couldn't load the tracing status"
+        message={config.error instanceof Error ? config.error.message : String(config.error)}
+        onRetry={() => void config.refetch()}
+      />
+    );
+  }
+  if (!c) return null;
+  return (
+    <div className={v.row} role="group" aria-label="Tracing status">
+      <Badge tone={c.enabled ? "ok" : "danger"}>{c.enabled ? "Recording: on" : "Recording: off"}</Badge>
+      <Badge tone="neutral">{c.captureContent ? "Prompts and outputs: stored" : "Prompts and outputs: not stored"}</Badge>
+      {c.otlp.configured ? (
+        <Badge tone="ok">Export: configured</Badge>
+      ) : (
+        <Badge
+          tone="neutral"
+          info={
+            <p>
+              No OTLP endpoint is configured, so regulAIt opens no outbound telemetry connection.{" "}
+              <strong>That is the shipped state, not a fault</strong>: traces are fully usable locally.
+            </p>
+          }
+        >
+          Export: not configured
+        </Badge>
+      )}
+      <Button size="sm" variant="ghost" onClick={() => props.onOpen("export")}>
+        Export settings
+      </Button>
+    </div>
+  );
+}
+
+/** I-2: the retention notes and the holds, moved out of the Traces and Automations tabs */
+function TracesRetention() {
+  const config = useQuery(tracingConfigQuery());
+  return (
+    <div className={v.stack}>
+      <QueryGate loading={config.isLoading} error={config.error} onRetry={() => void config.refetch()}>
+        {config.data && (
+          <Card title="Retention and limits">
+            <div className={v.stack}>
+              <p className={v.dim}>{config.data.retention}</p>
+              <p className={v.faint}>{config.data.limits}</p>
+            </div>
+          </Card>
+        )}
+      </QueryGate>
+      <RetentionHoldsCard />
+    </div>
+  );
+}
+
+function TracesView(props: { section: "traces" | "export" }) {
   const act = useAction();
   const [filters, setFilters] = useState<TraceListFilters>(EMPTY_TRACE_FILTERS);
   const setFilter = <K extends keyof TraceListFilters>(k: K, value: TraceListFilters[K]) =>
@@ -329,10 +413,7 @@ function TracesView() {
     queryKey: ["admin", "trace-sessions"],
     queryFn: () => api.get<{ sessions: SessionRow[]; scope: string }>("/v1/sessions?limit=50"),
   });
-  const config = useQuery({
-    queryKey: ["admin", "tracing-config"],
-    queryFn: () => api.get<TracingConfig>("/v1/tracing/config"),
-  });
+  const config = useQuery(tracingConfigQuery());
   const detail = useQuery({
     queryKey: ["admin", "trace", selected],
     enabled: Boolean(selected),
@@ -368,13 +449,14 @@ function TracesView() {
     <>
       <div className={v.stack}>
         {/* --- posture ------------------------------------------------- */}
+        {props.section === "export" && (
         <QueryGate
           loading={config.isLoading}
           error={config.error}
           onRetry={() => void config.refetch()}
         >
           {config.data && (
-            <Card title="Posture">
+            <Card title="Export and posture">
               <div className={v.stack}>
                 <p className={v.dim}>
                   {config.data.enabled
@@ -516,15 +598,10 @@ function TracesView() {
               </div>
             </Card>
           )}
-          {config.data && (
-            <Card title="Details" contain foldable startCollapsed count={2} countNoun={["note", "notes"]}>
-              <div className={v.stack}>
-                <p className={v.faint}>{config.data.limits}</p>
-                <p className={v.faint}>{config.data.retention}</p>
-              </div>
-            </Card>
-          )}
         </QueryGate>
+        )}
+        {props.section === "traces" && (
+        <>
 
         {/* --- sessions ------------------------------------------------- */}
         <Card title="Sessions">
@@ -1123,6 +1200,8 @@ function TracesView() {
               )}
             </QueryGate>
           </Card>
+        )}
+        </>
         )}
       </div>
     </>
