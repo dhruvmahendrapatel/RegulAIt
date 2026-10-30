@@ -128,7 +128,9 @@ test.describe("ADR-0173 2b: outbound webhooks (admin)", () => {
     await page.goto("/ui/admin/webhooks");
     await expect(page.getByRole("heading", { level: 1, name: "Webhooks" })).toBeVisible();
     await expect(page.getByText("No webhooks", { exact: true })).toBeVisible();
-    await expect(page.getByText("Standard Webhooks")).toBeVisible();
+    await page.getByRole("button", { name: "What is delivery signing?" }).click();
+    await expect(page.getByRole("note")).toContainText("Standard Webhooks");
+    await page.getByRole("button", { name: "Hide help for delivery signing" }).click();
     await expectAxeClean(page, "webhooks, empty");
 
     // the egress guard's refusal is shown verbatim

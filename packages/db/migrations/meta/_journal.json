@@ -1429,6 +1429,13 @@
       "when": 1785148000000,
       "tag": "0213_demo_beat_fallbacks",
       "breakpoints": true
+    },
+    {
+      "idx": 214,
+      "version": "7",
+      "when": 1785149000000,
+      "tag": "0214_mcp_upstream_credential",
+      "breakpoints": true
     }
   ]
 }

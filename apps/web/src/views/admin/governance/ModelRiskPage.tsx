@@ -270,7 +270,6 @@ export default function ModelRiskPage() {
     <>
       <PageHeader
         title="Model risk"
-        sub="One risk position, on one model, for one stated purpose."
         info={<p>A model card is one risk position on one model for one stated purpose: intended use, provider-stated data claims, known limitations, a recorded bias/fairness assessment, linked evidence, a named human sign-off, and the date that sign-off lapses. regulAIt records and expires these; it does NOT measure bias or fairness — that requires running the model against a purpose-built dataset.</p>}
       />
       <div className={v.stack}>
@@ -280,7 +279,7 @@ export default function ModelRiskPage() {
           onRetry={() => void refreshAll()}
         >
           {/* ---------------- posture ---------------- */}
-          <Card title="Enforcement posture">
+          <Card title="Enforcement posture" info={status.data?.note ? <p>{status.data.note}</p> : undefined}>
             <div className={v.stack}>
               <div>
                 <Badge
@@ -333,7 +332,25 @@ export default function ModelRiskPage() {
                   gate above. On by default (ADR-0181); off = staleness
                   informs and gates nothing, as ADR-0086 first shipped. */}
               <div className={a.formRow}>
-                <Field label="Staleness forces recertification">
+                <Field
+                  label="Staleness forces recertification"
+                  helpLabel="how recertification works"
+                  help={
+                    <>
+                      Staleness-forces-recertification only bites while the dispatch gate above is on — it
+                      deepens that gate, it creates none of its own. When armed, a card with a LIVE
+                      sign-off that has drifted at least this many times since the last granting decision
+                      refuses dispatch on the same 409 the expiry gate uses, naming the drift; a
+                      recertification resets the clock. Drift is a regression (an eval or red-team run
+                      that measured worse than at certification, or a scheduled run that failed its gate),
+                      a risk-register change, an agent guardrail relaxation, a model, prompt or endpoint
+                      change, or an edit of the card — the same events the card&apos;s certification-drift
+                      banner names. A risk counts once an admin or a named risk acceptor has written it; one
+                      only a non-admin has registered shows as awaiting triage. Passing runs and grants are
+                      routine evidence, not drift. Off keeps drift purely informational.
+                    </>
+                  }
+                >
                   <Select
                     value={status.data?.stalenessRecertEnabled ? "on" : "off"}
                     onChange={(e) =>
@@ -378,20 +395,6 @@ export default function ModelRiskPage() {
                   </Button>
                 </div>
               </div>
-              <div className={v.faint}>
-                Staleness-forces-recertification only bites while the dispatch gate above is on — it
-                deepens that gate, it creates none of its own. When armed, a card with a LIVE
-                sign-off that has drifted at least this many times since the last granting decision
-                refuses dispatch on the same 409 the expiry gate uses, naming the drift; a
-                recertification resets the clock. Drift is a regression (an eval or red-team run
-                that measured worse than at certification, or a scheduled run that failed its gate),
-                a risk-register change, an agent guardrail relaxation, a model, prompt or endpoint
-                change, or an edit of the card — the same events the card&apos;s certification-drift
-                banner names. A risk counts once an admin or a named risk acceptor has written it; one
-                only a non-admin has registered shows as awaiting triage. Passing runs and grants are
-                routine evidence, not drift. Off keeps drift purely informational.
-              </div>
-              <div className={v.faint}>{status.data?.note}</div>
               <div className={a.formRow}>
                 {(
                   [
@@ -499,7 +502,11 @@ export default function ModelRiskPage() {
                     placeholder='{"training":"vendor-stated; no customer data","retention":"30 days"}'
                   />
                 </Field>
-                <Field label="Standard refs (comma separated)" grow>
+                <Field
+                  label="Standard refs (comma separated)"
+                  grow
+                  help="Referencing a NIST AI RMF / ISO 42001 control id helps an auditor follow the mapping. It does not make this deployment, or its customer, certified against anything."
+                >
                   <Input
                     value={newRefs}
                     onChange={(e) => setNewRefs(e.target.value)}
@@ -507,9 +514,8 @@ export default function ModelRiskPage() {
                   />
                 </Field>
               </div>
-              <div className={v.faint}>
-                Referencing a NIST AI RMF / ISO 42001 control id helps an auditor follow the mapping. It does
-                not make this deployment, or its customer, certified against anything.
+              <div>
+                <Badge tone="neutral">Mapping, not certification</Badge>
               </div>
               <div>
                 <Button type="submit" disabled={!newAgent || !newUse}>
@@ -761,9 +767,11 @@ export default function ModelRiskPage() {
                 <div className={v.faint}>
                   <strong>Bias / fairness:</strong> {detail.completeness.bias.declared} declared,{" "}
                   {detail.completeness.bias.assessed} assessed, {detail.completeness.bias.waived} waived,{" "}
-                  {detail.completeness.bias.unevidenced} without evidence.
+                  {detail.completeness.bias.unevidenced} without evidence.{" "}
+                  <Badge tone="info" infoLabel="Declared, not measured" info={detail.completeness.bias.disclaimer}>
+                    Declared, not measured
+                  </Badge>
                 </div>
-                <div className={v.faint}>{detail.completeness.bias.disclaimer}</div>
 
                 {detail.biasFairness.length > 0 && (
                   <Table

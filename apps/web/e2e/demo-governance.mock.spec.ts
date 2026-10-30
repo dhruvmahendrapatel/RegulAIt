@@ -208,7 +208,8 @@ test("enterprise governance demo surfaces render and complete their core actions
   await page.getByRole("tab", { name: "Dependencies" }).click();
   await expect(page.getByRole("group", { name: /AI dependency/ })).toBeVisible();
   await expect(page.getByText("Unattached risks", { exact: true })).toBeVisible();
-  await expect(page.getByText(graph.notes.unattached)).toBeVisible();
+  await page.getByRole("button", { name: "What is rating propagation?" }).click();
+  await expect(page.getByRole("note").getByText(graph.notes.unattached)).toBeVisible();
   await page.getByRole("tab", { name: "Approvals" }).click();
   await expect(page.getByText("Approval history")).toBeVisible();
   await page.getByRole("tab", { name: "Audit" }).click();
@@ -589,7 +590,8 @@ test("trust coverage falls back to Bars when storage throws (L3)", async ({ page
 test("each heatmap names every cell's count and zone in its accessible name (L2)", async ({ page }) => {
   await page.goto("/ui/admin/governance/trust");
   // L1: the Mitigated hint matches the gateway definition (closed, or a control AND a residual position)
-  await expect(page.getByText("Closed, or a linked control and a residual rating", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "What is Mitigated?" }).click();
+  await expect(page.getByRole("note").filter({ hasText: "Closed, or a linked control and a residual rating" })).toBeVisible();
   // fixture: inherent count = likelihood rank + impact rank, so high/high is 4
   const inherent = page.getByRole("img", { name: /^Inherent risk matrix by likelihood and impact\./ });
   await expect(inherent).toHaveAttribute("aria-label", /high likelihood, high impact: 4 \(high zone\)/);

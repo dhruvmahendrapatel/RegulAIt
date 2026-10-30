@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
 import { plural } from "../../../api/format";
-import { Button, EmptyState, SeverityBadge } from "../../../ui/kit";
+import { Button, EmptyState, InfoButton, SeverityBadge } from "../../../ui/kit";
 import { QueryGate } from "../adminKit";
 import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
@@ -146,18 +146,21 @@ export function DependencyGraphPanel({ useCaseId }: { useCaseId?: string }) {
                 })}
               </svg>
             </div>
-            <p className={v.faint}>Solid edges are declared. Dashed edges are observed in the last {graph.data.window.days} days. A node’s outline and its kicker give its propagated rating; a dashed ring means propagated exposure differs from the node’s own risk.</p>
+            <p className={v.faint}>
+              Solid = declared · dashed = observed · colour = rating{" "}
+              <InfoButton label="rating propagation" term="How ratings propagate">
+                Solid edges are declared. Dashed edges are observed in the last {graph.data.window.days} days. A node’s outline and its kicker give its propagated rating; a dashed ring means propagated exposure differs from the node’s own risk.
+                <br />
+                {graph.data.notes.propagation}
+                <br />
+                {graph.data.notes.ratings}
+                <br />
+                {graph.data.notes.observed}
+                <br />
+                {graph.data.notes.unattached}
+              </InfoButton>
+            </p>
             {selected ? <GraphNodeDetail node={selected} nodes={graph.data.nodes} /> : <p className={v.dim}>Select a node to inspect its inherited-risk path and source.</p>}
-            {/* how ratings are computed: kept on the face of the page, after the detail */}
-            <div className={v.stackTight}>
-              <span className={v.faint}>How ratings are computed</span>
-              <ul className={s.notesList}>
-                <li>{graph.data.notes.propagation}</li>
-                <li>{graph.data.notes.ratings}</li>
-                <li>{graph.data.notes.observed}</li>
-                <li>{graph.data.notes.unattached}</li>
-              </ul>
-            </div>
           </>
         )}
       </QueryGate>

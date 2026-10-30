@@ -133,7 +133,9 @@ test.describe("ADR-0180 A3: required AI tests per tier", () => {
     await mockApi(page);
     await page.goto("/ui/admin/governance/review-policy");
     await expect(card(page)).toBeVisible();
-    await expect(card(page)).toContainText("Strict by default");
+    await card(page).getByRole("button", { name: "What is Required AI tests by tier?" }).click();
+    await expect(card(page).getByRole("note")).toContainText("Strict by default");
+    await card(page).getByRole("button", { name: "Hide help for Required AI tests by tier" }).click();
     await expect(card(page)).toContainText("Not changed yet: every tier uses the strict default.");
     const high = tierRow(page, "high");
     await expect(high.getByText("Strict default")).toBeVisible();
@@ -145,8 +147,9 @@ test.describe("ADR-0180 A3: required AI tests per tier", () => {
     // an unmeasurable id is offered disabled, and the card says why
     const add = high.getByLabel("Add a required test class to the high tier");
     await expect(add.locator("option", { hasText: "LLM03 Supply Chain (cannot be measured)" })).toBeDisabled();
-    await expect(card(page)).toContainText("Why some OWASP classes cannot be required");
-    await expect(card(page)).toContainText("LLM03 Supply Chain, LLM04 Data and Model Poisoning: No red-team attack class");
+    await expect(card(page)).toContainText("cannot be required.");
+    await card(page).getByRole("button", { name: "What is why some OWASP classes cannot be required?" }).click();
+    await expect(card(page).getByRole("note")).toContainText("LLM03 Supply Chain, LLM04 Data and Model Poisoning: No red-team attack class");
     await expectAxeClean(page, "review policy with required AI tests");
   });
 

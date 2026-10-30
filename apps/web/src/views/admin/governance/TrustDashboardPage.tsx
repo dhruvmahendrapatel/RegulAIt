@@ -105,7 +105,6 @@ export default function TrustDashboardPage() {
     <>
       <PageHeader
         title="Trust & evidence"
-        sub="Coverage by trust dimension, with measurement gaps left visible."
         info={
           <>
             <p>
@@ -166,8 +165,10 @@ function TrustReportView(props: {
         </div>
         <div className={`${v.stat} ${s.tileOk}`}>
           <span className={v.statValue}>{d.totals.risksMitigated.toLocaleString()}</span>
-          <span className={v.statLabel}>Mitigated</span>
-          <span className={v.faint}>Closed, or a linked control and a residual rating</span>
+          <span className={v.statLabel}>
+            Mitigated
+            <InfoButton label="Mitigated">Closed, or a linked control and a residual rating</InfoButton>
+          </span>
         </div>
         <div className={`${v.stat} ${d.totals.risksUnmitigated > 0 ? s.tileAttention : ""}`}>
           <span className={v.statValue}>{d.totals.risksUnmitigated.toLocaleString()}</span>
@@ -190,7 +191,12 @@ function TrustReportView(props: {
         <CoverageCard dimensions={d.dimensions} />
         <Card
           title="Risk position"
-          info="Inherent is before controls, residual is after. Each cell counts open, mitigating and accepted risks. Closed risks are left out."
+          info={
+            <>
+              <p>Inherent is before controls, residual is after. Each cell counts open, mitigating and accepted risks. Closed risks are left out.</p>
+              <p>Cell colour shows the zone of that likelihood and impact pair on the severity scale. The number is the count of risks; empty cells fade.</p>
+            </>
+          }
         >
           <div className={s.heatPair}>
             <div className={v.stack}>
@@ -202,7 +208,6 @@ function TrustReportView(props: {
               <Heatmap cells={d.residualHeatmap} label="Residual risk" />
             </div>
           </div>
-          <p className={v.faint}>Cell colour shows the zone of that likelihood and impact pair on the severity scale. The number is the count of risks; empty cells fade.</p>
         </Card>
       </div>
 

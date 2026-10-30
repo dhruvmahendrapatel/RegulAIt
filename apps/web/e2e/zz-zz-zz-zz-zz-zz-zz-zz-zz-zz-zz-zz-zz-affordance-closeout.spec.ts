@@ -171,5 +171,6 @@ test("a customer's own attack library can be created, and it starts as a draft",
   await expect(listed.getByText("draft")).toBeVisible();
   // and the page states the consequence of publishing rather than leaving it in
   // an ADR — the freeze is why a draft exists at all
-  await expect(page.getByText(/Publishing freezes it/)).toBeVisible();
+  await page.getByRole("button", { name: "What is a draft library?" }).click();
+  await expect(page.getByRole("note").getByText(/Publishing freezes it/)).toBeVisible();
 });

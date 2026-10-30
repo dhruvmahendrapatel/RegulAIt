@@ -86,7 +86,6 @@ export default function TeamsPage() {
     <>
       <PageHeader
         title="Teams"
-        sub="Flat membership; per-user roles live on Shared-Project membership."
         info={<p>Flat membership — per-user roles (owner/contributor/viewer) live on Shared-Project membership. Default classifications are surfaced (never silently resolved) when a member joins a project whose tags don't cover them.</p>}
       />
       <div className={v.stack}>
@@ -227,10 +226,6 @@ export default function TeamsPage() {
               </div>
             ))
           )}
-          <div className={v.faint} style={{ marginTop: "var(--s2)" }}>
-            Deleting a team that is the recorded contributor of shared context is refused with what blocks;
-            provenance history survives even a forced deletion.
-          </div>
         </Card>
       </div>
 
@@ -254,7 +249,7 @@ export default function TeamsPage() {
       <ConfirmModal
         open={confirmDelete !== null}
         title={`Delete team “${confirmDelete?.name}”?`}
-        body="If the team is the recorded contributor of shared context, deletion is refused and you can force-delete with a recorded reason."
+        body="If the team is the recorded contributor of shared context, deletion is refused with what blocks, and you can force-delete with a recorded reason. Provenance history survives even a forced deletion."
         danger
         confirmLabel="Delete team"
         onCancel={() => setConfirmDelete(null)}

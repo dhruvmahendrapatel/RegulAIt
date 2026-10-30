@@ -77,6 +77,15 @@ export default function FederationCard() {
   return (
     <Card
       title="Cloud federation"
+      info={
+        s?.issuer ? (
+          <p>
+            Issuer <code>{s.issuer}</code>, keys at <code>{s.jwksUri}</code>. Subject <code>{s.subjectFormat}</code>;
+            audiences: AWS <code>{s.audiences.aws}</code>, Entra <code>{s.audiences.azure}</code>, GCP{" "}
+            <code>{s.audiences.gcp}</code>.
+          </p>
+        ) : undefined
+      }
       actions={
         <>
           <Button disabled={act.busy || !s || pending !== null} onClick={generate}>Generate key</Button>
@@ -98,24 +107,17 @@ export default function FederationCard() {
         <p className={v.faint}>
           Generated keys are published at once so the clouds can cache them. {s.enabled ? "Rotate" : "Activate"} after a few minutes.
         </p>
+        <p className={v.faint}>
+          {s.awsPrincipal.configured
+            ? <>regulAIt&apos;s own AWS principal is <span className={v.mono}>{s.awsPrincipal.roleArn}</span> (subject <span className={v.mono}>{s.awsPrincipal.subject}</span>); an AWS source with target <span className={v.mono}>federation=principal</span> assumes your role from it with the source&apos;s external id.</>
+            : "regulAIt's own AWS principal is not configured, so each AWS source assumes your role directly with a short-lived token from this issuer."}
+        </p>
         {!s.issuer && (
           <p className={v.faint} data-testid="federation-no-public-url">
             This deployment&apos;s public URL is not configured, so no token can be minted. An operator sets it as described in
             the cloud discovery deployment guide.
           </p>
         )}
-        {s.issuer && (
-          <p className={v.faint}>
-            Issuer <span className={v.mono}>{s.issuer}</span>, keys at <span className={v.mono}>{s.jwksUri}</span>. Subject{" "}
-            <span className={v.mono}>{s.subjectFormat}</span>; audiences: AWS <span className={v.mono}>{s.audiences.aws}</span>, Entra{" "}
-            <span className={v.mono}>{s.audiences.azure}</span>, GCP <span className={v.mono}>{s.audiences.gcp}</span>.
-          </p>
-        )}
-        <p className={v.faint}>
-          {s.awsPrincipal.configured
-            ? <>regulAIt&apos;s own AWS principal is <span className={v.mono}>{s.awsPrincipal.roleArn}</span> (subject <span className={v.mono}>{s.awsPrincipal.subject}</span>); an AWS source with target <span className={v.mono}>federation=principal</span> assumes your role from it with the source&apos;s external id.</>
-            : "regulAIt's own AWS principal is not configured, so each AWS source assumes your role directly with a short-lived token from this issuer."}
-        </p>
         <Table
           rows={s.keys}
           rowKey={(k) => k.kid}

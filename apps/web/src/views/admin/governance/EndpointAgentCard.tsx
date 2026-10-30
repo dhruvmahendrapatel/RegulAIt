@@ -125,13 +125,17 @@ export function EndpointAgentCard({ sources }: { sources: readonly DiscoverySour
   };
 
   return (
-    <Card title="Endpoint agent enrolment">
-      <div className={v.stack}>
-        <p className={v.faint}>
+    <Card
+      title="Endpoint agent enrolment"
+      info={
+        <p>
           The regulAIt endpoint agent is distributed through your MDM. Issue an enrolment token here and deliver the enrolment file to each device; the
           agent&apos;s install step redeems it once for that device, and each user of the device registers their own device key. Nothing enrols or uploads
           while the source is disabled. Devices and their users are shown only as pseudonyms; a device user&apos;s name is self-reported by the device.
         </p>
+      }
+    >
+      <div className={v.stack}>
         {targets.length === 0 ? (
           <p className={v.faint}>Add and enable a regulAIt endpoint agent source above to enrol devices.</p>
         ) : (

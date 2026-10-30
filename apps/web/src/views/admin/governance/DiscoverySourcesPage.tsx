@@ -214,7 +214,6 @@ export default function DiscoverySourcesPage() {
     <>
       <PageHeader
         title="Discovery sources"
-        sub="Where regulAIt may scan, read-only, for shadow-AI use. Every source is off until you enable it."
         info={
           <>
             Discovery sources are the places regulAIt reads, read-only, to find AI use nobody registered, such as cloud
@@ -240,12 +239,16 @@ export default function DiscoverySourcesPage() {
               <span><strong>Findings land in Shadow-AI discovery</strong><span className={v.faint}><Link to="/admin/shadow-ai">Open the findings</Link></span></span>
             </li>
           </ol>
-          <Card title="Active discovery">
+          <Card
+            title="Active discovery"
+            info={
+              <p className={ds.inlineLinks}>
+                Findings land in <Link to="/admin/shadow-ai">Shadow-AI discovery</Link> only when an observation matches an enabled row of your
+                signature catalogue. Unmatched observations are listed per run as catalogue gaps.
+              </p>
+            }
+          >
             <p data-testid="discovery-statement">{posture?.statement}</p>
-            <p className={`${v.faint} ${ds.inlineLinks}`}>
-              Findings land in <Link to="/admin/shadow-ai">Shadow-AI discovery</Link> only when an observation matches an enabled row of your
-              signature catalogue. Unmatched observations are listed per run as catalogue gaps.
-            </p>
           </Card>
           <div className={v.grid5}>
             <Stat value={`${posture?.sourcesEnabled.length ?? 0} of ${posture?.sourcesTotal ?? 0}`} label={<>Sources enabled<InfoButton label="Sources enabled">How many configured sources are switched on. A source that is off is never scanned, so anything it would find is missing from the findings.</InfoButton></>} />
@@ -522,14 +525,10 @@ export default function DiscoverySourcesPage() {
             />
           </Card>
 
-          <Card title="Reveal a pseudonym">
+          <Card title="Reveal a pseudonym" actions={<Badge tone="info">Audited · step-up</Badge>}>
             <div className={v.stack}>
-              <p className={v.faint}>
-                Device users, commit authors and cloud principals appear in findings as pseudonyms (psn:…). Revealing the name behind one asks you to
-                confirm it&apos;s you and is audited.
-              </p>
               <div className={v.row}>
-                <Field label="Pseudonym" help="People in findings appear as pseudonyms. Revealing a real name asks you to confirm it's you, and every reveal is audited.">
+                <Field label="Pseudonym" help="Device users, commit authors and cloud principals appear in findings as pseudonyms (psn:…). Revealing the name behind one asks you to confirm it's you, and every reveal is audited.">
                   <Input ref={pseudonymRef} value={pseudonym} spellCheck={false} placeholder="psn:…" onChange={(e) => setPseudonym(e.target.value)} />
                 </Field>
                 <Button disabled={act.busy || !/^psn:[0-9a-f]{24}$/.test(pseudonym.trim())} onClick={reveal}>Reveal</Button>

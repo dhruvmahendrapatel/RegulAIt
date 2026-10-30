@@ -55,7 +55,7 @@ function SettingsEditor(props: { data: PolicySimulationSettingsResponse; onSaved
   const [form, setForm] = useState<SettingsForm>(() => settingsFormFrom(current));
   const [problem, setProblem] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<SettingsBody | null>(null);
-  const ids = { note: useId(), window: useId(), cap: useId(), problem: useId() };
+  const ids = { window: useId(), cap: useId(), problem: useId() };
   const set = <K extends keyof SettingsForm>(k: K, value: SettingsForm[K]) => {
     setProblem(null);
     setForm((f) => ({ ...f, [k]: value }));
@@ -80,7 +80,6 @@ function SettingsEditor(props: { data: PolicySimulationSettingsResponse; onSaved
   return (
     <form
       aria-label="Blast-radius settings"
-      aria-describedby={ids.note}
       className={v.stack}
       onSubmit={(e) => {
         e.preventDefault();
@@ -97,11 +96,12 @@ function SettingsEditor(props: { data: PolicySimulationSettingsResponse; onSaved
         else save(built.body);
       }}
     >
-      <p className={v.faint} id={ids.note}>
-        {props.data.note}
-      </p>
       <div className={v.row}>
-        <Badge tone={current.requirePreviewBeforeActivate ? "ok" : "warn"}>
+        <Badge
+          tone={current.requirePreviewBeforeActivate ? "ok" : "warn"}
+          infoLabel="the preview requirement"
+          info={props.data.note}
+        >
           {current.requirePreviewBeforeActivate ? "preview required before activation" : "preview NOT required (relaxed)"}
         </Badge>
         {current.updatedAt ? <span className={v.faint}>last changed {ago(current.updatedAt)}</span> : null}
@@ -115,7 +115,11 @@ function SettingsEditor(props: { data: PolicySimulationSettingsResponse; onSaved
         <span>Require a blast-radius preview of the exact version before it can be activated (recommended)</span>
       </label>
       <div className={a.formRow}>
-        <Field label="Default window (days)">
+        <Field
+          label="Default window (days)"
+          helpLabel="the preview window"
+          help="How much recorded history a preview replays when none is given."
+        >
           <Input
             inputMode="numeric"
             value={form.defaultWindowDays}
@@ -123,7 +127,11 @@ function SettingsEditor(props: { data: PolicySimulationSettingsResponse; onSaved
             onChange={(e) => set("defaultWindowDays", e.target.value)}
           />
         </Field>
-        <Field label="Default row cap">
+        <Field
+          label="Default row cap"
+          helpLabel="the row cap"
+          help="The most recorded calls one preview examines. A capped preview reports a lower bound."
+        >
           <Input
             inputMode="numeric"
             value={form.defaultRowCap}
@@ -134,12 +142,11 @@ function SettingsEditor(props: { data: PolicySimulationSettingsResponse; onSaved
       </div>
       <p className={v.faint}>
         <span id={ids.window}>
-          How much recorded history a preview replays when none is given: 1 to {POLICY_SIMULATION_BOUNDS.maxWindowDays} days
-          (shipped default {props.data.defaults.windowDays}).
+          Window: 1 to {POLICY_SIMULATION_BOUNDS.maxWindowDays} days (shipped default {props.data.defaults.windowDays}).
         </span>{" "}
         <span id={ids.cap}>
-          The most recorded calls one preview examines: 1 to {POLICY_SIMULATION_BOUNDS.maxRows.toLocaleString("en-US")} (shipped
-          default {props.data.defaults.rowCap.toLocaleString("en-US")}). A capped preview reports a lower bound.
+          Row cap: 1 to {POLICY_SIMULATION_BOUNDS.maxRows.toLocaleString("en-US")} (shipped default{" "}
+          {props.data.defaults.rowCap.toLocaleString("en-US")}).
         </span>
       </p>
       <div className={v.row}>

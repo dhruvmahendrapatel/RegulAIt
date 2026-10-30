@@ -294,7 +294,7 @@ back afterwards; a live run leaves it set — recreate the database before the n
   axis moves. An axis with no applicable control would show as unmeasured, never as a score."
 - **If asked about NIST IDs:** the pack is version 3; it corrects two subcategory IDs earlier versions
   had wrong (accountability is GOVERN 2.1, deactivation is MANAGE 2.4). Earlier versions stay as they
-  were, because published evidence is immutable.
+  were, because published evidence is tamper-evident.
 
 ### 3B. Governance alerts and remediation — Ada, then Avery
 - **URL:** `/ui/admin/governance/alerts` → **Evaluate now**

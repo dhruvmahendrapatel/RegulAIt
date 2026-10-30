@@ -44,7 +44,7 @@ export function RunLineageCard(props: { runId: string | null; onRunId: (runId: s
     setLastProp(props.runId);
     setDraft(props.runId ?? "");
   }
-  const ids = { hint: useId(), problem: useId() };
+  const ids = { problem: useId() };
   const lineage = useQuery({
     queryKey: ["admin", "lineage-run", props.runId],
     enabled: Boolean(props.runId),
@@ -58,7 +58,15 @@ export function RunLineageCard(props: { runId: string | null; onRunId: (runId: s
     { key: "ver", header: "Version", render: (n: LineageNodeLite) => n.version ?? "—" },
   ];
   return (
-    <Card title="One run's inputs and outputs">
+    <Card
+      title="One run's inputs and outputs"
+      info={
+        <p>
+          Or choose “Inputs and outputs” on a run in a traversal above. One hop each way: what was supplied to the run and
+          what it produced.
+        </p>
+      }
+    >
       <form
         aria-label="Look up a run's lineage"
         className={a.formRow}
@@ -74,16 +82,12 @@ export function RunLineageCard(props: { runId: string | null; onRunId: (runId: s
         }}
       >
         <Field label="Run id" grow>
-          <Input value={draft} aria-describedby={ids.hint} onChange={(e) => { setProblem(null); setDraft(e.target.value); }} placeholder="paste a run id" />
+          <Input value={draft} onChange={(e) => { setProblem(null); setDraft(e.target.value); }} placeholder="paste a run id" />
         </Field>
         <Button type="submit" variant="primary" aria-describedby={problem ? ids.problem : undefined}>
           Show lineage
         </Button>
       </form>
-      <p className={v.faint} id={ids.hint}>
-        Or choose “Inputs and outputs” on a run in a traversal above. One hop each way: what was supplied to the run and
-        what it produced.
-      </p>
       {problem && (
         <p className={v.errLine} role="alert" id={ids.problem}>
           {problem}

@@ -50,17 +50,19 @@ export function IssuerSigningKeysCard(props: { busy: boolean; ask: (c: AskConfir
   return (
     <Card
       title="Issuer signing keys"
+      info={
+        <p>
+          The gateway signs workload and delegated tokens with one active Ed25519 key. Only public halves are shown. A new key&apos;s private half is
+          configured by the deployment operator first; rotating here activates it and retires the current signer, whose public half stays published
+          until the tokens it signed expire.
+        </p>
+      }
       actions={
         <Button disabled={keys.isFetching} onClick={() => void keys.refetch()}>
           Refresh keys
         </Button>
       }
     >
-      <p>
-        The gateway signs workload and delegated tokens with one active Ed25519 key. Only public halves are shown. A new key&apos;s private half is
-        configured by the deployment operator first; rotating here activates it and retires the current signer, whose public half stays published
-        until the tokens it signed expire.
-      </p>
       {keys.data?.configuration && (
         // ADR-0188 S7: where the private halves come from; engine runners and PDP clients need one to authenticate
         <p>
