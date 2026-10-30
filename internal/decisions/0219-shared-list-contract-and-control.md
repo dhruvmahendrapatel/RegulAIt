@@ -38,8 +38,9 @@ paging patterns in the gateway (the REL-10 bound and the keyset cursor) that a t
    The columns are checked against the list's allow-list (unknown or repeated is a 400), the file holds every row
    matching the filters and sort, only the requested columns in that order, with the screen's labels. It answers with
    the list route's own authorisation: a non-admin's runs export holds only their runs, the incidents export only
-   what the caller may see, and `/v1/users/export.xlsx` is admin-only through the default gate. It is capped at the
-   CSV exports' ceiling (`REGULAIT_CSV_MAX_ROWS`, 500,000 by default); when that stops it, the file's last row and the
+   what the caller may see, and `/v1/users/export.xlsx` is admin-only through the default gate. It is capped at
+   100,000 rows by default (`REGULAIT_XLSX_MAX_ROWS`; owner, #453 c6529802888), and never above the CSV exports'
+   ceiling (`REGULAIT_CSV_MAX_ROWS`, 500,000 by default); when that stops it, the file's last row and the
    `x-regulait-export-truncated` header say so and the UI repeats it. Each export writes one audit row (`audit_export`,
    rule `list-export-xlsx`, with the list id, filter summary, sort, column ids and row count) right after the query and
    before the first byte, so a failed audit write fails the export.
@@ -74,7 +75,7 @@ paging patterns in the gateway (the REL-10 bound and the keyset cursor) that a t
   non-admin runs scope: `orchestration_runs (initiating_user_id, created_at desc, id desc)` and
   `(created_at desc, id desc)`; `ai_incidents (created_at desc, id desc)`; `users (created_at, id)`. The incident sorts
   by next clock, open actions and owner name are correlated subqueries per row.
-- The export holds its rows in memory up to the 500,000-row ceiling. A streamed xlsx writer that meets ADR-0176 would
+- The export holds its rows in memory up to the 100,000-row Excel ceiling; the streamed CSV export covers larger lists. A streamed xlsx writer that meets ADR-0176 would
   remove that; none was found.
-- All JS grows by about 6 kB gzip, within the owner's shared 1,060 kB cap (ADR-0196 addendum of 2026-10-30). The entry
+- All JS grows by about 6 kB gzip, within the owner's shared cap (1,060 kB, raised to 1,075 kB in #453 c6529802888) (ADR-0196 addendum of 2026-10-30). The entry
   ceilings do not move.

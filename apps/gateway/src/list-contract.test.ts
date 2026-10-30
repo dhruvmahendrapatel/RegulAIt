@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import { strFromU8, unzipSync } from "fflate";
 import { auditLog, createDb, desc, eq, inArray, orchestrationRuns, runMigrations, sql, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
-import { COUNT_ESTIMATE_CAP, exportCapNotice, wantsListContract } from "./list-contract.js";
+import { COUNT_ESTIMATE_CAP, exportCapNotice, listExportMaxRows, wantsListContract } from "./list-contract.js";
 import { likeLiteral } from "./users-list.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxStepUpForTest } from "./testing/step-up-posture.js";
@@ -297,6 +297,26 @@ describe("ADR-0219: the Excel export", () => {
   it("refuses an unknown, duplicated or missing column, and an unknown sort", async () => {
     for (const q of ["columns=name,passwordHash", "columns=name,name", "", "columns=name&sort=nope", `columns=${encodeURIComponent("name,(select 1)")}`]) {
       expect((await app.inject({ method: "GET", url: `/v1/runs/export.xlsx?${q}`, headers: who.a.auth })).statusCode, q).toBe(400);
+    }
+  });
+
+  it("caps Excel at 100,000 rows by default, its own setting, and never above the CSV ceiling", () => {
+    const prev = { x: process.env.REGULAIT_XLSX_MAX_ROWS, c: process.env.REGULAIT_CSV_MAX_ROWS };
+    try {
+      delete process.env.REGULAIT_XLSX_MAX_ROWS;
+      delete process.env.REGULAIT_CSV_MAX_ROWS;
+      expect(listExportMaxRows()).toBe(100_000);
+      process.env.REGULAIT_XLSX_MAX_ROWS = "250";
+      expect(listExportMaxRows()).toBe(250);
+      process.env.REGULAIT_CSV_MAX_ROWS = "40";
+      expect(listExportMaxRows()).toBe(40);
+      process.env.REGULAIT_XLSX_MAX_ROWS = "nonsense";
+      expect(listExportMaxRows()).toBe(40);
+    } finally {
+      for (const [k, v] of [["REGULAIT_XLSX_MAX_ROWS", prev.x], ["REGULAIT_CSV_MAX_ROWS", prev.c]] as const) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
     }
   });
 

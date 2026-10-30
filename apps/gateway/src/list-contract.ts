@@ -292,9 +292,16 @@ export function sendListError(reply: FastifyReply, e: unknown) {
 
 // ---- export ------------------------------------------------------------------
 
-/** the hard ceiling on one export: the same one the CSV exports use */
+/**
+ * The hard ceiling on one Excel export: 100,000 rows by default (owner, #453 c6529802888), and never above the CSV
+ * exports' ceiling. The xlsx writer holds the whole sheet in memory (no writer that meets ADR-0176 streams), so this
+ * bounds the gateway's memory per export; the CSV export streams and stays the way to take a larger list.
+ */
+export const XLSX_DEFAULT_MAX_ROWS = 100_000;
 export function listExportMaxRows(): number {
-  return csvMaxRows();
+  const raw = Number(process.env.REGULAIT_XLSX_MAX_ROWS);
+  const own = Number.isInteger(raw) && raw >= 1 ? raw : XLSX_DEFAULT_MAX_ROWS;
+  return Math.min(own, csvMaxRows());
 }
 
 const exportSchema = z.object({
@@ -327,7 +334,7 @@ export function parseListExport<Row>(spec: ListSpec<Row>, query: Record<string, 
 
 /** the line written as the file's last row when the ceiling stopped the export */
 export function exportCapNotice(max: number): string {
-  return `This file stopped at the ${max.toLocaleString("en-GB")}-row export limit and is not the complete list. Narrow the filters to export the rest.`;
+  return `This file stopped at the ${max.toLocaleString("en-GB")}-row Excel limit and is not the complete list. Narrow the filters, or use the CSV export for larger lists.`;
 }
 
 export interface ExportOutcome {
