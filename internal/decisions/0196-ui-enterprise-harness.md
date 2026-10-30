@@ -613,6 +613,6 @@ that fits, with one `CEILING_EXCEPTIONS` row.
 - Why: on main at fca02d54 total JS measures 1,049,109 B. Themes phase 2 (ADR-0218) adds 2,135 B gzip: the lazy
   Settings › Organisation Themes card (895 B), the on-demand module that adopts and saves the account's appearance
   (662 B), the Appearance card's account save and lock, and 166 B of entry JS (the two dynamic imports). It measures
-  1,051,244 B.
+  1,051,200 B.
 - Freeze week: ADR-0198 §2 covers entry raises only; this raise rests on the owner decision above. ADR-0198's post-demo
   reset applies to it.
