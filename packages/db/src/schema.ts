@@ -3536,6 +3536,12 @@ export const infraResources = pgTable("infra_resources", {
   deployTargetId: uuid("deploy_target_id").references(() => deployTargets.id, {
     onDelete: "set null",
   }),
+  /** ADR-0208 G8 (migration 0224): a retired resource stays readable but is read-only and out of every scan; the
+   * remediation ledgers that hang off it are why it is retired, never deleted */
+  status: text("status", { enum: ["active", "retired"] }).notNull().default("active"),
+  retiredAt: timestamp("retired_at", { withTimezone: true }),
+  retiredReason: text("retired_reason"),
+  retiredByUserId: uuid("retired_by_user_id").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -3557,9 +3563,24 @@ export const infraPolicies = pgTable(
     autoRemediateMaxSeverity: text("auto_remediate_max_severity", {
       enum: ["low", "medium", "high"],
     }),
+    /** ADR-0208 G8 (migration 0224): a retired policy stays readable and stops applying; its resource falls back to
+     * the active fleet policy. The fleet policy is edited, never retired. */
+    status: text("status", { enum: ["active", "retired"] }).notNull().default("active"),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+    retiredReason: text("retired_reason"),
+    retiredByUserId: uuid("retired_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("infra_policies_resource_idx").on(t.resourceId)],
+  (t) => [
+    index("infra_policies_resource_idx").on(t.resourceId),
+    // one ACTIVE policy per resource, and at most one ACTIVE fleet policy (migration 0224)
+    uniqueIndex("infra_policies_active_resource_uq")
+      .on(t.resourceId)
+      .where(sql`${t.status} = 'active' AND ${t.resourceId} IS NOT NULL`),
+    uniqueIndex("infra_policies_active_fleet_uq")
+      .on(sql`(${t.resourceId} IS NULL)`)
+      .where(sql`${t.status} = 'active' AND ${t.resourceId} IS NULL`),
+  ],
 );
 
 // A detected finding — an INERT report until governed. `signature` (carried in

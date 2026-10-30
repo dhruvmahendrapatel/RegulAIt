@@ -2007,6 +2007,30 @@ export const createInfraPolicySchema = z.object({
   autoRemediateMaxSeverity: z.enum(["low", "medium", "high"]).nullable().optional(),
 });
 
+// ADR-0208 G8 — edit and retire. Retire only (a delete would erase the remediation ledgers). Every field is
+// optional and bounded; `undefined` leaves a field as it is, `null` clears it. Strict: an unknown field is a 400.
+export const updateInfraResourceSchema = z
+  .object({
+    name: z.string().trim().min(1).max(200).optional(),
+    classifications: z.array(z.string().trim().min(1).max(64)).max(16).optional(),
+  })
+  .strict()
+  .refine((b) => Object.values(b).some((v) => v !== undefined), { message: "nothing to change" });
+
+export const updateInfraPolicySchema = z
+  .object({
+    patchCadenceDays: z.number().int().positive().max(3650).nullable().optional(),
+    certRotationDaysBeforeExpiry: z.number().int().positive().max(3650).nullable().optional(),
+    backupSchedule: z.string().trim().min(1).max(200).nullable().optional(),
+    backupRetentionDays: z.number().int().positive().max(36500).nullable().optional(),
+    autoRemediateMaxSeverity: z.enum(["low", "medium", "high"]).nullable().optional(),
+  })
+  .strict()
+  .refine((b) => Object.values(b).some((v) => v !== undefined), { message: "nothing to change" });
+
+/** the audited reason for retiring an infra resource or policy */
+export const retireInfraSchema = z.object({ reason: z.string().trim().min(10).max(2000) }).strict();
+
 // Scan on demand — optionally a single resource, else the whole fleet.
 export const scanInfraSchema = z
   .object({ resourceId: z.string().uuid().optional() })

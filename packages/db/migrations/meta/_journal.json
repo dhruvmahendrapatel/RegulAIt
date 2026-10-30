@@ -1443,6 +1443,13 @@
       "when": 1785158000000,
       "tag": "0223_compliance_profile_lifecycle",
       "breakpoints": true
+    },
+    {
+      "idx": 224,
+      "version": "7",
+      "when": 1785159000000,
+      "tag": "0224_infra_lifecycle",
+      "breakpoints": true
     }
   ]
 }
