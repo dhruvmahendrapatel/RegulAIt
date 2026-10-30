@@ -119,7 +119,7 @@ const ALERT_COLUMNS: Array<DataColumn<GovernanceAlert>> = [
     render: (alert) => (
       <span className={v.row}>
         <SlaChip alert={alert} />
-        {alert.sla && alert.sla !== "none" && alert.dueAt ? <span className={v.faint}>{fmtDateTime(alert.dueAt)}</span> : null}
+        {alert.sla && alert.sla !== "none" && alert.dueAt ? <span className={v.faint}>due {fmtDateTime(alert.dueAt)}</span> : null}
       </span>
     ),
   },
@@ -138,9 +138,11 @@ export default function GovernanceAlertsPage() {
   // ADR-0219: the list pages on the server; the counts and the last evaluation come with each page
   const [pageRows, setPageRows] = useState<GovernanceAlert[]>([]);
   const [meta, setMeta] = useState<Pick<AlertsResponse, "counts" | "lastEvaluatedAt"> | null>(null);
+  const [alertTotal, setAlertTotal] = useState<number | null>(null);
   const alertFilters = useMemo(() => ({ status }), [status]);
   const onRows = useCallback((rows: GovernanceAlert[], raw: Record<string, unknown>) => {
     setPageRows(rows);
+    setAlertTotal(typeof raw.total === "number" ? raw.total : rows.length);
     const body = raw as Partial<AlertsResponse>;
     if (body.counts) setMeta({ counts: body.counts, lastEvaluatedAt: body.lastEvaluatedAt ?? null });
   }, []);
@@ -212,7 +214,7 @@ export default function GovernanceAlertsPage() {
 
         <Tabs tabs={FILTERS} active={status} idPrefix={tabsId} label="Alert state" onChange={(next) => { setStatus(next); setSelectedId(null); }} />
         <div role="tabpanel" id={tabIds(tabsId, status).panel} aria-labelledby={tabIds(tabsId, status).tab}>
-        <Card flush title="Alerts">
+        <Card flush title="Alerts" count={alertTotal ?? undefined} countNoun={["alert", "alerts"]}>
           <div ref={list}>
             <DataList<GovernanceAlert>
               listId="governance-alerts"

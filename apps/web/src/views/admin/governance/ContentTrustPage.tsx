@@ -216,6 +216,7 @@ const RECORD_COLUMNS: Array<DataColumn<ContentProvenanceRecordView>> = [
   {
     key: "delivered",
     header: "Delivered",
+    main: true,
     sortable: true,
     render: (r) => (
       // the kit chip copies the full digest; a missing one says so
@@ -232,7 +233,6 @@ const RECORD_COLUMNS: Array<DataColumn<ContentProvenanceRecordView>> = [
   {
     key: "anchor",
     header: "Anchor",
-    main: true,
     render: (r) => (r.anchor ? `#${r.anchor.anchorSeq}, timestamp ${humanize(r.anchor.tsaStatus).toLowerCase()}` : "Not yet anchored"),
   },
 ];

@@ -133,7 +133,7 @@ export default function UseCasesPage() {
   const opener = useRef<HTMLElement | null>(null);
   const set = (patch: Partial<RegistryFilters>) => setFilters((f) => ({ ...f, ...patch }));
   const statusCount = (value: StatusFilter) => summary?.statusCounts[value] ?? 0;
-  const refresh = () => void queryClient.invalidateQueries({ queryKey: ["admin", "use-cases"] });
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ["admin", "use-cases"] });
   const tile = (label: string, value: number, pressed: boolean, apply: Partial<RegistryFilters>) => (
     <button type="button" className={r.tile} aria-pressed={pressed} onClick={() => setFilters(pressed ? NO_FILTERS : { ...NO_FILTERS, ...apply })}>
       <span className={r.tileLabel}>{label}</span>{" "}

@@ -89,6 +89,12 @@ test("FS-3: a keyboard-opened drawer heading draws the focus ring", async ({ pag
 });
 
 test("FS-4: a sortable header is reached with Tab and sorts with Enter", async ({ page }) => {
+  // ADR-0219: the registry sorts on the server, so Enter asks the server for that order
+  const asked: URL[] = [];
+  page.on("request", (r) => {
+    const u = new URL(r.url());
+    if (u.pathname === "/v1/use-cases" && u.searchParams.get("sort")) asked.push(u);
+  });
   await page.goto("/ui/admin/use-cases");
   await expect(page.getByRole("heading", { level: 1, name: "AI registry" })).toBeVisible();
   const sortName = page.getByRole("button", { name: "Name", exact: true });
@@ -103,12 +109,13 @@ test("FS-4: a sortable header is reached with Tab and sorts with Enter", async (
   await expect(header).toHaveAttribute("aria-sort", "ascending");
   await page.keyboard.press("Enter");
   await expect(header).toHaveAttribute("aria-sort", "descending");
-  await expect(page.locator("tbody tr").first()).toContainText("Support ticket summarizer");
+  await expect.poll(() => asked.at(-1)?.search ?? "").toContain("sort=name");
+  expect(asked.at(-1)!.searchParams.get("dir")).toBe("desc");
 });
 
 test("FS-15: the success toast sits left of an open side drawer, not over its pinned action row (G5 Acknowledge)", async ({ page }) => {
   await page.goto("/ui/admin/governance/alerts");
-  await page.getByRole("button", { name: /Credit-limit assistant inherits/ }).click();
+  await page.getByRole("link", { name: /Credit-limit assistant inherits/ }).click();
   const detail = page.getByTestId("alert-detail");
   await detail.getByLabel("Acknowledgement note — required and audited").fill("Avery owns the response.");
   await detail.getByRole("button", { name: "Acknowledge" }).click();

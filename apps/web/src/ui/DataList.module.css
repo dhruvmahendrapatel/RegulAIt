@@ -168,3 +168,9 @@
   font-size: var(--text-xs);
   color: var(--text-dim);
 }
+
+/* WCAG 2.2 SC 2.5.8 (axe target-size): a header's sort button is a 24px target even in a narrow column */
+.list thead button {
+  min-block-size: 24px;
+  min-inline-size: 24px;
+}

@@ -28,7 +28,7 @@ export default function FeedbackPage() {
   const filters = useMemo(() => ({ scope, status }), [scope, status]);
   // the server counts the overdue items across every matching item, not only the page on screen
   const [overdue, setOverdue] = useState(0);
-  const onRows = useCallback((_rows: FeedbackItem[], raw: Record<string, unknown>) => setOverdue(typeof raw.overdue === "number" ? raw.overdue : 0), []);
+  const onRows = useCallback((_rows: FeedbackItem[], raw: Record<string, unknown>) => setOverdue(typeof raw.overdue === "number" ? raw.overdue : _rows.filter((i) => i.sla.chip === "breached").length), []);
   const panel = tabIds("feedback", scope);
 
   return (

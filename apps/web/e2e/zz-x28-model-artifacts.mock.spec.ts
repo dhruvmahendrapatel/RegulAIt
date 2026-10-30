@@ -381,8 +381,9 @@ async function installMrmMock(page: Page) {
   await page.route("**/v1/mrm/status", (route) =>
     json(route, { enforced: false, warnDays: 30, stalenessRecertEnabled: true, stalenessRecertThreshold: 1, posture: "declared", label: "declared", cards: 1, approved: 0, expiring: 0, expired: 0, pending: 0, unsigned: 1, revoked: 0, note: "" }),
   );
-  await page.route("**/v1/mrm/expiring", (route) => json(route, { warnDays: 30, items: [] }));
-  await page.route("**/v1/mrm/cards", (route) => json(route, { cards: [card], enforced: false }));
+  // ADR-0219: the lists ask with the contract's query string, so match the path, not the whole URL
+  await page.route((u) => u.pathname === "/v1/mrm/expiring", (route) => json(route, { warnDays: 30, items: [] }));
+  await page.route((u) => u.pathname === "/v1/mrm/cards", (route) => json(route, { cards: [card], enforced: false }));
   await page.route(`**/v1/mrm/cards/${CARD}`, (route) => json(route, { card: { ...card, autofill: null, staleness: null } }));
   await page.route(`**/v1/mrm/cards/${CARD}/evidence`, (route) => {
     posted.push(route.request().postDataJSON());

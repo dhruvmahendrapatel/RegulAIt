@@ -435,7 +435,9 @@ export default function ShadowAiPage() {
     if (result) setMcpResult(result);
   };
 
-  const bySeverity: Record<string, number> = findings.data?.summary?.bySeverity ?? { critical: 0, high: 0, medium: 0, low: 0 };
+  // an older gateway answers the whole inventory with no summary: count it as before
+  const summary = useMemo(() => findings.data?.summary ?? (findings.data ? summariseFindings(findings.data.findings ?? []) : undefined), [findings.data]);
+  const bySeverity: Record<string, number> = summary?.bySeverity ?? { critical: 0, high: 0, medium: 0, low: 0 };
 
   const submitEvidence = async (mode: "dry_run" | "apply") => {
     let parsed: Record<string, unknown>;
@@ -452,10 +454,10 @@ export default function ShadowAiPage() {
     if (ok) refresh();
   };
 
-  const criticalOpen = findings.data?.summary?.criticalOpen ?? 0;
-  const statusCounts: Record<string, number> = findings.data?.summary?.statusCounts ?? { all: 0, open: 0, confirmed: 0, closed: 0 };
-  const seenAgain = findings.data?.summary?.seenAgain ?? [];
-  const seenAgainTotal = findings.data?.summary?.seenAgainTotal ?? seenAgain.length;
+  const criticalOpen = summary?.criticalOpen ?? 0;
+  const statusCounts: Record<string, number> = summary?.statusCounts ?? { all: 0, open: 0, confirmed: 0, closed: 0 };
+  const seenAgain = summary?.seenAgain ?? [];
+  const seenAgainTotal = summary?.seenAgainTotal ?? seenAgain.length;
   const subjectOf = (id: string | null) =>
     pageFindings.find((f) => f.id === id)?.subject ?? seenAgain.find((f) => f.id === id)?.subject ?? "this finding";
   const findingFilters = useMemo(() => ({ status: statusFilter === "all" ? undefined : statusFilter }), [statusFilter]);
@@ -1317,6 +1319,27 @@ export default function ShadowAiPage() {
 }
 
 const TAB_IDS = ["findings", "coverage", "import", "catalogue", "history"];
+
+const statusGroupOf = (d: string): "open" | "confirmed" | "closed" => (d === "open" ? "open" : d === "confirmed" ? "confirmed" : "closed");
+/** the figures an older gateway does not send, counted from the whole inventory it answers instead */
+function summariseFindings(all: readonly Finding[]): NonNullable<FindingsResponse["summary"]> {
+  const bySeverity: Record<string, number> = { critical: 0, high: 0, medium: 0, low: 0 };
+  const statusCounts: Record<string, number> = { all: 0, open: 0, confirmed: 0, closed: 0 };
+  for (const f of all) {
+    bySeverity[f.severity] = (bySeverity[f.severity] ?? 0) + 1;
+    statusCounts.all = (statusCounts.all ?? 0) + 1;
+    const g = statusGroupOf(f.disposition);
+    statusCounts[g] = (statusCounts[g] ?? 0) + 1;
+  }
+  const seenAgain = all.filter((f) => f.dispositionStale).map((f) => ({ id: f.id, subject: f.subject }));
+  return {
+    bySeverity,
+    statusCounts,
+    criticalOpen: all.filter((f) => f.severity === "critical" && statusGroupOf(f.disposition) !== "closed").length,
+    seenAgain,
+    seenAgainTotal: seenAgain.length,
+  };
+}
 
 /** ADR-0219: the import history's columns; the ids and sortable ones match the gateway's SHADOW_IMPORTS_LIST */
 const IMPORT_COLUMNS: Array<DataColumn<ImportRow>> = [

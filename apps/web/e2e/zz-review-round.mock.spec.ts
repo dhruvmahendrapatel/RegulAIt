@@ -21,6 +21,7 @@ import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test, type Locator, type Page, type Route } from "@playwright/test";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
+import { isContractRead, useCasesContract } from "./use-cases-contract";
 import { refreshSessionInPlace } from "./refresh-session-fixture";
 
 const SHOTS = process.env.G2_SHOTS_DIR;
@@ -250,11 +251,14 @@ async function mockGateway(page: Page, patch: Partial<State> = {}): Promise<Stat
     if (p === `/v1/workflows/instances/${INST}`) return json(route, { instance: { id: INST, status: "blocked_on_approval", createdAt: "2026-10-02T09:00:00Z", initiatorUserId: "ada", change: { description: `AI use-case intake: ${NAME}`, changeType: "ai-use-case-intake" }, definition: { stages: [{ id: "questionnaire", type: "artifact_generation", output: "use_case_questionnaire" }, { id: "signoff", type: "human_approval" }] }, state: { currentStageIndex: 1, stageStatuses: {} }, context: {} }, artifacts: [{ id: "art", output: "use_case_questionnaire", version: 2, content: QUESTIONNAIRE }] });
     if (p.startsWith("/v1/workflows/instances/")) return json(route, { error: "not_found" }, 404);
     if (p === "/v1/use-cases" && method === "GET") {
-      return json(route, { useCases: [
+      const q = new URL(route.request().url()).searchParams;
+      const useCases = [
         listRow({ id: UC, name: NAME, description: PURPOSE, status: state.status }),
         listRow({ id: RECERT, name: "Fraud scoring model", description: "Scores card transactions.", status: "under_review", approvedUntil: "2026-09-01T00:00:00Z", recertification: true, recertificationDueAt: "2026-09-01T00:00:00Z" }),
         listRow({ id: "77777777-1111-4111-8111-111111111111", name: "Ticket summarizer", status: "approved", euAiActTier: "minimal", approvedUntil: "2027-08-20T09:00:00Z" }),
-      ] });
+      ];
+      // ADR-0219: the registry's filters and figures run on the server
+      return json(route, isContractRead(q) ? useCasesContract(useCases, q) : { useCases });
     }
     if (p === `/v1/use-cases/${UC}/overview`) return me.isAdmin ? json(route, overview(state.status)) : json(route, { error: "forbidden" }, 403);
     if (p === `/v1/use-cases/${UC}` && method === "PATCH") {

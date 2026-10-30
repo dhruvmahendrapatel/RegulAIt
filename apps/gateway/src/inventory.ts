@@ -416,7 +416,7 @@ type InventoryListRowT = {
   id: string; name: string; provider: string; model: string | null; tier: number; enabled: boolean;
   owner: { userId: string; name: string | null; deactivated: boolean } | null;
   lifecycle: { status: string };
-  alignment: { status?: string } | null;
+  alignment: AgentAlignment | null;
   credential: { source: string };
   modelCard: { cards: number; liveApproved: boolean };
   granted: { effectiveHolders: number; grantingRoles: string[]; revokedUsers: number };
@@ -440,7 +440,10 @@ export const INVENTORY_AGENTS_LIST: ListSpec<InventoryListRowT> = {
       label: "Owner / lifecycle",
       value: (r) => `${r.owner ? `${r.owner.name ?? r.owner.userId}${r.owner.deactivated ? " (deactivated)" : ""}` : "no owner"} · ${r.lifecycle.status.replace(/_/g, " ")}`,
     },
-    alignment: { label: "Intent alignment", value: (r) => (r.alignment && typeof r.alignment.status === "string" ? r.alignment.status.replace(/_/g, " ") : null) },
+    alignment: {
+      label: "Intent alignment",
+      value: (r) => (!r.alignment ? null : r.alignment.overreach ? "overreach" : r.alignment.undershoot ? "undershoot" : r.alignment.aligned ? "aligned" : "no approved intent, no grants"),
+    },
     card: { label: "Model card", value: (r) => (r.modelCard.cards === 0 ? "none" : r.modelCard.liveApproved ? "live sign-off" : "no live sign-off") },
     granted: { label: "Granted (may)", value: (r) => `${r.granted.effectiveHolders} holder(s)${r.granted.grantingRoles.length ? `, roles: ${r.granted.grantingRoles.join(", ")}` : ""}${r.granted.revokedUsers ? `, ${r.granted.revokedUsers} revoked` : ""}` },
     observed: { label: "Observed (did)", value: (r) => `${r.observed.dispatchesInWindow} dispatch(es)${r.observed.lastDispatchAt ? `, last ${r.observed.lastDispatchAt}` : ", never observed"}` },

@@ -105,14 +105,16 @@ export default function DiscoverySourcesPage() {
   // a psn: link lands on the prefilled Pseudonym field: scrolled into view and focused, once the page has rendered
   const pseudonymRef = useRef<HTMLInputElement>(null);
   const linkedPseudonym = params.get("pseudonym");
-  const pageReady = !sources.isPending && !scanners.isPending && !sources.error && !scanners.error;
+  const pageReady = !sources.isPending && !scanners.isPending && !sources.error && !scanners.error && !runs.isPending;
+  // the Recent runs list above the field fills after the page renders: land on the field again once it has
+  const [runsListed, setRunsListed] = useState(false);
   useEffect(() => {
     const el = pseudonymRef.current;
     if (!linkedPseudonym || !pageReady || !el) return;
     const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
     el.scrollIntoView?.({ block: "center", behavior: reduce ? "auto" : "smooth" });
     el.focus({ preventScroll: true });
-  }, [linkedPseudonym, pageReady]);
+  }, [linkedPseudonym, pageReady, runsListed]);
 
   const kinds = scanners.data?.kinds ?? [];
   const built = kinds.filter((k) => k.built);
@@ -484,6 +486,7 @@ export default function DiscoverySourcesPage() {
               endpoint="/v1/discovery/runs"
               exportPath="/v1/discovery/runs/export.xlsx"
               queryKey={["admin", "discovery", "runs", "list"]}
+              onRows={() => setRunsListed(true)}
               legacyKey="runs"
               count="estimate"
               defaultSort={{ key: "when", dir: "desc" }}
@@ -532,7 +535,7 @@ export default function DiscoverySourcesPage() {
                       "none"
                     ),
                 },
-                { key: "reads", header: "Reads", fold: { md: "status" }, render: (r) => couldNotRead(r.readOutcomes) ?? <span className={v.faint} style={nowrap}>all read</span> },
+                { key: "reads", header: "Reads", main: true, required: "A source the scan could not read is always shown", fold: { md: "status" }, render: (r) => couldNotRead(r.readOutcomes) ?? <span className={v.faint} style={nowrap}>all read</span> },
               ]}
             />
           </Card>

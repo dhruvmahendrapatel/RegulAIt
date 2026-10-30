@@ -216,14 +216,14 @@ test("enterprise governance demo surfaces render and complete their core actions
   await expect(page.getByText("Recent use-case audit evidence")).toBeVisible();
 
   await page.goto("/ui/admin/governance/alerts");
-  await page.getByRole("button", { name: /inherits a HIGH rating/ }).click();
+  await page.getByRole("link", { name: /inherits a HIGH rating/ }).click();
   await page.getByRole("button", { name: "Post to chat" }).click();
-  await expect(page.getByRole("status")).toContainText("Posted to security-slack · C-GOVERNANCE");
+  await expect(page.getByRole("status").filter({ hasText: "Posted to" })).toHaveText("Posted to security-slack · C-GOVERNANCE");
   // the alert's detail is a drawer over the page: close it to reach Evaluate now, then reopen it
   await page.getByRole("button", { name: "Close alert" }).click();
   await page.getByRole("button", { name: "Evaluate now" }).click();
   await expect(page.getByText(/Evaluation raised 0, refreshed 1/)).toBeVisible();
-  await page.getByRole("button", { name: /inherits a HIGH rating/ }).click();
+  await page.getByRole("link", { name: /inherits a HIGH rating/ }).click();
   const acknowledgement = page.getByLabel("Acknowledgement note — required and audited");
   await acknowledgement.fill("x".repeat(501));
   await expect(acknowledgement).toHaveValue("x".repeat(500));
@@ -268,7 +268,7 @@ test("enterprise governance demo surfaces render and complete their core actions
 });
 
 test("alerts distinguish a monitor that has never run and use a valid agent inventory link", async ({ page }) => {
-  await page.route("**/v1/governance/alerts?status=active", async (route) => {
+  await page.route("**/v1/governance/alerts?status=active*", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -278,8 +278,8 @@ test("alerts distinguish a monitor that has never run and use a valid agent inve
   await page.goto("/ui/admin/governance/alerts");
   await expect(page.getByText("The governance monitor has not run yet. Select Evaluate now before treating this as an all-clear state.")).toBeVisible();
 
-  await page.unroute("**/v1/governance/alerts?status=active");
-  await page.route("**/v1/governance/alerts?status=active", async (route) => {
+  await page.unroute("**/v1/governance/alerts?status=active*");
+  await page.route("**/v1/governance/alerts?status=active*", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -292,12 +292,12 @@ test("alerts distinguish a monitor that has never run and use a valid agent inve
     });
   });
   await page.reload();
-  await page.getByRole("button", { name: /inherits a HIGH rating/ }).click();
+  await page.getByRole("link", { name: /inherits a HIGH rating/ }).click();
   await expect(page.getByRole("link", { name: "Open agent" })).toHaveAttribute("href", `/ui/admin/agents#agent-${AGENT}`);
 });
 
 test("trust dashboard does not show an all-clear badge before the monitor runs", async ({ page }) => {
-  await page.route("**/v1/governance/alerts?status=active", async (route) => {
+  await page.route("**/v1/governance/alerts?status=active*", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -459,7 +459,7 @@ test("ChatOps workspace alert threshold is editable and the exact post refusal i
     await route.fulfill({ status: 502, contentType: "application/json", body: JSON.stringify({ error: "post_failed", detail: "see the chatops-alert-post-failed audit row" }) });
   });
   await page.goto("/ui/admin/governance/alerts");
-  await page.getByRole("button", { name: /inherits a HIGH rating/ }).click();
+  await page.getByRole("link", { name: /inherits a HIGH rating/ }).click();
   await page.getByRole("button", { name: "Post to chat" }).click();
   await expect(page.getByRole("alert")).toContainText("Post failed — see the chatops-alert-post-failed audit row");
 });

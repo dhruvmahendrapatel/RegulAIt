@@ -69,7 +69,12 @@ async function mock(route: Route) {
   let body: unknown = {};
   if (p === "/auth/me") body = { userId: "u", isAdmin: true, via: "session", user: { id: "u", email: "ada@example.test", displayName: "Ada Admin" }, mustChangePassword: false, totpEnabled: true, passwordSet: true, mfaSetupRequired: false };
   else if (p === "/v1/me") body = { userId: "u", isAdmin: true, user: { id: "u", email: "ada@example.test", displayName: "Ada Admin" } };
-  else if (p === "/v1/shadow-ai/findings") body = { findings, coverage, posture: "Detection is signal, not proof." };
+  else if (p === "/v1/shadow-ai/findings") {
+    // ADR-0219: the status chips filter on the server (open, confirmed, or closed: every other disposition)
+    const status = new URL(route.request().url()).searchParams.get("status");
+    const group = (d: string) => (d === "open" ? "open" : d === "confirmed" ? "confirmed" : "closed");
+    body = { findings: status ? findings.filter((f) => group(f.disposition) === status) : findings, coverage, posture: "Detection is signal, not proof." };
+  }
   else if (p === "/v1/shadow-ai/catalogue") body = { signatures: [], total: 0, enabled: 0, oldestEntryAt: null, posture: "No collector ships." };
   else if (p === "/v1/shadow-ai/imports") body = { imports: [] };
   else if (p === "/v1/shadow-ai/adapters") body = { adapters: [], posture: "Operator supplied evidence only.", pipeline: "No raw content retained." };
@@ -138,9 +143,9 @@ test("Shadow AI: tabs, figures with (i), aligned next steps and the coverage til
   await expect(page.getByRole("note").filter({ hasText: "What this can see." })).toBeVisible();
   await expect(page.getByRole("button", { name: "What is Critical?" })).toBeVisible();
 
-  // X6a: the full findings list overflows, so it is a named, focusable scroll region (a filtered short list is not)
+  // ADR-0219: the inventory pages under the list control, which says where you are (no scroll box)
   const region = cardOf(page, "Inventory");
-  await expect(page.getByRole("region", { name: "Inventory, scrollable" })).toHaveAttribute("tabindex", "0");
+  await expect(region.getByTestId("list-status")).toHaveText(`1–${findings.length} of ${findings.length}`);
   // X7: every row's primary slot starts at the same x
   const lefts = await slotLefts(page, "Inventory");
   expect(lefts.length).toBe(findings.length);
@@ -217,7 +222,7 @@ test("A1: a finding's plan and triage open in the one shared drawer; Escape clos
   await expect(opener).toBeFocused();
   // triage replaces the plan rather than stacking a second drawer
   await opener.click();
-  const row = page.getByRole("region", { name: /Inventory, scrollable/ }).locator("tbody tr", { hasText: "team-17/payments-api" });
+  const row = cardOf(page, "Inventory").locator("tbody tr", { hasText: "team-17/payments-api" });
   // N1: the page gives up the drawer's width, so a real click reaches the row beside the open drawer
   await row.getByRole("button", { name: /^(Triage|Review again)\b/ }).click();
   await expect(page.getByRole("dialog")).toHaveCount(1);
@@ -252,57 +257,42 @@ test("D3 (#36, #46): the federation card says what turning it on does, in plain 
   await expect(fed).not.toContainText("AssumeRoleWithWebIdentity");
 });
 
-test("X6b: a contained section folds from its header, keeps its count and worst status, and is remembered", async ({ page }) => {
+test("ADR-0219: the Inventory pages under the list control; its header keeps the worst status", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 520 });
   await page.goto("/ui/admin/shadow-ai");
-  const fold = page.getByRole("button", { name: /^Inventory \d+ findings/ });
-  await expect(fold).toHaveAttribute("aria-expanded", "true");
-  await expect(page.getByRole("region", { name: "Inventory, scrollable" })).toBeVisible();
-  await expect(cardOf(page, "Inventory").getByText(/^Showing \d+ of \d+ · scroll the list for the rest, or Expand$/)).toBeVisible();
-  await fold.click();
-  await expect(fold).toHaveAttribute("aria-expanded", "false");
-  await expect(page.getByRole("region", { name: "Inventory, scrollable" })).toHaveCount(0);
-  // folded, the header still says how many and how bad, and the filters leave with the list
-  await expect(fold).toContainText("1 critical");
-  await expect(page.getByRole("group", { name: "Filter by status" })).toHaveCount(0);
+  const card = cardOf(page, "Inventory");
+  await expect(card.getByTestId("list-status")).toHaveText(`1–${findings.length} of ${findings.length}`);
+  await expect(card.locator("tbody tr")).toHaveCount(findings.length);
+  // the header still says how bad, and the status filters sit beside it
+  await expect(card).toContainText("1 critical");
+  await expect(page.getByRole("group", { name: "Filter by status" })).toBeVisible();
+  // a page size is remembered for this list
+  await card.getByLabel("Rows per page").selectOption("50");
   await page.reload();
-  await expect(page.getByRole("button", { name: /^Inventory \d+ findings/ })).toHaveAttribute("aria-expanded", "false");
-  await page.getByRole("button", { name: /^Inventory \d+ findings/ }).click();
-  await expect(page.getByRole("region", { name: "Inventory, scrollable" })).toBeVisible();
+  await expect(cardOf(page, "Inventory").getByLabel("Rows per page")).toHaveValue("50");
 });
 
-test("F33: the Inventory's Showing line counts the rows on screen, a last row cut by a few pixels included", async ({ page }) => {
-  await page.setViewportSize({ width: 1280, height: 520 });
-  await page.goto("/ui/admin/shadow-ai");
-  const region = page.getByRole("region", { name: "Inventory, scrollable" });
-  await expect(region).toBeVisible();
-  // a row is on screen once most of it is in the box
-  const onScreen = await region.evaluate((el) => {
-    const top = el.getBoundingClientRect().top;
-    return [...el.querySelectorAll("tbody > tr")].filter((r) => { const b = r.getBoundingClientRect(); return (b.top + b.bottom) / 2 - top <= el.clientHeight; }).length;
-  });
-  await expect(cardOf(page, "Inventory").getByText(`Showing ${onScreen} of ${findings.length} · scroll the list for the rest, or Expand`)).toBeVisible();
-});
-
-test("X6b (L2): a status filter makes the Inventory header count what the list shows, out of every finding", async ({ page }) => {
+test("X6b (L2): a status filter asks the server, and the list says how many it shows; the chips count every finding", async ({ page }) => {
   await page.goto("/ui/admin/shadow-ai");
   await expect(cardOf(page, "Inventory").locator("tbody tr").first()).toBeVisible();
   const all = await cardOf(page, "Inventory").locator("tbody tr").count();
+  const asked = page.waitForRequest((r) => new URL(r.url()).pathname === "/v1/shadow-ai/findings" && new URL(r.url()).searchParams.get("status") === "open");
   await page.getByRole("group", { name: "Filter by status" }).getByRole("button", { name: /^Open/ }).click();
+  await asked;
   await expect.poll(() => cardOf(page, "Inventory").locator("tbody tr").count()).toBeLessThan(all);
   const shown = await cardOf(page, "Inventory").locator("tbody tr").count();
-  await expect(page.getByRole("button", { name: new RegExp(`^Inventory ?${shown} of ${all} findings`) })).toBeVisible();
+  await expect(cardOf(page, "Inventory").getByTestId("list-status")).toHaveText(`1–${shown} of ${shown}`);
+  await expect(page.getByRole("group", { name: "Filter by status" }).getByRole("button", { name: /^All/ })).toContainText(String(all));
 });
 
 // the KEEP_VISIBLE refusal (a form or warning never folds) is probed in kit-contain.mock.spec.ts
-test("X6b: a secondary section starts folded, and the viewer's choice is remembered", async ({ page }) => {
+test("ADR-0219: Recent runs is a paged list with its own page size, remembered in this browser", async ({ page }) => {
   await page.goto("/ui/admin/shadow-ai/discovery-sources");
-  const runs = page.getByRole("button", { name: /^Recent runs/ });
-  await expect(runs).toHaveAttribute("aria-expanded", "false");
-  await runs.click();
-  await expect(runs).toHaveAttribute("aria-expanded", "true");
+  const runs = page.locator('[data-list="discovery-runs"]');
+  await expect(runs.getByLabel("Rows per page")).toHaveValue("10");
+  await runs.getByLabel("Rows per page").selectOption("100");
   await page.reload();
-  await expect(page.getByRole("button", { name: /^Recent runs/ })).toHaveAttribute("aria-expanded", "true");
+  await expect(page.locator('[data-list="discovery-runs"]').getByLabel("Rows per page")).toHaveValue("100");
 });
 
 /** the plan and triage buttons' offsets inside each row's action stack: one left and one top per button, on every row */
@@ -741,7 +731,7 @@ for (const [label, size] of [["390 px", { width: 390, height: 520 }], ["desktop"
   });
 }
 
-test("L5: folding still works when this browser refuses storage, and nothing is remembered", async ({ page }) => {
+test("L5: the list control still works when this browser refuses storage, and nothing is remembered", async ({ page }) => {
   await page.addInitScript(() => {
     const refuse = () => { throw new DOMException("storage refused", "SecurityError"); };
     Storage.prototype.getItem = refuse;
@@ -752,12 +742,12 @@ test("L5: folding still works when this browser refuses storage, and nothing is 
   page.on("pageerror", (e) => errors.push(e.message));
   await page.setViewportSize({ width: 1280, height: 520 });
   await page.goto("/ui/admin/shadow-ai");
-  const fold = page.getByRole("button", { name: /^Inventory \d+ findings/ });
-  await expect(fold).toHaveAttribute("aria-expanded", "true");
-  await fold.click();
-  await expect(fold).toHaveAttribute("aria-expanded", "false");
+  const size = cardOf(page, "Inventory").getByLabel("Rows per page");
+  await expect(size).toHaveValue("10");
+  await size.selectOption("50");
+  await expect(size).toHaveValue("50");
   await page.reload();
-  await expect(page.getByRole("button", { name: /^Inventory \d+ findings/ })).toHaveAttribute("aria-expanded", "true");
+  await expect(cardOf(page, "Inventory").getByLabel("Rows per page")).toHaveValue("10");
   expect(errors).toEqual([]);
 });
 
@@ -827,8 +817,9 @@ test("shadow-ai-01: the federation card shows a failed read as an error with Ret
 test("shadow-ai-02/03: failed runs, token and device reads show errors with Retry, not empty states", async ({ page }) => {
   const fail = (route: Route) => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "unavailable" }) });
   await page.route("**/v1/discovery/runs?*", fail);
-  await page.route("**/enrolment-tokens", fail);
-  await page.route("**/endpoint-devices", fail);
+  // ADR-0219: both lists ask with the contract's query string
+  await page.route(/\/enrolment-tokens(\?.*)?$/, fail);
+  await page.route(/\/endpoint-devices(\?.*)?$/, fail);
   await page.route("**/v1/discovery/sources", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ sources: [...sources, source(5, { name: "Fleet agent", kind: "endpoint_agent", credential: null })], posture }) }));
   await page.goto("/ui/admin/shadow-ai/discovery-sources");
@@ -899,7 +890,7 @@ test("shadow-ai-16: the signatures table folds to fit its card, names its action
 });
 
 test("shadow-ai-10: import history reads its mode and status in words, with an absolute date", async ({ page }) => {
-  await page.route("**/v1/shadow-ai/imports", (route) =>
+  await page.route((u) => u.pathname === "/v1/shadow-ai/imports", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ imports: [
       { id: "1", kind: "egress_log", mode: "dry_run", status: "accepted", rowCount: 1240, reason: "parsed", createdAt: ago(96) },
     ] }) }));
