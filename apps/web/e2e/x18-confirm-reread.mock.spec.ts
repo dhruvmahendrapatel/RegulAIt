@@ -33,6 +33,10 @@ test("MCP coverage: a method another admin enabled while the dialog was open sur
   const state: Record<string, unknown> = { "/v1/org/settings": { settings }, "/v1/servers": { servers: [] }, "/v1/users": { users: [] } };
   const writes = await mockApi(page, state);
   await page.goto("/ui/admin/mcp-servers");
+  // ADR-0180: each control's precondition stays visible, not only inside its (i)
+  await expect(page.getByText("Also needs a per-user grant.", { exact: true })).toBeVisible();
+  await expect(page.getByText("stdio also needs admission approval.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Also needs the method enabled above.", { exact: true })).toBeVisible();
   await page.getByRole("checkbox", { name: "prompts/list · read", exact: true }).check();
   await page.getByRole("button", { name: "Save MCP coverage" }).click();
   const dialog = page.getByRole("dialog", { name: "Enable more MCP coverage?" });

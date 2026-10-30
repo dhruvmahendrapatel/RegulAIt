@@ -119,9 +119,11 @@ function CoverageSettings({ settings }: { settings: Record<string, unknown> }) {
     {unavailable && <p role="alert">This gateway has not reported MCP protocol coverage. Refresh before changing it.</p>}
     {/* the (i) sits in the legend, which a disabled fieldset never disables */}
     <fieldset disabled={busy || unavailable}><legend>Enabled protocol methods <InfoButton label="enabled protocol methods">The strict default refuses all these methods. Enabling one relaxes that boundary and is audited; a matching user grant is still required.</InfoButton></legend>
+      <p className={v.faint}>Also needs a per-user grant.</p>
       {MCP_PROTOCOL_METHODS.map((method) => <label key={method} className={v.row}><input type="checkbox" checked={methods.includes(method)} onChange={(event) => setMethods(toggle(methods, method, event.target.checked))} />{method} · {method.startsWith("logging/") ? "write" : "read"}</label>)}
     </fieldset>
     <fieldset disabled={busy || unavailable}><legend>Enabled upstream transports <InfoButton label="enabled upstream transports">Only streamable HTTP is enabled by default. Enabling SSE or stdio is an audited relaxation. A stdio server never runs on the gateway: it runs from an image pinned by digest, inside a sandbox started by an executor that proves the required isolation, and it still needs admission approval.</InfoButton></legend>
+      <p className={v.faint}>stdio also needs admission approval.</p>
       {MCP_UPSTREAM_TRANSPORTS.map((transport) => <label key={transport} className={v.row}><input type="checkbox" checked={transports.includes(transport)} onChange={(event) => setTransports(toggle(transports, transport, event.target.checked))} />{transport}</label>)}
     </fieldset>
     <Button type="submit" disabled={busy || unavailable}>Save MCP coverage</Button>
@@ -156,6 +158,7 @@ function ProtocolGrantForm({ servers }: { servers: McpServer[] }) {
     {users.error && <PeopleLoadError onRetry={() => void users.refetch()} />}
     <Field label="Protocol server"><Select required value={serverId} onChange={(event) => setServerId(event.target.value)}>{optionEls(serverOpts(servers), "— select —")}</Select></Field>
     <Field label="Protocol grant"><Select value={grant} onChange={(event) => setGrant(event.target.value)}>{MCP_PROTOCOL_GRANT_NAMES.map((name) => <option key={name} value={name}>{name}</option>)}</Select></Field>
+    <p className={v.faint}>Also needs the method enabled above.</p>
     <Button type="submit" disabled={act.busy || flight.busy || users.isLoading || !!users.error}>Add protocol grant</Button>
     {act.error && <p role="alert">{act.error}</p>}
   </form></Card>;

@@ -110,13 +110,13 @@ export default function LicensingPage() {
       <PageHeader
         title="Licensing & seats"
         sub="The commercial ceiling that sits on top of the governance ceiling."
-        info={<p>A license is a COMMERCIAL ceiling on top of the governance ceiling — it caps how many entitled users exist and which tier features are available, and can never grant an entitlement the governance layer denies. It is a signed file verified locally against a pinned public key, with no phone-home of any kind, because the flagship deployment is air-gapped and there is no home to phone.</p>}
+        info={<p>A licence is a COMMERCIAL ceiling on top of the governance ceiling — it caps how many entitled users exist and which tier features are available, and can never grant an entitlement the governance layer denies. It is a signed file verified locally against a pinned public key, with no phone-home of any kind, because the flagship deployment is air-gapped and there is no home to phone.</p>}
       />
       <div className={v.stack}>
         <QueryGate loading={status.isLoading} error={status.error} onRetry={() => void status.refetch()}>
           <Card title="Current state">
             <div className={a.statRow}>
-              <Stat value={<Badge tone={stateTone(s?.state ?? "absent")}>{s?.state ?? "—"}</Badge>} label="license state" />
+              <Stat value={<Badge tone={stateTone(s?.state ?? "absent")}>{s?.state ?? "—"}</Badge>} label="licence state" />
               <Stat value={s?.tenant ?? <span className={v.faint}>unlicensed</span>} label="tenant" />
               <Stat value={s?.tier ?? <span className={v.faint}>—</span>} label="tier" />
               <Stat value={s?.deploymentMode ?? <span className={v.faint}>—</span>} label="deployment mode grant" />
@@ -133,19 +133,19 @@ export default function LicensingPage() {
             {s && !s.licensed && (
               <EmptyState
                 title="This deployment is UNLICENSED — and that is a state, not a failure"
-                body="Governance, approvals, guardrails and audit logging are fully operational. Every tier feature is closed and no seat cap is enforced, because there is no authoritative number to enforce. Install a signed license below to make seats and tier features real."
+                body="Governance, approvals, guardrails and audit logging are fully operational. Every tier feature is closed and no seat cap is enforced, because there is no authoritative number to enforce. Install a signed licence below to make seats and tier features real."
               />
             )}
             {s?.state === "grace" && (
               <div className={v.faint}>
-                <Badge tone="warn">grace</Badge> This license expired on {s.expiresAt} and the grace window ends{" "}
+                <Badge tone="warn">grace</Badge> This licence expired on {s.expiresAt} and the grace window ends{" "}
                 {s.graceEndsAt}. Everything still works. When the window closes the deployment freezes at its current
                 footprint and keeps enforcing it.
               </div>
             )}
             {s?.hardStopOnExpiry && (
               <div className={v.faint}>
-                <Badge tone="danger">hardStopOnExpiry</Badge> This license carries the opt-in total-shutdown flag.
+                <Badge tone="danger">hardStopOnExpiry</Badge> This licence carries the opt-in total-shutdown flag.
                 That is never our default — the default for a governance product is "stay governed" — and it is only
                 present because it was explicitly requested.
               </div>
@@ -191,7 +191,7 @@ export default function LicensingPage() {
                 {s?.seats.definition ? <p>{s.seats.definition}</p> : null}
                 <p>
                   Seat enforcement is a <strong>growth</strong> gate, never a service gate. Going over cap — which
-                  happens legitimately when a smaller license is installed onto a larger estate — refuses the next
+                  happens legitimately when a smaller licence is installed onto a larger estate — refuses the next
                   provisioning and touches nobody who already exists. Nothing here can revoke, disable or degrade a
                   user for a seat-count reason.
                 </p>
@@ -227,9 +227,9 @@ export default function LicensingPage() {
             title="Tier features"
             info={
               <p>
-                Any flag absent from the license defaults <strong>closed</strong>, so an older license simply does not
+                Any flag absent from the licence defaults <strong>closed</strong>, so an older licence simply does not
                 unlock newer paid features rather than failing. A flag may cap how many model providers or PM adapters a
-                tier connects — never <em>which</em>: the license never encodes a preferred vendor at any layer.
+                tier connects — never <em>which</em>: the licence never encodes a preferred vendor at any layer.
               </p>
             }
           >
@@ -251,13 +251,13 @@ export default function LicensingPage() {
           </Card>
 
           <Card
-            title="Install a license"
+            title="Install a licence"
             info={
               <p>
                 Verification is entirely local: the signature is checked against a public key already on this machine.
-                A license signed by a key this deployment does not pin is refused <strong>even if its signature is
+                A licence signed by a key this deployment does not pin is refused <strong>even if its signature is
                 internally valid</strong> — that is what pinning means. A tampered or forged artifact is refused
-                outright and never displaces the license already in force.
+                outright and never displaces the licence already in force.
               </p>
             }
           >
@@ -278,7 +278,7 @@ export default function LicensingPage() {
                       await api.post("/v1/licenses", JSON.parse(artifact));
                       setArtifact("");
                       await Promise.all([status.refetch(), history.refetch(), checks.refetch()]);
-                      return "License installed";
+                      return "Licence installed";
                     })
                   }
                 >
@@ -346,15 +346,15 @@ export default function LicensingPage() {
             )}
           </Card>
 
-          <Card title="Installed licenses">
+          <Card title="Installed licences">
             {(history.data?.licenses.length ?? 0) === 0 ? (
-              <EmptyState title="No license has ever been installed" body="The history is append-only: installing a new license supersedes the previous one and deletes nothing." />
+              <EmptyState title="No licence has ever been installed" body="The history is append-only: installing a new licence supersedes the previous one and deletes nothing." />
             ) : (
               <Table
                 rows={history.data!.licenses}
                 rowKey={(l) => l.id}
                 columns={[
-                  { key: "id", header: "License id", render: (l) => l.licenseId },
+                  { key: "id", header: "Licence id", render: (l) => l.licenseId },
                   { key: "t", header: "Tenant", render: (l) => l.tenant },
                   { key: "tier", header: "Tier", render: (l) => l.tier },
                   { key: "seats", header: "Seat cap", render: (l) => l.seatCap },
@@ -376,7 +376,7 @@ export default function LicensingPage() {
             {(checks.data?.verifications.length ?? 0) === 0 ? (
               <EmptyState
                 title="Nothing has ever been verified on this deployment"
-                body="Every install, every operator-driven check and every refusal lands here — including artifacts that were refused and therefore never became a license."
+                body="Every install, every operator-driven check and every refusal lands here — including artifacts that were refused and therefore never became a licence."
               />
             ) : (
               <Table

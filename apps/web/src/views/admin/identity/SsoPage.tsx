@@ -292,7 +292,7 @@ function OidcCard() {
           (password + code) or an admin approves below — never silently. With JIT off (the
           default-deny default) an unknown identity is refused and audited. A provider with broker sign-in
           buttons (the bundled Keycloak) shows “Continue with Microsoft / Google / GitHub” on the sign-in page;
-          see docs/deployment/SSO_KEYCLOAK.md. JIT-provisioned users are never admins and get at most the default role picked
+          the deployment guide covers setting it up. JIT-provisioned users are never admins and get at most the default role picked
           here. The “SSO only” switch below refuses to engage while no SSO provider — OIDC{" "}
           <em>or</em> SAML — is enabled anywhere on this page.
         </p>
@@ -733,6 +733,10 @@ function SessionsPolicyForm(props: { settings: Record<string, unknown> }) {
               </Select>
             </Field>
           </div>
+          <p className={v.faint} data-testid="sso-policy-requirements">
+            “SSO only” needs at least one enabled SSO provider. “Break-glass admins only” needs an enabled SSO
+            provider and at least one ticked administrator who has a password.
+          </p>
           <fieldset className={v.stack}>
             <legend className={v.faint}>Break-glass admins (may always use email sign-in)</legend>
             {admins.length === 0 ? (

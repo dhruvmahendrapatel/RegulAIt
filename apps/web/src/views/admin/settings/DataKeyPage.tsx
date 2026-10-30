@@ -240,9 +240,12 @@ export default function DataKeyPage() {
               writing the key there would put it in the database in plaintext, and therefore in the backup, which is
               exactly what the envelope split exists to prevent.
             </div>
-            <Button onClick={attest} disabled={act.busy || !s?.fingerprint}>
-              I have recorded this key out of band
-            </Button>
+            <div className={v.row}>
+              <Badge tone="warn">Claim, not verified</Badge>
+              <Button onClick={attest} disabled={act.busy || !s?.fingerprint}>
+                I have recorded this key out of band
+              </Button>
+            </div>
             {!s?.fingerprint && (
               <div className={v.faint}>
                 The gateway is running without REGULAIT_DATA_KEY, so there is no key to attest custody of.

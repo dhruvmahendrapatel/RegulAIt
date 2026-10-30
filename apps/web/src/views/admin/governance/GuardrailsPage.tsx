@@ -180,7 +180,7 @@ export default function GuardrailsPage() {
                   tone="warn"
                   info="No deployment default has been set, so the shipped posture applies: every added layer observes in 'log' mode and refuses nothing. Turning a layer up is a deliberate act."
                 >
-                  Shipped posture
+                  Shipped posture · nothing refused
                 </Badge>
               )}
             </div>
