@@ -1436,6 +1436,20 @@
       "when": 1785149000000,
       "tag": "0214_mcp_upstream_credential",
       "breakpoints": true
+    },
+    {
+      "idx": 233,
+      "version": "7",
+      "when": 1785168000000,
+      "tag": "0233_framework_import_proposals",
+      "breakpoints": true
+    },
+    {
+      "idx": 234,
+      "version": "7",
+      "when": 1785169000000,
+      "tag": "0234_regulatory_feed_imports",
+      "breakpoints": true
     }
   ]
 }
