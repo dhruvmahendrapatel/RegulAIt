@@ -230,7 +230,9 @@ function AgentDetail(props: { agent: A2aAgent }) {
         />
       </Card>
       <StaticCredentialCard
-        url={`/v1/a2a/agents/${agent.id}/credential`}
+        load={() => api.get<{ credential: UpstreamCredentialView }>(`/v1/a2a/agents/${agent.id}/credential`)}
+        save={(body, h) => stepUpApi.put(`/v1/a2a/agents/${agent.id}/credential`, body, h)}
+        clear={(h) => stepUpApi.del(`/v1/a2a/agents/${agent.id}/credential`, undefined, h)}
         queryKey={["admin", "a2a-credential", agent.id]}
         name={agent.name}
         title="Credential"

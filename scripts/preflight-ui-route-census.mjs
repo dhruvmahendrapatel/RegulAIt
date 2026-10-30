@@ -91,6 +91,7 @@ export const MACHINE_ONLY = new Map([
   ["GET /mcp/:serverId", "protocol plumbing: the Streamable HTTP SSE probe MCP clients send after initialize; answers 405 Allow: POST"],
   ["GET /v1/prompts/resolve", "data plane: runtimes and SDKs resolve a prompt@tag reference at call time"],
   ["POST /v1/connectors/:connectorId/invoke", "data plane: an agent runtime invokes a connector through the governance gate"],
+  ["POST /v1/a2a/agents/:agentId/messages", "data plane: a person's client or a worker calls a remote A2A agent through the governance gate (ADR-0219)"],
   ["POST /v1/authz/check", "data plane: the policy decision point external enforcement points call (ADR-0053)"],
 
   // ---- the CI gate ----------------------------------------------------------

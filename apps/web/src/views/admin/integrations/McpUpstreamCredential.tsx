@@ -37,7 +37,9 @@ export function McpUpstreamCredentialCard(props: { server: McpServer | undefined
   return (
     <StaticCredentialCard
       key={server.id}
-      url={`/v1/servers/${server.id}/upstream-credential`}
+      load={() => api.get<{ credential: UpstreamCredentialView }>(`/v1/servers/${server.id}/upstream-credential`)}
+      save={(body, h) => stepUpApi.put(`/v1/servers/${server.id}/upstream-credential`, body, h)}
+      clear={(h) => stepUpApi.del(`/v1/servers/${server.id}/upstream-credential`, undefined, h)}
       queryKey={["admin", "mcp-upstream-credential", server.id]}
       name={server.name}
       title="Upstream credential"
@@ -49,14 +51,23 @@ export function McpUpstreamCredentialCard(props: { server: McpServer | undefined
 
 /**
  * The write-only static credential card, shared by an MCP server and a remote A2A agent (ADR-0219): the same contract
- * (`GET`/`PUT`/`DELETE` on `url`, `{ credential: UpstreamCredentialView }`), the same step-up and the same copy.
+ * (`GET`/`PUT`/`DELETE`, `{ credential: UpstreamCredentialView }`), the same step-up and the same copy. Each caller passes
+ * its requests with the literal path, so the route and affordance censuses see them at the call site.
  */
-export function StaticCredentialCard(props: { url: string; queryKey: readonly unknown[]; name: string; title: string; target: string; footnote: string }) {
-  const { url } = props;
+export function StaticCredentialCard(props: {
+  load: () => Promise<{ credential: UpstreamCredentialView }>;
+  save: (body: Record<string, unknown>, headers: Record<string, string>) => Promise<unknown>;
+  clear: (headers: Record<string, string>) => Promise<unknown>;
+  queryKey: readonly unknown[];
+  name: string;
+  title: string;
+  target: string;
+  footnote: string;
+}) {
   const server = { name: props.name };
   const q = useQuery({
     queryKey: props.queryKey,
-    queryFn: () => api.get<{ credential: UpstreamCredentialView }>(url),
+    queryFn: props.load,
   });
   const users = useUsers();
   const act = useAction();
@@ -78,7 +89,7 @@ export function StaticCredentialCard(props: { url: string; queryKey: readonly un
     if ((scheme === "header" && headerNameProblem(headerName)) || secretProblem(secret)) return;
     const body = { scheme, ...(scheme === "header" ? { headerName: headerName.trim() } : {}), secret, rotate: isSet };
     void act
-      .run(() => withStepUp((h) => stepUpApi.put(url, body, h)), isSet ? `Credential for ${server.name} rotated` : `Credential for ${server.name} saved`)
+      .run(() => withStepUp((h) => props.save(body, h)), isSet ? `Credential for ${server.name} rotated` : `Credential for ${server.name} saved`)
       .then((ok) => {
         // the secret is never kept in the page once it has been sent, saved or not
         setSecret("");
@@ -88,7 +99,7 @@ export function StaticCredentialCard(props: { url: string; queryKey: readonly un
   };
   const clear = () => {
     setConfirmClear(false);
-    void act.run(() => withStepUp((h) => stepUpApi.del(url, undefined, h)), `Credential for ${server.name} cleared`);
+    void act.run(() => withStepUp((h) => props.clear(h)), `Credential for ${server.name} cleared`);
   };
 
   if (!view) return <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>{null}</QueryGate>;
