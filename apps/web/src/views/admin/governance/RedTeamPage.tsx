@@ -45,7 +45,8 @@ interface LibraryRow {
   name: string;
   version: number;
   note: string | null;
-  status: string;
+  /** ADR-0208 G9: a retired version takes no new run and leaves the scheduled sweep */
+  status: "draft" | "published" | "retired";
   evalDatasetId: string | null;
   probeCount: number;
   frozen: boolean;
@@ -96,11 +97,11 @@ interface FindingRow {
 
 const pct = (n: number | null | undefined) => (n == null ? "—" : `${Math.round(n * 100)}%`);
 
-/** PROTOTYPE (#453 G9): draft / published / retired */
+/** ADR-0208 G9: draft / published / retired */
 function LibraryStatus(props: { row: LibraryRow }) {
   const r = props.row;
   if (r.status === "retired") return <Badge tone="neutral">retired</Badge>;
-  return <Badge tone={r.frozen ? "ok" : "info"}>{r.frozen ? "published" : "draft"}</Badge>;
+  return <Badge tone={r.status === "published" ? "ok" : "info"}>{r.status}</Badge>;
 }
 
 export default function RedTeamPage() {
@@ -336,19 +337,26 @@ export default function RedTeamPage() {
                   <LibraryStatus row={libDetail.data.library} />
                   {libDetail.data.library.status === "retired" ? (
                     <span className={v.faint}>Read-only</span>
-                  ) : libDetail.data.frozen ? (
+                  ) : (
                     <ReasonedAction
                       label="Retire version"
                       title={`Retire ${libDetail.data.library.name} v${libDetail.data.library.version}?`}
                       body={
-                        <p className={v.flush}>
-                          Scheduled sweeps stop probing agents with this version. Its runs and findings stay readable. You will be asked to confirm it's you.
-                        </p>
+                        libDetail.data.library.status === "published" ? (
+                          <p className={v.flush}>
+                            Scheduled sweeps stop probing agents with this version. Its runs and findings stay readable. You will be asked to confirm it's you.
+                          </p>
+                        ) : (
+                          <p className={v.flush}>This draft can no longer be edited or published. Its probes stay readable.</p>
+                        )
                       }
-                      path={`/v1/redteam/libraries/${selectedLibrary}/retire`}
+                      submit={(reason) => api.post(`/v1/redteam/libraries/${selectedLibrary}/retire`, { reason })}
                       done={`${libDetail.data.library.name} v${libDetail.data.library.version} retired`}
+                      refusal={(code) =>
+                        code === "redteam_run_in_progress" ? "A run of this version is still in progress. Retire it once the run finishes." : null
+                      }
                     />
-                  ) : null}
+                  )}
                 </div>
               }
             >
