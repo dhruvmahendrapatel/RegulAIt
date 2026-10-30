@@ -23,7 +23,7 @@ const PAGES: Record<Kind, { url: string; api: string; name: string; row: Record<
     api: "/v1/pm/connections",
     name: "live-jira",
     row: { id: "p1", name: "live-jira", provider: "jira", baseUrl: "https://acme.atlassian.net", project: "DEMO", mapping: null, apiVersion: null, createdAt: ISO },
-    consequence: /must be registered again in Jira or Azure DevOps/,
+    consequence: /must be registered again in the PM tool/,
   },
 };
 
