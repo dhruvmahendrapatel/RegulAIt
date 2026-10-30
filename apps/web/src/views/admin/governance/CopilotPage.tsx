@@ -182,7 +182,8 @@ export default function CopilotPage() {
           <span className={v.row}>
             <Badge tone="ok">Scoped to your access</Badge>
             <Badge tone="info">Draft only</Badge>
-            {!tools.data ? null : tools.data.mutatingTools.length === 0 ? (
+            {/* the badge states only what the server said: no list, no claim either way */}
+            {!Array.isArray(tools.data?.mutatingTools) ? null : tools.data.mutatingTools.length === 0 ? (
               <Badge tone="ok">No write tools</Badge>
             ) : (
               <Badge tone="danger">Write tools: {tools.data.mutatingTools.join(", ")}</Badge>
@@ -200,7 +201,13 @@ export default function CopilotPage() {
             {tools.data?.scopeCaveat ? <p>{tools.data.scopeCaveat}</p> : null}
             {tools.data?.decisionSupport ? <p>{tools.data.decisionSupport}</p> : null}
             <p>
-              Mutating tools: {(tools.data?.mutatingTools ?? []).length === 0 ? "none" : tools.data?.mutatingTools.join(", ")}.{" "}
+              Mutating tools:{" "}
+              {!Array.isArray(tools.data?.mutatingTools)
+                ? "not reported"
+                : tools.data.mutatingTools.length === 0
+                  ? "none"
+                  : tools.data.mutatingTools.join(", ")}
+              .{" "}
               {tools.data?.note}
             </p>
             <p>
