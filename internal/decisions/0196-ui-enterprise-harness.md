@@ -611,6 +611,7 @@ the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
 
 - `all JS` from `1050 kB` to `1055 kB` (+5 kB). Entry JS stays at 138.5 kB and entry CSS at 10.7 kB; the lazy chunk
   ceilings are unchanged.
-- Why: with main merged into #604, total JS measures 1,053,590 B. The archive dialogs and the rename dialog are their
+- Why: with main merged into #604, total JS measures 1,053,590 B (1,054,715 B after the second merge of main on
+  2026-10-30). The archive dialogs and the rename dialog are their
   own lazily loaded chunks, so the entry measures 137.83 kB.
 - Headroom: 5 kB of the owner's 10 kB stays for #605 and #606 (M-104). Their raises chain from this row's `to`.
