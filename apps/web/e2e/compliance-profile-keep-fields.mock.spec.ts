@@ -26,7 +26,7 @@ const HIPAA = {
   minIsolationClass: "microvm",
 };
 
-async function mockApi(page: Page) {
+async function mockApi(page: Page, list: (route: Route) => Promise<void> = (route) => json(route, { profiles: [HIPAA] })) {
   const me = { userId: "u-ada", isAdmin: true, user: { id: "u-ada", email: "ada@example.test", displayName: "Ada Admin" } };
   const posts: Array<Record<string, unknown>> = [];
   await page.route("**/*", async (route) => {
@@ -39,7 +39,7 @@ async function mockApi(page: Page) {
       posts.push(req.postDataJSON());
       return json(route, { profile: HIPAA });
     }
-    if (p === "/v1/compliance/profiles") return json(route, { profiles: [HIPAA] });
+    if (p === "/v1/compliance/profiles") return list(route);
     if (p === "/v1/workflows/templates") return json(route, { templates: [] });
     return json(route, {});
   });
@@ -86,4 +86,81 @@ test("updating an existing tag loads it and sends back every floor the form does
     redteamFailOnSeverity: "high",
     minIsolationClass: "microvm",
   });
+});
+
+test("moving from an existing tag to a new one starts again from the strict defaults", async ({ page }) => {
+  const api = await mockApi(page, (route) => json(route, { profiles: [{ ...HIPAA, mcpDefaultMode: "read_write", piiMode: "log" }] }));
+  await page.goto("/ui/admin/compliance");
+  const card = form(page);
+  const tag = card.getByLabel("Tag", { exact: true });
+  await tag.fill("hipaa");
+  await expect(card.getByLabel("MCP default mode")).toHaveValue("read_write");
+  await expect(card.getByLabel("Audit retention days (blank = none)")).toHaveValue("2190");
+  await tag.pressSequentially("-eu");
+  await expect(tag).toHaveValue("hipaa-eu");
+  await expect(card.getByLabel("MCP default mode")).toHaveValue("read_only");
+  await expect(card.getByLabel("PII mode")).toHaveValue("block");
+  await expect(card.getByLabel("Audit retention days (blank = none)")).toHaveValue("");
+  await expect(card.getByLabel("Backup retention days (infra floor)")).toHaveValue("");
+  await expect(card.getByLabel("Patch cadence days (infra ceiling)")).toHaveValue("");
+  await card.getByRole("button", { name: "Save profile" }).click();
+  await expect.poll(() => api.posts.length).toBe(1);
+  expect(api.posts[0]).toEqual({
+    tag: "hipaa-eu",
+    mcpDefaultMode: "read_only",
+    piiMode: "block",
+    auditRetentionDays: null,
+    backupRetentionDays: null,
+    patchCadenceDays: null,
+  });
+});
+
+test("saving waits for the profiles list, then loads a tag typed before it arrived", async ({ page }) => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const api = await mockApi(page, async (route) => {
+    await gate;
+    await json(route, { profiles: [HIPAA] });
+  });
+  await page.goto("/ui/admin/compliance");
+  const card = form(page);
+  await card.getByLabel("Tag", { exact: true }).fill("hipaa");
+  await expect(card.getByRole("button", { name: "Save profile" })).toBeDisabled();
+  await expect(card.getByText("Loading the existing profiles")).toBeVisible();
+  release();
+  await expect(card.getByLabel("Audit retention days (blank = none)")).toHaveValue("2190");
+  await card.getByRole("button", { name: "Update profile" }).click();
+  await expect.poll(() => api.posts.length).toBe(1);
+  expect(api.posts[0]).toMatchObject({ tag: "hipaa", auditRetentionDays: 2190, minIsolationClass: "microvm", maxProjectBudgetUsd: 500 });
+});
+
+test("saving is off while the profiles list has failed to load", async ({ page }) => {
+  const api = await mockApi(page, (route) => json(route, { error: "unavailable" }, 503));
+  await page.goto("/ui/admin/compliance");
+  const card = form(page);
+  await card.getByLabel("Tag", { exact: true }).fill("hipaa");
+  await expect(card.getByRole("alert")).toContainText("did not load");
+  await expect(card.getByRole("button", { name: "Save profile" })).toBeDisabled();
+  expect(api.posts).toHaveLength(0);
+});
+
+test("a retired template the profile requires stays required when the Select is touched", async ({ page }) => {
+  const api = await mockApi(page, (route) => json(route, { profiles: [{ ...HIPAA, requiredTemplateIds: ["tpl-old"] }] }));
+  await page.route("**/v1/workflows/templates", (route) =>
+    json(route, {
+      templates: [
+        { id: "tpl-old", name: "Old review", retiredAt: "2026-10-01T00:00:00Z" },
+        { id: "tpl-new", name: "New review", retiredAt: null },
+      ],
+    }),
+  );
+  await page.goto("/ui/admin/compliance");
+  const card = form(page);
+  await card.getByLabel("Tag", { exact: true }).fill("hipaa");
+  const select = card.getByLabel("Required workflow templates (ctrl/cmd-click)");
+  await expect(select.locator("option", { hasText: "Old review" })).toBeDisabled();
+  await select.selectOption("tpl-new");
+  await card.getByRole("button", { name: "Update profile" }).click();
+  await expect.poll(() => api.posts.length).toBe(1);
+  expect(api.posts[0].requiredTemplateIds).toEqual(["tpl-old", "tpl-new"]);
 });

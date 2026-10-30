@@ -5,11 +5,16 @@
  * live cascade preview for any project (with how multiple tags compose — the
  * strictest wins per dimension) and the governed reclassification flow.
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { withStepUp } from "../../../stepup/stepUp";
-import type { ComplianceProfile, ProjectCompliance, WorkflowTemplate } from "../../../api/adminTypes";
+import type {
+  ComplianceProfile,
+  ComplianceProfileCarriedFloors,
+  ProjectCompliance,
+  WorkflowTemplate,
+} from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, CodeBlock, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
 import {
@@ -87,7 +92,12 @@ export default function ComplianceProfilesPage() {
           />
         </Card>
 
-        <UpsertProfileCard templates={templates.data?.templates ?? []} profiles={profiles.data?.profiles ?? []} />
+        <UpsertProfileCard
+          templates={templates.data?.templates ?? []}
+          profiles={profiles.data?.profiles ?? []}
+          profilesLoading={profiles.isLoading}
+          profilesFailed={!!profiles.error}
+        />
         <CascadePreviewCard />
         <ReclassifyCard />
       </div>
@@ -97,7 +107,7 @@ export default function ComplianceProfilesPage() {
 
 /** the profile fields this form does not show: an update sends them back as they are, because the route replaces the
  * whole profile and an omitted floor would otherwise be cleared */
-const CARRIED = [
+const CARRIED: ReadonlyArray<keyof ComplianceProfileCarriedFloors> = [
   "maxProjectBudgetUsd",
   "budgetEnforcement",
   "guardrailModes",
@@ -105,7 +115,7 @@ const CARRIED = [
   "redteamMinTrials",
   "redteamFailOnSeverity",
   "minIsolationClass",
-] as const;
+];
 
 // ADR-0181: a new profile starts at the strict defaults (read_only, block), the same as the server's
 const EMPTY_FORM = {
@@ -120,29 +130,48 @@ const EMPTY_FORM = {
 
 const numText = (n: number | null | undefined) => (n == null ? "" : String(n));
 
-function UpsertProfileCard(props: { templates: WorkflowTemplate[]; profiles: ComplianceProfile[] }) {
+const formFrom = (p: ComplianceProfile, tag: string) => ({
+  tag,
+  requiredTemplateIds: p.requiredTemplateIds ?? [],
+  mcpDefaultMode: p.mcpDefaultMode,
+  piiMode: p.piiMode,
+  auditRetentionDays: numText(p.auditRetentionDays),
+  backupRetentionDays: numText(p.backupRetentionDays),
+  patchCadenceDays: numText(p.patchCadenceDays),
+});
+
+function UpsertProfileCard(props: {
+  templates: WorkflowTemplate[];
+  profiles: ComplianceProfile[];
+  profilesLoading: boolean;
+  profilesFailed: boolean;
+}) {
   const act = useAction();
   const [f, setF] = useState(EMPTY_FORM);
+  // the tag whose stored profile is in the form; null while the form holds a new profile
+  const [loadedTag, setLoadedTag] = useState<string | null>(null);
   const set = (k: keyof typeof f, val: string | string[]) => setF((s) => ({ ...s, [k]: val }));
-  const existing = props.profiles.find((p) => p.tag === f.tag.trim());
-  // typing an existing tag loads that profile, so saving changes only what is edited here
-  const setTag = (tag: string) => {
-    const match = props.profiles.find((p) => p.tag === tag.trim());
-    setF(
-      match
-        ? {
-            tag,
-            requiredTemplateIds: match.requiredTemplateIds ?? [],
-            mcpDefaultMode: match.mcpDefaultMode,
-            piiMode: match.piiMode,
-            auditRetentionDays: numText(match.auditRetentionDays),
-            backupRetentionDays: numText(match.backupRetentionDays),
-            patchCadenceDays: numText(match.patchCadenceDays),
-          }
-        : (s) => ({ ...s, tag }),
-    );
-  };
+  // until the list has loaded without error, an existing tag cannot be told apart from a new one
+  const listReady = !props.profilesLoading && !props.profilesFailed;
+  const match = listReady ? props.profiles.find((p) => p.tag === f.tag.trim()) : undefined;
+  const existing = match && match.tag === loadedTag ? match : undefined;
+  // typing an existing tag loads that profile, also when the list arrives after the tag was typed; moving off it
+  // starts again from the strict defaults, so a new profile never inherits another profile's values
+  useEffect(() => {
+    if (match && match.tag !== loadedTag) {
+      setF(formFrom(match, f.tag));
+      setLoadedTag(match.tag);
+    } else if (listReady && !match && loadedTag !== null) {
+      setF({ ...EMPTY_FORM, tag: f.tag });
+      setLoadedTag(null);
+    }
+  }, [listReady, match, loadedTag, f.tag]);
+  const canSubmit = listReady && (!match || !!existing);
   const tplOpts = props.templates.filter((t) => !t.retiredAt);
+  const activeIds = new Set(tplOpts.map((t) => t.id));
+  const tplName = new Map(props.templates.map((t) => [t.id, t.name]));
+  // retired (or unknown) templates the profile still requires stay required: they show disabled and the Select keeps them
+  const keptIds = f.requiredTemplateIds.filter((id) => !activeIds.has(id));
   return (
     <Card title="Define or update a profile (upsert by tag)">
       <form
@@ -173,18 +202,30 @@ function UpsertProfileCard(props: { templates: WorkflowTemplate[]; profiles: Com
         }}
       >
         <Field label="Tag">
-          <Input required value={f.tag} onChange={(e) => setTag(e.target.value)} placeholder="for example hipaa" />
+          <Input required value={f.tag} onChange={(e) => set("tag", e.target.value)} placeholder="for example hipaa" />
         </Field>
         <Field label="Required workflow templates (ctrl/cmd-click)">
           <Select
             multiple
-            size={Math.min(4, Math.max(2, tplOpts.length || 2))}
+            size={Math.min(4, Math.max(2, tplOpts.length + keptIds.length || 2))}
             value={f.requiredTemplateIds}
-            onChange={(e) => set("requiredTemplateIds", Array.from(e.target.selectedOptions).map((o) => o.value))}
+            onChange={(e) =>
+              set("requiredTemplateIds", [
+                ...keptIds,
+                ...Array.from(e.target.selectedOptions)
+                  .map((o) => o.value)
+                  .filter((id) => activeIds.has(id)),
+              ])
+            }
           >
             {tplOpts.map((t) => (
               <option key={t.id} value={t.id}>
                 {t.name}
+              </option>
+            ))}
+            {keptIds.map((id) => (
+              <option key={id} value={id} disabled>
+                {(tplName.get(id) ?? id.slice(0, 8) + "…") + " (retired, stays required)"}
               </option>
             ))}
           </Select>
@@ -211,9 +252,19 @@ function UpsertProfileCard(props: { templates: WorkflowTemplate[]; profiles: Com
         <Field label="Patch cadence days (infra ceiling)">
           <Input type="number" value={f.patchCadenceDays} onChange={(e) => set("patchCadenceDays", e.target.value)} />
         </Field>
-        <Button type="submit" variant="primary" disabled={act.busy}>
+        <Button type="submit" variant="primary" disabled={act.busy || !canSubmit}>
           {existing ? "Update profile" : "Save profile"}
         </Button>
+        {props.profilesLoading && (
+          <span className={v.hint} role="status">
+            Loading the existing profiles, so a tag that already exists is updated rather than replaced.
+          </span>
+        )}
+        {props.profilesFailed && (
+          <span className={v.errLine} role="alert">
+            The profiles list did not load, so saving is off: an existing tag would lose its floors. Retry the list above.
+          </span>
+        )}
         {act.error && (
           <span className={v.errLine} role="alert">
             {act.error}
@@ -223,6 +274,7 @@ function UpsertProfileCard(props: { templates: WorkflowTemplate[]; profiles: Com
       {existing && (
         <p className={v.hint} role="status">
           Updating “{existing.tag}”: its budget, guardrail, red-team and isolation floors keep their current values.
+          Typing an existing tag loads its stored values in place of anything entered before.
         </p>
       )}
       <p className={v.faint}>
