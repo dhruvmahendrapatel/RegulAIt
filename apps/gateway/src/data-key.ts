@@ -244,6 +244,7 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   { table: "git_connections", column: "token_ciphertext", what: "git provider tokens" },
   { table: "pm_connections", column: "token_ciphertext", what: "PM tool tokens" },
   { table: "pm_connections", column: "webhook_secret_ciphertext", what: "PM webhook secrets" },
+  { table: "pm_connections", column: "previous_webhook_secret_ciphertext", what: "PM webhook secrets in a rotation window" },
   { table: "deploy_targets", column: "credential_ciphertext", what: "deploy-target credentials" },
   { table: "chatops_connections", column: "signing_secret_ciphertext", what: "ChatOps signing secrets" },
   // ADR-0065: the credential a REMOTE training backend needs before it will do

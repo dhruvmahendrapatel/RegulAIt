@@ -1436,6 +1436,27 @@
       "when": 1785149000000,
       "tag": "0214_mcp_upstream_credential",
       "breakpoints": true
+    },
+    {
+      "idx": 219,
+      "version": "7",
+      "when": 1785154000000,
+      "tag": "0219_connector_disable",
+      "breakpoints": true
+    },
+    {
+      "idx": 220,
+      "version": "7",
+      "when": 1785155000000,
+      "tag": "0220_mcp_server_disable",
+      "breakpoints": true
+    },
+    {
+      "idx": 221,
+      "version": "7",
+      "when": 1785156000000,
+      "tag": "0221_pm_webhook_secret_rotation",
+      "breakpoints": true
     }
   ]
 }
