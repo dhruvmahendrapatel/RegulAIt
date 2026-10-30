@@ -614,6 +614,6 @@ entry CSS ceilings stay unchanged"). It is the ADR-recorded exception the `--gua
   10.7 kB; the lazy chunk ceilings are unchanged.
 - Why: PR #606 wires the G7 (compliance profiles), G8 (infrastructure) and G9 (libraries) screens to their ADR-0208
   routes. The new code sits in admin chunks that already load lazily, and the profile edit dialog is its own lazy chunk,
-  so the entry is untouched (137.91 kB). Total JS measures 1,059.52 kB with size-limit (main: about 1,049.7 kB).
+  so the entry is untouched (137.91 kB). Total JS measures 1,059,615 B with size-limit after #602 merged (main: about 1,049.7 kB).
 - The other lanes unparked by the same decision (#604, #605) share this one cap; whichever lands later must find savings
   rather than raise it further without a new owner decision.
