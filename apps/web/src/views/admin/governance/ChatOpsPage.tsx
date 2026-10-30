@@ -383,7 +383,7 @@ export default function ChatOpsPage() {
             ))}
           </Select>
         </Field>
-        {connectors.data && chatOpsConnectorsFor(connectors.data.connectors, provider).length === 0 ? (
+        {connectors.data && chatOpsConnectorsFor(connectors.data.connectors ?? [], provider).length === 0 ? (
           <p className={v.faint} data-testid="chatops-no-connector">
             No connector has provider kind {provider} yet. Add one on the Connectors page first.
           </p>
