@@ -24,8 +24,39 @@ export function adoptAccountAppearance(a: AccountAppearance): void {
       void setPalette(a.org.defaultPalette);
     return;
   }
+  const carried = carryBrowserChoice(a);
+  if (carried) {
+    void saveAppearance(carried).catch(() => undefined);
+    return; // the page already shows this browser's choice, and it is now the account's too
+  }
   if (isPalette(a.effectivePalette)) void setPalette(a.effectivePalette);
   if (isMode(a.mode)) setThemeMode(a.mode);
+}
+
+/** set once this browser's copy has been adopted from an account, so it is a cache from then on, not a choice */
+const CARRIED_KEY = "regulait.appearance.carried";
+
+/**
+ * Phase 1 kept the choice in this browser only. The first time an account with nothing saved signs in here, a
+ * palette or mode picked in phase 1 moves to the account instead of being replaced by the organisation default. Only
+ * once per browser: after that the stored copy is whatever the account last said, and carrying it would pin the
+ * person to an old organisation default.
+ */
+function carryBrowserChoice(a: AccountAppearance): { palette?: PaletteId; mode?: ThemeMode } | null {
+  let palette: string | null = null;
+  let mode: string | null = null;
+  try {
+    if (localStorage.getItem(CARRIED_KEY)) return null;
+    localStorage.setItem(CARRIED_KEY, "1");
+    palette = localStorage.getItem("regulait.palette");
+    mode = localStorage.getItem("regulait.theme");
+  } catch {
+    return null; // no storage: nothing was picked here to carry
+  }
+  const out: { palette?: PaletteId; mode?: ThemeMode } = {};
+  if (a.palette === null && isPalette(palette) && (!a.org.locked || palette === a.org.defaultPalette || palette === ACCESSIBILITY_PALETTE)) out.palette = palette;
+  if (a.mode === null && isMode(mode)) out.mode = mode;
+  return out.palette || out.mode ? out : null;
 }
 
 /** signed out: nothing is saved anywhere but this browser until the next sign-in */
