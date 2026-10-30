@@ -1,5 +1,5 @@
 {
-  "lockSha256": "d93a4bfb3d43eea4489617654d35a1e705f1859704c940f3ec124f44629b9235",
+  "lockSha256": "71a4d7fbd270ce7f0d823f07910cc895386b97cac46c82baa99d5f263f79cc29",
   "packages": [
     {
       "name": "@cyclonedx/cyclonedx-library",
@@ -53,11 +53,11 @@
     },
     {
       "name": "fast-uri",
-      "version": "3.1.8",
+      "version": "3.1.9",
       "location": "node_modules/fast-uri",
       "licence": "BSD-3-Clause",
-      "resolved": "https://registry.npmjs.org/fast-uri/-/fast-uri-3.1.8.tgz",
-      "integrity": "sha512-GZMtZUTNRpOVIECoXwLNZS5xUGE+mVNbTB8h/7Rwh2TFWcBQiPzTgyZi05BF9UMZKkLJv8XBRJTlU7zg8+ZfMg==",
+      "resolved": "https://registry.npmjs.org/fast-uri/-/fast-uri-3.1.9.tgz",
+      "integrity": "sha512-hS/0Wt3Ya043oKXs0sIxrMpKQITXhMLIrVAKKXi4gozGC9v7YRWVnXIZzjNPTO02M9BdxLCWqK1yRXgNziVyJQ==",
       "noticeSource": "LICENSE",
       "noticeSha256": "b010b0dfdfdb23d7396e03b82cd4621fc9bb8f95d6b0aea70b9c24e12074c786"
     },

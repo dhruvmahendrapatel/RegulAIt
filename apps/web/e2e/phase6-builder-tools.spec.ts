@@ -18,7 +18,7 @@
  */
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import { passTotp } from "./totp-sign-in";
-import { ADMIN_EMAIL, asSteppedUpAdmin, grantBuilderAgentAsAdmin, signedInContext } from "./admin-api";
+import { ADMIN_EMAIL, asSteppedUpAdmin, grantBuilderAgentAsAdmin } from "./admin-api";
 import { steppedUpAs } from "./demo-credentials";
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -35,8 +35,6 @@ const state = JSON.parse(readFileSync(path.join(here, ".e2e-state.json"), "utf8"
 };
 const ADMIN_PASSWORD = E2E_PASSWORDS.admin;
 const DANA_PASSWORD = E2E_PASSWORDS.dana;
-/** phase2's key-custody journey replaces Avery's one-time password with this */
-const AVERY_PASSWORD = E2E_PASSWORDS.averyCustody;
 const CSRF = { "x-regulait-csrf": "1" };
 /** an org-settings write as Ada, stepped up with her authenticator (B4S-06: the
  * bootstrap credential passes a step-up only until an admin can give one). From her
@@ -170,8 +168,9 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
     expect(g.status(), await g.text()).toBeLessThan(300);
   }
   // B4S-03: Dana works on the seeded hipaa-project (an in-app-only data
-  // classification), so every tool call of hers needs the sensitive quorum — two
-  // different approvers — whatever project it bills to. The rule's pool is Ada
+  // classification), so every tool call of hers needs the sensitive quorum
+  // whatever project it bills to; the demo seed relaxes that quorum to 1 for
+  // beat E (audited, demo-relax-e-lib.ts), so one approver decides. The rule's pool is Ada
   // (named) plus an approver role holding Avery. Avery joins the role BEFORE any
   // rule names it, so the assignment pads no approver pool (no step-up).
   const directory = (await (await admin.request.get("/v1/users")).json()) as { users: Array<{ id: string; email: string }> };
@@ -306,15 +305,10 @@ test("an organisation approval waits for the admin and the thread finishes when 
   // the admin decides in the one approvals queue
   const decided = await admin.request.post(`/v1/approvals/${approvalId}/decide`, { headers: CSRF, data: { decision: "approved" } });
   expect(decided.status(), await decided.text()).toBe(200);
-  // B4S-03: Dana's call needs a second, different approver (she works on hipaa-project): Avery approves too
-  expect((await decided.json()) as { status?: string }).toMatchObject({ status: "pending" });
-  const averyCtx = await signedInContext(state.baseUrl, "avery@regulait.local", [AVERY_PASSWORD, state.passwords.avery], AVERY_PASSWORD);
-  try {
-    const second = await averyCtx.post(`/v1/approvals/${approvalId}/decide`, { headers: CSRF, data: { decision: "approved", reason: "second approver" } });
-    expect(second.status(), await second.text()).toBe(200);
-  } finally {
-    await averyCtx.dispose();
-  }
+  // B4S-03 would ask a second approver for Dana (she works on hipaa-project), but the demo seed relaxes the
+  // sensitive-data quorum to 1 for beat E (audited, owner #453 c6521685462; demo-relax-e-lib.ts), so the admin's
+  // decision completes it. Strict dual control is proved in zz-b4ab-dual-control-signed-approvals.test.ts.
+  expect((await decided.json()) as { status?: string }).toMatchObject({ status: "approved" });
   // the turn resumes AFTER the decide response (ADR-0173 review): wait for it
   // on the API before reading the page
   await expect

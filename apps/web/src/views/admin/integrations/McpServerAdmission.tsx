@@ -14,6 +14,7 @@
  *    to the grants the entitlement card lists.
  */
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { ApiError, api } from "../../../api/client";
 import type { McpServer, McpTool } from "../../../api/adminTypes";
 import { Badge, Button, Card, EmptyState, Field, Select, Table } from "../../../ui/kit";
@@ -21,6 +22,20 @@ import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { ReasonModal, optionEls, serverOpts, useAction, useUsers, userOpts } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+
+/** owner 2026-10-30: what still stands between a newly added server and its first call, with a way to each step.
+ * Shown under the register form and after a registry import, where the admin is looking. */
+export function McpServerNextSteps() {
+  return (
+    <p className={v.hint} data-testid="mcp-next-steps">
+      Before anyone can call a new server: a host outside this network needs an entry on the{" "}
+      <Link to="/admin/custom-providers" style={{ textDecoration: "underline" }}>egress allow-list</Link>; a new server
+      waits out the release-age cooldown unless you allow it sooner on{" "}
+      <Link to="/admin/admission" style={{ textDecoration: "underline" }}>Admission review</Link>; and nobody holds a
+      grant until you give one under Tool-level allow-list grants on the Servers tab. The first <code>tools/list</code> call syncs and scans its tools.
+    </p>
+  );
+}
 
 /** the clear route's own refusals, in words (pinned to mcp-admission.ts by the test) */
 export const ADMISSION_CLEAR_REFUSALS: Readonly<Record<string, string>> = {
