@@ -174,6 +174,9 @@ export async function computePostureReport(
     mitigating: riskByStatus.get("mitigating") ?? 0,
     accepted: riskByStatus.get("accepted") ?? 0,
     closed: riskByStatus.get("closed") ?? 0,
+    /** ADR-0211: the two treatments, each a record with evidence and an owner */
+    transferred: riskByStatus.get("transferred") ?? 0,
+    avoided: riskByStatus.get("avoided") ?? 0,
     total: riskCounts.reduce((a, r) => a + r.n, 0),
     /** named, per ADR-0081: risks in categories NO ledger measures — their
      * evidence is "none — attestation only", and the board should know how

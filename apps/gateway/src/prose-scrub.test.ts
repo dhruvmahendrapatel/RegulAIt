@@ -520,6 +520,8 @@ describe("6. the covered / NOT-covered inventory", () => {
     // ADR-0195 SD0 (migration 0202): an admin's note on a catalogue row
     "ai_endpoint_signatures.note",
     "ai_risks.acceptance_note",
+    // ADR-0211: the evidence behind a transferred or avoided risk
+    "ai_risks.treatment_evidence",
     "ai_use_cases.retired_reason",
     "ai_vendors.retired_reason",
     "approval_delegations.reason",

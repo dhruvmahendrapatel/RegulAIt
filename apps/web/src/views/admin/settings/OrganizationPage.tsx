@@ -189,6 +189,12 @@ function Loaded(props: { settings: Record<string, unknown> }) {
     assuranceGateMode: str(s, "assuranceGateMode") || "enforce",
   });
 
+  // --- 5b1a. Risk treatments: transferred and avoided (ADR-0211) -----------
+  // Its own admin-only, audited route; OFF by default, turning it on is a step-up.
+  const riskTreatments = useSection({
+    riskTreatmentsEnabled: str(s, "riskTreatmentsEnabled") || "false",
+  });
+
   // --- 5b2. Attribution mandate (ADR-0080 B6b amendment) -------------------
   const attribution = useSection({
     dispatchAttributionRequired: str(s, "dispatchAttributionRequired") || "true",
@@ -705,6 +711,41 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               <option value="enforce">enforce — hold the release (strict default)</option>
               <option value="warn">warn — report the checks, do not hold</option>
               <option value="off">off — skip the checks (the gate says so)</option>
+            </Select>
+          </Field>
+        </SectionShell>
+      </Card>
+
+      <Card title="5b1a · Risk treatments: transferred and avoided">
+        <SectionShell
+          title="May a risk be recorded as transferred or avoided?"
+          helpLabel="risk treatments"
+          busy={riskTreatments.act.busy}
+          error={riskTreatments.act.error}
+          submitLabel="Save risk treatments"
+          onSubmit={() =>
+            void riskTreatments.act.run(
+              () =>
+                withStepUp((h) => stepUpApi.put("/v1/org/settings/risk-treatments", {
+                  enabled: riskTreatments.f.riskTreatmentsEnabled === "true",
+                }, h)),
+              "Risk treatments saved (audited)",
+            )
+          }
+          help={
+            <>
+              <p>The strict default is off: a risk is open, mitigating, accepted or closed. Turned on, a risk's owner or an admin can also record it as transferred (to an insurer or a supplier contract) or avoided (the use stopped). Each needs its evidence and an owner, and each is on the audit trail.</p>
+              <p>A transferred risk keeps its rating and stays in the tolerance check. An avoided risk leaves the ratings. Turning this on asks you to confirm it's you; turning it off leaves recorded treatments as they are.</p>
+            </>
+          }
+        >
+          <Field label="Transferred and avoided treatments">
+            <Select
+              value={riskTreatments.f.riskTreatmentsEnabled}
+              onChange={(e) => riskTreatments.set("riskTreatmentsEnabled", e.target.value)}
+            >
+              <option value="false">off — open, mitigating, accepted or closed only (strict default)</option>
+              <option value="true">on — owners and admins may record a transfer or an avoidance</option>
             </Select>
           </Field>
         </SectionShell>
