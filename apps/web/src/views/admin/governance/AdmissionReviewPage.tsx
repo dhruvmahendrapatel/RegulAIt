@@ -241,7 +241,7 @@ export default function AdmissionReviewPage() {
         </Card>
 
         {/* ADR-0097: whether the manifest scan holds a server (enforce), only records (log), or does not run (off) */}
-        <OrgSettingsCard title="MCP admission scan" keys={["mcpAdmissionMode"]} testId="mcp-admission-mode" />
+        <OrgSettingsCard title="MCP admission scan" keys={["mcpAdmissionMode"]} testId="mcp-admission-mode" helpInInfo />
 
         <Card title="MCP servers held by the manifest scan">
           <p className={v.dim} style={{ marginTop: 0 }}>

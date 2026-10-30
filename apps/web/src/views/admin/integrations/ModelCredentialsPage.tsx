@@ -53,7 +53,6 @@ export default function ModelCredentialsPage() {
     <>
       <PageHeader
         title="Model credentials"
-        sub="One platform credential per provider, encrypted at rest. Nothing here ever reads a stored secret back."
         info={<p>One platform credential per provider, encrypted at rest. Re-adding a provider rotates its key in place; nothing here ever reads a stored secret back.</p>}
       />
       <div className={v.stack}>
@@ -152,7 +151,17 @@ export default function ModelCredentialsPage() {
           />
         </Card>
 
-        <Card title="Env keys present on this server" contain>
+        <Card
+          title="Env keys present on this server"
+          contain
+          info={
+            <p>
+              Names and presence only — a key's value is never read back by any endpoint. “Fallback blocked”
+              means the var may exist but dispatches will not use it (Settings → Organization owns the
+              toggle, which is off by default: every key goes through the encrypted store above).
+            </p>
+          }
+        >
           <Table
             columns={[
               { key: "provider", header: "Provider", render: (k: NonNullable<OrgSettingsResponse["envKeys"]>[number]) => <ProviderMark provider={k.provider} label={providerLabel(k.provider)} /> },
@@ -181,11 +190,6 @@ export default function ModelCredentialsPage() {
             onRetry={() => void org.refetch()}
             empty={<EmptyState title="No env vars surfaced" />}
           />
-          <p className={v.faint}>
-            Names and presence only — a key's value is never read back by any endpoint. “Fallback blocked”
-            means the var may exist but dispatches will not use it (Settings → Organization owns the
-            toggle, which is off by default: every key goes through the encrypted store above).
-          </p>
         </Card>
 
         <Card title="Agents waiting on a credential">
@@ -246,7 +250,16 @@ function ByoKeysCard() {
   };
 
   return (
-    <Card title="Per-user BYO keys">
+    <Card
+      title="Per-user BYO keys"
+      info={
+        <p>
+          Users add their own keys from the workspace → Account. A user's own key wins over the platform's
+          for their dispatches — unless key custody is enforced (Client access), which keeps these rows
+          inert.
+        </p>
+      }
+    >
       <form
         className={a.formRow}
         onSubmit={(e) => {
@@ -296,11 +309,6 @@ function ByoKeysCard() {
             rowKey={(c) => c.provider}
           />
         ))}
-      <p className={v.faint}>
-        Users add their own keys from the workspace → Account. A user's own key wins over the platform's
-        for their dispatches — unless key custody is enforced (Client access), which keeps these rows
-        inert.
-      </p>
       <ConfirmModal
         open={removeByo !== null}
         title={`Remove this user's ${removeByo} key?`}

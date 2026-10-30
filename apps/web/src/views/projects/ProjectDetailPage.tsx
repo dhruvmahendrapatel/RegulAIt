@@ -20,12 +20,15 @@ import {
   EmptyState,
   RecordError,
   Field,
+  Modal,
   Select,
   SkeletonBlock,
   Meter,
 } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
 import { ProjectChrome, useProjectChrome } from "./projectChrome";
+import { ProjectEditForm } from "./projectForms";
+import type { Initiative } from "../../api/adminTypes";
 import v from "../views.module.css";
 
 interface DirectoryUser {
@@ -51,6 +54,15 @@ export default function ProjectDetailPage() {
   const directoryQ = useQuery({
     queryKey: ["directory"],
     queryFn: () => api.get<{ users: DirectoryUser[] }>("/v1/users/directory"),
+  });
+
+  // G2 (#453): an admin edits the project's settings here, not only from the Cost dashboard
+  const isAdmin = Boolean(auth?.isAdmin);
+  const [editing, setEditing] = useState(false);
+  const initiativesQ = useQuery({
+    queryKey: ["admin", "initiatives"],
+    enabled: isAdmin && editing,
+    queryFn: () => api.get<{ initiatives: Initiative[] }>("/v1/initiatives"),
   });
 
   const directory = directoryQ.data?.users ?? [];
@@ -136,16 +148,44 @@ export default function ProjectDetailPage() {
         tab="overview"
         sub={c.initiative ? <span className={v.faint}>Initiative: {c.initiative.name}</span> : undefined}
         actions={
-          <Button
-            size="sm"
-            onClick={() => {
-              window.open(`/v1/projects/${projectId}/costs.csv`, "_blank");
-            }}
-          >
-            Download CSV
-          </Button>
+          <>
+            {isAdmin && projectId ? (
+              <Button size="sm" onClick={() => setEditing(true)}>
+                Settings
+              </Button>
+            ) : null}
+            <Button
+              size="sm"
+              onClick={() => {
+                window.open(`/v1/projects/${projectId}/costs.csv`, "_blank");
+              }}
+            >
+              Download CSV
+            </Button>
+          </>
         }
       />
+      {isAdmin && projectId ? (
+        <Modal
+          open={editing}
+          title={`Settings — ${project?.name ?? c.project?.name ?? "project"}`}
+          onClose={() => setEditing(false)}
+          wide
+          actions={<Button onClick={() => setEditing(false)}>Cancel</Button>}
+        >
+          <ProjectEditForm
+            projects={[]}
+            projectId={projectId}
+            current={project ? { name: project.name, budgetUsd: project.budgetUsd } : undefined}
+            initiatives={initiativesQ.data?.initiatives ?? []}
+            onDone={() => {
+              setEditing(false);
+              void queryClient.invalidateQueries({ queryKey: ["projects"] });
+              void queryClient.invalidateQueries({ queryKey: ["project-costs", projectId] });
+            }}
+          />
+        </Modal>
+      ) : null}
 
       <div className={v.stack}>
         <div className={v.grid2}>

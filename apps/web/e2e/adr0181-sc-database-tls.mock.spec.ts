@@ -92,15 +92,16 @@ test.describe("ADR-0181: database TLS on the Enforcement posture page", () => {
     await expect(page.getByRole("heading", { name: "Enforcement posture", level: 1 })).toBeVisible();
     await expect(page.getByText("database TLS", { exact: true })).toBeVisible();
     await expect(page.getByText("required", { exact: true }).first()).toBeVisible();
-    await expect(page.getByText("database TLS: relaxed")).toHaveCount(0);
+    await expect(page.getByText("DB TLS: disabled")).toHaveCount(0);
   });
 
-  test("relaxed (REGULAIT_DATABASE_SSL=disable): the page says 'database TLS: relaxed' and why; axe-clean", async ({ page }) => {
+  test("relaxed (REGULAIT_DATABASE_SSL=disable): the page says 'DB TLS: disabled' and why; axe-clean", async ({ page }) => {
     await mockApi(page, "relaxed");
     await page.goto("/ui/admin/enforcement-posture");
     await expect(page.getByRole("heading", { name: "Enforcement posture", level: 1 })).toBeVisible();
-    await expect(page.getByText("database TLS: relaxed")).toBeVisible();
-    await expect(page.getByText(/REGULAIT_DATABASE_SSL=disable is set/)).toBeVisible();
+    await expect(page.getByText("DB TLS: disabled", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "What is DB TLS: disabled?" }).click();
+    await expect(page.getByRole("note")).toContainText(/REGULAIT_DATABASE_SSL=disable is set/);
     await expect(page.getByText("relaxed", { exact: true }).first()).toBeVisible();
     // ADR-0190: the isolation settings card is on this page too, measured and editable
     const isolation = page.locator("section[data-rg-card]").filter({ has: page.getByRole("button", { name: "Save isolation settings" }) });

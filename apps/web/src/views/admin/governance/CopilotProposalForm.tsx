@@ -436,10 +436,8 @@ export function CopilotProposalForm(props: { queryId: string | null; question: s
     return (
       <Card title="Propose a change">
         <p className={v.faint}>
-          A proposal must rest on a recorded query of <strong>your own</strong> — the gateway refuses one built on
-          another user&rsquo;s evidence, because that evidence was retrieved under that user&rsquo;s entitlement scope
-          and reusing it here would launder a wider read into your hands. Ask a question above, then propose from what
-          it found.
+          A proposal must rest on a recorded query of <strong>your own</strong>. Ask a question above, then propose
+          from what it found.
         </p>
       </Card>
     );

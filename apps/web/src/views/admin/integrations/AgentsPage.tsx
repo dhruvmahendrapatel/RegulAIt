@@ -67,7 +67,6 @@ export default function AgentsPage() {
     <>
       <PageHeader
         title="Agents"
-        sub="The agent catalog, decoupled from entitlement — registering one grants nobody anything."
         info={<p>The global catalog is decoupled from entitlement: registering an agent grants nobody anything. Pricing feeds the cost meters; the tier feeds cost-aware routing.</p>}
       />
       <div className={v.stack}>
@@ -392,7 +391,18 @@ function ModelPricingCard(props: { agents: AdminAgent[] }) {
   const [inC, setInC] = useState("");
   const [outC, setOutC] = useState("");
   return (
-    <Card title="Model & pricing — dispatch-execution config">
+    <Card
+      title="Model & pricing — dispatch-execution config"
+      info={
+        <p>
+          Provider model ids age out (a seeded id already did once) — this is where a stale id is
+          refreshed. The save is versioned where versions exist: an agent with agent_config versions gets a
+          new version minted and activated (one click rolls back under Config versions); an unversioned
+          agent is updated in place. Provider, tier, enablement and lifecycle are deliberately not editable
+          here — each has its own governed control.
+        </p>
+      }
+    >
       <form
         className={a.formRow}
         onSubmit={(e) => {
@@ -442,13 +452,6 @@ function ModelPricingCard(props: { agents: AdminAgent[] }) {
           </span>
         )}
       </form>
-      <p className={v.faint}>
-        Provider model ids age out (a seeded id already did once) — this is where a stale id is
-        refreshed. The save is versioned where versions exist: an agent with agent_config versions gets a
-        new version minted and activated (one click rolls back under Config versions); an unversioned
-        agent is updated in place. Provider, tier, enablement and lifecycle are deliberately not editable
-        here — each has its own governed control.
-      </p>
     </Card>
   );
 }
@@ -458,7 +461,16 @@ function SystemPromptCard(props: { agents: AdminAgent[] }) {
   const [agentId, setAgentId] = useState("");
   const [prompt, setPrompt] = useState("");
   return (
-    <Card title="System prompt — admin base (governance artifact)">
+    <Card
+      title="System prompt — admin base (governance artifact)"
+      info={
+        <p>
+          Applied as the system BASE on every governed dispatch of this agent — direct invokes,
+          orchestration workers, and intercepted IDE calls alike. A caller-supplied system prompt is
+          appended after it and can never replace it.
+        </p>
+      }
+    >
       <form
         className={v.stack}
         onSubmit={(e) => {
@@ -494,11 +506,6 @@ function SystemPromptCard(props: { agents: AdminAgent[] }) {
             {act.error}
           </div>
         )}
-        <p className={v.faint}>
-          Applied as the system BASE on every governed dispatch of this agent — direct invokes,
-          orchestration workers, and intercepted IDE calls alike. A caller-supplied system prompt is
-          appended after it and can never replace it. Saving with an empty box clears the prompt.
-        </p>
       </form>
     </Card>
   );
@@ -597,7 +604,18 @@ function FallbackChainCard(props: { agents: AdminAgent[] }) {
   const candidates = props.agents.filter((x) => x.id !== agentId && !inChain.has(x.id));
 
   return (
-    <Card title="Fallback chain (ADR-0066) — what runs when the primary cannot">
+    <Card
+      title="Fallback chain — what runs when the primary cannot"
+      info={
+        <p>
+          Order is the policy: on a provider failure the gateway walks this list top-down and
+          dispatches the first agent it can reach. Every rung is still governed — a fallback the
+          CALLER is not entitled to is refused exactly like a direct invoke of it, so a chain can
+          never widen what someone may run. Cost and audit are attributed to the agent that actually
+          served. An agent cannot be its own fallback, and each target may appear once.
+        </p>
+      }
+    >
       <div className={a.formRow}>
         <Field label="Primary agent" grow>
           <Select
@@ -733,13 +751,6 @@ function FallbackChainCard(props: { agents: AdminAgent[] }) {
           {act.error}
         </div>
       )}
-      <p className={v.faint}>
-        Order is the policy: on a provider failure the gateway walks this list top-down and
-        dispatches the first agent it can reach. Every rung is still governed — a fallback the
-        CALLER is not entitled to is refused exactly like a direct invoke of it, so a chain can
-        never widen what someone may run. Cost and audit are attributed to the agent that actually
-        served. An agent cannot be its own fallback, and each target may appear once.
-      </p>
     </Card>
   );
 }
@@ -791,7 +802,16 @@ function PolicyCard(props: { uOpts: Array<{ v: string; l: string }>; aOpts: Arra
   const set = (k: keyof typeof f, val: string) => setF((s) => ({ ...s, [k]: val }));
   const clearable = [{ v: CLEAR, l: "— clear —" }, ...props.aOpts];
   return (
-    <Card title="Per-user agent policy — default, ceiling, routing, run budget">
+    <Card
+      title="Per-user agent policy — default, ceiling, routing, run budget"
+      info={
+        <p>
+          The ceiling is a tier cap, not a suggestion — an agent above it is denied even with a grant. A run
+          budget is what makes the run Budget card and the budget-overage approval exist at all; “leave
+          unchanged” keeps the stored value.
+        </p>
+      }
+    >
       <form
         className={a.formRow}
         onSubmit={(e) => {
@@ -847,11 +867,6 @@ function PolicyCard(props: { uOpts: Array<{ v: string; l: string }>; aOpts: Arra
           </span>
         )}
       </form>
-      <p className={v.faint}>
-        The ceiling is a tier cap, not a suggestion — an agent above it is denied even with a grant. A run
-        budget is what makes the run Budget card and the budget-overage approval exist at all; “leave
-        unchanged” keeps the stored value.
-      </p>
     </Card>
   );
 }

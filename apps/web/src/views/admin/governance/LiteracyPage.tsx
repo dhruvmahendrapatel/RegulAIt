@@ -14,7 +14,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { fmtAt } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Meter, Modal, Select, Table, Textarea } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, Field, InfoButton, Input, Meter, Modal, Select, Table, Textarea } from "../../../ui/kit";
 import { QueryGate, ReasonModal, useAction, useRoles, useTeams } from "../adminKit";
 import { KIND_TEXT, STATE_TEXT, policyHref, type LiteracyState } from "../../account/AcknowledgeGate";
 import v from "../../views.module.css";
@@ -493,17 +493,21 @@ function CoverageCard() {
   const [recording, setRecording] = useState<{ doc: CoverageDoc; person: CoveragePerson } | null>(null);
   const docs = q.data ?? [];
   return (
-    <Card title="Coverage">
+    <Card
+      title="Coverage"
+      info={
+        <p>
+          Who each published document applies to and who has acknowledged its current version (or an editorial
+          equivalent) and is not expired. Reading this report is recorded in the audit trail. A document below 100%
+          raises a low, observe-only alert.
+        </p>
+      }
+    >
       <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
         {docs.length === 0 ? (
           <EmptyState title="Nothing published" body="Coverage appears once a document is published." />
         ) : (
           <div className={v.stack}>
-            <p className={v.hint}>
-              Who each published document applies to and who has acknowledged its current version (or an editorial
-              equivalent) and is not expired. Reading this report is recorded in the audit trail. A document below
-              100% raises a low, observe-only alert.
-            </p>
             {docs.map((d) => (
               <div key={d.documentId} className={v.stack}>
                 <div className={v.row}>
@@ -708,9 +712,10 @@ function LiteracySettingsCard() {
               <div className={v.rowTight}>
                 <strong>{gateCopy.label}</strong>
                 {badge(s.literacyGateMode !== "enforce")}
+                <InfoButton label={gateCopy.label}>
+                  Strict default: {gateCopy.strict} Relaxing: {gateCopy.relaxed}
+                </InfoButton>
               </div>
-              <div className={v.faint}>Strict default: {gateCopy.strict}</div>
-              <div className={v.faint}>Relaxing: {gateCopy.relaxed}</div>
               <Field label="Gate mode">
                 <Select value={nextMode} onChange={(e) => setMode(e.target.value as LiteracySettings["literacyGateMode"])}>
                   <option value="enforce">enforce (strict default)</option>
@@ -723,9 +728,10 @@ function LiteracySettingsCard() {
               <div className={v.rowTight}>
                 <strong>{daysCopy.label}</strong>
                 {badge(s.literacyDefaultValidityDays > LITERACY_SETTING_STRICT.literacyDefaultValidityDays)}
+                <InfoButton label={daysCopy.label}>
+                  Strict default: {daysCopy.strict} Relaxing: {daysCopy.relaxed}
+                </InfoButton>
               </div>
-              <div className={v.faint}>Strict default: {daysCopy.strict}</div>
-              <div className={v.faint}>Relaxing: {daysCopy.relaxed}</div>
               <Field label="Default validity (days, 30 to 730)" error={daysOk ? null : "30 to 730 days"}>
                 <Input value={nextDays} inputMode="numeric" onChange={(e) => setDays(e.target.value.replace(/\D/g, ""))} />
               </Field>

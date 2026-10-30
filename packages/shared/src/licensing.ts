@@ -397,10 +397,10 @@ export interface SeatDecision {
 }
 
 export const SEAT_DEFINITION_NOTE =
-  "A seat is an ACTIVE user — a row in `users` with no `disabled_at`. Deactivate is not delete " +
-  "(ADR-0022): a disabled user keeps every FK, audit row and history, cannot authenticate and " +
+  "A seat is an ACTIVE user — one that has not been deactivated. Deactivate is not delete: " +
+  "a disabled user keeps every link, audit record and history, cannot authenticate and " +
   "cannot dispatch, and therefore consumes NO seat. There is exactly one implementation of this " +
-  "count and ADR-0051's billing consumes the same number.";
+  "count and billing consumes the same number.";
 
 /**
  * Seat enforcement is a GROWTH gate, never a SERVICE gate (ADR-0052 §3).

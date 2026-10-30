@@ -118,8 +118,9 @@ test("an external scorer is registered, tested against a real endpoint, enabled,
   // the disclosure is ON the page, not in a doc
   await expect(page.getByText(/the vendor's opinion/).first()).toBeVisible();
   await expect(page.getByText(/does not validate the instrument/).first()).toBeVisible();
-  // the named ADR-0042 boundary is stated where an admin would look for it
-  await expect(page.getByText(/inline guardrail path \(ADR-0042\) stays/)).toBeVisible();
+  // the inline-guardrail boundary is stated where an admin would look for it, behind the card's (i)
+  await page.getByRole("button", { name: "What is an external score?" }).click();
+  await expect(page.getByRole("note").getByText(/inline guardrail path stays/)).toBeVisible();
 
   // register through the real form
   await page.getByLabel("Scorer name").fill(SCORER);

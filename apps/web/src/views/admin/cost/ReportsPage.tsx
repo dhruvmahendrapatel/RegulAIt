@@ -119,12 +119,20 @@ export default function ReportsPage() {
     <>
       <PageHeader
         title="Executive & compliance reports"
-        sub="A read-only projection over the ledgers the platform already holds."
-        info={<p>A read-only projection over the ledgers this platform already holds — usage_events (spend), audit_log (governance decisions) and approvals (throughput). No second source of truth, no rollup table that could drift from the cost dashboard. Every generation is scoped to the requesting caller's own entitlement: a report can never show spend or audit data you could not see directly.</p>}
+        info={<p>A read-only projection over the ledgers this platform already holds — spend, governance decisions and approval throughput. No second source of truth, no rollup table that could drift from the cost dashboard. Every generation is scoped to the requesting caller's own entitlement: a report can never show spend or audit data you could not see directly.</p>}
       />
       <div className={v.stack}>
         <QueryGate loading={overview.isLoading} error={overview.error} onRetry={() => void overview.refetch()}>
-          <Card title="Report definitions">
+          <Card
+            title="Report definitions"
+            info={
+              <p>
+                An <strong>org</strong> reporting grant is admin-only: an org-wide rollup aggregates across teams,
+                which is exactly where a naive report leaks one team's numbers to another. A team or project grant is
+                further narrowed at generation time to the projects the caller is actually a member of.
+              </p>
+            }
+          >
             <div className={v.stack}>
               <div className={a.formRow}>
                 <Field label="Name">
@@ -197,11 +205,6 @@ export default function ReportsPage() {
                   </Button>
                 </Field>
               </div>
-              <div className={v.faint}>
-                An <strong>org</strong> reporting grant is admin-only: an org-wide rollup aggregates across teams,
-                which is exactly where a naive report leaks one team's numbers to another. A team or project grant is
-                further narrowed at generation time to the projects the caller is actually a member of.
-              </div>
               {defs.length === 0 ? (
                 <EmptyState title="No report definitions yet" body="A definition describes WHAT to compute and WHO may run it. It computes nothing until it is generated." />
               ) : (
@@ -269,12 +272,19 @@ export default function ReportsPage() {
             </div>
           </Card>
 
-          <Card title="Schedules">
-            <div className={v.stack}>
-              <div className={v.errLine} role="note">
-                Nothing in this deployment fires these. A schedule is a <strong>definition of a cadence</strong>; an
+          <Card
+            title="Schedules"
+            info={
+              <p>
+                A schedule is a <strong>definition of a cadence</strong>; an
                 operator or an external cron must call <code>POST /v1/reports/schedules/run-due</code>, or no
                 scheduled report is ever produced. "Last generated: never" below means exactly that.
+              </p>
+            }
+          >
+            <div className={v.stack}>
+              <div className={v.errLine} role="note">
+                Nothing in this deployment fires these: an operator or an external cron must run them.
               </div>
               <div className={a.formRow}>
                 <Field label="Definition">

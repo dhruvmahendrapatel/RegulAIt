@@ -63,6 +63,7 @@ import {
 import { attachLinkedStdioSession, placeStdioSession, type StdioPlacementInput, type StdioSessionFailure } from "./executor-stdio.js";
 import { observeUpstream, type MetricUpstreamOutcome } from "./metrics.js";
 import { identityAssertionMiddleware, type OutboundIdentity } from "./mcp-identity-assertion.js";
+import { openUpstreamCredential, upstreamCredentialMiddleware } from "./mcp-upstream-credential.js";
 import { loadEgressAllowList } from "./custom-providers.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { timeouts } from "./timeouts.js";
@@ -319,6 +320,8 @@ export const MCP_UPSTREAM_REFUSALS = {
   /** ADR-0190 decision 7: no executor can run this stdio server at its required isolation class */
   execution_profile_unavailable: "execution-profile",
   mcp_sse_endpoint_refused: "mcp-sse-endpoint-refused",
+  /** ADR-0204: the server has an upstream credential this process cannot open; nothing is sent without it */
+  mcp_upstream_credential_unavailable: "mcp-upstream-credential-unavailable",
 } as const;
 export type McpUpstreamRefusal = keyof typeof MCP_UPSTREAM_REFUSALS;
 
@@ -566,6 +569,21 @@ export async function guardedMcpConnect(
     }
     launch = { transport: "stdio", session: (placed as Extract<typeof placed, { kind: "placed" }>).session };
   } else {
+    // ADR-0204: the server's static credential, read fresh for this connect. One that cannot be opened refuses the
+    // connect (our own refusal, audited) rather than send without it.
+    const opened = await openUpstreamCredential(db, dest.row.id);
+    if (!opened.ok) {
+      observe("refused");
+      await refuseUpstream(
+        db,
+        dest.row,
+        "mcp_upstream_credential_unavailable",
+        `${label} refused: its upstream credential cannot be opened (${opened.reason === "data_key_unavailable" ? "the data key is not configured" : "it does not decrypt under the configured data key"}). ` +
+          `Nothing was sent. An admin may set the credential again.`,
+        { reason: opened.reason },
+      );
+    }
+    const credential = opened.ok ? opened.credential : null;
     const guarded = createGuardedFetch({
       allowList: dest.posture.allowList,
       privateLan: { openByDefault: dest.posture.openByDefault },
@@ -574,10 +592,13 @@ export async function guardedMcpConnect(
       // ADR-0188 S8: an assertion's "issued" row is written once the destination is allowed, before it leaves
       ...(deps.outboundIdentity ? { beforeSend: (init?: RequestInit) => deps.outboundIdentity!.beforeSend(init) } : {}),
     });
+    const asserted = deps.outboundIdentity ? (identityAssertionMiddleware(deps.outboundIdentity)(guarded) as typeof fetch) : guarded;
     launch = {
       transport: dest.transport,
       url: dest.row.url,
-      fetch: deps.outboundIdentity ? (identityAssertionMiddleware(deps.outboundIdentity)(guarded) as typeof fetch) : guarded,
+      // ADR-0204: OUTSIDE the assertion's middleware, so its holder still receives the init the guarded fetch is given;
+      // set only for the registered origin, and the guarded fetch refuses every redirect
+      fetch: credential ? (upstreamCredentialMiddleware(credential, dest.row.url)(asserted) as typeof fetch) : asserted,
     };
   }
 

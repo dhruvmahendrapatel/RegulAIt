@@ -461,7 +461,6 @@ export default function ShadowAiPage() {
     <>
       <PageHeader
         title="Shadow-AI discovery"
-        sub="AI use that nobody registered, found in evidence you already hold. Triage each lead and bring it into governance."
         info={
           <>
             Shadow AI is AI use that is not registered or routed through regulAIt. Findings come from evidence:
@@ -501,8 +500,19 @@ export default function ShadowAiPage() {
       {/* what this can and cannot see, stated once, on the face of the page */}
       <div className={sh.callout} role="note">
         <span>
-          <strong>What this can see.</strong> {findings.data?.coverage.statement ?? (findings.isError ? "Coverage could not be read." : "Loading coverage…")}
-          {findings.data?.posture ? <> {findings.data.posture}</> : null}{" "}
+          <strong>What this can see.</strong>{" "}
+          {findings.data ? (
+            <>
+              {/* partial coverage stays visibly partial: warn until every evidence class is supplied */}
+              <Badge tone={findings.data.coverage.sourcesOn < findings.data.coverage.sourcesPossible ? "warn" : "ok"}>
+                {findings.data.coverage.sourcesOn} of {findings.data.coverage.sourcesPossible} evidence classes
+              </Badge>{" "}
+              <InfoButton label="discovery coverage">
+                {findings.data.coverage.statement}
+                {findings.data.posture ? <> {findings.data.posture}</> : null}
+              </InfoButton>
+            </>
+          ) : findings.isError ? "Coverage could not be read." : "Loading coverage…"}{" "}
           <button type="button" className={sh.linkButton} onClick={() => setTab("coverage")}>See coverage</button>
         </span>
       </div>

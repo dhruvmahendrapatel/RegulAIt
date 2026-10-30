@@ -22,6 +22,7 @@ import {
   ConfirmModal,
   EmptyState,
   Field,
+  InfoButton,
   Input,
   Select,
   Table,
@@ -116,7 +117,6 @@ export default function WorkflowTemplatesPage() {
     <>
       <PageHeader
         title="Workflow templates"
-        sub="Stage chains, and how changes route to them."
         info={<p>Stage chains and how changes route to them. Retired templates start no new instances; in-flight ones keep their snapshotted definition.</p>}
       />
       <div className={v.stack}>
@@ -135,7 +135,8 @@ export default function WorkflowTemplatesPage() {
                     {tpl.retiredAt && (
                       <Badge
                         tone="danger"
-                        title={`retired ${String(tpl.retiredAt).slice(0, 10)}${tpl.retiredReason ? ` — ${tpl.retiredReason}` : ""}`}
+                        infoLabel={`the status of ${tpl.name}`}
+                        info={`retired ${String(tpl.retiredAt).slice(0, 10)}${tpl.retiredReason ? ` — ${tpl.retiredReason}` : ""}`}
                       >
                         retired
                       </Badge>
@@ -159,11 +160,7 @@ export default function WorkflowTemplatesPage() {
                   </div>
                 </div>
                 {!tpl.retiredAt && (
-                  <Button
-                    size="sm"
-                    onClick={() => setRetire(tpl)}
-                    title="soft-disable: no new instances; in-flight unaffected"
-                  >
+                  <Button size="sm" onClick={() => setRetire(tpl)}>
                     retire
                   </Button>
                 )}
@@ -176,7 +173,18 @@ export default function WorkflowTemplatesPage() {
 
         <AuthorCard connections={git.data?.connections ?? []} />
 
-        <Card title="Assignment rules — which template governs which change">
+        <Card
+          title="Assignment rules — which template governs which change"
+          infoLabel="assignment rules"
+          info={
+            <p>
+              All six dims are wired: path, change type, environment, target system, initiator role (matched against
+              the initiator's SERVER-derived roles), and data sensitivity (the compliance classifications of the
+              change's attributed project). Every rule that matches a change contributes its template — the merged
+              flow keeps every sign-off.
+            </p>
+          }
+        >
           <RuleForm
             templates={(templates.data?.templates ?? []).filter((t) => !t.retiredAt)}
             sensitivities={(profiles.data?.profiles ?? []).map((p) => p.tag)}
@@ -205,13 +213,7 @@ export default function WorkflowTemplatesPage() {
             onRetry={() => void rules.refetch()}
             empty={<EmptyState title="No assignment rules" />}
           />
-          <p className={v.faint}>
-            Conditions AND together; set at least one. All six dims are wired: path, change type,
-            environment, target system, initiator role (matched against the initiator's SERVER-derived
-            roles), and data sensitivity (the compliance classifications of the change's attributed
-            project). Every rule that matches a change contributes its template — the merged flow keeps
-            every sign-off.
-          </p>
+          <p className={v.faint}>Conditions AND together; set at least one.</p>
         </Card>
       </div>
       <ReasonModal
@@ -303,7 +305,25 @@ function GalleryCard() {
 
   const profiles = gallery.data?.profiles ?? [];
   return (
-    <Card title="Template gallery — cascade-aware starting shapes">
+    <Card
+      title="Template gallery — cascade-aware starting shapes"
+      infoLabel="the template gallery"
+      info={
+        <p>
+          Stage badges and the compliance-heavy shapes are derived live from the compliance profiles’ required
+          templates — the same rules the workflow engine enforces — so this gallery can never drift from the cascade.
+          {profiles.length > 0 &&
+            ` Profiles: ${profiles
+              .map(
+                (p) =>
+                  `${p.tag} (pii ${p.piiMode}, mcp ${p.mcpDefaultMode}${
+                    p.auditRetentionDays ? `, audit ${p.auditRetentionDays}d` : ""
+                  })`,
+              )
+              .join(" · ")}.`}
+        </p>
+      }
+    >
       {gallery.isLoading && <span className={v.dim}>Loading…</span>}
       {!gallery.isLoading && (
         <>
@@ -316,13 +336,27 @@ function GalleryCard() {
           </div>
           {(gallery.data?.entries ?? []).map((entry) => {
             const demanded = entry.stageAnnotations.filter((x) => x.demandedByTags.length > 0);
+            // one line visible; the rest of the description and the cascade detail sit behind the (i)
+            const [lead, ...restSentences] = (entry.description ?? "").split(/(?<=\.)\s+(?=[A-Z])/);
+            const more = [
+              restSentences.join(" "),
+              demanded.length > 0
+                ? `Cascade: ${demanded.map((x) => `${x.stageId} ← ${x.demandedByTags.join("+")}`).join(" · ")}.`
+                : "",
+            ]
+              .filter(Boolean)
+              .join(" ");
             return (
               <div key={entry.galleryId} className={v.listRow}>
                 <div className={v.grow}>
                   <div className={v.row}>
                     <strong>{entry.title}</strong>
                     {entry.source === "compliance_profile" && (
-                      <Badge tone="info" title="shape derived from a compliance profile's required templates">
+                      <Badge
+                        tone="info"
+                        infoLabel={`the ${entry.profileTag} profile shape`}
+                        info="shape derived from a compliance profile's required templates"
+                      >
                         {entry.profileTag}
                       </Badge>
                     )}
@@ -332,15 +366,11 @@ function GalleryCard() {
                       const tags =
                         entry.stageAnnotations.find((x) => x.stageId === s.id)?.demandedByTags ?? [];
                       return (
-                        <span
-                          key={`${s.id}-${i}`}
-                          className={a.stage}
-                          title={tags.length ? `demanded by compliance profile(s): ${tags.join(", ")}` : undefined}
-                        >
+                        <span key={`${s.id}-${i}`} className={a.stage}>
                           {s.id}
                           <span className={a.stageType}>{s.type}</span>
                           {tags.map((t) => (
-                            <Badge key={t} tone="warn" title={`the '${t}' cascade forces this stage`}>
+                            <Badge key={t} tone="warn">
                               {t}
                             </Badge>
                           ))}
@@ -349,11 +379,13 @@ function GalleryCard() {
                     })}
                   </div>
                   <div className={v.faint} style={{ marginTop: "var(--s0)" }}>
-                    {entry.description}
-                    {demanded.length > 0 &&
-                      ` Cascade: ${demanded
-                        .map((x) => `${x.stageId} ← ${x.demandedByTags.join("+")}`)
-                        .join(" · ")}.`}
+                    {lead}
+                    {more && (
+                      <>
+                        {" "}
+                        <InfoButton label={entry.title}>{more}</InfoButton>
+                      </>
+                    )}
                   </div>
                 </div>
                 <div className={v.row}>
@@ -392,20 +424,6 @@ function GalleryCard() {
               </div>
             );
           })}
-          <p className={v.faint}>
-            Stage badges and the compliance-heavy shapes are derived live from the compliance
-            profiles’ required templates — the same §8.3 rules the workflow engine enforces —
-            so this gallery can never drift from the cascade.
-            {profiles.length > 0 &&
-              ` Profiles: ${profiles
-                .map(
-                  (p) =>
-                    `${p.tag} (pii ${p.piiMode}, mcp ${p.mcpDefaultMode}${
-                      p.auditRetentionDays ? `, audit ${p.auditRetentionDays}d` : ""
-                    })`,
-                )
-                .join(" · ")}.`}
-          </p>
           {act.error && (
             <span className={v.errLine} role="alert">
               {act.error}
@@ -506,7 +524,20 @@ function AuthorCard(props: { connections: GitConnection[] }) {
             </Select>
           </Field>
         </div>
-        <Field label="Definition (JSON)">
+        <Field
+          label="Definition (JSON)"
+          helpLabel="the definition schema"
+          help={
+            <>
+              Stage types: trigger · planning · artifact_generation {"{output}"} · human_approval {"{approvers}"} ·
+              automated_build {"{scope?, run?}"} · automated_check {"{checks[], offlineAutoPass?}"} · git_operation{" "}
+              {"{action: create_branch | open_pr | merge, connection, repo, …}"}. open_pr needs an earlier
+              create_branch, merge an earlier open_pr. A named check nobody reports stays pending and holds the stage;
+              offlineAutoPass: true passes it instead, labelled “auto-passed — no report (offline mode)” everywhere —
+              but only on a gateway started with REGULAIT_OFFLINE_CHECKS=1, and never on a deployed box.
+            </>
+          }
+        >
           <Textarea
             rows={14}
             spellCheck={false}
@@ -517,14 +548,7 @@ function AuthorCard(props: { connections: GitConnection[] }) {
         </Field>
         <p className={v.faint}>
           A definition is {"{ workflow, costSensitivity?, stages[] }"}; the first stage must be a trigger.
-          Stage types: trigger · planning · artifact_generation {"{output}"} · human_approval{" "}
-          {"{approvers}"} · automated_build {"{scope?, run?}"} · automated_check {"{checks[], offlineAutoPass?}"} ·
-          git_operation {"{action: create_branch | open_pr | merge, connection, repo, …}"}. open_pr needs an
-          earlier create_branch, merge an earlier open_pr. A named check nobody reports stays pending and holds
-          the stage; offlineAutoPass: true passes it instead, labelled “auto-passed — no report (offline
-          mode)” everywhere — but only on a gateway started with REGULAIT_OFFLINE_CHECKS=1, and never on a
-          deployed box. Validation errors from the server appear below,
-          field by field.
+          Validation errors from the server appear below, field by field.
         </p>
         <div className={v.row}>
           <Button type="submit" variant="primary" disabled={act.busy}>

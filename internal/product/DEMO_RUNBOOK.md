@@ -4,7 +4,7 @@ For a **capability demo** driven by us, to a prospective customer. It is not a t
 nothing in it is production: every provider is a mock, every upstream is a loopback double, and every
 credential it mints is printed once and dies with the database.
 
-Sections 1-6 describe that local, seeded environment. **§7** adds what the 2026-11-01 demo needs on top: the live
+Sections 1-6 describe that local, seeded environment. **§7** adds what the 2026-10-31 demo (first planned for 11-01) needs on top: the live
 instance (since [ADR-0203](../decisions/0203-demo-hosting-after-aws-org-loss.md), the owner's laptop behind a Cloudflare
 Tunnel; the hosted AWS dev instance no longer exists), the real-account discovery sources (read-only scans of a GitLab demo group, a non-production AWS sandbox
 account and an Azure subscription, plus an imported inventory export of a demo laptop, ADR-0197 and its 2026-10-24
@@ -216,8 +216,9 @@ password step:
 
      The seed runs with `--seed-demo --open-assurance-window` and mints (or keeps) the 30-day ephemeral licence that
      says "NOT A PRODUCTION DEPLOYMENT"; only its public key is written, to the same volume. `demo:check` should end
-     **26 pass, 1 warn, 0 fail** (the WARN is `3 Monitor`, listing the active alerts; run `39940181481`, 2026-10-23,
-     and the 10-21 rehearsal agree), followed by `demo prep: complete in <n>s`. If a later green `Demo journey` run
+     **26 pass, 2 warn, 0 fail**: one WARN is `3 Monitor`, listing the active alerts (run `39940181481`, 2026-10-23,
+     and the 10-21 rehearsal agree); the other is `E External model and agent` until §7.10 is set up (a clean
+     `demo:prepare` on `main` at 71e80b1, 2026-10-30). The last line is `demo prep: complete in <n>s`. If a later green `Demo journey` run
      shows different counts, trust the run;
    - the **gateway**, with `REGULAIT_OFFLINE_CHECKS=1` and the export key set (as §1 step 5).
 
@@ -507,7 +508,7 @@ been run is a guess — the `openssl rand -base64 32` line that used to be in §
 
 ---
 
-## 7. The 2026-11-01 demo: the live instance on the laptop and real-account discovery (ADR-0197, ADR-0203)
+## 7. The 2026-10-31 demo: the live instance on the laptop and real-account discovery (ADR-0197, ADR-0203)
 
 This section is for `DEMO_SCRIPT_2026-11-01.md`. Sections 1-6 above still describe the local, seeded environment.
 
@@ -519,11 +520,13 @@ Its database is wiped once and prepared from empty with `demo:prepare --live`, s
 and the sample-data walkthrough is no longer on it. Steps below that only applied to the AWS host are kept, marked
 **superseded by ADR-0203**, so that older references still resolve; do not run them.
 
-**Dates (owner, 2026-10-23, #453).** Two runs use this section: a full **internal run-through on Sun 2026-11-01,
-afternoon ET**, and the **external demo on Tue 2026-11-03**. The code freeze stays **Thu 2026-10-29**. Everything here
-must be ready for 11-01 and still hold on 11-03. The T-7d, T-24h, T-1h, T-10 min and T-5 min rows of §7.3 apply to
-**both** runs (T-7d is 10-25 for the run-through and 10-27 for the demo; T-24h is 10-31 and 11-02). DST ends on
-11-01 at 02:00, so both runs are on EST (UTC-5). **Every step in this section is pending execution** (M-041)
+**Dates (owner, 2026-10-29, #453 c6508111468).** One run uses this section: the **customer demo on Sat 2026-10-31**.
+The internal run-through on Sun 11-01 and the external demo on Tue 11-03 (owner, 2026-10-23) are gone. The code freeze
+stays **Thu 2026-10-29**. The T-7d, T-24h, T-1h, T-10 min and T-5 min rows of §7.3 are counted from the 10-31 start
+time: T-24h is Fri 10-30; T-7d (10-24) has passed, so any T-7d row not yet done is done now, before T-24h. DST ends
+on 11-01, so 10-31 is still on EDT (UTC-4). Two owner-approved freeze exceptions are built by other PRs: Claude
+through the Anthropic API as the model and the agent, pointed at our MCP endpoint, and the ABAP MCP server behind our
+MCP proxy, so a live SAP change runs through governance. **Every step in this section is pending execution** (M-041)
 unless it says otherwise: none of it has been run yet. The infrastructure itself (the AWS sandbox account, the Azure
 app registration, the GitLab demo group, the public federation issuer) is Terraform and runbooks written by a
 separate lane under `infra/`; the owner runs or approves every apply (ADR-0197 decision 6). Steps that depend on it
@@ -533,8 +536,8 @@ point there rather than repeating commands nobody has run.
 
 - **Live instance:** the owner's laptop, published at `https://regulait.<domain>` through the Cloudflare Tunnel
   (ADR-0203 decision 1; it replaces ADR-0197 decision 1's hosted dev instance). The same laptop presents. It must be on
-  and online whenever a cloud fetches the federation issuer, at every scan, and for both runs, on the same network as
-  11-03 (ADR-0203 consequences). Its database carries the governance seed and the four real discovery sources (three
+  and online whenever a cloud fetches the federation issuer, at every scan, and for the run, on the same network as
+  the 10-31 demo (ADR-0203 consequences). Its database carries the governance seed and the four real discovery sources (three
   network scanners and one device inventory import source), and **only real findings**: what the real GitLab, AWS and
   Azure scans and the real device's inventory export find (owner, 2026-10-19, ADR-0197 addendum decision 3, option A;
   device import: owner, 2026-10-24, ADR-0197 addendum of that date). **No endpoint agent on LIVE** (FS-1): `GET
@@ -615,7 +618,7 @@ of a real demo laptop we own, imported through `POST /v1/discovery/sources/:sour
 3. On **Import endpoint evidence**: choose the source, the format, the file → **Dry run** (writes only an audit row and
    shows matched and refused rows) → once the matches are the planted apps, **Import** (enabled only when the source
    is enabled). The import opens a discovery run for the source, so it appears in **Recent runs**.
-4. The import is a state change on LIVE: do it at T-7d (first) and T-24h (refresh), never on stage and never on 11-01.
+4. The import is a state change on LIVE: do it at T-7d (first) and T-24h (refresh), never on stage.
 
 Then, on the **Cloud federation** card: **Generate key** → **Turn on with this key** (a step-up). The card says the
 issuer needs the deployment's public URL (`REGULAIT_PUBLIC_URL`); its discovery document and key set must be reachable
@@ -626,16 +629,15 @@ owner's notes and the infrastructure lane's state.
 
 ### 7.3 Pre-demo checklist
 
-Every row is **pending execution** unless it says otherwise. A **T-** row applies to **both** runs: the internal
-run-through (Sun 11-01, afternoon ET) and the external demo (Tue 11-03). Do it once for each, against that run's start
-time. Rows marked *once* are done a single time for both. The recipes the rows name are in §7.6.
+Every row is **pending execution** unless it says otherwise. A **T-** row is counted from the start of the one run,
+the customer demo on Sat 10-31 (owner, 2026-10-29, #453 c6508111468). Rows marked *once* are done a single time. The recipes the rows name are in §7.6.
 
 | When | Check | Status |
 |---|---|---|
-| Before Sun 10-25, *once* | **Power schedule off**: **superseded by ADR-0203** (the EC2 box and its EventBridge schedules no longer exist). Instead: keep the laptop on, awake and online for both runs and whenever a cloud must reach the issuer (`DEMO_REAL_ACCOUNTS.md` step 1a) | superseded |
+| Before Sun 10-25, *once* | **Power schedule off**: **superseded by ADR-0203** (the EC2 box and its EventBridge schedules no longer exist). Instead: keep the laptop on, awake and online for the run and whenever a cloud must reach the issuer (`DEMO_REAL_ACCOUNTS.md` step 1a) | superseded |
 | Before Thu 10-29, *once* | **The laptop on post-#508 main** (deep scan #38, owner): update the laptop's checkout to `main` after #508 (Postgres and Keycloak pinned by digest) and run `docker compose pull` while online, before the §7.6 wipe. The first boot after an update builds an audit index concurrently and stops with `ConcurrentIndexBlockedError` if it cannot get its locks within 60 s (#43): close any `psql` session first. **No `pull` during the freeze**; hold #521 until after the demo. (The dev host half is superseded by ADR-0203.) | pending execution — owner |
 | Before Thu 10-29, *once* | **Live gateway environment** (deep scan #6, owner; #453 c6485593621): `REGULAIT_DEMO_LICENSE=1` removed from the laptop's `.env`, and the export-signing key, its id and `REGULAIT_LICENSE_KEYRING` in the laptop's git-ignored local `docker-compose.override.yml`, written before the wipe (§7.6 steps 1-2). **Never the demo switch on the live laptop** | done 2026-10-29 (#453 c6486350055) |
-| Before Thu 10-29, *once* | **Branch rule on main** (deep scan #51, owner): require `ci.yml`'s `build-and-test` check on `main` for the freeze, with an admin bypass for docs-only PRs; remove it after 11-03 | pending execution — owner |
+| Before Thu 10-29, *once* | **Branch rule on main** (deep scan #51, owner): require `ci.yml`'s `build-and-test` check on `main` for the freeze, with an admin bypass for docs-only PRs; remove it after 10-31 | pending execution — owner |
 | *Once*, before `DEMO_REAL_ACCOUNTS.md` step 2 | The one wipe (`docker compose --profile tunnel down -v`) **done 2026-10-29, never again**, then `demo:prepare --live` from empty, passwords, admin MFA and `demo:check --live` on the laptop, through `docker compose exec` (§7.6 steps 3-8). It creates the mock deploy target `demo-staging` (environment `staging`). Never `down -v` again after step 2 | wipe, prep and passwords done 2026-10-29 (#453 c6486350055); admin MFA and `demo:check --live` pending — owner |
 | Now, then after the freeze dispatch | **Offline deck** (deep scan #20): rebuild it from the `demo-screens` artifact of run `39940181481` (artifact `12497390750`, kept until 11-22) with `node apps/web/e2e/fallback-deck.mjs --pack 2026-11-01 --dark --no-gate`. After the freeze-SHA dispatch below, rebuild it from that run's artifact with `--gate <path to real-gate.txt>` in place of `--no-gate` (31 slides) | pending execution |
 | Thu 10-29, *once* | **Freeze-SHA dispatches** (deep scan #21, owner): dispatch `demo.yml`, `ci.yml` and `ui-enterprise.yml` on `main` at the freeze SHA; record each run id and the SHA in §7.5. The 10-21 rehearsal's gate artifact expires 2026-10-28 15:06Z; the freeze dispatch replaces it | pending execution |
@@ -646,13 +648,13 @@ time. Rows marked *once* are done a single time for both. The recipes the rows n
 | T-7d | The remediation workflow walked once on a rehearsal database as Ada: start → **Finish planning** → **Submit for sign-off** → Morgan's **Review** and **Approve** in `/ui/inbox` (the item opens in the panel on the right; **Approve** is in its pinned foot) | pending execution |
 | T-7d | Morgan Reyes (security lead) is an active admin, Ada is the only other admin, and Morgan has enrolled her authenticator (after `demo:set-passwords`, at her next sign-in) | pending execution |
 | T-7d (prep) | **Morgan's AI policy** (deep scan #32): sign in as Morgan on **both** stacks and press **Acknowledge** on the AI-policy gate, not **Not now**. "Not now" lasts only for that browser session and leaves a banner on every page, which would show on her Inbox in S3. `demo:check` covers this only for Ada, Dana and Avery | pending execution |
-| T-7d (prep) | **S4 Link stack pairing** (owner, #453, lane D4 #527). Seed data: the credit-memo finding links to the seeded agent `claude-opus` and the vendor `Anthropic · approved`, on FALLBACK and on a LIVE finding with matching SDK evidence; that agent's model card has no sign-off, so G1's **Stack** tab shows **Not signed off**. For a LIVE finding from another provider, use that provider's matching unsigned pair from the governance seed. Check on LIVE that nobody has signed off that model card (agent's model card shows **Not signed off**); repeat at T-24h before each run | pending execution |
+| T-7d (prep) | **S4 Link stack pairing** (owner, #453, lane D4 #527). Seed data: the credit-memo finding links to the seeded agent `claude-opus` and the vendor `Anthropic · approved`, on FALLBACK and on a LIVE finding with matching SDK evidence; that agent's model card has no sign-off, so G1's **Stack** tab shows **Not signed off**. For a LIVE finding from another provider, use that provider's matching unsigned pair from the governance seed. Check on LIVE that nobody has signed off that model card (agent's model card shows **Not signed off**); repeat at T-24h | pending execution |
 | T-7d | **G1 "Found by discovery"** (lane D4, #527): on the fallback, after S4, the use case's header shows the **Found by discovery** chip, *discovery* opens the Shadow-AI **Findings** tab for Ada, and the finding's row reads *"Registered as <use case>"* | pending execution |
 | T-7d | **G3 ALLOW** rehearsed on the fallback database (§7.5 owner step 1, with `staging`) | pending execution |
 | T-3d | Code freeze held (2026-10-29: only demo-blocker fixes merge, ADR-0197 decision 9); the live instance runs the frozen build. Freeze notes: §7.7 | pending execution |
-| T-24h | **Run now** on the three live network sources; each run **succeeded**. Re-import the demo laptop's inventory export (**Dry run**, then **Import**; §7.2) so its run is fresh. Choose the rows S2-S4 walk from the real findings on `/ui/admin/shadow-ai`, and fill in the 11-03 S3 plan text in `DEMO_PRESENTER_NOTES_2026-11-01.md` with the chosen repository and path | pending execution |
-| T-24h | **E. Enforce it** (FS-8, owner 2026-10-24 and #453 comment 6387779914): on the stack the beat runs on (FALLBACK before 11-01, LIVE before 11-03), `/ui/admin/simulation` as Ada answers Dana · `repo-tools` · `search_code` with **deny** and `write_file` with **require approval** naming Avery. Each question writes one advisory audit row and nothing else. The beat is a *simulated decision* on both dates; it does not need the demo MCP server, so there is no MCP-server check (DEMO_SCRIPT E) | pending execution |
-| T-24h | On the live database, the chosen finding has **no** remediation workflow yet and has **not** been registered as a use case (S3 and S4 each use it up: LIVE allows one workflow per finding, and one finding is one use case, ever; a second registration is refused 409). On 11-01 S3 and S4 run on the fallback, so the LIVE finding is chosen for 11-03. On the fallback, `gitlab:acme-bank-demo/credit-memo-assistant`'s workflow waits on Morgan (`demo:check` "1 Remediation plan" PASS); nobody approved it at rehearsal | pending execution |
+| T-24h | **Run now** on the three live network sources; each run **succeeded**. Re-import the demo laptop's inventory export (**Dry run**, then **Import**; §7.2) so its run is fresh. Choose the rows S2-S4 walk from the real findings on `/ui/admin/shadow-ai`, and fill in the 10-31 S3 plan text in `DEMO_PRESENTER_NOTES_2026-11-01.md` with the chosen repository and path | pending execution |
+| T-24h | **E. Enforce it** (FS-8, owner 2026-10-24 and #453 comment 6387779914): on LIVE, and on FALLBACK for the failure fallback, `/ui/admin/simulation` as Ada answers Dana · `repo-tools` · `search_code` with **deny** and `write_file` with **require approval** naming Avery. Each question writes one advisory audit row and nothing else. The *simulated decision* does not need the demo MCP server, so there is no MCP-server check (DEMO_SCRIPT E) | pending execution |
+| T-24h | On the live database, the chosen finding has **no** remediation workflow yet and has **not** been registered as a use case (S3 and S4 each use it up: LIVE allows one workflow per finding, and one finding is one use case, ever; a second registration is refused 409). S3 and S4 run on LIVE on 10-31, so the LIVE finding is chosen for that run. On the fallback, `gitlab:acme-bank-demo/credit-memo-assistant`'s workflow waits on Morgan (`demo:check` "1 Remediation plan" PASS); nobody approved it at rehearsal | pending execution |
 | T-24h | `staging` is accepted on the live instance: `demo:check --live` shows "1 Remediation environment" PASS | pending execution |
 | T-24h | **Re-run `demo:traffic` on LIVE, only that step** (deep scan #8, owner): the monitor counts off-stack serving and trace evaluation over **7 days** and resolves alerts that clear, so traffic made at prepare time no longer holds G3's second BLOCK line. Rehearse the re-run on a copy of the database first (once). Then, on the laptop: `docker compose exec gateway node apps/gateway/dist/demo-traffic.js`, after the T-24h scans | pending execution |
 | T-24h | **Capture `real-gate.txt`** after that traffic re-run (deep scans #5, #8, #11): run the G3 script (§7.6) with `staging` and copy its output to `real-gate.txt` on the presenting laptop. Expect `DENY "Real-Time Fraud Detection Engine" (approved, EU AI Act tier high) → staging` with two `BLOCK open_high_alert` lines. Do **not** acknowledge the alerts on LIVE at this check | pending execution |
@@ -665,7 +667,7 @@ time. Rows marked *once* are done a single time for both. The recipes the rows n
 | T-24h, under 18 h before the start | Fallback stack prepared from empty in the second checkout (§7.8, steps 4–6), then the prep result read from the log as in §7.8 step 6 (never a bare `demo-check.js`), on `http://localhost:3100` | pending execution |
 | T-24h | F28: the live gateway has `REGULAIT_PUBLIC_URL` set to `https://regulait.<domain>` (TUNNEL.md step 4), so the Cloud federation card shows the issuer and does not say the public URL is not configured | pending execution |
 | T-24h | Neither demo budget alert has fired (AWS USD 40 and Azure USD 10, USD 50 in total; each alerts at 80%, USD 32 and USD 8, `internal/product/DEMO_REAL_ACCOUNTS.md`); planted usage still within budget (ADR-0197 decision 4) | pending execution |
-| Morning of each run | **Backup out of the window**: **superseded by ADR-0203** (the dev host's `regulait-pg-backup.timer` no longer exists; the laptop runs no backup timer, so nothing runs in the window) | superseded |
+| Morning of 10-31 | **Backup out of the window**: **superseded by ADR-0203** (the dev host's `regulait-pg-backup.timer` no longer exists; the laptop runs no backup timer, so nothing runs in the window) | superseded |
 | T-1h | Browsers: Profile A (Ada), Profile B (Avery) and Profile C (Morgan) on the live instance (`https://regulait.<domain>/ui`), all signed in; a fallback browser profile signed in on the fallback stack (`http://localhost:3100/ui`, §7.8); one spare browser installed | pending execution |
 | T-1h | **Idle limit** (deep scan #7, owner): a session ends after **30 idle minutes** (the strict default; it is not relaxed for the demo). The only keep-alive is the Inbox's 30-second poll, which pauses while a window is hidden. Profiles signed in at T-1h will have timed out by S3 unless they are refreshed at T-10 min | pending execution |
 | T-1h | A terminal open on the laptop in the repository checkout for G3, the G3 script in place, and `real-gate.txt` open in a viewer as its fallback (§7.6) | pending execution |
@@ -675,38 +677,37 @@ time. Rows marked *once* are done a single time for both. The recipes the rows n
 | T-1h | **Theme** (deep scan #35): the same look in every profile, chosen for the room's projector. Light or dark is the ☾ / ☀ button in the top bar (**Switch to dark theme** / **Switch to light theme**); the palette is on **Account** (`/ui/account`) → **Appearance**. Both are kept per browser, so set them in every profile and in the fallback browser | pending execution |
 | T-1h | Ada's and Morgan's authenticators on the presenting phone; the phone charged and silenced | pending execution |
 | T-1h | The live instance answers over HTTPS from the venue network (open `/ui` in each profile) and the tunnel shows **HEALTHY**. (The `sslip.io` hosts-file line is superseded by ADR-0203: the name is on Cloudflare DNS.) | pending execution |
-| T-1h | **Presenter brief on SLA chips** (deep scan #13): on LIVE, prepared more than a week earlier, every open high and medium alert reads **SLA breached** (the G5 unowned-agent alert included), and the drawer adds that it was escalated to the admins. Say: "the product escalates overdue alerts". Acknowledging an alert does not stop its clock. Do not relax the SLAs, and do not re-prepare LIVE | pending execution |
+| T-1h | **Presenter brief on SLA chips** (deep scan #13): on LIVE, prepared on 10-29 (about two days before the demo), every open high alert reads **SLA breached** (the G5 unowned-agent alert included) and the drawer adds that it was escalated to the admins; open medium alerts read *SLA on track* or *SLA due soon* (due soon from 54 h, breached at 72 h), so check them at this row. Say: "the product escalates overdue alerts". Acknowledging an alert does not stop its clock. Do not relax the SLAs, and do not re-prepare LIVE | pending execution |
 | T-10 min | **Sessions** (deep scan #7, owner): in every profile, the fallback browser included, sign in again or bring the window to the front so it is active. Keep the windows tiled and never fully covered, so each stays visible and its poll keeps running | pending execution |
 | T-5 min | **G3 terminal**: the laptop terminal is still open and the G3 script is still there. (Reconnecting a Session Manager shell is superseded by ADR-0203.) | pending execution |
-| 11-01 run-through | **State-changing beats on FALLBACK only** (owner, 2026-10-23, #453). LIVE is never re-prepared, so anything changed there on 11-01 stays for 11-03 (a re-detected alert keeps its acknowledged status, so an acknowledged G3 alert would turn 11-03's DENY into ALLOW; S3 and S4 each use up their finding, one finding is one use case, ever). On 11-01 these run on the **FALLBACK** laptop stack: G3 acknowledge then ALLOW, G5 resolve, S3 **Start and link** (Ada's live half on the second finding, FS-7), S4 register, and E (Enforce it). **LIVE read-only**: every other beat, plus G3's DENY gate. The per-beat marks are in DEMO_SCRIPT_2026-11-01 (each beat's "11-01 run-through" line) and in "11-01 run-through: where each beat runs" below | decided — owner |
-| Between the runs | **`demo:traffic` for 11-03**: re-run it on LIVE again at T-24h before 11-03 (Mon 11-02), after that day's scans, then capture a fresh `real-gate.txt`, so the monitor's 7-day window still holds G3's second BLOCK line on 11-03. The fallback is prepared again from empty, under 18 h before 11-03 | pending execution |
-| After 11-03 | **Power schedule back on**: **superseded by ADR-0203** (no EC2 box). Stop the tunnel when the demo is over (TUNNEL.md, "Stopping and rolling back") | superseded |
-| After 11-03 | **Remove the freeze branch rule** on `main` (deep scan #51, owner) | pending execution — post-demo, owner |
+| Sat 10-31 | **Every beat on LIVE, once** (owner, 2026-10-29, #453 c6508111468; it replaces the 11-01 run-through row of 2026-10-23). LIVE is never re-prepared, so a state-changing step (G3 acknowledge then ALLOW, G5 resolve, S3 **Start and link**, S4 register, G1/G2 on S4's use case, E) runs on it only once: at the demo. Rehearse those steps on the **FALLBACK** stack only; FALLBACK stays the failure fallback. The per-beat marks are in DEMO_SCRIPT_2026-11-01 (each beat's "Sat 10-31" line) and in "Sat 10-31: where each beat runs" below | decided — owner |
+| Between the runs | **Superseded by the single date** (owner, 2026-10-29): there is one run, so the T-24h row (Fri 10-30) is the only `demo:traffic` re-run and `real-gate.txt` capture, and the fallback is prepared from empty once, under 18 h before 10-31 | superseded |
+| After 10-31 | **Power schedule back on**: **superseded by ADR-0203** (no EC2 box). Stop the tunnel when the demo is over (TUNNEL.md, "Stopping and rolling back") | superseded |
+| After 10-31 | **Remove the freeze branch rule** on `main` (deep scan #51, owner) | pending execution — post-demo, owner |
 | After | Teardown of the sandbox resources and the Azure deployment, tracked as a follow-up (ADR-0197 consequences): [DEMO_TEARDOWN.md](DEMO_TEARDOWN.md) | pending execution — post-demo, owner |
 
 
-**11-01 run-through: where each beat runs** (owner, 2026-10-23, #453). FALLBACK is the second, sample-data stack on
-the laptop (§7.8, `http://localhost:3100/ui`). LIVE is prepared once and never re-prepared.
-On 11-01 every step that changes state runs on the FALLBACK laptop stack, so LIVE stays as prepared for 11-03. On
-11-03 every beat runs on LIVE as scripted.
+**Sat 10-31: where each beat runs** (owner, 2026-10-29, #453 c6508111468; it replaces the 11-01 run-through table of
+2026-10-23). FALLBACK is the second, sample-data stack on the laptop (§7.8, `http://localhost:3100/ui`). LIVE is
+prepared once and never re-prepared, so each state-changing step can run on it only once. With one date that once is
+the demo: every beat runs on LIVE as scripted, and FALLBACK is the failure fallback and the only place to rehearse.
 
-| Beat | 11-01 | Why |
+| Beat | 10-31 | Rehearse before 10-31 on |
 |---|---|---|
-| Opening, S1, S2 | LIVE read-only | no **Run now**, no federation toggle, no disposition change |
-| S3 Plan remediation, **Start and link**, Morgan's **Approve** | FALLBACK: Morgan approves the seeded workflow, then Ada walks **Plan remediation** → **Start and link** → **Finish planning** → **Submit for sign-off** on `gitlab:acme-bank-demo/support-ticket-triage` and Morgan approves again (FS-7) | LIVE allows one workflow per finding; the second finding rehearses the clicks Ada makes live on 11-03 |
-| S4 Register as use case | FALLBACK | one finding is one use case, ever (409 on a second) |
-| G1 record and risks, G2 independent review | FALLBACK | they work on S4's new use case; **Add risk** and the approval change state |
-| E Enforce it | FALLBACK | owner, 2026-10-24; on 11-03 the same Simulation beat runs on LIVE (a simulated decision; it writes only advisory audit rows) |
-| G3 step 1, DENY | LIVE read-only | the gate only reads and records the decision |
-| G3 steps 2-3, acknowledge then ALLOW | FALLBACK | an acknowledged alert stays acknowledged and would turn 11-03's DENY into ALLOW |
-| G4 trust dashboard | LIVE read-only | |
-| G5 **Evaluate now**, acknowledge, propose, approve, resolve | FALLBACK | a resolved alert would be gone on 11-03 |
-| G7, G8, Close | LIVE read-only | |
-| G6, G9, G10 (optional) | LIVE read-only | change nothing |
+| Opening, S1, S2 | LIVE read-only | LIVE (read-only: no **Run now**, no federation toggle, no disposition change) |
+| S3 Plan remediation, **Start and link**, Morgan's **Approve** | LIVE, on the finding chosen at T-24h | FALLBACK: Morgan approves the seeded workflow, then Ada walks **Plan remediation** → **Start and link** → **Finish planning** → **Submit for sign-off** on `gitlab:acme-bank-demo/support-ticket-triage` and Morgan approves again (FS-7); LIVE allows one workflow per finding |
+| S4 Register as use case | LIVE | FALLBACK only: one finding is one use case, ever (409 on a second) |
+| G1 record and risks, G2 independent review | LIVE (S4's new use case) | FALLBACK only: **Add risk** and the approval change state |
+| E Enforce it | LIVE (a live governed call, ADR-0202) | FALLBACK only |
+| G3 step 1, DENY | LIVE | LIVE or FALLBACK: the gate only reads and records the decision |
+| G3 steps 2-3, acknowledge then ALLOW | LIVE | FALLBACK only: an acknowledged alert stays acknowledged and would turn the demo's DENY into ALLOW |
+| G4 trust dashboard | LIVE read-only | either |
+| G5 **Evaluate now**, acknowledge, propose, approve, resolve | LIVE | FALLBACK only: a resolved alert would be gone at the demo |
+| G7, G8, Close | LIVE read-only | either |
+| G6, G9, G10 (optional) | LIVE read-only | either; change nothing |
 
-Answer to the D5 open question ("Between the runs"): the 11-01 acknowledgements and resolutions are done on the
-fallback only. Re-run `demo:traffic` on LIVE at T-24h before 11-03 (Mon 11-02), after that day's scans, and capture
-`real-gate.txt` again after it.
+The D5 open question ("Between the runs") no longer arises: there is one run. Re-run `demo:traffic` on LIVE at T-24h
+(Fri 10-30), after that day's scans, and capture `real-gate.txt` after it.
 
 ### 7.4 If something breaks on the day
 
@@ -777,7 +778,7 @@ the seed, the dataset or the gate: Actions → `Demo journey` → Run workflow.
    gateway unit test (`apps/gateway/src/zz-adr0161-deploy-gate.test.ts`, "an open high alert on the use case blocks;
    acknowledging it leaves a warning"), not on the demo database. Pending execution.
 2. **The sample-data stack.** All of the above on a docker compose sample-data stack (§1.3), less than 18 hours before
-   each run, with `REGULAIT_PUBLIC_URL` and the identity signing key set. CI used a Postgres service and node directly,
+   the run, with `REGULAIT_PUBLIC_URL` and the identity signing key set. CI used a Postgres service and node directly,
    not compose. On the laptop it is the fallback stack in the second checkout (§7.8), with `REGULAIT_PUBLIC_URL` set to
    `http://localhost:3100` (an `http` origin is accepted for localhost only). Pending execution.
 3. **`demo:gate` on the live laptop** (G3 live, and the T-24h `real-gate.txt` capture, §7.3), through the G3
@@ -1079,7 +1080,7 @@ never run `down -v` anywhere else (§7.6, step 3).
    [ "$(basename "$PWD")" = regulait-fallback ] && docker compose config --format json | grep -q '"name": "regulait-fallback"' && echo ok
    ```
 
-5. **Prepare from empty** (under 18 hours before each run, ADR-0197 decision 7): after step 4 prints `ok`, run
+5. **Prepare from empty** (under 18 hours before the run, ADR-0197 decision 7): after step 4 prints `ok`, run
    `docker compose down -v`, then `docker compose up -d --build`. The §1.3 switch runs the sample-data prep on the empty
    database. Then set the demo passwords and enrol the two admins' authenticators exactly as §1.3 describes (read
    `http://localhost:3100` wherever §1.3 says `3000`), in a
@@ -1092,3 +1093,209 @@ never run `down -v` anywhere else (§7.6, step 3).
    instant. If the laptop runs short of memory, `docker compose stop` it after the check and `docker compose start` it
    at T-10 min. After the demo, `docker compose down -v` in `regulait-fallback` (after step 4), then
    `git worktree remove ../regulait-fallback` from the live checkout.
+
+### 7.9 The ABAP MCP server behind the proxy (owner, 2026-10-29, #453 c6508111468; ADR-0204)
+
+The ABAP MCP server is a separate product. Registered behind our MCP proxy, a live change in that system runs through
+governance. It reads its API keys only from `Authorization: Bearer`, so the gateway authenticates to it with a static
+upstream credential under the Bearer scheme (the default). The full agreed configuration is in #453, in the master
+session's latest comment. Everything below is placeholders: the real host and key are entered by the owner in the
+product, never in chat, the repo or a ticket.
+
+1. **Allow the host.** Add `<abap-host>` to the egress allow-list (a public-internet URL needs an allow-host entry).
+2. **Register the server.** In `/ui`, **Integrations → MCP servers**: name `<abap-mcp-name>`, transport
+   `streamable_http`, URL `https://<abap-host>/mcp`.
+3. **Set the credential.** Select the server, then on the **Upstream credential** card choose **Bearer token in
+   Authorization** and paste an `rgk_<…>` key issued from the server's `admin` profile. Save, and confirm it's you when
+   asked. The card then shows the scheme and the key's last four characters only. (The named-header option exists, but
+   the demo does not use it.)
+4. **Identity to upstream: leave it `none`.** The server's OIDC verifier does not accept our EdDSA assertion.
+5. **Grants.** Grant the demo persona the tools `SAPWrite` and `SAPActivate`; everyone else stays denied by default.
+6. **Approval rule.** Require approval for any call to `SAPWrite` or `SAPActivate`, with the approver notified in Slack
+   and by email.
+7. **Check it.** Sync the server's tools (open its tools, or make one governed read-only call); the server's own log
+   should show the request authenticated. A `mcp-upstream-credential-unavailable` refusal on the audit page means the
+   gateway's data key differs from the one the key was saved under: set the credential again.
+8. **What to say.** SAP records a technical user, because principal propagation is off. The person is governed and
+   audited in RegulAIt: who asked, which tool, the approval and the outcome.
+9. **The refused case to show.** A write outside the allowed package produces the server's `safety_blocked` event and
+   never reaches SAP.
+10. **Do not** change the server's URL after setting the credential unless you mean to: a URL change clears it
+    (audited), and it must be set again. Rotate or clear on the same card; Clear is the secondary button and asks for a
+    confirmation.
+
+### 7.10 Claude as model and agent (owner, 2026-10-29, #453 c6508111468; freeze exception)
+
+Claude appears in two roles: as a **model** that a persona dispatches through the gateway, and as an **agent** whose
+tool calls reach the governed MCP proxy (`POST /mcp/:serverId`) and get a deny or an approval request. Every value
+below is a placeholder. The Anthropic key and every `rgl_` key are read into the shell with `read -rs`, so they never
+land in a file, a shell history, a log or this repository. Use a **demo-scoped** Anthropic key with a spend limit set
+in the Anthropic Console.
+
+**Placeholders used below** (set them in the terminal you run the steps from):
+
+```bash
+# pending execution
+export GW='https://regulait.<domain>'          # the tunnel front door (docs/deployment/TUNNEL.md); on the laptop alone, http://localhost:3000
+read -rs BOOT && export BOOT                   # the bootstrap token (admin setup calls only)
+read -rs RGL_KEY && export RGL_KEY             # Dana's rgl_ key, printed once by the seed (or minted below)
+H_BOOT="authorization: Bearer $BOOT"
+```
+
+**Defaults that stay strict** (ADR-0180, ADR-0181), and what each one means for this beat:
+
+- The egress posture is strict, so the compiled vendor endpoint is refused until an admin adds its host (step 1).
+- The env-key fallback is off, so the key is stored through the API, encrypted under `REGULAIT_DATA_KEY` (step 2).
+- An agent dispatches only with an approved model card (MRM), a project id, and a project whose use case is approved
+  (steps 3–5).
+- Every MCP call must name a project (`require_mcp_attribution`). Claude Code sends the `x-regulait-project-id` header.
+  The Messages API MCP connector cannot send custom headers, so it names the project in the URL as `?project=<id>`.
+  That parameter goes through the same check as the header, and a request whose header and query name different
+  projects is refused with 400 `project_attribution_conflict`.
+
+#### Model: claude-opus-5-5 through the gateway
+
+1. **Egress host (admin, step-up).** Adding a host is a stepped-up relaxation (ADR-0186 A). Ada adds it in the UI:
+   **Admin → Custom providers → Egress allow-list → Add host**. Enter host `api.anthropic.com`, leave private ranges
+   and plain HTTP off, and add the note "Claude beat (#453 c6508111468)". She confirms the step-up prompt.
+   Check it:
+
+   ```bash
+   curl -sS "$GW/v1/egress-allow-hosts" -H "$H_BOOT" | jq '.hosts[] | select(.host=="api.anthropic.com")'
+   ```
+
+2. **The key, stored through the API, encrypted.** The key is read without echo and piped as the request body. It is
+   never an argument and never in a file:
+
+   ```bash
+   # pending execution
+   read -rs ANTHROPIC_DEMO_KEY
+   jq -n --arg k "$ANTHROPIC_DEMO_KEY" '{provider:"anthropic", apiKey:$k}' \
+     | curl -sS -X POST "$GW/v1/model-credentials" -H "$H_BOOT" -H 'content-type: application/json' --data-binary @- \
+     | jq '{provider, baseUrl, createdAt}'
+   ```
+
+   Expect `201` with `provider: "anthropic"` and `baseUrl: null`. The response never contains the key. The audit row
+   `model-credential-stored` records the provider, never the key. Without `REGULAIT_DATA_KEY` the answer is
+   `503 no_data_key`. Keep `ANTHROPIC_DEMO_KEY` set only if you will run the Messages API example below; otherwise
+   `unset ANTHROPIC_DEMO_KEY` now.
+
+3. **Register the model connection, priced** (the beat's cost view must not read "Unpriced"). The list price is
+   $4 per million input tokens and $20 per million output tokens; check the Anthropic pricing page on the day. Tier
+   must be 2 or lower, because Dana's ceiling is tier 2:
+
+   ```bash
+   # pending execution
+   AGENT_ID=$(curl -sS -X POST "$GW/v1/agents" -H "$H_BOOT" -H 'content-type: application/json' \
+     -d '{"name":"claude-demo","provider":"anthropic","tier":2,"model":"claude-opus-5-5","costPerMTokIn":4,"costPerMTokOut":20}' \
+     | jq -r .id)
+   ```
+
+   To fix the prices later, use `PATCH /v1/agents/$AGENT_ID` with `{"costPerMTokIn":4,"costPerMTokOut":20}`.
+
+4. **Grant Dana the model.** Look up the personas and the project, then grant the agent to Dana:
+
+   ```bash
+   # pending execution
+   DANA_ID=$(curl -sS "$GW/v1/users" -H "$H_BOOT" | jq -r '.users[] | select(.email=="dana@regulait.local") | .id')
+   AVERY_ID=$(curl -sS "$GW/v1/users" -H "$H_BOOT" | jq -r '.users[] | select(.email=="avery@regulait.local") | .id')
+   PROJECT_ID=$(curl -sS "$GW/v1/projects" -H "$H_BOOT" | jq -r '.projects[] | select(.name=="demo-project") | .id')
+   curl -sS -X POST "$GW/v1/grants/agents" -H "$H_BOOT" -H 'content-type: application/json' \
+     -d "{\"userId\":\"$DANA_ID\",\"agentId\":\"$AGENT_ID\",\"allowedModes\":[\"execute\"]}" | jq '{id, userId, agentId}'
+   ```
+
+5. **Model card and sign-off (MRM is enforced).** Author the card, request Avery's sign-off, and have Avery decide in
+   his **Inbox** (Profile B). Give a reason; it is mandatory here because the request row names him.
+
+   ```bash
+   # pending execution
+   CARD_ID=$(curl -sS -X POST "$GW/v1/mrm/cards" -H "$H_BOOT" -H 'content-type: application/json' \
+     -d "{\"agentId\":\"$AGENT_ID\",\"intendedUse\":\"Demo: governed general-purpose assistant for the demo project\"}" | jq -r .card.id)
+   curl -sS -X POST "$GW/v1/mrm/cards/$CARD_ID/sign-off" -H "$H_BOOT" -H 'content-type: application/json' \
+     -d "{\"approverUserId\":\"$AVERY_ID\",\"validUntil\":\"$(date -u -d '+30 days' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+30d +%Y-%m-%dT%H:%M:%SZ)\"}" | jq '{approvalId}'
+   ```
+
+   Without this step every dispatch answers `409 mrm_approval_required`, which is the right answer for an unreviewed model.
+
+6. **Dispatch as Dana.** Check the project budget first: demo-project has a $0.20 monthly budget, and earlier demo
+   traffic bills it (`GET /v1/projects/$PROJECT_ID/costs`). Then:
+
+   ```bash
+   # pending execution
+   curl -sS -X POST "$GW/v1/agents/$AGENT_ID/invoke" -H "authorization: Bearer $RGL_KEY" -H 'content-type: application/json' \
+     -d "{\"mode\":\"execute\",\"input\":\"In one sentence: what does an AI gateway do?\",\"dispatch\":true,\"projectId\":\"$PROJECT_ID\",\"maxTokens\":512}" \
+     | jq '{model: .dispatch.model, costUsd: .dispatch.costUsd, text: .dispatch.outputText}'
+   ```
+
+   Expect the answer text and a non-null `costUsd`. The call is in the audit log and in the project's cost view.
+
+#### Agent: Claude's tool calls through the governed MCP proxy
+
+The persona is Dana. The server is the demo MCP server `repo-tools` (`demo:mcp`), with the seed's rules: her
+`search_code` is **denied** (her role's read grant is revoked for her), and her `write_file` is **queued for Avery**.
+Look up the server id:
+
+```bash
+SERVER_ID=$(curl -sS "$GW/v1/servers" -H "$H_BOOT" | jq -r '.servers[] | select(.name=="repo-tools") | .id')
+```
+
+**Path 1: Claude Code pointed at the gateway.** The gateway accepts the `rgl_` key only as
+`Authorization: Bearer` (the RFC 9728 metadata at `/.well-known/oauth-protected-resource/mcp/<id>` says the same). It
+speaks stateless Streamable HTTP: `POST` only, and `GET` answers `405 Allow: POST`, which clients treat as "no server
+stream". In a terminal where `RGL_KEY`, `PROJECT_ID` and `SERVER_ID` are set:
+
+```bash
+# pending execution
+claude mcp add --transport http regulait-repo-tools "$GW/mcp/$SERVER_ID" \
+  --header "Authorization: Bearer $RGL_KEY" \
+  --header "x-regulait-project-id: $PROJECT_ID"
+claude mcp list        # expect: regulait-repo-tools … connected
+```
+
+`claude mcp add` stores the header values in the local Claude Code config. Remove the entry after the demo with
+`claude mcp remove regulait-repo-tools`, and revoke the key. Then ask Claude Code to "search the code for TODO with
+the repo-tools search_code tool", and then to "write docs/enforce-it.md with repo-tools write_file".
+
+**Path 2: the Messages API MCP connector.** Anthropic's servers call the gateway, so the URL must be publicly
+reachable through the tunnel (docs/deployment/TUNNEL.md). The connector sends `authorization_token` as
+`Authorization: Bearer`, which is how the gateway takes the `rgl_` key. It cannot set custom headers, so the project
+rides on the URL. The model call itself goes from this terminal straight to the Anthropic API with the demo key, so
+only the tool calls are governed and attributed by RegulAIt here; the model-path dispatch above is the governed model call.
+
+```bash
+# pending execution — needs ANTHROPIC_DEMO_KEY (step 2) and the tunnel up
+jq -n --arg url "$GW/mcp/$SERVER_ID?project=$PROJECT_ID" --arg tok "$RGL_KEY" '{
+  model: "claude-opus-5-5",
+  max_tokens: 2048,
+  mcp_servers: [{type: "url", url: $url, name: "repo-tools", authorization_token: $tok}],
+  tools: [{type: "mcp_toolset", mcp_server_name: "repo-tools"}],
+  messages: [{role: "user", content: "Use repo-tools search_code to search for TODO, then report exactly what the tool returned."}]
+}' | curl -sS https://api.anthropic.com/v1/messages \
+  -H "x-api-key: $ANTHROPIC_DEMO_KEY" -H 'anthropic-version: 2023-06-01' \
+  -H 'anthropic-beta: mcp-client-2025-11-20' -H 'content-type: application/json' --data-binary @- \
+  | jq '.content[] | select(.type=="mcp_tool_use" or .type=="mcp_tool_result")'
+unset ANTHROPIC_DEMO_KEY
+```
+
+**Expected output, both paths:**
+
+| Call | What Claude receives | Audit (`/ui/admin/audit`) |
+|---|---|---|
+| `search_code` | an error result: `Denied by policy: …` naming the rule (`default-deny`; her role's grant revoked for her) | a deny row with the rule chain |
+| `write_file` | an error result: `Approval required: approval '<id>' is pending sign-off by approver 'Avery …' (…). Retry after approval.` | the queued approval; the request is in Avery's **Inbox** |
+| `write_file`, retried after Avery approves | the demo server's answer, `committed … as commit demo01a` | the decision and the executed call |
+
+On the connector path the result arrives as an `mcp_tool_result` block with `is_error: true` and the same text. A
+`400 mcp_attribution_required` means the project is missing from the header or the URL. A `401` means the key is
+missing, expired or revoked. A `403 egress_blocked` on the model path means step 1 is missing.
+
+**Check it:** `demo:check` reports the beat as `E External model and agent`. It shows a WARN while the beat is not set
+up, and FAILs if the agent is unpriced or lacks its credential or egress entry. It reads no key and makes no model call.
+
+**Not verified in this repository** (verify at rehearsal): a real call to the Anthropic API with the demo key; the
+connector reaching the gateway through the Cloudflare edge (a WAF or bot rule there could block Anthropic's servers);
+and the exact rendering of the error results in the Claude Code UI.
+
+**Teardown:** revoke Dana's demo key if you minted one (`POST /v1/keys/<keyId>/revoke`), remove the Claude
+Code entry, delete the stored credential (`DELETE /v1/model-credentials/anthropic`), and remove the egress host in the
+UI. Disable the Anthropic key in the Console.

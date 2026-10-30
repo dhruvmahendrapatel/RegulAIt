@@ -16,7 +16,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api, ApiError } from "../../../api/client";
 import { ago, fmtUsd } from "../../../api/format";
-import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Select, SeverityBadge, Table } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, Field, InfoButton, Input, Select, SeverityBadge, Table } from "../../../ui/kit";
 import { QueryGate, Stat, optionEls, useAction } from "../adminKit";
 import { RED_TEAM_SEVERITIES, REDTEAM_EVIDENCE_REFUSALS, asrText, probeTrialSummary, type ProbeTrial, type ProbeTrialSummary } from "./redteamModel";
 import a from "../admin.module.css";
@@ -113,7 +113,10 @@ export function RedTeamSummaryCard(props: { onOpenRun: (id: string) => void }) {
                 },
               ]}
             />
-            <p className={v.faint}>{s.disclosure}</p>
+            <p className={v.faint}>
+              A green run: no probe got through, not proof of safety.{" "}
+              <InfoButton label="a green red-team result">{s.disclosure}</InfoButton>
+            </p>
           </div>
         )}
       </QueryGate>
@@ -193,7 +196,12 @@ export function RedTeamFindingsCard(props: { attackClasses: string[]; onOpenRun:
         {(q.data?.findings?.length ?? 0) >= Number(limit) && (
           <p className={v.faint}>Showing the newest {limit}. Narrow by class or severity, or raise the limit, to see older ones.</p>
         )}
-        {q.data && <p className={v.faint}>{q.data.disclosure}</p>}
+        {q.data && (
+          <p className={v.faint}>
+            No finding is not proof of safety.{" "}
+            <InfoButton label="the coverage disclosure">{q.data.disclosure}</InfoButton>
+          </p>
+        )}
       </div>
     </Card>
   );

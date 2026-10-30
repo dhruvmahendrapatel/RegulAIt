@@ -25,7 +25,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Table, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, InfoButton, Table, type Tone } from "../../../ui/kit";
 import { QueryGate, useAction } from "../adminKit";
 import v from "../../views.module.css";
 import { fmtDateTime } from "../../../api/format";
@@ -119,35 +119,36 @@ export default function RecommendationsPage() {
     <>
       <PageHeader
         title="Access recommendations"
-        sub="The deterministic half of access intelligence."
         info={<p>The deterministic half of access intelligence: every recommendation is a stated, versioned rule over this deployment's own ledgers, computed at read time with its evidence attached. No scores, no ranking — severity is a class. Nothing executes automatically: the action path is a certification campaign over exactly the flagged grants, or an ordinary revocation. The model-judged half is credential-blocked, not approximated.</p>}
       />
       <QueryGate loading={report.isLoading} error={report.error} onRetry={() => void report.refetch()}>
         {d && (
           <div className={v.stack}>
             <div className={v.faint}>
-              Rules v{d.rulesVersion} · window {d.window.days} days (a parameter, not a truth) · computed{" "}
-              {fmtDateTime(d.computedAt)} · {d.notes.observed}
+              Rules v{d.rulesVersion} · {d.window.days}-day window · computed {fmtDateTime(d.computedAt)}{" "}
+              <InfoButton label="this run">
+                <p>The {d.window.days}-day window is a parameter, not a truth: it bounds what a rule may claim.</p>
+                <p>{d.notes.observed}</p>
+              </InfoButton>
             </div>
             <div>
               {d.judged.enabled === false ? (
                 <>
-                  <Badge tone="neutral">model-judged: off</Badge>{" "}
-                  <span className={v.faint}>{d.judged.note}</span>
+                  <Badge tone="neutral" info={d.judged.note}>model-judged: off</Badge>
                 </>
               ) : d.judged.status === "unavailable" ? (
                 <>
-                  <Badge tone="danger">judged: unavailable ({d.judged.error})</Badge>{" "}
-                  <span className={v.faint}>
-                    {d.judged.reason} — {d.judged.note}
-                  </span>
+                  <Badge tone="danger" infoLabel="judged: unavailable" info={d.judged.note}>
+                    judged: unavailable ({d.judged.error})
+                  </Badge>{" "}
+                  <span className={v.faint}>{d.judged.reason}</span>
                 </>
               ) : (
                 <>
-                  <Badge tone="info">model-judged: {d.judged.annotated} annotated</Badge>{" "}
-                  <span className={v.faint}>
-                    judge {d.judged.judge} — {d.judged.note}
-                  </span>
+                  <Badge tone="info" infoLabel="model-judged annotations" info={d.judged.note}>
+                    model-judged: {d.judged.annotated} annotated
+                  </Badge>{" "}
+                  <span className={v.faint}>judge {d.judged.judge}</span>
                 </>
               )}
             </div>
@@ -164,6 +165,7 @@ export default function RecommendationsPage() {
               <Card
                 key={rule.id}
                 title={`${rule.id} — ${rule.title}`}
+                info={<p>{rule.limits}</p>}
                 actions={
                   rule.counts.findings > 0 ? (
                     <Button disabled={act.busy} onClick={() => openCampaignFrom(rule)}>
@@ -236,7 +238,6 @@ export default function RecommendationsPage() {
                       )}
                     </>
                   )}
-                  <div className={v.faint}>{rule.limits}</div>
                 </div>
               </Card>
             ))}
@@ -246,7 +247,6 @@ export default function RecommendationsPage() {
                 body="A computed fact over the ledgers at this moment — not a clean bill of health. The rules see only what this gateway records."
               />
             )}
-            <div className={v.faint}>{d.notes.action}</div>
           </div>
         )}
       </QueryGate>

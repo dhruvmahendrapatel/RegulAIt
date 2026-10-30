@@ -184,7 +184,7 @@ function builtInShapes(): Array<
       galleryId: "ai-use-case-intake",
       title: "AI use-case intake",
       description:
-        "The ADR-0080 pre-build front-door: propose an AI use case, refine it at the resting " +
+        "The pre-build front-door: propose an AI use case, refine it at the resting " +
         "plan stage, submit the intake questionnaire as the governed artifact, and a human " +
         "sign-off registers it as an approved use case. POST /v1/use-cases starts instances of " +
         "the newest active template named 'ai-use-case-intake' — create one from this shape with " +
@@ -195,10 +195,10 @@ function builtInShapes(): Array<
       galleryId: "vendor-ai-assessment",
       title: "Vendor AI assessment",
       description:
-        "The ADR-0084 third-party front-door: propose an AI vendor, scope the assessment at " +
+        "The third-party front-door: propose an AI vendor, scope the assessment at " +
         "the resting plan stage, record the vendor's answers in the assessment questionnaire " +
-        "as the governed artifact, and a human sign-off registers the vendor as assessed. " +
-        "The answers are vendor attestations — recorded claims, never platform-verified " +
+        "as the governed artifact, and a human sign-off registers the vendor as assessed; " +
+        "the answers are vendor attestations — recorded claims, never platform-verified " +
         "evidence. POST /v1/vendors starts instances of the newest active template named " +
         "'vendor-ai-assessment' — create one from this shape with a named approver to route " +
         "vendor assessments to a risk owner.",

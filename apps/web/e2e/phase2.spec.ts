@@ -617,7 +617,7 @@ test("compliance profiles: upsert a profile + live cascade preview", async () =>
   await nav("Compliance profiles", "Compliance profiles");
   await expect(page.getByRole("cell", { name: "hipaa" })).toBeVisible();
 
-  await page.getByLabel("Tag").fill("e2e-framework");
+  await page.getByLabel("Tag", { exact: true }).fill("e2e-framework");
   await page.getByLabel("Audit retention days (blank = none)").fill("30");
   await page.getByRole("button", { name: "Save profile" }).click();
   await expect(page.getByText("Profile saved", { exact: false }).first()).toBeVisible();

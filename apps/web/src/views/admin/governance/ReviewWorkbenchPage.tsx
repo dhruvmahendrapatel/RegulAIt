@@ -29,7 +29,7 @@ import type { Approval } from "../../../api/types";
 import { ago } from "../../../api/format";
 import { useSession } from "../../../session/SessionContext";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Select, Table, Textarea } from "../../../ui/kit";
 import { QueryGate, optionEls, useAction, useProjects, useTeams, useUsers, projectOpts, teamOpts, userOpts } from "../adminKit";
 import { McpActionReview } from "../../approvals/McpActionReview";
 import { approvalReviewKey, inspectApprovalAction } from "../../approvals/approvalReview";
@@ -155,7 +155,6 @@ export default function ReviewWorkbenchPage() {
     <>
       <PageHeader
         title="Review workbench"
-        sub="Routing, SLA timers and bulk triage over the one approvals queue."
         info={<p>Routing, SLA timers, escalation and bulk triage over the SAME approvals the queue shows — one approval object, one decision path, one audit trail. Nothing here decides anything on a timer: escalation moves work toward someone who can decide it, and a queue that cleared itself by timeout would be a bypass, not a feature.</p>}
       />
       <div className={v.stack}>
@@ -203,21 +202,18 @@ export default function ReviewWorkbenchPage() {
                 }
               >
                 Run SLA sweep
-              </Button>
-            </div>
-            <div className={v.faint} style={{ marginTop: "var(--s2)" }}>
-              Nothing calls this on a timer — there is no in-process scheduler in this deployment. Breach is
-              also evaluated whenever the queue is read or an approval is decided, and the deadlines are a
-              pure function of the request time, so a lazily detected breach is exactly what a timer would
-              have produced.
+              </Button>{" "}
+              <InfoButton label="the SLA sweep">
+                Nothing calls this on a timer — there is no in-process scheduler in this deployment. Breach is
+                also evaluated whenever the queue is read or an approval is decided, and the deadlines are a
+                pure function of the request time, so a lazily detected breach is exactly what a timer would
+                have produced.
+              </InfoButton>
             </div>
           </Card>
 
           {/* ---------------- SLA policies ---------------- */}
-          <Card title="SLA policies">
-            <div className={v.faint} style={{ marginBottom: "var(--s2)" }}>
-              {policies.data?.note}
-            </div>
+          <Card title="SLA policies" info={policies.data?.note ? <p>{policies.data.note}</p> : undefined}>
             <form
               className={a.formRow}
               onSubmit={(e) => {
@@ -317,10 +313,7 @@ export default function ReviewWorkbenchPage() {
           </Card>
 
           {/* ---------------- routing rules ---------------- */}
-          <Card title="Routing rules">
-            <div className={v.faint} style={{ marginBottom: "var(--s2)" }}>
-              {rules.data?.note}
-            </div>
+          <Card title="Routing rules" info={rules.data?.note ? <p>{rules.data.note}</p> : undefined}>
             <form
               className={v.stack}
               onSubmit={(e) => {
@@ -416,9 +409,12 @@ export default function ReviewWorkbenchPage() {
                 </Field>
               </div>
               <div className={v.faint}>
-                A rule with no conditions is refused — it would silently capture every approval in the
-                deployment. Routing changes whose queue an item shows in; the decide endpoint still checks who
-                is allowed to act, independently.
+                A rule with no conditions is refused.{" "}
+                <InfoButton label="the routing-rule conditions">
+                  A rule with no conditions is refused — it would silently capture every approval in the
+                  deployment. Routing changes whose queue an item shows in; the decide endpoint still checks who
+                  is allowed to act, independently.
+                </InfoButton>
               </div>
             </form>
             {(rules.data?.rules ?? []).length > 0 && (
@@ -611,10 +607,13 @@ export default function ReviewWorkbenchPage() {
                   </div>
                   {unreviewedActions > 0 && <div role="status">{unreviewedActions} selected MCP action(s) need review.</div>}
                   <div className={v.faint}>
-                    A bulk is N individual decisions through the one decide endpoint, each with its own audit
-                    row — never one opaque event. It is capped per action, and it is refused item-by-item on
-                    approvals attributed to a project whose compliance cascade blocks PII. Those must be
-                    decided individually; the friction is the control.
+                    Bulk decisions are refused item-by-item where a project blocks PII.{" "}
+                    <InfoButton label="a bulk decision">
+                      A bulk is N individual decisions through the one decide endpoint, each with its own audit
+                      row — never one opaque event. It is capped per action, and it is refused item-by-item on
+                      approvals attributed to a project whose compliance cascade blocks PII. Those must be
+                      decided individually; the friction is the control.
+                    </InfoButton>
                   </div>
                 </form>
                 {bulkResults && (

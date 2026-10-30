@@ -47,7 +47,7 @@ export default function SsoPage() {
         <LinkRequestsCard />
         <SessionsPolicyCard />
         {/* ADR-0186 A: which actions need a fresh second proof, and how long one lasts */}
-        <OrgSettingsCard title="Step-up for sensitive actions" keys={["stepUpMode", "stepUpMaxAgeSeconds", "stepUpActions"]} testId="sso-step-up-settings" />
+        <OrgSettingsCard title="Step-up for sensitive actions" keys={["stepUpMode", "stepUpMaxAgeSeconds", "stepUpActions"]} testId="sso-step-up-settings" helpInInfo />
       </div>
     </>
   );
@@ -76,222 +76,228 @@ function OidcCard() {
   const csv = (v: string) => v.split(",").map((x) => x.trim()).filter(Boolean);
 
   return (
-    <Card title="Single sign-on — OIDC providers">
-      <form
-        className={a.formRow}
-        onSubmit={(e) => {
-          e.preventDefault();
-          void act
-            .run(
-              () =>
-                withStepUp((h) => api.postWithHeaders("/v1/auth/oidc-providers", {
-                  name,
-                  issuerUrl,
-                  clientId,
-                  clientSecret,
-                  jitProvisioning: jit === "true",
-                  ...(domains
-                    ? { allowedEmailDomains: domains.split(",").map((s) => s.trim()).filter(Boolean) }
-                    : {}),
-                  ...(defaultRoleId ? { defaultRoleId } : {}),
-                  ...(groupsClaim ? { groupsClaim } : {}),
-                  ...(brokerIdps ? { brokerIdps: csv(brokerIdps).map((x) => x.toLowerCase()) } : {}),
-                  ...(acrValues ? { mfaAcrValues: csv(acrValues) } : {}),
-                  ...(brokerMfa === "true" ? { brokerEnforcesMfa: true } : {}),
-                }, h)),
-              "Provider added",
-            )
-            .then((ok) => {
-              if (ok) {
-                setName("");
-                setIssuerUrl("");
-                setClientId("");
-                setClientSecret("");
-                setDomains("");
-                setDefaultRoleId("");
-                setJit("false");
-                setGroupsClaim("");
-                setBrokerIdps("");
-                setAcrValues("");
-                setBrokerMfa("false");
-              }
-            });
-        }}
-      >
-        <Field label="Name">
-          <Input required value={name} onChange={(e) => setName(e.target.value)} placeholder="okta-prod" />
-        </Field>
-        <Field label="Issuer URL" grow>
-          <Input
-            required
-            value={issuerUrl}
-            onChange={(e) => setIssuerUrl(e.target.value)}
-            placeholder="https://idp.example.com"
-          />
-        </Field>
-        <Field label="Client id">
-          <Input required value={clientId} onChange={(e) => setClientId(e.target.value)} />
-        </Field>
-        <Field label="Client secret">
-          <Input
-            required
-            type="password"
-            value={clientSecret}
-            onChange={(e) => setClientSecret(e.target.value)}
-          />
-        </Field>
-        <Field label="Allowed email domains (comma; required when JIT is on, empty = any)">
-          <Input
-            value={domains}
-            onChange={(e) => setDomains(e.target.value)}
-            placeholder="example.com"
-            required={jit === "true"}
-          />
-        </Field>
-        <Field label="Groups claim (blank = no group signal from this IdP)">
-          <Input
-            value={groupsClaim}
-            onChange={(e) => setGroupsClaim(e.target.value)}
-            placeholder="groups"
-          />
-        </Field>
-        <Field label="Broker sign-in buttons (Keycloak: microsoft, google, github — blank = enterprise IdP)">
-          <Input
-            value={brokerIdps}
-            onChange={(e) => setBrokerIdps(e.target.value)}
-            placeholder="microsoft, google, github"
-          />
-        </Field>
-        <Field label="MFA acr values (comma; blank = RFC 8176 amr only)">
-          <Input value={acrValues} onChange={(e) => setAcrValues(e.target.value)} placeholder="mfa" />
-        </Field>
-        <Field label="Broker enforces MFA">
-          <Select value={brokerMfa} onChange={(e) => setBrokerMfa(e.target.value)}>
-            <option value="false">no — amr must say mfa or name two factors (default)</option>
-            <option value="true">yes — one code/passkey amr counts (the bundled Keycloak)</option>
-          </Select>
-        </Field>
-        <Field label="JIT default role">
-          <Select value={defaultRoleId} onChange={(e) => setDefaultRoleId(e.target.value)}>
-            {optionEls(roleOpts(roles.data?.roles), "— none —")}
-          </Select>
-        </Field>
-        <Field label="JIT provisioning">
-          <Select value={jit} onChange={(e) => setJit(e.target.value)}>
-            <option value="false">off — unknown users are refused (default)</option>
-            <option value="true">on — first login creates the user (never admin; needs allowed domains)</option>
-          </Select>
-        </Field>
-        <Button type="submit" variant="primary" disabled={act.busy}>
-          Add provider
-        </Button>
-      </form>
-      {act.error && (
-        <div className={v.errLine} role="alert">
-          {act.error}
-        </div>
-      )}
-      <Table<OidcProvider>
-        columns={[
-          { key: "name", header: "Name", render: (p) => p.name },
-          { key: "issuer", header: "Issuer", render: (p) => <span className={v.mono}>{p.issuerUrl}</span> },
-          { key: "clientId", header: "Client id", render: (p) => <span className={v.mono}>{p.clientId}</span> },
-          {
-            key: "domains",
-            header: "Domains",
-            render: (p) => (p.allowedEmailDomains ?? []).join(", ") || "any",
-          },
-          { key: "jit", header: "JIT", render: (p) => (p.jitProvisioning ? "on" : "off") },
-          {
-            key: "broker",
-            header: "Sign-in buttons",
-            render: (p) =>
-              p.brokerIdps && p.brokerIdps.length > 0 ? (
-                <span title="a broker: each upstream IdP is a 'Continue with …' button">{p.brokerIdps.join(", ")}</span>
-              ) : (
-                <span className={v.faint}>single sign-on</span>
-              ),
-          },
-          {
-            key: "groups",
-            header: "Groups",
-            render: (p) =>
-              p.groupsClaim ? (
-                <span className={v.mono}>{p.groupsClaim}</span>
-              ) : (
-                <span className={v.faint} title="no group signal — logins here never reconcile roles">
-                  none
+    <>
+      <Card title="Single sign-on — OIDC providers">
+        <form
+          className={a.formRow}
+          onSubmit={(e) => {
+            e.preventDefault();
+            void act
+              .run(
+                () =>
+                  withStepUp((h) => api.postWithHeaders("/v1/auth/oidc-providers", {
+                    name,
+                    issuerUrl,
+                    clientId,
+                    clientSecret,
+                    jitProvisioning: jit === "true",
+                    ...(domains
+                      ? { allowedEmailDomains: domains.split(",").map((s) => s.trim()).filter(Boolean) }
+                      : {}),
+                    ...(defaultRoleId ? { defaultRoleId } : {}),
+                    ...(groupsClaim ? { groupsClaim } : {}),
+                    ...(brokerIdps ? { brokerIdps: csv(brokerIdps).map((x) => x.toLowerCase()) } : {}),
+                    ...(acrValues ? { mfaAcrValues: csv(acrValues) } : {}),
+                    ...(brokerMfa === "true" ? { brokerEnforcesMfa: true } : {}),
+                  }, h)),
+                "Provider added",
+              )
+              .then((ok) => {
+                if (ok) {
+                  setName("");
+                  setIssuerUrl("");
+                  setClientId("");
+                  setClientSecret("");
+                  setDomains("");
+                  setDefaultRoleId("");
+                  setJit("false");
+                  setGroupsClaim("");
+                  setBrokerIdps("");
+                  setAcrValues("");
+                  setBrokerMfa("false");
+                }
+              });
+          }}
+        >
+          <Field label="Name">
+            <Input required value={name} onChange={(e) => setName(e.target.value)} placeholder="okta-prod" />
+          </Field>
+          <Field label="Issuer URL" grow>
+            <Input
+              required
+              value={issuerUrl}
+              onChange={(e) => setIssuerUrl(e.target.value)}
+              placeholder="https://idp.example.com"
+            />
+          </Field>
+          <Field label="Client id">
+            <Input required value={clientId} onChange={(e) => setClientId(e.target.value)} />
+          </Field>
+          <Field label="Client secret">
+            <Input
+              required
+              type="password"
+              value={clientSecret}
+              onChange={(e) => setClientSecret(e.target.value)}
+            />
+          </Field>
+          <Field label="Allowed email domains (comma; required when JIT is on, empty = any)">
+            <Input
+              value={domains}
+              onChange={(e) => setDomains(e.target.value)}
+              placeholder="example.com"
+              required={jit === "true"}
+            />
+          </Field>
+          <Field label="Groups claim (blank = no group signal from this IdP)">
+            <Input
+              value={groupsClaim}
+              onChange={(e) => setGroupsClaim(e.target.value)}
+              placeholder="groups"
+            />
+          </Field>
+          <Field label="Broker sign-in buttons (Keycloak: microsoft, google, github — blank = enterprise IdP)">
+            <Input
+              value={brokerIdps}
+              onChange={(e) => setBrokerIdps(e.target.value)}
+              placeholder="microsoft, google, github"
+            />
+          </Field>
+          <Field label="MFA acr values (comma; blank = RFC 8176 amr only)">
+            <Input value={acrValues} onChange={(e) => setAcrValues(e.target.value)} placeholder="mfa" />
+          </Field>
+          <Field label="Broker enforces MFA">
+            <Select value={brokerMfa} onChange={(e) => setBrokerMfa(e.target.value)}>
+              <option value="false">no — amr must say mfa or name two factors (default)</option>
+              <option value="true">yes — one code/passkey amr counts (the bundled Keycloak)</option>
+            </Select>
+          </Field>
+          <Field label="JIT default role">
+            <Select value={defaultRoleId} onChange={(e) => setDefaultRoleId(e.target.value)}>
+              {optionEls(roleOpts(roles.data?.roles), "— none —")}
+            </Select>
+          </Field>
+          <Field label="JIT provisioning">
+            <Select value={jit} onChange={(e) => setJit(e.target.value)}>
+              <option value="false">off — unknown users are refused (default)</option>
+              <option value="true">on — first login creates the user (never admin; needs allowed domains)</option>
+            </Select>
+          </Field>
+          <Button type="submit" variant="primary" disabled={act.busy}>
+            Add provider
+          </Button>
+        </form>
+        {act.error && (
+          <div className={v.errLine} role="alert">
+            {act.error}
+          </div>
+        )}
+        <Table<OidcProvider>
+          columns={[
+            { key: "name", header: "Name", render: (p) => p.name },
+            { key: "issuer", header: "Issuer", render: (p) => <span className={v.mono}>{p.issuerUrl}</span> },
+            { key: "clientId", header: "Client id", render: (p) => <span className={v.mono}>{p.clientId}</span> },
+            {
+              key: "domains",
+              header: "Domains",
+              render: (p) => (p.allowedEmailDomains ?? []).join(", ") || "any",
+            },
+            { key: "jit", header: "JIT", render: (p) => (p.jitProvisioning ? "on" : "off") },
+            {
+              key: "broker",
+              header: "Sign-in buttons",
+              info: <>A broker: each upstream IdP is a “Continue with …” button.</>,
+              render: (p) =>
+                p.brokerIdps && p.brokerIdps.length > 0 ? (
+                  <span>{p.brokerIdps.join(", ")}</span>
+                ) : (
+                  <span className={v.faint}>single sign-on</span>
+                ),
+            },
+            {
+              key: "groups",
+              header: "Groups",
+              info: <>“none”: no group signal — logins here never reconcile roles.</>,
+              render: (p) =>
+                p.groupsClaim ? (
+                  <span className={v.mono}>{p.groupsClaim}</span>
+                ) : (
+                  <span className={v.faint}>
+                    none
+                  </span>
+                ),
+            },
+            {
+              key: "status",
+              header: "Status",
+              render: (p) => (p.enabled ? <Badge tone="ok">enabled</Badge> : <Badge>disabled</Badge>),
+            },
+            {
+              key: "actions",
+              header: "",
+              srHeader: "Actions",
+              align: "right",
+              render: (p) => (
+                <span className={v.rowTight}>
+                  <Button
+                    size="sm"
+                    onClick={() =>
+                      void act.run(
+                        () => api.patch(`/v1/auth/oidc-providers/${p.id}`, { enabled: !p.enabled }),
+                        p.enabled ? "Provider disabled" : "Provider enabled",
+                      )
+                    }
+                  >
+                    {p.enabled ? "disable" : "enable"}
+                  </Button>
+                  <Button size="sm" variant="danger" onClick={() => setDeleteProvider(p)}>
+                    delete
+                  </Button>
                 </span>
               ),
-          },
-          {
-            key: "status",
-            header: "Status",
-            render: (p) => (p.enabled ? <Badge tone="ok">enabled</Badge> : <Badge>disabled</Badge>),
-          },
-          {
-            key: "actions",
-            header: "",
-            srHeader: "Actions",
-            align: "right",
-            render: (p) => (
-              <span className={v.rowTight}>
-                <Button
-                  size="sm"
-                  onClick={() =>
-                    void act.run(
-                      () => api.patch(`/v1/auth/oidc-providers/${p.id}`, { enabled: !p.enabled }),
-                      p.enabled ? "Provider disabled" : "Provider enabled",
-                    )
-                  }
-                >
-                  {p.enabled ? "disable" : "enable"}
-                </Button>
-                <Button size="sm" variant="danger" onClick={() => setDeleteProvider(p)}>
-                  delete
-                </Button>
-              </span>
-            ),
-          },
-        ]}
-        rows={providers.data?.providers ?? []}
-        rowKey={(p) => p.id}
-        loading={providers.isLoading}
-        error={providers.error}
-        onRetry={() => void providers.refetch()}
-        empty={
-          <EmptyState
-            title="No OIDC providers"
-            body="Password sign-in is the only browser path until a provider is added and enabled."
-          />
-        }
-      />
-      <p className={v.faint}>
-        Authorization-code + PKCE; state and nonce are validated server-side and the client secret is
-        stored encrypted, write-only — it is never returned by any endpoint. Sign-in maps the VERIFIED
-        email claim to an existing user only when that account has never been used; any account already in
-        use (signed in before, or linked to another provider) is linked only after the person proves it
-        (password + code) or an admin approves below — never silently. With JIT off (the
-        default-deny default) an unknown identity is refused and audited. A provider with broker sign-in
-        buttons (the bundled Keycloak) shows “Continue with Microsoft / Google / GitHub” on the sign-in page;
-        see docs/deployment/SSO_KEYCLOAK.md. JIT-provisioned users are never admins and get at most the default role picked
-        here. The “SSO only” switch below refuses to engage while no SSO provider — OIDC{" "}
-        <em>or</em> SAML — is enabled anywhere on this page.
-      </p>
-      <ConfirmModal
-        open={deleteProvider !== null}
-        title={`Delete provider “${deleteProvider?.name}”?`}
-        body="Users who signed in through it keep their accounts; the sign-in path disappears immediately."
-        danger
-        confirmLabel="Delete provider"
-        onCancel={() => setDeleteProvider(null)}
-        onConfirm={() => {
-          const p = deleteProvider;
-          setDeleteProvider(null);
-          if (p) void act.run(() => api.del(`/v1/auth/oidc-providers/${p.id}`), "Provider deleted");
-        }}
-      />
-    </Card>
+            },
+          ]}
+          rows={providers.data?.providers ?? []}
+          rowKey={(p) => p.id}
+          loading={providers.isLoading}
+          error={providers.error}
+          onRetry={() => void providers.refetch()}
+          empty={
+            <EmptyState
+              title="No OIDC providers"
+              body="Password sign-in is the only browser path until a provider is added and enabled."
+            />
+          }
+        />
+        <ConfirmModal
+          open={deleteProvider !== null}
+          title={`Delete provider “${deleteProvider?.name}”?`}
+          body="Users who signed in through it keep their accounts; the sign-in path disappears immediately."
+          danger
+          confirmLabel="Delete provider"
+          onCancel={() => setDeleteProvider(null)}
+          onConfirm={() => {
+            const p = deleteProvider;
+            setDeleteProvider(null);
+            if (p) void act.run(() => api.del(`/v1/auth/oidc-providers/${p.id}`), "Provider deleted");
+          }}
+        />
+      </Card>
+      <Card title="How OIDC sign-in works" contain foldable startCollapsed count={1} countNoun={["note", "notes"]}>
+        <p className={v.faint}>
+          Authorization-code + PKCE; state and nonce are validated server-side and the client secret is
+          stored encrypted, write-only — it is never returned by any endpoint. Sign-in maps the VERIFIED
+          email claim to an existing user only when that account has never been used; any account already in
+          use (signed in before, or linked to another provider) is linked only after the person proves it
+          (password + code) or an admin approves below — never silently. With JIT off (the
+          default-deny default) an unknown identity is refused and audited. A provider with broker sign-in
+          buttons (the bundled Keycloak) shows “Continue with Microsoft / Google / GitHub” on the sign-in page;
+          the deployment guide covers setting it up. JIT-provisioned users are never admins and get at most the default role picked
+          here. The “SSO only” switch below refuses to engage while no SSO provider — OIDC{" "}
+          <em>or</em> SAML — is enabled anywhere on this page.
+        </p>
+      </Card>
+    </>
   );
 }
 
@@ -341,276 +347,291 @@ function SamlCard() {
       .filter((c) => c.length > 0);
 
   return (
-    <Card title="Single sign-on — SAML 2.0 providers">
-      <form
-        className={a.formRow}
-        onSubmit={(e) => {
-          e.preventDefault();
-          void act
-            .run(
-              () =>
-                withStepUp((h) => api.postWithHeaders("/v1/auth/saml-providers", {
-                  name,
-                  entityId,
-                  idpSsoUrl,
-                  idpSigningCerts: splitCerts(certs),
-                  jitProvisioning: jit === "true",
-                  allowIdpInitiated: idpInitiated === "true",
-                  wantAuthnResponseSigned: responseSigned === "true",
-                  ...(emailAttribute ? { emailAttribute } : {}),
-                  ...(groupsAttribute ? { groupsAttribute } : {}),
-                  ...(mfaContexts
-                    ? { mfaAuthnContexts: mfaContexts.split(",").map((x) => x.trim()).filter(Boolean) }
-                    : {}),
-                  ...(domains
-                    ? { allowedEmailDomains: domains.split(",").map((x) => x.trim()).filter(Boolean) }
-                    : {}),
-                  ...(defaultRoleId ? { defaultRoleId } : {}),
-                }, h)),
-              "SAML provider added",
-            )
-            .then((ok) => {
-              if (ok) {
-                setName("");
-                setEntityId("");
-                setIdpSsoUrl("");
-                setCerts("");
-                setDomains("");
-                setEmailAttribute("");
-                setGroupsAttribute("");
-                setMfaContexts("");
-                setDefaultRoleId("");
-                setJit("false");
-                setIdpInitiated("false");
-                setResponseSigned("true");
+    <>
+      <Card title="Single sign-on — SAML 2.0 providers">
+        <form
+          className={a.formRow}
+          onSubmit={(e) => {
+            e.preventDefault();
+            void act
+              .run(
+                () =>
+                  withStepUp((h) => api.postWithHeaders("/v1/auth/saml-providers", {
+                    name,
+                    entityId,
+                    idpSsoUrl,
+                    idpSigningCerts: splitCerts(certs),
+                    jitProvisioning: jit === "true",
+                    allowIdpInitiated: idpInitiated === "true",
+                    wantAuthnResponseSigned: responseSigned === "true",
+                    ...(emailAttribute ? { emailAttribute } : {}),
+                    ...(groupsAttribute ? { groupsAttribute } : {}),
+                    ...(mfaContexts
+                      ? { mfaAuthnContexts: mfaContexts.split(",").map((x) => x.trim()).filter(Boolean) }
+                      : {}),
+                    ...(domains
+                      ? { allowedEmailDomains: domains.split(",").map((x) => x.trim()).filter(Boolean) }
+                      : {}),
+                    ...(defaultRoleId ? { defaultRoleId } : {}),
+                  }, h)),
+                "SAML provider added",
+              )
+              .then((ok) => {
+                if (ok) {
+                  setName("");
+                  setEntityId("");
+                  setIdpSsoUrl("");
+                  setCerts("");
+                  setDomains("");
+                  setEmailAttribute("");
+                  setGroupsAttribute("");
+                  setMfaContexts("");
+                  setDefaultRoleId("");
+                  setJit("false");
+                  setIdpInitiated("false");
+                  setResponseSigned("true");
+                }
+              });
+          }}
+        >
+          <Field label="Name">
+            <Input required value={name} onChange={(e) => setName(e.target.value)} placeholder="adfs-prod" />
+          </Field>
+          <Field label="IdP entity id (Issuer)" grow>
+            <Input
+              required
+              value={entityId}
+              onChange={(e) => setEntityId(e.target.value)}
+              placeholder="http://idp.example.com/adfs/services/trust"
+            />
+          </Field>
+          <Field label="IdP sign-on URL" grow>
+            <Input
+              required
+              value={idpSsoUrl}
+              onChange={(e) => setIdpSsoUrl(e.target.value)}
+              placeholder="https://idp.example.com/adfs/ls/"
+            />
+          </Field>
+          <Field label="IdP signing certificate(s), PEM — paste both during a rollover" grow>
+            <Textarea
+              required
+              rows={4}
+              value={certs}
+              onChange={(e) => setCerts(e.target.value)}
+              placeholder={"-----BEGIN CERTIFICATE-----\n…\n-----END CERTIFICATE-----"}
+            />
+          </Field>
+          <Field label="Allowed email domains (comma, empty = any — see warning)">
+            <Input value={domains} onChange={(e) => setDomains(e.target.value)} placeholder="example.com" />
+          </Field>
+          <Field label="Email attribute (blank = NameID when it is an emailAddress)">
+            <Input
+              value={emailAttribute}
+              onChange={(e) => setEmailAttribute(e.target.value)}
+              placeholder="http://schemas.xmlsoap.org/…/emailaddress"
+            />
+          </Field>
+          <Field label="Group attribute (blank = no group signal from this IdP)">
+            <Input
+              value={groupsAttribute}
+              onChange={(e) => setGroupsAttribute(e.target.value)}
+              placeholder="memberOf"
+            />
+          </Field>
+          <Field label="MFA authentication contexts (comma; blank = none — MFA then steps up to TOTP)">
+            <Input
+              value={mfaContexts}
+              onChange={(e) => setMfaContexts(e.target.value)}
+              placeholder="https://refeds.org/profile/mfa"
+            />
+          </Field>
+          <Field label="JIT default role">
+            <Select value={defaultRoleId} onChange={(e) => setDefaultRoleId(e.target.value)}>
+              {optionEls(roleOpts(roles.data?.roles), "— none —")}
+            </Select>
+          </Field>
+          <Field label="JIT provisioning">
+            <Select value={jit} onChange={(e) => setJit(e.target.value)}>
+              <option value="false">off — unknown users are refused (default)</option>
+              <option value="true">on — first login creates the user (never admin)</option>
+            </Select>
+          </Field>
+          <Field label="IdP-initiated sign-in">
+            <Select value={idpInitiated} onChange={(e) => setIdpInitiated(e.target.value)}>
+              <option value="false">off — only sign-ins we started (default)</option>
+              <option value="true">on — accept unsolicited assertions</option>
+            </Select>
+          </Field>
+          <Field label="Signed SAML response">
+            <Select value={responseSigned} onChange={(e) => setResponseSigned(e.target.value)}>
+              <option value="true">required — the response and the assertion are signed (default)</option>
+              <option value="false">not required — the IdP signs only the assertion</option>
+            </Select>
+          </Field>
+          <Button type="submit" variant="primary" disabled={act.busy}>
+            Add provider
+          </Button>
+        </form>
+        {act.error && (
+          <div className={v.errLine} role="alert">
+            {act.error}
+          </div>
+        )}
+        {!domains && (
+          <div className={v.row}>
+            <Badge
+              tone="warn"
+              infoLabel="an empty domain list"
+              info={
+                <>
+                  Leaving the domain list empty means this deployment will accept <strong>any</strong> email
+                  address the IdP asserts. That is a deliberate choice, not a default — pin the domains you
+                  actually own unless you have a reason not to.
+                </>
               }
-            });
-        }}
-      >
-        <Field label="Name">
-          <Input required value={name} onChange={(e) => setName(e.target.value)} placeholder="adfs-prod" />
-        </Field>
-        <Field label="IdP entity id (Issuer)" grow>
-          <Input
-            required
-            value={entityId}
-            onChange={(e) => setEntityId(e.target.value)}
-            placeholder="http://idp.example.com/adfs/services/trust"
-          />
-        </Field>
-        <Field label="IdP sign-on URL" grow>
-          <Input
-            required
-            value={idpSsoUrl}
-            onChange={(e) => setIdpSsoUrl(e.target.value)}
-            placeholder="https://idp.example.com/adfs/ls/"
-          />
-        </Field>
-        <Field label="IdP signing certificate(s), PEM — paste both during a rollover" grow>
-          <Textarea
-            required
-            rows={4}
-            value={certs}
-            onChange={(e) => setCerts(e.target.value)}
-            placeholder={"-----BEGIN CERTIFICATE-----\n…\n-----END CERTIFICATE-----"}
-          />
-        </Field>
-        <Field label="Allowed email domains (comma, empty = any — see warning)">
-          <Input value={domains} onChange={(e) => setDomains(e.target.value)} placeholder="example.com" />
-        </Field>
-        <Field label="Email attribute (blank = NameID when it is an emailAddress)">
-          <Input
-            value={emailAttribute}
-            onChange={(e) => setEmailAttribute(e.target.value)}
-            placeholder="http://schemas.xmlsoap.org/…/emailaddress"
-          />
-        </Field>
-        <Field label="Group attribute (blank = no group signal from this IdP)">
-          <Input
-            value={groupsAttribute}
-            onChange={(e) => setGroupsAttribute(e.target.value)}
-            placeholder="memberOf"
-          />
-        </Field>
-        <Field label="MFA authentication contexts (comma; blank = none — MFA then steps up to TOTP)">
-          <Input
-            value={mfaContexts}
-            onChange={(e) => setMfaContexts(e.target.value)}
-            placeholder="https://refeds.org/profile/mfa"
-          />
-        </Field>
-        <Field label="JIT default role">
-          <Select value={defaultRoleId} onChange={(e) => setDefaultRoleId(e.target.value)}>
-            {optionEls(roleOpts(roles.data?.roles), "— none —")}
-          </Select>
-        </Field>
-        <Field label="JIT provisioning">
-          <Select value={jit} onChange={(e) => setJit(e.target.value)}>
-            <option value="false">off — unknown users are refused (default)</option>
-            <option value="true">on — first login creates the user (never admin)</option>
-          </Select>
-        </Field>
-        <Field label="IdP-initiated sign-in">
-          <Select value={idpInitiated} onChange={(e) => setIdpInitiated(e.target.value)}>
-            <option value="false">off — only sign-ins we started (default)</option>
-            <option value="true">on — accept unsolicited assertions</option>
-          </Select>
-        </Field>
-        <Field label="Signed SAML response">
-          <Select value={responseSigned} onChange={(e) => setResponseSigned(e.target.value)}>
-            <option value="true">required — the response and the assertion are signed (default)</option>
-            <option value="false">not required — the IdP signs only the assertion</option>
-          </Select>
-        </Field>
-        <Button type="submit" variant="primary" disabled={act.busy}>
-          Add provider
-        </Button>
-      </form>
-      {act.error && (
-        <div className={v.errLine} role="alert">
-          {act.error}
-        </div>
-      )}
-      {!domains && (
-        <p className={v.faint}>
-          Leaving the domain list empty means this deployment will accept <strong>any</strong> email
-          address the IdP asserts. That is a deliberate choice, not a default — pin the domains you
-          actually own unless you have a reason not to.
-        </p>
-      )}
-      <Table<SamlProvider>
-        columns={[
-          { key: "name", header: "Name", render: (p) => p.name },
-          { key: "entity", header: "IdP entity id", render: (p) => <span className={v.mono}>{p.entityId}</span> },
-          {
-            key: "certs",
-            header: "Certs",
-            render: (p) =>
-              p.idpSigningCerts.length > 1 ? (
-                <Badge tone="warn" title="a rollover is staged: either certificate verifies">
-                  {p.idpSigningCerts.length} pinned
-                </Badge>
-              ) : (
-                "1 pinned"
-              ),
-          },
-          {
-            key: "domains",
-            header: "Domains",
-            render: (p) =>
-              p.allowedEmailDomains && p.allowedEmailDomains.length > 0 ? (
-                p.allowedEmailDomains.join(", ")
-              ) : (
-                <Badge tone="warn" title="every email this IdP asserts is trusted">
-                  any
-                </Badge>
-              ),
-          },
-          { key: "jit", header: "JIT", render: (p) => (p.jitProvisioning ? "on" : "off") },
-          {
-            key: "groups",
-            header: "Groups",
-            render: (p) =>
-              p.groupsAttribute ? (
-                <span className={v.mono}>{p.groupsAttribute}</span>
-              ) : (
-                <span className={v.faint} title="no group signal — logins here never reconcile roles">
-                  none
+            >
+              Any email domain accepted
+            </Badge>
+          </div>
+        )}
+        <Table<SamlProvider>
+          columns={[
+            { key: "name", header: "Name", render: (p) => p.name },
+            { key: "entity", header: "IdP entity id", render: (p) => <span className={v.mono}>{p.entityId}</span> },
+            {
+              key: "certs",
+              header: "Certs",
+              render: (p) =>
+                p.idpSigningCerts.length > 1 ? (
+                  <Badge tone="warn" infoLabel="a staged rollover" info={<>A rollover is staged: either certificate verifies.</>}>
+                    {p.idpSigningCerts.length} pinned
+                  </Badge>
+                ) : (
+                  "1 pinned"
+                ),
+            },
+            {
+              key: "domains",
+              header: "Domains",
+              render: (p) =>
+                p.allowedEmailDomains && p.allowedEmailDomains.length > 0 ? (
+                  p.allowedEmailDomains.join(", ")
+                ) : (
+                  <Badge tone="warn" infoLabel="any domain" info={<>Every email this IdP asserts is trusted.</>}>
+                    any
+                  </Badge>
+                ),
+            },
+            { key: "jit", header: "JIT", render: (p) => (p.jitProvisioning ? "on" : "off") },
+            {
+              key: "groups",
+              header: "Groups",
+              info: <>“none”: no group signal — logins here never reconcile roles.</>,
+              render: (p) =>
+                p.groupsAttribute ? (
+                  <span className={v.mono}>{p.groupsAttribute}</span>
+                ) : (
+                  <span className={v.faint}>
+                    none
+                  </span>
+                ),
+            },
+            {
+              key: "idpInit",
+              header: "IdP-initiated",
+              render: (p) =>
+                p.allowIdpInitiated ? <Badge tone="warn">on</Badge> : <span className={v.faint}>off</span>,
+            },
+            {
+              key: "status",
+              header: "Status",
+              render: (p) => (p.enabled ? <Badge tone="ok">enabled</Badge> : <Badge>disabled</Badge>),
+            },
+            {
+              key: "actions",
+              header: "",
+              srHeader: "Actions",
+              align: "right",
+              render: (p) => (
+                <span className={v.rowTight}>
+                  <Button size="sm" onClick={() => setMetadataFor(p)}>
+                    metadata
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={() =>
+                      void act.run(
+                        () => api.patch(`/v1/auth/saml-providers/${p.id}`, { enabled: !p.enabled }),
+                        p.enabled ? "Provider disabled" : "Provider enabled",
+                      )
+                    }
+                  >
+                    {p.enabled ? "disable" : "enable"}
+                  </Button>
+                  <Button size="sm" variant="danger" onClick={() => setDeleteProvider(p)}>
+                    delete
+                  </Button>
                 </span>
               ),
-          },
-          {
-            key: "idpInit",
-            header: "IdP-initiated",
-            render: (p) =>
-              p.allowIdpInitiated ? <Badge tone="warn">on</Badge> : <span className={v.faint}>off</span>,
-          },
-          {
-            key: "status",
-            header: "Status",
-            render: (p) => (p.enabled ? <Badge tone="ok">enabled</Badge> : <Badge>disabled</Badge>),
-          },
-          {
-            key: "actions",
-            header: "",
-            srHeader: "Actions",
-            align: "right",
-            render: (p) => (
-              <span className={v.rowTight}>
-                <Button size="sm" onClick={() => setMetadataFor(p)}>
-                  metadata
-                </Button>
-                <Button
-                  size="sm"
-                  onClick={() =>
-                    void act.run(
-                      () => api.patch(`/v1/auth/saml-providers/${p.id}`, { enabled: !p.enabled }),
-                      p.enabled ? "Provider disabled" : "Provider enabled",
-                    )
-                  }
-                >
-                  {p.enabled ? "disable" : "enable"}
-                </Button>
-                <Button size="sm" variant="danger" onClick={() => setDeleteProvider(p)}>
-                  delete
-                </Button>
-              </span>
-            ),
-          },
-        ]}
-        rows={providers.data?.providers ?? []}
-        rowKey={(p) => p.id}
-        loading={providers.isLoading}
-        error={providers.error}
-        onRetry={() => void providers.refetch()}
-        empty={
-          <EmptyState
-            title="No SAML providers"
-            body="SAML 2.0 sits beside OIDC, not instead of it — add a provider here if your IdP is configured for SAML."
-          />
-        }
-      />
-      <p className={v.faint}>
-        Assertions are verified against the certificate(s) pinned here and never against a certificate
-        embedded in the document — that pinning is what defeats signature-wrapping. Audience, Recipient
-        and the NotBefore/NotOnOrAfter window are all enforced, with a small bounded clock skew, and an
-        assertion id is refused if it is presented twice. Sign-in maps the asserted email to an existing
-        user — never to a username; with JIT off (the default-deny default) an unknown identity is
-        refused and audited, and JIT-provisioned users are never admins. An expired pinned certificate
-        fails closed: sign-ins stop rather than being accepted unverified, so stage the incoming
-        certificate here before your IdP cuts over.
-      </p>
-      <Modal
-        open={metadataFor !== null}
-        title={`Service-provider metadata — “${metadataFor?.name}”`}
-        onClose={() => setMetadataFor(null)}
-      >
+            },
+          ]}
+          rows={providers.data?.providers ?? []}
+          rowKey={(p) => p.id}
+          loading={providers.isLoading}
+          error={providers.error}
+          onRetry={() => void providers.refetch()}
+          empty={
+            <EmptyState
+              title="No SAML providers"
+              body="SAML 2.0 sits beside OIDC, not instead of it — add a provider here if your IdP is configured for SAML."
+            />
+          }
+        />
+        <Modal
+          open={metadataFor !== null}
+          title={`Service-provider metadata — “${metadataFor?.name}”`}
+          onClose={() => setMetadataFor(null)}
+        >
+          <p className={v.faint}>
+            Give this URL to your IdP administrator. It publishes our entity id, this provider&rsquo;s
+            Assertion Consumer Service URL and (when configured) our public certificate — nothing secret.
+          </p>
+          <CodeBlock>
+            {metadataFor ? `${window.location.origin}/auth/saml/${metadataFor.id}/metadata` : ""}
+          </CodeBlock>
+          <p className={v.faint}>
+            Sign-in entry point (what the login page uses):{" "}
+            <span className={v.mono}>/auth/saml/{metadataFor?.id}/start</span>
+          </p>
+        </Modal>
+        <ConfirmModal
+          open={deleteProvider !== null}
+          title={`Delete provider “${deleteProvider?.name}”?`}
+          body="Users who signed in through it keep their accounts; the sign-in path disappears immediately."
+          danger
+          confirmLabel="Delete provider"
+          onCancel={() => setDeleteProvider(null)}
+          onConfirm={() => {
+            const p = deleteProvider;
+            setDeleteProvider(null);
+            if (p) void act.run(() => api.del(`/v1/auth/saml-providers/${p.id}`), "Provider deleted");
+          }}
+        />
+      </Card>
+      <Card title="How SAML sign-in works" contain foldable startCollapsed count={1} countNoun={["note", "notes"]}>
         <p className={v.faint}>
-          Give this URL to your IdP administrator. It publishes our entity id, this provider&rsquo;s
-          Assertion Consumer Service URL and (when configured) our public certificate — nothing secret.
+          Assertions are verified against the certificate(s) pinned here and never against a certificate
+          embedded in the document — that pinning is what defeats signature-wrapping. Audience, Recipient
+          and the NotBefore/NotOnOrAfter window are all enforced, with a small bounded clock skew, and an
+          assertion id is refused if it is presented twice. Sign-in maps the asserted email to an existing
+          user — never to a username; with JIT off (the default-deny default) an unknown identity is
+          refused and audited, and JIT-provisioned users are never admins. An expired pinned certificate
+          fails closed: sign-ins stop rather than being accepted unverified, so stage the incoming
+          certificate here before your IdP cuts over.
         </p>
-        <CodeBlock>
-          {metadataFor ? `${window.location.origin}/auth/saml/${metadataFor.id}/metadata` : ""}
-        </CodeBlock>
-        <p className={v.faint}>
-          Sign-in entry point (what the login page uses):{" "}
-          <span className={v.mono}>/auth/saml/{metadataFor?.id}/start</span>
-        </p>
-      </Modal>
-      <ConfirmModal
-        open={deleteProvider !== null}
-        title={`Delete provider “${deleteProvider?.name}”?`}
-        body="Users who signed in through it keep their accounts; the sign-in path disappears immediately."
-        danger
-        confirmLabel="Delete provider"
-        onCancel={() => setDeleteProvider(null)}
-        onConfirm={() => {
-          const p = deleteProvider;
-          setDeleteProvider(null);
-          if (p) void act.run(() => api.del(`/v1/auth/saml-providers/${p.id}`), "Provider deleted");
-        }}
-      />
-    </Card>
+      </Card>
+    </>
   );
 }
 
@@ -659,101 +680,109 @@ function SessionsPolicyForm(props: { settings: Record<string, unknown> }) {
     </Field>
   );
   return (
-    <Card title="Sessions policy — browser sign-in">
-      <form
-        className={v.stack}
-        onSubmit={(e) => {
-          e.preventDefault();
-          void act.run(
-            () =>
-              putOrgSettings({
-                passwordMinLength: Number(f.passwordMinLength),
-                passwordRequireClasses: Number(f.passwordRequireClasses),
-                sessionLifetimeHours: Number(f.sessionLifetimeHours),
-                sessionIdleMinutes: Number(f.sessionIdleMinutes),
-                mfaRequired: f.mfaRequired,
-                ssoOnly: f.ssoOnly === "true",
-                loginLockoutThreshold: Number(f.loginLockoutThreshold),
-                loginLockoutWindowMinutes: Number(f.loginLockoutWindowMinutes),
-                loginLockoutMinutes: Number(f.loginLockoutMinutes),
-                localSignIn: f.localSignIn,
-                breakGlassUserIds: breakGlass,
-              }),
-            "Sign-in policy saved (audited)",
-          );
-        }}
-      >
-        <div className={v.grid3}>
-          {num("Password min length", "passwordMinLength")}
-          {num("Character classes required (1–4)", "passwordRequireClasses")}
-          {num("Session lifetime (hours)", "sessionLifetimeHours")}
-          {num("Idle timeout (minutes)", "sessionIdleMinutes")}
-          <Field label="Require TOTP MFA">
-            <Select value={f.mfaRequired} onChange={(e) => set("mfaRequired", e.target.value)}>
-              <option value="off">off (self-service)</option>
-              <option value="admins">admins must enroll (default)</option>
-              <option value="all">everyone must enroll</option>
-            </Select>
-          </Field>
-          <Field label="SSO only">
-            <Select value={f.ssoOnly} onChange={(e) => set("ssoOnly", e.target.value)}>
-              <option value="false">off — password login allowed (default)</option>
-              <option value="true">on — password login refused</option>
-            </Select>
-          </Field>
-          {num("Lock after N failed logins", "loginLockoutThreshold")}
-          {num("Failure window (minutes)", "loginLockoutWindowMinutes")}
-          {num("Lockout duration (minutes)", "loginLockoutMinutes")}
-          <Field label="Email sign-in">
-            <Select value={f.localSignIn} onChange={(e) => set("localSignIn", e.target.value)}>
-              <option value="enabled">everyone with a password (default)</option>
-              <option value="break_glass_only">break-glass admins only — everyone else uses SSO</option>
-            </Select>
-          </Field>
-        </div>
-        <fieldset className={v.stack}>
-          <legend className={v.faint}>Break-glass admins (may always use email sign-in)</legend>
-          {admins.length === 0 ? (
-            <span className={v.faint}>No active administrators.</span>
-          ) : (
-            admins.map((u) => (
-              <label key={u.id} className={v.row}>
-                <input
-                  type="checkbox"
-                  checked={breakGlass.includes(u.id)}
-                  onChange={(e) =>
-                    setBreakGlass((cur) => (e.target.checked ? [...cur, u.id] : cur.filter((x) => x !== u.id)))
-                  }
-                />
-                <span>
-                  {u.displayName} <span className={v.faint}>({u.email}{u.hasPassword ? "" : " — no password yet"})</span>
-                </span>
-              </label>
-            ))
-          )}
-        </fieldset>
-        <div className={v.row}>
-          <Button type="submit" variant="primary" disabled={act.busy}>
-            Save sign-in policy
-          </Button>
-          {act.error && (
-            <span className={v.errLine} role="alert">
-              {act.error}
-            </span>
-          )}
-        </div>
-        <p className={v.faint}>
-          Defaults: 12+ characters using 3 of 4 character classes; sessions live at most 24h with a 30-minute idle
-          wall (any use slides the idle wall, never the lifetime); 5 failures inside 15 minutes lock the
-          account for 15 minutes — audited, and the login answer stays the same uniform 401 so lockout
-          leaks nothing. “SSO only” will not engage while zero enabled SSO providers exist — OIDC and
-          SAML are counted together, and the last enabled provider of either family cannot be disabled
-          or deleted while it is on. No self-lockouts. “Break-glass admins only” keeps email sign-in for the
-          administrators ticked above and sends everyone else to single sign-on; it needs an enabled SSO
-          provider and at least one ticked administrator who has a password.
-        </p>
-      </form>
-    </Card>
+    <>
+      <Card title="Sessions policy — browser sign-in">
+        <form
+          className={v.stack}
+          onSubmit={(e) => {
+            e.preventDefault();
+            void act.run(
+              () =>
+                putOrgSettings({
+                  passwordMinLength: Number(f.passwordMinLength),
+                  passwordRequireClasses: Number(f.passwordRequireClasses),
+                  sessionLifetimeHours: Number(f.sessionLifetimeHours),
+                  sessionIdleMinutes: Number(f.sessionIdleMinutes),
+                  mfaRequired: f.mfaRequired,
+                  ssoOnly: f.ssoOnly === "true",
+                  loginLockoutThreshold: Number(f.loginLockoutThreshold),
+                  loginLockoutWindowMinutes: Number(f.loginLockoutWindowMinutes),
+                  loginLockoutMinutes: Number(f.loginLockoutMinutes),
+                  localSignIn: f.localSignIn,
+                  breakGlassUserIds: breakGlass,
+                }),
+              "Sign-in policy saved (audited)",
+            );
+          }}
+        >
+          <div className={v.grid3}>
+            {num("Password min length", "passwordMinLength")}
+            {num("Character classes required (1–4)", "passwordRequireClasses")}
+            {num("Session lifetime (hours)", "sessionLifetimeHours")}
+            {num("Idle timeout (minutes)", "sessionIdleMinutes")}
+            <Field label="Require TOTP MFA">
+              <Select value={f.mfaRequired} onChange={(e) => set("mfaRequired", e.target.value)}>
+                <option value="off">off (self-service)</option>
+                <option value="admins">admins must enroll (default)</option>
+                <option value="all">everyone must enroll</option>
+              </Select>
+            </Field>
+            <Field label="SSO only">
+              <Select value={f.ssoOnly} onChange={(e) => set("ssoOnly", e.target.value)}>
+                <option value="false">off — password login allowed (default)</option>
+                <option value="true">on — password login refused</option>
+              </Select>
+            </Field>
+            {num("Lock after N failed logins", "loginLockoutThreshold")}
+            {num("Failure window (minutes)", "loginLockoutWindowMinutes")}
+            {num("Lockout duration (minutes)", "loginLockoutMinutes")}
+            <Field label="Email sign-in">
+              <Select value={f.localSignIn} onChange={(e) => set("localSignIn", e.target.value)}>
+                <option value="enabled">everyone with a password (default)</option>
+                <option value="break_glass_only">break-glass admins only — everyone else uses SSO</option>
+              </Select>
+            </Field>
+          </div>
+          <p className={v.faint} data-testid="sso-policy-requirements">
+            “SSO only” needs at least one enabled SSO provider. “Break-glass admins only” needs an enabled SSO
+            provider and at least one ticked administrator who has a password.
+          </p>
+          <fieldset className={v.stack}>
+            <legend className={v.faint}>Break-glass admins (may always use email sign-in)</legend>
+            {admins.length === 0 ? (
+              <span className={v.faint}>No active administrators.</span>
+            ) : (
+              admins.map((u) => (
+                <label key={u.id} className={v.row}>
+                  <input
+                    type="checkbox"
+                    checked={breakGlass.includes(u.id)}
+                    onChange={(e) =>
+                      setBreakGlass((cur) => (e.target.checked ? [...cur, u.id] : cur.filter((x) => x !== u.id)))
+                    }
+                  />
+                  <span>
+                    {u.displayName} <span className={v.faint}>({u.email}{u.hasPassword ? "" : " — no password yet"})</span>
+                  </span>
+                </label>
+              ))
+            )}
+          </fieldset>
+          <div className={v.row}>
+            <Button type="submit" variant="primary" disabled={act.busy}>
+              Save sign-in policy
+            </Button>
+            {act.error && (
+              <span className={v.errLine} role="alert">
+                {act.error}
+              </span>
+            )}
+          </div>
+        </form>
+      </Card>
+      <Card title="How the sign-in policy works" contain foldable startCollapsed count={1} countNoun={["note", "notes"]}>
+          <p className={v.faint}>
+            Defaults: 12+ characters using 3 of 4 character classes; sessions live at most 24h with a 30-minute idle
+            wall (any use slides the idle wall, never the lifetime); 5 failures inside 15 minutes lock the
+            account for 15 minutes — audited, and the login answer stays the same uniform 401 so lockout
+            leaks nothing. “SSO only” will not engage while zero enabled SSO providers exist — OIDC and
+            SAML are counted together, and the last enabled provider of either family cannot be disabled
+            or deleted while it is on. No self-lockouts. “Break-glass admins only” keeps email sign-in for the
+            administrators ticked above and sends everyone else to single sign-on; it needs an enabled SSO
+            provider and at least one ticked administrator who has a password.
+          </p>
+      </Card>
+    </>
   );
 }
 

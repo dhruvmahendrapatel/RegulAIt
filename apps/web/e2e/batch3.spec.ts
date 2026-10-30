@@ -86,7 +86,7 @@ test.afterAll(async () => {
 test("retention inventory is honest and an audited extension persists only after confirmation", async () => {
   await page.goto("/ui/admin/retention");
   await expect(page.getByRole("heading", { name: "Memory & retention", exact: true })).toBeVisible();
-  await expect(page.getByText("No retention sweep implemented", { exact: true })).toHaveCount(2);
+  await expect(page.getByText("Not enforced automatically: no sweep runs in this release", { exact: true })).toHaveCount(2);
   const metrics = (await request("/v1/org/posture")).metrics;
   expect(metrics).toEqual({ separateListener: "off", mainListener: false, tokenConfigured: false });
   await expect(page.getByText("Separate metrics listener: off.", { exact: true })).toBeVisible();
@@ -143,7 +143,7 @@ test("stdio registration refuses a disabled transport and preserves separate arg
   await page.goto("/ui/admin/mcp-servers");
   const form = page.getByRole("button", { name: "Register", exact: true }).locator("..");
   await form.getByLabel("Name", { exact: true }).fill(SERVER);
-  await page.getByLabel("Upstream transport").selectOption("stdio");
+  await page.getByLabel("Upstream transport", { exact: true }).selectOption("stdio");
   await page.getByLabel("Closure image digest", { exact: true }).fill(IMAGE);
   await page.getByLabel("Entry point in the image", { exact: true }).fill("/srv/mcp/server.js");
   await page.getByRole("button", { name: "Add argument", exact: true }).click();

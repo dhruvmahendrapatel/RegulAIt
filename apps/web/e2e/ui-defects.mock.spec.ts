@@ -476,6 +476,8 @@ test("UIA-04: a long fingerprint wraps inside its stat tile instead of being cli
     return json(route, {});
   });
   await page.goto("/ui/admin/data-key");
+  // ADR-0180: the attestation is a claim, and that stays visible at the point of attesting
+  await expect(page.getByText("Claim, not verified", { exact: true })).toBeVisible();
   const codes = page.locator("code", { hasText: fp });
   await expect(codes).toHaveCount(2);
   const clipped = await codes.evaluateAll((els) =>
