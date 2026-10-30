@@ -97,6 +97,8 @@ export function federationAudiences(kind: DiscoverySourceKind, publicConfig: Rea
     case "cloud_azure":
     // ADR-0195 A5: Azure DevOps through Entra workload identity federation
     case "repo_azure_devops":
+    // ADR-0218: Entra app consents through the same Entra workload identity federation
+    case "idp_entra":
       return [FEDERATION_AUDIENCES.azure];
     case "cloud_gcp": {
       const { projectNumber, workloadIdentityPool, workloadIdentityProvider } = publicConfig;

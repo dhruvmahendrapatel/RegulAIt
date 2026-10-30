@@ -42,6 +42,7 @@ import type { AiSignature, AiSignatureKind, DiscoveryCredentialMode, DiscoveryRe
 import { REPO_SCANNERS } from "./discovery-repo-scanner.js";
 import { cloudDiscoveryScanners } from "./discovery-cloud-scanners.js";
 import { ENDPOINT_AGENT_SCANNER, ENDPOINT_IMPORT_SCANNERS } from "./endpoint-discovery-scanners.js";
+import { WIDER_DISCOVERY_SCANNERS } from "./discovery-wider-scanners.js";
 
 /** the source as a scanner sees it */
 export interface ScanSource {
@@ -212,6 +213,8 @@ export const DISCOVERY_SCANNERS: ScannerRegistry = scannerRegistry([
   ...ENDPOINT_IMPORT_SCANNERS,
   // SD4b: endpoint_agent, fed by the agents' signed reports (endpoint-agent-routes.ts)
   ENDPOINT_AGENT_SCANNER,
+  // ADR-0218 (P9): saas_inventory_api, idp_entra, ml_mlflow, each family behind its default-off org switch
+  ...WIDER_DISCOVERY_SCANNERS,
 ]);
 
 /**

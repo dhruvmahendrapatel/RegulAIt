@@ -5,6 +5,8 @@ import {
   describeSchedule,
   describeScope,
   editablePublicConfig,
+  familyChanges,
+  familySwitchedOff,
   formatKeyValues,
   parseIncludeList,
   parseKeyValueLines,
@@ -93,5 +95,22 @@ describe("catalogue gaps and evidence kinds in words (the codes stay available)"
     const d = describeGap({ kind: "browser_extension", value: "abcdefghijklmnop" });
     expect(d.name).toBe("abcdefghijklmnop");
     expect(d.kind).toBe("Browser extension");
+  });
+});
+
+describe("wider-source family switches (all off by default)", () => {
+  const off = { saas: false, identity: false, ml_platform: false };
+  const kind = (family: string) => ({ kind: "k", label: "K", family, slice: "P9", evidenceKinds: [], subjectKinds: [], built: true, requiresCredential: true }) as never;
+  it("a gated kind is off until its family is on; the original families have no switch", () => {
+    expect(familySwitchedOff(kind("identity"), off)).toBe(true);
+    expect(familySwitchedOff(kind("identity"), { ...off, identity: true })).toBe(false);
+    expect(familySwitchedOff(kind("identity"), undefined)).toBe(true);
+    expect(familySwitchedOff(kind("cloud"), off)).toBe(false);
+  });
+  it("a save sends only what changed, and says when it turns a family on (that asks for the step-up)", () => {
+    expect(familyChanges(off, {})).toEqual({ changed: {}, turnsOn: false });
+    expect(familyChanges(off, { saas: false })).toEqual({ changed: {}, turnsOn: false });
+    expect(familyChanges(off, { saas: true })).toEqual({ changed: { saas: true }, turnsOn: true });
+    expect(familyChanges({ ...off, ml_platform: true }, { ml_platform: false })).toEqual({ changed: { ml_platform: false }, turnsOn: false });
   });
 });

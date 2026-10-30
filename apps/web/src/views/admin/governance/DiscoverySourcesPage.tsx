@@ -10,6 +10,10 @@
  *    target or scope, storing a static secret, lengthening the warning age or
  *    the endpoint retention, and revealing a pseudonym each ask the admin to
  *    confirm it's them (withStepUp); disabling and revoking never do.
+ *  - ADR-0218: the wider kinds (SaaS app inventories, identity-provider app
+ *    consents, standalone ML platforms) are each behind a family switch in
+ *    Settings, off by default; turning one on asks for the step-up, and the
+ *    kind picker says when a chosen kind's family is off.
  *  - A credential's secret is never shown: the gateway never returns it. The
  *    page shows its mode, its public config, its age and whether its write
  *    scope has been verified.
@@ -22,7 +26,7 @@ import { fmtDateTime, humanize, plural } from "../../../api/format";
 import ds from "./discoverySources.module.css";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, RowActions, Select, Table, Textarea } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, Fieldset, InfoButton, Input, RowActions, Select, Table, Textarea } from "../../../ui/kit";
 import { FoldTable } from "../../../ui/fold";
 import { QueryGate, Stat, useAction } from "../adminKit";
 import v from "../../views.module.css";
@@ -35,6 +39,11 @@ import {
   describeSchedule,
   describeScope,
   editablePublicConfig,
+  FAMILY_SWITCH_TEXT,
+  familyChanges,
+  familySwitchedOff,
+  GATED_FAMILIES,
+  type FamilySwitches,
   formatKeyValues,
   parseIncludeList,
   parseKeyValueLines,
@@ -92,6 +101,8 @@ export default function DiscoverySourcesPage() {
   const [credError, setCredError] = useState<string | null>(null);
   const [warnDays, setWarnDays] = useState("");
   const [retentionDays, setRetentionDays] = useState("");
+  // ADR-0218: the wider-source family switches as edited (unsaved); empty = as saved
+  const [familyDraft, setFamilyDraft] = useState<Partial<FamilySwitches>>({});
   // a finding's sighting links here with ?pseudonym=… (revealing still needs the step-up)
   const [params] = useSearchParams();
   const [pseudonym, setPseudonym] = useState(params.get("pseudonym") ?? "");
@@ -110,6 +121,10 @@ export default function DiscoverySourcesPage() {
 
   const kinds = scanners.data?.kinds ?? [];
   const built = kinds.filter((k) => k.built);
+  const savedFamilies: FamilySwitches = settings.data?.families ?? { saas: false, identity: false, ml_platform: false };
+  const familyEdit = familyChanges(savedFamilies, familyDraft);
+  const chosenKind = kinds.find((k) => k.kind === form.kind);
+  const chosenKindOff = !form.editing && familySwitchedOff(chosenKind, savedFamilies);
   const posture = sources.data?.posture;
   const list = sources.data?.sources ?? [];
   const refetchAll = async () => {
@@ -192,13 +207,15 @@ export default function DiscoverySourcesPage() {
   const saveSettings = () => {
     const s = settings.data;
     if (!s) return;
-    const body: Record<string, number> = { version: s.version };
+    const body: Record<string, unknown> = { version: s.version };
     if (warnDays.trim()) body.credentialWarningAgeDays = Number(warnDays);
     if (retentionDays.trim()) body.endpointRetentionDays = Number(retentionDays);
+    if (Object.keys(familyEdit.changed).length > 0) body.families = familyEdit.changed;
     void act.run(async () => {
       await withStepUp((h) => stepUpApi.put("/v1/discovery/settings", body, h));
       setWarnDays("");
       setRetentionDays("");
+      setFamilyDraft({});
       await refetchAll();
     }, "Discovery settings saved");
   };
@@ -293,6 +310,7 @@ export default function DiscoverySourcesPage() {
                         {built.map((k) => (
                           <option key={k.kind} value={k.kind}>
                             {k.label}
+                            {familySwitchedOff(k, savedFamilies) ? " (switched off in Settings)" : ""}
                           </option>
                         ))}
                       </Select>
@@ -305,6 +323,11 @@ export default function DiscoverySourcesPage() {
                     </Field>
                   )}
                 </div>
+                {chosenKindOff && (
+                  <p className={v.faint} role="note">
+                    {chosenKind?.label} sources are switched off for your organisation. Turn them on under Settings at the foot of this page, then add the source.
+                  </p>
+                )}
                 <Field label="Target (one key=value per line)">
                   <Textarea rows={3} value={form.target} spellCheck={false} onChange={(e) => setForm({ ...form, target: e.target.value })} />
                 </Field>
@@ -320,8 +343,8 @@ export default function DiscoverySourcesPage() {
                 <div className={v.row}>
                   <Button
                     variant="primary"
-                    disabled={act.busy || (!form.editing && !form.kind)}
-                    title={!form.editing && !form.kind ? "Choose a kind first" : undefined}
+                    disabled={act.busy || (!form.editing && !form.kind) || chosenKindOff}
+                    title={!form.editing && !form.kind ? "Choose a kind first" : chosenKindOff ? "Turn this kind of source on under Settings first" : undefined}
                     aria-describedby={form.editing ? undefined : "add-source-hint"}
                     onClick={submitSource}
                   >
@@ -559,8 +582,30 @@ export default function DiscoverySourcesPage() {
                   <Input type="number" min={1} max={3650} placeholder={String(settings.data?.endpointRetentionDays ?? "")} value={retentionDays} onChange={(e) => setRetentionDays(e.target.value)} />
                 </Field>
               </div>
+              <Fieldset legend="Wider discovery sources">
+                <p className={v.faint}>
+                  Each kind is off until you turn it on. Turning one on asks you to confirm it&apos;s you; turning one off is free and stops its scans at once.
+                </p>
+                {GATED_FAMILIES.map((f) => {
+                  const on = familyDraft[f] ?? savedFamilies[f];
+                  return (
+                    <label key={f} className={v.row}>
+                      <input type="checkbox" checked={on} disabled={!settings.data} onChange={(e) => setFamilyDraft({ ...familyDraft, [f]: e.target.checked })} />
+                      <span>
+                        {FAMILY_SWITCH_TEXT[f].label}
+                        <span className={v.faint}> · {FAMILY_SWITCH_TEXT[f].help}</span>
+                      </span>
+                    </label>
+                  );
+                })}
+              </Fieldset>
               <div>
-                <Button disabled={act.busy || !settings.data || (!warnDays.trim() && !retentionDays.trim())} onClick={saveSettings}>Save settings</Button>
+                <Button
+                  disabled={act.busy || !settings.data || (!warnDays.trim() && !retentionDays.trim() && Object.keys(familyEdit.changed).length === 0)}
+                  onClick={saveSettings}
+                >
+                  {familyEdit.turnsOn ? "Save settings (confirm it's you)" : "Save settings"}
+                </Button>
               </div>
             </div>
             </QueryGate>

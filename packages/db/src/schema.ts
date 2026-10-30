@@ -7032,7 +7032,7 @@ export const discoverySources = pgTable(
   (t) => [
     check(
       "discovery_sources_kind_check",
-      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent')`,
+      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow')`,
     ),
     check("discovery_sources_name_check", sql`char_length(${t.name}) BETWEEN 1 AND 120`),
     check("discovery_sources_target_check", sql`jsonb_typeof(${t.target}) = 'object'`),
@@ -7117,7 +7117,7 @@ export const discoveryRuns = pgTable(
     check("discovery_runs_status_check", sql`${t.status} IN ('queued', 'running', 'succeeded', 'failed')`),
     check(
       "discovery_runs_kind_check",
-      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent')`,
+      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow')`,
     ),
     check("discovery_runs_attempt_check", sql`${t.attempt} BETWEEN 0 AND 3`),
     check("discovery_runs_gaps_check", sql`jsonb_typeof(${t.catalogueGaps}) = 'array' AND jsonb_array_length(${t.catalogueGaps}) <= 50`),
@@ -7148,6 +7148,10 @@ export const discoverySettings = pgTable(
     id: integer("id").primaryKey().default(1),
     credentialWarningAgeDays: integer("credential_warning_age_days").notNull().default(90),
     endpointRetentionDays: integer("endpoint_retention_days").notNull().default(90),
+    // ADR-0218: the wider-source family switches, all off (migration 0238)
+    saasSourcesEnabled: boolean("saas_sources_enabled").notNull().default(false),
+    identitySourcesEnabled: boolean("identity_sources_enabled").notNull().default(false),
+    mlPlatformSourcesEnabled: boolean("ml_platform_sources_enabled").notNull().default(false),
     version: integer("version").notNull().default(1),
     updatedBy: uuid("updated_by"),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -7184,7 +7188,7 @@ export const discoveryPseudonyms = pgTable(
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    check("discovery_pseudonyms_kind_check", sql`${t.kind} IN ('device_user', 'commit_author', 'cloud_principal', 'device')`),
+    check("discovery_pseudonyms_kind_check", sql`${t.kind} IN ('device_user', 'commit_author', 'cloud_principal', 'device', 'idp_user')`),
     check("discovery_pseudonyms_pseudonym_check", sql`${t.pseudonym} ~ '^psn:[0-9a-f]{24}$'`),
     check("discovery_pseudonyms_seen_check", sql`${t.firstSeenAt} <= ${t.lastSeenAt}`),
     uniqueIndex("discovery_pseudonyms_pseudonym_uq").on(t.pseudonym),

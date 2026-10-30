@@ -135,6 +135,7 @@ import { ENV_FALLBACK_PROVIDERS, platformEnvKey } from "./agents-connectors.js";
 import { envFallbackAllowed, loadOrgSettings } from "./org-settings.js";
 import { activeDiscoverySources, activeDiscoveryStatement } from "./discovery-posture.js";
 import { CLOUD_AI_SERVICE_SEED } from "@regulait/cloud-discovery";
+import { ML_PLATFORM_ASSET_SEED } from "./discovery-wider-scanners.js";
 import {
   REMEDIATION_ENVIRONMENT_PATTERN,
   SHADOW_AI_REMEDIATION_CHANGE_TYPE,
@@ -151,11 +152,12 @@ import {
 
 /**
  * Everything the shipped seed installs: the default signatures, plus each discovery slice's own artifact seed rows
- * (ADR-0195 SD2: `cloud_ai_service`, matched by `identifier`). SD1 and SD3 add theirs here the same way.
+ * (ADR-0195 SD2: `cloud_ai_service`; ADR-0218: `ml_platform_asset`; both matched by `identifier`). SD1 and SD3 add
+ * theirs here the same way.
  */
 export const SHIPPED_SIGNATURE_SEED: ReadonlyArray<Omit<AiSignature, "lastUpdatedAt">> = Object.freeze([
   ...DEFAULT_AI_SIGNATURES,
-  ...CLOUD_AI_SERVICE_SEED.map((r) => ({
+  ...[...CLOUD_AI_SERVICE_SEED, ...ML_PLATFORM_ASSET_SEED].map((r) => ({
     provider: r.provider,
     kind: r.kind,
     value: r.value,

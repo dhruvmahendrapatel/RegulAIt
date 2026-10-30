@@ -11,13 +11,18 @@ import {
   activeDiscoveryPosture,
   DISCOVERY_CREDENTIAL_WARNING_DEFAULT_DAYS,
   DISCOVERY_ENDPOINT_RETENTION_DEFAULT_DAYS,
+  DISCOVERY_FAMILY_SWITCHES_DEFAULT,
+  familySwitchProblem,
   type ActiveDiscoverySource,
+  type DiscoveryFamilySwitches,
   type DiscoverySourceKind,
 } from "@regulait/shared";
 
 export interface DiscoverySettingsView {
   credentialWarningAgeDays: number;
   endpointRetentionDays: number;
+  /** ADR-0218: the wider-source family switches (all off by default) */
+  families: DiscoveryFamilySwitches;
   version: number;
   updatedAt: string | null;
 }
@@ -29,6 +34,7 @@ export async function loadDiscoverySettings(db: Db): Promise<DiscoverySettingsVi
     return {
       credentialWarningAgeDays: DISCOVERY_CREDENTIAL_WARNING_DEFAULT_DAYS,
       endpointRetentionDays: DISCOVERY_ENDPOINT_RETENTION_DEFAULT_DAYS,
+      families: DISCOVERY_FAMILY_SWITCHES_DEFAULT,
       version: 1,
       updatedAt: null,
     };
@@ -36,18 +42,21 @@ export async function loadDiscoverySettings(db: Db): Promise<DiscoverySettingsVi
   return {
     credentialWarningAgeDays: row.credentialWarningAgeDays,
     endpointRetentionDays: row.endpointRetentionDays,
+    families: { saas: row.saasSourcesEnabled, identity: row.identitySourcesEnabled, ml_platform: row.mlPlatformSourcesEnabled },
     version: row.version,
     updatedAt: row.updatedAt.toISOString(),
   };
 }
 
-/** the enabled sources, by name */
+/** the enabled sources, by name; a source whose family is switched off is not scanned, so it is not named (ADR-0218) */
 export async function activeDiscoverySources(db: Db): Promise<ActiveDiscoverySource[]> {
-  return db
+  const { families } = await loadDiscoverySettings(db);
+  const rows = await db
     .select({ name: discoverySources.name, kind: discoverySources.kind })
     .from(discoverySources)
     .where(eq(discoverySources.enabled, true))
     .orderBy(asc(discoverySources.name));
+  return rows.filter((r) => familySwitchProblem(r.kind, families) === null);
 }
 
 /** the posture sentence naming the enabled sources (decision 5b) */
@@ -75,6 +84,8 @@ export interface DiscoveryPosture {
   credentialsRefused: SourceRef[];
   credentialWarningAgeDays: number;
   endpointRetentionDays: number;
+  /** ADR-0218: the wider-source family switches */
+  families: DiscoveryFamilySwitches;
   statement: string;
 }
 
@@ -106,7 +117,8 @@ export async function discoveryPosture(db: Db): Promise<DiscoveryPosture> {
     if (c.writeScope === "refused") credentialsRefused.push(s);
   }
   const staleCredentials = staticCredentials.filter((c) => c.ageDays >= settings.credentialWarningAgeDays);
-  const enabled = sources.filter((s) => s.enabled);
+  // a source whose family is switched off is never run, so it is not counted as scanning (ADR-0218)
+  const enabled = sources.filter((s) => s.enabled && familySwitchProblem(s.kind, settings.families) === null);
   return {
     sourcesTotal: sources.length,
     sourcesEnabled: enabled,
@@ -116,6 +128,7 @@ export async function discoveryPosture(db: Db): Promise<DiscoveryPosture> {
     credentialsRefused,
     credentialWarningAgeDays: settings.credentialWarningAgeDays,
     endpointRetentionDays: settings.endpointRetentionDays,
+    families: settings.families,
     statement: activeDiscoveryPosture(enabled),
   };
 }

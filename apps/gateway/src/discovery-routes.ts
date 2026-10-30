@@ -18,6 +18,7 @@
  *   GET    /v1/discovery/runs                             recent runs, optionally for one source
  *   GET    /v1/discovery/settings                         the warning age and the endpoint retention
  *   PUT    /v1/discovery/settings                         lengthening either is a `settings_relax` step-up (CAS)
+ *                                                     turning a wider-source family on (ADR-0218) is the same step-up
  *   POST   /v1/discovery/pseudonyms/:pseudonym/reveal     a `pseudonym_reveal` step-up, audited
  *
  * THE SECRET NEVER LEAVES. No view below returns `secret_ciphertext` or the
@@ -68,6 +69,8 @@ import {
   publicConfigProblem,
   defaultCredentialMode,
   scopeWidens,
+  DISCOVERY_GATED_FAMILIES,
+  familySwitchProblem,
 } from "@regulait/shared";
 import { checkStepUp, isStepUpPrompt, type StepUpCheckArgs } from "./step-up.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
@@ -132,6 +135,11 @@ const settingsSchema = z
     version: z.number().int().min(1),
     credentialWarningAgeDays: z.number().int().min(DISCOVERY_CREDENTIAL_WARNING_MIN_DAYS).max(DISCOVERY_CREDENTIAL_WARNING_MAX_DAYS).optional(),
     endpointRetentionDays: z.number().int().min(DISCOVERY_ENDPOINT_RETENTION_MIN_DAYS).max(DISCOVERY_ENDPOINT_RETENTION_MAX_DAYS).optional(),
+    // ADR-0218: the wider-source family switches; turning one on is a relaxation, turning one off is free
+    families: z
+      .object({ saas: z.boolean().optional(), identity: z.boolean().optional(), ml_platform: z.boolean().optional() })
+      .strict()
+      .optional(),
   })
   .strict();
 const uuidParam = z.object({ sourceId: z.string().uuid() });
@@ -374,6 +382,9 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
     if (!registry.has(body.kind)) {
       return send(reply, refusal(409, "scanner_not_built", `no scanner is built for ${body.kind} yet (ADR-0195 ${DISCOVERY_KIND_SPECS[body.kind].slice}); a source of this kind cannot be created`));
     }
+    // ADR-0218: a wider-source family is off until an admin turns it on
+    const createFamilyOff = familySwitchProblem(body.kind, (await loadDiscoverySettings(db)).families);
+    if (createFamilyOff) return send(reply, refusal(409, "family_disabled", createFamilyOff));
     // secure by default: a target the kind's scanner rejects is refused at save time, not at run time
     const createProblem = registry.get(body.kind)!.validateTarget?.(body.target, body.scope) ?? null;
     if (createProblem) return send(reply, refusal(400, "target_invalid", createProblem));
@@ -487,6 +498,8 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
       if (s.enabled) return refusal(409, "already_enabled", "this source is already enabled");
       const scanner = registry.get(s.kind);
       if (!scanner) return refusal(409, "scanner_not_built", `no scanner is built for ${s.kind} yet (ADR-0195 ${DISCOVERY_KIND_SPECS[s.kind].slice})`);
+      const enableFamilyOff = familySwitchProblem(s.kind, (await loadDiscoverySettings(t)).families);
+      if (enableFamilyOff) return refusal(409, "family_disabled", enableFamilyOff);
       const enableCred = await liveCredential(t, s.id);
       if (scanner.requiresCredential && !enableCred) {
         return refusal(409, "credential_missing", "store a credential for this source before enabling it");
@@ -675,6 +688,8 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
     if (!s.enabled) return send(reply, refusal(409, "source_disabled", "enable this source before running it"));
     const scanner = registry.get(s.kind);
     if (!scanner) return send(reply, refusal(409, "scanner_not_built", `no scanner is built for ${s.kind} yet`));
+    const runFamilyOff = familySwitchProblem(s.kind, (await loadDiscoverySettings(db)).families);
+    if (runFamilyOff) return send(reply, refusal(409, "family_disabled", runFamilyOff));
     const runCred = await liveCredential(db, s.id);
     if (scanner.requiresCredential && !runCred) {
       return send(reply, refusal(409, "credential_missing", "store a credential for this source first"));
@@ -731,6 +746,11 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
       if (body.endpointRetentionDays !== undefined && body.endpointRetentionDays > row.endpointRetentionDays) {
         relaxed[DISCOVERY_STEP_UP_KEYS.retention] = body.endpointRetentionDays;
       }
+      // ADR-0218: turning a wider-source family ON is a relaxation, bound to exactly the families being turned on
+      const beforeFamilies = { saas: row.saasSourcesEnabled, identity: row.identitySourcesEnabled, ml_platform: row.mlPlatformSourcesEnabled };
+      const afterFamilies = { ...beforeFamilies, ...(body.families ?? {}) };
+      const turnedOn = DISCOVERY_GATED_FAMILIES.filter((f) => afterFamilies[f] && !beforeFamilies[f]);
+      if (turnedOn.length > 0) relaxed[DISCOVERY_STEP_UP_KEYS.families] = turnedOn;
       if (Object.keys(relaxed).length > 0) {
         const r = await spendStepUp(req, { kind: "settings_relax", facts: { values: relaxed } }, null);
         if (r) return r;
@@ -740,6 +760,9 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
         .set({
           ...(body.credentialWarningAgeDays !== undefined ? { credentialWarningAgeDays: body.credentialWarningAgeDays } : {}),
           ...(body.endpointRetentionDays !== undefined ? { endpointRetentionDays: body.endpointRetentionDays } : {}),
+          saasSourcesEnabled: afterFamilies.saas,
+          identitySourcesEnabled: afterFamilies.identity,
+          mlPlatformSourcesEnabled: afterFamilies.ml_platform,
           version: row.version + 1,
           updatedBy: actor(req),
           updatedAt: sql`now()`,
@@ -747,7 +770,7 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
         .where(eq(discoverySettings.id, 1));
       await audit(t, req, "discovery_settings", null, Object.keys(relaxed).length ? "discovery-settings-relaxed" : "discovery-settings-updated", "allow",
         `discovery settings updated${Object.keys(relaxed).length ? " (relaxed, with a step-up)" : ""}`,
-        { before: { credentialWarningAgeDays: row.credentialWarningAgeDays, endpointRetentionDays: row.endpointRetentionDays }, after: { credentialWarningAgeDays: body.credentialWarningAgeDays ?? row.credentialWarningAgeDays, endpointRetentionDays: body.endpointRetentionDays ?? row.endpointRetentionDays } });
+        { before: { credentialWarningAgeDays: row.credentialWarningAgeDays, endpointRetentionDays: row.endpointRetentionDays, families: beforeFamilies }, after: { credentialWarningAgeDays: body.credentialWarningAgeDays ?? row.credentialWarningAgeDays, endpointRetentionDays: body.endpointRetentionDays ?? row.endpointRetentionDays, families: afterFamilies } });
       return true;
     });
     if (isRefusal(out)) return send(reply, out);

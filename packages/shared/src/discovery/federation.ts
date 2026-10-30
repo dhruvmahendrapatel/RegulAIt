@@ -108,6 +108,10 @@ export function federationUnsupportedReason(kind: string): string | null {
     const name = kind === "repo_gitlab" ? "GitLab" : "Bitbucket";
     return `${name} accepts no external OIDC token for its API, so a federated credential cannot work; store a read-only access token in static mode (a relaxation, confirmed with a step-up)`;
   }
+  // ADR-0218: a generic SaaS inventory API and an MLflow-compatible platform take no external OIDC token either
+  if (kind === "saas_inventory_api" || kind === "ml_mlflow") {
+    return "this kind of source accepts no external OIDC token, so a federated credential cannot work; store a read-only API token in static mode (a relaxation, confirmed with a step-up)";
+  }
   return null;
 }
 

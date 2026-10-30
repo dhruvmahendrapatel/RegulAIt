@@ -601,3 +601,16 @@ the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
   carried on their own.
 - Freeze week: ADR-0198 §2 covers entry raises only; this raise rests on the owner decision above. ADR-0198's post-demo
   reset applies to it.
+
+## Addendum / As built (2026-10-30) — all JS 1,050 → 1,052 kB (P9 wider discovery sources)
+
+The owner's backlog rules of 2026-10-30 cap all JS at 1,060 kB, shared by every backlog lane:
+<https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6522850568>. This raise stays inside that cap
+and is the ADR-recorded exception the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
+
+- `all JS` from `1050 kB` to `1052 kB` (+2 kB). Entry JS stays at 138.5 kB and entry CSS at 10.7 kB; the lazy chunk
+  ceilings are unchanged.
+- Why: main measured 1,050,176 B locally before the lane, already at its ceiling; the lane adds 732 B (gzip) to the
+  lazy governance chunk: the three family switches on Discovery sources, the switched-off note at the point of
+  choosing a kind, and two catalogue kinds ([ADR-0218](0218-wider-discovery-sources.md)). Measured total 1,050,908 B.
+- Other backlog lanes may raise the same ceiling; the master reconciles the rows when the lanes merge, inside 1,060 kB.

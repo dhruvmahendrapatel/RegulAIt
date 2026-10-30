@@ -171,6 +171,10 @@ export const ARTIFACT_SIGNATURE_KINDS = [
   "browser_extension",
   "local_runtime",
   "assistant_config",
+  // ADR-0218: an OAuth/OIDC client application an identity provider holds consents for (its application id), and an
+  // asset on a standalone ML platform (`mlflow:serving_endpoint`, `mlflow:external_model:<provider>`, ...)
+  "oauth_app",
+  "ml_platform_asset",
 ] as const;
 export type ArtifactSignatureKind = (typeof ARTIFACT_SIGNATURE_KINDS)[number];
 
@@ -560,6 +564,8 @@ const ARTIFACT_SEVERITY: Readonly<Record<ArtifactSignatureKind, ShadowAiSeverity
   browser_extension: "medium",
   local_runtime: "medium",
   assistant_config: "low",
+  oauth_app: "medium",
+  ml_platform_asset: "medium",
 };
 const ARTIFACT_PHRASE: Readonly<Record<ArtifactSignatureKind, string>> = {
   cloud_ai_service: "the cloud AI service",
@@ -568,6 +574,8 @@ const ARTIFACT_PHRASE: Readonly<Record<ArtifactSignatureKind, string>> = {
   browser_extension: "the browser extension",
   local_runtime: "the local model runtime",
   assistant_config: "the coding-assistant config",
+  oauth_app: "the identity-provider app",
+  ml_platform_asset: "the ML platform asset",
 };
 
 const CONF_RANK: Readonly<Record<SignatureConfidence, number>> = { low: 0, medium: 1, high: 2 };
