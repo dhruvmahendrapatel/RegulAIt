@@ -54,6 +54,7 @@ import {
   DETECTION_MONITOR_RULE_IDS,
   MONITOR_RULES,
   MONITOR_RULE_IDS,
+  MODEL_DRIFT_MONITOR_RULE_ID,
   effectiveRiskRating,
   type AccountabilityMonitorRuleId,
   type AssuranceMonitorRuleId,
@@ -94,6 +95,7 @@ import { afterAlertsRaised, alertOwnershipAtRaise, alertOwnershipViews } from ".
 // ADR-0186 M — the four detection rules' loader (slice M's module)
 import { detectionMonitorInput } from "./monitor-detection-rules.js";
 import { errMessage } from "./err-serializer.js";
+import { modelDriftMonitorInput } from "./classical-drift-monitor.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -141,6 +143,8 @@ export interface MonitorOptionalInputs {
   /** ADR-0186 M — the four detection rules (monitor-detection-rules.ts; the
    * foundation's loader reports none, so none is evaluated) */
   detection: DetectionLoader;
+  /** ADR-0223 — classical-model drift (classical-drift-monitor.ts) */
+  modelDrift: (db: Db, now: Date) => Promise<MonitorAssuranceInput>;
 }
 type DetectionLoader = (db: Db, now: Date) => Promise<Partial<Record<DetectionMonitorRuleId, MonitorAssuranceInput>>>;
 type AssuranceLoader = (db: Db, now: Date) => Promise<Partial<Record<AssuranceMonitorRuleId, MonitorAssuranceInput>>>;
@@ -163,6 +167,7 @@ const OPTIONAL_INPUT_RULES: Record<keyof MonitorOptionalInputs, readonly Monitor
   feedback: ["feedback_sla_breached"],
   literacy: ["literacy_coverage_gap"],
   detection: [...DETECTION_MONITOR_RULE_IDS],
+  modelDrift: [MODEL_DRIFT_MONITOR_RULE_ID],
 };
 const ASSURANCE_INPUTS = ["conditionMetrics", "requiredTests", "autonomy", "residualRisks"] as const;
 const ACCOUNTABILITY_INPUTS = ["incidents", "feedback", "literacy"] as const;
@@ -200,6 +205,7 @@ export async function runGovernanceMonitor(
     feedback: feedbackMonitorInput,
     literacy: literacyMonitorInput,
     detection: detectionMonitorInput,
+    modelDrift: modelDriftMonitorInput,
     ...opts.optionalInputs,
   };
   const failedInputs: Array<{ input: keyof MonitorOptionalInputs; ruleId: MonitorRuleId; error: string }> = [];
@@ -352,6 +358,9 @@ export async function runGovernanceMonitor(
   for (const [ruleId, a] of Object.entries(detection)) {
     for (const k of a?.heldSubjectKeys ?? []) heldSubjects.add(`${ruleId}|${k}`);
   }
+  // ADR-0223 — classical-model drift; a latest summary with too few samples holds its episode
+  const modelDrift = await optional("modelDrift");
+  for (const k of modelDrift?.heldSubjectKeys ?? []) heldSubjects.add(`${MODEL_DRIFT_MONITOR_RULE_ID}|${k}`);
 
   const findings = evaluateMonitorRules({
     useCases,
@@ -370,6 +379,7 @@ export async function runGovernanceMonitor(
     assurance,
     accountability,
     detection,
+    ...(modelDrift ? { modelDrift } : {}),
   });
   const notEvaluated = new Set<string>([
     ...failedInputs.map((f) => f.ruleId),
