@@ -314,6 +314,10 @@ function UpsertProfileCard(props: {
   // version), so submitting is off while the typed tag names a stored profile.
   const canSubmit = listReady && !match;
   const tplOpts = props.templates.filter((t) => !t.retiredAt);
+  const activeIds = new Set(tplOpts.map((t) => t.id));
+  const tplName = new Map(props.templates.map((t) => [t.id, t.name]));
+  // retired (or unknown) templates the profile still requires stay required: they show disabled and the Select keeps them
+  const keptIds = f.requiredTemplateIds.filter((id) => !activeIds.has(id));
   return (
     <Card
       title="New profile"
@@ -359,13 +363,25 @@ function UpsertProfileCard(props: {
         <Field label="Required workflow templates (ctrl/cmd-click)">
           <Select
             multiple
-            size={Math.min(4, Math.max(2, tplOpts.length || 2))}
+            size={Math.min(4, Math.max(2, tplOpts.length + keptIds.length || 2))}
             value={f.requiredTemplateIds}
-            onChange={(e) => set("requiredTemplateIds", Array.from(e.target.selectedOptions).map((o) => o.value))}
+            onChange={(e) =>
+              set("requiredTemplateIds", [
+                ...keptIds,
+                ...Array.from(e.target.selectedOptions)
+                  .map((o) => o.value)
+                  .filter((id) => activeIds.has(id)),
+              ])
+            }
           >
             {tplOpts.map((t) => (
               <option key={t.id} value={t.id}>
                 {t.name}
+              </option>
+            ))}
+            {keptIds.map((id) => (
+              <option key={id} value={id} disabled>
+                {(tplName.get(id) ?? id.slice(0, 8) + "…") + " (retired, stays required)"}
               </option>
             ))}
           </Select>
