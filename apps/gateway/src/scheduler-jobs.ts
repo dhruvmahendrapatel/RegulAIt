@@ -31,6 +31,7 @@
  * stated reason when that human is gone. That asymmetry is deliberate: nothing
  * a timer does should be able to reach a model the initiating user could not.
  */
+import { runMrmAutoRetestSweep } from "./mrm-auto-retest.js";
 import type { Db } from "@regulait/db";
 import { runMrmExpirySweep } from "./mrm.js";
 import { runApprovalSlaSweep } from "./workbench.js";
@@ -76,6 +77,8 @@ export const SCHEDULER_JOB_NAMES = {
   spendAnomalies: "spend-anomaly-sweep",
   evalDrift: "eval-drift-sweep",
   redteam: "redteam-sweep",
+  // ADR-0217: automatic re-test after a model change
+  mrmAutoRetest: "mrm-auto-retest-sweep",
   trainingPoll: "training-job-poll-sweep",
   costReconciliation: "cost-reconciliation-sweep",
   certificationExpiry: "certification-expiry-sweep",
@@ -221,6 +224,33 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
             ran: out.ran.length,
             regressions: out.ran.filter((r) => r.regression).length,
             skipped: out.skipped.length,
+          },
+        };
+      },
+    },
+    {
+      // ADR-0217 — re-runs a changed model's chosen suites once per change, as the people who chose them, and
+      // attaches the results to its re-certification request. A no-op while `mrmAutoRetestEnabled` is off.
+      name: SCHEDULER_JOB_NAMES.mrmAutoRetest,
+      description:
+        "After a model, prompt or endpoint change on a certified model, re-run its pinned eval baselines and " +
+        "probed red-team libraries once, and attach the results to its re-certification. Off unless an admin " +
+        "turns it on; spends model tokens only when something changed.",
+      adr: "ADR-0217",
+      defaultIntervalSeconds: HOUR,
+      run: async (ctx) => {
+        const out = await runMrmAutoRetestSweep(ctx.db, opts.dataKey);
+        const runs = out.cards.flatMap((c) => c.runs);
+        return {
+          itemsProcessed: runs.length,
+          detail: {
+            enabled: out.enabled,
+            cards: out.cards.length,
+            passed: runs.filter((r) => r.status === "passed").length,
+            failedGate: runs.filter((r) => r.status === "failed_gate").length,
+            reported: runs.filter((r) => r.status === "reported").length,
+            refused: runs.filter((r) => r.status === "refused").length,
+            skipped: runs.filter((r) => r.status === "skipped").length,
           },
         };
       },

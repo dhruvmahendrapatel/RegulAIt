@@ -2430,6 +2430,9 @@ export const updateOrgSettingsSchema = z
     mrmExpiryWarnDays: z.number().int().min(0).max(3650).optional(),
     mrmStalenessRecertEnabled: z.boolean().optional(),
     mrmStalenessRecertThreshold: z.number().int().min(1).max(100_000).optional(),
+    /** ADR-0217: automatic re-test after a model change (strict false: it spends model tokens, so turning it
+     * on is a relaxation and needs a step-up). It adds evidence to a re-certification; it never replaces one. */
+    mrmAutoRetestEnabled: z.boolean().optional(),
     /** ADR-0182 (ADR-0175 batch D4) — the accountability settings. Each one
      * defaults STRICT (migration 0162 wrote the strict value onto the existing
      * row); a write that relaxes one is audited like every other key here, as

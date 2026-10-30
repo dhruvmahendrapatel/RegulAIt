@@ -1436,6 +1436,13 @@
       "when": 1785149000000,
       "tag": "0214_mcp_upstream_credential",
       "breakpoints": true
+    },
+    {
+      "idx": 237,
+      "version": "7",
+      "when": 1785172000000,
+      "tag": "0237_mrm_auto_retest",
+      "breakpoints": true
     }
   ]
 }
