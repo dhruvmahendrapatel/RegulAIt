@@ -4,7 +4,7 @@
  * Deleting a held role answers 409 with the holders named; force-delete
  * requires a recorded, audited reason.
  */
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api, ApiError } from "../../../api/client";
 import { withStepUp } from "../../../stepup/stepUp";
@@ -19,6 +19,7 @@ import {
   EmptyState,
   Field,
   Input,
+  RowActions,
   Select,
   Table,
 } from "../../../ui/kit";
@@ -42,6 +43,9 @@ import {
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
+// G10 (ADR-0206): the rename dialog is its own chunk, loaded when an admin opens it
+const RenameModal = lazy(() => import("./RenameModal").then((m) => ({ default: m.RenameModal })));
+
 export default function RolesPage() {
   const roles = useRoles();
   const users = useUsers();
@@ -55,6 +59,7 @@ export default function RolesPage() {
   const [activeRoleId, setActiveRoleId] = useState("");
 
   const [confirmDelete, setConfirmDelete] = useState<Role | null>(null);
+  const [renameTarget, setRenameTarget] = useState<Role | null>(null);
   const [forceDelete, setForceDelete] = useState<{ role: Role; holders: string[] } | null>(null);
 
   const deleteRole = async (role: Role) => {
@@ -151,16 +156,33 @@ export default function RolesPage() {
                 srHeader: "Actions",
                 align: "right",
                 render: (r) => (
-                  <Button
-                    size="sm"
-                    variant="danger"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setConfirmDelete(r);
-                    }}
-                  >
-                    delete
-                  </Button>
+                  <RowActions
+                    slot="0"
+                    secondary={
+                      <Button
+                        size="sm"
+                        aria-label={`Rename role ${r.name}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setRenameTarget(r);
+                        }}
+                      >
+                        Rename
+                      </Button>
+                    }
+                    rest={
+                      <Button
+                        size="sm"
+                        variant="danger"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setConfirmDelete(r);
+                        }}
+                      >
+                        delete
+                      </Button>
+                    }
+                  />
                 ),
               },
             ]}
@@ -187,6 +209,11 @@ export default function RolesPage() {
         )}
       </div>
 
+      {renameTarget && (
+        <Suspense fallback={null}>
+          <RenameModal noun="role" target={renameTarget} onClose={() => setRenameTarget(null)} />
+        </Suspense>
+      )}
       <ConfirmModal
         open={confirmDelete !== null}
         title={`Delete role “${confirmDelete?.name}”?`}

@@ -4706,3 +4706,5 @@ export * from "./endpoint-discovery/index.js";
 export * from "./provenance/index.js";
 // ADR-0204: a static upstream credential per MCP server (header refusals, the write contract, the read view)
 export * from "./mcp-upstream-credential.js";
+// ADR-0206: G1 project archive and G10 rename roles and teams (bodies, refusal codes, the archive-impact view)
+export * from "./project-archive-rename.js";

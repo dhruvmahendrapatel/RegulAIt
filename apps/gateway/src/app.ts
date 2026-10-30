@@ -459,6 +459,8 @@ import {
 } from "./org-settings.js";
 // ADR-0202 decision 4 — the per-beat simulated fallback for the hosted demo (admin-only, audited)
 import { registerDemoBeatRoutes } from "./demo-beats.js";
+import { registerProjectArchiveRoutes } from "./project-archive.js";
+import { registerRoleTeamRenameRoutes } from "./role-team-rename.js";
 // ADR-0185 G5 — request metrics (a no-op seam until the meter lands)
 import { registerMetricsHooks } from "./metrics.js";
 import {
@@ -5470,6 +5472,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerOrgSettingsRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0202 decision 4 — the demo beats' simulated fallback; admin-only (not in NON_ADMIN_ROUTES), audited
   registerDemoBeatRoutes(app, db);
+  // ADR-0206: G1 project archive and G10 rename roles and teams (admin-only)
+  registerProjectArchiveRoutes(app, db);
+  registerRoleTeamRenameRoutes(app, db);
   registerPosturePresetRoutes(app, db, { sink: anchorSink, bootstrapConfigured: Boolean(opts.bootstrapToken) });
   // ADR-0124 — the kill switch and safe modes
   registerExecutionControlRoutes(app, db);

@@ -5,12 +5,12 @@
  * context answers 409 with what blocks; force-delete requires a recorded
  * reason and provenance survives.
  */
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { api, ApiError } from "../../../api/client";
 import { withStepUp } from "../../../stepup/stepUp";
 import type { Team } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, Input, Select, SkeletonBlock } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, Input, RowActions, Select, SkeletonBlock } from "../../../ui/kit";
 import {
   ReasonModal,
   optionEls,
@@ -23,6 +23,9 @@ import {
 } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+
+// G10 (ADR-0206): the rename dialog is its own chunk, loaded when an admin opens it
+const RenameModal = lazy(() => import("./RenameModal").then((m) => ({ default: m.RenameModal })));
 
 async function deleteWithBody(path: string, body: unknown): Promise<void> {
   const res = await fetch(path, {
@@ -55,6 +58,7 @@ export default function TeamsPage() {
   const [memberUser, setMemberUser] = useState("");
   const [removeMember, setRemoveMember] = useState<{ team: Team; userId: string; name: string } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<Team | null>(null);
+  const [renameTarget, setRenameTarget] = useState<Team | null>(null);
   const [forceDelete, setForceDelete] = useState<{
     team: Team;
     contextItems: number;
@@ -208,15 +212,30 @@ export default function TeamsPage() {
                     ))}
                   </div>
                 </div>
-                <Button size="sm" variant="danger" onClick={() => setConfirmDelete(team)}>
-                  delete team
-                </Button>
+                <RowActions
+                  slot="0"
+                  secondary={
+                    <Button size="sm" aria-label={`Rename team ${team.name}`} onClick={() => setRenameTarget(team)}>
+                      Rename
+                    </Button>
+                  }
+                  rest={
+                    <Button size="sm" variant="danger" onClick={() => setConfirmDelete(team)}>
+                      delete team
+                    </Button>
+                  }
+                />
               </div>
             ))
           )}
         </Card>
       </div>
 
+      {renameTarget && (
+        <Suspense fallback={null}>
+          <RenameModal noun="team" target={renameTarget} onClose={() => setRenameTarget(null)} />
+        </Suspense>
+      )}
       <ConfirmModal
         open={removeMember !== null}
         title={`Remove ${removeMember?.name} from ${removeMember?.team.name}?`}

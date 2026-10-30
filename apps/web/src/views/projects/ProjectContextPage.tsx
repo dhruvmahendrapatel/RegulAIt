@@ -50,7 +50,7 @@ import {
   SkeletonBlock,
   Textarea,
 } from "../../ui/kit";
-import { ProjectChrome, useProjectChrome } from "./projectChrome";
+import { ARCHIVED_REASON, ProjectChrome, useProjectChrome } from "./projectChrome";
 import v from "../views.module.css";
 import c from "./context.module.css";
 
@@ -270,6 +270,10 @@ export default function ProjectContextPage() {
         actions={
           chrome.canWrite ? (
             <Button size="sm" variant="primary" onClick={() => setEditing({ key: null })}>
+              Add context
+            </Button>
+          ) : chrome.archived ? (
+            <Button size="sm" variant="primary" disabled title={ARCHIVED_REASON}>
               Add context
             </Button>
           ) : undefined
