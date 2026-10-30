@@ -75,6 +75,7 @@ const UseCaseOverviewPage = screen(() => import("./screens/admin-ai-governance")
 const GovernanceAlertsPage = screen(() => import("./screens/admin-overview"), "GovernanceAlertsPage");
 const DependencyGraphPage = screen(() => import("./screens/admin-ai-governance"), "DependencyGraphPage");
 const RegulatoryIntelligencePage = screen(() => import("./screens/admin-ai-governance"), "RegulatoryIntelligencePage");
+const RegulatoryFeedSourcesPage = screen(() => import("./screens/admin-ai-governance"), "RegulatoryFeedSourcesPage");
 const VendorsPage = screen(() => import("./screens/admin-ai-governance"), "VendorsPage");
 const RisksPage = screen(() => import("./screens/admin-ai-governance"), "RisksPage");
 const InventoryPage = screen(() => import("./screens/admin-access-reviews"), "InventoryPage");
@@ -116,6 +117,7 @@ const BillingPage = screen(() => import("./screens/admin-cost-optimization"), "B
 const OptimizationPage = screen(() => import("./screens/admin-cost-optimization"), "OptimizationPage");
 const ComplianceProfilesPage = screen(() => import("./screens/admin-compliance-infra"), "ComplianceProfilesPage");
 const CompliancePacksPage = screen(() => import("./screens/admin-compliance-infra"), "CompliancePacksPage");
+const FrameworkImportsPage = screen(() => import("./screens/admin-compliance-infra"), "FrameworkImportsPage");
 const InfrastructurePage = screen(() => import("./screens/admin-compliance-infra"), "InfrastructurePage");
 const OrganizationPage = screen(() => import("./screens/admin-settings"), "OrganizationPage");
 const RetentionPage = screen(() => import("./screens/admin-settings"), "RetentionPage");
@@ -267,6 +269,7 @@ function ApplicationRoutes() {
                 <Route path="governance/alerts" element={<GovernanceAlertsPage />} />
                 <Route path="governance/graph" element={<DependencyGraphPage />} />
                 <Route path="governance/regulatory" element={<RegulatoryIntelligencePage />} />
+                <Route path="governance/regulatory/sources" element={<RegulatoryFeedSourcesPage />} />
                 {/* ADR-0182 (D4): A11 decision regression, A14 AI literacy */}
                 <Route path="governance/decision-regression" element={<DecisionRegressionPage />} />
                 <Route path="governance/literacy" element={<LiteracyPage />} />
@@ -326,6 +329,7 @@ function ApplicationRoutes() {
                 <Route path="compliance" element={<ComplianceProfilesPage />} />
                 {/* ADR-0058 */}
                 <Route path="compliance-packs" element={<CompliancePacksPage />} />
+                <Route path="compliance-packs/imports" element={<FrameworkImportsPage />} />
                 <Route path="infrastructure" element={<InfrastructurePage />} />
                 <Route path="organization" element={<OrganizationPage />} />
                 <Route path="retention" element={<RetentionPage />} />
