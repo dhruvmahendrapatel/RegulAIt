@@ -508,6 +508,8 @@ describe("6. the covered / NOT-covered inventory", () => {
     // ADR-0175: a held skill's admission reason and a release-age override reason
     "builder_skills.admit_reason",
     "release_overrides.reason",
+    // ADR-0216: an admin's reason for relaxing a model file's supply-chain check
+    "model_artifact_supply_chain_relaxations.reason",
     // ADR-0175 A15: where an energy factor came from
     "energy_factors.source_note",
     // ADR-0173 batch 2c: an annotation comment, a judge rationale, a rule pause reason
