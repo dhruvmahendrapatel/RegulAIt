@@ -45,7 +45,6 @@ export default function CostDashboardPage() {
     <>
       <PageHeader
         title="Cost dashboard"
-        sub="Per-project AI spend, attributed at the point of every gateway call."
         info={<p>Real-time per-project AI spend attribution applied at the point of every gateway call — budget-vs-actual, forecast, showback, chargeback. Built into the gateway, not bolted on.</p>}
       />
       <div className={v.stack}>
@@ -408,7 +407,16 @@ function InitiativesCard(props: { initiatives: Initiative[]; loading: boolean })
   // Batch U4: the initiative opened for its child projects and their spend
   const [openId, setOpenId] = useState<string | null>(null);
   return (
-    <Card title="Initiatives — cross-team rollup">
+    <Card
+      title="Initiatives — cross-team rollup"
+      info={
+        <p>
+          An initiative is a flat, reporting-only grouping of projects for cross-team cost attribution — no
+          initiative-level budget or enforcement; each project keeps its own budget and governance. Group a
+          project under one on the edit form above.
+        </p>
+      }
+    >
       <form
         className={a.formRow}
         onSubmit={(e) => {
@@ -496,11 +504,6 @@ function InitiativesCard(props: { initiatives: Initiative[]; loading: boolean })
         loading={props.loading}
         empty={<EmptyState title="No initiatives" />}
       />
-      <p className={v.faint}>
-        An initiative is a flat, reporting-only grouping of projects for cross-team cost attribution — no
-        initiative-level budget or enforcement; each project keeps its own budget and governance. Group a
-        project under one on the edit form above.
-      </p>
       {openId && <InitiativeDetail key={openId} initiativeId={openId} onClose={() => setOpenId(null)} />}
     </Card>
   );

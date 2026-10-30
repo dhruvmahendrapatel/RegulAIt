@@ -1,0 +1,80 @@
+/* ---- ADR-0094: the home launcher's suite tiles ----
+   One tile per product suite; the grid packs and stacks responsively (one
+   column at phone widths via auto-fill). Only the home page uses these, so they
+   live here, out of the entry CSS. */
+.tileGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: var(--s2);
+}
+.tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s0-5);
+  padding: var(--s1-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  color: var(--text);
+  text-decoration: none;
+  transition: border-color var(--rg-dur-fast) var(--rg-ease),
+    box-shadow var(--rg-dur-fast) var(--rg-ease);
+}
+.tile:hover {
+  border-color: var(--rg-signal);
+  box-shadow: var(--shadow-md);
+  text-decoration: none;
+  color: var(--text);
+}
+.tileGlyph {
+  color: var(--rg-ink-muted);
+}
+.tile:hover .tileGlyph {
+  color: var(--rg-signal-700);
+}
+/* glyph inline with the name: one header line per tile */
+.tileHead {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  min-width: 0;
+}
+.tileName {
+  font-weight: 600;
+  font-size: var(--text-md);
+}
+/* the tile is a div (its purpose sits behind an (i) button, which may not nest
+   in a link): the name's link covers the whole tile, the (i) sits above it */
+.tileLink,
+.tileLink:hover {
+  color: inherit;
+  text-decoration: none;
+}
+.tileLink::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+}
+.tileHead > :last-child {
+  position: relative;
+  z-index: 1;
+}
+.tileStat {
+  margin-top: auto;
+  padding-top: var(--s1);
+  display: flex;
+  align-items: baseline;
+  gap: var(--s1);
+}
+.tileStatValue {
+  font-size: var(--text-lg);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.tileStatLabel {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-dim);
+}

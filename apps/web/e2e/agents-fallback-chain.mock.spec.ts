@@ -97,7 +97,7 @@ async function checkScreen(page: Page, label: string) {
 }
 
 const chainCard = (page: Page) =>
-  page.locator("section").filter({ has: page.getByText(/^Fallback chain \(ADR-0066\)/) }).first();
+  page.locator("section").filter({ has: page.getByText(/^Fallback chain — what runs/) }).first();
 
 const order = (page: Page) => chainCard(page).locator("ol li strong");
 

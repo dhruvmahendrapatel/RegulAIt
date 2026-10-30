@@ -213,7 +213,12 @@ test.describe("U3: spend and data key", () => {
     await expect(card.getByText("2 unpriced, not counted as zero", { exact: false })).toBeVisible();
     await expect(card.getByText("No USD total")).toBeVisible();
     await expect(card.getByText("22.00 EUR")).toBeVisible();
-    await expect(card.getByText("There is deliberately no combined figure.", { exact: false })).toBeVisible();
+    // the caveat stays visible as a short qualifier; its full sentence is in the metered (i)
+    await expect(card.getByText("no combined figure", { exact: false })).toBeVisible();
+    await expect(card.getByText("Imported · customer-supplied", { exact: false })).toBeVisible();
+    await card.getByRole("button", { name: "What is metered spend?" }).click();
+    await expect(page.getByRole("note")).toContainText("There is deliberately no combined figure.");
+    await page.keyboard.press("Escape");
     expect(m.calls.some((c) => c.path.startsWith(`/v1/users/${ME}/cost-consolidated`))).toBe(true);
     await expectAxeClean(page, "consolidated spend", '[data-testid="my-cost-consolidated"]');
   });

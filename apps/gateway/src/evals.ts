@@ -2687,8 +2687,8 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
         action: "re-run this dataset version against this agent and pin the NEW run",
       })),
       note:
-        "ADR-0072 corrected two scoring inversions, which changed what stored eval and red-team numbers MEAN " +
-        "without changing their shape. Migration 0083 MARKED every pre-existing run as semantics v1 — nothing " +
+        "Two scoring inversions were corrected, which changed what stored eval and red-team numbers MEAN " +
+        "without changing their shape. Every pre-existing run was MARKED as semantics v1 — nothing " +
         "was deleted and nothing was rewritten. Baseline resolution and both gates refuse to compare across " +
         "versions. Any pinned baseline listed above still blocks its dataset/agent from producing a comparable " +
         "delta until it is re-pinned; pinning a v1 run is now refused outright with `baseline_semantics_stale`.",

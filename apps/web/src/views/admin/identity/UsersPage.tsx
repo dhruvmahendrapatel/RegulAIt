@@ -267,7 +267,8 @@ export default function UsersPage() {
           title="API key lifetimes"
           keys={["apiKeyDefaultTtlDays", "apiKeyMaxTtlDays"]}
           testId="api-key-lifetimes"
-          intro={<p className={v.faint}>Applies to keys issued from now on; a key keeps the expiry it was issued with. The default can never be longer than the ceiling.</p>}
+          info={<p>Applies to keys issued from now on; a key keeps the expiry it was issued with. The default can never be longer than the ceiling.</p>}
+          helpInInfo
         />
       </div>
 

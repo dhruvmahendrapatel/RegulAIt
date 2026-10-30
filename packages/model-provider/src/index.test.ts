@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   AnthropicProvider,
+  anthropicThinking,
   MockModelProvider,
   ModelProviderError,
   GoogleProvider,
@@ -2450,8 +2451,9 @@ describe("thinking (ADR-0020 long tail): Anthropic extended thinking", () => {
         return anthropicJson(thinkingMessage);
       },
     });
+    // an earlier-generation id keeps the explicit budget form
     const r = await provider.dispatch({
-      model: "claude-opus-5",
+      model: "claude-test-4",
       input: "think about it",
       maxTokens: 2048,
       thinking: { budgetTokens: 1024 },
@@ -2464,6 +2466,41 @@ describe("thinking (ADR-0020 long tail): Anthropic extended thinking", () => {
     // the ledger stays honest: output_tokens is the provider's billed total,
     // thinking INCLUDED, carried unchanged
     expect(r.usage).toEqual({ inputTokens: 10, outputTokens: 57 });
+  });
+
+  it("sends adaptive thinking to a model that rejects budget_tokens, keeping max_tokens as the ceiling", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new AnthropicProvider({
+      apiKey: "k",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return anthropicJson({ ...thinkingMessage, model: "claude-opus-5-5" });
+      },
+    });
+    const r = await provider.dispatch({
+      model: "claude-opus-5-5",
+      input: "think about it",
+      maxTokens: 2048,
+      thinking: { budgetTokens: 1024 },
+    });
+    expect(captured!.thinking).toEqual({ type: "adaptive" });
+    expect(captured!).not.toHaveProperty("thinking.budget_tokens");
+    expect(captured!.max_tokens).toBe(2048);
+    expect(r.outputText).toBe("The answer is 42.");
+  });
+
+  it("anthropicThinking: generation from the id's shape; non-Claude ids keep the budget form", () => {
+    expect(anthropicThinking("claude-opus-5-5", 900)).toEqual({ type: "adaptive" });
+    expect(anthropicThinking("claude-test-12", 900)).toEqual({ type: "adaptive" });
+    expect(anthropicThinking("claude-test-4", 900)).toEqual({ type: "enabled", budget_tokens: 900 });
+    expect(anthropicThinking("claude-opus-4-8", 900)).toEqual({ type: "adaptive" });
+    expect(anthropicThinking("claude-opus-4-7", 900)).toEqual({ type: "adaptive" });
+    expect(anthropicThinking("claude-sonnet-4-6", 900)).toEqual({ type: "adaptive" });
+    expect(anthropicThinking("claude-haiku-4-5", 900)).toEqual({ type: "enabled", budget_tokens: 900 });
+    expect(anthropicThinking("claude-sonnet-4-20250514", 900)).toEqual({ type: "enabled", budget_tokens: 900 });
+    expect(anthropicThinking("claude-opus-5", 900)).toEqual({ type: "adaptive" });
+    expect(anthropicThinking("local-bridge-model-7", 900)).toEqual({ type: "enabled", budget_tokens: 900 });
+    expect(anthropicThinking("claude", 900)).toEqual({ type: "enabled", budget_tokens: 900 });
   });
 
   it("round-trips thinking + redacted_thinking history blocks natively, signature intact", async () => {

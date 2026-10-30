@@ -275,18 +275,34 @@ export default function WorkloadIdentitiesPage() {
           />
         )}
 
-        <Card title="Delegation safeguards">
-          <p>
-            Only an agent&apos;s stewards who can access the project may delegate it; admin status alone does not replace
-            stewardship. A root grant needs a cap unless an admin has turned on an audited relaxation, and lives 15 minutes by
-            default. Limits are checked again at exchange, even if settings changed after the proof was created.
-          </p>
-          <p>
-            <code>delegation_depth_unenforced</code>: {delegationRefusalMessages.delegation_depth_unenforced}
-          </p>
-          <p>
-            <code>invalid_target</code>: {delegationRefusalMessages.invalid_target}
-          </p>
+        <Card
+          title="Delegation safeguards"
+          info={
+            <>
+              <p>
+                Only an agent&apos;s stewards who can access the project may delegate it; admin status alone does not replace
+                stewardship. A root grant needs a cap unless an admin has turned on an audited relaxation, and lives 15 minutes by
+                default. Limits are checked again at exchange, even if settings changed after the proof was created.
+              </p>
+              <p>
+                <code>invalid_target</code>: {delegationRefusalMessages.invalid_target}
+              </p>
+            </>
+          }
+        >
+          <div className={s.actions}>
+            <Badge
+              tone="danger"
+              infoLabel="external child delegation"
+              info={
+                <>
+                  <code>delegation_depth_unenforced</code>: {delegationRefusalMessages.delegation_depth_unenforced}
+                </>
+              }
+            >
+              External child delegation unavailable
+            </Badge>
+          </div>
         </Card>
 
         {/* ADR-0188 decision 10: least privilege, token lifetime, chain depth, workload sign-in and the root-grant limits */}
@@ -304,6 +320,7 @@ export default function WorkloadIdentitiesPage() {
             "delegationRootMaxLifetimeSeconds",
           ]}
           testId="identity-delegation-settings"
+          helpInInfo
         />
 
         <IssuerSigningKeysCard busy={write.busy} ask={ask} />
@@ -654,7 +671,15 @@ function RunDelegationTree(props: {
   const actorLabel = (id: string) => props.identities?.find((i) => i.id === id)?.identifier ?? id;
 
   return (
-    <Card title="Run delegation tree">
+    <Card
+      title="Run delegation tree"
+      info={
+        <p>
+          An allocation is held on one parent→child edge. Closing a child returns its unspent capacity to its parent; it reaches
+          the root only as those parents close. One measured call may cross a cap; the next use is refused.
+        </p>
+      }
+    >
       <form
         className={s.actions}
         onSubmit={(e) => {
@@ -677,10 +702,6 @@ function RunDelegationTree(props: {
           </Button>
         )}
       </form>
-      <p>
-        An allocation is held on one parent→child edge. Closing a child returns its unspent capacity to its parent; it reaches
-        the root only as those parents close. One measured call may cross a cap; the next use is refused.
-      </p>
       {!runId ? (
         <EmptyState title="Choose a run" body="The tree shows the human sponsor, every actor, and each edge's allocation, draw and release." />
       ) : tree.isPending ? (

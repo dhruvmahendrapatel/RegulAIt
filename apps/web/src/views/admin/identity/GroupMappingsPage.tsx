@@ -112,7 +112,22 @@ export default function GroupMappingsPage() {
                 )}
               </Select>
             </Field>
-            <Field label="Group as the IdP asserts it" grow>
+            <Field
+              label="Group as the IdP asserts it"
+              grow
+              helpLabel="group matching"
+              help={
+                <>
+                  The group identifier is matched exactly as the IdP asserts it — a SCIM group's external
+                  id (or its display name where the connector sends none), an entry in the OIDC{" "}
+                  <span className={v.mono}>groups</span> claim, or a value of the SAML group attribute. It
+                  is scoped per identity path on purpose: “Engineering” asserted over SAML and
+                  “Engineering” synced over SCIM are two different assertions from two different trust
+                  paths, and each is opted into separately. Holders pick the role up on their next login
+                  or sync; they lose it the same way.
+                </>
+              }
+            >
               <Input
                 required
                 value={externalGroup}
@@ -134,15 +149,6 @@ export default function GroupMappingsPage() {
               {act.error}
             </div>
           )}
-          <p className={v.faint}>
-            The group identifier is matched exactly as the IdP asserts it — a SCIM group's external
-            id (or its display name where the connector sends none), an entry in the OIDC{" "}
-            <span className={v.mono}>groups</span> claim, or a value of the SAML group attribute. It
-            is scoped per identity path on purpose: “Engineering” asserted over SAML and
-            “Engineering” synced over SCIM are two different assertions from two different trust
-            paths, and each is opted into separately. Holders pick the role up on their next login
-            or sync; they lose it the same way.
-          </p>
         </Card>
 
         <Card flush>
@@ -228,11 +234,20 @@ export default function GroupMappingsPage() {
                 {
                   key: "mapped",
                   header: "Grants",
+                  info: (
+                    <>
+                      A group listed here with <strong>nothing</strong> in the Grants column is being
+                      asserted by your directory and conferring no access. That is the correct default for a
+                      group nobody mapped — and it is also what an IdP-side rename looks like, so a mapping
+                      that used to work and a group that never had one are deliberately the same, visible,
+                      row rather than a silent difference.
+                    </>
+                  ),
                   render: (g) =>
                     g.mapped ? (
                       <span>{g.roles.map((r) => r.roleName).join(", ")}</span>
                     ) : (
-                      <Badge tone="warn" title="no mapping exists, so membership confers nothing">
+                      <Badge tone="warn">
                         nothing
                       </Badge>
                     ),
@@ -263,13 +278,6 @@ export default function GroupMappingsPage() {
                 />
               }
             />
-            <p className={v.faint}>
-              A group listed here with <strong>nothing</strong> in the Grants column is being
-              asserted by your directory and conferring no access. That is the correct default for a
-              group nobody mapped — and it is also what an IdP-side rename looks like, so a mapping
-              that used to work and a group that never had one are deliberately the same, visible,
-              row rather than a silent difference.
-            </p>
           </Card>
         </QueryGate>
       </div>

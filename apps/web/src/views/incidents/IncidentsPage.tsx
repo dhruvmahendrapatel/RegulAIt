@@ -15,7 +15,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../api/client";
 import { PageHeader } from "../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, RowActions, Select, SeverityBadge } from "../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, InfoButton, RowActions, Select, SeverityBadge } from "../../ui/kit";
 import { FoldTable } from "../../ui/fold";
 import { useSession } from "../../session/SessionContext";
 import { QueryGate, useAction } from "../admin/adminKit";
@@ -41,18 +41,17 @@ import { putOrgSettings } from "../../stepup/stepUp";
 const ROW = { display: "flex", gap: "var(--s2)", alignItems: "center", minHeight: 32 } as const;
 const BOX = { width: 18, height: 18, margin: 0, flex: "none" } as const;
 
-function SettingNote(props: { k: keyof IncidentSettings; value: IncidentSettings[keyof IncidentSettings] }) {
-  const copy = INCIDENT_SETTING_COPY[props.k];
-  const relaxed = settingRelaxed(props.k, props.value);
+/** a setting's state stays visible as a pill; what the strict default does, and what relaxing gives up, is its (i) */
+function SettingPill(props: { k: keyof IncidentSettings; value: IncidentSettings[keyof IncidentSettings] }) {
+  return settingRelaxed(props.k, props.value) ? <Badge tone="warn">Relaxed</Badge> : <Badge tone="ok">Strict default</Badge>;
+}
+function settingHelp(k: keyof IncidentSettings, value: IncidentSettings[keyof IncidentSettings]) {
+  const copy = INCIDENT_SETTING_COPY[k];
   return (
-    <div className={v.stackTight}>
-      <span className={v.faint}>Strict default — {copy.strict}</span>
-      {relaxed && (
-        <span>
-          <Badge tone="warn">relaxed</Badge> <span className={v.faint}>{copy.relaxed}</span>
-        </span>
-      )}
-    </div>
+    <>
+      <p>Strict default — {copy.strict}</p>
+      {settingRelaxed(k, value) && <p>Relaxed — {copy.relaxed}</p>}
+    </>
   );
 }
 
@@ -67,15 +66,19 @@ function IncidentSettingsCard() {
   const save = (patch: Partial<IncidentSettings>, msg: string) =>
     void act.run(() => putOrgSettings(patch), msg).then(() => void q.refetch());
   return (
-    <Card title="Incident settings">
+    <Card
+      title="Incident settings"
+      info={<p>Each setting starts at its strict value. Relaxing one is recorded in the audit log with the old and new value.</p>}
+    >
       <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
         {s && (
           <div className={v.stack}>
-            <p className={v.faint}>
-              Each setting starts at its strict value. Relaxing one is recorded in the audit log with the old and new value.
-            </p>
             <div className={a.formRow}>
-              <Field label={INCIDENT_SETTING_COPY.incidentGateMode.label}>
+              <Field
+                label={INCIDENT_SETTING_COPY.incidentGateMode.label}
+                help={settingHelp("incidentGateMode", s.incidentGateMode)}
+                helpLabel={INCIDENT_SETTING_COPY.incidentGateMode.label}
+              >
                 <Select
                   value={s.incidentGateMode}
                   disabled={act.busy}
@@ -86,8 +89,10 @@ function IncidentSettingsCard() {
                   <option value="off">Off</option>
                 </Select>
               </Field>
+              <span style={{ alignSelf: "flex-end", paddingBottom: "var(--s1)" }}>
+                <SettingPill k="incidentGateMode" value={s.incidentGateMode} />
+              </span>
             </div>
-            <SettingNote k="incidentGateMode" value={s.incidentGateMode} />
             <div style={ROW}>
               <input
                 type="checkbox"
@@ -98,10 +103,19 @@ function IncidentSettingsCard() {
                 onChange={(e) => save({ incidentEvidenceHold: e.target.checked }, e.target.checked ? "Evidence hold on" : "Evidence hold off")}
               />
               <label htmlFor="inc-set-hold">{INCIDENT_SETTING_COPY.incidentEvidenceHold.label}</label>
+              <InfoButton label={INCIDENT_SETTING_COPY.incidentEvidenceHold.label}>
+                {settingHelp("incidentEvidenceHold", s.incidentEvidenceHold)}
+              </InfoButton>
+              <SettingPill k="incidentEvidenceHold" value={s.incidentEvidenceHold} />
             </div>
-            <SettingNote k="incidentEvidenceHold" value={s.incidentEvidenceHold} />
             <fieldset style={{ border: 0, padding: 0, margin: 0 }}>
-              <legend className={v.faint}>{INCIDENT_SETTING_COPY.incidentClockRegimes.label}</legend>
+              <legend className={v.faint}>
+                {INCIDENT_SETTING_COPY.incidentClockRegimes.label}
+                <InfoButton label={INCIDENT_SETTING_COPY.incidentClockRegimes.label}>
+                  {settingHelp("incidentClockRegimes", s.incidentClockRegimes)}
+                </InfoButton>{" "}
+                <SettingPill k="incidentClockRegimes" value={s.incidentClockRegimes} />
+              </legend>
               {REGIMES.map((r) => (
                 <div key={r.id} style={ROW}>
                   <input
@@ -121,7 +135,6 @@ function IncidentSettingsCard() {
                 </div>
               ))}
             </fieldset>
-            <SettingNote k="incidentClockRegimes" value={s.incidentClockRegimes} />
             {act.error && (
               <div className={v.errLine} role="alert">
                 {act.error}
@@ -209,7 +222,9 @@ export default function IncidentsPage() {
             </div>
           </div>
           <p className={v.faint}>
-            {list.data?.scope === "all" ? "Showing every incident (admin)." : "Showing the incidents you own or reported, those on use cases you own and those linked to agents you steward."} {CLOCK_DISCLAIMER}
+            {list.data?.scope === "all" ? "Showing every incident (admin)." : "Showing the incidents you own or reported, those on use cases you own and those linked to agents you steward."}
+            {/* the caveat stays visible as a short qualifier; the full sentence is the Next clock (i) and the title (i) */}
+            {" "}Clocks are reminders, not legal advice.
           </p>
           <FoldTable
             rows={rows}
@@ -245,6 +260,7 @@ export default function IncidentsPage() {
               {
                 key: "clock",
                 header: "Next clock",
+                info: <p>{CLOCK_DISCLAIMER}</p>,
                 fold: { sm: "ref" },
                 render: (r) =>
                   r.clocks.nextDue ? (

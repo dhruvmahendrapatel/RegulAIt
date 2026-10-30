@@ -58,9 +58,12 @@ export const CEILING_EXCEPTIONS = [
   { name: "all JS", from: "1040 kB", to: "1041 kB", date: "2026-10-25", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6393701751" },
   { name: "all JS", from: "1041 kB", to: "1043 kB", date: "2026-10-25", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6396960492" },
   { name: "entry JS (index)", from: "137.9 kB", to: "138.5 kB", date: "2026-10-25", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6402364303" },
+  { name: "all JS", from: "1043 kB", to: "1046 kB", date: "2026-10-29", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6494584993" },
   // G2 + G11 (#453): one raise to 1048 kB, landing either before #597 (from 1043) or after it (from 1046)
   { name: "all JS", from: "1043 kB", to: "1048 kB", date: "2026-10-29", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6498510014" },
   { name: "all JS", from: "1046 kB", to: "1048 kB", date: "2026-10-29", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6498510014" },
+  // G2 + G11 (#599) with batch I-1 (#597) merged in: measured 1,049,109 B
+  { name: "all JS", from: "1048 kB", to: "1050 kB", date: "2026-10-30", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6515493026" },
 ];
 const DECISION_LINK = /^https:\/\/github\.com\/dhruvmahendrapatel\/RegulAIt\/issues\/\d+#issuecomment-\d+$/;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;

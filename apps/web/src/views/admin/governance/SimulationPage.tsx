@@ -78,7 +78,6 @@ export default function SimulationPage() {
     <>
       <PageHeader
         title="Simulation / access preview"
-        sub="Would this call be allowed right now? Evaluated live, executing nothing."
         info={<p>Would this call be allowed right now? Evaluates live policy without executing anything — the same kernel, the same precedence, zero side effects.</p>}
       />
       <div className={v.stack}>
@@ -145,7 +144,7 @@ export default function SimulationPage() {
           <Card>
             <EmptyState
               title="Run an evaluation to see the decision"
-              body="Pick a user, a server and a tool — the full precedence chain renders here, every rule in the order the kernel walked it."
+              body="Pick a user, a server and a tool."
             />
           </Card>
         ) : (
@@ -221,10 +220,11 @@ function BlastRadiusPanel() {
   });
 
   return (
-    <Card title="Blast radius — what would a PROPOSED policy version have changed?">
-      <div className={v.faint} style={{ marginBottom: "var(--s2)" }}>
-        {history.data?.fidelity}
-      </div>
+    <Card
+      title="Blast radius — what would a PROPOSED policy version have changed?"
+      infoLabel="the blast-radius dry run"
+      info={history.data?.fidelity ? <p>{history.data.fidelity}</p> : undefined}
+    >
       <form
         className={a.formRow}
         onSubmit={(e) => {
@@ -256,7 +256,12 @@ function BlastRadiusPanel() {
           });
         }}
       >
-        <Field label="Proposed policy version id" grow>
+        <Field
+          label="Proposed policy version id"
+          grow
+          helpLabel="the proposed version"
+          help="The dry run re-decides recorded history under that version — it dispatches nothing, queues nothing, and does not activate the policy."
+        >
           <Input value={versionId} onChange={(e) => setVersionId(e.target.value)} required />
         </Field>
         <Field label="Window (days)">
@@ -298,7 +303,7 @@ function BlastRadiusPanel() {
           <div className={v.row} style={{ marginTop: "var(--s2)", flexWrap: "wrap" }}>
             <Badge tone="danger">newly blocked: {sim.simulation.newlyDenied}</Badge>
             <Badge tone="warn">newly needs approval: {sim.simulation.newlyApprovalRequired}</Badge>
-            <Badge tone="neutral" title={sim.abacCannotGrant}>
+            <Badge tone="neutral" infoLabel="newly allowed" info={sim.abacCannotGrant}>
               newly allowed: {sim.simulation.newlyAllowed} (structurally always zero)
             </Badge>
             <Badge tone="ok">unchanged: {sim.simulation.unchanged}</Badge>
@@ -342,7 +347,7 @@ function BlastRadiusPanel() {
       ) : (
         <EmptyState
           title="No preview run yet"
-          body="Paste a proposed policy version id. The dry run re-decides recorded history under that version — it dispatches nothing, queues nothing, and does not activate the policy."
+          body="Paste a proposed policy version id."
         />
       )}
 

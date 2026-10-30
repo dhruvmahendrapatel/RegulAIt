@@ -52,7 +52,7 @@ export default function ProjectsPage() {
     <>
       <PageHeader
         title="Projects"
-        sub="Shared, governed workspaces — context every member sees, spend every member shares."
+        info={<p>Shared, governed workspaces — context every member sees, spend every member shares.</p>}
         actions={
           isAdmin ? (
             <Button variant="primary" size="sm" onClick={() => setCreating(true)}>
@@ -115,16 +115,20 @@ export default function ProjectsPage() {
                       {cap != null ? ` / ${fmtUsd(cap)}` : ""}
                     </span>
                   </div>
-                  {cap != null ? (
+                  {cap != null && (
                     <div style={{ marginTop: "var(--s1)" }}>
                       <Meter value={spent} max={cap} over={spent > cap} label={`${p.name} budget`} />
                     </div>
-                  ) : (
-                    <div className={v.faint} style={{ marginTop: "var(--s1)" }}>
-                      no budget set — spend is attributed but unenforced
-                    </div>
                   )}
                 </button>
+                {/* outside the card's button: the (i) is a button of its own */}
+                {cap == null && (
+                  <div style={{ marginTop: "var(--s1)" }}>
+                    <Badge tone="warn" info="No budget set — spend is attributed but unenforced.">
+                      No budget · unenforced
+                    </Badge>
+                  </div>
+                )}
               </Card>
             );
           })}

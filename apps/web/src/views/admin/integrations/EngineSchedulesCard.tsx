@@ -64,12 +64,16 @@ export function EngineSchedulesCard(props: {
     );
 
   return (
-    <Card title="Recurring runs">
-      <p className={v.faint} style={{ marginTop: 0 }}>
-        Repeat the run described above every few hours. Every run it starts executes as you, is checked again first (engine on, your entitlement,
-        project, budget ceiling, approver) and needs approval the same way a run started by hand does. A check that fails skips that run and says
-        why; nothing runs on weaker terms.
-      </p>
+    <Card
+      title="Recurring runs"
+      info={
+        <p>
+          Repeat the run described above every few hours. Every run it starts executes as you, is checked again first
+          (engine on, your entitlement, project, budget ceiling, approver) and needs approval the same way a run started
+          by hand does. A check that fails skips that run and says why; nothing runs on weaker terms.
+        </p>
+      }
+    >
       <form
         className={a.formRow}
         aria-label="Schedule this run"

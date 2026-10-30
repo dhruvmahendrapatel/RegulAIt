@@ -22,7 +22,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago, fmtUsd } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Select, Table } from "../../../ui/kit";
 import { KV, QueryGate, Stat, downloadCsv, optionEls, projectOpts, teamOpts, useAction, useProjects, useTeams } from "../adminKit";
 import { useToast } from "../../../ui/toast";
 import { BillingHistoryCard, RateCardDetail, StatementDetail } from "./BillingHistory";
@@ -200,15 +200,15 @@ export default function BillingPage() {
       <PageHeader
         title="Metering & billing"
         sub="Invoices and rate cards, read from the one usage ledger."
-        info={<p>Nothing on this page meters. Every governed agent, connector and MCP call already writes a measured row to usage_events and an estimated (list-price) row to cost_events at the point of the call; billing is a read-side consumer of that one ledger, so no number here can drift from the cost dashboard. Rate cards are immutable versions and every statement freezes the snapshot it was rated against, so changing a price cannot restate an invoice you already issued.</p>}
+        info={<p>Nothing on this page meters. Every governed agent, connector and MCP call already writes a measured row to the usage ledger and an estimated (list-price) row to the cost ledger at the point of the call; billing is a read-side consumer of that one ledger, so no number here can drift from the cost dashboard. Rate cards are immutable versions and every statement freezes the snapshot it was rated against, so changing a price cannot restate an invoice you already issued.</p>}
       />
       <div className={v.stack}>
         <QueryGate loading={overview.isLoading} error={overview.error} onRetry={() => void overview.refetch()}>
-          <Card title="What this does and does not do">
+          <Card title="What this does and does not do" info={o?.note ? <p>{o.note}</p> : undefined}>
             <div className={a.statRow}>
               <Stat value={o?.ledger.totalEvents ?? 0} label="metered events in the ledger" />
               <Stat value={fmtUsd(o?.ledger.totalListPriceUsd ?? 0)} label="list-price estimate (not a bill)" />
-              <Stat value={o?.activeSeats ?? 0} label="active seats (ADR-0052's definition)" />
+              <Stat value={o?.activeSeats ?? 0} label="active seats" />
               <Stat
                 value={<Badge tone={o?.paymentProcessorIntegrated ? "ok" : "warn"}>{o?.paymentProcessorIntegrated ? "yes" : "no"}</Badge>}
                 label="payment processor integrated"
@@ -222,16 +222,27 @@ export default function BillingPage() {
                 label="provider-invoice reconciliation"
               />
             </div>
-            <div className={v.faint}>{o?.note}</div>
             <div className={v.faint}>
-              Backend: <strong>{o?.backend.name}</strong> — export-only, and it makes no network call of any kind.
-              That is ADR-0051 §6's default for the BYOC/air-gapped motion, where there is no outbound path to a
-              hosted billing system: billing is settled by an exported statement the customer transmits on their own
-              schedule.
+              Backend: <strong>{o?.backend.name}</strong> — export-only, and it makes no network call of any kind.{" "}
+              <InfoButton label="the export-only backend">
+                That is the default for the BYOC/air-gapped motion, where there is no outbound path to a
+                hosted billing system: billing is settled by an exported statement the customer transmits on their own
+                schedule.
+              </InfoButton>
             </div>
           </Card>
 
-          <Card title="Rate cards — immutable versions">
+          <Card
+            title="Rate cards — immutable versions"
+            info={
+              <p>
+                A rate card is a <strong>commercial</strong> price, deliberately separate from the provider list price
+                the ledger already records. Keeping them apart is what makes a rating mistake a billing bug rather
+                than a corrupted meter. Cards are never edited: creating a version supersedes the previous one and
+                leaves every already-cut statement exactly where it was.
+              </p>
+            }
+          >
             <div className={v.stack}>
               <div className={a.formRow}>
                 <Field label="Card name">
@@ -274,16 +285,18 @@ export default function BillingPage() {
                   </Button>
                 </Field>
               </div>
-              <div className={v.faint}>
-                A rate card is a <strong>commercial</strong> price, deliberately separate from the provider list price
-                the ledger already records. Keeping them apart is what makes a rating mistake a billing bug rather
-                than a corrupted meter. Cards are never edited: creating a version supersedes the previous one and
-                leaves every already-cut statement exactly where it was.
-              </div>
               {(o?.rateCards.length ?? 0) === 0 ? (
                 <EmptyState
                   title="No rate card yet"
-                  body="With no card, every event is reported UNPRICED rather than billed at zero — which is the correct answer, not a failure."
+                  body={
+                    <Badge
+                      tone="warn"
+                      infoLabel="unpriced events"
+                      info="With no card, every event is reported UNPRICED rather than billed at zero — which is the correct answer, not a failure."
+                    >
+                      Unpriced
+                    </Badge>
+                  }
                 />
               ) : (
                 <Table
@@ -316,7 +329,17 @@ export default function BillingPage() {
             </div>
           </Card>
 
-          <Card title="Billing periods">
+          <Card
+            title="Billing periods"
+            info={
+              <p>
+                Opening a period computes nothing. There is no in-process scheduler in this deployment: an operator or
+                an external cron must close a period, and closing is idempotent so driving it repeatedly cuts one
+                statement, not many. A period whose <strong>closed</strong> column stays empty has never been closed —
+                that is the disclosure, not an assumption that it worked.
+              </p>
+            }
+          >
             <div className={v.stack}>
               <div className={a.formRow}>
                 <Field label="Scope">
@@ -366,12 +389,6 @@ export default function BillingPage() {
                     Open period
                   </Button>
                 </Field>
-              </div>
-              <div className={v.faint}>
-                Opening a period computes nothing. There is no in-process scheduler in this deployment: an operator or
-                an external cron must close a period, and closing is idempotent so driving it repeatedly cuts one
-                statement, not many. A period whose <strong>closed</strong> column stays empty has never been closed —
-                that is the disclosure, not an assumption that it worked.
               </div>
               {(o?.periods.length ?? 0) === 0 ? (
                 <EmptyState title="No billing periods" body="A period is the window an invoice is cut for." />
@@ -612,13 +629,17 @@ export default function BillingPage() {
             )}
           </Card>
 
-          <Card title="Exports">
-            <div className={v.stack}>
-              <div className={v.faint}>
+          <Card
+            title="Exports"
+            info={
+              <p>
                 One shipment per (period, backend), enforced by a unique index — a double-bill is structurally
                 impossible rather than merely unlikely. Chargeback/showback needs no billing backend at all: the CSV
                 is the interchange format, and it works in the air-gapped default.
-              </div>
+              </p>
+            }
+          >
+            <div className={v.stack}>
               {(o?.exports.length ?? 0) === 0 ? (
                 <EmptyState title="Nothing exported yet" body="Export a statement to record a shipment." />
               ) : (

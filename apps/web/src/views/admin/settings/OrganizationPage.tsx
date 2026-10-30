@@ -10,7 +10,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../../api/client";
 import type { OrgSettingsResponse } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
-import { Button, Card, ConfirmModal, Field, Input, Select, Textarea } from "../../../ui/kit";
+import { Button, Card, ConfirmModal, Field, InfoButton, Input, Select, Textarea } from "../../../ui/kit";
 import { QueryGate, agentOpts, optionEls, useAction, useAgents } from "../adminKit";
 import { useToast } from "../../../ui/toast";
 import v from "../../views.module.css";
@@ -57,10 +57,16 @@ function SectionShell(props: {
   busy: boolean;
   error: string | null;
   submitLabel?: string;
+  /** why the section exists, behind the (i) beside its title */
   help: ReactNode;
+  /** names the (i) when the title is a question, e.g. "the attribution mandate" */
+  helpLabel?: string;
+  /** the rest of a long explanation, in a collapsed Details fold under the form */
+  details?: ReactNode;
   children: ReactNode;
 }) {
   return (
+    <>
     <form
       className={v.stack}
       onSubmit={(e) => {
@@ -68,7 +74,9 @@ function SectionShell(props: {
         props.onSubmit();
       }}
     >
-      <div className={v.sectionTitle}>{props.title}</div>
+      <div className={v.sectionTitle}>
+        {props.title} <InfoButton label={props.helpLabel ?? props.title}>{props.help}</InfoButton>
+      </div>
       <div className={v.grid3}>{props.children}</div>
       <div className={v.row}>
         <Button type="submit" variant="primary" size="sm" disabled={props.busy}>
@@ -80,8 +88,13 @@ function SectionShell(props: {
           </span>
         )}
       </div>
-      <p className={v.faint}>{props.help}</p>
     </form>
+    {props.details != null && (
+      <Card title="Details" infoLabel={`${props.helpLabel ?? props.title} details`} contain foldable startCollapsed count={1} countNoun={["note", "notes"]}>
+        <div className={v.faint}>{props.details}</div>
+      </Card>
+    )}
+    </>
   );
 }
 
@@ -304,7 +317,12 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               "Optimization settings saved (audited)",
             )
           }
-          help="Each toggle is the org CEILING for one cost-optimization technique: disabled means it never runs for anyone. Enabled (the default — today's behaviour) defers to each user's own routing mode; a user's explicit passthrough always wins. Semantic cache 'off' beats a caller's semanticCache:true. Compaction 'fail closed' refuses the turn when summarization fails. A fixed summarizer must still be in the calling user's own entitled roster — it can never widen entitlement. The numeric dials are the formerly-hardcoded kernel constants (compact past 1600 tokens keeping 4 messages verbatim; cache 1024+ token prefixes at a 0.9 read discount; at most 20 lazy-loaded tools; diff edits over 200-token baselines)."
+          help={
+            <>
+              <p>Each toggle is the org CEILING for one cost-optimization technique: disabled means it never runs for anyone. Enabled (the default — today's behaviour) defers to each user's own routing mode; a user's explicit passthrough always wins. Semantic cache 'off' beats a caller's semanticCache:true. Compaction 'fail closed' refuses the turn when summarization fails. A fixed summarizer must still be in the calling user's own entitled roster — it can never widen entitlement.</p>
+              <p>The numeric dials are the formerly-hardcoded kernel constants (compact past 1600 tokens keeping 4 messages verbatim; cache 1024+ token prefixes at a 0.9 read discount; at most 20 lazy-loaded tools; diff edits over 200-token baselines).</p>
+            </>
+          }
         >
           {(
             [
@@ -384,7 +402,12 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               "Compliance defaults saved (audited)",
             )
           }
-          help="Default PII mode is the DEPLOYMENT-WIDE FLOOR: it applies wherever no compliance framework governs — an unclassified project, tags matching no profile, and calls attributed to NO project at all (model, connector, MCP, cached replays, streams and training ingest alike), so omitting the project is not an exit from enforcement. A classified project's own cascade always wins — the floor fills gaps under the frameworks, it never overrides one. The env-var fallback lets a dispatch use ANTHROPIC_API_KEY-style server env vars when no credential is stored. It is OFF by default, so every key goes through the encrypted store (Model Credentials); turning it on is an audited relaxation, and you can narrow which providers may use it."
+          help={
+            <>
+              <p>Default PII mode is the DEPLOYMENT-WIDE FLOOR: it applies wherever no compliance framework governs — an unclassified project, tags matching no profile, and calls attributed to NO project at all (model, connector, MCP, cached replays, streams and training ingest alike), so omitting the project is not an exit from enforcement. A classified project's own cascade always wins — the floor fills gaps under the frameworks, it never overrides one.</p>
+              <p>The env-var fallback lets a dispatch use provider API-key server env vars when no credential is stored. It is OFF by default, so every key goes through the encrypted store (Model Credentials); turning it on is an audited relaxation, and you can narrow which providers may use it.</p>
+            </>
+          }
         >
           <Field label="Default PII mode (the floor: unclassified projects + unattributed calls)">
             <Select value={comp.f.defaultPiiMode} onChange={(e) => comp.set("defaultPiiMode", e.target.value)}>
@@ -417,9 +440,9 @@ function Loaded(props: { settings: Record<string, unknown> }) {
       </Card>
 
       {/* ADR-0117: which international national identifiers are detected (ships empty) */}
-      <OrgSettingsCard title="2a · International identifiers (ADR-0117)" keys={["piiInternationalCategories"]} testId="org-pii-international" />
+      <OrgSettingsCard title="2a · International identifiers" keys={["piiInternationalCategories"]} testId="org-pii-international" />
 
-      <Card title="3 · Custom LLM providers (ADR-0034)">
+      <Card title="3 · Custom LLM providers">
         <SectionShell
           title="Master switch"
           busy={custom.act.busy}
@@ -431,7 +454,12 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               "Custom-provider switch saved (audited)",
             )
           }
-          help="The 'remove the capability entirely' switch for admin-registered endpoints (a local model server, an internal gateway). It is NOT the thing standing between this org and an open proxy — the capability is already default-deny four separate ways beneath it: registration is admin-only, the egress allow-list starts empty, a provider stays disabled until a connection test passes, and a user still needs the ordinary per-agent grant. Off refuses registration and enablement and stops every custom dispatch with a 409 before any request leaves the box; the Integrations → Custom LLM providers page then says so plainly instead of appearing broken."
+          help={
+            <>
+              <p>The 'remove the capability entirely' switch for admin-registered endpoints (a local model server, an internal gateway). It is NOT the thing standing between this org and an open proxy — the capability is already default-deny four separate ways beneath it: registration is admin-only, the egress allow-list starts empty, a provider stays disabled until a connection test passes, and a user still needs the ordinary per-agent grant.</p>
+              <p>Off refuses registration and enablement and stops every custom dispatch with a 409 before any request leaves the box; the Integrations → Custom LLM providers page then says so plainly instead of appearing broken.</p>
+            </>
+          }
         >
           <Field label="Custom LLM providers">
             <Select
@@ -445,7 +473,7 @@ function Loaded(props: { settings: Record<string, unknown> }) {
         </SectionShell>
       </Card>
 
-      <Card title="3b · MCP egress posture (ADR-0043)">
+      <Card title="3b · MCP egress posture">
         <SectionShell
           title="Private ranges for MCP servers"
           busy={mcpEgress.act.busy}
@@ -457,7 +485,12 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               "MCP egress posture saved (audited)",
             )
           }
-          help="The default for MCP servers that never took an explicit per-server decision (their flag is 'inherit'). Strict (default) = every server needs its own explicit allow-private-ranges flag (set on the MCP servers page) or an egress allow entry with the private-range opt-in. Open = a self-hosted MCP server on a private address (http://mcp.internal:9000, http://localhost:3000) works with zero ceremony; choosing it relaxes the strict default and is audited. Either way, link-local / instance-metadata (169.254.0.0/16) and the other never-legitimate ranges stay unconditionally blocked, and a public-internet MCP URL still requires an egress allow entry."
+          help={
+            <>
+              <p>The default for MCP servers that never took an explicit per-server decision (their flag is 'inherit'). Strict (default) = every server needs its own explicit allow-private-ranges flag (set on the MCP servers page) or an egress allow entry with the private-range opt-in. Open = a self-hosted MCP server on a private address (http://mcp.internal:9000, http://localhost:3000) works with zero ceremony; choosing it relaxes the strict default and is audited.</p>
+              <p>Either way, link-local / instance-metadata (169.254.0.0/16) and the other never-legitimate ranges stay unconditionally blocked, and a public-internet MCP URL still requires an egress allow entry.</p>
+            </>
+          }
         >
           <Field label="Private-range default for MCP servers">
             <Select
@@ -471,7 +504,7 @@ function Loaded(props: { settings: Record<string, unknown> }) {
         </SectionShell>
       </Card>
 
-      <Card title="3c · Compiled vendor endpoints (ADR-0062)">
+      <Card title="3c · Compiled vendor endpoints">
         <SectionShell
           title="Deployment egress posture"
           busy={compiledEgress.act.busy}
@@ -487,7 +520,16 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               "Deployment egress posture saved (audited)",
             )
           }
-          help="The egress guard has always adjudicated URLs a human typed. It did not adjudicate the endpoint a built-in adapter falls back to with no baseUrl override — api.anthropic.com, slack.com, api.github.com and friends — because nobody can type a constant. That is a complete answer to SSRF and no answer at all to 'may this installation reach that vendor'. This dial can only TIGHTEN: the deployment-wide posture comes from the server's REGULAIT_DEPLOY_MODE (air_gapped is always strict, and nothing here can loosen it, because 'is this box air-gapped' is not something a portal toggle can know). Strict (default) = a dispatch that would run on a compiled vendor endpoint is refused with a 403 and audited unless that host is in Egress Allow Hosts; a self-hosted model on a private address keeps working once allow-listed. Inherit = the deploy mode decides, which on a hosted or BYOC box means compiled endpoints are not adjudicated; choosing it relaxes the strict default and is audited."
+          help={
+            <>
+              <p>The egress guard has always adjudicated URLs a human typed. It did not adjudicate the endpoint a built-in adapter falls back to with no baseUrl override — slack.com, api.github.com and friends — because nobody can type a constant. That is a complete answer to SSRF and no answer at all to 'may this installation reach that vendor'.</p>
+            </>
+          }
+          details={
+            <>
+              <p>This dial can only TIGHTEN: the deployment-wide posture comes from the server's REGULAIT_DEPLOY_MODE (air_gapped is always strict, and nothing here can loosen it, because 'is this box air-gapped' is not something a portal toggle can know). Strict (default) = a dispatch that would run on a compiled vendor endpoint is refused with a 403 and audited unless that host is in Egress Allow Hosts; a self-hosted model on a private address keeps working once allow-listed. Inherit = the deploy mode decides, which on a hosted or BYOC box means compiled endpoints are not adjudicated; choosing it relaxes the strict default and is audited.</p>
+            </>
+          }
         >
           <Field label="Compiled vendor endpoints">
             <Select
@@ -524,7 +566,12 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               "Budgets & limits saved (audited)",
             )
           }
-          help="'Block' (default) refuses attributed dispatches once measured spend reaches the hard-block threshold, until the named approver sanctions the overage. 'Warn only' still files the overage into the Approvals queue and audits every crossing, but lets the calls run — showback without enforcement. Worker caps bound the tool-using agent loop; the size ceilings narrow below their API walls (at most 8 attachments of 6 MiB, a flat 1200-token estimate per image, 100k-char node instructions, 20k chars of stored node output)."
+          help={
+            <>
+              <p>'Block' (default) refuses attributed dispatches once measured spend reaches the hard-block threshold, until the named approver sanctions the overage. 'Warn only' still files the overage into the Approvals queue and audits every crossing, but lets the calls run — showback without enforcement.</p>
+              <p>Worker caps bound the tool-using agent loop; the size ceilings narrow below their API walls (at most 8 attachments of 6 MiB, a flat 1200-token estimate per image, 100k-char node instructions, 20k chars of stored node output).</p>
+            </>
+          }
         >
           <Field label="Project budget enforcement">
             <Select value={budget.f.budgetEnforcement} onChange={(e) => budget.set("budgetEnforcement", e.target.value)}>
@@ -559,7 +606,12 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               "Approval policy saved (audited)",
             )
           }
-          help="Applies to workflow human_approval stages. 'All' (default — today's behaviour): the stage advances only when every named approver has approved; any denial denies it. 'Any': the first approval advances the stage and the remaining pending approvals are superseded so no dead gate lingers. Approver delegation: when disabled, creating delegation windows is refused and existing windows stop applying immediately — for orgs whose control posture forbids deciding in another's name."
+          help={
+            <>
+              <p>Applies to workflow human_approval stages. 'All' (default — today's behaviour): the stage advances only when every named approver has approved; any denial denies it. 'Any': the first approval advances the stage and the remaining pending approvals are superseded so no dead gate lingers.</p>
+              <p>Approver delegation: when disabled, creating delegation windows is refused and existing windows stop applying immediately — for orgs whose control posture forbids deciding in another's name.</p>
+            </>
+          }
         >
           <Field label="Human-approval quorum">
             <Select value={approvals.f.approvalQuorum} onChange={(e) => approvals.set("approvalQuorum", e.target.value)}>
@@ -586,7 +638,7 @@ function Loaded(props: { settings: Record<string, unknown> }) {
         testId="org-approval-safeguards"
       />
 
-      <Card title="5b · AI use-case dispatch gate (ADR-0080)">
+      <Card title="5b · AI use-case dispatch gate">
         <SectionShell
           title="Approved-use-case requirement for governed dispatch"
           busy={useCaseGate.act.busy}
@@ -598,7 +650,16 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               "Use-case gate saved (audited)",
             )
           }
-          help="The AI use-case registry's approval used to register intent and gate nothing — that honest limit is now a choice. This applies to a governed dispatch ATTRIBUTED TO A PROJECT THAT AT LEAST ONE USE CASE NAMES (the use case's optional project link is the only join there is): 'enforce' (the strict default) refuses it with a named 409 before any provider work until a linked use case is approved on the Approvals queue; 'off' lets approval register intent and gate nothing; 'warn' lets such a dispatch run when no linked use case is approved, but audits the fact and annotates the response, so you can see what enforce would refuse. A project no use case links — and a dispatch attributed to no project — is untouched in every mode: this gate holds registered intent to its approval, it does not require every call to have a use case. A retired use case no longer satisfies it. Every change is audited with the old and the new value."
+          help={
+            <>
+              <p>The AI use-case registry's approval used to register intent and gate nothing — that honest limit is now a choice. This applies to a governed dispatch ATTRIBUTED TO A PROJECT THAT AT LEAST ONE USE CASE NAMES (the use case's optional project link is the only join there is): 'enforce' (the strict default) refuses it with a named 409 before any provider work until a linked use case is approved on the Approvals queue; 'off' lets approval register intent and gate nothing; 'warn' lets such a dispatch run when no linked use case is approved, but audits the fact and annotates the response, so you can see what enforce would refuse.</p>
+            </>
+          }
+          details={
+            <>
+              <p>A project no use case links — and a dispatch attributed to no project — is untouched in every mode: this gate holds registered intent to its approval, it does not require every call to have a use case. A retired use case no longer satisfies it. Every change is audited with the old and the new value.</p>
+            </>
+          }
         >
           <Field label="Use-case dispatch gate">
             <Select
@@ -613,9 +674,10 @@ function Loaded(props: { settings: Record<string, unknown> }) {
         </SectionShell>
       </Card>
 
-      <Card title="5b1 · Continuous-assurance deploy gate (ADR-0180)">
+      <Card title="5b1 · Continuous-assurance deploy gate">
         <SectionShell
           title="Do the deploy gate's continuous-assurance checks hold a release?"
+          helpLabel="the assurance gate"
           busy={assuranceGate.act.busy}
           error={assuranceGate.act.error}
           submitLabel="Save assurance gate"
@@ -628,7 +690,12 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               "Assurance gate saved (audited)",
             )
           }
-          help="The strict default is enforce. The deploy gate then holds a release when a measured approval condition is failing, a required AI test is missing, stale or failing, an agent's autonomy floor is not met, or a residual risk is above tolerance with no valid acceptance. The checks run live against every use case. 'warn' reports them on the gate without holding; 'off' skips them, and the gate response says they were skipped. Every change is audited with the old and the new value."
+          help={
+            <>
+              <p>The strict default is enforce. The deploy gate then holds a release when a measured approval condition is failing, a required AI test is missing, stale or failing, an agent's autonomy floor is not met, or a residual risk is above tolerance with no valid acceptance. The checks run live against every use case.</p>
+              <p>'warn' reports them on the gate without holding; 'off' skips them, and the gate response says they were skipped. Every change is audited with the old and the new value.</p>
+            </>
+          }
         >
           <Field label="Continuous-assurance gate">
             <Select
@@ -643,9 +710,10 @@ function Loaded(props: { settings: Record<string, unknown> }) {
         </SectionShell>
       </Card>
 
-      <Card title="5b2 · Project attribution mandate (ADR-0080)">
+      <Card title="5b2 · Project attribution mandate">
         <SectionShell
           title="Must every governed dispatch name a project?"
+          helpLabel="the attribution mandate"
           busy={attribution.act.busy}
           error={attribution.act.error}
           submitLabel="Save attribution mandate"
@@ -660,7 +728,16 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               "Attribution mandate saved (audited)",
             )
           }
-          help="Attribution is required by default: a governed model dispatch that names no project is refused — a named 409 (attribution_required), audited, before anything reaches a provider and before anything is billed. That keeps chargeback complete and keeps the use-case gate above honest: that gate can only see a dispatch that NAMES a project, so without this a caller can walk past it by omitting the project. Relax it to 'optional' and a call that names no project runs, and its cost lands in the explicit 'Unattributed' bucket on the cost dashboard rather than disappearing. The two settings are independent — either can be on without the other — and this one only ever looks at calls naming NO project, so it never changes what happens to an attributed one. Two related settings live elsewhere and are not replaced by this: 'Require project attribution (compat)' on Client Access refuses a header-less IDE/compat call at that edge, and its MCP twin does the same for tool calls. Every change is audited with the old and the new value."
+          help={
+            <>
+              <p>Attribution is required by default: a governed model dispatch that names no project is refused — a named 409 (attribution_required), audited, before anything reaches a provider and before anything is billed. That keeps chargeback complete and keeps the use-case gate above honest: that gate can only see a dispatch that NAMES a project, so without this a caller can walk past it by omitting the project.</p>
+            </>
+          }
+          details={
+            <>
+              <p>Relax it to 'optional' and a call that names no project runs, and its cost lands in the explicit 'Unattributed' bucket on the cost dashboard rather than disappearing. The two settings are independent — either can be on without the other — and this one only ever looks at calls naming NO project, so it never changes what happens to an attributed one. Two related settings live elsewhere and are not replaced by this: 'Require project attribution (compat)' on Client Access refuses a header-less IDE/compat call at that edge, and its MCP twin does the same for tool calls. Every change is audited with the old and the new value.</p>
+            </>
+          }
         >
           <Field label="Require project attribution (governed dispatch)">
             <Select
@@ -678,9 +755,10 @@ function Loaded(props: { settings: Record<string, unknown> }) {
         </SectionShell>
       </Card>
 
-      <Card title="5b3 · Workflow check reports (AER-048)">
+      <Card title="5b3 · Workflow check reports">
         <SectionShell
           title="Must a CI name the workflow round its check results belong to?"
+          helpLabel="check-report rounds"
           busy={checkRounds.act.busy}
           error={checkRounds.act.error}
           submitLabel="Save check-report setting"
@@ -693,7 +771,16 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               "Check-report setting saved (audited)",
             )
           }
-          help="Every workflow instance has a round, which moves on whenever the change is re-opened (a new artifact version, a sign-off sent back). A check result belongs to the round it was produced for: a result for an earlier round is always refused (409 stale_check_report), so a CI run against the old artifact can never pass the new one. By default a CI (anything reporting with an API key) must also NAME the round — it is in the PR body as 'regulait-round:' and on the instance — and a report that names none is refused (422 round_required). Allowing unbound reports restores the older behaviour for CI integrations that cannot send it yet: such a report is taken for whatever round is current when it arrives, which is exactly the gap the round closes. People reporting from this console are bound to the round on their screen either way."
+          help={
+            <>
+              <p>Every workflow instance has a round, which moves on whenever the change is re-opened (a new artifact version, a sign-off sent back). A check result belongs to the round it was produced for: a result for an earlier round is always refused (409 stale_check_report), so a CI run against the old artifact can never pass the new one.</p>
+            </>
+          }
+          details={
+            <>
+              <p>By default a CI (anything reporting with an API key) must also NAME the round — it is in the PR body as 'regulait-round:' and on the instance — and a report that names none is refused (422 round_required). Allowing unbound reports restores the older behaviour for CI integrations that cannot send it yet: such a report is taken for whatever round is current when it arrives, which is exactly the gap the round closes. People reporting from this console are bound to the round on their screen either way.</p>
+            </>
+          }
         >
           <Field label="Check reports without a round">
             <Select
@@ -707,7 +794,7 @@ function Loaded(props: { settings: Record<string, unknown> }) {
         </SectionShell>
       </Card>
 
-      <Card title="5c · Model-judged access recommendations (ADR-0092)">
+      <Card title="5c · Model-judged access recommendations">
         <SectionShell
           title="Advisory model annotations on the deterministic recommendation rules"
           busy={recJudge.act.busy}
@@ -725,7 +812,16 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               "Judged-recommendation setting saved (audited)",
             )
           }
-          help="Access recommendations are six DETERMINISTIC rules over this deployment's ledgers, each re-derivable by hand — that is what makes them trustworthy, and this switch does not change them. OFF (default) means the report is those rules and nothing else. ON means each finding the rules ALREADY made may additionally carry an advisory annotation from a model judge, labelled `model-judged` and rendered separately: it cannot create a finding, cannot remove one, cannot change any evidence value or severity, and does not clear a grant — only a named human's decision does. The judge is an ordinary registry agent dispatched with the CALLING USER's entitlements and budget, so its tokens are metered and audited like any other call. If no judge agent is named, or the named one has no reachable model credential, the report is returned UNCHANGED and says `judged: unavailable` — an unannotated report from a working judge and one from a missing judge are different facts, and the page never blurs them."
+          help={
+            <>
+              <p>Access recommendations are six DETERMINISTIC rules over this deployment's ledgers, each re-derivable by hand — that is what makes them trustworthy, and this switch does not change them. OFF (default) means the report is those rules and nothing else. ON means each finding the rules ALREADY made may additionally carry an advisory annotation from a model judge, labelled <code>model-judged</code> and rendered separately: it cannot create a finding, cannot remove one, cannot change any evidence value or severity, and does not clear a grant — only a named human's decision does.</p>
+            </>
+          }
+          details={
+            <>
+              <p>The judge is an ordinary registry agent dispatched with the CALLING USER's entitlements and budget, so its tokens are metered and audited like any other call. If no judge agent is named, or the named one has no reachable model credential, the report is returned UNCHANGED and says <code>judged: unavailable</code> — an unannotated report from a working judge and one from a missing judge are different facts, and the page never blurs them.</p>
+            </>
+          }
         >
           <Field label="Model-judged annotations">
             <Select
@@ -766,7 +862,12 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               "Retention policy saved (audited)",
             )
           }
-          help="Off by default: pruning only happens when an admin presses the button on the Audit log page. When on, the gateway prunes on the configured interval under the SAME floor the manual button uses. The org default retention only fills the gap when no compliance profile sets one — a profile floor always wins upward, so this can never shorten a framework's audit trail. Enter 0 to clear the org default (never prune without a profile floor). Every prune, manual or scheduled, is itself audited."
+          help={
+            <>
+              <p>Off by default: pruning only happens when an admin presses the button on the Audit log page. When on, the gateway prunes on the configured interval under the SAME floor the manual button uses.</p>
+              <p>The org default retention only fills the gap when no compliance profile sets one — a profile floor always wins upward, so this can never shorten a framework's audit trail. Enter 0 to clear the org default (never prune without a profile floor). Every prune, manual or scheduled, is itself audited.</p>
+            </>
+          }
         >
           <Field label="Scheduled auto-prune">
             <Select value={retention.f.autoPruneEnabled} onChange={(e) => retention.set("autoPruneEnabled", e.target.value)}>
@@ -779,14 +880,23 @@ function Loaded(props: { settings: Record<string, unknown> }) {
         </SectionShell>
       </Card>
 
-      <Card title="7 · Network access — IP allow-listing (ADR-0039)">
+      <Card title="7 · Network access — IP allow-listing">
         <SectionShell
           title="Trusted-network policy"
           busy={netBusy}
           error={netError}
           submitLabel="Save network access policy"
           onSubmit={() => void saveNet(false)}
-          help="Confine sign-ins to your corporate networks by CIDR (IPv4 + IPv6, one block per line; empty = no restriction — the upgrade-safe default). The HUMAN knob governs password/SSO sessions: 'enforce at login' refuses new sign-ins from outside the list (existing sessions untouched); 'enforce continuously' also checks every request and force-signs-out a session the moment it leaves the envelope (fail-closed: an undeterminable client IP counts as outside). The API-KEY knob is a deliberately SEPARATE choice for automation (CI runners, IDEs, key-exchanged sessions) over the same list — so 'humans confined, CI not' is a visible chosen state, and tightening one path never silently locks out the other. The deploy-time bootstrap token is never IP-restricted (break-glass recovery). Malformed CIDR blocks are refused at save time; saving a continuous policy that excludes your own current IP demands an explicit confirmation. Behind a TLS-terminating proxy the gateway must trust it (REGULAIT_TRUSTED_PROXIES) or the observed client IP is the proxy's. Every denial and forced sign-out is audited with the IP and the policy that fired."
+          help={
+            <>
+              <p>Confine sign-ins to your corporate networks by CIDR (IPv4 + IPv6, one block per line; empty = no restriction — the upgrade-safe default). The HUMAN knob governs password/SSO sessions: 'enforce at login' refuses new sign-ins from outside the list (existing sessions untouched); 'enforce continuously' also checks every request and force-signs-out a session the moment it leaves the envelope (fail-closed: an undeterminable client IP counts as outside).</p>
+            </>
+          }
+          details={
+            <>
+              <p>The API-KEY knob is a deliberately SEPARATE choice for automation (CI runners, IDEs, key-exchanged sessions) over the same list — so 'humans confined, CI not' is a visible chosen state, and tightening one path never silently locks out the other. The deploy-time bootstrap token is never IP-restricted (break-glass recovery). Malformed CIDR blocks are refused at save time; saving a continuous policy that excludes your own current IP demands an explicit confirmation. Behind a TLS-terminating proxy the gateway must trust it (REGULAIT_TRUSTED_PROXIES) or the observed client IP is the proxy's. Every denial and forced sign-out is audited with the IP and the policy that fired.</p>
+            </>
+          }
         >
           <Field label="Human session policy">
             <Select

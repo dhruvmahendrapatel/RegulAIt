@@ -285,7 +285,7 @@ export default function InboxPage() {
     <>
       <PageHeader
         title="Inbox"
-        sub="Everything that pauses for you: sign-offs, escalations, budget overages, context conflicts."
+        info={<p>Everything that pauses for you: sign-offs, escalations, budget overages, context conflicts.</p>}
         // only the items this person can decide are waiting on them; their own requests awaiting someone else are not
         actions={decidable > 0 ? <Badge tone="info">{`${decidable} waiting on you`}</Badge> : undefined}
       />
@@ -308,7 +308,7 @@ export default function InboxPage() {
                   <div className={v.faint}>
                     {it.intake ? "Use case" : humanize(a.objectType)} · requested by {a.requestedByName ?? "unknown"} · {ago(a.requestedAt)}
                   </div>
-                  <ReasonWarning it={it} />
+                  <ReasonWarning it={it} compact />
                   {it.intake ? (
                     <div className={v.row}>
                       <ReviewPanel approval={a} open={openId === a.id} onOpenChange={(o) => setOpenId(o ? a.id : null)} />
@@ -462,13 +462,18 @@ function ItemTitle(props: { a: Approval; it: ItemView }) {
   return it.target ? <Link to={it.target}>{`View ${humanize(a.objectType)}`}</Link> : <>{approvalLabel(a)}</>;
 }
 
-function ReasonWarning(props: { it: ItemView }) {
+/** the list row shows a short chip with the sentence in its (i); the decision drawer shows the sentence itself */
+function ReasonWarning(props: { it: ItemView; compact?: boolean }) {
   if (!props.it.reasonRequired) return null;
-  return (
-    <p className={ib.warning}>
-      {props.it.override ? "You are not the named approver, so a reason is required." : "Deciding this approves your own request, so a reason is required."}
-    </p>
-  );
+  const why = props.it.override ? "You are not the named approver, so a reason is required." : "Deciding this approves your own request, so a reason is required.";
+  if (props.compact) {
+    return (
+      <div className={v.row}>
+        <Badge tone="warn" info={why}>Reason required</Badge>
+      </div>
+    );
+  }
+  return <p className={ib.warning}>{why}</p>;
 }
 
 /**

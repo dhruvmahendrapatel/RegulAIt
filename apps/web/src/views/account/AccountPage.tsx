@@ -147,6 +147,17 @@ function AiPoliciesCard(props: { hasUser: boolean }) {
           {d && d.required && (d.current ? <Badge tone="ok">all acknowledged</Badge> : <Badge tone="warn">to acknowledge</Badge>)}
         </span>
       }
+      infoLabel="AI policies"
+      info={
+        props.hasUser && d ? (
+          <p>
+            Your organisation asks you to read and acknowledge these as one of its measures to support the
+            development of AI literacy (Regulation (EU) 2024/1689, Article 4, as amended). An acknowledgement records
+            that you read the version shown; it expires and is asked for again, and a new version (other than an
+            editorial correction) needs a new acknowledgement.
+          </p>
+        ) : undefined
+      }
     >
       {!props.hasUser ? (
         <div className={v.faint}>The bootstrap identity is not a person and acknowledges nothing.</div>
@@ -163,13 +174,9 @@ function AiPoliciesCard(props: { hasUser: boolean }) {
         </div>
       ) : (
         <div className={v.stack}>
-          <div className={v.faint}>
-            Your organisation asks you to read and acknowledge these as one of its measures to support the
-            development of AI literacy (Regulation (EU) 2024/1689, Article 4, as amended). An acknowledgement records
-            that you read the version shown; it expires and is asked for again, and a new version (other than an
-            editorial correction) needs a new acknowledgement.
-            {d.exempt === "break_glass" ? " As a designated break-glass admin, your governed calls are not held for it." : ""}
-          </div>
+          {d.exempt === "break_glass" ? (
+            <div className={v.faint}>As a designated break-glass admin, your governed calls are not held for it.</div>
+          ) : null}
           <LiteracyDocumentList data={d} />
         </div>
       )}

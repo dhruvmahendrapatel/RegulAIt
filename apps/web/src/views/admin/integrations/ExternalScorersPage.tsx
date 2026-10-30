@@ -66,28 +66,38 @@ export default function ExternalScorersPage() {
     <>
       <PageHeader
         title="External scorers"
-        sub="Bring your own scoring instrument. regulAIt governs the call and records provenance; it does not validate the instrument."
+        sub="regulAIt governs the call and records provenance; it does not validate the instrument."
         info={<p>Bring your own scoring instrument — a scoring endpoint you run or buy — as a governed, disclosed eval scorer. regulAIt governs the call and records provenance; it does not validate the instrument.</p>}
       />
       <div className={v.stack}>
-        <Card title="What an external score is, and is not">
+        <Card
+          title="What an external score is, and is not"
+          infoLabel="an external score"
+          info={
+            <>
+              <p>
+                Every eval result an external instrument scores is stamped{" "}
+                <code>method: &quot;external:&lt;name&gt;&quot;</code> — never blended with the local lexical
+                metrics or a model judge&apos;s verdict. A named scorer that is unknown, disabled, not claiming the
+                metric, or refused by the egress guard refuses the whole run with a 422{" "}
+                <em>before any row is written</em>, exactly like a missing judge. The deterministic (lexical) metrics
+                never route externally. To use one: set{" "}
+                <code>{"{"}&quot;externalScorer&quot;: &quot;&lt;name&gt;&quot;{"}"}</code> in a judge-backed
+                scorer&apos;s config on the Evaluations page.
+              </p>
+              <p>
+                The wire contract is ours, not the vendor&apos;s API: one POST of{" "}
+                <code>{"{input, output, context, scorerKind}"}</code> returning{" "}
+                <code>{"{score: 0..1, reasons?}"}</code>. A vendor that speaks a different dialect gets a thin
+                translation shim you control. The inline guardrail path stays local-detector only — an external
+                verdict inside every dispatch is a latency and data-egress decision this slice deliberately does not
+                make.
+              </p>
+            </>
+          }
+        >
           <p className={v.faint}>
-            An external score is <strong>the vendor&apos;s opinion</strong>. Every eval result an
-            external instrument scores is stamped <code>method: &quot;external:&lt;name&gt;&quot;</code> —
-            never blended with the local lexical metrics or a model judge&apos;s verdict. A named
-            scorer that is unknown, disabled, not claiming the metric, or refused by the egress
-            guard refuses the whole run with a 422 <em>before any row is written</em>, exactly like
-            a missing judge (ADR-0067). The deterministic (lexical) metrics never route externally.
-            To use one: set <code>{"{"}&quot;externalScorer&quot;: &quot;&lt;name&gt;&quot;{"}"}</code> in a
-            judge-backed scorer&apos;s config on the Evaluations page.
-          </p>
-          <p className={v.faint}>
-            The wire contract is ours, not the vendor&apos;s API: one POST of{" "}
-            <code>{"{input, output, context, scorerKind}"}</code> returning{" "}
-            <code>{"{score: 0..1, reasons?}"}</code>. A vendor that speaks a different dialect gets a
-            thin translation shim you control. The inline guardrail path (ADR-0042) stays
-            local-detector only — an external verdict inside every dispatch is a latency and
-            data-egress decision this slice deliberately does not make.
+            An external score is <strong>the vendor&apos;s opinion</strong>.
           </p>
         </Card>
 
@@ -96,15 +106,25 @@ export default function ExternalScorersPage() {
           error={scorers.error}
           onRetry={() => void scorers.refetch()}
         >
-          <Card title="Register a scoring endpoint">
+          <Card
+            title="Register a scoring endpoint"
+            info={
+              <p>
+                The endpoint URL is a typed destination under the same egress governance as a custom LLM provider:
+                its host must be in the egress allow-list (managed on the Custom LLM providers page), private ranges
+                and plaintext http are per-host opt-ins, and the guard re-checks on every request.
+              </p>
+            }
+          >
             <p className={v.faint}>
-              The endpoint URL is a typed destination under the same egress governance as a custom
-              LLM provider: its host must be in the egress allow-list (managed on the Custom LLM
-              providers page), private ranges and plaintext http are per-host opt-ins, and the
-              guard re-checks on every request. A new scorer registers <strong>disabled</strong>{" "}
-              until its connection test passes.
+              A new scorer registers <strong>disabled</strong> until its connection test passes.
               {(hosts.data?.hosts ?? []).length === 0 && (
-                <> The allow-list is currently empty, so no endpoint is reachable yet.</>
+                <>
+                  {" "}
+                  <Badge tone="warn" info="The allow-list is currently empty, so no endpoint is reachable yet.">
+                    Egress allow-list empty
+                  </Badge>
+                </>
               )}
             </p>
             <form
@@ -198,12 +218,20 @@ export default function ExternalScorersPage() {
             )}
           </Card>
 
-          <Card title="Registered scorers">
+          <Card
+            title="Registered scorers"
+            info={
+              <p>
+                With none registered, every eval scores locally or through the governed model judge — that is the
+                shipped posture, not a gap. The last failed test&apos;s reason is kept on the row (open the (i) beside
+                the badge). Moving an endpoint disables the scorer until a fresh test passes. Removing a scorer that a
+                dataset still names makes that dataset&apos;s next run refuse with <code>external_scorer_unknown</code>{" "}
+                — it never silently scores another way.
+              </p>
+            }
+          >
             {(scorers.data?.scorers ?? []).length === 0 ? (
-              <EmptyState
-                title="No external scorers registered"
-                body="Nothing here means every eval scores locally or through the governed model judge — that is the shipped posture, not a gap."
-              />
+              <EmptyState title="No external scorers registered" />
             ) : (
               <Table
                 rows={scorers.data?.scorers ?? []}
@@ -223,7 +251,7 @@ export default function ExternalScorersPage() {
                       r.enabled ? (
                         <Badge tone="ok">enabled</Badge>
                       ) : r.lastTestError ? (
-                        <Badge tone="danger" title={r.lastTestError}>
+                        <Badge tone="danger" infoLabel={`why the last test of ${r.name} failed`} info={r.lastTestError}>
                           last test failed
                         </Badge>
                       ) : r.lastTestedAt ? (
@@ -282,12 +310,6 @@ export default function ExternalScorersPage() {
                 ]}
               />
             )}
-            <p className={v.faint}>
-              The last failed test&apos;s reason is kept on the row (hover the badge). Moving an
-              endpoint disables the scorer until a fresh test passes. Removing a scorer that a
-              dataset still names makes that dataset&apos;s next run refuse with{" "}
-              <code>external_scorer_unknown</code> — it never silently scores another way.
-            </p>
           </Card>
         </QueryGate>
       </div>

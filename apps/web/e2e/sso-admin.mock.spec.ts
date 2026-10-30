@@ -138,6 +138,11 @@ test("ADR-0186 A: saving the sign-in policy asks to confirm it's you and resends
   await mockApi(page);
   const su = await requireStepUpOn(page, { method: "PUT", path: "/v1/org/settings", kind: "break_glass" });
   await page.goto("/ui/admin/sso");
+  // ADR-0180: the requirements for "SSO only" and "Email sign-in" stay visible beside the selects, not only in the fold
+  const reqs = page.getByTestId("sso-policy-requirements");
+  await expect(reqs).toBeVisible();
+  await expect(reqs).toContainText("“SSO only” needs at least one enabled SSO provider.");
+  await expect(reqs).toContainText("at least one ticked administrator who has a password");
   await page.getByRole("button", { name: "Save sign-in policy" }).click();
   await confirmStepUp(page);
   await su.expectResentOnce();

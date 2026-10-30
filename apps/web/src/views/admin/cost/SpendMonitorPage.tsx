@@ -21,7 +21,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago, fmtUsd } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Select, Table } from "../../../ui/kit";
 import { QueryGate, optionEls, projectOpts, useAction, useProjects } from "../adminKit";
 import { AnomalyHistory, ScheduledChangeHistory } from "./SpendHistory";
 import a from "../admin.module.css";
@@ -95,6 +95,13 @@ interface ForecastBody {
   scope: { effectiveProjectIds: string[] | null; reason: string };
 }
 
+/** the gateway's note names its design record, a column and a table; customer copy names none of them */
+const withoutAdrRef = (note: string | undefined) =>
+  (note ?? "")
+    .replace(/\bADR-\d{4}'s\s+/g, "The ")
+    .replace("`lastEvaluatedAt` staying null", "last-evaluated time staying empty")
+    .replace("over usage_events", "over the usage ledger");
+
 export default function SpendMonitorPage() {
   const act = useAction();
   const projects = useProjects();
@@ -133,7 +140,7 @@ export default function SpendMonitorPage() {
       />
       <div className={v.stack}>
         {/* ---------------- forecast ---------------- */}
-        <Card title="Forecast">
+        <Card title="Forecast" info={<p>A forecast is a read-only projection over the measured usage ledger.</p>}>
           <div className={v.stack}>
             <div className={a.formRow}>
               <Field label="Scope">
@@ -173,7 +180,7 @@ export default function SpendMonitorPage() {
             {!f ? (
               <EmptyState
                 title="No forecast computed yet"
-                body="A forecast is a read-only projection over usage_events. Nothing is stored until you ask for one, and asking again recomputes from the ledger."
+                body="Nothing is stored until you ask for one, and asking again recomputes from the ledger."
               />
             ) : !f.sufficient ? (
               /* THE HONEST EMPTY ANSWER. Deliberately NOT a zero or a dash. */
@@ -188,6 +195,15 @@ export default function SpendMonitorPage() {
               </div>
             ) : (
               <div className={v.stack}>
+                <div className={v.row}>
+                  <Badge
+                    tone="warn"
+                    infoLabel="the projection"
+                    info="The forecast extrapolates the past: a change nobody declared makes it wrong, which is why its assumptions and limits are printed beside every number."
+                  >
+                    Projection
+                  </Badge>
+                </div>
                 <div className={a.formRow}>
                   <Field label={`Projected (${f.method}, ${f.period.label})`}>
                     <Input readOnly value={fmtUsd(f.projectedSpendUsd)} />
@@ -245,7 +261,8 @@ export default function SpendMonitorPage() {
           <Card title="Anomaly policies">
             <div className={v.stack}>
               <div className={a.effectBanner}>
-                <strong>Nothing drives these.</strong> {overview.data?.note}
+                <strong>No scheduler or operator run is evaluating these policies.</strong>{" "}
+                <InfoButton label="what evaluates anomaly policies">{withoutAdrRef(overview.data?.note)}</InfoButton>
               </div>
               <div className={a.formRow}>
                 <Field label="Scope">
@@ -309,14 +326,35 @@ export default function SpendMonitorPage() {
                   </Button>
                 </Field>
               </div>
-              <div className={v.faint}>
-                A project with fewer than {overview.data?.minBaselineSamples ?? 7} days of measured spend in its
-                baseline window gets <strong>no anomaly claims at all</strong> — the page reports &ldquo;baseline
-                building&rdquo; rather than a spurious flag. That cold-start window is a disclosed blind spot: only
-                the static budget and compliance caps protect a brand-new project.
+              <div className={v.row}>
+                <Badge
+                  tone="warn"
+                  infoLabel="the cold-start blind spot"
+                  info={
+                    <>
+                      A project with fewer than {overview.data?.minBaselineSamples ?? 7} days of measured spend in its
+                      baseline window gets <strong>no anomaly claims at all</strong> — the page reports &ldquo;baseline
+                      building&rdquo; rather than a spurious flag. That cold-start window is a disclosed blind spot: only
+                      the static budget and compliance caps protect a brand-new project.
+                    </>
+                  }
+                >
+                  Blind spot: first {overview.data?.minBaselineSamples ?? 7} days
+                </Badge>
               </div>
               {(overview.data?.policies ?? []).length === 0 ? (
-                <EmptyState title="No policies" body="Spend monitoring is ON by default: with no policy row every project is evaluated with the built-in defaults. Add a policy to tune it, or to switch it off (audited)." />
+                <EmptyState
+                  title="No policies"
+                  body={
+                    <Badge
+                      tone="ok"
+                      infoLabel="the default spend monitoring"
+                      info="Spend monitoring is ON by default: with no policy row every project is evaluated with the built-in defaults. Add a policy to tune it, or to switch it off (audited)."
+                    >
+                      Strict default · monitoring on
+                    </Badge>
+                  }
+                />
               ) : (
                 <Table
                   rows={overview.data!.policies}
@@ -342,10 +380,20 @@ export default function SpendMonitorPage() {
           {/* ---------------- anomalies ---------------- */}
           <Card title={`Anomaly signals (${overview.data?.openAnomalies ?? 0} open)`}>
             <div className={v.stack}>
-              <div className={v.faint}>
-                An anomaly is a <strong>signal for human review, never proof of wrongdoing</strong>. Every row below
-                carries the method, the baseline and the threshold it was derived from so the arithmetic can be
-                re-checked. Where a policy escalates, the review item lands on the existing Approvals Queue.
+              <div className={v.row}>
+                <Badge
+                  tone="warn"
+                  infoLabel="an anomaly signal"
+                  info={
+                    <>
+                      An anomaly is a <strong>signal for human review, never proof of wrongdoing</strong>. Every row below
+                      carries the method, the baseline and the threshold it was derived from so the arithmetic can be
+                      re-checked. Where a policy escalates, the review item lands on the existing Approvals Queue.
+                    </>
+                  }
+                >
+                  Signal for review, not proof
+                </Badge>
               </div>
               {(overview.data?.recentAnomalies ?? []).length === 0 ? (
                 <EmptyState title="No anomalies recorded" body="Either nothing has been flagged, or no operator has driven the evaluator yet." />
@@ -394,14 +442,18 @@ export default function SpendMonitorPage() {
           </Card>
 
           {/* ---------------- scheduled changes ---------------- */}
-          <Card title="Decided future changes">
-            <div className={v.stack}>
-              <div className={v.faint}>
+          <Card
+            title="Decided future changes"
+            info={
+              <p>
                 The forecast extrapolates the past. A change that has been <strong>decided</strong> but not yet
                 happened is invisible to any extrapolation, so it is recorded here and added on top. Nothing else is
                 anticipated — an undeclared change simply makes the projection wrong, which is why the limits are
                 printed beside every number.
-              </div>
+              </p>
+            }
+          >
+            <div className={v.stack}>
               <div className={a.formRow}>
                 <Field label="Project">
                   <Select value={scProject} onChange={(e) => setScProject(e.target.value)}>
