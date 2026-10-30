@@ -67,6 +67,8 @@ const ContentTrustPage = screen(() => import("./screens/admin-policies-gates"), 
 const ModelPolicyPage = screen(() => import("./screens/admin-policies-gates"), "ModelPolicyPage");
 const EvalsPage = screen(() => import("./screens/admin-quality-security"), "EvalsPage");
 const ModelRiskPage = screen(() => import("./screens/admin-ai-governance"), "ModelRiskPage");
+// ADR-0222 (P13(a)): its own lazy chunk, loaded only when fairness testing is opened
+const FairnessTestingPage = lazy(() => import("./views/admin/governance/FairnessTestingPage"));
 const UseCasesPage = screen(() => import("./screens/admin-ai-governance"), "UseCasesPage");
 const IntakeWizardPage = screen(() => import("./screens/admin-ai-governance"), "IntakeWizardPage");
 const ReviewPolicyPage = screen(() => import("./screens/admin-ai-governance"), "ReviewPolicyPage");
@@ -257,6 +259,8 @@ function ApplicationRoutes() {
                 {/* ADR-0173 batch 2c (Q) */}
                 <Route path="annotation-queues" element={<AnnotationQueuesPage />} />
                 <Route path="model-risk" element={<ModelRiskPage />} />
+                {/* ADR-0222 (P13(a)) */}
+                <Route path="model-risk/fairness" element={<FairnessTestingPage />} />
                 {/* ADR-0080 */}
                 <Route path="use-cases" element={<UseCasesPage />} />
                 <Route path="governance/intake" element={<IntakeWizardPage />} />

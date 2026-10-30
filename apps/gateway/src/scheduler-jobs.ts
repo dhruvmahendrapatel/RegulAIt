@@ -118,6 +118,8 @@ export const SCHEDULER_JOB_NAMES = {
   endpointAgentIngest: "endpoint-agent-ingest",
   // ADR-0188 S9 follow-up: fetches due SPIFFE bundle endpoints (oauth/spiffe-bundle-endpoint.ts)
   spiffeBundleRefresh: "spiffe-bundle-refresh",
+  // ADR-0222 (P13(a)): deletes fairness dataset rows past retention (fairness.ts)
+  fairnessDatasetRetentionSweep: "fairness-dataset-retention-sweep",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -787,6 +789,7 @@ import { modelArtifactJobDefinitions, type ArtifactStore } from "./model-artifac
 import { discoveryJobDefinitions } from "./discovery-worker.js";
 import { endpointAgentJobDefinitions } from "./endpoint-agent-routes.js";
 import { spiffeBundleRefreshJobDefinitions } from "./oauth/spiffe-bundle-endpoint.js";
+import { fairnessJobDefinitions } from "./fairness.js";
 
 function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
   return [
@@ -802,6 +805,7 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...discoveryJobDefinitions({ dataKey: opts.dataKey }), // ADR-0195 SD0: discovery-scan-sweep
     ...endpointAgentJobDefinitions(), // ADR-0195 SD4b: endpoint-agent-ingest
     ...spiffeBundleRefreshJobDefinitions(), // ADR-0188 S9 follow-up: spiffe-bundle-refresh
+    ...fairnessJobDefinitions(), // ADR-0222 (P13(a)): fairness-dataset-retention-sweep
   ];
 }
 // ===== end ADR-0182 block ====================================================

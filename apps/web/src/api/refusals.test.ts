@@ -25,6 +25,12 @@ describe("refusalGuidance (ADR-0183 2.3)", () => {
     expect(refusalGuidance(500, { error: "custom_provider_disabled" })).toBeNull();
   });
 
+  it("a fairness hold and the feature being off point at the fairness testing page (ADR-0222)", () => {
+    expect(refusalGuidance(409, { error: "fairness_test_failed" })).toBe(REFUSAL_GUIDANCE.fairnessTestFailed);
+    expect(refusalGuidance(409, { error: "fairness_testing_off" })).toBe(REFUSAL_GUIDANCE.fairnessTestingOff);
+    expect(refusalGuidance(500, { error: "fairness_test_failed" })).toBeNull();
+  });
+
   it("anything else is not guided", () => {
     expect(refusalGuidance(403, { error: "forbidden" })).toBeNull();
     expect(refusalGuidance(403, { decision: { reason: "x", ruleId: "no-grant" } as never })).toBeNull();
@@ -34,7 +40,7 @@ describe("refusalGuidance (ADR-0183 2.3)", () => {
 
   it("every guidance links to an Account section or admin page that exists", () => {
     for (const g of Object.values(REFUSAL_GUIDANCE)) {
-      expect(g.to).toMatch(/^(\/account\?section=(mfa|ai-policies)|\/admin\/custom-providers)$/);
+      expect(g.to).toMatch(/^(\/account\?section=(mfa|ai-policies)|\/admin\/custom-providers|\/admin\/model-risk\/fairness)$/);
     }
   });
 });

@@ -43,6 +43,7 @@ import type { ArtifactScan } from "./modelArtifacts";
 import { SpdxFieldsPanel } from "./SpdxFieldsPanel";
 import { OrgSettingsCard } from "../settings/OrgSettingsCard";
 import { ModelCardEditButton } from "./ModelCardEditButton";
+import { RefusalNotice } from "../../../ui/RefusalNotice";
 
 // ADR-0189 B6: an agent's model card shows that agent's AI BOM (R25: a card approval snapshots its agent)
 const AiBomPanel = lazy(() => import("./BomEvidencePanel").then((m) => ({ default: m.AiBomPanel })));
@@ -115,6 +116,8 @@ interface StatusView {
    * on by default (ADR-0181); deepens the dispatch gate and only bites while enforced */
   stalenessRecertEnabled: boolean;
   stalenessRecertThreshold: number;
+  /** ADR-0222 (P13(a)): measured fairness testing, off by default */
+  fairness?: { enabled: boolean; blockOnFail: boolean };
   posture: "enforced" | "declared" | "absent";
   label: string;
   cards: number;
@@ -623,6 +626,16 @@ export default function ModelRiskPage() {
                       : `missing: ${detail.completeness.missing.join(", ")}`}
                   </span>
                 </div>
+                {status.data?.fairness?.enabled && (
+                  <div className={v.stack}>
+                    {status.data.fairness.blockOnFail && (
+                      <p className={v.faint}>A failing or inconclusive latest fairness test holds this card&apos;s sign-off and use.</p>
+                    )}
+                    <p>
+                      <Link to={`/admin/model-risk/fairness?card=${detail.id}`}>Fairness tests for this model card</Link>
+                    </p>
+                  </div>
+                )}
 
                 {detail.agentId && (
                   <Tabs
@@ -824,6 +837,8 @@ export default function ModelRiskPage() {
                     </Button>
                   </Field>
                 </form>
+                {/* ADR-0222: a failing fairness test refuses the request; say why and where to fix it */}
+                <RefusalNotice guidance={act.guidance} />
                 <div className={v.faint}>
                   The request lands in the one <Link to="/admin/approvals" style={{ textDecoration: "underline" }}>Approvals Queue</Link>. There is no
                   approve button on this page, deliberately — one inbox, one decision path, one audit trail.

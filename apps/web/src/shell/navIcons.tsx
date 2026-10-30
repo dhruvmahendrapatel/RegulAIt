@@ -131,6 +131,7 @@ const BY_ROUTE: Record<string, keyof typeof G> = {
   "/admin/governance/decision-regression": "history", // ADR-0182 A11
   "/admin/governance/literacy": "ribbon", // ADR-0182 A14
   "/admin/model-risk": "cube",
+  "/admin/model-risk/fairness": "scales", // ADR-0222
   "/admin/vendors": "building",
   "/admin/risks": "warning",
   "/admin/shadow-ai": "eye",
