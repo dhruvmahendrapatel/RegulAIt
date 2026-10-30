@@ -61,7 +61,7 @@ import {
   guardrailOutcome,
   recordGuardrailDecision,
   resolveGuardrailPolicy,
-  runGuardrails,
+  runGuardrailsAsync,
   type DispatchGuardrails,
 } from "./guardrails.js";
 import { approvalTargetForServer, auditPolicyChangedRefusal, decisionPolicyStillCurrent, governedEvaluate, type RetiredApproval } from "./governed-evaluate.js";
@@ -1337,9 +1337,9 @@ async function executeGovernedToolCallInner(
     // here — arguments in, tool result out — with PII excluded (its dedicated
     // path is directly above).
     const mcpGuardrails = await resolveGuardrailPolicy(db, { projectId });
-    let mgInput: ReturnType<typeof runGuardrails> | null = null;
+    let mgInput: Awaited<ReturnType<typeof runGuardrailsAsync>> | null = null;
     if (mcpGuardrails.active) {
-      mgInput = runGuardrails(mcpGuardrails, "input", JSON.stringify(args.arguments ?? null));
+      mgInput = await runGuardrailsAsync(mcpGuardrails, "input", JSON.stringify(args.arguments ?? null));
       const outcome = guardrailOutcome(mgInput);
       if (outcome) {
         await recordGuardrailDecision(db, {
@@ -1514,10 +1514,10 @@ async function executeGovernedToolCallInner(
     // surface: a compromised or hostile MCP server answers with text that the
     // orchestrator will feed straight back to a model as context. A block is
     // bill-and-withhold, identical to the PII rule directly above.
-    let mgOutput: ReturnType<typeof runGuardrails> | null = null;
+    let mgOutput: Awaited<ReturnType<typeof runGuardrailsAsync>> | null = null;
     let mgWithheld = false;
     if (mcpGuardrails.active) {
-      mgOutput = runGuardrails(mcpGuardrails, "output", scannableMcpText(content, decodeMcpBlobs(content)));
+      mgOutput = await runGuardrailsAsync(mcpGuardrails, "output", scannableMcpText(content, decodeMcpBlobs(content)));
       if (mgOutput.action === "block") {
         mgWithheld = true;
         resultContent = {
