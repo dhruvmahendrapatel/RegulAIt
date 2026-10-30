@@ -2746,21 +2746,36 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       });
       if (refusal) return reply.status(400).send(refusal);
     }
-    const [row] = await db
-      .insert(gitConnections)
-      .values({
-        name: body.name,
-        provider: body.provider,
-        baseUrl: body.baseUrl ?? null,
-        tokenCiphertext: encryptTokenOnce(opts.dataKey, body.token),
-      })
-      .returning({
-        id: gitConnections.id,
-        name: gitConnections.name,
-        provider: gitConnections.provider,
-        baseUrl: gitConnections.baseUrl,
-        createdAt: gitConnections.createdAt,
+    const dataKey = opts.dataKey;
+    // #453 follow-up: the creation is on the record in the same transaction as the row, as the delete is
+    const row = await db.transaction(async (tx) => {
+      const [created] = await tx
+        .insert(gitConnections)
+        .values({
+          name: body.name,
+          provider: body.provider,
+          baseUrl: body.baseUrl ?? null,
+          tokenCiphertext: encryptTokenOnce(dataKey, body.token),
+        })
+        .returning({
+          id: gitConnections.id,
+          name: gitConnections.name,
+          provider: gitConnections.provider,
+          baseUrl: gitConnections.baseUrl,
+          createdAt: gitConnections.createdAt,
+        });
+      await tx.insert(auditLog).values({
+        userId: req.authCtx.userId ?? SYSTEM_IDENTITY,
+        objectType: "git_connection",
+        objectId: created!.id,
+        detail: { phase: "created", name: created!.name, provider: created!.provider, baseUrl: created!.baseUrl },
+        effect: "allow",
+        ruleId: "git-connection-created",
+        ruleChain: [],
+        reason: `git connection '${created!.name}' (${created!.provider}) created`,
       });
+      return created!;
+    });
     return reply.status(201).send(row);
   });
 

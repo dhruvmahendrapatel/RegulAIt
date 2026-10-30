@@ -447,22 +447,37 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
     // verification (linear/asana HMAC signatures, generic's signed envelope)
     // must re-derive MACs from the secret itself — a hash cannot key an HMAC.
     const webhookSecret = `rglwh_${randomBytes(24).toString("hex")}`;
-    const [row] = await db
-      .insert(pmConnections)
-      .values({
-        name: body.name,
-        provider: body.provider,
-        baseUrl: body.baseUrl ?? null,
-        project: body.project,
-        tokenCiphertext: encryptSecret(opts.dataKey, body.token),
-        mapping: body.mapping ?? null,
-        apiVersion: body.apiVersion ?? null,
-        webhookSecretHash: sha256(webhookSecret),
-        webhookSecretCiphertext: encryptSecret(opts.dataKey, webhookSecret),
-        // O7 (ADR-0027): drift policy — manual (today) unless the admin chose
-        driftResolution: body.driftResolution ?? "manual",
-      })
-      .returning(CONNECTION_COLUMNS);
+    const dataKey = opts.dataKey;
+    // #453 follow-up: the creation is on the record in the same transaction as the row, as the delete is
+    const row = await db.transaction(async (tx) => {
+      const [created] = await tx
+        .insert(pmConnections)
+        .values({
+          name: body.name,
+          provider: body.provider,
+          baseUrl: body.baseUrl ?? null,
+          project: body.project,
+          tokenCiphertext: encryptSecret(dataKey, body.token),
+          mapping: body.mapping ?? null,
+          apiVersion: body.apiVersion ?? null,
+          webhookSecretHash: sha256(webhookSecret),
+          webhookSecretCiphertext: encryptSecret(dataKey, webhookSecret),
+          // O7 (ADR-0027): drift policy — manual (today) unless the admin chose
+          driftResolution: body.driftResolution ?? "manual",
+        })
+        .returning(CONNECTION_COLUMNS);
+      await tx.insert(auditLog).values({
+        userId: req.authCtx.userId ?? SYSTEM_IDENTITY,
+        objectType: "pm_connection",
+        objectId: created!.id,
+        detail: { phase: "created", name: body.name, provider: body.provider, project: body.project, baseUrl: body.baseUrl ?? null },
+        effect: "allow",
+        ruleId: "pm-connection-created",
+        ruleChain: [],
+        reason: `PM connection '${body.name}' (${body.provider}) created`,
+      });
+      return created!;
+    });
     return reply.status(201).send({ ...row, webhookSecret });
   });
 

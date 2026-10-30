@@ -66,8 +66,12 @@ async function mkPm(name: string) {
   return r.json().id as string;
 }
 
+/** the removal row only: the connection's creation is on the record under the same object id */
 const removedRow = (objectType: "git_connection" | "pm_connection", objectId: string) =>
-  db.select().from(auditLog).where(and(eq(auditLog.objectType, objectType), eq(auditLog.objectId, objectId)));
+  db
+    .select()
+    .from(auditLog)
+    .where(and(eq(auditLog.objectType, objectType), eq(auditLog.objectId, objectId), eq(auditLog.ruleId, `${objectType.replace("_", "-")}-removed`)));
 
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
