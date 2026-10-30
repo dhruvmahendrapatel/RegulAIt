@@ -123,7 +123,65 @@ evidence is ever deleted; every new route is in the OpenAPI map and the route cl
    UI)? It is kept as a direct, step-up-gated edit for policy-as-code because the brief requires it never to clear
    floors, which presumes it stays; many suites drive it. Owner's call.
 
-## As built
+## As built (2026-10-30, PR #606)
 
-Filled in when G8 and G9 merge into the lane branch: the exact refusal codes, audit rule ids and any deviation from the
-decision above.
+### G7 (migration 0223)
+
+- Routes: `POST /v1/compliance/profiles/:id/versions` (202), `POST /v1/compliance/profiles/:id/retire` (200), both
+  admin-only; module `apps/gateway/src/compliance-profile-lifecycle.ts`. The decide path's hooks are
+  `precheckComplianceProfileDecision` and `applyComplianceProfileDecision`; the queue label reads
+  "compliance profile '<tag>' v<n>".
+- Refusals: `unknown_compliance_profile` (404), `compliance_profile_retired`, `compliance_profile_already_retired`,
+  `compliance_profile_in_use` (with `projects`, `pendingProjects`, `teams`, `resources` by name),
+  `compliance_profile_version_pending` (with `approvalId`) (409); `reviewer_is_author`, `reviewer_not_eligible`,
+  `no_change`, `unknown_template` (422); `cannot_approve_own_compliance_profile_change` (403, decide path).
+- Audit rule ids: `compliance-profile-version-proposed`, `compliance-profile-version-approved`,
+  `compliance-profile-version-rejected`, `compliance-profile-version-stale`, `compliance-profile-retired`.
+- Drafts are minted through `proposeRuleVersion` in `rule-writes.ts`, so that module stays the only one that mints
+  versions of a rule artifact (`rule-write-guard.test.ts`); the retire write is an audited writer there (lifecycle
+  columns only, none versioned).
+- A retired infrastructure resource (G8) no longer counts as a carrier.
+
+### G8 (migration 0224)
+
+- Routes: `PATCH /v1/infra/resources/:id`, `POST /v1/infra/resources/:id/retire`, `PATCH /v1/infra/policies/:id`,
+  `POST /v1/infra/policies/:id/retire` (returns `{policy, fallback}`). The UI reads the active fleet policy from the
+  existing `GET /v1/infra/policies` to show the fallback before confirming.
+- Refusals (409): `infra_resource_retired`, `infra_policy_retired`, `infra_resource_remediations_pending` (with
+  `findingIds`), `infra_fleet_policy_not_retirable`, `infra_policy_already_active` (with `existingPolicyId`),
+  `infra_resource_name_taken`, `changed_concurrently`; 404 `unknown_resource`, `unknown_policy`.
+- Audit rule ids: `infra-resource-created`, `infra-resource-updated`, `infra-resource-retired`, `infra-policy-created`,
+  `infra-policy-updated`, `infra-policy-retired`.
+- Partial unique indexes `infra_policies_active_resource_uq` and `infra_policies_active_fleet_uq`, with their
+  duplicate checks in the deferred-unique preflight.
+- Beyond the design: retiring a resource also retires its active resource-scoped policy (its own audit row). A retired
+  resource keeps its name, and names stay unique. Retired resources are left out of scans, backup verification and the
+  posture count; naming one in a scan, remediation, rotation, patch, restore or new policy is refused.
+- Deviation: the design lists "removing the auto-remediation cap" as loosening. In the code a null
+  `autoRemediateMaxSeverity` means "never auto-remediate", the strictest value, so clearing it is treated as tightening.
+  Clearing patch cadence, backup retention or the rotation lead time is loosening.
+
+### G9 (migration 0225)
+
+- Routes: `POST /v1/evals/datasets/:id/retire`, `POST /v1/redteam/libraries/:id/retire`,
+  `PATCH` and `DELETE /v1/engine-schedules/:scheduleId` (in `NON_ADMIN_ROUTES`, object-level checks in the handler),
+  `POST /v1/certification-campaigns/:campaignId/cancel`.
+- Refusals: `eval_dataset_builtin`, `eval_dataset_in_use` (`templates`, `automationRules`),
+  `eval_dataset_already_retired`; `redteam_run_in_progress`, `redteam_library_already_retired`; `schedule_owner_only`
+  (403), `engine_schedule_not_found` (404); `campaign_not_open` (with `status`). Downstream: `eval_dataset_retired`,
+  `redteam_library_retired`, `campaign_cancelled`.
+- Audit rule ids: `eval-dataset-retired`, `redteam-library-retired`, `engine-schedule-updated`,
+  `engine-schedule-deleted`, `certification-campaign-cancelled`.
+- The next run after an interval edit is `max(now, last scheduled run + new interval)` on the database clock. An admin
+  can still switch off another person's schedule, as before, but only the owner changes its interval.
+- Deviations: the automation action that writes to a dataset is `{type: "dataset", datasetId}` (the brief's
+  `add_to_dataset` was a guess); cancel also refuses an expired-incomplete campaign, so cancelling cannot hide that
+  posture fact. `ReasonedAction` takes a `submit(reason)` callback instead of a path, so the route census sees each
+  screen's call; campaign cancel and red-team retire go through `withStepUp`.
+
+### Open questions added while building
+
+2. Should engine anchor libraries (`engine:<id>`) and the `redteam:*` datasets a library publishes be blocked from
+   retirement?
+3. Creating an automation rule checks for a retired dataset outside a transaction, so a narrow race remains; use of a
+   retired dataset still fails closed further down.
