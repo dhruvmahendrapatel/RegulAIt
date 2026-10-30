@@ -11,7 +11,7 @@ import { api } from "../../../api/client";
 import type { AdminAgent, CustomModelProvider, UserAgentPolicyView } from "../../../api/adminTypes";
 import { fmtUsd } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, Input, Select, SkeletonBlock, Table, Textarea } from "../../../ui/kit";
 import {
   KV,
   RemoveButton,
@@ -33,6 +33,8 @@ import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 
 const CLEAR = "__clear__";
 
+// ADR-0205: the setup assistant loads only when an admin opens it (entry-bundle budget)
+const AgentSetupAssistant = lazy(() => import("./AgentSetupAssistant"));
 const AiBomPanel = lazy(() => import("../governance/BomEvidencePanel").then((m) => ({ default: m.AiBomPanel })));
 
 export default function AgentsPage() {
@@ -228,6 +230,7 @@ function RegisterAgentCard() {
   const customProviders = useCustomProviders();
   const [f, setF] = useState(EMPTY_AGENT);
   const set = (k: keyof typeof f, val: string) => setF((s) => ({ ...s, [k]: val }));
+  const [assistOpen, setAssistOpen] = useState(false);
 
   // ADR-0034: ONLY ENABLED ENDPOINTS ARE SELECTABLE. A disabled one is either
   // untested or deliberately switched off; binding an agent to it would build
@@ -240,6 +243,21 @@ function RegisterAgentCard() {
 
   return (
     <Card title="Register an agent">
+      <div className={v.row}>
+        <Button type="button" aria-expanded={assistOpen} onClick={() => setAssistOpen((o) => !o)}>
+          Setup assistant
+        </Button>
+      </div>
+      {assistOpen && (
+        <Suspense fallback={<SkeletonBlock lines={2} />}>
+          <AgentSetupAssistant
+            onUse={(d) =>
+              // fills the form only; the agent exists once the admin presses Register
+              setF((previous) => ({ ...previous, name: d.name.value, tier: String(d.tier.value), systemPrompt: d.systemPrompt.value }))
+            }
+          />
+        </Suspense>
+      )}
       <form
         className={v.stack}
         onSubmit={(e) => {

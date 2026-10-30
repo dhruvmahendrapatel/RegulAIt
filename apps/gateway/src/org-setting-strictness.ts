@@ -264,6 +264,8 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   // adding back a provider the org had removed loosens it
   envFallbackProviders: fromStored(["anthropic", "openai", "google", "xai"], addsAny),
   customModelProvidersEnabled: notEqual(false),
+  // ADR-0205: the agent setup assistant sends an admin's description to a model — off by default
+  agentSetupAssistEnabled: notEqual(false),
   mcpPrivateRangesDefault: notEqual(false),
   mcpAdmissionMode: notEqual("enforce"),
   minReleaseAgeDays: atLeast(7),

@@ -1436,6 +1436,13 @@
       "when": 1785149000000,
       "tag": "0214_mcp_upstream_credential",
       "breakpoints": true
+    },
+    {
+      "idx": 215,
+      "version": "7",
+      "when": 1785150000000,
+      "tag": "0215_agent_setup_assist",
+      "breakpoints": true
     }
   ]
 }
