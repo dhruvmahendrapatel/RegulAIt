@@ -273,6 +273,9 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
     group: "Integrations",
     items: [
       { label: "Agents", to: "/admin/agents" },
+      // ADR-0219 (P10) — remote agents over A2A sit directly under Agents: the same job (register, credential,
+      // grant per person) for an agent another team or vendor runs.
+      { label: "Remote agents (A2A)", to: "/admin/a2a-agents" },
       { label: "Model credentials", to: "/admin/model-credentials" },
       // ADR-0034 — sits next to Model credentials because it is the same
       // question ("what can our models talk to?") asked about an endpoint we

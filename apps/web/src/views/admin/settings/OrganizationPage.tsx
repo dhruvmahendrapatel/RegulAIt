@@ -154,6 +154,11 @@ function Loaded(props: { settings: Record<string, unknown> }) {
     mcpPrivateRangesDefault: str(s, "mcpPrivateRangesDefault"),
   });
 
+  // --- 2c1. Remote agents over A2A (ADR-0219) -------------------------------
+  const a2a = useSection({
+    a2aEnabled: str(s, "a2aEnabled"),
+  });
+
   // --- 2d. Deployment egress posture (ADR-0062) ----------------------------
   const compiledEgress = useSection({
     egressCompiledDefaultPolicy: str(s, "egressCompiledDefaultPolicy"),
@@ -499,6 +504,31 @@ function Loaded(props: { settings: Record<string, unknown> }) {
             >
               <option value="false">strict (default — each server needs an explicit opt-in)</option>
               <option value="true">open (private-LAN MCP servers just work — relaxed)</option>
+            </Select>
+          </Field>
+        </SectionShell>
+      </Card>
+
+      <Card title="3b1 · Remote agents (A2A)">
+        <SectionShell
+          title="Calls to remote agents"
+          busy={a2a.act.busy}
+          error={a2a.act.error}
+          submitLabel="Save remote agent setting"
+          onSubmit={() =>
+            void a2a.act.run(() => put({ a2aEnabled: asBool(a2a.f.a2aEnabled!) }), "Remote agent setting saved (audited)")
+          }
+          help={
+            <>
+              <p>Off (default) = no remote agent can be registered or called. On = admins may register remote agents on the Remote agents (A2A) page; turning it on loosens a security setting, so you will be asked to confirm it's you, and it is audited.</p>
+              <p>Even when on, nobody may call a remote agent until an admin gives them access, and every call is checked, costed and recorded. Remote agents are reached under the same network rules as MCP servers.</p>
+            </>
+          }
+        >
+          <Field label="Calls to remote agents">
+            <Select value={a2a.f.a2aEnabled} onChange={(e) => a2a.set("a2aEnabled", e.target.value)}>
+              <option value="false">off (default — no remote agent can be registered or called)</option>
+              <option value="true">on (admins may register remote agents — relaxed)</option>
             </Select>
           </Field>
         </SectionShell>

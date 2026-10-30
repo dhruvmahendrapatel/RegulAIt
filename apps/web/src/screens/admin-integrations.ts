@@ -1,4 +1,5 @@
 // ADR-0196 U4: the screens of one chunk, loaded together on the first visit to any of them (see App.tsx).
+export { default as A2aAgentsPage } from "../views/admin/integrations/A2aAgentsPage";
 export { default as AdmissionReviewPage } from "../views/admin/governance/AdmissionReviewPage";
 export { default as AgentsPage } from "../views/admin/integrations/AgentsPage";
 export { default as ConnectorsPage } from "../views/admin/integrations/ConnectorsPage";

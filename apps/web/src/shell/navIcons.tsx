@@ -162,6 +162,7 @@ const BY_ROUTE: Record<string, keyof typeof G> = {
   "/admin/provisioning": "sync",
   "/admin/group-mappings": "mapping",
   "/admin/agents": "robot",
+  "/admin/a2a-agents": "plug", // ADR-0219
   "/admin/model-credentials": "key",
   "/admin/custom-providers": "chip",
   "/admin/regulait-llm": "spark",

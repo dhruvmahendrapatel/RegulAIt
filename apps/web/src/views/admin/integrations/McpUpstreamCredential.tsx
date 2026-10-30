@@ -34,14 +34,28 @@ export function McpUpstreamCredentialCard(props: { server: McpServer | undefined
       </Card>
     );
   }
-  return <CredentialCard key={server.id} server={server} />;
+  return (
+    <StaticCredentialCard
+      key={server.id}
+      url={`/v1/servers/${server.id}/upstream-credential`}
+      queryKey={["admin", "mcp-upstream-credential", server.id]}
+      name={server.name}
+      title="Upstream credential"
+      target="this server"
+      footnote="The key is never shown again. A change of the server's URL clears it."
+    />
+  );
 }
 
-function CredentialCard(props: { server: McpServer }) {
-  const { server } = props;
-  const url = `/v1/servers/${server.id}/upstream-credential`;
+/**
+ * The write-only static credential card, shared by an MCP server and a remote A2A agent (ADR-0219): the same contract
+ * (`GET`/`PUT`/`DELETE` on `url`, `{ credential: UpstreamCredentialView }`), the same step-up and the same copy.
+ */
+export function StaticCredentialCard(props: { url: string; queryKey: readonly unknown[]; name: string; title: string; target: string; footnote: string }) {
+  const { url } = props;
+  const server = { name: props.name };
   const q = useQuery({
-    queryKey: ["admin", "mcp-upstream-credential", server.id],
+    queryKey: props.queryKey,
     queryFn: () => api.get<{ credential: UpstreamCredentialView }>(url),
   });
   const users = useUsers();
@@ -80,17 +94,17 @@ function CredentialCard(props: { server: McpServer }) {
   if (!view) return <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>{null}</QueryGate>;
   return (
     <Card
-      title="Upstream credential"
+      title={props.title}
       actions={<Badge tone={view.set ? "warn" : "ok"}>{view.set ? "Credential set" : "Nothing sent (default)"}</Badge>}
     >
       <p>
         {view.set
-          ? `${sentAs(view)} Only to this server's address. Set by ${setter ?? "an admin"}${view.setAt ? ` on ${fmtAt(view.setAt)}` : ""}.`
-          : "Nothing is sent to this server. Set a key if it checks one; you will be asked to confirm it's you."}
+          ? `${sentAs(view)} Only to ${props.target}'s address. Set by ${setter ?? "an admin"}${view.setAt ? ` on ${fmtAt(view.setAt)}` : ""}.`
+          : `Nothing is sent to ${props.target}. Set a key if it checks one; you will be asked to confirm it's you.`}
       </p>
-      <p className={v.dim}>The key is never shown again. A change of the server&apos;s URL clears it.</p>
+      <p className={v.dim}>{props.footnote}</p>
       <form
-        aria-label={`Upstream credential for ${server.name}`}
+        aria-label={`${props.title} for ${server.name}`}
         onSubmit={(e) => {
           e.preventDefault();
           save();

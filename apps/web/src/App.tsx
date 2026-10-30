@@ -100,6 +100,8 @@ const TracesPage = screen(() => import("./screens/admin-approvals-audit"), "Trac
 const MonitoringPage = screen(() => import("./screens/admin-overview"), "MonitoringPage");
 const WorkflowTemplatesPage = screen(() => import("./screens/admin-policies-gates"), "WorkflowTemplatesPage");
 const AgentsPage = screen(() => import("./screens/admin-integrations"), "AgentsPage");
+// ADR-0219 (P10)
+const A2aAgentsPage = screen(() => import("./screens/admin-integrations"), "A2aAgentsPage");
 const ModelCredentialsPage = screen(() => import("./screens/admin-integrations"), "ModelCredentialsPage");
 const CustomProvidersPage = screen(() => import("./screens/admin-integrations"), "CustomProvidersPage");
 const ExternalScorersPage = screen(() => import("./screens/admin-quality-security"), "ExternalScorersPage");
@@ -303,6 +305,7 @@ function ApplicationRoutes() {
                 <Route path="chatops" element={<ChatOpsPage />} />
                 <Route path="workflow-templates" element={<WorkflowTemplatesPage />} />
                 <Route path="agents" element={<AgentsPage />} />
+                <Route path="a2a-agents" element={<A2aAgentsPage />} />
                 <Route path="model-credentials" element={<ModelCredentialsPage />} />
                 <Route path="custom-providers" element={<CustomProvidersPage />} />
                 {/* ADR-0088 */}
