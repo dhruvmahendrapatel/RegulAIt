@@ -33,6 +33,7 @@ import { breakerAdmits, recordUpstreamFailure, recordUpstreamSuccess } from "./u
 import { classifyUpstreamError, isDeadlineError } from "./upstream-retry.js";
 import { mcpSyncRateLimitKey } from "./rate-limit.js";
 import { requireStepUp } from "./step-up.js";
+import { errMessage } from "./err-serializer.js";
 import { abacPrincipalFromRequest } from "./abac-principal.js";
 import { isReservedToolName } from "./mcp-protocol.js";
 
@@ -120,7 +121,7 @@ export function registerMcpToolSyncRoutes(app: FastifyInstance, db: Db): void {
       const refused = mcpPreHijackRefusal(err);
       if (refused) return refuse(refused.status, refused.body);
       if (classifyUpstreamError(err).why !== "our_own_refusal") {
-        await recordUpstreamFailure(db, row, err instanceof Error ? err.message : String(err));
+        await recordUpstreamFailure(db, row, errMessage(err));
       }
       // the upstream's own text can carry its address or a token echo: it goes to the breaker row, not the answer
       const timedOut = isDeadlineError(err);
