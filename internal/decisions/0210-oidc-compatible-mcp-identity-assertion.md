@@ -85,11 +85,14 @@ may say.
 
 - An upstream with a standard OIDC validator can verify who each governed call is for, with a scope an admin chose,
   without a long-lived static secret.
-- An upstream that refuses unauthenticated requests cannot be manifest-synced through an unarmed connection with this
-  profile alone (the sync before a decision carries no identity, by design). Follow-up for the owner: either an
-  admin-run sync that carries a gateway-scoped assertion, or keeping tool registration manual for such servers.
+- **Honest limit (master, 2026-10-30, #612):** an upstream that refuses unauthenticated requests cannot be
+  manifest-synced through an unarmed connection with this profile alone: the sync before a decision carries no
+  identity, by design, and this slice does not change that. Manual tool registration is the workaround; the separate
+  governed on-demand sync lane (`builder/mcp-sync-cooldown`, #625) is where a sync for such servers belongs.
 - More audit rows: one per request of an armed connection, not one per call.
-- The ES256 key is operator-managed only; the installer still generates an Ed25519 key alone. Follow-up: an
-  install-generated P-256 key, and a UI control for the profile and scope (this change is API-only).
+- The ES256 key is operator-managed; the installer still generates an Ed25519 key alone. Decided (master,
+  2026-10-30): no install-time P-256 key; first-use activation of an operator-configured key is enough.
+- **Named follow-up: the UI control.** This slice is API-only (accepted by the master for this slice). The profile and
+  scope control belongs with the MCP server's identity settings in the admin UI.
 - The Simulation preview and the queue now agree on quorum and signature mode. The preview still passes no project
   attribution, and budget and compliance gates are still not previewed.
