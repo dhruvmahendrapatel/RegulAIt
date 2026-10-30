@@ -266,6 +266,11 @@ export interface AdminAgent {
   enabled: boolean;
   costPerMTokIn: number | null;
   costPerMTokOut: number | null;
+  /** per-modality list prices; null = priced at the text price */
+  costPerMTokImageIn?: number | null;
+  costPerMTokImageOut?: number | null;
+  costPerMTokAudioIn?: number | null;
+  costPerMTokAudioOut?: number | null;
   systemPrompt: string | null;
   /** ADR-0034: set iff provider === 'custom' — the DB enforces the pair as a
    * discriminated union, so these two fields are never independently valid. */
@@ -505,6 +510,19 @@ export interface DataScopeRule extends RuleBase {
 export interface RateLimitRule extends RuleBase {
   maxCalls: number;
   windowSeconds: number;
+}
+
+/** a rate limit keyed on one model (agent registry entry) for a subject */
+export interface ModelRateLimitRule {
+  id: string;
+  scope: "user" | "role" | "team" | "fleet";
+  userId: string | null;
+  roleId: string | null;
+  teamId: string | null;
+  agentId: string;
+  maxCalls: number;
+  windowSeconds: number;
+  createdAt: string;
 }
 
 export interface RuleTrace {

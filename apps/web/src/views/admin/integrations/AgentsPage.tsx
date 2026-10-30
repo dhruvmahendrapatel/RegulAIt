@@ -315,12 +315,44 @@ function RegisterAgentCard() {
  * agent_config edit path on the gateway: a versioned agent's save mints and
  * activates a config version, an unversioned agent keeps the plain row write.
  */
+type ModalityPriceKey = "costPerMTokImageIn" | "costPerMTokImageOut" | "costPerMTokAudioIn" | "costPerMTokAudioOut";
+const MODALITY_PRICE_FIELDS: ReadonlyArray<readonly [ModalityPriceKey, string]> = [
+  ["costPerMTokImageIn", "$/MTok image in"],
+  ["costPerMTokImageOut", "$/MTok image out"],
+  ["costPerMTokAudioIn", "$/MTok audio in"],
+  ["costPerMTokAudioOut", "$/MTok audio out"],
+];
+const EMPTY_MODALITY_PRICES: Record<ModalityPriceKey, string> = {
+  costPerMTokImageIn: "",
+  costPerMTokImageOut: "",
+  costPerMTokAudioIn: "",
+  costPerMTokAudioOut: "",
+};
+
+/** the form draft for an agent's modality prices (empty = no price of its own) */
+export function modalityPriceDraft(agent: Partial<Record<ModalityPriceKey, number | null>> | undefined): Record<ModalityPriceKey, string> {
+  const out = { ...EMPTY_MODALITY_PRICES };
+  for (const [k] of MODALITY_PRICE_FIELDS) {
+    const v = agent?.[k];
+    out[k] = v == null ? "" : String(v);
+  }
+  return out;
+}
+
+/** the PUT body: an empty field clears that price, so the modality falls back to the text price */
+export function modalityPriceBody(draft: Record<ModalityPriceKey, string>): Record<ModalityPriceKey, number | null> {
+  const out = {} as Record<ModalityPriceKey, number | null>;
+  for (const [k] of MODALITY_PRICE_FIELDS) out[k] = draft[k].trim() === "" ? null : Number(draft[k]);
+  return out;
+}
+
 function ModelPricingCard(props: { agents: AdminAgent[] }) {
   const act = useAction();
   const [agentId, setAgentId] = useState("");
   const [model, setModel] = useState("");
   const [inC, setInC] = useState("");
   const [outC, setOutC] = useState("");
+  const [modal, setModal] = useState<Record<ModalityPriceKey, string>>(EMPTY_MODALITY_PRICES);
   return (
     <Card
       title="Model & pricing — dispatch-execution config"
@@ -334,19 +366,22 @@ function ModelPricingCard(props: { agents: AdminAgent[] }) {
         </p>
       }
     >
+      <p className={v.hint}>
+        Image and audio prices apply only when the provider reports how many tokens were image or audio. Leave one
+        empty to price that modality at the text price; with no modality prices, costs are exactly as before.
+      </p>
       <form
         className={a.formRow}
         onSubmit={(e) => {
           e.preventDefault();
-          void act.run(
-            () =>
-              api.patch(`/v1/agents/${agentId}`, {
-                model: model || null,
-                costPerMTokIn: inC === "" ? null : Number(inC),
-                costPerMTokOut: outC === "" ? null : Number(outC),
-              }),
-            "Model & pricing saved",
-          );
+          void act.run(async () => {
+            await api.patch(`/v1/agents/${agentId}`, {
+              model: model || null,
+              costPerMTokIn: inC === "" ? null : Number(inC),
+              costPerMTokOut: outC === "" ? null : Number(outC),
+            });
+            await api.put(`/v1/agents/${agentId}/modality-pricing`, modalityPriceBody(modal));
+          }, "Model & pricing saved");
         }}
       >
         <Field label="Agent" grow>
@@ -359,6 +394,7 @@ function ModelPricingCard(props: { agents: AdminAgent[] }) {
               setModel(picked?.model ?? "");
               setInC(picked?.costPerMTokIn == null ? "" : String(picked.costPerMTokIn));
               setOutC(picked?.costPerMTokOut == null ? "" : String(picked.costPerMTokOut));
+              setModal(modalityPriceDraft(picked));
             }}
             data-testid="model-pricing-agent"
           >
@@ -374,6 +410,18 @@ function ModelPricingCard(props: { agents: AdminAgent[] }) {
         <Field label="$/MTok out (empty = unpriced)">
           <Input type="number" step="any" value={outC} onChange={(e) => setOutC(e.target.value)} />
         </Field>
+        {MODALITY_PRICE_FIELDS.map(([key, label]) => (
+          <Field key={key} label={`${label} (empty = text price)`}>
+            <Input
+              type="number"
+              min={0}
+              step="any"
+              value={modal[key]}
+              onChange={(e) => setModal((m) => ({ ...m, [key]: e.target.value }))}
+              data-testid={`model-pricing-${key}`}
+            />
+          </Field>
+        ))}
         <Button type="submit" disabled={act.busy || !agentId}>
           Save model & pricing
         </Button>
