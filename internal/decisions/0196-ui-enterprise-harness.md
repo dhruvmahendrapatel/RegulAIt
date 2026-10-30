@@ -559,3 +559,17 @@ the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
   ~1.4 kB is margin for review fixes.
 - Freeze week: ADR-0198 §2 covers entry raises only; this total-JS raise rests on the owner decision above, not on that
   allowance. ADR-0198's post-demo reset applies to it.
+
+## Addendum / As built (2026-10-30) — all JS 1,046 → 1,048 kB on batch I-1 (#597)
+
+The owner approved a 1,048 kB all-JS ceiling on 2026-10-29:
+<https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6498510014>. PR #599 (G2 and G11) carries the
+same figure. #597 now needs it too, so it carries the same two dated `CEILING_EXCEPTIONS` rows as #599: from `1043 kB`
+(what `--guard origin/main` compares against while main is at 1,043 kB) and from `1046 kB`.
+
+- `all JS` from `1046 kB` to `1048 kB` (+2 kB) on this branch; against main as it stands, `all JS` from `1043 kB` to `1048 kB`.
+  Entry JS stays at 138.5 kB and entry CSS at 10.7 kB; the lazy chunk ceilings are unchanged.
+- Why: with main merged in, #597 measured 1,046,359 B against 1,046,000 B in CI, before the review fixes. Those fixes
+  add visible requirement lines and a chip on the SSO, MCP and Data key pages (ADR-0180).
+- Freeze week: ADR-0198 §2 covers entry raises only; this raise rests on the owner decision above. ADR-0198's post-demo
+  reset applies to it.
