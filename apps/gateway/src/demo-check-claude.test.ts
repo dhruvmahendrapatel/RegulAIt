@@ -1,5 +1,5 @@
 /**
- * The "Claude as model and agent" readiness check (DEMO_RUNBOOK §7.9): optional beat = WARN when absent, FAIL when
+ * The "Claude as model and agent" readiness check (DEMO_RUNBOOK §7.10): optional beat = WARN when absent, FAIL when
  * half-built, PASS when the agent is priced and has its credential and egress entry. Pure: no database.
  */
 import { describe, expect, it } from "vitest";
@@ -28,7 +28,7 @@ describe("checkClaudeBeat", () => {
     const out = await checkClaudeBeat(getter({ ...ready, "/v1/agents?limit=200": { status: 200, body: { agents: [] } } }));
     expect(out).toHaveLength(1);
     expect(out[0]).toMatchObject({ beat: CLAUDE_BEAT, level: "WARN" });
-    expect(out[0]!.fix).toContain("§7.9");
+    expect(out[0]!.fix).toContain("§7.10");
   });
 
   it("set up: three PASS rows", async () => {

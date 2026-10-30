@@ -4704,3 +4704,5 @@ export * from "./discovery/index.js";
 export * from "./endpoint-discovery/index.js";
 // ADR-0193 (I4) P0/P1: the content provenance label and digest, and the trust-tier policy
 export * from "./provenance/index.js";
+// ADR-0204: a static upstream credential per MCP server (header refusals, the write contract, the read view)
+export * from "./mcp-upstream-credential.js";

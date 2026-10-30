@@ -871,7 +871,7 @@ export function formatDemoCheck(checks: DemoCheck[]): string {
   return lines.join("\n");
 }
 
-/** the beat label of the "Claude as model and agent" readiness check (DEMO_RUNBOOK §7.9) */
+/** the beat label of the "Claude as model and agent" readiness check (DEMO_RUNBOOK §7.10) */
 export const CLAUDE_BEAT = "E External model and agent";
 /** the API model id the owner named for this beat (10-29, #453) — configuration data */
 export const CLAUDE_BEAT_MODEL = "claude-opus-5-5";
@@ -889,7 +889,7 @@ export async function checkClaudeBeat(
   get: (url: string) => Promise<{ status: number; body: Json }>,
 ): Promise<DemoCheck[]> {
   const out: DemoCheck[] = [];
-  const fix = "follow DEMO_RUNBOOK.md §7.9";
+  const fix = "follow DEMO_RUNBOOK.md §7.10";
   const agentsRes = await get("/v1/agents?limit=200");
   if (agentsRes.status !== 200) {
     return [{ beat: CLAUDE_BEAT, level: "FAIL", detail: `agents list ${agentsRes.status}` }];
@@ -906,7 +906,7 @@ export async function checkClaudeBeat(
       beat: CLAUDE_BEAT,
       level: "FAIL",
       detail: `agent(s) ${unpriced.map((a) => `'${a.name}'`).join(", ")} have no token prices — every call would read Unpriced`,
-      fix: "PATCH /v1/agents/:agentId with costPerMTokIn and costPerMTokOut (§7.9 step 3)",
+      fix: "PATCH /v1/agents/:agentId with costPerMTokIn and costPerMTokOut (§7.10 step 3)",
     });
   } else {
     out.push({ beat: CLAUDE_BEAT, level: "PASS", detail: `${claude.length} priced agent(s) for ${CLAUDE_BEAT_MODEL}` });

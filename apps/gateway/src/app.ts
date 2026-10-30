@@ -357,6 +357,7 @@ export interface BuildAppOptions {
 }
 import { z } from "zod";
 import { boundTargetsForApprovals, registerMcpProxy } from "./mcp-proxy.js";
+import { clearUpstreamCredentialOnUrlMove, registerMcpUpstreamCredentialRoutes } from "./mcp-upstream-credential.js";
 import { ExternalEffectBlockedError } from "./external-effects.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
 import { registerCustomProviderRoutes } from "./custom-providers.js";
@@ -2314,6 +2315,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             reason:
               `${label}: private ranges ${String(before.allowPrivateRanges ?? "inherit")} → ${String(written.allowPrivateRanges ?? "inherit")}` +
               (rangesRelaxed ? " — a relaxation of the strict default" : ""),
+          });
+        }
+        // ADR-0204: a url move clears the server's upstream credential (audited here), after the row update above, so
+        // the row lock orders it against a concurrent set: the secret never follows the url to a new destination
+        if (body.url !== undefined && written.url !== before.url) {
+          await clearUpstreamCredentialOnUrlMove(tx as unknown as Db, {
+            serverId,
+            label,
+            fromUrl: before.url,
+            toUrl: written.url,
+            userId: req.authCtx.userId ?? null,
           });
         }
         // a url move that keeps it on writes no identity column, and is still a relaxation on the trail
@@ -5403,6 +5415,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerRiskRoutes(app, db);
 
   registerMcpProxy(app, db, { dataKey: opts.dataKey });
+  // ADR-0204 — a server's static upstream credential: set, rotate, clear (admin-only through the default gate, each a
+  // settings_relax step-up, audited); reads show only whether one is set, its header and last four characters
+  registerMcpUpstreamCredentialRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0097 part A — the admission review queue and the reason-required,
   // audited clear. Admin-only through the default gate, like the MCP registry
   // writes it sits beside.
