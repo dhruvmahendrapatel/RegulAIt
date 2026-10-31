@@ -5,7 +5,8 @@
  * default gate). The overview keeps a preview of each.
  */
 import { useMemo, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, Route, Routes, useSearchParams } from "react-router-dom";
+import DiscoverySourcesPage from "./DiscoverySourcesPage";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { plural } from "../../../api/format";
@@ -226,5 +227,22 @@ export function EndpointDevicesPage() {
       </div>
       {revoke.modal}
     </>
+  );
+}
+
+/**
+ * The Discovery sources area: the Discovery sources page (with its five-row previews) at the index, the full runs,
+ * enrolment-token and device lists each on their own nested route. One lazy chunk mounted at
+ * `shadow-ai/discovery-sources/*`, reached through the Shadow AI screen barrel, so the sub-pages add nothing to the
+ * entry bundle (ADR-0196 U4; the SPA route census follows this module — scripts/ui-spa-routes.mjs).
+ */
+export function DiscoverySourcesArea() {
+  return (
+    <Routes>
+      <Route index element={<DiscoverySourcesPage />} />
+      <Route path="runs" element={<DiscoveryRunsPage />} />
+      <Route path="tokens" element={<EnrolmentTokensPage />} />
+      <Route path="devices" element={<EndpointDevicesPage />} />
+    </Routes>
   );
 }
