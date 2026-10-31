@@ -221,6 +221,7 @@ export default function RisksPage() {
                   <option value="third_party_ai">third-party AI (vendors)</option>
                   <option value="bias_fairness">bias / fairness</option>
                   <option value="unsafe_output">unsafe output</option>
+                  <option value="supply_chain">supply chain</option>
                 </Select>
               </Field>
             </div>

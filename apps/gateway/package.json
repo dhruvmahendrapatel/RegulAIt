@@ -70,6 +70,8 @@
     "@regulait/shared": "workspace:*",
     "@regulait/training-provider": "workspace:*",
     "@regulait/workflow-kernel": "workspace:*",
+    "@sigstore/bundle": "5.0.0",
+    "@sigstore/verify": "4.1.2",
     "@simplewebauthn/server": "14.0.3",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
