@@ -623,95 +623,11 @@ export function registerVendorRoutes(
         detail: "a retired vendor's record is closed — re-assessing is a new proposal",
       });
     }
-    const [pack] = await db
-      .select()
-      .from(compliancePacks)
-      .where(
-        and(eq(compliancePacks.framework, body.framework), eq(compliancePacks.status, "active")),
-      );
-    if (!pack) {
-      return reply.status(409).send({
-        error: "no_active_pack_for_framework",
-        detail: `no active compliance pack exists for framework '${body.framework}'`,
-      });
-    }
-    const [control] = await db
-      .select()
-      .from(compliancePackControls)
-      .where(
-        and(
-          eq(compliancePackControls.packId, pack.id),
-          eq(compliancePackControls.controlRef, body.controlRef),
-        ),
-      );
-    if (!control) {
-      return reply.status(400).send({
-        error: "unknown_control_ref",
-        detail: `framework '${body.framework}' (pack v${pack.version}) has no control '${body.controlRef}'`,
-      });
-    }
-    // the questionnaire is the SOURCE the attribution names — nothing is
-    // recorded before it exists
-    let questionnaireVersion: number | null = null;
-    if (row.workflowInstanceId) {
-      const [artifact] = await db
-        .select({ version: workflowArtifacts.version })
-        .from(workflowArtifacts)
-        .where(
-          and(
-            eq(workflowArtifacts.instanceId, row.workflowInstanceId),
-            eq(workflowArtifacts.output, VENDOR_QUESTIONNAIRE_OUTPUT),
-          ),
-        )
-        .orderBy(desc(workflowArtifacts.version))
-        .limit(1);
-      questionnaireVersion = artifact?.version ?? null;
-    }
-    if (questionnaireVersion === null) {
-      return reply.status(409).send({
-        error: "questionnaire_not_submitted",
-        detail:
-          "vendor attestations are recorded FROM the assessment questionnaire — submit the " +
-          `'${VENDOR_QUESTIONNAIRE_OUTPUT}' artifact on the assessment instance first`,
-      });
-    }
-    const attestation: AiVendorPackAttestation = {
-      framework: body.framework,
-      packId: pack.id,
-      packVersion: pack.version,
-      controlRef: body.controlRef,
-      statement: body.statement,
-      evidenceRef: body.evidenceRef ?? null,
-      recordedByUserId: userId,
-      recordedAt: new Date().toISOString(),
-      questionnaireVersion,
-    };
-    const [updated] = await db
-      .update(aiVendors)
-      .set({
-        packAttestations: [...row.packAttestations, attestation],
-        updatedAt: new Date(),
-      })
-      .where(eq(aiVendors.id, vendorId))
-      .returning();
-    await db.insert(auditLog).values({
-      userId,
-      objectType: "ai_vendor",
-      objectId: vendorId,
-      detail: {
-        phase: "attestation-recorded",
-        framework: body.framework,
-        packVersion: pack.version,
-        controlRef: body.controlRef,
-        questionnaireVersion,
-      },
-      effect: "allow",
-      ruleId: "vendor-attestation-recorded",
-      ruleChain: [],
-      reason:
-        `vendor '${row.name}' attestation recorded for ${body.controlRef} (questionnaire ` +
-        `v${questionnaireVersion}) — a vendor claim with attribution, never platform evidence`,
-    });
+    const out = await db.transaction(async (rawTx) =>
+      recordVendorAttestation(rawTx as unknown as Db, row, { ...body, evidenceRef: body.evidenceRef ?? null, userId }),
+    );
+    if (!out.ok) return reply.status(out.status).send(out.body);
+    const { updated, attestation } = out;
     return reply.status(201).send({
       vendor: updated,
       attestation,
@@ -998,4 +914,129 @@ export function registerVendorRoutes(
     });
     return updated;
   });
+}
+
+export type VendorAttestationOutcome =
+  | { ok: true; updated: AiVendorRow; attestation: AiVendorPackAttestation }
+  | { ok: false; status: number; body: Record<string, unknown> };
+
+/**
+ * The ONE write of a vendor attestation (ADR-0084 §3), shared by the platform route below and by the supplier
+ * portal's accept decision (ADR-0221): the control must exist in the framework's ACTIVE pack, the questionnaire
+ * artifact must already be submitted (the attribution names its version), and the vendor row and its audit row are
+ * written through the same handle — pass a transaction so they commit together. The caller has already checked
+ * who may record and that the vendor is not retired.
+ */
+export async function recordVendorAttestation(
+  db: Db,
+  row: AiVendorRow,
+  input: {
+    framework: string;
+    controlRef: string;
+    statement: string;
+    evidenceRef: string | null;
+    userId: string;
+    submittedBySupplier?: AiVendorPackAttestation["submittedBySupplier"];
+  },
+): Promise<VendorAttestationOutcome> {
+  const vendorId = row.id;
+  const [pack] = await db
+    .select()
+    .from(compliancePacks)
+    .where(and(eq(compliancePacks.framework, input.framework), eq(compliancePacks.status, "active")));
+  if (!pack) {
+    return {
+      ok: false,
+      status: 409,
+      body: {
+        error: "no_active_pack_for_framework",
+        detail: `no active compliance pack exists for framework '${input.framework}'`,
+      },
+    };
+  }
+  const [control] = await db
+    .select()
+    .from(compliancePackControls)
+    .where(and(eq(compliancePackControls.packId, pack.id), eq(compliancePackControls.controlRef, input.controlRef)));
+  if (!control) {
+    return {
+      ok: false,
+      status: 400,
+      body: {
+        error: "unknown_control_ref",
+        detail: `framework '${input.framework}' (pack v${pack.version}) has no control '${input.controlRef}'`,
+      },
+    };
+  }
+  // the questionnaire is the SOURCE the attribution names — nothing is
+  // recorded before it exists
+  let questionnaireVersion: number | null = null;
+  if (row.workflowInstanceId) {
+    const [artifact] = await db
+      .select({ version: workflowArtifacts.version })
+      .from(workflowArtifacts)
+      .where(
+        and(
+          eq(workflowArtifacts.instanceId, row.workflowInstanceId),
+          eq(workflowArtifacts.output, VENDOR_QUESTIONNAIRE_OUTPUT),
+        ),
+      )
+      .orderBy(desc(workflowArtifacts.version))
+      .limit(1);
+    questionnaireVersion = artifact?.version ?? null;
+  }
+  if (questionnaireVersion === null) {
+    return {
+      ok: false,
+      status: 409,
+      body: {
+        error: "questionnaire_not_submitted",
+        detail:
+          "vendor attestations are recorded FROM the assessment questionnaire — submit the " +
+          `'${VENDOR_QUESTIONNAIRE_OUTPUT}' artifact on the assessment instance first`,
+      },
+    };
+  }
+  const attestation: AiVendorPackAttestation = {
+    framework: input.framework,
+    packId: pack.id,
+    packVersion: pack.version,
+    controlRef: input.controlRef,
+    statement: input.statement,
+    evidenceRef: input.evidenceRef,
+    recordedByUserId: input.userId,
+    recordedAt: new Date().toISOString(),
+    questionnaireVersion,
+    ...(input.submittedBySupplier ? { submittedBySupplier: input.submittedBySupplier } : {}),
+  };
+  const [updated] = await db
+    .update(aiVendors)
+    // appended in SQL, never from the caller's snapshot: two writers (the platform route and the supplier portal's
+    // accept) can record at the same moment, and a read-modify-write of the array would drop one of them
+    .set({ packAttestations: sql`${aiVendors.packAttestations} || ${JSON.stringify([attestation])}::jsonb`, updatedAt: new Date() })
+    .where(eq(aiVendors.id, vendorId))
+    .returning();
+  await db.insert(auditLog).values({
+    userId: input.userId,
+    objectType: "ai_vendor",
+    objectId: vendorId,
+    detail: {
+      phase: "attestation-recorded",
+      framework: input.framework,
+      packVersion: pack.version,
+      controlRef: input.controlRef,
+      questionnaireVersion,
+      ...(input.submittedBySupplier
+        ? { supplierAccessId: input.submittedBySupplier.accessId, supplierSubmissionId: input.submittedBySupplier.submissionId }
+        : {}),
+    },
+    effect: "allow",
+    ruleId: "vendor-attestation-recorded",
+    ruleChain: [],
+    reason:
+      `vendor '${row.name}' attestation recorded for ${input.controlRef} (questionnaire ` +
+      `v${questionnaireVersion})${input.submittedBySupplier ? " from a supplier portal submission" : ""} — a vendor ` +
+      "claim with attribution, never platform evidence",
+  });
+  return { ok: true, updated: updated!, attestation };
 }

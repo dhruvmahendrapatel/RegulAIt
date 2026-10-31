@@ -77,6 +77,8 @@ const DependencyGraphPage = screen(() => import("./screens/admin-ai-governance")
 const RegulatoryIntelligencePage = screen(() => import("./screens/admin-ai-governance"), "RegulatoryIntelligencePage");
 const RegulatoryFeedSourcesPage = screen(() => import("./screens/admin-ai-governance"), "RegulatoryFeedSourcesPage");
 const VendorsPage = screen(() => import("./screens/admin-ai-governance"), "VendorsPage");
+// ADR-0221: the supplier portal switch and the custom supplier questionnaires
+const SupplierQuestionnairesPage = screen(() => import("./screens/admin-ai-governance"), "SupplierQuestionnairesPage");
 const RisksPage = screen(() => import("./screens/admin-ai-governance"), "RisksPage");
 const InventoryPage = screen(() => import("./screens/admin-access-reviews"), "InventoryPage");
 const CampaignsPage = screen(() => import("./screens/admin-access-reviews"), "CampaignsPage");
@@ -141,6 +143,8 @@ const IncidentsPage = screen(() => import("./screens/incidents"), "IncidentsPage
 const IncidentDetailPage = screen(() => import("./screens/incidents"), "IncidentDetailPage");
 const FeedbackPage = screen(() => import("./screens/feedback"), "FeedbackPage");
 const FeedbackFormPage = screen(() => import("./screens/feedback"), "FeedbackFormPage");
+// ADR-0221: the supplier portal, its own small chunk (no admin code, no platform API client)
+const SupplierPortalPage = lazy(() => import("./views/supplier/SupplierPortalPage"));
 
 /** one screen of a ./screens chunk, as a lazy component */
 function screen<M extends Record<K, ComponentType<any>>, K extends keyof M & string>(load: () => Promise<M>, name: K) {
@@ -200,6 +204,9 @@ function ApplicationRoutes() {
       {/* ADR-0225 (P13 d): PUBLIC, no app chrome, no session; the gateway answers 404 while the pages are off */}
       <Route path="/trust" element={<TrustCenterPage />} />
       <Route path="/audit" element={<AuditorPortalPage />} />
+      {/* ADR-0221: the SUPPLIER portal — no app chrome, no platform session;
+          the single-use link's token arrives in the fragment (shipped off) */}
+      <Route path="/supplier" element={<SupplierPortalPage />} />
       <Route element={<Protected />}>
         <Route path="/" element={<HomePage />} />
         <Route path="/chat" element={<ChatPage />} />
@@ -284,6 +291,8 @@ function ApplicationRoutes() {
                 <Route path="governance/literacy" element={<LiteracyPage />} />
                 {/* ADR-0084 */}
                 <Route path="vendors" element={<VendorsPage />} />
+                {/* ADR-0221 */}
+                <Route path="vendors/questionnaires" element={<SupplierQuestionnairesPage />} />
                 {/* ADR-0081 */}
                 <Route path="risks" element={<RisksPage />} />
                 {/* ADR-0082 */}

@@ -101,8 +101,8 @@ for (const [verb, names] of Object.entries(VERB_FORMS)) for (const n of names) M
  */
 export const UI_SINKS = Object.freeze(["fetch", "window.open", "xhr.open", "href="]);
 
-/** the path prefixes a web call can name (the gateway's browser-facing API surfaces) */
-const PATH_PREFIXES = ["/v1/", "/auth/"];
+/** the path prefixes a web call can name (the gateway's browser-facing API surfaces; `/supplier/` is the ADR-0221 portal) */
+const PATH_PREFIXES = ["/v1/", "/auth/", "/supplier/"];
 
 /*
  * THE PARSER. Web sources are read with the TypeScript compiler API (already a

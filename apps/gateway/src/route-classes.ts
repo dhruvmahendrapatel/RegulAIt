@@ -34,6 +34,8 @@ import {
   MCP_IDENTITY_OIDC_DISCOVERY_PATH,
   MCP_IDENTITY_OIDC_JWKS_PATH,
   IDENTITY_JWKS_PATH,
+  SUPPLIER_ROUTE_PATHS,
+  SUPPLIER_ROUTES,
   OAUTH_INTROSPECTION_PATH,
   OAUTH_REVOCATION_PATH,
   OAUTH_TOKEN_PATH,
@@ -150,6 +152,11 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   "/v1/trust-center",
   "/v1/auditor/session",
   "/v1/auditor/items/:slug",
+  // ADR-0221 (P4) — the SUPPLIER PORTAL: the routes a supplier, who holds no platform credential, signs in to and
+  // answers one assessment through. They authenticate IN-ROUTE on the supplier's own cookie (supplier-portal.ts) and
+  // never read a platform session or key; they answer 404 while `supplier_portal_enabled` is off (the shipped
+  // default). Listed in NON_ADMIN_ROUTES too, so they are `public` to the platform hooks.
+  ...SUPPLIER_ROUTE_PATHS,
   // ADR-0037 — SCIM is a SEPARATE TRUST PATH, and this exemption is what
   // makes that true rather than aspirational. These routes must never
   // authenticate via a human session cookie or a user's API key: they
@@ -745,6 +752,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "DELETE /v1/use-cases/:useCaseId/feedback-links/:linkId",
   "POST /v1/feedback/l/:token",
   "GET /v1/feedback/l/:token",
+  // ADR-0221 (P4): the supplier routes (see AUTH_EXEMPT_ROUTES)
+  ...SUPPLIER_ROUTES,
   //
   // --- ADR-0225 (P13 d): the public trust pages ---------------------------------
   // Everything under /v1/trust/* (drafting, publishing, the heading, auditor grants) is DELIBERATELY ABSENT, so

@@ -1543,6 +1543,20 @@
       "breakpoints": true
     },
     {
+      "idx": 256,
+      "version": "7",
+      "when": 1785191000000,
+      "tag": "0256_supplier_portal_access",
+      "breakpoints": true
+    },
+    {
+      "idx": 257,
+      "version": "7",
+      "when": 1785192000000,
+      "tag": "0257_supplier_submissions",
+      "breakpoints": true
+    },
+    {
       "idx": 258,
       "version": "7",
       "when": 1785193000000,
