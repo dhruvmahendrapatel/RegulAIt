@@ -11,7 +11,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { plural } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Card, EmptyState, Field, Select } from "../../../ui/kit";
+import { Card, EmptyState, ErrorState, Field, Select, SkeletonBlock } from "../../../ui/kit";
 import { DataList } from "../../../ui/DataList";
 import { FoldTable } from "../../../ui/fold";
 import {
@@ -140,7 +140,13 @@ function useAgentSource() {
       </Select>
     </Field>
   );
-  return { sourceId, picker, loading: sources.isLoading, none: !sources.isLoading && targets.length === 0 };
+  // until the sources are read the page cannot say whether there is one: it says it is loading, or that the read failed
+  const pending = sources.isLoading ? (
+    <SkeletonBlock />
+  ) : sources.isError ? (
+    <ErrorState title="Couldn't load the discovery sources" message="The endpoint agent sources could not be read. No source is assumed." onRetry={() => void sources.refetch()} />
+  ) : null;
+  return { sourceId, picker, pending, loading: sources.isLoading, none: !sources.isLoading && !sources.isError && targets.length === 0 };
 }
 
 export function EnrolmentTokensPage() {
@@ -159,7 +165,7 @@ export function EnrolmentTokensPage() {
               {revoke.error}
             </p>
           )}
-          {src.sourceId ? (
+          {src.pending ?? (src.sourceId ? (
             <DataList<TokenView>
               key={src.sourceId}
               listId="enrolment-tokens"
@@ -175,7 +181,7 @@ export function EnrolmentTokensPage() {
             />
           ) : (
             <EmptyState title={src.none ? "No endpoint agent source" : "Choose a source"} body={src.none ? "Add and enable a regulAIt endpoint agent source on Discovery sources." : "Choose the endpoint agent source whose tokens to list."} />
-          )}
+          ))}
         </Card>
       </div>
       {revoke.modal}
@@ -205,7 +211,7 @@ export function EndpointDevicesPage() {
               {revoke.error}
             </p>
           )}
-          {src.sourceId ? (
+          {src.pending ?? (src.sourceId ? (
             <DataList<DeviceView>
               key={src.sourceId}
               listId="endpoint-devices"
@@ -222,7 +228,7 @@ export function EndpointDevicesPage() {
             />
           ) : (
             <EmptyState title={src.none ? "No endpoint agent source" : "Choose a source"} body={src.none ? "Add and enable a regulAIt endpoint agent source on Discovery sources." : "Choose the endpoint agent source whose devices to list."} />
-          )}
+          ))}
         </Card>
       </div>
       {revoke.modal}
