@@ -4458,6 +4458,13 @@ export const orgSettings = pgTable(
      * counts, summed) it takes before an armed staleness gate refuses. 1 =
      * any drift at all forces recertification. */
     mrmStalenessRecertThreshold: integer("mrm_staleness_recert_threshold").notNull().default(1),
+    /** ADR-0217 (migration 0237): automatic re-test after a model change. true = when a certified card's
+     * model, prompt or endpoint configuration changes, the `mrm-auto-retest-sweep` job re-runs the card's
+     * pinned eval baselines and previously probed red-team libraries against the new configuration, under
+     * the ordinary runners, and attaches the results to the re-certification request. It never signs
+     * anything off. Off by default: it spends model tokens, so turning it on is a stepped-up, audited
+     * relaxation (`notEqual(false)`). */
+    mrmAutoRetestEnabled: boolean("mrm_auto_retest_enabled").notNull().default(false),
 
     // --- ADR-0080 amendment (migration 0098): use-case dispatch gate --------
     /** 'enforce' is the ADR-0181 default (see below); 'off' (an audited admin
@@ -5792,6 +5799,51 @@ export const modelCardEvidence = pgTable(
       .where(sql`${t.evalRunId} IS NOT NULL`),
   ],
 );
+
+/** ADR-0217 (migration 0237): one automatic re-test of a card after a model change. A row is CLAIMED (status
+ * `running`) before its suite runs, unique on (card, drift key, kind, source), so a drift is re-tested at most
+ * once per suite however often the sweep runs. `card_approval_id` is the re-certification request the result
+ * is attached to: set when the request is created, or at once when one is already pending. */
+export const MRM_RETEST_KINDS = ["eval", "redteam"] as const;
+/** `reported`: the suite ran but its runner gave no gate verdict (e.g. no gating class exercised) — never a pass */
+export const MRM_RETEST_STATUSES = ["running", "passed", "failed_gate", "reported", "refused", "skipped"] as const;
+export const mrmRetestRuns = pgTable(
+  "mrm_retest_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    cardId: uuid("card_id")
+      .notNull()
+      .references(() => modelCards.id, { onDelete: "cascade" }),
+    /** the certification and configuration-change count this re-test answers */
+    driftKey: text("drift_key").notNull(),
+    kind: text("kind", { enum: MRM_RETEST_KINDS }).notNull(),
+    /** the eval dataset (kind eval) or red-team library (kind redteam) re-run */
+    sourceId: uuid("source_id").notNull(),
+    sourceName: text("source_name").notNull(),
+    runAsUserId: uuid("run_as_user_id").references(() => users.id, { onDelete: "set null" }),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
+    evalRunId: uuid("eval_run_id").references(() => evalRuns.id, { onDelete: "set null" }),
+    redteamRunId: uuid("redteam_run_id").references((): AnyPgColumn => redteamRuns.id, { onDelete: "set null" }),
+    status: text("status", { enum: MRM_RETEST_STATUSES }).notNull(),
+    reason: text("reason"),
+    /** the measured figures, copied at completion: gatePassed, regression, meanScore, passRate, asr */
+    summary: jsonb("summary").$type<Record<string, unknown>>().notNull().default({}),
+    cardApprovalId: uuid("card_approval_id").references(() => modelCardApprovals.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (t) => [
+    check("mrm_retest_runs_kind_check", sql`${t.kind} IN ('eval','redteam')`),
+    check(
+      "mrm_retest_runs_status_check",
+      sql`${t.status} IN ('running','passed','failed_gate','reported','refused','skipped')`,
+    ),
+    uniqueIndex("mrm_retest_runs_drift_uq").on(t.cardId, t.driftKey, t.kind, t.sourceId),
+    index("mrm_retest_runs_card_idx").on(t.cardId),
+    index("mrm_retest_runs_approval_idx").on(t.cardApprovalId),
+  ],
+);
+export type MrmRetestRunRow = typeof mrmRetestRuns.$inferSelect;
 
 export type ModelCardRow = typeof modelCards.$inferSelect;
 export type ModelCardApprovalRow = typeof modelCardApprovals.$inferSelect;

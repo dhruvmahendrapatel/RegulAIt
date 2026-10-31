@@ -270,6 +270,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   // an admin's runner-revocation reason.
   [s.engineRunItems, ["reason", "verdictNote"]],
   [s.engineRunners, ["revokeReason"]],
+  // ADR-0217: an automatic re-test's reason (a runner's gate reason or refusal detail, which can quote a case)
+  [s.mrmRetestRuns, ["reason"]],
 ];
 
 /**
