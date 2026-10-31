@@ -481,7 +481,7 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * Orchestration runs, newest first. Bounded: `limit` (default 200, max 1000); `status` narrows.
+ * Orchestration runs, newest first. Bounded: `limit` (default 200, max 1000); `status` narrows. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226).
  * @stability public-beta — auth: user
    */
   getV1Runs<T = unknown>(options?: RequestOptions): Promise<T> {
@@ -547,7 +547,7 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * List users, with sign-in posture flags (never a hash or a secret). Bounded: `limit` (default 1000, max 5000).
+ * List users, with sign-in posture flags (never a hash or a secret). Bounded: `limit` (default 1000, max 5000). With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226), with `q`, `role` and `status` filters.
  * @stability public-stable — auth: admin
    */
   getV1Users<T = unknown>(options?: RequestOptions): Promise<T> {
