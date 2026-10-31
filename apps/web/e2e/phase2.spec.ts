@@ -456,7 +456,8 @@ test("agents: register an agent and save its base system prompt", async () => {
   // the agent now appears in the catalog AND the stewardship table (ADR-0168 item 6)
   await expect(page.getByRole("cell", { name: "e2e-agent", exact: true }).first()).toBeVisible();
 
-  // admin base system prompt (governance artifact)
+  // admin base system prompt (governance artifact); P3 keeps it under the "Pricing & prompts" settings tab
+  await page.getByRole("tab", { name: /^Pricing & prompts/ }).click();
   const promptCard = page.locator("section", { has: page.getByRole("button", { name: "Save prompt" }) });
   await promptCard.getByLabel("Agent").selectOption({ label: "e2e-agent · mock · tier 0" });
   await promptCard.getByLabel("System prompt (empty = clear)").fill("You are the e2e governance agent.");
