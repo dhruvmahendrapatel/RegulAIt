@@ -59,12 +59,15 @@ function assertTolerancesView(x: unknown): TolerancesView {
   return v as TolerancesView;
 }
 
+/** the tolerance read, shared with the Risks page's one-line tolerance chip so both show the same values */
+export const riskTolerancesQuery = () => ({
+  queryKey: ["admin", "risk-tolerances"],
+  queryFn: async () => assertTolerancesView(await api.get<unknown>("/v1/risk-tolerances")),
+});
+
 export function RiskTolerancePanel() {
   const act = useAction();
-  const q = useQuery({
-    queryKey: ["admin", "risk-tolerances"],
-    queryFn: async () => assertTolerancesView(await api.get<unknown>("/v1/risk-tolerances")),
-  });
+  const q = useQuery(riskTolerancesQuery());
   // "" = no row: the strict default applies
   const [draft, setDraft] = useState<Record<string, string>>({});
   useEffect(() => {

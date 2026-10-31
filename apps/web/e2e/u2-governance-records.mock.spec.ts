@@ -492,6 +492,8 @@ test.describe("U2: governance records", () => {
   test("a published red-team library mints its next version as a draft", async ({ page }) => {
     const calls = await mockApi(page);
     await page.goto("/ui/admin/redteam");
+    // I-2: the libraries are on their own tab, which counts them
+    await page.getByRole("tab", { name: /^Libraries \(\d+\)$/ }).click();
     await page.getByRole("cell", { name: "core" }).first().click();
     const mint = page.getByRole("form", { name: "Mint the next library version" });
     await mint.getByLabel("Note for the new version (optional)").fill("add jailbreaks");

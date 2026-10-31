@@ -380,6 +380,10 @@ test.describe("U3: billing statement export", () => {
       return route.fulfill({ status: 200, contentType: "text/csv", body: "dimension,billedUsd\nmodel,120\n" });
     });
     await page.goto("/ui/admin/billing");
+    // I-2: with no rate card the stepper opens on Rate card, and says so; the statements are the third step
+    const steps = page.getByRole("list", { name: "Billing set-up" });
+    await expect(steps.getByRole("button", { name: /Rate card/ })).toContainText("Unpriced: no rate card");
+    await steps.getByRole("button", { name: /Statement/ }).click();
     await page.getByRole("button", { name: "Export statement v1 as CSV" }).click();
     await expect(page.getByRole("alert").filter({ hasText: "could not reach the gateway" })).toBeVisible();
     await page.getByRole("button", { name: "Export statement v1 as CSV" }).click();

@@ -184,7 +184,8 @@ test.describe("U2: retention holds", () => {
     const cap = await mockApi(page);
     const su = await requireStepUpOn(page, { method: "POST", path: "/v1/retention-holds/release", kind: "evidence_hold_override" });
     await page.goto("/ui/admin/traces");
-    await page.getByRole("tab", { name: "Automations" }).click();
+    // I-2: the holds moved from the Automations tab to the Retention tab
+    await page.getByRole("tab", { name: "Retention" }).click();
     const card = page.locator("section[data-rg-card]").filter({ hasText: "Retention holds" }).first();
     await expect(card).toContainText("a hold lasts at most 60 days");
     await expect(card.getByRole("checkbox", { name: `Select the hold on trace ${HELD_B}` })).toHaveCount(0);
@@ -212,7 +213,8 @@ test.describe("U2: retention holds", () => {
   test("changing the filter clears the selection, so a hidden hold cannot be released unseen", async ({ page }) => {
     const cap = await mockApi(page);
     await page.goto("/ui/admin/traces");
-    await page.getByRole("tab", { name: "Automations" }).click();
+    // I-2: the holds moved from the Automations tab to the Retention tab
+    await page.getByRole("tab", { name: "Retention" }).click();
     const card = page.locator("section[data-rg-card]").filter({ hasText: "Retention holds" }).first();
     const form = page.getByRole("form", { name: "Release retention holds" });
     await card.getByRole("checkbox", { name: `Select the hold on trace ${HELD_A}` }).check();
@@ -229,7 +231,7 @@ test.describe("U2: retention holds", () => {
     const cap = await mockApi(page);
     const su = await requireStepUpOn(page, { method: "POST", path: "/v1/retention-holds/release", kind: "evidence_hold_override" });
     await page.goto("/ui/admin/traces");
-    await page.getByRole("tab", { name: "Automations" }).click();
+    await page.getByRole("tab", { name: "Retention" }).click();
     const form = page.getByRole("form", { name: "Release retention holds" });
     await form.getByLabel("What to release").selectOption("person");
     await form.getByLabel("Person").selectOption(USER);
