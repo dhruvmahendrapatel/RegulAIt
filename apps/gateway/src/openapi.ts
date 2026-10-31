@@ -41,6 +41,7 @@
  */
 import { decideApprovalWithMeasuredSchema } from "./condition-metrics.js";
 import { putOverrideSchema } from "./guardrails.js";
+import { approvalsListQuery, usageSummaryQuery } from "./list-queries.js";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
@@ -253,7 +254,14 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
     body: evaluateRequestSchema,
   },
 
-  "GET /v1/approvals": { summary: "The approvals queue, scoped to what the caller may see." },
+  "GET /v1/approvals": {
+    summary: "The approvals queue, scoped to what the caller may see.",
+    query: approvalsListQuery,
+    responseNote:
+      "At most 100 rows, newest first by `requestedAt` unless `order=asc`. `status` takes one status or a " +
+      "comma-separated list. `total` counts every row the same filters and visibility match, and `hasMore` is " +
+      "true when `total` exceeds the rows returned.",
+  },
   "POST /v1/approvals/:approvalId/decide": {
     summary: "Approve or deny a pending request. Non-admin by design — the named approver is usually not an admin.",
     // ADR-0180 A2: the decide body also accepts measured conditions
@@ -268,6 +276,18 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
   "GET /v1/projects/:projectId/costs.csv": { summary: "The same ledger as a streamed CSV export." },
   "GET /v1/cost-events": { summary: "The raw cost ledger, one row per priced gateway call." },
   "GET /v1/usage-events": { summary: "The raw usage ledger, one row per governed call (priced or not)." },
+  "GET /v1/usage-events/summary": {
+    summary:
+      "Spend by agent, connector, MCP tool, project or UTC day, aggregated over every usage event in a window " +
+      "(default: the last 30 days). " +
+      "Same scoping as the usage ledger: a non-admin sees only their own events.",
+    query: usageSummaryQuery,
+    responseNote:
+      "`window` echoes the half-open `[from, to)` range applied (`defaulted` when `from` was omitted); `groups` are " +
+      "sorted by cost (`day` by date); `totals` is the sum over `groups`. `ledger` is the whole window across every " +
+      "object type, with `byObjectType` and `other` (what no typed breakdown names), so the agent, connector and " +
+      "MCP tool breakdowns plus `other` add up to `ledger`.",
+  },
 
   "GET /v1/workflows/instances": { summary: "Workflow instances." },
   "POST /v1/workflows/instances": { summary: "Start a workflow instance from a template." },

@@ -2307,6 +2307,8 @@ export const updateOrgSettingsSchema = z
     /** ADR-0034: master switch for admin-registered custom LLM providers.
      * false refuses registration/enable and stops every custom dispatch (409). */
     customModelProvidersEnabled: z.boolean().optional(),
+    /** ADR-0205: the agent setup assistant on the Register an agent card; off by default, turning it on is audited */
+    agentSetupAssistEnabled: z.boolean().optional(),
     /** ADR-0043: the org default for MCP servers whose allowPrivateRanges is
      * null. false (the strict default since ADR-0181) = a private-LAN MCP URL
      * needs an explicit per-server flag or an allow entry; true = private-LAN
@@ -3829,6 +3831,22 @@ export {
   type RiskSuggestion,
   type SuggestionSource,
 } from "./intake-assist.js";
+// ADR-0205 — the agent setup assistant's deterministic draft and model-reply merge
+export {
+  AGENT_SETUP_RISK_TIERS,
+  agentSetupAssistRequestSchema,
+  agentSetupGuardLines,
+  buildAgentSetupPrompt,
+  mergeAgentSetupReply,
+  parseAgentSetupReply,
+  suggestAgentSetup,
+  type AgentSetupAssistRequest,
+  type AgentSetupDraft,
+  type AgentSetupField,
+  type AgentSetupModelReply,
+  type AgentSetupRiskTier,
+  type AgentSetupSource,
+} from "./agent-setup-assist.js";
 // demo task G1/C6 — the fixture contract between Gemini's data and the seeder
 export {
   DEMO_DATA_SENSITIVITIES,

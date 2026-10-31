@@ -133,13 +133,12 @@ import {
   updateUserSchema,
   advisoryDetail,
   authzCheckRequestSchema,
-  /** B9b — the ten kinds the one queue holds; the `objectType` filter's enum */
-  APPROVAL_OBJECT_TYPES,
   type AuthzDecision,
   // ADR-0173 batch 2c fix round A: the audit-log CSV row formatter
   csvRecord,
 } from "@regulait/shared";
 import { governedEvaluate } from "./governed-evaluate.js";
+import { APPROVALS_PAGE_LIMIT, approvalsListQuery } from "./list-queries.js";
 import { checkMcpTransportWrite, refuseMcpServerWrite } from "./mcp-egress.js";
 import {
   agentIdDisclosureUpdate,
@@ -192,6 +191,7 @@ import { registerTrustDashboardRoutes } from "./trust-dashboard.js";
 import { registerUseCaseOverviewRoutes } from "./use-case-overview.js";
 import { registerUseCaseDraftRoutes } from "./use-case-drafts.js";
 import { registerAgentCardRoutes } from "./agent-card.js";
+import { registerAgentSetupAssistRoutes } from "./agent-setup-assist.js";
 import { registerDependencyGraphRoutes } from "./dependency-graph.js";
 import { registerRunGraphRoutes } from "./run-graph.js";
 import { registerGovernanceMonitorRoutes } from "./governance-monitor.js";
@@ -3835,13 +3835,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // `approverUserId` is a DISPLAY filter, never a widening: it is intersected
     // with `scopeCondition` below, so a non-admin filtering by somebody else's
     // id sees only the rows they could already see.
-    const { status, objectType, approverUserId } = z
-      .object({
-        status: z.enum(["pending", "approved", "denied", "returned", "consumed", "superseded"]).optional(),
-        objectType: z.enum(APPROVAL_OBJECT_TYPES).optional(),
-        approverUserId: z.string().uuid().optional(),
-      })
-      .parse(req.query);
+    //
+    // `status` takes one status or a comma-separated list (`approved,denied`),
+    // so the inbox's "Recently decided" card is its own server-filtered query
+    // and never shares a capped page with the pending queue. `order` defaults to
+    // newest first (the long-standing behaviour); the pending queue asks for
+    // `asc`, because the oldest waiting decision is the one that matters most.
+    // `total` and `hasMore` say how many rows the SAME filters and scope match,
+    // so a capped page is never mistaken for the whole queue.
+    const { status, objectType, approverUserId, order } = approvalsListQuery.parse(req.query);
     // ADR-0022 delegation widening: a non-admin sees their own rows PLUS the
     // PENDING rows of anyone actively delegating to them (pending only — a
     // delegate covers live decisions, they don't inherit the archive).
@@ -3907,18 +3909,28 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           ],
         );
     const conditions = [
-      status ? eq(approvals.status, status) : undefined,
+      status ? (status.length === 1 ? eq(approvals.status, status[0]!) : inArray(approvals.status, status)) : undefined,
       objectType ? eq(approvals.objectType, objectType) : undefined,
       // ANDed with `scopeCondition`, never substituted for it
       approverUserId ? eq(approvals.approverUserId, approverUserId) : undefined,
       scopeCondition,
     ].filter((c) => c !== undefined);
-    const rows = await db
-      .select()
-      .from(approvals)
-      .where(conditions.length > 0 ? and(...conditions) : undefined)
-      .orderBy(desc(approvals.requestedAt))
-      .limit(100);
+    const listWhere = conditions.length > 0 ? and(...conditions) : undefined;
+    // `id` breaks requested_at ties so the page boundary is stable in either order
+    const [rows, [counted]] = await Promise.all([
+      db
+        .select()
+        .from(approvals)
+        .where(listWhere)
+        .orderBy(
+          ...(order === "asc"
+            ? [asc(approvals.requestedAt), asc(approvals.id)]
+            : [desc(approvals.requestedAt), desc(approvals.id)]),
+        )
+        .limit(APPROVALS_PAGE_LIMIT),
+      db.select({ n: sql<number>`count(*)::int` }).from(approvals).where(listWhere),
+    ]);
+    const total = counted?.n ?? rows.length;
     // ADR-0186 A/B: each tool-call row's per-principal decisions (never the assertion)
     const toolCallRowIds = rows.filter((r) => isToolCallApproval(r)).map((r) => r.id);
     const decisionRows = toolCallRowIds.length
@@ -4360,6 +4372,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           : {}),
         ...contextConflictFor(r),
       })),
+      total,
+      hasMore: total > rows.length,
+      limit: APPROVALS_PAGE_LIMIT,
     };
   });
 
@@ -5575,6 +5590,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerUseCaseOverviewRoutes(app, db);
   // demo task C5 — the agent card
   registerAgentCardRoutes(app, db);
+  // ADR-0205 — the agent setup assistant (admin, off by default, suggestion-only)
+  registerAgentSetupAssistRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0156 — the AI-system dependency graph with propagated declared risk
   registerDependencyGraphRoutes(app, db);
   // ADR-0173 batch 2b — the read-only run graph (builder turn, orchestration run, use case)

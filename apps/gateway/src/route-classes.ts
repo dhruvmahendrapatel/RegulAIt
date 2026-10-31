@@ -435,6 +435,9 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/traces/tags",
   "GET /v1/cost-events",
   "GET /v1/usage-events",
+  // the windowed by-agent / by-connector aggregate of the same ledger; the
+  // handler applies the identical self-scoping (userId forced to self)
+  "GET /v1/usage-events/summary",
   // ADR-0047: a team lead generating and reading THEIR OWN scorecard. Every
   // one of these applies `evaluateReportAccess` inside the handler, which
   // returns the exact project-id list the caller may query and refuses
