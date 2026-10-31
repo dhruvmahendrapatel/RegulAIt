@@ -169,6 +169,10 @@ describe("ADR-0215 licences", () => {
     ]);
     expect(() => normaliseAtlasRelease(atlas, { framework: "mitre-atlas", licence: "proprietary" })).toThrow(/not allowed/);
     expect(() => snapshotOf([{ controlRef: "nist-ai-rmf:X", title: "x", description: null }], { licence: "SSPL-1.0" })).toThrow();
+    // every link the UI renders is https: no javascript: or plain http
+    for (const bad of ["javascript:alert(1)", "http://example.org/licence"]) {
+      expect(() => snapshotOf([{ controlRef: "nist-ai-rmf:X", title: "x", description: null }], { licenceUrl: bad })).toThrow();
+    }
   });
 });
 

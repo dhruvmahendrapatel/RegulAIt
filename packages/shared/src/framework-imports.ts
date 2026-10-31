@@ -75,6 +75,12 @@ export const REGULATORY_FEED_IMPORT_SCHEMA = "regulait.regulatory-feed-import/v1
 
 const ymd = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const sha = z.string().regex(/^[0-9a-f]{64}$/);
+/** links the UI renders as hrefs: https only, so no other scheme (javascript:, data:) can reach one */
+const httpsUrl = z
+  .string()
+  .url()
+  .max(500)
+  .refine((u) => u.startsWith("https://"), { message: "must be an https URL" });
 
 export const importSourceSchema = z
   .object({
@@ -82,8 +88,8 @@ export const importSourceSchema = z
     title: z.string().min(1).max(300),
     publisher: z.string().min(1).max(200),
     licence: z.string().min(1).max(64),
-    licenceUrl: z.string().url().max(500),
-    upstreamUrl: z.string().url().max(500),
+    licenceUrl: httpsUrl,
+    upstreamUrl: httpsUrl,
     /** the upstream's own version label ("1.0.0", "2026.10") */
     sourceVersion: z.string().min(1).max(64),
     /** the upstream commit or edition the bytes came from */
@@ -137,7 +143,7 @@ export const importedFeedEntrySchema = z
     status: z.enum(REGULATORY_UPDATE_STATUSES),
     frameworks: z.array(z.string().min(1).max(64)).max(20),
     controlRefs: z.array(z.string().min(1).max(200)).max(50),
-    sourceUrl: z.string().url().max(500),
+    sourceUrl: httpsUrl,
     verifiedOn: ymd,
   })
   .strict();

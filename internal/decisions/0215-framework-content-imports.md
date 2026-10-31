@@ -64,8 +64,20 @@ feed that is not curated by hand, and share-alike or non-commercial content cite
 
 ## Tests
 
-`packages/shared/src/framework-imports.test.ts` (16): the normalisers are deterministic and order-independent, licences
+`packages/shared/src/framework-imports.test.ts` (17): the normalisers are deterministic and order-independent, licences
 are enforced, an edited control is never overwritten unless named, and the feed diff and merge.
 `apps/gateway/src/zz-adr0215-framework-imports.test.ts` (5): the routes refuse and audit while off, a proposal is
 deterministic, accept writes a new draft version that keeps edits, a bad resolution or a moved base writes nothing,
 every decision is audited, and accepted feed entries join the regulatory feed only while imports are on.
+`apps/web/e2e/framework-imports.mock.spec.ts` (2): a description-only change is visible on both sides of the import
+drawer, and the feed-update drawer lists the entries before Accept.
+
+## As built (review of 2026-10-31)
+
+- The framework-import drawer shows each control's description on both sides, with the changed parts named in words
+  ("Changes: description"), so an edit the import would keep or overwrite is visible when it touches only the
+  description.
+- `GET /v1/regulatory/feed-imports/:id` returns the entries a feed update adds, changes (with the entry in the feed
+  now) and removes: key, title, instrument, effective date, status and link. The Regulatory feed sources page lists
+  them in a drawer with the Accept and Reject actions pinned; the counts-only confirmation is gone.
+- Import source, licence and entry links must be https; the snapshot schema refuses any other scheme.
