@@ -531,7 +531,7 @@ function Loaded(props: { settings: Record<string, unknown> }) {
           }
           help={
             <>
-              <p>Off (default) = no remote agent can be registered or called. On = admins may register remote agents on the Remote agents (A2A) page; turning it on loosens a security setting, so you will be asked to confirm it's you, and it is audited.</p>
+              <p>Off (default) = no remote agent can be registered or called. On = admins may register remote agents on the Agents page, in its Remote agents (A2A) tab; turning it on loosens a security setting, so you will be asked to confirm it's you, and it is audited.</p>
               <p>Even when on, nobody may call a remote agent until an admin gives them access, and every call is checked, costed and recorded. Remote agents are reached under the same network rules as MCP servers.</p>
             </>
           }

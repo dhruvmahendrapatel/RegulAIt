@@ -113,3 +113,10 @@ Smaller points from the same review:
 - **Redirect test.** The suite now proves that a redirect from the agent is refused, and that the credential never
   reaches the other origin.
 
+**Placement change (2026-10-31, after main's merge).** Main's entry bundle reached 138,495 B against the 138.5 kB
+ceiling. This lane's own nav entry, icon, route and lazy screen declaration added about 60 B there, which put entry JS
+over the ceiling. The registry is therefore now a second tab on the existing Agents page: Integrations > Agents >
+"Remote agents (A2A)", linked as `/admin/agents?tab=remote`. It lives in the same lazy chunk, and the entry bundle is
+byte-identical to main's apart from chunk hashes. The page-local link style is in its own CSS module rather than in
+the entry-bundled `admin.module.css`.
+

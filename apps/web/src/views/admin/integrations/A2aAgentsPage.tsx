@@ -17,9 +17,11 @@ import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { RefusalNotice } from "../../../ui/RefusalNotice";
 import { Badge, Button, Card, EmptyState, Field, Input, RowActions, Select, Table } from "../../../ui/kit";
 import { QueryGate, RemoveButton, optionEls, useAction, useUsers, userOpts } from "../adminKit";
+import type { AgentsTabSlot } from "./AgentsScreen";
 import { StaticCredentialCard } from "./McpUpstreamCredential";
 import type { UpstreamCredentialView } from "./mcpUpstreamCredentialModel";
 import a from "../admin.module.css";
+import x from "./a2aAgents.module.css";
 import v from "../../views.module.css";
 
 interface A2aSkill {
@@ -53,7 +55,7 @@ interface A2aGrant {
 const LIST_KEY = ["admin", "a2a-agents"] as const;
 const NAME_SHAPE = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
-export default function A2aAgentsPage() {
+export default function A2aAgentsPage(props: { slot?: AgentsTabSlot }) {
   const q = useQuery({ queryKey: LIST_KEY, queryFn: () => api.get<{ enabled: boolean; agents: A2aAgent[] }>("/v1/a2a/agents") });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const agents = q.data?.agents ?? [];
@@ -70,8 +72,9 @@ export default function A2aAgentsPage() {
           </p>
         }
       />
+      {props.slot?.tabs}
       <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
-        <div className={v.stack}>
+        <div className={v.stack} {...props.slot?.panel}>
           <Card
             title="Registry"
             actions={<Badge tone={q.data?.enabled ? "warn" : "ok"}>{q.data?.enabled ? "Calls to remote agents on" : "Off (default)"}</Badge>}
@@ -79,7 +82,7 @@ export default function A2aAgentsPage() {
             {!q.data?.enabled && (
               <p role="status">
                 Calls to remote agents are off for this organisation, so none can be registered or called. An admin can turn
-                them on in <Link to="/admin/organization" className={a.inlineLink}>Organisation settings</Link>.
+                them on in <Link to="/admin/organization" className={x.inlineLink}>Organisation settings</Link>.
               </p>
             )}
             <RegisterForm enabled={q.data?.enabled === true} />
