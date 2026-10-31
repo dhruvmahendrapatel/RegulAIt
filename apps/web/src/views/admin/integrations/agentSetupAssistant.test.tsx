@@ -5,7 +5,7 @@
  */
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { DraftResultView, type AgentSetupDraft, type AssistResponse } from "./AgentSetupAssistant";
+import { DraftResultView, draftButtonLabel, type AgentSetupDraft, type AssistResponse } from "./AgentSetupAssistant";
 
 const f = <T,>(value: T, source: "rules" | "model" | "mock" = "rules") => ({ value, source });
 const draft: AgentSetupDraft = {
@@ -46,5 +46,10 @@ describe("agent setup assistant draft view (ADR-0205)", () => {
     const onUse = vi.fn();
     renderToStaticMarkup(<DraftResultView result={resp({ status: "not_requested" })} onUse={onUse} />);
     expect(onUse).not.toHaveBeenCalled();
+  });
+
+  it("labels the draft button while a draft runs, so a slow model call is visible", () => {
+    expect(draftButtonLabel(true)).toBe("Drafting…");
+    expect(draftButtonLabel(false)).toBe("Draft configuration");
   });
 });

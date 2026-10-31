@@ -3831,6 +3831,7 @@ export {
 export {
   AGENT_SETUP_RISK_TIERS,
   agentSetupAssistRequestSchema,
+  agentSetupGuardLines,
   buildAgentSetupPrompt,
   mergeAgentSetupReply,
   parseAgentSetupReply,

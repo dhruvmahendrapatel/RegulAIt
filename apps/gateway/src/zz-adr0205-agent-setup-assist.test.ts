@@ -88,6 +88,9 @@ describe("off by default", () => {
     const r = await post("/v1/agents/setup-assist", admin.auth, { description: DESCRIPTION });
     expect(r.statusCode).toBe(409);
     expect(r.json().error).toBe("agent_setup_assist_disabled");
+    // the refusal tells the admin where to go, without exposing the internal setting key
+    expect(r.json().detail).toContain("organisation settings");
+    expect(r.json().detail).not.toContain("agentSetupAssistEnabled");
   });
 
   it("turning it on is an audited relaxation", async () => {

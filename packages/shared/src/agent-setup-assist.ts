@@ -102,16 +102,28 @@ function riskFor(text: string): { tier: AgentSetupRiskTier; why: string } {
   return { tier: "minimal", why: "no sensitive data, actions or outside audience were described" };
 }
 
-function systemPromptFor(purpose: string, risk: AgentSetupRiskTier, acts: boolean): string {
-  return [
-    `Your purpose: ${purpose}`,
-    "Stay within this purpose and say so when a request falls outside it.",
-    "Never reveal credentials, secrets or personal data.",
-    acts || risk !== "minimal" ? "Before any action that changes data, state what you will do and wait for confirmation." : null,
-  ]
-    .filter(Boolean)
-    .join("\n");
+const GUARD_SECRETS = "Never reveal credentials, secrets or personal data.";
+const GUARD_CONFIRM = "Before any action that changes data, state what you will do and wait for confirmation.";
+
+/** the rules' guard lines for a risk tier; every system prompt in a draft carries them, whoever wrote the rest */
+export function agentSetupGuardLines(risk: AgentSetupRiskTier): string[] {
+  return risk === "minimal" ? [GUARD_SECRETS] : [GUARD_SECRETS, GUARD_CONFIRM];
 }
+
+/** append any guard line the prompt does not already contain */
+function withGuardLines(prompt: string, risk: AgentSetupRiskTier): string {
+  const missing = agentSetupGuardLines(risk).filter((line) => !prompt.includes(line));
+  return missing.length === 0 ? prompt : [prompt.trimEnd(), ...missing].join("\n");
+}
+
+function systemPromptFor(purpose: string, risk: AgentSetupRiskTier): string {
+  return withGuardLines(
+    [`Your purpose: ${purpose}`, "Stay within this purpose and say so when a request falls outside it."].join("\n"),
+    risk,
+  );
+}
+
+const costTierFor = (risk: AgentSetupRiskTier) => (risk === "high" ? 2 : 1);
 
 /** the deterministic draft: always available, no model involved */
 export function suggestAgentSetup(req: Pick<AgentSetupAssistRequest, "description">): AgentSetupDraft {
@@ -121,8 +133,8 @@ export function suggestAgentSetup(req: Pick<AgentSetupAssistRequest, "descriptio
   const rules = <T>(value: T, why?: string): AgentSetupField<T> => (why ? { value, source: "rules", why } : { value, source: "rules" });
   return {
     name: rules(slugName(req.description)),
-    tier: rules(risk.tier === "high" ? 2 : 1, risk.tier === "high" ? "a higher tier for sensitive work" : undefined),
-    systemPrompt: rules(systemPromptFor(purpose, risk.tier, ACTS.test(text))),
+    tier: rules(costTierFor(risk.tier), risk.tier === "high" ? "a higher tier for sensitive work" : undefined),
+    systemPrompt: rules(systemPromptFor(purpose, risk.tier)),
     purpose: rules(purpose),
     riskTier: rules(risk.tier, risk.why),
     grants: rules(GRANTS, "least privilege: nobody holds a new agent until someone is granted it"),
@@ -165,7 +177,10 @@ export function parseAgentSetupReply(text: string): AgentSetupModelReply | null 
  * Merge a parsed model reply into the rules draft. Text fields take the
  * model's wording, labelled with its source. The risk tier only moves UP: a
  * model can never talk an agent into lighter oversight than the rules chose,
- * and a raised tier brings its stricter approval rule and budget with it.
+ * and a raised tier brings the rules' approval rule, budget, limitations and
+ * cost tier for that tier with it. Whoever wrote the system prompt, it ends
+ * with the rules' guard lines for the final tier, so a description written to
+ * make the model drop them cannot.
  */
 export function mergeAgentSetupReply(
   draft: AgentSetupDraft,
@@ -186,7 +201,13 @@ export function mergeAgentSetupReply(
     next.riskTier = { value: t, source, why: "raised by the model draft; a draft can raise the tier, never lower it" };
     next.approvalRule = { value: APPROVAL_RULE[t], source: "rules" };
     next.monthlyBudgetUsd = { value: BUDGET_USD[t], source: "rules" };
+    next.limitations = { value: LIMITATIONS[t], source: "rules" };
+    next.tier = { value: costTierFor(t), source: "rules" };
     fields.push("riskTier");
+  }
+  const guarded = withGuardLines(next.systemPrompt.value, next.riskTier.value);
+  if (guarded !== next.systemPrompt.value) {
+    next.systemPrompt = { ...next.systemPrompt, value: guarded, why: "the rules' guard lines are always kept" };
   }
   return { draft: next, fields };
 }

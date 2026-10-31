@@ -53,7 +53,7 @@ export function registerAgentSetupAssistRoutes(app: FastifyInstance, db: Db, opt
     if (!org.agentSetupAssistEnabled) {
       return reply.status(409).send({
         error: "agent_setup_assist_disabled",
-        detail: "the agent setup assistant is off; an admin turns it on in organization settings (agentSetupAssistEnabled)",
+        detail: "the agent setup assistant is off; an admin turns it on in organisation settings",
       });
     }
     const body = agentSetupAssistRequestSchema.parse(req.body ?? {});

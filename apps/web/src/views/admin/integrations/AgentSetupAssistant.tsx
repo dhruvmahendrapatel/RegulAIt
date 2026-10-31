@@ -11,7 +11,7 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
-import { Badge, Button, Field, Select, Textarea } from "../../../ui/kit";
+import { Badge, Button, Field, Select, SkeletonBlock, Textarea } from "../../../ui/kit";
 import { agentOpts, optionEls, useAction, useAgents } from "../adminKit";
 import { putOrgSettings } from "../../../stepup/stepUp";
 import v from "../../views.module.css";
@@ -60,6 +60,9 @@ const ROWS: Array<[string, keyof AgentSetupDraft]> = [
   ["Limitations", "limitations"],
 ];
 
+/** a real model call can take seconds; the button says so while it runs */
+export const draftButtonLabel = (busy: boolean) => (busy ? "Drafting…" : "Draft configuration");
+
 export default function AgentSetupAssistant(props: { onUse: (draft: AgentSetupDraft) => void }) {
   const qc = useQueryClient();
   const status = useQuery({
@@ -78,7 +81,7 @@ export default function AgentSetupAssistant(props: { onUse: (draft: AgentSetupDr
     </span>
   );
 
-  if (!status.data) return status.error ? <p className={v.errLine} role="alert">Assistant unavailable.</p> : null;
+  if (!status.data) return status.error ? <p className={v.errLine} role="alert">Assistant unavailable.</p> : <SkeletonBlock lines={2} />;
 
   if (!status.data.enabled) {
     return (
@@ -147,7 +150,7 @@ export default function AgentSetupAssistant(props: { onUse: (draft: AgentSetupDr
             }, null)
           }
         >
-          Draft configuration
+          {draftButtonLabel(act.busy)}
         </Button>
         {errorLine}
       </div>
