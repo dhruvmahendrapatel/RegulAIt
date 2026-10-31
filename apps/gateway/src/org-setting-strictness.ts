@@ -299,6 +299,8 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   ),
   mrmStalenessRecertEnabled: notEqual(true),
   mrmStalenessRecertThreshold: atMost(1),
+  // ADR-0217: re-testing spends model tokens on the org's behalf, so ON is the relaxation
+  mrmAutoRetestEnabled: notEqual(false),
 
   // --- audit retention ------------------------------------------------------
   autoPruneEnabled: exempt(

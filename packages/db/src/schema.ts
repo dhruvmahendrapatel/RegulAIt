@@ -3443,6 +3443,12 @@ export const complianceProfiles = pgTable("compliance_profiles", {
    * `guardrailModes`), so a tag can only raise the requirement. NULL = no isolation opinion. */
   minIsolationClass: text("min_isolation_class", { enum: ["hardened_container", "user_space_kernel", "microvm"] }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  /** ADR-0208 (migration 0223): a retired profile is read-only — no new version, no new carrier. Retire is refused
+   * while any project, pending project, team or infra resource carries the tag. DB CHECK ties retired_* to status. */
+  status: text("status", { enum: ["active", "retired"] }).notNull().default("active"),
+  retiredAt: timestamp("retired_at", { withTimezone: true }),
+  retiredReason: text("retired_reason"),
+  retiredByUserId: uuid("retired_by_user_id").references(() => users.id, { onDelete: "set null" }),
 });
 
 // PILLAR 4 (§9, ADR-0011): teams and Shared-Project membership. Membership
@@ -3578,6 +3584,12 @@ export const infraResources = pgTable("infra_resources", {
   deployTargetId: uuid("deploy_target_id").references(() => deployTargets.id, {
     onDelete: "set null",
   }),
+  /** ADR-0208 G8 (migration 0224): a retired resource stays readable but is read-only and out of every scan; the
+   * remediation ledgers that hang off it are why it is retired, never deleted */
+  status: text("status", { enum: ["active", "retired"] }).notNull().default("active"),
+  retiredAt: timestamp("retired_at", { withTimezone: true }),
+  retiredReason: text("retired_reason"),
+  retiredByUserId: uuid("retired_by_user_id").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -3599,9 +3611,24 @@ export const infraPolicies = pgTable(
     autoRemediateMaxSeverity: text("auto_remediate_max_severity", {
       enum: ["low", "medium", "high"],
     }),
+    /** ADR-0208 G8 (migration 0224): a retired policy stays readable and stops applying; its resource falls back to
+     * the active fleet policy. The fleet policy is edited, never retired. */
+    status: text("status", { enum: ["active", "retired"] }).notNull().default("active"),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+    retiredReason: text("retired_reason"),
+    retiredByUserId: uuid("retired_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("infra_policies_resource_idx").on(t.resourceId)],
+  (t) => [
+    index("infra_policies_resource_idx").on(t.resourceId),
+    // one ACTIVE policy per resource, and at most one ACTIVE fleet policy (migration 0224)
+    uniqueIndex("infra_policies_active_resource_uq")
+      .on(t.resourceId)
+      .where(sql`${t.status} = 'active' AND ${t.resourceId} IS NOT NULL`),
+    uniqueIndex("infra_policies_active_fleet_uq")
+      .on(sql`(${t.resourceId} IS NULL)`)
+      .where(sql`${t.status} = 'active' AND ${t.resourceId} IS NULL`),
+  ],
 );
 
 // A detected finding — an INERT report until governed. `signature` (carried in
@@ -4458,6 +4485,13 @@ export const orgSettings = pgTable(
      * counts, summed) it takes before an armed staleness gate refuses. 1 =
      * any drift at all forces recertification. */
     mrmStalenessRecertThreshold: integer("mrm_staleness_recert_threshold").notNull().default(1),
+    /** ADR-0217 (migration 0237): automatic re-test after a model change. true = when a certified card's
+     * model, prompt or endpoint configuration changes, the `mrm-auto-retest-sweep` job re-runs the card's
+     * pinned eval baselines and previously probed red-team libraries against the new configuration, under
+     * the ordinary runners, and attaches the results to the re-certification request. It never signs
+     * anything off. Off by default: it spends model tokens, so turning it on is a stepped-up, audited
+     * relaxation (`notEqual(false)`). */
+    mrmAutoRetestEnabled: boolean("mrm_auto_retest_enabled").notNull().default(false),
 
     // --- ADR-0080 amendment (migration 0098): use-case dispatch gate --------
     /** 'enforce' is the ADR-0181 default (see below); 'off' (an audited admin
@@ -5379,9 +5413,18 @@ export const evalDatasets = pgTable(
     scorerConfig: jsonb("scorer_config").$type<Record<string, unknown>>().notNull().default({}),
     createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    /** ADR-0208 G9 (migration 0225): retired BY NAME — every version of the name carries the stamp. A retired
+     * dataset takes no new run, version, case, gate binding or automation rule; its runs stay readable. */
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+    retiredReason: text("retired_reason"),
+    retiredByUserId: uuid("retired_by_user_id").references(() => users.id, { onDelete: "set null" }),
   },
   (t) => [
     check("eval_datasets_version_check", sql`${t.version} >= 1`),
+    check(
+      "eval_datasets_retired_check",
+      sql`(${t.retiredAt} IS NULL) = (${t.retiredReason} IS NULL) AND (${t.retiredReason} IS NULL OR length(btrim(${t.retiredReason})) > 0)`,
+    ),
     check(
       "eval_datasets_scorer_kind_check",
       sql`${t.scorerKind} IN (${EVAL_SCORER_KINDS_SQL})`,
@@ -5800,6 +5843,51 @@ export const modelCardEvidence = pgTable(
       .where(sql`${t.evalRunId} IS NOT NULL`),
   ],
 );
+
+/** ADR-0217 (migration 0237): one automatic re-test of a card after a model change. A row is CLAIMED (status
+ * `running`) before its suite runs, unique on (card, drift key, kind, source), so a drift is re-tested at most
+ * once per suite however often the sweep runs. `card_approval_id` is the re-certification request the result
+ * is attached to: set when the request is created, or at once when one is already pending. */
+export const MRM_RETEST_KINDS = ["eval", "redteam"] as const;
+/** `reported`: the suite ran but its runner gave no gate verdict (e.g. no gating class exercised) — never a pass */
+export const MRM_RETEST_STATUSES = ["running", "passed", "failed_gate", "reported", "refused", "skipped"] as const;
+export const mrmRetestRuns = pgTable(
+  "mrm_retest_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    cardId: uuid("card_id")
+      .notNull()
+      .references(() => modelCards.id, { onDelete: "cascade" }),
+    /** the certification and configuration-change count this re-test answers */
+    driftKey: text("drift_key").notNull(),
+    kind: text("kind", { enum: MRM_RETEST_KINDS }).notNull(),
+    /** the eval dataset (kind eval) or red-team library (kind redteam) re-run */
+    sourceId: uuid("source_id").notNull(),
+    sourceName: text("source_name").notNull(),
+    runAsUserId: uuid("run_as_user_id").references(() => users.id, { onDelete: "set null" }),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
+    evalRunId: uuid("eval_run_id").references(() => evalRuns.id, { onDelete: "set null" }),
+    redteamRunId: uuid("redteam_run_id").references((): AnyPgColumn => redteamRuns.id, { onDelete: "set null" }),
+    status: text("status", { enum: MRM_RETEST_STATUSES }).notNull(),
+    reason: text("reason"),
+    /** the measured figures, copied at completion: gatePassed, regression, meanScore, passRate, asr */
+    summary: jsonb("summary").$type<Record<string, unknown>>().notNull().default({}),
+    cardApprovalId: uuid("card_approval_id").references(() => modelCardApprovals.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (t) => [
+    check("mrm_retest_runs_kind_check", sql`${t.kind} IN ('eval','redteam')`),
+    check(
+      "mrm_retest_runs_status_check",
+      sql`${t.status} IN ('running','passed','failed_gate','reported','refused','skipped')`,
+    ),
+    uniqueIndex("mrm_retest_runs_drift_uq").on(t.cardId, t.driftKey, t.kind, t.sourceId),
+    index("mrm_retest_runs_card_idx").on(t.cardId),
+    index("mrm_retest_runs_approval_idx").on(t.cardApprovalId),
+  ],
+);
+export type MrmRetestRunRow = typeof mrmRetestRuns.$inferSelect;
 
 export type ModelCardRow = typeof modelCards.$inferSelect;
 export type ModelCardApprovalRow = typeof modelCardApprovals.$inferSelect;
@@ -7669,7 +7757,9 @@ export const redteamLibraries = pgTable(
     name: text("name").notNull(),
     version: integer("version").notNull().default(1),
     note: text("note"),
-    status: text("status", { enum: ["draft", "published"] })
+    /** ADR-0208 G9 (migration 0225): `retired` — one version stops being run (new runs and the sweep); its runs
+     * and findings stay readable */
+    status: text("status", { enum: ["draft", "published", "retired"] })
       .notNull()
       .default("draft"),
     /** the eval dataset this library version was materialized into. NULL until
@@ -7687,8 +7777,18 @@ export const redteamLibraries = pgTable(
     publishedAt: timestamp("published_at", { withTimezone: true }),
     createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+    retiredReason: text("retired_reason"),
+    retiredByUserId: uuid("retired_by_user_id").references(() => users.id, { onDelete: "set null" }),
   },
-  (t) => [uniqueIndex("redteam_libraries_name_version_uq").on(t.name, t.version)],
+  (t) => [
+    uniqueIndex("redteam_libraries_name_version_uq").on(t.name, t.version),
+    check("redteam_libraries_status_ck", sql`${t.status} IN ('draft', 'published', 'retired')`),
+    check(
+      "redteam_libraries_retired_check",
+      sql`(${t.status} = 'retired') = (${t.retiredAt} IS NOT NULL) AND (${t.retiredAt} IS NULL) = (${t.retiredReason} IS NULL) AND (${t.retiredReason} IS NULL OR length(btrim(${t.retiredReason})) > 0)`,
+    ),
+  ],
 );
 
 /** One adversarial probe: the prompt, the class it attacks, how bad a defeat
@@ -10250,12 +10350,16 @@ export const grantCertificationCampaigns = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
     dueAt: timestamp("due_at", { withTimezone: true }).notNull(),
-    /** stored status is only ever open|completed; 'expired-incomplete' is computed on read */
-    status: text("status", { enum: ["open", "completed"] })
+    /** stored status is open|completed|cancelled (ADR-0208 G9); 'expired-incomplete' is computed on read */
+    status: text("status", { enum: ["open", "completed", "cancelled"] })
       .notNull()
       .default("open"),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    /** ADR-0208 G9 (migration 0225): cancelled by an admin, with the reason; pending reviews were withdrawn */
+    cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+    cancelledReason: text("cancelled_reason"),
+    cancelledByUserId: uuid("cancelled_by_user_id").references(() => users.id, { onDelete: "set null" }),
   },
   (t) => [
     check("grant_cert_campaigns_name_check", sql`length(btrim(${t.name})) > 0`),
@@ -10266,6 +10370,11 @@ export const grantCertificationCampaigns = pgTable(
     check(
       "grant_cert_campaigns_completed_check",
       sql`(${t.status} = 'completed') = (${t.completedAt} IS NOT NULL)`,
+    ),
+    check("grant_cert_campaigns_status_check", sql`${t.status} IN ('open', 'completed', 'cancelled')`),
+    check(
+      "grant_cert_campaigns_cancelled_check",
+      sql`(${t.status} = 'cancelled') = (${t.cancelledAt} IS NOT NULL) AND (${t.cancelledAt} IS NULL) = (${t.cancelledReason} IS NULL) AND (${t.cancelledReason} IS NULL OR length(btrim(${t.cancelledReason})) > 0)`,
     ),
     index("grant_cert_campaigns_status_idx").on(t.status),
   ],
@@ -13107,10 +13216,13 @@ export const engineSchedules = pgTable(
     lastSkip: text("last_skip"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    /** ADR-0208 G9 (migration 0225): soft delete — gone from listings, never started from again */
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    deletedByUserId: uuid("deleted_by_user_id").references(() => users.id, { onDelete: "set null" }),
   },
   (t) => [
     check("engine_schedules_interval_check", sql`${t.intervalHours} BETWEEN 1 AND 720`),
-    index("engine_schedules_due_idx").on(t.nextRunAt).where(sql`${t.enabled}`),
+    index("engine_schedules_due_idx").on(t.nextRunAt).where(sql`${t.enabled} AND ${t.deletedAt} IS NULL`),
   ],
 );
 
