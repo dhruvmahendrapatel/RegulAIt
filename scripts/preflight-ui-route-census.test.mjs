@@ -358,7 +358,7 @@ describe("route census: KNOWN_UI_GAPS only shrinks", () => {
   it("THE PINNED SIZES: known gaps, machine-only, superseded and indirect entries", () => {
     expect(KNOWN_UI_GAPS_MAX).toBe(0);
     expect(KNOWN_UI_GAPS.size).toBe(KNOWN_UI_GAPS_MAX);
-    expect(MACHINE_ONLY.size).toBe(44); // GET /v1/receipts/keys left: the posture page lists the keys to retire them; ADR-0195 SD4b added the endpoint agent channel; SD2b added the federation issuer's discovery document and JWKS; #453 c6508111468 added the MCP Streamable HTTP GET probe (405); ADR-0219 added the governed A2A call (POST /v1/a2a/agents/:agentId/messages)
+    expect(MACHINE_ONLY.size).toBe(46); // GET /v1/receipts/keys left: the posture page lists the keys to retire them; ADR-0195 SD4b added the endpoint agent channel; SD2b added the federation issuer's discovery document and JWKS; #453 c6508111468 added the MCP Streamable HTTP GET probe (405); ADR-0210 added the OIDC-profile identity assertion issuer's discovery document and JWKS; ADR-0219 added the governed A2A call (POST /v1/a2a/agents/:agentId/messages)
     expect(SUPERSEDED.size).toBe(14);
     expect(INDIRECT_UI_CALLS.size).toBe(8); // ADR-0226: the three list exports DataList downloads from the path its page passes
     for (const [key, g] of KNOWN_UI_GAPS) {

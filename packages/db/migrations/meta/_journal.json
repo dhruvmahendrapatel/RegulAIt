@@ -1459,6 +1459,13 @@
       "breakpoints": true
     },
     {
+      "idx": 228,
+      "version": "7",
+      "when": 1785163000000,
+      "tag": "0228_oidc_identity_assertion",
+      "breakpoints": true
+    },
+    {
       "idx": 230,
       "version": "7",
       "when": 1785165000000,
@@ -1477,6 +1484,13 @@
       "version": "7",
       "when": 1785174000000,
       "tag": "0239_a2a_agents",
+      "breakpoints": true
+    },
+    {
+      "idx": 247,
+      "version": "7",
+      "when": 1785182000000,
+      "tag": "0247_trust_pages",
       "breakpoints": true
     }
   ]
