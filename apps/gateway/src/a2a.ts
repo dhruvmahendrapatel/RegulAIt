@@ -11,9 +11,13 @@
  *  3. the lead ceiling: a worker may call only the agents its lead chain allows (it can only NARROW, never widen);
  *  4. the person's grant (`a2a_agent_grants`): default-deny, for the whole agent or that one skill. A worker never has
  *     a grant of its own: it calls as the person who started the run, so it never exceeds them;
- *  5. the egress decision on the CURRENT posture (the MCP allow-list and private-range default), then the guarded
+ *  5. the project: it exists and the person may attribute to it (`assertProjectAttribution`), then the pillar-5
+ *     budget gate (`preDispatchProjectGate`: a project over its hard block is refused and escalated);
+ *  6. the project's PII mode (`projectPiiMode`, the org floor when unattributed): block refuses on a hit, warn and log
+ *     record it, and redact refuses because no A2A redaction path exists yet (fail closed);
+ *  7. the egress decision on the CURRENT posture (the MCP allow-list and private-range default), then the guarded
  *     fetch for every request (re-validated, pinned, redirect-refused);
- *  6. the credential, opened at send time and sent only to the registered origin.
+ *  8. the credential, opened at send time and sent only to the registered origin.
  * The outcome is written in ONE transaction: the pillar-5 `usage_events` row (`object_type` 'a2a_agent', the agent's
  * flat price, the project) and the audit row.
  *
@@ -50,7 +54,8 @@ import {
 import { mcpUpstreamHeaderNameProblem, mcpUpstreamSecretProblem, setMcpUpstreamCredentialSchema } from "@regulait/shared";
 import { createGuardedFetch, egressRefusal } from "./egress-guard.js";
 import { checkMcpServerUrl, loadMcpEgressPosture } from "./mcp-egress.js";
-import { loadOrgSettings } from "./org-settings.js";
+import { loadOrgSettings, piiInternationalCategories } from "./org-settings.js";
+import { assertProjectAttribution, enforcePII, piiCategoryList, preDispatchProjectGate, projectPiiMode } from "./projects.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { checkStepUp, requireStepUp } from "./step-up.js";
 import { timeouts } from "./timeouts.js";
@@ -87,6 +92,11 @@ export const A2A_RULE_IDS = Object.freeze({
   egress: "a2a-egress-blocked",
   credentialUnavailable: "a2a-credential-unavailable",
   upstreamError: "a2a-upstream-error",
+  // the same rule ids the MCP and model paths use, so one query finds every refusal of its kind
+  projectAttribution: "project-attribution",
+  projectBudget: "project-budget-cap",
+  piiBlocked: "pii-blocked",
+  piiUnsupported: "a2a-pii-unsupported",
 });
 
 // ---------------------------------------------------------------------------
@@ -215,6 +225,14 @@ async function fetchCard(db: Db, url: string, allowPrivateRanges: boolean | null
 // THE GOVERNED CALL
 // ---------------------------------------------------------------------------
 
+/**
+ * The message metadata key that names the skill a call was granted for. A2A has no skill field on a message: the
+ * remote agent chooses its skill from the content. So a skill-scoped grant decides whether the call is made and
+ * labels it in the trail and the ledger, and the skill is passed to the agent as a request it may honour. It cannot
+ * stop the agent from doing something else with the text.
+ */
+export const A2A_SKILL_METADATA_KEY = "regulait.requestedSkill";
+
 export interface GovernedA2aCallArgs {
   /** the person the call is made for: the caller, or the person who started a worker's run */
   userId: string;
@@ -226,6 +244,8 @@ export interface GovernedA2aCallArgs {
   projectId?: string | null;
   /** §5.1 lead ceiling: the agent ids a worker's lead chain permits. null/undefined = no lead constraint */
   ceilingAgentIds?: readonly string[] | null;
+  /** an admin may attribute to any project; anyone else must be a member of a project that has members (absent = not an admin) */
+  callerIsAdmin?: boolean;
 }
 
 export type GovernedA2aCallOutcome =
@@ -281,15 +301,43 @@ export async function executeGovernedA2aCall(db: Db, args: GovernedA2aCallArgs, 
     return deny(403, "forbidden", A2A_RULE_IDS.noGrant, skillId === null ? "you have no access to this agent" : `you have no access to this agent's skill '${skillId}'`, label);
   }
 
-  // 5. the egress decision on the current posture
+  // 5. the project: it must exist and the person may attribute to it, then the pillar-5 budget gate (the same
+  //    `assertProjectAttribution` and `preDispatchProjectGate` the MCP and model paths call). Unattributed = the
+  //    Unattributed bucket, which has no project budget to exceed.
+  if (projectId !== null) {
+    const attribution = await assertProjectAttribution(db, projectId, args.userId, args.callerIsAdmin === true);
+    if (!attribution.ok) {
+      return deny(attribution.status, attribution.error, A2A_RULE_IDS.projectAttribution, attribution.error === "invalid_reference" ? "no such project" : "you are not a member of that project", label);
+    }
+  }
+  const budget = await preDispatchProjectGate(db, projectId, args.userId);
+  if (!budget.ok) return deny(budget.status, budget.error, A2A_RULE_IDS.projectBudget, `${budget.error}: ${budget.detail ?? "the project budget is exhausted"}`, label);
+
+  // 6. the project's PII mode (the pillar-3 cascade, the org floor when unattributed or unclassified), on the text
+  //    before it leaves. Block refuses on a hit; warn and log record it. Redact has no prepared A2A path yet, so it
+  //    refuses (fail closed) rather than sending the text unredacted. No profile or org setting can produce redact
+  //    today (it is in the PiiMode type only); the branch keeps a future one from passing silently.
+  const piiMode = await projectPiiMode(db, projectId);
+  let piiDetail: Record<string, unknown> | null = null;
+  if (piiMode === "redact") {
+    return deny(403, "pii_unsupported", A2A_RULE_IDS.piiUnsupported, "the project's PII mode is redact, which calls to remote agents cannot apply yet, so nothing was sent", label, { pii: { mode: piiMode } });
+  }
+  if (piiMode) {
+    const chk = enforcePII(piiMode, { input: args.text }, await piiInternationalCategories(db));
+    // COUNTS ONLY, never the matched text
+    piiDetail = { mode: piiMode, action: chk.action, phase: "input", inputHits: chk.hits };
+    if (chk.action === "block") return deny(403, "pii_blocked", A2A_RULE_IDS.piiBlocked, `the message contains PII (${piiCategoryList(chk.hits)})`, label, { pii: piiDetail });
+  }
+
+  // 7. the egress decision on the current posture
   const { decision } = await checkMcpServerUrl(db, agent.url, agent.allowPrivateRanges);
   if (!decision.ok) return deny(403, "egress_blocked", A2A_RULE_IDS.egress, decision.reason, label, { code: decision.code });
 
-  // 6. the credential
+  // 8. the credential
   const opened = await openCredential(db, agent.id);
   if (!opened.ok) return deny(503, opened.reason, A2A_RULE_IDS.credentialUnavailable, "its credential could not be opened, so nothing was sent", label);
 
-  const grantDetail = { ...base, grantId: grant.id, url: agent.url };
+  const grantDetail = { ...base, grantId: grant.id, url: agent.url, ...(piiDetail ? { pii: piiDetail } : {}) };
   let result: Message | Task;
   try {
     const fetchImpl = await agentFetch(db, agent, opened.credential, deps);
@@ -297,7 +345,7 @@ export async function executeGovernedA2aCall(db: Db, args: GovernedA2aCallArgs, 
     result = await client.sendMessage(
       {
         tenant: "",
-        message: { messageId: randomUUID(), contextId: "", taskId: "", role: Role.ROLE_USER, parts: [{ content: { $case: "text", value: args.text }, metadata: undefined, filename: "", mediaType: "text/plain" }], metadata: undefined, extensions: [], referenceTaskIds: [] },
+        message: { messageId: randomUUID(), contextId: "", taskId: "", role: Role.ROLE_USER, parts: [{ content: { $case: "text", value: args.text }, metadata: undefined, filename: "", mediaType: "text/plain" }], metadata: skillId ? { [A2A_SKILL_METADATA_KEY]: skillId } : undefined, extensions: [], referenceTaskIds: [] },
         configuration: undefined,
         metadata: undefined,
       },
@@ -607,7 +655,7 @@ export function registerA2aRoutes(app: FastifyInstance, db: Db, opts: { dataKey?
     const row = await db.transaction(async (tx) => {
       const [created] = await tx.insert(a2aAgentGrants).values({ agentId, userId, skillId, grantedBy: req.authCtx.userId ?? null }).onConflictDoNothing().returning();
       if (!created) return null;
-      await audit(tx as unknown as Db, req, agentId, A2A_RULE_IDS.granted, "allow", `Remote agent '${agent.name}': ${user.email} may now call ${skillId ? `skill '${skillId}'` : "every skill"}`, { phase: "grant", grantId: created.id, userId, skillId });
+      await audit(tx as unknown as Db, req, agentId, A2A_RULE_IDS.granted, "allow", `Remote agent '${agent.name}': ${user.email} may now call ${skillId ? `it for skill '${skillId}' (passed to the agent as the requested skill; the agent chooses what it does with the text)` : "every skill"}`, { phase: "grant", grantId: created.id, userId, skillId });
       return created;
     });
     if (!row) return reply.status(409).send({ error: "grant_exists", detail: "this person already has this access" });
@@ -636,7 +684,7 @@ export function registerA2aRoutes(app: FastifyInstance, db: Db, opts: { dataKey?
     if (!parsed.success) return reply.status(400).send({ error: "invalid_request", detail: `expected { text (1 to ${A2A_MESSAGE_MAX_CHARS} characters), skillId?, projectId? }` });
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "forbidden", detail: "a remote agent is called as a person; this credential has none" });
-    const out = await executeGovernedA2aCall(db, { userId, agentId, skillId: parsed.data.skillId ?? null, text: parsed.data.text, projectId: parsed.data.projectId ?? null }, deps);
+    const out = await executeGovernedA2aCall(db, { userId, agentId, skillId: parsed.data.skillId ?? null, text: parsed.data.text, projectId: parsed.data.projectId ?? null, callerIsAdmin: req.authCtx.isAdmin === true }, deps);
     if (out.kind === "allowed") return { reply: out.reply, taskState: out.taskState, costUsd: out.costUsd, auditId: out.auditId };
     return reply.status(out.status).send({ error: out.error, detail: out.reason, auditId: out.auditId, ...(out.kind === "denied" ? { ruleId: out.ruleId } : {}) });
   });

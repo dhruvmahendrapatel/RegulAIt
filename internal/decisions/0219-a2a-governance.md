@@ -87,3 +87,29 @@ existing agent and MCP registry pages.
 - **Tighter credential writes.** The step-up is spent before the write transaction. ADR-0204 claims it inside the
   transaction, after a compare-and-set on the url. A remote agent's url cannot change, so the compare-and-set has
   nothing to protect, but a claim inside the transaction would match ADR-0204 exactly.
+
+## Addendum 2026-10-31: review on #630 (independent review c6542924936)
+
+The review asked for two fixes before merge. Both are now in `executeGovernedA2aCall`, between the grant check and
+egress. Each refusal is audited and nothing is sent.
+
+1. **Project attribution and the pillar-5 budget gate.** A named project must exist, and the caller must be allowed to
+   attribute to it: `assertProjectAttribution`, rule `project-attribution`, 400 or 403. The project then goes through
+   `preDispatchProjectGate`, rule `project-budget-cap`: 422 for an unknown project, 409 over the hard block, escalated.
+   These are the same functions and rule ids the MCP and model paths use. "Budgets" is no longer a follow-up.
+2. **The project's PII mode.** `projectPiiMode` gives the project's mode, or the org floor when the call is unattributed
+   or the project unclassified.
+   - `block` refuses a message with a PII hit (`pii-blocked`).
+   - `warn` and `log` send the message and record the hit counts in the audit row, never the matched text.
+   - `redact` refuses (`a2a-pii-unsupported`), because A2A has no prepared redaction path. No profile or org setting can
+     produce `redact` today; the branch keeps a future one from passing silently.
+
+   PII on the reply, guardrails and the policy kernel's rules on the text remain follow-ups.
+
+Smaller points from the same review:
+- **A skill-scoped grant is advisory toward the agent.** The A2A protocol has no skill field on a message, and the agent
+  picks its skill from the content. A skill grant therefore decides whether the call is made and labels it. The skill
+  is sent as message metadata (`regulait.requestedSkill`). The grant's audit text and the access card now say so.
+- **Redirect test.** The suite now proves that a redirect from the agent is refused, and that the credential never
+  reaches the other origin.
+

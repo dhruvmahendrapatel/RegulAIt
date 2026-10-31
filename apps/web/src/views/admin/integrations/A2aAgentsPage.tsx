@@ -79,7 +79,7 @@ export default function A2aAgentsPage() {
             {!q.data?.enabled && (
               <p role="status">
                 Calls to remote agents are off for this organisation, so none can be registered or called. An admin can turn
-                them on in <Link to="/admin/organization" style={{ textDecoration: "underline" }}>Organisation settings</Link>.
+                them on in <Link to="/admin/organization" className={a.inlineLink}>Organisation settings</Link>.
               </p>
             )}
             <RegisterForm enabled={q.data?.enabled === true} />
@@ -256,6 +256,10 @@ function AccessCard(props: { agent: A2aAgent }) {
   return (
     <Card title="Who may call it">
       <p>Nobody may call this agent until they are given access here. A worker agent never has access of its own: it calls as the person who started its run, and only where its lead allows.</p>
+      <p className={v.dim}>
+        Access to one skill decides whether a call is made and how it is recorded. The skill is sent to the agent as a
+        request, but the agent chooses what it does with the message, so it cannot be held to that skill.
+      </p>
       <form
         className={a.formRow}
         aria-label={`Give access to ${agent.name}`}

@@ -405,3 +405,8 @@
   border: 1px solid var(--border);
   background: var(--surface-2);
 }
+
+/* a link inside a sentence is underlined, never told apart by colour alone */
+.inlineLink {
+  text-decoration: underline;
+}

@@ -155,7 +155,8 @@ sequenceDiagram
   single-attempt upstream call, output PII, usage and provenance rows.
 - **Remote agent (A2A) call** (ADR-0219) — `POST /v1/a2a/agents/:agentId/messages` → `executeGovernedA2aCall` in
   `a2a.ts`, the only sender. It checks, in order: the default-off org setting, the agent and its skill, the lead ceiling
-  (it only narrows), and the person's own grant (default-deny). Egress is decided on the MCP posture. The A2A SDK
+  (it only narrows), the person's own grant (default-deny), project attribution and the budget gate
+  (`preDispatchProjectGate`), and the project's PII mode. Egress is decided on the MCP posture. The A2A SDK
   client sends through the guarded fetch, with the credential going only to the registered origin. The usage row and
   the audit row are written in one transaction.
 - **Model/agent call** — `POST /v1/agents/:agentId/invoke` and the IDE compat endpoints (both go through

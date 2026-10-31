@@ -20,7 +20,7 @@ import { AgentCard, Role, type Message } from "@a2a-js/sdk";
 import { AgentEvent, DefaultRequestHandler, InMemoryTaskStore, JsonRpcTransportHandler, ServerCallContext, type AgentExecutor } from "@a2a-js/sdk/server";
 import { a2aAgentCredentials, a2aAgentGrants, a2aAgents, and, auditLog, createDb, desc, eq, inArray, ORG_SETTINGS_ID, orgSettings, runMigrations, usageEvents, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
-import { A2A_RULE_IDS, executeGovernedA2aCall } from "./a2a.js";
+import { A2A_RULE_IDS, A2A_SKILL_METADATA_KEY, executeGovernedA2aCall } from "./a2a.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -40,15 +40,17 @@ const agentIds: string[] = [];
 let userId: string;
 let userKey: Record<string, string>;
 let adminKey: Record<string, string>;
+let adminId: string;
 
 interface Seen {
   method: string;
   path: string;
   headers: http.IncomingHttpHeaders;
+  body: string;
 }
 
 /** an A2A agent with one `echo` skill; `rpcOrigin` lets a test publish a card whose interface is elsewhere */
-async function startAgent(rpcOrigin?: string) {
+async function startAgent(rpcOrigin?: string, opts: { redirectRpcTo?: () => string } = {}) {
   const seen: Seen[] = [];
   let base = "";
   const card = () =>
@@ -89,9 +91,13 @@ async function startAgent(rpcOrigin?: string) {
     req.on("data", (c) => (body += c));
     req.on("end", () => {
       void (async () => {
-        seen.push({ method: req.method ?? "", path: req.url ?? "", headers: { ...req.headers } });
+        seen.push({ method: req.method ?? "", path: req.url ?? "", headers: { ...req.headers }, body });
         if (req.method === "GET" && req.url === "/.well-known/agent-card.json") {
           res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(AgentCard.toJSON(card())));
+          return;
+        }
+        if (req.method === "POST" && req.url === "/rpc" && opts.redirectRpcTo) {
+          res.writeHead(302, { location: opts.redirectRpcTo() }).end();
           return;
         }
         if (req.method === "POST" && req.url === "/rpc") {
@@ -131,6 +137,18 @@ const setEnabled = (on: boolean) => db.update(orgSettings).set({ a2aEnabled: on 
 const lastAudit = async (ruleId: string, objectId?: string) =>
   (await db.select().from(auditLog).where(objectId ? and(eq(auditLog.ruleId, ruleId), eq(auditLog.objectId, objectId)) : eq(auditLog.ruleId, ruleId)).orderBy(desc(auditLog.seq)).limit(1))[0];
 
+async function mkProject(payload: Record<string, unknown>): Promise<string> {
+  const r = await req("POST", "/v1/projects", { name: `p10-proj-${RUN}-${Math.random().toString(36).slice(2, 6)}`, ...payload });
+  expect(r.statusCode, r.body).toBe(201);
+  return r.json().id as string;
+}
+async function mkPiiProject(piiMode: "block" | "warn"): Promise<string> {
+  const tag = `p10-${piiMode}-${RUN}`;
+  const c = await req("POST", "/v1/compliance/profiles", { tag, piiMode });
+  expect([201, 409], c.body).toContain(c.statusCode);
+  return mkProject({ classifications: [tag] });
+}
+
 async function register(name: string, url: string, extra: Record<string, unknown> = { allowPrivateRanges: true }) {
   const r = await req("POST", "/v1/a2a/agents", { name, url, ...extra });
   if (r.statusCode === 201) agentIds.push(r.json().id);
@@ -154,7 +172,8 @@ beforeAll(async () => {
   userKey = { authorization: `Bearer ${(await req("POST", `/v1/users/${userId}/keys`, { name: "p10" })).json().token}` };
   const a = await req("POST", "/v1/users", { email: `p10-admin-${RUN}@example.com`, displayName: `p10 admin ${RUN}`, isAdmin: true });
   expect(a.statusCode, a.body).toBe(201);
-  adminKey = { authorization: `Bearer ${(await req("POST", `/v1/users/${a.json().id}/keys`, { name: "p10" })).json().token}` };
+  adminId = a.json().id;
+  adminKey = { authorization: `Bearer ${(await req("POST", `/v1/users/${adminId}/keys`, { name: "p10" })).json().token}` };
 }, 120_000);
 
 afterAll(async () => {
@@ -256,7 +275,7 @@ describe("A2A: the governed call", () => {
   });
 
   it("an allowed call returns the reply and writes the usage row and the audit row", async () => {
-    const projectId = "7a1e2b3c-0000-4000-8000-00000000a2a0";
+    const projectId = await mkProject({});
     const r = await call({ text: "hi there", skillId: "echo", projectId });
     expect(r.statusCode, r.body).toBe(200);
     expect(r.json()).toMatchObject({ reply: "echo: hi there", costUsd: 0.02 });
@@ -265,6 +284,57 @@ describe("A2A: the governed call", () => {
     const usageId = (a!.detail as { usageEventId: string }).usageEventId;
     const [u] = await db.select().from(usageEvents).where(eq(usageEvents.id, usageId));
     expect(u).toMatchObject({ userId, objectType: "a2a_agent", operation: "echo", costUsd: 0.02, projectId });
+  });
+
+  it("an unknown project is refused before anything is sent (no spend lands on a made-up project id)", async () => {
+    const before = agentUp.posts().length;
+    const r = await call({ text: "x", skillId: "echo", projectId: "7a1e2b3c-0000-4000-8000-00000000a2a0" });
+    expect(r.statusCode, r.body).toBe(400);
+    expect(r.json()).toMatchObject({ error: "invalid_reference", ruleId: A2A_RULE_IDS.projectAttribution });
+    expect(agentUp.posts().length).toBe(before);
+  });
+
+  it("a project over its hard-block budget is refused (409) and nothing is sent", async () => {
+    const projectId = await mkProject({ budgetUsd: 0.01, budgetApproverUserId: adminId });
+    await db.insert(usageEvents).values({ userId, objectType: "agent", projectId, costUsd: 1 });
+    const before = agentUp.posts().length;
+    const r = await call({ text: "x", skillId: "echo", projectId });
+    expect(r.statusCode, r.body).toBe(409);
+    expect(r.json()).toMatchObject({ error: "project_budget_exceeded", ruleId: A2A_RULE_IDS.projectBudget });
+    expect(agentUp.posts().length).toBe(before);
+    expect(await db.select().from(usageEvents).where(and(eq(usageEvents.projectId, projectId), eq(usageEvents.objectType, "a2a_agent")))).toHaveLength(0);
+  });
+
+  it("a project whose PII mode is block refuses a message with PII, and sends one without", async () => {
+    const projectId = await mkPiiProject("block");
+    const before = agentUp.posts().length;
+    const r = await call({ text: "please email jane.doe@example.com the figures", skillId: "echo", projectId });
+    expect(r.statusCode, r.body).toBe(403);
+    expect(r.json()).toMatchObject({ error: "pii_blocked", ruleId: A2A_RULE_IDS.piiBlocked });
+    expect(agentUp.posts().length).toBe(before);
+    const a = await lastAudit(A2A_RULE_IDS.piiBlocked, agentId());
+    expect(JSON.stringify(a)).not.toContain("jane.doe@example.com");
+    const ok = await call({ text: "no personal data here", skillId: "echo", projectId });
+    expect(ok.statusCode, ok.body).toBe(200);
+  });
+
+  it("a project whose PII mode is warn sends the message and records the hit as counts only", async () => {
+    const projectId = await mkPiiProject("warn");
+    const before = agentUp.posts().length;
+    const r = await call({ text: "copy jane.doe@example.com", skillId: "echo", projectId });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(agentUp.posts().length).toBe(before + 1);
+    const a = await lastAudit(A2A_RULE_IDS.callAllowed, agentId());
+    expect(a?.detail).toMatchObject({ pii: { mode: "warn", action: "warn", phase: "input" } });
+    expect(JSON.stringify(a)).not.toContain("jane.doe@example.com");
+  });
+
+  it("the granted skill is passed to the agent as the requested skill", async () => {
+    const before = agentUp.posts().length;
+    expect((await call({ text: "meta", skillId: "echo" })).statusCode).toBe(200);
+    const sent = agentUp.posts().slice(before);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.body).toContain(A2A_SKILL_METADATA_KEY);
   });
 
   it("a worker's lead ceiling only narrows: excluded agents are refused even with a grant", async () => {
@@ -316,6 +386,26 @@ describe("A2A: the credential", () => {
     const sent = agentUp.posts().slice(before);
     expect(sent).toHaveLength(1);
     expect(sent[0]!.headers.authorization).toBe(`Bearer ${SECRET}`);
+  });
+
+  it("a redirect from the agent is refused, so the credential never reaches the other origin", async () => {
+    const hop = await startAgent(undefined, { redirectRpcTo: () => `${elsewhereUp.base}/rpc` });
+    try {
+      const reg = await register(`p10-hop-${RUN}`, hop.base);
+      expect(reg.statusCode, reg.body).toBe(201);
+      const hopId = reg.json().id as string;
+      expect((await req("PUT", `/v1/a2a/agents/${hopId}/credential`, { scheme: "bearer", secret: SECRET })).statusCode).toBe(201);
+      expect((await req("POST", `/v1/a2a/agents/${hopId}/grants`, { userId })).statusCode).toBe(201);
+      const elsewhereBefore = elsewhereUp.seen.length;
+      const r = await req("POST", `/v1/a2a/agents/${hopId}/messages`, { text: "hop" }, userKey);
+      expect(r.statusCode, r.body).toBe(502);
+      expect(r.json()).toMatchObject({ error: "a2a_upstream_error" });
+      expect(hop.posts()).toHaveLength(1);
+      expect(hop.posts()[0]!.headers.authorization).toBe(`Bearer ${SECRET}`);
+      expect(elsewhereUp.seen.length).toBe(elsewhereBefore);
+    } finally {
+      await hop.close();
+    }
   });
 
   it("clears", async () => {
