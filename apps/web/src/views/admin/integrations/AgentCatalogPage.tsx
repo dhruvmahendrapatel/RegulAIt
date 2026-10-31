@@ -4,7 +4,9 @@
  * on the server). The agents overview keeps a five-row preview with the disabled count in its heading.
  */
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
-import { useLocation } from "react-router-dom";
+import { Route, Routes, useLocation } from "react-router-dom";
+import AgentsPage from "./AgentsPage";
+import AgentStewardshipPage from "./AgentStewardshipPage";
 import type { AdminAgent } from "../../../api/adminTypes";
 import { fmtUsd } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
@@ -210,5 +212,21 @@ export default function AgentCatalogPage() {
 
       </div>
     </>
+  );
+}
+
+/**
+ * The agents area: the Agents page (with its catalogue and stewardship previews, and the `#agent-<id>` deep-link
+ * redirect into the full catalogue) at the index, the full catalogue and the stewardship list each on their own nested
+ * route. One lazy chunk mounted at `agents/*`, reached through the integrations screen barrel, so the sub-pages add
+ * nothing to the entry bundle (ADR-0196 U4; the SPA route census follows this module — scripts/ui-spa-routes.mjs).
+ */
+export function AgentsArea() {
+  return (
+    <Routes>
+      <Route index element={<AgentsPage />} />
+      <Route path="catalog" element={<AgentCatalogPage />} />
+      <Route path="stewardship" element={<AgentStewardshipPage />} />
+    </Routes>
   );
 }

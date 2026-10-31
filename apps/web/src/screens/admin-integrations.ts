@@ -11,3 +11,6 @@ export { default as ModelCredentialsPage } from "../views/admin/integrations/Mod
 export { default as PmConnectionsPage } from "../views/admin/integrations/PmConnectionsPage";
 export { default as RegulAItLlmPage } from "../views/admin/llm/RegulAItLlmPage";
 export { default as WebhooksPage } from "../views/admin/integrations/WebhooksPage";
+// P3 (#453): the agents area (Agents page + full catalogue and stewardship lists) as one lazy chunk reached through
+// this screen; its module owns the nested <Routes> and keeps the #agent- deep-link redirect (see App.tsx).
+export { AgentsArea } from "../views/admin/integrations/AgentCatalogPage";

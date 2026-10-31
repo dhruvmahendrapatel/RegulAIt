@@ -4,6 +4,8 @@
  * overview keeps a five-row preview with the admin-asserted count in its heading.
  */
 import { useMemo, useState } from "react";
+import { Route, Routes } from "react-router-dom";
+import ChatOpsPage from "./ChatOpsPage";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
@@ -132,5 +134,19 @@ export default function ChatIdentityLinksPage() {
         </div>
       </Card>
     </>
+  );
+}
+
+/**
+ * The ChatOps area: the ChatOps page (with its identity-links preview) at the index, the full chat-identity-links list
+ * on its own nested route. One lazy chunk mounted at `chatops/*`, reached through the approvals/audit screen barrel, so
+ * the sub-page adds nothing to the entry bundle (ADR-0196 U4; the SPA route census follows this module).
+ */
+export function ChatOpsArea() {
+  return (
+    <Routes>
+      <Route index element={<ChatOpsPage />} />
+      <Route path="identity-links" element={<ChatIdentityLinksPage />} />
+    </Routes>
   );
 }

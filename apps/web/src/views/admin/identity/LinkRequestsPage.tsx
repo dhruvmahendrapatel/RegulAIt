@@ -3,6 +3,8 @@
  * preview of the pending ones; this page has the full list, its status filter, and approve and deny.
  */
 import { useMemo, useState } from "react";
+import { Route, Routes } from "react-router-dom";
+import SsoPage from "./SsoPage";
 import { api } from "../../../api/client";
 import type { LinkRequest } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
@@ -145,5 +147,19 @@ function LinkRequestsCard() {
         }
       />
     </Card>
+  );
+}
+
+/**
+ * The SSO area: the SSO page (with its link-requests preview) at the index, the full linking-request queue on its own
+ * nested route. One lazy chunk mounted at `sso/*`, reached through the identity screen barrel, so the sub-page adds
+ * nothing to the entry bundle (ADR-0196 U4; the SPA route census follows this module — scripts/ui-spa-routes.mjs).
+ */
+export function SsoArea() {
+  return (
+    <Routes>
+      <Route index element={<SsoPage />} />
+      <Route path="link-requests" element={<LinkRequestsPage />} />
+    </Routes>
   );
 }

@@ -4,7 +4,8 @@
  * overview keeps a preview of each, with what needs attention counted in the heading.
  */
 import { useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, Route, Routes, useParams } from "react-router-dom";
+import WorkloadIdentitiesPage from "./WorkloadIdentitiesPage";
 import { useQuery } from "@tanstack/react-query";
 import { PageHeader } from "../../../shell/AppShell";
 import { Card, EmptyState, ErrorState, Field, Select, SkeletonBlock } from "../../../ui/kit";
@@ -128,5 +129,21 @@ export function GrantProposalsPage() {
       </Card>
       <IdentityConfirm confirmation={confirmation} onClose={() => setConfirmation(null)} write={write} />
     </>
+  );
+}
+
+/**
+ * The workload-identities area: the overview (with its identities and proposal previews) at the index, the full
+ * identities list and one identity's grant proposals each on their own nested route. One lazy chunk mounted at
+ * `workload-identities/*`, reached through the identity screen barrel, so the sub-pages add nothing to the entry
+ * bundle (ADR-0196 U4; the SPA route census follows this module — scripts/ui-spa-routes.mjs).
+ */
+export function WorkloadIdentitiesArea() {
+  return (
+    <Routes>
+      <Route index element={<WorkloadIdentitiesPage />} />
+      <Route path="identities" element={<WorkloadIdentitiesListPage />} />
+      <Route path=":identityId/proposals" element={<GrantProposalsPage />} />
+    </Routes>
   );
 }

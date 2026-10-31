@@ -4,6 +4,8 @@
  * its heading.
  */
 import { useMemo, useState } from "react";
+import { Route, Routes } from "react-router-dom";
+import LicensingPage from "./LicensingPage";
 import { PageHeader } from "../../../shell/AppShell";
 import { Card, Field, Select } from "../../../ui/kit";
 import { DataList } from "../../../ui/DataList";
@@ -43,5 +45,19 @@ export default function LicenceVerificationsPage() {
         />
       </Card>
     </>
+  );
+}
+
+/**
+ * The licensing area: the Licensing page (with its verifications preview) at the index, the full licence-verification
+ * history on its own nested route. One lazy chunk mounted at `licensing/*`, reached through the settings screen barrel,
+ * so the sub-page adds nothing to the entry bundle (ADR-0196 U4; the SPA route census follows this module).
+ */
+export function LicensingArea() {
+  return (
+    <Routes>
+      <Route index element={<LicensingPage />} />
+      <Route path="verifications" element={<LicenceVerificationsPage />} />
+    </Routes>
   );
 }
