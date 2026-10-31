@@ -962,14 +962,21 @@ export type TableProps<T> = {
   onRetry?: () => void;
   onRowClick?: (row: T) => void;
   rowLabel?: (row: T) => string;
+  /**
+   * A sort the server applies (DataList): the rows arrive already sorted, a column with `sort` set is sortable and its
+   * header calls `by`, and the table does not re-sort the page in the browser.
+   */
+  sort?: TableSort;
 };
 
 export function Table<T>(props: TableProps<T>) {
-  const [sortKey, setSortKey] = useState<string | null>(null);
-  const [sortDir, setSortDir] = useState<1 | -1>(1);
+  const [localKey, setSortKey] = useState<string | null>(null);
+  const [localDir, setSortDir] = useState<1 | -1>(1);
+  const sortKey = props.sort ? props.sort.key : localKey;
+  const sortDir = props.sort ? props.sort.dir : localDir;
   const sorted = useMemo(() => {
     const rows = props.rows ?? [];
-    if (!sortKey) return rows;
+    if (!sortKey || props.sort) return rows;
     const col = props.columns.find((c) => c.key === sortKey);
     if (!col?.sort) return rows;
     const sortFn = col.sort;
@@ -978,9 +985,10 @@ export function Table<T>(props: TableProps<T>) {
       const bv = sortFn(b);
       return (av < bv ? -1 : av > bv ? 1 : 0) * sortDir;
     });
-  }, [props.rows, props.columns, sortKey, sortDir]);
+  }, [props.rows, props.columns, props.sort, sortKey, sortDir]);
   const by = (key: string) => {
-    if (sortKey === key) setSortDir((d) => (d === 1 ? -1 : 1));
+    if (props.sort) props.sort.by(key);
+    else if (sortKey === key) setSortDir((d) => (d === 1 ? -1 : 1));
     else {
       setSortKey(key);
       setSortDir(1);

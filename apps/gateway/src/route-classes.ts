@@ -598,6 +598,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/me",
   "GET /v1/model-providers/status",
   "GET /v1/runs",
+  // ADR-0226: the Excel export of the same list, under the same scope (a non-admin gets only their own runs)
+  "GET /v1/runs/export.xlsx",
   "GET /v1/workflows/instances",
   "GET /v1/projects",
   "GET /v1/users/directory",
@@ -693,6 +695,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // aside (not-required, toll), containment (it halts an agent) and the signed
   // export.
   "GET /v1/incidents",
+  // ADR-0226: the register's Excel export, filtered to what the caller may see like the list
+  "GET /v1/incidents/export.xlsx",
   "POST /v1/incidents",
   "GET /v1/incidents/:incidentId",
   "PATCH /v1/incidents/:incidentId",
