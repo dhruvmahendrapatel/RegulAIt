@@ -137,6 +137,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.configActivationEvents, ["reason"]],
   [s.configCanaryObservations, ["servedReason", "candidateReason", "failureReason"]],
   [s.workflowTemplates, ["retiredReason"]],
+  // ADR-0208 (migration 0223): why a compliance profile was retired
+  [s.complianceProfiles, ["retiredReason"]],
   [s.certRotations, ["reason"]],
   [s.dataKeyAttestations, ["note"]],
   [s.licenseVerifications, ["reason"]],
@@ -151,7 +153,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.vendorAccountAliases, ["reason"]],
   [s.vendorDomainRules, ["reason"]],
   // --- model risk, evals, red team ---
-  [s.evalDatasets, ["note"]],
+  // ADR-0208 G9 (migration 0225): the retire reason
+  [s.evalDatasets, ["note", "retiredReason"]],
   [s.evalRuns, ["gateReason", "note"]],
   // ADR-0115 — `error` joins `judgeRationale` here, and it is the SAME argument
   // ADR-0102 already made for `trace_spans.status_reason`: this column takes
@@ -181,7 +184,7 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.modelCards, ["note"]],
   [s.modelCardApprovals, ["decisionReason"]],
   [s.modelCardEvidence, ["note"]],
-  [s.redteamLibraries, ["note"]],
+  [s.redteamLibraries, ["note", "retiredReason"]],
   [s.redteamProbes, ["note"]],
   [s.redteamRuns, ["gateReason", "note"]],
   [s.trainingDatasets, ["note"]],
@@ -193,6 +196,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.aiEndpointSignatures, ["replacementNote", "note"]],
   [s.aiUseCases, ["retiredReason"]],
   [s.aiVendors, ["retiredReason"]],
+  // ADR-0208 G9 (migration 0225): a campaign's cancel reason
+  [s.grantCertificationCampaigns, ["cancelledReason"]],
   [s.aiRisks, ["acceptanceNote"]],
   // ADR-0157 / ADR-0159 — an alert acknowledgement is operator prose; a
   // remediation's rationale embeds risk and agent titles a person typed.
@@ -230,6 +235,9 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.webauthnCredentials, ["label", "revokeReason"]],
   // ADR-0202 decision 4 (migration 0213): an admin's reason for switching a demo beat to or from its fallback
   [s.demoBeatFallbacks, ["reason"]],
+  // ADR-0208 G8 (migration 0224): the reason an admin typed when retiring an infra resource or policy
+  [s.infraResources, ["retiredReason"]],
+  [s.infraPolicies, ["retiredReason"]],
   // --- machine-written free text that quotes an error, and ADR-0111's
   //     EXPORTED OBSERVABILITY COPY ---
   //
@@ -270,6 +278,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   // an admin's runner-revocation reason.
   [s.engineRunItems, ["reason", "verdictNote"]],
   [s.engineRunners, ["revokeReason"]],
+  // ADR-0217: an automatic re-test's reason (a runner's gate reason or refusal detail, which can quote a case)
+  [s.mrmRetestRuns, ["reason"]],
 ];
 
 /**

@@ -906,6 +906,27 @@ export const createRateLimitSchema = z
   })
   .superRefine(refineRuleScope);
 
+/** ADR-0212 (P12 c) — a rate limit keyed on the MODEL (the agent registry entry) a
+ * dispatch is served by, beside user/role/team/fleet. It has no server or tool: the
+ * server discriminant is fixed to 'all' and is not posted. */
+export const MODEL_RATE_LIMIT_MAX_CALLS = 1_000_000;
+export const MODEL_RATE_LIMIT_MAX_WINDOW_SECONDS = 30 * 24 * 3600;
+export const createModelRateLimitSchema = z
+  .object({
+    scope: ruleScopeSchema.default("user"),
+    userId: z.string().uuid().nullable().optional(),
+    roleId: z.string().uuid().nullable().optional(),
+    teamId: z.string().uuid().nullable().optional(),
+    agentId: z.string().uuid(),
+    maxCalls: z.number().int().positive().max(MODEL_RATE_LIMIT_MAX_CALLS),
+    windowSeconds: z.number().int().positive().max(MODEL_RATE_LIMIT_MAX_WINDOW_SECONDS),
+  })
+  .strict()
+  .superRefine((body, ctx) => refineRuleScope({ ...body, serverScope: "all", serverId: null }, ctx));
+
+/** the org opt-in for model rate limits (off by default; turning it on needs a step-up) */
+export const setModelRateLimitEnforcementSchema = z.object({ enabled: z.boolean() }).strict();
+
 /** ADR-0168 — a condition's due date: a calendar date (`YYYY-MM-DD`, due at
  * the END of that day, UTC) or a full ISO-8601 timestamp. ADR-0180: defined
  * once in assurance.ts, which measured conditions share. */
@@ -2007,6 +2028,30 @@ export const createInfraPolicySchema = z.object({
   autoRemediateMaxSeverity: z.enum(["low", "medium", "high"]).nullable().optional(),
 });
 
+// ADR-0208 G8 — edit and retire. Retire only (a delete would erase the remediation ledgers). Every field is
+// optional and bounded; `undefined` leaves a field as it is, `null` clears it. Strict: an unknown field is a 400.
+export const updateInfraResourceSchema = z
+  .object({
+    name: z.string().trim().min(1).max(200).optional(),
+    classifications: z.array(z.string().trim().min(1).max(64)).max(16).optional(),
+  })
+  .strict()
+  .refine((b) => Object.values(b).some((v) => v !== undefined), { message: "nothing to change" });
+
+export const updateInfraPolicySchema = z
+  .object({
+    patchCadenceDays: z.number().int().positive().max(3650).nullable().optional(),
+    certRotationDaysBeforeExpiry: z.number().int().positive().max(3650).nullable().optional(),
+    backupSchedule: z.string().trim().min(1).max(200).nullable().optional(),
+    backupRetentionDays: z.number().int().positive().max(36500).nullable().optional(),
+    autoRemediateMaxSeverity: z.enum(["low", "medium", "high"]).nullable().optional(),
+  })
+  .strict()
+  .refine((b) => Object.values(b).some((v) => v !== undefined), { message: "nothing to change" });
+
+/** the audited reason for retiring an infra resource or policy */
+export const retireInfraSchema = z.object({ reason: z.string().trim().min(10).max(2000) }).strict();
+
 // Scan on demand — optionally a single resource, else the whole fleet.
 export const scanInfraSchema = z
   .object({ resourceId: z.string().uuid().optional() })
@@ -2038,6 +2083,19 @@ export const reclassifySchema = z.object({
   /** required when the project already has classifications: the named admin
    * who reviews the cascade diff before it commits */
   reviewerUserId: z.string().uuid().optional(),
+});
+
+// ADR-0208 (G7): a profile edit is a proposed VERSION, applied only when the named reviewer approves it. Every
+// versioned field is optional: an omitted field keeps its current value, an explicit null removes it (a loosening).
+export const proposeComplianceProfileVersionSchema = upsertComplianceProfileSchema.omit({ tag: true }).extend({
+  /** the admin who reviews the diff; never the author */
+  reviewerUserId: z.string().uuid(),
+  reason: z.string().trim().min(10).max(2000),
+});
+
+// ADR-0208 (G7): retiring a profile (step-up; refused while anything carries the tag)
+export const retireComplianceProfileSchema = z.object({
+  reason: z.string().trim().min(10).max(2000),
 });
 
 export const addTeamMemberSchema = z.object({ userId: z.string().uuid() });
@@ -2434,6 +2492,9 @@ export const updateOrgSettingsSchema = z
     mrmExpiryWarnDays: z.number().int().min(0).max(3650).optional(),
     mrmStalenessRecertEnabled: z.boolean().optional(),
     mrmStalenessRecertThreshold: z.number().int().min(1).max(100_000).optional(),
+    /** ADR-0217: automatic re-test after a model change (strict false: it spends model tokens, so turning it
+     * on is a relaxation and needs a step-up). It adds evidence to a re-certification; it never replaces one. */
+    mrmAutoRetestEnabled: z.boolean().optional(),
     /** ADR-0182 (ADR-0175 batch D4) — the accountability settings. Each one
      * defaults STRICT (migration 0162 wrote the strict value onto the existing
      * row); a write that relaxes one is audited like every other key here, as
@@ -4656,6 +4717,8 @@ export * from "./feedback.js";
 export * from "./ai-literacy.js";
 export * from "./alert-ownership.js";
 export * from "./isaca-pack.js";
+// ADR-0212 (P12 b): modality pricing
+export * from "./modality-pricing.js";
 
 // ===== ADR-0185 (batch 3) — retention, MCP protocol/transports, owners, Outlook allow-list =====
 export * from "./batch3.js";
@@ -4710,6 +4773,7 @@ export * from "./endpoint-discovery/index.js";
 export * from "./provenance/index.js";
 // ADR-0204: a static upstream credential per MCP server (header refusals, the write contract, the read view)
 export * from "./mcp-upstream-credential.js";
+export * from "./library-lifecycle.js";
 
 // ===== ADR-0215 (P5) — framework content imports and the imported regulatory feed =====
 export * from "./framework-imports.js";

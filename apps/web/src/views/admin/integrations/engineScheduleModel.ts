@@ -6,6 +6,9 @@
  * A schedule carries the SAME request as `POST /v1/engine-runs`; the gateway
  * validates it now as the creator and again at every run it starts. It runs as
  * its creator, so only the creator may switch it back on.
+ *
+ * ADR-0208 G9: only the creator may change its interval (the PATCH body carries `enabled` and/or `intervalHours`);
+ * the creator or an admin may delete it (soft: it leaves the list and starts no further run).
  */
 
 export const SCHEDULE_INTERVAL_LIMITS = { min: 1, max: 720 } as const;
@@ -51,6 +54,16 @@ export function scheduleToggle(s: Pick<EngineSchedule, "enabled" | "runAsUserId"
   return { ok: true, next: true };
 }
 
+/** ADR-0208 G9: may this person change how often the schedule runs? Only the person it runs as. */
+export function scheduleEditable(s: Pick<EngineSchedule, "runAsUserId">, me: string | null): boolean {
+  return me !== null && s.runAsUserId === me;
+}
+
+/** ADR-0208 G9: may this person delete the schedule? The person it runs as, or an admin. */
+export function scheduleDeletable(s: Pick<EngineSchedule, "runAsUserId">, me: string | null, isAdmin: boolean): boolean {
+  return isAdmin || scheduleEditable(s, me);
+}
+
 /** the sets and target of a stored request, read defensively */
 export function scheduleRequestSummary(request: unknown): { agentId: string | null; sets: string[]; trials: number | null } {
   const r = (request && typeof request === "object" ? request : {}) as Record<string, unknown>;
@@ -66,6 +79,6 @@ export function scheduleRequestSummary(request: unknown): { agentId: string | nu
 /** the schedule routes' own refusal codes, in words (pinned to engine-runs.ts by the test) */
 export const SCHEDULE_REFUSALS: Readonly<Record<string, string>> = {
   engine_schedule_not_found: "That schedule no longer exists, or you cannot see it. Refresh the list.",
-  schedule_owner_only: "Only the person this schedule runs as can switch it back on.",
+  schedule_owner_only: "Only the person this schedule runs as can switch it back on or change how often it runs.",
   bootstrap_cannot_schedule_engine: "A schedule runs as the person who creates it, so it cannot be created without a signed-in user.",
 };

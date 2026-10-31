@@ -61,6 +61,8 @@ import {
   users,
   workflowInstances,
   runWithAuditActor,
+  complianceProfiles,
+  configVersions,
   type Db,
   type SQL,
 } from "@regulait/db";
@@ -415,7 +417,18 @@ import {
   wwwAuthenticateFor,
 } from "./mcp-auth-metadata.js";
 import { registerConversationRoutes } from "./conversations.js";
-import { applyProjectApprovalDecision, registerProjectRoutes } from "./projects.js";
+import {
+  applyProjectApprovalDecision,
+  reapplyReclassificationToInFlight,
+  registerProjectRoutes,
+  requiredTemplateIdsFor,
+} from "./projects.js";
+import {
+  applyComplianceProfileDecision,
+  COMPLIANCE_VERSION_PREFIX,
+  precheckComplianceProfileDecision,
+  registerComplianceProfileLifecycleRoutes,
+} from "./compliance-profile-lifecycle.js";
 import { applyInfraApprovalDecision, registerInfraRoutes } from "./infra.js";
 import { registerOptimizationRoutes } from "./optimization.js";
 import { applyRunApprovalDecision, registerOrchestrationRoutes } from "./orchestration.js";
@@ -458,6 +471,7 @@ import {
   registerOrgSettingsRoutes,
   startAuditPruneScheduler,
 } from "./org-settings.js";
+import { registerModelRateLimitRoutes } from "./model-rate-limits.js";
 // ADR-0202 decision 4 — the per-beat simulated fallback for the hosted demo (admin-only, audited)
 import { registerDemoBeatRoutes } from "./demo-beats.js";
 // ADR-0185 G5 — request metrics (a no-op seam until the meter lands)
@@ -4110,6 +4124,26 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const title = governanceRemediationById.get(stageId.slice(GOVERNANCE_REMEDIATION_PREFIX.length));
       return title ?? null; // the SPA's stage label already says "Governance remediation"
     };
+    // ADR-0208 (G7): "compliance profile 'tag' v3" for a version review
+    const complianceVersionIds = ids(
+      rows.map((r) =>
+        r.objectType === "compliance_profile" && r.stageId?.startsWith(COMPLIANCE_VERSION_PREFIX)
+          ? r.stageId.slice(COMPLIANCE_VERSION_PREFIX.length)
+          : null,
+      ),
+    );
+    const complianceVersionById = new Map(
+      (complianceVersionIds.length
+        ? await db
+            .select({ id: configVersions.id, version: configVersions.version, tag: complianceProfiles.tag })
+            .from(configVersions)
+            .innerJoin(complianceProfiles, eq(complianceProfiles.id, configVersions.artifactId))
+            .where(inArray(configVersions.id, complianceVersionIds))
+        : []
+      ).map((v) => [v.id, `compliance profile '${v.tag}' v${v.version}`]),
+    );
+    const complianceVersionLabelFor = (stageId: string | null): string | null =>
+      stageId?.startsWith(COMPLIANCE_VERSION_PREFIX) ? (complianceVersionById.get(stageId.slice(COMPLIANCE_VERSION_PREFIX.length)) ?? null) : null;
     const sodOverrideLabelFor = (stageId: string | null): string | null => {
       if (!stageId?.startsWith(SOD_OVERRIDE_PREFIX)) return null;
       return sodOverrideById.get(stageId.slice(SOD_OVERRIDE_PREFIX.length)) ?? null;
@@ -4190,6 +4224,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           (r.objectType === "grant_certification" ? grantCertLabelFor(r.stageId) : null) ??
           (r.objectType === "sod_override" ? sodOverrideLabelFor(r.stageId) : null) ??
           (r.objectType === "remediation" ? governanceRemediationLabelFor(r.stageId) : null) ??
+          (r.objectType === "compliance_profile" ? complianceVersionLabelFor(r.stageId) : null) ??
           r.toolName ??
           null,
         // ADR-0022: this row reached the caller via an active delegation —
@@ -4610,6 +4645,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const refusal = await precheckPromptPromotionDecision(db, row, deciderUserId);
       if (refusal) return fail(refusal.status, refusal.body);
     }
+    // ADR-0208 (G7) — `cannot_approve_own_compliance_profile_change`, keyed on the DECIDER so the author of a
+    // profile change cannot reach its review through delegation or the admin override above.
+    if (row.objectType === "compliance_profile") {
+      const refusal = await precheckComplianceProfileDecision(db, row, deciderUserId);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
     // Separation-of-duties guard: the person deciding IS the person who
     // triggered the governed action. Still decidable (alternate-approver
     // routing is deliberately out of scope) but never silently — a recorded
@@ -4876,6 +4917,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // (named-approver, admin-override-reason, self-review-reason) apply above.
       if (updated.objectType === "infra_operation") {
         await applyInfraApprovalDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
+      }
+      // ADR-0208 (G7): a reviewed compliance-profile version — approved = it becomes the active version here, inside
+      // the decision's transaction, only if its base version is still the active one (else recorded stale); running
+      // workflow instances of the carrying projects get the additive changes only. Denied = nothing changes.
+      if (updated.objectType === "compliance_profile") {
+        await applyComplianceProfileDecision(
+          tx as unknown as Db,
+          updated,
+          binaryDecision,
+          deciderUserId,
+          (d, projectId, oldRequired, by) => reapplyReclassificationToInFlight(d, projectId, [], by, oldRequired),
+          requiredTemplateIdsFor,
+        );
       }
       // ADR-0045 MRM sign-offs: the risk acceptance is recorded on the model
       // card chain HERE, inside the one decide path, so it inherits every
@@ -5377,6 +5431,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerRegulAItLlmRoutes(app, db, { dataKey: opts.dataKey });
   registerConversationRoutes(app, db);
   registerProjectRoutes(app, db);
+  // ADR-0208 (G7): reviewed compliance-profile versions and retire
+  registerComplianceProfileLifecycleRoutes(app, db);
   registerInfraRoutes(app, db, opts.dataKey);
   registerOptimizationRoutes(app, db);
   registerOrchestrationRoutes(app, db, { dataKey: opts.dataKey });
@@ -5471,6 +5527,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // GET/PUT routes are admin-only (deliberately NOT in NON_ADMIN_ROUTES); the
   // audit auto-prune scheduler is OFF by default and unref'd, stopped on close.
   registerOrgSettingsRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0212 (P12 b/c): model rate limits, their org opt-in, and per-modality agent prices
+  registerModelRateLimitRoutes(app, db);
   // ADR-0202 decision 4 — the demo beats' simulated fallback; admin-only (not in NON_ADMIN_ROUTES), audited
   registerDemoBeatRoutes(app, db);
   registerPosturePresetRoutes(app, db, { sink: anchorSink, bootstrapConfigured: Boolean(opts.bootstrapToken) });
