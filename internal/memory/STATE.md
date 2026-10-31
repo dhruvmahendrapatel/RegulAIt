@@ -5420,6 +5420,12 @@ Owner decision (2026-10-24): ADR-0201 (internal folder) moves project memory and
 and CI `paths-ignore` covers `internal/**`. CLAUDE.md's bootstrap sequence points at the new paths. ADR and session
 text changed in link targets only. The index now ends at 0201, with 196 files and 196 rows.
 
+**ADR-0227 (owner, 2026-10-31): Codex and Gemini rejoin.** This amends ADR-0191 decision 1. Codex may build lanes on
+`codex/<lane>` branches as HOLD draft PRs and may review Claude lanes. Gemini writes markdown audits only. The Claude
+master still assigns lanes, reserves numbers, renumbers migrations at merge and releases PRs. The live board is
+[internal/process/AGENT_COORDINATION.md](../process/AGENT_COORDINATION.md), and root `AGENTS.md` and `GEMINI.md`
+point both agents at it. The demo freeze binds every agent.
+
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
 (b) standing policy for future scaffolds recorded (ADR-0006, no implementation yet — nothing to
