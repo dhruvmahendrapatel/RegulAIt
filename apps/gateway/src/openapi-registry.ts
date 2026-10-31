@@ -649,6 +649,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/mcp-registries/:registryId/entries": "internal",
   "POST /v1/mcp-registries/entries/:entryId/import": "internal",
   "POST /v1/servers/:serverId/admission/clear": "internal",
+  "POST /v1/servers/:serverId/tools/sync": "internal",
   // ADR-0175 A6/A5 — the builder-skill review queue and the release-age
   // cooldown's admin surface (operator console, admin-only)
   "GET /v1/admission/skills": "internal",
@@ -1775,6 +1776,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/mcp-registries/:registryId/entries": "servers",
   "POST /v1/mcp-registries/entries/:entryId/import": "servers",
   "POST /v1/servers/:serverId/admission/clear": "servers",
+  "POST /v1/servers/:serverId/tools/sync": "servers",
   "GET /v1/admission/skills": "builder",
   "POST /v1/admission/skills/:id/admit": "builder",
   "POST /v1/admission/skills/:id/visibility": "builder",

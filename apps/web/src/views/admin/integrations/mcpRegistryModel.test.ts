@@ -1,7 +1,15 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../../../api/client";
-import { ADMISSION_CLEAR_REFUSALS, ADMISSION_REASON_MAX, admissionClearRefusal, admissionReasonProblem } from "./McpServerAdmission";
+import {
+  ADMISSION_CLEAR_REFUSALS,
+  ADMISSION_REASON_MAX,
+  TOOL_SYNC_REFUSALS,
+  admissionClearRefusal,
+  admissionReasonProblem,
+  toolSyncRefusal,
+  toolSyncSummary,
+} from "./McpServerAdmission";
 import {
   REFUSAL_SENTENCES,
   createRegistryBody,
@@ -178,6 +186,28 @@ describe("pinned to the gateway source", () => {
     expect(Object.keys(ADMISSION_CLEAR_REFUSALS).filter((code) => !gateway.includes(`error: "${code}"`))).toEqual([]);
     expect(admissionClearRefusal(new ApiError(409, { error: "reserved_tool_name" }))).toMatch(/rename/);
     expect(admissionClearRefusal(new ApiError(500, { error: "internal" }))).toBeNull();
+  });
+
+  it("every tool-sync refusal code is one the sync route or its shared gates send", () => {
+    const gateway = ["mcp-tool-sync.ts", "mcp-proxy.ts", "app.ts", "mcp-egress.ts"]
+      .map((f) => src(`../../../../../gateway/src/${f}`))
+      .join("\n");
+    expect(Object.keys(TOOL_SYNC_REFUSALS).filter((code) => !gateway.includes(`"${code}"`))).toEqual([]);
+    expect(toolSyncRefusal(new ApiError(502, { error: "mcp_upstream_unreachable" }))).toMatch(/could not be reached/);
+    // the cooldown keeps its own guidance (a link to Admission review), so it is not flattened here
+    expect(toolSyncRefusal(new ApiError(403, { error: "mcp_release_age_cooldown" }))).toBeNull();
+    expect(toolSyncRefusal(new Error("x"))).toBeNull();
+  });
+
+  it("the sync summary says how many tools and how many are new", () => {
+    expect(toolSyncSummary("Docs", { toolCount: 1, added: ["a"] })).toBe("Synced 1 tool from Docs (1 new)");
+    expect(toolSyncSummary("Docs", { toolCount: 3, added: [] })).toBe("Synced 3 tools from Docs, no new tools");
+  });
+
+  it("the next-steps copy no longer says the first tools/list call syncs tools", () => {
+    const copy = src("./McpServerAdmission.tsx");
+    expect(copy).not.toContain("call syncs and scans its tools");
+    expect(copy).toContain("Sync tools now");
   });
 
   it("the clear reason is bounded like clearMcpAdmissionSchema (1 to 2000 characters)", () => {
