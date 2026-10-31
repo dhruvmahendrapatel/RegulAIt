@@ -918,17 +918,17 @@ describe("ADR-0052 — admin gating, disclosure and audit", () => {
     expect(s.schedulerPresent).toBe(false);
     expect(s.keyring.pinnedKeyIds).toContain(KEY_ID);
     expect(s.enforcementPointsWired).toEqual([
-      "user.provision",
-      "agent.create",
-      "connector.create",
-      "mcp_server.create",
-      "pm_connection.create",
-      "feature.sso_saml (saml_provider.create)",
-      "feature.scim_provisioning (scim_token.create)",
-      "feature.compliance_packs (compliance_pack.activate)",
-      "feature.advanced_orchestration (run.decompose)",
-      "feature.airgapped_mode (deploy_target.create[mode=air_gapped])",
-      "feature.custom_model_providers (model_provider.connect)",
+      "Seats (adding a user)",
+      "Agents (adding an agent)",
+      "Connectors (adding a connector)",
+      "MCP servers (registering a server)",
+      "Project trackers (connecting a tracker)",
+      "SSO (adding a SAML provider)",
+      "SCIM (issuing a SCIM token)",
+      "Compliance packs (activating a pack)",
+      "Advanced orchestration (splitting a run into tasks)",
+      "Air-gapped mode (adding an air-gapped deploy target)",
+      "Custom model providers (connecting a provider)",
     ]);
     expect(s.note).toMatch(/no network call of any kind/);
     // ADR-0064: a scheduler exists; licence re-verification deliberately has no
