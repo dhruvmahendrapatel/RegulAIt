@@ -90,6 +90,8 @@ import { GROUNDEDNESS_SCORER_KINDS } from "./risks.js";
 // ADR-0189 R25 item 13 follow-up: use cases left behind a completed instance
 import { useCasesBehindCompletedInstance } from "./use-cases.js";
 import { databaseNow } from "./db-clock.js";
+// ADR-0214 (PENDING P3): the explainable estimate, objective cards and ranked actions, scored from this document
+import { scorePosture } from "./posture-score.js";
 
 /** the rolling activity window the posture view reads (denials, PII blocks,
  * pack evidence, eval runs). Spend uses the current calendar month, because
@@ -174,6 +176,9 @@ export async function computePostureReport(
     mitigating: riskByStatus.get("mitigating") ?? 0,
     accepted: riskByStatus.get("accepted") ?? 0,
     closed: riskByStatus.get("closed") ?? 0,
+    /** ADR-0211: the two treatments, each a record with evidence and an owner */
+    transferred: riskByStatus.get("transferred") ?? 0,
+    avoided: riskByStatus.get("avoided") ?? 0,
     total: riskCounts.reduce((a, r) => a + r.n, 0),
     /** named, per ADR-0081: risks in categories NO ledger measures — their
      * evidence is "none — attestation only", and the board should know how
@@ -572,6 +577,17 @@ export async function computePostureReport(
     accessRecommendations,
     useCases,
     aiBom,
+    score: scorePosture({
+      packs: { active: packSection },
+      risks,
+      redteam,
+      evals,
+      spend,
+      auditChain,
+      agentOwnership,
+      certificationCampaigns,
+      sod,
+    }),
     note:
       "computed live from this deployment's own ledgers at request time — no rollup table, no " +
       "stored snapshot (ADR-0047's principle). This is a window over what the ledgers hold, not " +

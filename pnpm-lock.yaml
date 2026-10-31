@@ -19,6 +19,9 @@ importers:
       dependency-cruiser:
         specifier: 18.6.0
         version: 18.6.0
+      js-yaml:
+        specifier: 4.3.2
+        version: 4.3.2
       typescript:
         specifier: ^5.8.3
         version: 5.9.3
@@ -199,6 +202,9 @@ importers:
       standardwebhooks:
         specifier: 1.1.1
         version: 1.1.1
+      write-excel-file:
+        specifier: 4.1.1
+        version: 4.1.1
       zod:
         specifier: 4.6.6
         version: 4.6.6
@@ -215,6 +221,9 @@ importers:
       '@types/node':
         specifier: 26.1.1
         version: 26.1.1
+      fflate:
+        specifier: 0.8.3
+        version: 0.8.3
       simple-statistics:
         specifier: 7.12.1
         version: 7.12.1
@@ -2856,6 +2865,9 @@ packages:
     resolution: {integrity: sha512-7yAQpD2UMJzLi1Dqv7qFYnPbaPx7ZfFK6PiIxQ4PfkGPyNyl2Ugx+a/umUonmKqjhM4DnfbMvdX6otXq83soQQ==}
     engines: {node: ^12.20 || >= 14.13}
 
+  fflate@0.8.3:
+    resolution: {integrity: sha512-tbZNuJrLwGUp3zshBtdy4W+ORxZuIh8a5ilyIEQDC5rY1f3U20JMry0Ll3WBzU58EZKsEuJFXhb5gwv8CsPvgA==}
+
   finalhandler@2.1.1:
     resolution: {integrity: sha512-S8KoZgRZN+a5rNwqTxlZZePjT/4cnm0ROV70LedRHZ0p8u9fRID0hJUZQpkKLzro8LfmC8sx23bY6tVNxv8pQA==}
     engines: {node: '>= 18.0.0'}
@@ -4157,6 +4169,10 @@ packages:
 
   wrappy@1.0.2:
     resolution: {integrity: sha512-l4Sp/DRseor9wL6EvV2+TuQn63dMkPjZ/sp9XkghTEbV9KlPS1xUsZ3u7/IQO4wxtcFB4bgpQPRcR3QCvezPcQ==}
+
+  write-excel-file@4.1.1:
+    resolution: {integrity: sha512-MUnCnNtQrcZek832ZcU24uU0rSphFmKPD1DvIjXOlygVb93CV7Tme6H3jUTkxsMmjB2W7HIzERzjqTi5kui71A==}
+    engines: {node: '>=18'}
 
   write-file-atomic@8.0.0:
     resolution: {integrity: sha512-dYwyZredl67GyLLIHJnRM3h2PcOmN5SkcgC7eM5DPDEOEl6dLFqVrMg3F1Ea32usj4VSVZtd2H4MtKTNOf6nPg==}
@@ -6748,6 +6764,8 @@ snapshots:
       node-domexception: 1.0.0
       web-streams-polyfill: 3.3.3
 
+  fflate@0.8.3: {}
+
   finalhandler@2.1.1:
     dependencies:
       debug: 4.4.3
@@ -8093,6 +8111,10 @@ snapshots:
       strip-ansi: 7.2.0
 
   wrappy@1.0.2: {}
+
+  write-excel-file@4.1.1:
+    dependencies:
+      fflate: 0.8.3
 
   write-file-atomic@8.0.0:
     dependencies:

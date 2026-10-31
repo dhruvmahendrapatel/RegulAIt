@@ -4,7 +4,7 @@
 - **Date**: 2026-10-30
 - **Related**: ADR-0149 (the intake assistant this copies), ADR-0173 §3 (the model allow-list feature gate), ADR-0180
   and ADR-0181 (strict defaults, audited relaxation), ADR-0186 A (settings_relax step-up)
-- **Migration**: 0216
+- **Migration**: 0254 (reserved as 0216; renumbered above main at merge, M-108)
 
 ## Context
 
@@ -16,7 +16,7 @@ approvals.
 
 ## Decision
 
-1. **An org switch, off by default.** `org_settings.agent_setup_assist_enabled` (migration 0216), default `false`.
+1. **An org switch, off by default.** `org_settings.agent_setup_assist_enabled` (migration 0254), default `false`.
    Turning it on goes through `PUT /v1/org/settings`. The strictness registry records the change as a relaxation, so it
    needs a `settings_relax` step-up and is audited old -> new.
 2. **`GET /v1/agents/setup-assist`** (admin) returns `{ enabled, connectedProviders }`. The card uses it to decide what to

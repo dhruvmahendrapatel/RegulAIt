@@ -189,6 +189,12 @@ function Loaded(props: { settings: Record<string, unknown> }) {
     assuranceGateMode: str(s, "assuranceGateMode") || "enforce",
   });
 
+  // --- 5b1a. Risk treatments: transferred and avoided (ADR-0211) -----------
+  // Its own admin-only, audited route; OFF by default, turning it on is a step-up.
+  const riskTreatments = useSection({
+    riskTreatmentsEnabled: str(s, "riskTreatmentsEnabled") || "false",
+  });
+
   // --- 5b2. Attribution mandate (ADR-0080 B6b amendment) -------------------
   const attribution = useSection({
     dispatchAttributionRequired: str(s, "dispatchAttributionRequired") || "true",
@@ -203,6 +209,11 @@ function Loaded(props: { settings: Record<string, unknown> }) {
   const recJudge = useSection({
     recommendationJudgeEnabled: str(s, "recommendationJudgeEnabled") || "false",
     recommendationJudgeAgentId: str(s, "recommendationJudgeAgentId"),
+  });
+
+  // --- 5d. Framework content and feed imports (ADR-0215) --------------------
+  const frameworkImports = useSection({
+    frameworkImportsEnabled: str(s, "frameworkImportsEnabled") || "false",
   });
 
   // --- 7. Network access (ADR-0039) ----------------------------------------
@@ -710,6 +721,41 @@ function Loaded(props: { settings: Record<string, unknown> }) {
         </SectionShell>
       </Card>
 
+      <Card title="5b1a · Risk treatments: transferred and avoided">
+        <SectionShell
+          title="May a risk be recorded as transferred or avoided?"
+          helpLabel="risk treatments"
+          busy={riskTreatments.act.busy}
+          error={riskTreatments.act.error}
+          submitLabel="Save risk treatments"
+          onSubmit={() =>
+            void riskTreatments.act.run(
+              () =>
+                withStepUp((h) => stepUpApi.put("/v1/org/settings/risk-treatments", {
+                  enabled: riskTreatments.f.riskTreatmentsEnabled === "true",
+                }, h)),
+              "Risk treatments saved (audited)",
+            )
+          }
+          help={
+            <>
+              <p>The strict default is off: a risk is open, mitigating, accepted or closed. Turned on, a risk's owner or an admin can also record it as transferred (to an insurer or a supplier contract) or avoided (the use stopped). Each needs its evidence and an owner, and each is on the audit trail.</p>
+              <p>A transferred risk keeps its rating and stays in the tolerance check. An avoided risk leaves the ratings. Turning this on asks you to confirm it's you; turning it off leaves recorded treatments as they are.</p>
+            </>
+          }
+        >
+          <Field label="Transferred and avoided treatments">
+            <Select
+              value={riskTreatments.f.riskTreatmentsEnabled}
+              onChange={(e) => riskTreatments.set("riskTreatmentsEnabled", e.target.value)}
+            >
+              <option value="false">off — open, mitigating, accepted or closed only (strict default)</option>
+              <option value="true">on — owners and admins may record a transfer or an avoidance</option>
+            </Select>
+          </Field>
+        </SectionShell>
+      </Card>
+
       <Card title="5b2 · Project attribution mandate">
         <SectionShell
           title="Must every governed dispatch name a project?"
@@ -838,6 +884,41 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               placeholder="registry agent uuid (blank = judged: unavailable)"
               onChange={(e) => recJudge.set("recommendationJudgeAgentId", e.target.value)}
             />
+          </Field>
+        </SectionShell>
+      </Card>
+
+      <Card title="5d · Framework imports">
+        <SectionShell
+          title="Import published framework content and regulatory notices"
+          busy={frameworkImports.act.busy}
+          error={frameworkImports.act.error}
+          submitLabel="Save framework-import setting"
+          onSubmit={() =>
+            void frameworkImports.act.run(
+              () => put({ frameworkImportsEnabled: asBool(frameworkImports.f.frameworkImportsEnabled!) }),
+              "Framework-import setting saved (audited)",
+            )
+          }
+          help={
+            <>
+              <p>OFF (default) means compliance pack control text is only what admins write, and the regulatory feed is the hand-checked entries only. ON lets an admin review published framework content and regulatory notices that ship with RegulAIt (nothing is downloaded) and accept them: a framework becomes a new draft pack version, and accepted notices join the regulatory feed. Turning it on asks you to confirm your identity again.</p>
+            </>
+          }
+          details={
+            <>
+              <p>Every proposal shows its changes before anything is written. An import never overwrites control text an admin changed unless the admin chooses to for that control, never changes how a control is evidenced, and never activates a pack. Each proposal, acceptance and rejection is recorded in the audit log.</p>
+            </>
+          }
+        >
+          <Field label="Framework imports">
+            <Select
+              value={frameworkImports.f.frameworkImportsEnabled}
+              onChange={(e) => frameworkImports.set("frameworkImportsEnabled", e.target.value)}
+            >
+              <option value="false">off — admin-written control text only (default)</option>
+              <option value="true">on — allow reviewed imports</option>
+            </Select>
           </Field>
         </SectionShell>
       </Card>

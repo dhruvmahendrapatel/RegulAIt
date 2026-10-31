@@ -75,6 +75,8 @@ export const MACHINE_ONLY = new Map([
   ["GET /.well-known/jwks.json", "auth plumbing: the issuer's public JWKS, fetched by relying parties"],
   ["GET /federation/.well-known/openid-configuration", "auth plumbing: the cloud federation issuer's OIDC discovery document, fetched by AWS, GCP and Entra"],
   ["GET /federation/.well-known/jwks.json", "auth plumbing: the cloud federation issuer's RS256 JWKS, fetched by AWS, GCP and Entra"],
+  ["GET /mcp-identity/.well-known/openid-configuration", "auth plumbing: the OIDC-profile MCP identity assertion issuer's discovery document, fetched by an upstream's validator (ADR-0210)"],
+  ["GET /mcp-identity/.well-known/jwks.json", "auth plumbing: the OIDC-profile MCP identity assertion issuer's ES256 JWKS, fetched by an upstream's validator (ADR-0210)"],
   ["POST /oauth/token", "auth plumbing: RFC 6749 token endpoint for workload clients"],
   ["POST /oauth/token/revocation", "auth plumbing: RFC 7009 token revocation for workload clients"],
   ["POST /oauth/token/introspection", "auth plumbing: RFC 7662 token introspection for resource servers"],
@@ -124,6 +126,7 @@ export const SUPERSEDED = new Map([
   ["GET /v1/spend/monitor-policies", { replacement: "GET /v1/spend/monitor-overview", reason: "the monitor overview carries every policy (unpaged, all rows)" }],
   ["GET /v1/scim/tokens", { replacement: "GET /v1/scim/status", reason: "the SCIM status carries the token list" }],
   ["GET /v1/org/settings/assurance-gate-mode", { replacement: "GET /v1/org/settings", reason: "the settings read carries assuranceGateMode; the page writes it through the dedicated PUT" }],
+  ["GET /v1/org/settings/risk-treatments", { replacement: "GET /v1/org/settings", reason: "the settings read carries riskTreatmentsEnabled; the page writes it through the dedicated PUT" }],
   ["POST /v1/agents/:agentId/owner", { replacement: "PATCH /v1/agents/:agentId/stewardship", reason: "ADR-0168 stewardship sets the steward (the ADR-0089 owner column) in one audited save" }],
   ["POST /v1/agents/:agentId/lifecycle", { replacement: "PATCH /v1/agents/:agentId/stewardship", reason: "ADR-0168 stewardship sets the lifecycle status in the same save" }],
   ["GET /v1/licenses/:id", { replacement: "GET /v1/licenses", reason: "the history list carries every full license row the detail returns" }],
@@ -156,6 +159,20 @@ export const INDIRECT_UI_CALLS = new Map([
       file: "apps/web/src/views/admin/compliance/InfrastructurePage.tsx",
       evidence: "api.post(pr.url",
       reason: "propose(…) keeps the path in state; the confirm dialog posts it",
+    },
+  ]),
+  // ADR-0226: the shared list control downloads the Excel file from the path its page hands it (`exportPath`)
+  ...[
+    ["GET /v1/runs/export.xlsx", "apps/web/src/views/runs/RunsPage.tsx"],
+    ["GET /v1/incidents/export.xlsx", "apps/web/src/views/incidents/IncidentsPage.tsx"],
+    ["GET /v1/users/export.xlsx", "apps/web/src/views/admin/identity/UsersPage.tsx"],
+  ].map(([r, page]) => [
+    r,
+    {
+      file: "apps/web/src/ui/DataList.tsx",
+      evidence: "exportUrl(props.exportPath",
+      pathIn: page,
+      reason: "the page passes the export path to DataList, whose Download Excel button fetches it",
     },
   ]),
   [

@@ -615,12 +615,13 @@ test("optimization: savings by technique + event ledgers", async () => {
 
 test("compliance profiles: upsert a profile + live cascade preview", async () => {
   await nav("Compliance profiles", "Compliance profiles");
-  await expect(page.getByRole("cell", { name: "hipaa" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: /^hipaa\b/ })).toBeVisible();
 
   await page.getByLabel("Tag", { exact: true }).fill("e2e-framework");
   await page.getByLabel("Audit retention days (blank = none)").fill("30");
-  await page.getByRole("button", { name: "Save profile" }).click();
-  await expect(page.getByText("Profile saved", { exact: false }).first()).toBeVisible();
+  // G7 (#453): this card creates profiles only; an existing tag is changed through Edit profile and review
+  await page.getByRole("button", { name: "Create profile" }).click();
+  await expect(page.getByText("Profile created", { exact: false }).first()).toBeVisible();
 
   // cascade preview on the classified seeded project
   const preview = page.locator("section", { hasText: "Cascade preview" }).first();

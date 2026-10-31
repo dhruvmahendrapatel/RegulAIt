@@ -275,8 +275,17 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   egressCompiledDefaultPolicy: notEqual("strict"),
   useCaseGateMode: notEqual("enforce"),
   dispatchAttributionRequired: notEqual(true),
+  // ADR-0224 (P13 c): shipped off (owner 10-30), so nothing is looser than the default; once an org turns the
+  // processing limit on, turning it off again is a relaxation
+  privacyOpsEnabled: fromStored(false, (v, b) => b === true && v === false),
+  // a longer due date for data-subject requests is looser
+  dsrSlaDays: atMost(30),
   recommendationJudgeEnabled: exempt("adds a model-judged annotation to the deterministic findings; it refuses and allows nothing"),
   recommendationJudgeAgentId: exempt("names the judge of the annotation above; it refuses and allows nothing"),
+  // ADR-0215: off = the framework-import and feed-import routes refuse; on lets an admin propose and accept imports
+  frameworkImportsEnabled: notEqual(false),
+  // ADR-0225 (P13 d): public trust pages and auditor access ship off; turning them on publishes outside the org
+  trustPagesEnabled: notEqual(false),
 
   // --- budgets and approvals ------------------------------------------------
   budgetEnforcement: notEqual("block"),
@@ -299,6 +308,8 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   ),
   mrmStalenessRecertEnabled: notEqual(true),
   mrmStalenessRecertThreshold: atMost(1),
+  // ADR-0217: re-testing spends model tokens on the org's behalf, so ON is the relaxation
+  mrmAutoRetestEnabled: notEqual(false),
 
   // --- audit retention ------------------------------------------------------
   autoPruneEnabled: exempt(

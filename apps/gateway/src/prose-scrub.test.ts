@@ -505,6 +505,8 @@ describe("6. the covered / NOT-covered inventory", () => {
     "engine_run_items.reason",
     "engine_run_items.verdict_note",
     "engine_runners.revoke_reason",
+    // ADR-0217: an automatic re-test's reason
+    "mrm_retest_runs.reason",
     // ADR-0175: a held skill's admission reason and a release-age override reason
     "builder_skills.admit_reason",
     "release_overrides.reason",
@@ -520,6 +522,8 @@ describe("6. the covered / NOT-covered inventory", () => {
     // ADR-0195 SD0 (migration 0202): an admin's note on a catalogue row
     "ai_endpoint_signatures.note",
     "ai_risks.acceptance_note",
+    // ADR-0211: the evidence behind a transferred or avoided risk
+    "ai_risks.treatment_evidence",
     "ai_use_cases.retired_reason",
     "ai_vendors.retired_reason",
     "approval_delegations.reason",
@@ -592,6 +596,12 @@ describe("6. the covered / NOT-covered inventory", () => {
     "vendor_account_aliases.reason",
     "vendor_domain_rules.reason",
     "workflow_templates.retired_reason",
+    // ADR-0208 (migration 0223)
+    "compliance_profiles.retired_reason",
+    // ADR-0208 G9 (migration 0225): retire and cancel reasons of the libraries
+    "eval_datasets.retired_reason",
+    "redteam_libraries.retired_reason",
+    "grant_certification_campaigns.cancelled_reason",
     // ADR-0182 (D4, migration 0162): every new free-text column of the
     // accountability records (feedback bodies are ciphertext, not prose)
     "decision_regression_cases.label",
@@ -616,6 +626,12 @@ describe("6. the covered / NOT-covered inventory", () => {
     "webauthn_credentials.revoke_reason",
     // ADR-0202 decision 4 (migration 0213)
     "demo_beat_fallbacks.reason",
+    // ADR-0208 G8 (migration 0224)
+    "infra_resources.retired_reason",
+    "infra_policies.retired_reason",
+    // ADR-0224 (migration 0252)
+    "data_subject_requests.close_note",
+    "data_subject_tombstones.reason",
   ];
 
   it("covers exactly the enumerated columns — the ADR's list is this list", () => {

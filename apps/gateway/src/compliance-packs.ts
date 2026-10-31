@@ -630,7 +630,7 @@ export async function packControlsSection(
 // Persistence helpers
 // ---------------------------------------------------------------------------
 
-async function insertPack(
+export async function insertPack(
   db: Db,
   input: z.infer<typeof createCompliancePackSchema>,
   createdByUserId: string | null,

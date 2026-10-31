@@ -1438,10 +1438,94 @@
       "breakpoints": true
     },
     {
-      "idx": 216,
+      "idx": 223,
       "version": "7",
-      "when": 1785151000000,
-      "tag": "0216_agent_setup_assist",
+      "when": 1785158000000,
+      "tag": "0223_compliance_profile_lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 224,
+      "version": "7",
+      "when": 1785159000000,
+      "tag": "0224_infra_lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 225,
+      "version": "7",
+      "when": 1785160000000,
+      "tag": "0225_library_lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 228,
+      "version": "7",
+      "when": 1785163000000,
+      "tag": "0228_oidc_identity_assertion",
+      "breakpoints": true
+    },
+    {
+      "idx": 230,
+      "version": "7",
+      "when": 1785165000000,
+      "tag": "0230_gateway_modality_pricing_model_rate_limits",
+      "breakpoints": true
+    },
+    {
+      "idx": 237,
+      "version": "7",
+      "when": 1785172000000,
+      "tag": "0237_mrm_auto_retest",
+      "breakpoints": true
+    },
+    {
+      "idx": 247,
+      "version": "7",
+      "when": 1785182000000,
+      "tag": "0247_trust_pages",
+      "breakpoints": true
+    },
+    {
+      "idx": 248,
+      "version": "7",
+      "when": 1785183000000,
+      "tag": "0248_framework_import_proposals",
+      "breakpoints": true
+    },
+    {
+      "idx": 249,
+      "version": "7",
+      "when": 1785184000000,
+      "tag": "0249_regulatory_feed_imports",
+      "breakpoints": true
+    },
+    {
+      "idx": 250,
+      "version": "7",
+      "when": 1785185000000,
+      "tag": "0250_risk_transferred_avoided",
+      "breakpoints": true
+    },
+    {
+      "idx": 251,
+      "version": "7",
+      "when": 1785186000000,
+      "tag": "0251_privacy_ops_records",
+      "breakpoints": true
+    },
+    {
+      "idx": 252,
+      "version": "7",
+      "when": 1785187000000,
+      "tag": "0252_privacy_ops_requests",
+      "breakpoints": true
+    },
+    {
+      "idx": 254,
+      "version": "7",
+      "when": 1785189000000,
+      "tag": "0254_agent_setup_assist",
       "breakpoints": true
     }
   ]
