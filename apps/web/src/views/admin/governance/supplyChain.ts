@@ -80,3 +80,11 @@ export function relaxationExpiry(day: string, now: Date = new Date()): string | 
   if (!Number.isFinite(end.getTime()) || end.getTime() <= now.getTime()) return null;
   return (end.getTime() > max.getTime() ? max : end).toISOString();
 }
+
+/** the confirmation shown before a signing key is revoked: it names the key and the consequence */
+export function revokeKeyConfirm(name: string): { title: string; body: string } {
+  return {
+    title: `Revoke signing key ${name}?`,
+    body: "Model files signed only by this key will be blocked at once, and the key can never be trusted again.",
+  };
+}

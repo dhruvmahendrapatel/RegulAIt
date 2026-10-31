@@ -37,7 +37,10 @@ never opens a risk entry, and the register has no supply-chain category (PENDING
 5. **At upload** a bundle may ride the upload in the `x-regulait-model-signature` header (base64 of its JSON) and is
    verified in the upload's transaction; **afterwards** the uploader or an admin attaches one with
    `POST /v1/model-artifacts/:artifactId/signature`. Every presentation is a `model_artifact_signatures` row and an
-   audit entry (`model-signature-verified` / `model-signature-failed`, with the reason), pass or fail.
+   audit entry (`model-signature-verified` / `model-signature-failed`, with the reason), pass or fail. Only the NEWEST
+   presentation counts: a later failed attach overrides an earlier verified one (conservative: only the uploader or
+   an admin can attach, so only they can block their own file this way). A bundle over 64 KiB is refused
+   (`bundle_malformed`) and only its size is kept, never its content.
 6. **Before serving** the newest signature is re-verified against the keys in force on every gated read: each
    dispatch of a model whose card cites the file, each sign-off, and each artifact view. Revoking a key takes effect at
    once. Streaming the file to the scanner is not gated, because scanning an unsigned file is the scanner's job.
@@ -57,7 +60,8 @@ never opens a risk entry, and the register has no supply-chain category (PENDING
    index keeps it to one entry per file until it is closed. A library entry and three intake scenarios are added.
 10. **Relaxation.** An admin may relax named conditions for one file: `PUT
     /v1/model-artifacts/:artifactId/supply-chain-relaxation` with a stated reason and an end of at most 30 days (the
-    database CHECK repeats the bound against its own clock), a `settings_relax` step-up bound to the file, its sha256,
+    database CHECK repeats the bound against its own clock; the end date is required, because the step-up is bound to
+    that exact value), a `settings_relax` step-up bound to the file, its sha256,
     the conditions and the expiry, audited `model-supply-chain-relaxed`. It counts only for the bytes it was decided on
     and only until it expires (checked on every read). Clearing is audited and needs no step-up. One in force per file.
 
@@ -87,3 +91,11 @@ never opens a risk entry, and the register has no supply-chain category (PENDING
   now carries (ADR-0196 addenda), so this lane raises no ceiling.
 - `AI_RISK_CATEGORIES` is a shared contract: the db enum, the CHECK, the shared vocabulary, the dimension map, the
   intake suggestions, the scenario library and the register's filter are updated together.
+
+## Addendum (2026-10-31, #614 review)
+
+- Revoking a trusted signing key opens a confirmation that names the key and the consequence (files signed only by
+  it are blocked at once; the key can never be trusted again). The keys table's actions follow X7: an empty primary
+  slot and Revoke in the last slot, the same slots on a revoked row.
+- `expiresAt` on a relaxation is required (it was defaulted per request, which no step-up could ever match).
+- An oversized signature bundle keeps only its size. Only the newest signature presented counts (point 5).

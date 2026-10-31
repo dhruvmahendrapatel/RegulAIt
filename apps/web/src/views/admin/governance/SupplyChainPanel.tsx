@@ -13,7 +13,7 @@ import { api } from "../../../api/client";
 import { fmtDay } from "../../../api/format";
 import { withStepUp } from "../../../stepup/stepUp";
 import { useSession } from "../../../session/SessionContext";
-import { Badge, Button, Card, EmptyState, Field, Input, Table, Textarea } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, RowActions, Table, Textarea } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
 import v from "../../views.module.css";
 import { refusalText } from "./modelArtifacts";
@@ -23,6 +23,7 @@ import {
   SUPPLY_CHAIN_CONDITIONS,
   conditionLabel,
   dateInputValue,
+  revokeKeyConfirm,
   parseBundle,
   relaxationExpiry,
   signatureText,
@@ -138,7 +139,7 @@ export function SupplyChainSection(props: { artifactId: string; filename: string
         </p>
       )}
 
-      <Field label="Signature bundle" help="The JSON bundle the model-signing tool wrote for this file (key-based signing).">
+      <Field label="Signature bundle" help="The JSON bundle the model-signing tool wrote for this file (key-based signing). Only the newest signature attached counts.">
         <Textarea rows={3} value={bundleText} onChange={(e) => setBundleText(e.target.value)} aria-label="Signature bundle" />
       </Field>
       <Button disabled={sigBusy || !bundleText.trim()} onClick={() => void attach()}>
@@ -199,6 +200,8 @@ export function SigningKeysCard() {
   const [pem, setPem] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /** the key a revocation is being confirmed for (revoking is permanent: it is never trusted again) */
+  const [confirmRevoke, setConfirmRevoke] = useState<SigningKey | null>(null);
   if (!isAdmin) return null;
   const refresh = () => {
     void qc.invalidateQueries({ queryKey: KEYS });
@@ -220,6 +223,7 @@ export function SigningKeysCard() {
     }
   };
   const revoke = async (k: SigningKey) => {
+    setConfirmRevoke(null);
     setError(null);
     try {
       await api.post(`/v1/model-signing-keys/${encodeURIComponent(k.id)}/revoke`, {});
@@ -252,11 +256,7 @@ export function SigningKeysCard() {
             key: "actions",
             header: "",
             srHeader: "Actions",
-            render: (k) => (k.revokedAt ? null : (
-              <Button size="sm" aria-label={`Revoke ${k.name}`} onClick={() => void revoke(k)}>
-                Revoke
-              </Button>
-            )),
+            render: (k) => <SigningKeyActions signingKey={k} onRevoke={setConfirmRevoke} />,
           },
         ]}
       />
@@ -274,6 +274,35 @@ export function SigningKeysCard() {
           {error}
         </div>
       )}
+      <ConfirmModal
+        open={confirmRevoke !== null}
+        danger
+        title={confirmRevoke ? revokeKeyConfirm(confirmRevoke.name).title : ""}
+        body={confirmRevoke ? revokeKeyConfirm(confirmRevoke.name).body : null}
+        confirmLabel="Revoke key"
+        onConfirm={() => confirmRevoke && void revoke(confirmRevoke)}
+        onCancel={() => setConfirmRevoke(null)}
+      />
     </Card>
+  );
+}
+
+/**
+ * X7 row actions for a signing key: no primary action (the primary slot stays empty, so every row lines up), and
+ * Revoke, which is destructive, in the last slot. A revoked key keeps the same empty slots.
+ */
+export function SigningKeyActions(props: { signingKey: SigningKey; onRevoke: (k: SigningKey) => void }) {
+  const k = props.signingKey;
+  return (
+    <RowActions
+      slot="6.5rem"
+      rest={
+        k.revokedAt ? undefined : (
+          <Button size="sm" aria-label={`Revoke ${k.name}`} onClick={() => props.onRevoke(k)}>
+            Revoke
+          </Button>
+        )
+      }
+    />
   );
 }

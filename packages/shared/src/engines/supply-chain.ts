@@ -115,7 +115,7 @@ export const relaxModelSupplyChainSchema = z
   .object({
     conditions: z.array(z.enum(SUPPLY_CHAIN_CONDITIONS)).min(1).max(3),
     reason: z.string().trim().min(1).max(1000),
-    /** default and maximum: 30 days from now */
-    expiresAt: z.string().datetime({ offset: true }).optional(),
+    /** at most 30 days from now; required, because the step-up is bound to this exact value (#614 review) */
+    expiresAt: z.string().datetime({ offset: true }),
   })
   .strict();

@@ -57,7 +57,7 @@ import {
   type SupplyChainCondition,
 } from "@regulait/shared";
 import { z } from "zod";
-import { parseSigningKey, verifyModelSignature, type SignatureVerdict, type TrustedSigningKey } from "./model-signing.js";
+import { MAX_SIGNATURE_BUNDLE_BYTES, parseSigningKey, verifyModelSignature, type SignatureVerdict, type TrustedSigningKey } from "./model-signing.js";
 import { requireStepUp } from "./step-up.js";
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
@@ -106,6 +106,7 @@ export async function recordSignatureTx(
   phase: "upload" | "attach",
   userId: string | null,
 ): Promise<{ row: ModelArtifactSignatureRow; verdict: SignatureVerdict }> {
+  const bundleBytes = bundle === null ? 0 : Buffer.byteLength(JSON.stringify(bundle));
   const trusted = await loadTrustedKeys(tx);
   const verdict: SignatureVerdict = bundle ? verifyModelSignature(bundle, artifact.sha256, trusted.keys, trusted.revokedHints) : { ok: false, failure: "bundle_malformed", keyHint: null };
   const [row] = await tx
@@ -113,7 +114,8 @@ export async function recordSignatureTx(
     .values({
       artifactId: artifact.id,
       artifactSha256: artifact.sha256,
-      bundle: bundle ?? {},
+      // a bundle over the size cap is refused and not kept: only its size is recorded (#614 review)
+      bundle: bundle === null ? {} : bundleBytes > MAX_SIGNATURE_BUNDLE_BYTES ? { oversized: true, bytes: bundleBytes } : bundle,
       status: verdict.ok ? "verified" : "failed",
       failure: verdict.ok ? null : verdict.failure,
       signingKeyId: verdict.ok ? verdict.keyId : null,
@@ -537,7 +539,7 @@ export function registerModelSupplyChainRoutes(app: FastifyInstance, db: Db): vo
     if (!b.success) return reply.status(400).send({ error: "invalid_body", issues: b.error.issues.slice(0, 10) });
     const now = new Date();
     const max = new Date(now.getTime() + SUPPLY_CHAIN_RELAXATION_MAX_DAYS * DAY_MS);
-    const expiresAt = b.data.expiresAt ? new Date(b.data.expiresAt) : max;
+    const expiresAt = new Date(b.data.expiresAt);
     if (expiresAt.getTime() <= now.getTime() + 60_000 || expiresAt.getTime() > max.getTime()) {
       return reply.status(422).send({ error: "invalid_expiry", detail: `a relaxation ends in the future and at most ${SUPPLY_CHAIN_RELAXATION_MAX_DAYS} days from now` });
     }

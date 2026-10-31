@@ -27,6 +27,7 @@ import {
   auditLog,
   createDb,
   eq,
+  modelArtifactSignatures,
   modelArtifacts,
   modelCardEvidence,
   modelCards,
@@ -251,6 +252,17 @@ describe("ADR-0216 trust roots and signatures", () => {
     expect(denied).toMatchObject({ effect: "deny" });
   });
 
+  it("a bundle over the size cap is refused and not kept: only its size is recorded", async () => {
+    const a = await artifactRow("safetensors", "oversized");
+    const huge = { ...signFile(signer, a.sha256), padding: "x".repeat(70 * 1024) };
+    const r = await app.inject({ method: "POST", url: `/v1/model-artifacts/${a.id}/signature`, headers: aliceKey, payload: { bundle: huge } });
+    expect(r.statusCode, r.body).toBe(422);
+    expect(r.json().signature).toMatchObject({ status: "failed", failure: "bundle_malformed" });
+    const [row] = await db.select().from(modelArtifactSignatures).where(eq(modelArtifactSignatures.artifactId, a.id));
+    expect(row!.bundle).toMatchObject({ oversized: true });
+    expect(JSON.stringify(row!.bundle).length).toBeLessThan(200);
+  });
+
   it("a signature attached later is verified (the uploader may attach; a mismatch is refused 422)", async () => {
     const a = await artifactRow("safetensors", "attach");
     const wrong = await app.inject({ method: "POST", url: `/v1/model-artifacts/${a.id}/signature`, headers: aliceKey, payload: { bundle: signFile(signer, sha("not it")) } });
@@ -332,7 +344,10 @@ describe("ADR-0216 the block", () => {
       const noStep = await app.inject({ method: "PUT", url, headers: adminKey, payload: body });
       expect(noStep.statusCode, noStep.body).toBe(403);
       expect(noStep.json()).toMatchObject({ error: "step_up_required" });
-      // no reason, or past the 30-day bound: refused
+      // no reason, no end date (the step-up is bound to it), or past the 30-day bound: refused
+      const { expiresAt: _omit, ...noExpiry } = body;
+      void _omit;
+      expect((await app.inject({ method: "PUT", url, headers: AUTH, payload: noExpiry })).statusCode).toBe(400);
       expect((await app.inject({ method: "PUT", url, headers: AUTH, payload: { ...body, reason: " " } })).statusCode).toBe(400);
       expect((await app.inject({ method: "PUT", url, headers: AUTH, payload: { ...body, expiresAt: new Date(Date.now() + 31 * 86_400_000).toISOString() } })).statusCode).toBe(422);
       const relaxed = await asAdminSteppedUp("PUT", url, body, supplyChainRelaxStepUp(a.id, a.sha256, ["unsigned"], expiresAt));
