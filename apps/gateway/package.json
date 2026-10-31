@@ -28,6 +28,7 @@
     "demo:set-passwords": "node dist/demo-set-passwords.js"
   },
   "dependencies": {
+    "@a2a-js/sdk": "1.3.0",
     "@aws-sdk/client-acm": "^3.700.0",
     "@aws-sdk/client-backup": "^3.700.0",
     "@aws-sdk/client-ecs": "3.1098.0",
