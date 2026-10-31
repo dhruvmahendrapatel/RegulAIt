@@ -4484,6 +4484,10 @@ export const orgSettings = pgTable(
      * entirely flips this and an org that never registers one is unaffected. */
     // ADR-0181: OFF by default (was true); an admin enables it, audited.
     customModelProvidersEnabled: boolean("custom_model_providers_enabled").notNull().default(false),
+    /** ADR-0205 (migration 0254): the agent setup assistant. OFF by default; an
+     * admin turns it on through PUT /v1/org/settings (a settings_relax step-up,
+     * audited old -> new). Its model calls take the governed dispatch path. */
+    agentSetupAssistEnabled: boolean("agent_setup_assist_enabled").notNull().default(false),
     /** ADR-0043 (migration 0049): the org default for MCP servers whose
      * allowPrivateRanges is null. FALSE (default since ADR-0181, migration
      * 0159) = strict: every server needs an explicit per-server
