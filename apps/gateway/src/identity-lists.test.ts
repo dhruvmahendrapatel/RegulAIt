@@ -70,7 +70,7 @@ const at = (i: number) => new Date(Date.parse("2026-02-01T00:00:00Z") + (i < 3 ?
 
 function readXlsx(buf: Buffer): Array<Array<string | number | null>> {
   const files = unzipSync(new Uint8Array(buf));
-  const shared = files["xl/sharedStrings.xml"] ? [...strFromU8(files["xl/sharedStrings.xml"]).matchAll(/<si>(.*?)<\/si>/gs)].map((m) => [...m[1]!.matchAll(/<t(?:\s[^>]*)?>(.*?)<\/t>/gs)].map((t) => t[1]!).join("").replace(/&amp;/g, "&").replace(/&apos;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"')) : [];
+  const shared = files["xl/sharedStrings.xml"] ? [...strFromU8(files["xl/sharedStrings.xml"]).matchAll(/<si>(.*?)<\/si>/gs)].map((m) => [...m[1]!.matchAll(/<t(?:\s[^>]*)?>(.*?)<\/t>/gs)].map((t) => t[1]!).join("").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&")) : [];
   const sheet = strFromU8(files["xl/worksheets/sheet1.xml"]!);
   return [...sheet.matchAll(/<row[^>]*>(.*?)<\/row>/gs)].map((row) => {
     const out: Array<string | number | null> = [];
