@@ -16,8 +16,11 @@ import {
   readFileAsBase64,
   scanLabel,
   SESSION_REFUSAL_DETAIL,
+  REVIEW_STATUS_LABEL,
   statementProblem,
+  SUBMISSION_STATUSES,
   SUPPLIER_LIMITS,
+  SUPPLIER_STATUS_LABEL,
   tokenFromHash,
   withoutHash,
 } from "./supplierPortal";
@@ -135,6 +138,14 @@ describe("statementProblem", () => {
 });
 
 describe("labels", () => {
+  it("names every status for both readers, including an answer a newer one replaced", () => {
+    for (const st of SUBMISSION_STATUSES) {
+      expect(SUPPLIER_STATUS_LABEL[st], st).toBeTruthy();
+      expect(REVIEW_STATUS_LABEL[st], st).toBeTruthy();
+    }
+    expect(SUPPLIER_STATUS_LABEL.withdrawn).toBe("Replaced by a newer answer");
+    expect(REVIEW_STATUS_LABEL.withdrawn).toBe("Withdrawn");
+  });
   it("says plainly when a file was not scanned", () => {
     expect(scanLabel(null)).toBe("Not scanned");
     expect(scanLabel("not_scanned")).toBe("Not scanned");
@@ -157,11 +168,15 @@ describe("the mirrored values match @regulait/shared", () => {
       SUPPLIER_SESSION_REFUSAL: { detail: string };
       SUPPLIER_INVITE_TOKEN_RE: RegExp;
       SUPPLIER_FILE_TYPES: readonly string[];
+      SUPPLIER_SUBMISSION_STATUSES: readonly string[];
       supplierQuestionSchema: { safeParse: (v: unknown) => { success: boolean } };
     };
     for (const k of Object.keys(SUPPLIER_LIMITS) as Array<keyof typeof SUPPLIER_LIMITS>) {
       expect(SUPPLIER_LIMITS[k], k).toBe(s.SUPPLIER_PORTAL_LIMITS[k]);
     }
+    expect(SUPPLIER_LIMITS.perAccessSubmissionsMax).toBe(500);
+    expect(SUPPLIER_LIMITS.perAccessFileBytesMax).toBe(50 * 1024 * 1024);
+    expect([...SUBMISSION_STATUSES]).toEqual([...s.SUPPLIER_SUBMISSION_STATUSES]);
     expect(LINK_REFUSAL_DETAIL).toBe(s.SUPPLIER_LINK_REFUSAL.detail);
     expect(SESSION_REFUSAL_DETAIL).toBe(s.SUPPLIER_SESSION_REFUSAL.detail);
     expect(INVITE_TOKEN_RE.source).toBe(s.SUPPLIER_INVITE_TOKEN_RE.source);

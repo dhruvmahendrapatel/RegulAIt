@@ -6,6 +6,10 @@
  *    file is sent as base64 after the browser-side checks; a refused link shows the server's own sentence;
  *  - the ADMIN side: a vendor's "Supplier access" panel invites a supplier through the step-up prompt and shows the
  *    link once; the "Supplier questionnaires" page turns the portal on through the step-up prompt;
+ *  - files: with files not accepted the supplier sees no file input and is told where documents go; a file nobody
+ *    scanned downloads only after the reviewer confirms, with `?acknowledgeUnscanned=1`;
+ *  - deciding an answer goes out with the plain client (no step-up), and accepting an answer to an unlinked question
+ *    says nothing is added to the vendor's checklist;
  *  - axe (WCAG 2.x A/AA) in light and dark on the supplier page and the panel.
  */
 import { AxeBuilder } from "@axe-core/playwright";
@@ -48,9 +52,12 @@ interface SupplierState {
   ended: number;
   platformCalls: string[];
   mine: unknown[];
+  filesAccepted: boolean;
+  /** when set, the next submission is refused with this answer */
+  refuseSubmission: { status: number; body: unknown } | null;
 }
 
-const assessment = (mine: unknown[]) => ({
+const assessment = (mine: unknown[], filesAccepted = true) => ({
   vendorName: "Acme Transcribe",
   framework: "eu-ai-act",
   open: true,
@@ -67,11 +74,27 @@ const assessment = (mine: unknown[]) => ({
     questions: [{ id: "q1", prompt: "Do you encrypt data at rest?", help: "", required: true, allowFile: false, controlRef: null }],
   },
   submissions: mine,
-  limits: { fileMaxBytes: 2 * 1024 * 1024, statementMax: 4000, fileTypes: ["application/pdf", "image/png", "image/jpeg", "text/plain", "text/csv"] },
+  limits: {
+    fileMaxBytes: 2 * 1024 * 1024,
+    statementMax: 4000,
+    fileTypes: ["application/pdf", "image/png", "image/jpeg", "text/plain", "text/csv"],
+    filesAccepted,
+    fileBytesBudget: 50 * 1024 * 1024,
+  },
 });
 
 async function mockSupplier(page: Page, patch: Partial<SupplierState> = {}): Promise<SupplierState> {
-  const state: SupplierState = { sessionStatus: 200, sessionPosts: [], submissions: [], ended: 0, platformCalls: [], mine: [], ...patch };
+  const state: SupplierState = {
+    sessionStatus: 200,
+    sessionPosts: [],
+    submissions: [],
+    ended: 0,
+    platformCalls: [],
+    mine: [],
+    filesAccepted: true,
+    refuseSubmission: null,
+    ...patch,
+  };
   let signedIn = false;
   await page.route("**/*", async (route) => {
     const req = route.request();
@@ -92,11 +115,12 @@ async function mockSupplier(page: Page, patch: Partial<SupplierState> = {}): Pro
     }
     if (p === "/supplier/v1/assessment" && req.method() === "GET") {
       if (!signedIn) return json(route, { error: "session_not_valid", detail: "Your session has ended. Open the most recent link you were sent, or ask your contact for a new one." }, 401);
-      return json(route, assessment(state.mine));
+      return json(route, assessment(state.mine, state.filesAccepted));
     }
     if (p === "/supplier/v1/submissions" && req.method() === "POST") {
       const body = req.postDataJSON() as { target: { controlRef?: string }; statement: string; file?: { name: string } };
       state.submissions.push({ body, csrf });
+      if (state.refuseSubmission) return json(route, state.refuseSubmission.body, state.refuseSubmission.status);
       const row = {
         id: SUB,
         kind: "control",
@@ -155,13 +179,48 @@ test.describe("ADR-0221: the supplier page", () => {
       body: { target: { kind: "control", controlRef: "ART-10" }, statement: "Training data is reviewed every quarter.", file: { name: "policy.txt", base64: Buffer.from("hello").toString("base64") } },
       csrf: "1",
     });
-    await expect(art10.getByRole("status")).toContainText("Answer sent");
+    await expect(art10.getByRole("status").filter({ hasText: "Answer sent" })).toBeVisible();
     await expect(art10.getByText("Waiting for review")).toBeVisible();
 
     await page.getByRole("button", { name: "Sign out" }).click();
     await expect(page.getByText("You have signed out")).toBeVisible();
     expect(state.ended).toBe(1);
     expect(state.platformCalls).toEqual([]);
+  });
+
+  test("with files not accepted there is no file input, and the page says where documents go", async ({ page }) => {
+    await mockSupplier(page, { filesAccepted: false });
+    await page.goto(`/ui/supplier#${TOKEN}`);
+    await expect(page.getByRole("heading", { name: "Supplier assessment" })).toBeVisible();
+    await expect(page.getByTestId("supplier-files-not-accepted")).toHaveText(
+      "Files cannot be attached here. Write your answer, and send any supporting documents to your contact.",
+    );
+    await expect(page.getByLabel("Supporting file (optional)")).toHaveCount(0);
+    await expect(page.locator('input[type="file"]')).toHaveCount(0);
+    await expectAxeClean(page, "supplier assessment, files not accepted");
+  });
+
+  test("a refused answer shows the server's own sentence beside the form", async ({ page }) => {
+    const detail = "This access can hold at most 50 MB of files. Submit your answer without a file, or ask your contact for help.";
+    const state = await mockSupplier(page, { refuseSubmission: { status: 413, body: { error: "file_budget_exceeded", detail } } });
+    await page.goto(`/ui/supplier#${TOKEN}`);
+    const art10 = page.getByRole("region", { name: /ART-10/ });
+    await art10.getByLabel("Your answer for ART-10").fill("See the attached policy.");
+    // the counter is described, not announced on every keystroke
+    await expect(art10.locator("[aria-live]")).toHaveCount(0);
+    await art10.getByRole("button", { name: "Send answer" }).click();
+    await expect.poll(() => state.submissions.length).toBe(1);
+    await expect(art10.getByRole("alert")).toHaveText(detail);
+  });
+
+  test("an answer a newer one replaced reads as replaced", async ({ page }) => {
+    const old = {
+      id: SUB, kind: "control", controlRef: "ART-10", questionId: null, statement: "First try.", file: null,
+      status: "withdrawn", decisionReason: "Replaced by a newer answer from the supplier", decidedAt: "2026-10-30T10:05:00Z", createdAt: "2026-10-30T10:00:00Z",
+    };
+    await mockSupplier(page, { mine: [old] });
+    await page.goto(`/ui/supplier#${TOKEN}`);
+    await expect(page.getByRole("region", { name: /ART-10/ }).getByText("Replaced by a newer answer")).toBeVisible();
   });
 
   test("a refused link shows the server's sentence and is still dropped from the address", async ({ page }) => {
@@ -188,12 +247,47 @@ test.describe("ADR-0221: the supplier page", () => {
 
 interface AdminState {
   enabled: boolean;
+  acceptUnscannedFiles: boolean;
+  scannerConfigured: boolean;
   grantPosts: unknown[];
   settingsPuts: unknown[];
+  decisions: Array<{ id: string; body: unknown; stepUp: string | null }>;
+  downloads: string[];
 }
 
+const QSUB = "55555555-5555-4555-8555-555555555555";
+const RSUB = "66666666-6666-4666-8666-666666666666";
+const WSUB = "77777777-7777-4777-8777-777777777777";
+const CSUB = "88888888-8888-4888-8888-888888888888";
+const sub = (patch: Record<string, unknown>) => ({
+  id: SUB, kind: "control", controlRef: "ART-10", questionnaireId: null, questionId: null, statement: "Training data is reviewed every quarter.",
+  file: null, status: "submitted", decisionReason: null, decidedAt: null, createdAt: "2026-10-30T10:00:00Z",
+  accessId: ACCESS, accessState: "active", supplierEmail: "sam@supplier.example", framework: "eu-ai-act",
+  ...patch,
+});
+const REVIEW_LIST = [
+  sub({ file: { name: "policy.pdf", contentType: "application/pdf", size: 20480, sha256: "ab".repeat(32), scanStatus: "not_scanned" } }),
+  // an answer to a question with no linked control
+  sub({ id: QSUB, kind: "question", controlRef: null, questionnaireId: "44444444-4444-4444-8444-444444444444", questionId: "q1", statement: "Yes, AES-256.", supplierEmail: "pat@supplier.example" }),
+  // from a grant since revoked: no Accept
+  sub({ id: RSUB, statement: "Reviewed yearly.", supplierEmail: "lee@supplier.example", accessState: "revoked" }),
+  // replaced by a newer answer: no actions, no file
+  sub({ id: WSUB, statement: "Draft.", supplierEmail: "kim@supplier.example", status: "withdrawn", decisionReason: "Replaced by a newer answer from the supplier" }),
+  // a clean file downloads directly
+  sub({ id: CSUB, statement: "Scanned evidence.", supplierEmail: "ash@supplier.example", status: "accepted", file: { name: "clean.pdf", contentType: "application/pdf", size: 2048, sha256: "cd".repeat(32), scanStatus: "clean" } }),
+];
+
 async function mockAdmin(page: Page, patch: Partial<AdminState> = {}): Promise<AdminState> {
-  const state: AdminState = { enabled: true, grantPosts: [], settingsPuts: [], ...patch };
+  const state: AdminState = {
+    enabled: true,
+    acceptUnscannedFiles: false,
+    scannerConfigured: false,
+    grantPosts: [],
+    settingsPuts: [],
+    decisions: [],
+    downloads: [],
+    ...patch,
+  };
   const me = { id: "riley", email: "riley@example.test", displayName: "Riley Admin" };
   const vendor = {
     id: VENDOR, name: "Acme Transcribe", description: "Transcribes calls.", category: "ai_feature_vendor", ownerUserId: "riley", ownerName: "Riley Admin",
@@ -212,12 +306,28 @@ async function mockAdmin(page: Page, patch: Partial<AdminState> = {}): Promise<A
       return json(route, { vendor, instance: null, questionnaire: null, questionnaireTemplate: null, attestations: [], packChecklist: null, disclaimer: "Vendor-attested, not verified." });
     }
     if (p === "/v1/compliance/packs") return json(route, { packs: [{ framework: "eu-ai-act", status: "active" }] });
-    if (p === "/v1/supplier-portal/settings" && m === "GET") return json(route, { enabled: state.enabled });
+    const settingsView = () => ({ enabled: state.enabled, acceptUnscannedFiles: state.acceptUnscannedFiles, scannerConfigured: state.scannerConfigured });
+    if (p === "/v1/supplier-portal/settings" && m === "GET") return json(route, settingsView());
     if (p === "/v1/supplier-portal/settings" && m === "PUT") {
-      const body = req.postDataJSON() as { enabled: boolean };
+      const body = req.postDataJSON() as { enabled?: boolean; acceptUnscannedFiles?: boolean };
       state.settingsPuts.push(body);
-      state.enabled = body.enabled;
-      return json(route, { enabled: body.enabled, changed: true });
+      if (body.enabled !== undefined) state.enabled = body.enabled;
+      if (body.acceptUnscannedFiles !== undefined) state.acceptUnscannedFiles = body.acceptUnscannedFiles;
+      return json(route, { ...settingsView(), changed: true });
+    }
+    const decision = /^\/v1\/vendors\/[^/]+\/supplier-submissions\/([^/]+)\/decision$/.exec(p);
+    if (decision && m === "POST") {
+      state.decisions.push({ id: decision[1]!, body: req.postDataJSON(), stepUp: req.headers()["x-regulait-step-up"] ?? null });
+      return json(route, { id: decision[1], status: "accepted", attestation: null, disclaimer: "Vendor-attested." });
+    }
+    const file = /^\/v1\/vendors\/[^/]+\/supplier-submissions\/([^/]+)\/file$/.exec(p);
+    if (file && m === "GET") {
+      const u = new URL(req.url());
+      state.downloads.push(`${file[1]}${u.search}`);
+      if (file[1] === SUB && u.searchParams.get("acknowledgeUnscanned") !== "1") {
+        return json(route, { error: "unscanned_file_acknowledgement_required", detail: "This file has not been scanned for malware." }, 409);
+      }
+      return route.fulfill({ status: 200, contentType: "application/pdf", body: "%PDF-1.4" });
     }
     if (p === "/v1/supplier-questionnaires" && m === "GET") {
       return json(route, { questionnaires: [{ id: "44444444-4444-4444-8444-444444444444", name: "Security basics", version: 1, description: "", questions: [{ id: "q1", prompt: "Do you encrypt data at rest?", help: "", required: true, allowFile: false, controlRef: null }], createdAt: "2026-10-01T09:00:00Z", retiredAt: null }] });
@@ -240,13 +350,7 @@ async function mockAdmin(page: Page, patch: Partial<AdminState> = {}): Promise<A
     }
     if (p === `/v1/vendors/${VENDOR}/supplier-submissions` && m === "GET") {
       return json(route, {
-        submissions: [
-          {
-            id: SUB, kind: "control", controlRef: "ART-10", questionnaireId: null, questionId: null, statement: "Training data is reviewed every quarter.",
-            file: { name: "policy.pdf", contentType: "application/pdf", size: 20480, sha256: "ab".repeat(32), scanStatus: "not_scanned" },
-            status: "submitted", decisionReason: null, decidedAt: null, createdAt: "2026-10-30T10:00:00Z", accessId: ACCESS, supplierEmail: "sam@supplier.example", framework: "eu-ai-act",
-          },
-        ],
+        submissions: REVIEW_LIST,
         disclaimer: "An accepted answer is the vendor's claim, not verified by this platform.",
       });
     }
@@ -297,6 +401,13 @@ test.describe("ADR-0221: supplier access for admins", () => {
     await expect(page.getByRole("button", { name: "Create access and link" })).toBeDisabled();
     // what a supplier sent is still reviewable: the file says plainly that it was not scanned
     await expect(page.getByText("Not scanned")).toBeVisible();
+    await expect(page.getByText("Access revoked", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Accept answer from lee@supplier.example" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Reject answer from lee@supplier.example" })).toBeVisible();
+    await expect(page.getByText("Withdrawn", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: /kim@supplier\.example/ })).toHaveCount(0);
+    // a question's internal id is never shown
+    await expect(page.getByText("Do you encrypt data at rest?")).toBeVisible();
     await expect(page.getByText("An accepted answer is the vendor's claim, not verified by this platform.")).toBeVisible();
     await expect(page.getByRole("button", { name: "Accept answer from sam@supplier.example" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Reject answer from sam@supplier.example" })).toBeVisible();
@@ -309,7 +420,8 @@ test.describe("ADR-0221: supplier access for admins", () => {
     const su = await requireStepUpOn(page, { method: "PUT", path: "/v1/supplier-portal/settings", kind: "settings_relax", when: (b) => (b as { enabled?: boolean }).enabled === true });
     await page.goto("/ui/admin/vendors/questionnaires");
     await expect(page.getByRole("heading", { name: "Supplier questionnaires" })).toBeVisible();
-    await expect(page.getByText("Strict default")).toBeVisible();
+    // the portal and the unscanned-files setting both start strict
+    await expect(page.getByText("Strict default")).toHaveCount(2);
     await expect(page.getByRole("heading", { name: "Security basics" })).toBeVisible();
     await expectAxeClean(page, "supplier questionnaires");
     await page.getByRole("button", { name: "Turn the portal on" }).click();
@@ -317,5 +429,71 @@ test.describe("ADR-0221: supplier access for admins", () => {
     await su.expectResentOnce();
     expect(state.settingsPuts).toEqual([{ enabled: true }]);
     await expect(page.getByText("Relaxed", { exact: true })).toBeVisible();
+  });
+
+  test("accepting unscanned files is a second, step-up relaxation, and not offered with a scanner", async ({ page }) => {
+    const state = await mockAdmin(page);
+    const su = await requireStepUpOn(page, {
+      method: "PUT",
+      path: "/v1/supplier-portal/settings",
+      kind: "settings_relax",
+      when: (b) => (b as { acceptUnscannedFiles?: boolean }).acceptUnscannedFiles === true,
+    });
+    await page.goto("/ui/admin/vendors/questionnaires");
+    const files = page.getByTestId("supplier-unscanned-setting");
+    await expect(files).toContainText("Off: suppliers cannot attach files until a malware scanner is configured.");
+    await files.getByRole("button", { name: "Accept unscanned files" }).click();
+    await confirmStepUp(page);
+    await su.expectResentOnce();
+    expect(state.settingsPuts).toEqual([{ acceptUnscannedFiles: true }]);
+    await expect(files).toContainText("On: suppliers can attach files that nobody has scanned. Each download asks the reviewer to confirm.");
+    await expect(files.getByText("Relaxed", { exact: true })).toBeVisible();
+    await expectAxeClean(page, "supplier questionnaires, unscanned files accepted");
+  });
+
+  test("with a scanner configured there is no unscanned-files switch", async ({ page }) => {
+    await mockAdmin(page, { scannerConfigured: true });
+    await page.goto("/ui/admin/vendors/questionnaires");
+    const files = page.getByTestId("supplier-unscanned-setting");
+    await expect(files).toContainText("A scanner checks every file.");
+    await expect(files.getByRole("button")).toHaveCount(0);
+  });
+
+  test("an unscanned file downloads only after the reviewer confirms; a clean one downloads at once", async ({ page }) => {
+    const state = await mockAdmin(page);
+    await page.goto(`/ui/admin/vendors?vendorId=${VENDOR}`);
+    await page.getByRole("button", { name: "Download file policy.pdf" }).click();
+    const dialog = page.getByRole("dialog", { name: "Download a file that has not been scanned?" });
+    await expect(dialog).toContainText("has not been scanned for malware. Open it only if you trust the supplier");
+    await expect(dialog).toContainText("The download is recorded in the audit trail.");
+    expect(state.downloads).toEqual([]);
+    await expectAxeClean(page, "unscanned download confirmation");
+    const download = page.waitForEvent("download");
+    await dialog.getByRole("button", { name: "Download anyway" }).click();
+    expect((await download).suggestedFilename()).toBe("policy.pdf");
+    expect(state.downloads).toEqual([`${SUB}?acknowledgeUnscanned=1`]);
+
+    const clean = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Download file clean.pdf" }).click();
+    await clean;
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    expect(state.downloads).toEqual([`${SUB}?acknowledgeUnscanned=1`, CSUB]);
+  });
+
+  test("accepting an answer to an unlinked question says nothing is added, and asks for no step-up", async ({ page }) => {
+    const state = await mockAdmin(page);
+    await page.goto(`/ui/admin/vendors?vendorId=${VENDOR}`);
+    await page.getByRole("button", { name: "Accept answer from pat@supplier.example" }).click();
+    const dialog = page.getByRole("dialog", { name: "Accept this answer?" });
+    await expect(dialog).toContainText("This question is not linked to a control, so nothing is added to the vendor's checklist.");
+    await dialog.getByRole("button", { name: "Accept answer" }).click();
+    await expect.poll(() => state.decisions.length).toBe(1);
+    expect(state.decisions[0]).toEqual({ id: QSUB, body: { decision: "accept" }, stepUp: null });
+    await expect(page.getByText("Accepted. This question is not linked to a control, so nothing is added to the vendor's checklist.").first()).toBeVisible();
+    await expect(page.getByRole("dialog", { name: "Confirm it's you" })).toHaveCount(0);
+
+    // a control answer keeps the claim wording
+    await page.getByRole("button", { name: "Accept answer from sam@supplier.example" }).click();
+    await expect(page.getByRole("dialog", { name: "Accept this answer?" })).toContainText("as a claim the vendor made, attributed to you");
   });
 });

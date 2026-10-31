@@ -17,6 +17,10 @@ export const SUPPLIER_LIMITS = Object.freeze({
   sessionAbsoluteHours: 8,
   fileMaxBytes: 2 * 1024 * 1024,
   statementMax: 4000,
+  /** per grant, in total: answers stored (a withdrawn answer still counts) */
+  perAccessSubmissionsMax: 500,
+  /** per grant, in total: raw bytes of the evidence files still held */
+  perAccessFileBytesMax: 50 * 1024 * 1024,
 });
 
 /** mirrors SUPPLIER_LINK_REFUSAL.detail: the one answer every refused sign-in link gets */
@@ -100,13 +104,16 @@ export function statementProblem(statement: string, max: number = SUPPLIER_LIMIT
   return null;
 }
 
-export type SubmissionStatus = "submitted" | "accepted" | "rejected";
+/** mirrors SUPPLIER_SUBMISSION_STATUSES; `withdrawn` is an answer a newer one to the same item replaced before review */
+export const SUBMISSION_STATUSES = ["submitted", "accepted", "rejected", "withdrawn"] as const;
+export type SubmissionStatus = (typeof SUBMISSION_STATUSES)[number];
 
 /** a submission's status as the supplier reads it */
 export const SUPPLIER_STATUS_LABEL: Record<SubmissionStatus, string> = {
   submitted: "Waiting for review",
   accepted: "Accepted",
   rejected: "Not accepted",
+  withdrawn: "Replaced by a newer answer",
 };
 
 /** a submission's status as a reviewer reads it */
@@ -114,7 +121,12 @@ export const REVIEW_STATUS_LABEL: Record<SubmissionStatus, string> = {
   submitted: "Awaiting review",
   accepted: "Accepted",
   rejected: "Rejected",
+  withdrawn: "Withdrawn",
 };
+
+/** files cannot be attached on this portal: said once, beside the answers, so the supplier knows where documents go */
+export const FILES_NOT_ACCEPTED_NOTE =
+  "Files cannot be attached here. Write your answer, and send any supporting documents to your contact.";
 
 /** the scan result as words; a file nobody scanned says so plainly */
 export function scanLabel(status: string | null | undefined): string {

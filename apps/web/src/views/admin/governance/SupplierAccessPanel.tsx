@@ -3,10 +3,12 @@
  * answer this vendor's assessment, the single-use sign-in links, and the review of what they sent.
  *
  *  - Granting, a new link and revoking may ask the admin to confirm it's them (`withStepUp`, the app-wide prompt).
+ *    Deciding an answer does not: the gateway does not ask for it there.
  *  - A link is shown ONCE, in a dialog, from the response that minted it. It is never put in the query cache or in
  *    browser storage, and closing the dialog drops it.
- *  - Nothing a supplier sends reaches the vendor's record on its own: accepting records it as a vendor-attested claim,
- *    rejecting sends the reason back to the supplier.
+ *  - Nothing a supplier sends reaches the vendor's record on its own: accepting an answer to a control (or to a question
+ *    linked to one) records it as a vendor-attested claim, rejecting sends the reason back to the supplier.
+ *  - A file nobody scanned downloads only after the reviewer confirms, and the request says they did.
  *  - Every refusal is shown inline beside the action (and as a toast).
  */
 import { useState } from "react";
@@ -21,12 +23,20 @@ import { useToast } from "../../../ui/toast";
 import { QueryGate, ReasonModal, useAction } from "../adminKit";
 import { fileTypeLabel, REVIEW_STATUS_LABEL, scanLabel, SUPPLIER_LIMITS } from "../../supplier/supplierPortal";
 import {
+  acceptOutcome,
   ACCESS_STATE_LABEL,
+  ANSWER_ACCESS_LABEL,
+  answerFilePath,
+  answerTargetLabel,
+  canAccept,
+  canDecide,
+  downloadName,
   EMPTY_INVITE,
   inviteBody,
   inviteProblems,
   LINK_STATE_LABEL,
   latestLink,
+  needsUnscannedConfirm,
   questionnaireLabel,
   usableQuestionnaires,
   type InviteDraft,
@@ -43,7 +53,10 @@ import sa from "./supplierAccess.module.css";
 export const QUESTIONNAIRES_PATH = "/admin/vendors/questionnaires";
 
 const accessTone = (s: SupplierGrant["state"]): Tone => (s === "active" ? "info" : s === "revoked" ? "danger" : "neutral");
-const reviewTone = (s: ReviewSubmission["status"]): Tone => (s === "accepted" ? "ok" : s === "rejected" ? "danger" : "warn");
+const reviewTone = (s: ReviewSubmission["status"]): Tone =>
+  s === "accepted" ? "ok" : s === "rejected" ? "danger" : s === "withdrawn" ? "neutral" : "warn";
+
+const NO_CONTROL_ACCEPTED = "Accepted. This question is not linked to a control, so nothing is added to the vendor's checklist.";
 
 /** a vendor whose assessment still takes answers */
 const assessmentOpen = (status: string) => status === "proposed" || status === "under_assessment";
@@ -89,6 +102,7 @@ export default function SupplierAccessPanel(props: { vendorId: string; vendorNam
   const [revokeFor, setRevokeFor] = useState<SupplierGrant | null>(null);
   const [acceptFor, setAcceptFor] = useState<ReviewSubmission | null>(null);
   const [rejectFor, setRejectFor] = useState<ReviewSubmission | null>(null);
+  const [unscannedFor, setUnscannedFor] = useState<ReviewSubmission | null>(null);
 
   const refetch = async () => {
     await Promise.all([grants.refetch(), submissions.refetch()]);
@@ -132,26 +146,39 @@ export default function SupplierAccessPanel(props: { vendorId: string; vendorNam
   const decide = (s: ReviewSubmission, decision: "accept" | "reject", reason?: string) => {
     setAcceptFor(null);
     setRejectFor(null);
+    // the gateway does not ask for step-up here: the plain client, so no prompt can appear
     void act.run(async () => {
-      await withStepUp((h) =>
-        stepUpApi.post(`${base}/supplier-submissions/${s.id}/decision`, decision === "accept" ? { decision } : { decision, reason }, h),
+      const out = await api.post<{ attestation: unknown }>(
+        `${base}/supplier-submissions/${s.id}/decision`,
+        decision === "accept" ? { decision } : { decision, reason },
       );
       await refetch();
-    }, decision === "accept" ? "Answer accepted and recorded as a vendor-attested claim." : "Answer rejected. The supplier sees your reason.");
+      if (decision === "reject") return "Answer rejected. The supplier sees your reason.";
+      return out.attestation ? "Answer accepted and recorded as a vendor-attested claim." : NO_CONTROL_ACCEPTED;
+    });
   };
 
-  const download = (s: ReviewSubmission) =>
+  /** a clean file downloads at once; any other asks first, and the request carries the reviewer's confirmation */
+  const download = (s: ReviewSubmission, acknowledged = false) => {
+    setUnscannedFor(null);
+    if (!s.file || act.busy) return;
+    if (needsUnscannedConfirm(s.file) && !acknowledged) {
+      setUnscannedFor(s);
+      return;
+    }
+    const file = s.file;
     void act.run(async () => {
-      const { body } = await api.getBlob(`${base}/supplier-submissions/${s.id}/file`);
+      const { body } = await api.getBlob(answerFilePath(props.vendorId, s.id, needsUnscannedConfirm(file)));
       const url = URL.createObjectURL(body);
       const link = document.createElement("a");
       link.href = url;
-      link.download = s.file?.name ?? "evidence";
+      link.download = downloadName(file);
       document.body.append(link);
       link.click();
       link.remove();
       setTimeout(() => URL.revokeObjectURL(url), 0);
     }, "File downloaded");
+  };
 
   const copy = async () => {
     if (!issued) return;
@@ -163,12 +190,8 @@ export default function SupplierAccessPanel(props: { vendorId: string; vendorNam
     }
   };
 
-  const targetLabel = (s: ReviewSubmission) => {
-    if (s.kind === "control") return s.controlRef ?? "Control";
-    const q = (questionnaires.data?.questionnaires ?? []).find((x) => x.id === s.questionnaireId);
-    const question = q?.questions.find((x) => x.id === s.questionId);
-    return question ? question.prompt : `Question ${s.questionId ?? ""}`;
-  };
+  const allQuestionnaires = questionnaires.data?.questionnaires ?? [];
+  const targetLabel = (s: ReviewSubmission) => answerTargetLabel(s, allQuestionnaires);
 
   const rows = grants.data?.access ?? [];
   const subs = submissions.data?.submissions ?? [];
@@ -395,8 +418,13 @@ export default function SupplierAccessPanel(props: { vendorId: string; vendorNam
                     <div>
                       <strong>{targetLabel(s)}</strong>
                     </div>
-                    <div className={v.faint}>
-                      {s.supplierEmail} · sent {fmtAt(s.createdAt)}
+                    <div className={`${v.faint} ${v.row}`}>
+                      <span>
+                        {s.supplierEmail} · sent {fmtAt(s.createdAt)}
+                      </span>
+                      {ANSWER_ACCESS_LABEL[s.accessState] && (
+                        <Badge tone={s.accessState === "revoked" ? "danger" : "neutral"}>{ANSWER_ACCESS_LABEL[s.accessState]}</Badge>
+                      )}
                     </div>
                     <div className={sa.prose}>{s.statement}</div>
                   </>
@@ -406,7 +434,7 @@ export default function SupplierAccessPanel(props: { vendorId: string; vendorNam
                 key: "file",
                 header: "File",
                 render: (s) =>
-                  s.file ? (
+                  s.file && s.status !== "withdrawn" ? (
                     <>
                       <div className={sa.prose}>{s.file.name}</div>
                       <div className={v.faint}>
@@ -424,7 +452,7 @@ export default function SupplierAccessPanel(props: { vendorId: string; vendorNam
                 header: "Status",
                 render: (s) => (
                   <>
-                    <Badge tone={reviewTone(s.status)}>{REVIEW_STATUS_LABEL[s.status]}</Badge>
+                    <Badge tone={reviewTone(s.status)}>{REVIEW_STATUS_LABEL[s.status] ?? s.status}</Badge>
                     {s.status === "rejected" && s.decisionReason && <div className={v.faint}>Reason: {s.decisionReason}</div>}
                   </>
                 ),
@@ -437,21 +465,21 @@ export default function SupplierAccessPanel(props: { vendorId: string; vendorNam
                   <RowActions
                     slot="5.5rem"
                     primary={
-                      s.status === "submitted" ? (
+                      canAccept(s) ? (
                         <Button size="sm" aria-label={`Accept answer from ${s.supplierEmail}`} aria-disabled={act.busy || undefined} onClick={() => !act.busy && setAcceptFor(s)}>
                           Accept
                         </Button>
                       ) : null
                     }
                     secondary={
-                      s.status === "submitted" ? (
+                      canDecide(s) ? (
                         <Button size="sm" variant="danger" aria-label={`Reject answer from ${s.supplierEmail}`} aria-disabled={act.busy || undefined} onClick={() => !act.busy && setRejectFor(s)}>
                           Reject
                         </Button>
                       ) : null
                     }
                     rest={
-                      s.file ? (
+                      s.file && s.status !== "withdrawn" ? (
                         <Button size="sm" variant="ghost" aria-label={`Download file ${s.file.name}`} aria-disabled={act.busy || undefined} onClick={() => !act.busy && download(s)}>
                           Download file
                         </Button>
@@ -518,17 +546,27 @@ export default function SupplierAccessPanel(props: { vendorId: string; vendorNam
       <ConfirmModal
         open={acceptFor !== null}
         title="Accept this answer?"
-        body={
-          acceptFor ? (
-            <p>
-              The answer from {acceptFor.supplierEmail} for <strong>{targetLabel(acceptFor)}</strong> is recorded on {props.vendorName} as
-              a claim the vendor made, attributed to you. It is not verified by this platform. This cannot be undone.
-            </p>
-          ) : null
-        }
+        body={acceptFor ? <AcceptBody s={acceptFor} label={targetLabel(acceptFor)} vendorName={props.vendorName} outcome={acceptOutcome(acceptFor, allQuestionnaires)} /> : null}
         confirmLabel="Accept answer"
         onConfirm={() => acceptFor && decide(acceptFor, "accept")}
         onCancel={() => setAcceptFor(null)}
+      />
+
+      <ConfirmModal
+        open={unscannedFor !== null}
+        title="Download a file that has not been scanned?"
+        body={
+          unscannedFor?.file ? (
+            <p data-testid="supplier-unscanned-confirm">
+              <strong>{unscannedFor.file.name}</strong> has not been scanned for malware. Open it only if you trust the supplier who
+              sent it. The download is recorded in the audit trail.
+            </p>
+          ) : null
+        }
+        confirmLabel="Download anyway"
+        danger
+        onConfirm={() => unscannedFor && download(unscannedFor, true)}
+        onCancel={() => setUnscannedFor(null)}
       />
 
       <ReasonModal
@@ -542,5 +580,36 @@ export default function SupplierAccessPanel(props: { vendorId: string; vendorNam
         onCancel={() => setRejectFor(null)}
       />
     </Card>
+  );
+}
+
+/** what accepting does, said before the reviewer confirms: a claim on the vendor's checklist, or only "accepted" */
+function AcceptBody(props: { s: ReviewSubmission; label: string; vendorName: string; outcome: ReturnType<typeof acceptOutcome> }) {
+  const intro = (
+    <>
+      The answer from {props.s.supplierEmail} for <strong>{props.label}</strong>
+    </>
+  );
+  if (props.outcome === "no_control") {
+    return (
+      <p data-testid="supplier-accept-outcome">
+        {intro} will be marked accepted. This question is not linked to a control, so nothing is added to the vendor&apos;s checklist.
+        This cannot be undone.
+      </p>
+    );
+  }
+  if (props.outcome === "unknown") {
+    return (
+      <p data-testid="supplier-accept-outcome">
+        {intro} will be marked accepted. If its question is linked to a control, the answer is also recorded on {props.vendorName} as a
+        claim the vendor made, attributed to you, and not verified by this platform. This cannot be undone.
+      </p>
+    );
+  }
+  return (
+    <p data-testid="supplier-accept-outcome">
+      {intro} is recorded on {props.vendorName} as a claim the vendor made, attributed to you. It is not verified by this
+      platform. This cannot be undone.
+    </p>
   );
 }

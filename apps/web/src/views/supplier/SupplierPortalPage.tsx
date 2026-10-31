@@ -21,6 +21,7 @@ import {
   fileLimitLabel,
   fileProblem,
   fileTypeLabel,
+  FILES_NOT_ACCEPTED_NOTE,
   LINK_REFUSAL_DETAIL,
   readFileAsBase64,
   SESSION_REFUSAL_DETAIL,
@@ -67,7 +68,14 @@ interface Assessment {
   controls: Control[];
   questionnaire: { name: string; version: number; description: string; questions: Question[] } | null;
   submissions: Submission[];
-  limits: { fileMaxBytes: number; statementMax: number };
+  limits: Limits;
+}
+/** `filesAccepted` is false while no malware scanner is configured and an admin has not chosen to take unscanned files */
+interface Limits {
+  fileMaxBytes: number;
+  statementMax: number;
+  filesAccepted: boolean;
+  fileBytesBudget: number;
 }
 
 type Target = { kind: "control"; controlRef: string } | { kind: "question"; questionId: string };
@@ -128,7 +136,11 @@ type Phase =
   | { kind: "failed"; message: string }
   | { kind: "signedOut" };
 
-const statusTone = (st: SubmissionStatus): Tone => (st === "accepted" ? "ok" : st === "rejected" ? "danger" : "info");
+const statusTone = (st: SubmissionStatus): Tone =>
+  st === "accepted" ? "ok" : st === "rejected" ? "danger" : st === "withdrawn" ? "neutral" : "info";
+
+/** the counter speaks only once the answer is close to the limit, never on every keystroke */
+const NEAR_LIMIT_SHARE = 0.9;
 
 export default function SupplierPortalPage() {
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
@@ -242,6 +254,8 @@ function AssessmentView(props: { data: Assessment; onSessionEnded: (message: str
   const forTarget = (t: Target) =>
     d.submissions.filter((x) => (t.kind === "control" ? x.kind === "control" && x.controlRef === t.controlRef : x.kind === "question" && x.questionId === t.questionId));
   const questions = d.questionnaire?.questions ?? [];
+  // fail closed: only an explicit "yes" from the server shows a file input
+  const filesAccepted = d.limits.filesAccepted === true;
   return (
     <>
       <Card>
@@ -269,9 +283,19 @@ function AssessmentView(props: { data: Assessment; onSessionEnded: (message: str
             </div>
           </dl>
           <p className={v.hint}>
-            For your security, the session also ends after 30 minutes without activity. Files can be PDF, PNG, JPEG, plain text or
-            CSV, at most {fileLimitLabel(d.limits.fileMaxBytes)} each.
+            For your security, the session also ends after 30 minutes without activity.
+            {filesAccepted && (
+              <>
+                {" "}Files can be PDF, PNG, JPEG, plain text or CSV, at most {fileLimitLabel(d.limits.fileMaxBytes)} each, and{" "}
+                {fileLimitLabel(d.limits.fileBytesBudget)} in total.
+              </>
+            )}
           </p>
+          {!filesAccepted && (
+            <p className={s.prose} data-testid="supplier-files-not-accepted">
+              <strong>{FILES_NOT_ACCEPTED_NOTE}</strong>
+            </p>
+          )}
           {!d.open && (
             <div role="alert" className={v.errLine}>
               This assessment has been decided and no longer takes answers. You can still read what you sent.
@@ -295,7 +319,7 @@ function AssessmentView(props: { data: Assessment; onSessionEnded: (message: str
                 <AnswerForm
                   target={{ kind: "control", controlRef: c.controlRef }}
                   label={`Your answer for ${c.controlRef}`}
-                  allowFile
+                  allowFile={filesAccepted}
                   disabled={!d.open}
                   limits={d.limits}
                   onSessionEnded={props.onSessionEnded}
@@ -322,7 +346,7 @@ function AssessmentView(props: { data: Assessment; onSessionEnded: (message: str
                 <AnswerForm
                   target={{ kind: "question", questionId: q.id }}
                   label={`Your answer to question ${i + 1}`}
-                  allowFile={q.allowFile}
+                  allowFile={q.allowFile && filesAccepted}
                   disabled={!d.open}
                   limits={d.limits}
                   onSessionEnded={props.onSessionEnded}
@@ -345,7 +369,7 @@ function History(props: { items: Submission[] }) {
       {props.items.map((x) => (
         <li key={x.id} className={s.historyItem}>
           <div className={v.row}>
-            <Badge tone={statusTone(x.status)}>{SUPPLIER_STATUS_LABEL[x.status]}</Badge>
+            <Badge tone={statusTone(x.status)}>{SUPPLIER_STATUS_LABEL[x.status] ?? x.status}</Badge>
             <span className={v.faint}>Sent {fmtAt(x.createdAt)}</span>
           </div>
           <p className={s.prose}>{x.statement}</p>
@@ -372,7 +396,7 @@ function AnswerForm(props: {
   label: string;
   allowFile: boolean;
   disabled: boolean;
-  limits: { fileMaxBytes: number; statementMax: number };
+  limits: Limits;
   onSessionEnded: (message: string) => void;
   onSubmitted: () => void;
 }) {
@@ -384,6 +408,8 @@ function AnswerForm(props: {
   const fileRef = useRef<HTMLInputElement>(null);
   const fileId = useId();
   const fileHintId = useId();
+  const counterId = useId();
+  const nearLimit = statement.length >= Math.floor(props.limits.statementMax * NEAR_LIMIT_SHARE);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -408,6 +434,8 @@ function AnswerForm(props: {
         return;
       }
       if (r.status === 401) return props.onSessionEnded(refusalText(401, r.body, SESSION_REFUSAL_DETAIL));
+      // the server stopped taking files since the page loaded: refresh, so the file input goes away
+      if (r.body?.error === "files_not_accepted") props.onSubmitted();
       setProblem(refusalText(r.status, r.body, "Your answer could not be sent. Try again in a moment."));
     } catch (err) {
       setProblem(err instanceof Error ? err.message : NETWORK_FAILURE);
@@ -424,11 +452,16 @@ function AnswerForm(props: {
           value={statement}
           maxLength={props.limits.statementMax}
           disabled={props.disabled}
+          aria-describedby={counterId}
           onChange={(e) => setStatement(e.target.value)}
         />
       </Field>
-      <span className={s.counter} aria-live="polite">
+      <span id={counterId} className={s.counter}>
         {statement.length.toLocaleString("en-GB")} of {props.limits.statementMax.toLocaleString("en-GB")} characters
+      </span>
+      {/* one fixed sentence once the answer nears the limit: read out once, not on every keystroke */}
+      <span role="status" className={v.faint}>
+        {nearLimit ? `Your answer is close to the limit of ${props.limits.statementMax.toLocaleString("en-GB")} characters.` : ""}
       </span>
       {props.allowFile && (
         <div className={v.stackTight}>

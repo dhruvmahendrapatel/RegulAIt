@@ -66,6 +66,8 @@ export interface ReviewSubmission {
   decidedAt: string | null;
   createdAt: string;
   accessId: string;
+  /** the grant the answer came through, as it stands now: a revoked grant's answers cannot be accepted */
+  accessState: AccessState;
   supplierEmail: string;
   framework: string;
 }
@@ -77,6 +79,61 @@ export const LINK_STATE_LABEL: Record<LinkState, string> = {
   expired: "Link expired",
   revoked: "Link withdrawn",
 };
+
+/** beside the supplier's address on an answer; nothing for a grant that is still active */
+export const ANSWER_ACCESS_LABEL: Record<AccessState, string | null> = {
+  active: null,
+  expired: "Access expired",
+  revoked: "Access revoked",
+};
+
+/** a reviewer may decide only an answer still waiting; accepting one needs a grant that was not revoked */
+export const canDecide = (s: Pick<ReviewSubmission, "status">) => s.status === "submitted";
+export const canAccept = (s: Pick<ReviewSubmission, "status" | "accessState">) => canDecide(s) && s.accessState !== "revoked";
+
+/** the shown name of what an answer is for; never the internal question id */
+export function answerTargetLabel(
+  s: Pick<ReviewSubmission, "kind" | "controlRef" | "questionnaireId" | "questionId">,
+  questionnaires: readonly SupplierQuestionnaire[],
+): string {
+  if (s.kind === "control") return s.controlRef ?? "Control";
+  return findQuestion(s, questionnaires)?.prompt ?? "Question (from an earlier version)";
+}
+
+function findQuestion(
+  s: Pick<ReviewSubmission, "questionnaireId" | "questionId">,
+  questionnaires: readonly SupplierQuestionnaire[],
+): SupplierQuestion | undefined {
+  const q = questionnaires.find((x) => x.id === s.questionnaireId);
+  return q?.questions.find((x) => x.id === s.questionId);
+}
+
+/**
+ * What accepting this answer does, mirroring the gateway: an answer to a control, or to a question linked to one, is
+ * recorded as a vendor-attested claim; an answer to a question with no linked control is only marked accepted.
+ * `unknown` when the question's version is not in the list the screen has.
+ */
+export type AcceptOutcome = "attestation" | "no_control" | "unknown";
+export function acceptOutcome(
+  s: Pick<ReviewSubmission, "kind" | "questionnaireId" | "questionId">,
+  questionnaires: readonly SupplierQuestionnaire[],
+): AcceptOutcome {
+  if (s.kind === "control") return "attestation";
+  const q = findQuestion(s, questionnaires);
+  if (!q) return "unknown";
+  return q.controlRef ? "attestation" : "no_control";
+}
+
+/** a file that is not known to be clean asks the reviewer to confirm before it downloads */
+export const needsUnscannedConfirm = (file: { scanStatus: string | null } | null): boolean => file !== null && file.scanStatus !== "clean";
+
+/** the file's address; `acknowledgeUnscanned` carries the reviewer's confirmation for a file nobody scanned */
+export const answerFilePath = (vendorId: string, submissionId: string, acknowledgeUnscanned: boolean) =>
+  `/v1/vendors/${vendorId}/supplier-submissions/${submissionId}/file${acknowledgeUnscanned ? "?acknowledgeUnscanned=1" : ""}`;
+
+/** the name a downloaded file is saved under: a CSV is served as plain text, so it is saved as `.txt` too */
+export const downloadName = (file: { name: string; contentType: string | null }) =>
+  file.contentType === "text/csv" ? `${file.name}.txt` : file.name;
 
 /** the newest link's state, which is the one that matters; null when the grant has none */
 export function latestLink(g: SupplierGrant): SupplierLink | null {

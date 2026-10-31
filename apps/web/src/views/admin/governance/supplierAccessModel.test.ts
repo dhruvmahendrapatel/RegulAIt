@@ -1,7 +1,14 @@
 /** ADR-0221 — the supplier-access forms' checks and the questionnaire list's grouping. */
 import { describe, expect, it } from "vitest";
 import {
+  acceptOutcome,
+  ANSWER_ACCESS_LABEL,
+  answerFilePath,
+  answerTargetLabel,
   blankQuestion,
+  canAccept,
+  canDecide,
+  downloadName,
   draftsFrom,
   EMPTY_INVITE,
   groupQuestionnaires,
@@ -9,6 +16,7 @@ import {
   inviteProblems,
   latestLink,
   looksLikeEmail,
+  needsUnscannedConfirm,
   nextQuestionId,
   questionnaireLabel,
   questionProblems,
@@ -135,5 +143,58 @@ describe("a grant's sign-in state", () => {
     const newer = { id: "2", expiresAt: "2026-10-03T00:00:00Z", usedAt: "2026-10-02T09:00:00Z", revokedAt: null, state: "used" as const };
     expect(latestLink(grant([older, newer]))?.id).toBe("2");
     expect(latestLink(grant([newer, older]))?.id).toBe("2");
+  });
+});
+
+describe("reviewing an answer", () => {
+  const qn = (questions: SupplierQuestionnaire["questions"]): SupplierQuestionnaire => ({
+    id: "qn-1",
+    name: "Security basics",
+    version: 1,
+    description: "",
+    questions,
+    createdAt: "2026-10-01T09:00:00Z",
+    retiredAt: null,
+  });
+  const linked = qn([
+    { id: "q1", prompt: "Do you encrypt data at rest?", help: "", required: true, allowFile: false, controlRef: "ART-10" },
+    { id: "q2", prompt: "Who is your DPO?", help: "", required: true, allowFile: false, controlRef: null },
+  ]);
+  const control = { kind: "control" as const, controlRef: "ART-10", questionnaireId: null, questionId: null };
+  const q1 = { kind: "question" as const, controlRef: null, questionnaireId: "qn-1", questionId: "q1" };
+  const q2 = { ...q1, questionId: "q2" };
+  const gone = { ...q1, questionnaireId: "qn-old", questionId: "old-slug" };
+
+  it("says what accepting does: a claim for a control or a linked question, nothing for an unlinked question", () => {
+    expect(acceptOutcome(control, [])).toBe("attestation");
+    expect(acceptOutcome(q1, [linked])).toBe("attestation");
+    expect(acceptOutcome(q2, [linked])).toBe("no_control");
+    expect(acceptOutcome(gone, [linked])).toBe("unknown");
+  });
+  it("names the question by its prompt and never by its internal id", () => {
+    expect(answerTargetLabel(control, [])).toBe("ART-10");
+    expect(answerTargetLabel(q2, [linked])).toBe("Who is your DPO?");
+    expect(answerTargetLabel(gone, [linked])).toBe("Question (from an earlier version)");
+    expect(answerTargetLabel(gone, [linked])).not.toContain("old-slug");
+  });
+  it("offers Accept only for a waiting answer from a grant that was not revoked", () => {
+    expect(canAccept({ status: "submitted", accessState: "active" })).toBe(true);
+    expect(canAccept({ status: "submitted", accessState: "expired" })).toBe(true);
+    expect(canAccept({ status: "submitted", accessState: "revoked" })).toBe(false);
+    expect(canDecide({ status: "withdrawn" })).toBe(false);
+    expect(canAccept({ status: "withdrawn", accessState: "active" })).toBe(false);
+    expect(ANSWER_ACCESS_LABEL).toEqual({ active: null, expired: "Access expired", revoked: "Access revoked" });
+  });
+  it("asks before a file nobody scanned downloads, and says so in the request", () => {
+    expect(needsUnscannedConfirm({ scanStatus: "clean" })).toBe(false);
+    expect(needsUnscannedConfirm({ scanStatus: "not_scanned" })).toBe(true);
+    expect(needsUnscannedConfirm({ scanStatus: null })).toBe(true);
+    expect(needsUnscannedConfirm(null)).toBe(false);
+    expect(answerFilePath("v", "s", false)).toBe("/v1/vendors/v/supplier-submissions/s/file");
+    expect(answerFilePath("v", "s", true)).toBe("/v1/vendors/v/supplier-submissions/s/file?acknowledgeUnscanned=1");
+  });
+  it("saves a CSV as plain text, as it is served", () => {
+    expect(downloadName({ name: "data.csv", contentType: "text/csv" })).toBe("data.csv.txt");
+    expect(downloadName({ name: "policy.pdf", contentType: "application/pdf" })).toBe("policy.pdf");
   });
 });

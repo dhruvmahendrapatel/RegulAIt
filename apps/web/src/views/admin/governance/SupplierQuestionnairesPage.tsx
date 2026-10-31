@@ -43,6 +43,18 @@ const PORTAL_COPY = {
     "link and ends every supplier session.",
 };
 
+const UNSCANNED_COPY = {
+  label: "Accept files that have not been scanned",
+  strict: "Off: suppliers cannot attach files until a malware scanner is configured.",
+  relaxed: "On: suppliers can attach files that nobody has scanned. Each download asks the reviewer to confirm.",
+};
+
+interface PortalSettings {
+  enabled: boolean;
+  acceptUnscannedFiles: boolean;
+  scannerConfigured: boolean;
+}
+
 interface BuilderState {
   /** the version a new one is published from; null for a new questionnaire */
   from: SupplierQuestionnaire | null;
@@ -56,7 +68,7 @@ export default function SupplierQuestionnairesPage() {
   const act = useAction();
   const settings = useQuery({
     queryKey: ["admin", "supplier-portal", "settings"],
-    queryFn: () => api.get<{ enabled: boolean }>("/v1/supplier-portal/settings"),
+    queryFn: () => api.get<PortalSettings>("/v1/supplier-portal/settings"),
   });
   const list = useQuery({
     queryKey: ["admin", "supplier-questionnaires"],
@@ -69,6 +81,9 @@ export default function SupplierQuestionnairesPage() {
   const [retiring, setRetiring] = useState<SupplierQuestionnaire | null>(null);
 
   const enabled = settings.data?.enabled === true;
+  // fail closed: only an explicit "yes" reads as relaxed
+  const acceptUnscanned = settings.data?.acceptUnscannedFiles === true;
+  const scannerConfigured = settings.data?.scannerConfigured === true;
   const groups = groupQuestionnaires(list.data?.questionnaires ?? []);
   const problems = questionProblems(builder.questions);
   const nameProblem = builder.from === null && !builder.name.trim() ? "Give the questionnaire a name." : builder.name.trim().length > 120 ? "The name can be at most 120 characters." : null;
@@ -84,6 +99,13 @@ export default function SupplierQuestionnairesPage() {
       await withStepUp((h) => stepUpApi.put("/v1/supplier-portal/settings", { enabled: on }, h));
       await settings.refetch();
     }, on ? "Supplier portal turned on. This is recorded as a relaxation." : "Supplier portal turned off. Unused links and supplier sessions were withdrawn.");
+  };
+
+  const setUnscanned = (on: boolean) => {
+    void act.run(async () => {
+      await withStepUp((h) => stepUpApi.put("/v1/supplier-portal/settings", { acceptUnscannedFiles: on }, h));
+      await settings.refetch();
+    }, on ? "Unscanned files are now accepted. This is recorded as a relaxation." : "Unscanned files are refused again.");
   };
 
   const setQuestion = (i: number, patch: Partial<QuestionDraft>) =>
@@ -162,6 +184,38 @@ export default function SupplierQuestionnairesPage() {
                   </>
                 )}
               </div>
+              <section className={v.stackTight} aria-labelledby="supplier-unscanned-title" data-testid="supplier-unscanned-setting">
+                <h3 id="supplier-unscanned-title" className={v.sectionTitle}>
+                  Files from suppliers
+                </h3>
+                {scannerConfigured ? (
+                  <p className={v.hint}>A scanner checks every file.</p>
+                ) : (
+                  <div className={v.stack}>
+                    <div className={v.row}>
+                      <span>{UNSCANNED_COPY.label}:</span>
+                      <strong>{acceptUnscanned ? "On" : "Off"}</strong>
+                      <InfoButton label={UNSCANNED_COPY.label}>{acceptUnscanned ? UNSCANNED_COPY.relaxed : UNSCANNED_COPY.strict}</InfoButton>
+                      {acceptUnscanned ? <Badge tone="warn">Relaxed</Badge> : <Badge tone="ok">Strict default</Badge>}
+                    </div>
+                    <p className={v.hint}>{acceptUnscanned ? UNSCANNED_COPY.relaxed : UNSCANNED_COPY.strict}</p>
+                    <div className={v.row}>
+                      {acceptUnscanned ? (
+                        <Button aria-disabled={act.busy || undefined} onClick={() => !act.busy && setUnscanned(false)}>
+                          Stop accepting unscanned files
+                        </Button>
+                      ) : (
+                        <>
+                          <Button aria-disabled={act.busy || undefined} onClick={() => !act.busy && setUnscanned(true)}>
+                            Accept unscanned files
+                          </Button>
+                          <span className={v.faint}>This is a relaxation: you will be asked to confirm it&apos;s you.</span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </section>
               <p className={v.hint}>
                 Invite a supplier from the vendor&apos;s page in <Link className={sa.inlineLink} to="/admin/vendors">Vendors</Link>.
               </p>
