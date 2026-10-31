@@ -7,7 +7,7 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
-import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
+import { api as stepUpApi, putOrgSettings, withStepUp } from "../../../stepup/stepUp";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Fieldset, Input, Modal, RecordError, RowActions, Select, SkeletonBlock, Table, Textarea } from "../../../ui/kit";
 import { RefusalNotice } from "../../../ui/RefusalNotice";
@@ -50,16 +50,40 @@ function useLimitOn() {
 
 export function LimitStatus() {
   const q = useLimitOn();
+  const act = useAction();
   if (q.isLoading) return <SkeletonBlock lines={1} />;
   if (q.error) return <p className={v.errLine} role="alert">Could not read whether the processing limit is on.</p>;
   const on = q.data?.settings?.privacyOpsEnabled === true;
+  const toggle = () => {
+    if (act.busy) return;
+    void act.run(
+      () => putOrgSettings({ privacyOpsEnabled: !on }),
+      on ? "Processing limit turned off" : "Processing limit turned on",
+    );
+  };
   return (
-    <p className={v.hint}>
-      <Badge tone={on ? "ok" : "neutral"}>{on ? "Processing limit on" : "Processing limit off"}</Badge>{" "}
-      {on
-        ? "Personal data in a dispatch is refused unless an active record for its project lists the category."
-        : "Records are kept but nothing is refused. An admin turns the limit on under Settings, Organization."}
-    </p>
+    <div className={p.section}>
+      <p className={v.hint}>
+        <Badge tone={on ? "ok" : "neutral"}>{on ? "Processing limit on" : "Processing limit off"}</Badge>{" "}
+        {on
+          ? "Personal data in a call is refused unless an active record for its project lists the category. Turning the limit off loosens a security setting, so you will be asked to confirm it's you."
+          : "Records are kept but nothing is refused. Turning the limit on refuses personal data in any call whose project has no active record listing its category, including calls that name no project."}
+      </p>
+      <div>
+        <Button aria-disabled={act.busy} onClick={toggle}>
+          {on ? "Turn the processing limit off" : "Turn the processing limit on"}
+        </Button>
+      </div>
+      {act.guidance ? (
+        <RefusalNotice guidance={act.guidance} />
+      ) : (
+        act.error && (
+          <div className={v.errLine} role="alert">
+            {act.error}
+          </div>
+        )
+      )}
+    </div>
   );
 }
 

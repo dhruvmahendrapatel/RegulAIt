@@ -4129,6 +4129,21 @@ export function registerAgentConnectorRoutes(
             .status(inputBlock.status)
             .send({ decision, error: inputBlock.error, detail: inputBlock.detail, pii: inputBlock.pii, ...suppressionFlag });
         }
+        // ADR-0224 (P13 c): the processing limit, hoisted for the same reason as the PII rung above: a repeat of an
+        // input carrying a category no record permits must be refused and audited, not answered from the semantic
+        // cache. dispatchAttempt keeps its own call for the orchestration and worker paths that never reach here.
+        const privacyRefusal = await privacyDispatchGate(db, {
+          userId,
+          agentId: agent.id,
+          agentName: agent.name,
+          projectId: projectId ?? null,
+          input: body.input ?? "",
+        });
+        if (privacyRefusal) {
+          return reply
+            .status(privacyRefusal.status)
+            .send({ decision, error: privacyRefusal.error, detail: privacyRefusal.detail, ...suppressionFlag });
+        }
       }
       // PILLAR 6 §8/§10 SEMANTIC CACHING (REAL cache) — opt-in per-(user,agent)
       // EXACT-MATCH response cache. When enabled, a byte-identical single-turn

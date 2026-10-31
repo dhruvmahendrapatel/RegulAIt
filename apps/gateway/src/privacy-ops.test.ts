@@ -311,3 +311,82 @@ describe("data-subject requests", () => {
     expect(await db.select().from(dataSubjectTombstones).where(eq(dataSubjectTombstones.requestId, id))).toHaveLength(0);
   });
 });
+
+// Review #626 finding 1: erasure and locate must match the subject at a boundary, never inside another person's data.
+describe("the subject pattern never reaches a superstring neighbour", () => {
+  async function message(content: string) {
+    const [c] = await db.insert(conversations).values({ userId, agentId, projectId: proj, title: "neighbours" }).returning();
+    const [m] = await db.insert(conversationMessages).values({ conversationId: c!.id, role: "user", content }).returning();
+    return m!.id;
+  }
+  const read = async (id: string) => (await db.select().from(conversationMessages).where(eq(conversationMessages.id, id)))[0]!.content;
+  async function erase(identifierKind: "email" | "phone", identifier: string) {
+    const c = await app.inject({ method: "POST", url: "/v1/privacy/requests", headers: AUTH, payload: { kind: "erasure", identifierKind, identifier } });
+    expect(c.statusCode).toBe(201);
+    const id = c.json().request.id as string;
+    const loc = await app.inject({ method: "POST", url: `/v1/privacy/requests/${id}/locate`, headers: AUTH, payload: { identifier } });
+    expect(loc.statusCode).toBe(200);
+    expect(loc.json().searchScope).toContain("Only these four");
+    const conv = (loc.json().request.located as Array<{ store: string; matches: number }>).find((f) => f.store === "conversations")!;
+    const close = await app.inject({ method: "POST", url: `/v1/privacy/requests/${id}/close`, headers: AUTH, payload: { outcome: "completed", note: "erased", identifier } });
+    expect(close.statusCode).toBe(200);
+    return conv.matches;
+  }
+
+  it("email: the subject is erased; jo<subject> and <subject>.au survive byte-for-byte and are not counted", async () => {
+    const subject = `ann.${RUN}@example.com`;
+    const mixed = await message(`Write to ${subject.toUpperCase()}, not jo${subject} or ${subject}.au. Thanks ${subject}.`);
+    const neighbourText = `Copy jo${subject} and ${subject}.au and x${subject}-y`;
+    const neighbour = await message(neighbourText);
+    expect(await erase("email", subject)).toBe(1);
+    expect(await read(mixed)).toBe(`Write to ${ERASED_MARKER}, not jo${subject} or ${subject}.au. Thanks ${ERASED_MARKER}.`);
+    expect(await read(neighbour)).toBe(neighbourText);
+  });
+
+  it("phone: a longer digit run containing the number survives byte-for-byte and is not counted", async () => {
+    const phone = `0794${RUN.replace(/\D/g, "").padEnd(6, "7").slice(0, 6)}1`;
+    const mixed = await message(`Ring ${phone} today, not account 9${phone}5.`);
+    const neighbourText = `Account numbers 1${phone} and ${phone}22 belong to someone else`;
+    const neighbour = await message(neighbourText);
+    expect(await erase("phone", phone)).toBe(1);
+    expect(await read(mixed)).toBe(`Ring ${ERASED_MARKER} today, not account 9${phone}5.`);
+    expect(await read(neighbour)).toBe(neighbourText);
+  });
+});
+
+// Review #626 finding 2: a repeat answered from the semantic cache must still meet the processing limit.
+describe("the processing limit runs before the semantic-cache serve", () => {
+  it("an input answered once is refused 409 from the cache path once the limit is on", async () => {
+    const restore = await setOrgSettingsForTest(db, { privacyOpsEnabled: false, semanticCachePolicy: "opt_in" });
+    try {
+      const p = await app.inject({ method: "POST", url: "/v1/projects", headers: AUTH, payload: { name: `privacy-cache-${RUN}` } });
+      const cacheProj = p.json().id as string;
+      const input = `Summarise the thread with cache.${RUN}@example.com`;
+      const send = () =>
+        app.inject({
+          method: "POST",
+          url: `/v1/agents/${agentId}/invoke`,
+          headers: userAuth,
+          payload: { mode: "execute", input, dispatch: true, semanticCache: true, projectId: cacheProj },
+        });
+      const first = await send();
+      expect(first.statusCode, first.body).toBe(200);
+      expect(first.json().cached).toBeFalsy();
+      const second = await send();
+      expect(second.statusCode).toBe(200);
+      expect(second.json().cached).toBe(true);
+
+      await setOrgSettingsForTest(db, { privacyOpsEnabled: true });
+      const before = await db.select().from(auditLog).where(and(eq(auditLog.userId, userId), eq(auditLog.ruleId, PRIVACY_RULE_IDS.dispatchRefused)));
+      const third = await send();
+      expect(third.statusCode).toBe(409);
+      expect(third.json().error).toBe("processing_not_permitted");
+      expect(third.json().cached).toBeUndefined();
+      expect(third.json().dispatch).toBeUndefined();
+      const after = await db.select().from(auditLog).where(and(eq(auditLog.userId, userId), eq(auditLog.ruleId, PRIVACY_RULE_IDS.dispatchRefused)));
+      expect(after.length).toBe(before.length + 1);
+    } finally {
+      await restore();
+    }
+  });
+});

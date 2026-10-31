@@ -172,11 +172,26 @@ const INVALID = (expected: string) => ({ error: "invalid_request", detail: `expe
 // Locating a subject
 // ---------------------------------------------------------------------------
 
-/** `position(needle in haystack) > 0`, case-insensitive: a parameterised substring test with no pattern syntax */
-const containsCi = (column: unknown, needle: string) => sql`position(lower(${needle}) in lower(${column})) > 0`;
+/**
+ * THE ONE SUBJECT PATTERN. Locate, the erasure `UPDATE ... WHERE` and the replacement all use it, so what is counted is
+ * exactly what is rewritten. A bare substring match is not enough: erasing `ann@example.com` must not touch
+ * `joann@example.com` or `ann@example.com.au`, and a phone number must not match inside a longer digit run (another
+ * number, an account number). So the identifier, with every metacharacter escaped, is anchored by lookarounds that
+ * Postgres AREs and JavaScript both support:
+ *   email  not preceded by a local-part character, not followed by a domain character or a further `.label`
+ *   phone  not preceded or followed by a digit
+ * Matching is case-insensitive (`~*`, and the `gi` flags of `regexp_replace`). The pattern is a bound parameter, never
+ * spliced into SQL.
+ */
+export function subjectPattern(kind: DsrIdentifierKind, identifier: string): string {
+  const escaped = identifier.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return kind === "email"
+    ? `(?<![A-Za-z0-9._%+-])${escaped}(?![A-Za-z0-9-]|\\.[A-Za-z0-9])`
+    : `(?<![0-9])${escaped}(?![0-9])`;
+}
 
-/** a case-insensitive regex for `needle`, with every metacharacter escaped, for Postgres `regexp_replace` */
-const literalRegex = (needle: string) => needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** the column matches the subject pattern (case-insensitive) */
+const matchesSubject = (column: unknown, pattern: string) => sql`${column} ~* ${pattern}`;
 
 interface Located {
   findings: DsrStoreFinding[];
@@ -184,6 +199,11 @@ interface Located {
   auditCount: number;
   newestAuditAt: Date | null;
 }
+
+/** said with every locate result, so the counts are never read as an exhaustive search */
+export const SEARCH_SCOPE_NOTE =
+  "Only these four RegulAIt-held stores are searched, for the identifier as typed. Data held in other systems, in " +
+  "conversation message metadata, or in a different spelling or format is not found.";
 
 const STORE_NOTES: Readonly<Record<DsrStore, string>> = {
   accounts:
@@ -196,21 +216,21 @@ const STORE_NOTES: Readonly<Record<DsrStore, string>> = {
 
 async function locateSubject(db: Db, kind: DsrIdentifierKind, identifier: string): Promise<Located> {
   // the identifier as typed (trimmed) is what appears in free text; the normalised form is what an account holds
-  const needle = identifier.trim();
+  const pattern = subjectPattern(kind, identifier);
   const normalised = normaliseDsrIdentifier(kind, identifier);
   const [accountRows, messageRows, summaryRows, contextRows, auditCountRows, auditIdRows] = await Promise.all([
     kind === "email" ? db.select({ id: users.id }).from(users).where(sql`lower(${users.email}) = ${normalised}`) : Promise.resolve([]),
-    db.select({ n: sql<number>`count(*)::int` }).from(conversationMessages).where(containsCi(conversationMessages.content, needle)),
-    db.select({ n: sql<number>`count(*)::int` }).from(conversations).where(and(sql`${conversations.summary} IS NOT NULL`, containsCi(conversations.summary, needle))),
-    db.select({ n: sql<number>`count(*)::int` }).from(projectContextItems).where(containsCi(projectContextItems.content, needle)),
+    db.select({ n: sql<number>`count(*)::int` }).from(conversationMessages).where(matchesSubject(conversationMessages.content, pattern)),
+    db.select({ n: sql<number>`count(*)::int` }).from(conversations).where(and(sql`${conversations.summary} IS NOT NULL`, matchesSubject(conversations.summary, pattern))),
+    db.select({ n: sql<number>`count(*)::int` }).from(projectContextItems).where(matchesSubject(projectContextItems.content, pattern)),
     db
       .select({ n: sql<number>`count(*)::int`, newest: sql<Date | null>`max(${auditLog.at})` })
       .from(auditLog)
-      .where(or(containsCi(sql`${auditLog.detail}::text`, needle), containsCi(auditLog.reason, needle))),
+      .where(or(matchesSubject(sql`${auditLog.detail}::text`, pattern), matchesSubject(auditLog.reason, pattern))),
     db
       .select({ id: auditLog.id })
       .from(auditLog)
-      .where(or(containsCi(sql`${auditLog.detail}::text`, needle), containsCi(auditLog.reason, needle)))
+      .where(or(matchesSubject(sql`${auditLog.detail}::text`, pattern), matchesSubject(auditLog.reason, pattern)))
       .orderBy(desc(auditLog.at))
       .limit(TOMBSTONE_MAX_IDS),
   ]);
@@ -620,7 +640,7 @@ export function registerPrivacyOpsRoutes(app: FastifyInstance, db: Db, opts: { d
       return u;
     });
     if (!updated) return reply.status(409).send({ error: "request_closed", detail: "this request is closed" });
-    return { request: requestView(updated) };
+    return { request: requestView(updated), searchScope: SEARCH_SCOPE_NOTE };
   });
 
   const closeBody = closeDsrSchema.and(z.object({ identifier: z.string().trim().min(3).max(320).optional() }));
@@ -647,22 +667,21 @@ export function registerPrivacyOpsRoutes(app: FastifyInstance, db: Db, opts: { d
       const closedAt = new Date();
       let findings = (row.located as DsrStoreFinding[] | null) ?? null;
       if (located && opened.identifier) {
-        const needle = opened.identifier.trim();
-        const pattern = literalRegex(needle);
+        const pattern = subjectPattern(row.identifierKind as DsrIdentifierKind, opened.identifier);
         const msgs = await t
           .update(conversationMessages)
           .set({ content: sql`regexp_replace(${conversationMessages.content}, ${pattern}, ${ERASED_MARKER}, 'gi')` })
-          .where(containsCi(conversationMessages.content, needle))
+          .where(matchesSubject(conversationMessages.content, pattern))
           .returning({ id: conversationMessages.id });
         const sums = await t
           .update(conversations)
           .set({ summary: sql`regexp_replace(${conversations.summary}, ${pattern}, ${ERASED_MARKER}, 'gi')` })
-          .where(and(sql`${conversations.summary} IS NOT NULL`, containsCi(conversations.summary, needle)))
+          .where(and(sql`${conversations.summary} IS NOT NULL`, matchesSubject(conversations.summary, pattern)))
           .returning({ id: conversations.id });
         const ctx = await t
           .update(projectContextItems)
           .set({ content: sql`regexp_replace(${projectContextItems.content}, ${pattern}, ${ERASED_MARKER}, 'gi')` })
-          .where(containsCi(projectContextItems.content, needle))
+          .where(matchesSubject(projectContextItems.content, pattern))
           .returning({ id: projectContextItems.id });
         const retainedUntil =
           floorDays != null && located.newestAuditAt ? new Date(located.newestAuditAt.getTime() + floorDays * 86_400_000) : null;
@@ -723,7 +742,7 @@ export function registerPrivacyOpsRoutes(app: FastifyInstance, db: Db, opts: { d
       throw err;
     });
     if (!out) return reply.status(409).send({ error: "request_closed", detail: "this request is closed" });
-    return { request: requestView(out) };
+    return { request: requestView(out), ...(located ? { searchScope: SEARCH_SCOPE_NOTE } : {}) };
   });
 
   app.get("/v1/privacy/requests/:id/tombstones", async (req, reply) => {

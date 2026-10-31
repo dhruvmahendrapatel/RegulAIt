@@ -233,6 +233,10 @@ function RequestModal(props: { id: string; onClose: () => void }) {
             <div className={p.section}>
               <strong>Where the person's data was found</strong>
               <Findings located={r.located} />
+              <p className={v.hint}>
+                Only these four stores are searched, for the identifier exactly as typed. Data in other systems, in
+                message metadata, or written in another format is not found.
+              </p>
             </div>
           )}
           {(tombs.data?.tombstones?.length ?? 0) > 0 && (

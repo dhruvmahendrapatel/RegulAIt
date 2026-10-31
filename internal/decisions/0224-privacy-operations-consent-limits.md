@@ -102,3 +102,32 @@ another may not.
 - Erasure has no dedicated step-up kind; adding one is a migration of `step_up_actions` and every kind list.
 - Rotating the data key changes the digest key, so open requests recorded before a rotation can no longer be matched.
 - The Organization settings page has no control for `privacyOpsEnabled` or `dsrSlaDays` yet.
+
+## Addendum, 2026-10-31: review fixes (#626)
+
+1. **Locate and erasure match the subject at a boundary.** The first slice used a bare substring test, so erasing
+   `ann@example.com` would also have rewritten `joann@example.com` and `ann@example.com.au`, and a phone number would
+   have matched inside a longer digit run. One pattern (`subjectPattern` in `privacy-ops.ts`) is now used for the locate
+   counts, the erasure `UPDATE ... WHERE` and the replacement. It is the escaped identifier anchored by lookarounds that
+   Postgres AREs support, matched case-insensitively with `~*`:
+   - an email is not preceded by a local-part character, and not followed by a domain character or a further `.label`;
+   - a phone number is not preceded or followed by a digit.
+
+   A Postgres test puts superstring neighbours in the same message and in a message of their own, and checks that they
+   survive byte for byte and are not counted.
+2. **The processing limit runs before the semantic-cache lookup.** It now also runs in the native invoke handler,
+   directly after the hoisted PII input rung, and refuses before any cache work. The `dispatchAttempt` call stays for the
+   orchestration and worker paths. At the reviewed head a cache hit was already served inside `dispatchAttempt`, after
+   this rung (the cache test passes with or without the hoist). The hoist makes the order explicit and refuses before
+   the lookup; the test pins the behaviour.
+3. **The switch is on the Records of processing page.** Turning the limit off goes through the stepped-up settings
+   write, as a relaxation.
+4. **Locate says what it searched.** The response (`searchScope`) and the page both say that only the four RegulAIt-held
+   stores are searched, for the identifier as typed.
+5. **Erasure still has no step-up.** None of the existing kinds describes it truthfully: the dialog would tell the admin
+   they were "loosening a security setting". A dedicated kind is still the follow-up.
+
+Further honest limits:
+- `conversation_messages.detail` (jsonb) is neither searched nor erased.
+- Training-corpus ingest (`regulait-llm.ts`) sends scanned corpora to trainers without the processing limit, like the
+  connector and MCP paths.
