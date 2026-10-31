@@ -15,7 +15,7 @@ with High contrast always selectable by anyone (accessibility).
 
 ## Decision
 
-1. **Saved to the account.** A new table `user_appearance` (migration 0255, hand-written) holds one row per person: their
+1. **Saved to the account.** A new table `user_appearance` (migration 0256, hand-written) holds one row per person: their
    palette and mode, each nullable ("nothing saved"). `/auth/me` carries `appearance` (the saved values, the palette to
    paint, the organisation default and lock), so the console repaints in the account's palette on any browser.
    Browser storage stays as the pre-paint cache: the page paints from it first, then adopts the account's values.
@@ -43,7 +43,7 @@ their own palette) is the one shipped.
 
 ## Consequences
 
-- One migration (0255), one ADR, two org settings, one self-service route. The Appearance card says the choice is saved
+- One migration (0256), one ADR, two org settings, one self-service route. The Appearance card says the choice is saved
   to the account (or kept in this browser for the bootstrap operator) and, while locked, offers only the default and
   High contrast.
 - The palette list now lives in two places, `@regulait/shared` (`THEME_PALETTE_IDS`, the gateway and the CHECKs) and

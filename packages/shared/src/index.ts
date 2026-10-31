@@ -141,6 +141,7 @@ export {
   parseExternalScorerResponse,
   externalScorerAvailabilityFor,
   externalScorerKindSchema,
+  EXTERNAL_SCORER_CLAIMABLE_KINDS,
   createExternalScorerSchema,
   updateExternalScorerSchema,
   setExternalScorerEnabledSchema,
@@ -2537,7 +2538,7 @@ export const updateOrgSettingsSchema = z
     ...bomOrgSettingsFields,
     // ADR-0190 (batch 6 item 3): isolation enforcement, the class floors and the executor attestation lifetime
     ...isolationOrgSettingsFields,
-    // ADR-0218 (migration 0255): the organisation default palette and the theme lock (High contrast stays open)
+    // ADR-0218 (migration 0256): the organisation default palette and the theme lock (High contrast stays open)
     ...appearanceOrgSettingsFields,
     // ADR-0225 (P13 d): the public trust pages and auditor access, shipped off
     ...trustPagesOrgSettingsFields,
@@ -4826,6 +4827,8 @@ export * from "./provenance/index.js";
 // ADR-0204: a static upstream credential per MCP server (header refusals, the write contract, the read view)
 export * from "./mcp-upstream-credential.js";
 export * from "./library-lifecycle.js";
+// ADR-0220: trained runtime detectors (PII recogniser, injection classifier, harm model) behind the external-scorer contract
+export * from "./trained-detectors.js";
 // ADR-0224 (P13 c): privacy operations — records of processing, data-subject requests, the processing limit
 export * from "./privacy-ops.js";
 
