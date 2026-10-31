@@ -606,19 +606,7 @@ export function registerLicensingRoutes(app: FastifyInstance, db: Db): void {
       lastVerifiedAt: lastCheck?.at ?? null,
       schedulerPresent: false,
       phoneHome: false,
-      enforcementPointsWired: [
-        "user.provision",
-        "agent.create",
-        "connector.create",
-        "mcp_server.create",
-        "pm_connection.create",
-        "feature.sso_saml (saml_provider.create)",
-        "feature.scim_provisioning (scim_token.create)",
-        "feature.compliance_packs (compliance_pack.activate)",
-        "feature.advanced_orchestration (run.decompose)",
-        "feature.airgapped_mode (deploy_target.create[mode=air_gapped])",
-        "feature.custom_model_providers (model_provider.connect)",
-      ],
+      enforcementPointsWired: LICENSE_ENFORCEMENT_POINTS_WIRED,
       posture: LICENSE_POSTURE_NOTE,
       note:
         "Verification is OFFLINE and makes no network call of any kind — there is no license server to " +
@@ -918,6 +906,21 @@ export async function refuseIfFeatureNotLicensed(
     },
   };
 }
+
+/** the honest list of wired enforcement points; the Licensing page shows it verbatim */
+export const LICENSE_ENFORCEMENT_POINTS_WIRED: readonly string[] = [
+  "Seats (adding a user)",
+  "Agents (adding an agent)",
+  "Connectors (adding a connector)",
+  "MCP servers (registering a server)",
+  "Project trackers (connecting a tracker)",
+  "SSO (adding a SAML provider)",
+  "SCIM (issuing a SCIM token)",
+  "Compliance packs (activating a pack)",
+  "Advanced orchestration (splitting a run into tasks)",
+  "Air-gapped mode (adding an air-gapped deploy target)",
+  "Custom model providers (connecting a provider)",
+];
 
 /** exported for the admin surface and the tests */
 export { LICENSE_ACTION_INVENTORY, LICENSE_POSTURE_NOTE, SEAT_DEFINITION_NOTE };

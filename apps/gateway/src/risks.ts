@@ -74,6 +74,7 @@ import {
   projects,
   redteamRuns,
   shadowAiFindings,
+  sql,
   toolGrants,
   users,
   type AiRiskRow,
@@ -83,11 +84,15 @@ import {
   SCENARIO_LIBRARY,
   AI_RISK_CATEGORIES,
   AI_RISK_REGISTER_DISCLAIMER,
+  AI_RISK_STATUSES,
   DEFAULT_RISK_LIBRARY,
+  LIVE_RISK_STATUSES,
   RISK_CATEGORY_EVIDENCE,
   acceptRiskSchema,
   createRiskSchema,
+  isTreatedRiskStatus,
   linkRiskControlSchema,
+  recordRiskTreatmentSchema,
   setResidualRiskSchema,
   transitionRiskSchema,
   updateRiskSchema,
@@ -96,7 +101,9 @@ import {
 } from "@regulait/shared";
 import { z } from "zod";
 import { runCollector, type CollectorContext } from "./compliance-packs.js";
+import { loadOrgSettings } from "./org-settings.js";
 import { acceptorRefusal, recordRiskAcceptanceTx } from "./risk-tolerance.js";
+import { CHANGED_CONCURRENTLY } from "./step-up.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 const riskIdParam = z.object({ riskId: z.string().uuid() });
@@ -110,6 +117,10 @@ export const RISK_RULE_IDS = {
   updated: "risk-updated",
   transitioned: (to: string) => `risk-${to}`,
   accepted: "risk-accepted",
+  /** ADR-0211: `risk-transferred` / `risk-avoided` — the same `risk-<to>` shape a transition has */
+  treated: (treatment: "transferred" | "avoided") => `risk-${treatment}`,
+  /** ADR-0211: a treatment refused because the org switch is off */
+  treatmentRefused: "risk-treatment-refused",
   /** ADR-0147 */
   residualSet: "risk-residual-set",
   controlLinked: "risk-control-linked",
@@ -681,6 +692,11 @@ function summarizeEvidence(block: RiskEvidenceBlock): Array<Record<string, unkno
   }));
 }
 
+/** ADR-0211: is the risk still being worked (open or mitigating), rather than a decided record? */
+function isLiveRisk(status: string): boolean {
+  return (LIVE_RISK_STATUSES as readonly string[]).includes(status);
+}
+
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
@@ -715,6 +731,11 @@ export function registerRiskRoutes(app: FastifyInstance, db: Db): void {
       if (!u) return { ok: false, field: "useCaseId" };
     }
     return { ok: true };
+  }
+
+  async function userName(id: string): Promise<string | null> {
+    const [u] = await db.select({ displayName: users.displayName, email: users.email }).from(users).where(eq(users.id, id));
+    return u ? u.displayName || u.email : null;
   }
 
   // The seed library and the resolver vocabulary — static data, so the UI's
@@ -852,7 +873,7 @@ export function registerRiskRoutes(app: FastifyInstance, db: Db): void {
   app.get("/v1/risks", async (req, reply) => {
     const q = z
       .object({
-        status: z.enum(["open", "mitigating", "accepted", "closed"]).optional(),
+        status: z.enum(AI_RISK_STATUSES).optional(),
         category: z.enum(AI_RISK_CATEGORIES).optional(),
         /** ADR-0147: the risks registered against one use case */
         useCaseId: z.string().uuid().optional(),
@@ -925,9 +946,22 @@ export function registerRiskRoutes(app: FastifyInstance, db: Db): void {
                 note: row.acceptanceNote,
               }
             : null,
+        /** ADR-0211: the transfer or avoidance record, when the risk carries one */
+        treatment: isTreatedRiskStatus(row.status)
+          ? {
+              treatment: row.status,
+              evidence: row.treatmentEvidence,
+              ownerUserId: row.treatmentOwnerUserId,
+              ownerName: row.treatmentOwnerUserId ? await userName(row.treatmentOwnerUserId) : null,
+              treatedByUserId: row.treatedByUserId,
+              treatedAt: row.treatedAt,
+            }
+          : null,
         note: "human judgments and decisions — never blended into the computed evidence beside them",
       },
       evidence: await resolveRiskEvidence(db, row),
+      /** ADR-0211: may this risk be recorded as transferred or avoided right now (the org switch)? */
+      treatments: { enabled: (await loadOrgSettings(db)).riskTreatmentsEnabled },
     };
   });
 
@@ -970,7 +1004,7 @@ export function registerRiskRoutes(app: FastifyInstance, db: Db): void {
         detail: "a risk is editable by its owner and by admins",
       });
     }
-    if (row.status === "accepted" || row.status === "closed") {
+    if (!isLiveRisk(row.status)) {
       return reply.status(409).send({
         error: "risk_not_editable",
         detail: `a ${row.status} risk is a decided record — editing it would change what was ${row.status}`,
@@ -1008,7 +1042,11 @@ export function registerRiskRoutes(app: FastifyInstance, db: Db): void {
   });
 
   // Transition: open <-> mitigating, either -> closed. Audited. `accepted` is
-  // NOT reachable here — acceptance is its own act with its own record.
+  // NOT reachable here — acceptance is its own act with its own record. ADR-0211:
+  // nor are `transferred` and `avoided` (POST .../treatment), but a treated risk
+  // may move on from here: back to `open` (the contract lapsed, the use resumed)
+  // or to `closed`. Either move ends the treatment record on the row; the audit
+  // row keeps what it was.
   app.post("/v1/risks/:riskId/transition", async (req, reply) => {
     const { riskId } = riskIdParam.parse(req.params);
     const raw = (req.body ?? {}) as Record<string, unknown>;
@@ -1018,6 +1056,14 @@ export function registerRiskRoutes(app: FastifyInstance, db: Db): void {
         detail:
           "residual-risk acceptance is recorded through POST /v1/risks/:riskId/accept — an " +
           "audited, admin-only act naming who accepted and why — never as an ordinary transition",
+      });
+    }
+    if (typeof raw.status === "string" && isTreatedRiskStatus(raw.status)) {
+      return reply.status(422).send({
+        error: "treatment_is_its_own_act",
+        detail:
+          "a transfer or an avoidance is recorded through POST /v1/risks/:riskId/treatment, with its " +
+          "evidence and an accountable owner — never as an ordinary transition",
       });
     }
     const body = transitionRiskSchema.parse(req.body);
@@ -1038,22 +1084,150 @@ export function registerRiskRoutes(app: FastifyInstance, db: Db): void {
     if (row.status === body.status) {
       return reply.status(409).send({ error: "already_in_status" });
     }
-    const [updated] = await db
-      .update(aiRisks)
-      .set({ status: body.status, updatedAt: new Date() })
-      .where(eq(aiRisks.id, riskId))
-      .returning();
-    await db.insert(auditLog).values({
-      userId: req.authCtx.userId ?? NO_IDENTITY,
-      objectType: "ai_risk",
-      objectId: riskId,
-      detail: { phase: "transition", from: row.status, to: body.status, reason: body.reason },
-      effect: "allow",
-      ruleId: RISK_RULE_IDS.transitioned(body.status),
-      ruleChain: [],
-      reason: `AI risk '${row.title}' moved ${row.status} -> ${body.status}: ${body.reason}`,
+    const treated = isTreatedRiskStatus(row.status);
+    if (treated && body.status === "mitigating") {
+      return reply.status(409).send({
+        error: "treated_risk_reopens_first",
+        detail: `a ${row.status} risk moves back to open, or to closed — reopen it before mitigating it`,
+      });
+    }
+    const ended = treated
+      ? { treatment: row.status, evidence: row.treatmentEvidence, ownerUserId: row.treatmentOwnerUserId, treatedAt: row.treatedAt }
+      : null;
+    const updated = await db.transaction(async (tx) => {
+      const [after] = await tx
+        .update(aiRisks)
+        .set({
+          status: body.status,
+          ...(treated ? { treatmentEvidence: null, treatmentOwnerUserId: null, treatedByUserId: null, treatedAt: null } : {}),
+          updatedAt: new Date(),
+        })
+        .where(and(eq(aiRisks.id, riskId), eq(aiRisks.status, row.status)))
+        .returning();
+      if (!after) return null;
+      await tx.insert(auditLog).values({
+        userId: req.authCtx.userId ?? NO_IDENTITY,
+        objectType: "ai_risk",
+        objectId: riskId,
+        detail: {
+          phase: "transition",
+          from: row.status,
+          to: body.status,
+          reason: body.reason,
+          ...(ended ? { endedTreatment: ended } : {}),
+        },
+        effect: "allow",
+        ruleId: RISK_RULE_IDS.transitioned(body.status),
+        ruleChain: [],
+        reason: `AI risk '${row.title}' moved ${row.status} -> ${body.status}: ${body.reason}`,
+      });
+      return after;
     });
+    if (!updated) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     return updated;
+  });
+
+  // ADR-0211 (P17) — record a risk as TRANSFERRED (to an insurer or a supplier
+  // contract) or AVOIDED (the use stopped). Owner-or-admin, like a transition;
+  // only from a live risk; only while the org switch is on (default off). The
+  // evidence and an accountable owner are required, and the row and its audit
+  // row are written in one transaction. The audit row also freezes what every
+  // evidence resolver measured at that moment, exactly as acceptance does.
+  app.post("/v1/risks/:riskId/treatment", async (req, reply) => {
+    const { riskId } = riskIdParam.parse(req.params);
+    const [row] = await db.select().from(aiRisks).where(eq(aiRisks.id, riskId));
+    if (!row) return reply.status(404).send({ error: "not_found" });
+    const callerId = req.authCtx.userId;
+    if (!req.authCtx.isAdmin && callerId !== row.ownerUserId) {
+      return reply.status(403).send({
+        error: "forbidden",
+        detail: "a risk's treatment is recorded by its owner and by admins",
+      });
+    }
+    const org = await loadOrgSettings(db);
+    if (!org.riskTreatmentsEnabled) {
+      await db.insert(auditLog).values({
+        userId: callerId ?? NO_IDENTITY,
+        objectType: "ai_risk",
+        objectId: riskId,
+        detail: { phase: "treatment-refused", error: "risk_treatments_off" },
+        effect: "deny",
+        ruleId: RISK_RULE_IDS.treatmentRefused,
+        ruleChain: [],
+        reason: `treatment of AI risk '${row.title}' refused: transferred and avoided treatments are turned off`,
+      });
+      return reply.status(409).send({
+        error: "risk_treatments_off",
+        detail: "recording a risk as transferred or avoided is turned off for this organisation; an admin can turn it on",
+      });
+    }
+    const body = recordRiskTreatmentSchema.parse(req.body);
+    if (!isLiveRisk(row.status)) {
+      return reply.status(409).send({
+        error: "risk_not_treatable",
+        detail: `a ${row.status} risk is a decided record — only an open or mitigating risk can be transferred or avoided`,
+      });
+    }
+    if (!req.authCtx.isAdmin && body.ownerUserId !== callerId) {
+      return reply.status(403).send({
+        error: "forbidden_owner",
+        detail: "you may name only yourself as the owner of a treatment; an admin can name someone else",
+      });
+    }
+    const [owner] = await db.select({ id: users.id }).from(users).where(eq(users.id, body.ownerUserId));
+    if (!owner) return reply.status(400).send({ error: "invalid_reference", field: "ownerUserId" });
+    const evidence = await resolveRiskEvidence(db, row);
+    const updated = await db.transaction(async (tx) => {
+      const [after] = await tx
+        .update(aiRisks)
+        .set({
+          status: body.treatment,
+          treatmentEvidence: body.evidence,
+          treatmentOwnerUserId: body.ownerUserId,
+          treatedByUserId: callerId ?? null,
+          treatedAt: sql`now()`,
+          updatedAt: new Date(),
+        })
+        .where(and(eq(aiRisks.id, riskId), eq(aiRisks.status, row.status)))
+        .returning();
+      if (!after) return null;
+      await tx.insert(auditLog).values({
+        userId: callerId ?? NO_IDENTITY,
+        objectType: "ai_risk",
+        objectId: riskId,
+        detail: {
+          phase: "treatment",
+          treatment: body.treatment,
+          from: row.status,
+          evidence: body.evidence,
+          ownerUserId: body.ownerUserId,
+          declared: { likelihood: row.likelihood, impact: row.impact },
+          residual:
+            row.residualLikelihood && row.residualImpact
+              ? { likelihood: row.residualLikelihood, impact: row.residualImpact }
+              : null,
+          evidenceAtTreatment: summarizeEvidence(evidence),
+          evidenceWindow: evidence.window,
+        },
+        effect: "allow",
+        ruleId: RISK_RULE_IDS.treated(body.treatment),
+        ruleChain: [],
+        reason:
+          body.treatment === "transferred"
+            ? `AI risk '${row.title}' TRANSFERRED: ${body.evidence} — the arrangement moves who carries the cost, ` +
+              `not whether the harm can happen; the risk keeps its rating`
+            : `AI risk '${row.title}' AVOIDED: ${body.evidence} — the use that created it stopped`,
+      });
+      return after;
+    });
+    if (!updated) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
+    return reply.status(201).send({
+      ...updated,
+      note:
+        body.treatment === "transferred"
+          ? "a transfer is a record, not a control — the risk keeps its rating and stays in the tolerance check"
+          : "an avoided risk no longer carries a rating; reopen it if the use resumes",
+    });
   });
 
   // Accept: admin-only (the default gate), reason required, audited — THE
@@ -1142,7 +1316,7 @@ export function registerRiskRoutes(app: FastifyInstance, db: Db): void {
     if (!req.authCtx.isAdmin && req.authCtx.userId !== row.ownerUserId) {
       return { status: 403, body: { error: "forbidden", detail: "a risk is editable by its owner and by admins" } };
     }
-    if (row.status === "accepted" || row.status === "closed") {
+    if (!isLiveRisk(row.status)) {
       return {
         status: 409,
         body: {

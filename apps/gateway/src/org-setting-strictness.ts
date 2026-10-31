@@ -264,7 +264,11 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   // adding back a provider the org had removed loosens it
   envFallbackProviders: fromStored(["anthropic", "openai", "google", "xai"], addsAny),
   customModelProvidersEnabled: notEqual(false),
+  // ADR-0205: the agent setup assistant sends an admin's description to a model — off by default
+  agentSetupAssistEnabled: notEqual(false),
   mcpPrivateRangesDefault: notEqual(false),
+  // ADR-0219 (P10): turning on calls to remote A2A agents opens a new egress path and a new callable
+  a2aEnabled: notEqual(false),
   mcpAdmissionMode: notEqual("enforce"),
   minReleaseAgeDays: atLeast(7),
   credentialUnusedDays: atMost(90),
@@ -273,10 +277,19 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   egressCompiledDefaultPolicy: notEqual("strict"),
   useCaseGateMode: notEqual("enforce"),
   dispatchAttributionRequired: notEqual(true),
+  // ADR-0224 (P13 c): shipped off (owner 10-30), so nothing is looser than the default; once an org turns the
+  // processing limit on, turning it off again is a relaxation
+  privacyOpsEnabled: fromStored(false, (v, b) => b === true && v === false),
+  // a longer due date for data-subject requests is looser
+  dsrSlaDays: atMost(30),
   recommendationJudgeEnabled: exempt("adds a model-judged annotation to the deterministic findings; it refuses and allows nothing"),
   recommendationJudgeAgentId: exempt("names the judge of the annotation above; it refuses and allows nothing"),
   // ADR-0213: turning the vendor questionnaire drafter on sends supplier material to a model
   vendorDraftAssistEnabled: notEqual(false),
+  // ADR-0215: off = the framework-import and feed-import routes refuse; on lets an admin propose and accept imports
+  frameworkImportsEnabled: notEqual(false),
+  // ADR-0225 (P13 d): public trust pages and auditor access ship off; turning them on publishes outside the org
+  trustPagesEnabled: notEqual(false),
 
   // --- budgets and approvals ------------------------------------------------
   budgetEnforcement: notEqual("block"),

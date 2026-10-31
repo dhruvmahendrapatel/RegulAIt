@@ -8,8 +8,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FocusEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { api } from "../api/client";
-import type { Approval } from "../api/types";
+import { pendingQueueQuery, pendingRows, queueTotal } from "../api/approvalQueue";
 import { useSession } from "../session/SessionContext";
 import { useTheme } from "../ui/useTheme";
 import { Lockup } from "../ui/Brand";
@@ -128,15 +127,12 @@ export default function AppShell(props: { children: ReactNode }) {
   };
 
   // pending-inbox count for the nav badge (soft-refreshing, never blocking). It asks for pending rows only: the
-  // unfiltered queue is capped at 100 rows oldest first, so decided rows could push live ones out of the count.
-  // Every decide path invalidates ["approvals"], which this key falls under, so a decision refreshes it.
-  const inbox = useQuery({
-    queryKey: ["approvals", "pending"],
-    queryFn: () => api.get<{ approvals: Approval[] }>("/v1/approvals?status=pending"),
-    refetchInterval: 30_000,
-  });
-  const pendingCount = (inbox.data?.approvals ?? []).filter((a) => a.status === "pending").length;
-  // the answer is capped at 100 rows, so a full page is shown as "99+" rather than as an exact total
+  // unfiltered queue is capped at 100 rows NEWEST first, so decided rows could push live ones out of the count. The
+  // count is the server's `total` for that filter, not the length of the capped page. It shares the Inbox's query
+  // (one fetch), and every decide path invalidates ["approvals"], which this key falls under.
+  const inbox = useQuery({ ...pendingQueueQuery(), refetchInterval: 30_000 });
+  const pendingCount = queueTotal(inbox.data, pendingRows(inbox.data).length);
+  // a badge has room for two digits, so a larger queue reads "99+"
   const pendingShown = pendingCount > 99 ? "99+" : String(pendingCount);
 
   // "/" focuses the nav filter from anywhere outside a form control

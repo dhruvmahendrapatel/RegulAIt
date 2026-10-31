@@ -1300,3 +1300,72 @@ and the exact rendering of the error results in the Claude Code UI.
 **Teardown:** revoke Dana's demo key if you minted one (`POST /v1/keys/<keyId>/revoke`), remove the Claude
 Code entry, delete the stored credential (`DELETE /v1/model-credentials/anthropic`), and remove the egress host in the
 UI. Disable the Anthropic key in the Console.
+
+### 7.11 Act 3 "Build it": set-up checklist (2026-10-31 addendum)
+
+The beats are in `DEMO_SCRIPT_2026-11-01.md`, "Addendum (2026-10-31): Act 3 — Build it". Every row is **pending
+execution**. The keep-in-order rule from §7.3 still applies: the `demo:relax-e` row (beat E's audited relaxation) is
+done at T-24h, before any E rehearsal, and before the steps below. Nothing here changes it.
+
+**Order matters: store the Claude key after the T-24h `demo:traffic` re-run.** The seed grants `claude-opus` to Ada,
+Dana and Avery (`apps/gateway/src/seed.ts`, the grant loop after the agent catalogue). Once the org key is stored,
+`claude-opus` can serve, and a mock agent stops being a routing candidate for anyone whose entitled roster holds a live
+agent that can serve (`mockShadowedByLive`, `apps/gateway/src/agents-connectors.ts`); the decompose roster follows the
+same rule. A mock that is chosen explicitly still serves. So `demo:traffic` run after the key would route Dana's traffic
+to Claude: it would be refused by MRM before the card is signed, and would spend real money after.
+
+| When | Check | Status |
+|---|---|---|
+| T-24h, after the `demo:traffic` re-run and `real-gate.txt` | **`REGULAIT_DATA_KEY` is set** on the live gateway: `POST /v1/model-credentials` answers `503 no_data_key` without it | pending execution |
+| T-24h | **Egress host** for the provider added by Ada with step-up (§7.10, step 1). Without it the call is refused `403 egress_blocked` | pending execution |
+| T-24h | **The owner enters the Claude key themselves**, signed in as Ada, on `/ui/admin/model-credentials` → **Add or rotate a platform credential** (**Provider**, **API key**, **Save credential**). Use a demo-scoped key with a spend limit set in the provider console. The key is never written in a file, chat, environment variable, terminal history or this repository, and nobody else is asked for it or shown it. Per-user keys are refused (`409 key_custody_enforced`) while key custody is on, which is the default; use this page | pending execution — owner |
+| T-24h | **Provider status:** `GET /v1/model-providers/status` (any signed-in user) shows the provider `configured: true`. It returns booleans only, never a key | pending execution |
+| T-24h | **The `claude-opus` model id is current.** Compare its stored model id with the provider's current model list in the provider console. If it is stale, correct it on `/ui/admin/agents` → **Model & pricing** card: pick the agent, edit **Model id (empty = not dispatchable)**, **Save model & pricing** (or `PATCH /v1/agents/:agentId` with `model`). Check the prices against the provider's pricing page in the same card. Do not write the model id into any document | pending execution |
+| T-24h | **Model card: signed live, not before.** Decided here: B2 shows the `409 mrm_approval_required` refusal and the sign-off on stage, and G1 needs `claude-opus`'s card **Not signed off** until then (§7.3, "S4 Link stack pairing"). So check that `claude-opus` has **no** signed-off card on LIVE at T-24h and at T-1h. Rehearse the card and sign-off on FALLBACK only | pending execution |
+| T-24h | **Presenter persona grant:** on `/ui/admin/agents` → **Per-user entitlement**, Ada holds a grant for `claude-opus` (the seed made it; re-grant with **Grant an agent** if it is missing). Avery is the model-card approver; he needs no grant | pending execution |
+| T-24h | **A small run budget**, so the live run cannot overspend. On `/ui/admin/agents` → **Per-user agent policy — default, ceiling, routing, run budget**, set Ada's **Run budget USD** to a small amount and **On breach** to *approve* (a run over the cap waits for approval instead of running). There is no per-run field on the run itself: the cap comes from the initiator's policy when the run is planned | pending execution |
+| T-24h | **Project budget headroom.** B2 and B3 bill `demo-project`, which has a small monthly budget that earlier demo traffic already uses (`GET /v1/projects/:projectId/costs`). If there is no headroom the call is refused `project_budget_exceeded`. If needed, an admin raises it on the project's edit form (**Budget USD**, **Save changes**); that change is audited | pending execution |
+| T-24h, only if PR #611 is merged | **Claude-assisted set-up:** turn on `agent_setup_assist_enabled` through the org settings as Ada; it is a relaxation, so it needs a step-up and is audited old → new. Then open `/ui/admin/agents` and check that the set-up panel is on **Register an agent**. If #611 is not merged, B1 skips the step and nobody mentions it | pending execution |
+| T-24h | **Guardrails:** `/ui/admin/guardrails` loads; **Try a sample** with the presenter-notes sample shows a finding. Write the sample and B3's goal into `DEMO_PRESENTER_NOTES_2026-11-01.md` | pending execution |
+| T-1h | One live call as Ada in `/ui/builder/playground` with an explicitly chosen **mock** model, to check the page and the project billing without spending. No live Claude call before the demo on LIVE: the first one is B2's refusal | pending execution |
+
+**Fallback, per beat** (switch at once; never retry in front of the audience; always say it):
+
+| Beat | If the network or the provider fails | Say |
+|---|---|---|
+| B1 set-up assistant | Skip it; register nothing, grant nothing | nothing (the panel is optional) |
+| B1 builder agent | Choose a mock agent under **Advanced → Model** | "I'll build it on a mock model" |
+| B2 chat, playground, builder chat | Choose `balanced-mock` explicitly in the **Agent** / **Model** picker; skip the playground and builder chat | "the provider is not answering, so I'll switch this to a mock agent" |
+| B3 task graph | **Lead agent** `balanced-mock`, then set every **Owner agent** to a mock agent before **Plan run** | "I'll run this plan on mock agents" |
+| B4 guardrails | Nothing changes: the sample tester and the decisions log do not call a provider | — |
+| Everything | Switch to the FALLBACK stack, which has no provider key and runs on mocks | "this is the same product on a prepared copy, with a mock model" |
+
+As a last resort, deleting the stored credential (`DELETE /v1/model-credentials/anthropic`, audited) puts every
+persona back on mocks at once. Do it after the act, not on stage.
+
+**What the act must never claim** (each is a limit in the code on `main` on 2026-10-31):
+
+- Task-graph nodes are owned by **registry** agents only (`ownerAgentId` is a registry agent id). A builder agent cannot
+  own a node.
+- Builder sub-agents are **configuration only** (`PUT /v1/builder/agents/:id/subagents` and the export manifest); no
+  runtime dispatches them. Never say builder agents call each other.
+- The lead agent's suggestions are resolved only against the caller's entitlements: an ungranted or unknown agent is
+  swapped for the caller's fallback agent and the swap is recorded; a plan a person edits back to an ungranted agent is
+  refused at **Plan run** (`422 entitlement_exceeded`) and the deny is audited. Nobody's access is widened by a lead.
+- Review is a human gate unless **auto-accept reviews** is ticked; tick it off on stage.
+- The per-run budget is the initiator's policy (**Run budget USD**), not a field on the run.
+- A workflow stage can carry a nested run (`workflowInstanceId`); this act does not show it.
+- The model-card page has no approve button; the named approver decides in the Inbox. A requester deciding their own
+  sign-off needs a recorded self-review reason; on stage, Avery decides.
+- PII on a model call is block, warn or log. Redaction applies only on MCP and connector tool calls, never inside a
+  model call.
+- The playground's API answer includes the PII and guardrails verdicts; the playground page does not show them.
+- Claude-assisted set-up exists only if PR #611 is merged and its switch is on.
+
+**Teardown:** as §7.10, plus: delete the builder agent and the B1 agent if one was registered, set Ada's run budget
+back, and leave the model card signed off only if the owner wants it kept (its sign-off expires on the **Recertify by**
+date).
+
+**Test:** `apps/gateway/src/zz-demo-build-it-task-graph.test.ts` runs B3's chain on the demo's three mock agents
+against real Postgres: decompose, the ungranted suggestion swapped, the edited plan refused and audited, the run created
+and auto-advanced to completion, every node done through a metered, audited governed dispatch.

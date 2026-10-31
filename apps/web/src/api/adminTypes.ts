@@ -853,6 +853,8 @@ export interface OrgSettings {
    * null. true (default) = private-LAN MCP URLs work with zero ceremony;
    * false = strict. IMDS/link-local stays blocked either way. */
   mcpPrivateRangesDefault?: boolean;
+  /** ADR-0219: calls to remote agents over A2A. false (default) = none can be registered or called. */
+  a2aEnabled?: boolean;
   /** ADR-0062: TIGHTEN-ONLY dial over the deployment-wide egress posture.
    * 'inherit' (default) defers to the server's REGULAIT_DEPLOY_MODE; 'strict'
    * adjudicates compiled vendor endpoints against the egress allow-list even

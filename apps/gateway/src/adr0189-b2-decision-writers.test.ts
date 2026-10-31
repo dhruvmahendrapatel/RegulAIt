@@ -23,6 +23,7 @@ const dbSrc = path.resolve(here, "../../../packages/db/src");
 
 /** every gateway module that writes a `receiptClass: "decision"` audit row (B2's list) */
 const DECISION_WRITERS = [
+  "agent-setup-assist.ts", // ADR-0205: the setup assistant's refused model draft (insert(auditLog) on the chained handle)
   "agents-connectors.ts", // agent dispatch: lifecycle, PII, egress and fallback refusals
   "app.ts", // advisory evaluate callouts and builder approval resumes
   "approval-signatures.ts", // approval decisions (objectType approval)
@@ -44,6 +45,7 @@ const DECISION_WRITERS = [
   "model-rate-limits.ts", // ADR-0212: a dispatch refused by a per-model rate limit (insert(auditLog) on the chained handle)
   "outbound-audience.ts",
   "playground.ts",
+  "privacy-ops.ts", // ADR-0224: the processing limit's dispatch refusal
   "redteam.ts",
   "use-case-gate.ts",
   "use-cases.ts",

@@ -47,6 +47,7 @@ import { randomBytes } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { generateAuthenticationOptions, verifyAuthenticationResponse, type AuthenticationResponseJSON } from "@simplewebauthn/server";
 import { isoBase64URL } from "@simplewebauthn/server/helpers";
+import type { Decision } from "@regulait/policy-kernel";
 import {
   and,
   approvalAssignments,
@@ -362,6 +363,62 @@ export async function toolApprovalRequirements(
   };
 }
 
+/** the rule id a call denied at queue time for an unsatisfiable quorum carries */
+export const QUORUM_UNSATISFIABLE_RULE = "approval-quorum-unsatisfiable";
+
+/** the refusal reason of a call denied at queue time because no pool can approve it (the queue and the preview word it once) */
+export function quorumUnsatisfiableReason(req: ToolApprovalRequirements, toolName: string): string {
+  return (
+    `call to '${toolName}' needs ${req.quorum} different approvers` +
+    (req.sensitiveBecause.includes("attributed_project")
+      ? " (its project carries an in-app-only data classification)"
+      : req.sensitive
+        ? " (the caller works on a project that carries an in-app-only data classification)"
+        : "") +
+    `, but only ${req.pool.principals} eligible approver(s) exist besides the caller` +
+    (req.signatureMode === "passkey" ? " who can sign with a passkey they already hold" : "") +
+    " — denied rather than queued " +
+    "for an approval nobody could give"
+  );
+}
+
+/**
+ * The PREVIEW's half of the queue-time check (`POST /v1/evaluate`). A
+ * `require_approval` decision runs through the same `toolApprovalRequirements`
+ * the queue writer uses (same quorum, same sensitivity sources, same signature
+ * mode narrowing the pool), and a pool that can never reach the quorum
+ * previews as the deny the queue would produce — same rule id, same reason —
+ * rather than an approval nobody could give. Reads only: no audit row, nothing
+ * queued. Every other decision is returned unchanged.
+ */
+export async function previewToolApprovalQueue(
+  db: Q,
+  input: {
+    callerUserId: string;
+    decision: Decision;
+    matchedApprovalRuleIds: readonly string[];
+    projectId: string | null;
+    toolName: string;
+  },
+): Promise<Decision> {
+  const { decision } = input;
+  if (decision.effect !== "require_approval") return decision;
+  const req = await toolApprovalRequirements(db, {
+    callerUserId: input.callerUserId,
+    approverUserId: decision.approverUserId!,
+    ruleId: decision.ruleId,
+    matchedApprovalRuleIds: input.matchedApprovalRuleIds,
+    projectId: input.projectId,
+  });
+  if (req.satisfiable) return decision;
+  return {
+    effect: "deny",
+    ruleId: QUORUM_UNSATISFIABLE_RULE,
+    ruleChain: decision.ruleChain,
+    reason: quorumUnsatisfiableReason(req, input.toolName),
+  };
+}
+
 /** the audit row and refusal reason of a call denied at queue time because no pool can approve it */
 export async function auditQuorumUnsatisfiableAtQueue(
   db: Q,
@@ -372,17 +429,7 @@ export async function auditQuorumUnsatisfiableAtQueue(
     target: { serverId: string; toolName: string } | { connectorId: string; toolName: string };
   },
 ): Promise<string> {
-  const reason =
-    `call to '${input.target.toolName}' needs ${input.req.quorum} different approvers` +
-    (input.req.sensitiveBecause.includes("attributed_project")
-      ? " (its project carries an in-app-only data classification)"
-      : input.req.sensitive
-        ? " (the caller works on a project that carries an in-app-only data classification)"
-        : "") +
-    `, but only ${input.req.pool.principals} eligible approver(s) exist besides the caller` +
-    (input.req.signatureMode === "passkey" ? " who can sign with a passkey they already hold" : "") +
-    " — denied rather than queued " +
-    "for an approval nobody could give";
+  const reason = quorumUnsatisfiableReason(input.req, input.target.toolName);
   await db.insert(auditLog).values({
     userId: input.userId,
     ...("serverId" in input.target
@@ -398,7 +445,7 @@ export async function auditQuorumUnsatisfiableAtQueue(
       projectId: input.projectId,
     },
     effect: "deny",
-    ruleId: "approval-quorum-unsatisfiable",
+    ruleId: QUORUM_UNSATISFIABLE_RULE,
     ruleChain: [],
     reason,
   });

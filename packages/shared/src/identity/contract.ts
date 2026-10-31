@@ -343,6 +343,13 @@ export const DEFAULT_IDENTITY_PROPAGATION: IdentityPropagationMode = "none";
 
 /** the gateway issuer signs with Ed25519 only (decision 5) */
 export const IDENTITY_SIGNING_ALGORITHM = "Ed25519" as const;
+/**
+ * ADR-0210: the algorithms an issuer key may have. Ed25519 signs every token and the default assertion; ES256 (P-256)
+ * signs only the OIDC-profile MCP identity assertion, under its own issuer, and is never accepted by a delegated-token
+ * verifier.
+ */
+export const IDENTITY_SIGNING_KEY_ALGORITHMS = ["Ed25519", "ES256"] as const;
+export type IdentitySigningKeyAlgorithm = (typeof IDENTITY_SIGNING_KEY_ALGORITHMS)[number];
 /** the deploy-time secret that carries the issuer's private key (never in the database) */
 export const IDENTITY_SIGNING_KEY_ENV = "REGULAIT_IDENTITY_SIGNING_KEY" as const;
 
@@ -1020,8 +1027,9 @@ export interface IdentityPickerSourcesView {
 
 export interface IdentitySigningKeyView {
   kid: string;
-  algorithm: typeof IDENTITY_SIGNING_ALGORITHM;
-  publicJwk: { kty: "OKP"; crv: "Ed25519"; x: string; kid?: string };
+  /** ADR-0210: `ES256` keys sign only the OIDC-profile MCP identity assertion, never a delegated token */
+  algorithm: IdentitySigningKeyAlgorithm;
+  publicJwk: { kty: "OKP"; crv: "Ed25519"; x: string; kid?: string } | { kty: "EC"; crv: "P-256"; x: string; y: string; kid?: string };
   createdAt: string;
   activatedAt: string | null;
   retiredAt: string | null;
