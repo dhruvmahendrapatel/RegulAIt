@@ -121,7 +121,7 @@ async function installAdmissionMock(page: Page, st: MockState) {
   };
   await page.route(/\/v1\/admission\/skills(\?|$)/, (route) => {
     const q = new URL(route.request().url()).searchParams;
-    // ADR-0219: the held list and the share requests are each a page of the server's queue, filtered by `view`
+    // ADR-0226: the held list and the share requests are each a page of the server's queue, filtered by `view`
     if (q.get("sort") || q.get("count")) {
       const items = state.skills.filter((k) =>
         q.get("view") === "shares" ? k.requestedVisibility === "workspace" : ["held", "refused", "admitted"].includes(k.admissionState),

@@ -1,5 +1,5 @@
 /**
- * ADR-0219 — the shared list contract on the workflows, engines, cost and operations lists (P2 batch C).
+ * ADR-0226 — the shared list contract on the workflows, engines, cost and operations lists (P2 batch C).
  *
  * The same checks the pilot routes have (list-contract.test.ts), run over every list this batch converts:
  *
@@ -540,7 +540,7 @@ const CASES: Case[] = [
 const latestExportAudit = async () => (await db.select().from(auditLog).where(eq(auditLog.ruleId, "list-export-xlsx")).orderBy(desc(auditLog.at)).limit(1))[0]!;
 const sep = (u: string) => (u.includes("?") ? "&" : "?");
 
-describe.each(CASES)("ADR-0219 batch C: $name", (c) => {
+describe.each(CASES)("ADR-0226 batch C: $name", (c) => {
   const idOf = (r: Json) => (c.idOf ? c.idOf(r) : String(r.id));
 
   it("pages every row exactly once, by the default sort and by another, with the true total", async () => {
@@ -602,7 +602,7 @@ describe.each(CASES)("ADR-0219 batch C: $name", (c) => {
   });
 });
 
-describe("ADR-0219 batch C: details", () => {
+describe("ADR-0226 batch C: details", () => {
   it("an unknown parent is the route's own 404, for the page and the export", async () => {
     const nil = "00000000-0000-4000-8000-000000000000";
     for (const [url, code] of [

@@ -62,7 +62,7 @@ import {
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
-/** ADR-0219: the users list's columns; the ids and sortable ones match the gateway's USERS_LIST */
+/** ADR-0226: the users list's columns; the ids and sortable ones match the gateway's USERS_LIST */
 export const USER_COLUMNS: Array<DataColumn<AdminUser>> = [
   {
     key: "name",

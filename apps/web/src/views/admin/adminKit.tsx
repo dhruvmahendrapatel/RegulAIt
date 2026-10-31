@@ -5,7 +5,7 @@
  * reveal, reason-required modals, and small display helpers. Everything here
  * composes the phase-1 kit — no new dependencies.
  */
-import { useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, api } from "../../api/client";
 import { guidanceOf, type RefusalGuidance } from "../../api/refusals";
@@ -14,6 +14,7 @@ import type {
   AdminProject,
   AdminUser,
   ComplianceProfile,
+  ComplianceProfileRecord,
   Connector,
   CustomModelProvider,
   EgressAllowHost,
@@ -164,7 +165,7 @@ export const useEgressAllowHosts = () =>
 export const useComplianceProfiles = () =>
   useQuery({
     queryKey: adminKeys.profiles,
-    queryFn: () => api.get<{ profiles: ComplianceProfile[] }>("/v1/compliance/profiles"),
+    queryFn: () => api.get<{ profiles: ComplianceProfileRecord[] }>("/v1/compliance/profiles"),
   });
 export const useServerTools = (serverId: string | null | undefined) =>
   useQuery({
@@ -723,11 +724,21 @@ export function ReasonModal(props: {
    * looking at the box rather than after the round trip.
    */
   minLength?: number;
+  /** the dismiss button's label, when "Cancel" would read as the action itself (cancelling a campaign) */
+  cancelLabel?: string;
   onConfirm: (reason: string) => void;
   onCancel: () => void;
 }) {
   const [reason, setReason] = useState("");
   const [err, setErr] = useState<string | null>(null);
+  // #453 (c6509969403): the typed reason survives a server refusal while the dialog stays open, and is cleared
+  // only once the dialog closes, so a refused retire never makes the operator type the reason again
+  useEffect(() => {
+    if (!props.open) {
+      setReason("");
+      setErr(null);
+    }
+  }, [props.open]);
   const close = () => {
     setReason("");
     setErr(null);
@@ -745,10 +756,8 @@ export function ReasonModal(props: {
       );
       return;
     }
-    const r = reason.trim();
-    setReason("");
     setErr(null);
-    props.onConfirm(r);
+    props.onConfirm(reason.trim());
   };
   return (
     <Modal
@@ -757,7 +766,7 @@ export function ReasonModal(props: {
       onClose={close}
       actions={
         <>
-          <Button onClick={close}>Cancel</Button>
+          <Button onClick={close}>{props.cancelLabel ?? "Cancel"}</Button>
           <Button variant={props.danger ? "danger" : "primary"} onClick={go}>
             {props.confirmLabel ?? "Confirm"}
           </Button>

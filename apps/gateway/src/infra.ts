@@ -35,9 +35,11 @@ import {
   deployTargets,
   desc,
   eq,
+  inArray,
   infraFindings,
   infraPolicies,
   infraResources,
+  isNull,
   patchRecords,
   users,
   sql,
@@ -49,8 +51,11 @@ import {
   createInfraResourceSchema,
   proposeInfraRemediationSchema,
   restoreBackupSchema,
+  retireInfraSchema,
   rotateCertSchema,
   scanInfraSchema,
+  updateInfraPolicySchema,
+  updateInfraResourceSchema,
 } from "@regulait/shared";
 import {
   evaluateBackupSchedule,
@@ -71,6 +76,8 @@ import { loadOrgSettings, type SchedulerTickState } from "./org-settings.js";
 import { recordSchedulerFailure, recordSchedulerSuccess } from "./scheduler-health.js";
 import { ExternalEffectBlockedError, runExternalWrite } from "./external-effects.js";
 import { errMessage } from "./err-serializer.js";
+import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
+import { retiredTagRefusal, retiredTagsAmong } from "./compliance-profile-facts.js";
 
 type InfraResourceRow = typeof infraResources.$inferSelect;
 type InfraPolicyRow = typeof infraPolicies.$inferSelect;
@@ -370,11 +377,13 @@ export function providerConfig(
 }
 
 /** The base policy for a resource: its own resource-scoped policy if any, else
- * the fleet-wide (null resourceId) default. */
+ * the fleet-wide (null resourceId) default. ADR-0208 G8: only ACTIVE policies
+ * apply — a retired policy is history, and its resource falls back to the fleet. */
 function basePolicy(resource: InfraResourceRow, policies: InfraPolicyRow[]): InfraPolicyRow | null {
+  const active = policies.filter((p) => p.status === "active");
   return (
-    policies.find((p) => p.resourceId === resource.id) ??
-    policies.find((p) => p.resourceId == null) ??
+    active.find((p) => p.resourceId === resource.id) ??
+    active.find((p) => p.resourceId == null) ??
     null
   );
 }
@@ -1152,10 +1161,11 @@ async function requireApprover(db: Db, approverUserId: string): Promise<boolean>
 export async function runBackupVerifyOnce(
   db: Db,
 ): Promise<{ checked: number; verified: number; missed: number; skipped: number }> {
+  // ADR-0208 G8: a retired target is no longer monitored
   const resources = await db
     .select()
     .from(infraResources)
-    .where(eq(infraResources.kind, "backup_target"));
+    .where(and(eq(infraResources.kind, "backup_target"), eq(infraResources.status, "active")));
   let verified = 0;
   let missed = 0;
   let skipped = 0;
@@ -1257,6 +1267,171 @@ export function startBackupVerifyScheduler(db: Db): () => void {
   return () => clearInterval(timer);
 }
 
+// ===========================================================================
+// ADR-0208 G8 — edit and retire infra resources and policies (helpers)
+// ===========================================================================
+
+const objectIdParam = z.object({ id: z.string().uuid() });
+
+/** a read-only handle: the app's db or a transaction */
+type Reader = Pick<Db, "select">;
+
+/** the editable/auditable facts of a resource (its before/after in an audit row) */
+function resourceFacts(r: InfraResourceRow) {
+  return {
+    name: r.name,
+    kind: r.kind,
+    provider: r.provider,
+    classifications: r.classifications ?? [],
+    status: r.status,
+  };
+}
+
+/** the policy fields an edit can change */
+const POLICY_FIELDS = [
+  "patchCadenceDays",
+  "certRotationDaysBeforeExpiry",
+  "backupSchedule",
+  "backupRetentionDays",
+  "autoRemediateMaxSeverity",
+] as const;
+type PolicyEdit = Partial<Pick<InfraPolicyRow, (typeof POLICY_FIELDS)[number]>>;
+
+function policyFacts(p: InfraPolicyRow) {
+  return {
+    resourceId: p.resourceId,
+    patchCadenceDays: p.patchCadenceDays,
+    certRotationDaysBeforeExpiry: p.certRotationDaysBeforeExpiry,
+    backupSchedule: p.backupSchedule,
+    backupRetentionDays: p.backupRetentionDays,
+    autoRemediateMaxSeverity: p.autoRemediateMaxSeverity,
+    status: p.status,
+  };
+}
+
+const CEILING_RANK: Record<string, number> = { low: 1, medium: 2, high: 3 };
+
+/**
+ * The fields of a policy edit that LOOSEN it, with their new values (the step-up's facts). Empty = nothing loosens.
+ *  - patch cadence: a larger number of days between patches, or clearing it;
+ *  - backup retention and the cert-rotation lead time: a smaller number, or clearing it;
+ *  - auto-remediate ceiling: null means NEVER auto-remediate (the strictest value), so setting one where there was
+ *    none, or raising it (low < medium < high), loosens; lowering it or clearing it tightens.
+ * A backup schedule has no order, so changing it is audited but never stepped up.
+ */
+export function policyLoosening(before: PolicyEdit, edit: PolicyEdit): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const larger = (b: number | null | undefined, a: number | null | undefined) => b != null && (a == null || a > b);
+  const smaller = (b: number | null | undefined, a: number | null | undefined) => b != null && (a == null || a < b);
+  if (edit.patchCadenceDays !== undefined && larger(before.patchCadenceDays, edit.patchCadenceDays)) {
+    out.patchCadenceDays = edit.patchCadenceDays;
+  }
+  if (edit.backupRetentionDays !== undefined && smaller(before.backupRetentionDays, edit.backupRetentionDays)) {
+    out.backupRetentionDays = edit.backupRetentionDays;
+  }
+  if (
+    edit.certRotationDaysBeforeExpiry !== undefined &&
+    smaller(before.certRotationDaysBeforeExpiry, edit.certRotationDaysBeforeExpiry)
+  ) {
+    out.certRotationDaysBeforeExpiry = edit.certRotationDaysBeforeExpiry;
+  }
+  const next = edit.autoRemediateMaxSeverity;
+  if (next != null && (before.autoRemediateMaxSeverity == null || CEILING_RANK[next]! > CEILING_RANK[before.autoRemediateMaxSeverity]!)) {
+    out.autoRemediateMaxSeverity = next;
+  }
+  return out;
+}
+
+/** the constraint a unique violation names, if the error is one (drizzle wraps the driver error in `cause`) */
+function uniqueViolation(err: unknown): string | null {
+  const e = err as { code?: string; constraint?: string; cause?: { code?: string; constraint?: string } };
+  if (e?.code === "23505") return e.constraint ?? "";
+  if (e?.cause?.code === "23505") return e.cause.constraint ?? "";
+  return null;
+}
+
+function nameTaken(name: string) {
+  return {
+    error: "infra_resource_name_taken",
+    detail: "another resource (active or retired) already has this name; names stay unique so history reads unambiguously",
+    name,
+  };
+}
+
+function resourceRetired(r: { id: string; name: string }) {
+  return {
+    error: "infra_resource_retired",
+    detail: `resource '${r.name}' is retired: it stays readable but cannot be changed or start new work`,
+    resourceId: r.id,
+  };
+}
+
+function policyRetired(p: { id: string }) {
+  return {
+    error: "infra_policy_retired",
+    detail: "this policy is retired: it stays readable but cannot be changed",
+    policyId: p.id,
+  };
+}
+
+/** findings on a resource whose remediation waits for approval or is approved but not applied */
+async function pendingRemediations(db: Reader, resourceId: string): Promise<string[]> {
+  const rows = await db
+    .select({ id: infraFindings.id })
+    .from(infraFindings)
+    .where(
+      and(eq(infraFindings.resourceId, resourceId), inArray(infraFindings.status, ["remediation_proposed", "approved"])),
+    )
+    .orderBy(asc(infraFindings.detectedAt), asc(infraFindings.id));
+  return rows.map((r) => r.id);
+}
+
+function remediationsPending(findingIds: string[]) {
+  return {
+    error: "infra_resource_remediations_pending",
+    detail:
+      "remediations on this resource wait for approval or are approved but not applied: decide or apply them " +
+      "before retiring it",
+    findingIds,
+    pendingRemediations: findingIds.length,
+  };
+}
+
+/** the ACTIVE policy for a resource, or the active fleet policy when resourceId is null */
+async function activePolicyFor(db: Reader, resourceId: string | null): Promise<InfraPolicyRow | null> {
+  const [row] = await db
+    .select()
+    .from(infraPolicies)
+    .where(
+      and(
+        eq(infraPolicies.status, "active"),
+        resourceId ? eq(infraPolicies.resourceId, resourceId) : isNull(infraPolicies.resourceId),
+      ),
+    )
+    .limit(1);
+  return row ?? null;
+}
+
+function policyAlreadyActive(resourceId: string | null, existingPolicyId: string | null) {
+  return {
+    error: "infra_policy_already_active",
+    detail: resourceId
+      ? "this resource already has an active policy: edit it, or retire it first"
+      : "an active fleet policy already exists: edit it",
+    resourceId,
+    existingPolicyId,
+  };
+}
+
+/** a 409 for new work on a resource that is retired (scan, remediation, rotation, patch, restore) */
+async function retiredResourceRefusal(db: Reader, resourceId: string) {
+  const [r] = await db
+    .select({ id: infraResources.id, name: infraResources.name, status: infraResources.status })
+    .from(infraResources)
+    .where(eq(infraResources.id, resourceId));
+  return r && r.status !== "active" ? resourceRetired(r) : null;
+}
+
 const SEVERITY_ORDER: InfraSeverity[] = ["low", "medium", "high", "critical"];
 
 export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: string) {
@@ -1266,7 +1441,7 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
   const stopBackupVerifyScheduler = startBackupVerifyScheduler(db);
   app.addHook("onClose", async () => stopBackupVerifyScheduler());
 
-  // ADR-0219: with any of sort/dir/cursor/offset/count each of the five
+  // ADR-0226: with any of sort/dir/cursor/offset/count each of the five
   // ledgers (resources, findings, certificates, patches, backups) answers the
   // shared list contract (every row, a total, server sort); with none of
   // them, exactly the whole-ledger responses below. Admin-only, as before.
@@ -1363,20 +1538,180 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
 
   app.post("/v1/infra/resources", async (req, reply) => {
     const body = createInfraResourceSchema.parse(req.body);
-    const [row] = await db
-      .insert(infraResources)
-      .values({
-        kind: body.kind,
-        name: body.name,
-        provider: body.provider,
-        config: body.config ?? null,
-        classifications: body.classifications ?? null,
-      })
-      .returning();
-    return reply.status(201).send(row);
+    // ADR-0208 G7: a retired compliance profile takes no new carrier
+    const retiredTags = await retiredTagsAmong(db, body.classifications ?? []);
+    if (retiredTags.length > 0) return reply.status(409).send(retiredTagRefusal(retiredTags));
+    const actorId = await resolveActor(db, req.authCtx.userId);
+    try {
+      const row = await db.transaction(async (tx) => {
+        const [created] = await tx
+          .insert(infraResources)
+          .values({
+            kind: body.kind,
+            name: body.name,
+            provider: body.provider,
+            config: body.config ?? null,
+            classifications: body.classifications ?? null,
+          })
+          .returning();
+        // ADR-0208 G8: a resource's creation is audited in its own transaction
+        await tx.insert(auditLog).values({
+          userId: actorId,
+          objectType: "infra_operation",
+          objectId: created!.id,
+          detail: { phase: "resource-created", after: resourceFacts(created!) },
+          effect: "allow",
+          ruleId: "infra-resource-created",
+          ruleChain: [],
+          reason: `infra resource '${created!.name}' (${created!.kind}) registered for monitoring`,
+        });
+        return created!;
+      });
+      return reply.status(201).send(row);
+    } catch (err) {
+      if (uniqueViolation(err) === "infra_resources_name_unique") return reply.status(409).send(nameTaken(body.name));
+      throw err;
+    }
+  });
+
+  // ADR-0208 G8 — edit a resource. A retired resource is read-only. Dropping a classification lowers the floors
+  // the resource inherits, so it needs a settings_relax step-up bound to the resource and its new tags.
+  app.patch("/v1/infra/resources/:id", async (req, reply) => {
+    const { id } = objectIdParam.parse(req.params);
+    const body = updateInfraResourceSchema.parse(req.body);
+    const [before] = await db.select().from(infraResources).where(eq(infraResources.id, id));
+    if (!before) return reply.status(404).send({ error: "unknown_resource" });
+    if (before.status !== "active") return reply.status(409).send(resourceRetired(before));
+    const nextTags = body.classifications ? [...new Set(body.classifications)] : undefined;
+    // ADR-0208 G7: a tag the resource does not hold yet may not name a retired compliance profile
+    const retiredTags = await retiredTagsAmong(db, (nextTags ?? []).filter((t) => !(before.classifications ?? []).includes(t)));
+    if (retiredTags.length > 0) return reply.status(409).send(retiredTagRefusal(retiredTags));
+    const dropped = nextTags ? (before.classifications ?? []).filter((t) => !nextTags.includes(t)) : [];
+    if (dropped.length > 0) {
+      const ok = await requireStepUp(db, req, reply, {
+        kind: "settings_relax",
+        facts: { values: { infraResourceClassifications: { resourceId: id, classifications: nextTags } } },
+      });
+      if (!ok.ok) return reply;
+    }
+    const actorId = await resolveActor(db, req.authCtx.userId);
+    try {
+      const out = await db.transaction(async (tx) => {
+        const [locked] = await tx.select().from(infraResources).where(eq(infraResources.id, id)).for("update");
+        // ADR-0186 A: the step-up was decided on the unlocked read; write only if that read still holds
+        if (!locked || JSON.stringify(resourceFacts(locked)) !== JSON.stringify(resourceFacts(before))) return null;
+        const set: Partial<typeof infraResources.$inferInsert> = {};
+        if (body.name !== undefined && body.name !== locked.name) set.name = body.name;
+        if (nextTags && JSON.stringify(nextTags) !== JSON.stringify(locked.classifications ?? [])) set.classifications = nextTags;
+        if (Object.keys(set).length === 0) return { row: locked, changed: false };
+        const [row] = await tx.update(infraResources).set(set).where(eq(infraResources.id, id)).returning();
+        await tx.insert(auditLog).values({
+          userId: actorId,
+          objectType: "infra_operation",
+          objectId: id,
+          detail: {
+            phase: "resource-updated",
+            before: resourceFacts(locked),
+            after: resourceFacts(row!),
+            droppedClassifications: dropped,
+          },
+          effect: "allow",
+          ruleId: "infra-resource-updated",
+          ruleChain: [],
+          reason:
+            dropped.length > 0
+              ? `infra resource '${row!.name}' edited; dropped classification(s) ${dropped.join(", ")} lower the floors it inherits`
+              : `infra resource '${row!.name}' edited`,
+        });
+        return { row: row!, changed: true };
+      });
+      if (!out) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
+      return reply.status(200).send({ resource: out.row, changed: out.changed });
+    } catch (err) {
+      if (uniqueViolation(err) === "infra_resources_name_unique") return reply.status(409).send(nameTaken(body.name ?? ""));
+      throw err;
+    }
+  });
+
+  // ADR-0208 G8 — retire a resource (never delete: the remediation ledgers hang off it). Refused while a
+  // remediation waits for approval or is approved but not applied. Always a step-up: it stops monitoring. Its
+  // active resource-scoped policy is retired with it, each audited in the same transaction.
+  app.post("/v1/infra/resources/:id/retire", async (req, reply) => {
+    const { id } = objectIdParam.parse(req.params);
+    const { reason } = retireInfraSchema.parse(req.body);
+    const [before] = await db.select().from(infraResources).where(eq(infraResources.id, id));
+    if (!before) return reply.status(404).send({ error: "unknown_resource" });
+    if (before.status !== "active") return reply.status(409).send(resourceRetired(before));
+    const pending = await pendingRemediations(db, id);
+    if (pending.length > 0) return reply.status(409).send(remediationsPending(pending));
+    const ok = await requireStepUp(db, req, reply, {
+      kind: "settings_relax",
+      facts: { values: { infraResourceRetire: { resourceId: id } } },
+    });
+    if (!ok.ok) return reply;
+    const actorId = await resolveActor(db, req.authCtx.userId);
+    type RetireOutcome =
+      | { refused: { status: number; body: Record<string, unknown> }; row?: undefined; policiesRetired?: undefined }
+      | { refused?: undefined; row: InfraResourceRow; policiesRetired: string[] };
+    const out = await db.transaction(async (tx): Promise<RetireOutcome> => {
+      const [locked] = await tx.select().from(infraResources).where(eq(infraResources.id, id)).for("update");
+      if (!locked || locked.status !== "active") return { refused: CHANGED_CONCURRENTLY };
+      const stillPending = await pendingRemediations(tx, id);
+      if (stillPending.length > 0) return { refused: { status: 409, body: remediationsPending(stillPending) } };
+      const [row] = await tx
+        .update(infraResources)
+        .set({ status: "retired", retiredAt: sql`now()`, retiredReason: reason, retiredByUserId: actorId })
+        .where(eq(infraResources.id, id))
+        .returning();
+      const policiesRetired = await tx
+        .update(infraPolicies)
+        .set({ status: "retired", retiredAt: sql`now()`, retiredReason: reason, retiredByUserId: actorId })
+        .where(and(eq(infraPolicies.resourceId, id), eq(infraPolicies.status, "active")))
+        .returning();
+      for (const p of policiesRetired) {
+        await tx.insert(auditLog).values({
+          userId: actorId,
+          objectType: "infra_operation",
+          objectId: p.id,
+          detail: {
+            phase: "policy-retired",
+            cause: "resource-retired",
+            resourceId: id,
+            before: policyFacts(p),
+            reason,
+            fallback: null,
+          },
+          effect: "allow",
+          ruleId: "infra-policy-retired",
+          ruleChain: [],
+          reason,
+        });
+      }
+      await tx.insert(auditLog).values({
+        userId: actorId,
+        objectType: "infra_operation",
+        objectId: id,
+        detail: {
+          phase: "resource-retired",
+          before: resourceFacts(locked),
+          after: resourceFacts(row!),
+          reason,
+          policiesRetired: policiesRetired.map((p) => p.id),
+        },
+        effect: "allow",
+        ruleId: "infra-resource-retired",
+        ruleChain: [],
+        reason,
+      });
+      return { row: row!, policiesRetired: policiesRetired.map((p) => p.id) };
+    });
+    if (out.refused) return reply.status(out.refused.status).send(out.refused.body);
+    return reply.status(200).send({ resource: out.row, policiesRetired: out.policiesRetired });
   });
 
   // --- policies ----------------------------------------------------------
+  // Retired policies are listed (history stays readable); the UI reads the ACTIVE fleet policy
+  // (resourceId null, status active) from this list as the fallback a policy retirement states.
   app.get("/v1/infra/policies", async () => ({
     policies: await db.select().from(infraPolicies).orderBy(desc(infraPolicies.createdAt)),
   }));
@@ -1384,22 +1719,152 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
   app.post("/v1/infra/policies", async (req, reply) => {
     const body = createInfraPolicySchema.parse(req.body);
     if (body.resourceId) {
-      const [res] = await db.select({ id: infraResources.id }).from(infraResources).where(eq(infraResources.id, body.resourceId));
+      const [res] = await db
+        .select({ id: infraResources.id, name: infraResources.name, status: infraResources.status })
+        .from(infraResources)
+        .where(eq(infraResources.id, body.resourceId));
       if (!res) return reply.status(422).send({ error: "unknown_resource" });
+      if (res.status !== "active") return reply.status(409).send(resourceRetired(res));
     }
-    const [row] = await db
-      .insert(infraPolicies)
-      .values({
-        resourceId: body.resourceId ?? null,
-        patchCadenceDays: body.patchCadenceDays ?? null,
-        certRotationDaysBeforeExpiry: body.certRotationDaysBeforeExpiry ?? null,
-        backupSchedule: body.backupSchedule ?? null,
-        backupRetentionDays: body.backupRetentionDays ?? null,
-        driftBaseline: body.driftBaseline ?? null,
-        autoRemediateMaxSeverity: body.autoRemediateMaxSeverity ?? null,
-      })
-      .returning();
-    return reply.status(201).send(row);
+    const resourceId = body.resourceId ?? null;
+    const existing = await activePolicyFor(db, resourceId);
+    if (existing) return reply.status(409).send(policyAlreadyActive(resourceId, existing.id));
+    const actorId = await resolveActor(db, req.authCtx.userId);
+    try {
+      const row = await db.transaction(async (tx) => {
+        const [created] = await tx
+          .insert(infraPolicies)
+          .values({
+            resourceId,
+            patchCadenceDays: body.patchCadenceDays ?? null,
+            certRotationDaysBeforeExpiry: body.certRotationDaysBeforeExpiry ?? null,
+            backupSchedule: body.backupSchedule ?? null,
+            backupRetentionDays: body.backupRetentionDays ?? null,
+            driftBaseline: body.driftBaseline ?? null,
+            autoRemediateMaxSeverity: body.autoRemediateMaxSeverity ?? null,
+          })
+          .returning();
+        await tx.insert(auditLog).values({
+          userId: actorId,
+          objectType: "infra_operation",
+          objectId: created!.id,
+          detail: { phase: "policy-created", resourceId, after: policyFacts(created!) },
+          effect: "allow",
+          ruleId: "infra-policy-created",
+          ruleChain: [],
+          reason: resourceId ? `infra policy set for resource ${resourceId}` : "fleet-wide infra policy set",
+        });
+        return created!;
+      });
+      return reply.status(201).send(row);
+    } catch (err) {
+      const c = uniqueViolation(err);
+      if (c === "infra_policies_active_resource_uq" || c === "infra_policies_active_fleet_uq") {
+        const now = await activePolicyFor(db, resourceId);
+        return reply.status(409).send(policyAlreadyActive(resourceId, now?.id ?? null));
+      }
+      throw err;
+    }
+  });
+
+  // ADR-0208 G8 — edit a policy (the fleet policy too). A retired policy is read-only. An edit that LOOSENS
+  // (slower patch cadence, a higher auto-remediate ceiling, shorter backup retention, a shorter cert-rotation lead,
+  // or clearing any of those three numbers) needs a settings_relax step-up bound to the policy and the new values.
+  app.patch("/v1/infra/policies/:id", async (req, reply) => {
+    const { id } = objectIdParam.parse(req.params);
+    const body = updateInfraPolicySchema.parse(req.body);
+    const [before] = await db.select().from(infraPolicies).where(eq(infraPolicies.id, id));
+    if (!before) return reply.status(404).send({ error: "unknown_policy" });
+    if (before.status !== "active") return reply.status(409).send(policyRetired(before));
+    const relaxed = policyLoosening(before, body);
+    if (Object.keys(relaxed).length > 0) {
+      const ok = await requireStepUp(db, req, reply, {
+        kind: "settings_relax",
+        facts: { values: { infraPolicy: { policyId: id, ...relaxed } } },
+      });
+      if (!ok.ok) return reply;
+    }
+    const actorId = await resolveActor(db, req.authCtx.userId);
+    const out = await db.transaction(async (tx) => {
+      const [locked] = await tx.select().from(infraPolicies).where(eq(infraPolicies.id, id)).for("update");
+      if (!locked || JSON.stringify(policyFacts(locked)) !== JSON.stringify(policyFacts(before))) return null;
+      const set: Partial<typeof infraPolicies.$inferInsert> = {};
+      for (const k of POLICY_FIELDS) {
+        const v = body[k];
+        if (v !== undefined && v !== locked[k]) (set as Record<string, unknown>)[k] = v;
+      }
+      if (Object.keys(set).length === 0) return { row: locked, changed: false };
+      const [row] = await tx.update(infraPolicies).set(set).where(eq(infraPolicies.id, id)).returning();
+      await tx.insert(auditLog).values({
+        userId: actorId,
+        objectType: "infra_operation",
+        objectId: id,
+        detail: {
+          phase: "policy-updated",
+          resourceId: locked.resourceId,
+          before: policyFacts(locked),
+          after: policyFacts(row!),
+          loosened: Object.keys(relaxed),
+        },
+        effect: "allow",
+        ruleId: "infra-policy-updated",
+        ruleChain: [],
+        reason:
+          Object.keys(relaxed).length > 0
+            ? `infra policy edited; loosened ${Object.keys(relaxed).join(", ")} after a step-up`
+            : "infra policy edited; nothing loosened",
+      });
+      return { row: row!, changed: true };
+    });
+    if (!out) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
+    return reply.status(200).send({ policy: out.row, changed: out.changed });
+  });
+
+  // ADR-0208 G8 — retire a resource-scoped policy; its resource falls back to the active fleet policy, which is
+  // returned (and audited) as `fallback`. The fleet policy is edited, never retired. Always a step-up.
+  app.post("/v1/infra/policies/:id/retire", async (req, reply) => {
+    const { id } = objectIdParam.parse(req.params);
+    const { reason } = retireInfraSchema.parse(req.body);
+    const [before] = await db.select().from(infraPolicies).where(eq(infraPolicies.id, id));
+    if (!before) return reply.status(404).send({ error: "unknown_policy" });
+    if (before.resourceId == null) {
+      return reply.status(409).send({
+        error: "infra_fleet_policy_not_retirable",
+        detail: "the fleet policy is every resource's fallback: edit it instead of retiring it",
+        policyId: id,
+      });
+    }
+    if (before.status !== "active") return reply.status(409).send(policyRetired(before));
+    const ok = await requireStepUp(db, req, reply, {
+      kind: "settings_relax",
+      facts: { values: { infraPolicyRetire: { policyId: id } } },
+    });
+    if (!ok.ok) return reply;
+    const actorId = await resolveActor(db, req.authCtx.userId);
+    const out = await db.transaction(async (tx) => {
+      const [locked] = await tx.select().from(infraPolicies).where(eq(infraPolicies.id, id)).for("update");
+      if (!locked || locked.status !== "active") return null;
+      const [row] = await tx
+        .update(infraPolicies)
+        .set({ status: "retired", retiredAt: sql`now()`, retiredReason: reason, retiredByUserId: actorId })
+        .where(eq(infraPolicies.id, id))
+        .returning();
+      const fleet = await activePolicyFor(tx, null);
+      const fallback = fleet ? { policyId: fleet.id, ...policyFacts(fleet) } : null;
+      await tx.insert(auditLog).values({
+        userId: actorId,
+        objectType: "infra_operation",
+        objectId: id,
+        detail: { phase: "policy-retired", resourceId: locked.resourceId, before: policyFacts(locked), reason, fallback },
+        effect: "allow",
+        ruleId: "infra-policy-retired",
+        ruleChain: [],
+        reason,
+      });
+      return { row: row!, fallback };
+    });
+    if (!out) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
+    return reply.status(200).send({ policy: out.row, fallback: out.fallback });
   });
 
   // --- findings (posture inbox) -----------------------------------------
@@ -1442,10 +1907,12 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
     }
     const openStatuses = new Set(["open", "remediation_proposed"]);
     const open = findings.filter((f) => openStatuses.has(f.status));
-    const backupTargets = resources.filter((r) => r.kind === "backup_target").length;
+    // ADR-0208 G8: posture counts monitored (active) resources; a retired resource's findings stay in the history
+    const monitored = resources.filter((r) => r.status === "active");
+    const backupTargets = monitored.filter((r) => r.kind === "backup_target").length;
     const backupsMissed = open.filter((f) => f.kind === "backup_missed").length;
     return {
-      resources: resources.length,
+      resources: monitored.length,
       findings: findings.length,
       open: open.length,
       byKind,
@@ -1460,12 +1927,14 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
     const body = scanInfraSchema.parse(req.body ?? {});
     const actorId = await resolveActor(db, req.authCtx.userId);
     const policies = await db.select().from(infraPolicies);
+    // ADR-0208 G8: a retired resource is never scanned; naming one is a 409, the fleet scan skips it
     const resources = body.resourceId
       ? await db.select().from(infraResources).where(eq(infraResources.id, body.resourceId))
-      : await db.select().from(infraResources);
+      : await db.select().from(infraResources).where(eq(infraResources.status, "active"));
     if (body.resourceId && resources.length === 0) {
       return reply.status(404).send({ error: "unknown_resource" });
     }
+    if (body.resourceId && resources[0]!.status !== "active") return reply.status(409).send(resourceRetired(resources[0]!));
     let created = 0;
     let autoRemediated = 0;
     let refreshed = 0;
@@ -1510,6 +1979,8 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
         detail: `finding is '${finding.status}', only an 'open' finding can be proposed for remediation`,
       });
     }
+    const retiredFinding = await retiredResourceRefusal(db, finding.resourceId);
+    if (retiredFinding) return reply.status(409).send(retiredFinding);
     const [approver] = await db.select({ id: users.id }).from(users).where(eq(users.id, body.approverUserId));
     if (!approver) return reply.status(422).send({ error: "unknown_approver" });
     const actorId = await resolveActor(db, req.authCtx.userId);
@@ -1592,6 +2063,8 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
         detail: `cert is '${cert.status}' — a rotation can be proposed from ${REPROPOSABLE.join("/")} only`,
       });
     }
+    const retiredCert = await retiredResourceRefusal(db, cert.resourceId);
+    if (retiredCert) return reply.status(409).send(retiredCert);
     if (!(await requireApprover(db, body.approverUserId))) return reply.status(422).send({ error: "unknown_approver" });
     const actorId = await resolveActor(db, req.authCtx.userId);
     await db.update(certInventory).set({ status: "rotation_proposed" }).where(eq(certInventory.id, certId));
@@ -1642,6 +2115,8 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
     if (patch.status !== "open") {
       return reply.status(409).send({ error: "not_applicable", detail: `patch is '${patch.status}'` });
     }
+    const retiredPatch = await retiredResourceRefusal(db, patch.resourceId);
+    if (retiredPatch) return reply.status(409).send(retiredPatch);
     if (!(await requireApprover(db, body.approverUserId))) return reply.status(422).send({ error: "unknown_approver" });
     const actorId = await resolveActor(db, req.authCtx.userId);
     await db.update(patchRecords).set({ status: "patch_proposed" }).where(eq(patchRecords.id, patchId));
@@ -1674,6 +2149,8 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
     if (run.status !== "missed") {
       return reply.status(409).send({ error: "not_restorable", detail: `backup run is '${run.status}'` });
     }
+    const retiredBackup = await retiredResourceRefusal(db, run.resourceId);
+    if (retiredBackup) return reply.status(409).send(retiredBackup);
     if (!(await requireApprover(db, body.approverUserId))) return reply.status(422).send({ error: "unknown_approver" });
     const actorId = await resolveActor(db, req.authCtx.userId);
     await db.update(backupRuns).set({ status: "restore_proposed" }).where(eq(backupRuns.id, backupId));
@@ -1689,7 +2166,7 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
 }
 
 // ---------------------------------------------------------------------------
-// ADR-0219: the five infrastructure ledgers under the shared list contract
+// ADR-0226: the five infrastructure ledgers under the shared list contract
 // ---------------------------------------------------------------------------
 
 type InfraResourceListRow = InfraResourceRow & { effectivePolicy: Awaited<ReturnType<typeof effectiveInfraPolicy>> };

@@ -134,7 +134,7 @@ helpers and formatters live next to it.
 | `ErrorState` | A failed read, `role="alert"` with Retry | [kit.tsx](../apps/web/src/ui/kit.tsx) |
 | `RecordError` | A missing, refused or failed record | kit.tsx |
 | `Table` | Every table; pass `error` and `onRetry` | kit.tsx |
-| `DataList` | A list that grows: page size, server sort, column picker, Refresh, Excel download (ADR-0219) | [DataList.tsx](../apps/web/src/ui/DataList.tsx) (lazy, loaded with the pages that use it) |
+| `DataList` | A list that grows: page size, server sort, column picker, Refresh, Excel download (ADR-0226) | [DataList.tsx](../apps/web/src/ui/DataList.tsx) (lazy, loaded with the pages that use it) |
 | `FoldTable` | A table wider than its container | [fold.tsx](../apps/web/src/ui/fold.tsx) (lazy, kept out of the entry bundle) |
 | `RowActions` | Fixed primary/secondary/rest slots per row | kit.tsx |
 | `Badge` with `info` | A status with an explanation, via an `InfoButton` | kit.tsx |

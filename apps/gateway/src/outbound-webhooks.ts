@@ -674,7 +674,7 @@ export function registerOutboundWebhookRoutes(
     return { ok: out.ok, responseCode: out.responseCode, error: out.error, delivery: publicDelivery(logged!) };
   });
 
-  // ADR-0219: with any of sort/dir/cursor/offset/count one webhook's
+  // ADR-0226: with any of sort/dir/cursor/offset/count one webhook's
   // deliveries answer the shared list contract (every delivery, a total);
   // with none of them, exactly the newest-`limit` response below. The
   // payload is never in the Excel file: the list does not show it.
@@ -744,7 +744,7 @@ export function registerOutboundWebhookRoutes(
   });
 }
 
-/** ADR-0219: one webhook's deliveries under the shared list contract (never the payload) */
+/** ADR-0226: one webhook's deliveries under the shared list contract (never the payload) */
 export const WEBHOOK_DELIVERIES_LIST: ListSpec<ReturnType<typeof publicDelivery>> = {
   id: "webhook-deliveries",
   sorts: {

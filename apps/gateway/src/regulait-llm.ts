@@ -1532,7 +1532,7 @@ export function registerRegulAItLlmRoutes(app: FastifyInstance, db: Db, opts: Re
 
   // --- jobs ---------------------------------------------------------------
 
-  // ADR-0219: with any of sort/dir/cursor/offset/count the training jobs
+  // ADR-0226: with any of sort/dir/cursor/offset/count the training jobs
   // answer the shared list contract; with none of them, exactly the
   // newest-`limit` response below (the dataset detail reads its own).
   const jobsList: ContractList<JobListRow, { status?: string }> = {
@@ -2274,7 +2274,7 @@ export async function setLlmTrainingSettings(
 }
 
 // ---------------------------------------------------------------------------
-// ADR-0219: training jobs under the shared list contract (never hyperparameters or external ids)
+// ADR-0226: training jobs under the shared list contract (never hyperparameters or external ids)
 // ---------------------------------------------------------------------------
 
 type JobListRow = TrainingJobRow & { datasetName: string | null; artifactId: string | null; inProcess: boolean };

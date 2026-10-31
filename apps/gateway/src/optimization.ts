@@ -20,7 +20,7 @@ const listQuery = z.object({
  * dashboard will roll these up later; until then this endpoint is the
  * dashboard-ready source of truth (per-technique totals + raw events). */
 export function registerOptimizationRoutes(app: FastifyInstance, db: Db) {
-  // ADR-0219: with any of sort/dir/cursor/offset/count the raw ledger answers
+  // ADR-0226: with any of sort/dir/cursor/offset/count the raw ledger answers
   // the shared list contract; with none of them, exactly the response below
   // (the per-technique totals and the newest `limit` events). The same
   // visibility rule: a non-admin's userId is forced to their own.
@@ -127,7 +127,7 @@ export function registerOptimizationRoutes(app: FastifyInstance, db: Db) {
 }
 
 // ---------------------------------------------------------------------------
-// ADR-0219: the raw cost-events ledger under the shared list contract
+// ADR-0226: the raw cost-events ledger under the shared list contract
 // ---------------------------------------------------------------------------
 
 type CostEventListRow = typeof costEvents.$inferSelect & { userName: string | null };

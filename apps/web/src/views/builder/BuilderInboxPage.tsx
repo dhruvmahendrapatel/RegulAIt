@@ -29,7 +29,7 @@ const EMPTY: Record<Tab, { title: string; body: string }> = {
   all: { title: "No threads yet", body: "Start a conversation with one of your agents to see it here." },
 };
 
-/** ADR-0219: the inbox's columns; the ids and sortable ones match the gateway's BUILDER_THREADS_LIST */
+/** ADR-0226: the inbox's columns; the ids and sortable ones match the gateway's BUILDER_THREADS_LIST */
 export const THREAD_COLUMNS: Array<DataColumn<BuilderThreadSummary>> = [
   {
     key: "title",

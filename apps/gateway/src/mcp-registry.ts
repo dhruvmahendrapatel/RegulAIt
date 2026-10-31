@@ -1389,7 +1389,7 @@ export function registerMcpRegistryRoutes(app: FastifyInstance, db: Db, deps: Mc
     return reply.status(out.outcome === "ok" ? 200 : 200).send(out);
   });
 
-  // ADR-0219: with any of sort/dir/cursor/offset/count one registry's
+  // ADR-0226: with any of sort/dir/cursor/offset/count one registry's
   // catalogue answers the shared list contract, with a search (`q`) on the
   // server; with none of them, exactly the whole-catalogue response below.
   const entriesList: ContractList<RegistryEntryRow, { q?: string; kind?: "remote" | "catalogue_only" }> = {
@@ -1461,7 +1461,7 @@ export function registerMcpRegistryRoutes(app: FastifyInstance, db: Db, deps: Mc
 export const FEDERATION_HAS_NO_CALL_PATH_BRANCH = true;
 
 // ---------------------------------------------------------------------------
-// ADR-0219: a registry's catalogue under the shared list contract
+// ADR-0226: a registry's catalogue under the shared list contract
 // ---------------------------------------------------------------------------
 
 type RegistryEntryRow = typeof mcpRegistryEntries.$inferSelect;

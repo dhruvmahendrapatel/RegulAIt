@@ -158,7 +158,7 @@ export const INDIRECT_UI_CALLS = new Map([
       reason: "propose(…) keeps the path in state; the confirm dialog posts it",
     },
   ]),
-  // ADR-0219: the shared list control downloads the Excel file from the path its page hands it (`exportPath`)
+  // ADR-0226: the shared list control downloads the Excel file from the path its page hands it (`exportPath`)
   ...[
     ["GET /v1/runs/export.xlsx", "apps/web/src/views/runs/RunsPage.tsx"],
     ["GET /v1/incidents/export.xlsx", "apps/web/src/views/incidents/IncidentsPage.tsx"],
@@ -202,7 +202,7 @@ export const INDIRECT_UI_CALLS = new Map([
       reason: "the page passes the export path to DataList, whose Download Excel button fetches it",
     },
   ]),
-  // ADR-0219 P2 batch C: a list the shared control reads, page by page, from the endpoint its page hands it
+  // ADR-0226 P2 batch C: a list the shared control reads, page by page, from the endpoint its page hands it
   ...[
     ["GET /v1/admission/skills", "apps/web/src/views/admin/governance/AdmissionReviewPage.tsx"],
     ["GET /v1/billing/statements", "apps/web/src/views/admin/cost/BillingHistory.tsx"],

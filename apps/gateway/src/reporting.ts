@@ -831,7 +831,7 @@ export function registerReportingRoutes(app: FastifyInstance, db: Db): void {
     });
   });
 
-  // ADR-0219: with any of sort/dir/cursor/offset/count the run history
+  // ADR-0226: with any of sort/dir/cursor/offset/count the run history
   // answers the shared list contract; with none of them, exactly the response
   // below. A non-admin's narrowing (runs they could regenerate) is the same
   // rule, moved into the WHERE so the page, the total and the export agree.
@@ -1075,7 +1075,7 @@ export function registerReportingRoutes(app: FastifyInstance, db: Db): void {
 }
 
 // ---------------------------------------------------------------------------
-// ADR-0219: report run history under the shared list contract
+// ADR-0226: report run history under the shared list contract
 // ---------------------------------------------------------------------------
 
 const REPORT_RUN_LIST_COLUMNS = {

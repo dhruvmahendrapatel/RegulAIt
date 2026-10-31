@@ -552,7 +552,7 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
     return reply.send(await adminExecutorView(db, row));
   });
 
-  // ADR-0219: with any of sort/dir/cursor/offset/count one executor's
+  // ADR-0226: with any of sort/dir/cursor/offset/count one executor's
   // self-test history answers the shared list contract (every report, a
   // total); with none of them, exactly the newest-100 response below. The
   // report body is never in the Excel file: the list shows only its digest.
@@ -862,7 +862,7 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
 }
 
 // ---------------------------------------------------------------------------
-// ADR-0219: an executor's self-test history under the shared list contract
+// ADR-0226: an executor's self-test history under the shared list contract
 // ---------------------------------------------------------------------------
 
 function attestationView(a: typeof executorAttestations.$inferSelect) {
