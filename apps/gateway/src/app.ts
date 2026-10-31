@@ -190,6 +190,7 @@ import { registerTrustDashboardRoutes } from "./trust-dashboard.js";
 import { registerUseCaseOverviewRoutes } from "./use-case-overview.js";
 import { registerUseCaseDraftRoutes } from "./use-case-drafts.js";
 import { registerAgentCardRoutes } from "./agent-card.js";
+import { registerAgentSetupAssistRoutes } from "./agent-setup-assist.js";
 import { registerDependencyGraphRoutes } from "./dependency-graph.js";
 import { registerRunGraphRoutes } from "./run-graph.js";
 import { registerGovernanceMonitorRoutes } from "./governance-monitor.js";
@@ -5579,6 +5580,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerUseCaseOverviewRoutes(app, db);
   // demo task C5 — the agent card
   registerAgentCardRoutes(app, db);
+  // ADR-0205 — the agent setup assistant (admin, off by default, suggestion-only)
+  registerAgentSetupAssistRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0156 — the AI-system dependency graph with propagated declared risk
   registerDependencyGraphRoutes(app, db);
   // ADR-0173 batch 2b — the read-only run graph (builder turn, orchestration run, use case)

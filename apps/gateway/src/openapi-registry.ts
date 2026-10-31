@@ -100,6 +100,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/agents/:agentId/fallbacks": "internal",
   "PUT /v1/agents/:agentId/fallbacks": "internal",
   "POST /v1/agents": "internal",
+  "GET /v1/agents/setup-assist": "internal",
+  "POST /v1/agents/setup-assist": "internal",
   // B1.5 — the versioned agent_config edit surface (model + list prices).
   "PATCH /v1/agents/:agentId": "internal",
   "POST /v1/agents/:agentId/enabled": "internal",
@@ -1301,6 +1303,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/agents/:agentId/fallbacks": "agents",
   "PUT /v1/agents/:agentId/fallbacks": "agents",
   "POST /v1/agents": "agents",
+  "GET /v1/agents/setup-assist": "agents",
+  "POST /v1/agents/setup-assist": "agents",
   "PATCH /v1/agents/:agentId": "agents",
   "POST /v1/agents/:agentId/enabled": "agents",
   "POST /v1/agents/:agentId/invoke": "agents",
