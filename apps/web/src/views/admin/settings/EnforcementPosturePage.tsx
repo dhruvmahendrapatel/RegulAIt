@@ -51,7 +51,7 @@ import { OrgSettingsCard } from "./OrgSettingsCard";
 import { IsolationSettingsCard } from "../integrations/isolation/IsolationSettings";
 import { DiscoveryPostureCard } from "../governance/DiscoveryPostureCard";
 import type { DiscoveryPostureView } from "../governance/discoverySourcesModel";
-import ds from "../governance/discoverySources.module.css";
+import ps from "./posture.module.css";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -292,7 +292,7 @@ export default function EnforcementPosturePage() {
             }
           >
             {/* inlineLinks: a link inside a Fix sentence is underlined, so it is not told apart by colour alone */}
-            <div className={`${v.stack} ${ds.inlineLinks}`}>
+            <div className={`${v.stack} ${ps.inlineLinks}`}>
               <Table<MatrixRow>
                 rows={[...enforcement, ...optimisation].map(controlRow)}
                 rowKey={(r) => r.key}

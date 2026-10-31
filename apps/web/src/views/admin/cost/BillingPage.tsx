@@ -27,6 +27,7 @@ import { KV, QueryGate, Stat, downloadCsv, optionEls, projectOpts, teamOpts, use
 import { useToast } from "../../../ui/toast";
 import { BillingHistoryCard, RateCardDetail, StatementDetail } from "./BillingHistory";
 import a from "../admin.module.css";
+import bl from "./billing.module.css";
 import v from "../../views.module.css";
 
 interface RateCardEntry {
@@ -293,11 +294,11 @@ export default function BillingPage() {
             </div>
           </Card>
 
-          <ol className={a.steps} aria-label="Billing set-up">
+          <ol className={bl.steps} aria-label="Billing set-up">
             {steps.map((x, i) => (
-              <li key={x.id} className={x.id === step ? a.stepOn : x.done ? a.stepDone : undefined}>
+              <li key={x.id} className={x.id === step ? bl.stepOn : x.done ? bl.stepDone : undefined}>
                 <button type="button" aria-current={x.id === step ? "step" : undefined} onClick={() => setStep(x.id)}>
-                  <span className={a.stepNum} aria-hidden>{x.done && x.id !== step ? "✓" : i + 1}</span>
+                  <span className={bl.stepNum} aria-hidden>{x.done && x.id !== step ? "✓" : i + 1}</span>
                   <span>{x.label}</span>
                   {x.status}
                 </button>
