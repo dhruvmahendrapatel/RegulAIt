@@ -5,7 +5,7 @@
  * ADR-0033 removed the legacy consoles entirely, so this shell is the whole
  * product surface — there are no outbound bridges left.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type FocusEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type FocusEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { pendingQueueQuery, pendingRows, queueTotal } from "../api/approvalQueue";
@@ -15,12 +15,14 @@ import { Lockup } from "../ui/Brand";
 import { InfoButton } from "../ui/kit";
 import { ADMIN_GROUPS, SUITES, WORKSPACE, SuiteGlyph, suiteHome, shadowedByMoreSpecific, suiteOfPath, type NavEntry } from "./suites";
 import { NavGlyph, RailGlyph } from "./navIcons";
-import { CommandPalette } from "./CommandPalette";
 import StepUpDialog from "../stepup/StepUpDialog";
 // ADR-0182 (D4) A14: the acknowledgement interstitial's slot (A14's file)
 import AcknowledgeGate from "../views/account/AcknowledgeGate";
 import s from "./shell.module.css";
 
+// The command palette renders nothing until it is opened, so its code (and its entity lists) load on first open
+// rather than in the entry chunk every page pays for.
+const CommandPalette = lazy(() => import("./CommandPalette").then((m) => ({ default: m.CommandPalette })));
 
 /**
  * route path → the nav section it lives under, so a page header can state where
@@ -558,12 +560,16 @@ export default function AppShell(props: { children: ReactNode }) {
           <AcknowledgeGate>{props.children}</AcknowledgeGate>
         </main>
       </div>
-      <CommandPalette
-        open={paletteOpen}
-        onClose={() => setPaletteOpen(false)}
-        isAdmin={Boolean(auth?.isAdmin)}
-        userId={auth?.userId ?? null}
-      />
+      {paletteOpen && (
+        <Suspense fallback={null}>
+          <CommandPalette
+            open
+            onClose={() => setPaletteOpen(false)}
+            isAdmin={Boolean(auth?.isAdmin)}
+            userId={auth?.userId ?? null}
+          />
+        </Suspense>
+      )}
       {/* ADR-0186 A: the one "confirm it's you" dialog (step-up), for every screen */}
       <StepUpDialog />
     </div>

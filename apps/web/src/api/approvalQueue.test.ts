@@ -1,15 +1,6 @@
 import { describe, expect, it } from "vitest";
-import {
-  DECIDED_QUEUE_URL,
-  PENDING_QUEUE_URL,
-  decidedQueueQuery,
-  decidedRows,
-  pendingCapNote,
-  pendingQueueQuery,
-  pendingRows,
-  queueTotal,
-  type ApprovalQueuePage,
-} from "./approvalQueue";
+import { PENDING_QUEUE_URL, pendingQueueQuery, pendingRows, queueTotal, type ApprovalQueuePage } from "./approvalQueue";
+import { DECIDED_QUEUE_URL, decidedQueueQuery, decidedRows, pendingCapNote } from "./approvalQueuePages";
 import type { Approval } from "./types";
 
 const row = (id: string, status: Approval["status"]): Approval => ({ id, status, objectType: "workflow", stageId: null }) as unknown as Approval;
