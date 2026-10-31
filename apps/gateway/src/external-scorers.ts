@@ -30,7 +30,7 @@
  */
 
 import type { FastifyInstance } from "fastify";
-import { auditLog, eq, externalScorers, type Db, type ExternalScorerRow } from "@regulait/db";
+import { and, auditLog, eq, externalScorers, guardrailTrainedDetectors, type Db, type ExternalScorerRow } from "@regulait/db";
 import {
   createExternalScorerSchema,
   parseExternalScorerResponse,
@@ -454,6 +454,18 @@ export function registerExternalScorerRoutes(
 
   app.delete("/v1/external-scorers/:scorerId", async (req, reply) => {
     const { scorerId } = idParam.parse(req.params);
+    // ADR-0220: an enabled trained detector calls this scorer at every
+    // enforcement site; turn the detector off first (a step-up relaxation)
+    const [inUse] = await db
+      .select({ kind: guardrailTrainedDetectors.kind })
+      .from(guardrailTrainedDetectors)
+      .where(and(eq(guardrailTrainedDetectors.scorerId, scorerId), eq(guardrailTrainedDetectors.enabled, true)));
+    if (inUse) {
+      return reply.status(409).send({
+        error: "external_scorer_in_use",
+        detail: `an enabled trained detector (${inUse.kind}) uses this scorer — turn it off on the Guardrails page first`,
+      });
+    }
     const [removed] = await db
       .delete(externalScorers)
       .where(eq(externalScorers.id, scorerId))

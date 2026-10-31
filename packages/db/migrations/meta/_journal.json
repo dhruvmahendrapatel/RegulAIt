@@ -1534,6 +1534,13 @@
       "when": 1785189000000,
       "tag": "0254_agent_setup_assist",
       "breakpoints": true
+    },
+    {
+      "idx": 255,
+      "version": "7",
+      "when": 1785190000000,
+      "tag": "0255_guardrail_trained_detectors",
+      "breakpoints": true
     }
   ]
 }
