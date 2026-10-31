@@ -304,6 +304,25 @@ describe("ADR-0215 the imported regulatory feed", () => {
     expect(proposed.json().diff).toMatchObject({ added: [key], removed: [], changed: [] });
     expect(await keys()).not.toContain(key);
     const id = proposed.json().feedImport.id as string;
+    // the review view lists the entries themselves, not only their count
+    const review = await get(`/v1/regulatory/feed-imports/${id}`);
+    expect(review.statusCode).toBe(200);
+    expect(review.json().feedImport).toMatchObject({
+      status: "pending",
+      added: [
+        {
+          key,
+          title: `Imported AI rule ${RUN}`,
+          instrument: "Federal Register test",
+          effectiveDate: "2026-01-01",
+          status: "in_force",
+          sourceUrl: "https://www.federalregister.gov/d/test",
+        },
+      ],
+      changed: [],
+      removed: [],
+    });
+    expect((await get("/v1/regulatory/feed-imports/00000000-0000-4000-8000-000000000000")).statusCode).toBe(404);
     expect((await post(`/v1/regulatory/feed-imports/${id}/accept`)).statusCode).toBe(200);
     expect(await keys()).toContain(key);
     const rules = (await auditFor(id)).map((r) => r.ruleId).sort();

@@ -11,7 +11,8 @@ import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
 import { fmtDay, plural } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, ConfirmModal, EmptyState, RowActions, Table } from "../../../ui/kit";
+import { DetailDrawer, DrawerActions } from "../../../ui/DetailDrawer";
+import { Badge, Button, Card, EmptyState, RecordError, RowActions, SkeletonBlock, Table } from "../../../ui/kit";
 import { RefusalNotice } from "../../../ui/RefusalNotice";
 import { useAction } from "../adminKit";
 import v from "../../views.module.css";
@@ -51,9 +52,143 @@ const diffWords = (d: FeedDiff) =>
   `${plural(d.added.length, "entry added", "entries added")}, ${plural(d.changed.length, "entry changed", "entries changed")}, ` +
   `${plural(d.removed.length, "entry removed", "entries removed")}`;
 
+interface FeedEntryView {
+  key: string;
+  title: string;
+  instrument: string;
+  effectiveDate: string;
+  status: string;
+  sourceUrl: string;
+}
+
+interface FeedImportReview {
+  id: string;
+  sourceId: string;
+  sourceVersion: string;
+  status: string;
+  added: FeedEntryView[];
+  changed: Array<FeedEntryView & { previous: FeedEntryView | null }>;
+  removed: FeedEntryView[];
+}
+
+const STATUS_WORDS: Record<string, string> = {
+  in_force: "In force",
+  upcoming: "Upcoming",
+  proposed: "Proposed",
+  published: "Published",
+  withdrawn: "Withdrawn",
+};
+
+function EntryLine(props: { entry: FeedEntryView; label?: string }) {
+  const e = props.entry;
+  return (
+    <div>
+      <p>
+        {props.label && <span className={v.dim}>{props.label}: </span>}
+        <a href={e.sourceUrl} target="_blank" rel="noreferrer noopener">
+          {e.title}
+        </a>
+      </p>
+      <p className={v.dim}>
+        {e.instrument} · {STATUS_WORDS[e.status] ?? e.status} · effective {fmtDay(e.effectiveDate)} · <code>{e.key}</code>
+      </p>
+    </div>
+  );
+}
+
+function EntryList(props: { title: string; entries: FeedEntryView[]; empty: string }) {
+  return (
+    <Card title={`${props.title} (${props.entries.length})`}>
+      {props.entries.length === 0 ? (
+        <p className={v.dim}>{props.empty}</p>
+      ) : (
+        <ul className={v.stack}>
+          {props.entries.map((e) => (
+            <li key={e.key}>
+              <EntryLine entry={e} />
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
+  );
+}
+
+/** what an update adds, changes and removes, read before it is accepted; the decision row stays pinned */
+function FeedReviewDrawer(props: { importId: string; onClose: () => void }) {
+  const act = useAction();
+  const q = useQuery({
+    queryKey: ["admin", "regulatory-feed-imports", "review", props.importId],
+    queryFn: () => api.get<{ feedImport: FeedImportReview }>(`/v1/regulatory/feed-imports/${props.importId}`),
+  });
+  const r = q.data?.feedImport;
+  const decide = (decision: "accept" | "reject") => {
+    if (act.busy || !r) return;
+    void act
+      .run(
+        () => api.post(`/v1/regulatory/feed-imports/${r.id}/${decision}`, {}),
+        decision === "accept" ? "Entries added to the regulatory feed" : "Update rejected",
+      )
+      .then((ok) => ok && props.onClose());
+  };
+  return (
+    <DetailDrawer
+      type="Regulatory feed update"
+      title={r ? `Update of ${fmtDay(r.sourceVersion)}` : "Regulatory feed update"}
+      subjectKey={props.importId}
+      meta={r ? <Badge tone="warn">Review waiting</Badge> : undefined}
+      onClose={props.onClose}
+    >
+      {q.isLoading && <SkeletonBlock lines={6} />}
+      {q.error && <RecordError noun="feed update" error={q.error} onRetry={() => void q.refetch()} />}
+      {r && (
+        <div className={v.stack}>
+          <p>
+            Accepting adds these entries to the regulatory feed and removes the ones listed as removed. Hand-checked entries with the same
+            key are kept. Imported entries are not mapped to your controls. The decision is recorded in the audit log.
+          </p>
+          <EntryList title="Entries added" entries={r.added} empty="No entry is added." />
+          <Card title={`Entries changed (${r.changed.length})`}>
+            {r.changed.length === 0 ? (
+              <p className={v.dim}>No entry is changed.</p>
+            ) : (
+              <ul className={v.stack}>
+                {r.changed.map((e) => (
+                  <li key={e.key}>
+                    {e.previous && <EntryLine entry={e.previous} label="In the feed now" />}
+                    <EntryLine entry={e} label="After this update" />
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Card>
+          <EntryList title="Entries removed" entries={r.removed} empty="No entry is removed." />
+          {act.guidance ? (
+            <RefusalNotice guidance={act.guidance} />
+          ) : (
+            act.error && (
+              <div className={v.errLine} role="alert">
+                {act.error}
+              </div>
+            )
+          )}
+          <DrawerActions>
+            <Button variant="primary" aria-disabled={act.busy} onClick={() => decide("accept")}>
+              Accept entries
+            </Button>
+            <Button aria-disabled={act.busy} onClick={() => decide("reject")}>
+              Reject update
+            </Button>
+          </DrawerActions>
+        </div>
+      )}
+    </DetailDrawer>
+  );
+}
+
 export default function RegulatoryFeedSourcesPage() {
   const act = useAction();
-  const [deciding, setDeciding] = useState<{ source: FeedSource; decision: "accept" | "reject" } | null>(null);
+  const [reviewing, setReviewing] = useState<string | null>(null);
   const q = useQuery({
     queryKey: ["admin", "regulatory-feed-imports"],
     queryFn: () => api.get<{ enabled: boolean; sources: FeedSource[] }>("/v1/regulatory/feed-imports"),
@@ -142,8 +277,8 @@ export default function RegulatoryFeedSourcesPage() {
                     slot="11rem"
                     primary={
                       s.pending ? (
-                        <Button size="sm" variant="primary" aria-disabled={act.busy} onClick={() => !act.busy && setDeciding({ source: s, decision: "accept" })}>
-                          Accept entries
+                        <Button size="sm" variant="primary" onClick={() => setReviewing(s.pending!.id)}>
+                          Review update
                         </Button>
                       ) : enabled && !s.accepted?.upToDate ? (
                         <Button
@@ -153,19 +288,16 @@ export default function RegulatoryFeedSourcesPage() {
                           onClick={() => {
                             if (act.busy) return;
                             void act.run(async () => {
-                              const out = await api.post<{ noChange?: boolean }>(`/v1/regulatory/feed-imports/${encodeURIComponent(s.sourceId)}/proposals`, {});
+                              const out = await api.post<{ noChange?: boolean; feedImport?: { id: string } }>(
+                                `/v1/regulatory/feed-imports/${encodeURIComponent(s.sourceId)}/proposals`,
+                                {},
+                              );
+                              if (out.feedImport) setReviewing(out.feedImport.id);
                               return out.noChange ? "Nothing new: the feed already has these entries" : "Update ready to review";
                             }, undefined);
                           }}
                         >
                           Propose update
-                        </Button>
-                      ) : undefined
-                    }
-                    secondary={
-                      s.pending ? (
-                        <Button size="sm" aria-disabled={act.busy} onClick={() => !act.busy && setDeciding({ source: s, decision: "reject" })}>
-                          Reject entries
                         </Button>
                       ) : undefined
                     }
@@ -182,28 +314,7 @@ export default function RegulatoryFeedSourcesPage() {
           />
         </Card>
       </div>
-      <ConfirmModal
-        open={deciding !== null}
-        title={deciding?.decision === "accept" ? `Add these entries to the regulatory feed?` : `Reject this update?`}
-        body={
-          deciding?.source.pending
-            ? deciding.decision === "accept"
-              ? `${diffWords(deciding.source.pending.diff)}. Hand-checked entries with the same key are kept. The decision is recorded in the audit log.`
-              : "The feed stays as it is. The decision is recorded in the audit log."
-            : undefined
-        }
-        confirmLabel={deciding?.decision === "accept" ? "Accept entries" : "Reject entries"}
-        onCancel={() => setDeciding(null)}
-        onConfirm={() => {
-          const d = deciding;
-          setDeciding(null);
-          if (d?.source.pending)
-            void act.run(
-              () => api.post(`/v1/regulatory/feed-imports/${d.source.pending!.id}/${d.decision}`, {}),
-              d.decision === "accept" ? "Entries added to the regulatory feed" : "Update rejected",
-            );
-        }}
-      />
+      {reviewing && <FeedReviewDrawer importId={reviewing} onClose={() => setReviewing(null)} />}
     </>
   );
 }

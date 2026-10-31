@@ -454,6 +454,50 @@ export function registerFrameworkImportRoutes(app: FastifyInstance, db: Db): voi
     return { enabled: settings.frameworkImportsEnabled, sources };
   });
 
+  /**
+   * The review view of one feed import: the entries it would add, change (with
+   * what is in the feed now) and remove, so an admin sees what joins the feed
+   * before accepting it. Changed and removed entries are read from the source's
+   * accepted row, the same baseline the stored diff was computed against.
+   */
+  app.get("/v1/regulatory/feed-imports/:id", async (req, reply) => {
+    const { id } = idParam.parse(req.params);
+    const [row] = await db.select().from(regulatoryFeedImports).where(eq(regulatoryFeedImports.id, id));
+    if (!row) return reply.status(404).send({ error: "unknown_feed_import" });
+    const [accepted] = await db
+      .select({ entries: regulatoryFeedImports.entries })
+      .from(regulatoryFeedImports)
+      .where(and(eq(regulatoryFeedImports.sourceId, row.sourceId), eq(regulatoryFeedImports.status, "accepted")));
+    const view = (e: RegulatoryUpdate) => ({
+      key: e.key,
+      title: e.title,
+      instrument: e.instrument,
+      effectiveDate: e.effectiveDate,
+      status: e.status,
+      sourceUrl: e.sourceUrl,
+    });
+    const next = new Map((row.entries as unknown as RegulatoryUpdate[]).map((e) => [e.key, e]));
+    const prev = new Map(((accepted?.entries ?? []) as unknown as RegulatoryUpdate[]).map((e) => [e.key, e]));
+    const diff = row.diff as { added?: string[]; changed?: string[]; removed?: string[] };
+    const pick = (keys: string[] | undefined, from: Map<string, RegulatoryUpdate>) =>
+      (keys ?? []).flatMap((k) => (from.has(k) ? [view(from.get(k)!)] : []));
+    return {
+      feedImport: {
+        id: row.id,
+        sourceId: row.sourceId,
+        sourceVersion: row.sourceVersion,
+        status: row.status,
+        createdAt: row.createdAt,
+        decidedAt: row.decidedAt,
+        added: pick(diff.added, next),
+        changed: (diff.changed ?? []).flatMap((k) =>
+          next.has(k) ? [{ ...view(next.get(k)!), previous: prev.has(k) ? view(prev.get(k)!) : null }] : [],
+        ),
+        removed: pick(diff.removed, prev),
+      },
+    };
+  });
+
   app.post("/v1/regulatory/feed-imports/:sourceId/proposals", async (req, reply) => {
     const actor = req.authCtx.userId ?? null;
     if (await refuseIfDisabled(actor, "proposing a regulatory feed import", reply)) return reply;
