@@ -35,6 +35,14 @@
  * never authenticate. The variable always wins: setting it is how an operator takes the key over (and
  * rotates: list the next key beside the current one, then rotate here).
  *
+ * ES256 BESIDE Ed25519 (ADR-0210): the same file may also hold PKCS#8 P-256 keys. They sign only the OIDC-profile
+ * MCP identity assertion (`mcp-identity-assertion.ts`), under its own issuer and JWKS. Each algorithm has its own
+ * signer (one active key PER ALGORITHM, migration 0228), its own first-load activation, and the same rotate and
+ * revoke (a rotation retires only the active key of the target's algorithm). Every verifier of our own tokens reads
+ * `publishedSigningKeys`, which returns Ed25519 keys unless asked otherwise, so an ES256 key never verifies a
+ * delegated token, a delegation proof or a self token. The install-generated key stays Ed25519 only: an ES256 key is
+ * operator-managed.
+ *
  * Open source first (ADR-0176): the key parsing is Node's own `crypto`
  * (`createPrivateKey`/`createPublicKey`), the thumbprint and every JWS are
  * `jose` 6.2.12 (already exact-pinned). No cryptography is written here.
@@ -48,6 +56,7 @@ import {
   IDENTITY_SETTING_LIMITS,
   IDENTITY_SIGNING_KEY_ENV,
   IDENTITY_SIGNING_KID_PATTERN,
+  type IdentitySigningKeyAlgorithm,
   type IdentitySigningKeyConfigurationView,
   type IdentitySigningKeyView,
 } from "@regulait/shared";
@@ -62,20 +71,31 @@ import {
 
 /** a retired key verifies for this long after retirement: the longest a delegated token may live */
 export const SIGNING_KEY_OVERLAP_SECONDS = IDENTITY_SETTING_LIMITS.delegatedTokenTtlSeconds.max;
-/** the JWS `alg` of every issuer signature (Ed25519, RFC 8037) */
+/** the JWS `alg` of every issuer signature of our own tokens (Ed25519, RFC 8037) */
 export const ISSUER_JWS_ALG = "EdDSA" as const;
+/** ADR-0210: the JWS `alg` each key algorithm signs with */
+export const JWS_ALG_OF = { Ed25519: ISSUER_JWS_ALG, ES256: "ES256" } as const satisfies Record<IdentitySigningKeyAlgorithm, string>;
 /** the system actor of an automatic first activation (no person asked for it) */
 const SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000000";
 const MAX_KEY_FILE_BYTES = 64 * 1024;
 const MAX_CONFIGURED_KEYS = 8;
 
-export interface IssuerPublicJwk {
+export interface Ed25519PublicJwk {
   kty: "OKP";
   crv: "Ed25519";
   x: string;
 }
+/** ADR-0210: a P-256 public key (ES256) */
+export interface P256PublicJwk {
+  kty: "EC";
+  crv: "P-256";
+  x: string;
+  y: string;
+}
+export type IssuerPublicJwk = Ed25519PublicJwk | P256PublicJwk;
 export interface ConfiguredSigningKey {
   kid: string;
+  algorithm: IdentitySigningKeyAlgorithm;
   privateKey: KeyObject;
   publicJwk: IssuerPublicJwk;
 }
@@ -123,8 +143,8 @@ export function operatorIdentityKeyConfigured(env: NodeJS.ProcessEnv = process.e
 }
 
 async function asConfigured(privateKey: KeyObject, x: string): Promise<ConfiguredSigningKey> {
-  const publicJwk: IssuerPublicJwk = { kty: "OKP", crv: "Ed25519", x };
-  return { kid: await calculateJwkThumbprint(publicJwk, "sha256"), privateKey, publicJwk };
+  const publicJwk: Ed25519PublicJwk = { kty: "OKP", crv: "Ed25519", x };
+  return { kid: await calculateJwkThumbprint(publicJwk, "sha256"), algorithm: "Ed25519", privateKey, publicJwk };
 }
 
 /** the install-generated issuer key, read as strictly as the receipt key (or [] when there is none) */
@@ -204,7 +224,8 @@ export async function configuredIdentitySigningKeys(env: NodeJS.ProcessEnv = pro
   const file = env[IDENTITY_SIGNING_KEY_ENV]?.trim();
   // ADR-0188 S7: unset → the install-generated key, when the install secrets directory holds one
   if (!file) return installGeneratedIdentityKeys(env);
-  const bad = () => new IdentitySigningKeyError("signing_key_config_invalid", `${IDENTITY_SIGNING_KEY_ENV} does not name a readable file of PKCS#8 Ed25519 private keys`);
+  const bad = () =>
+    new IdentitySigningKeyError("signing_key_config_invalid", `${IDENTITY_SIGNING_KEY_ENV} does not name a readable file of PKCS#8 Ed25519 or P-256 private keys`);
   let st;
   try {
     st = statSync(file);
@@ -227,24 +248,40 @@ export async function configuredIdentitySigningKeys(env: NodeJS.ProcessEnv = pro
     } catch {
       throw bad();
     }
-    if (privateKey.asymmetricKeyType !== "ed25519") throw bad();
     const jwk = createPublicKey(pem).export({ format: "jwk" });
-    if (jwk.kty !== "OKP" || jwk.crv !== "Ed25519" || typeof jwk.x !== "string" || "d" in jwk) throw bad();
-    const publicJwk: IssuerPublicJwk = { kty: "OKP", crv: "Ed25519", x: jwk.x };
+    if ("d" in jwk || typeof jwk.x !== "string") throw bad();
+    let algorithm: IdentitySigningKeyAlgorithm;
+    let publicJwk: IssuerPublicJwk;
+    if (privateKey.asymmetricKeyType === "ed25519" && jwk.kty === "OKP" && jwk.crv === "Ed25519") {
+      algorithm = "Ed25519";
+      publicJwk = { kty: "OKP", crv: "Ed25519", x: jwk.x };
+    } else if (privateKey.asymmetricKeyType === "ec" && privateKey.asymmetricKeyDetails?.namedCurve === "prime256v1" && jwk.kty === "EC" && jwk.crv === "P-256" && typeof jwk.y === "string") {
+      // ADR-0210: P-256 only (ES256); any other curve is refused with the whole file
+      algorithm = "ES256";
+      publicJwk = { kty: "EC", crv: "P-256", x: jwk.x, y: jwk.y };
+    } else {
+      throw bad();
+    }
     const kid = await calculateJwkThumbprint(publicJwk, "sha256");
     if (!IDENTITY_SIGNING_KID_PATTERN.test(kid)) throw bad();
     if (keys.some((k) => k.kid === kid)) throw bad();
-    keys.push({ kid, privateKey, publicJwk });
+    keys.push({ kid, algorithm, privateKey, publicJwk });
   }
   memo = { file, mtimeMs: st.mtimeMs, size: st.size, keys };
   return keys;
 }
 
+/** the public members of a stored key, rebuilt member by member (never a stored extra) */
+function publicMembers(r: Pick<IdentitySigningKeyRow, "algorithm" | "publicJwk">): IssuerPublicJwk {
+  const j = r.publicJwk;
+  return r.algorithm === "ES256" && j.kty === "EC" ? { kty: "EC", crv: "P-256", x: j.x, y: j.y } : { kty: "OKP", crv: "Ed25519", x: j.x };
+}
+
 export function signingKeyView(r: IdentitySigningKeyRow): IdentitySigningKeyView {
   return {
     kid: r.kid,
-    algorithm: "Ed25519",
-    publicJwk: { kty: "OKP", crv: "Ed25519", x: r.publicJwk.x, kid: r.kid },
+    algorithm: r.algorithm,
+    publicJwk: { ...publicMembers(r), kid: r.kid },
     createdAt: r.createdAt.toISOString(),
     activatedAt: r.activatedAt?.toISOString() ?? null,
     retiredAt: r.retiredAt?.toISOString() ?? null,
@@ -264,6 +301,8 @@ export async function listIdentitySigningKeys(db: Db): Promise<IdentitySigningKe
  * overlap. Anything else refuses (decision 12's rotation/revocation table).
  */
 export function signingKeyAccepts(row: IdentitySigningKeyRow, iatSeconds: number, now: Date): boolean {
+  // ADR-0210: an ES256 key signs only the OIDC-profile assertion; it never verifies one of our own tokens
+  if (row.algorithm !== "Ed25519") return false;
   if (row.revokedAt || !row.activatedAt) return false;
   const iatMs = iatSeconds * 1000;
   // one second of slack at BOTH ends of the key's stretch: a JWT `iat` is whole seconds and the stamps are
@@ -277,21 +316,28 @@ export function signingKeyAccepts(row: IdentitySigningKeyRow, iatSeconds: number
   return true;
 }
 
-/** the keys a verifier may use right now (database clock unless pinned): activated, unrevoked, and (if retired) inside the overlap */
-export async function publishedSigningKeys(db: Db, nowIn?: Date): Promise<IdentitySigningKeyRow[]> {
+/**
+ * The keys a verifier may use right now (database clock unless pinned): activated, unrevoked, and (if retired) inside
+ * the overlap. Of ONE algorithm, Ed25519 unless asked (ADR-0210): the ES256 keys are published only in the OIDC
+ * profile's own JWKS, and never reach a verifier of our own tokens.
+ */
+export async function publishedSigningKeys(db: Db, nowIn?: Date, algorithm: IdentitySigningKeyAlgorithm = "Ed25519"): Promise<IdentitySigningKeyRow[]> {
   const now = nowIn ?? (await databaseNow(db));
-  const rows = await db.select().from(identitySigningKeys).where(isNull(identitySigningKeys.revokedAt));
+  const rows = await db
+    .select()
+    .from(identitySigningKeys)
+    .where(and(isNull(identitySigningKeys.revokedAt), eq(identitySigningKeys.algorithm, algorithm)));
   return rows.filter(
     (r) => r.activatedAt !== null && (r.retiredAt === null || now.getTime() < r.retiredAt.getTime() + SIGNING_KEY_OVERLAP_SECONDS * 1000),
   );
 }
 
-/** the RFC 7517 JWKS document of the issuer (decision 5): public halves only */
+/** the RFC 7517 JWKS document of the issuer (decision 5): public halves only, each with its own `alg` */
 export function jwksDocument(rows: readonly IdentitySigningKeyRow[]): { keys: Array<IssuerPublicJwk & { kid: string; alg: string; use: "sig" }> } {
   return {
     keys: [...rows]
       .sort((a, b) => (b.activatedAt?.getTime() ?? 0) - (a.activatedAt?.getTime() ?? 0))
-      .map((r) => ({ kty: "OKP", crv: "Ed25519", x: r.publicJwk.x, kid: r.kid, alg: ISSUER_JWS_ALG, use: "sig" })),
+      .map((r) => ({ ...publicMembers(r), kid: r.kid, alg: JWS_ALG_OF[r.algorithm], use: "sig" as const })),
   };
 }
 
@@ -304,6 +350,7 @@ async function auditSigningKey(
   detail: {
     phase: "activate" | "rotate" | "revoke";
     kid: string;
+    algorithm?: IdentitySigningKeyAlgorithm;
     previousKid?: string | null;
     tokensRevoked?: number;
     /** migration 0203: the step-up an admin gave for a rotate or revoke (its kind is always `key_management`) */
@@ -344,18 +391,32 @@ export interface ActiveIssuerSigner extends ConfiguredSigningKey {
  * `activatedAt` is returned so a minting replica never stamps a token as
  * issued before its key's activation (see `mintDelegatedToken`).
  */
-export async function currentIssuerSigner(db: Db, env: NodeJS.ProcessEnv = process.env): Promise<ActiveIssuerSigner> {
-  const configured = await configuredIdentitySigningKeys(env);
+export async function currentIssuerSigner(
+  db: Db,
+  env: NodeJS.ProcessEnv = process.env,
+  algorithm: IdentitySigningKeyAlgorithm = "Ed25519",
+): Promise<ActiveIssuerSigner> {
+  // ADR-0210: each algorithm has its own signer, its own first load and its own rotation
+  const configured = (await configuredIdentitySigningKeys(env)).filter((k) => k.algorithm === algorithm);
   const active = async () =>
     (
       await db
         .select()
         .from(identitySigningKeys)
-        .where(and(sql`${identitySigningKeys.activatedAt} IS NOT NULL`, isNull(identitySigningKeys.retiredAt), isNull(identitySigningKeys.revokedAt)))
+        .where(
+          and(
+            eq(identitySigningKeys.algorithm, algorithm),
+            sql`${identitySigningKeys.activatedAt} IS NOT NULL`,
+            isNull(identitySigningKeys.retiredAt),
+            isNull(identitySigningKeys.revokedAt),
+          ),
+        )
     )[0];
   let row = await active();
   if (!row) {
-    const recorded = new Set((await db.select({ kid: identitySigningKeys.kid }).from(identitySigningKeys)).map((r) => r.kid));
+    const recorded = new Set(
+      (await db.select({ kid: identitySigningKeys.kid }).from(identitySigningKeys).where(eq(identitySigningKeys.algorithm, algorithm))).map((r) => r.kid),
+    );
     // ONLY a true first load (no key ever recorded) activates automatically. Once any key has been
     // recorded — retired or revoked — choosing the next signer is an admin act (rotate, with a step-up),
     // never a silent SYSTEM activation on the next mint (security review, PR #279).
@@ -371,8 +432,15 @@ export async function currentIssuerSigner(db: Db, env: NodeJS.ProcessEnv = proce
     try {
       await db.transaction(async (tx) => {
         // database clock (one `now()` per transaction), like every other lifecycle stamp of this table
-        await tx.insert(identitySigningKeys).values({ kid: k.kid, publicJwk: k.publicJwk, createdAt: sql`now()`, activatedAt: sql`now()` });
-        await auditSigningKey(tx, SYSTEM_USER_ID, { phase: "activate", kid: k.kid, previousKid: null }, "first issuer signing key activated on first use (ADR-0188 decision 5)");
+        await tx
+          .insert(identitySigningKeys)
+          .values({ kid: k.kid, algorithm: k.algorithm, publicJwk: k.publicJwk, createdAt: sql`now()`, activatedAt: sql`now()` });
+        await auditSigningKey(
+          tx,
+          SYSTEM_USER_ID,
+          { phase: "activate", kid: k.kid, algorithm: k.algorithm, previousKid: null },
+          `first ${k.algorithm} issuer signing key activated on first use (ADR-0188 decision 5)`,
+        );
       });
     } catch (err) {
       if (!isUniqueViolation(err)) throw err;
@@ -451,14 +519,24 @@ export async function rotateIdentitySigningKey(
       // database clock, never earlier than activation: a replica whose clock trails
       // the one that activated the key must not trip the lifecycle check
       .set({ retiredAt: sql`GREATEST(now(), ${identitySigningKeys.activatedAt})` })
-      .where(and(sql`${identitySigningKeys.activatedAt} IS NOT NULL`, isNull(identitySigningKeys.retiredAt), isNull(identitySigningKeys.revokedAt)))
+      .where(
+        and(
+          // ADR-0210: only the active key of the target's algorithm is retired
+          eq(identitySigningKeys.algorithm, target.algorithm),
+          sql`${identitySigningKeys.activatedAt} IS NOT NULL`,
+          isNull(identitySigningKeys.retiredAt),
+          isNull(identitySigningKeys.revokedAt),
+        ),
+      )
       .returning({ kid: identitySigningKeys.kid });
     // the new key's stamps are the database's too, the same `now()` the previous key was retired at
-    await tx.insert(identitySigningKeys).values({ kid: target.kid, publicJwk: target.publicJwk, createdAt: sql`now()`, activatedAt: sql`now()` });
+    await tx
+      .insert(identitySigningKeys)
+      .values({ kid: target.kid, algorithm: target.algorithm, publicJwk: target.publicJwk, createdAt: sql`now()`, activatedAt: sql`now()` });
     await auditSigningKey(
       tx,
       opts.actorUserId,
-      { phase: "rotate", kid: target.kid, previousKid: previous?.kid ?? null, ...stepUpDetail(opts.stepUp) },
+      { phase: "rotate", kid: target.kid, algorithm: target.algorithm, previousKid: previous?.kid ?? null, ...stepUpDetail(opts.stepUp) },
       previous
         ? `issuer signing key rotated; the previous key stays published for ${SIGNING_KEY_OVERLAP_SECONDS} s so the tokens it signed live to their expiry`
         : "issuer signing key activated by rotation (there was no active key)",
@@ -492,7 +570,7 @@ export async function revokeIdentitySigningKey(db: Db, opts: { kid: string; acto
     await auditSigningKey(
       tx,
       opts.actorUserId,
-      { phase: "revoke", kid: opts.kid, tokensRevoked: revoked.length, ...stepUpDetail(opts.stepUp) },
+      { phase: "revoke", kid: opts.kid, algorithm: row.algorithm, tokensRevoked: revoked.length, ...stepUpDetail(opts.stepUp) },
       "issuer signing key revoked: every token it signed is refused from now on (ADR-0188 decision 12)",
     );
     return { tokensRevoked: revoked.length };
