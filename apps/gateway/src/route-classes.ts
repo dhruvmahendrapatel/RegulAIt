@@ -31,6 +31,8 @@ import {
   EXECUTOR_CHANNEL_ROUTES,
   FEDERATION_DISCOVERY_PATH,
   FEDERATION_JWKS_PATH,
+  MCP_IDENTITY_OIDC_DISCOVERY_PATH,
+  MCP_IDENTITY_OIDC_JWKS_PATH,
   IDENTITY_JWKS_PATH,
   SUPPLIER_ROUTE_PATHS,
   SUPPLIER_ROUTES,
@@ -127,6 +129,11 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // and metadata only. Listed in NON_ADMIN_ROUTES too, so `public`.
   FEDERATION_DISCOVERY_PATH,
   FEDERATION_JWKS_PATH,
+  // ADR-0210 — the OIDC-profile MCP identity assertion issuer's discovery document and ES256 JWKS: public by definition
+  // (an upstream's OIDC validator fetches them, holding no RegulAIt credential). Public keys and metadata only. Listed
+  // in NON_ADMIN_ROUTES too, so `public`.
+  MCP_IDENTITY_OIDC_DISCOVERY_PATH,
+  MCP_IDENTITY_OIDC_JWKS_PATH,
   // ADR-0182 (D4) A13 — a PUBLIC SIGNED FEEDBACK LINK: the one D4 exemption.
   // People outside the organisation, who hold no RegulAIt credential, report a
   // problem or appeal a decision through a link a use-case owner minted. The
@@ -136,6 +143,15 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // rate-limited per token and address, and GET returns only the use case's
   // public name. Listed in NON_ADMIN_ROUTES too, so it is `public`.
   "/v1/feedback/l/:token",
+  // ADR-0225 (P13 d) — the PUBLIC trust centre and the auditor portal. Both answer 404 while
+  // `trust_pages_enabled` is off (the shipped default) and are rate-limited per address. The trust centre is
+  // read-only and serves only what an admin published. The auditor routes authenticate IN-ROUTE: a single-use
+  // link token (only its SHA-256 stored, at most 72 hours) opens a session cookie (HttpOnly, SameSite=Strict,
+  // Path=/v1/auditor, at most an hour); the reads are scoped to the grant's selected items and every view is
+  // audited. Listed in NON_ADMIN_ROUTES too, so they are `public`.
+  "/v1/trust-center",
+  "/v1/auditor/session",
+  "/v1/auditor/items/:slug",
   // ADR-0221 (P4) — the SUPPLIER PORTAL: the routes a supplier, who holds no platform credential, signs in to and
   // answers one assessment through. They authenticate IN-ROUTE on the supplier's own cookie (supplier-portal.ts) and
   // never read a platform session or key; they answer 404 while `supplier_portal_enabled` is off (the shipped
@@ -726,6 +742,15 @@ export const NON_ADMIN_ROUTES = new Set([
   // ADR-0221 (P4): the supplier routes (see AUTH_EXEMPT_ROUTES)
   ...SUPPLIER_ROUTES,
   //
+  // --- ADR-0225 (P13 d): the public trust pages ---------------------------------
+  // Everything under /v1/trust/* (drafting, publishing, the heading, auditor grants) is DELIBERATELY ABSENT, so
+  // ADMIN-ONLY. These are the public reads and the auditor portal (also in AUTH_EXEMPT_ROUTES above).
+  "GET /v1/trust-center",
+  "POST /v1/auditor/session",
+  "GET /v1/auditor/session",
+  "DELETE /v1/auditor/session",
+  "GET /v1/auditor/items/:slug",
+  //
   // --- A14: AI literacy and acceptable use ------------------------------------
   // A person lists what applies to them, acknowledges for THEMSELVES only (the
   // handler refuses anyone else, 403), and reads their own status.
@@ -790,6 +815,9 @@ export const NON_ADMIN_ROUTES = new Set([
   // ADR-0195 SD2b — the cloud federation issuer's public metadata (auth-exempt above too)
   `GET ${FEDERATION_DISCOVERY_PATH}`,
   `GET ${FEDERATION_JWKS_PATH}`,
+  // ADR-0210 — the OIDC-profile identity assertion issuer's public metadata (auth-exempt above too)
+  `GET ${MCP_IDENTITY_OIDC_DISCOVERY_PATH}`,
+  `GET ${MCP_IDENTITY_OIDC_JWKS_PATH}`,
   `POST ${OAUTH_TOKEN_PATH}`,
   `POST ${OAUTH_REVOCATION_PATH}`,
   `POST ${OAUTH_INTROSPECTION_PATH}`,
