@@ -35,7 +35,7 @@
     "@aws-sdk/client-ssm": "^3.700.0",
     "@aws-sdk/client-sts": "^3.700.0",
     "@azure/arm-compute": "^24.1.0",
-    "@azure/arm-recoveryservicesbackup": "^13.2.0",
+    "@azure/arm-recoveryservicesbackup": "^15.0.0",
     "@azure/arm-resourcegraph": "^4.2.1",
     "@azure/arm-resources": "^5.2.0",
     "@azure/identity": "^4.13.1",
