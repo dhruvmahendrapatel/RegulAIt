@@ -568,6 +568,7 @@ import { registerEuAiActRoleRoutes } from "./eu-ai-act-role.js";
 import { registerDecisionRegressionRoutes } from "./decision-regression.js";
 import { registerIncidentRoutes } from "./incidents.js";
 import { registerFeedbackRoutes } from "./feedback.js";
+import { registerTrustPagesRoutes } from "./trust-pages.js";
 import { registerAiLiteracyRoutes } from "./ai-literacy.js";
 import { registerAlertOwnershipRoutes } from "./alert-ownership.js";
 import { builderStepsAwaitingApproval, resumeBuilderAfterApproval } from "./builder-runtime.js";
@@ -5803,6 +5804,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerDecisionRegressionRoutes(app, db);
   registerIncidentRoutes(app, db, { dataKey: opts.dataKey });
   registerFeedbackRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0225 (P13 d): the public trust centre, AI system cards and the auditor portal (shipped off)
+  registerTrustPagesRoutes(app, db);
   registerAiLiteracyRoutes(app, db);
   registerAlertOwnershipRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0186 (batch 4, AgentCoordination §4.9). A: passkeys and step-up (self

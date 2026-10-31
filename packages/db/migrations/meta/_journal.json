@@ -1478,6 +1478,13 @@
       "when": 1785172000000,
       "tag": "0237_mrm_auto_retest",
       "breakpoints": true
+    },
+    {
+      "idx": 247,
+      "version": "7",
+      "when": 1785182000000,
+      "tag": "0247_trust_pages",
+      "breakpoints": true
     }
   ]
 }
