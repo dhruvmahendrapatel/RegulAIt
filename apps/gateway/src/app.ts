@@ -179,6 +179,7 @@ import { registerGroupRoleMappingRoutes } from "./group-role-api.js";
 import { registerAbacRoutes } from "./abac.js";
 import { registerPolicySimulationRoutes } from "./policy-simulation.js";
 import { registerGuardrailRoutes } from "./guardrails.js";
+import { configureTrainedDetectorRuntime, registerTrainedDetectorRoutes } from "./trained-detectors.js";
 import { registerEvalRoutes } from "./evals.js";
 import { applyModelCardApprovalDecision, registerMrmRoutes } from "./mrm.js";
 import { AiBomError } from "./ai-bom.js";
@@ -328,6 +329,11 @@ export interface BuildAppOptions {
   retry?: Partial<RetryConfig>;
   /** hex AES-256 key for encrypting stored git tokens (REGULAIT_DATA_KEY) */
   dataKey?: string;
+  /** ADR-0220 test seams: the egress resolver and fetch the trained-detector
+   * scorer calls ride (process-wide, like `retry` above). Production leaves
+   * both unset, so the real DNS-pinned guarded fetch is used. */
+  trainedDetectorResolve?: import("./egress-guard.js").EgressResolver;
+  trainedDetectorFetch?: typeof fetch;
   /** ADR-0031: which peers may speak for the client via X-Forwarded-*.
    * Defaults to REGULAIT_TRUSTED_PROXIES (which itself defaults to trusting
    * nothing). Exposed so a test can assert both directions. */
@@ -5331,6 +5337,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // through the DEFAULT gate — none appear in NON_ADMIN_ROUTES, because
   // relaxing a content control is exactly a privileged act.
   registerGuardrailRoutes(app, db);
+  // ADR-0220: trained runtime detectors — the settings routes, and the data key
+  // (and test egress seams) the enforcement sites' scorer calls need
+  configureTrainedDetectorRuntime({ dataKey: opts.dataKey, resolve: opts.trainedDetectorResolve, fetchImpl: opts.trainedDetectorFetch });
+  registerTrainedDetectorRoutes(app, db);
   // ADR-0044 — the evaluation harness: golden dataset versions, the scorer
   // registry, runs, per-case results and the baseline comparison. Authoring a
   // dataset or moving a baseline changes what the promotion gate will accept,

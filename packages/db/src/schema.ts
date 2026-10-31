@@ -5467,6 +5467,40 @@ export const guardrailConfigs = pgTable(
 
 export type GuardrailConfigRow = typeof guardrailConfigs.$inferSelect;
 
+/**
+ * ADR-0220 (migration 0255): the trained runtime detectors, one row per kind
+ * (`pii`, `prompt_injection`, `harm`). No row = off (ADR-0180: default-off; a
+ * fresh or upgraded database has none). Each enabled row names the registered
+ * external scorer (ADR-0088) that serves its guardrail kind; the gateway calls
+ * it through the egress-guarded fetch at every enforcement site. The strict
+ * values (mode block, fail closed) are the column defaults; a relaxation needs
+ * a settings_relax step-up and every write is audited in its transaction.
+ * Single-tenant per deployment, like `guardrail_configs`, so no RLS.
+ */
+export const guardrailTrainedDetectors = pgTable(
+  "guardrail_trained_detectors",
+  {
+    kind: text("kind", { enum: ["pii", "prompt_injection", "harm"] }).primaryKey(),
+    enabled: boolean("enabled").notNull().default(false),
+    scorerId: uuid("scorer_id").references(() => externalScorers.id, { onDelete: "set null" }),
+    mode: text("mode", { enum: ["log", "warn", "block"] }).notNull().default("block"),
+    threshold: doublePrecision("threshold").notNull().default(0.5),
+    onFailure: text("on_failure", { enum: ["block", "heuristic"] }).notNull().default("block"),
+    timeoutMs: integer("timeout_ms").notNull().default(2000),
+    updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("guardrail_trained_detectors_kind_check", sql`${t.kind} IN ('pii', 'prompt_injection', 'harm')`),
+    check("guardrail_trained_detectors_mode_check", sql`${t.mode} IN ('log', 'warn', 'block')`),
+    check("guardrail_trained_detectors_on_failure_check", sql`${t.onFailure} IN ('block', 'heuristic')`),
+    check("guardrail_trained_detectors_threshold_check", sql`${t.threshold} > 0 AND ${t.threshold} <= 1`),
+    check("guardrail_trained_detectors_timeout_check", sql`${t.timeoutMs} BETWEEN 200 AND 10000`),
+    check("guardrail_trained_detectors_enabled_scorer_check", sql`NOT ${t.enabled} OR ${t.scorerId} IS NOT NULL`),
+  ],
+);
+export type GuardrailTrainedDetectorRow = typeof guardrailTrainedDetectors.$inferSelect;
+
 // ---------------------------------------------------------------------------
 // ADR-0044 (migration 0056) — THE AGENT EVALUATION & REGRESSION HARNESS.
 //

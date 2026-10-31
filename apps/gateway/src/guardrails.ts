@@ -67,8 +67,11 @@ import {
   type GuardrailPhase,
   type GuardrailTerms,
   type VendoredDetectionPack,
+  mergeTrainedOutcomes,
+  planTrainedDetectors,
 } from "@regulait/shared";
 import { complianceProfilesForTags, projectClassifications } from "./projects.js";
+import { loadTrainedDetectorRuntime, runTrainedCalls, type TrainedDetectorRuntime } from "./trained-detectors.js";
 import { settingTransitions } from "./setting-transitions.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
@@ -145,6 +148,10 @@ export interface GuardrailPolicy {
   /** ADR-0186 V: `org_settings.vendored_detection_packs` (undefined = all on,
    * the strict default — e.g. before the singleton row exists) */
   vendoredPacks?: readonly VendoredDetectionPack[] | undefined;
+  /** ADR-0220: the trained detectors this org has turned on (absent = none,
+   * the default). Read by `runGuardrailsAsync`; the sync `runGuardrails`
+   * ignores it, so only the enforcement sites call the scorers. */
+  trained?: TrainedDetectorRuntime | undefined;
 }
 
 /** The org-default row, or undefined when an admin has never touched the
@@ -271,7 +278,7 @@ export async function resolveGuardrailPolicy(
       ? "connector"
       : null;
 
-  const [orgRow, overrideRow, packsRow] = await Promise.all([
+  const [orgRow, overrideRow, packsRow, trained] = await Promise.all([
     loadOrgGuardrailConfig(db),
     scope && scopeId
       ? db
@@ -294,6 +301,8 @@ export async function resolveGuardrailPolicy(
       .from(orgSettings)
       .where(eq(orgSettings.id, ORG_SETTINGS_ID))
       .then((r) => r[0]),
+    // ADR-0220: the trained detectors in force (one indexed read; none by default)
+    loadTrainedDetectorRuntime(db),
   ]);
 
   const orgModes: Partial<GuardrailModes> = orgRow ? rowModes(orgRow) : { ...GUARDRAIL_DEFAULT_MODES };
@@ -333,16 +342,20 @@ export async function resolveGuardrailPolicy(
 
   const registry = guardrailRegistry();
   const atBlock = (phase: GuardrailPhase) =>
-    registry.some((d) => d.phases.includes(phase) && modes[d.id] === "block");
+    registry.some((d) => d.phases.includes(phase) && modes[d.id] === "block") ||
+    // a trained detector at block (or failing closed at block) must also see
+    // the whole text before any of it is delivered
+    planTrainedDetectors(trained?.settings ?? [], phase, modes).some((p) => p.mode === "block");
 
   return {
     modes,
     terms,
     provenance,
-    active: GUARDRAIL_DETECTOR_IDS.some((id) => modes[id] !== "off"),
+    active: GUARDRAIL_DETECTOR_IDS.some((id) => modes[id] !== "off") || (trained?.settings.length ?? 0) > 0,
     blocksInput: atBlock("input"),
     blocksOutput: atBlock("output"),
     vendoredPacks: packsRow?.packs,
+    ...(trained ? { trained } : {}),
   };
 }
 
@@ -458,6 +471,24 @@ export function runGuardrails(
     exclude: ["pii"],
     vendoredPacks: policy.vendoredPacks,
   });
+}
+
+/**
+ * ADR-0220: one phase at an ENFORCEMENT site — the heuristic detectors, then
+ * the trained detectors the org has turned on, merged (a trained verdict only
+ * adds findings; a failed call fails closed per its setting). With no trained
+ * detector on this is `runGuardrails` with no I/O at all.
+ */
+export async function runGuardrailsAsync(
+  policy: GuardrailPolicy,
+  phase: GuardrailPhase,
+  text: string,
+): Promise<GuardrailEvaluation> {
+  const base = runGuardrails(policy, phase, text);
+  if (!policy.trained) return base;
+  const plans = planTrainedDetectors(policy.trained.settings, phase, policy.modes);
+  if (plans.length === 0) return base;
+  return mergeTrainedOutcomes(base, await runTrainedCalls(policy.trained, plans, phase, text));
 }
 
 // ---------------------------------------------------------------------------
