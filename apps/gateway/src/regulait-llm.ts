@@ -2279,7 +2279,9 @@ export async function setLlmTrainingSettings(
 
 type JobListRow = TrainingJobRow & { datasetName: string | null; artifactId: string | null; inProcess: boolean };
 const JOB_DATASET_NAME = sql<string | null>`(select ${trainingDatasets.name} from ${trainingDatasets} where ${trainingDatasets.id} = ${trainingJobs.datasetId})`;
-const JOB_ARTIFACT_ID = sql<string | null>`(select ${trainingArtifacts.id}::text from ${trainingArtifacts} where ${trainingArtifacts.jobId} = ${trainingJobs.id} limit 1)`;
+// explicit qualifiers: drizzle renders a column bare in a single-table select, and a bare "id" here would bind
+// to training_artifacts.id rather than the outer job row
+const JOB_ARTIFACT_ID = sql<string | null>`(select "training_artifacts"."id"::text from "training_artifacts" where "training_artifacts"."job_id" = "training_jobs"."id" limit 1)`;
 
 export const TRAINING_JOBS_LIST: ListSpec<JobListRow> = {
   id: "training-jobs",

@@ -2984,10 +2984,12 @@ function datasetView(d: EvalDatasetRow, caseCount: number, runCount: number, nam
 }
 type DatasetListRow = ReturnType<typeof datasetView>;
 
-const DATASET_CASES = sql<number>`(select count(*)::int from ${evalCases} where ${evalCases.datasetId} = ${evalDatasets.id})`;
-const DATASET_RUNS = sql<number>`(select count(*)::int from ${evalRuns} where ${evalRuns.datasetId} = ${evalDatasets.id})`;
+// Explicit qualifiers: in a single-table select drizzle renders a column bare, and a bare "id" inside these
+// subqueries would bind to the inner table (eval_cases.id / eval_runs.id), not the outer dataset row.
+const DATASET_CASES = sql<number>`(select count(*)::int from "eval_cases" where "eval_cases"."dataset_id" = "eval_datasets"."id")`;
+const DATASET_RUNS = sql<number>`(select count(*)::int from "eval_runs" where "eval_runs"."dataset_id" = "eval_datasets"."id")`;
 /** ADR-0208 G9: true when any version of this row's name carries the retired stamp (retirement is by name) */
-const DATASET_NAME_RETIRED = sql<boolean>`exists (select 1 from ${evalDatasets} as named where named.name = ${evalDatasets.name} and named.retired_at is not null)`;
+const DATASET_NAME_RETIRED = sql<boolean>`exists (select 1 from "eval_datasets" as "named" where "named"."name" = "eval_datasets"."name" and "named"."retired_at" is not null)`;
 const BUILTIN_LIKE = `${BUILTIN_EVAL_DATASET_PREFIX.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
 
 export const EVAL_DATASETS_LIST: ListSpec<DatasetListRow> = {

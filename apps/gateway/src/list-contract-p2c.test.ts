@@ -645,6 +645,38 @@ describe("ADR-0226 batch C: details", () => {
     expect(m.statusCode).toBe(400);
   });
 
+  it("eval datasets carry main's lifecycle status and builtIn, retired by name, in the page, the sort, the export and the old shape", async () => {
+    // ADR-0208 G9: retirement is by name, so stamping one version makes every version of the name read retired
+    const name = `lc2c-${RUN}-1`;
+    await q(`insert into eval_datasets (name, version, retired_at, retired_reason) values ('${name}', 2, now(), 'superseded by the next quarter set')`);
+    try {
+      const { items } = await walk("/v1/evals/datasets?sort=status&dir=desc", adminAuth);
+      const mine = items.filter((d) => String(d.name).startsWith(`lc2c-${RUN}-`));
+      expect(mine.filter((d) => d.name === name).map((d) => d.status)).toEqual(["retired", "retired"]);
+      expect(mine.filter((d) => d.name !== name).every((d) => d.status === "active")).toBe(true);
+      expect(mine.every((d) => d.builtIn === false)).toBe(true);
+      // descending status puts the retired rows before the active ones
+      const order = items.map((d) => d.status as string);
+      expect(order.lastIndexOf("retired")).toBeLessThan(order.indexOf("active"));
+
+      const legacy = (await get("/v1/evals/datasets", adminAuth)).json() as Json;
+      const legacyMine = (legacy.datasets as Json[]).filter((d) => String(d.name).startsWith(`lc2c-${RUN}-`));
+      for (const d of legacyMine) {
+        const paged = mine.find((x) => x.id === d.id)!;
+        expect({ status: d.status, builtIn: d.builtIn, frozen: d.frozen }).toEqual({ status: paged.status, builtIn: paged.builtIn, frozen: paged.frozen });
+      }
+
+      const res = await get("/v1/evals/datasets/export.xlsx?columns=name,status&sort=name", adminAuth);
+      expect(res.statusCode, res.body.slice(0, 300)).toBe(200);
+      const rows = readXlsx(res.rawPayload);
+      expect(rows[0]).toEqual(["Dataset", "Status"]);
+      expect(rows.filter((r) => r[0] === name).map((r) => r[1])).toEqual(["retired", "retired"]);
+      expect(rows.filter((r) => r[0] === `lc2c-${RUN}-2`).map((r) => r[1])).toEqual(["active"]);
+    } finally {
+      await q(`delete from eval_datasets where name = '${name}' and version = 2`);
+    }
+  });
+
   it("findings sort worst first by default", async () => {
     const body = (await get("/v1/infra/findings?limit=50&count=exact", adminAuth)).json() as Json;
     const rank = { critical: 4, high: 3, medium: 2, low: 1 } as Record<string, number>;
