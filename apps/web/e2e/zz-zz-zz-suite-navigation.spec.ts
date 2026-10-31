@@ -86,8 +86,6 @@ const SUITE_MANIFEST: Array<{ id: string; name: string; landing: string; entries
       "Use cases",
       "Model risk",
       "Vendors",
-      // ADR-0221
-      "Supplier questionnaires",
       "Risks",
       "Shadow-AI discovery",
       // ADR-0182 (D4)

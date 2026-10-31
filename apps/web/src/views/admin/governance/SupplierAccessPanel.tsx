@@ -21,7 +21,6 @@ import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Modal, Row
 import { RefusalNotice } from "../../../ui/RefusalNotice";
 import { useToast } from "../../../ui/toast";
 import { QueryGate, ReasonModal, useAction } from "../adminKit";
-import { fileTypeLabel, REVIEW_STATUS_LABEL, scanLabel, SUPPLIER_LIMITS } from "../../supplier/supplierPortal";
 import {
   acceptOutcome,
   ACCESS_STATE_LABEL,
@@ -32,19 +31,23 @@ import {
   canDecide,
   downloadName,
   EMPTY_INVITE,
+  fileTypeLabel,
+  GRANT_LIMITS,
   inviteBody,
+  type InviteDraft,
   inviteProblems,
-  LINK_STATE_LABEL,
+  type IssuedLink,
   latestLink,
+  LINK_STATE_LABEL,
   needsUnscannedConfirm,
   questionnaireLabel,
-  usableQuestionnaires,
-  type InviteDraft,
-  type IssuedLink,
+  REVIEW_STATUS_LABEL,
   type ReviewSubmission,
+  scanLabel,
   type SupplierAccessList,
   type SupplierGrant,
   type SupplierQuestionnaire,
+  usableQuestionnaires,
 } from "./supplierAccessModel";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
@@ -129,7 +132,7 @@ export default function SupplierAccessPanel(props: { vendorId: string; vendorNam
     setLinkFor(null);
     if (act.busy) return;
     void act.run(async () => {
-      const out = await withStepUp((h) => stepUpApi.post<IssuedLink>(`${base}/supplier-access/${g.id}/links`, { inviteHours: SUPPLIER_LIMITS.inviteHoursDefault }, h));
+      const out = await withStepUp((h) => stepUpApi.post<IssuedLink>(`${base}/supplier-access/${g.id}/links`, { inviteHours: GRANT_LIMITS.inviteHoursDefault }, h));
       show(out, g.email);
       await refetch();
     }, "New sign-in link created. Copy it now; it is shown once.");
@@ -366,23 +369,23 @@ export default function SupplierAccessPanel(props: { vendorId: string; vendorNam
                   ))}
                 </Select>
               </Field>
-              <Field label={`Access lasts (days, 1 to ${SUPPLIER_LIMITS.accessDaysMax})`} error={shown.accessDays}>
+              <Field label={`Access lasts (days, 1 to ${GRANT_LIMITS.accessDaysMax})`} error={shown.accessDays}>
                 <Input
                   type="number"
                   inputMode="numeric"
                   min={1}
-                  max={SUPPLIER_LIMITS.accessDaysMax}
+                  max={GRANT_LIMITS.accessDaysMax}
                   value={draft.accessDays}
                   disabled={!canGrant}
                   onChange={(e) => setDraft({ ...draft, accessDays: e.target.value })}
                 />
               </Field>
-              <Field label={`Link works for (hours, 1 to ${SUPPLIER_LIMITS.inviteHoursMax})`} error={shown.inviteHours}>
+              <Field label={`Link works for (hours, 1 to ${GRANT_LIMITS.inviteHoursMax})`} error={shown.inviteHours}>
                 <Input
                   type="number"
                   inputMode="numeric"
                   min={1}
-                  max={SUPPLIER_LIMITS.inviteHoursMax}
+                  max={GRANT_LIMITS.inviteHoursMax}
                   value={draft.inviteHours}
                   disabled={!canGrant}
                   onChange={(e) => setDraft({ ...draft, inviteHours: e.target.value })}
@@ -524,7 +527,7 @@ export default function SupplierAccessPanel(props: { vendorId: string; vendorNam
         body={
           <p>
             Any earlier link they have not used stops working. The new link works once, is shown to you once and expires in{" "}
-            {SUPPLIER_LIMITS.inviteHoursDefault} hours.
+            {GRANT_LIMITS.inviteHoursDefault} hours.
           </p>
         }
         confirmLabel="Create link"

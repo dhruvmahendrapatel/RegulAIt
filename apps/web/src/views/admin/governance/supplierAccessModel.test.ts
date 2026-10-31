@@ -2,6 +2,11 @@
 import { describe, expect, it } from "vitest";
 import {
   acceptOutcome,
+  fileTypeLabel,
+  GRANT_LIMITS,
+  QUESTION_ID_RE,
+  REVIEW_STATUS_LABEL,
+  scanLabel,
   ANSWER_ACCESS_LABEL,
   answerFilePath,
   answerTargetLabel,
@@ -196,5 +201,44 @@ describe("reviewing an answer", () => {
   it("saves a CSV as plain text, as it is served", () => {
     expect(downloadName({ name: "data.csv", contentType: "text/csv" })).toBe("data.csv.txt");
     expect(downloadName({ name: "policy.pdf", contentType: "application/pdf" })).toBe("policy.pdf");
+  });
+});
+
+describe("the reviewer's labels", () => {
+  it("names every status, including an answer a newer one replaced", () => {
+    for (const st of ["submitted", "accepted", "rejected", "withdrawn"] as const) expect(REVIEW_STATUS_LABEL[st], st).toBeTruthy();
+    expect(REVIEW_STATUS_LABEL.withdrawn).toBe("Withdrawn");
+  });
+  it("says plainly when a file was not scanned", () => {
+    expect(scanLabel(null)).toBe("Not scanned");
+    expect(scanLabel("not_scanned")).toBe("Not scanned");
+    expect(scanLabel("clean")).toBe("Scanned, clean");
+  });
+  it("names the detected type in words, never as a media type", () => {
+    expect(fileTypeLabel("application/pdf")).toBe("PDF");
+    expect(fileTypeLabel("text/csv")).toBe("CSV");
+    expect(fileTypeLabel(null)).toBe("File");
+  });
+});
+
+describe("the admin side's mirrored values match @regulait/shared", () => {
+  it("grant limits, statuses, file types and the question-id rule", async () => {
+    // runtime-only import: the SPA does not depend on @regulait/shared
+    const sharedPath = new URL("../../../../../../packages/shared/src/supplier-portal.ts", import.meta.url).pathname;
+    const s = (await import(/* @vite-ignore */ sharedPath)) as {
+      SUPPLIER_PORTAL_LIMITS: Record<string, unknown>;
+      SUPPLIER_FILE_TYPES: readonly string[];
+      SUPPLIER_SUBMISSION_STATUSES: readonly string[];
+      supplierQuestionSchema: { safeParse: (v: unknown) => { success: boolean } };
+    };
+    for (const k of Object.keys(GRANT_LIMITS) as Array<keyof typeof GRANT_LIMITS>) {
+      expect(GRANT_LIMITS[k], k).toBe(s.SUPPLIER_PORTAL_LIMITS[k]);
+    }
+    expect(Object.keys(REVIEW_STATUS_LABEL).sort()).toEqual([...s.SUPPLIER_SUBMISSION_STATUSES].sort());
+    expect(s.SUPPLIER_FILE_TYPES.map((t) => fileTypeLabel(t))).not.toContain("File");
+    for (const id of ["q1", "data-retention", "a_b", "9", "Q1", "-q", "q 1", "x".repeat(65)]) {
+      const shared = s.supplierQuestionSchema.safeParse({ id, prompt: "p" }).success;
+      expect(QUESTION_ID_RE.test(id), id).toBe(shared);
+    }
   });
 });

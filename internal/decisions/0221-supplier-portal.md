@@ -148,3 +148,11 @@ defence. No magic-link library fits a Fastify gateway with our own session table
   - Supplier reads (`GET /supplier/v1/assessment`) are not audited. Sign-in, every write and every refusal are.
   - The shared step-up copy for `identity_manage` still reads "changing an agent identity". That wording belongs to
     the step-up module and its pinned tests.
+- **Entry bundle (2026-10-31, the owner's entry ceiling of 138.5 kB does not move).** Main left 130 B of headroom, and
+  this lane added about 205 B, mostly hashed chunk names in the preload table. Three changes bring it under the
+  ceiling, at 138,471 B:
+  - The admin side no longer imports values from the supplier page's module, so no third shared chunk is created.
+  - "Supplier questionnaires" is reached from a link in the Vendors page header (with a link back), instead of its
+    own entry in the navigation rail. It keeps its route.
+  - The supplier page no longer skips the app-wide sign-in check. It makes one `GET /auth/me`, as the other public
+    pages do. That call carries no supplier data and gets a 401 for someone with no platform account.

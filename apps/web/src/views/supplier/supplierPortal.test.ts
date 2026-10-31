@@ -8,14 +8,10 @@ import {
   base64FromDataUrl,
   fileLimitLabel,
   fileProblem,
-  fileTypeLabel,
   INVITE_TOKEN_RE,
   LINK_REFUSAL_DETAIL,
-  QUESTION_ID_RE,
   readFileAsBase64,
-  scanLabel,
   SESSION_REFUSAL_DETAIL,
-  REVIEW_STATUS_LABEL,
   statementProblem,
   SUBMISSION_STATUSES,
   SUPPLIER_LIMITS,
@@ -126,28 +122,16 @@ describe("statementProblem", () => {
 });
 
 describe("labels", () => {
-  it("names every status for both readers, including an answer a newer one replaced", () => {
+  it("names every status for the supplier, including an answer a newer one replaced", () => {
     for (const st of SUBMISSION_STATUSES) {
       expect(SUPPLIER_STATUS_LABEL[st], st).toBeTruthy();
-      expect(REVIEW_STATUS_LABEL[st], st).toBeTruthy();
     }
     expect(SUPPLIER_STATUS_LABEL.withdrawn).toBe("Replaced by a newer answer");
-    expect(REVIEW_STATUS_LABEL.withdrawn).toBe("Withdrawn");
-  });
-  it("says plainly when a file was not scanned", () => {
-    expect(scanLabel(null)).toBe("Not scanned");
-    expect(scanLabel("not_scanned")).toBe("Not scanned");
-    expect(scanLabel("clean")).toBe("Scanned, clean");
-  });
-  it("names the detected type in words, never as a media type", () => {
-    expect(fileTypeLabel("application/pdf")).toBe("PDF");
-    expect(fileTypeLabel("text/csv")).toBe("CSV");
-    expect(fileTypeLabel(null)).toBe("File");
   });
 });
 
 describe("the mirrored values match @regulait/shared", () => {
-  it("limits, refusals, token and question-id rules", async () => {
+  it("limits, refusals and the token rule", async () => {
     // runtime-only import: the SPA does not depend on @regulait/shared
     const sharedPath = new URL("../../../../../packages/shared/src/supplier-portal.ts", import.meta.url).pathname;
     const s = (await import(/* @vite-ignore */ sharedPath)) as {
@@ -168,10 +152,5 @@ describe("the mirrored values match @regulait/shared", () => {
     expect(LINK_REFUSAL_DETAIL).toBe(s.SUPPLIER_LINK_REFUSAL.detail);
     expect(SESSION_REFUSAL_DETAIL).toBe(s.SUPPLIER_SESSION_REFUSAL.detail);
     expect(INVITE_TOKEN_RE.source).toBe(s.SUPPLIER_INVITE_TOKEN_RE.source);
-    expect(s.SUPPLIER_FILE_TYPES.map((t) => fileTypeLabel(t))).not.toContain("File");
-    for (const id of ["q1", "data-retention", "a_b", "9", "Q1", "-q", "q 1", "x".repeat(65)]) {
-      const shared = s.supplierQuestionSchema.safeParse({ id, prompt: "p" }).success;
-      expect(QUESTION_ID_RE.test(id), id).toBe(shared);
-    }
   });
 });

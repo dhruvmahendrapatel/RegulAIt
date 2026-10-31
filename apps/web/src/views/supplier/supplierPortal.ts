@@ -3,16 +3,14 @@
  * the SPA does not depend on `@regulait/shared` at runtime (supplierPortal.test.ts pins every mirrored value against
  * `packages/shared/src/supplier-portal.ts`, so drift fails a test rather than a supplier).
  *
- * Pure functions only: no React, no platform API client. The supplier page imports this, and so does the admin
- * panel, so neither pulls the other's code into its chunk.
+ * Pure functions only: no React, no platform API client. ONLY the supplier page imports values from here (the admin
+ * side imports types at most, which are erased): a module both chunks import becomes a third chunk, and every lazy
+ * chunk costs the entry bundle a hashed file name in its preload table. The admin side's mirrored values live in
+ * `views/admin/governance/supplierAccessModel.ts`.
  */
 
 /** mirrors SUPPLIER_PORTAL_LIMITS (the parts a screen shows or checks before sending) */
 export const SUPPLIER_LIMITS = Object.freeze({
-  inviteHoursMax: 72,
-  inviteHoursDefault: 24,
-  accessDaysMax: 30,
-  accessDaysDefault: 14,
   sessionIdleMinutes: 30,
   sessionAbsoluteHours: 8,
   fileMaxBytes: 2 * 1024 * 1024,
@@ -32,8 +30,6 @@ export const SESSION_REFUSAL_DETAIL =
 
 /** mirrors SUPPLIER_INVITE_TOKEN_RE */
 export const INVITE_TOKEN_RE = /^rglsi_[A-Za-z0-9_-]{43}$/;
-/** mirrors the shared question id rule */
-export const QUESTION_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
 /** the file name endings the gateway accepts, each matched to the type it detects from the bytes */
 export const ACCEPTED_EXTENSIONS = ["pdf", "png", "jpg", "jpeg", "txt", "csv"] as const;
@@ -116,39 +112,6 @@ export const SUPPLIER_STATUS_LABEL: Record<SubmissionStatus, string> = {
   withdrawn: "Replaced by a newer answer",
 };
 
-/** a submission's status as a reviewer reads it */
-export const REVIEW_STATUS_LABEL: Record<SubmissionStatus, string> = {
-  submitted: "Awaiting review",
-  accepted: "Accepted",
-  rejected: "Rejected",
-  withdrawn: "Withdrawn",
-};
-
 /** files cannot be attached on this portal: said once, beside the answers, so the supplier knows where documents go */
 export const FILES_NOT_ACCEPTED_NOTE =
   "Files cannot be attached here. Write your answer, and send any supporting documents to your contact.";
-
-/** the scan result as words; a file nobody scanned says so plainly */
-export function scanLabel(status: string | null | undefined): string {
-  if (status === "clean") return "Scanned, clean";
-  if (status === "rejected") return "Refused by the scan";
-  return "Not scanned";
-}
-
-/** the detected file type as words */
-export function fileTypeLabel(contentType: string | null | undefined): string {
-  switch (contentType) {
-    case "application/pdf":
-      return "PDF";
-    case "image/png":
-      return "PNG image";
-    case "image/jpeg":
-      return "JPEG image";
-    case "text/plain":
-      return "Plain text";
-    case "text/csv":
-      return "CSV";
-    default:
-      return "File";
-  }
-}

@@ -143,7 +143,9 @@ export default function SupplierQuestionnairesPage() {
     <>
       <PageHeader
         title="Supplier questionnaires"
+        crumbs={["AI Governance", "Vendors"]}
         sub="Turn the supplier portal on or off, and write the extra questions a supplier answers."
+        actions={<Link to="/admin/vendors">Back to vendors</Link>}
         info={
           <p>
             With the supplier portal on, an admin can let one person at a supplier answer a vendor&apos;s assessment

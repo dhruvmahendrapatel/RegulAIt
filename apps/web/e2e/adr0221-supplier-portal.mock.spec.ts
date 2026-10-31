@@ -146,8 +146,11 @@ async function mockSupplier(page: Page, patch: Partial<SupplierState> = {}): Pro
   return state;
 }
 
+/** the platform calls the supplier page made, apart from the app-wide sign-in check every public page makes */
+const appCalls = (state: { platformCalls: string[] }) => state.platformCalls.filter((c) => c !== "GET /auth/me");
+
 test.describe("ADR-0221: the supplier page", () => {
-  test("spends the link, drops it from the address, answers with a file and signs out, with no platform call", async ({ page }) => {
+  test("spends the link, drops it from the address, answers with a file and signs out, with no platform call beyond the sign-in check", async ({ page }) => {
     const state = await mockSupplier(page);
     await page.goto(`/ui/supplier#${TOKEN}`);
     await expect(page.getByRole("heading", { name: "Supplier assessment" })).toBeVisible();
@@ -158,7 +161,7 @@ test.describe("ADR-0221: the supplier page", () => {
     expect(state.sessionPosts).toEqual([{ body: { token: TOKEN }, csrf: "1" }]);
     // no app chrome, and the platform was never asked who is signed in
     await expect(page.getByRole("navigation")).toHaveCount(0);
-    expect(state.platformCalls).toEqual([]);
+    expect(appCalls(state)).toEqual([]);
     // a question that takes no file has no file input
     const q1 = page.getByRole("region", { name: /Do you encrypt data at rest/ });
     await expect(q1.getByLabel("Supporting file (optional)")).toHaveCount(0);
@@ -185,7 +188,7 @@ test.describe("ADR-0221: the supplier page", () => {
     await page.getByRole("button", { name: "Sign out" }).click();
     await expect(page.getByText("You have signed out")).toBeVisible();
     expect(state.ended).toBe(1);
-    expect(state.platformCalls).toEqual([]);
+    expect(appCalls(state)).toEqual([]);
   });
 
   test("with files not accepted there is no file input, and the page says where documents go", async ({ page }) => {
@@ -228,7 +231,7 @@ test.describe("ADR-0221: the supplier page", () => {
     await page.goto(`/ui/supplier#${TOKEN}`);
     await expect(page.getByRole("alert")).toContainText("This link cannot be used. It may have expired or already been used.");
     expect(new URL(page.url()).hash).toBe("");
-    expect(state.platformCalls).toEqual([]);
+    expect(appCalls(state)).toEqual([]);
     await expectAxeClean(page, "supplier link refused");
   });
 
@@ -237,7 +240,7 @@ test.describe("ADR-0221: the supplier page", () => {
     await page.goto("/ui/supplier");
     await expect(page.getByRole("alert")).toContainText("Your session has ended.");
     expect(state.sessionPosts).toEqual([]);
-    expect(state.platformCalls).toEqual([]);
+    expect(appCalls(state)).toEqual([]);
   });
 });
 
@@ -420,6 +423,8 @@ test.describe("ADR-0221: supplier access for admins", () => {
     const su = await requireStepUpOn(page, { method: "PUT", path: "/v1/supplier-portal/settings", kind: "settings_relax", when: (b) => (b as { enabled?: boolean }).enabled === true });
     await page.goto("/ui/admin/vendors/questionnaires");
     await expect(page.getByRole("heading", { name: "Supplier questionnaires" })).toBeVisible();
+    // reached from the Vendors page header, not the navigation rail; it links back
+    await expect(page.getByRole("link", { name: "Back to vendors" })).toHaveAttribute("href", "/ui/admin/vendors");
     // the portal and the unscanned-files setting both start strict
     await expect(page.getByText("Strict default")).toHaveCount(2);
     await expect(page.getByRole("heading", { name: "Security basics" })).toBeVisible();

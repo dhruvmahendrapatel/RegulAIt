@@ -2,7 +2,50 @@
  * The supplier portal's admin screens (ADR-0221): the shapes the gateway answers and the pure checks the forms run
  * before sending. The gateway re-checks everything; these only let a form say what is wrong next to the field.
  */
-import { QUESTION_ID_RE, SUPPLIER_LIMITS, type SubmissionStatus } from "../../supplier/supplierPortal";
+import type { SubmissionStatus } from "../../supplier/supplierPortal";
+
+/**
+ * The admin side's mirror of the shared supplier-portal values (supplierAccessModel.test.ts pins each one against
+ * `packages/shared/src/supplier-portal.ts`). Kept here, not imported from the supplier page's module: a value both
+ * chunks imported would become a chunk of its own, and its hashed name would sit in the entry bundle.
+ */
+export const GRANT_LIMITS = Object.freeze({ inviteHoursMax: 72, inviteHoursDefault: 24, accessDaysMax: 30, accessDaysDefault: 14 });
+/** mirrors the shared question id rule */
+export const QUESTION_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+
+/** a submission's status as a reviewer reads it */
+export const REVIEW_STATUS_LABEL: Record<SubmissionStatus, string> = {
+  submitted: "Awaiting review",
+  accepted: "Accepted",
+  rejected: "Rejected",
+  withdrawn: "Withdrawn",
+};
+
+/** the scan result as words; a file nobody scanned says so plainly */
+export function scanLabel(status: string | null | undefined): string {
+  if (status === "clean") return "Scanned, clean";
+  if (status === "rejected") return "Refused by the scan";
+  return "Not scanned";
+}
+
+/** the detected file type as words */
+export function fileTypeLabel(contentType: string | null | undefined): string {
+  switch (contentType) {
+    case "application/pdf":
+      return "PDF";
+    case "image/png":
+      return "PNG image";
+    case "image/jpeg":
+      return "JPEG image";
+    case "text/plain":
+      return "Plain text";
+    case "text/csv":
+      return "CSV";
+    default:
+      return "File";
+  }
+}
+
 
 export type AccessState = "active" | "expired" | "revoked";
 export type LinkState = "active" | "used" | "expired" | "revoked";
@@ -159,8 +202,8 @@ export const EMPTY_INVITE: InviteDraft = {
   email: "",
   framework: "",
   questionnaireId: "",
-  accessDays: String(SUPPLIER_LIMITS.accessDaysDefault),
-  inviteHours: String(SUPPLIER_LIMITS.inviteHoursDefault),
+  accessDays: String(GRANT_LIMITS.accessDaysDefault),
+  inviteHours: String(GRANT_LIMITS.inviteHoursDefault),
 };
 
 /** one @, no whitespace, 3–254 characters: the gateway's own rule */
@@ -174,11 +217,11 @@ export function inviteProblems(d: InviteDraft): Partial<Record<keyof InviteDraft
   const out: Partial<Record<keyof InviteDraft, string>> = {};
   if (!looksLikeEmail(d.email)) out.email = "Enter the supplier contact's email address.";
   if (!d.framework) out.framework = "Choose the framework the supplier answers.";
-  if (wholeInRange(d.accessDays, 1, SUPPLIER_LIMITS.accessDaysMax) === null) {
-    out.accessDays = `A whole number of days from 1 to ${SUPPLIER_LIMITS.accessDaysMax}.`;
+  if (wholeInRange(d.accessDays, 1, GRANT_LIMITS.accessDaysMax) === null) {
+    out.accessDays = `A whole number of days from 1 to ${GRANT_LIMITS.accessDaysMax}.`;
   }
-  if (wholeInRange(d.inviteHours, 1, SUPPLIER_LIMITS.inviteHoursMax) === null) {
-    out.inviteHours = `A whole number of hours from 1 to ${SUPPLIER_LIMITS.inviteHoursMax}.`;
+  if (wholeInRange(d.inviteHours, 1, GRANT_LIMITS.inviteHoursMax) === null) {
+    out.inviteHours = `A whole number of hours from 1 to ${GRANT_LIMITS.inviteHoursMax}.`;
   }
   return out;
 }

@@ -139,9 +139,6 @@ export function SessionProvider(props: { children: ReactNode }) {
       forgetSession();
       setAuth(null);
     });
-    // ADR-0221: the supplier portal is for someone with no platform account; it never asks who is signed in to the
-    // platform, so a supplier's browser sends no platform request at all (the page has no route into the app)
-    if (location.pathname.startsWith("/ui/supplier")) return () => setUnauthorizedHandler(null);
     void refresh();
     return () => setUnauthorizedHandler(null);
   }, [refresh, forgetSession]);

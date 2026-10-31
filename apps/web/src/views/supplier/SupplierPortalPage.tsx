@@ -20,7 +20,6 @@ import {
   ACCEPT_ATTRIBUTE,
   fileLimitLabel,
   fileProblem,
-  fileTypeLabel,
   FILES_NOT_ACCEPTED_NOTE,
   LINK_REFUSAL_DETAIL,
   readFileAsBase64,
@@ -375,8 +374,8 @@ function History(props: { items: Submission[] }) {
           <p className={s.prose}>{x.statement}</p>
           {x.file && (
             <span className={v.faint}>
-              File: {x.file.name} ({fileTypeLabel(x.file.contentType)}
-              {x.file.size != null ? `, ${fmtBytes(x.file.size)}` : ""})
+              File: {x.file.name}
+              {x.file.size != null ? ` (${fmtBytes(x.file.size)})` : ""}
             </span>
           )}
           {x.status === "rejected" && x.decisionReason && (
