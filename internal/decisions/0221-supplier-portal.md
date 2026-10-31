@@ -115,3 +115,36 @@ defence. No magic-link library fits a Fastify gateway with our own session table
   (ADR-0084 requires it before any attestation); accepting an answer before that is refused and rolled back.
 - **Retention.** Supplier rows and files follow the vendor (cascade on vendor deletion); a retention sweep for
   evidence files is a follow-up.
+
+## Addendum 2026-10-31: functional and security review fixes (#629)
+
+- **Concurrent attestations.** `recordVendorAttestation` now appends in SQL (`pack_attestations || $new`), so the
+  platform route and a supplier accept recorded at the same moment both survive. Before this, each wrote back the
+  snapshot its caller had read.
+- **A revoked grant's answers.** Revoking a grant rejects its pending answers in the same transaction, with reason
+  "Access revoked: …". Accepting an answer from a revoked grant is refused (`access_revoked`). An expired grant's
+  answers can still be accepted, because expiry is the planned end of access. The review list shows each grant's
+  state.
+- **Unscanned files (ADR-0180).** A second default-off setting, `supplier_portal_accept_unscanned_files`, is added to
+  migration 0241, still unapplied, in place.
+  - With no scanner configured, evidence files are refused. Statement-only answers still work.
+  - Accepting unscanned files is a `settings_relax` step-up and is audited as a relaxation.
+  - Downloading an unscanned file needs an explicit `acknowledgeUnscanned=1`, which the audit row records.
+  - A CSV downloads as plain text (`.txt`), so a spreadsheet application never evaluates its cells.
+- **Storage.**
+  - Each grant holds at most one pending answer per item. A newer answer withdraws the older one, which keeps no file
+    (status `withdrawn`, added to 0242 in place).
+  - Each grant is capped at 50 MiB of held file bytes and 500 answers, checked under the grant's row lock.
+  - The data-key envelope stays the shared hex format. The custody probe and the re-encryption walk handle every
+    `CIPHERTEXT_COLUMNS` entry through that one format, and a second, compact format would fork them. The per-grant
+    budget bounds the stored size instead: worst case about 2.7 × 50 MiB per grant. A binary envelope is a follow-up
+    for the data-key module, not for this lane.
+- **Smaller fixes.**
+  - The step-up digest now covers every field that shapes a grant and a link (`questionnaireId`, `inviteHours`).
+  - A forged session cookie is refused by a database lookup before the body is read.
+  - A questionnaire linked to controls outside the grant's framework cannot be granted.
+  - A duplicate questionnaire name answers 409 instead of 500.
+- **Not done, recorded.**
+  - Supplier reads (`GET /supplier/v1/assessment`) are not audited. Sign-in, every write and every refusal are.
+  - The shared step-up copy for `identity_manage` still reads "changing an agent identity". That wording belongs to
+    the step-up module and its pinned tests.
