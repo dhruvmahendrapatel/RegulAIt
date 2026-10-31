@@ -28,7 +28,8 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, Input, Select, Textarea, type Tone } from "../../../ui/kit";
+import { ExpandableTable } from "../../../ui/ExpandableTable";
 import { QueryGate, optionEls, useAction, useAgents, useProjects, agentOpts } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
@@ -434,7 +435,7 @@ export default function RisksPage() {
                 body="Register one above — the library seeds the scenarios this deployment's ledgers can evidence."
               />
             ) : (
-              <Table
+              <ExpandableTable
                 rows={list.data?.risks ?? []}
                 rowKey={(r) => r.id}
                 expand={{
