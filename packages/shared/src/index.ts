@@ -906,6 +906,27 @@ export const createRateLimitSchema = z
   })
   .superRefine(refineRuleScope);
 
+/** ADR-0212 (P12 c) — a rate limit keyed on the MODEL (the agent registry entry) a
+ * dispatch is served by, beside user/role/team/fleet. It has no server or tool: the
+ * server discriminant is fixed to 'all' and is not posted. */
+export const MODEL_RATE_LIMIT_MAX_CALLS = 1_000_000;
+export const MODEL_RATE_LIMIT_MAX_WINDOW_SECONDS = 30 * 24 * 3600;
+export const createModelRateLimitSchema = z
+  .object({
+    scope: ruleScopeSchema.default("user"),
+    userId: z.string().uuid().nullable().optional(),
+    roleId: z.string().uuid().nullable().optional(),
+    teamId: z.string().uuid().nullable().optional(),
+    agentId: z.string().uuid(),
+    maxCalls: z.number().int().positive().max(MODEL_RATE_LIMIT_MAX_CALLS),
+    windowSeconds: z.number().int().positive().max(MODEL_RATE_LIMIT_MAX_WINDOW_SECONDS),
+  })
+  .strict()
+  .superRefine((body, ctx) => refineRuleScope({ ...body, serverScope: "all", serverId: null }, ctx));
+
+/** the org opt-in for model rate limits (off by default; turning it on needs a step-up) */
+export const setModelRateLimitEnforcementSchema = z.object({ enabled: z.boolean() }).strict();
+
 /** ADR-0168 — a condition's due date: a calendar date (`YYYY-MM-DD`, due at
  * the END of that day, UTC) or a full ISO-8601 timestamp. ADR-0180: defined
  * once in assurance.ts, which measured conditions share. */
@@ -4661,6 +4682,8 @@ export * from "./feedback.js";
 export * from "./ai-literacy.js";
 export * from "./alert-ownership.js";
 export * from "./isaca-pack.js";
+// ADR-0212 (P12 b): modality pricing
+export * from "./modality-pricing.js";
 
 // ===== ADR-0185 (batch 3) — retention, MCP protocol/transports, owners, Outlook allow-list =====
 export * from "./batch3.js";

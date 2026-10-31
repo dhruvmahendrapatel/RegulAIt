@@ -44,6 +44,7 @@ describe("FS-33 — usage CSV cells are formula-neutralised", () => {
     } as unknown as Parameters<typeof usageEventRow>[0]);
     const cells = row.split(",");
     expect(cells[5]).toBe("'=cmd|' /C calc'!A0");
-    expect(cells.slice(7)).toEqual(["3", "4", "0.001000", "-0.000100", ""]);
+    // ADR-0212: the three modality cost cells trail the row, empty for a row with no split
+    expect(cells.slice(7)).toEqual(["3", "4", "0.001000", "-0.000100", "", "", "", ""]);
   });
 });
