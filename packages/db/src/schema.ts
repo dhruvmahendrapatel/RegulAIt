@@ -4810,9 +4810,9 @@ export const orgSettings = pgTable(
     feedbackResolveSlaDays: integer("feedback_resolve_sla_days").notNull().default(30),
     /** A13: after this many days a feedback body and contact are deleted (the resolution record stays) */
     feedbackRetentionDays: integer("feedback_retention_days").notNull().default(365),
-    /** ADR-0221 (migration 0256): the supplier portal — built, shipped OFF; turning it on is a relaxation */
+    /** ADR-0221 (migration 0241): the supplier portal — built, shipped OFF; turning it on is a relaxation */
     supplierPortalEnabled: boolean("supplier_portal_enabled").notNull().default(false),
-    /** ADR-0221 (migration 0256): with no scanner configured, evidence files are refused unless this is on (a relaxation) */
+    /** ADR-0221 (migration 0241): with no scanner configured, evidence files are refused unless this is on (a relaxation) */
     supplierPortalAcceptUnscannedFiles: boolean("supplier_portal_accept_unscanned_files").notNull().default(false),
     /** ADR-0211 (migration 0250): may a risk be recorded as transferred or
      * avoided? OFF by default (ADR-0180); turning it on is a step-up relaxation */
@@ -14934,64 +14934,6 @@ export const auditorSessions = pgTable(
 );
 export type AuditorSessionRow = typeof auditorSessions.$inferSelect;
 
-/**
- * ADR-0221 (migrations 0256-0257, PENDING P4) — the supplier portal. A supplier signs in through a single-use link
- * and answers ONE vendor's ONE assessment; every answer is held for a reviewer, who accepts it into the vendor's
- * ADR-0084 attestations or rejects it. Tokens are stored as sha256 only; timestamps are on the database clock.
- */
-export interface SupplierQuestion {
-  /** stable within the questionnaire, `^[a-z0-9][a-z0-9_-]{0,63}$` */
-  id: string;
-  prompt: string;
-  help: string;
-  required: boolean;
-  /** whether the supplier may (not must) attach one evidence file */
-  allowFile: boolean;
-  /** an answer accepted by a reviewer becomes an attestation against this control, when set */
-  controlRef: string | null;
-}
-
-export const supplierQuestionnaires = pgTable(
-  "supplier_questionnaires",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    name: text("name").notNull(),
-    version: integer("version").notNull(),
-    description: text("description").notNull().default(""),
-    questions: jsonb("questions").$type<SupplierQuestion[]>().notNull(),
-    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    retiredAt: timestamp("retired_at", { withTimezone: true }),
-  },
-  (t) => [
-    unique("supplier_questionnaires_name_version_uq").on(t.name, t.version),
-    check("supplier_questionnaires_name_check", sql`char_length(${t.name}) BETWEEN 1 AND 120`),
-    check("supplier_questionnaires_description_check", sql`char_length(${t.description}) <= 2000`),
-    check("supplier_questionnaires_version_check", sql`${t.version} >= 1`),
-    check(
-      "supplier_questionnaires_questions_check",
-      sql`jsonb_typeof(${t.questions}) = 'array' AND jsonb_array_length(${t.questions}) BETWEEN 1 AND 100`,
-    ),
-  ],
-);
-export type SupplierQuestionnaireRow = typeof supplierQuestionnaires.$inferSelect;
-
-export const supplierAccess = pgTable(
-  "supplier_access",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    vendorId: uuid("vendor_id")
-      .notNull()
-      .references(() => aiVendors.id, { onDelete: "cascade" }),
-    workflowInstanceId: uuid("workflow_instance_id")
-      .notNull()
-      .references(() => workflowInstances.id, { onDelete: "cascade" }),
-    framework: text("framework").notNull(),
-    questionnaireId: uuid("questionnaire_id").references(() => supplierQuestionnaires.id, { onDelete: "restrict" }),
-    supplierEmail: text("supplier_email").notNull(),
-    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
-    revokedAt: timestamp("revoked_at", { withTimezone: true }),
-    revokedBy: uuid("revoked_by").references(() => users.id, { onDelete: "set null" }),
 // ---------------------------------------------------------------------------
 // ADR-0224 (P13 c, migrations 0251–0246) — privacy operations
 // ---------------------------------------------------------------------------
@@ -15057,6 +14999,115 @@ export const dataSubjectRequests = pgTable(
     locatedAt: timestamp("located_at", { withTimezone: true }),
     closedAt: timestamp("closed_at", { withTimezone: true }),
     closeNote: text("close_note"),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("data_subject_requests_open_due_idx").on(t.dueAt).where(sql`${t.status} IN ('received', 'in_progress')`),
+    check("data_subject_requests_kind_check", sql`${t.kind} IN ('access', 'erasure', 'objection')`),
+    check("data_subject_requests_identifier_kind_check", sql`${t.identifierKind} IN ('email', 'phone')`),
+    check(
+      "data_subject_requests_status_check",
+      sql`${t.status} IN ('received', 'in_progress', 'completed', 'rejected')`,
+    ),
+    check("data_subject_requests_digest_check", sql`${t.subjectDigest} ~ '^[0-9a-f]{64}$'`),
+    check("data_subject_requests_due_check", sql`${t.dueAt} > ${t.receivedAt}`),
+    check(
+      "data_subject_requests_closed_check",
+      sql`(${t.status} IN ('completed', 'rejected')) = (${t.closedAt} IS NOT NULL)`,
+    ),
+  ],
+);
+export type DataSubjectRequestRow = typeof dataSubjectRequests.$inferSelect;
+
+/**
+ * The tombstone an erasure leaves where it may not delete. The audit trail is tamper-evident (hash-chained, ADR-0067),
+ * so erasing a subject never edits or deletes an audit row: each row the erasure covered is listed here with the date
+ * its retention rule lets it be pruned, and the row stays until then. One row per request and store.
+ */
+export const dataSubjectTombstones = pgTable(
+  "data_subject_tombstones",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    requestId: uuid("request_id")
+      .notNull()
+      .references(() => dataSubjectRequests.id, { onDelete: "cascade" }),
+    store: text("store").notNull(),
+    rowIds: jsonb("row_ids").$type<string[]>().notNull().default([]),
+    rowCount: integer("row_count").notNull(),
+    retainedUntil: timestamp("retained_until", { withTimezone: true }),
+    reason: text("reason").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("data_subject_tombstones_request_store_uq").on(t.requestId, t.store),
+    check(
+      "data_subject_tombstones_store_check",
+      sql`${t.store} IN ('accounts', 'conversations', 'project_context', 'audit_trail')`,
+    ),
+    check("data_subject_tombstones_count_check", sql`${t.rowCount} >= 0`),
+  ],
+);
+export type DataSubjectTombstoneRow = typeof dataSubjectTombstones.$inferSelect;
+
+/**
+ * ADR-0221 (migrations 0241-0242, PENDING P4) — the supplier portal. A supplier signs in through a single-use link
+ * and answers ONE vendor's ONE assessment; every answer is held for a reviewer, who accepts it into the vendor's
+ * ADR-0084 attestations or rejects it. Tokens are stored as sha256 only; timestamps are on the database clock.
+ */
+export interface SupplierQuestion {
+  /** stable within the questionnaire, `^[a-z0-9][a-z0-9_-]{0,63}$` */
+  id: string;
+  prompt: string;
+  help: string;
+  required: boolean;
+  /** whether the supplier may (not must) attach one evidence file */
+  allowFile: boolean;
+  /** an answer accepted by a reviewer becomes an attestation against this control, when set */
+  controlRef: string | null;
+}
+
+export const supplierQuestionnaires = pgTable(
+  "supplier_questionnaires",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    version: integer("version").notNull(),
+    description: text("description").notNull().default(""),
+    questions: jsonb("questions").$type<SupplierQuestion[]>().notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+  },
+  (t) => [
+    unique("supplier_questionnaires_name_version_uq").on(t.name, t.version),
+    check("supplier_questionnaires_name_check", sql`char_length(${t.name}) BETWEEN 1 AND 120`),
+    check("supplier_questionnaires_description_check", sql`char_length(${t.description}) <= 2000`),
+    check("supplier_questionnaires_version_check", sql`${t.version} >= 1`),
+    check(
+      "supplier_questionnaires_questions_check",
+      sql`jsonb_typeof(${t.questions}) = 'array' AND jsonb_array_length(${t.questions}) BETWEEN 1 AND 100`,
+    ),
+  ],
+);
+export type SupplierQuestionnaireRow = typeof supplierQuestionnaires.$inferSelect;
+
+export const supplierAccess = pgTable(
+  "supplier_access",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    vendorId: uuid("vendor_id")
+      .notNull()
+      .references(() => aiVendors.id, { onDelete: "cascade" }),
+    workflowInstanceId: uuid("workflow_instance_id")
+      .notNull()
+      .references(() => workflowInstances.id, { onDelete: "cascade" }),
+    framework: text("framework").notNull(),
+    questionnaireId: uuid("questionnaire_id").references(() => supplierQuestionnaires.id, { onDelete: "restrict" }),
+    supplierEmail: text("supplier_email").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: uuid("revoked_by").references(() => users.id, { onDelete: "set null" }),
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -15165,49 +15216,3 @@ export const supplierSubmissions = pgTable(
   ],
 );
 export type SupplierSubmissionRow = typeof supplierSubmissions.$inferSelect;
-    index("data_subject_requests_open_due_idx").on(t.dueAt).where(sql`${t.status} IN ('received', 'in_progress')`),
-    check("data_subject_requests_kind_check", sql`${t.kind} IN ('access', 'erasure', 'objection')`),
-    check("data_subject_requests_identifier_kind_check", sql`${t.identifierKind} IN ('email', 'phone')`),
-    check(
-      "data_subject_requests_status_check",
-      sql`${t.status} IN ('received', 'in_progress', 'completed', 'rejected')`,
-    ),
-    check("data_subject_requests_digest_check", sql`${t.subjectDigest} ~ '^[0-9a-f]{64}$'`),
-    check("data_subject_requests_due_check", sql`${t.dueAt} > ${t.receivedAt}`),
-    check(
-      "data_subject_requests_closed_check",
-      sql`(${t.status} IN ('completed', 'rejected')) = (${t.closedAt} IS NOT NULL)`,
-    ),
-  ],
-);
-export type DataSubjectRequestRow = typeof dataSubjectRequests.$inferSelect;
-
-/**
- * The tombstone an erasure leaves where it may not delete. The audit trail is tamper-evident (hash-chained, ADR-0067),
- * so erasing a subject never edits or deletes an audit row: each row the erasure covered is listed here with the date
- * its retention rule lets it be pruned, and the row stays until then. One row per request and store.
- */
-export const dataSubjectTombstones = pgTable(
-  "data_subject_tombstones",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    requestId: uuid("request_id")
-      .notNull()
-      .references(() => dataSubjectRequests.id, { onDelete: "cascade" }),
-    store: text("store").notNull(),
-    rowIds: jsonb("row_ids").$type<string[]>().notNull().default([]),
-    rowCount: integer("row_count").notNull(),
-    retainedUntil: timestamp("retained_until", { withTimezone: true }),
-    reason: text("reason").notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [
-    uniqueIndex("data_subject_tombstones_request_store_uq").on(t.requestId, t.store),
-    check(
-      "data_subject_tombstones_store_check",
-      sql`${t.store} IN ('accounts', 'conversations', 'project_context', 'audit_trail')`,
-    ),
-    check("data_subject_tombstones_count_check", sql`${t.rowCount} >= 0`),
-  ],
-);
-export type DataSubjectTombstoneRow = typeof dataSubjectTombstones.$inferSelect;
