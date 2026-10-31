@@ -952,7 +952,7 @@ export const mcpServerUpstreamCredentials = pgTable(
 export type McpServerUpstreamCredentialRow = typeof mcpServerUpstreamCredentials.$inferSelect;
 
 /**
- * ADR-0219 (P10, migration 0239) — A REMOTE AGENT reached over the agent-to-agent (A2A) protocol. Registered by an
+ * ADR-0219 (P10, migration 0253) — A REMOTE AGENT reached over the agent-to-agent (A2A) protocol. Registered by an
  * admin only while `org_settings.a2a_enabled`; its card was read through the guarded fetch and is kept as a bounded
  * snapshot. Every call goes through `executeGovernedA2aCall` (a2a.ts): the person's grant (default-deny), the lead
  * ceiling, the egress guard, the cost ledger and the audit row. `allowPrivateRanges` NULL inherits
@@ -1206,6 +1206,9 @@ export const auditLog = pgTable(
         // ADR-0202 decision 4: an admin switching one demo beat between live and
         // its simulated fallback (demo_beat_fallbacks). Plain text column.
         "demo_beat",
+        // ADR-0224 (P13 c): records of processing and data-subject requests. Plain text column.
+        "processing_record",
+        "data_subject_request",
         // A4 (ADR-0027): an admin set/clear of the deploy-mode scope on a
         // pillar-1 restriction rule. Plain text column — no DDL needed.
         "restriction_rule",
@@ -4485,7 +4488,7 @@ export const orgSettings = pgTable(
      * ceremony; an admin may relax to it (audited).
      * Link-local/IMDS stays unconditionally blocked in BOTH postures. */
     mcpPrivateRangesDefault: boolean("mcp_private_ranges_default").notNull().default(false),
-    /** ADR-0219 (P10, migration 0239): calls to remote agents over A2A. FALSE (the default, ADR-0180) = no remote
+    /** ADR-0219 (P10, migration 0253): calls to remote agents over A2A. FALSE (the default, ADR-0180) = no remote
      * agent can be registered or called; an admin may turn it on (settings_relax step-up, audited). */
     a2aEnabled: boolean("a2a_enabled").notNull().default(false),
     /** ADR-0097 (migration 0103): the MCP ADMISSION posture. 'enforce'
@@ -4802,6 +4805,9 @@ export const orgSettings = pgTable(
     feedbackResolveSlaDays: integer("feedback_resolve_sla_days").notNull().default(30),
     /** A13: after this many days a feedback body and contact are deleted (the resolution record stays) */
     feedbackRetentionDays: integer("feedback_retention_days").notNull().default(365),
+    /** ADR-0211 (migration 0250): may a risk be recorded as transferred or
+     * avoided? OFF by default (ADR-0180); turning it on is a step-up relaxation */
+    riskTreatmentsEnabled: boolean("risk_treatments_enabled").notNull().default(false),
     /** A14: a human-originated governed call by a person not current on an applicable published document is refused */
     literacyGateMode: text("literacy_gate_mode", { enum: ACCOUNTABILITY_GATE_MODES }).notNull().default("enforce"),
     literacyDefaultValidityDays: integer("literacy_default_validity_days").notNull().default(365),
@@ -4819,6 +4825,14 @@ export const orgSettings = pgTable(
     /** ADR-0225 (P13 d, migration 0247): the public trust centre and the auditor portal — built, shipped OFF
      * (ADR-0180). Off, both answer 404 and nothing can be published or granted. */
     trustPagesEnabled: boolean("trust_pages_enabled").notNull().default(false),
+
+    // --- ADR-0224 (P13 c, migration 0251): privacy operations ------------
+    /** Shipped OFF (owner, 10-30). When on, personal data the PII detector finds in a governed dispatch must be a
+     * category an active record of processing permits for the dispatch's project, or the dispatch is refused 409
+     * `processing_not_permitted` (privacy-ops.ts). Turning it off again is an audited relaxation with a step-up. */
+    privacyOpsEnabled: boolean("privacy_ops_enabled").notNull().default(false),
+    /** days from a data-subject request's receipt to its due date; 30 is the strict default, shorter is stricter */
+    dsrSlaDays: integer("dsr_sla_days").notNull().default(30),
 
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -4885,6 +4899,7 @@ export const orgSettings = pgTable(
     check("org_settings_feedback_retention_check", sql`${t.feedbackRetentionDays} BETWEEN 30 AND 2555`),
     check("org_settings_literacy_gate_mode_check", sql`${t.literacyGateMode} IN ('off', 'warn', 'enforce')`),
     check("org_settings_literacy_validity_check", sql`${t.literacyDefaultValidityDays} BETWEEN 30 AND 730`),
+    check("org_settings_dsr_sla_days_check", sql`${t.dsrSlaDays} BETWEEN 1 AND 90`),
     check(
       "org_settings_alert_sla_hours_check",
       sql`jsonb_typeof(${t.alertSlaHours}) = 'object' AND jsonb_typeof(${t.alertSlaHours} -> 'high') = 'number' AND jsonb_typeof(${t.alertSlaHours} -> 'medium') = 'number' AND jsonb_typeof(${t.alertSlaHours} -> 'low') = 'number' AND (${t.alertSlaHours} ->> 'high')::numeric BETWEEN 1 AND 720 AND (${t.alertSlaHours} ->> 'medium')::numeric BETWEEN 1 AND 720 AND (${t.alertSlaHours} ->> 'low')::numeric BETWEEN 1 AND 720`,
@@ -10247,7 +10262,9 @@ export type AiVendorRow = typeof aiVendors.$inferSelect;
 // never a tick-box" discipline applied to risk.
 // ---------------------------------------------------------------------------
 
-export const AI_RISK_STATUSES = ["open", "mitigating", "accepted", "closed"] as const;
+/** ADR-0211 (migration 0250): `transferred` and `avoided` are the two treatments
+ * recorded through POST /v1/risks/:riskId/treatment; the first four keep their meaning */
+export const AI_RISK_STATUSES = ["open", "mitigating", "accepted", "closed", "transferred", "avoided"] as const;
 export type AiRiskStatus = (typeof AI_RISK_STATUSES)[number];
 
 /** kept in lockstep with @regulait/shared's AI_RISK_CATEGORIES — the curated
@@ -10313,11 +10330,23 @@ export const aiRisks = pgTable(
      * linked controls operate — same three-level scale, both or neither */
     residualLikelihood: text("residual_likelihood", { enum: AI_RISK_LEVELS }),
     residualImpact: text("residual_impact", { enum: AI_RISK_LEVELS }),
+    /** ADR-0211 (migration 0250): the treatment record of a `transferred` or
+     * `avoided` risk — the contract or policy reference, or the decision that
+     * stopped the use; the accountable owner; who recorded it and when.
+     * Written ONLY by the audited treatment endpoint. */
+    treatmentEvidence: text("treatment_evidence"),
+    treatmentOwnerUserId: uuid("treatment_owner_user_id").references(() => users.id, { onDelete: "set null" }),
+    treatedByUserId: uuid("treated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    treatedAt: timestamp("treated_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     check("ai_risks_title_check", sql`length(btrim(${t.title})) > 0`),
+    check(
+      "ai_risks_treatment_check",
+      sql`(${t.status} IN ('transferred', 'avoided')) = (${t.treatmentEvidence} IS NOT NULL AND ${t.treatedAt} IS NOT NULL) AND (${t.treatmentEvidence} IS NULL OR length(btrim(${t.treatmentEvidence})) BETWEEN 1 AND 2000)`,
+    ),
     check(
       "ai_risks_acceptance_check",
       sql`(${t.status} = 'accepted') = (${t.acceptedAt} IS NOT NULL AND ${t.acceptanceNote} IS NOT NULL)`,
@@ -14892,3 +14921,119 @@ export const auditorSessions = pgTable(
   ],
 );
 export type AuditorSessionRow = typeof auditorSessions.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0224 (P13 c, migrations 0251–0246) — privacy operations
+// ---------------------------------------------------------------------------
+
+/**
+ * A record of processing for an AI system: why personal data is processed (purpose), on what lawful basis, which data
+ * categories, for how long, and who receives it. Linked to a project, a use case, or both. An ACTIVE record is what
+ * the gateway's processing limit reads (privacy-ops.ts): its `data_categories` are the detector categories personal
+ * data in a dispatch attributed to the linked project may carry. Written only through `/v1/privacy/processing-records`
+ * (admin; a widening write needs a `settings_relax` step-up), each write audited in its transaction.
+ */
+export const processingRecords = pgTable(
+  "processing_records",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    purpose: text("purpose").notNull(),
+    lawfulBasis: text("lawful_basis").notNull(),
+    dataCategories: jsonb("data_categories").$type<string[]>().notNull().default([]),
+    retentionDays: integer("retention_days").notNull(),
+    recipients: jsonb("recipients").$type<string[]>().notNull().default([]),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "cascade" }),
+    useCaseId: uuid("use_case_id").references(() => aiUseCases.id, { onDelete: "cascade" }),
+    status: text("status").notNull().default("active"),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("processing_records_project_idx").on(t.projectId).where(sql`${t.status} = 'active'`),
+    index("processing_records_use_case_idx").on(t.useCaseId).where(sql`${t.status} = 'active'`),
+    check("processing_records_link_check", sql`${t.projectId} IS NOT NULL OR ${t.useCaseId} IS NOT NULL`),
+    check("processing_records_status_check", sql`${t.status} IN ('active', 'retired')`),
+    check(
+      "processing_records_lawful_basis_check",
+      sql`${t.lawfulBasis} IN ('consent', 'contract', 'legal_obligation', 'vital_interests', 'public_task', 'legitimate_interests')`,
+    ),
+    check("processing_records_retention_check", sql`${t.retentionDays} BETWEEN 1 AND 36500`),
+    check("processing_records_categories_check", sql`jsonb_typeof(${t.dataCategories}) = 'array'`),
+    check("processing_records_recipients_check", sql`jsonb_typeof(${t.recipients}) = 'array'`),
+  ],
+);
+export type ProcessingRecordRow = typeof processingRecords.$inferSelect;
+
+/**
+ * A data-subject request (access, erasure, objection). It holds NO personal data: `subject_digest` is an HMAC of the
+ * normalised identifier under a key derived from the data key, so a request can be matched again when an admin types
+ * the identifier to locate the subject, and cannot be reversed. `located` holds per-store counts, never content.
+ */
+export const dataSubjectRequests = pgTable(
+  "data_subject_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kind: text("kind").notNull(),
+    identifierKind: text("identifier_kind").notNull(),
+    subjectDigest: text("subject_digest").notNull(),
+    reference: text("reference"),
+    processingRecordId: uuid("processing_record_id").references(() => processingRecords.id, { onDelete: "set null" }),
+    status: text("status").notNull().default("received"),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+    dueAt: timestamp("due_at", { withTimezone: true }).notNull(),
+    located: jsonb("located").$type<unknown[]>(),
+    locatedAt: timestamp("located_at", { withTimezone: true }),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    closeNote: text("close_note"),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("data_subject_requests_open_due_idx").on(t.dueAt).where(sql`${t.status} IN ('received', 'in_progress')`),
+    check("data_subject_requests_kind_check", sql`${t.kind} IN ('access', 'erasure', 'objection')`),
+    check("data_subject_requests_identifier_kind_check", sql`${t.identifierKind} IN ('email', 'phone')`),
+    check(
+      "data_subject_requests_status_check",
+      sql`${t.status} IN ('received', 'in_progress', 'completed', 'rejected')`,
+    ),
+    check("data_subject_requests_digest_check", sql`${t.subjectDigest} ~ '^[0-9a-f]{64}$'`),
+    check("data_subject_requests_due_check", sql`${t.dueAt} > ${t.receivedAt}`),
+    check(
+      "data_subject_requests_closed_check",
+      sql`(${t.status} IN ('completed', 'rejected')) = (${t.closedAt} IS NOT NULL)`,
+    ),
+  ],
+);
+export type DataSubjectRequestRow = typeof dataSubjectRequests.$inferSelect;
+
+/**
+ * The tombstone an erasure leaves where it may not delete. The audit trail is tamper-evident (hash-chained, ADR-0067),
+ * so erasing a subject never edits or deletes an audit row: each row the erasure covered is listed here with the date
+ * its retention rule lets it be pruned, and the row stays until then. One row per request and store.
+ */
+export const dataSubjectTombstones = pgTable(
+  "data_subject_tombstones",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    requestId: uuid("request_id")
+      .notNull()
+      .references(() => dataSubjectRequests.id, { onDelete: "cascade" }),
+    store: text("store").notNull(),
+    rowIds: jsonb("row_ids").$type<string[]>().notNull().default([]),
+    rowCount: integer("row_count").notNull(),
+    retainedUntil: timestamp("retained_until", { withTimezone: true }),
+    reason: text("reason").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("data_subject_tombstones_request_store_uq").on(t.requestId, t.store),
+    check(
+      "data_subject_tombstones_store_check",
+      sql`${t.store} IN ('accounts', 'conversations', 'project_context', 'audit_trail')`,
+    ),
+    check("data_subject_tombstones_count_check", sql`${t.rowCount} >= 0`),
+  ],
+);
+export type DataSubjectTombstoneRow = typeof dataSubjectTombstones.$inferSelect;

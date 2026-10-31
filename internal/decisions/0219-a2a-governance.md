@@ -16,7 +16,7 @@ existing agent and MCP registry pages.
 
 ## Decision
 
-1. **A default-off org setting.** `org_settings.a2a_enabled` (migration 0239) is false by default (ADR-0180). While it is
+1. **A default-off org setting.** `org_settings.a2a_enabled` (migration 0253) is false by default (ADR-0180). While it is
    false, no remote agent can be registered and no call is made; both refusals are audited. Turning it on is a
    relaxation in the strictness registry (`notEqual(false)`), so `PUT /v1/org/settings` asks for a `settings_relax`
    step-up and names it in the audit row's `relaxed`.

@@ -93,8 +93,38 @@ export const AI_RISK_CATEGORIES = [
 ] as const;
 export type AiRiskCategory = (typeof AI_RISK_CATEGORIES)[number];
 
-export const AI_RISK_STATUSES = ["open", "mitigating", "accepted", "closed"] as const;
+/** ADR-0211: `transferred` (to an insurer or a supplier contract) and `avoided`
+ * (the use stopped) are TREATMENTS, each a record with evidence and an owner,
+ * reached only through the treatment endpoint. The first four keep their meaning. */
+export const AI_RISK_STATUSES = ["open", "mitigating", "accepted", "closed", "transferred", "avoided"] as const;
 export type AiRiskStatus = (typeof AI_RISK_STATUSES)[number];
+
+/** ADR-0211: the two treatments recorded through POST /v1/risks/:riskId/treatment */
+export const AI_RISK_TREATMENTS = ["transferred", "avoided"] as const;
+export type AiRiskTreatment = (typeof AI_RISK_TREATMENTS)[number];
+
+/** ADR-0211: true for a status reached only through the treatment endpoint */
+export function isTreatedRiskStatus(status: string): status is AiRiskTreatment {
+  return (AI_RISK_TREATMENTS as readonly string[]).includes(status);
+}
+
+/**
+ * ADR-0211: the statuses a risk is still LIVE in — being worked, not decided.
+ * `accepted`, `transferred` and `avoided` are decided records; `closed` is done.
+ * Every "how many risks are live" count reads this one list.
+ */
+export const LIVE_RISK_STATUSES = ["open", "mitigating"] as const satisfies readonly AiRiskStatus[];
+
+/**
+ * ADR-0211: does a risk in this status still carry a rating (heat maps, the
+ * dependency graph, the tolerance gate)? `closed` does not, and neither does
+ * `avoided`: the use that created it stopped. A `transferred` risk DOES — a
+ * contract moves who pays, not whether the harm can happen — so it stays in
+ * every rating, exactly as an accepted one does.
+ */
+export function riskStatusCarriesRating(status: string): boolean {
+  return status !== "closed" && status !== "avoided";
+}
 
 /** DECLARED human judgments — a position a person takes, never a measurement */
 export const AI_RISK_LEVELS = ["low", "medium", "high"] as const;
@@ -305,6 +335,28 @@ export const linkRiskControlSchema = z.object({
   controlRef: z.string().min(3).max(200),
 });
 export type LinkRiskControlInput = z.infer<typeof linkRiskControlSchema>;
+
+/**
+ * ADR-0211: record a risk as transferred or avoided. Both need EVIDENCE — for a
+ * transfer, the contract or policy reference; for an avoidance, the decision
+ * that stopped the use — and an accountable OWNER of that arrangement.
+ */
+export const recordRiskTreatmentSchema = z
+  .object({
+    treatment: z.enum(AI_RISK_TREATMENTS),
+    evidence: z
+      .string()
+      .max(2000)
+      .transform((v) => v.trim())
+      .pipe(z.string().min(1, "evidence is required")),
+    ownerUserId: z.string().uuid(),
+  })
+  .strict();
+export type RecordRiskTreatmentInput = z.infer<typeof recordRiskTreatmentSchema>;
+
+/** ADR-0211: the org switch for the two treatments (default off) */
+export const setRiskTreatmentsEnabledSchema = z.object({ enabled: z.boolean() }).strict();
+export type SetRiskTreatmentsEnabledInput = z.infer<typeof setRiskTreatmentsEnabledSchema>;
 
 export const acceptRiskSchema = z.object({
   /** WHY the residual risk is acceptable — the substance of the record */

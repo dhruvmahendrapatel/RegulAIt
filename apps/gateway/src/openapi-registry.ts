@@ -658,6 +658,17 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/servers/:serverId/upstream-credential": "internal",
   "PUT /v1/servers/:serverId/upstream-credential": "internal",
   "DELETE /v1/servers/:serverId/upstream-credential": "internal",
+  // ADR-0224 (P13 c): records of processing and data-subject requests (admin-only)
+  "GET /v1/privacy/processing-records": "internal",
+  "GET /v1/privacy/processing-records/:id": "internal",
+  "POST /v1/privacy/processing-records": "internal",
+  "PATCH /v1/privacy/processing-records/:id": "internal",
+  "GET /v1/privacy/requests": "internal",
+  "GET /v1/privacy/requests/:id": "internal",
+  "POST /v1/privacy/requests": "internal",
+  "POST /v1/privacy/requests/:id/locate": "internal",
+  "POST /v1/privacy/requests/:id/close": "internal",
+  "GET /v1/privacy/requests/:id/tombstones": "internal",
   "GET /v1/servers/:serverId/tools": "internal",
   "POST /v1/servers/:serverId/tools": "internal",
   // ADR-0097 — the MCP admission review surface
@@ -1035,6 +1046,10 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // --- P0
   "GET /v1/org/settings/assurance-gate-mode": "internal",
   "PUT /v1/org/settings/assurance-gate-mode": "internal",
+  // --- ADR-0211 (P17)
+  "GET /v1/org/settings/risk-treatments": "internal",
+  "PUT /v1/org/settings/risk-treatments": "internal",
+  "POST /v1/risks/:riskId/treatment": "internal",
   // --- A2
   "POST /v1/use-cases/:useCaseId/conditions/:conditionId/evaluate": "internal",
   "POST /v1/use-cases/:useCaseId/conditions/:conditionId/waive": "internal",
@@ -1720,6 +1735,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "PATCH /v1/risks/:riskId": "risks",
   "POST /v1/risks/:riskId/transition": "risks",
   "POST /v1/risks/:riskId/accept": "risks",
+  "POST /v1/risks/:riskId/treatment": "risks",
   "PUT /v1/risks/:riskId/residual": "risks",
   "POST /v1/risks/:riskId/controls": "risks",
   "DELETE /v1/risks/:riskId/controls/:controlRef": "risks",
@@ -1793,6 +1809,16 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/servers/:serverId/upstream-credential": "servers",
   "PUT /v1/servers/:serverId/upstream-credential": "servers",
   "DELETE /v1/servers/:serverId/upstream-credential": "servers",
+  "GET /v1/privacy/processing-records": "privacy",
+  "GET /v1/privacy/processing-records/:id": "privacy",
+  "POST /v1/privacy/processing-records": "privacy",
+  "PATCH /v1/privacy/processing-records/:id": "privacy",
+  "GET /v1/privacy/requests": "privacy",
+  "GET /v1/privacy/requests/:id": "privacy",
+  "POST /v1/privacy/requests": "privacy",
+  "POST /v1/privacy/requests/:id/locate": "privacy",
+  "POST /v1/privacy/requests/:id/close": "privacy",
+  "GET /v1/privacy/requests/:id/tombstones": "privacy",
   "GET /v1/servers/:serverId/tools": "servers",
   "POST /v1/servers/:serverId/tools": "servers",
   "GET /v1/mcp/admission": "servers",
@@ -2111,6 +2137,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   // --- P0
   "GET /v1/org/settings/assurance-gate-mode": "org",
   "PUT /v1/org/settings/assurance-gate-mode": "org",
+  "GET /v1/org/settings/risk-treatments": "org",
+  "PUT /v1/org/settings/risk-treatments": "org",
   // --- A2
   "POST /v1/use-cases/:useCaseId/conditions/:conditionId/evaluate": "use-cases",
   "POST /v1/use-cases/:useCaseId/conditions/:conditionId/waive": "use-cases",

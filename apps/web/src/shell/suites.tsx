@@ -349,6 +349,16 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
     ],
   },
   {
+    // ADR-0224 (P13 c) — privacy operations. Its own group beside Compliance & infra rather than inside it: the
+    // processing limit reads the same compliance cascade and PII handling mode those pages set, but records of
+    // processing and data-subject requests are their own job, done by a privacy lead rather than a platform admin.
+    group: "Privacy",
+    items: [
+      { label: "Records of processing", to: "/admin/privacy" },
+      { label: "Data subject requests", to: "/admin/privacy/requests" },
+    ],
+  },
+  {
     group: "Settings",
     items: [
       { label: "Organization", to: "/admin/organization" },
@@ -504,7 +514,7 @@ export const SUITES: Suite[] = [
     name: "Compliance & infra",
     purpose: "Compliance profiles and packs, and this installation's own infrastructure.",
     admin: true,
-    sections: sectionsOf("Compliance & infra"),
+    sections: sectionsOf("Compliance & infra", "Privacy"),
   },
   {
     id: "cost-optimization",

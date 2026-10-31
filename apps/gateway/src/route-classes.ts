@@ -683,6 +683,12 @@ export const NON_ADMIN_ROUTES = new Set([
   // POST /v1/risks/:riskId/accept.
   "GET /v1/risks/:riskId/acceptances",
   "POST /v1/risks/:riskId/acceptances",
+  //
+  // --- ADR-0211 (P17): transferred and avoided treatments ---------------------
+  // Recording a treatment is owner-or-admin INSIDE the handler, exactly like a
+  // transition, and only while the org switch is on. DELIBERATELY ABSENT, so
+  // ADMIN-ONLY: GET and PUT /v1/org/settings/risk-treatments (the switch).
+  "POST /v1/risks/:riskId/treatment",
 
   // ===== ADR-0182 (ADR-0175 batch D4) — accountability records ==============
   // Each slice's block below is APPEND-ONLY for that slice. Every route a

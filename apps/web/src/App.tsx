@@ -125,6 +125,8 @@ const TrustPublishingPage = screen(() => import("./screens/admin-compliance-infr
 // ADR-0225 (P13 d): the public trust centre and the auditor portal (their own chunk, no app shell)
 const TrustCenterPage = screen(() => import("./screens/trust"), "TrustCenterPage");
 const AuditorPortalPage = screen(() => import("./screens/trust"), "AuditorPortalPage");
+const ProcessingRecordsPage = screen(() => import("./screens/admin-compliance-infra"), "ProcessingRecordsPage");
+const DataSubjectRequestsPage = screen(() => import("./screens/admin-compliance-infra"), "DataSubjectRequestsPage");
 const OrganizationPage = screen(() => import("./screens/admin-settings"), "OrganizationPage");
 const RetentionPage = screen(() => import("./screens/admin-settings"), "RetentionPage");
 const GettingStartedPage = screen(() => import("./screens/admin-settings"), "GettingStartedPage");
@@ -343,6 +345,9 @@ function ApplicationRoutes() {
                 {/* ADR-0225 (P13 d) */}
                 <Route path="trust-publishing" element={<TrustPublishingPage />} />
                 <Route path="infrastructure" element={<InfrastructurePage />} />
+                {/* ADR-0224 (P13 c) */}
+                <Route path="privacy" element={<ProcessingRecordsPage />} />
+                <Route path="privacy/requests" element={<DataSubjectRequestsPage />} />
                 <Route path="organization" element={<OrganizationPage />} />
                 <Route path="retention" element={<RetentionPage />} />
                 <Route path="licensing" element={<LicensingPage />} />

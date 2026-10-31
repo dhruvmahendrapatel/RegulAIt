@@ -63,7 +63,7 @@ import { timeouts } from "./timeouts.js";
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 /** the JSON-RPC binding is the one transport this gateway speaks to a remote agent */
 const JSONRPC = "JSONRPC";
-/** a stored card is at most this many bytes of JSON (the 0239 CHECK allows a little more for jsonb overhead) */
+/** a stored card is at most this many bytes of JSON (the 0253 CHECK allows a little more for jsonb overhead) */
 export const A2A_CARD_MAX_BYTES = 60_000;
 /** what a caller may send and what we hand back, in characters */
 export const A2A_MESSAGE_MAX_CHARS = 32_000;

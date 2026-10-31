@@ -131,7 +131,7 @@ describe("every step-up-protected write in the app goes through withStepUp (ADR-
       if (/api\.put(?:WithHeaders)?(?:<[^>]*>)?\(\s*["'`]\/v1\/org\/settings["'`]/.test(src)) offenders.push(`${f}: PUT /v1/org/settings`);
       // the dedicated setting routes that also need a settings_relax step-up for a relaxation
       const dedicated = src.match(
-        /(?<![A-Za-z])api\.(?:put|post)(?:WithHeaders)?(?:<[^>]*>)?\(\s*["'`]\/v1\/(?:org\/settings\/assurance-gate-mode|mrm\/enforcement|interception\/settings|policy-simulations\/settings|guardrails\/config)["'`]/g,
+        /(?<![A-Za-z])api\.(?:put|post)(?:WithHeaders)?(?:<[^>]*>)?\(\s*["'`]\/v1\/(?:org\/settings\/assurance-gate-mode|org\/settings\/risk-treatments|mrm\/enforcement|interception\/settings|policy-simulations\/settings|guardrails\/config)["'`]/g,
       );
       for (const m of dedicated ?? []) offenders.push(`${f}: ${m}`);
       // per-scope and halt-lifting relaxations: the execution mode, a per-object guardrail

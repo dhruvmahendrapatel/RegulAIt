@@ -290,7 +290,7 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   { table: "federation_signing_keys", column: "private_key_ciphertext", what: "federation signing private keys" },
   // ADR-0204 (migration 0214): the static credential an admin attached to an MCP server (sent upstream, never returned)
   { table: "mcp_server_upstream_credentials", column: "secret_ciphertext", what: "MCP server upstream credentials" },
-  // ADR-0219 (migration 0239): the static credential an admin attached to a remote A2A agent (sent, never returned)
+  // ADR-0219 (migration 0253): the static credential an admin attached to a remote A2A agent (sent, never returned)
   { table: "a2a_agent_credentials", column: "secret_ciphertext", what: "remote A2A agent credentials" },
 ];
 
