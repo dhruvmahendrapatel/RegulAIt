@@ -286,8 +286,23 @@ test("X6b (L2): a status filter asks the server, and the list says how many it s
 });
 
 // the KEEP_VISIBLE refusal (a form or warning never folds) is probed in kit-contain.mock.spec.ts
+test("X6b: a secondary section starts folded, and the viewer's choice is remembered", async ({ page }) => {
+  await page.goto("/ui/admin/shadow-ai/discovery-sources");
+  const runs = page.getByRole("button", { name: /^Recent runs/ });
+  await expect(runs).toHaveAttribute("aria-expanded", "false");
+  await runs.click();
+  await expect(runs).toHaveAttribute("aria-expanded", "true");
+  await page.reload();
+  await expect(page.getByRole("button", { name: /^Recent runs/ })).toHaveAttribute("aria-expanded", "true");
+});
+
+// the list control's page size and column picker change only how the list shows: the folding card keeps its fold
 test("ADR-0219: Recent runs is a paged list with its own page size, remembered in this browser", async ({ page }) => {
   await page.goto("/ui/admin/shadow-ai/discovery-sources");
+  const fold = page.getByRole("button", { name: /^Recent runs/ });
+  await expect(fold).toHaveAttribute("aria-expanded", "false");
+  await fold.click();
+  await expect(fold).toHaveAttribute("aria-expanded", "true");
   const runs = page.locator('[data-list="discovery-runs"]');
   await expect(runs.getByLabel("Rows per page")).toHaveValue("10");
   await runs.getByLabel("Rows per page").selectOption("100");

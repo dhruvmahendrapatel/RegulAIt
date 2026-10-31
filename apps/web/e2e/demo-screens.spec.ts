@@ -241,6 +241,11 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
   await test.step("S2 findings, sightings, coverage", async () => {
     await ada.goto("/ui/admin/shadow-ai");
     await expect(ada.getByRole("heading", { name: "Shadow-AI discovery" })).toBeVisible();
+    // the inventory opens at 10 rows, most severe first; the presenter shows every finding on one page, a choice this
+    // browser remembers for the S3 and S4 beats
+    const inventory = ada.locator('[data-list="shadow-ai-findings"]');
+    await inventory.getByLabel("Rows per page").selectOption("50");
+    await expect(inventory.getByTestId("list-status")).toHaveText(/^1–\d+ of \d+$/);
     await expect(ada.getByRole("button", { name: `Plan remediation for ${REMEDIATION_REPO}` })).toBeVisible();
     await capture(ada, ADA, "ds-s2-findings", { dark: true });
     pseudonymHref = await ada.locator('a[href*="discovery-sources?pseudonym="]').first().getAttribute("href", { timeout: 5_000 }).catch(() => null);
@@ -450,7 +455,10 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
   await test.step("G5 an alert in the shared detail drawer: a side panel above 900 px, a modal at 900 px and below", async () => {
     await ada.goto("/ui/admin/governance/alerts");
     await expect(ada.getByRole("heading", { name: "Governance alerts", exact: true })).toBeVisible();
-    const rows = ada.getByRole("button").filter({ has: ada.locator("strong") }).filter({ hasText: / · seen / });
+    // each alert row in the list is a link named for its alert; it opens the alert in the shared detail drawer
+    const rows = ada.getByRole("link", { name: /^Open alert / });
+    // the list has loaded (a row, or its empty state) before the rows are counted
+    await expect(rows.first().or(ada.getByText("No active alerts", { exact: true }))).toBeVisible();
     if ((await rows.count()) === 0) {
       report.at(-1)?.notes.push("no active alert to open: the drawer was not captured");
       return;
