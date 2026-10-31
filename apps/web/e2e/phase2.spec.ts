@@ -264,6 +264,8 @@ test("sso & sessions: OIDC list + sessions policy save", async () => {
   test.setTimeout(150_000); // a step-up's TOTP code may wait for the next 30 s window (B4S-06)
   await nav("SSO & sessions", "SSO & sessions");
   await expect(page.getByText("Single sign-on — OIDC providers")).toBeVisible();
+  // P3: the sign-in/session policy now lives on its own settings tab on /admin/sso
+  await page.getByRole("tab", { name: /^Sessions & step-up/ }).click();
   await page.getByRole("button", { name: "Save sign-in policy" }).click();
   const policySaved = page.getByText("Sign-in policy saved", { exact: false }).first();
   await settleWithStepUp(page, policySaved);
