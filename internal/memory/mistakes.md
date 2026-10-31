@@ -1885,6 +1885,6 @@ formula". But the migrator applies an entry only when its `when` is above the ne
 and lanes at 0216–0236 were heading the same way. CI was green because it migrates fresh databases. The #617
 re-review caught it.
 
-Rule: a reserved migration number never reserves a `when`. At merge time the master re-stamps every new journal
-entry to main's newest `when` + 1,000,000 each, appended at the end of the journal, and CI enforces it
-(`scripts/migration-watermark-guard.mjs`, #646).
+Rule: a reserved migration number never reserves a place in the watermark. A lane whose number is below main's
+highest migration is renumbered to the next free numbers above it before merge: file, tag, `idx`, and `when` by
+the formula. A `when`-only re-stamp breaks the placement tests. CI enforces it (`scripts/migration-watermark-guard.mjs`, #646).

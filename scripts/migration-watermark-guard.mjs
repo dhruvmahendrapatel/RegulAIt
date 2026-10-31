@@ -20,7 +20,7 @@ export function watermarkProblems(base, head) {
   for (const e of head.entries) {
     if (baseTags.has(e.tag)) continue;
     if (!(e.when > baseMax)) {
-      out.push(`${e.tag}: when ${e.when} is not above the base branch's newest when ${baseMax}; it would never apply on a database that has run the base branch. Re-stamp it to ${baseMax + 1_000_000} or later and append it at the end of the journal.`);
+      out.push(`${e.tag}: when ${e.when} is not above the base branch's newest when ${baseMax}; it would never apply on a database that has run the base branch. Renumber it above the base branch's highest migration (file, tag, idx, and when by the formula); see CONTRIBUTING_PARALLEL_SESSIONS §4.1.`);
     }
   }
   const whens = head.entries.map((e) => e.when);

@@ -88,9 +88,11 @@ Two related traps from the same mechanism:
 > **Addendum (2026-10-31): reserved numbers do not reserve the watermark.** Lanes reserved migration
 > numbers ahead with `when` set by formula (`1785149000000 + (N−214)×1,000,000`). That is safe only if
 > lanes merge in number order. When 0237 merged before 0223–0225 and 0228, any database that ran main in
-> between would skip the lower ones, because the watermark rule above applies to them too. From now on,
-> a lane merging after a higher number re-stamps its entries to main's newest `when` plus 1,000,000 each,
-> appended at the end of the journal. The file name and number stay as reserved. CI enforces this with
+> between would skip the lower ones, because the watermark rule above applies to them too. Moving only the
+> `when` is not enough either: the placement tests (`zz-adr0190-*`) require `when` to rise with `idx`. From now
+> on, a lane whose migration number is below main's highest migration is **renumbered** before it merges.
+> Its file, tag and `idx` move to the next free numbers above main's highest, and `when` follows the formula
+> for the new number. Every reference to the old tag moves with it. CI enforces this with
 > `scripts/migration-watermark-guard.mjs`, which refuses any new entry not above the base branch's newest
 > `when`.
 
