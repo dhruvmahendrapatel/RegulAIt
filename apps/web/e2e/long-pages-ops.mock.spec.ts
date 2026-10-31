@@ -51,7 +51,7 @@ async function expectControl(page: Page, cap: OpsCapture, listId: string, endpoi
 
 async function backTo(page: Page, crumb: string, path: string) {
   await page.getByRole("navigation", { name: "Breadcrumb" }).getByRole("link", { name: crumb }).click();
-  await expect(page).toHaveURL(new RegExp(`/ui${path.replace(/[?]/g, "\\?")}$`));
+  await expect(page).toHaveURL(new RegExp(`/ui${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`));
 }
 
 test.describe("Cross-vendor consolidation", () => {
