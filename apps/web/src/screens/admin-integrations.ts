@@ -11,3 +11,7 @@ export { default as ModelCredentialsPage } from "../views/admin/integrations/Mod
 export { default as PmConnectionsPage } from "../views/admin/integrations/PmConnectionsPage";
 export { default as RegulAItLlmPage } from "../views/admin/llm/RegulAItLlmPage";
 export { default as WebhooksPage } from "../views/admin/integrations/WebhooksPage";
+// P3 (#453): each long area is one lazy chunk whose module owns its nested <Routes> (overview at the index, each full
+// list on its own page), reached through this screen so the sub-pages add nothing to the entry bundle.
+export { McpServersArea } from "../views/admin/integrations/McpRegistrySubpages";
+export { EnginesArea } from "../views/admin/integrations/EnginesSubpages";

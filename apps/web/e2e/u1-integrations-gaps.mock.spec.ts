@@ -179,6 +179,9 @@ test.describe("MCP servers — federated registries (ADR-0101)", () => {
     await expect(page.getByTestId("registry-sync-result")).toContainText("3 entries seen, 3 new, 0 refreshed, 2 importable, 1 catalogue only. No server and no grant was created.");
 
     await page.getByRole("button", { name: "Browse entries of internal-mirror" }).click();
+    // P3: the tab keeps a five-row preview with its count; Import is on the catalogue's own page
+    await expect(page.getByText("Catalogue: internal-mirror · 3 catalogue entries")).toBeVisible();
+    await page.getByRole("link", { name: "View all catalogue entries" }).click();
     await expect(page.getByText("Catalogue only: package_only")).toBeVisible();
     await expect(page.getByRole("button", { name: "Import io.example/tool-2" })).toBeDisabled();
     await page.getByRole("button", { name: "Import io.example/tool-1" }).click();
@@ -236,6 +239,7 @@ test.describe("MCP servers — federated registries (ADR-0101)", () => {
     expect(su.attempts).toHaveLength(2);
 
     await page.getByRole("button", { name: "Browse entries of internal-mirror" }).click();
+    await page.getByRole("link", { name: "View all catalogue entries" }).click();
     // a collision recorded at the last sync is a warning; the gateway re-checks it live and decides
     await expect(page.getByText(/At the last sync an existing MCP server had this name/)).toBeVisible();
     await page.getByRole("button", { name: "Import io.example/tool-3" }).click();
@@ -591,7 +595,7 @@ async function setupExecutors(page: Page) {
 test.describe("Engines — executor lifecycle (ADR-0190 I3)", () => {
   test("detail with self-test history; quarantine is confirmed; revoke needs the typed name", async ({ page }) => {
     const calls = await setupExecutors(page);
-    await page.goto("/ui/admin/engines");
+    await page.goto("/ui/admin/engines?tab=isolation"); // P3: executors are on the Isolation tab
     await page.getByRole("button", { name: "Manage executor gvisor-a" }).click({ timeout: 30_000 });
     const detail = page.getByTestId("executor-detail");
     await expect(detail).toContainText("Fresh report");
@@ -617,7 +621,7 @@ test.describe("Engines — executor lifecycle (ADR-0190 I3)", () => {
   test("re-enable and mapping a customer plane go through the settings_relax step-up", async ({ page }) => {
     const calls = await setupExecutors(page);
     const reenable = await requireStepUpOn(page, { method: "POST", path: `/v1/executors/${U(602)}/reenable`, kind: "settings_relax" });
-    await page.goto("/ui/admin/engines");
+    await page.goto("/ui/admin/engines?tab=isolation"); // P3: executors are on the Isolation tab
     await page.getByRole("button", { name: "Manage executor byoc-plane" }).click({ timeout: 30_000 });
     const detail = page.getByTestId("executor-detail");
     await expect(detail.getByLabel("Declared class mapping")).toHaveValue("");

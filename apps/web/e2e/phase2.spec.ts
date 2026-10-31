@@ -637,6 +637,9 @@ test("infrastructure: posture, set approver, propose a governed remediation", as
   test.setTimeout(150_000); // a step-up's TOTP code may wait for the next 30 s window (B4S-06)
   await nav("Infrastructure", "Infrastructure");
   await expect(page.getByText("monitored resources", { exact: true })).toBeVisible();
+  // P3: the overview previews each ledger; the findings, with their approver and propose actions, are on their own page
+  await page.getByRole("link", { name: "View all findings" }).click();
+  await expect(page).toHaveURL(/\/ui\/admin\/infrastructure\/findings$/);
 
   // persist the org default remediation approver
   await page.getByLabel("Remediation approver (persisted org default)").selectOption({ index: 1 });

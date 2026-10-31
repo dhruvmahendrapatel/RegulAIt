@@ -56,7 +56,8 @@ async function signIn(page: Page, email: string, candidates: string[], settleOn:
 
 test("a blocked remove is focusable and its reason is reachable by keyboard", async ({ page }) => {
   await signIn(page, "admin@regulait.local", [ADMIN_PASSWORD, state.passwords.admin], ADMIN_PASSWORD);
-  await page.goto("/ui/admin/cost");
+  // P3: initiatives are on the cost dashboard's set-up tab
+  await page.goto("/ui/admin/cost?tab=setup");
   await expect(page.getByRole("heading", { name: "Cost dashboard", exact: true })).toBeVisible();
 
   // the seeded initiative that a project rolls up to — its removal is refused

@@ -31,8 +31,10 @@
  * House pattern: react-router + TanStack Query + the owned kit.
  */
 import { useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { DataList } from "../../../ui/DataList";
+import { ListPreview } from "../../../ui/ListPreview";
+import { normalisePage, pageUrl } from "../../../ui/listState";
 import { api } from "../../../api/client";
 import { ago, fmtUsd, shortId } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
@@ -46,13 +48,14 @@ import {
   Input,
   Select,
   Table,
+  Tabs,
   Textarea,
+  tabIds,
 } from "../../../ui/kit";
 import {
   KV,
   OutcomePanel,
   QueryGate,
-  ReasonModal,
   RefusalList,
   Stat,
   downloadCsv,
@@ -63,7 +66,7 @@ import {
   userOpts,
   type RowRefusal,
 } from "../adminKit";
-import { CostImportDetail } from "./CostImportDetail";
+import { IMPORTS_ENDPOINT, IMPORTS_PATH, IMPORTS_QUERY_KEY, IMPORTS_SORT, IMPORT_COLUMNS, type ImportBatch } from "./costImports";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -120,22 +123,6 @@ interface ImportResult {
   ingestScan: { mode: string; verdict: string; findings: unknown };
   piiPosture: string;
   basisStatement: string;
-}
-
-interface ImportBatch {
-  id: string;
-  adapter: string;
-  vendor: string;
-  format: string;
-  mode: string;
-  status: string;
-  source: string | null;
-  rowsParsed: number;
-  rowsAccepted: number;
-  rowsRefused: number;
-  totalUsd: number | null;
-  reason: string;
-  createdAt: string;
 }
 
 interface AliasRow {
@@ -290,6 +277,10 @@ const METHOD_LABEL: Record<string, string> = {
   unresolved: "NOBODY — unattributed",
 };
 
+const CONSOLIDATION_TABS = ["import", "mapping", "consolidated", "reconciliation"] as const;
+type ConsolidationTab = (typeof CONSOLIDATION_TABS)[number];
+const REFUSED = { status: "refused" };
+
 function isoDay(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
@@ -397,10 +388,6 @@ export default function CostConsolidationPage() {
   const [rosterResult, setRosterResult] = useState<RosterResult | null>(null);
   const [rosterFileError, setRosterFileError] = useState<string | null>(null);
 
-  const [revoking, setRevoking] = useState<ImportBatch | null>(null);
-  // Batch U4: the batch opened from Import history (its lines, GET /v1/cost-imports/:importId)
-  const [openImport, setOpenImport] = useState<string | null>(null);
-
   const adapter = (adapters.data?.adapters ?? []).find((x) => x.id === adapterId) ?? null;
 
   const refreshAll = () => {
@@ -497,18 +484,37 @@ export default function CostConsolidationPage() {
     refreshAll();
   };
 
-  const revokeBatch = async (reason: string) => {
-    if (!revoking) return;
-    const target = revoking;
-    setRevoking(null);
-    await act.run(
-      () => api.del(`/v1/cost-imports/${target.id}`, { reason }),
-      "Batch revoked — its lines are withdrawn and the batch row remains as a record.",
-    );
-    refreshAll();
-  };
-
   const subjects = consolidated.data?.subjects ?? [];
+
+  // P3 (#453 c6527514889): the setup flow and its two results as tabs. A tab that hides something unresolved says so
+  // in its label, so a refused import, unattributed spend or a reconciliation warning is never one click away.
+  const [params, setParams] = useSearchParams();
+  const tab: ConsolidationTab = CONSOLIDATION_TABS.includes(params.get("tab") as ConsolidationTab) ? (params.get("tab") as ConsolidationTab) : "import";
+  const setTab = (id: string) =>
+    setParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (id === "import") next.delete("tab");
+      else next.set("tab", id);
+      return next;
+    });
+  const panel = tabIds("cc", tab);
+  // the same read as the Import history preview's attention count (one cached request)
+  const refused = useQuery({
+    queryKey: [...IMPORTS_QUERY_KEY, "preview-count", REFUSED],
+    queryFn: () =>
+      api.get<unknown>(pageUrl(IMPORTS_ENDPOINT, { limit: 10, sort: IMPORTS_SORT, filters: REFUSED, count: "exact" })).then((b) => normalisePage<ImportBatch>(b, "imports")),
+  });
+  const refusedCount = refused.data ? (refused.data.total ?? refused.data.items.length) : 0;
+  const unattributed = subjects.filter((x) => !x.attributed).length;
+  const lastRun = reconciliation.data?.lastRun ?? null;
+  const reconWarnings = (lastRun?.warnings.length ?? 0) + (lastRun?.outcome === "failed" ? 1 : 0);
+  const withCount = (label: string, n: number, what: string) => (n > 0 ? `${label} · ${n.toLocaleString("en-GB")} ${what}` : label);
+  const tabs = [
+    { id: "import", label: withCount("Import", refusedCount, "refused") },
+    { id: "mapping", label: "Identity mapping" },
+    { id: "consolidated", label: withCount("Consolidated view", unattributed, "unattributed") },
+    { id: "reconciliation", label: withCount("Reconciliation", reconWarnings, reconWarnings === 1 ? "warning" : "warnings") },
+  ];
 
   return (
     <>
@@ -546,929 +552,861 @@ export default function CostConsolidationPage() {
           </div>
         </Card>
 
-        {/* --- import ------------------------------------------------------ */}
-        <Card title="Import a vendor export" info={adapters.data?.posture ? <p>{adapters.data.posture}</p> : undefined}>
-          <QueryGate
-            loading={adapters.isLoading}
-            error={adapters.error}
-            onRetry={() => void adapters.refetch()}
-          >
-            <div className={v.stack}>
-              <div className={a.formRow}>
-                <Field label="Adapter">
-                  <Select
-                    value={adapterId}
-                    onChange={(e) => setAdapterId(e.target.value)}
-                    data-testid="ci-adapter"
-                  >
-                    {optionEls(
-                      (adapters.data?.adapters ?? []).map((x) => ({
-                        v: x.id,
-                        l: `${x.displayName} · ${x.vendor}`,
-                      })),
-                    )}
-                  </Select>
-                </Field>
-                <Field label="File format">
-                  <Select
-                    value={format}
-                    onChange={(e) => setFormat(e.target.value as "csv" | "json")}
-                    data-testid="ci-format"
-                  >
-                    {(adapter?.formats ?? ["csv", "json"]).map((f) => (
-                      <option key={f} value={f}>
-                        {f}
-                      </option>
-                    ))}
-                  </Select>
-                </Field>
-                <Field label="Where this came from (provenance)">
-                  <Input
-                    value={source}
-                    onChange={(e) => setSource(e.target.value)}
-                    placeholder="for example copilot-seats-2026-07.csv"
-                    data-testid="ci-source"
-                  />
-                </Field>
-              </div>
-
-              {adapter && (
-                <div className={v.stack}>
-                  <div className={v.sectionTitle}>
-                    What this adapter cannot do{" "}
-                    {/* VERBATIM. The adapter's own sentence, not a paraphrase; the chips below stay visible. */}
-                    <InfoButton label="this adapter's limits">
-                      <span data-testid="ci-adapter-limits">{adapter.limits}</span>
-                    </InfoButton>
-                  </div>
-                  <div className={v.row}>
-                    <Badge tone={adapter.capabilities.amountFromFile ? "ok" : "warn"}>
-                      {adapter.capabilities.amountFromFile
-                        ? "the file carries the money"
-                        : "the money is an operator assertion"}
-                    </Badge>
-                    <Badge tone={adapter.capabilities.accountIsEmail ? "ok" : "warn"}>
-                      {adapter.capabilities.accountIsEmail
-                        ? "account column is an email — resolves without an alias"
-                        : "account column is not an email — an admin alias may be needed"}
-                    </Badge>
-                    <Badge tone={adapter.capabilities.currency ? "ok" : "neutral"}>
-                      {adapter.capabilities.currency ? "currency from file" : "currency assumed"}
-                    </Badge>
-                  </div>
-                  {ADAPTER_HINT[adapter.id] && <p className={v.dim}>{ADAPTER_HINT[adapter.id]}</p>}
-                </div>
-              )}
-
-              <div className={a.formRow}>
-                <Field label="Upload a file">
-                  <input
-                    type="file"
-                    accept=".csv,.json,text/csv,application/json,text/plain"
-                    onChange={(e) => void readFile(e.target.files?.[0])}
-                    data-testid="ci-file"
-                  />
-                </Field>
-              </div>
-              {fileError && (
-                <div className={v.errLine} role="alert">
-                  {fileError}
-                </div>
-              )}
-
-              <Field label="…or paste the export here" grow>
-                <Textarea
-                  rows={10}
-                  value={content}
-                  onChange={(e) => setContent(e.target.value)}
-                  spellCheck={false}
-                  placeholder="account,amount,period&#10;alice@acme.com,19.00,2026-07"
-                  data-testid="ci-content"
-                />
-              </Field>
-
-              <Field label="Adapter configuration (JSON) — optional" grow>
-                <Textarea
-                  rows={3}
-                  value={config}
-                  onChange={(e) => setConfig(e.target.value)}
-                  spellCheck={false}
-                  placeholder='{"mapping":{"account":"user","amount":"cost"}}'
-                  data-testid="ci-config"
-                />
-              </Field>
-
-              <div className={v.row}>
-                <Button
-                  disabled={act.busy || !content.trim()}
-                  onClick={() => void submitImport("dry_run")}
-                  data-testid="ci-dry-run"
-                >
-                  Dry run (writes nothing)
-                </Button>
-                <Button
-                  variant="primary"
-                  disabled={act.busy || !content.trim()}
-                  onClick={() => void submitImport("apply")}
-                  data-testid="ci-apply"
-                >
-                  Apply
-                </Button>
-                <span className={v.faint}>
-                  Re-applying the exact same bytes is refused with a 409 — applying twice would double every
-                  figure the file contributed to.
-                </span>
-              </div>
-
-              <OutcomePanel outcome={act.outcome} testId="ci-outcome">
-                {/* A 4xx from the importer carries the refused LINE NUMBERS.
-                    Dropping them is precisely what this slice was built not to
-                    do, so they are rendered from the error body too. */}
-                {act.outcome && !act.outcome.ok && Array.isArray(act.outcome.payload?.refusals) && (
-                  <RefusalList
-                    refusals={act.outcome.payload.refusals as RowRefusal[]}
-                    testId="ci-outcome-refusals"
-                  />
-                )}
-              </OutcomePanel>
-            </div>
-          </QueryGate>
-        </Card>
-
-        {/* --- the dry-run / apply result ---------------------------------- */}
-        {result && (
-          <Card
-            title={result.mode === "dry_run" ? "Dry run — nothing was written" : "Applied"}
-            actions={
-              <Button size="sm" variant="ghost" onClick={() => setResult(null)}>
-                Close
-              </Button>
-            }
-          >
-            <div className={v.stack} data-testid="ci-result">
-              <div className={v.grid}>
-                <Stat value={result.rowsParsed} label="Rows parsed" />
-                <Stat value={result.rowsAccepted} label="Rows accepted" />
-                <Stat value={result.rowsRefused} label="Rows refused" />
-                <Stat
-                  value={
-                    result.totalUsd === null ? "no single figure" : fmtUsd(result.totalUsd)
-                  }
-                  label="Imported total in this file"
-                />
-              </div>
-              <p className={v.faint}>
-                <code>rows parsed = accepted + refused</code> is a database CHECK constraint, not a
-                convention — a corrupt file returns fewer accepted rows <em>and says so</em>, rather than
-                quietly returning less money.
-              </p>
-              {result.totalUsdNote && <p className={v.dim}>{result.totalUsdNote}</p>}
-
-              <RefusalList
-                refusals={result.refusals}
-                truncated={result.refusalsTruncated}
-                testId="ci-refusals"
-              />
-
-              <div className={v.sectionTitle}>How each accepted line found its human</div>
-              <Table<{ method: string; n: number }>
-                rows={Object.entries(result.resolution.byMethod).map(([method, n]) => ({ method, n }))}
-                rowKey={(r) => r.method}
-                columns={[
-                  {
-                    key: "method",
-                    header: "Resolved by",
-                    render: (r) => METHOD_LABEL[r.method] ?? r.method,
-                  },
-                  { key: "n", header: "Lines", render: (r) => <span className={v.num}>{r.n}</span> },
-                ]}
-              />
-              {result.resolution.unattributedLines > 0 && (
-                <div className={v.errLine} role="alert" data-testid="ci-unattributed">
-                  {result.resolution.unattributedLines} accepted line(s), worth{" "}
-                  {fmtUsd(result.resolution.unattributedAmount)}, resolved to no regulAIt user. They are
-                  retained and reported as <strong>unattributed spend</strong>. Map the account below to
-                  attribute them.
-                </div>
-              )}
-              <p className={v.faint}>{result.resolution.note}</p>
-              <KV
-                rows={[
-                  ["Import id", <span className={v.mono}>{result.importId}</span>],
-                  ["Adapter", <code>{result.adapter}</code>],
-                  ["Basis", <Badge tone="warn">imported — we were told, we did not observe</Badge>],
-                  ["Currencies in the file", result.currencies.join(", ") || "—"],
-                  [
-                    "Period covered",
-                    result.periodStart && result.periodEnd
-                      ? `${result.periodStart.slice(0, 10)} → ${result.periodEnd.slice(0, 10)}`
-                      : "not stated by the file",
-                  ],
-                  [
-                    "Ingest scan",
-                    `${result.ingestScan.verdict} at mode '${result.ingestScan.mode}'`,
-                  ],
-                ]}
-              />
-              <p className={v.faint}>{result.piiPosture}</p>
-            </div>
-          </Card>
-        )}
-
-        {/* --- consolidated view -------------------------------------------- */}
-        <Card
-          title="Consolidated view"
-          actions={
-            <Button
-              size="sm"
-              onClick={() =>
-                void downloadCsv(
-                  `/v1/cost-consolidated?${consolidatedQs}&format=csv`,
-                  `regulait-consolidated-${by}-${from}.csv`,
-                  (m) =>
-                    act.setOutcome({ ok: false, code: null, status: null, reason: m, payload: null }),
-                )
-              }
-            >
-              Download CSV
-            </Button>
-          }
-        >
-          <div className={v.stack}>
-            <div className={a.formRow}>
-              <Field label="Group by">
-                <Select
-                  value={by}
-                  onChange={(e) => setBy(e.target.value as "user" | "cost_center")}
-                  data-testid="cc-by"
-                >
-                  <option value="user">person</option>
-                  <option value="cost_center">cost centre</option>
-                </Select>
-              </Field>
-              <Field label="From">
-                <Input type="date" value={from} onChange={(e) => setFrom(e.target.value)} data-testid="cc-from" />
-              </Field>
-              <Field label="To">
-                <Input type="date" value={to} onChange={(e) => setTo(e.target.value)} data-testid="cc-to" />
-              </Field>
-            </div>
-
-            <QueryGate
-              loading={consolidated.isLoading}
-              error={consolidated.error}
-              onRetry={() => void consolidated.refetch()}
-            >
-              {subjects.length === 0 ? (
-                <EmptyState
-                  title="No spend of either basis in this window"
-                  body="Widen the dates, or import a vendor export above."
-                />
-              ) : (
-                <div className={v.stack} data-testid="cc-subjects">
-                  {subjects.map((s) => (
-                    <Card
-                      key={`${s.subjectKind}:${s.subjectId ?? "null"}`}
-                      title={
-                        <span className={v.row}>
-                          <span>{s.label}</span>
-                          {!s.attributed && (
-                            <Badge tone="danger" title="nobody was resolved for this spend">
-                              unattributed
-                            </Badge>
-                          )}
-                        </span>
-                      }
-                    >
-                      <div className={v.stack}>
-                        <BasisPair subject={s} />
-                        {/* the API's own sentence about the split, in words */}
-                        <p className={v.dim}>{s.coverage}</p>
-                        {s.imported.byBillingKind.length > 0 && (
-                          <p className={v.faint}>
-                            Imported by kind:{" "}
-                            {s.imported.byBillingKind
-                              .map((k) => `${k.billingKind} ${k.amount.toFixed(2)} ${k.currency}`)
-                              .join(", ")}
-                          </p>
-                        )}
-                      </div>
-                    </Card>
-                  ))}
-                </div>
-              )}
-            </QueryGate>
-
-            <p className={v.dim} data-testid="cc-note">
-              {consolidated.data?.note}
-            </p>
-
-            <div className={v.sectionTitle}>How fresh is the imported side?</div>
-            {(consolidated.data?.staleness.vendors ?? []).length === 0 ? (
-              <p className={v.faint}>
-                No vendor export has been applied yet, so the imported side of every figure above is empty
-                — not zero-spend, simply un-supplied.
-              </p>
-            ) : (
-              <Table<{ vendor: string; lastImportedAt: string | null; appliedBatches: number; daysSinceLastImport: number | null }>
-                rows={consolidated.data?.staleness.vendors ?? []}
-                rowKey={(r) => r.vendor}
-                columns={[
-                  { key: "vendor", header: "Vendor", render: (r) => r.vendor },
-                  { key: "batches", header: "Applied batches", render: (r) => r.appliedBatches },
-                  {
-                    key: "last",
-                    header: "Last import",
-                    render: (r) => (r.lastImportedAt ? ago(r.lastImportedAt) : "never"),
-                  },
-                  {
-                    key: "stale",
-                    header: "Days stale",
-                    render: (r) =>
-                      r.daysSinceLastImport === null ? (
-                        <span className={v.faint}>unknown</span>
-                      ) : (
-                        <Badge tone={r.daysSinceLastImport > 45 ? "danger" : r.daysSinceLastImport > 14 ? "warn" : "ok"}>
-                          {r.daysSinceLastImport}
-                        </Badge>
-                      ),
-                  },
-                ]}
-              />
-            )}
-            <p className={v.faint}>{consolidated.data?.staleness.note}</p>
-            {consolidated.data && consolidated.data.reconciliation.supersededLinesExcluded > 0 && (
-              <p className={v.dim} data-testid="cc-reconciliation-note">
-                {consolidated.data.reconciliation.supersededLinesExcluded} superseded duplicate line(s) are
-                excluded from the imported side above — marked by a reconciliation pass, never deleted. The
-                full list is in the reconciliation card below.
-              </p>
-            )}
-          </div>
-        </Card>
-
-        {/* --- ADR-0076: scheduled reconciliation --------------------------- */}
-        <Card
-          title="Reconciliation — the same vendor line, never counted twice"
-          infoLabel="reconciliation"
-          info={reconciliation.data?.posture ? <p>{reconciliation.data.posture}</p> : undefined}
-          actions={
-            <Button
-              size="sm"
-              variant="primary"
-              disabled={act.busy}
-              onClick={() => void runReconciliation()}
-              data-testid="rc-run-now"
-            >
-              Run now
-            </Button>
-          }
-        >
-          <QueryGate
-            loading={reconciliation.isLoading}
-            error={reconciliation.error}
-            onRetry={() => void reconciliation.refetch()}
-          >
-            <div className={v.stack} data-testid="rc-card">
-              <div className={v.grid}>
-                <Stat value={reconciliation.data?.liveLines ?? 0} label="Live imported lines" />
-                <Stat
-                  value={reconciliation.data?.supersededLines ?? 0}
-                  label="Superseded (marked, kept)"
-                />
-                <Stat
-                  value={
-                    reconciliation.data?.lastRun
-                      ? ago(reconciliation.data.lastRun.startedAt)
-                      : "never"
-                  }
-                  label="Last pass"
-                />
-                <Stat
-                  value={reconciliation.data?.lastRun?.ambiguousGroups ?? 0}
-                  label="Ambiguous groups (left alone)"
-                />
-              </div>
-              {reconciliation.data?.lastRun && (
-                <KV
-                  rows={[
-                    [
-                      "Last pass outcome",
-                      <Badge
-                        tone={reconciliation.data.lastRun.outcome === "ok" ? "ok" : "danger"}
-                      >
-                        {reconciliation.data.lastRun.outcome}
-                      </Badge>,
-                    ],
-                    ["Trigger", reconciliation.data.lastRun.trigger],
-                    ["Lines scanned", String(reconciliation.data.lastRun.scannedLines)],
-                    ["Duplicate groups marked", String(reconciliation.data.lastRun.duplicateGroups)],
-                    [
-                      "Overlapping windows reported (not touched)",
-                      String(reconciliation.data.lastRun.overlapWarnings),
-                    ],
-                  ]}
-                />
-              )}
-              {(reconciliation.data?.lastRun?.warnings ?? []).length > 0 && (
-                <div className={v.stack} data-testid="rc-warnings">
-                  <div className={v.sectionTitle}>What the last pass refused to decide</div>
-                  {reconciliation.data!.lastRun!.warnings.slice(0, 10).map((w, i) => (
-                    <p key={i} className={v.errLine} role="alert">
-                      {w.detail}
-                    </p>
-                  ))}
-                </div>
-              )}
-              {(reconciliation.data?.supersededSample ?? []).length > 0 && (
-                <>
-                  <div className={v.sectionTitle}>Superseded lines (marked, never deleted)</div>
-                  <Table<ReconciliationReport["supersededSample"][number]>
-                    rows={reconciliation.data?.supersededSample ?? []}
-                    rowKey={(r) => r.id}
-                    columns={[
-                      { key: "vendor", header: "Vendor", render: (r) => r.vendor },
-                      {
-                        key: "account",
-                        header: "Account",
-                        render: (r) => <span className={v.mono}>{r.accountKey}</span>,
-                      },
-                      {
-                        key: "amount",
-                        header: "Amount",
-                        render: (r) => `${r.amount.toFixed(2)} ${r.currency}`,
-                      },
-                      { key: "when", header: "Marked", render: (r) => ago(r.supersededAt) },
-                      {
-                        key: "why",
-                        header: "Why",
-                        render: (r) => <span className={v.dim}>{r.supersededReason}</span>,
-                      },
-                    ]}
-                  />
-                </>
-              )}
-              <p className={v.faint}>{reconciliation.data?.scheduler.note}</p>
-            </div>
-          </QueryGate>
-        </Card>
-
-        {/* --- identity mapping --------------------------------------------- */}
-        <Card
-          title="Identity mapping — which vendor account is which person"
-          infoLabel="identity mapping"
-          info={mappings.data?.posture ? <p>{mappings.data.posture}</p> : undefined}
-        >
-          <QueryGate
-            loading={mappings.isLoading}
-            error={mappings.error}
-            onRetry={() => void mappings.refetch()}
-          >
-            <div className={v.stack}>
-
-              <div className={v.sectionTitle}>Admin aliases (highest precedence)</div>
-              <div className={a.formRow}>
-                <Field label="Vendor (* = any)">
-                  <Input value={aliasVendor} onChange={(e) => setAliasVendor(e.target.value)} data-testid="al-vendor" />
-                </Field>
-                <Field label="Vendor account, exactly as the file spells it" grow>
-                  <Input
-                    value={aliasAccount}
-                    onChange={(e) => setAliasAccount(e.target.value)}
-                    placeholder="for example a.smith@contractor.example"
-                    data-testid="al-account"
-                  />
-                </Field>
-                <Field label="Is this person">
-                  <Select value={aliasUser} onChange={(e) => setAliasUser(e.target.value)} data-testid="al-user">
-                    {optionEls(userOpts(users.data?.users), "pick a user")}
-                  </Select>
-                </Field>
-                <Field label="Reason for this alias (audited)" grow>
-                  <Input value={aliasReason} onChange={(e) => setAliasReason(e.target.value)} data-testid="al-reason" />
-                </Field>
-                <Button
-                  disabled={act.busy || !aliasAccount.trim() || !aliasUser || !aliasReason.trim()}
-                  onClick={() =>
-                    void act
-                      .run(
-                        () =>
-                          api.post("/v1/cost-imports/mappings", {
-                            vendor: aliasVendor.trim() || "*",
-                            accountRef: aliasAccount.trim(),
-                            userId: aliasUser,
-                            reason: aliasReason.trim(),
-                          }),
-                        "Alias saved — every stored line was re-resolved against it.",
-                      )
-                      .then(() => {
-                        setAliasAccount("");
-                        setAliasReason("");
-                        refreshAll();
-                      })
-                  }
-                  data-testid="al-save"
-                >
-                  Assert
-                </Button>
-              </div>
-              <Table<AliasRow>
-                rows={mappings.data?.aliases ?? []}
-                rowKey={(r) => r.id}
-                empty={<EmptyState title="No aliases yet" body="Only needed where the account column is not already a matching email." />}
-                columns={[
-                  { key: "vendor", header: "Vendor", render: (r) => <code>{r.vendor}</code> },
-                  { key: "account", header: "Account", render: (r) => <span className={v.mono}>{r.accountKey}</span> },
-                  {
-                    key: "user",
-                    header: "Is",
-                    render: (r) => names.userEmail.get(r.userId) ?? shortId(r.userId),
-                  },
-                  { key: "reason", header: "Reason", render: (r) => <span className={v.dim}>{r.reason}</span> },
-                  {
-                    key: "rm",
-                    header: "",
-                    srHeader: "Actions",
-                    render: (r) => (
-                      <Button
-                        size="sm"
-                        variant="danger"
-                        disabled={act.busy}
-                        onClick={() =>
-                          void act
-                            .run(
-                              () => api.del(`/v1/cost-imports/mappings/${r.id}`),
-                              "Alias removed — stored lines were re-resolved without it.",
-                            )
-                            .then(refreshAll)
-                        }
-                      >
-                        Remove
-                      </Button>
-                    ),
-                  },
-                ]}
-              />
-
-              <div className={v.sectionTitle}>Domain rules (lowest precedence)</div>
-              <div className={a.formRow}>
-                <Field label="Vendor (* = any)">
-                  <Input value={ruleVendor} onChange={(e) => setRuleVendor(e.target.value)} data-testid="dr-vendor" />
-                </Field>
-                <Field label="Accounts at this domain…">
-                  <Input
-                    value={ruleFrom}
-                    onChange={(e) => setRuleFrom(e.target.value)}
-                    placeholder="acme-legacy.com"
-                    data-testid="dr-from"
-                  />
-                </Field>
-                <Field label="…resolve against this one">
-                  <Input
-                    value={ruleTo}
-                    onChange={(e) => setRuleTo(e.target.value)}
-                    placeholder="acme.com"
-                    data-testid="dr-to"
-                  />
-                </Field>
-                <Field label="Reason for this domain rule (audited)" grow>
-                  <Input value={ruleReason} onChange={(e) => setRuleReason(e.target.value)} data-testid="dr-reason" />
-                </Field>
-                <Button
-                  disabled={act.busy || !ruleFrom.trim() || !ruleTo.trim() || !ruleReason.trim()}
-                  onClick={() =>
-                    void act
-                      .run(
-                        () =>
-                          api.post("/v1/cost-imports/domain-rules", {
-                            vendor: ruleVendor.trim() || "*",
-                            fromDomain: ruleFrom.trim(),
-                            toDomain: ruleTo.trim(),
-                            reason: ruleReason.trim(),
-                          }),
-                        "Domain rule saved — every stored line was re-resolved against it.",
-                      )
-                      .then(() => {
-                        setRuleFrom("");
-                        setRuleTo("");
-                        setRuleReason("");
-                        refreshAll();
-                      })
-                  }
-                  data-testid="dr-save"
-                >
-                  Add rule
-                </Button>
-              </div>
-              <Table<DomainRuleRow>
-                rows={mappings.data?.domainRules ?? []}
-                rowKey={(r) => r.id}
-                empty={<EmptyState title="No domain rules yet" />}
-                columns={[
-                  { key: "vendor", header: "Vendor", render: (r) => <code>{r.vendor}</code> },
-                  { key: "rule", header: "Rule", render: (r) => <span className={v.mono}>{r.fromDomain} → {r.toDomain}</span> },
-                  { key: "enabled", header: "Enabled", render: (r) => <Badge tone={r.enabled ? "ok" : "neutral"}>{r.enabled ? "yes" : "no"}</Badge> },
-                  { key: "reason", header: "Reason", render: (r) => <span className={v.dim}>{r.reason}</span> },
-                  {
-                    key: "rm",
-                    header: "",
-                    srHeader: "Actions",
-                    render: (r) => (
-                      <Button
-                        size="sm"
-                        variant="danger"
-                        disabled={act.busy}
-                        onClick={() =>
-                          void act
-                            .run(
-                              () => api.del(`/v1/cost-imports/domain-rules/${r.id}`),
-                              "Domain rule removed — stored lines were re-resolved without it.",
-                            )
-                            .then(refreshAll)
-                        }
-                      >
-                        Remove
-                      </Button>
-                    ),
-                  },
-                ]}
-              />
-              <p className={v.faint}>
-                Two rules that resolve one account to two different people resolve it to{" "}
-                <strong>nobody</strong>. Ambiguity is never broken by guessing, and an unmatched account is
-                never spread pro-rata across the people who did resolve.
-              </p>
-
-              <div className={v.sectionTitle}>Cost centre for a person</div>
-              <p className={v.faint}>
-                <code>projects.cost_center</code> covers governed work. A coding-assistant seat is not a project, so
-                a human needs one too — this is the key the &ldquo;by cost centre&rdquo; view groups on.
-              </p>
-              <div className={a.formRow}>
-                <Field label="Person">
-                  <Select value={ccUser} onChange={(e) => setCcUser(e.target.value)} data-testid="cc-user">
-                    {optionEls(userOpts(users.data?.users), "pick a user")}
-                  </Select>
-                </Field>
-                <Field label="Cost centre (blank clears it)">
-                  <Input value={ccValue} onChange={(e) => setCcValue(e.target.value)} data-testid="cc-value" />
-                </Field>
-                <Button
-                  disabled={act.busy || !ccUser}
-                  onClick={() =>
-                    void act
-                      .run(
-                        () =>
-                          api.put(`/v1/users/${ccUser}/cost-center`, {
-                            costCenter: ccValue.trim() === "" ? null : ccValue.trim(),
-                          }),
-                        "Cost centre saved.",
-                      )
-                      .then(refreshAll)
-                  }
-                  data-testid="cc-save"
-                >
-                  Save
-                </Button>
-              </div>
-            </div>
-          </QueryGate>
-        </Card>
-
-        {/* --- ADR-0076: roster upload --------------------------------------- */}
-        <Card title="Roster upload — bulk identity mapping from your directory">
-          <div className={v.stack}>
-            <p className={v.dim}>
-              Consume a SCIM-style user export (JSON) or a CSV roster to assert vendor-account aliases and
-              person-level cost centres <strong>in bulk, through the same write paths</strong> as the forms
-              above. An account mapped to two people — or one person given two cost centres — is refused
-              loudly, never resolved by guessing.
-            </p>
-            <div className={a.formRow}>
-              <Field label="Format">
-                <Select
-                  value={rosterFormat}
-                  onChange={(e) => setRosterFormat(e.target.value as "csv" | "json")}
-                  data-testid="ro-format"
-                >
-                  <option value="json">JSON (SCIM or rows)</option>
-                  <option value="csv">CSV</option>
-                </Select>
-              </Field>
-              <Field label="Vendor for asserted aliases (* = any)">
-                <Input value={rosterVendor} onChange={(e) => setRosterVendor(e.target.value)} data-testid="ro-vendor" />
-              </Field>
-              <Field label="Where this came from (provenance)" grow>
-                <Input
-                  value={rosterSource}
-                  onChange={(e) => setRosterSource(e.target.value)}
-                  placeholder="for example okta-export-2026-08.json"
-                  data-testid="ro-source"
-                />
-              </Field>
-            </div>
-            <div className={a.formRow}>
-              <Field label="Upload a file">
-                <input
-                  type="file"
-                  accept=".csv,.json,text/csv,application/json,text/plain"
-                  onChange={(e) => void readRosterFile(e.target.files?.[0])}
-                  data-testid="ro-file"
-                />
-              </Field>
-            </div>
-            {rosterFileError && (
-              <div className={v.errLine} role="alert">
-                {rosterFileError}
-              </div>
-            )}
-            <Field label="…or paste the export here" grow>
-              <Textarea
-                rows={8}
-                value={rosterContent}
-                onChange={(e) => setRosterContent(e.target.value)}
-                spellCheck={false}
-                placeholder='{"Resources":[{"userName":"a.smith@vendorbill.example","emails":[{"value":"alice@acme.com","primary":true}]}]}'
-                data-testid="ro-content"
-              />
-            </Field>
-            <Field label="Reason for this bulk assertion (audited, stamped on every alias)" grow>
-              <Input value={rosterReason} onChange={(e) => setRosterReason(e.target.value)} data-testid="ro-reason" />
-            </Field>
-            <div className={v.row}>
-              <Button
-                disabled={act.busy || !rosterContent.trim() || !rosterReason.trim()}
-                onClick={() => void submitRoster("dry_run")}
-                data-testid="ro-dry-run"
-              >
-                Dry run (writes nothing)
-              </Button>
-              <Button
-                variant="primary"
-                disabled={act.busy || !rosterContent.trim() || !rosterReason.trim()}
-                onClick={() => void submitRoster("apply")}
-                data-testid="ro-apply"
-              >
-                Apply
-              </Button>
-              <span className={v.faint}>
-                Identity columns are join keys (PII-exempt by disclosed construction); the cost-centre column
-                is scanned. Unmapped columns are discarded at parse.
-              </span>
-            </div>
-            <OutcomePanel outcome={act.outcome} testId="ro-outcome" />
-            {rosterResult && (
-              <div className={v.stack} data-testid="ro-result">
-                <div className={v.grid}>
-                  <Stat value={rosterResult.rowsParsed} label="Rows parsed" />
-                  <Stat value={rosterResult.rowsAccepted} label="Rows accepted" />
-                  <Stat value={rosterResult.rowsRefused} label="Rows refused" />
-                  <Stat
-                    value={
-                      rosterResult.applied
-                        ? `${rosterResult.aliasesCreated ?? 0} / ${rosterResult.aliasesUpdated ?? 0}`
-                        : `${rosterResult.counts.aliasesToCreate} / ${rosterResult.counts.aliasesToUpdate}`
-                    }
-                    label={rosterResult.applied ? "Aliases created / updated" : "Aliases to create / update"}
-                  />
-                </div>
-                <KV
-                  rows={[
-                    ["Dialect", rosterResult.dialect === "scim" ? "SCIM user export" : "column-mapped rows"],
-                    [
-                      "Unnecessary aliases (account already the directory address)",
-                      String(rosterResult.counts.aliasesUnnecessary),
-                    ],
-                    [
-                      "Cost centres",
-                      rosterResult.applied
-                        ? `${rosterResult.costCentersSet ?? 0} set, ${rosterResult.counts.costCentersUnchanged} unchanged`
-                        : `${rosterResult.counts.costCentersToSet} to set, ${rosterResult.counts.costCentersUnchanged} unchanged`,
-                    ],
-                    [
-                      "Stored lines re-attributed",
-                      rosterResult.reresolved ? String(rosterResult.reresolved.changed) : "— (dry run)",
-                    ],
-                    ["Ingest scan", `${rosterResult.ingestScan.verdict} at mode '${rosterResult.ingestScan.mode}'`],
-                  ]}
-                />
-                <RefusalList
-                  refusals={rosterResult.refusals}
-                  truncated={rosterResult.refusalsTruncated}
-                  testId="ro-refusals"
-                />
-                <p className={v.faint}>{rosterResult.posture}</p>
-                <p className={v.faint}>{rosterResult.piiPosture}</p>
-              </div>
-            )}
-          </div>
-        </Card>
-
-        {/* --- import history ------------------------------------------------ */}
-        <Card title="Import history">
-          <div className={v.stack}>
-            <DataList<ImportBatch>
-              listId="cost-imports"
-              noun="imports"
-              endpoint="/v1/cost-imports"
-              exportPath="/v1/cost-imports/export.xlsx"
-              queryKey={["admin", "cost-imports", "list"]}
-              legacyKey="imports"
-              defaultSort={{ key: "when", dir: "desc" }}
-              rowKey={(r) => r.id}
-              empty={<EmptyState title="Nothing imported yet" />}
-              columns={[
-                { key: "when", main: true, sortable: true, header: "When", render: (r) => ago(r.createdAt) },
-                { key: "adapter", sortable: true, header: "Adapter", render: (r) => <code>{r.adapter}</code> },
-                { key: "vendor", main: true, sortable: true, header: "Vendor", render: (r) => r.vendor },
-                { key: "mode", main: true, sortable: true, header: "Mode", render: (r) => r.mode },
-                {
-                  key: "status",
-                  header: "Status",
-                  main: true,
-                  sortable: true,
-                  required: "Status is always shown",
-                  render: (r) => (
-                    <Badge
-                      tone={
-                        r.status === "refused"
-                          ? "danger"
-                          : r.status === "applied"
-                            ? "ok"
-                            : r.status === "revoked"
-                              ? "warn"
-                              : "neutral"
-                      }
-                    >
-                      {r.status}
-                    </Badge>
-                  ),
-                },
-                {
-                  key: "rows",
-                  header: "Parsed / accepted / refused",
-                  main: true,
-                  sortable: true,
-                  render: (r) => (
-                    <span className={v.num}>
-                      {r.rowsParsed} / {r.rowsAccepted} / {r.rowsRefused}
-                    </span>
-                  ),
-                },
-                {
-                  key: "usd",
-                  header: "Imported",
-                  sortable: true,
-                  render: (r) =>
-                    r.totalUsd === null ? <span className={v.faint}>no single figure</span> : fmtUsd(r.totalUsd),
-                },
-                { key: "reason", main: true, sortable: true, required: "Why an import was refused is always shown", header: "Outcome", render: (r) => <span className={v.dim}>{r.reason}</span> },
-                {
-                  key: "act",
-                  action: true,
-                  header: "",
-                  srHeader: "Actions",
-                  render: (r) => (
-                    <div className={v.row}>
-                      <Button size="sm" aria-label={`Open the ${r.vendor} import from ${ago(r.createdAt)}`} onClick={() => setOpenImport(r.id)}>
-                        Open
-                      </Button>
-                      {r.status === "applied" ? (
-                        <Button size="sm" variant="danger" onClick={() => setRevoking(r)}>
-                          Revoke
-                        </Button>
-                      ) : null}
-                    </div>
-                  ),
-                },
-              ]}
+        <OutcomePanel outcome={act.outcome} testId="ci-outcome">
+          {/* A 4xx from the importer carries the refused LINE NUMBERS.
+              Dropping them is precisely what this slice was built not to
+              do, so they are rendered from the error body too. */}
+          {act.outcome && !act.outcome.ok && Array.isArray(act.outcome.payload?.refusals) && (
+            <RefusalList
+              refusals={act.outcome.payload.refusals as RowRefusal[]}
+              testId="ci-outcome-refusals"
             />
-            <p className={v.faint}>
-              A refused import is recorded, not discarded — &ldquo;somebody tried to import July&apos;s
-              invoice and it would not parse&rdquo; is exactly the kind of thing an auditor asks about
-              later. Revoking withdraws a batch&apos;s lines and keeps the batch row.
-            </p>
+          )}
+        </OutcomePanel>
+
+        <div>
+          <Tabs tabs={tabs} active={tab} idPrefix="cc" label="Consolidation sections" onChange={setTab} />
+          <div role="tabpanel" id={panel.panel} aria-labelledby={panel.tab} className={v.stack}>
+            {tab === "import" && (
+              <>
+                {/* --- import ------------------------------------------------------ */}
+                <Card title="Import a vendor export" info={adapters.data?.posture ? <p>{adapters.data.posture}</p> : undefined}>
+                  <QueryGate
+                    loading={adapters.isLoading}
+                    error={adapters.error}
+                    onRetry={() => void adapters.refetch()}
+                  >
+                    <div className={v.stack}>
+                      <div className={a.formRow}>
+                        <Field label="Adapter">
+                          <Select
+                            value={adapterId}
+                            onChange={(e) => setAdapterId(e.target.value)}
+                            data-testid="ci-adapter"
+                          >
+                            {optionEls(
+                              (adapters.data?.adapters ?? []).map((x) => ({
+                                v: x.id,
+                                l: `${x.displayName} · ${x.vendor}`,
+                              })),
+                            )}
+                          </Select>
+                        </Field>
+                        <Field label="File format">
+                          <Select
+                            value={format}
+                            onChange={(e) => setFormat(e.target.value as "csv" | "json")}
+                            data-testid="ci-format"
+                          >
+                            {(adapter?.formats ?? ["csv", "json"]).map((f) => (
+                              <option key={f} value={f}>
+                                {f}
+                              </option>
+                            ))}
+                          </Select>
+                        </Field>
+                        <Field label="Where this came from (provenance)">
+                          <Input
+                            value={source}
+                            onChange={(e) => setSource(e.target.value)}
+                            placeholder="for example copilot-seats-2026-07.csv"
+                            data-testid="ci-source"
+                          />
+                        </Field>
+                      </div>
+
+                      {adapter && (
+                        <div className={v.stack}>
+                          <div className={v.sectionTitle}>
+                            What this adapter cannot do{" "}
+                            {/* VERBATIM. The adapter's own sentence, not a paraphrase; the chips below stay visible. */}
+                            <InfoButton label="this adapter's limits">
+                              <span data-testid="ci-adapter-limits">{adapter.limits}</span>
+                            </InfoButton>
+                          </div>
+                          <div className={v.row}>
+                            <Badge tone={adapter.capabilities.amountFromFile ? "ok" : "warn"}>
+                              {adapter.capabilities.amountFromFile
+                                ? "the file carries the money"
+                                : "the money is an operator assertion"}
+                            </Badge>
+                            <Badge tone={adapter.capabilities.accountIsEmail ? "ok" : "warn"}>
+                              {adapter.capabilities.accountIsEmail
+                                ? "account column is an email — resolves without an alias"
+                                : "account column is not an email — an admin alias may be needed"}
+                            </Badge>
+                            <Badge tone={adapter.capabilities.currency ? "ok" : "neutral"}>
+                              {adapter.capabilities.currency ? "currency from file" : "currency assumed"}
+                            </Badge>
+                          </div>
+                          {ADAPTER_HINT[adapter.id] && <p className={v.dim}>{ADAPTER_HINT[adapter.id]}</p>}
+                        </div>
+                      )}
+
+                      <div className={a.formRow}>
+                        <Field label="Upload a file">
+                          <input
+                            type="file"
+                            accept=".csv,.json,text/csv,application/json,text/plain"
+                            onChange={(e) => void readFile(e.target.files?.[0])}
+                            data-testid="ci-file"
+                          />
+                        </Field>
+                      </div>
+                      {fileError && (
+                        <div className={v.errLine} role="alert">
+                          {fileError}
+                        </div>
+                      )}
+
+                      <Field label="…or paste the export here" grow>
+                        <Textarea
+                          rows={10}
+                          value={content}
+                          onChange={(e) => setContent(e.target.value)}
+                          spellCheck={false}
+                          placeholder="account,amount,period&#10;alice@acme.com,19.00,2026-07"
+                          data-testid="ci-content"
+                        />
+                      </Field>
+
+                      <Field label="Adapter configuration (JSON) — optional" grow>
+                        <Textarea
+                          rows={3}
+                          value={config}
+                          onChange={(e) => setConfig(e.target.value)}
+                          spellCheck={false}
+                          placeholder='{"mapping":{"account":"user","amount":"cost"}}'
+                          data-testid="ci-config"
+                        />
+                      </Field>
+
+                      <div className={v.row}>
+                        <Button
+                          disabled={act.busy || !content.trim()}
+                          onClick={() => void submitImport("dry_run")}
+                          data-testid="ci-dry-run"
+                        >
+                          Dry run (writes nothing)
+                        </Button>
+                        <Button
+                          variant="primary"
+                          disabled={act.busy || !content.trim()}
+                          onClick={() => void submitImport("apply")}
+                          data-testid="ci-apply"
+                        >
+                          Apply
+                        </Button>
+                        <span className={v.faint}>
+                          Re-applying the exact same bytes is refused with a 409 — applying twice would double every
+                          figure the file contributed to.
+                        </span>
+                      </div>
+
+                    </div>
+                  </QueryGate>
+                </Card>
+
+                {/* --- the dry-run / apply result ---------------------------------- */}
+                {result && (
+                  <Card
+                    title={result.mode === "dry_run" ? "Dry run — nothing was written" : "Applied"}
+                    actions={
+                      <Button size="sm" variant="ghost" onClick={() => setResult(null)}>
+                        Close
+                      </Button>
+                    }
+                  >
+                    <div className={v.stack} data-testid="ci-result">
+                      <div className={v.grid}>
+                        <Stat value={result.rowsParsed} label="Rows parsed" />
+                        <Stat value={result.rowsAccepted} label="Rows accepted" />
+                        <Stat value={result.rowsRefused} label="Rows refused" />
+                        <Stat
+                          value={
+                            result.totalUsd === null ? "no single figure" : fmtUsd(result.totalUsd)
+                          }
+                          label="Imported total in this file"
+                        />
+                      </div>
+                      <p className={v.faint}>
+                        <code>rows parsed = accepted + refused</code> is a database CHECK constraint, not a
+                        convention — a corrupt file returns fewer accepted rows <em>and says so</em>, rather than
+                        quietly returning less money.
+                      </p>
+                      {result.totalUsdNote && <p className={v.dim}>{result.totalUsdNote}</p>}
+
+                      <RefusalList
+                        refusals={result.refusals}
+                        truncated={result.refusalsTruncated}
+                        testId="ci-refusals"
+                      />
+
+                      <div className={v.sectionTitle}>How each accepted line found its human</div>
+                      <Table<{ method: string; n: number }>
+                        rows={Object.entries(result.resolution.byMethod).map(([method, n]) => ({ method, n }))}
+                        rowKey={(r) => r.method}
+                        columns={[
+                          {
+                            key: "method",
+                            header: "Resolved by",
+                            render: (r) => METHOD_LABEL[r.method] ?? r.method,
+                          },
+                          { key: "n", header: "Lines", render: (r) => <span className={v.num}>{r.n}</span> },
+                        ]}
+                      />
+                      {result.resolution.unattributedLines > 0 && (
+                        <div className={v.errLine} role="alert" data-testid="ci-unattributed">
+                          {result.resolution.unattributedLines} accepted line(s), worth{" "}
+                          {fmtUsd(result.resolution.unattributedAmount)}, resolved to no regulAIt user. They are
+                          retained and reported as <strong>unattributed spend</strong>. Map the account below to
+                          attribute them.
+                        </div>
+                      )}
+                      <p className={v.faint}>{result.resolution.note}</p>
+                      <KV
+                        rows={[
+                          ["Import id", <span className={v.mono}>{result.importId}</span>],
+                          ["Adapter", <code>{result.adapter}</code>],
+                          ["Basis", <Badge tone="warn">imported — we were told, we did not observe</Badge>],
+                          ["Currencies in the file", result.currencies.join(", ") || "—"],
+                          [
+                            "Period covered",
+                            result.periodStart && result.periodEnd
+                              ? `${result.periodStart.slice(0, 10)} → ${result.periodEnd.slice(0, 10)}`
+                              : "not stated by the file",
+                          ],
+                          [
+                            "Ingest scan",
+                            `${result.ingestScan.verdict} at mode '${result.ingestScan.mode}'`,
+                          ],
+                        ]}
+                      />
+                      <p className={v.faint}>{result.piiPosture}</p>
+                    </div>
+                  </Card>
+                )}
+
+                <ListPreview<ImportBatch>
+                  title="Import history"
+                  noun="imports"
+                  endpoint={IMPORTS_ENDPOINT}
+                  legacyKey="imports"
+                  queryKey={IMPORTS_QUERY_KEY}
+                  sort={IMPORTS_SORT}
+                  attention={[{ label: "refused", filters: REFUSED }]}
+                  columns={IMPORT_COLUMNS.filter((c) => c.main)}
+                  rowKey={(r) => r.id}
+                  viewAll={IMPORTS_PATH}
+                  empty={<EmptyState title="Nothing imported yet" />}
+                />
+              </>
+            )}
+            {tab === "mapping" && (
+              <>
+                {/* --- identity mapping --------------------------------------------- */}
+                <Card
+                  title="Identity mapping — which vendor account is which person"
+                  infoLabel="identity mapping"
+                  info={mappings.data?.posture ? <p>{mappings.data.posture}</p> : undefined}
+                >
+                  <QueryGate
+                    loading={mappings.isLoading}
+                    error={mappings.error}
+                    onRetry={() => void mappings.refetch()}
+                  >
+                    <div className={v.stack}>
+
+                      <div className={v.sectionTitle}>Admin aliases (highest precedence)</div>
+                      <div className={a.formRow}>
+                        <Field label="Vendor (* = any)">
+                          <Input value={aliasVendor} onChange={(e) => setAliasVendor(e.target.value)} data-testid="al-vendor" />
+                        </Field>
+                        <Field label="Vendor account, exactly as the file spells it" grow>
+                          <Input
+                            value={aliasAccount}
+                            onChange={(e) => setAliasAccount(e.target.value)}
+                            placeholder="for example a.smith@contractor.example"
+                            data-testid="al-account"
+                          />
+                        </Field>
+                        <Field label="Is this person">
+                          <Select value={aliasUser} onChange={(e) => setAliasUser(e.target.value)} data-testid="al-user">
+                            {optionEls(userOpts(users.data?.users), "pick a user")}
+                          </Select>
+                        </Field>
+                        <Field label="Reason for this alias (audited)" grow>
+                          <Input value={aliasReason} onChange={(e) => setAliasReason(e.target.value)} data-testid="al-reason" />
+                        </Field>
+                        <Button
+                          disabled={act.busy || !aliasAccount.trim() || !aliasUser || !aliasReason.trim()}
+                          onClick={() =>
+                            void act
+                              .run(
+                                () =>
+                                  api.post("/v1/cost-imports/mappings", {
+                                    vendor: aliasVendor.trim() || "*",
+                                    accountRef: aliasAccount.trim(),
+                                    userId: aliasUser,
+                                    reason: aliasReason.trim(),
+                                  }),
+                                "Alias saved — every stored line was re-resolved against it.",
+                              )
+                              .then(() => {
+                                setAliasAccount("");
+                                setAliasReason("");
+                                refreshAll();
+                              })
+                          }
+                          data-testid="al-save"
+                        >
+                          Assert
+                        </Button>
+                      </div>
+                      <Table<AliasRow>
+                        rows={mappings.data?.aliases ?? []}
+                        rowKey={(r) => r.id}
+                        empty={<EmptyState title="No aliases yet" body="Only needed where the account column is not already a matching email." />}
+                        columns={[
+                          { key: "vendor", header: "Vendor", render: (r) => <code>{r.vendor}</code> },
+                          { key: "account", header: "Account", render: (r) => <span className={v.mono}>{r.accountKey}</span> },
+                          {
+                            key: "user",
+                            header: "Is",
+                            render: (r) => names.userEmail.get(r.userId) ?? shortId(r.userId),
+                          },
+                          { key: "reason", header: "Reason", render: (r) => <span className={v.dim}>{r.reason}</span> },
+                          {
+                            key: "rm",
+                            header: "",
+                            srHeader: "Actions",
+                            render: (r) => (
+                              <Button
+                                size="sm"
+                                variant="danger"
+                                disabled={act.busy}
+                                onClick={() =>
+                                  void act
+                                    .run(
+                                      () => api.del(`/v1/cost-imports/mappings/${r.id}`),
+                                      "Alias removed — stored lines were re-resolved without it.",
+                                    )
+                                    .then(refreshAll)
+                                }
+                              >
+                                Remove
+                              </Button>
+                            ),
+                          },
+                        ]}
+                      />
+
+                      <div className={v.sectionTitle}>Domain rules (lowest precedence)</div>
+                      <div className={a.formRow}>
+                        <Field label="Vendor (* = any)">
+                          <Input value={ruleVendor} onChange={(e) => setRuleVendor(e.target.value)} data-testid="dr-vendor" />
+                        </Field>
+                        <Field label="Accounts at this domain…">
+                          <Input
+                            value={ruleFrom}
+                            onChange={(e) => setRuleFrom(e.target.value)}
+                            placeholder="acme-legacy.com"
+                            data-testid="dr-from"
+                          />
+                        </Field>
+                        <Field label="…resolve against this one">
+                          <Input
+                            value={ruleTo}
+                            onChange={(e) => setRuleTo(e.target.value)}
+                            placeholder="acme.com"
+                            data-testid="dr-to"
+                          />
+                        </Field>
+                        <Field label="Reason for this domain rule (audited)" grow>
+                          <Input value={ruleReason} onChange={(e) => setRuleReason(e.target.value)} data-testid="dr-reason" />
+                        </Field>
+                        <Button
+                          disabled={act.busy || !ruleFrom.trim() || !ruleTo.trim() || !ruleReason.trim()}
+                          onClick={() =>
+                            void act
+                              .run(
+                                () =>
+                                  api.post("/v1/cost-imports/domain-rules", {
+                                    vendor: ruleVendor.trim() || "*",
+                                    fromDomain: ruleFrom.trim(),
+                                    toDomain: ruleTo.trim(),
+                                    reason: ruleReason.trim(),
+                                  }),
+                                "Domain rule saved — every stored line was re-resolved against it.",
+                              )
+                              .then(() => {
+                                setRuleFrom("");
+                                setRuleTo("");
+                                setRuleReason("");
+                                refreshAll();
+                              })
+                          }
+                          data-testid="dr-save"
+                        >
+                          Add rule
+                        </Button>
+                      </div>
+                      <Table<DomainRuleRow>
+                        rows={mappings.data?.domainRules ?? []}
+                        rowKey={(r) => r.id}
+                        empty={<EmptyState title="No domain rules yet" />}
+                        columns={[
+                          { key: "vendor", header: "Vendor", render: (r) => <code>{r.vendor}</code> },
+                          { key: "rule", header: "Rule", render: (r) => <span className={v.mono}>{r.fromDomain} → {r.toDomain}</span> },
+                          { key: "enabled", header: "Enabled", render: (r) => <Badge tone={r.enabled ? "ok" : "neutral"}>{r.enabled ? "yes" : "no"}</Badge> },
+                          { key: "reason", header: "Reason", render: (r) => <span className={v.dim}>{r.reason}</span> },
+                          {
+                            key: "rm",
+                            header: "",
+                            srHeader: "Actions",
+                            render: (r) => (
+                              <Button
+                                size="sm"
+                                variant="danger"
+                                disabled={act.busy}
+                                onClick={() =>
+                                  void act
+                                    .run(
+                                      () => api.del(`/v1/cost-imports/domain-rules/${r.id}`),
+                                      "Domain rule removed — stored lines were re-resolved without it.",
+                                    )
+                                    .then(refreshAll)
+                                }
+                              >
+                                Remove
+                              </Button>
+                            ),
+                          },
+                        ]}
+                      />
+                      <p className={v.faint}>
+                        Two rules that resolve one account to two different people resolve it to{" "}
+                        <strong>nobody</strong>. Ambiguity is never broken by guessing, and an unmatched account is
+                        never spread pro-rata across the people who did resolve.
+                      </p>
+
+                      <div className={v.sectionTitle}>Cost centre for a person</div>
+                      <p className={v.faint}>
+                        <code>projects.cost_center</code> covers governed work. A coding-assistant seat is not a project, so
+                        a human needs one too — this is the key the &ldquo;by cost centre&rdquo; view groups on.
+                      </p>
+                      <div className={a.formRow}>
+                        <Field label="Person">
+                          <Select value={ccUser} onChange={(e) => setCcUser(e.target.value)} data-testid="cc-user">
+                            {optionEls(userOpts(users.data?.users), "pick a user")}
+                          </Select>
+                        </Field>
+                        <Field label="Cost centre (blank clears it)">
+                          <Input value={ccValue} onChange={(e) => setCcValue(e.target.value)} data-testid="cc-value" />
+                        </Field>
+                        <Button
+                          disabled={act.busy || !ccUser}
+                          onClick={() =>
+                            void act
+                              .run(
+                                () =>
+                                  api.put(`/v1/users/${ccUser}/cost-center`, {
+                                    costCenter: ccValue.trim() === "" ? null : ccValue.trim(),
+                                  }),
+                                "Cost centre saved.",
+                              )
+                              .then(refreshAll)
+                          }
+                          data-testid="cc-save"
+                        >
+                          Save
+                        </Button>
+                      </div>
+                    </div>
+                  </QueryGate>
+                </Card>
+
+                {/* --- ADR-0076: roster upload --------------------------------------- */}
+                <Card title="Roster upload — bulk identity mapping from your directory">
+                  <div className={v.stack}>
+                    <p className={v.dim}>
+                      Consume a SCIM-style user export (JSON) or a CSV roster to assert vendor-account aliases and
+                      person-level cost centres <strong>in bulk, through the same write paths</strong> as the forms
+                      above. An account mapped to two people — or one person given two cost centres — is refused
+                      loudly, never resolved by guessing.
+                    </p>
+                    <div className={a.formRow}>
+                      <Field label="Format">
+                        <Select
+                          value={rosterFormat}
+                          onChange={(e) => setRosterFormat(e.target.value as "csv" | "json")}
+                          data-testid="ro-format"
+                        >
+                          <option value="json">JSON (SCIM or rows)</option>
+                          <option value="csv">CSV</option>
+                        </Select>
+                      </Field>
+                      <Field label="Vendor for asserted aliases (* = any)">
+                        <Input value={rosterVendor} onChange={(e) => setRosterVendor(e.target.value)} data-testid="ro-vendor" />
+                      </Field>
+                      <Field label="Where this came from (provenance)" grow>
+                        <Input
+                          value={rosterSource}
+                          onChange={(e) => setRosterSource(e.target.value)}
+                          placeholder="for example okta-export-2026-08.json"
+                          data-testid="ro-source"
+                        />
+                      </Field>
+                    </div>
+                    <div className={a.formRow}>
+                      <Field label="Upload a file">
+                        <input
+                          type="file"
+                          accept=".csv,.json,text/csv,application/json,text/plain"
+                          onChange={(e) => void readRosterFile(e.target.files?.[0])}
+                          data-testid="ro-file"
+                        />
+                      </Field>
+                    </div>
+                    {rosterFileError && (
+                      <div className={v.errLine} role="alert">
+                        {rosterFileError}
+                      </div>
+                    )}
+                    <Field label="…or paste the export here" grow>
+                      <Textarea
+                        rows={8}
+                        value={rosterContent}
+                        onChange={(e) => setRosterContent(e.target.value)}
+                        spellCheck={false}
+                        placeholder='{"Resources":[{"userName":"a.smith@vendorbill.example","emails":[{"value":"alice@acme.com","primary":true}]}]}'
+                        data-testid="ro-content"
+                      />
+                    </Field>
+                    <Field label="Reason for this bulk assertion (audited, stamped on every alias)" grow>
+                      <Input value={rosterReason} onChange={(e) => setRosterReason(e.target.value)} data-testid="ro-reason" />
+                    </Field>
+                    <div className={v.row}>
+                      <Button
+                        disabled={act.busy || !rosterContent.trim() || !rosterReason.trim()}
+                        onClick={() => void submitRoster("dry_run")}
+                        data-testid="ro-dry-run"
+                      >
+                        Dry run (writes nothing)
+                      </Button>
+                      <Button
+                        variant="primary"
+                        disabled={act.busy || !rosterContent.trim() || !rosterReason.trim()}
+                        onClick={() => void submitRoster("apply")}
+                        data-testid="ro-apply"
+                      >
+                        Apply
+                      </Button>
+                      <span className={v.faint}>
+                        Identity columns are join keys (PII-exempt by disclosed construction); the cost-centre column
+                        is scanned. Unmapped columns are discarded at parse.
+                      </span>
+                    </div>
+                    <OutcomePanel outcome={act.outcome} testId="ro-outcome" />
+                    {rosterResult && (
+                      <div className={v.stack} data-testid="ro-result">
+                        <div className={v.grid}>
+                          <Stat value={rosterResult.rowsParsed} label="Rows parsed" />
+                          <Stat value={rosterResult.rowsAccepted} label="Rows accepted" />
+                          <Stat value={rosterResult.rowsRefused} label="Rows refused" />
+                          <Stat
+                            value={
+                              rosterResult.applied
+                                ? `${rosterResult.aliasesCreated ?? 0} / ${rosterResult.aliasesUpdated ?? 0}`
+                                : `${rosterResult.counts.aliasesToCreate} / ${rosterResult.counts.aliasesToUpdate}`
+                            }
+                            label={rosterResult.applied ? "Aliases created / updated" : "Aliases to create / update"}
+                          />
+                        </div>
+                        <KV
+                          rows={[
+                            ["Dialect", rosterResult.dialect === "scim" ? "SCIM user export" : "column-mapped rows"],
+                            [
+                              "Unnecessary aliases (account already the directory address)",
+                              String(rosterResult.counts.aliasesUnnecessary),
+                            ],
+                            [
+                              "Cost centres",
+                              rosterResult.applied
+                                ? `${rosterResult.costCentersSet ?? 0} set, ${rosterResult.counts.costCentersUnchanged} unchanged`
+                                : `${rosterResult.counts.costCentersToSet} to set, ${rosterResult.counts.costCentersUnchanged} unchanged`,
+                            ],
+                            [
+                              "Stored lines re-attributed",
+                              rosterResult.reresolved ? String(rosterResult.reresolved.changed) : "— (dry run)",
+                            ],
+                            ["Ingest scan", `${rosterResult.ingestScan.verdict} at mode '${rosterResult.ingestScan.mode}'`],
+                          ]}
+                        />
+                        <RefusalList
+                          refusals={rosterResult.refusals}
+                          truncated={rosterResult.refusalsTruncated}
+                          testId="ro-refusals"
+                        />
+                        <p className={v.faint}>{rosterResult.posture}</p>
+                        <p className={v.faint}>{rosterResult.piiPosture}</p>
+                      </div>
+                    )}
+                  </div>
+                </Card>
+
+              </>
+            )}
+            {tab === "consolidated" && (
+              <>
+                {/* --- consolidated view -------------------------------------------- */}
+                <Card
+                  title="Consolidated view"
+                  actions={
+                    <Button
+                      size="sm"
+                      onClick={() =>
+                        void downloadCsv(
+                          `/v1/cost-consolidated?${consolidatedQs}&format=csv`,
+                          `regulait-consolidated-${by}-${from}.csv`,
+                          (m) =>
+                            act.setOutcome({ ok: false, code: null, status: null, reason: m, payload: null }),
+                        )
+                      }
+                    >
+                      Download CSV
+                    </Button>
+                  }
+                >
+                  <div className={v.stack}>
+                    <div className={a.formRow}>
+                      <Field label="Group by">
+                        <Select
+                          value={by}
+                          onChange={(e) => setBy(e.target.value as "user" | "cost_center")}
+                          data-testid="cc-by"
+                        >
+                          <option value="user">person</option>
+                          <option value="cost_center">cost centre</option>
+                        </Select>
+                      </Field>
+                      <Field label="From">
+                        <Input type="date" value={from} onChange={(e) => setFrom(e.target.value)} data-testid="cc-from" />
+                      </Field>
+                      <Field label="To">
+                        <Input type="date" value={to} onChange={(e) => setTo(e.target.value)} data-testid="cc-to" />
+                      </Field>
+                    </div>
+
+                    <QueryGate
+                      loading={consolidated.isLoading}
+                      error={consolidated.error}
+                      onRetry={() => void consolidated.refetch()}
+                    >
+                      {subjects.length === 0 ? (
+                        <EmptyState
+                          title="No spend of either basis in this window"
+                          body="Widen the dates, or import a vendor export above."
+                        />
+                      ) : (
+                        <div className={v.stack} data-testid="cc-subjects">
+                          {subjects.map((s) => (
+                            <Card
+                              key={`${s.subjectKind}:${s.subjectId ?? "null"}`}
+                              title={
+                                <span className={v.row}>
+                                  <span>{s.label}</span>
+                                  {!s.attributed && (
+                                    <Badge tone="danger" title="nobody was resolved for this spend">
+                                      unattributed
+                                    </Badge>
+                                  )}
+                                </span>
+                              }
+                            >
+                              <div className={v.stack}>
+                                <BasisPair subject={s} />
+                                {/* the API's own sentence about the split, in words */}
+                                <p className={v.dim}>{s.coverage}</p>
+                                {s.imported.byBillingKind.length > 0 && (
+                                  <p className={v.faint}>
+                                    Imported by kind:{" "}
+                                    {s.imported.byBillingKind
+                                      .map((k) => `${k.billingKind} ${k.amount.toFixed(2)} ${k.currency}`)
+                                      .join(", ")}
+                                  </p>
+                                )}
+                              </div>
+                            </Card>
+                          ))}
+                        </div>
+                      )}
+                    </QueryGate>
+
+                    <p className={v.dim} data-testid="cc-note">
+                      {consolidated.data?.note}
+                    </p>
+
+                    <div className={v.sectionTitle}>How fresh is the imported side?</div>
+                    {(consolidated.data?.staleness.vendors ?? []).length === 0 ? (
+                      <p className={v.faint}>
+                        No vendor export has been applied yet, so the imported side of every figure above is empty
+                        — not zero-spend, simply un-supplied.
+                      </p>
+                    ) : (
+                      <Table<{ vendor: string; lastImportedAt: string | null; appliedBatches: number; daysSinceLastImport: number | null }>
+                        rows={consolidated.data?.staleness.vendors ?? []}
+                        rowKey={(r) => r.vendor}
+                        columns={[
+                          { key: "vendor", header: "Vendor", render: (r) => r.vendor },
+                          { key: "batches", header: "Applied batches", render: (r) => r.appliedBatches },
+                          {
+                            key: "last",
+                            header: "Last import",
+                            render: (r) => (r.lastImportedAt ? ago(r.lastImportedAt) : "never"),
+                          },
+                          {
+                            key: "stale",
+                            header: "Days stale",
+                            render: (r) =>
+                              r.daysSinceLastImport === null ? (
+                                <span className={v.faint}>unknown</span>
+                              ) : (
+                                <Badge tone={r.daysSinceLastImport > 45 ? "danger" : r.daysSinceLastImport > 14 ? "warn" : "ok"}>
+                                  {r.daysSinceLastImport}
+                                </Badge>
+                              ),
+                          },
+                        ]}
+                      />
+                    )}
+                    <p className={v.faint}>{consolidated.data?.staleness.note}</p>
+                    {consolidated.data && consolidated.data.reconciliation.supersededLinesExcluded > 0 && (
+                      <p className={v.dim} data-testid="cc-reconciliation-note">
+                        {consolidated.data.reconciliation.supersededLinesExcluded} superseded duplicate line(s) are
+                        excluded from the imported side above — marked by a reconciliation pass, never deleted. The
+                        full list is in the reconciliation card below.
+                      </p>
+                    )}
+                  </div>
+                </Card>
+
+              </>
+            )}
+            {tab === "reconciliation" && (
+              <>
+                {/* --- ADR-0076: scheduled reconciliation --------------------------- */}
+                <Card
+                  title="Reconciliation — the same vendor line, never counted twice"
+                  infoLabel="reconciliation"
+                  info={reconciliation.data?.posture ? <p>{reconciliation.data.posture}</p> : undefined}
+                  actions={
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      disabled={act.busy}
+                      onClick={() => void runReconciliation()}
+                      data-testid="rc-run-now"
+                    >
+                      Run now
+                    </Button>
+                  }
+                >
+                  <QueryGate
+                    loading={reconciliation.isLoading}
+                    error={reconciliation.error}
+                    onRetry={() => void reconciliation.refetch()}
+                  >
+                    <div className={v.stack} data-testid="rc-card">
+                      <div className={v.grid}>
+                        <Stat value={reconciliation.data?.liveLines ?? 0} label="Live imported lines" />
+                        <Stat
+                          value={reconciliation.data?.supersededLines ?? 0}
+                          label="Superseded (marked, kept)"
+                        />
+                        <Stat
+                          value={
+                            reconciliation.data?.lastRun
+                              ? ago(reconciliation.data.lastRun.startedAt)
+                              : "never"
+                          }
+                          label="Last pass"
+                        />
+                        <Stat
+                          value={reconciliation.data?.lastRun?.ambiguousGroups ?? 0}
+                          label="Ambiguous groups (left alone)"
+                        />
+                      </div>
+                      {reconciliation.data?.lastRun && (
+                        <KV
+                          rows={[
+                            [
+                              "Last pass outcome",
+                              <Badge
+                                tone={reconciliation.data.lastRun.outcome === "ok" ? "ok" : "danger"}
+                              >
+                                {reconciliation.data.lastRun.outcome}
+                              </Badge>,
+                            ],
+                            ["Trigger", reconciliation.data.lastRun.trigger],
+                            ["Lines scanned", String(reconciliation.data.lastRun.scannedLines)],
+                            ["Duplicate groups marked", String(reconciliation.data.lastRun.duplicateGroups)],
+                            [
+                              "Overlapping windows reported (not touched)",
+                              String(reconciliation.data.lastRun.overlapWarnings),
+                            ],
+                          ]}
+                        />
+                      )}
+                      {(reconciliation.data?.lastRun?.warnings ?? []).length > 0 && (
+                        <div className={v.stack} data-testid="rc-warnings">
+                          <div className={v.sectionTitle}>What the last pass refused to decide</div>
+                          {reconciliation.data!.lastRun!.warnings.slice(0, 10).map((w, i) => (
+                            <p key={i} className={v.errLine} role="alert">
+                              {w.detail}
+                            </p>
+                          ))}
+                        </div>
+                      )}
+                      {(reconciliation.data?.supersededSample ?? []).length > 0 && (
+                        <>
+                          <div className={v.sectionTitle}>Superseded lines (marked, never deleted)</div>
+                          <Table<ReconciliationReport["supersededSample"][number]>
+                            rows={reconciliation.data?.supersededSample ?? []}
+                            rowKey={(r) => r.id}
+                            columns={[
+                              { key: "vendor", header: "Vendor", render: (r) => r.vendor },
+                              {
+                                key: "account",
+                                header: "Account",
+                                render: (r) => <span className={v.mono}>{r.accountKey}</span>,
+                              },
+                              {
+                                key: "amount",
+                                header: "Amount",
+                                render: (r) => `${r.amount.toFixed(2)} ${r.currency}`,
+                              },
+                              { key: "when", header: "Marked", render: (r) => ago(r.supersededAt) },
+                              {
+                                key: "why",
+                                header: "Why",
+                                render: (r) => <span className={v.dim}>{r.supersededReason}</span>,
+                              },
+                            ]}
+                          />
+                        </>
+                      )}
+                      <p className={v.faint}>{reconciliation.data?.scheduler.note}</p>
+                    </div>
+                  </QueryGate>
+                </Card>
+
+              </>
+            )}
           </div>
-        </Card>
+        </div>
       </div>
 
-      {openImport && <CostImportDetail key={openImport} importId={openImport} onClose={() => setOpenImport(null)} />}
-      <ReasonModal
-        open={revoking !== null}
-        title={revoking ? `Withdraw the lines from this ${revoking.vendor} import?` : ""}
-        danger
-        confirmLabel="Revoke batch"
-        placeholder="why this batch is being withdrawn (required, audited)"
-        body={
-          <p>
-            The imported cost lines are deleted and every consolidated figure they contributed to changes.
-            The batch row itself is <strong>kept</strong>, marked revoked, with your reason attached. This
-            is the correction path: revoke, then re-import the corrected file.
-          </p>
-        }
-        onConfirm={(reason) => void revokeBatch(reason)}
-        onCancel={() => setRevoking(null)}
-      />
     </>
   );
 }

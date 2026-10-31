@@ -402,7 +402,8 @@ test.describe("U3: edit forms send only what was edited", () => {
       "GET /v1/energy/factors": { factors: [], region: null, notes: { shipped: "none shipped", unknown: "unknown" } },
       [`PATCH /v1/initiatives/${U(20)}`]: (b: Json) => ({ id: U(20), name: b.name ?? "Platform", costCenter: b.costCenter === undefined ? "CC-1" : b.costCenter }),
     });
-    await page.goto("/ui/admin/cost");
+    // P3: initiatives are on the cost dashboard's set-up tab
+    await page.goto("/ui/admin/cost?tab=setup");
     await page.getByRole("button", { name: "Edit initiative Platform" }).click();
     const dialog = page.getByRole("dialog", { name: "Edit initiative Platform" });
     await expect(dialog.getByRole("button", { name: "Save changes" })).toBeDisabled();

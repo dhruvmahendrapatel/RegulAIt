@@ -624,3 +624,20 @@ one `CEILING_EXCEPTIONS` row.
 - Why: main already measures 1,050,176 B, the supplier portal lane alone adds about 13.8 kB, and about ten more UI lanes
   are queued. A raise per lane would make every lane edit the same line.
 - Lanes keep reporting their all-JS bytes; crossing 1,150 kB goes back to the owner.
+
+## Addendum / As built (2026-10-31) — the P3 operations/cost long-page split adds ~0 to the entry bundle
+
+The P3 split (the long cost-consolidation, Engines, MCP servers and Infrastructure pages keep a five-row preview and
+move each full list to its own page) first declared every sub-page as its own lazy route in `App.tsx`. Each lazy route
+costs a little entry JS, and with the other lanes in flight the entry chunk had almost no headroom under its 138.5 kB
+ceiling.
+
+- Each area is now **one** lazy route with a splat (`engines/*`, `cost-consolidation/*`, `mcp-servers/*`,
+  `infrastructure/*`). The area's module owns a nested `<Routes>`: the overview at the index, each full list on its own
+  nested route. The area module is reached through the section's existing screen barrel, so `App.tsx` adds no new import
+  specifier and no new entry chunk reference. Every URL, deep-link redirect, access gate and breadcrumb is unchanged.
+- Entry JS measured 138,409 B before and 137,982 B after (−427 B) on the same lockfile; all JS fell from 1,073,132 B to
+  1,067,732 B. No ceiling changes; entry stays well under 138.5 kB.
+- The SPA route census (`scripts/ui-spa-routes.mjs`) now follows a splat whose element is such a lazy area module
+  (through its screen barrel's `export … from` re-export) into that module's `<Routes>`, so every sub-page is still
+  enumerated for the enterprise harness exactly as before — the census output is unchanged.

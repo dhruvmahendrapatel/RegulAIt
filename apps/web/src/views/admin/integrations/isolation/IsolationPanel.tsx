@@ -14,11 +14,12 @@
  *  as a default or an empty list.
  */
 import { lazy, Suspense, useEffect, useId, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../../api/client";
 import { ago, fmtAt, fmtDateTime } from "../../../../api/format";
 import { api as stepUpApi, withStepUp } from "../../../../stepup/stepUp";
-import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Modal, RowActions, Select, Table } from "../../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, Input, Modal, RowActions, Select, Table } from "../../../../ui/kit";
 import { useAction } from "../../adminKit";
 import {
   assignableProfiles,
@@ -96,7 +97,7 @@ export function IsolationPanel() {
       <ProfilesCard />
       <ExecutorsCard />
       <ProjectIsolationCard />
-      <PlacementsCard />
+      <PlacementsPreview />
     </>
   );
 }
@@ -107,7 +108,8 @@ const unreadableKey = (r: Unreadable) => `unreadable-${r.index}`;
 
 function ReadFailure(props: { what: string; q: { isError: boolean; error: unknown; isPending: boolean }; parsed: unknown }) {
   const { q } = props;
-  if (q.isError) return <EmptyState title={`${props.what[0]!.toUpperCase()}${props.what.slice(1)} unavailable`} body={unavailableText(props.what, availabilityOf(q.error))} />;
+  // a failed read is announced as an error, not shown as an empty list
+  if (q.isError) return <ErrorState title={`${props.what[0]!.toUpperCase()}${props.what.slice(1)} unavailable`} message={unavailableText(props.what, availabilityOf(q.error))} />;
   if (!q.isPending && props.parsed === null)
     return <EmptyState title={`${props.what[0]!.toUpperCase()}${props.what.slice(1)} unavailable`} body={`The gateway's ${props.what} could not be read. Nothing is shown rather than a guessed value.`} />;
   return null;
@@ -427,9 +429,8 @@ function outcomeBadge(p: Placement) {
   return <Badge tone="warn">Refused</Badge>;
 }
 
-function PlacementsCard() {
-  const [open, setOpen] = useState<string | null>(null);
-  // N11: keyset pages; a later page carries only the cursors of the lists that have more
+/** N11: keyset pages of placement decisions; a later page carries only the cursors of the lists that have more */
+function usePlacements() {
   const q = useInfiniteQuery({
     queryKey: isolationKeys.placements,
     retry: false,
@@ -444,6 +445,127 @@ function PlacementsCard() {
   }, [q.data]);
   // a failed LATER page keeps the pages already shown; only the first page failing hides the list
   const failed = (q.isError && !q.isFetchNextPageError) || (!q.isPending && parsed === null);
+  return { q, parsed, failed };
+}
+
+/**
+ * What the Isolation tab holds that needs attention, for its label (P3): quarantined executors, unreadable executor
+ * records, the refused, mismatched and unreadable placement decisions on the newest page, and projects whose
+ * sensitivity is unresolved (their isolable calls are refused). The same reads (and
+ * cache entries) as the cards themselves.
+ */
+export function useIsolationAttention(): Array<{ count: number; label: string }> {
+  const ex = useQuery({ queryKey: isolationKeys.executors, retry: false, refetchInterval: 60_000, queryFn: () => api.get<unknown>("/v1/executors") });
+  const { q } = usePlacements();
+  const pq = useQuery({ queryKey: isolationKeys.projectSensitivities, retry: false, queryFn: () => api.get<unknown>("/v1/execution-project-sensitivities") });
+  const projects = pq.data === undefined ? null : parseProjectSensitivities(pq.data);
+  const executors = ex.data === undefined ? null : parseExecutors(ex.data);
+  const first = q.data?.pages[0] ?? null;
+  const read = first ? (first.placements.filter((r) => !isUnreadable(r)) as Placement[]) : [];
+  return [
+    { count: (executors ?? []).filter((e) => !("unreadable" in e) && e.status === "quarantined").length, label: "quarantined" },
+    { count: (executors ?? []).filter((e) => "unreadable" in e).length + (first ? first.placements.length - read.length : 0), label: "unreadable" },
+    { count: read.filter((r) => r.outcome === "refused" || r.outcome === "mismatch").length + (first?.unrecorded.length ?? 0), label: "refused" },
+    { count: (projects ?? []).filter((x) => x.effectiveSensitivity === null).length, label: "projects unresolved" },
+  ].filter((x) => x.count > 0);
+}
+
+/**
+ * P3 (#453 c6527514889): the Engines page keeps the newest five decisions, with what needs attention counted in the
+ * heading; every decision, the evidence and the refusal reasons are on their own page. There is no total to count
+ * (two keyset lists, no count), so the heading says how many it read.
+ */
+function PlacementsPreview() {
+  const { q, parsed, failed } = usePlacements();
+  const firstPage = q.data?.pages[0] ?? null;
+  const read = firstPage ? firstPage.placements.filter((r) => !isUnreadable(r)) as Placement[] : [];
+  const n = (x: number) => x.toLocaleString("en-GB");
+  const parts = firstPage
+    ? [
+        `${q.hasNextPage ? "newest " : ""}${n(firstPage.placements.length)} decisions`,
+        ...([
+          [read.filter((r) => r.outcome === "refused").length, "refused"],
+          [read.filter((r) => r.outcome === "mismatch").length, "mismatched"],
+          [firstPage.unrecorded.length, "refused before placement"],
+          [firstPage.placements.length - read.length + firstPage.unrecorded.filter(isUnreadable).length, "unreadable"],
+        ] as Array<[number, string]>)
+          .filter(([c]) => c > 0)
+          .map(([c, label]) => `${n(c)} ${label}`),
+      ]
+    : [];
+  return (
+    <Card
+      title={parts.length ? `Placement decisions · ${parts.join(" · ")}` : "Placement decisions"}
+      actions={
+        <Link to={PLACEMENTS_PATH} aria-label="View all placement decisions">
+          View all →
+        </Link>
+      }
+    >
+      {failed ? (
+        <ReadFailure what="placement decisions" q={q} parsed={parsed} />
+      ) : (
+        <PlacementsTable rows={(parsed?.placements ?? []).slice(0, 5)} loading={q.isPending} />
+      )}
+    </Card>
+  );
+}
+
+export const PLACEMENTS_PATH = "/admin/engines/placements";
+
+function PlacementsTable(props: { rows: PlacementRow[]; loading: boolean; open?: string | null; onOpen?: (id: string | null) => void }) {
+  const { open = null, onOpen } = props;
+  return (
+    <Table<PlacementRow>
+      rows={props.rows}
+      rowKey={(r) => (isUnreadable(r) ? unreadableKey(r) : r.id)}
+      loading={props.loading}
+      columns={[
+        { key: "at", header: "When", render: (r) => (isUnreadable(r) ? "Not reported" : <span title={fmtAt(new Date(r.createdAt).toISOString())}>{ago(new Date(r.createdAt).toISOString())}</span>) },
+        { key: "kind", header: "Workload", render: (r) => (isUnreadable(r) ? "Unreadable record" : r.workloadKind) },
+        {
+          key: "required",
+          header: "Required",
+          render: (r) => (isUnreadable(r) ? "Not reported" : `${classText(r.requiredClass)}, set by ${REQUIRED_BY_TEXT[r.requiredBy] ?? r.requiredBy}`),
+        },
+        { key: "outcome", header: "Outcome", render: (r) => (isUnreadable(r) ? <Badge tone="neutral">Unmeasured</Badge> : outcomeBadge(r)) },
+        {
+          key: "detail",
+          header: "Reason or placement",
+          render: (r) =>
+            isUnreadable(r) ? (
+              "Not reported"
+            ) : r.outcome === "placed" ? (
+              `${classText(r.appliedClass)} on ${r.executorName ?? "an executor"}`
+            ) : r.outcome === "offered" ? (
+              `Offered to ${r.executorName ?? "an executor"} at ${classText(r.appliedClass)}; nothing runs until its sandbox reports and the report is accepted`
+            ) : (
+              <span>
+                <code>{r.refusalCode}</code> <span className={v.faint}>{refusalText(r.refusalCode)}</span>
+              </span>
+            ),
+        },
+        ...(onOpen ? [{
+          key: "open",
+          header: "Evidence",
+          align: "right" as const,
+          render: (r: PlacementRow) =>
+            isUnreadable(r) ? null : (
+              <Button size="sm" variant="ghost" aria-label={`Evidence for placement ${r.id}`} aria-pressed={open === r.id} onClick={() => onOpen(open === r.id ? null : r.id)}>
+                Evidence
+              </Button>
+            ),
+        }] : []),
+      ]}
+      empty={<EmptyState title="No placement decisions yet" body="No isolable call has been placed or refused." />}
+    />
+  );
+}
+
+/** every placement decision, with its evidence and the refusals decided before a placement could exist */
+export function PlacementsCard() {
+  const [open, setOpen] = useState<string | null>(null);
+  const { q, parsed, failed } = usePlacements();
   return (
     <Card
       title="Placement decisions"
@@ -462,49 +584,7 @@ function PlacementsCard() {
           <ReadFailure what="placement decisions" q={q} parsed={parsed} />
         ) : (
           <>
-            <Table<PlacementRow>
-              rows={parsed?.placements ?? []}
-              rowKey={(r) => (isUnreadable(r) ? unreadableKey(r) : r.id)}
-              loading={q.isPending}
-              columns={[
-                { key: "at", header: "When", render: (r) => (isUnreadable(r) ? "Not reported" : <span title={fmtAt(new Date(r.createdAt).toISOString())}>{ago(new Date(r.createdAt).toISOString())}</span>) },
-                { key: "kind", header: "Workload", render: (r) => (isUnreadable(r) ? "Unreadable record" : r.workloadKind) },
-                {
-                  key: "required",
-                  header: "Required",
-                  render: (r) => (isUnreadable(r) ? "Not reported" : `${classText(r.requiredClass)}, set by ${REQUIRED_BY_TEXT[r.requiredBy] ?? r.requiredBy}`),
-                },
-                { key: "outcome", header: "Outcome", render: (r) => (isUnreadable(r) ? <Badge tone="neutral">Unmeasured</Badge> : outcomeBadge(r)) },
-                {
-                  key: "detail",
-                  header: "Reason or placement",
-                  render: (r) =>
-                    isUnreadable(r) ? (
-                      "Not reported"
-                    ) : r.outcome === "placed" ? (
-                      `${classText(r.appliedClass)} on ${r.executorName ?? "an executor"}`
-                    ) : r.outcome === "offered" ? (
-                      `Offered to ${r.executorName ?? "an executor"} at ${classText(r.appliedClass)}; nothing runs until its sandbox reports and the report is accepted`
-                    ) : (
-                      <span>
-                        <code>{r.refusalCode}</code> <span className={v.faint}>{refusalText(r.refusalCode)}</span>
-                      </span>
-                    ),
-                },
-                {
-                  key: "open",
-                  header: "Evidence",
-                  align: "right",
-                  render: (r) =>
-                    isUnreadable(r) ? null : (
-                      <Button size="sm" variant="ghost" aria-label={`Evidence for placement ${r.id}`} aria-pressed={open === r.id} onClick={() => setOpen(open === r.id ? null : r.id)}>
-                        Evidence
-                      </Button>
-                    ),
-                },
-              ]}
-              empty={<EmptyState title="No placement decisions yet" body="No isolable call has been placed or refused." />}
-            />
+            <PlacementsTable rows={parsed?.placements ?? []} loading={q.isPending} open={open} onOpen={setOpen} />
             {open && <PlacementEvidence key={open} placementId={open} />}
             {q.hasNextPage && (
               <Button size="sm" disabled={q.isFetchingNextPage} onClick={() => void q.fetchNextPage()}>
@@ -530,7 +610,7 @@ function PlacementEvidence(props: { placementId: string }) {
   const detail = q.data === undefined ? null : parsePlacementDetail(q.data);
   return (
     <div data-testid="placement-evidence">
-      <h3 className={v.sectionTitle}>Placement evidence</h3>
+      <h2 className={v.sectionTitle}>Placement evidence</h2>
       {q.isPending ? (
         <p className={v.dim}>Loading…</p>
       ) : q.isError ? (
@@ -571,7 +651,7 @@ function PlacementEvidence(props: { placementId: string }) {
 function UnrecordedRefusals(props: { rows: Array<UnrecordedRefusal | Unreadable> }) {
   return (
     <div>
-      <h3 className={v.sectionTitle}>Refused before any placement</h3>
+      <h2 className={v.sectionTitle}>Refused before any placement</h2>
       <p className={v.dim}>A policy fact did not resolve, or the profile digest named no profile: refused before any executor was offered work.</p>
       <ul className={v.stackTight}>
         {props.rows.map((r) =>
@@ -593,7 +673,7 @@ function UnrecordedRefusals(props: { rows: Array<UnrecordedRefusal | Unreadable>
 function RefusalReasons() {
   return (
     <div>
-      <h3 className={v.sectionTitle}>What each refusal reason means</h3>
+      <h2 className={v.sectionTitle}>What each refusal reason means</h2>
       <dl className={v.stackTight}>
         {REFUSAL_REASONS.map((reason) => (
           <div key={reason}>
@@ -1160,7 +1240,7 @@ function ProjectIsolationEditor(props: { project: ProjectSensitivity; onSaved: (
   const raisesAfter = preview ? adminFieldRaises({ useCaseSensitivity: project.useCaseSensitivity, adminSensitivity: preview.sensitivity }) : false;
   return (
     <div className={v.stack} data-testid="project-isolation-editor">
-      <h3>{project.name}</h3>
+      <h2 className={v.sectionTitle}>{project.name}</h2>
       <Field label="Sensitivity set by an admin">
         <Select value={draft} disabled={act.busy} onChange={(e) => setDraft(e.target.value)}>
           <option value="">Not set (use cases only)</option>
