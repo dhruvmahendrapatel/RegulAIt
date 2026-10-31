@@ -3,27 +3,27 @@
   "engines": {
     "promptfoo": {
       "repository": "ghcr.io/dhruvmahendrapatel/regulait-engine-promptfoo",
-      "manifestDigest": "sha256:c54fe2d821a46cd7a6ed68c09cac2b3713d99ae2cf705d4f6957c99c29db0be2",
-      "imageId": "sha256:d500a7b03421aa96fd10126a7c6f75f2f8b76115781d65570dbdeb7dd27dbe30",
-      "publishGeneration": 9,
-      "sourceCommit": "fe5cfbb43a61f3ad975d260170f6c29beab03a44",
-      "publishedAt": "2026-10-24T23:15:26.890Z"
+      "manifestDigest": "sha256:73cef1d286b11596232fe02cbb2f10a274a96106666534c2a4b6cb7c03bc1e73",
+      "imageId": "sha256:4b5442dcbe1368c47a90e1557988ab7a857bfea9e9b363ca93b631a4de8edba0",
+      "publishGeneration": 10,
+      "sourceCommit": "322cf929af9cd7d9bfb85f5dbbe120c1da43ba87",
+      "publishedAt": "2026-10-31T05:58:48.593Z"
     },
     "modelscan": {
       "repository": "ghcr.io/dhruvmahendrapatel/regulait-engine-modelscan",
-      "manifestDigest": "sha256:2980529bf57d232760c9400f34a5e701411acc79b59a462f4e20d3a4dda60ac2",
-      "imageId": "sha256:334f94729d99b0b4ce333c6c48add3c14752ec1bcbb67628147b7002c1690480",
-      "publishGeneration": 8,
-      "sourceCommit": "4ae0eebcb170abf65840baafe9bec834ac4ea4a4",
-      "publishedAt": "2026-10-24T22:26:31.270Z"
+      "manifestDigest": "sha256:2fec4b9c7b659dc91f0b5bec5b4e9e41cfd7947a427001d5b9a6518353c5b4e8",
+      "imageId": "sha256:273a5f1980a80b0fdf3ea857a16d72534b3b727fc82706f554e32a7de3ee498a",
+      "publishGeneration": 9,
+      "sourceCommit": "322cf929af9cd7d9bfb85f5dbbe120c1da43ba87",
+      "publishedAt": "2026-10-31T05:58:48.593Z"
     },
     "garak": {
       "repository": "ghcr.io/dhruvmahendrapatel/regulait-engine-garak",
-      "manifestDigest": "sha256:70c59a0177cfba5063a587de5dc958e60bedae2487997e4d01b62a747b50cf52",
-      "imageId": "sha256:5c0ab003fe301804cd7f98653ca61017ea31886549f2fac1b2e25589cc40483a",
-      "publishGeneration": 9,
-      "sourceCommit": "4ae0eebcb170abf65840baafe9bec834ac4ea4a4",
-      "publishedAt": "2026-10-24T22:26:31.270Z"
+      "manifestDigest": "sha256:1996da8af102e29494ee172f76f2bdc6dde5778378cb3d8a72fffee307318a92",
+      "imageId": "sha256:b3c1f5e77115eac06c88a033d4c1f27ee14f2ab4d7acd727cb64d4cfea7358f6",
+      "publishGeneration": 10,
+      "sourceCommit": "322cf929af9cd7d9bfb85f5dbbe120c1da43ba87",
+      "publishedAt": "2026-10-31T05:58:48.593Z"
     }
   }
 }
