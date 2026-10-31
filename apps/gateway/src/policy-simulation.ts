@@ -1550,7 +1550,7 @@ export function registerPolicySimulationRoutes(app: FastifyInstance, db: Db): vo
    * named users/projects/tools and the scope itself stay on the detail route,
    * where the scope check guards them.
    */
-  // ADR-0219: the one predicate for the preview history, its count and its Excel export. A non-admin sees what they
+  // ADR-0226: the one predicate for the preview history, its count and its Excel export. A non-admin sees what they
   // ran, and a wider preview only when every user it scoped is someone they may see (the read below, in SQL).
   const simulationsScope = async (req: FastifyRequest, f: z.infer<typeof simulationsFilterQuery>): Promise<SQLL | undefined | null> => {
     const callerId = req.authCtx.userId ?? null;
@@ -1748,7 +1748,7 @@ export function registerPolicySimulationRoutes(app: FastifyInstance, db: Db): vo
   });
 }
 
-// ---- ADR-0219: the preview history under the shared list contract (never the blast radius or the scope)
+// ---- ADR-0226: the preview history under the shared list contract (never the blast radius or the scope)
 const simulationsFilterQuery = z.object({ policyVersionId: z.string().uuid().optional() }).strict();
 type SimulationListRow = Omit<typeof policySimulations.$inferSelect, "blastRadius" | "scopeUserIds">;
 export const SIMULATIONS_LIST: ListSpec<SimulationListRow> = {

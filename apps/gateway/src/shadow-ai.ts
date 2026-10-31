@@ -217,7 +217,7 @@ export const SHADOW_AI_RULE_IDS = {
 
 const SEVERITY_RANK: Record<ShadowAiSeverity, number> = { low: 0, medium: 1, high: 2, critical: 3 };
 
-// ---- ADR-0219: the inventory and the import history under the shared list contract
+// ---- ADR-0226: the inventory and the import history under the shared list contract
 const findingsFilterQuery = z
   .object({
     severity: z.enum(["low", "medium", "high", "critical"]).optional(),
@@ -1361,7 +1361,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
   };
   const importsWhere = (f: z.infer<typeof importsFilterQuery>): SQLL | undefined =>
     f.status ? eq(shadowAiImports.status, f.status) : undefined;
-  // ADR-0219: with any of sort/dir/cursor/offset/count the import history answers the shared list contract; with
+  // ADR-0226: with any of sort/dir/cursor/offset/count the import history answers the shared list contract; with
   // none of them, exactly the response it always gave (the newest 200). Admin only.
   app.get("/v1/shadow-ai/imports/export.xlsx", async (req, reply) => {
     try {
@@ -1492,7 +1492,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
     return conds.length ? and(...conds) : undefined;
   };
 
-  // ADR-0219: with any of sort/dir/cursor/offset/count the inventory answers the shared list contract, with the
+  // ADR-0226: with any of sort/dir/cursor/offset/count the inventory answers the shared list contract, with the
   // status filter on the server and the page's figures (`summary`), coverage and posture beside the page; with none
   // of them, exactly the response it always gave. Admin only. The export holds no raw evidence: the evidence kinds only.
   app.get("/v1/shadow-ai/findings/export.xlsx", async (req, reply) => {

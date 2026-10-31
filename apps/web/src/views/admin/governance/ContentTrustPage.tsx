@@ -6,7 +6,7 @@
  * source below the write floor is refused. Every tier change (up or down) and every floor change asks the admin to
  * confirm it is them (a `settings_relax` step-up) and is audited.
  *
- * The evidence card lists the provenance records under the shared list control (ADR-0219): the label and both digests (what upstream returned, what
+ * The evidence card lists the provenance records under the shared list control (ADR-0226): the label and both digests (what upstream returned, what
  * was delivered) of each governed result, never its content, with the audit anchor that covers it.
  */
 import { useState } from "react";
@@ -200,7 +200,7 @@ function TierEditor(props: { source: ContentTrustSource; onSaved: () => void }) 
   );
 }
 
-/** ADR-0219: the provenance records' columns; the ids and sortable ones match the gateway's PROVENANCE_LIST */
+/** ADR-0226: the provenance records' columns; the ids and sortable ones match the gateway's PROVENANCE_LIST */
 const RECORD_COLUMNS: Array<DataColumn<ContentProvenanceRecordView>> = [
   { key: "at", header: "Recorded", main: true, sortable: true, render: (r) => ago(r.createdAt) },
   {

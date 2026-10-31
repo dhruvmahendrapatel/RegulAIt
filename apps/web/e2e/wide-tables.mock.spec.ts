@@ -258,7 +258,7 @@ test("Recent runs takes the full width, with Reveal a pseudonym in its own row b
 });
 
 /** the header texts and each row's folded lines (data-fold key → its label) */
-// the server-sorted column carries its arrow (ADR-0219): the header's words are what these tests read
+// the server-sorted column carries its arrow (ADR-0226): the header's words are what these tests read
 const heads = (card: Locator) => card.locator("thead th").allInnerTexts().then((all) => all.map((h) => h.replace(/[▲▼]/g, "").replace(/\s+/g, " ").trim()));
 async function foldLabels(row: Locator, labels: Record<string, string>) {
   for (const [key, label] of Object.entries(labels)) await expect(row.locator(`[data-fold="${key}"]`).locator("span").first()).toHaveText(label);
@@ -281,7 +281,7 @@ test("Recent runs at 1024 px, on its own page, folds at md with every value labe
   await page.setViewportSize({ width: 1024, height: 1000 });
   await page.goto("/ui/admin/shadow-ai/discovery-sources/runs");
   const card = cardOf(page, "Runs");
-  // ADR-0219: the card pages under the list control instead of folding, so its table is there from the start
+  // ADR-0226: the card pages under the list control instead of folding, so its table is there from the start
   await openCard(page, "Runs");
   await expect(card.locator("[data-fold-step]")).toHaveAttribute("data-fold-step", "md");
   expect(await overflow(card)).toBe(0);
@@ -320,7 +320,7 @@ test("Audit entries at 1024 px: a folded column keeps its own sort, from its nam
   await foldLabels(card.locator("tbody tr").first(), { user: "User", deployMode: "Deploy mode" });
   const effect = card.locator("thead th", { hasText: "Effect" });
   const rows = card.locator("tbody tr");
-  // ADR-0219: the folded Deploy mode sorts on the server, ascending then descending
+  // ADR-0226: the folded Deploy mode sorts on the server, ascending then descending
   const asks = (sort: string, dir: string) => page.waitForRequest((r) => { const q = new URL(r.url()).searchParams; return new URL(r.url()).pathname === "/v1/audit" && q.get("sort") === sort && q.get("dir") === dir; });
   let asked = asks("deployMode", "asc");
   await effect.getByRole("button", { name: "Deploy mode", exact: true }).click();
@@ -363,7 +363,7 @@ test("on a phone a card's header wraps: the title keeps one line and the filters
   await page.setViewportSize({ width: 390, height: 1000 });
   await page.goto("/ui/admin/shadow-ai");
   const header = (await openCard(page, "Inventory")).locator(":scope > div").first();
-  // ADR-0219: the Inventory pages under the list control instead of folding; its title is the header's first span
+  // ADR-0226: the Inventory pages under the list control instead of folding; its title is the header's first span
   const fold = header.locator(":scope > span").first();
   const filters = header.getByRole("button", { name: /^All/ });
   const [f, a] = [(await fold.boundingBox())!, (await filters.boundingBox())!];

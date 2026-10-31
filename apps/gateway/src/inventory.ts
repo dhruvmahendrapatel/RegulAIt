@@ -409,7 +409,7 @@ export async function buildAgentHolderIndex(db: Db): Promise<AgentHolderIndex> {
 // Routes
 // ---------------------------------------------------------------------------
 
-// ---- ADR-0219: the registered agents under the shared list contract. Sortable by what the agents table holds; the
+// ---- ADR-0226: the registered agents under the shared list contract. Sortable by what the agents table holds; the
 // read-time figures (dispatches, coverage, links) are computed per page and say they cannot be sorted.
 const inventoryFilterQuery = z.object({ lifecycle: z.enum(["proposed", "under_review", "active", "deprecated", "suspended", "retired"]).optional() }).strict();
 type InventoryListRowT = {
@@ -745,7 +745,7 @@ export function registerInventoryRoutes(app: FastifyInstance, db: Db): void {
   };
   const inventoryWhere = (f: z.infer<typeof inventoryFilterQuery>): SQLL | undefined =>
     f.lifecycle ? eq(agents.lifecycleStatus, f.lifecycle) : undefined;
-  // ADR-0219: with any of sort/dir/cursor/offset/count the registered agents answer the shared list contract (the
+  // ADR-0226: with any of sort/dir/cursor/offset/count the registered agents answer the shared list contract (the
   // window and notes beside the page; the SoD section stays on the legacy read and its own card); admin only.
   app.get("/v1/inventory/agents/export.xlsx", async (req, reply) => {
     try {

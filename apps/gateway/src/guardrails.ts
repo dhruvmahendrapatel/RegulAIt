@@ -873,7 +873,7 @@ export function registerGuardrailRoutes(app: FastifyInstance, db: Db): void {
       .groupBy(auditLog.ruleId);
     return Object.fromEntries(counts.map((c) => [c.ruleId.replace("guardrail-", ""), c.n]));
   };
-  // ADR-0219: with any of sort/dir/cursor/offset/count the decisions answer the shared list contract; admin only.
+  // ADR-0226: with any of sort/dir/cursor/offset/count the decisions answer the shared list contract; admin only.
   // Counts and detector ids only, as the list: no matched content is stored anywhere.
   app.get("/v1/guardrails/violations/export.xlsx", async (req, reply) => {
     try {
@@ -953,7 +953,7 @@ export function registerGuardrailRoutes(app: FastifyInstance, db: Db): void {
   });
 }
 
-// ---- ADR-0219: the recent guardrail decisions under the shared list contract
+// ---- ADR-0226: the recent guardrail decisions under the shared list contract
 const VIOLATIONS_NOTE =
   "Sourced from the single audit log — the same table every other governed decision lands in. Counts only; no matched content is stored anywhere.";
 const violationsFilterQuery = z.object({ outcome: z.enum(["blocked", "warned", "logged"]).optional() }).strict();

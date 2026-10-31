@@ -377,7 +377,7 @@ export default function DecisionRegressionPage() {
   );
 }
 
-/** ADR-0219: the regression runs' columns; the ids and sortable ones match the gateway's REGRESSION_RUNS_LIST */
+/** ADR-0226: the regression runs' columns; the ids and sortable ones match the gateway's REGRESSION_RUNS_LIST */
 const REGRESSION_RUN_COLUMNS: Array<DataColumn<RegressionRun>> = [
   { key: "at", header: "When", main: true, sortable: true, render: (r) => shortDate(r.createdAt) },
   { key: "subject", header: "Change to", main: true, sortable: true, render: (r) => SUBJECT_LABEL[r.subject] },

@@ -149,7 +149,7 @@ const settingsSchema = z
 const uuidParam = z.object({ sourceId: z.string().uuid() });
 const pseudonymParam = z.object({ pseudonym: z.string().regex(/^psn:[0-9a-f]{24}$/) });
 const runsQuery = z.object({ sourceId: z.string().uuid().optional(), limit: z.coerce.number().int().min(1).max(200).default(50) });
-// ---- ADR-0219: the recent runs under the shared list contract
+// ---- ADR-0226: the recent runs under the shared list contract
 const runsFilterQuery = z.object({ sourceId: z.string().uuid().optional(), status: z.enum(["queued", "running", "succeeded", "failed"]).optional() }).strict();
 type DiscoveryRunListRow = ReturnType<typeof runView> & { sourceName: string | null };
 const RUN_SOURCE_NAME = sqlL<string | null>`(select ${discoverySources.name} from ${discoverySources} where ${discoverySources.id} = ${discoveryRuns.sourceId})`;
@@ -759,7 +759,7 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
     countable: (where) => db.select({ one: sqlL`1` }).from(discoveryRuns).where(where),
     idOf: (r) => r.id,
   };
-  // ADR-0219: with any of sort/dir/cursor/offset/count it answers the shared list contract; admin only
+  // ADR-0226: with any of sort/dir/cursor/offset/count it answers the shared list contract; admin only
   app.get("/v1/discovery/runs/export.xlsx", async (req, reply) => {
     try {
       const q = req.query as Record<string, unknown>;

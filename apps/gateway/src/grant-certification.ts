@@ -72,15 +72,16 @@ import {
   roleToolGrants,
   roles,
   serverGrants,
+  sql,
   toolGrants,
   users,
   type Db,
   type GrantCertGrantKind,
   type GrantCertificationCampaignRow,
 } from "@regulait/db";
-import { parseRecommendationRuleIds } from "@regulait/shared";
+import { cancelCertificationCampaignSchema, parseRecommendationRuleIds } from "@regulait/shared";
 import { z } from "zod";
-import { sql, type SQL } from "@regulait/db";
+import type { SQL } from "@regulait/db";
 import {
   filterParams,
   parseListExport,
@@ -93,6 +94,7 @@ import {
   type ListSpec,
 } from "./list-contract.js";
 import { userNameSql } from "./delegations-list.js";
+import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
 // ADR-0092 (gap L24): the recommendation-scoped campaign snapshot — the one
 // action path a recommendation has (recommend → review → human decides →
 // revoke-is-real). Imported here as one more scope filter, never a parallel
@@ -145,12 +147,22 @@ const openCampaignSchema = z.object({
 });
 const campaignIdParam = z.object({ campaignId: z.string().uuid() });
 
-// ---- ADR-0219: the campaigns list and a campaign's items, under the shared list contract
+// ---- ADR-0226: the campaigns list and a campaign's items, under the shared list contract
+// Explicit qualifiers: in a single-table select drizzle renders a column bare, and a bare "id" inside this
+// subquery would bind to grant_certification_items.id rather than the outer campaign row.
 const ITEMS_OF = (decision: "keep" | "revoke" | "undecided" | "all") =>
-  sql<number>`(select count(*)::int from ${grantCertificationItems} where ${grantCertificationItems.campaignId} = ${grantCertificationCampaigns.id}${
-    decision === "all" ? sql`` : decision === "undecided" ? sql` and ${grantCertificationItems.decision} is null` : sql` and ${grantCertificationItems.decision} = ${decision}`
+  sql<number>`(select count(*)::int from "grant_certification_items" where "grant_certification_items"."campaign_id" = "grant_certification_campaigns"."id"${
+    decision === "all"
+      ? sql``
+      : decision === "undecided"
+        ? sql` and "grant_certification_items"."decision" is null`
+        : sql` and "grant_certification_items"."decision" = ${decision}`
   })`;
-const CAMPAIGN_STATUS_ORDER = sql`case when ${grantCertificationCampaigns.status} = 'completed' then 3 when ${grantCertificationCampaigns.dueAt} < now() and ${ITEMS_OF("undecided")} > 0 then 2 else 1 end`;
+/** the read-time status (campaignEffectiveStatus) in SQL, for the filter, the per-status counts and the sort */
+const CAMPAIGN_EFFECTIVE_STATUS = sql<EffectiveCampaignStatus>`(case when "grant_certification_campaigns"."status" = 'completed' then 'completed' when "grant_certification_campaigns"."status" = 'cancelled' then 'cancelled' when "grant_certification_campaigns"."due_at" < now() and ${ITEMS_OF("undecided")} > 0 then 'expired-incomplete' else 'open' end)`;
+const CAMPAIGN_STATUS_ORDER = sql`case ${CAMPAIGN_EFFECTIVE_STATUS} when 'cancelled' then 4 when 'completed' then 3 when 'expired-incomplete' then 2 else 1 end`;
+/** ADR-0208 G9 statuses, in the order the page's filter buttons show them */
+export const CAMPAIGN_STATUSES = ["open", "completed", "expired-incomplete", "cancelled"] as const;
 interface CampaignListRow {
   id: string;
   name: string;
@@ -160,10 +172,11 @@ interface CampaignListRow {
   status: EffectiveCampaignStatus;
   storedStatus: string;
   completedAt: string | null;
+  cancellation: { at: string; reason: string | null; byUserId: string | null } | null;
   createdAt: string;
   items: { total: number; keep: number; revoke: number; undecided: number };
 }
-const campaignsFilterQuery = z.object({ status: z.enum(["open", "completed", "expired-incomplete"]).optional() }).strict();
+const campaignsFilterQuery = z.object({ status: z.enum(CAMPAIGN_STATUSES).optional() }).strict();
 export const CAMPAIGNS_LIST: ListSpec<CampaignListRow> = {
   id: "certification-campaigns",
   sorts: {
@@ -188,14 +201,9 @@ export const CAMPAIGNS_LIST: ListSpec<CampaignListRow> = {
   defaultSort: { col: "created", dir: "desc" },
   idCol: grantCertificationCampaigns.id,
 };
+// the status is an allow-listed enum (the zod schema above), bound as a parameter, never interpolated
 const campaignsWhere = (f: z.infer<typeof campaignsFilterQuery>): SQL | undefined =>
-  f.status === "completed"
-    ? sql`${grantCertificationCampaigns.status} = 'completed'`
-    : f.status === "expired-incomplete"
-      ? sql`${grantCertificationCampaigns.status} <> 'completed' and ${grantCertificationCampaigns.dueAt} < now() and ${ITEMS_OF("undecided")} > 0`
-      : f.status === "open"
-        ? sql`${grantCertificationCampaigns.status} <> 'completed' and not (${grantCertificationCampaigns.dueAt} < now() and ${ITEMS_OF("undecided")} > 0)`
-        : undefined;
+  f.status ? sql`${CAMPAIGN_EFFECTIVE_STATUS} = ${f.status}` : undefined;
 interface CampaignItemListRow {
   id: string;
   grantKind: string;
@@ -253,7 +261,12 @@ export function campaignPastDue(campaign: { dueAt: Date }, now: Date): boolean {
   return campaign.dueAt.getTime() < now.getTime();
 }
 
-export type EffectiveCampaignStatus = "open" | "completed" | "expired-incomplete";
+/** ADR-0208 G9: who cancelled a campaign, when and why (null while it is not cancelled) */
+function cancellationView(c: GrantCertificationCampaignRow): { at: string; reason: string | null; byUserId: string | null } | null {
+  return c.cancelledAt ? { at: c.cancelledAt.toISOString(), reason: c.cancelledReason, byUserId: c.cancelledByUserId } : null;
+}
+
+export type EffectiveCampaignStatus ="open" | "completed" | "expired-incomplete" | "cancelled";
 
 /**
  * The read-time status projection (rule 4 above). Stored status is only ever
@@ -267,6 +280,8 @@ export function campaignEffectiveStatus(
   now: Date,
 ): EffectiveCampaignStatus {
   if (campaign.status === "completed") return "completed";
+  // ADR-0208 G9: an admin cancelled it; its undecided items were withdrawn, its decisions stand
+  if (campaign.status === "cancelled") return "cancelled";
   if (campaignPastDue(campaign, now) && undecidedItems > 0) return "expired-incomplete";
   return "open";
 }
@@ -511,6 +526,16 @@ export async function precheckGrantCertificationDecision(
     .select()
     .from(grantCertificationCampaigns)
     .where(eq(grantCertificationCampaigns.id, item.campaignId));
+  // ADR-0208 G9: a cancelled campaign's pending reviews were withdrawn; none may land late
+  if (campaign && campaign.status === "cancelled") {
+    return {
+      status: 409,
+      body: {
+        error: "campaign_cancelled",
+        detail: "this certification campaign was cancelled — its undecided reviews were withdrawn and the grant stays unattested",
+      },
+    };
+  }
   if (campaign && campaign.status === "open" && campaignPastDue(campaign, new Date())) {
     return {
       status: 409,
@@ -670,11 +695,12 @@ export async function certificationPostureSection(db: Db, now: Date) {
         .groupBy(grantCertificationItems.campaignId)
     : [];
   const undecidedByCampaign = new Map(undecidedRows.map((r) => [r.campaignId, r.n]));
-  const counts = { open: 0, completed: 0, expiredIncomplete: 0 };
+  const counts = { open: 0, completed: 0, expiredIncomplete: 0, cancelled: 0 };
   for (const c of campaigns) {
     const s = campaignEffectiveStatus(c, undecidedByCampaign.get(c.id) ?? 0, now);
     if (s === "open") counts.open += 1;
     else if (s === "completed") counts.completed += 1;
+    else if (s === "cancelled") counts.cancelled += 1;
     else counts.expiredIncomplete += 1;
   }
   return {
@@ -905,6 +931,7 @@ export function registerGrantCertificationRoutes(app: FastifyInstance, db: Db): 
         status: campaignEffectiveStatus(c, Number(undecided), now),
         storedStatus: c.status,
         completedAt: c.completedAt ? c.completedAt.toISOString() : null,
+        cancellation: cancellationView(c),
         createdAt: c.createdAt.toISOString(),
         items: { total: Number(total), keep: Number(keep), revoke: Number(revoke), undecided: Number(undecided) },
         _cursorAt,
@@ -912,6 +939,17 @@ export function registerGrantCertificationRoutes(app: FastifyInstance, db: Db): 
     },
     countable: (where) => db.select({ one: sql`1` }).from(grantCertificationCampaigns).where(where),
     idOf: (r) => r.id,
+  };
+  /** ADR-0208 G9: how many campaigns are in each status, across every campaign (the list is admin-only, so the
+   * scope is the whole table) — whatever status the page is filtered to, the filter buttons count them all */
+  const campaignsSummary = async (): Promise<{ statusCounts: Record<EffectiveCampaignStatus, number> }> => {
+    const rows = await db
+      .select({ status: CAMPAIGN_EFFECTIVE_STATUS, n: sql<number>`count(*)::int` })
+      .from(grantCertificationCampaigns)
+      .groupBy(CAMPAIGN_EFFECTIVE_STATUS);
+    const statusCounts = Object.fromEntries(CAMPAIGN_STATUSES.map((k) => [k, 0])) as Record<EffectiveCampaignStatus, number>;
+    for (const r of rows) if (Object.hasOwn(statusCounts, r.status)) statusCounts[r.status] = Number(r.n);
+    return { statusCounts };
   };
   const itemsReader: ListReader<CampaignItemListRow> = {
     fetch: async (q) => {
@@ -955,7 +993,7 @@ export function registerGrantCertificationRoutes(app: FastifyInstance, db: Db): 
           : undefined,
     )!;
 
-  // ADR-0219: with any of sort/dir/cursor/offset/count the campaigns list answers the shared list contract; with
+  // ADR-0226: with any of sort/dir/cursor/offset/count the campaigns list answers the shared list contract; with
   // none of them, exactly the response it always gave. A campaign's items page through their own route. Admin only.
   app.get("/v1/certification-campaigns/export.xlsx", async (req, reply) => {
     try {
@@ -1001,7 +1039,8 @@ export function registerGrantCertificationRoutes(app: FastifyInstance, db: Db): 
         const q = req.query as Record<string, unknown>;
         const filters = campaignsFilterQuery.parse(filterParams(q));
         const page = parseListPage(CAMPAIGNS_LIST, q);
-        return { ...(await runListPage(db, CAMPAIGNS_LIST, campaignsReader, campaignsWhere(filters), page)), notes: CERTIFICATION_NOTES };
+        const [out, summary] = await Promise.all([runListPage(db, CAMPAIGNS_LIST, campaignsReader, campaignsWhere(filters), page), campaignsSummary()]);
+        return { ...out, summary, notes: CERTIFICATION_NOTES };
       } catch (e) {
         return sendListError(reply, e);
       }
@@ -1044,6 +1083,7 @@ export function registerGrantCertificationRoutes(app: FastifyInstance, db: Db): 
           status: campaignEffectiveStatus(c, undecided, now),
           storedStatus: c.status,
           completedAt: c.completedAt ? c.completedAt.toISOString() : null,
+          cancellation: cancellationView(c),
           createdAt: c.createdAt.toISOString(),
           items: { total: rows.reduce((a, r) => a + r.n, 0), keep: of("keep"), revoke: of("revoke"), undecided },
         };
@@ -1087,6 +1127,7 @@ export function registerGrantCertificationRoutes(app: FastifyInstance, db: Db): 
       status: campaignEffectiveStatus(campaign, undecided, now),
       storedStatus: campaign.status,
       completedAt: campaign.completedAt ? campaign.completedAt.toISOString() : null,
+      cancellation: cancellationView(campaign),
       createdAt: campaign.createdAt.toISOString(),
       notes: CERTIFICATION_NOTES,
       items: items.map((i) => ({
@@ -1102,6 +1143,100 @@ export function registerGrantCertificationRoutes(app: FastifyInstance, db: Db): 
         decidedAt: i.decidedAt ? i.decidedAt.toISOString() : null,
         revocation: i.revocationDetail ?? null,
       })),
+    };
+  });
+
+  /**
+   * ADR-0208 G9 — CANCEL an open campaign. Admin-only (the default gate), reason required, `settings_relax` step-up
+   * (it stops a review of standing access part-way). Only a campaign that reads `open` — a completed one is done and
+   * an expired-incomplete one keeps its posture fact (`campaign_not_open`). Every undecided item's queue row leaves the
+   * reviewers' pending queues (`superseded`, the status every other path uses to retire a pending approval); the
+   * item stays undecided and the grant stays unattested. Decisions already made, revocations included, stand.
+   */
+  app.post("/v1/certification-campaigns/:campaignId/cancel", async (req, reply) => {
+    const { campaignId } = campaignIdParam.parse(req.params);
+    const body = cancelCertificationCampaignSchema.parse(req.body);
+    const actor = req.authCtx.userId ?? null;
+    const notOpen = (status: string) =>
+      reply.status(409).send({ error: "campaign_not_open", status, detail: `only an open campaign can be cancelled; this one reads '${status}'` });
+    const readState = async (d: Db) => {
+      const [row] = await d
+        .select({ campaign: grantCertificationCampaigns, pastDue: sql<boolean>`${grantCertificationCampaigns.dueAt} < now()` })
+        .from(grantCertificationCampaigns)
+        .where(eq(grantCertificationCampaigns.id, campaignId));
+      if (!row) return null;
+      const [u] = await d
+        .select({ n: count() })
+        .from(grantCertificationItems)
+        .where(and(eq(grantCertificationItems.campaignId, campaignId), isNull(grantCertificationItems.decision)));
+      const undecided = u?.n ?? 0;
+      // the database clock decides "past due" here
+      const status: EffectiveCampaignStatus =
+        row.campaign.status !== "open" ? row.campaign.status : row.pastDue && undecided > 0 ? "expired-incomplete" : "open";
+      return { campaign: row.campaign, status };
+    };
+    const before = await readState(db);
+    if (!before) return reply.status(404).send({ error: "not_found" });
+    if (before.status !== "open") return notOpen(before.status);
+    const su = await requireStepUp(db, req, reply, {
+      kind: "settings_relax",
+      facts: { op: "certification_campaign_cancel", campaignId, name: before.campaign.name },
+    });
+    if (!su.ok) return reply;
+    const out = await db.transaction(async (tx) => {
+      const t = tx as unknown as Db;
+      await t.select({ id: grantCertificationCampaigns.id }).from(grantCertificationCampaigns).where(eq(grantCertificationCampaigns.id, campaignId)).for("update");
+      const now = await readState(t);
+      if (!now) return { kind: "changed" as const };
+      if (now.status !== "open") return { kind: "not_open" as const, status: now.status };
+      const items = await t
+        .select({ id: grantCertificationItems.id, decision: grantCertificationItems.decision, approvalId: grantCertificationItems.approvalId })
+        .from(grantCertificationItems)
+        .where(eq(grantCertificationItems.campaignId, campaignId));
+      const undecided = items.filter((i) => i.decision === null);
+      const pendingIds = undecided.map((i) => i.approvalId).filter((a): a is string => a !== null);
+      const withdrawn = pendingIds.length
+        ? await t
+            .update(approvals)
+            .set({ status: "superseded", decisionReason: `superseded: certification campaign '${now.campaign.name}' was cancelled` })
+            .where(and(inArray(approvals.id, pendingIds), eq(approvals.status, "pending")))
+            .returning({ id: approvals.id })
+        : [];
+      const [row] = await t
+        .update(grantCertificationCampaigns)
+        .set({ status: "cancelled", cancelledAt: sql`now()`, cancelledReason: body.reason, cancelledByUserId: actor })
+        .where(and(eq(grantCertificationCampaigns.id, campaignId), eq(grantCertificationCampaigns.status, "open")))
+        .returning();
+      const counts = {
+        items: items.length,
+        decided: items.length - undecided.length,
+        kept: items.filter((i) => i.decision === "keep").length,
+        revoked: items.filter((i) => i.decision === "revoke").length,
+        undecided: undecided.length,
+        withdrawn: withdrawn.length,
+      };
+      await t.insert(auditLog).values({
+        userId: actor ?? "00000000-0000-0000-0000-000000000000",
+        objectType: "certification_campaign",
+        objectId: campaignId,
+        detail: { phase: "cancel", name: now.campaign.name, reason: body.reason, ...counts, withdrawnApprovalIds: withdrawn.map((w) => w.id) },
+        effect: "allow",
+        ruleId: "certification-campaign-cancelled",
+        ruleChain: [],
+        reason:
+          `certification campaign '${now.campaign.name}' cancelled: ${body.reason} — ${counts.withdrawn} pending review(s) withdrawn ` +
+          `(those grants stay unattested); ${counts.decided} decision(s) already made stand`,
+      });
+      return { kind: "ok" as const, row: row!, counts };
+    });
+    if (out.kind === "changed") return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
+    if (out.kind === "not_open") return notOpen(out.status);
+    return {
+      cancelled: true,
+      id: out.row.id,
+      status: "cancelled" as const,
+      cancellation: cancellationView(out.row),
+      ...out.counts,
     };
   });
 
@@ -1166,6 +1301,10 @@ export function registerGrantCertificationRoutes(app: FastifyInstance, db: Db): 
         error: "item_already_decided",
         detail: "this item is decided — a recorded attestation keeps its reviewer; reassignment moves pending reviews only",
       });
+    }
+    // ADR-0208 G9: a cancelled campaign has no pending review to move
+    if (campaign.status === "cancelled") {
+      return reply.status(409).send({ error: "campaign_not_open", status: "cancelled", detail: "this campaign was cancelled; its pending reviews were withdrawn" });
     }
     if (campaign.status === "open" && campaignPastDue(campaign, new Date())) {
       return reply.status(409).send({

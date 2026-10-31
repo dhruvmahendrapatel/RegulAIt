@@ -101,7 +101,7 @@ export function SlaChip(props: { sla: FeedbackSla }) {
   return <Badge tone="ok">{`On time: ${what} by ${due}`}</Badge>;
 }
 
-/** ADR-0219: the feedback list's columns; the ids and sortable ones match the gateway's FEEDBACK_LIST */
+/** ADR-0226: the feedback list's columns; the ids and sortable ones match the gateway's FEEDBACK_LIST */
 export const FEEDBACK_COLUMNS: Array<DataColumn<FeedbackItem>> = [
   { key: "at", header: "Received", main: true, sortable: true, render: (r) => fmtAt(r.createdAt) },
   { key: "uc", header: "Use case", main: true, sortable: true, render: (r) => r.useCaseName ?? <IdChip id={r.useCaseId} /> },

@@ -98,7 +98,7 @@ const FILTERS = [
   { id: "resolved", label: "Resolved" },
 ];
 
-/** ADR-0219: the alerts list's columns; the ids and sortable ones match the gateway's ALERTS_LIST */
+/** ADR-0226: the alerts list's columns; the ids and sortable ones match the gateway's ALERTS_LIST */
 const ALERT_COLUMNS: Array<DataColumn<GovernanceAlert>> = [
   { key: "severity", header: "Severity", main: true, sortable: true, required: "Severity is always shown", render: (alert) => <SeverityBadge severity={alert.severity} /> },
   { key: "status", header: "Status", main: true, sortable: true, required: "Status is always shown", render: (alert) => humanize(alert.status) },
@@ -135,7 +135,7 @@ export default function GovernanceAlertsPage() {
   const [postResult, setPostResult] = useState<string | null>(null);
   const action = useAction();
   const queryClient = useQueryClient();
-  // ADR-0219: the list pages on the server; the counts and the last evaluation come with each page
+  // ADR-0226: the list pages on the server; the counts and the last evaluation come with each page
   const [pageRows, setPageRows] = useState<GovernanceAlert[]>([]);
   const [meta, setMeta] = useState<Pick<AlertsResponse, "counts" | "lastEvaluatedAt"> | null>(null);
   const [alertTotal, setAlertTotal] = useState<number | null>(null);
@@ -687,7 +687,7 @@ function SubjectLinks({ alert }: { alert: GovernanceAlert }) {
 export function GovernanceAlertsSnapshot() {
   const alerts = useQuery({
     queryKey: ["governance", "alerts", "active"],
-    // ADR-0219: the counts and the last evaluation come with any page; one small page is enough
+    // ADR-0226: the counts and the last evaluation come with any page; one small page is enough
     queryFn: () => api.get<AlertsResponse>("/v1/governance/alerts?status=active&limit=10&sort=lastSeen&dir=desc"),
   });
   const active = (alerts.data?.counts.open ?? 0) + (alerts.data?.counts.acknowledged ?? 0);

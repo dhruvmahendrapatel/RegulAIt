@@ -1,5 +1,5 @@
 /**
- * ADR-0219 — the approver delegations table (`/admin/approvals`) under the
+ * ADR-0226 — the approver delegations table (`/admin/approvals`) under the
  * shared list contract (list-contract.ts). `GET /v1/delegations` is admin-only
  * through the default gate (route-classes.ts), and so is its Excel export.
  */

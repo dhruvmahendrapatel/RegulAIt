@@ -362,7 +362,7 @@ export const enrolmentTokenLongExpiryStepUp = (input: { sourceId: string; label:
   facts: { op: "endpoint_enrolment_token_long_expiry", sourceId: input.sourceId, label: input.label, deviceCap: input.deviceCap, expiresInDays: input.expiresInDays },
 });
 
-// ---- ADR-0219: a source's enrolment tokens and endpoint devices under the shared list contract. A token's secret
+// ---- ADR-0226: a source's enrolment tokens and endpoint devices under the shared list contract. A token's secret
 // (and its hash) is never in the row, the page or the file; a device's ticket hash never is either.
 type TokenListRow = ReturnType<typeof tokenView> & { devicesActive: number };
 const TOKEN_ACTIVE_DEVICES = sqlL<number>`(select count(*)::int from ${endpointDevices} where ${endpointDevices.tokenId} = ${endpointEnrolmentTokens.id} and ${endpointDevices.revokedAt} is null)`;
@@ -1015,7 +1015,7 @@ export function registerEndpointAgentRoutes(app: FastifyInstance, db: Db, opts: 
     }
     return agentSource(reply, p.data.sourceId as string, false);
   };
-  // ADR-0219: with any of sort/dir/cursor/offset/count each list answers the shared list contract; admin only
+  // ADR-0226: with any of sort/dir/cursor/offset/count each list answers the shared list contract; admin only
   app.get("/v1/discovery/sources/:sourceId/enrolment-tokens/export.xlsx", async (req, reply) => {
     try {
       const source = await listSource(req, reply);

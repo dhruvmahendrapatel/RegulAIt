@@ -1,7 +1,7 @@
 /**
  * P3 (owner, #453 c6527514889): the Discovery sources page's full record lists, each on its own page under the
  * parent's path — recent runs, a source's enrolment tokens and its endpoint devices — with a breadcrumb back to the
- * parent, the shared list control (ADR-0219) and the list's filters. Admin-only like the parent (the gateway's
+ * parent, the shared list control (ADR-0226) and the list's filters. Admin-only like the parent (the gateway's
  * default gate). The overview keeps a preview of each.
  */
 import { useMemo, useState } from "react";

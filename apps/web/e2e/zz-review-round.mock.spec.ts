@@ -257,7 +257,7 @@ async function mockGateway(page: Page, patch: Partial<State> = {}): Promise<Stat
         listRow({ id: RECERT, name: "Fraud scoring model", description: "Scores card transactions.", status: "under_review", approvedUntil: "2026-09-01T00:00:00Z", recertification: true, recertificationDueAt: "2026-09-01T00:00:00Z" }),
         listRow({ id: "77777777-1111-4111-8111-111111111111", name: "Ticket summarizer", status: "approved", euAiActTier: "minimal", approvedUntil: "2027-08-20T09:00:00Z" }),
       ];
-      // ADR-0219: the registry's filters and figures run on the server
+      // ADR-0226: the registry's filters and figures run on the server
       return json(route, isContractRead(q) ? useCasesContract(useCases, q) : { useCases });
     }
     if (p === `/v1/use-cases/${UC}/overview`) return me.isAdmin ? json(route, overview(state.status)) : json(route, { error: "forbidden" }, 403);

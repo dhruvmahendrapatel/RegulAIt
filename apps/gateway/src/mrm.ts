@@ -99,6 +99,7 @@ import {
   type MrmGateCard,
   type MrmGateDecision,
 } from "@regulait/shared";
+import { MRM_AUTO_RETEST_NOTE, attachRetestsToRequest, retestsForCard } from "./mrm-retest-store.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { modelCardSignoffSubjects, prepareAiBomSignoff, runAiBomSignoffs, type AiBomSignoff } from "./ai-bom-signoff.js";
 import { settingTransitions } from "./setting-transitions.js";
@@ -551,7 +552,7 @@ export async function runMrmExpirySweep(
 const idParam = z.object({ id: z.string().uuid() });
 const evidenceParam = z.object({ id: z.string().uuid(), evidenceId: z.string().uuid() });
 
-/** ADR-0219: the model card's subject name, as the list shows it (an agent's or a custom provider's) */
+/** ADR-0226: the model card's subject name, as the list shows it (an agent's or a custom provider's) */
 const CARD_SUBJECT = sql<string | null>`coalesce((select ${agents.name} from ${agents} where ${agents.id} = ${modelCards.agentId}), (select ${customModelProviders.name} from ${customModelProviders} where ${customModelProviders.id} = ${modelCards.customProviderId}))`;
 /** the newest sign-off record's expiry: what "Expires" counts down to */
 const CARD_EXPIRY = sql`(select ${modelCardApprovals.validUntil} from ${modelCardApprovals} where ${modelCardApprovals.cardId} = ${modelCards.id} order by ${modelCardApprovals.requestedAt} desc limit 1)`;
@@ -671,13 +672,17 @@ async function cardView(db: Db, card: ModelCardRow, now: Date, warnDays: number)
     }),
   );
   const state = cardState(chain, now, warnDays);
+  // ADR-0217: the automatic re-tests, shown on the request they are evidence for
+  const retests = await retestsForCard(db, card.id, chain.map((a) => a.id));
   return {
     ...card,
     approvals: chain.map((a) => ({
       ...a,
       effectiveStatus: effectiveApprovalStatus(a, now),
       daysUntilExpiry: daysUntilExpiry(a, now),
+      retests: retests.byApproval.get(a.id) ?? [],
     })),
+    retestsAwaitingRequest: retests.unattached,
     evidence,
     state: state.state,
     daysUntilExpiry: state.daysLeft,
@@ -749,6 +754,9 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
        * dispatch gate (mrmEnforced) — with enforcement off it gates nothing */
       stalenessRecertEnabled: org.mrmStalenessRecertEnabled,
       stalenessRecertThreshold: org.mrmStalenessRecertThreshold,
+      /** ADR-0217: off by default; written through PUT /v1/org/settings (a stepped-up relaxation) */
+      autoRetestEnabled: org.mrmAutoRetestEnabled,
+      autoRetestNote: MRM_AUTO_RETEST_NOTE,
       ...mrmPosture({ enforced: org.mrmEnforced, cardCount: cards.length, approvedCount }),
       cards: cards.length,
       approved: count("approved"),
@@ -803,7 +811,7 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
     countable: (where) => db.select({ one: sql`1` }).from(modelCards).where(where),
     idOf: (r) => r.id,
   });
-  // ADR-0219: the Excel export sits outside the presentation scope below: that scope rewrites a non-JSON body as
+  // ADR-0226: the Excel export sits outside the presentation scope below: that scope rewrites a non-JSON body as
   // text, which would break a binary file, and no exported column carries an eval run's quoted claims
   app.get("/v1/mrm/cards/export.xlsx", async (req, reply) => {
     try {
@@ -823,7 +831,7 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
 
 
     scope.get("/v1/mrm/cards", async (req, reply) => {
-      // ADR-0219: with any of sort/dir/cursor/offset/count, one page under the shared list contract
+      // ADR-0226: with any of sort/dir/cursor/offset/count, one page under the shared list contract
       if (wantsListContract(req.query)) {
         try {
           const q = req.query as Record<string, unknown>;
@@ -1113,6 +1121,8 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
           supersedesId: superseding?.id ?? null,
         })
         .returning();
+      // ADR-0217: automatic re-tests run since the last request become this request's evidence
+      const retestsAttached = await attachRetestsToRequest(tx, card.id, record!.id);
       await tx.insert(auditLog).values({
         userId: req.authCtx.userId ?? NO_IDENTITY,
         objectType: "model_card",
@@ -1125,6 +1135,7 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
           approverUserId: body.approverUserId,
           validUntil: validUntil?.toISOString() ?? null,
           recertificationOf: superseding?.id ?? null,
+          retestsAttached,
         },
         effect: "allow",
         ruleId: "mrm-sign-off-requested",
@@ -1352,7 +1363,7 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
     }
   });
   app.get("/v1/mrm/expiring", async (req, reply) => {
-    // ADR-0219: with any of sort/dir/cursor/offset/count, one page under the shared list contract
+    // ADR-0226: with any of sort/dir/cursor/offset/count, one page under the shared list contract
     if (wantsListContract(req.query)) {
       try {
         const q = req.query as Record<string, unknown>;

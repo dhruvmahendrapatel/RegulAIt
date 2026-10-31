@@ -1626,7 +1626,7 @@ export function registerSodRoutes(app: FastifyInstance, db: Db): void {
     countable: (where) => db.select({ one: sqlL`1` }).from(sodOverrideRequests).where(where),
     idOf: (r) => r.id,
   };
-  // ADR-0219: with any of sort/dir/cursor/offset/count it answers the shared list contract; admin only
+  // ADR-0226: with any of sort/dir/cursor/offset/count it answers the shared list contract; admin only
   app.get("/v1/sod/overrides/export.xlsx", async (req, reply) => {
     try {
       const q = req.query as Record<string, unknown>;
@@ -1691,7 +1691,7 @@ export function registerSodRoutes(app: FastifyInstance, db: Db): void {
   });
 }
 
-// ---- ADR-0219: override requests under the shared list contract ------------
+// ---- ADR-0226: override requests under the shared list contract ------------
 interface SodOverrideListRow {
   id: string;
   ruleId: string;

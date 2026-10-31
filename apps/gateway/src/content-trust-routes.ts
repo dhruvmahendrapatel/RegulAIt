@@ -292,7 +292,7 @@ export function registerContentTrustRoutes(app: FastifyInstance, db: Db): void {
   };
   const recordsWhere = (f: z.infer<typeof recordsFilterQuery>): SQLL | undefined =>
     f.contextId ? eq(contentProvenanceRecords.contextId, f.contextId) : undefined;
-  // ADR-0219: with any of sort/dir/cursor/offset/count it answers the shared list contract; admin only. The file
+  // ADR-0226: with any of sort/dir/cursor/offset/count it answers the shared list contract; admin only. The file
   // holds exactly the digests the list shows (content digests, never a key).
   app.get("/v1/content-provenance/records/export.xlsx", async (req, reply) => {
     try {

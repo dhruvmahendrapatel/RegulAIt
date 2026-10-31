@@ -624,14 +624,14 @@ const listQuery = z
   })
   .strict();
 
-/** ADR-0219: the list's filters (the contract's own params ride beside them) */
+/** ADR-0226: the list's filters (the contract's own params ride beside them) */
 const feedbackFilterQuery = listQuery.omit({ limit: true }).strict();
 type FeedbackListRow = ReturnType<typeof listView> & { ownerName: string | null };
 const FB_SLA_DUE = sql`case when ${useCaseFeedback.resolvedAt} is not null then null when ${useCaseFeedback.acknowledgedAt} is null then ${useCaseFeedback.ackDueAt} else ${useCaseFeedback.resolveDueAt} end`;
 /** past a response time, as `feedbackSlaState` says "breached" */
 const FB_BREACHED = sql`(${useCaseFeedback.resolvedAt} is null and ((${useCaseFeedback.acknowledgedAt} is null and ${useCaseFeedback.ackDueAt} <= now()) or ${useCaseFeedback.resolveDueAt} <= now()))`;
 const fbDate = (v: string | null) => (v ? new Date(v) : null);
-/** ADR-0219: the feedback queue (and a use case's feedback tab) under the shared list contract */
+/** ADR-0226: the feedback queue (and a use case's feedback tab) under the shared list contract */
 export const FEEDBACK_LIST: ListSpec<FeedbackListRow> = {
   id: "feedback",
   sorts: {
@@ -826,7 +826,7 @@ export function registerFeedbackRoutes(app: FastifyInstance, db: Db, opts: Feedb
   });
 
   // ---- the queue -------------------------------------------------------------
-  // ADR-0219: the one predicate for the list, its count and the Excel export —
+  // ADR-0226: the one predicate for the list, its count and the Excel export —
   // what the caller submitted, or the items routed to them (every item for an
   // admin), then the filters. null = a caller with no identity, who sees none.
   const feedbackScope = (req: FastifyRequest, q: z.infer<typeof feedbackFilterQuery>): SQL | undefined | null => {

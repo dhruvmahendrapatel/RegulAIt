@@ -76,7 +76,7 @@ async function mockApi(page: Page) {
     if (p === "/auth/me") return json(route, { userId: "u", isAdmin: true, via: "session", user: { id: "u", email: "avery@example.test", displayName: "Avery Admin" }, mustChangePassword: false, totpEnabled: true, passwordSet: true, mfaSetupRequired: false });
     if (p === "/v1/me") return json(route, { userId: "u", isAdmin: true, user: { id: "u", email: "avery@example.test", displayName: "Avery Admin" } });
     if (p === "/v1/use-cases" && method === "GET") {
-      // ADR-0219: the registry's filters, sort and figures run on the server
+      // ADR-0226: the registry's filters, sort and figures run on the server
       const q = new URL(route.request().url()).searchParams;
       return json(route, isContractRead(q) ? useCasesContract(useCases, q) : { useCases });
     }
@@ -136,7 +136,7 @@ test.describe("ADR-0168: one registry, one way in", () => {
     await expect(page.getByRole("heading", { level: 1, name: "AI registry" })).toBeVisible();
     const table = page.getByRole("table");
     // G11: the last column holds the row's actions (Retire), named for screen readers only
-    // the Created header carries the server sort's arrow (ADR-0219)
+    // the Created header carries the server sort's arrow (ADR-0226)
     await expect(table.locator("thead th")).toHaveText(["Name", "Status", "Tier", "Owner", /^Created/, "Valid until", "Open conditions", ""]);
     // nothing on the registry creates a use case: no form, no propose button
     await expect(page.getByRole("button", { name: /Propose/ })).toHaveCount(0);

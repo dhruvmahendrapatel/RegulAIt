@@ -67,7 +67,7 @@ test("Audit log: chain state first and never green unasked, entries contained, r
   await expect(page.getByRole("cell", { name: "Not recorded", exact: true })).toHaveCount(1);
 });
 
-/** ADR-0219: the trail under the list contract, keyset-paged on its default (at DESC, id DESC) sort */
+/** ADR-0226: the trail under the list contract, keyset-paged on its default (at DESC, id DESC) sort */
 const contractTrail = (rows: ReturnType<typeof many>) => (cursor: string | null, q: URLSearchParams) => {
   const limit = Number(q.get("limit"));
   const start = cursor ? Number(cursor) : 0;

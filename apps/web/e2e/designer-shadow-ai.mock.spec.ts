@@ -70,7 +70,7 @@ async function mock(route: Route) {
   if (p === "/auth/me") body = { userId: "u", isAdmin: true, via: "session", user: { id: "u", email: "ada@example.test", displayName: "Ada Admin" }, mustChangePassword: false, totpEnabled: true, passwordSet: true, mfaSetupRequired: false };
   else if (p === "/v1/me") body = { userId: "u", isAdmin: true, user: { id: "u", email: "ada@example.test", displayName: "Ada Admin" } };
   else if (p === "/v1/shadow-ai/findings") {
-    // ADR-0219: the status chips filter on the server (open, confirmed, or closed: every other disposition)
+    // ADR-0226: the status chips filter on the server (open, confirmed, or closed: every other disposition)
     const status = new URL(route.request().url()).searchParams.get("status");
     const group = (d: string) => (d === "open" ? "open" : d === "confirmed" ? "confirmed" : "closed");
     body = { findings: status ? findings.filter((f) => group(f.disposition) === status) : findings, coverage, posture: "Detection is signal, not proof." };
@@ -143,7 +143,7 @@ test("Shadow AI: tabs, figures with (i), aligned next steps and the coverage til
   await expect(page.getByRole("note").filter({ hasText: "What this can see." })).toBeVisible();
   await expect(page.getByRole("button", { name: "What is Critical?" })).toBeVisible();
 
-  // ADR-0219: the inventory pages under the list control, which says where you are (no scroll box)
+  // ADR-0226: the inventory pages under the list control, which says where you are (no scroll box)
   const region = cardOf(page, "Inventory");
   await expect(region.getByTestId("list-status")).toHaveText(`1–${findings.length} of ${findings.length}`);
   // X7: every row's primary slot starts at the same x
@@ -257,7 +257,7 @@ test("D3 (#36, #46): the federation card says what turning it on does, in plain 
   await expect(fed).not.toContainText("AssumeRoleWithWebIdentity");
 });
 
-test("ADR-0219: the Inventory pages under the list control; its header keeps the worst status", async ({ page }) => {
+test("ADR-0226: the Inventory pages under the list control; its header keeps the worst status", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 520 });
   await page.goto("/ui/admin/shadow-ai");
   const card = cardOf(page, "Inventory");
@@ -286,7 +286,7 @@ test("X6b (L2): a status filter asks the server, and the list says how many it s
 });
 
 // the KEEP_VISIBLE refusal (a form or warning never folds) is probed in kit-contain.mock.spec.ts
-test("ADR-0219: Recent runs is a paged list with its own page size, remembered in this browser", async ({ page }) => {
+test("ADR-0226: Recent runs is a paged list with its own page size, remembered in this browser", async ({ page }) => {
   // P3: the full list is on its own page; the overview previews the newest runs
   await page.goto("/ui/admin/shadow-ai/discovery-sources/runs");
   const runs = page.locator('[data-list="discovery-runs"]');
@@ -818,7 +818,7 @@ test("shadow-ai-01: the federation card shows a failed read as an error with Ret
 test("shadow-ai-02/03: failed runs, token and device reads show errors with Retry, not empty states", async ({ page }) => {
   const fail = (route: Route) => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "unavailable" }) });
   await page.route("**/v1/discovery/runs?*", fail);
-  // ADR-0219: both lists ask with the contract's query string
+  // ADR-0226: both lists ask with the contract's query string
   await page.route(/\/enrolment-tokens(\?.*)?$/, fail);
   await page.route(/\/endpoint-devices(\?.*)?$/, fail);
   await page.route("**/v1/discovery/sources", (route) =>

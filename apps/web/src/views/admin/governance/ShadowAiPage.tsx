@@ -116,7 +116,7 @@ interface FindingsResponse {
     statement: string;
   };
   posture: string;
-  /** ADR-0219: the figures across every finding, with any contract page */
+  /** ADR-0226: the figures across every finding, with any contract page */
   summary?: {
     bySeverity: Record<string, number>;
     statusCounts: Record<string, number>;
@@ -288,7 +288,7 @@ const OS_LABEL: Record<string, string> = { macos: "macOS", windows: "Windows", l
 
 export default function ShadowAiPage() {
   const catalogue = useQuery({ queryKey: ["shadow-ai", "catalogue"], queryFn: () => api.get<CatalogueResponse>("/v1/shadow-ai/catalogue") });
-  // ADR-0219: the inventory pages on the server; this one small page carries the figures, coverage and posture
+  // ADR-0226: the inventory pages on the server; this one small page carries the figures, coverage and posture
   const findings = useQuery({
     queryKey: ["shadow-ai", "findings", "summary"],
     queryFn: () => api.get<FindingsResponse>("/v1/shadow-ai/findings?limit=10&sort=severity&dir=desc"),
@@ -1341,7 +1341,7 @@ function summariseFindings(all: readonly Finding[]): NonNullable<FindingsRespons
   };
 }
 
-/** ADR-0219: the import history's columns; the ids and sortable ones match the gateway's SHADOW_IMPORTS_LIST */
+/** ADR-0226: the import history's columns; the ids and sortable ones match the gateway's SHADOW_IMPORTS_LIST */
 const IMPORT_COLUMNS: Array<DataColumn<ImportRow>> = [
   { key: "when", header: "When", main: true, sortable: true, render: (r) => <><span style={{ whiteSpace: "nowrap" }}>{fmtDateTime(r.createdAt)}</span><div className={v.faint}>{ago(r.createdAt)}</div></> },
   { key: "kind", header: "Kind", main: true, sortable: true, render: (r) => evidenceLabel(r.kind) },

@@ -328,7 +328,7 @@ const vendorsFilterQuery = z
   })
   .strict();
 const VENDOR_STATUS_ORDER = sql`case ${aiVendors.status} when 'proposed' then 1 when 'under_assessment' then 2 when 'approved' then 3 when 'rejected' then 4 when 'retired' then 5 end`;
-/** ADR-0219: the vendor registry under the shared list contract */
+/** ADR-0226: the vendor registry under the shared list contract */
 export const VENDORS_LIST: ListSpec<VendorListRow> = {
   id: "vendors",
   sorts: {
@@ -445,7 +445,7 @@ export function registerVendorRoutes(
 
   // List: fleet for admins, own proposals for everyone else — the exact
   // GET /v1/use-cases scoping shape.
-  // ADR-0219: the one predicate for the list, its count and the Excel export —
+  // ADR-0226: the one predicate for the list, its count and the Excel export —
   // the fleet for an admin, an owner's own vendors otherwise. null = no caller.
   const vendorsScope = (req: FastifyRequest, f: z.infer<typeof vendorsFilterQuery>): SQL | undefined | null => {
     const conds: SQL[] = [];

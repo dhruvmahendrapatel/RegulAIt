@@ -264,7 +264,7 @@ test("F36: on the flush Alerts card, the list's paging line takes the header's i
   alertsShown = Array.from({ length: 30 }, (_, i) => ({ ...alert, id: `al${i}`, title: `Assistant ${i + 1} inherits a high rating` }));
   await page.goto("/ui/admin/governance/alerts");
   const list = page.locator("section[data-rg-card]").filter({ hasText: "Alerts" }).first();
-  // ADR-0219: the list pages on the server and says where you are, never a silent cap
+  // ADR-0226: the list pages on the server and says where you are, never a silent cap
   const line = list.getByTestId("list-status");
   await expect(line).toHaveText(/^1–\d+ of 30$/);
   const card = await list.boundingBox();
@@ -382,7 +382,7 @@ test("X6b M2: acknowledge with the drawer open: focus moves to the alert in its 
   ackRemoves = true;
   await page.goto("/ui/admin/governance/alerts");
   await page.getByRole("link", { name: /Credit-limit assistant inherits/ }).click();
-  // ADR-0219: the Alerts card pages on the server instead of folding, and its header still counts every alert
+  // ADR-0226: the Alerts card pages on the server instead of folding, and its header still counts every alert
   await expect(page.locator("section[data-rg-card]").filter({ hasText: "Alerts" }).first()).toContainText("2 alerts");
   await page.getByTestId("alert-detail").getByLabel("Acknowledgement note — required and audited").fill("Avery owns the response.");
   await page.getByTestId("alert-detail").getByRole("button", { name: "Acknowledge" }).click();

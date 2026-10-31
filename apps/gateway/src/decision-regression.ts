@@ -825,7 +825,7 @@ const runsQuery = z
   .strict();
 const runsFilterQuery = runsQuery.omit({ limit: true }).strict();
 type RegressionRunListRow = DecisionRegressionRunView;
-/** ADR-0219: the regression runs under the shared list contract */
+/** ADR-0226: the regression runs under the shared list contract */
 export const REGRESSION_RUNS_LIST: ListSpec<RegressionRunListRow> = {
   id: "decision-regression-runs",
   sorts: {
@@ -987,7 +987,7 @@ export function registerDecisionRegressionRoutes(app: FastifyInstance, db: Db): 
     idOf: (r) => r.id,
   };
   const regressionRunsWhere = (f: z.infer<typeof runsFilterQuery>) => (f.subject ? eq(decisionRegressionRuns.subject, f.subject) : undefined);
-  // ADR-0219: with any of sort/dir/cursor/offset/count it answers the shared list contract; admin only
+  // ADR-0226: with any of sort/dir/cursor/offset/count it answers the shared list contract; admin only
   app.get("/v1/governance/decision-regression/runs/export.xlsx", async (req, reply) => {
     try {
       const q = req.query as Record<string, unknown>;

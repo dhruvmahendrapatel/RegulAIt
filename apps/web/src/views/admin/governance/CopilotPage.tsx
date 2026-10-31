@@ -106,7 +106,7 @@ interface ProposalRow {
   appliedAt: string | null;
   appliedResult: Record<string, unknown> | null;
   createdAt?: string;
-  /** ADR-0219: the linked approval's state, read from the one queue by the gateway */
+  /** ADR-0226: the linked approval's state, read from the one queue by the gateway */
   approvalStatus?: string | null;
 }
 interface QueryRow {

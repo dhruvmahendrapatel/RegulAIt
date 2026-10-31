@@ -1,5 +1,5 @@
 /**
- * ADR-0219 (P2 batch A) — the one list control on the governance and Shadow AI lists, against a mocked gateway that
+ * ADR-0226 (P2 batch A) — the one list control on the governance and Shadow AI lists, against a mocked gateway that
  * implements the list contract (limit, cursor or offset, sort and dir, count) and the Excel export route. Three lists
  * stand for the batch: the vendor registry, the SoD override requests and the decision-regression runs.
  *

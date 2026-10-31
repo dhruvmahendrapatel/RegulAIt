@@ -828,7 +828,7 @@ type AlertListRow = { id: string; ruleLabel: string; severity: string; status: s
 const ALERT_SEVERITY_ORDER = sql`case ${governanceAlerts.severity} when 'critical' then 4 when 'high' then 3 when 'medium' then 2 when 'low' then 1 else 0 end`;
 const ALERT_STATUS_ORDER = sql`case ${governanceAlerts.status} when 'open' then 1 when 'acknowledged' then 2 when 'resolved' then 3 end`;
 const alertDate = (v: string | null | undefined) => (v ? new Date(v) : null);
-/** ADR-0219: the governance alerts list under the shared list contract */
+/** ADR-0226: the governance alerts list under the shared list contract */
 export const ALERTS_LIST: ListSpec<AlertListRow> = {
   id: "governance-alerts",
   sorts: {
@@ -971,7 +971,7 @@ export function registerGovernanceMonitorRoutes(app: FastifyInstance, db: Db): v
     idOf: (r) => r.id,
   };
 
-  // ADR-0219: with any of sort/dir/cursor/offset/count the list answers the
+  // ADR-0226: with any of sort/dir/cursor/offset/count the list answers the
   // shared contract (with the counts, last evaluation and rules beside it);
   // with none of them, exactly the response it always gave. Admin only.
   app.get("/v1/governance/alerts/export.xlsx", async (req, reply) => {

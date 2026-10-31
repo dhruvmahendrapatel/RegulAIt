@@ -75,6 +75,8 @@ export const MACHINE_ONLY = new Map([
   ["GET /.well-known/jwks.json", "auth plumbing: the issuer's public JWKS, fetched by relying parties"],
   ["GET /federation/.well-known/openid-configuration", "auth plumbing: the cloud federation issuer's OIDC discovery document, fetched by AWS, GCP and Entra"],
   ["GET /federation/.well-known/jwks.json", "auth plumbing: the cloud federation issuer's RS256 JWKS, fetched by AWS, GCP and Entra"],
+  ["GET /mcp-identity/.well-known/openid-configuration", "auth plumbing: the OIDC-profile MCP identity assertion issuer's discovery document, fetched by an upstream's validator (ADR-0210)"],
+  ["GET /mcp-identity/.well-known/jwks.json", "auth plumbing: the OIDC-profile MCP identity assertion issuer's ES256 JWKS, fetched by an upstream's validator (ADR-0210)"],
   ["POST /oauth/token", "auth plumbing: RFC 6749 token endpoint for workload clients"],
   ["POST /oauth/token/revocation", "auth plumbing: RFC 7009 token revocation for workload clients"],
   ["POST /oauth/token/introspection", "auth plumbing: RFC 7662 token introspection for resource servers"],
@@ -158,7 +160,7 @@ export const INDIRECT_UI_CALLS = new Map([
       reason: "propose(…) keeps the path in state; the confirm dialog posts it",
     },
   ]),
-  // ADR-0219: the shared list control downloads the Excel file from the path its page hands it (`exportPath`)
+  // ADR-0226: the shared list control downloads the Excel file from the path its page hands it (`exportPath`)
   ...[
     ["GET /v1/runs/export.xlsx", "apps/web/src/views/runs/RunsPage.tsx"],
     ["GET /v1/incidents/export.xlsx", "apps/web/src/views/incidents/IncidentsPage.tsx"],
@@ -172,7 +174,7 @@ export const INDIRECT_UI_CALLS = new Map([
       reason: "the page passes the export path to DataList, whose Download Excel button fetches it",
     },
   ]),
-  // ADR-0219 (P2 batch A): the governance and Shadow AI lists' Excel exports, through DataList's Download Excel
+  // ADR-0226 (P2 batch A): the governance and Shadow AI lists' Excel exports, through DataList's Download Excel
   ...[
     ["GET /v1/audit/export.xlsx", "apps/web/src/views/admin/governance/AuditLogPage.tsx"],
     ["GET /v1/delegations/export.xlsx", "apps/web/src/views/admin/governance/ApprovalsAdminPage.tsx"],
@@ -209,7 +211,7 @@ export const INDIRECT_UI_CALLS = new Map([
       reason: "the page passes the export path to DataList, whose Download Excel button fetches it",
     },
   ]),
-  // ADR-0219 (P2 batch A): the lists DataList reads page by page from the endpoint its page hands it (`endpoint`)
+  // ADR-0226 (P2 batch A): the lists DataList reads page by page from the endpoint its page hands it (`endpoint`)
   ...[
     ["GET /v1/delegations", "apps/web/src/views/admin/governance/ApprovalsAdminPage.tsx"],
     ["GET /v1/guardrails/violations", "apps/web/src/views/admin/governance/GuardrailsPage.tsx"],

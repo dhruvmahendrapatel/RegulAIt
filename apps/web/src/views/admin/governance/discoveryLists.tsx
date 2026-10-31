@@ -2,7 +2,7 @@
  * P3 (owner, #453 c6527514889): the Discovery sources page's record lists — recent runs, enrolment tokens and
  * endpoint devices. The overview keeps a short preview of each (at most five rows and a count, with anything that
  * needs attention counted in the heading, and "View all →"); each full list has its own page under the parent's path
- * with the shared list control (ADR-0219). The columns are declared once here, for the preview and the page alike.
+ * with the shared list control (ADR-0226). The columns are declared once here, for the preview and the page alike.
  */
 import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";

@@ -95,7 +95,7 @@ const CATEGORY_LABELS: Record<string, string> = {
   integration: "integration",
 };
 
-/** ADR-0219: the vendor registry's columns; the ids and sortable ones match the gateway's VENDORS_LIST */
+/** ADR-0226: the vendor registry's columns; the ids and sortable ones match the gateway's VENDORS_LIST */
 export const VENDOR_COLUMNS: Array<DataColumn<VendorRow>> = [
   { key: "name", header: "Vendor", main: true, sortable: true, render: (r) => r.name },
   {
