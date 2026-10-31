@@ -10,7 +10,8 @@ import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
 
 type DimensionKey = "bias" | "security" | "privacy" | "reliability" | "safety" | "compliance";
-type RiskStateCounts = { open: number; mitigating: number; accepted: number; closed: number };
+/** transferred and avoided are optional: a report from before they existed has neither */
+type RiskStateCounts = { open: number; mitigating: number; accepted: number; closed: number; transferred?: number; avoided?: number };
 
 interface TrustDimension {
   key: DimensionKey;
@@ -38,6 +39,8 @@ interface TrustReport {
     risksFound: number;
     risksMitigated: number;
     risksAccepted: number;
+    risksTransferred?: number;
+    risksAvoided?: number;
     risksOpen: number;
     risksUnmitigated: number;
     evidenceCoveragePct: number | null;
@@ -73,11 +76,15 @@ const READING_GUIDE: Array<[string, string]> = [
   ],
   [
     "Not yet mitigated",
-    "Live risks without that mitigation. Mitigated, accepted and not yet mitigated add up to the risks found.",
+    "Live risks without that mitigation. Mitigated, accepted, transferred, avoided and not yet mitigated add up to the risks found.",
+  ],
+  [
+    "Transferred and avoided",
+    "A transferred risk is carried by an insurer or a supplier contract; it keeps its rating, because a contract moves who pays, not whether the harm can happen. An avoided risk is one whose use has stopped; it no longer carries a rating. Each is recorded with its evidence and an owner.",
   ],
   [
     "Heatmap",
-    "Live risks placed by declared likelihood and impact — human judgments on a three-level scale, never computed scores. The residual view uses the declared residual position where one exists.",
+    "Risks that still carry a rating — everything except closed and avoided — placed by declared likelihood and impact: human judgments on a three-level scale, never computed scores. The residual view uses the declared residual position where one exists.",
   ],
 ];
 
@@ -162,6 +169,8 @@ function TrustReportView(props: {
           <span className={v.statValue}>{d.totals.risksFound.toLocaleString()}</span>
           <span className={v.statLabel}>Risks found</span>
           {d.totals.risksAccepted > 0 ? <span className={v.faint}>{d.totals.risksAccepted.toLocaleString()} accepted</span> : null}
+          {(d.totals.risksTransferred ?? 0) > 0 ? <span className={v.faint}>{(d.totals.risksTransferred ?? 0).toLocaleString()} transferred</span> : null}
+          {(d.totals.risksAvoided ?? 0) > 0 ? <span className={v.faint}>{(d.totals.risksAvoided ?? 0).toLocaleString()} avoided</span> : null}
         </div>
         <div className={`${v.stat} ${s.tileOk}`}>
           <span className={v.statValue}>{d.totals.risksMitigated.toLocaleString()}</span>
@@ -193,7 +202,7 @@ function TrustReportView(props: {
           title="Risk position"
           info={
             <>
-              <p>Inherent is before controls, residual is after. Each cell counts open, mitigating and accepted risks. Closed risks are left out.</p>
+              <p>Inherent is before controls, residual is after. Each cell counts open, mitigating, accepted and transferred risks. Closed and avoided risks are left out.</p>
               <p>Cell colour shows the zone of that likelihood and impact pair on the severity scale. The number is the count of risks; empty cells fade.</p>
             </>
           }
@@ -242,6 +251,8 @@ function TrustReportView(props: {
               <Stat value={current.risks.mitigating} label="Mitigating" />
               <Stat value={current.risks.accepted} label="Accepted" />
               <Stat value={current.risks.closed} label="Closed" />
+              <Stat value={current.risks.transferred ?? 0} label="Transferred" />
+              <Stat value={current.risks.avoided ?? 0} label="Avoided" />
             </div>
           </div>
         ) : null}

@@ -125,6 +125,11 @@ const GUARDRAIL_RANK: Record<string, number> = { off: 0, log: 1, warn: 2, block:
 export const COMPLIANCE_PROFILE_LOOSENING: Classified<typeof complianceProfiles.$inferSelect> = {
   id: IDENTITY,
   createdAt: IDENTITY,
+  // ADR-0208: lifecycle, written only by the retire route (always a step-up), never part of a version
+  status: { kind: "identity", why: "lifecycle state; never versioned, only the retire route writes it" },
+  retiredAt: { kind: "identity", why: "lifecycle fact; written with status by the retire route" },
+  retiredReason: { kind: "identity", why: "lifecycle fact; written with status by the retire route" },
+  retiredByUserId: { kind: "identity", why: "lifecycle fact; written with status by the retire route" },
   tag: { kind: "selection", why: "the framework tag the profile is for; an edit never re-tags (a new tag is a new profile)" },
   requiredTemplateIds: { kind: "compare", looser: forcedDropped, why: "a workflow template the framework no longer forces" },
   mcpDefaultMode: { kind: "compare", looser: rankLowered({ read_write: 0, read_only: 1 }), why: "read_only -> read_write" },

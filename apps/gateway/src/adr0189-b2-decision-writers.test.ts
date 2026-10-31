@@ -44,6 +44,7 @@ const DECISION_WRITERS = [
   "model-rate-limits.ts", // ADR-0212: a dispatch refused by a per-model rate limit (insert(auditLog) on the chained handle)
   "outbound-audience.ts",
   "playground.ts",
+  "privacy-ops.ts", // ADR-0224: the processing limit's dispatch refusal
   "redteam.ts",
   "use-case-gate.ts",
   "use-cases.ts",

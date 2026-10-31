@@ -51,7 +51,7 @@ interface Status {
   };
   features: Record<string, boolean>;
   actionClasses: { read: ActionDecision; governance: ActionDecision; expansion: ActionDecision };
-  inventory: Array<{ action: string; class: string; why: string }>;
+  inventory: Array<{ action: string; label: string; class: string; why: string }>;
   keyring: { dir: string; pinnedKeyIds: string[] };
   lastVerifiedAt: string | null;
   schedulerPresent: boolean;
@@ -330,7 +330,7 @@ export default function LicensingPage() {
                 rows={s.inventory}
                 rowKey={(r) => r.action}
                 columns={[
-                  { key: "a", header: "Action", render: (r) => <code>{r.action}</code> },
+                  { key: "a", header: "Action", render: (r) => r.label },
                   {
                     key: "c",
                     header: "Class",

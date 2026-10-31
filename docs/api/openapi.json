@@ -198,7 +198,7 @@
       },
       "get": {
         "operationId": "getV1Users",
-        "summary": "List users, with sign-in posture flags (never a hash or a secret). Bounded: `limit` (default 1000, max 5000).",
+        "summary": "List users, with sign-in posture flags (never a hash or a secret). Bounded: `limit` (default 1000, max 5000). With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226), with `q`, `role` and `status` filters.",
         "tags": [
           "users"
         ],
@@ -1100,6 +1100,65 @@
         "x-regulait-stability": "public-stable",
         "x-regulait-auth": "user",
         "x-regulait-guarantee": "breaking changes require a new major path (/v2) served alongside /v1; a deprecated route or field emits RFC-8594 Deprecation and Sunset headers for at least 12 months before removal",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "objectType",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "mcp_tool",
+                "workflow",
+                "run",
+                "project",
+                "infra_operation",
+                "model_card",
+                "copilot_proposal",
+                "training_job",
+                "grant_certification",
+                "sod_override",
+                "remediation",
+                "prompt_promotion",
+                "connector_call",
+                "engine_run",
+                "eval_run",
+                "compliance_profile"
+              ]
+            }
+          },
+          {
+            "name": "approverUserId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": "desc",
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            }
+          }
+        ],
         "responses": {
           "400": {
             "description": "Request body failed schema validation."
@@ -1114,7 +1173,7 @@
             "description": "Rate limited. Retry after the `retry-after` header."
           },
           "2XX": {
-            "description": "Success."
+            "description": "At most 100 rows, newest first by `requestedAt` unless `order=asc`. `status` takes one status or a comma-separated list. `total` counts every row the same filters and visibility match, and `hasMore` is true when `total` exceeds the rows returned."
           }
         }
       }
@@ -2435,6 +2494,79 @@
         }
       }
     },
+    "/v1/usage-events/summary": {
+      "get": {
+        "operationId": "getV1UsageEventsSummary",
+        "summary": "Spend by agent, connector, MCP tool, project or UTC day, aggregated over every usage event in a window (default: the last 30 days). Same scoping as the usage ledger: a non-admin sees only their own events.",
+        "tags": [
+          "usage-events"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "x-regulait-stability": "public-beta",
+        "x-regulait-auth": "user",
+        "x-regulait-guarantee": "in the published spec and clients, but may change within the major with notice; the deprecation window is 90 days, not 12 months",
+        "parameters": [
+          {
+            "name": "groupBy",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "agent",
+                "connector",
+                "mcp_tool",
+                "project",
+                "day"
+              ]
+            }
+          },
+          {
+            "name": "userId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {}
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {}
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Request body failed schema validation."
+          },
+          "401": {
+            "description": "Missing, invalid, or revoked credential."
+          },
+          "403": {
+            "description": "Refused. Among the reasons: `mfa_enrollment_required`, when the organization requires MFA for the credential's owner, who has not enrolled TOTP (ADR-0181). Audited."
+          },
+          "429": {
+            "description": "Rate limited. Retry after the `retry-after` header."
+          },
+          "2XX": {
+            "description": "`window` echoes the half-open `[from, to)` range applied (`defaulted` when `from` was omitted); `groups` are sorted by cost (`day` by date); `totals` is the sum over `groups`. `ledger` is the whole window across every object type, with `byObjectType` and `other` (what no typed breakdown names), so the agent, connector and MCP tool breakdowns plus `other` add up to `ledger`."
+          }
+        }
+      }
+    },
     "/v1/runs": {
       "post": {
         "operationId": "postV1Runs",
@@ -2471,7 +2603,7 @@
       },
       "get": {
         "operationId": "getV1Runs",
-        "summary": "Orchestration runs, newest first. Bounded: `limit` (default 200, max 1000); `status` narrows.",
+        "summary": "Orchestration runs, newest first. Bounded: `limit` (default 200, max 1000); `status` narrows. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226).",
         "tags": [
           "runs"
         ],

@@ -27,7 +27,12 @@ import type { ApiErrorPayload } from "./client";
 
 export interface RefusalGuidance {
   /** the gateway refusal this answers */
-  code: "mfa_enrollment_required" | "ai-literacy-not-current" | "step_up_unavailable" | "custom_provider_disabled";
+  code:
+    | "mfa_enrollment_required"
+    | "ai-literacy-not-current"
+    | "step_up_unavailable"
+    | "custom_provider_disabled"
+    | "mcp_release_age_cooldown";
   /** what happened and what to do next, in words */
   message: string;
   /** the in-app route that resolves it */
@@ -87,6 +92,15 @@ export const REFUSAL_GUIDANCE = {
       "test and turn it on under Integrations → Custom LLM providers, then try again.",
     to: "/admin/custom-providers",
     linkLabel: "Open Custom LLM providers (administrators)",
+  },
+  // ADR-0175 A5 (#609 review): the release-age cooldown, no longer reported as an admission hold
+  releaseAgeCooldown: {
+    code: "mcp_release_age_cooldown",
+    message:
+      "This MCP server is new to this deployment, so it waits out the release-age cooldown before anyone can use it. " +
+      "An administrator can allow it sooner, with a reason, under Admission review → Waiting period for new releases.",
+    to: "/admin/admission",
+    linkLabel: "Open Admission review (administrators)",
   },
 } as const satisfies Record<string, RefusalGuidance>;
 
@@ -155,6 +169,7 @@ export function refusalGuidance(status: number, payload: ApiErrorPayload | null 
     if (status === 403) return payload.credential === "api_key" ? REFUSAL_GUIDANCE.apiKeyMfa : REFUSAL_GUIDANCE.sessionMfa;
   }
   if (code === "custom_provider_disabled" && status === 409) return REFUSAL_GUIDANCE.customProviderDisabled;
+  if (code === "mcp_release_age_cooldown" && status === 403) return REFUSAL_GUIDANCE.releaseAgeCooldown;
   return null;
 }
 

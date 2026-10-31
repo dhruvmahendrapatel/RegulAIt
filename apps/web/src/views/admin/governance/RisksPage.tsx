@@ -36,9 +36,10 @@ import v from "../../views.module.css";
 import { RiskLibraryPicker } from "./RiskLibraryPicker";
 import { RiskAcceptancePanel } from "./RiskAcceptancePanel";
 import { RiskTolerancePanel, riskTolerancesQuery } from "./RiskTolerancePanel";
+import { RecordTreatment, TreatmentRecordCard, type TreatmentRecord } from "./RiskTreatmentPanel";
 import { useSession } from "../../../session/SessionContext";
 
-type RiskStatus = "open" | "mitigating" | "accepted" | "closed";
+type RiskStatus = "open" | "mitigating" | "accepted" | "closed" | "transferred" | "avoided";
 
 interface RiskRow {
   id: string;
@@ -86,8 +87,11 @@ interface RiskDetail {
     status: RiskStatus;
     mitigation: string | null;
     acceptance: { acceptedByUserId: string | null; acceptedAt: string; note: string } | null;
+    /** absent from a gateway that predates transferred and avoided */
+    treatment?: TreatmentRecord | null;
     note: string;
   };
+  treatments?: { enabled: boolean };
   evidence: {
     window: { start: string; end: string; days: number };
     scope: { projectId: string | null; agentId: string | null };
@@ -99,7 +103,13 @@ interface RiskDetail {
 }
 
 const statusTone = (s: RiskStatus): Tone =>
-  s === "accepted" ? "warn" : s === "mitigating" ? "info" : s === "closed" ? "neutral" : "danger";
+  s === "accepted" || s === "transferred"
+    ? "warn"
+    : s === "mitigating"
+      ? "info"
+      : s === "closed" || s === "avoided"
+        ? "neutral"
+        : "danger";
 const kindTone = (k: EvidenceEntry["kind"]): Tone =>
   k === "measured" ? "info" : k === "configuration" ? "ok" : "warn";
 
@@ -183,7 +193,9 @@ export default function RisksPage() {
                     <span className={v.faint}>
                       {d.risk.status === "accepted"
                         ? `residual risk accepted ${d.risk.acceptedAt ? ago(d.risk.acceptedAt) : ""}: ${d.risk.acceptanceNote}`
-                        : "status moves through audited transitions; acceptance is its own recorded act"}
+                        : d.declared.treatment
+                          ? `${d.declared.treatment.treatment} ${d.declared.treatment.treatedAt ? ago(d.declared.treatment.treatedAt) : ""}: ${d.declared.treatment.evidence ?? ""}`
+                          : "status moves through audited transitions; acceptance, transfer and avoidance are recorded acts"}
                     </span>
                   </div>
                   <div className={v.faint}>{d.risk.description}</div>
@@ -275,6 +287,18 @@ export default function RisksPage() {
                       </Field>
                     </div>
                   )}
+
+                  {/* transferred and avoided: the record and its ways on, or the form while the risk is live */}
+                  {d.declared.treatment ? (
+                    <TreatmentRecordCard key={`treated-${d.risk.id}`} riskId={d.risk.id} record={d.declared.treatment} onChanged={refreshAll} />
+                  ) : (d.risk.status === "open" || d.risk.status === "mitigating") && d.treatments?.enabled ? (
+                    <RecordTreatment
+                      key={`treat-${d.risk.id}`}
+                      riskId={d.risk.id}
+                      selfId={auth?.userId ?? null}
+                      onChanged={refreshAll}
+                    />
+                  ) : null}
 
                   {/* ADR-0180 §6: tolerance vs residual, the acceptance history, the time-boxed accept form */}
                   <RiskAcceptancePanel key={d.risk.id} riskId={d.risk.id} onChanged={() => void refreshAll()} />
