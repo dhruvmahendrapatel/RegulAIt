@@ -49,6 +49,8 @@
  */
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
+import { wantsListContract, type ListSpec } from "./list-contract.js";
+import { answerListExport, answerListPage, regenerableBy, type ContractList } from "./list-contract-route.js";
 import {
   and,
   approvals,
@@ -829,7 +831,39 @@ export function registerReportingRoutes(app: FastifyInstance, db: Db): void {
     });
   });
 
-  app.get("/v1/reports/runs", async (req) => {
+  // ADR-0226: with any of sort/dir/cursor/offset/count the run history
+  // answers the shared list contract; with none of them, exactly the response
+  // below. A non-admin's narrowing (runs they could regenerate) is the same
+  // rule, moved into the WHERE so the page, the total and the export agree.
+  const reportRunsList: ContractList<ReportRunListRow, { definitionId?: string; trigger?: string }> = {
+    spec: REPORT_RUNS_LIST,
+    filters: z.object({ definitionId: z.string().uuid().optional(), trigger: z.string().min(1).max(32).optional() }).strict(),
+    reader: {
+      fetch: (q) =>
+        db
+          .select({ ...REPORT_RUN_LIST_COLUMNS, definitionName: RUN_DEFINITION_NAME, _cursorAt: q.cursorAt })
+          .from(reportRuns)
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset),
+      countable: (where) => db.select({ one: sql`1` }).from(reportRuns).where(where),
+      idOf: (r) => r.id,
+    },
+    where: async (req, f) => {
+      const conds = [
+        f.definitionId ? eq(reportRuns.definitionId, f.definitionId) : undefined,
+        f.trigger ? eq(reportRuns.trigger, f.trigger as never) : undefined,
+      ];
+      if (!req.authCtx.isAdmin) {
+        conds.push(regenerableBy(reportRuns.entitlementScope, reportRuns.effectiveProjectIds, await callerProjectIds(db, req.authCtx.userId ?? null)));
+      }
+      return and(...conds);
+    },
+  };
+  app.get("/v1/reports/runs/export.xlsx", async (req, reply) => answerListExport(db, req, reply, reportRunsList));
+  app.get("/v1/reports/runs", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, reportRunsList);
     const q = z
       .object({ definitionId: z.string().uuid().optional(), limit: z.coerce.number().int().min(1).max(200).default(50) })
       .parse(req.query ?? {});
@@ -1039,3 +1073,51 @@ export function registerReportingRoutes(app: FastifyInstance, db: Db): void {
     };
   });
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0226: report run history under the shared list contract
+// ---------------------------------------------------------------------------
+
+const REPORT_RUN_LIST_COLUMNS = {
+  id: reportRuns.id,
+  definitionId: reportRuns.definitionId,
+  scheduleId: reportRuns.scheduleId,
+  requestedByUserId: reportRuns.requestedByUserId,
+  trigger: reportRuns.trigger,
+  period: reportRuns.period,
+  periodStart: reportRuns.periodStart,
+  periodEnd: reportRuns.periodEnd,
+  entitlementScope: reportRuns.entitlementScope,
+  effectiveProjectIds: reportRuns.effectiveProjectIds,
+  format: reportRuns.format,
+  rowCount: reportRuns.rowCount,
+  generatedAt: reportRuns.generatedAt,
+};
+const RUN_DEFINITION_NAME = sql<string | null>`(select ${reportDefinitions.name} from ${reportDefinitions} where ${reportDefinitions.id} = ${reportRuns.definitionId})`;
+type ReportRunListRow = Pick<ReportRunRow, keyof typeof REPORT_RUN_LIST_COLUMNS> & { definitionName: string | null };
+const day = (d: Date) => d.toISOString().slice(0, 10);
+
+export const REPORT_RUNS_LIST: ListSpec<ReportRunListRow> = {
+  id: "report-runs",
+  sorts: {
+    d: { expr: sql`lower(${RUN_DEFINITION_NAME})` },
+    g: { expr: reportRuns.generatedAt, keysetAt: reportRuns.generatedAt },
+    t: { expr: reportRuns.trigger },
+    p: { expr: reportRuns.periodStart, keysetAt: reportRuns.periodStart },
+    s: { expr: sql`jsonb_array_length(${reportRuns.effectiveProjectIds})` },
+    n: { expr: reportRuns.rowCount },
+    f: { expr: reportRuns.format },
+  },
+  columns: {
+    d: { label: "Definition", value: (r) => r.definitionName ?? "deleted definition" },
+    g: { label: "Generated", value: (r) => r.generatedAt },
+    t: { label: "Trigger", value: (r) => r.trigger },
+    p: { label: "Period", value: (r) => `${day(r.periodStart)} – ${day(r.periodEnd)}` },
+    s: { label: "Entitlement", value: (r) => (r.effectiveProjectIds === null ? "org-wide" : `${r.effectiveProjectIds.length} project(s)`) },
+    n: { label: "Rows", value: (r) => r.rowCount },
+    f: { label: "Format", value: (r) => r.format },
+  },
+  filters: ["definitionId", "trigger"],
+  defaultSort: { col: "g", dir: "desc" },
+  idCol: reportRuns.id,
+};

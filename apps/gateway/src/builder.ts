@@ -23,7 +23,11 @@
 import { ensureIdentityFor } from "./in-process-delegation.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
+import { wantsListContract, type ListSpec } from "./list-contract.js";
+import { answerListExport, answerListPage, type ContractList } from "./list-contract-route.js";
+import { likeLiteral } from "./users-list.js";
 import {
+  getTableColumns,
   agents,
   approvals,
   and,
@@ -1600,7 +1604,57 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     };
   };
 
+  // ADR-0226: with any of sort/dir/cursor/offset/count the inbox answers the
+  // shared list contract, with the search (`q`) on the server; with none of
+  // them, exactly the response below (the command palette's newest 200).
+  // Threads stay personal: the WHERE always starts with the viewer's own id.
+  const threadsList: ContractList<ThreadSummaryRow, z.infer<typeof threadsFilterQuery>> = {
+    spec: BUILDER_THREADS_LIST,
+    filters: threadsFilterQuery,
+    reader: {
+      fetch: async (q) => {
+        const rows = await db
+          .select({ ...getTableColumns(builderThreads), _cursorAt: q.cursorAt })
+          .from(builderThreads)
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset);
+        const out = await threadSummaries(db, rows);
+        return out.map((t, i) => ({ ...t, createdAt: rows[i]!.createdAt.toISOString(), _cursorAt: rows[i]!._cursorAt }));
+      },
+      countable: (where) => db.select({ one: sql`1` }).from(builderThreads).where(where),
+      idOf: (r) => r.id,
+    },
+    where: (req, f) => {
+      if (!req.authCtx.userId) return null;
+      const conds = [eq(builderThreads.userId, req.authCtx.userId)];
+      if (f.status && f.status !== "all") conds.push(eq(builderThreads.status, f.status));
+      if (f.agentId) conds.push(eq(builderThreads.agentId, f.agentId));
+      if (f.q) {
+        const pattern = likeLiteral(f.q);
+        conds.push(
+          or(
+            sql`${builderThreads.title} ilike ${pattern}`,
+            sql`${THREAD_AGENT_NAME} ilike ${pattern}`,
+            sql`coalesce(${THREAD_LAST_MESSAGE}, '') ilike ${pattern}`,
+          )!,
+        );
+      }
+      return and(...conds);
+    },
+    refusal: {
+      status: 403,
+      body: {
+        error: "builder_requires_identity",
+        detail: "A builder agent runs with the entitlements of the person using it. A token with no user identity has none to lend it.",
+      },
+    },
+  };
+  app.get("/v1/builder/threads/export.xlsx", async (req, reply) => answerListExport(db, req, reply, threadsList));
+
   app.get("/v1/builder/threads", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, threadsList);
     const viewer = viewerOf(req, reply);
     if (!viewer) return;
     const q = builderThreadListQuerySchema.parse(req.query ?? {});
@@ -2192,3 +2246,48 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     };
   });
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0226: the inbox's threads under the shared list contract
+// ---------------------------------------------------------------------------
+
+type ThreadSummaryRow = Awaited<ReturnType<typeof threadSummaries>>[number] & { createdAt: string };
+const threadsFilterQuery = z
+  .object({
+    status: z.enum(["needs_attention", "completed", "all"]).optional(),
+    agentId: z.string().uuid().optional(),
+    /** matches the title, the agent's name or the last message, case-insensitively; `%` and `_` are literal */
+    q: z.string().trim().max(200).optional(),
+  })
+  .strict();
+const THREAD_AGENT_NAME = sql`(select ${builderAgents.name} from ${builderAgents} where ${builderAgents.id} = ${builderThreads.agentId})`;
+const THREAD_LAST_MESSAGE = sql`(select ${builderMessages.content} from ${builderMessages} where ${builderMessages.threadId} = ${builderThreads.id} order by ${builderMessages.createdAt} desc limit 1)`;
+const THREAD_WAITING = sql`(select min(${builderToolSteps.status}) from ${builderToolSteps} where ${builderToolSteps.threadId} = ${builderThreads.id} and ${builderToolSteps.status} in ('pending_confirmation', 'pending_approval'))`;
+const WAITING_LABEL: Record<string, string> = { pending_confirmation: "Needs your OK", pending_approval: "Awaiting approval" };
+const SOURCE_LABEL: Record<string, string> = { chat: "Chat", schedule: "Scheduled", channel: "Channel" };
+
+export const BUILDER_THREADS_LIST: ListSpec<ThreadSummaryRow> = {
+  id: "builder-threads",
+  sorts: {
+    title: { expr: sql`lower(${builderThreads.title})` },
+    agent: { expr: sql`lower(${THREAD_AGENT_NAME})` },
+    waiting: { expr: THREAD_WAITING },
+    source: { expr: builderThreads.source },
+    updated: { expr: builderThreads.updatedAt, keysetAt: builderThreads.updatedAt },
+    status: { expr: builderThreads.status },
+    created: { expr: builderThreads.createdAt, keysetAt: builderThreads.createdAt },
+  },
+  columns: {
+    title: { label: "Thread", value: (r) => r.title },
+    agent: { label: "Agent", value: (r) => r.agentName },
+    waiting: { label: "Waiting on", value: (r) => (r.pendingStep ? (WAITING_LABEL[r.pendingStep.status] ?? r.pendingStep.status) : null) },
+    source: { label: "Source", value: (r) => SOURCE_LABEL[r.source] ?? r.source },
+    updated: { label: "Last activity", value: (r) => new Date(r.updatedAt) },
+    status: { label: "Status", value: (r) => r.status },
+    created: { label: "Started", value: (r) => new Date(r.createdAt) },
+    preview: { label: "Last message", value: (r) => r.lastMessagePreview },
+  },
+  filters: ["status", "agentId", "q"],
+  defaultSort: { col: "updated", dir: "desc" },
+  idCol: builderThreads.id,
+};

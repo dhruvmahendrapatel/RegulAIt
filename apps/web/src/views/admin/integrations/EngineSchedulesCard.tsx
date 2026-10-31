@@ -10,11 +10,11 @@
  * on, and that is confirmed because it resumes spending.
  */
 import { useId, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { DataList } from "../../../ui/DataList";
 import { ApiError, api } from "../../../api/client";
 import { ago, fmtAt } from "../../../api/format";
 import { useSession } from "../../../session/SessionContext";
-import { Badge, Button, Card, ConfirmModal, EmptyState, Field, IdChip, Input, Modal, RowActions, Table } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, Field, IdChip, Input, Modal, RowActions } from "../../../ui/kit";
 import { useAction } from "../adminKit";
 import {
   SCHEDULE_INTERVAL_LIMITS,
@@ -53,7 +53,6 @@ export function EngineSchedulesCard(props: {
   const { auth } = useSession();
   const me = auth?.userId ?? null;
   const isAdmin = auth?.isAdmin === true;
-  const list = useQuery({ queryKey: engineScheduleKeys.list, queryFn: () => api.get<{ schedules: EngineSchedule[] }>("/v1/engine-schedules") });
   const create = useAction();
   const toggle = useAction();
   const [interval, setIntervalHours] = useState("24");
@@ -120,32 +119,41 @@ export function EngineSchedulesCard(props: {
           </span>
         )}
       </form>
-      <Table<EngineSchedule>
-        rows={list.data?.schedules ?? []}
+      <DataList<EngineSchedule>
+        listId="engine-schedules"
+        noun="recurring runs"
+        endpoint="/v1/engine-schedules"
+        exportPath="/v1/engine-schedules/export.xlsx"
+        queryKey={[...engineScheduleKeys.list, "list"]}
+        legacyKey="schedules"
+        defaultSort={{ key: "created", dir: "desc" }}
         rowKey={(s) => s.id}
-        loading={list.isLoading}
-        error={list.error}
-        onRetry={() => void list.refetch()}
         empty={<EmptyState title="No recurring runs" body="Nothing runs on a schedule until someone creates one here." />}
         columns={[
-          { key: "engine", header: "Engine", render: (s) => props.engineName(s.engineId) },
+          { key: "engine", header: "Engine", main: true, sortable: true, render: (s) => props.engineName(s.engineId) },
           {
             key: "target",
             header: "Target · sets",
+            main: true,
+            sortable: true,
             render: (s) => {
               const r = scheduleRequestSummary(s.request);
               return `${r.agentId ? props.agentName(r.agentId) : "Not reported"} · ${r.sets.join(", ") || "no sets"}`;
             },
           },
-          { key: "every", header: "Every", render: (s) => `${s.intervalHours} h` },
+          { key: "every", header: "Every", main: true, sortable: true, render: (s) => `${s.intervalHours} h` },
           {
             key: "next",
             header: "Next run",
+            main: true,
+            sortable: true,
             render: (s) => (s.enabled ? <span title={fmtAt(s.nextRunAt)}>{fmtAt(s.nextRunAt)}</span> : <span className={v.faint}>off</span>),
           },
           {
             key: "last",
             header: "Last",
+            sortable: true,
+            required: "A skipped run's reason is always shown",
             render: (s) =>
               s.lastSkip ? (
                 <span>
@@ -157,11 +165,14 @@ export function EngineSchedulesCard(props: {
                 <span className={v.faint}>not run yet</span>
               ),
           },
-          { key: "state", header: "State", render: (s) => (s.enabled ? <Badge tone="ok">on</Badge> : <Badge tone="neutral">off</Badge>) },
-          { key: "created", header: "Created", render: (s) => ago(s.createdAt) },
+          { key: "state", header: "State", main: true, sortable: true, required: "Whether a schedule is on is always shown", render: (s) => (s.enabled ? <Badge tone="ok">on</Badge> : <Badge tone="neutral">off</Badge>) },
+          { key: "created", header: "Created", sortable: true, render: (s) => ago(s.createdAt) },
           {
             key: "actions",
             header: "Actions",
+            // ADR-0208 G9: Edit, the on/off switch and Delete; each mutation runs through useAction, whose
+            // admin-prefix invalidation refreshes this DataList's query key
+            action: true,
             render: (s) => (
               <RowActions
                 slot="4rem"

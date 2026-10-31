@@ -28,6 +28,7 @@ import v from "../../views.module.css";
 import { putOrgSettings, api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { OrgSettingsCard } from "../settings/OrgSettingsCard";
 import ModelArtifactsTab from "./ModelArtifactsTab";
+import { DataList } from "../../../ui/DataList";
 import { fmtDay } from "../../../api/format";
 
 interface ReviewSkill {
@@ -43,13 +44,8 @@ interface ReviewSkill {
   admissionFindings: AdmissionFindingCount[];
   admittedAt: string | null;
   admitReason: string | null;
-}
-interface SkillQueue {
-  scannerVersion: string;
-  holdAt: string;
-  refuseAt: string;
-  rules: string[];
-  skills: ReviewSkill[];
+  admissionScannedAt?: string | null;
+  visibilityRequestedAt?: string | null;
 }
 interface QuarantineItem {
   id: string;
@@ -80,6 +76,9 @@ interface McpQueue {
 }
 
 const KEY = ["admin", "admission-review"] as const;
+const HELD = { view: "held" } as const;
+const SHARES = { view: "shares" } as const;
+const HELD_SERVERS = { state: "held" } as const;
 const day = fmtDay;
 const findingText = (f: AdmissionFindingCount[]) =>
   f.length ? f.map((x) => `${x.rule} in ${x.where} (${x.severity}, ×${x.count})`).join("; ") : "no findings recorded";
@@ -105,15 +104,11 @@ export default function AdmissionReviewPage() {
   const [params, setParams] = useSearchParams();
   const tab = params.get("tab") === "artifacts" ? "artifacts" : "review";
   const setTab = (id: string) => setParams(id === "artifacts" ? { tab: "artifacts" } : {}, { replace: true });
-  const skills = useQuery({ queryKey: [...KEY, "skills"], queryFn: () => api.get<SkillQueue>("/v1/admission/skills") });
   const quarantine = useQuery({ queryKey: [...KEY, "quarantine"], queryFn: () => api.get<Quarantine>("/v1/release-quarantine") });
   const mcp = useQuery({ queryKey: [...KEY, "mcp"], queryFn: () => api.get<McpQueue>("/v1/mcp/admission") });
   const act = useAction();
   const [pending, setPending] = useState<Pending | null>(null);
 
-  const held = (skills.data?.skills ?? []).filter((k) => k.admissionState === "held" || k.admissionState === "refused" || k.admissionState === "admitted");
-  const shares = (skills.data?.skills ?? []).filter((k) => k.requestedVisibility === "workspace");
-  const heldServers = (mcp.data?.servers ?? []).filter((x) => x.admissionState === "held");
 
   const confirm = (reason: string) => {
     const p = pending;
@@ -174,20 +169,25 @@ export default function AdmissionReviewPage() {
         <WaitingPeriodCard q={quarantine.data} onOverride={(item, target) => setPending({ kind: "override", item, target })} loading={quarantine.isLoading} />
 
         <Card title="Builder skills held by the admission detectors">
-          <Table<ReviewSkill>
-            rows={held}
-            loading={skills.isLoading}
-            error={skills.error}
-            onRetry={() => void skills.refetch()}
+          <DataList<ReviewSkill>
+            listId="admission-held-skills"
+            noun="held skills"
+            endpoint="/v1/admission/skills"
+            exportPath="/v1/admission/skills/export.xlsx"
+            queryKey={[...KEY, "skills", "held"]}
+            legacyKey="skills"
+            filters={HELD}
+            defaultSort={{ key: "name", dir: "asc" }}
             rowKey={(k) => k.id}
             empty={<EmptyState title="Nothing held" body="No skill is waiting for review." />}
             columns={[
-              { key: "name", header: "Skill", render: (k) => <span>{k.name} <span className={v.dim}>v{k.version}</span></span> },
-              { key: "owner", header: "Owner", render: (k) => k.ownerName ?? "—" },
-              { key: "state", header: "State", render: (k) => <Badge tone={STATE_TONE[k.admissionState] ?? "neutral"}>{k.admissionState}</Badge> },
-              { key: "findings", header: "Findings", render: (k) => <span className={v.dim}>{findingText(k.admissionFindings)}</span> },
+              { key: "name", header: "Skill", main: true, sortable: true, render: (k) => <span>{k.name} <span className={v.dim}>v{k.version}</span></span> },
+              { key: "owner", header: "Owner", main: true, sortable: true, render: (k) => k.ownerName ?? "—" },
+              { key: "state", header: "State", main: true, sortable: true, required: "The admission state is always shown", render: (k) => <Badge tone={STATE_TONE[k.admissionState] ?? "neutral"}>{k.admissionState}</Badge> },
+              { key: "findings", header: "Findings", main: true, sortable: true, required: "Findings are always shown", render: (k) => <span className={v.dim}>{findingText(k.admissionFindings)}</span> },
               {
                 key: "act",
+                action: true,
                 header: "",
                 srHeader: "Actions",
                 render: (k) =>
@@ -201,22 +201,30 @@ export default function AdmissionReviewPage() {
                     <span className={v.dim}>owner must edit it</span>
                   ),
               },
+              { key: "scanned", header: "Scanned", sortable: true, render: (k) => (k.admissionScannedAt ? day(k.admissionScannedAt) : "—") },
             ]}
           />
         </Card>
 
         <Card title="Requests to share a skill with the workspace">
-          <Table<ReviewSkill>
-            rows={shares}
-            loading={skills.isLoading}
+          <DataList<ReviewSkill>
+            listId="admission-share-requests"
+            noun="share requests"
+            endpoint="/v1/admission/skills"
+            exportPath="/v1/admission/skills/export.xlsx"
+            queryKey={[...KEY, "skills", "shares"]}
+            legacyKey="skills"
+            filters={SHARES}
+            defaultSort={{ key: "requested", dir: "desc" }}
             rowKey={(k) => k.id}
             empty={<EmptyState title="No requests" body="Nobody is waiting to share a skill." />}
             columns={[
-              { key: "name", header: "Skill", render: (k) => k.name },
-              { key: "owner", header: "Owner", render: (k) => k.ownerName ?? "—" },
-              { key: "state", header: "Scan", render: (k) => <Badge tone={STATE_TONE[k.admissionState] ?? "neutral"}>{k.admissionState}</Badge> },
+              { key: "name", header: "Skill", main: true, sortable: true, render: (k) => k.name },
+              { key: "owner", header: "Owner", main: true, sortable: true, render: (k) => k.ownerName ?? "—" },
+              { key: "state", header: "Scan", main: true, sortable: true, required: "The scan state is always shown", render: (k) => <Badge tone={STATE_TONE[k.admissionState] ?? "neutral"}>{k.admissionState}</Badge> },
               {
                 key: "act",
+                action: true,
                 header: "",
                 srHeader: "Actions",
                 render: (k) => (
@@ -236,6 +244,7 @@ export default function AdmissionReviewPage() {
                   </span>
                 ),
               },
+              { key: "requested", header: "Requested", main: true, sortable: true, render: (k) => (k.visibilityRequestedAt ? day(k.visibilityRequestedAt) : "—") },
             ]}
           />
         </Card>
@@ -248,15 +257,22 @@ export default function AdmissionReviewPage() {
             Mode: {mcp.data?.mode ?? "…"}
             {mcp.data && !mcp.data.enforcing ? " — recorded only, nothing is refused." : ""} Clear a held server with its Clear hold control on the <Link to="/admin/mcp-servers" style={{ textDecoration: "underline" }}>MCP servers page</Link>.
           </p>
-          <Table
-            rows={heldServers}
-            loading={mcp.isLoading}
+          <DataList<McpQueue["servers"][number] & { admissionScannedAt?: string | null }>
+            listId="admission-held-mcp"
+            noun="held MCP servers"
+            endpoint="/v1/mcp/admission"
+            exportPath="/v1/mcp/admission/export.xlsx"
+            queryKey={[...KEY, "mcp", "held"]}
+            legacyKey="servers"
+            filters={HELD_SERVERS}
+            defaultSort={{ key: "scanned", dir: "desc" }}
             rowKey={(x) => x.id}
             empty={<EmptyState title="Nothing held" body="No MCP server is held by the manifest scan." />}
             columns={[
-              { key: "name", header: "Server", render: (x) => x.name },
-              { key: "sev", header: "Severity", render: (x) => x.admissionSeverity ?? "—" },
-              { key: "findings", header: "Findings", render: (x) => <span className={v.dim}>{findingText(x.admissionFindings ?? [])}</span> },
+              { key: "name", header: "Server", main: true, sortable: true, render: (x) => x.name },
+              { key: "sev", header: "Severity", main: true, sortable: true, required: "Severity is always shown", render: (x) => x.admissionSeverity ?? "—" },
+              { key: "findings", header: "Findings", main: true, sortable: true, required: "Findings are always shown", render: (x) => <span className={v.dim}>{findingText(x.admissionFindings ?? [])}</span> },
+              { key: "scanned", header: "Scanned", main: true, sortable: true, render: (x) => (x.admissionScannedAt ? day(x.admissionScannedAt) : "—") },
             ]}
           />
         </Card>

@@ -27,6 +27,7 @@ import v from "../../views.module.css";
 import { CertRotationsCard } from "./CertRotations";
 import { putOrgSettings } from "../../../stepup/stepUp";
 import { OrgSettingsCard } from "../settings/OrgSettingsCard";
+import { DataList } from "../../../ui/DataList";
 import { PolicyActions, ResourceActions } from "./InfraRowActions";
 
 const SEV_TONE: Record<string, Tone> = { critical: "danger", high: "danger", medium: "warn", low: "ok" };
@@ -53,22 +54,6 @@ export default function InfrastructurePage() {
   const policies = useQuery({
     queryKey: ["admin", "infra-policies"],
     queryFn: () => api.get<{ policies: InfraPolicy[] }>("/v1/infra/policies"),
-  });
-  const findings = useQuery({
-    queryKey: ["admin", "infra-findings"],
-    queryFn: () => api.get<{ findings: InfraFinding[] }>("/v1/infra/findings"),
-  });
-  const certs = useQuery({
-    queryKey: ["admin", "infra-certs"],
-    queryFn: () => api.get<{ certs: InfraCert[] }>("/v1/infra/certs"),
-  });
-  const patches = useQuery({
-    queryKey: ["admin", "infra-patches"],
-    queryFn: () => api.get<{ patches: InfraPatch[] }>("/v1/infra/patches"),
-  });
-  const backups = useQuery({
-    queryKey: ["admin", "infra-backups"],
-    queryFn: () => api.get<{ backups: InfraBackup[] }>("/v1/infra/backups"),
   });
   const org = useQuery({
     queryKey: ["admin", "org-settings"],
@@ -160,10 +145,19 @@ export default function InfrastructurePage() {
         <RegisterResourceCard />
 
         <Card flush title="Resources — with cascade-derived floors">
-          <Table<InfraResource>
+          <DataList<InfraResource>
+            listId="infra-resources"
+            noun="resources"
+            endpoint="/v1/infra/resources"
+            exportPath="/v1/infra/resources/export.xlsx"
+            queryKey={["admin", "infra-resources", "list"]}
+            legacyKey="resources"
+            defaultSort={{ key: "created", dir: "desc" }}
             columns={[
               {
                 key: "name",
+                main: true,
+                sortable: true,
                 header: "Name",
                 render: (r) => (
                   <span className={v.row}>
@@ -172,37 +166,33 @@ export default function InfrastructurePage() {
                   </span>
                 ),
               },
-              { key: "kind", header: "Kind", render: (r) => r.kind },
-              { key: "provider", header: "Provider", render: (r) => r.provider },
+              { key: "kind", main: true, sortable: true, header: "Kind", render: (r) => r.kind },
+              { key: "provider", main: true, sortable: true, header: "Provider", render: (r) => r.provider },
               {
-                key: "classifications",
+                key: "classifications", main: true, sortable: true,
                 header: "Classifications",
                 render: (r) => (r.classifications ?? []).join(", ") || "—",
               },
               {
-                key: "auto",
+                key: "auto", main: true,
                 header: "Auto ceiling",
                 render: (r) => r.effectivePolicy?.autoRemediateMaxSeverity ?? "never",
               },
               {
-                key: "backupFloor",
+                key: "backupFloor", main: true,
                 header: "Backup floor (d)",
                 align: "right",
                 render: (r) => r.effectivePolicy?.backupRetentionDaysFloor ?? "—",
               },
               {
-                key: "patchCeiling",
+                key: "patchCeiling", main: true,
                 header: "Patch ceiling (d)",
                 align: "right",
                 render: (r) => r.effectivePolicy?.patchCadenceDaysCeiling ?? "—",
               },
-              { key: "actions", header: "Actions", render: (r) => <ResourceActions resource={r} /> },
+              { key: "actions", header: "Actions", action: true, render: (r) => <ResourceActions resource={r} /> },
             ]}
-            rows={resources.data?.resources ?? []}
             rowKey={(r) => r.id}
-            loading={resources.isLoading}
-            error={resources.error}
-            onRetry={() => void resources.refetch()}
             empty={<EmptyState title="No monitored resources" body="Register one above — mock scans deterministically." />}
           />
         </Card>
@@ -242,14 +232,23 @@ export default function InfrastructurePage() {
             lands in the Approvals queue (objectType infra_operation). Auto-remediated findings are already
             fixed; only 'open' findings can be proposed.
           </p>
-          <Table<InfraFinding>
+          <DataList<InfraFinding>
+            listId="infra-findings"
+            noun="findings"
+            endpoint="/v1/infra/findings"
+            exportPath="/v1/infra/findings/export.xlsx"
+            queryKey={["admin", "infra-findings", "list"]}
+            legacyKey="findings"
+            defaultSort={{ key: "severity", dir: "desc" }}
             columns={[
-              { key: "resource", header: "Governs", render: (f) => f.resourceName ?? "—" },
-              { key: "kind", header: "Kind", render: (f) => f.kind },
+              { key: "resource", main: true, sortable: true, header: "Governs", render: (f) => f.resourceName ?? "—" },
+              { key: "kind", main: true, sortable: true, header: "Kind", render: (f) => f.kind },
               {
                 key: "severity",
+                main: true,
+                sortable: true,
+                required: "Severity is always shown",
                 header: "Severity",
-                sort: (f) => ["critical", "high", "medium", "low"].indexOf(f.severity),
                 render: (f) => (
                   <Badge tone={SEV_TONE[f.severity] ?? "neutral"} title={`severity: ${f.severity}`}>
                     {f.severity}
@@ -257,19 +256,18 @@ export default function InfrastructurePage() {
                 ),
               },
               {
-                key: "status",
+                key: "status", main: true, sortable: true, required: "Status is always shown",
                 header: "Status",
-                sort: (f) => f.status,
                 render: (f) => (
                   <Badge tone={STATUS_TONE[f.status] ?? "neutral"} title={`status: ${f.status}`}>
                     {f.status.replaceAll("_", " ")}
                   </Badge>
                 ),
               },
-              { key: "summary", header: "Summary", render: (f) => f.detail?.summary ?? "" },
-              { key: "detected", header: "Detected", sort: (f) => f.detectedAt, render: (f) => ago(f.detectedAt) },
+              { key: "summary", main: true, sortable: true, header: "Summary", render: (f) => f.detail?.summary ?? "" },
+              { key: "detected", main: true, sortable: true, header: "Detected", render: (f) => ago(f.detectedAt) },
               {
-                key: "actions",
+                key: "actions", action: true,
                 header: "",
                 srHeader: "Actions",
                 align: "right",
@@ -293,25 +291,28 @@ export default function InfrastructurePage() {
                   ),
               },
             ]}
-            rows={findings.data?.findings ?? []}
             rowKey={(f) => f.id}
-            loading={findings.isLoading}
-            error={findings.error}
-            onRetry={() => void findings.refetch()}
             empty={<EmptyState title="No findings" body="Run a scan to detect drift, cert expiry, missed backups and CVEs." />}
           />
         </Card>
 
         <Card title="Certificates — rotation ledger">
-          <Table<InfraCert>
+          <DataList<InfraCert>
+            listId="infra-certs"
+            noun="certificates"
+            endpoint="/v1/infra/certs"
+            exportPath="/v1/infra/certs/export.xlsx"
+            queryKey={["admin", "infra-certs", "list"]}
+            legacyKey="certs"
+            defaultSort={{ key: "created", dir: "desc" }}
             columns={[
-              { key: "resource", header: "Governs", render: (c) => c.resourceName ?? "—" },
-              { key: "cn", header: "Common name", render: (c) => <span className={v.mono}>{c.commonName}</span> },
-              { key: "notAfter", header: "Not after", render: (c) => String(c.notAfter).slice(0, 10) },
-              { key: "status", header: "Status", render: (c) => <Badge>{c.status}</Badge> },
-              { key: "serial", header: "Serial", render: (c) => c.serial ?? "—" },
+              { key: "resource", main: true, sortable: true, header: "Governs", render: (c) => c.resourceName ?? "—" },
+              { key: "cn", main: true, sortable: true, header: "Common name", render: (c) => <span className={v.mono}>{c.commonName}</span> },
+              { key: "notAfter", main: true, sortable: true, required: "Expiry is always shown", header: "Not after", render: (c) => String(c.notAfter).slice(0, 10) },
+              { key: "status", main: true, sortable: true, required: "Status is always shown", header: "Status", render: (c) => <Badge>{c.status}</Badge> },
+              { key: "serial", main: true, sortable: true, header: "Serial", render: (c) => c.serial ?? "—" },
               {
-                key: "actions",
+                key: "actions", action: true,
                 header: "",
                 srHeader: "Actions",
                 align: "right",
@@ -341,11 +342,7 @@ export default function InfrastructurePage() {
                 ),
               },
             ]}
-            rows={certs.data?.certs ?? []}
             rowKey={(c) => c.id}
-            loading={certs.isLoading}
-            error={certs.error}
-            onRetry={() => void certs.refetch()}
             empty={<EmptyState title="No certificates tracked" />}
           />
         </Card>
@@ -354,20 +351,27 @@ export default function InfrastructurePage() {
         ) : null}
 
         <Card title="CVE patches — remediation ledger">
-          <Table<InfraPatch>
+          <DataList<InfraPatch>
+            listId="infra-patches"
+            noun="CVE patches"
+            endpoint="/v1/infra/patches"
+            exportPath="/v1/infra/patches/export.xlsx"
+            queryKey={["admin", "infra-patches", "list"]}
+            legacyKey="patches"
+            defaultSort={{ key: "created", dir: "desc" }}
             columns={[
-              { key: "resource", header: "Governs", render: (x) => x.resourceName ?? "—" },
-              { key: "cve", header: "CVE", render: (x) => <span className={v.mono}>{x.cve}</span> },
+              { key: "resource", main: true, sortable: true, header: "Governs", render: (x) => x.resourceName ?? "—" },
+              { key: "cve", main: true, sortable: true, header: "CVE", render: (x) => <span className={v.mono}>{x.cve}</span> },
               {
-                key: "severity",
+                key: "severity", main: true, sortable: true, required: "Severity is always shown",
                 header: "Severity",
                 render: (x) => <Badge tone={SEV_TONE[x.severity] ?? "neutral"}>{x.severity}</Badge>,
               },
-              { key: "package", header: "Package", render: (x) => x.package ?? "—" },
-              { key: "fixed", header: "Fixed version", render: (x) => x.fixedVersion ?? "—" },
-              { key: "status", header: "Status", render: (x) => <Badge>{x.status}</Badge> },
+              { key: "package", main: true, sortable: true, header: "Package", render: (x) => x.package ?? "—" },
+              { key: "fixed", main: true, sortable: true, header: "Fixed version", render: (x) => x.fixedVersion ?? "—" },
+              { key: "status", main: true, sortable: true, required: "Status is always shown", header: "Status", render: (x) => <Badge>{x.status}</Badge> },
               {
-                key: "actions",
+                key: "actions", action: true,
                 header: "",
                 srHeader: "Actions",
                 align: "right",
@@ -391,11 +395,7 @@ export default function InfrastructurePage() {
                   ),
               },
             ]}
-            rows={patches.data?.patches ?? []}
             rowKey={(x) => x.id}
-            loading={patches.isLoading}
-            error={patches.error}
-            onRetry={() => void patches.refetch()}
             empty={<EmptyState title="No CVE patches tracked" />}
           />
         </Card>
@@ -404,14 +404,21 @@ export default function InfrastructurePage() {
         <OrgSettingsCard title="Backup verification" keys={["backupVerifyEnabled", "backupVerifyIntervalHours"]} testId="backup-verify-settings" />
 
         <Card title="Backups — run / restore ledger">
-          <Table<InfraBackup>
+          <DataList<InfraBackup>
+            listId="infra-backups"
+            noun="backup runs"
+            endpoint="/v1/infra/backups"
+            exportPath="/v1/infra/backups/export.xlsx"
+            queryKey={["admin", "infra-backups", "list"]}
+            legacyKey="backups"
+            defaultSort={{ key: "created", dir: "desc" }}
             columns={[
-              { key: "resource", header: "Governs", render: (b) => b.resourceName ?? "—" },
-              { key: "kind", header: "Kind", render: (b) => b.kind },
-              { key: "status", header: "Status", render: (b) => <Badge>{b.status}</Badge> },
-              { key: "retention", header: "Retention until", render: (b) => (b.retentionUntil ? String(b.retentionUntil).slice(0, 10) : "—") },
+              { key: "resource", main: true, sortable: true, header: "Governs", render: (b) => b.resourceName ?? "—" },
+              { key: "kind", main: true, sortable: true, header: "Kind", render: (b) => b.kind },
+              { key: "status", main: true, sortable: true, required: "Status is always shown", header: "Status", render: (b) => <Badge>{b.status}</Badge> },
+              { key: "retention", main: true, sortable: true, header: "Retention until", render: (b) => (b.retentionUntil ? String(b.retentionUntil).slice(0, 10) : "—") },
               {
-                key: "actions",
+                key: "actions", action: true,
                 header: "",
                 srHeader: "Actions",
                 align: "right",
@@ -435,11 +442,7 @@ export default function InfrastructurePage() {
                   ),
               },
             ]}
-            rows={backups.data?.backups ?? []}
             rowKey={(b) => b.id}
-            loading={backups.isLoading}
-            error={backups.error}
-            onRetry={() => void backups.refetch()}
             empty={<EmptyState title="No backup runs tracked" />}
           />
         </Card>

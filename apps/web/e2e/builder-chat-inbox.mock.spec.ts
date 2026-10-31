@@ -83,12 +83,13 @@ test.describe("ADR-0172: agent inbox", () => {
     await page.goto("/ui/builder/inbox");
     await expect(page.getByRole("heading", { level: 1, name: "Agent inbox" })).toBeVisible();
     await expect(page.getByRole("tab", { name: "Needs attention" })).toHaveAttribute("aria-selected", "true");
-    const list = page.getByRole("list", { name: "Threads" });
-    await expect(list.getByRole("button")).toHaveCount(1);
+    const list = page.locator('[data-list="builder-threads"]');
+    const rows = list.getByRole("link", { name: /^Open thread/ });
+    await expect(rows).toHaveCount(1);
     await expect(page.getByText("Choose a thread")).toBeVisible();
     await expectAxeClean(page, "inbox");
 
-    await list.getByRole("button", { name: /Morning sweep/ }).click();
+    await list.getByRole("link", { name: /Morning sweep/ }).click();
     await expect(page).toHaveURL(/thread=th-0001/);
     await expect(page.getByText("Two are missing a data owner")).toBeVisible();
     await expect(page.getByText("Scheduled run: Morning sweep")).toBeVisible();
@@ -104,9 +105,9 @@ test.describe("ADR-0172: agent inbox", () => {
     await expect(page.getByRole("button", { name: "Reopen" })).toBeVisible();
 
     await page.getByRole("tab", { name: "All" }).click();
-    await expect(list.getByRole("button")).toHaveCount(3);
+    await expect(rows).toHaveCount(3);
     await page.getByLabel("Search threads").fill("vendor");
-    await expect(list.getByRole("button")).toHaveCount(1);
+    await expect(rows).toHaveCount(1);
     await page.getByLabel("Search threads").fill("zzz");
     await expect(page.getByText("No matching threads")).toBeVisible();
   });
@@ -119,6 +120,6 @@ test.describe("ADR-0172: agent inbox", () => {
     const page2 = await page.context().newPage();
     await installBuilderMock(page2, { fail: ["/threads"] });
     await page2.goto("/ui/builder/inbox");
-    await expect(page2.getByRole("alert").filter({ hasText: "Couldn't load threads" })).toBeVisible({ timeout: 15_000 });
+    await expect(page2.getByRole("alert").filter({ hasText: "Couldn't load this list" })).toBeVisible({ timeout: 15_000 });
   });
 });

@@ -340,8 +340,9 @@ export interface WorkflowInstanceSummary {
   id: string;
   status: string;
   createdAt: string;
+  updatedAt?: string;
   projectId?: string | null;
-  change?: { description?: string; changeType?: string; environment?: string };
+  change?: { description?: string; changeType?: string; environment?: string; targetSystem?: string };
 }
 
 export interface WorkflowStage {

@@ -26,7 +26,8 @@
  */
 import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { DataList } from "../../../ui/DataList";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
@@ -49,7 +50,6 @@ import EvalsCompareTab from "./EvalsCompareTab";
 import EvalsJudgeCalibration from "./EvalsJudgeCalibration";
 import { EngineRunsPanel } from "./EngineRunsPanel";
 import { QueryGate, RemoveButton, Stat, agentOpts, optionEls, projectOpts, useAction, useAgents, useProjects } from "../adminKit";
-import { NewestNote } from "../../../ui/fold";
 import a from "../admin.module.css";
 import { EvalsSummaryCard } from "./EvalsSummaryCard";
 import { ReasonedAction } from "./ReasonedAction";
@@ -212,6 +212,7 @@ export default function EvalsPage() {
   const agents = useAgents();
   const projects = useProjects();
   const act = useAction();
+  const qc = useQueryClient();
 
   const scorers = useQuery({
     queryKey: ["admin", "eval-scorers"],
@@ -504,7 +505,7 @@ export default function EvalsPage() {
                   });
                   setDsName("");
                   setDsNote("");
-                  await datasets.refetch();
+                  await qc.invalidateQueries({ queryKey: ["admin", "eval-datasets"] });
                 }, "Dataset created at version 1");
               }}
             >
@@ -526,74 +527,93 @@ export default function EvalsPage() {
                 Create
               </Button>
             </form>
-            {(datasets.data?.datasets ?? []).length === 0 ? (
-              <EmptyState
-                title="No datasets yet"
-                body="A regression gate needs a fixed set of cases to measure against. Create one, add cases, then run it to establish a baseline."
-              />
-            ) : (
-              <Table
-                rows={datasets.data?.datasets ?? []}
-                rowKey={(r) => r.id}
-                onRowClick={(r) => setSelectedDataset(r.id)}
-                columns={[
-                  { key: "name", header: "Dataset", render: (r) => r.name },
-                  { key: "version", header: "Version", render: (r) => `v${r.version}` },
-                  { key: "cases", header: "Cases", render: (r) => r.caseCount },
-                  { key: "runs", header: "Runs", render: (r) => r.runCount },
-                  { key: "scorer", header: "Default scorer", render: (r) => <code>{r.scorerKind}</code> },
-                  {
-                    key: "frozen",
-                    header: "State",
-                    render: (r) =>
-                      r.status === "retired" ? (
-                        <Badge tone="neutral">retired</Badge>
-                      ) : r.frozen ? (
-                        <Badge tone="info" title="A run has scored against this version, so its cases can no longer change.">
-                          frozen
-                        </Badge>
-                      ) : (
-                        <Badge tone="neutral">editable</Badge>
-                      ),
-                  },
-                  {
-                    key: "actions",
-                    header: "Actions",
-                    render: (r) =>
-                      r.status === "retired" ? (
-                        <span className={v.faint}>Read-only</span>
-                      ) : r.builtIn ? (
-                        <span className={v.faint}>Built in</span>
-                      ) : (
-                        <ReasonedAction
-                          label="Retire dataset"
-                          ariaLabel={`Retire dataset ${r.name}`}
-                          title={`Retire dataset “${r.name}”?`}
-                          body={<p className={v.flush}>No new runs or quality gates can use ‘{r.name}’. Past runs and every version stay readable.</p>}
-                          submit={(reason) => api.post(`/v1/evals/datasets/${r.id}/retire`, { reason })}
-                          done={`Dataset “${r.name}” retired`}
-                          refusal={(code, payload) => {
-                            if (code !== "eval_dataset_in_use") return null;
-                            const templates = (payload.templates as string[] | undefined) ?? [];
-                            const rules = Number(payload.automationRules ?? 0);
-                            return (
-                              <>
-                                Still in use. Remove it from these first, then retire it:
-                                <ul style={{ margin: "var(--s1) 0 0", paddingLeft: "var(--s3)" }}>
-                                  {templates.map((t) => (
-                                    <li key={t}>workflow template “{t}” (quality gate)</li>
-                                  ))}
-                                  {rules > 0 && <li>{rules} automation {rules === 1 ? "rule" : "rules"}</li>}
-                                </ul>
-                              </>
-                            );
-                          }}
-                        />
-                      ),
-                  },
-                ]}
-              />
-            )}
+            <DataList<DatasetRow>
+              listId="eval-datasets"
+              noun="datasets"
+              endpoint="/v1/evals/datasets"
+              exportPath="/v1/evals/datasets/export.xlsx"
+              queryKey={["admin", "eval-datasets", "list"]}
+              legacyKey="datasets"
+              defaultSort={{ key: "name", dir: "asc" }}
+              rowKey={(r) => r.id}
+              onRowClick={(r) => setSelectedDataset(r.id)}
+              empty={
+                <EmptyState
+                  title="No datasets yet"
+                  body="A regression gate needs a fixed set of cases to measure against. Create one, add cases, then run it to establish a baseline."
+                />
+              }
+              columns={[
+                { key: "name", header: "Dataset", main: true, sortable: true, render: (r) => r.name },
+                { key: "version", header: "Version", main: true, sortable: true, render: (r) => `v${r.version}` },
+                { key: "cases", header: "Cases", main: true, sortable: true, render: (r) => r.caseCount },
+                { key: "runs", header: "Runs", main: true, sortable: true, render: (r) => r.runCount },
+                { key: "scorer", header: "Default scorer", main: true, sortable: true, render: (r) => <code>{r.scorerKind}</code> },
+                {
+                  key: "frozen",
+                  header: "State",
+                  main: true,
+                  sortable: true,
+                  required: "Whether a dataset can still change is always shown",
+                  render: (r) =>
+                    r.status === "retired" ? (
+                      <Badge tone="neutral">retired</Badge>
+                    ) : r.frozen ? (
+                      <Badge tone="info" title="A run has scored against this version, so its cases can no longer change.">
+                        frozen
+                      </Badge>
+                    ) : (
+                      <Badge tone="neutral">editable</Badge>
+                    ),
+                },
+                {
+                  key: "status",
+                  header: "Status",
+                  main: true,
+                  sortable: true,
+                  required: "Whether a dataset is retired is always shown",
+                  render: (r) => (r.status === "retired" ? <Badge tone="neutral">retired</Badge> : <Badge tone="ok">active</Badge>),
+                },
+                { key: "created", header: "Created", sortable: true, render: (r) => ago(r.createdAt) },
+                { key: "note", header: "Note", render: (r) => r.note ?? "—" },
+                {
+                  key: "actions",
+                  header: "Actions",
+                  action: true,
+                  render: (r) =>
+                    r.status === "retired" ? (
+                      <span className={v.faint}>Read-only</span>
+                    ) : r.builtIn ? (
+                      <span className={v.faint}>Built in</span>
+                    ) : (
+                      <ReasonedAction
+                        label="Retire dataset"
+                        ariaLabel={`Retire dataset ${r.name}`}
+                        title={`Retire dataset “${r.name}”?`}
+                        body={<p className={v.flush}>No new runs or quality gates can use ‘{r.name}’. Past runs and every version stay readable.</p>}
+                        submit={(reason) => api.post(`/v1/evals/datasets/${r.id}/retire`, { reason })}
+                        done={`Dataset “${r.name}” retired`}
+                        refusal={(code, payload) => {
+                          if (code !== "eval_dataset_in_use") return null;
+                          const templates = (payload.templates as string[] | undefined) ?? [];
+                          const rules = Number(payload.automationRules ?? 0);
+                          return (
+                            <>
+                              Still in use. Remove it from these first, then retire it:
+                              <ul style={{ margin: "var(--s1) 0 0", paddingLeft: "var(--s3)" }}>
+                                {templates.map((t) => (
+                                  <li key={t}>workflow template “{t}” (quality gate)</li>
+                                ))}
+                                {rules > 0 && <li>{rules} automation {rules === 1 ? "rule" : "rules"}</li>}
+                              </ul>
+                            </>
+                          );
+                        }}
+                      />
+                    ),
+                },
+              ]}
+            />
           </Card>
 
           {/* ---------------- dataset detail + run trigger ---------------- */}
@@ -626,7 +646,7 @@ export default function EvalsPage() {
                             `/v1/evals/datasets/${selectedDataset}/versions`,
                           );
                           setSelectedDataset(next.dataset.id);
-                          await datasets.refetch();
+                          await qc.invalidateQueries({ queryKey: ["admin", "eval-datasets"] });
                         }, "Next version minted with the cases copied")
                       }
                     >
@@ -657,7 +677,7 @@ export default function EvalsPage() {
                       setCaseExpected("");
                       setCaseContext("");
                       await detail.refetch();
-                      await datasets.refetch();
+                      await qc.invalidateQueries({ queryKey: ["admin", "eval-datasets"] });
                     }, "Case added");
                   }}
                 >
@@ -792,8 +812,8 @@ export default function EvalsPage() {
                         projectId: runProject || undefined,
                         tolerance: Number(runTolerance),
                       });
-                      await runs.refetch();
-                      await datasets.refetch();
+                      await qc.invalidateQueries({ queryKey: ["admin", "eval-runs"] });
+                      await qc.invalidateQueries({ queryKey: ["admin", "eval-datasets"] });
                       await detail.refetch();
                     }, "Run complete");
                   }}
@@ -905,22 +925,29 @@ export default function EvalsPage() {
 
           {/* ---------------- runs ---------------- */}
           <Card title="Runs" contain>
-            <NewestNote shown={runs.data?.runs?.length ?? 0} limit={100} noun="runs" />
-            <Table
-              rows={runs.data?.runs ?? []}
+            <DataList<RunRow>
+              listId="eval-runs"
+              noun="runs"
+              endpoint="/v1/evals/runs"
+              exportPath="/v1/evals/runs/export.xlsx"
+              queryKey={["admin", "eval-runs", "list"]}
+              legacyKey="runs"
+              count="estimate"
+              defaultSort={{ key: "when", dir: "desc" }}
               rowKey={(r) => r.id}
               onRowClick={(r) => setSelectedRun(r.id)}
-              empty="No runs yet."
+              empty={<EmptyState title="No runs yet" body="Run a dataset above to score an agent against it." />}
               columns={[
-                { key: "dataset", header: "Dataset", render: (r) => `${r.datasetName ?? "?"} v${r.datasetVersion}` },
-                { key: "agent", header: "Agent", render: (r) => r.agentName },
-                { key: "model", header: "Model", render: (r) => r.model ?? "—" },
-                { key: "trigger", header: "Trigger", render: (r) => r.trigger },
-                { key: "score", header: "Mean score", render: (r) => (r.meanScore ?? 0).toFixed(3) },
-                { key: "pass", header: "Pass rate", render: (r) => pct(r.passRate) },
+                { key: "dataset", main: true, sortable: true, header: "Dataset", render: (r) => `${r.datasetName ?? "?"} v${r.datasetVersion}` },
+                { key: "agent", main: true, sortable: true, header: "Agent", render: (r) => r.agentName },
+                { key: "model", sortable: true, header: "Model", render: (r) => r.model ?? "—" },
+                { key: "trigger", sortable: true, header: "Trigger", render: (r) => r.trigger },
+                { key: "score", main: true, sortable: true, header: "Mean score", render: (r) => (r.meanScore ?? 0).toFixed(3) },
+                { key: "pass", main: true, sortable: true, header: "Pass rate", render: (r) => pct(r.passRate) },
                 {
                   key: "delta",
                   header: "Δ vs baseline",
+                  sortable: true,
                   render: (r) => (
                     <Badge
                       tone={
@@ -934,6 +961,9 @@ export default function EvalsPage() {
                 {
                   key: "gate",
                   header: "Gate",
+                  main: true,
+                  sortable: true,
+                  required: "The gate verdict is always shown",
                   render: (r) =>
                     r.gatePassed == null ? (
                       <Badge tone="neutral">—</Badge>
@@ -945,10 +975,11 @@ export default function EvalsPage() {
                       </Badge>
                     ),
                 },
-                { key: "cost", header: "Cost", render: (r) => `$${r.costUsd.toFixed(4)}` },
+                { key: "cost", sortable: true, header: "Cost", render: (r) => `$${r.costUsd.toFixed(4)}` },
                 {
                   key: "baseline",
                   header: "Baseline",
+                  sortable: true,
                   render: (r) =>
                     r.isBaseline ? (
                       <Badge tone="info">pinned</Badge>
@@ -959,7 +990,7 @@ export default function EvalsPage() {
                         onClick={() =>
                           void act.run(async () => {
                             await api.post(`/v1/evals/runs/${r.id}/baseline`, { isBaseline: true });
-                            await runs.refetch();
+                            await qc.invalidateQueries({ queryKey: ["admin", "eval-runs"] });
                           }, "Baseline pinned — every later run on this dataset version is measured against it")
                         }
                       >
@@ -967,7 +998,9 @@ export default function EvalsPage() {
                       </Button>
                     ),
                 },
-                { key: "when", header: "When", render: (r) => ago(r.startedAt) },
+                { key: "when", main: true, sortable: true, header: "When", render: (r) => ago(r.startedAt) },
+                { key: "status", header: "Status", sortable: true, render: (r) => r.status },
+                { key: "cases", header: "Cases", sortable: true, render: (r) => r.cases },
               ]}
             />
           </Card>

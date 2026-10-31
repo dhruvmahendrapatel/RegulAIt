@@ -38,7 +38,10 @@
  */
 import { createHash } from "node:crypto";
 import type { FastifyInstance, FastifyReply } from "fastify";
+import { wantsListContract, type ListSpec } from "./list-contract.js";
+import { answerListExport, answerListPage, type ContractList } from "./list-contract-route.js";
 import {
+  getTableColumns,
   agents,
   and,
   approvals,
@@ -1506,7 +1509,59 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
     return reply.status(202).send({ run: publicRun(out.run), approvalId: out.approvalId });
   });
 
-  app.get("/v1/engine-runs", async (req) => {
+  // ADR-0226: with any of sort/dir/cursor/offset/count the runs and schedules
+  // lists answer the shared list contract; with none of them, exactly the
+  // responses below (the model-artifacts scan history reads the old shape).
+  // The visibility rule is the same: an admin sees every run, anyone else
+  // only the runs and schedules that execute as them.
+  const runsList: ContractList<EngineRunListRow, z.infer<typeof engineRunsFilterQuery>> = {
+    spec: ENGINE_RUNS_LIST,
+    filters: engineRunsFilterQuery,
+    reader: {
+      fetch: async (q) => {
+        const rows = await db
+          .select({ ...getTableColumns(engineRuns), targetAgentName: RUN_TARGET_NAME, _cursorAt: q.cursorAt })
+          .from(engineRuns)
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset);
+        return rows.map(({ _cursorAt, targetAgentName, ...r }) => ({ ...publicRun(r), targetAgentName, _cursorAt }));
+      },
+      countable: (where) => db.select({ one: sql`1` }).from(engineRuns).where(where),
+      idOf: (r) => r.id,
+    },
+    where: (req, f) => {
+      const conds = [];
+      if (!req.authCtx.isAdmin) conds.push(eq(engineRuns.runAsUserId, req.authCtx.userId ?? NO_IDENTITY));
+      if (f.engineId) conds.push(eq(engineRuns.engineId, f.engineId));
+      if (f.status) conds.push(eq(engineRuns.status, f.status));
+      if (f.targetKind) conds.push(eq(engineRuns.targetKind, f.targetKind));
+      return conds.length ? and(...conds) : undefined;
+    },
+  };
+  app.get("/v1/engine-runs/export.xlsx", async (req, reply) => answerListExport(db, req, reply, runsList));
+  const schedulesList: ContractList<EngineScheduleListRow, Record<string, never>> = {
+    spec: ENGINE_SCHEDULES_LIST,
+    filters: z.object({}).strict() as unknown as z.ZodType<Record<string, never>>,
+    reader: {
+      fetch: (q) =>
+        db
+          .select({ ...getTableColumns(engineSchedules), targetAgentName: SCHEDULE_TARGET_NAME, _cursorAt: q.cursorAt })
+          .from(engineSchedules)
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset),
+      countable: (where) => db.select({ one: sql`1` }).from(engineSchedules).where(where),
+      idOf: (r) => r.id,
+    },
+    where: (req) => (req.authCtx.isAdmin ? undefined : eq(engineSchedules.runAsUserId, req.authCtx.userId ?? NO_IDENTITY)),
+  };
+  app.get("/v1/engine-schedules/export.xlsx", async (req, reply) => answerListExport(db, req, reply, schedulesList));
+
+  app.get("/v1/engine-runs", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, runsList);
     const q = listQuery.parse(req.query ?? {});
     const conds = [];
     if (!req.authCtx.isAdmin) conds.push(eq(engineRuns.runAsUserId, req.authCtx.userId ?? NO_IDENTITY));
@@ -1603,7 +1658,8 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
     return reply.status(201).send({ schedule: row });
   });
 
-  app.get("/v1/engine-schedules", async (req) => {
+  app.get("/v1/engine-schedules", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, schedulesList);
     const rows = await db
       .select()
       .from(engineSchedules)
@@ -2200,3 +2256,96 @@ export async function engineRunItemsOf(db: Db, runIds: string[]) {
   if (runIds.length === 0) return [];
   return db.select().from(engineRunItems).where(inArray(engineRunItems.runId, runIds));
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0226: the engine runs and schedules lists under the shared list contract
+// ---------------------------------------------------------------------------
+
+const engineRunsFilterQuery = z
+  .object({
+    engineId: z.enum(ENGINE_IDS).optional(),
+    status: z.enum(ENGINE_RUN_STATUSES).optional(),
+    /** the agent runs list leaves out the artifact scans, which the model-artifacts tab lists */
+    targetKind: z.enum(["agent", "artifact"]).optional(),
+  })
+  .strict();
+type EngineRunListRow = ReturnType<typeof publicRun> & { targetAgentName: string | null };
+const RUN_TARGET_NAME = sql<string | null>`(select ${agents.name} from ${agents} where ${agents.id} = ${engineRuns.targetAgentId})`;
+const RUN_VERDICT = sql`case when ${engineRuns.status} = 'not_run' then 'not_run' when ${engineRuns.status} in ('completed', 'failed', 'timeout', 'cancelled') then case when ${engineRuns.summary}->>'verdict' = 'pass' and ${engineRuns.status} <> 'completed' then 'unknown' else coalesce(nullif(${engineRuns.summary}->>'verdict', ''), 'unknown') end end`;
+/** the verdict the Engine runs table shows (engineRuns.ts `runVerdict`): none until the run ends */
+function runVerdictText(r: EngineRunListRow): string | null {
+  if (!isTerminalEngineRunStatus(r.status)) return null;
+  if (r.status === "not_run") return "not_run";
+  const v = (r.summary as Record<string, unknown> | null)?.verdict;
+  if (typeof v !== "string" || !v) return "unknown";
+  if (v === "pass" && r.status !== "completed") return "unknown";
+  return v;
+}
+const runSets = (config: unknown): string[] => {
+  const sets = (config as { sets?: unknown } | null)?.sets;
+  return Array.isArray(sets) ? sets.filter((x): x is string => typeof x === "string") : [];
+};
+
+export const ENGINE_RUNS_LIST: ListSpec<EngineRunListRow> = {
+  id: "engine-runs",
+  sorts: {
+    engine: { expr: engineRuns.engineId },
+    status: { expr: engineRuns.status },
+    verdict: { expr: RUN_VERDICT },
+    target: { expr: sql`lower(${RUN_TARGET_NAME})` },
+    sets: { expr: sql`${engineRuns.config}->>'sets'` },
+    trigger: { expr: engineRuns.trigger },
+    cost: { expr: engineRuns.costUsd },
+    when: { expr: engineRuns.createdAt, keysetAt: engineRuns.createdAt },
+    finished: { expr: engineRuns.finishedAt },
+    budget: { expr: engineRuns.budgetUsd },
+    trials: { expr: engineRuns.trials },
+    id: { expr: engineRuns.id },
+  },
+  columns: {
+    engine: { label: "Engine", value: (r) => `${r.engineId} ${r.engineVersion}` },
+    status: { label: "Status", value: (r) => r.status.replaceAll("_", " ") },
+    verdict: { label: "Verdict", value: (r) => runVerdictText(r)?.replaceAll("_", " ") ?? null },
+    target: { label: "Target", value: (r) => r.targetAgentName ?? r.targetAgentId },
+    sets: { label: "Sets", value: (r) => runSets(r.config).join(", ") || null },
+    trigger: { label: "Trigger", value: (r) => r.trigger },
+    cost: { label: "Cost", value: (r) => r.costUsd },
+    when: { label: "Created", value: (r) => r.createdAt },
+    finished: { label: "Finished", value: (r) => r.finishedAt },
+    budget: { label: "Budget", value: (r) => r.budgetUsd },
+    trials: { label: "Trials", value: (r) => r.trials },
+    id: { label: "Run id", value: (r) => r.id },
+  },
+  filters: ["engineId", "status", "targetKind"],
+  defaultSort: { col: "when", dir: "desc" },
+  idCol: engineRuns.id,
+};
+
+type EngineScheduleListRow = typeof engineSchedules.$inferSelect & { targetAgentName: string | null };
+const SCHEDULE_TARGET_NAME = sql<string | null>`(select ${agents.name} from ${agents} where ${agents.id}::text = ${engineSchedules.request}->'target'->>'agentId')`;
+const scheduleSets = (s: EngineScheduleListRow) => runSets((s.request as { config?: unknown } | null)?.config ?? s.request);
+
+export const ENGINE_SCHEDULES_LIST: ListSpec<EngineScheduleListRow> = {
+  id: "engine-schedules",
+  sorts: {
+    engine: { expr: engineSchedules.engineId },
+    target: { expr: sql`lower(${SCHEDULE_TARGET_NAME})` },
+    every: { expr: engineSchedules.intervalHours },
+    next: { expr: sql`case when ${engineSchedules.enabled} then ${engineSchedules.nextRunAt} end` },
+    last: { expr: sql`coalesce(${engineSchedules.lastSkip}, ${engineSchedules.lastRunId}::text)` },
+    state: { expr: engineSchedules.enabled },
+    created: { expr: engineSchedules.createdAt, keysetAt: engineSchedules.createdAt },
+  },
+  columns: {
+    engine: { label: "Engine", value: (r) => r.engineId },
+    target: { label: "Target · sets", value: (r) => `${r.targetAgentName ?? "Not reported"} · ${scheduleSets(r).join(", ") || "no sets"}` },
+    every: { label: "Every (hours)", value: (r) => r.intervalHours },
+    next: { label: "Next run", value: (r) => (r.enabled ? r.nextRunAt : null) },
+    last: { label: "Last", value: (r) => (r.lastSkip ? `skipped: ${r.lastSkip}` : r.lastRunId) },
+    state: { label: "State", value: (r) => (r.enabled ? "on" : "off") },
+    created: { label: "Created", value: (r) => r.createdAt },
+  },
+  filters: [],
+  defaultSort: { col: "created", dir: "desc" },
+  idCol: engineSchedules.id,
+};

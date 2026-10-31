@@ -62,7 +62,10 @@
  */
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
+import { wantsListContract, type ListSpec } from "./list-contract.js";
+import { answerListExport, answerListPage, type ContractList } from "./list-contract-route.js";
 import {
+  getTableColumns,
   and,
   approvals,
   auditLog,
@@ -889,7 +892,57 @@ export function registerSpendMonitorRoutes(app: FastifyInstance, db: Db): void {
 
   // --- anomalies (NON-ADMIN reachable READ, entitlement-scoped) ------------
 
-  app.get("/v1/spend/anomalies", async (req) => {
+  // ADR-0226: with any of sort/dir/cursor/offset/count the anomaly signals
+  // and the decided changes answer the shared list contract; with none of
+  // them, exactly the responses below (the overview's newest 25). The
+  // project narrowing for a non-admin is the same WHERE as the old route's.
+  const anomaliesList: ContractList<AnomalyListRow, { projectId?: string; status?: "open" | "acknowledged" | "dismissed" }> = {
+    spec: SPEND_ANOMALIES_LIST,
+    filters: z.object({ projectId: z.string().uuid().optional(), status: z.enum(["open", "acknowledged", "dismissed"]).optional() }).strict(),
+    reader: {
+      fetch: (q) =>
+        db
+          .select({ ...getTableColumns(spendAnomalies), projectName: ANOMALY_PROJECT, _cursorAt: q.cursorAt })
+          .from(spendAnomalies)
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset),
+      countable: (where) => db.select({ one: sql`1` }).from(spendAnomalies).where(where),
+      idOf: (r) => r.id,
+    },
+    where: async (req, f) => {
+      const mine = req.authCtx.isAdmin ? null : await callerProjectIds(db, req.authCtx.userId ?? null);
+      return and(
+        f.projectId ? eq(spendAnomalies.projectId, f.projectId) : undefined,
+        f.status ? eq(spendAnomalies.status, f.status) : undefined,
+        mine === null ? undefined : inArray(spendAnomalies.projectId, mine.length ? mine : [ZERO_UUID]),
+      );
+    },
+    extra: () => ({ note: ANOMALY_NOTE }),
+  };
+  app.get("/v1/spend/anomalies/export.xlsx", async (req, reply) => answerListExport(db, req, reply, anomaliesList));
+  const changesList: ContractList<ScheduledChangeListRow, { projectId?: string }> = {
+    spec: SPEND_SCHEDULED_CHANGES_LIST,
+    filters: z.object({ projectId: z.string().uuid().optional() }).strict(),
+    reader: {
+      fetch: (q) =>
+        db
+          .select({ ...getTableColumns(spendScheduledChanges), projectName: CHANGE_PROJECT, _cursorAt: q.cursorAt })
+          .from(spendScheduledChanges)
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset),
+      countable: (where) => db.select({ one: sql`1` }).from(spendScheduledChanges).where(where),
+      idOf: (r) => r.id,
+    },
+    where: (_req, f) => (f.projectId ? eq(spendScheduledChanges.projectId, f.projectId) : undefined),
+  };
+  app.get("/v1/spend/scheduled-changes/export.xlsx", async (req, reply) => answerListExport(db, req, reply, changesList));
+
+  app.get("/v1/spend/anomalies", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, anomaliesList);
     const q = z
       .object({
         projectId: z.string().uuid().optional(),
@@ -919,10 +972,7 @@ export function registerSpendMonitorRoutes(app: FastifyInstance, db: Db): void {
       .limit(q.limit);
     return {
       anomalies: rows,
-      note:
-        "An anomaly is a SIGNAL FOR HUMAN REVIEW, never proof of wrongdoing. Every row carries the " +
-        "method, baseline, threshold and score it was derived from so it can be re-checked by hand. " +
-        "Enforcement, where configured, rides the existing Approvals Queue.",
+      note: ANOMALY_NOTE,
     };
   });
 
@@ -1048,7 +1098,8 @@ export function registerSpendMonitorRoutes(app: FastifyInstance, db: Db): void {
     return reply.status(201).send({ scheduledChange: row });
   });
 
-  app.get("/v1/spend/scheduled-changes", async (req) => {
+  app.get("/v1/spend/scheduled-changes", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, changesList);
     const q = z.object({ projectId: z.string().uuid().optional() }).parse(req.query ?? {});
     const rows = await db
       .select()
@@ -1122,3 +1173,68 @@ export function registerSpendMonitorRoutes(app: FastifyInstance, db: Db): void {
     };
   });
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0226: anomaly signals and decided changes under the shared list contract
+// ---------------------------------------------------------------------------
+
+const ANOMALY_NOTE =
+  "An anomaly is a SIGNAL FOR HUMAN REVIEW, never proof of wrongdoing. Every row carries the " +
+  "method, baseline, threshold and score it was derived from so it can be re-checked by hand. " +
+  "Enforcement, where configured, rides the existing Approvals Queue.";
+type AnomalyListRow = typeof spendAnomalies.$inferSelect & { projectName: string | null };
+const ANOMALY_PROJECT = sql<string | null>`(select ${projects.name} from ${projects} where ${projects.id} = ${spendAnomalies.projectId})`;
+
+export const SPEND_ANOMALIES_LIST: ListSpec<AnomalyListRow> = {
+  id: "spend-anomalies",
+  sorts: {
+    p: { expr: sql`lower(${ANOMALY_PROJECT})` },
+    s: { expr: spendAnomalies.signal },
+    o: { expr: spendAnomalies.observed },
+    sc: { expr: spendAnomalies.score },
+    a: { expr: sql`(${spendAnomalies.approvalId} is not null)` },
+    st: { expr: spendAnomalies.status },
+    d: { expr: spendAnomalies.detectedAt, keysetAt: spendAnomalies.detectedAt },
+    m: { expr: spendAnomalies.method },
+    w: { expr: spendAnomalies.windowStart, keysetAt: spendAnomalies.windowStart },
+  },
+  columns: {
+    p: { label: "Project", value: (r) => r.projectName ?? "unknown project" },
+    s: { label: "Signal", value: (r) => r.signal },
+    o: { label: "Observed", value: (r) => r.observed },
+    sc: { label: "Score vs threshold", value: (r) => (r.score == null ? null : `${r.score} vs ${r.threshold}`) },
+    a: { label: "Action", value: (r) => (r.approvalId ? "approval raised" : "alert only") },
+    st: { label: "Status", value: (r) => r.status },
+    d: { label: "Detected", value: (r) => r.detectedAt },
+    m: { label: "Method", value: (r) => r.method },
+    w: { label: "Window start", value: (r) => r.windowStart },
+    x: { label: "Explanation", value: (r) => r.explanation },
+  },
+  filters: ["projectId", "status"],
+  defaultSort: { col: "d", dir: "desc" },
+  idCol: spendAnomalies.id,
+};
+
+type ScheduledChangeListRow = typeof spendScheduledChanges.$inferSelect & { projectName: string | null };
+const CHANGE_PROJECT = sql<string | null>`(select ${projects.name} from ${projects} where ${projects.id} = ${spendScheduledChanges.projectId})`;
+
+export const SPEND_SCHEDULED_CHANGES_LIST: ListSpec<ScheduledChangeListRow> = {
+  id: "spend-scheduled-changes",
+  sorts: {
+    p: { expr: sql`lower(${CHANGE_PROJECT})` },
+    d: { expr: spendScheduledChanges.deltaUsd },
+    e: { expr: spendScheduledChanges.effectiveAt, keysetAt: spendScheduledChanges.effectiveAt },
+    r: { expr: sql`lower(${spendScheduledChanges.reason})` },
+    c: { expr: spendScheduledChanges.createdAt, keysetAt: spendScheduledChanges.createdAt },
+  },
+  columns: {
+    p: { label: "Project", value: (r) => r.projectName ?? "unknown project" },
+    d: { label: "Delta", value: (r) => r.deltaUsd },
+    e: { label: "Effective", value: (r) => r.effectiveAt },
+    r: { label: "Reason", value: (r) => r.reason },
+    c: { label: "Decided", value: (r) => r.createdAt },
+  },
+  filters: ["projectId"],
+  defaultSort: { col: "e", dir: "desc" },
+  idCol: spendScheduledChanges.id,
+};

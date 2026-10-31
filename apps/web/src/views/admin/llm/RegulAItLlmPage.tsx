@@ -28,7 +28,7 @@
  */
 import { useState } from "react";
 import { TrainingJobDetail } from "./TrainingJobDetail";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
@@ -48,7 +48,7 @@ import {
   type Tone,
 } from "../../../ui/kit";
 import { KV, OutcomePanel, QueryGate, RemoveButton, Stat, agentOpts, optionEls, projectOpts, useAction, useAgents, useApiAction, useProjects } from "../adminKit";
-import { NewestNote } from "../../../ui/fold";
+import { DataList } from "../../../ui/DataList";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 import { SpdxFieldsPanel } from "../governance/SpdxFieldsPanel";
@@ -235,10 +235,9 @@ export default function RegulAItLlmPage() {
     queryKey: ["admin", "llm-datasets"],
     queryFn: () => api.get<{ datasets: DatasetRow[]; note: string }>("/v1/llm/datasets"),
   });
-  const jobs = useQuery({
-    queryKey: ["admin", "llm-jobs"],
-    queryFn: () => api.get<{ jobs: JobRow[] }>("/v1/llm/jobs?limit=100"),
-  });
+  // the jobs list is the shared list control below; a write refreshes it through this prefix
+  const qc = useQueryClient();
+  const jobs = { refetch: () => qc.invalidateQueries({ queryKey: ["admin", "llm-jobs"] }) };
   const artifacts = useQuery({
     queryKey: ["admin", "llm-artifacts"],
     queryFn: () => api.get<{ artifacts: ArtifactRow[]; note: string }>("/v1/llm/artifacts"),
@@ -778,15 +777,22 @@ export default function RegulAItLlmPage() {
           {openJob && <TrainingJobDetail key={openJob} jobId={openJob} onClose={() => setOpenJob(null)} />}
           {/* ---------------- jobs ---------------- */}
           <Card title="Training jobs" contain>
-            <NewestNote shown={jobs.data?.jobs?.length ?? 0} limit={100} noun="jobs" />
-            <Table
-              rows={jobs.data?.jobs ?? []}
+            <DataList<JobRow>
+              listId="training-jobs"
+              noun="training jobs"
+              endpoint="/v1/llm/jobs"
+              exportPath="/v1/llm/jobs/export.xlsx"
+              queryKey={["admin", "llm-jobs", "list"]}
+              legacyKey="jobs"
+              defaultSort={{ key: "when", dir: "desc" }}
               rowKey={(r) => r.id}
-              empty="No training jobs yet."
+              empty={<EmptyState title="No training jobs yet" body="Start a job from a dataset above." />}
               columns={[
                 {
                   key: "name",
                   header: "Job",
+                  main: true,
+                  sortable: true,
                   render: (r) => (
                     <span className={v.row}>
                       {r.name}
@@ -799,13 +805,18 @@ export default function RegulAItLlmPage() {
                 {
                   key: "dataset",
                   header: "Trained on",
+                  main: true,
+                  sortable: true,
                   render: (r) => `${r.datasetName ?? "?"} v${r.datasetVersion}`,
                 },
-                { key: "backend", header: "Backend", render: (r) => <code>{r.backend}</code> },
-                { key: "method", header: "Method", render: (r) => <code>{r.method}</code> },
+                { key: "backend", header: "Backend", main: true, sortable: true, render: (r) => <code>{r.backend}</code> },
+                { key: "method", header: "Method", sortable: true, render: (r) => <code>{r.method}</code> },
                 {
                   key: "status",
                   header: "Status",
+                  main: true,
+                  sortable: true,
+                  required: "Status is always shown",
                   render: (r) => (
                     <Badge
                       tone={statusTone(r.status)}
@@ -822,12 +833,15 @@ export default function RegulAItLlmPage() {
                 {
                   key: "progress",
                   header: "Progress",
+                  sortable: true,
                   render: (r) =>
                     r.status === "running" ? <Meter value={r.progress} max={1} /> : <span className={v.faint}>—</span>,
                 },
                 {
                   key: "cost",
                   header: "Cost",
+                  main: true,
+                  sortable: true,
                   render: (r) => (
                     <span title={`estimated ${usd(r.estimatedCostUsd)}`}>
                       {r.costUsd == null ? `est. ${usd(r.estimatedCostUsd)}` : usd(r.costUsd)}
@@ -837,6 +851,8 @@ export default function RegulAItLlmPage() {
                 {
                   key: "approval",
                   header: "Approval",
+                  sortable: true,
+                  required: "A job waiting on approval is always shown",
                   render: (r) =>
                     r.approvalId ? (
                       <Link to="/admin/approvals" title="Decided in the one Approvals Queue">
@@ -849,6 +865,7 @@ export default function RegulAItLlmPage() {
                 {
                   key: "artifact",
                   header: "Artifact",
+                  sortable: true,
                   render: (r) =>
                     r.artifactId ? (
                       <Button size="sm" onClick={() => setSelectedArtifact(r.artifactId!)}>
@@ -858,9 +875,10 @@ export default function RegulAItLlmPage() {
                       <span className={v.faint}>—</span>
                     ),
                 },
-                { key: "when", header: "Started", render: (r) => ago(r.createdAt) },
+                { key: "when", header: "Started", main: true, sortable: true, render: (r) => ago(r.createdAt) },
                 {
                   key: "act",
+                  action: true,
                   header: "",
                   srHeader: "Actions",
                   render: (r) =>

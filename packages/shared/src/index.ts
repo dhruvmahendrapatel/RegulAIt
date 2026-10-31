@@ -28,6 +28,7 @@ import { batch5OrgSettingsFields } from "./engines/settings.js";
 // ADR-0188 (batch 6 item 1): the identity settings ride the same PUT
 import { identityOrgSettingsFields } from "./identity/settings.js";
 import { IDENTITY_PROPAGATION_MODES } from "./identity/contract.js";
+import { IDENTITY_ASSERTION_PROFILES, IDENTITY_ASSERTION_SCOPE_MAX } from "./identity/mcp-identity-assertion.js";
 // ADR-0189 (batch 6 item 2): the Decision BOM / AI BOM settings ride the same PUT
 import { bomOrgSettingsFields } from "./bom/settings.js";
 // ADR-0190 (batch 6 item 3): the isolation settings ride the same PUT
@@ -810,6 +811,10 @@ export const updateServerSchema = z
     identityPropagation: z.enum(IDENTITY_PROPAGATION_MODES).optional(),
     // ADR-0188 S8 follow-up: name agents by their workload IDs, not pairwise ids (a relaxation: settings_relax step-up)
     discloseAgentWorkloadIds: z.boolean().optional(),
+    // ADR-0210: send the assertion as an OIDC bearer (ES256, its own issuer) with an admin-set scope (a relaxation:
+    // settings_relax step-up); the scope's shape is checked by `assertionProfileUpdate`, which answers with a sentence
+    identityAssertionProfile: z.enum(IDENTITY_ASSERTION_PROFILES).optional(),
+    identityAssertionScope: z.string().max(IDENTITY_ASSERTION_SCOPE_MAX).nullable().optional(),
   })
   .strict();
 

@@ -657,7 +657,7 @@ test.describe("Red-teaming — recurring engine runs (ADR-0187)", () => {
       ["GET", /^\/v1\/redteam\/(libraries|runs)$/, () => ({ body: { libraries: [], runs: [], note: "" } })],
     ]);
     await installEnginesMock(page);
-    await page.route(/\/v1\/engine-schedules(\/|$)/, async (route) => {
+    await page.route(/\/v1\/engine-schedules(\/|\?|$)/, async (route) => {
       const req = route.request();
       const p = new URL(req.url()).pathname;
       const body = req.method() === "GET" ? undefined : req.postDataJSON();

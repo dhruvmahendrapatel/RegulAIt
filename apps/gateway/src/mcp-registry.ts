@@ -91,7 +91,11 @@
  * deciding whether a governance promise applies, and the promise is worth more
  * than the convenience.
  */
+import { wantsListContract, type ListSpec } from "./list-contract.js";
+import { answerListExport, answerListPage, type ContractList } from "./list-contract-route.js";
+import { likeLiteral } from "./users-list.js";
 import {
+  getTableColumns,
   and,
   asc,
   auditLog,
@@ -1385,7 +1389,43 @@ export function registerMcpRegistryRoutes(app: FastifyInstance, db: Db, deps: Mc
     return reply.status(out.outcome === "ok" ? 200 : 200).send(out);
   });
 
+  // ADR-0226: with any of sort/dir/cursor/offset/count one registry's
+  // catalogue answers the shared list contract, with a search (`q`) on the
+  // server; with none of them, exactly the whole-catalogue response below.
+  const entriesList: ContractList<RegistryEntryRow, { q?: string; kind?: "remote" | "catalogue_only" }> = {
+    spec: MCP_REGISTRY_ENTRIES_LIST,
+    filters: z.object({ q: z.string().trim().max(200).optional(), kind: z.enum(["remote", "catalogue_only"]).optional() }).strict(),
+    reader: {
+      fetch: (q) =>
+        db
+          .select({ ...getTableColumns(mcpRegistryEntries), _cursorAt: q.cursorAt })
+          .from(mcpRegistryEntries)
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset),
+      countable: (where) => db.select({ one: sql`1` }).from(mcpRegistryEntries).where(where),
+      idOf: (r) => r.id,
+    },
+    where: async (req, f) => {
+      const p = uuidParam.safeParse(req.params);
+      if (!p.success) return null;
+      const [registry] = await db.select({ id: mcpRegistries.id }).from(mcpRegistries).where(eq(mcpRegistries.id, p.data.registryId));
+      if (!registry) return null;
+      const pattern = f.q ? likeLiteral(f.q) : null;
+      return and(
+        eq(mcpRegistryEntries.registryId, registry.id),
+        f.kind ? eq(mcpRegistryEntries.kind, f.kind) : undefined,
+        pattern
+          ? sql`(${mcpRegistryEntries.upstreamName} ilike ${pattern} or coalesce(${mcpRegistryEntries.title}, '') ilike ${pattern} or coalesce(${mcpRegistryEntries.remoteUrl}, '') ilike ${pattern})`
+          : undefined,
+      );
+    },
+    refusal: { status: 404, body: { error: "unknown_registry" } },
+  };
+  app.get("/v1/mcp-registries/:registryId/entries/export.xlsx", async (req, reply) => answerListExport(db, req, reply, entriesList));
   app.get("/v1/mcp-registries/:registryId/entries", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, entriesList);
     const { registryId } = uuidParam.parse(req.params);
     const [registry] = await db.select().from(mcpRegistries).where(eq(mcpRegistries.id, registryId));
     if (!registry) return reply.status(404).send({ error: "unknown_registry" });
@@ -1419,3 +1459,56 @@ export function registerMcpRegistryRoutes(app: FastifyInstance, db: Db, deps: Mc
  * policy gate, the proxy route, the admission gate or the egress guard, and
  * this constant exists to make the absence searchable. */
 export const FEDERATION_HAS_NO_CALL_PATH_BRANCH = true;
+
+// ---------------------------------------------------------------------------
+// ADR-0226: a registry's catalogue under the shared list contract
+// ---------------------------------------------------------------------------
+
+type RegistryEntryRow = typeof mcpRegistryEntries.$inferSelect;
+/** the State column's badges, as words (worst first) */
+function entryStateText(e: RegistryEntryRow): string {
+  const parts: string[] = [];
+  if (e.conflictReason) parts.push(e.conflictReason === "name_taken" ? "name taken" : "URL taken");
+  if (e.missingSince) parts.push("no longer listed");
+  if (e.remoteUrlDrift) parts.push("endpoint moved");
+  if (e.upstreamStatus && e.upstreamStatus !== "active") parts.push(e.upstreamStatus);
+  if (e.serverId) parts.push("imported");
+  return parts.join(", ");
+}
+/** the same order as a sort: a conflict first, then no longer listed, endpoint moved, deprecated or deleted, imported */
+const ENTRY_STATE_RANK = sql`case
+  when ${mcpRegistryEntries.conflictReason} is not null then 0
+  when ${mcpRegistryEntries.missingSince} is not null then 1
+  when ${mcpRegistryEntries.remoteUrlDrift} is not null then 2
+  when coalesce(${mcpRegistryEntries.upstreamStatus}, 'active') <> 'active' then 3
+  when ${mcpRegistryEntries.serverId} is not null then 4
+  else 5 end`;
+
+export const MCP_REGISTRY_ENTRIES_LIST: ListSpec<RegistryEntryRow> = {
+  id: "mcp-registry-entries",
+  sorts: {
+    name: { expr: sql`lower(${mcpRegistryEntries.upstreamName})` },
+    kind: { expr: mcpRegistryEntries.kind },
+    endpoint: { expr: mcpRegistryEntries.remoteUrl },
+    state: { expr: ENTRY_STATE_RANK },
+    version: { expr: mcpRegistryEntries.upstreamVersion },
+    title: { expr: sql`lower(${mcpRegistryEntries.title})` },
+    published: { expr: mcpRegistryEntries.upstreamPublishedAt },
+    firstSeen: { expr: mcpRegistryEntries.firstSeenAt, keysetAt: mcpRegistryEntries.firstSeenAt },
+    lastSeen: { expr: mcpRegistryEntries.lastSeenAt, keysetAt: mcpRegistryEntries.lastSeenAt },
+  },
+  columns: {
+    name: { label: "Entry", value: (r) => r.upstreamName },
+    kind: { label: "Kind", value: (r) => (r.kind === "remote" ? `remote · ${r.remoteTransport ?? "transport not reported"}` : "catalogue only") },
+    endpoint: { label: "Endpoint", value: (r) => r.remoteUrl },
+    state: { label: "State", value: entryStateText },
+    version: { label: "Version", value: (r) => r.upstreamVersion },
+    title: { label: "Title", value: (r) => r.title },
+    published: { label: "Published upstream", value: (r) => r.upstreamPublishedAt },
+    firstSeen: { label: "First seen", value: (r) => r.firstSeenAt },
+    lastSeen: { label: "Last seen", value: (r) => r.lastSeenAt },
+  },
+  filters: ["q", "kind"],
+  defaultSort: { col: "name", dir: "asc" },
+  idCol: mcpRegistryEntries.id,
+};

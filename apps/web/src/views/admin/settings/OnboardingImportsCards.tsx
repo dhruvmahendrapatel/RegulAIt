@@ -12,8 +12,8 @@
  *    refusal, newest first, filterable by kind and status. Refusals are in the
  *    list on purpose.
  */
-import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
+import { DataList } from "../../../ui/DataList";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
@@ -164,11 +164,7 @@ const STATUS_TONE: Record<string, Tone> = { planned: "info", applied: "ok", refu
 export function ImportHistoryCard() {
   const [kind, setKind] = useState("");
   const [status, setStatus] = useState("");
-  const qs = new URLSearchParams({ limit: "50", ...(kind ? { kind } : {}), ...(status ? { status } : {}) }).toString();
-  const q = useQuery({
-    queryKey: ["admin", "onboarding-imports", kind, status],
-    queryFn: () => api.get<{ imports: OnboardingImport[] }>(`/v1/onboarding/imports?${qs}`),
-  });
+  const filters = useMemo(() => ({ kind: kind || undefined, status: status || undefined }), [kind, status]);
   return (
     <Card title="Import history">
       <div className={v.stack} data-testid="onboarding-import-history">
@@ -190,19 +186,23 @@ export function ImportHistoryCard() {
             </Select>
           </Field>
         </div>
-        <Table<OnboardingImport>
-          rows={q.data?.imports ?? []}
+        <DataList<OnboardingImport>
+          listId="onboarding-imports"
+          noun="imports"
+          endpoint="/v1/onboarding/imports"
+          exportPath="/v1/onboarding/imports/export.xlsx"
+          queryKey={["admin", "onboarding-imports", "list"]}
+          legacyKey="imports"
+          filters={filters}
+          defaultSort={{ key: "at", dir: "desc" }}
           rowKey={(r) => r.id}
-          loading={q.isLoading}
-          error={q.error}
-          onRetry={() => void q.refetch()}
           columns={[
-            { key: "at", header: "When", sort: (r) => r.createdAt, render: (r) => ago(r.createdAt) },
-            { key: "kind", header: "Kind", render: (r) => KIND_TEXT[r.kind] ?? r.kind },
-            { key: "mode", header: "Mode", render: (r) => (r.mode === "dry_run" ? "Preview" : r.mode === "apply" ? "Apply" : r.mode) },
-            { key: "status", header: "Status", render: (r) => <Badge tone={STATUS_TONE[r.status] ?? "warn"}>{r.status}</Badge> },
-            { key: "rows", header: "Rows", align: "right", render: (r) => r.rowCount },
-            { key: "why", header: "What happened", render: (r) => <span className={v.dim}>{r.reason}</span> },
+            { key: "at", header: "When", main: true, sortable: true, render: (r) => ago(r.createdAt) },
+            { key: "kind", header: "Kind", main: true, sortable: true, render: (r) => KIND_TEXT[r.kind] ?? r.kind },
+            { key: "mode", header: "Mode", main: true, sortable: true, render: (r) => (r.mode === "dry_run" ? "Preview" : r.mode === "apply" ? "Apply" : r.mode) },
+            { key: "status", header: "Status", main: true, sortable: true, required: "Status is always shown", render: (r) => <Badge tone={STATUS_TONE[r.status] ?? "warn"}>{r.status}</Badge> },
+            { key: "rows", header: "Rows", main: true, sortable: true, align: "right", render: (r) => r.rowCount },
+            { key: "why", header: "What happened", main: true, sortable: true, required: "Why an import was refused is always shown", render: (r) => <span className={v.dim}>{r.reason}</span> },
           ]}
           empty={<EmptyState title="No imports yet" body="Previews, applies and refusals appear here." />}
         />

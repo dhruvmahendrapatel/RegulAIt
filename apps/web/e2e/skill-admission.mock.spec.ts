@@ -119,9 +119,17 @@ async function installAdmissionMock(page: Page, st: MockState) {
       { ...PENDING, ownerName: "Cora Analyst", admissionSeverity: null, admissionFindings: [], visibilityRequestedAt: iso(0), admissionScannedAt: iso(0), admittedAt: null, admitReason: null },
     ],
   };
-  await page.route("**/v1/admission/skills", (route) =>
-    json(route, { scannerVersion: "skill-admission/2", holdAt: "medium", refuseAt: "high", rules: [], skills: state.skills }),
-  );
+  await page.route(/\/v1\/admission\/skills(\?|$)/, (route) => {
+    const q = new URL(route.request().url()).searchParams;
+    // ADR-0226: the held list and the share requests are each a page of the server's queue, filtered by `view`
+    if (q.get("sort") || q.get("count")) {
+      const items = state.skills.filter((k) =>
+        q.get("view") === "shares" ? k.requestedVisibility === "workspace" : ["held", "refused", "admitted"].includes(k.admissionState),
+      );
+      return json(route, { items, nextCursor: null, nextOffset: null, total: items.length, totalIsEstimate: false });
+    }
+    return json(route, { scannerVersion: "skill-admission/2", holdAt: "medium", refuseAt: "high", rules: [], skills: state.skills });
+  });
   await page.route(/\/v1\/admission\/skills\/[^/]+\/(admit|visibility)$/, (route) => {
     st.calls.push({ method: "POST", path: new URL(route.request().url()).pathname, body: route.request().postDataJSON() });
     return json(route, { skill: {} });
@@ -139,7 +147,11 @@ async function installAdmissionMock(page: Page, st: MockState) {
     st.calls.push({ method: "POST", path: "/v1/release-quarantine/override", body: route.request().postDataJSON() });
     return json(route, { override: {} }, 201);
   });
-  await page.route("**/v1/mcp/admission", (route) => json(route, { mode: "log", enforcing: false, servers: [] }));
+  await page.route(/\/v1\/mcp\/admission(\?|$)/, (route) =>
+    new URL(route.request().url()).searchParams.get("count")
+      ? json(route, { mode: "log", enforcing: false, items: [], nextCursor: null, nextOffset: null, total: 0, totalIsEstimate: false })
+      : json(route, { mode: "log", enforcing: false, servers: [] }),
+  );
   await page.route("**/v1/org/settings", (route) => {
     if (route.request().method() === "PUT") {
       const body = route.request().postDataJSON();

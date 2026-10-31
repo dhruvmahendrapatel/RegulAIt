@@ -44,6 +44,9 @@
  */
 import { createHash } from "node:crypto";
 import type { FastifyInstance } from "fastify";
+import { wantsListContract, type ListSpec } from "./list-contract.js";
+import { answerListExport, answerListPage, type ContractList } from "./list-contract-route.js";
+import { getTableColumns } from "@regulait/db";
 import { z } from "zod";
 import {
   and,
@@ -447,7 +450,38 @@ export async function runSkillAdmissionRescan(db: Db, opts: { limit?: number } =
 // ---------------------------------------------------------------------------
 
 export function registerSkillAdmissionRoutes(app: FastifyInstance, db: Db) {
-  app.get("/v1/admission/skills", async () => {
+  // ADR-0226: with any of sort/dir/cursor/offset/count the review queue
+  // answers the shared list contract for one of its two lists (`view=held`:
+  // held, refused or admitted; `view=shares`: requests to share with the
+  // workspace); with none of them, exactly the whole-queue response below.
+  const skillsList: ContractList<ReviewSkillRow, { view: "held" | "shares" }> = {
+    spec: ADMISSION_SKILLS_LIST,
+    filters: z.object({ view: z.enum(["held", "shares"]).default("held") }).strict(),
+    reader: {
+      fetch: async (q) => {
+        const rows = await db
+          .select({ skill: builderSkills, ownerName: users.displayName, _cursorAt: q.cursorAt })
+          .from(builderSkills)
+          .innerJoin(users, eq(builderSkills.ownerUserId, users.id))
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset);
+        return rows.map(({ skill, ownerName, _cursorAt }) => ({ ...reviewSkillView(skill, ownerName), _cursorAt }));
+      },
+      countable: (where) => db.select({ one: sql`1` }).from(builderSkills).innerJoin(users, eq(builderSkills.ownerUserId, users.id)).where(where),
+      idOf: (r) => r.id,
+    },
+    where: (_req, f) =>
+      and(
+        isNull(builderSkills.archivedAt),
+        f.view === "shares" ? eq(builderSkills.requestedVisibility, "workspace") : inArray(builderSkills.admissionState, ["held", "refused", "admitted"]),
+      ),
+    extra: () => ({ scannerVersion: SKILL_ADMISSION_SCANNER_VERSION, holdAt: SKILL_ADMISSION_HOLD_AT, refuseAt: SKILL_ADMISSION_REFUSE_AT }),
+  };
+  app.get("/v1/admission/skills/export.xlsx", async (req, reply) => answerListExport(db, req, reply, skillsList));
+  app.get("/v1/admission/skills", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, skillsList);
     const rows = await db
       .select({ skill: builderSkills, ownerName: users.displayName })
       .from(builderSkills)
@@ -464,22 +498,7 @@ export function registerSkillAdmissionRoutes(app: FastifyInstance, db: Db) {
       holdAt: SKILL_ADMISSION_HOLD_AT,
       refuseAt: SKILL_ADMISSION_REFUSE_AT,
       rules: [...mcpAdmissionRuleIds().filter((r) => r !== "mcp.tool_order.model_directive"), ...skillAdmissionRuleIds()],
-      skills: rows.map(({ skill: s, ownerName }) => ({
-        id: s.id,
-        name: s.name,
-        ownerName,
-        visibility: s.visibility,
-        requestedVisibility: s.requestedVisibility,
-        visibilityRequestedAt: s.visibilityRequestedAt?.toISOString() ?? null,
-        version: s.version,
-        contentDigest: s.contentDigest,
-        admissionState: s.admissionState,
-        admissionSeverity: s.admissionSeverity,
-        admissionFindings: s.admissionFindings ?? [],
-        admissionScannedAt: s.admissionScannedAt?.toISOString() ?? null,
-        admittedAt: s.admittedAt?.toISOString() ?? null,
-        admitReason: s.admitReason,
-      })),
+      skills: rows.map(({ skill: s, ownerName }) => reviewSkillView(s, ownerName)),
     };
   });
 
@@ -633,3 +652,58 @@ export function registerSkillAdmissionRoutes(app: FastifyInstance, db: Db) {
     return reply.send({ skill: { id, visibility: approve ? s.requestedVisibility : s.visibility, requestedVisibility: null } });
   });
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0226: the skill review queue under the shared list contract
+// ---------------------------------------------------------------------------
+
+function reviewSkillView(s: BuilderSkillRow, ownerName: string | null) {
+  return {
+    id: s.id,
+    name: s.name,
+    ownerName,
+    visibility: s.visibility,
+    requestedVisibility: s.requestedVisibility,
+    visibilityRequestedAt: s.visibilityRequestedAt?.toISOString() ?? null,
+    version: s.version,
+    contentDigest: s.contentDigest,
+    admissionState: s.admissionState,
+    admissionSeverity: s.admissionSeverity,
+    admissionFindings: s.admissionFindings ?? [],
+    admissionScannedAt: s.admissionScannedAt?.toISOString() ?? null,
+    admittedAt: s.admittedAt?.toISOString() ?? null,
+    admitReason: s.admitReason,
+  };
+}
+type ReviewSkillRow = ReturnType<typeof reviewSkillView>;
+/** the page's findingText: rule in where (severity, ×count), or that none was recorded */
+export function admissionFindingText(f: unknown): string {
+  const list = Array.isArray(f) ? (f as Array<{ rule?: unknown; where?: unknown; severity?: unknown; count?: unknown }>) : [];
+  return list.length ? list.map((x) => `${String(x.rule)} in ${String(x.where)} (${String(x.severity)}, ×${String(x.count)})`).join("; ") : "no findings recorded";
+}
+
+export const ADMISSION_SKILLS_LIST: ListSpec<ReviewSkillRow> = {
+  id: "admission-skills",
+  sorts: {
+    name: { expr: sql`lower(${builderSkills.name})` },
+    owner: { expr: sql`lower(${users.displayName})` },
+    state: { expr: builderSkills.admissionState },
+    findings: { expr: sql`jsonb_array_length(coalesce(${builderSkills.admissionFindings}, '[]'::jsonb))` },
+    severity: { expr: builderSkills.admissionSeverity },
+    requested: { expr: builderSkills.visibilityRequestedAt },
+    scanned: { expr: builderSkills.admissionScannedAt },
+    created: { expr: builderSkills.createdAt, keysetAt: builderSkills.createdAt },
+  },
+  columns: {
+    name: { label: "Skill", value: (r) => `${r.name} v${r.version}` },
+    owner: { label: "Owner", value: (r) => r.ownerName },
+    state: { label: "State", value: (r) => r.admissionState },
+    findings: { label: "Findings", value: (r) => admissionFindingText(r.admissionFindings) },
+    severity: { label: "Severity", value: (r) => r.admissionSeverity },
+    requested: { label: "Requested", value: (r) => (r.visibilityRequestedAt ? new Date(r.visibilityRequestedAt) : null) },
+    scanned: { label: "Scanned", value: (r) => (r.admissionScannedAt ? new Date(r.admissionScannedAt) : null) },
+  },
+  filters: ["view"],
+  defaultSort: { col: "name", dir: "asc" },
+  idCol: builderSkills.id,
+};

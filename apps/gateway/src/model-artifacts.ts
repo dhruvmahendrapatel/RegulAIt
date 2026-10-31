@@ -40,6 +40,9 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import type { FastifyInstance } from "fastify";
+import { wantsListContract, type ListSpec } from "./list-contract.js";
+import { answerListExport, answerListPage, type ContractList } from "./list-contract-route.js";
+import { getTableColumns, type SQL } from "@regulait/db";
 import {
   and,
   artifactScans,
@@ -889,7 +892,36 @@ export function registerModelArtifactRoutes(app: FastifyInstance, db: Db, opts: 
   });
 
   // ---- GET /v1/model-artifacts (the caller's own; an admin sees all) ------------
-  app.get("/v1/model-artifacts", async (req) => {
+  // ADR-0226: with any of sort/dir/cursor/offset/count the artifacts list
+  // answers the shared list contract (every artifact the caller may see, a
+  // total) with each row's newest scan; with none of them, exactly the
+  // newest-200 response below. Never the storage key.
+  const artifactsList: ContractList<ArtifactListRow, Record<string, never>> = {
+    spec: MODEL_ARTIFACTS_LIST,
+    filters: z.object({}).strict() as unknown as z.ZodType<Record<string, never>>,
+    reader: {
+      fetch: async (q) => {
+        const rows = await db
+          .select({ ...getTableColumns(modelArtifacts), scanVerdict: LATEST_SCAN_VERDICT, scanFormat: LATEST_SCAN_FORMAT, scanIssues: LATEST_SCAN_ISSUES, _cursorAt: q.cursorAt })
+          .from(modelArtifacts)
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset);
+        return rows.map(({ scanVerdict, scanFormat, scanIssues, _cursorAt, ...a }) => ({
+          ...artifactView(a),
+          latestScan: scanVerdict === null ? null : { verdict: scanVerdict, format: scanFormat, issues: Number(scanIssues ?? 0) },
+          _cursorAt,
+        }));
+      },
+      countable: (where) => db.select({ one: sql`1` }).from(modelArtifacts).where(where),
+      idOf: (r) => r.id,
+    },
+    where: (req) => (req.authCtx.isAdmin ? undefined : eq(modelArtifacts.uploadedByUserId, req.authCtx.userId ?? NO_IDENTITY)),
+  };
+  app.get("/v1/model-artifacts/export.xlsx", async (req, reply) => answerListExport(db, req, reply, artifactsList));
+  app.get("/v1/model-artifacts", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, artifactsList);
     const where = req.authCtx.isAdmin ? undefined : eq(modelArtifacts.uploadedByUserId, req.authCtx.userId ?? NO_IDENTITY);
     const rows = await db.select().from(modelArtifacts).where(where).orderBy(desc(modelArtifacts.createdAt)).limit(200);
     return { artifacts: rows.map(artifactView) };
@@ -956,3 +988,52 @@ export function registerModelArtifactRoutes(app: FastifyInstance, db: Db, opts: 
     });
   });
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0226: model artifacts under the shared list contract
+// ---------------------------------------------------------------------------
+
+type ArtifactListRow = ReturnType<typeof artifactView> & { latestScan: { verdict: string; format: string | null; issues: number } | null };
+const newestScan = (col: SQL) =>
+  sql`(select ${col} from ${artifactScans} where ${artifactScans.artifactId} = ${modelArtifacts.id} order by ${artifactScans.createdAt} desc, ${artifactScans.id} desc limit 1)`;
+const LATEST_SCAN_VERDICT = sql<string | null>`${newestScan(sql`${artifactScans.verdict}`)}`;
+const LATEST_SCAN_FORMAT = sql<string | null>`${newestScan(sql`${artifactScans.format}`)}`;
+const LATEST_SCAN_ISSUES = sql<number | null>`${newestScan(sql`jsonb_array_length(${artifactScans.issues})`)}`;
+
+/**
+ * The Scan column as words, as the page reads it (modelArtifacts.ts `scanStatus`): only a verified safetensors
+ * file with an admissible clean scan and no finding is clean; anything else that claims clean is inconclusive.
+ */
+function artifactScanWords(r: ArtifactListRow): string {
+  const s = r.latestScan;
+  if (!s) return "Not scanned";
+  const verdict = s.verdict as ArtifactScanVerdictValue;
+  if (verdict === "clean") {
+    const clean = artifactScanAdmissible(verdict) && s.format === "safetensors" && r.format === "safetensors" && r.executable === false && s.issues === 0;
+    return clean ? ARTIFACT_SCAN_CHIP.clean : ARTIFACT_SCAN_CHIP.unknown;
+  }
+  return ARTIFACT_SCAN_CHIP[verdict] ?? ARTIFACT_SCAN_CHIP.unknown;
+}
+
+export const MODEL_ARTIFACTS_LIST: ListSpec<ArtifactListRow> = {
+  id: "model-artifacts",
+  sorts: {
+    name: { expr: sql`lower(${modelArtifacts.filename})` },
+    format: { expr: modelArtifacts.format },
+    size: { expr: modelArtifacts.sizeBytes },
+    at: { expr: modelArtifacts.createdAt, keysetAt: modelArtifacts.createdAt },
+    scan: { expr: LATEST_SCAN_VERDICT },
+    sha: { expr: modelArtifacts.sha256 },
+  },
+  columns: {
+    name: { label: "File name", value: (r) => r.filename },
+    format: { label: "Format (from content)", value: (r) => `${r.format}${r.executable ? " (executable)" : " (holds no code)"}` },
+    size: { label: "Size (bytes)", value: (r) => r.sizeBytes },
+    at: { label: "Uploaded", value: (r) => r.createdAt },
+    scan: { label: "Scan", value: artifactScanWords },
+    sha: { label: "SHA-256", value: (r) => r.sha256 },
+  },
+  filters: [],
+  defaultSort: { col: "at", dir: "desc" },
+  idCol: modelArtifacts.id,
+};

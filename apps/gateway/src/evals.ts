@@ -40,6 +40,7 @@ import crypto from "node:crypto";
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import {
+  getTableColumns,
   agents,
   agentGrants,
   and,
@@ -145,6 +146,8 @@ import { checkBuiltinEvalDatasetForRun, isBuiltinEvalDataset } from "./eval-buil
 import { holdOffensiveBuiltinRun } from "./eval-run-approvals.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { errMessage } from "./err-serializer.js";
+import { wantsListContract, type ListSpec } from "./list-contract.js";
+import { answerListExport, answerListPage, type ContractList } from "./list-contract-route.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -2169,7 +2172,38 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
 
   /** datasets, newest version of each name first, with case counts and the
    * frozen flag an editor needs before it offers an edit button */
-  app.get("/v1/evals/datasets", async () => {
+  // ADR-0226: with any of sort/dir/cursor/offset/count the datasets and runs
+  // lists answer the shared list contract; with none of them, exactly the
+  // responses below (the run form's dataset picker and the Compare tab).
+  const datasetsList: ContractList<DatasetListRow, Record<string, never>> = {
+    spec: EVAL_DATASETS_LIST,
+    filters: z.object({}).strict() as unknown as z.ZodType<Record<string, never>>,
+    reader: {
+      fetch: async (q) => {
+        const rows = await db
+          .select({
+            ...getTableColumns(evalDatasets),
+            caseCount: DATASET_CASES,
+            runCount: DATASET_RUNS,
+            nameRetired: DATASET_NAME_RETIRED,
+            _cursorAt: q.cursorAt,
+          })
+          .from(evalDatasets)
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset);
+        return rows.map(({ nameRetired, ...d }) => datasetView(d, Number(d.caseCount), Number(d.runCount), nameRetired === true));
+      },
+      countable: (where) => db.select({ one: sql`1` }).from(evalDatasets).where(where),
+      idOf: (r) => r.id,
+    },
+    where: () => undefined,
+    extra: () => ({ note: DATASETS_NOTE }),
+  };
+  app.get("/v1/evals/datasets/export.xlsx", async (req, reply) => answerListExport(db, req, reply, datasetsList));
+  app.get("/v1/evals/datasets", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, datasetsList);
     const rows = await db.select().from(evalDatasets).orderBy(asc(evalDatasets.name), desc(evalDatasets.version));
     const counts = await db
       .select({ datasetId: evalCases.datasetId, n: sql<number>`count(*)::int` })
@@ -2183,23 +2217,8 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
     const runMap = new Map(runCounts.map((c) => [c.datasetId, c.n]));
     const retiredNames = new Set(rows.filter((d) => d.retiredAt !== null).map((d) => d.name));
     return {
-      datasets: rows.map((d) => {
-        // ADR-0187 decision 187: a built-in dataset is read-only and says what it is
-        const spec = isBuiltinEvalDataset(d) ? builtinEvalDatasetByName(d.name) : null;
-        return {
-          ...d,
-          caseCount: caseMap.get(d.id) ?? 0,
-          runCount: runMap.get(d.id) ?? 0,
-          // ADR-0208 G9: retirement is by name, so a name with any retired version reads retired
-          status: retiredNames.has(d.name) ? ("retired" as const) : ("active" as const),
-          builtIn: isBuiltinEvalDataset(d),
-          frozen: (runMap.get(d.id) ?? 0) > 0 || isBuiltinEvalDataset(d),
-          builtin: isBuiltinEvalDataset(d)
-            ? { key: spec?.key ?? null, sensitivity: spec?.sensitivity ?? "offensive", current: spec?.version === d.version, measures: spec?.measures ?? null }
-            : null,
-        };
-      }),
-      note: "A dataset version freezes the moment a run scores against it. Editing cases mints the next version instead — a gate result is meaningless if the ruler can move underneath it.",
+      datasets: rows.map((d) => datasetView(d, caseMap.get(d.id) ?? 0, runMap.get(d.id) ?? 0, retiredNames.has(d.name))),
+      note: DATASETS_NOTE,
     };
   });
 
@@ -2493,7 +2512,33 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
     });
   });
 
-  app.get("/v1/evals/runs", async (req) => {
+  const runsList: ContractList<EvalRunListRow, { datasetId?: string; agentId?: string; status?: string }> = {
+    spec: EVAL_RUNS_LIST,
+    filters: z
+      .object({ datasetId: z.string().uuid().optional(), agentId: z.string().uuid().optional(), status: z.string().min(1).max(32).optional() })
+      .strict(),
+    reader: {
+      fetch: (q) =>
+        db
+          .select({ ...getTableColumns(evalRuns), datasetName: RUN_DATASET_NAME, _cursorAt: q.cursorAt })
+          .from(evalRuns)
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset),
+      countable: (where) => db.select({ one: sql`1` }).from(evalRuns).where(where),
+      idOf: (r) => r.id,
+    },
+    where: (_req, f) =>
+      and(
+        f.datasetId ? eq(evalRuns.datasetId, f.datasetId) : undefined,
+        f.agentId ? eq(evalRuns.agentId, f.agentId) : undefined,
+        f.status ? eq(evalRuns.status, f.status as never) : undefined,
+      ),
+  };
+  app.get("/v1/evals/runs/export.xlsx", async (req, reply) => answerListExport(db, req, reply, runsList));
+  app.get("/v1/evals/runs", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, runsList);
     const q = z
       .object({
         datasetId: z.string().uuid().optional(),
@@ -2912,3 +2957,106 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
     };
   });
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0226: the datasets and runs lists under the shared list contract
+// ---------------------------------------------------------------------------
+
+const DATASETS_NOTE =
+  "A dataset version freezes the moment a run scores against it. Editing cases mints the next version instead — a gate result is meaningless if the ruler can move underneath it.";
+
+/** one dataset as both list shapes answer it */
+function datasetView(d: EvalDatasetRow, caseCount: number, runCount: number, nameRetired: boolean) {
+  // ADR-0187 decision 187: a built-in dataset is read-only and says what it is
+  const spec = isBuiltinEvalDataset(d) ? builtinEvalDatasetByName(d.name) : null;
+  return {
+    ...d,
+    caseCount,
+    runCount,
+    // ADR-0208 G9: retirement is by name, so a name with any retired version reads retired
+    status: nameRetired ? ("retired" as const) : ("active" as const),
+    builtIn: isBuiltinEvalDataset(d),
+    frozen: runCount > 0 || isBuiltinEvalDataset(d),
+    builtin: isBuiltinEvalDataset(d)
+      ? { key: spec?.key ?? null, sensitivity: spec?.sensitivity ?? "offensive", current: spec?.version === d.version, measures: spec?.measures ?? null }
+      : null,
+  };
+}
+type DatasetListRow = ReturnType<typeof datasetView>;
+
+// Explicit qualifiers: in a single-table select drizzle renders a column bare, and a bare "id" inside these
+// subqueries would bind to the inner table (eval_cases.id / eval_runs.id), not the outer dataset row.
+const DATASET_CASES = sql<number>`(select count(*)::int from "eval_cases" where "eval_cases"."dataset_id" = "eval_datasets"."id")`;
+const DATASET_RUNS = sql<number>`(select count(*)::int from "eval_runs" where "eval_runs"."dataset_id" = "eval_datasets"."id")`;
+/** ADR-0208 G9: true when any version of this row's name carries the retired stamp (retirement is by name) */
+const DATASET_NAME_RETIRED = sql<boolean>`exists (select 1 from "eval_datasets" as "named" where "named"."name" = "eval_datasets"."name" and "named"."retired_at" is not null)`;
+const BUILTIN_LIKE = `${BUILTIN_EVAL_DATASET_PREFIX.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+
+export const EVAL_DATASETS_LIST: ListSpec<DatasetListRow> = {
+  id: "eval-datasets",
+  sorts: {
+    name: { expr: sql`lower(${evalDatasets.name})` },
+    version: { expr: evalDatasets.version },
+    cases: { expr: DATASET_CASES },
+    runs: { expr: DATASET_RUNS },
+    scorer: { expr: evalDatasets.scorerKind },
+    frozen: { expr: sql`(${DATASET_RUNS} > 0 or ${evalDatasets.name} like ${BUILTIN_LIKE})` },
+    status: { expr: sql`case when ${DATASET_NAME_RETIRED} then 'retired' else 'active' end` },
+    created: { expr: evalDatasets.createdAt, keysetAt: evalDatasets.createdAt },
+  },
+  columns: {
+    name: { label: "Dataset", value: (r) => r.name },
+    version: { label: "Version", value: (r) => r.version },
+    cases: { label: "Cases", value: (r) => r.caseCount },
+    runs: { label: "Runs", value: (r) => r.runCount },
+    scorer: { label: "Default scorer", value: (r) => r.scorerKind },
+    frozen: { label: "State", value: (r) => (r.status === "retired" ? "retired" : r.frozen ? "frozen" : "editable") },
+    status: { label: "Status", value: (r) => r.status },
+    created: { label: "Created", value: (r) => r.createdAt },
+    note: { label: "Note", value: (r) => r.note },
+  },
+  filters: [],
+  defaultSort: { col: "name", dir: "asc" },
+  idCol: evalDatasets.id,
+};
+
+type EvalRunListRow = EvalRunRow & { datasetName: string | null };
+const RUN_DATASET_NAME = sql<string | null>`(select ${evalDatasets.name} from ${evalDatasets} where ${evalDatasets.id} = ${evalRuns.datasetId})`;
+const gateText = (r: EvalRunRow) => (r.gatePassed == null ? null : r.gatePassed ? "pass" : r.regression ? "regression" : "fail");
+
+export const EVAL_RUNS_LIST: ListSpec<EvalRunListRow> = {
+  id: "eval-runs",
+  sorts: {
+    dataset: { expr: sql`lower(${RUN_DATASET_NAME})` },
+    agent: { expr: sql`lower(${evalRuns.agentName})` },
+    model: { expr: evalRuns.model },
+    trigger: { expr: evalRuns.trigger },
+    score: { expr: evalRuns.meanScore },
+    pass: { expr: evalRuns.passRate },
+    delta: { expr: evalRuns.scoreDelta },
+    gate: { expr: sql`case when ${evalRuns.gatePassed} is null then null when ${evalRuns.gatePassed} then 2 when ${evalRuns.regression} then 0 else 1 end` },
+    cost: { expr: evalRuns.costUsd },
+    baseline: { expr: evalRuns.isBaseline },
+    when: { expr: evalRuns.startedAt, keysetAt: evalRuns.startedAt },
+    status: { expr: evalRuns.status },
+    cases: { expr: evalRuns.cases },
+  },
+  columns: {
+    dataset: { label: "Dataset", value: (r) => `${r.datasetName ?? "?"} v${r.datasetVersion}` },
+    agent: { label: "Agent", value: (r) => r.agentName },
+    model: { label: "Model", value: (r) => r.model },
+    trigger: { label: "Trigger", value: (r) => r.trigger },
+    score: { label: "Mean score", value: (r) => r.meanScore },
+    pass: { label: "Pass rate", value: (r) => r.passRate },
+    delta: { label: "Δ vs baseline", value: (r) => r.scoreDelta },
+    gate: { label: "Gate", value: gateText },
+    cost: { label: "Cost", value: (r) => r.costUsd },
+    baseline: { label: "Baseline", value: (r) => (r.isBaseline ? "pinned" : null) },
+    when: { label: "When", value: (r) => r.startedAt },
+    status: { label: "Status", value: (r) => r.status },
+    cases: { label: "Cases", value: (r) => r.cases },
+  },
+  filters: ["datasetId", "agentId", "status"],
+  defaultSort: { col: "when", dir: "desc" },
+  idCol: evalRuns.id,
+};
