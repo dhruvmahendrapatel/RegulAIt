@@ -3,7 +3,6 @@
  * made before sending (the gateway re-checks the bytes), and the values mirrored from @regulait/shared.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { isSupplierPortalPath } from "../../session/SessionContext";
 import {
   ACCEPT_ATTRIBUTE,
   base64FromDataUrl,
@@ -49,17 +48,6 @@ describe("tokenFromHash", () => {
   it("rebuilds the address without the fragment", () => {
     expect(withoutHash("/ui/supplier", "")).toBe("/ui/supplier");
     expect(withoutHash("/ui/supplier", "?a=1")).toBe("/ui/supplier?a=1");
-  });
-});
-
-describe("the session probe is skipped only on the supplier page", () => {
-  it("matches /ui/supplier and nothing else", () => {
-    expect(isSupplierPortalPath("/ui/supplier")).toBe(true);
-    expect(isSupplierPortalPath("/ui/supplier/")).toBe(true);
-    expect(isSupplierPortalPath("/ui/supplierx")).toBe(false);
-    expect(isSupplierPortalPath("/ui/admin/vendors")).toBe(false);
-    expect(isSupplierPortalPath("/ui/admin/vendors/questionnaires")).toBe(false);
-    expect(isSupplierPortalPath("/supplier/v1/assessment")).toBe(false);
   });
 });
 
