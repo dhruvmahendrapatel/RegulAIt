@@ -324,7 +324,12 @@ export default function VendorsPage() {
                           platform, and a drafted answer counts only once you submit it. Submitting stores it as the
                           instance&apos;s versioned artifact and sends the vendor to assessment review.
                         </div>
-                        <VendorDraftPanel vendorId={d.vendor.id} onUseDraft={setAnswers} />
+                        <VendorDraftPanel
+                          vendorId={d.vendor.id}
+                          current={answers || d.questionnaireTemplate || ""}
+                          template={d.questionnaireTemplate || ""}
+                          onChange={setAnswers}
+                        />
                         <Textarea
                           rows={14}
                           value={answers || d.questionnaireTemplate || ""}

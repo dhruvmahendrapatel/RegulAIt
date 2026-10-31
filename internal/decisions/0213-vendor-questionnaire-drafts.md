@@ -20,8 +20,14 @@ draft become a record or an attestation by itself.
 
 ## Decision
 
-`POST /v1/vendors/:vendorId/questionnaire/draft` returns drafts and writes
-nothing but one audit row (counts and outcome, never supplier text).
+`POST /v1/vendors/:vendorId/questionnaire/draft` returns drafts and never
+writes a questionnaire artifact, an attestation or a vendor status. In
+records-only mode it writes one audit row (counts and outcome, never supplier
+text). In model mode the governed dispatch also writes what every governed call
+writes: a usage event (the cost), its dispatch audit row and a trace span. The
+span's input preview holds the start of the prompt, which can include pasted
+supplier text, whenever the org's `tracingCaptureContent` is on — the same rule
+as the intake assistant and every other dispatch, governed by that setting.
 
 1. **Off by default.** `org_settings.vendor_draft_assist_enabled` defaults to
    false; the route refuses `409 vendor_draft_disabled` until an admin turns it
@@ -39,7 +45,11 @@ nothing but one audit row (counts and outcome, never supplier text).
 3. **Governed model half (optional).** `useModel: true` runs the ADR-0149 path
    unchanged: `agentDecision` with a new model-policy feature `vendor_draft`
    (data class `confidential`), then `executeGovernedDispatch` (entitlement,
-   PII, guardrails, budget, metering, attribution, audit). The prompt fences
+   PII, guardrails, budget, metering, attribution, audit). A `projectId` the
+   spend is billed to passes `assertProjectAttribution` first, exactly as on the
+   invoke route: a caller who is not a member of a project with members is
+   refused `403 not_a_project_member` before any read or dispatch. A named
+   model connection that does not exist is refused inline and audited. The prompt fences
    supplier documents as data. A model answer is kept only if it cites at least
    one source id it was given; otherwise the record-based draft stands. No model
    connection, an ungranted one, a failure or an unparseable reply is reported
@@ -47,7 +57,10 @@ nothing but one audit row (counts and outcome, never supplier text).
 4. **Labels and human acceptance.** Every section carries `source`
    (`rules`, `model`, `mock`, `none`) and its citations; the composed text
    carries a source line per drafted section, so the submitted artifact keeps
-   it. A draft only fills the questionnaire text area. The questionnaire is
+   it. Drafting changes nothing by itself: the assessor uses each drafted
+   answer into its own section; "use drafts in unanswered sections" fills only
+   sections still at the blank prompt; replacing a section the assessor already
+   wrote takes its own, explicitly labelled click. The questionnaire is
    still submitted by a person through the workflow artifact endpoint, and an
    attestation is still recorded by a person through
    `POST /v1/vendors/:vendorId/attestations`. ADR-0084's "nothing is pre-filled
@@ -80,8 +93,16 @@ with the existing `zod` schemas; no new dependency.
   inline with nothing dispatched; an entitled mock agent is metered and its
   canned prose is not passed off as a draft; supplier text stays out of the
   audit row; non-owner, identity-less and unknown-key requests refused.
-- `apps/web/e2e/zz-vendor-draft.mock.spec.ts`: drafts fill the text with labels
-  and post no artifact or attestation; both refusals render inline with a link.
+- `apps/web/e2e/zz-vendor-draft.mock.spec.ts`: drafting changes nothing until
+  an answer is used, a used answer carries its source line, a typed answer
+  survives a draft and is replaced only by its own labelled click, no artifact
+  or attestation is posted, and both refusals render inline with a link (the
+  model refusal with its reason).
+- The gateway suite also pins the billed-project check (a non-member's foreign
+  `projectId` is refused 403 with no usage event and no draft audit row) and the
+  audited refusal of an unknown model connection.
+
+ADR-0084 carries a dated addendum recording the narrowed rule.
 
 ## Honest limits
 

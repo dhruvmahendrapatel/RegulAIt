@@ -92,6 +92,7 @@ import {
 import { z } from "zod";
 import { executeGovernedDispatch } from "./agents-connectors.js";
 import { agentDecision, featureDefaultModel } from "./copilot.js";
+import { assertProjectAttribution } from "./projects.js";
 import {
   createWorkflowTemplateValidated,
   startWorkflowInstanceWithTemplates,
@@ -763,6 +764,20 @@ export function registerVendorRoutes(
       });
     }
 
+    // OBJECT-LEVEL AUTHORISATION ON THE BILLED PROJECT: the model spend lands on
+    // the project named here, so the caller must be allowed to attribute to it —
+    // the same check the invoke route makes. Refused before any grounding read
+    // or dispatch, so a refused request bills nothing.
+    if (body.useModel && body.projectId) {
+      const attribution = await assertProjectAttribution(db, body.projectId, userId, isAdmin);
+      if (!attribution.ok) {
+        return reply.status(attribution.status).send({
+          error: attribution.error,
+          detail: "you can only attribute model spend to a project you are a member of",
+        });
+      }
+    }
+
     // GROUNDING. Earlier records of the same vendor (re-assessment is a new
     // proposal), only those the caller may see: object-level authorisation
     // applies to what grounds a draft as much as to what it returns.
@@ -842,11 +857,24 @@ export function registerVendorRoutes(
       const [named] = body.agentId ? await db.select().from(agents).where(eq(agents.id, body.agentId)) : [];
       const agent = named ?? (body.agentId ? undefined : await featureDefaultModel(db, userId, gate));
       if (!agent) {
+        if (body.agentId) {
+          // a named model connection that does not exist is refused and audited like a policy refusal
+          await db.insert(auditLog).values({
+            userId,
+            objectType: "agent",
+            objectId: body.agentId,
+            detail: { surface: "vendor_draft", dataClass: gate.dataClass, receiptClass: "decision" },
+            effect: "deny",
+            ruleId: "unknown_agent",
+            ruleChain: [],
+            reason: "the named model connection does not exist",
+          });
+        }
         model = {
           status: "refused",
           reason: body.agentId
             ? "the named model connection does not exist"
-            : "no model connection is available to you for vendor questionnaire drafts — ask an admin to set a default in Model policy, or choose one",
+            : "no model connection is available to you for vendor questionnaire drafts — ask an admin to set a default for this feature in Model policy",
         };
       } else {
         const decision = await agentDecision(db, userId, agent, gate);

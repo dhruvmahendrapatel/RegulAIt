@@ -2,12 +2,15 @@
  * ADR-0213 (backlog P6) — drafted answers for the vendor assessment
  * questionnaire, inside the vendor detail's questionnaire card.
  *
- * The panel only ever fills the questionnaire text area: "Submit
- * questionnaire" and "Record attestation" stay the only writes, and both stay
- * a person's act. Each drafted section carries its source line in the text
- * itself (so the submitted artifact keeps it); a section nothing grounds keeps
- * the blank form's prompt. A refusal (drafts off, no model connection) is shown
- * here, beside the button that was refused.
+ * Drafting changes nothing by itself. The assessor accepts each drafted answer
+ * into its own section ("Use this answer"); "Use drafts in unanswered sections"
+ * fills only sections still at the blank form's prompt, and replacing a section
+ * the assessor already wrote takes its own, explicitly labelled click — typed
+ * answers are never overwritten silently. An accepted answer carries its source
+ * line in the text, so the submitted artifact keeps it. "Submit questionnaire"
+ * and "Record attestation" stay the only writes, and both stay a person's act.
+ * A refusal (drafts off, no model connection) is shown here, beside the button
+ * that was refused.
  */
 import { useState } from "react";
 import { api } from "../../../api/client";
@@ -28,6 +31,36 @@ interface DraftSection {
   cites: Array<{ id: string; kind: string; label: string }>;
 }
 
+const SOURCE_LABEL: Record<DraftSource, string> = {
+  rules: "Drafted from records",
+  model: "Drafted by a model",
+  mock: "Drafted by a model",
+  none: "Not drafted",
+};
+
+/** the body under `## heading` in a questionnaire, or null when the heading is missing */
+function sectionBody(text: string, heading: string): string | null {
+  const lines = text.split("\n");
+  const at = lines.findIndex((l) => l.startsWith("## ") && l.slice(3).trim() === heading);
+  if (at < 0) return null;
+  const end = lines.findIndex((l, i) => i > at && l.startsWith("## "));
+  return lines.slice(at + 1, end < 0 ? undefined : end).join("\n").trim();
+}
+
+/** `text` with the body under `## heading` replaced (the section is appended when missing) */
+function withSection(text: string, heading: string, body: string): string {
+  const lines = text.split("\n");
+  const at = lines.findIndex((l) => l.startsWith("## ") && l.slice(3).trim() === heading);
+  if (at < 0) return `${text.trimEnd()}\n\n## ${heading}\n${body}\n`;
+  const end = lines.findIndex((l, i) => i > at && l.startsWith("## "));
+  const tail = end < 0 ? [] : ["", ...lines.slice(end)];
+  return [...lines.slice(0, at + 1), body, ...tail].join("\n");
+}
+
+/** the accepted answer as it goes into the questionnaire: its source line, then the text */
+const labelled = (s: DraftSection) =>
+  `> ${SOURCE_LABEL[s.source]} — from: ${s.cites.map((c) => c.label).join("; ")}. Check it against the vendor's own answer before submitting.\n\n${s.text}`;
+
 interface DraftResponse {
   sections: DraftSection[];
   model:
@@ -38,7 +71,14 @@ interface DraftResponse {
   disclaimer: string;
 }
 
-export function VendorDraftPanel(props: { vendorId: string; onUseDraft: (text: string) => void }) {
+export function VendorDraftPanel(props: {
+  vendorId: string;
+  /** the questionnaire text as it stands (typed answers or the blank form) */
+  current: string;
+  /** the blank form, to tell an unanswered section from one the assessor wrote */
+  template: string;
+  onChange: (text: string) => void;
+}) {
   const act = useAction();
   const [mode, setMode] = useState<"records" | "model">("records");
   const [doc, setDoc] = useState("");
@@ -52,10 +92,17 @@ export function VendorDraftPanel(props: { vendorId: string; onUseDraft: (text: s
         supplierDocuments: doc.trim() ? [{ name: "Supplier document", text: doc.trim() }] : [],
       });
       setResult(out);
-      props.onUseDraft(out.draft);
     }, null);
 
   const m = result?.model;
+  const drafted = (result?.sections ?? []).filter((x) => x.source !== "none" && x.text.trim());
+  /** the assessor has written something in this section (it is no longer the blank prompt) */
+  const answered = (x: DraftSection) => {
+    const now = sectionBody(props.current, x.heading);
+    return now !== null && now !== "" && now !== sectionBody(props.template, x.heading);
+  };
+  const useAllUnanswered = () =>
+    props.onChange(drafted.filter((x) => !answered(x)).reduce((t, x) => withSection(t, x.heading, labelled(x)), props.current));
 
   return (
     <div className={v.stack} data-testid="vendor-draft-panel">
@@ -77,12 +124,17 @@ export function VendorDraftPanel(props: { vendorId: string; onUseDraft: (text: s
       )}
       <div>
         <Button aria-disabled={act.busy} onClick={() => !act.busy && draft()}>
-          Draft answers into the questionnaire
+          Draft answers
         </Button>
       </div>
 
       {act.guidance ? <RefusalNotice guidance={act.guidance} /> : act.error && <div role="alert">{act.error}</div>}
-      {m?.status === "refused" && <RefusalNotice guidance={REFUSAL_GUIDANCE.vendorDraftNoModel} />}
+      {m?.status === "refused" && (
+        <>
+          <RefusalNotice guidance={REFUSAL_GUIDANCE.vendorDraftNoModel} />
+          <div className={v.faint}>Reason: {m.reason}</div>
+        </>
+      )}
       {(m?.status === "failed" || m?.status === "unparseable") && (
         <div role="alert" className={v.faint}>
           Model draft not used: {m.reason}
@@ -90,9 +142,30 @@ export function VendorDraftPanel(props: { vendorId: string; onUseDraft: (text: s
       )}
 
       {result && (
-        <div className={v.faint} role="status" data-testid="vendor-draft-result">
-          {result.sections.filter((x) => x.source !== "none").length} of 6 sections drafted below, each labelled with its
-          sources. Check them before you submit.
+        <div className={v.stack} data-testid="vendor-draft-result">
+          <div className={v.faint} role="status">
+            {drafted.length} of {result.sections.length} sections drafted. Nothing changes in the questionnaire until you
+            use an answer.
+          </div>
+          {drafted.map((x) => (
+            <div key={x.id} className={v.stack} data-testid={`vendor-draft-section-${x.id}`}>
+              <strong>{x.heading}</strong>
+              <div className={v.faint}>
+                {SOURCE_LABEL[x.source]} — from: {x.cites.map((c) => c.label).join("; ")}
+              </div>
+              <div style={{ whiteSpace: "pre-wrap" }}>{x.text}</div>
+              <div>
+                <Button onClick={() => props.onChange(withSection(props.current, x.heading, labelled(x)))}>
+                  {answered(x) ? `Replace my answer to ${x.heading}` : `Use this answer for ${x.heading}`}
+                </Button>
+              </div>
+            </div>
+          ))}
+          {drafted.some((x) => !answered(x)) && (
+            <div>
+              <Button onClick={useAllUnanswered}>Use drafts in unanswered sections</Button>
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -212,6 +212,33 @@ describe("drafts, once on", () => {
 });
 
 describe("object-level authorisation", () => {
+  it("refuses billing model spend to another team's project, with nothing dispatched", async () => {
+    const proj = await post("/v1/projects", AUTH, { name: `adr0213-other-team-${RUN}` });
+    expect(proj.statusCode, proj.body).toBe(201);
+    const projectId = proj.json().id as string;
+    // the project has a member who is not the caller, so only members may attribute to it
+    const mem = await post(`/v1/projects/${projectId}/members`, AUTH, { userId: other.id, role: "contributor" });
+    expect(mem.statusCode, mem.body).toBe(201);
+    const u0 = await usage();
+    const audits0 = (await draftAudits()).length;
+    const r = await post(draftUrl(), owner.auth, { useModel: true, agentId: grantedAgent, projectId });
+    expect(r.statusCode).toBe(403);
+    expect(r.json().error).toBe("not_a_project_member");
+    expect(await usage()).toBe(u0);
+    // refused before drafting: no draft audit row either
+    expect((await draftAudits()).length).toBe(audits0);
+  });
+
+  it("audits a refused unknown model connection", async () => {
+    const unknown = "00000000-0000-4000-8000-0000000a0213";
+    const r = await post(draftUrl(), owner.auth, { useModel: true, agentId: unknown });
+    expect(r.statusCode).toBe(200);
+    expect(r.json().model).toEqual({ status: "refused", reason: "the named model connection does not exist" });
+    const rows = await db.select().from(auditLog).where(and(eq(auditLog.objectId, unknown), eq(auditLog.ruleId, "unknown_agent")));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.effect).toBe("deny");
+  });
+
   it("refuses a person who neither owns the vendor nor is an admin", async () => {
     const r = await post(draftUrl(), other.auth, {});
     expect(r.statusCode).toBe(403);
