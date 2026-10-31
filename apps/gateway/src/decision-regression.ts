@@ -52,6 +52,18 @@ import { diffArrays } from "diff";
 import { z } from "zod";
 import { validateDefinition } from "@regulait/workflow-kernel";
 import {
+  filterParams,
+  parseListExport,
+  parseListPage,
+  runListPage,
+  sendListError,
+  sendListExport,
+  wantsListContract,
+  type ListReader,
+  type ListSpec,
+} from "./list-contract.js";
+import { userNameSql } from "./delegations-list.js";
+import {
   aiUseCases,
   and,
   approvals,
@@ -811,6 +823,32 @@ const runsQuery = z
     limit: z.coerce.number().int().min(1).max(200).default(50),
   })
   .strict();
+const runsFilterQuery = runsQuery.omit({ limit: true }).strict();
+type RegressionRunListRow = DecisionRegressionRunView;
+/** ADR-0226: the regression runs under the shared list contract */
+export const REGRESSION_RUNS_LIST: ListSpec<RegressionRunListRow> = {
+  id: "decision-regression-runs",
+  sorts: {
+    at: { expr: decisionRegressionRuns.createdAt, keysetAt: decisionRegressionRuns.createdAt },
+    subject: { expr: decisionRegressionRuns.subject },
+    trigger: { expr: decisionRegressionRuns.trigger },
+    changed: { expr: decisionRegressionRuns.changed },
+    cases: { expr: decisionRegressionRuns.cases },
+    by: { expr: sql`lower(${userNameSql(decisionRegressionRuns.createdBy)})` },
+  },
+  columns: {
+    at: { label: "When", value: (r) => new Date(r.createdAt) },
+    subject: { label: "Change to", value: (r) => r.subject.replace(/_/g, " ") },
+    trigger: { label: "Run", value: (r) => r.trigger },
+    changed: { label: "Changed outcomes", value: (r) => `${r.changed} of ${r.cases}` },
+    cases: { label: "Cases", value: (r) => r.cases },
+    by: { label: "By", value: (r) => r.createdByName ?? "system" },
+    digest: { label: "Body digest", value: (r) => r.candidateDigest },
+  },
+  filters: ["subject"],
+  defaultSort: { col: "at", dir: "desc" },
+  idCol: decisionRegressionRuns.id,
+};
 
 /** the newest ACTIVE intake template other than `excludeId` (what decides once `excludeId` is retired) */
 async function activeIntakeTemplateExcept(db: Writer, excludeId: string): Promise<{ id: string; name: string; definition: unknown } | null> {
@@ -932,7 +970,46 @@ export function registerDecisionRegressionRoutes(app: FastifyInstance, db: Db): 
     return reply.status(201).send(runView(row, await namesOf(db, [row.createdBy]), settings.decisionRegressionMaxAgeMinutes));
   });
 
-  app.get("/v1/governance/decision-regression/runs", async (req) => {
+  const regressionRunsReader: ListReader<RegressionRunListRow> = {
+    fetch: async (q) => {
+      const rows = await db
+        .select({ r: decisionRegressionRuns, _cursorAt: q.cursorAt })
+        .from(decisionRegressionRuns)
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset);
+      const names = await namesOf(db, rows.map((r) => r.r.createdBy));
+      const settings = await loadOrgSettings(db);
+      return rows.map((r) => ({ ...runView(r.r, names, settings.decisionRegressionMaxAgeMinutes, false), _cursorAt: r._cursorAt }));
+    },
+    countable: (where) => db.select({ one: sql`1` }).from(decisionRegressionRuns).where(where),
+    idOf: (r) => r.id,
+  };
+  const regressionRunsWhere = (f: z.infer<typeof runsFilterQuery>) => (f.subject ? eq(decisionRegressionRuns.subject, f.subject) : undefined);
+  // ADR-0226: with any of sort/dir/cursor/offset/count it answers the shared list contract; admin only
+  app.get("/v1/governance/decision-regression/runs/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const filters = runsFilterQuery.parse(filterParams(q));
+      const ex = parseListExport(REGRESSION_RUNS_LIST, q);
+      await sendListExport(db, req, reply, REGRESSION_RUNS_LIST, regressionRunsReader, regressionRunsWhere(filters), ex, filters);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+  app.get("/v1/governance/decision-regression/runs", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      try {
+        const q = req.query as Record<string, unknown>;
+        const filters = runsFilterQuery.parse(filterParams(q));
+        const page = parseListPage(REGRESSION_RUNS_LIST, q);
+        return await runListPage(db, REGRESSION_RUNS_LIST, regressionRunsReader, regressionRunsWhere(filters), page);
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
     const q = runsQuery.parse(req.query ?? {});
     const rows = await db
       .select()

@@ -55,7 +55,19 @@
  *     deterministic caveat in the grounded text.
  */
 import { z } from "zod";
-import type { FastifyInstance } from "fastify";
+import {
+  filterParams,
+  parseListExport,
+  parseListPage,
+  runListPage,
+  sendListError,
+  sendListExport,
+  wantsListContract,
+  type ListReader,
+  type ListSpec,
+} from "./list-contract.js";
+import { getTableColumns as colsL, sql as sqlL, type SQL as SQLL } from "@regulait/db";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   EVALUATION_ONLY_EXECUTION,
   agentHaltOf,
@@ -1936,7 +1948,69 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
     });
   });
 
-  app.get("/v1/copilot/queries", async (req) => {
+  // ADR-0226: the one predicate for each list, its count and its Excel export: a non-admin's own rows only
+  const queriesScope = (req: FastifyRequest): SQLL | undefined =>
+    req.authCtx.isAdmin ? undefined : eq(copilotQueries.userId, req.authCtx.userId ?? ZERO_UUID);
+  const proposalsScope = (req: FastifyRequest): SQLL | undefined =>
+    req.authCtx.isAdmin ? undefined : eq(copilotProposals.proposedByUserId, req.authCtx.userId ?? ZERO_UUID);
+  const queriesReader: ListReader<CopilotQueryListRow> = {
+    fetch: (q) =>
+      db
+        .select({ ...colsL(copilotQueries), _cursorAt: q.cursorAt })
+        .from(copilotQueries)
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset),
+    countable: (where) => db.select({ one: sqlL`1` }).from(copilotQueries).where(where),
+    idOf: (r) => r.id,
+  };
+  const proposalsReader: ListReader<CopilotProposalListRow> = {
+    fetch: (q) =>
+      db
+        .select({ ...colsL(copilotProposals), approvalStatus: PROPOSAL_APPROVAL_STATUS, _cursorAt: q.cursorAt })
+        .from(copilotProposals)
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset),
+    countable: (where) => db.select({ one: sqlL`1` }).from(copilotProposals).where(where),
+    idOf: (r) => r.id,
+  };
+  app.get("/v1/copilot/queries/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      z.object({}).strict().parse(filterParams(q));
+      const ex = parseListExport(COPILOT_QUERIES_LIST, q);
+      await sendListExport(db, req, reply, COPILOT_QUERIES_LIST, queriesReader, queriesScope(req), ex, {});
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+  app.get("/v1/copilot/proposals/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      z.object({}).strict().parse(filterParams(q));
+      const ex = parseListExport(COPILOT_PROPOSALS_LIST, q);
+      await sendListExport(db, req, reply, COPILOT_PROPOSALS_LIST, proposalsReader, proposalsScope(req), ex, {});
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+
+  app.get("/v1/copilot/queries", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      try {
+        const q = req.query as Record<string, unknown>;
+        z.object({}).strict().parse(filterParams(q));
+        const page = parseListPage(COPILOT_QUERIES_LIST, q);
+        return { ...(await runListPage(db, COPILOT_QUERIES_LIST, queriesReader, queriesScope(req), page)), decisionSupport: COPILOT_DECISION_SUPPORT_NOTICE };
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
     const q = z
       .object({ limit: z.coerce.number().int().min(1).max(200).default(50) })
       .parse(req.query ?? {});
@@ -2441,7 +2515,17 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
     }
   });
 
-  app.get("/v1/copilot/proposals", async (req) => {
+  app.get("/v1/copilot/proposals", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      try {
+        const q = req.query as Record<string, unknown>;
+        z.object({}).strict().parse(filterParams(q));
+        const page = parseListPage(COPILOT_PROPOSALS_LIST, q);
+        return await runListPage(db, COPILOT_PROPOSALS_LIST, proposalsReader, proposalsScope(req), page);
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
     const rows = req.authCtx.isAdmin
       ? await db.select().from(copilotProposals).orderBy(desc(copilotProposals.createdAt)).limit(200)
       : await db
@@ -2458,3 +2542,47 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
     };
   });
 }
+
+// ---- ADR-0226: recent questions and proposals under the shared list contract
+type CopilotQueryListRow = typeof copilotQueries.$inferSelect;
+type CopilotProposalListRow = typeof copilotProposals.$inferSelect & { approvalStatus: string | null };
+/** the state of the approval a proposal rests on, read from the one queue */
+const PROPOSAL_APPROVAL_STATUS = sqlL<string | null>`(select ${approvals.status} from ${approvals} where ${approvals.id} = ${copilotProposals.approvalId})`;
+export const COPILOT_QUERIES_LIST: ListSpec<CopilotQueryListRow> = {
+  id: "copilot-questions",
+  sorts: {
+    q: { expr: sqlL`lower(${copilotQueries.question})` },
+    g: { expr: copilotQueries.generation },
+    gr: { expr: copilotQueries.guardrailAction },
+    at: { expr: copilotQueries.createdAt, keysetAt: copilotQueries.createdAt },
+  },
+  columns: {
+    q: { label: "Question", value: (r) => r.question },
+    g: { label: "Generation", value: (r) => r.generation },
+    gr: { label: "Guardrail", value: (r) => r.guardrailAction },
+    at: { label: "Asked", value: (r) => r.createdAt },
+  },
+  filters: [],
+  defaultSort: { col: "at", dir: "desc" },
+  idCol: copilotQueries.id,
+};
+export const COPILOT_PROPOSALS_LIST: ListSpec<CopilotProposalListRow> = {
+  id: "copilot-proposals",
+  sorts: {
+    t: { expr: sqlL`lower(${copilotProposals.title})` },
+    k: { expr: copilotProposals.kind },
+    s: { expr: PROPOSAL_APPROVAL_STATUS },
+    a: { expr: copilotProposals.appliedAt },
+    at: { expr: copilotProposals.createdAt, keysetAt: copilotProposals.createdAt },
+  },
+  columns: {
+    t: { label: "Proposal", value: (r) => r.title },
+    k: { label: "Kind", value: (r) => r.kind },
+    s: { label: "Consent", value: (r) => (r.approvalId ? (r.approvalStatus ?? "unknown") : "no approval") },
+    a: { label: "Applied", value: (r) => r.appliedAt },
+    at: { label: "Proposed", value: (r) => r.createdAt },
+  },
+  filters: [],
+  defaultSort: { col: "at", dir: "desc" },
+  idCol: copilotProposals.id,
+};

@@ -20,11 +20,12 @@
  */
 import { lazy, Suspense, useState } from "react";
 import { Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Tabs, Textarea, tabIds } from "../../../ui/kit";
+import { DataList, type DataColumn } from "../../../ui/DataList";
 import {
   QueryGate,
   RemoveButton,
@@ -218,6 +219,23 @@ const modeSummary = (modes: Record<string, string>) =>
 const stateTone = (s: CardState) =>
   s === "approved" ? "ok" : s === "expiring" ? "warn" : s === "pending" ? "info" : "danger";
 
+type ExpiringRow = ExpiringView["items"][number] & { effectiveStatus?: string; daysUntilExpiry?: number | null };
+/** ADR-0226: the expiring sign-offs' columns; the ids and sortable ones match the gateway's MRM_EXPIRING_LIST */
+const EXPIRING_COLUMNS: Array<DataColumn<ExpiringRow>> = [
+  { key: "use", header: "Intended use", main: true, sortable: true, render: (r) => r.intendedUse ?? r.cardId },
+  {
+    key: "state",
+    header: "State",
+    main: true,
+    sortable: true,
+    required: "The sign-off state is always shown",
+    render: (r) => <Badge tone={r.effectiveStatus === "expired" ? "danger" : "warn"}>{r.effectiveStatus}</Badge>,
+  },
+  { key: "until", header: "Valid until", main: true, sortable: true, render: (r) => (r.validUntil ? ago(r.validUntil) : "no expiry") },
+  { key: "days", header: "Days", main: true, sortable: true, render: (r) => r.daysUntilExpiry ?? "—" },
+  { key: "requested", header: "Requested", sortable: true, render: (r) => (r.requestedAt ? ago(r.requestedAt) : "—") },
+];
+
 export default function ModelRiskPage() {
   const agents = useAgents();
   const users = useUsers();
@@ -227,14 +245,9 @@ export default function ModelRiskPage() {
     queryKey: ["admin", "mrm-status"],
     queryFn: () => api.get<StatusView>("/v1/mrm/status"),
   });
-  const cards = useQuery({
-    queryKey: ["admin", "mrm-cards"],
-    queryFn: () => api.get<{ cards: ModelCard[]; enforced: boolean }>("/v1/mrm/cards"),
-  });
-  const expiring = useQuery({
-    queryKey: ["admin", "mrm-expiring"],
-    queryFn: () => api.get<ExpiringView>("/v1/mrm/expiring"),
-  });
+  // ADR-0226: the cards and the expiring sign-offs page on the server; the open card is read from the page on screen
+  const queryClient = useQueryClient();
+  const [pageCards, setPageCards] = useState<ModelCard[]>([]);
 
 
   const [newAgent, setNewAgent] = useState("");
@@ -264,10 +277,15 @@ export default function ModelRiskPage() {
   const [stalenessThreshold, setStalenessThreshold] = useState<string | null>(null);
 
   const refreshAll = async () => {
-    await Promise.all([status.refetch(), cards.refetch(), expiring.refetch(), cardDetail.refetch()]);
+    await Promise.all([
+      status.refetch(),
+      queryClient.invalidateQueries({ queryKey: ["admin", "mrm-cards"] }),
+      queryClient.invalidateQueries({ queryKey: ["admin", "mrm-expiring"] }),
+      cardDetail.refetch(),
+    ]);
   };
 
-  const detail = (cards.data?.cards ?? []).find((c) => c.id === openCard) ?? null;
+  const detail = pageCards.find((c) => c.id === openCard) ?? null;
   const autofill = openCard === cardDetail.data?.card.id ? cardDetail.data.card.autofill : null;
   const staleness = openCard === cardDetail.data?.card.id ? cardDetail.data.card.staleness : null;
 
@@ -279,8 +297,8 @@ export default function ModelRiskPage() {
       />
       <div className={v.stack}>
         <QueryGate
-          loading={status.isLoading || cards.isLoading}
-          error={status.error ?? cards.error}
+          loading={status.isLoading}
+          error={status.error}
           onRetry={() => void refreshAll()}
         >
           {/* ---------------- posture ---------------- */}
@@ -427,31 +445,23 @@ export default function ModelRiskPage() {
 
           {/* ---------------- expiring work ---------------- */}
           <Card title="Expiring and lapsed sign-offs">
-            {(expiring.data?.items ?? []).length === 0 ? (
-              <EmptyState
-                title="Nothing lapsing"
-                body="No risk acceptance expires inside the warn window. A lapse should reach this list as work long before it stops a dispatch."
-              />
-            ) : (
-              <Table
-                rows={expiring.data?.items ?? []}
-                rowKey={(r) => r.id}
-                columns={[
-                  { key: "use", header: "Intended use", render: (r) => r.intendedUse ?? r.cardId },
-                  {
-                    key: "state",
-                    header: "State",
-                    render: (r) => (
-                      <Badge tone={r.effectiveStatus === "expired" ? "danger" : "warn"}>
-                        {r.effectiveStatus}
-                      </Badge>
-                    ),
-                  },
-                  { key: "until", header: "Valid until", render: (r) => (r.validUntil ? ago(r.validUntil) : "no expiry") },
-                  { key: "days", header: "Days", render: (r) => r.daysUntilExpiry ?? "—" },
-                ]}
-              />
-            )}
+            <DataList<ExpiringRow>
+              listId="model-card-expiring"
+              noun="sign-offs"
+              endpoint="/v1/mrm/expiring"
+              exportPath="/v1/mrm/expiring/export.xlsx"
+              queryKey={["admin", "mrm-expiring"]}
+              legacyKey="items"
+              defaultSort={{ key: "until", dir: "asc" }}
+              columns={EXPIRING_COLUMNS}
+              rowKey={(r) => r.id}
+              empty={
+                <EmptyState
+                  title="Nothing lapsing"
+                  body="No risk acceptance expires inside the warn window. A lapse should reach this list as work long before it stops a dispatch."
+                />
+              }
+            />
           </Card>
 
           {/* ---------------- author a card ---------------- */}
@@ -535,26 +545,37 @@ export default function ModelRiskPage() {
 
           {/* ---------------- the registry ---------------- */}
           <Card title="Model cards">
-            {(cards.data?.cards ?? []).length === 0 ? (
-              <EmptyState
-                title="No model cards"
-                body="An empty registry enforces nothing, whatever the toggle says. Cards are human work — the platform can require them and expire them, it cannot write them."
-              />
-            ) : (
-              <Table
-                rows={cards.data?.cards ?? []}
+            <DataList<ModelCard>
+                listId="model-cards"
+                noun="model cards"
+                endpoint="/v1/mrm/cards"
+                exportPath="/v1/mrm/cards/export.xlsx"
+                queryKey={["admin", "mrm-cards"]}
+                legacyKey="cards"
+                defaultSort={{ key: "created", dir: "desc" }}
                 rowKey={(r) => r.id}
+                onRows={(rows) => setPageCards(rows)}
+                empty={
+                  <EmptyState
+                    title="No model cards"
+                    body="An empty registry enforces nothing, whatever the toggle says. Cards are human work — the platform can require them and expire them, it cannot write them."
+                  />
+                }
                 columns={[
-                  { key: "subject", header: "Model", render: (r) => r.subjectName ?? r.agentId ?? r.customProviderId },
-                  { key: "use", header: "Intended use", render: (r) => r.intendedUse },
+                  { key: "subject", header: "Model", main: true, sortable: true, render: (r) => r.subjectName ?? r.agentId ?? r.customProviderId },
+                  { key: "use", header: "Intended use", main: true, sortable: true, render: (r) => r.intendedUse },
                   {
                     key: "state",
                     header: "State",
+                    main: true,
+                    required: "The sign-off state is always shown",
                     render: (r) => <Badge tone={stateTone(r.state)}>{r.state}</Badge>,
                   },
                   {
                     key: "complete",
                     header: "Card",
+                    main: true,
+                    required: "Missing card sections are always shown",
                     render: (r) =>
                       r.completeness.complete ? (
                         <Badge tone="ok">complete</Badge>
@@ -564,16 +585,20 @@ export default function ModelRiskPage() {
                         </Badge>
                       ),
                   },
-                  { key: "evidence", header: "Evidence", render: (r) => r.evidence.length },
+                  { key: "evidence", header: "Evidence", main: true, sortable: true, render: (r) => r.evidence.length },
                   {
                     key: "expiry",
                     header: "Expires",
+                    main: true,
+                    sortable: true,
                     render: (r) => (r.daysUntilExpiry === null ? "—" : `${r.daysUntilExpiry}d`),
                   },
+                  { key: "created", header: "Created", sortable: true, render: (r) => ago(r.createdAt) },
                   {
                     key: "open",
                     header: "",
                     srHeader: "Actions",
+                    action: true,
                     render: (r) => (
                       <Button variant="ghost" onClick={() => setOpenCard(r.id === openCard ? null : r.id)}>
                         {r.id === openCard ? "Close" : "Open"}
@@ -583,8 +608,9 @@ export default function ModelRiskPage() {
                   {
                     key: "actions",
                     header: "",
-                    srHeader: "Actions",
+                    srHeader: "Remove",
                     align: "right",
+                    action: true,
                     render: (r) => (
                       <RemoveButton
                         what={`the model card for ${r.subjectName ?? r.agentId ?? "this model"}`}
@@ -606,14 +632,13 @@ export default function ModelRiskPage() {
                         onRemove={() => api.del(`/v1/mrm/cards/${r.id}`)}
                         onDone={() => {
                           if (openCard === r.id) setOpenCard(null);
-                          void cards.refetch();
+                          void queryClient.invalidateQueries({ queryKey: ["admin", "mrm-cards"] });
                         }}
                       />
                     ),
                   },
                 ]}
               />
-            )}
           </Card>
 
           {/* ---------------- one card ---------------- */}

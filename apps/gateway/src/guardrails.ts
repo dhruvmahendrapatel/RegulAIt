@@ -26,6 +26,18 @@
  * admin "effective policy" endpoint and the tests all use one definition.
  */
 import { z } from "zod";
+import {
+  filterParams,
+  parseListExport,
+  parseListPage,
+  runListPage,
+  sendListError,
+  sendListExport,
+  wantsListContract,
+  type ListReader,
+  type ListSpec,
+} from "./list-contract.js";
+import { userNameSql } from "./delegations-list.js";
 import type { FastifyInstance } from "fastify";
 import { CHANGED_CONCURRENTLY, requireRelaxStepUp, requireStepUp } from "./step-up.js";
 import {
@@ -37,6 +49,7 @@ import {
   eq,
   guardrailConfigs,
   gt,
+  getTableColumns,
   inArray,
   isNull,
   lte,
@@ -838,7 +851,53 @@ export function registerGuardrailRoutes(app: FastifyInstance, db: Db): void {
    * `guardrail-blocked | guardrail-warned | guardrail-logged` rows, newest
    * first. Everything shown is counts-only by construction.
    */
-  app.get("/v1/guardrails/violations", async (req) => {
+  const violationsReader: ListReader<typeof auditLog.$inferSelect> = {
+    fetch: (q) =>
+      db
+        .select({ ...getTableColumns(auditLog), _cursorAt: q.cursorAt })
+        .from(auditLog)
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset),
+    countable: (where) => db.select({ one: sql`1` }).from(auditLog).where(where),
+    idOf: (r) => r.id,
+  };
+  const violationsWhere = (f: z.infer<typeof violationsFilterQuery>) =>
+    inArray(auditLog.ruleId, f.outcome ? [`guardrail-${f.outcome}`] : ["guardrail-blocked", "guardrail-warned", "guardrail-logged"]);
+  const violationsTotals = async () => {
+    const counts = await db
+      .select({ ruleId: auditLog.ruleId, n: sql<number>`count(*)::int` })
+      .from(auditLog)
+      .where(inArray(auditLog.ruleId, ["guardrail-blocked", "guardrail-warned", "guardrail-logged"]))
+      .groupBy(auditLog.ruleId);
+    return Object.fromEntries(counts.map((c) => [c.ruleId.replace("guardrail-", ""), c.n]));
+  };
+  // ADR-0226: with any of sort/dir/cursor/offset/count the decisions answer the shared list contract; admin only.
+  // Counts and detector ids only, as the list: no matched content is stored anywhere.
+  app.get("/v1/guardrails/violations/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const filters = violationsFilterQuery.parse(filterParams(q));
+      const ex = parseListExport(VIOLATIONS_LIST, q);
+      await sendListExport(db, req, reply, VIOLATIONS_LIST, violationsReader, violationsWhere(filters), ex, filters);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+  app.get("/v1/guardrails/violations", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      try {
+        const q = req.query as Record<string, unknown>;
+        const filters = violationsFilterQuery.parse(filterParams(q));
+        const page = parseListPage(VIOLATIONS_LIST, q);
+        const [out, totals] = await Promise.all([runListPage(db, VIOLATIONS_LIST, violationsReader, violationsWhere(filters), page), violationsTotals()]);
+        return { ...out, totals, note: VIOLATIONS_NOTE };
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
     const q = z
       .object({
         limit: z.coerce.number().int().min(1).max(500).default(50),
@@ -864,7 +923,7 @@ export function registerGuardrailRoutes(app: FastifyInstance, db: Db): void {
     return {
       violations: rows,
       totals: Object.fromEntries(counts.map((c) => [c.ruleId.replace("guardrail-", ""), c.n])),
-      note: "Sourced from the single audit log — the same table every other governed decision lands in. Counts only; no matched content is stored anywhere.",
+      note: VIOLATIONS_NOTE,
     };
   });
 
@@ -893,3 +952,36 @@ export function registerGuardrailRoutes(app: FastifyInstance, db: Db): void {
     };
   });
 }
+
+// ---- ADR-0226: the recent guardrail decisions under the shared list contract
+const VIOLATIONS_NOTE =
+  "Sourced from the single audit log — the same table every other governed decision lands in. Counts only; no matched content is stored anywhere.";
+const violationsFilterQuery = z.object({ outcome: z.enum(["blocked", "warned", "logged"]).optional() }).strict();
+const guardrailOf = (r: { detail: unknown }) => {
+  const d = r.detail && typeof r.detail === "object" ? (r.detail as Record<string, unknown>).guardrail : null;
+  return (d && typeof d === "object" ? d : {}) as { phase?: string; outcome?: string; findings?: Array<{ detector?: string; category?: string; count?: number; mode?: string }> };
+};
+export const VIOLATIONS_LIST: ListSpec<typeof auditLog.$inferSelect> = {
+  id: "guardrail-decisions",
+  sorts: {
+    at: { expr: auditLog.at, keysetAt: auditLog.at },
+    outcome: { expr: auditLog.ruleId },
+    phase: { expr: sql`(${auditLog.detail}->'guardrail'->>'phase')` },
+    obj: { expr: auditLog.objectType },
+    user: { expr: sql`lower(${userNameSql(auditLog.userId)})` },
+  },
+  columns: {
+    at: { label: "When", value: (r) => r.at },
+    outcome: { label: "Outcome", value: (r) => guardrailOf(r).outcome ?? r.ruleId },
+    phase: { label: "Phase", value: (r) => guardrailOf(r).phase ?? null },
+    obj: { label: "Surface", value: (r) => r.objectType },
+    f: {
+      label: "Findings (counts only)",
+      value: (r) => (guardrailOf(r).findings ?? []).map((f) => `${f.detector}:${f.category} x${f.count} (${f.mode})`).join("; ") || null,
+    },
+    user: { label: "User id", value: (r) => r.userId },
+  },
+  filters: ["outcome"],
+  defaultSort: { col: "at", dir: "desc" },
+  idCol: auditLog.id,
+};

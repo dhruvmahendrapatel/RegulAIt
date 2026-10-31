@@ -143,6 +143,10 @@ import { governedEvaluate } from "./governed-evaluate.js";
 import { checkMcpTransportWrite, refuseMcpServerWrite } from "./mcp-egress.js";
 import {
   agentIdDisclosureUpdate,
+  assertionProfileUpdate,
+  auditAssertionProfileChange,
+  refuseAssertionProfile,
+  refuseBearerConflict,
   auditAgentIdDisclosureChange,
   auditIdentityPropagationChange,
   identityPropagationUpdate,
@@ -278,8 +282,11 @@ import {
   sendListError,
   sendListExport,
   wantsListContract,
+  type ListReader,
+  type ListSpec,
 } from "./list-contract.js";
 import { USERS_LIST, usersFilterQuery, usersReader, usersWhere } from "./users-list.js";
+import { DELEGATIONS_LIST, delegationsFilterQuery, delegationsReader, delegationsWhere, userNameSql } from "./delegations-list.js";
 import { evaluateIpEnvelope } from "./net-policy.js";
 import { activeDelegatorsFor, activeDelegationFrom } from "./delegations.js";
 
@@ -506,6 +513,7 @@ import {
   approvingPrincipals,
   decidedByViewerCondition,
   poolVisibilityCondition,
+  previewToolApprovalQueue,
   registerApprovalSigningRoutes,
 } from "./approval-signatures.js";
 import { registerDecisionReceiptRoutes } from "./decision-receipts.js";
@@ -542,6 +550,7 @@ import { registerShadowAiRoutes } from "./shadow-ai.js";
 import { registerDiscoveryRoutes } from "./discovery-routes.js";
 import { registerContentTrustRoutes } from "./content-trust-routes.js";
 import { registerFederationRoutes } from "./federation-routes.js";
+import { registerMcpIdentityOidcRoutes } from "./mcp-identity-oidc-routes.js";
 import { registerEndpointImportRoutes } from "./endpoint-import-routes.js";
 import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
@@ -664,6 +673,32 @@ function unknownAuditObjectType(q: AuditFilterInput): { error: string; detail: s
     detail: "objectType is not an object type the audit log records; omit it to read every object type",
   };
 }
+
+/** ADR-0226: the audit trail under the shared list contract (the screen's columns; the full CSV export is unchanged) */
+type AuditListRow = { id: string; at: Date; userId: string; userName: string | null; objectType: string | null; objectId: string | null; effect: string; ruleId: string; reason: string | null; deployMode: string | null };
+const AUDIT_LIST: ListSpec<AuditListRow> = {
+  id: "audit-log",
+  sorts: {
+    at: { expr: auditLog.at, keysetAt: auditLog.at },
+    user: { expr: sql`lower(${userNameSql(auditLog.userId)})` },
+    event: { expr: sql`coalesce(${auditLog.objectType}, '') || ' ' || ${auditLog.ruleId}` },
+    effect: { expr: auditLog.effect },
+    deployMode: { expr: sql`coalesce(${auditLog.deployMode}, 'unknown')` },
+  },
+  columns: {
+    at: { label: "At", value: (r) => r.at },
+    user: { label: "User", value: (r) => r.userName ?? r.userId },
+    event: { label: "Event", value: (r) => `${r.objectType ? `${r.objectType}: ` : ""}${r.ruleId}` },
+    effect: { label: "Effect", value: (r) => r.effect.replace(/_/g, " ") },
+    deployMode: { label: "Deploy mode", value: (r) => r.deployMode ?? "not recorded" },
+    reason: { label: "Reason", value: (r) => r.reason },
+    objectId: { label: "Object id", value: (r) => r.objectId },
+    id: { label: "Audit id", value: (r) => r.id },
+  },
+  filters: ["id", "userId", "deployMode", "objectType", "objectId", "effect", "from", "to"],
+  defaultSort: { col: "at", dir: "desc" },
+  idCol: auditLog.id,
+};
 
 /** the screen read adds paging on top of the shared filter set */
 const auditQuery = auditFilterQuery.extend({
@@ -2128,7 +2163,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       });
     }
     // ADR-0188 S8: a stdio server cannot carry an identity assertion, nor the agent IDs inside one (409, nothing saved)
-    const identityRefusal = refuseIdentityPropagationOnStdio(isStdio, body.identityPropagation, body.discloseAgentWorkloadIds);
+    const identityRefusal = refuseIdentityPropagationOnStdio(isStdio, body.identityPropagation, body.discloseAgentWorkloadIds, body.identityAssertionProfile);
     if (identityRefusal) return reply.status(identityRefusal.status).send(identityRefusal.body);
     const label = `MCP server '${before.name}'`;
     const nextUrl = body.url ?? before.url;
@@ -2205,15 +2240,27 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const disclosure = agentIdDisclosureUpdate(before, body, identity);
     const disclosureRefusal = refuseAgentIdDisclosureWithoutAssertion(disclosure);
     if (disclosureRefusal) return reply.status(disclosureRefusal.status).send(disclosureRefusal.body);
+    // ADR-0210: the OIDC profile (an ES256 assertion as the Bearer token, with an admin-set scope) is a further
+    // relaxation, only while an assertion is sent and only with a valid scope (else refused before any step-up); a url
+    // move or propagation turning off returns it to the default. Never beside an ADR-0204 Bearer credential.
+    const profile = assertionProfileUpdate(before, body, identity);
+    const profileRefusal = refuseAssertionProfile(profile);
+    if (profileRefusal) return reply.status(profileRefusal.status).send(profileRefusal.body);
+    if (profile.relaxed) {
+      const conflict = await refuseBearerConflict(db, serverId);
+      if (conflict) return reply.status(conflict.status).send(conflict.body);
+    }
     const relaxedValues =
-      rangesRelaxed || identity.relaxed || disclosure.relaxed ? { ...rangesRelaxed, ...identity.relaxed, ...disclosure.relaxed } : null;
+      rangesRelaxed || identity.relaxed || disclosure.relaxed || profile.relaxed
+        ? { ...rangesRelaxed, ...identity.relaxed, ...disclosure.relaxed, ...profile.relaxed }
+        : null;
     const rangesStepUpArgs = relaxedValues
       ? {
           kind: "settings_relax" as const,
           facts: {
             op: "mcp_server_update",
             serverId,
-            ...(body.url !== undefined || identity.relaxed || disclosure.relaxed ? { url: nextUrl } : {}),
+            ...(body.url !== undefined || identity.relaxed || disclosure.relaxed || profile.relaxed ? { url: nextUrl } : {}),
             values: relaxedValues,
           },
         }
@@ -2271,6 +2318,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         : {}),
       ...(identity.write !== null ? { identityPropagation: identity.write } : {}),
       ...(disclosure.write !== null ? { discloseAgentWorkloadIds: disclosure.write } : {}),
+      ...(profile.write !== null ? profile.write : {}),
       ...stdioPatch,
       ...(ownerChanges ? { ownerUserId: ownerTarget } : {}),
     };
@@ -2287,13 +2335,23 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // the same transaction, on its connection, AFTER that compare-and-set, so a 409 never burns them; a refused
       // claim throws and rolls the write back.
       const touchesPosture =
-        body.allowPrivateRanges !== undefined || body.url !== undefined || identity.write !== null || disclosure.write !== null;
+        body.allowPrivateRanges !== undefined ||
+        body.url !== undefined ||
+        identity.write !== null ||
+        disclosure.write !== null ||
+        profile.write !== null;
       type Patched = { row: typeof mcpServers.$inferSelect } | { refused: { status: number; body: Record<string, unknown> } };
       const out = await db.transaction(async (tx): Promise<Patched> => {
         if (identity.relaxed) {
           await lockIdentityAudiences(tx);
           const shared = await refuseSharedIdentityAudience(tx, serverId, nextUrl);
           if (shared) return { refused: { status: shared.status, body: shared.body } };
+        }
+        if (profile.relaxed) {
+          // ADR-0210: re-checked under the server row's lock, which the credential's writers take too
+          await tx.select({ id: mcpServers.id }).from(mcpServers).where(eq(mcpServers.id, serverId)).for("update");
+          const conflict = await refuseBearerConflict(tx, serverId);
+          if (conflict) return { refused: { status: conflict.status, body: conflict.body } };
         }
         const [written] = await tx
           .update(mcpServers)
@@ -2309,6 +2367,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
                     eq(mcpServers.url, before.url),
                     eq(mcpServers.identityPropagation, before.identityPropagation),
                     eq(mcpServers.discloseAgentWorkloadIds, before.discloseAgentWorkloadIds),
+                    eq(mcpServers.identityAssertionProfile, before.identityAssertionProfile),
+                    sql`${mcpServers.identityAssertionScope} IS NOT DISTINCT FROM ${before.identityAssertionScope}`,
                   ]
                 : []),
               ...(ownerChanges ? [sql`${mcpServers.ownerUserId} IS NOT DISTINCT FROM ${before.ownerUserId}`] : []),
@@ -2402,6 +2462,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             url: written.url,
             update: disclosure,
             stepUp: disclosure.relaxed ? rangesStepUp : null,
+          });
+        }
+        // ADR-0210: every change of the assertion profile or scope, and a url move that keeps it on, on the trail
+        if (profile.write !== null || profile.relaxed) {
+          await auditAssertionProfileChange(tx, {
+            userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+            serverId,
+            label,
+            from: { identityAssertionProfile: before.identityAssertionProfile, identityAssertionScope: before.identityAssertionScope },
+            to: { identityAssertionProfile: written.identityAssertionProfile, identityAssertionScope: written.identityAssertionScope },
+            url: written.url,
+            update: profile,
+            stepUp: profile.relaxed ? rangesStepUp : null,
           });
         }
         if (stdioChange) {
@@ -3419,7 +3492,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
     // Full governed evaluation, but decision-only: unlike the proxy path this
     // endpoint never creates queue entries or consumes approvals.
-    const { decision } = await governedEvaluate(
+    const { decision: evaluated, matchedApprovalRuleIds } = await governedEvaluate(
       db,
       body.userId,
       body.serverId,
@@ -3438,6 +3511,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       undefined,
       { actor: null }, // ADR-0188 S4: the person's own decision; agent paths decide with their delegation grant in the governed core
     );
+    // ADR-0186 A — the queue-time quorum and signature-mode check, run read-only:
+    // a `require_approval` the queue would refuse (no pool can ever sign it)
+    // previews as that same deny, so the preview and the gateway agree.
+    const decision = await previewToolApprovalQueue(db, {
+      callerUserId: body.userId,
+      decision: evaluated,
+      matchedApprovalRuleIds: matchedApprovalRuleIds ?? [],
+      projectId: null,
+      toolName: body.toolName,
+    });
 
     // ADR-0127 — MARKED ADVISORY. This route answers "what would you decide"
     // and executes nothing, but it wrote an `allow` row indistinguishable from
@@ -3695,7 +3778,31 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     return reply.status(201).send(row);
   });
 
-  app.get("/v1/delegations", async () => {
+  // ADR-0226: with any of sort/dir/cursor/offset/count it answers the shared
+  // list contract (delegations-list.ts) with a status filter; with none of
+  // them, exactly the response below. Admin only, like the export.
+  app.get("/v1/delegations/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const filters = delegationsFilterQuery.parse(filterParams(q));
+      const ex = parseListExport(DELEGATIONS_LIST, q);
+      await sendListExport(db, req, reply, DELEGATIONS_LIST, delegationsReader(db), delegationsWhere(filters), ex, filters);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+  app.get("/v1/delegations", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      try {
+        const q = req.query as Record<string, unknown>;
+        const filters = delegationsFilterQuery.parse(filterParams(q));
+        const page = parseListPage(DELEGATIONS_LIST, q);
+        return await runListPage(db, DELEGATIONS_LIST, delegationsReader(db), delegationsWhere(filters), page);
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
     const rows = await db.select().from(approvalDelegations);
     const ids = [...new Set(rows.flatMap((r) => [r.fromUserId, r.toUserId]))];
     const userRows = ids.length
@@ -5612,6 +5719,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // fetch them), and the admin key lifecycle (off by default; on is a `settings_relax` step-up, rotate and revoke
   // are `key_management` step-ups). The admin routes are admin-only by default (none is in NON_ADMIN_ROUTES).
   registerFederationRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0210: the OIDC-profile identity assertion issuer's public discovery document and ES256 JWKS
+  registerMcpIdentityOidcRoutes(app, db);
   // ADR-0195 SD3 — no-agent endpoint evidence (osquery results, MDM/EDR inventory) imported into an endpoint source,
   // and the endpoint signature seed. Admin-only by default.
   registerEndpointImportRoutes(app, db, {
@@ -5786,7 +5895,51 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // filters on from/to/objectType/objectId/effect as well as userId and deployMode —
   // all through the SAME auditFilters() the CSV export uses. Callers that pass
   // nothing get EXACTLY the old behaviour: the newest 100 rows under `entries`.
+  // ADR-0226: the audit trail under the shared list contract. The trail already pages by a keyset `cursor`, so here
+  // the switch is any of sort/dir/offset/count (a caller paging with `cursor` alone keeps the old response); the
+  // default sort is the same (at DESC, id DESC) keyset, so the contract's cursor is the same cursor.
+  const auditListReader: ListReader<AuditListRow> = {
+    fetch: (q) =>
+      db
+        .select({ ...auditLogColumns, userName: userNameSql(auditLog.userId), _cursorAt: q.cursorAt })
+        .from(auditLog)
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset),
+    countable: (where) => db.select({ one: sql`1` }).from(auditLog).where(where),
+    idOf: (r) => r.id,
+  };
+  const auditListWhere = (q: AuditFilterInput): SQL | undefined => {
+    const filters = auditFilters(q, q.from ?? null, q.to ?? null);
+    return filters.length ? and(...filters) : undefined;
+  };
+  app.get("/v1/audit/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const filters = auditFilterQuery.strict().parse(filterParams(q));
+      const unknownType = unknownAuditObjectType(filters);
+      if (unknownType) return reply.status(400).send(unknownType);
+      const ex = parseListExport(AUDIT_LIST, q);
+      await sendListExport(db, req, reply, AUDIT_LIST, auditListReader, auditListWhere(filters), ex, filters);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
   app.get("/v1/audit", async (req, reply) => {
+    const raw = (req.query ?? {}) as Record<string, unknown>;
+    if (["sort", "dir", "offset", "count"].some((k) => raw[k] !== undefined)) {
+      try {
+        const filters = auditFilterQuery.strict().parse(filterParams(raw));
+        const unknownType = unknownAuditObjectType(filters);
+        if (unknownType) return reply.status(400).send(unknownType);
+        const page = parseListPage(AUDIT_LIST, raw);
+        return await runListPage(db, AUDIT_LIST, auditListReader, auditListWhere(filters), page);
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
     const q = auditQuery.parse(req.query);
     const unknownType = unknownAuditObjectType(q);
     if (unknownType) return reply.status(400).send(unknownType);

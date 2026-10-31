@@ -74,6 +74,11 @@ export interface SortColumn {
   expr: SQL | PgColumn;
   /** a NOT NULL timestamptz column the keyset cursor can seek on (`expr` must be this column) */
   keysetAt?: PgColumn;
+  /**
+   * further ORDER BY keys, in the same direction, before the id tie-breaker (e.g. severity, then the most recent):
+   * only on a sort without `keysetAt`, which pages by offset
+   */
+  then?: Array<SQL | PgColumn>;
 }
 
 export type XlsxCell = string | number | boolean | Date | null;
@@ -180,7 +185,8 @@ const DESC = sql`desc`;
 /** ORDER BY for this page: the chosen expression (nulls last), then the id in the same direction */
 export function orderByFor<Row>(spec: ListSpec<Row>, page: Pick<ListPage, "sort" | "dir">): SQL[] {
   const d = page.dir === "asc" ? ASC : DESC;
-  return [sql`${spec.sorts[page.sort]!.expr} ${d} nulls last`, sql`${spec.idCol} ${d}`];
+  const col = spec.sorts[page.sort]!;
+  return [sql`${col.expr} ${d} nulls last`, ...(col.then ?? []).map((e) => sql`${e} ${d} nulls last`), sql`${spec.idCol} ${d}`];
 }
 
 /** "strictly after this cursor" for a keyset sort in either direction */

@@ -16,14 +16,14 @@
  */
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Fieldset, Input, Modal, Select, Table } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
 import { QueryGate, RemoveButton, downloadCsv, useAction, useUsers } from "../adminKit";
-import { NewestNote } from "../../../ui/fold";
+import { DataList } from "../../../ui/DataList";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -258,24 +258,30 @@ function QueueModal(props: { open: boolean; editing: QueueDetail | null; onClose
 }
 
 function ItemsModal(props: { queue: QueueSummary | null; onClose: () => void }) {
-  const items = useQuery({
-    queryKey: KEYS.items(props.queue?.id ?? ""),
-    queryFn: () => api.get<{ items: Item[] }>(`/v1/annotation-queues/${props.queue!.id}/items?limit=200`),
-    enabled: !!props.queue,
-  });
+  const queryClient = useQueryClient();
+  const queueId = props.queue?.id ?? "";
   return (
     <Modal open={props.queue !== null} wide title={`Items — ${props.queue?.name ?? ""}`} onClose={props.onClose} actions={<Button onClick={props.onClose}>Close</Button>}>
-      <QueryGate loading={items.isLoading} error={items.error} onRetry={() => void items.refetch()}>
-        <NewestNote shown={items.data?.items?.length ?? 0} limit={200} noun="items" />
-        <Table
-          rows={items.data?.items ?? []}
+      {props.queue && (
+        <DataList<Item>
+          key={queueId}
+          listId="annotation-items"
+          noun="queue items"
+          endpoint={`/v1/annotation-queues/${queueId}/items`}
+          exportPath={`/v1/annotation-queues/${queueId}/items/export.xlsx`}
+          queryKey={KEYS.items(queueId)}
+          legacyKey="items"
+          defaultSort={{ key: "queued", dir: "desc" }}
           rowKey={(r) => r.id}
           empty={<EmptyState title="No items yet" body="Send traces here from the Traces page, or with an automation rule." />}
           columns={[
-            { key: "subject", header: "Subject", render: (r) => <span>{SUBJECT_LABEL[r.subjectKind]} <code>{r.subjectId.slice(0, 8)}</code></span> },
+            { key: "subject", header: "Subject", main: true, sortable: true, render: (r) => <span>{SUBJECT_LABEL[r.subjectKind]} <code>{r.subjectId.slice(0, 8)}</code></span> },
             {
               key: "status",
               header: "Status",
+              main: true,
+              sortable: true,
+              required: "Status, a missed deadline and a disagreement are always shown",
               render: (r) => (
                 <span style={{ display: "inline-flex", gap: 4, flexWrap: "wrap" }}>
                   <Badge tone={r.status === "completed" ? "ok" : "neutral"}>{r.status}</Badge>
@@ -284,12 +290,14 @@ function ItemsModal(props: { queue: QueueSummary | null; onClose: () => void }) 
                 </span>
               ),
             },
-            { key: "reviews", header: "Reviews", render: (r) => `${r.submissionCount} of ${r.requiredReviews}` },
-            { key: "queued", header: "Queued", render: (r) => ago(r.createdAt) },
+            { key: "reviews", header: "Reviews", main: true, sortable: true, render: (r) => `${r.submissionCount} of ${r.requiredReviews}` },
+            { key: "queued", header: "Queued", main: true, sortable: true, render: (r) => ago(r.createdAt) },
+            { key: "due", header: "Due", sortable: true, render: (r) => (r.dueAt ? ago(r.dueAt) : "—") },
             {
               key: "actions",
               header: "",
               srHeader: "Actions",
+              action: true,
               render: (r) => (
                 <div className={v.row}>
                   <Link to={`/inbox/annotations/${r.id}`} aria-label={`Open item ${r.subjectId.slice(0, 8)}`}>
@@ -298,15 +306,15 @@ function ItemsModal(props: { queue: QueueSummary | null; onClose: () => void }) 
                   <RemoveButton
                     what={`item ${r.subjectId.slice(0, 8)}`}
                     consequence="Its reviews are deleted with it. Scores already recorded on the trace stay, and the audit log keeps the record."
-                    onRemove={() => api.del(`/v1/annotation-queues/${props.queue!.id}/items/${r.id}`)}
-                    onDone={() => void items.refetch()}
+                    onRemove={() => api.del(`/v1/annotation-queues/${queueId}/items/${r.id}`)}
+                    onDone={() => void queryClient.invalidateQueries({ queryKey: KEYS.items(queueId) })}
                   />
                 </div>
               ),
             },
           ]}
         />
-      </QueryGate>
+      )}
     </Modal>
   );
 }

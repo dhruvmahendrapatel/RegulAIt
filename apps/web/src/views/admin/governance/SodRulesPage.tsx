@@ -21,11 +21,12 @@
  *    approval mints the refused grant with the rule recorded as overridden.
  */
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Select, Table, type Tone } from "../../../ui/kit";
+import { DataList, type DataColumn } from "../../../ui/DataList";
 import {
   QueryGate,
   agentOpts,
@@ -81,6 +82,7 @@ interface OverrideRow {
   label: string;
   status: "pending" | "approved" | "denied";
   decidedBy: { name: string | null } | null;
+  requestedBy?: { userId: string; name: string | null };
   minted: { table: string } | null;
   createdAt: string;
 }
@@ -94,6 +96,32 @@ const KIND_LABELS: Record<CapKind, string> = {
 
 const statusTone = (s: OverrideRow["status"]): Tone =>
   s === "approved" ? "ok" : s === "denied" ? "danger" : "info";
+
+/** ADR-0226: the override requests' columns; the ids and sortable ones match the gateway's SOD_OVERRIDES_LIST */
+const OVERRIDE_COLUMNS: Array<DataColumn<OverrideRow>> = [
+  { key: "label", header: "Request", main: true, sortable: true, render: (r) => r.label },
+  { key: "rule", header: "Overrides rule", main: true, sortable: true, render: (r) => r.ruleName ?? "—" },
+  { key: "kind", header: "Mint", main: true, sortable: true, render: (r) => r.mintKind.replace(/_/g, " ") },
+  {
+    key: "status",
+    header: "Status",
+    main: true,
+    sortable: true,
+    required: "Status is always shown",
+    render: (r) => (
+      <>
+        <Badge tone={statusTone(r.status)}>{r.status}</Badge>{" "}
+        {r.status === "approved" && (
+          <span className={v.faint}>minted{r.minted ? ` into ${r.minted.table}` : ""} with the rule recorded as overridden</span>
+        )}
+        {r.status === "denied" && <span className={v.faint}>nothing minted</span>}
+      </>
+    ),
+  },
+  { key: "when", header: "Requested", main: true, sortable: true, render: (r) => ago(r.createdAt) },
+  { key: "requester", header: "Requested by", sortable: true, render: (r) => r.requestedBy?.name ?? r.requestedBy?.userId ?? "—" },
+  { key: "decider", header: "Decided by", render: (r) => r.decidedBy?.name ?? "—" },
+];
 
 /** B2c: what one side of the rule form selects by — a concrete object, or a
  * pattern over one of the three ENUMERABLE dimensions (never free text) */
@@ -235,10 +263,7 @@ export default function SodRulesPage() {
     queryKey: ["admin", "sod", "rules"],
     queryFn: () => api.get<{ rules: SodRule[]; notes: { enforcement: string } }>("/v1/sod/rules"),
   });
-  const overrides = useQuery({
-    queryKey: ["admin", "sod", "overrides"],
-    queryFn: () => api.get<{ overrides: OverrideRow[] }>("/v1/sod/overrides"),
-  });
+  const queryClient = useQueryClient();
 
   // ---- create-rule form (2..8 sides, concrete and/or pattern — B2c) ----
   const [name, setName] = useState("");
@@ -286,7 +311,7 @@ export default function SodRulesPage() {
   const escObjectOpts = escKind === "agent" ? aOpts : escKind === "connector" ? cOpts : sOpts;
 
   const refreshAll = async () => {
-    await Promise.all([rules.refetch(), overrides.refetch()]);
+    await Promise.all([rules.refetch(), queryClient.invalidateQueries({ queryKey: ["admin", "sod", "overrides"] })]);
   };
 
   return (
@@ -551,42 +576,20 @@ export default function SodRulesPage() {
         </Card>
 
         {/* ---------------- overrides ---------------- */}
-        <QueryGate loading={overrides.isLoading} error={overrides.error} onRetry={() => void overrides.refetch()}>
-          <Card title="Override requests">
-            {(overrides.data?.overrides ?? []).length === 0 ? (
-              <EmptyState
-                title="No override has been requested"
-                body="A refused mint escalated above appears here with its queue decision."
-              />
-            ) : (
-              <Table
-                rows={overrides.data?.overrides ?? []}
-                rowKey={(r) => r.id}
-                columns={[
-                  { key: "label", header: "Request", render: (r) => r.label },
-                  { key: "rule", header: "Overrides rule", render: (r) => r.ruleName ?? "—" },
-                  { key: "kind", header: "Mint", render: (r) => r.mintKind.replace(/_/g, " ") },
-                  {
-                    key: "status",
-                    header: "Status",
-                    render: (r) => (
-                      <>
-                        <Badge tone={statusTone(r.status)}>{r.status}</Badge>{" "}
-                        {r.status === "approved" && (
-                          <span className={v.faint}>
-                            minted{r.minted ? ` into ${r.minted.table}` : ""} with the rule recorded as overridden
-                          </span>
-                        )}
-                        {r.status === "denied" && <span className={v.faint}>nothing minted</span>}
-                      </>
-                    ),
-                  },
-                  { key: "when", header: "Requested", render: (r) => ago(r.createdAt) },
-                ]}
-              />
-            )}
-          </Card>
-        </QueryGate>
+        <Card title="Override requests" flush>
+          <DataList<OverrideRow>
+            listId="sod-overrides"
+            noun="override requests"
+            endpoint="/v1/sod/overrides"
+            exportPath="/v1/sod/overrides/export.xlsx"
+            queryKey={["admin", "sod", "overrides"]}
+            legacyKey="overrides"
+            defaultSort={{ key: "when", dir: "desc" }}
+            columns={OVERRIDE_COLUMNS}
+            rowKey={(r) => r.id}
+            empty={<EmptyState title="No override has been requested" body="A refused mint escalated above appears here with its queue decision." />}
+          />
+        </Card>
       </div>
     </>
   );

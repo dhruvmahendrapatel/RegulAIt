@@ -18,7 +18,7 @@ import { DetectionContentPanel } from "./DetectionContentPanel";
  *    query over the same table every other governed decision lands in, and it
  *    carries counts only — never the matched content.
  */
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
@@ -34,6 +34,7 @@ import {
   Textarea,
 } from "../../../ui/kit";
 import { QueryGate, optionEls, useAction, useAgents, useConnectors, useProjects } from "../adminKit";
+import { DataList } from "../../../ui/DataList";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
@@ -143,13 +144,9 @@ export default function GuardrailsPage() {
       return api.get<EffectiveView>(`/v1/guardrails/effective?${q.toString()}`);
     },
   });
-  const violations = useQuery({
-    queryKey: ["admin", "guardrail-violations", outcome],
-    queryFn: () =>
-      api.get<{ violations: ViolationRow[]; totals: Record<string, number>; note: string }>(
-        `/v1/guardrails/violations?limit=100${outcome ? `&outcome=${outcome}` : ""}`,
-      ),
-  });
+  // ADR-0226: the decisions page on the server; the totals come with each page, across every decision
+  const [totals, setTotals] = useState<Record<string, number> | null>(null);
+  const violationFilters = useMemo(() => ({ outcome: outcome || undefined }), [outcome]);
 
   const configurable = (info.data?.detectors ?? []).filter((d) => d.configurable);
   const orgModes = orgDraft ?? config.data?.orgModes ?? {};
@@ -482,37 +479,45 @@ export default function GuardrailsPage() {
                 </Select>
               </Field>
               <span className={v.faint}>
-                blocked {violations.data?.totals?.blocked ?? 0} · warned{" "}
-                {violations.data?.totals?.warned ?? 0} · logged{" "}
-                {violations.data?.totals?.logged ?? 0}. Sourced from the single audit log; counts
+                blocked {totals?.blocked ?? 0} · warned{" "}
+                {totals?.warned ?? 0} · logged{" "}
+                {totals?.logged ?? 0}. Sourced from the single audit log; counts
                 only, never the matched content.
               </span>
             </div>
-            {(violations.data?.violations ?? []).length === 0 ? (
-              <EmptyState
-                title="No guardrail events yet"
-                body="Nothing has tripped a detector on this deployment."
-              />
-            ) : (
-              <Table
-                rows={violations.data?.violations ?? []}
+              <DataList<ViolationRow>
+                listId="guardrail-decisions"
+                noun="guardrail decisions"
+                endpoint="/v1/guardrails/violations"
+                exportPath="/v1/guardrails/violations/export.xlsx"
+                queryKey={["admin", "guardrail-violations"]}
+                legacyKey="violations"
+                count="estimate"
+                filters={violationFilters}
+                defaultSort={{ key: "at", dir: "desc" }}
                 rowKey={(r) => r.id}
+                onRows={(_rows, raw) => setTotals((raw.totals as Record<string, number> | undefined) ?? null)}
+                empty={<EmptyState title="No guardrail events yet" body="Nothing has tripped a detector on this deployment." />}
                 columns={[
-                  { key: "at", header: "When", render: (r) => ago(r.at) },
+                  { key: "at", header: "When", main: true, sortable: true, render: (r) => ago(r.at) },
                   {
                     key: "outcome",
                     header: "Outcome",
+                    main: true,
+                    sortable: true,
+                    required: "The outcome is always shown",
                     render: (r) => (
                       <Badge tone={r.effect === "deny" ? "danger" : "warn"}>
                         {r.detail.guardrail?.outcome ?? r.ruleId}
                       </Badge>
                     ),
                   },
-                  { key: "phase", header: "Phase", render: (r) => r.detail.guardrail?.phase ?? "—" },
-                  { key: "obj", header: "Surface", render: (r) => r.objectType },
+                  { key: "phase", header: "Phase", main: true, sortable: true, render: (r) => r.detail.guardrail?.phase ?? "—" },
+                  { key: "obj", header: "Surface", main: true, sortable: true, render: (r) => r.objectType },
                   {
                     key: "f",
                     header: "Findings (counts only)",
+                    main: true,
                     render: (r) => (
                       <span className={v.row}>
                         {(r.detail.guardrail?.findings ?? []).map((f, i) => (
@@ -525,7 +530,6 @@ export default function GuardrailsPage() {
                   },
                 ]}
               />
-            )}
           </Card>
         </QueryGate>
       </div>

@@ -35,6 +35,18 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
+  filterParams,
+  parseListExport,
+  parseListPage,
+  runListPage,
+  sendListError,
+  sendListExport,
+  wantsListContract,
+  type ListReader,
+  type ListSpec,
+} from "./list-contract.js";
+import { sql as sqlL, type SQL as SQLL } from "@regulait/db";
+import {
   and,
   auditLog,
   desc,
@@ -137,6 +149,41 @@ const settingsSchema = z
 const uuidParam = z.object({ sourceId: z.string().uuid() });
 const pseudonymParam = z.object({ pseudonym: z.string().regex(/^psn:[0-9a-f]{24}$/) });
 const runsQuery = z.object({ sourceId: z.string().uuid().optional(), limit: z.coerce.number().int().min(1).max(200).default(50) });
+// ---- ADR-0226: the recent runs under the shared list contract
+const runsFilterQuery = z.object({ sourceId: z.string().uuid().optional(), status: z.enum(["queued", "running", "succeeded", "failed"]).optional() }).strict();
+type DiscoveryRunListRow = ReturnType<typeof runView> & { sourceName: string | null };
+const RUN_SOURCE_NAME = sqlL<string | null>`(select ${discoverySources.name} from ${discoverySources} where ${discoverySources.id} = ${discoveryRuns.sourceId})`;
+export const DISCOVERY_RUNS_LIST: ListSpec<DiscoveryRunListRow> = {
+  id: "discovery-runs",
+  sorts: {
+    source: { expr: sqlL`lower(${RUN_SOURCE_NAME})` },
+    status: { expr: discoveryRuns.status },
+    when: { expr: discoveryRuns.createdAt, keysetAt: discoveryRuns.createdAt },
+    counts: { expr: discoveryRuns.observed },
+    findings: { expr: sqlL`(${discoveryRuns.findingsCreated} + ${discoveryRuns.findingsUpdated})` },
+    gaps: { expr: sqlL`jsonb_array_length(${discoveryRuns.catalogueGaps})` },
+    finished: { expr: discoveryRuns.finishedAt },
+  },
+  columns: {
+    source: { label: "Source", value: (r) => r.sourceName ?? r.sourceId },
+    status: { label: "Status", value: (r) => `${r.status}${r.errorCode ? `: ${r.errorCode}` : ""}` },
+    when: { label: "Queued", value: (r) => new Date(r.createdAt) },
+    counts: { label: "Observed / matched", value: (r) => `${r.observed} / ${r.matched}` },
+    findings: { label: "Findings", value: (r) => `${r.findingsCreated} new, ${r.findingsUpdated} updated` },
+    gaps: { label: "Catalogue gaps", value: (r) => (r.catalogueGaps.length ? r.catalogueGaps.map((g) => `${g.kind}: ${g.value}`).join("; ") : "none") },
+    reads: { label: "Reads", value: (r) => r.readOutcomes.length },
+    finished: { label: "Finished", value: (r) => (r.finishedAt ? new Date(r.finishedAt) : null) },
+  },
+  filters: ["sourceId", "status"],
+  defaultSort: { col: "when", dir: "desc" },
+  idCol: discoveryRuns.id,
+};
+const discoveryRunsWhere = (f: z.infer<typeof runsFilterQuery>): SQLL | undefined => {
+  const conds: SQLL[] = [];
+  if (f.sourceId) conds.push(sqlL`${discoveryRuns.sourceId} = ${f.sourceId}`);
+  if (f.status) conds.push(sqlL`${discoveryRuns.status} = ${f.status}`);
+  return conds.length ? sqlL.join(conds, sqlL` and `) : undefined;
+};
 
 // ---------------------------------------------------------------------------
 // views (never the secret)
@@ -698,7 +745,48 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
     return reply.status(202).send(runView(run));
   });
 
+  const discoveryRunsReader: ListReader<DiscoveryRunListRow> = {
+    fetch: async (q) => {
+      const rows = await db
+        .select({ r: discoveryRuns, sourceName: RUN_SOURCE_NAME, _cursorAt: q.cursorAt })
+        .from(discoveryRuns)
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset);
+      return rows.map((r) => ({ ...runView(r.r), sourceName: r.sourceName, _cursorAt: r._cursorAt }));
+    },
+    countable: (where) => db.select({ one: sqlL`1` }).from(discoveryRuns).where(where),
+    idOf: (r) => r.id,
+  };
+  // ADR-0226: with any of sort/dir/cursor/offset/count it answers the shared list contract; admin only
+  app.get("/v1/discovery/runs/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const filters = runsFilterQuery.parse(filterParams(q));
+      const ex = parseListExport(DISCOVERY_RUNS_LIST, q);
+      await sendListExport(db, req, reply, DISCOVERY_RUNS_LIST, discoveryRunsReader, discoveryRunsWhere(filters), ex, filters);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
   app.get("/v1/discovery/runs", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      try {
+        const q = req.query as Record<string, unknown>;
+        const filters = runsFilterQuery.parse(filterParams(q));
+        const page = parseListPage(DISCOVERY_RUNS_LIST, q);
+        const [out, [failed]] = await Promise.all([
+          runListPage(db, DISCOVERY_RUNS_LIST, discoveryRunsReader, discoveryRunsWhere(filters), page),
+          // the folded card still says when a scan failed: across every run, not the page on screen
+          db.select({ n: sqlL<number>`count(*)::int` }).from(discoveryRuns).where(sqlL`${discoveryRuns.status} = 'failed'`),
+        ]);
+        return { ...out, failed: Number(failed?.n ?? 0) };
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
     const q = runsQuery.safeParse(req.query ?? {});
     if (!q.success) return badRequest(reply, q.error);
     const rows = await db

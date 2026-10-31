@@ -183,7 +183,8 @@ test("a person's own call from an interactive session runs at L2; the BOM shows 
   await expect(page.getByTestId("audit-only-row")).toContainText(SET_AUDIT);
   await expect(page.getByRole("row").filter({ hasText: "may now run at L2 instead of L3" })).toHaveCount(1);
   await expect(page.getByRole("button", { name: `Decision BOM for audit row ${RELAXED_DECISION}`, exact: true })).toHaveCount(0);
-  expect(px.auditQueries).toContain(`id=${SET_AUDIT}`);
+  // ADR-0226: the one-row filter rides on the list control's request
+  expect(px.auditQueries.some((q) => new URLSearchParams(q).get("id") === SET_AUDIT)).toBe(true);
   // and back to every row
   await page.getByRole("button", { name: "Show every row", exact: true }).click();
   await expect(page.getByRole("button", { name: `Decision BOM for audit row ${RELAXED_DECISION}`, exact: true })).toBeVisible();

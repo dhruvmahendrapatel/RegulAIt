@@ -1,7 +1,7 @@
 /**
  * ADR-0182 (ADR-0175 batch D4) A13 — the pieces the feedback screens share. OWNER: A13 (D4).
  *
- *   FeedbackList     the queue table with SLA chips (FeedbackPage, FeedbackTab)
+ *   FeedbackList     the queue under the shared list control, with SLA chips (FeedbackPage, FeedbackTab)
  *   FeedbackDetail   one item: what the person wrote (opening it is an audited
  *                    read), the answer form, "Open incident"
  *   FeedbackSettings the admin's four settings, strict default and relaxed copy
@@ -15,7 +15,9 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../api/client";
 import { fmtAt, humanize } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
-import { Badge, Button, Card, EmptyState, Field, IdChip, InfoButton, Input, Modal, Select, Table, Textarea, type Tone } from "../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, IdChip, InfoButton, Input, Modal, Select, Textarea, type Tone } from "../../ui/kit";
+import { DataList, type DataColumn } from "../../ui/DataList";
+import type { Filters } from "../../ui/listState";
 import type { AdminUser } from "../../api/adminTypes";
 import { QueryGate, useAction } from "../admin/adminKit";
 import v from "../views.module.css";
@@ -99,51 +101,65 @@ export function SlaChip(props: { sla: FeedbackSla }) {
   return <Badge tone="ok">{`On time: ${what} by ${due}`}</Badge>;
 }
 
+/** ADR-0226: the feedback list's columns; the ids and sortable ones match the gateway's FEEDBACK_LIST */
+export const FEEDBACK_COLUMNS: Array<DataColumn<FeedbackItem>> = [
+  { key: "at", header: "Received", main: true, sortable: true, render: (r) => fmtAt(r.createdAt) },
+  { key: "uc", header: "Use case", main: true, sortable: true, render: (r) => r.useCaseName ?? <IdChip id={r.useCaseId} /> },
+  { key: "kind", header: "Kind", main: true, sortable: true, render: (r) => `${KIND_LABEL[r.kind]}${r.channel === "signed_link" ? " (link)" : ""}` },
+  { key: "status", header: "Status", main: true, sortable: true, required: "Status is always shown", render: (r) => <FeedbackStatusBadge status={r.status} /> },
+  { key: "sla", header: "Response time", main: true, sortable: true, required: "The response time is always shown", render: (r) => <SlaChip sla={r.sla} /> },
+  {
+    key: "owner",
+    header: "Owner",
+    main: true,
+    sortable: true,
+    render: (r) => (r.ownerUserId ? (r.ownerName ?? <IdChip id={r.ownerUserId} />) : <span className={v.faint}>admins</span>),
+  },
+  { key: "resolved", header: "Resolved", sortable: true, render: (r) => (r.resolvedAt ? fmtAt(r.resolvedAt) : "—") },
+];
+
+/** the feedback queue (or a use case's feedback) under the shared list control: paging, sort and filters on the server */
 export function FeedbackList(props: {
-  rows: FeedbackItem[] | undefined;
-  loading?: boolean;
-  error?: unknown;
-  onRetry?: () => void;
+  listId: string;
+  filters: Filters;
+  queryKey: readonly unknown[];
   onOpen?: (row: FeedbackItem) => void;
   showUseCase?: boolean;
   empty: ReactNode;
+  onRows?: (rows: FeedbackItem[], raw: Record<string, unknown>) => void;
 }) {
+  const columns: Array<DataColumn<FeedbackItem>> = [
+    ...FEEDBACK_COLUMNS.filter((c) => props.showUseCase !== false || c.key !== "uc"),
+    ...(props.onOpen
+      ? [
+          {
+            key: "open",
+            header: "",
+            srHeader: "Actions",
+            action: true,
+            render: (r: FeedbackItem) => (
+              <Button size="sm" aria-label={`Open ${KIND_LABEL[r.kind].toLowerCase()} received ${fmtAt(r.createdAt)}`} onClick={() => props.onOpen!(r)}>
+                Open
+              </Button>
+            ),
+          },
+        ]
+      : []),
+  ];
   return (
-    <Table
-      rows={props.rows}
-      loading={props.loading}
-      error={props.error}
-      onRetry={props.onRetry}
+    <DataList<FeedbackItem>
+      listId={props.listId}
+      noun="feedback items"
+      endpoint="/v1/feedback"
+      exportPath="/v1/feedback/export.xlsx"
+      queryKey={props.queryKey}
+      legacyKey="items"
+      filters={props.filters}
+      defaultSort={{ key: "at", dir: "desc" }}
+      columns={columns}
       rowKey={(r) => r.id}
       empty={props.empty}
-      columns={[
-        { key: "at", header: "Received", render: (r) => fmtAt(r.createdAt), sort: (r) => r.createdAt },
-        ...(props.showUseCase === false
-          ? []
-          : [{ key: "uc", header: "Use case", render: (r: FeedbackItem) => r.useCaseName ?? <IdChip id={r.useCaseId} /> }]),
-        { key: "kind", header: "Kind", render: (r) => `${KIND_LABEL[r.kind]}${r.channel === "signed_link" ? " (link)" : ""}` },
-        { key: "status", header: "Status", render: (r) => <FeedbackStatusBadge status={r.status} /> },
-        { key: "sla", header: "Response time", render: (r) => <SlaChip sla={r.sla} />, sort: (r) => r.sla.dueAt ?? "9" },
-        {
-          key: "owner",
-          header: "Owner",
-          render: (r) => (r.ownerUserId ? (r.ownerName ?? <IdChip id={r.ownerUserId} />) : <span className={v.faint}>admins</span>),
-        },
-        ...(props.onOpen
-          ? [
-              {
-                key: "open",
-                header: "",
-                srHeader: "Actions",
-                render: (r: FeedbackItem) => (
-                  <Button size="sm" aria-label={`Open ${KIND_LABEL[r.kind].toLowerCase()} received ${fmtAt(r.createdAt)}`} onClick={() => props.onOpen!(r)}>
-                    Open
-                  </Button>
-                ),
-              },
-            ]
-          : []),
-      ]}
+      onRows={props.onRows}
     />
   );
 }

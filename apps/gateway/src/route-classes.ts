@@ -31,6 +31,8 @@ import {
   EXECUTOR_CHANNEL_ROUTES,
   FEDERATION_DISCOVERY_PATH,
   FEDERATION_JWKS_PATH,
+  MCP_IDENTITY_OIDC_DISCOVERY_PATH,
+  MCP_IDENTITY_OIDC_JWKS_PATH,
   IDENTITY_JWKS_PATH,
   OAUTH_INTROSPECTION_PATH,
   OAUTH_REVOCATION_PATH,
@@ -125,6 +127,11 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // and metadata only. Listed in NON_ADMIN_ROUTES too, so `public`.
   FEDERATION_DISCOVERY_PATH,
   FEDERATION_JWKS_PATH,
+  // ADR-0210 — the OIDC-profile MCP identity assertion issuer's discovery document and ES256 JWKS: public by definition
+  // (an upstream's OIDC validator fetches them, holding no RegulAIt credential). Public keys and metadata only. Listed
+  // in NON_ADMIN_ROUTES too, so `public`.
+  MCP_IDENTITY_OIDC_DISCOVERY_PATH,
+  MCP_IDENTITY_OIDC_JWKS_PATH,
   // ADR-0182 (D4) A13 — a PUBLIC SIGNED FEEDBACK LINK: the one D4 exemption.
   // People outside the organisation, who hold no RegulAIt credential, report a
   // problem or appeal a decision through a link a use-case owner minted. The
@@ -282,6 +289,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // pipeline runs as the service account that owns the use case it ships)
   "POST /v1/gates/deploy",
   "GET /v1/use-cases",
+  // ADR-0226: the Excel export of the same list, under the same scope
+  "GET /v1/use-cases/export.xlsx",
   "GET /v1/use-cases/:useCaseId",
   // ADR-0058 mapping view. Non-admin for the same reason the detail route is:
   // it is the owner's own use case. The EVIDENCE half is separately gated by
@@ -363,6 +372,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // decisions of the linked assessment instance on the one queue.
   "POST /v1/vendors",
   "GET /v1/vendors",
+  // ADR-0226: the Excel export of the same list, under the same scope
+  "GET /v1/vendors/export.xlsx",
   "GET /v1/vendors/:vendorId",
   "PATCH /v1/vendors/:vendorId",
   "POST /v1/vendors/:vendorId/attestations",
@@ -436,6 +447,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // preview-required-before-activate dial is conspicuously NOT here.
   "POST /v1/policy-simulations",
   "GET /v1/policy-simulations",
+  // ADR-0226: the Excel export of the same list, under the same scope
+  "GET /v1/policy-simulations/export.xlsx",
   "GET /v1/policy-simulations/:id",
   // ADR-0058: EVALUATING a compliance pack and reading the resulting scorecard.
   // Same reasoning, same function: the handler applies `evaluateReportAccess`
@@ -460,8 +473,12 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/copilot/tools",
   "POST /v1/copilot/ask",
   "GET /v1/copilot/queries",
+  // ADR-0226: the Excel export of the same list, under the same scope
+  "GET /v1/copilot/queries/export.xlsx",
   "POST /v1/copilot/proposals",
   "GET /v1/copilot/proposals",
+  // ADR-0226: the Excel export of the same list, under the same scope
+  "GET /v1/copilot/proposals/export.xlsx",
   // ADR-0049: a team lead reading THEIR OWN forecast and THEIR OWN project's
   // anomaly flags. Both resolve the caller's entitlement to a CONCRETE
   // project-id set through ADR-0047's `evaluateReportAccess` — the same
@@ -708,6 +725,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // AUTH_EXEMPT_ROUTES above).
   "POST /v1/use-cases/:useCaseId/feedback",
   "GET /v1/feedback",
+  // ADR-0226: the Excel export of the same list, under the same scope
+  "GET /v1/feedback/export.xlsx",
   "GET /v1/feedback/:feedbackId",
   "PATCH /v1/feedback/:feedbackId",
   "POST /v1/feedback/:feedbackId/open-incident",
@@ -781,6 +800,9 @@ export const NON_ADMIN_ROUTES = new Set([
   // ADR-0195 SD2b — the cloud federation issuer's public metadata (auth-exempt above too)
   `GET ${FEDERATION_DISCOVERY_PATH}`,
   `GET ${FEDERATION_JWKS_PATH}`,
+  // ADR-0210 — the OIDC-profile identity assertion issuer's public metadata (auth-exempt above too)
+  `GET ${MCP_IDENTITY_OIDC_DISCOVERY_PATH}`,
+  `GET ${MCP_IDENTITY_OIDC_JWKS_PATH}`,
   `POST ${OAUTH_TOKEN_PATH}`,
   `POST ${OAUTH_REVOCATION_PATH}`,
   `POST ${OAUTH_INTROSPECTION_PATH}`,

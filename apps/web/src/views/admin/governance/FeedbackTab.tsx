@@ -11,14 +11,14 @@
  *     org setting is off (the shipped default) minting is refused and the tab
  *     says so.
  */
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, api } from "../../../api/client";
 import { fmtAt } from "../../../api/format";
 import { Badge, Button, Card, CodeBlock, EmptyState, Field, Input, Table, type Tone } from "../../../ui/kit";
 import { QueryGate, RemoveButton, useAction } from "../adminKit";
-import { FeedbackDetail, FeedbackList, type FeedbackItem } from "../../feedback/feedbackKit";
+import { FeedbackDetail, FeedbackList } from "../../feedback/feedbackKit";
 import v from "../../views.module.css";
 
 interface LinkRow {
@@ -39,10 +39,8 @@ const STATE: Record<LinkRow["state"], { label: string; tone: Tone }> = {
 
 export function FeedbackTab(props: { useCaseId: string }) {
   const [openId, setOpenId] = useState<string | null>(null);
-  const items = useQuery({
-    queryKey: ["feedback", "use-case", props.useCaseId],
-    queryFn: () => api.get<{ items: FeedbackItem[] }>(`/v1/feedback?useCaseId=${props.useCaseId}&status=all`),
-  });
+  const queryClient = useQueryClient();
+  const filters = useMemo(() => ({ useCaseId: props.useCaseId, status: "all" }), [props.useCaseId]);
   return (
     <div className={v.stack}>
       <Card
@@ -54,10 +52,9 @@ export function FeedbackTab(props: { useCaseId: string }) {
         }
       >
         <FeedbackList
-          rows={items.data?.items}
-          loading={items.isLoading}
-          error={items.error}
-          onRetry={() => void items.refetch()}
+          listId="use-case-feedback"
+          filters={filters}
+          queryKey={["feedback", "use-case", props.useCaseId]}
           onOpen={(r) => setOpenId(r.id)}
           showUseCase={false}
           empty={
@@ -73,7 +70,7 @@ export function FeedbackTab(props: { useCaseId: string }) {
         id={openId}
         onClose={() => {
           setOpenId(null);
-          void items.refetch();
+          void queryClient.invalidateQueries({ queryKey: ["feedback", "use-case", props.useCaseId] });
         }}
       />
     </div>

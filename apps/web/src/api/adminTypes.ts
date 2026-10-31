@@ -537,6 +537,7 @@ export interface Delegation {
   endsAt: string;
   active?: boolean;
   reason?: string | null;
+  createdAt?: string;
 }
 
 export interface AuditRetention {
