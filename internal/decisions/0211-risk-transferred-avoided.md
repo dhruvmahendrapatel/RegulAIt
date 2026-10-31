@@ -22,7 +22,7 @@ governance semantics ADR-0176 §4 reserves for us. No library models it.
 ## Decision
 
 1. **Two more statuses, nothing else changes meaning.** `ai_risks.status` gains `transferred` and `avoided`
-   (migration 0229, hand-written). `open`, `mitigating`, `accepted` and `closed` keep exactly their meaning and their
+   (migration 0250, hand-written). `open`, `mitigating`, `accepted` and `closed` keep exactly their meaning and their
    transitions. "Live" stays `open` or `mitigating` everywhere it is counted.
 2. **A treatment is a record, not a flag.** Each needs **evidence** (for a transfer, the contract or policy reference;
    for an avoidance, the decision that stopped the use; 1–2000 characters) and an **accountable owner**. The row stores
@@ -67,7 +67,7 @@ governance semantics ADR-0176 §4 reserves for us. No library models it.
 
 ## As built
 
-- Migration 0229 (`0229_risk_transferred_avoided.sql`): the status CHECK, four columns, two FKs (SET NULL), the
+- Migration 0250 (`0250_risk_transferred_avoided.sql`): the status CHECK, four columns, two FKs (SET NULL), the
   treatment CHECK and the `org_settings` column. Journal `when` 1785164000000.
 - Gateway: `risks.ts` (treatment route, transition and detail), `risk-treatment-settings.ts` (the switch),
   `risk-tolerance.ts` and `use-cases.ts` (acceptance refusals, avoided out of the position), `trust-dashboard.ts`,

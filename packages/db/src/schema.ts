@@ -4727,7 +4727,7 @@ export const orgSettings = pgTable(
     feedbackResolveSlaDays: integer("feedback_resolve_sla_days").notNull().default(30),
     /** A13: after this many days a feedback body and contact are deleted (the resolution record stays) */
     feedbackRetentionDays: integer("feedback_retention_days").notNull().default(365),
-    /** ADR-0211 (migration 0229): may a risk be recorded as transferred or
+    /** ADR-0211 (migration 0250): may a risk be recorded as transferred or
      * avoided? OFF by default (ADR-0180); turning it on is a step-up relaxation */
     riskTreatmentsEnabled: boolean("risk_treatments_enabled").notNull().default(false),
     /** A14: a human-originated governed call by a person not current on an applicable published document is refused */
@@ -10175,7 +10175,7 @@ export type AiVendorRow = typeof aiVendors.$inferSelect;
 // never a tick-box" discipline applied to risk.
 // ---------------------------------------------------------------------------
 
-/** ADR-0211 (migration 0229): `transferred` and `avoided` are the two treatments
+/** ADR-0211 (migration 0250): `transferred` and `avoided` are the two treatments
  * recorded through POST /v1/risks/:riskId/treatment; the first four keep their meaning */
 export const AI_RISK_STATUSES = ["open", "mitigating", "accepted", "closed", "transferred", "avoided"] as const;
 export type AiRiskStatus = (typeof AI_RISK_STATUSES)[number];
@@ -10243,7 +10243,7 @@ export const aiRisks = pgTable(
      * linked controls operate — same three-level scale, both or neither */
     residualLikelihood: text("residual_likelihood", { enum: AI_RISK_LEVELS }),
     residualImpact: text("residual_impact", { enum: AI_RISK_LEVELS }),
-    /** ADR-0211 (migration 0229): the treatment record of a `transferred` or
+    /** ADR-0211 (migration 0250): the treatment record of a `transferred` or
      * `avoided` risk — the contract or policy reference, or the decision that
      * stopped the use; the accountable owner; who recorded it and when.
      * Written ONLY by the audited treatment endpoint. */

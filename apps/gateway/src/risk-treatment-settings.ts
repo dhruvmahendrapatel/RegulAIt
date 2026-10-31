@@ -12,7 +12,7 @@
  * write is audited with the value it replaced in the same transaction. Turning
  * it OFF needs no step-up and leaves every recorded treatment as it is.
  *
- * It is a column on the `org_settings` singleton (migration 0229). This module
+ * It is a column on the `org_settings` singleton (migration 0250). This module
  * is its ONLY writer: the general `PUT /v1/org/settings` schema is strict and
  * does not accept the key.
  */
