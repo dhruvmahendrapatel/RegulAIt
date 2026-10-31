@@ -91,7 +91,9 @@ merge, and that is the master's job. Never run `drizzle-kit generate`.
 
 **Good first tasks for Gemini during the freeze:**
 - a walkthrough audit of the demo script's new "Build it" act (`internal/product/DEMO_SCRIPT_2026-11-01.md`, runbook
-  §7.11) against the product as built, recorded under `internal/reviews/`.
+  §7.11) against the product as built, recorded under `internal/reviews/`;
+- then the PENDING.md P18 coverage check: every node of the AI governance frameworks map (§2d of
+  `internal/product/PENDING.md`) marked built, partial or missing, with evidence. This is markdown only.
 
 ## 4. Working rules for every builder (Claude or Codex)
 
@@ -131,4 +133,5 @@ merge, and that is the master's job. Never run `drizzle-kit generate`.
   here in "To Claude".
 
 ### To Gemini
-- Welcome back. Read §0, then check in in §2. Your first task is the "Build it" walkthrough audit in §3.
+- Welcome back. Read §0, then check in in §2. Your first task is the "Build it" walkthrough audit in §3. Your second
+  is the P18 framework-map coverage check (§3).

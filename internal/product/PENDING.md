@@ -74,6 +74,46 @@ version before it is pinned.
 
 ---
 
+## 2d. Coverage check against an AI governance frameworks map — post-demo backlog (owner, 2026-10-31)
+
+On 2026-10-31 the owner shared a one-page map of AI governance frameworks and asked for it to go into future work. The map
+groups the laws, standards, roles and controls behind enterprise AI governance. Its nodes are listed below so this item
+does not depend on the image. Nothing is built before the demo. The first step is a check of how far the product
+already covers each node, and that check feeds the lanes.
+
+| # | Gap | What it would take |
+|---|---|---|
+| **P18** | **No node-by-node coverage check against a full governance framework map.** Packs, controls and roles have grown ADR by ADR. Nobody has checked them against one complete map of the field, so coverage gaps and overlaps are not visible in one place. The map's nodes are listed after this table. | **Step 1, an audit (Gemini, markdown only, ADR-0227):** for each node, record built / partial / missing, with the evidence (ADR, file, pack ID) and, for gaps, a one-line scope. Record it under `internal/reviews/`, with no new claims of compliance or certification. **Step 2, the master:** turn confirmed gaps into lanes, each with its own ADR. Use the order of ADR-0176 open-source-first imports first, then packs, then controls. Content licensed share-alike or non-commercial is cited by ID only (as P5). |
+
+**Map nodes to check:**
+
+- **Regulation:**
+  - AI-specific laws:
+    - the EU AI Act: prohibited practices, high-risk systems, transparency obligations and general-purpose AI models;
+    - other jurisdictions: South Korea's AI Basic Act, Japan's AI Promotion Act, China's generative AI measures and the
+      Council of Europe AI Convention.
+  - Related laws:
+    - privacy: GDPR, CCPA, India's DPDP Act and Brazil's LGPD;
+    - sector rules: financial model risk, medical devices, hiring and employment, and consumer protection.
+  - Cyber and resilience: NIS2, DORA and the Cyber Resilience Act.
+- **Standards:**
+  - ISO/IEC 42001 (management system), 23894 (risk management), 42005 (impact assessment) and 22989 (terminology);
+  - the NIST AI RMF 1.0 (Govern, Map, Measure, Manage) and its Generative AI Profile;
+  - principles: the OECD AI Principles, UNESCO AI Ethics and the G7 Hiroshima Code;
+  - AI security: the OWASP LLM Top 10, the OWASP Agentic Top 10 and MITRE ATLAS.
+- **Roles:**
+  - EU AI Act operators: provider, deployer, importer and distributor;
+  - in the organisation: AI governance board, data protection officer, model owner, chief AI officer, CISO and
+    internal audit.
+- **Controls:**
+  - AI inventory;
+  - risk assessment: risk tiering and impact assessment;
+  - model assurance: evaluations, bias testing and red teaming;
+  - data controls: classification, lineage, DLP and retention;
+  - monitoring and audit: logging, audit trail and incident response;
+  - human oversight;
+  - agent controls: agent identity, least privilege and tool permissions.
+
 ## 3. Structural gaps — the ADR shipped, a named half did not
 
 These are cases where an ADR is Accepted and genuinely working, but a specific clause is
