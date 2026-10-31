@@ -24,7 +24,7 @@ export interface IdentityLink {
   userId: string;
   emailVerifiedSource: string;
   createdAt: string;
-  /** ADR-0219: the workspace's name, joined by the list contract */
+  /** ADR-0226: the workspace's name, joined by the list contract */
   connectionName?: string | null;
 }
 

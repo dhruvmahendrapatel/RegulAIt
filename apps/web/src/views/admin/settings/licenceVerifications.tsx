@@ -18,7 +18,7 @@ export interface VerificationRow {
   signingKeyId: string | null;
 }
 
-/** ADR-0219: the trail's columns; the ids and sortable ones match the gateway's VERIFICATIONS_LIST */
+/** ADR-0226: the trail's columns; the ids and sortable ones match the gateway's VERIFICATIONS_LIST */
 export const VERIFICATION_COLUMNS: Array<DataColumn<VerificationRow>> = [
   { key: "at", header: "When", main: true, sortable: true, render: (c) => ago(c.at) },
   { key: "trigger", header: "Trigger", main: true, sortable: true, render: (c) => c.trigger },

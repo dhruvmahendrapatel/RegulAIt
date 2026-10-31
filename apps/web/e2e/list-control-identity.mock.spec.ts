@@ -1,5 +1,5 @@
 /**
- * ADR-0219 P2 batch B — the shared list control on the identity-and-access lists (Teams, the agent catalog, the
+ * ADR-0226 P2 batch B — the shared list control on the identity-and-access lists (Teams, the agent catalog, the
  * credential inventory and the licence verification trail), against a mocked gateway that implements the list
  * contract and the Excel export route:
  *

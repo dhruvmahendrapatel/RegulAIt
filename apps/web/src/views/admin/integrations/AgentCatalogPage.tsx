@@ -34,7 +34,7 @@ export default function AgentCatalogPage() {
   // list has loaded, scroll that agent's row into view and mark it, so the
   // link lands on the agent rather than at the top of the catalog
   //
-  // ADR-0219: the catalog pages on the server, so a deep link narrows it to that agent (the server's own `id`
+  // ADR-0226: the catalog pages on the server, so a deep link narrows it to that agent (the server's own `id`
   // filter) until the reader asks for the whole catalog again
   const { hash } = useLocation();
   const linkedAgentId = hash.startsWith("#agent-") ? hash.slice("#agent-".length) : null;

@@ -2696,7 +2696,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
 
   // ---- ADR-0174 §5: admin review of link requests (default admin gate) -----
 
-  // ADR-0219: the shared list contract with any of sort/dir/cursor/offset/count (the same `status` filter, pending
+  // ADR-0226: the shared list contract with any of sort/dir/cursor/offset/count (the same `status` filter, pending
   // by default, and no 200-row cap); with none of them, exactly the response below.
   app.get("/v1/auth/link-requests/export.xlsx", async (req, reply) =>
     answerListExport(db, req, reply, LINK_REQUESTS_LIST, linkRequestsReader(db), linkRequestsFilterQuery, linkRequestsWhere),
@@ -3082,7 +3082,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
 
   const revokeReasonSchema = z.object({ reason: z.string().trim().min(1).max(500).optional() });
 
-  // ADR-0219: the shared list contract with any of sort/dir/cursor/offset/count (a `status` filter); with none of
+  // ADR-0226: the shared list contract with any of sort/dir/cursor/offset/count (a `status` filter); with none of
   // them, exactly the response below. Every page read and every export is audited, as the whole-list read is.
   app.get("/v1/users/:userId/sessions/export.xlsx", async (req, reply) => {
     const { userId } = userIdParam.parse(req.params);

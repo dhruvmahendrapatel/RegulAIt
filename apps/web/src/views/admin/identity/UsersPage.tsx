@@ -59,7 +59,7 @@ import {
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
-/** ADR-0219: the users list's columns; the ids and sortable ones match the gateway's USERS_LIST */
+/** ADR-0226: the users list's columns; the ids and sortable ones match the gateway's USERS_LIST */
 export const USER_COLUMNS: Array<DataColumn<AdminUser>> = [
   {
     key: "name",
@@ -515,7 +515,7 @@ function RenameForm(props: { user: AdminUser }) {
 
 const sessionLive = (s: UserSession) => !s.revokedAt && new Date(s.expiresAt).getTime() > Date.now();
 
-/** ADR-0219: a user's sessions; the ids and sortable ones match the gateway's SESSIONS_LIST */
+/** ADR-0226: a user's sessions; the ids and sortable ones match the gateway's SESSIONS_LIST */
 function sessionColumns(userId: string, act: ReturnType<typeof useAction>): Array<DataColumn<UserSession>> {
   return [
     { key: "created", header: "Signed in", main: true, sortable: true, render: (s) => ago(s.createdAt) },

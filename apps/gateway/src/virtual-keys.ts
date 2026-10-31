@@ -424,7 +424,7 @@ function publicKey(row: VirtualKeyRow) {
   };
 }
 
-// ---- ADR-0219: the two lists on this surface, under the shared list contract -------
+// ---- ADR-0226: the two lists on this surface, under the shared list contract -------
 //
 // The issued keys: what `publicKey()` projects, plus the owner's email; never the token or its hash (the hash is
 // read with the row and dropped by `publicKey()` before anything leaves). Key usage: the `usage_events` rows that
@@ -660,12 +660,12 @@ export function registerVirtualKeyRoutes(app: FastifyInstance, db: Db) {
   });
 
   // ---- GET /v1/virtual-keys -------------------------------------------------
-  // ADR-0219: the Excel export of the same list, under the same visibility
+  // ADR-0226: the Excel export of the same list, under the same visibility
   app.get("/v1/virtual-keys/export.xlsx", async (req, reply) =>
     answerListExport(db, req, reply, VIRTUAL_KEYS_LIST, vkListReader(db), vkListFilters, (f) => vkScope(req.authCtx.isAdmin, req.authCtx.userId, f)),
   );
   app.get("/v1/virtual-keys", async (req, reply) => {
-    // ADR-0219: with any of sort/dir/cursor/offset/count, the shared list contract under the same visibility
+    // ADR-0226: with any of sort/dir/cursor/offset/count, the shared list contract under the same visibility
     if (wantsListContract(req.query)) {
       return answerListPage(db, req, reply, VIRTUAL_KEYS_LIST, vkListReader(db), vkListFilters, (f) => vkScope(req.authCtx.isAdmin, req.authCtx.userId, f));
     }
@@ -686,7 +686,7 @@ export function registerVirtualKeyRoutes(app: FastifyInstance, db: Db) {
   // Per-key spend, read straight off the ONE ledger rather than off the
   // enforcement counter, so the two can be compared instead of assumed equal.
   //
-  // ADR-0219: with any of sort/dir/cursor/offset/count it answers the shared list contract over the key's ledger
+  // ADR-0226: with any of sort/dir/cursor/offset/count it answers the shared list contract over the key's ledger
   // rows, newest first by default; with none of them, exactly the totals below. The export is the same list.
   const visibleKey = async (keyId: string, req: { authCtx: { isAdmin: boolean; userId?: string | null } }) => {
     const [row] = await db.select().from(virtualKeys).where(eq(virtualKeys.id, keyId));

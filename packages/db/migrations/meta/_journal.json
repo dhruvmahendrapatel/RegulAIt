@@ -1438,10 +1438,38 @@
       "breakpoints": true
     },
     {
+      "idx": 223,
+      "version": "7",
+      "when": 1785158000000,
+      "tag": "0223_compliance_profile_lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 224,
+      "version": "7",
+      "when": 1785159000000,
+      "tag": "0224_infra_lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 225,
+      "version": "7",
+      "when": 1785160000000,
+      "tag": "0225_library_lifecycle",
+      "breakpoints": true
+    },
+    {
       "idx": 230,
       "version": "7",
       "when": 1785165000000,
       "tag": "0230_gateway_modality_pricing_model_rate_limits",
+      "breakpoints": true
+    },
+    {
+      "idx": 237,
+      "version": "7",
+      "when": 1785172000000,
+      "tag": "0237_mrm_auto_retest",
       "breakpoints": true
     }
   ]

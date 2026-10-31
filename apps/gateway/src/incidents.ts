@@ -1226,7 +1226,7 @@ const listFilters = z
   .strict();
 const listQuery = listFilters.extend({ limit: z.coerce.number().int().min(1).max(500).default(200) }).strict();
 
-/** one register row as the list returns it (ADR-0219 export reads the same shape) */
+/** one register row as the list returns it (ADR-0226 export reads the same shape) */
 interface IncidentListRow {
   id: string;
   ref: string;
@@ -1251,7 +1251,7 @@ const NEXT_CLOCK_DUE = sql`(select min(${aiIncidentNotifications.dueAt}) from ${
 const OPEN_ACTIONS = sql`(select count(*) from ${aiIncidentActions} where ${aiIncidentActions.incidentId} = ${aiIncidents.id} and ${aiIncidentActions.status} = 'open')`;
 const OWNER_NAME = sql`(select lower(coalesce(nullif(${users.displayName}, ''), ${users.email})) from ${users} where ${users.id} = ${aiIncidents.ownerUserId})`;
 const isoDate = (v: string | null) => (v ? new Date(v) : null);
-/** ADR-0219: the incident register under the shared list contract */
+/** ADR-0226: the incident register under the shared list contract */
 export const INCIDENTS_LIST: ListSpec<IncidentListRow> = {
   id: "incidents",
   sorts: {
@@ -1313,7 +1313,7 @@ function send(reply: FastifyReply, e: unknown) {
  */
 export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { dataKey?: string | undefined } = {}): void {
   // ---- list ---------------------------------------------------------------
-  // ADR-0219: the one predicate for the list, its count and the Excel export —
+  // ADR-0226: the one predicate for the list, its count and the Excel export —
   // the readers `accessTo` names, then the filters. null = a caller who may see none.
   const incidentsScope = (req: FastifyRequest, q: z.infer<typeof listFilters>) => {
     const actor = actorOf(req);

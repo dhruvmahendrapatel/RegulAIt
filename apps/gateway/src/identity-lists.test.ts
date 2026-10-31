@@ -1,5 +1,5 @@
 /**
- * ADR-0219 P2 batch B — the identity-and-access lists under the shared list contract, and their Excel exports:
+ * ADR-0226 P2 batch B — the identity-and-access lists under the shared list contract, and their Excel exports:
  *
  *  - every row exactly once across pages, on the default sort (keyset where it is a date) and on another sort (offset);
  *  - the sort allow-list: an unknown column is a 400;
@@ -236,7 +236,7 @@ afterAll(async () => {
 const latestExportAudit = async () =>
   (await db.select().from(auditLog).where(eq(auditLog.ruleId, "list-export-xlsx")).orderBy(desc(auditLog.at)).limit(1))[0]!;
 
-describe.each(CASES)("ADR-0219: $name", (c) => {
+describe.each(CASES)("ADR-0226: $name", (c) => {
   const idOf = (r: Json) => (c.idOf ? c.idOf(r) : (r.id as string));
 
   it("pages every row exactly once on the default sort and on another, with a true total", async () => {
@@ -291,7 +291,7 @@ describe.each(CASES)("ADR-0219: $name", (c) => {
   });
 });
 
-describe("ADR-0219: list-specific rules", () => {
+describe("ADR-0226: list-specific rules", () => {
   it("virtual keys: a member pages and exports only their own keys; another's usage is a 404", async () => {
     const mine = await walk("/v1/virtual-keys?limit=10&count=exact", who.b.auth);
     expect(new Set(mine.map((k) => k.id))).toEqual(new Set(seeded.vks!.slice(20)));

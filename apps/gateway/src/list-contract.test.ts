@@ -1,5 +1,5 @@
 /**
- * ADR-0219 — the shared list contract on its three pilot routes
+ * ADR-0226 — the shared list contract on its three pilot routes
  * (`/v1/runs`, `/v1/incidents`, `/v1/users`) and their Excel exports.
  *
  *  - limit + cursor (keyset) and limit + offset paging return every row
@@ -124,7 +124,7 @@ afterAll(async () => {
   await restoreMfa?.();
 });
 
-describe("ADR-0219: paging returns every row exactly once", () => {
+describe("ADR-0226: paging returns every row exactly once", () => {
   it("keyset (cursor) paging on the default sort, newest first with the id as tie-breaker", async () => {
     const items = await walk("/v1/runs?limit=10&count=exact", who.a.auth, "cursor");
     expect(items).toHaveLength(A_RUNS);
@@ -194,7 +194,7 @@ describe("ADR-0219: paging returns every row exactly once", () => {
   });
 });
 
-describe("ADR-0219: the sort allow-list", () => {
+describe("ADR-0226: the sort allow-list", () => {
   it.each([
     ["an unknown column", "sort=nope"],
     ["an injection attempt", `sort=${encodeURIComponent("name; drop table users; --")}`],
@@ -226,7 +226,7 @@ describe("ADR-0219: the sort allow-list", () => {
   });
 });
 
-describe("ADR-0219: totals", () => {
+describe("ADR-0226: totals", () => {
   it("count=exact is the true total; no count means total null", async () => {
     const exact = (await get("/v1/runs?limit=10&count=exact", who.c.auth)).json();
     expect(exact).toMatchObject({ total: C_RUNS, totalIsEstimate: false });
@@ -242,7 +242,7 @@ describe("ADR-0219: totals", () => {
   });
 });
 
-describe("ADR-0219: the Excel export", () => {
+describe("ADR-0226: the Excel export", () => {
   const latestExportAudit = async () =>
     (await db.select().from(auditLog).where(eq(auditLog.ruleId, "list-export-xlsx")).orderBy(desc(auditLog.at)).limit(1))[0]!;
 
@@ -347,7 +347,7 @@ describe("ADR-0219: the Excel export", () => {
   });
 });
 
-describe("ADR-0219: existing callers are unchanged", () => {
+describe("ADR-0226: existing callers are unchanged", () => {
   it("only the new params switch a route to the contract", () => {
     expect(wantsListContract({})).toBe(false);
     expect(wantsListContract({ limit: "10", status: "running" })).toBe(false);

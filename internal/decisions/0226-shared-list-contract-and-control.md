@@ -1,4 +1,4 @@
-# ADR-0219: One list contract and one list control for growing lists
+# ADR-0226: One list contract and one list control for growing lists
 
 - **Status**: Accepted (owner, #453 comment 6527514889, approving the list-control sample)
 - **Date**: 2026-10-30

@@ -79,11 +79,11 @@ interface VirtualKey {
   createdAt: string;
   lastUsedAt: string | null;
   active: boolean;
-  /** ADR-0219: the owner's email, joined by the list contract */
+  /** ADR-0226: the owner's email, joined by the list contract */
   ownerEmail?: string | null;
 }
 
-/** one ledger row that references a key (ADR-0219 list contract) */
+/** one ledger row that references a key (ADR-0226 list contract) */
 interface KeyUsageEvent {
   id: string;
   at: string;

@@ -65,7 +65,7 @@ export default function TeamsPage() {
   } | null>(null);
 
   const tagList = (profiles.data?.profiles ?? []).map((p) => p.tag);
-  // ADR-0219: the search runs on the server, a moment after typing stops
+  // ADR-0226: the search runs on the server, a moment after typing stops
   const [search, setSearch] = useState("");
   const [q, setQ] = useState("");
   useEffect(() => {

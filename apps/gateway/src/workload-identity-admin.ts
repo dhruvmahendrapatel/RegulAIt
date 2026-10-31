@@ -607,7 +607,7 @@ export async function getWorkloadIdentity(db: Db, identityId: string): Promise<W
   return { ...view(r), activeCredentialCount: creds?.n ?? 0, liveDelegationGrantCount: live?.n ?? 0 };
 }
 
-// ---- ADR-0219: the identity list under the shared list contract ----------------
+// ---- ADR-0226: the identity list under the shared list contract ----------------
 //
 // The legacy read pages by an id `cursor` with `limit` up to 200; only `sort`, `dir`, `offset` or `count` switch it
 // to the contract, whose `cursor` is the contract's keyset cursor. Rows are `view()` plus the stewards' names, so the
@@ -697,7 +697,7 @@ export function workloadIdentityAdminHandlers(db: Db) {
       if (!q.success) return reply.status(400).send({ error: "invalid_query", detail: q.error.issues.map((i) => i.message).join("; ") });
       return reply.send(await listWorkloadIdentities(db, q.data));
     },
-    /** ADR-0219: the identity list as an Excel file, admin-only like the list */
+    /** ADR-0226: the identity list as an Excel file, admin-only like the list */
     exportList: async (req: FastifyRequest, reply: FastifyReply) => {
       try {
         const raw = req.query as Record<string, unknown>;
