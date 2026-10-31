@@ -63,7 +63,7 @@ async function grantFor(action: { kind: string; body: Record<string, unknown> })
   return v.json().stepUpToken as string;
 }
 
-const STRICT_SQL = sql`UPDATE org_settings SET assurance_gate_mode = 'enforce', mrm_enforced = true,
+const STRICT_SQL = sql`UPDATE org_settings SET assurance_gate_mode = 'enforce', mrm_enforced = true, risk_treatments_enabled = false,
   mrm_staleness_recert_enabled = true, mrm_staleness_recert_threshold = 1, step_up_mode = 'required',
   step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management"]'::jsonb
   WHERE id = ${ORG_SETTINGS_ID}`;
@@ -165,6 +165,15 @@ const CASES: Case[] = [
     values: { "guardrails.prompt_injection": "warn" },
     restore: { modes: { prompt_injection: "block" } },
   },
+  {
+    // ADR-0211 (P17): turning transferred and avoided risk treatments on
+    name: "PUT /v1/org/settings/risk-treatments",
+    method: "PUT",
+    url: "/v1/org/settings/risk-treatments",
+    relax: { enabled: true },
+    values: { riskTreatmentsEnabled: true },
+    restore: { enabled: false },
+  },
 ];
 
 describe("ADR-0186 A: settings_relax on the dedicated setting routes", () => {
@@ -198,7 +207,7 @@ describe("ADR-0186 A: settings_relax on the dedicated setting routes", () => {
       expect(r.statusCode, `${c.name}: ${r.body}`).toBe(200);
     }
     const [row] = await db.execute(sql`SELECT count(*)::int AS n FROM step_up_grants WHERE user_id = ${admin.id} AND used_at IS NULL`).then((r) => (r as unknown as { rows: Array<{ n: number }> }).rows);
-    expect(row!.n).toBe(5); // the five "other" grants were never spent
+    expect(row!.n).toBe(CASES.length); // one "other" grant per case, never spent
     void eq;
   });
 });

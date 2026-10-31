@@ -102,6 +102,7 @@ import {
 import {
   assertAdmitted,
   McpAdmissionHeldError,
+  McpReleaseQuarantinedError,
   recordManifestScan,
   type McpAdmissionTrigger,
 } from "./mcp-admission.js";
@@ -1980,6 +1981,8 @@ export async function syncUpstreamTools(
   trigger: McpAdmissionTrigger = "sync",
   /** ADR-0185 G5: the row's transport, for the `/metrics` label only */
   transport?: McpUpstreamTransport | null,
+  /** the on-demand sync's audit row (mcp-tool-sync.ts), written in the transaction that stores the manifest */
+  onStored?: (tx: Db, tools: Tool[]) => Promise<void>,
 ): Promise<Tool[]> {
   // G2: a manifest is small, so a slow one is a sick upstream, not a busy one.
   // ADR-0128: and reading a manifest is idempotent by definition, so it is one
@@ -2006,21 +2009,25 @@ export async function syncUpstreamTools(
         `and no tool from it was returned. An admin must review and clear the server.`,
     );
   }
-  for (const tool of tools) {
-    await db
-      .insert(mcpTools)
-      .values({
-        serverId,
-        name: tool.name,
-        kind: toolKind(tool),
-        description: tool.description ?? null,
-        inputSchema: tool.inputSchema,
-      })
-      .onConflictDoUpdate({
-        target: [mcpTools.serverId, mcpTools.name],
-        set: { kind: toolKind(tool), description: tool.description ?? null, inputSchema: tool.inputSchema },
-      });
-  }
+  await db.transaction(async (rawTx) => {
+    const tx = rawTx as unknown as Db;
+    for (const tool of tools) {
+      await tx
+        .insert(mcpTools)
+        .values({
+          serverId,
+          name: tool.name,
+          kind: toolKind(tool),
+          description: tool.description ?? null,
+          inputSchema: tool.inputSchema,
+        })
+        .onConflictDoUpdate({
+          target: [mcpTools.serverId, mcpTools.name],
+          set: { kind: toolKind(tool), description: tool.description ?? null, inputSchema: tool.inputSchema },
+        });
+    }
+    if (onStored) await onStored(tx, tools);
+  });
   return tools;
 }
 
@@ -2107,6 +2114,51 @@ export async function resolveNodeToolContext(
     }
   }
   return { toolDefs, serverByTool };
+}
+
+/**
+ * Where to lift a release-age cooldown (ADR-0175 A5): the admin override, one server at the release shown, with a
+ * reason. Named in the refusal so the caller is not left with a bare "held".
+ */
+export const RELEASE_AGE_COOLDOWN_REMEDY =
+  "An admin can allow this server before the cooldown ends: Admission review > Waiting period for new releases, with " +
+  "a reason (POST /v1/release-quarantine/override). Otherwise it is usable from readyAt.";
+
+/**
+ * The refusals that are OURS before any upstream contact, as a plain answer: the route's pre-hijack 403/409 and the
+ * on-demand sync route (mcp-tool-sync.ts) share it, so a refusal reads the same wherever it is met. Null = not ours.
+ */
+export function mcpPreHijackRefusal(err: unknown): { status: 403 | 409; body: Record<string, unknown> } | null {
+  // ADR-0190 decision 7 (I4): a stdio server no executor can run at its required class answers the isolation
+  // envelope, 409 `execution_profile_unavailable` with rule id `execution-profile` and the fixed reason
+  if (err instanceof McpUpstreamRefusedError && err.error === "execution_profile_unavailable" && err.executionRefusal) {
+    return {
+      status: 409,
+      body: { error: "execution_profile_unavailable", ruleId: "execution-profile", reason: err.executionRefusal, detail: err.decision.reason },
+    };
+  }
+  if (err instanceof McpEgressBlockedError) {
+    // ADR-0185 G4: `egress_blocked` for a destination refusal, the
+    // transport refusal's own contract code otherwise (e.g.
+    // `mcp_stdio_image_unpinned`, `mcp_transport_disabled`)
+    return { status: 403, body: { error: err.error, code: err.decision.code, detail: err.decision.reason } };
+  }
+  // ADR-0175 A5 (#609 review): the release-age cooldown is not a scan hold, so it has its own code and names its
+  // remedy. Checked BEFORE the held branch: the cooldown's error is a subclass of the held one.
+  if (err instanceof McpReleaseQuarantinedError) {
+    return {
+      status: 403,
+      body: { error: "mcp_release_age_cooldown", detail: err.detail, readyAt: err.readyAt, remedy: RELEASE_AGE_COOLDOWN_REMEDY },
+    };
+  }
+  // ADR-0097: an admission HOLD surfaces in exactly the same place and the
+  // same shape as ADR-0043's egress refusal — a plain pre-hijack 403 naming
+  // the real reason, with the refusal already audited and NOTHING having
+  // been attempted upstream. The findings ride along counts-only.
+  if (err instanceof McpAdmissionHeldError) {
+    return { status: 403, body: { error: "mcp_admission_held", detail: err.detail, findings: err.findings } };
+  }
+  return null;
 }
 
 /** `dataKey`: ADR-0188 S8, the pairwise subject of an outbound identity assertion is keyed from it */
@@ -2303,40 +2355,10 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
         }));
       }
     }
-    /** The two refusals that are OURS, as the route's plain pre-hijack 403. */
+    /** The refusals that are OURS, as the route's plain pre-hijack answer (`mcpPreHijackRefusal`). */
     const ownRefusal = (err: unknown) => {
-      // ADR-0190 decision 7 (I4): a stdio server no executor can run at its required class answers the isolation
-      // envelope, 409 `execution_profile_unavailable` with rule id `execution-profile` and the fixed reason
-      if (err instanceof McpUpstreamRefusedError && err.error === "execution_profile_unavailable" && err.executionRefusal) {
-        return reply.status(409).send({
-          error: "execution_profile_unavailable",
-          ruleId: "execution-profile",
-          reason: err.executionRefusal,
-          detail: err.decision.reason,
-        });
-      }
-      if (err instanceof McpEgressBlockedError) {
-        // ADR-0185 G4: `egress_blocked` for a destination refusal, the
-        // transport refusal's own contract code otherwise (e.g.
-        // `mcp_stdio_image_unpinned`, `mcp_transport_disabled`)
-        return reply.status(403).send({
-          error: err.error,
-          code: err.decision.code,
-          detail: err.decision.reason,
-        });
-      }
-      // ADR-0097: an admission HOLD surfaces in exactly the same place and the
-      // same shape as ADR-0043's egress refusal — a plain pre-hijack 403 naming
-      // the real reason, with the refusal already audited and NOTHING having
-      // been attempted upstream. The findings ride along counts-only.
-      if (err instanceof McpAdmissionHeldError) {
-        return reply.status(403).send({
-          error: "mcp_admission_held",
-          detail: err.detail,
-          findings: err.findings,
-        });
-      }
-      return null;
+      const refused = mcpPreHijackRefusal(err);
+      return refused ? reply.status(refused.status).send(refused.body) : null;
     };
     if (needsManifest) {
       // AER-024: admission and egress are adjudicated BEFORE the breaker is

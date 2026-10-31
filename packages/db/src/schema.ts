@@ -1347,6 +1347,11 @@ export const auditLog = pgTable(
         // control is auto-evidenced and a human statement must not stand in for
         // ledger evidence. Plain text column — no DDL needed.
         "compliance_pack",
+        // ADR-0215: framework content imports and imported regulatory feed
+        // entries — each proposal, acceptance and rejection, and each write
+        // refused because imports are off. Plain text column — no DDL needed.
+        "framework_import",
+        "regulatory_feed_import",
         // ADR-0056: the governance COPILOT. Every question asked of it, with
         // the exact entitlement scope its retrieval was narrowed to; every
         // narration dispatch; every proposal it opened in the Approvals Queue;
@@ -4608,6 +4613,10 @@ export const orgSettings = pgTable(
      * choice, never widen entitlement. NULL while enabled = `judged:
      * unavailable` with `judge_required`, never a silent no-annotation run. */
     recommendationJudgeAgentId: uuid("recommendation_judge_agent_id"),
+    /** ADR-0215 (migration 0248): may an admin import vendored framework content as new
+     * draft pack versions, and accept imported regulatory feed entries? false (default) =
+     * the import routes refuse and the feed is the hand-curated list only. */
+    frameworkImportsEnabled: boolean("framework_imports_enabled").notNull().default(false),
 
     // --- ADR-0046 (migration 0058): review-workbench bulk fences ------------
     /** hard cap on items per bulk approve/deny/reassign. Not a UI convenience:
@@ -4721,6 +4730,9 @@ export const orgSettings = pgTable(
     feedbackResolveSlaDays: integer("feedback_resolve_sla_days").notNull().default(30),
     /** A13: after this many days a feedback body and contact are deleted (the resolution record stays) */
     feedbackRetentionDays: integer("feedback_retention_days").notNull().default(365),
+    /** ADR-0211 (migration 0250): may a risk be recorded as transferred or
+     * avoided? OFF by default (ADR-0180); turning it on is a step-up relaxation */
+    riskTreatmentsEnabled: boolean("risk_treatments_enabled").notNull().default(false),
     /** A14: a human-originated governed call by a person not current on an applicable published document is refused */
     literacyGateMode: text("literacy_gate_mode", { enum: ACCOUNTABILITY_GATE_MODES }).notNull().default("enforce"),
     literacyDefaultValidityDays: integer("literacy_default_validity_days").notNull().default(365),
@@ -4739,7 +4751,7 @@ export const orgSettings = pgTable(
      * (ADR-0180). Off, both answer 404 and nothing can be published or granted. */
     trustPagesEnabled: boolean("trust_pages_enabled").notNull().default(false),
 
-    // --- ADR-0224 (P13 c, migration 0245): privacy operations ------------
+    // --- ADR-0224 (P13 c, migration 0251): privacy operations ------------
     /** Shipped OFF (owner, 10-30). When on, personal data the PII detector finds in a governed dispatch must be a
      * category an active record of processing permits for the dispatch's project, or the dispatch is refused 409
      * `processing_not_permitted` (privacy-ops.ts). Turning it off again is an audited relaxation with a step-up. */
@@ -8219,6 +8231,72 @@ export type CompliancePackAttestationRow = typeof compliancePackAttestations.$in
 export type CompliancePackReportRow = typeof compliancePackReports.$inferSelect;
 
 // ---------------------------------------------------------------------------
+// ADR-0215 (migrations 0248, 0249) — FRAMEWORK CONTENT IMPORTS AND THE IMPORTED FEED
+// ---------------------------------------------------------------------------
+//
+// An import is a PROPOSAL an admin reviews. Accepting a framework import inserts a
+// NEW draft pack version (`compliance_packs`); it never updates a pack row. The
+// accepted proposal's `snapshot` is the baseline the next import compares
+// against, which is how a control an admin edited is told apart from one the
+// last import wrote. Accepting a feed import adds its entries to the ADR-0158
+// feed. One pending and one accepted row per source.
+
+export const frameworkImportProposals = pgTable(
+  "framework_import_proposals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceId: text("source_id").notNull(),
+    framework: text("framework").notNull(),
+    sourceVersion: text("source_version").notNull(),
+    contentSha256: text("content_sha256").notNull(),
+    /** the vendored snapshot exactly as planned (source + controls) */
+    snapshot: jsonb("snapshot").$type<Record<string, unknown>>().notNull(),
+    /** the pack version the plan was computed against; no FK, a draft may be deleted */
+    basePackId: uuid("base_pack_id"),
+    basePackVersion: integer("base_pack_version"),
+    plan: jsonb("plan").$type<Record<string, unknown>>().notNull(),
+    status: text("status", { enum: ["pending", "accepted", "rejected", "superseded"] }).notNull().default("pending"),
+    /** the edited controls an admin chose to overwrite with the imported text */
+    takeIncoming: jsonb("take_incoming").$type<string[]>().notNull().default([]),
+    resultingPackId: uuid("resulting_pack_id"),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    decidedByUserId: uuid("decided_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("framework_import_proposals_one_pending_uq").on(t.sourceId).where(sql`status = 'pending'`),
+    uniqueIndex("framework_import_proposals_one_accepted_uq").on(t.sourceId).where(sql`status = 'accepted'`),
+    index("framework_import_proposals_source_idx").on(t.sourceId, t.createdAt),
+  ],
+);
+export type FrameworkImportProposalRow = typeof frameworkImportProposals.$inferSelect;
+
+export const regulatoryFeedImports = pgTable(
+  "regulatory_feed_imports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceId: text("source_id").notNull(),
+    sourceVersion: text("source_version").notNull(),
+    contentSha256: text("content_sha256").notNull(),
+    source: jsonb("source").$type<Record<string, unknown>>().notNull(),
+    entries: jsonb("entries").$type<Array<Record<string, unknown>>>().notNull(),
+    diff: jsonb("diff").$type<Record<string, unknown>>().notNull(),
+    status: text("status", { enum: ["pending", "accepted", "rejected", "superseded"] }).notNull().default("pending"),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    decidedByUserId: uuid("decided_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("regulatory_feed_imports_one_pending_uq").on(t.sourceId).where(sql`status = 'pending'`),
+    uniqueIndex("regulatory_feed_imports_one_accepted_uq").on(t.sourceId).where(sql`status = 'accepted'`),
+    index("regulatory_feed_imports_source_idx").on(t.sourceId, t.createdAt),
+  ],
+);
+export type RegulatoryFeedImportRow = typeof regulatoryFeedImports.$inferSelect;
+
+// ---------------------------------------------------------------------------
 // ADR-0056 (migration 0072) — THE AI GOVERNANCE COPILOT
 // ---------------------------------------------------------------------------
 //
@@ -10109,7 +10187,9 @@ export type AiVendorRow = typeof aiVendors.$inferSelect;
 // never a tick-box" discipline applied to risk.
 // ---------------------------------------------------------------------------
 
-export const AI_RISK_STATUSES = ["open", "mitigating", "accepted", "closed"] as const;
+/** ADR-0211 (migration 0250): `transferred` and `avoided` are the two treatments
+ * recorded through POST /v1/risks/:riskId/treatment; the first four keep their meaning */
+export const AI_RISK_STATUSES = ["open", "mitigating", "accepted", "closed", "transferred", "avoided"] as const;
 export type AiRiskStatus = (typeof AI_RISK_STATUSES)[number];
 
 /** kept in lockstep with @regulait/shared's AI_RISK_CATEGORIES — the curated
@@ -10175,11 +10255,23 @@ export const aiRisks = pgTable(
      * linked controls operate — same three-level scale, both or neither */
     residualLikelihood: text("residual_likelihood", { enum: AI_RISK_LEVELS }),
     residualImpact: text("residual_impact", { enum: AI_RISK_LEVELS }),
+    /** ADR-0211 (migration 0250): the treatment record of a `transferred` or
+     * `avoided` risk — the contract or policy reference, or the decision that
+     * stopped the use; the accountable owner; who recorded it and when.
+     * Written ONLY by the audited treatment endpoint. */
+    treatmentEvidence: text("treatment_evidence"),
+    treatmentOwnerUserId: uuid("treatment_owner_user_id").references(() => users.id, { onDelete: "set null" }),
+    treatedByUserId: uuid("treated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    treatedAt: timestamp("treated_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     check("ai_risks_title_check", sql`length(btrim(${t.title})) > 0`),
+    check(
+      "ai_risks_treatment_check",
+      sql`(${t.status} IN ('transferred', 'avoided')) = (${t.treatmentEvidence} IS NOT NULL AND ${t.treatedAt} IS NOT NULL) AND (${t.treatmentEvidence} IS NULL OR length(btrim(${t.treatmentEvidence})) BETWEEN 1 AND 2000)`,
+    ),
     check(
       "ai_risks_acceptance_check",
       sql`(${t.status} = 'accepted') = (${t.acceptedAt} IS NOT NULL AND ${t.acceptanceNote} IS NOT NULL)`,
@@ -14756,7 +14848,7 @@ export const auditorSessions = pgTable(
 export type AuditorSessionRow = typeof auditorSessions.$inferSelect;
 
 // ---------------------------------------------------------------------------
-// ADR-0224 (P13 c, migrations 0245–0246) — privacy operations
+// ADR-0224 (P13 c, migrations 0251–0246) — privacy operations
 // ---------------------------------------------------------------------------
 
 /**

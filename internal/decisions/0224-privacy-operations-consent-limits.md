@@ -6,7 +6,7 @@
 ## Context
 
 The owner said yes to P13(c) on 2026-10-30 (#453, comment 6527069781) as one of four P13 lanes, with migration numbers
-0245–0246 and this ADR number reserved in comment 6527158879. The common backlog rules (comment 6522850568) apply:
+0245–0246 and this ADR number reserved in comment 6527158879 (the migrations were renumbered to 0251–0252 at merge, M-108). The common backlog rules (comment 6522850568) apply:
 default-off org setting, admin-only with step-up for relaxations, each write audited in its transaction, open source
 first, and a UI placement note before any UI.
 
@@ -27,7 +27,7 @@ another may not.
 
 ## Decision
 
-1. **Records of processing.** A new table, `processing_records` (migration 0245, hand-written), holds an AI system's
+1. **Records of processing.** A new table, `processing_records` (migration 0251, hand-written), holds an AI system's
    purpose, lawful basis (the six GDPR Article 6(1) bases), data categories, retention in days and recipients, linked
    to a project, a use case, or both (never neither, by a CHECK). A record is `active` or `retired`. Routes under
    `/v1/privacy/processing-records` are admin-only (the default gate). A write that widens what the gateway permits — a
@@ -52,7 +52,7 @@ another may not.
    again is a relaxation (stored-value rule, ADR-0186 decision 27), so it needs the step-up and is named in the audit
    row.
 
-4. **Data-subject requests hold no personal data.** `data_subject_requests` (migration 0246) stores the request type
+4. **Data-subject requests hold no personal data.** `data_subject_requests` (migration 0252) stores the request type
    (access, erasure, objection), how the person is identified (email or phone), the admin's own reference, the status
    and the due date. The identifier itself is never stored or logged: the row keeps an HMAC-SHA256 of the normalised
    identifier under a key derived (HKDF) from the data key. Locating the person's data and completing an erasure each

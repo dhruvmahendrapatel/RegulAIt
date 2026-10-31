@@ -522,6 +522,8 @@ describe("6. the covered / NOT-covered inventory", () => {
     // ADR-0195 SD0 (migration 0202): an admin's note on a catalogue row
     "ai_endpoint_signatures.note",
     "ai_risks.acceptance_note",
+    // ADR-0211: the evidence behind a transferred or avoided risk
+    "ai_risks.treatment_evidence",
     "ai_use_cases.retired_reason",
     "ai_vendors.retired_reason",
     "approval_delegations.reason",
@@ -627,7 +629,7 @@ describe("6. the covered / NOT-covered inventory", () => {
     // ADR-0208 G8 (migration 0224)
     "infra_resources.retired_reason",
     "infra_policies.retired_reason",
-    // ADR-0224 (migration 0246)
+    // ADR-0224 (migration 0252)
     "data_subject_requests.close_note",
     "data_subject_tombstones.reason",
   ];

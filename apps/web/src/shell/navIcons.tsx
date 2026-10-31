@@ -128,6 +128,7 @@ const BY_ROUTE: Record<string, keyof typeof G> = {
   "/admin/governance/review-policy": "checklist",
   "/admin/governance/graph": "graph",
   "/admin/governance/regulatory": "scales",
+  "/admin/governance/regulatory/sources": "report", // ADR-0215
   "/admin/governance/decision-regression": "history", // ADR-0182 A11
   "/admin/governance/literacy": "ribbon", // ADR-0182 A14
   "/admin/model-risk": "cube",
@@ -180,6 +181,7 @@ const BY_ROUTE: Record<string, keyof typeof G> = {
   "/admin/optimization": "bolt",
   "/admin/compliance": "shield",
   "/admin/compliance-packs": "box",
+  "/admin/compliance-packs/imports": "layers", // ADR-0215
   "/admin/trust-publishing": "report", // ADR-0225
   "/admin/infrastructure": "server",
   "/admin/privacy/processing": "lock",

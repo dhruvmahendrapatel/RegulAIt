@@ -126,6 +126,7 @@ export const SUPERSEDED = new Map([
   ["GET /v1/spend/monitor-policies", { replacement: "GET /v1/spend/monitor-overview", reason: "the monitor overview carries every policy (unpaged, all rows)" }],
   ["GET /v1/scim/tokens", { replacement: "GET /v1/scim/status", reason: "the SCIM status carries the token list" }],
   ["GET /v1/org/settings/assurance-gate-mode", { replacement: "GET /v1/org/settings", reason: "the settings read carries assuranceGateMode; the page writes it through the dedicated PUT" }],
+  ["GET /v1/org/settings/risk-treatments", { replacement: "GET /v1/org/settings", reason: "the settings read carries riskTreatmentsEnabled; the page writes it through the dedicated PUT" }],
   ["POST /v1/agents/:agentId/owner", { replacement: "PATCH /v1/agents/:agentId/stewardship", reason: "ADR-0168 stewardship sets the steward (the ADR-0089 owner column) in one audited save" }],
   ["POST /v1/agents/:agentId/lifecycle", { replacement: "PATCH /v1/agents/:agentId/stewardship", reason: "ADR-0168 stewardship sets the lifecycle status in the same save" }],
   ["GET /v1/licenses/:id", { replacement: "GET /v1/licenses", reason: "the history list carries every full license row the detail returns" }],

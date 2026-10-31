@@ -1480,24 +1480,45 @@
       "breakpoints": true
     },
     {
-      "idx": 245,
-      "version": "7",
-      "when": 1785180000000,
-      "tag": "0245_privacy_ops_records",
-      "breakpoints": true
-    },
-    {
-      "idx": 246,
-      "version": "7",
-      "when": 1785181000000,
-      "tag": "0246_privacy_ops_requests",
-      "breakpoints": true
-    },
-    {
       "idx": 247,
       "version": "7",
       "when": 1785182000000,
       "tag": "0247_trust_pages",
+      "breakpoints": true
+    },
+    {
+      "idx": 248,
+      "version": "7",
+      "when": 1785183000000,
+      "tag": "0248_framework_import_proposals",
+      "breakpoints": true
+    },
+    {
+      "idx": 249,
+      "version": "7",
+      "when": 1785184000000,
+      "tag": "0249_regulatory_feed_imports",
+      "breakpoints": true
+    },
+    {
+      "idx": 250,
+      "version": "7",
+      "when": 1785185000000,
+      "tag": "0250_risk_transferred_avoided",
+      "breakpoints": true
+    },
+    {
+      "idx": 251,
+      "version": "7",
+      "when": 1785186000000,
+      "tag": "0251_privacy_ops_records",
+      "breakpoints": true
+    },
+    {
+      "idx": 252,
+      "version": "7",
+      "when": 1785187000000,
+      "tag": "0252_privacy_ops_requests",
       "breakpoints": true
     }
   ]

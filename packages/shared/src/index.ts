@@ -2359,7 +2359,7 @@ export const updateOrgSettingsSchema = z
      * of `useCaseGateMode` by construction: this acts only where projectId is
      * null, that one only where it is not. */
     dispatchAttributionRequired: z.boolean().optional(),
-    /** ADR-0224 (P13 c, migration 0245): the privacy processing limit. false (shipped, owner 10-30) = nothing is
+    /** ADR-0224 (P13 c, migration 0251): the privacy processing limit. false (shipped, owner 10-30) = nothing is
      * limited. true = personal data the PII detector finds in a governed dispatch must be a category an active
      * record of processing permits for the dispatch's project, or the dispatch is refused 409
      * `processing_not_permitted`. Turning it off again is an audited relaxation. */
@@ -2373,6 +2373,10 @@ export const updateOrgSettingsSchema = z
      * dispatchable judge reports `judged: unavailable` and changes nothing. */
     recommendationJudgeEnabled: z.boolean().optional(),
     recommendationJudgeAgentId: z.string().uuid().nullable().optional(),
+    /** ADR-0215 (migration 0248): may an admin import vendored framework content
+     * (new draft pack versions) and accept imported feed entries? false (default) =
+     * the import routes refuse. Turning it on is a relaxation (settings_relax step-up). */
+    frameworkImportsEnabled: z.boolean().optional(),
     // budgets
     budgetEnforcement: budgetEnforcementSchema.optional(),
     budgetHardBlockPct: z.number().int().min(1).max(100).optional(),
@@ -3744,6 +3748,15 @@ export {
   AI_RISK_LEVELS,
   AI_RISK_REGISTER_DISCLAIMER,
   AI_RISK_STATUSES,
+  AI_RISK_TREATMENTS,
+  LIVE_RISK_STATUSES,
+  isTreatedRiskStatus,
+  riskStatusCarriesRating,
+  recordRiskTreatmentSchema,
+  setRiskTreatmentsEnabledSchema,
+  type AiRiskTreatment,
+  type RecordRiskTreatmentInput,
+  type SetRiskTreatmentsEnabledInput,
   DEFAULT_RISK_LIBRARY,
   RISK_CATEGORY_DIMENSION,
   RISK_CATEGORY_EVIDENCE,
@@ -4789,3 +4802,6 @@ export * from "./mcp-upstream-credential.js";
 export * from "./library-lifecycle.js";
 // ADR-0224 (P13 c): privacy operations — records of processing, data-subject requests, the processing limit
 export * from "./privacy-ops.js";
+
+// ===== ADR-0215 (P5) — framework content imports and the imported regulatory feed =====
+export * from "./framework-imports.js";
