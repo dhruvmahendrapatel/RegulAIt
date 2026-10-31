@@ -2359,6 +2359,13 @@ export const updateOrgSettingsSchema = z
      * of `useCaseGateMode` by construction: this acts only where projectId is
      * null, that one only where it is not. */
     dispatchAttributionRequired: z.boolean().optional(),
+    /** ADR-0224 (P13 c, migration 0251): the privacy processing limit. false (shipped, owner 10-30) = nothing is
+     * limited. true = personal data the PII detector finds in a governed dispatch must be a category an active
+     * record of processing permits for the dispatch's project, or the dispatch is refused 409
+     * `processing_not_permitted`. Turning it off again is an audited relaxation. */
+    privacyOpsEnabled: z.boolean().optional(),
+    /** ADR-0224: days from a data-subject request's receipt to its due date (1–90; 30 is the strict default) */
+    dsrSlaDays: z.number().int().min(1).max(90).optional(),
     /** ADR-0092 amendment (migration 0100, L6c): may the deterministic
      * access-recommendation findings carry a MODEL-JUDGED annotation? false
      * (default) = the report is the six deterministic rules and nothing else.
@@ -4793,6 +4800,8 @@ export * from "./provenance/index.js";
 // ADR-0204: a static upstream credential per MCP server (header refusals, the write contract, the read view)
 export * from "./mcp-upstream-credential.js";
 export * from "./library-lifecycle.js";
+// ADR-0224 (P13 c): privacy operations — records of processing, data-subject requests, the processing limit
+export * from "./privacy-ops.js";
 
 // ===== ADR-0215 (P5) — framework content imports and the imported regulatory feed =====
 export * from "./framework-imports.js";

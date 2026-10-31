@@ -1506,6 +1506,20 @@
       "when": 1785185000000,
       "tag": "0250_risk_transferred_avoided",
       "breakpoints": true
+    },
+    {
+      "idx": 251,
+      "version": "7",
+      "when": 1785186000000,
+      "tag": "0251_privacy_ops_records",
+      "breakpoints": true
+    },
+    {
+      "idx": 252,
+      "version": "7",
+      "when": 1785187000000,
+      "tag": "0252_privacy_ops_requests",
+      "breakpoints": true
     }
   ]
 }

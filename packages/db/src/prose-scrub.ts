@@ -239,6 +239,9 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   // ADR-0208 G8 (migration 0224): the reason an admin typed when retiring an infra resource or policy
   [s.infraResources, ["retiredReason"]],
   [s.infraPolicies, ["retiredReason"]],
+  // ADR-0224 (migration 0252): an admin's note closing a data-subject request, and an erasure tombstone's reason
+  [s.dataSubjectRequests, ["closeNote"]],
+  [s.dataSubjectTombstones, ["reason"]],
   // --- machine-written free text that quotes an error, and ADR-0111's
   //     EXPORTED OBSERVABILITY COPY ---
   //

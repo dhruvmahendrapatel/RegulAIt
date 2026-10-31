@@ -273,6 +273,11 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   egressCompiledDefaultPolicy: notEqual("strict"),
   useCaseGateMode: notEqual("enforce"),
   dispatchAttributionRequired: notEqual(true),
+  // ADR-0224 (P13 c): shipped off (owner 10-30), so nothing is looser than the default; once an org turns the
+  // processing limit on, turning it off again is a relaxation
+  privacyOpsEnabled: fromStored(false, (v, b) => b === true && v === false),
+  // a longer due date for data-subject requests is looser
+  dsrSlaDays: atMost(30),
   recommendationJudgeEnabled: exempt("adds a model-judged annotation to the deterministic findings; it refuses and allows nothing"),
   recommendationJudgeAgentId: exempt("names the judge of the annotation above; it refuses and allows nothing"),
   // ADR-0215: off = the framework-import and feed-import routes refuse; on lets an admin propose and accept imports
