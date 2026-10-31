@@ -214,7 +214,8 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
     summary: "The versioning and deprecation policy, plus every route currently on a sunset clock, as machine-readable data.",
   },
 
-  "GET /v1/users": { summary: "List users, with sign-in posture flags (never a hash or a secret). Bounded: `limit` (default 1000, max 5000)." },
+  "GET /v1/users": { summary: "List users, with sign-in posture flags (never a hash or a secret). Bounded: `limit` (default 1000, max 5000). With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226), with `q`, `role` and `status` filters." },
+  "GET /v1/users/export.xlsx": { summary: "The users list as an Excel file: every row matching the filters, in the requested sort, with the requested `columns` in order. Admin only; audited." },
   "POST /v1/users": {
     summary: "Provision a user. Refused when the licensed seat cap is reached (ADR-0052) — a growth gate, never a service gate.",
     body: createUserSchema,
@@ -350,7 +351,8 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
   "POST /v1/chat/completions": { summary: "OpenAI-shaped compatibility surface (ADR-0024). Off-the-shelf OpenAI clients point here unchanged." },
   "POST /mcp/:serverId": { summary: "The governed MCP proxy. Speaks the MCP wire protocol; every tool call is entitlement-checked." },
   "POST /v1/runs": { summary: "Start a multi-agent orchestration run (pillar 7)." },
-  "GET /v1/runs": { summary: "Orchestration runs, newest first. Bounded: `limit` (default 200, max 1000); `status` narrows." },
+  "GET /v1/runs": { summary: "Orchestration runs, newest first. Bounded: `limit` (default 200, max 1000); `status` narrows. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226)." },
+  "GET /v1/runs/export.xlsx": { summary: "The runs list as an Excel file: every run the caller may see that matches the filters, in the requested sort, with the requested `columns` in order. Audited." },
   "GET /v1/runs/:runId": { summary: "One orchestration run with its task graph." },
   "POST /v1/runs/decompose": { summary: "Decompose a goal into a task DAG without executing it." },
   "GET /v1/reports/runs": { summary: "Generated report runs the caller may see." },

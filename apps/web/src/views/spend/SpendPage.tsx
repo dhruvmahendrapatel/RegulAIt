@@ -268,7 +268,7 @@ export default function SpendPage() {
           <Card>
             <div className={v.stat}>
               <span className={v.statValue}>{fmtUsd(totals.costUsd)}</span>
-              <span className={v.statLabel}>measured spend · {plural(totals.events ?? 0, "call")}</span>
+              <span className={v.statLabel}>measured spend · all time · {plural(totals.events ?? 0, "call")}</span>
             </div>
           </Card>
           <Card>

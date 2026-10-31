@@ -27,6 +27,7 @@ import { fmtUsd, ago, plural } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, InfoButton } from "../../../ui/kit";
 import { QueryGate } from "../adminKit";
+import { PostureEstimate, type PostureScoreDoc } from "./PostureEstimate";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 import p from "./posture.module.css";
@@ -46,7 +47,17 @@ interface PostureDoc {
     }>;
     note: string;
   };
-  risks: { open: number; mitigating: number; accepted: number; closed: number; total: number; attestationOnly: number };
+  risks: {
+    open: number;
+    mitigating: number;
+    accepted: number;
+    closed: number;
+    /** absent from a report made before these treatments existed */
+    transferred?: number;
+    avoided?: number;
+    total: number;
+    attestationOnly: number;
+  };
   redteam: {
     measured: boolean;
     runsInWindow: number;
@@ -126,6 +137,8 @@ interface PostureDoc {
     /** ADR-0189 R25 item 13 follow-up: intake workflow completed, use case never approved */
     instanceCompletedNotApproved?: { count: number; sampleUseCaseIds: string[]; action: string };
   };
+  /** the explainable estimate, objective cards and ranked actions, scored on the server from this document */
+  score?: PostureScoreDoc;
   note: string;
 }
 
@@ -320,7 +333,7 @@ export default function PosturePage() {
     <>
       <PageHeader
         title="Posture"
-        info={<p>The one-page executive read of everything the operator pages hold: pack coverage, open risks, red-team posture, spend vs budget, governance activity, audit anchoring and the use-case pipeline. Every number is computed from the real ledgers at the moment this page loads — nothing is a stored rollup — and where a ledger is empty the page says unmeasured, never zero-implies-good. Print this page for the meeting: the browser's print view drops the app chrome.</p>}
+        info={<p>The one-page executive read of everything the operator pages hold: pack coverage, open risks, red-team posture, spend vs budget, governance activity, audit anchoring and the use-case pipeline. The posture estimate at the top weighs seven objectives by published formulae and ranks what to fix first; it is an estimate, never a compliance verdict. Every number is computed from the real ledgers at the moment this page loads — nothing is a stored rollup — and where a ledger is empty the page says unmeasured, never zero-implies-good. Print this page for the meeting: the browser's print view drops the app chrome.</p>}
         actions={
           <span className={p.noPrint}>
             <Button variant="ghost" onClick={() => window.print()}>
@@ -332,6 +345,8 @@ export default function PosturePage() {
       <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
         {d && (
           <div className={v.stack}>
+            {/* ---------------- estimate, objectives and what to fix first ---------------- */}
+            {d.score && <PostureEstimate score={d.score} />}
             {/* ---------------- headlines ---------------- */}
             <div className={v.grid4}>
               <Headline
@@ -360,6 +375,8 @@ export default function PosturePage() {
                 line={
                   <>
                     {d.risks.open} open, {d.risks.mitigating} being mitigated, {d.risks.accepted} formally accepted.
+                    {(d.risks.transferred ?? 0) > 0 && <> {d.risks.transferred} transferred to an insurer or supplier.</>}
+                    {(d.risks.avoided ?? 0) > 0 && <> {d.risks.avoided} avoided — the use stopped.</>}
                     {d.risks.attestationOnly > 0 && (
                       <> {d.risks.attestationOnly} rest on attestation only — no ledger measures them.</>
                     )}

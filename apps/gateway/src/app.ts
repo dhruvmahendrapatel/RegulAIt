@@ -61,6 +61,8 @@ import {
   users,
   workflowInstances,
   runWithAuditActor,
+  complianceProfiles,
+  configVersions,
   type Db,
   type SQL,
 } from "@regulait/db";
@@ -140,6 +142,10 @@ import { APPROVALS_PAGE_LIMIT, approvalsListQuery } from "./list-queries.js";
 import { checkMcpTransportWrite, refuseMcpServerWrite } from "./mcp-egress.js";
 import {
   agentIdDisclosureUpdate,
+  assertionProfileUpdate,
+  auditAssertionProfileChange,
+  refuseAssertionProfile,
+  refuseBearerConflict,
   auditAgentIdDisclosureChange,
   auditIdentityPropagationChange,
   identityPropagationUpdate,
@@ -190,6 +196,7 @@ import { registerGovernanceMonitorRoutes } from "./governance-monitor.js";
 import { registerCredentialInventoryRoutes } from "./credential-inventory.js";
 import { registerEnergyRoutes } from "./energy.js";
 import { registerRegulatoryIntelRoutes } from "./regulatory-intel.js";
+import { registerFrameworkImportRoutes } from "./framework-imports.js";
 import {
   REMEDIATION_PREFIX as GOVERNANCE_REMEDIATION_PREFIX,
   applyRemediationDecision,
@@ -267,6 +274,16 @@ import {
 } from "./workbench.js";
 import { abacPrincipalFromRequest } from "./abac-principal.js";
 import { listLimitQuery } from "./list-limit.js";
+import {
+  filterParams,
+  parseListExport,
+  parseListPage,
+  runListPage,
+  sendListError,
+  sendListExport,
+  wantsListContract,
+} from "./list-contract.js";
+import { USERS_LIST, usersFilterQuery, usersReader, usersWhere } from "./users-list.js";
 import { evaluateIpEnvelope } from "./net-policy.js";
 import { activeDelegatorsFor, activeDelegationFrom } from "./delegations.js";
 
@@ -357,6 +374,7 @@ export interface BuildAppOptions {
 import { z } from "zod";
 import { boundTargetsForApprovals, registerMcpProxy } from "./mcp-proxy.js";
 import { clearUpstreamCredentialOnUrlMove, registerMcpUpstreamCredentialRoutes } from "./mcp-upstream-credential.js";
+import { registerPrivacyOpsRoutes } from "./privacy-ops.js";
 import { ExternalEffectBlockedError } from "./external-effects.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
 import { registerCustomProviderRoutes } from "./custom-providers.js";
@@ -404,6 +422,7 @@ import {
   registerMcpAdmissionRoutes,
   REGISTRATION_ADMISSION_STATE,
 } from "./mcp-admission.js";
+import { registerMcpToolSyncRoutes } from "./mcp-tool-sync.js";
 // ADR-0101 — federated MCP registries. Admin-only through the default gate;
 // a sync writes only the catalogue and an import is an explicit operator act.
 import { privateRangesRelaxation, registerMcpRegistryRoutes } from "./mcp-registry.js";
@@ -413,7 +432,18 @@ import {
   wwwAuthenticateFor,
 } from "./mcp-auth-metadata.js";
 import { registerConversationRoutes } from "./conversations.js";
-import { applyProjectApprovalDecision, registerProjectRoutes } from "./projects.js";
+import {
+  applyProjectApprovalDecision,
+  reapplyReclassificationToInFlight,
+  registerProjectRoutes,
+  requiredTemplateIdsFor,
+} from "./projects.js";
+import {
+  applyComplianceProfileDecision,
+  COMPLIANCE_VERSION_PREFIX,
+  precheckComplianceProfileDecision,
+  registerComplianceProfileLifecycleRoutes,
+} from "./compliance-profile-lifecycle.js";
 import { applyInfraApprovalDecision, registerInfraRoutes } from "./infra.js";
 import { registerOptimizationRoutes } from "./optimization.js";
 import { applyRunApprovalDecision, registerOrchestrationRoutes } from "./orchestration.js";
@@ -456,6 +486,7 @@ import {
   registerOrgSettingsRoutes,
   startAuditPruneScheduler,
 } from "./org-settings.js";
+import { registerModelRateLimitRoutes } from "./model-rate-limits.js";
 // ADR-0202 decision 4 — the per-beat simulated fallback for the hosted demo (admin-only, audited)
 import { registerDemoBeatRoutes } from "./demo-beats.js";
 // ADR-0185 G5 — request metrics (a no-op seam until the meter lands)
@@ -481,6 +512,7 @@ import {
   approvingPrincipals,
   decidedByViewerCondition,
   poolVisibilityCondition,
+  previewToolApprovalQueue,
   registerApprovalSigningRoutes,
 } from "./approval-signatures.js";
 import { registerDecisionReceiptRoutes } from "./decision-receipts.js";
@@ -517,6 +549,7 @@ import { registerShadowAiRoutes } from "./shadow-ai.js";
 import { registerDiscoveryRoutes } from "./discovery-routes.js";
 import { registerContentTrustRoutes } from "./content-trust-routes.js";
 import { registerFederationRoutes } from "./federation-routes.js";
+import { registerMcpIdentityOidcRoutes } from "./mcp-identity-oidc-routes.js";
 import { registerEndpointImportRoutes } from "./endpoint-import-routes.js";
 import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
@@ -528,6 +561,7 @@ import { registerCopilotRoutes } from "./copilot.js";
 import { registerBuilderRoutes } from "./builder.js";
 // ADR-0180 (D3) — continuous assurance: P0's gate-mode setting and each item owner's routes
 import { registerAssuranceSettingsRoutes } from "./assurance-settings.js";
+import { registerRiskTreatmentSettingsRoutes } from "./risk-treatment-settings.js";
 import { decideApprovalWithMeasuredSchema, registerConditionMetricRoutes } from "./condition-metrics.js";
 import { registerRequiredTestRoutes } from "./required-tests.js";
 import { registerAutonomyRoutes } from "./autonomy.js";
@@ -537,6 +571,7 @@ import { registerEuAiActRoleRoutes } from "./eu-ai-act-role.js";
 import { registerDecisionRegressionRoutes } from "./decision-regression.js";
 import { registerIncidentRoutes } from "./incidents.js";
 import { registerFeedbackRoutes } from "./feedback.js";
+import { registerTrustPagesRoutes } from "./trust-pages.js";
 import { registerAiLiteracyRoutes } from "./ai-literacy.js";
 import { registerAlertOwnershipRoutes } from "./alert-ownership.js";
 import { builderStepsAwaitingApproval, resumeBuilderAfterApproval } from "./builder-runtime.js";
@@ -1448,8 +1483,33 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // a list endpoint, not only POST. disabledAt rides along (ADR-0022) so the
   // portal can grey deactivated accounts and offer Reactivate.
   // REL-10: bounded — `limit` (default LIST_DEFAULT_LIMIT, max LIST_MAX_LIMIT)
-  app.get("/v1/users", async (req) => ({
-    users: await db
+  //
+  // ADR-0226: with any of sort/dir/cursor/offset/count it answers the shared
+  // list contract (list-contract.ts) with server-side search and filters;
+  // with none of them, exactly the response above.
+  app.get("/v1/users/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const filters = usersFilterQuery.parse(filterParams(q));
+      const ex = parseListExport(USERS_LIST, q);
+      await sendListExport(db, req, reply, USERS_LIST, usersReader(db), usersWhere(filters), ex, filters);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+  app.get("/v1/users", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      try {
+        const q = req.query as Record<string, unknown>;
+        const filters = usersFilterQuery.parse(filterParams(q));
+        const page = parseListPage(USERS_LIST, q);
+        return await runListPage(db, USERS_LIST, usersReader(db), usersWhere(filters), page);
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
+    return { users: await db
       .select({
         id: users.id,
         email: users.email,
@@ -1469,7 +1529,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       .from(users)
       .orderBy(users.createdAt)
       .limit(listLimitQuery.parse(req.query).limit),
-  }));
+    };
+  });
 
   // --- ADR-0022 identity lifecycle (admin-only via the default gate) --------
   // Deactivate ≠ delete: nothing is removed, audit history and FKs survive;
@@ -2077,7 +2138,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       });
     }
     // ADR-0188 S8: a stdio server cannot carry an identity assertion, nor the agent IDs inside one (409, nothing saved)
-    const identityRefusal = refuseIdentityPropagationOnStdio(isStdio, body.identityPropagation, body.discloseAgentWorkloadIds);
+    const identityRefusal = refuseIdentityPropagationOnStdio(isStdio, body.identityPropagation, body.discloseAgentWorkloadIds, body.identityAssertionProfile);
     if (identityRefusal) return reply.status(identityRefusal.status).send(identityRefusal.body);
     const label = `MCP server '${before.name}'`;
     const nextUrl = body.url ?? before.url;
@@ -2154,15 +2215,27 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const disclosure = agentIdDisclosureUpdate(before, body, identity);
     const disclosureRefusal = refuseAgentIdDisclosureWithoutAssertion(disclosure);
     if (disclosureRefusal) return reply.status(disclosureRefusal.status).send(disclosureRefusal.body);
+    // ADR-0210: the OIDC profile (an ES256 assertion as the Bearer token, with an admin-set scope) is a further
+    // relaxation, only while an assertion is sent and only with a valid scope (else refused before any step-up); a url
+    // move or propagation turning off returns it to the default. Never beside an ADR-0204 Bearer credential.
+    const profile = assertionProfileUpdate(before, body, identity);
+    const profileRefusal = refuseAssertionProfile(profile);
+    if (profileRefusal) return reply.status(profileRefusal.status).send(profileRefusal.body);
+    if (profile.relaxed) {
+      const conflict = await refuseBearerConflict(db, serverId);
+      if (conflict) return reply.status(conflict.status).send(conflict.body);
+    }
     const relaxedValues =
-      rangesRelaxed || identity.relaxed || disclosure.relaxed ? { ...rangesRelaxed, ...identity.relaxed, ...disclosure.relaxed } : null;
+      rangesRelaxed || identity.relaxed || disclosure.relaxed || profile.relaxed
+        ? { ...rangesRelaxed, ...identity.relaxed, ...disclosure.relaxed, ...profile.relaxed }
+        : null;
     const rangesStepUpArgs = relaxedValues
       ? {
           kind: "settings_relax" as const,
           facts: {
             op: "mcp_server_update",
             serverId,
-            ...(body.url !== undefined || identity.relaxed || disclosure.relaxed ? { url: nextUrl } : {}),
+            ...(body.url !== undefined || identity.relaxed || disclosure.relaxed || profile.relaxed ? { url: nextUrl } : {}),
             values: relaxedValues,
           },
         }
@@ -2220,6 +2293,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         : {}),
       ...(identity.write !== null ? { identityPropagation: identity.write } : {}),
       ...(disclosure.write !== null ? { discloseAgentWorkloadIds: disclosure.write } : {}),
+      ...(profile.write !== null ? profile.write : {}),
       ...stdioPatch,
       ...(ownerChanges ? { ownerUserId: ownerTarget } : {}),
     };
@@ -2236,13 +2310,23 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // the same transaction, on its connection, AFTER that compare-and-set, so a 409 never burns them; a refused
       // claim throws and rolls the write back.
       const touchesPosture =
-        body.allowPrivateRanges !== undefined || body.url !== undefined || identity.write !== null || disclosure.write !== null;
+        body.allowPrivateRanges !== undefined ||
+        body.url !== undefined ||
+        identity.write !== null ||
+        disclosure.write !== null ||
+        profile.write !== null;
       type Patched = { row: typeof mcpServers.$inferSelect } | { refused: { status: number; body: Record<string, unknown> } };
       const out = await db.transaction(async (tx): Promise<Patched> => {
         if (identity.relaxed) {
           await lockIdentityAudiences(tx);
           const shared = await refuseSharedIdentityAudience(tx, serverId, nextUrl);
           if (shared) return { refused: { status: shared.status, body: shared.body } };
+        }
+        if (profile.relaxed) {
+          // ADR-0210: re-checked under the server row's lock, which the credential's writers take too
+          await tx.select({ id: mcpServers.id }).from(mcpServers).where(eq(mcpServers.id, serverId)).for("update");
+          const conflict = await refuseBearerConflict(tx, serverId);
+          if (conflict) return { refused: { status: conflict.status, body: conflict.body } };
         }
         const [written] = await tx
           .update(mcpServers)
@@ -2258,6 +2342,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
                     eq(mcpServers.url, before.url),
                     eq(mcpServers.identityPropagation, before.identityPropagation),
                     eq(mcpServers.discloseAgentWorkloadIds, before.discloseAgentWorkloadIds),
+                    eq(mcpServers.identityAssertionProfile, before.identityAssertionProfile),
+                    sql`${mcpServers.identityAssertionScope} IS NOT DISTINCT FROM ${before.identityAssertionScope}`,
                   ]
                 : []),
               ...(ownerChanges ? [sql`${mcpServers.ownerUserId} IS NOT DISTINCT FROM ${before.ownerUserId}`] : []),
@@ -2351,6 +2437,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             url: written.url,
             update: disclosure,
             stepUp: disclosure.relaxed ? rangesStepUp : null,
+          });
+        }
+        // ADR-0210: every change of the assertion profile or scope, and a url move that keeps it on, on the trail
+        if (profile.write !== null || profile.relaxed) {
+          await auditAssertionProfileChange(tx, {
+            userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+            serverId,
+            label,
+            from: { identityAssertionProfile: before.identityAssertionProfile, identityAssertionScope: before.identityAssertionScope },
+            to: { identityAssertionProfile: written.identityAssertionProfile, identityAssertionScope: written.identityAssertionScope },
+            url: written.url,
+            update: profile,
+            stepUp: profile.relaxed ? rangesStepUp : null,
           });
         }
         if (stdioChange) {
@@ -3368,7 +3467,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
     // Full governed evaluation, but decision-only: unlike the proxy path this
     // endpoint never creates queue entries or consumes approvals.
-    const { decision } = await governedEvaluate(
+    const { decision: evaluated, matchedApprovalRuleIds } = await governedEvaluate(
       db,
       body.userId,
       body.serverId,
@@ -3387,6 +3486,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       undefined,
       { actor: null }, // ADR-0188 S4: the person's own decision; agent paths decide with their delegation grant in the governed core
     );
+    // ADR-0186 A — the queue-time quorum and signature-mode check, run read-only:
+    // a `require_approval` the queue would refuse (no pool can ever sign it)
+    // previews as that same deny, so the preview and the gateway agree.
+    const decision = await previewToolApprovalQueue(db, {
+      callerUserId: body.userId,
+      decision: evaluated,
+      matchedApprovalRuleIds: matchedApprovalRuleIds ?? [],
+      projectId: null,
+      toolName: body.toolName,
+    });
 
     // ADR-0127 — MARKED ADVISORY. This route answers "what would you decide"
     // and executes nothing, but it wrote an `allow` row indistinguishable from
@@ -4120,6 +4229,26 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const title = governanceRemediationById.get(stageId.slice(GOVERNANCE_REMEDIATION_PREFIX.length));
       return title ?? null; // the SPA's stage label already says "Governance remediation"
     };
+    // ADR-0208 (G7): "compliance profile 'tag' v3" for a version review
+    const complianceVersionIds = ids(
+      rows.map((r) =>
+        r.objectType === "compliance_profile" && r.stageId?.startsWith(COMPLIANCE_VERSION_PREFIX)
+          ? r.stageId.slice(COMPLIANCE_VERSION_PREFIX.length)
+          : null,
+      ),
+    );
+    const complianceVersionById = new Map(
+      (complianceVersionIds.length
+        ? await db
+            .select({ id: configVersions.id, version: configVersions.version, tag: complianceProfiles.tag })
+            .from(configVersions)
+            .innerJoin(complianceProfiles, eq(complianceProfiles.id, configVersions.artifactId))
+            .where(inArray(configVersions.id, complianceVersionIds))
+        : []
+      ).map((v) => [v.id, `compliance profile '${v.tag}' v${v.version}`]),
+    );
+    const complianceVersionLabelFor = (stageId: string | null): string | null =>
+      stageId?.startsWith(COMPLIANCE_VERSION_PREFIX) ? (complianceVersionById.get(stageId.slice(COMPLIANCE_VERSION_PREFIX.length)) ?? null) : null;
     const sodOverrideLabelFor = (stageId: string | null): string | null => {
       if (!stageId?.startsWith(SOD_OVERRIDE_PREFIX)) return null;
       return sodOverrideById.get(stageId.slice(SOD_OVERRIDE_PREFIX.length)) ?? null;
@@ -4200,6 +4329,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           (r.objectType === "grant_certification" ? grantCertLabelFor(r.stageId) : null) ??
           (r.objectType === "sod_override" ? sodOverrideLabelFor(r.stageId) : null) ??
           (r.objectType === "remediation" ? governanceRemediationLabelFor(r.stageId) : null) ??
+          (r.objectType === "compliance_profile" ? complianceVersionLabelFor(r.stageId) : null) ??
           r.toolName ??
           null,
         // ADR-0022: this row reached the caller via an active delegation —
@@ -4623,6 +4753,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const refusal = await precheckPromptPromotionDecision(db, row, deciderUserId);
       if (refusal) return fail(refusal.status, refusal.body);
     }
+    // ADR-0208 (G7) — `cannot_approve_own_compliance_profile_change`, keyed on the DECIDER so the author of a
+    // profile change cannot reach its review through delegation or the admin override above.
+    if (row.objectType === "compliance_profile") {
+      const refusal = await precheckComplianceProfileDecision(db, row, deciderUserId);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
     // Separation-of-duties guard: the person deciding IS the person who
     // triggered the governed action. Still decidable (alternate-approver
     // routing is deliberately out of scope) but never silently — a recorded
@@ -4889,6 +5025,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // (named-approver, admin-override-reason, self-review-reason) apply above.
       if (updated.objectType === "infra_operation") {
         await applyInfraApprovalDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
+      }
+      // ADR-0208 (G7): a reviewed compliance-profile version — approved = it becomes the active version here, inside
+      // the decision's transaction, only if its base version is still the active one (else recorded stale); running
+      // workflow instances of the carrying projects get the additive changes only. Denied = nothing changes.
+      if (updated.objectType === "compliance_profile") {
+        await applyComplianceProfileDecision(
+          tx as unknown as Db,
+          updated,
+          binaryDecision,
+          deciderUserId,
+          (d, projectId, oldRequired, by) => reapplyReclassificationToInFlight(d, projectId, [], by, oldRequired),
+          requiredTemplateIdsFor,
+        );
       }
       // ADR-0045 MRM sign-offs: the risk acceptance is recorded on the model
       // card chain HERE, inside the one decide path, so it inherits every
@@ -5390,6 +5539,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerRegulAItLlmRoutes(app, db, { dataKey: opts.dataKey });
   registerConversationRoutes(app, db);
   registerProjectRoutes(app, db);
+  // ADR-0208 (G7): reviewed compliance-profile versions and retire
+  registerComplianceProfileLifecycleRoutes(app, db);
   registerInfraRoutes(app, db, opts.dataKey);
   registerOptimizationRoutes(app, db);
   registerOrchestrationRoutes(app, db, { dataKey: opts.dataKey });
@@ -5439,6 +5590,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerEnergyRoutes(app, db);
   // ADR-0158 — regulatory intelligence joined to our packs and use cases
   registerRegulatoryIntelRoutes(app, db);
+  // ADR-0215 (P5): vendored framework-content and feed imports, proposed and accepted by an admin
+  registerFrameworkImportRoutes(app, db);
   // ADR-0159 — remediation proposals for monitor alerts
   registerRemediationRoutes(app, db);
   // ADR-0160 — continuous trace evaluation
@@ -5464,6 +5617,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // audited clear. Admin-only through the default gate, like the MCP registry
   // writes it sits beside.
   registerMcpAdmissionRoutes(app, db);
+  // #609 follow-up: an admin's on-demand manifest sync for one server — admin-only through the default gate, rate
+  // limited per server, a settings_relax step-up, and the live path's admission, egress, transport and scan gates
+  registerMcpToolSyncRoutes(app, db);
   // ADR-0101 — configure an upstream MCP registry, pull its catalogue, and
   // import ONE entry as a federated `mcp_servers` row that is `unscanned`,
   // ungranted and subject to the same ADR-0097 admission and ADR-0043 egress
@@ -5482,6 +5638,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // GET/PUT routes are admin-only (deliberately NOT in NON_ADMIN_ROUTES); the
   // audit auto-prune scheduler is OFF by default and unref'd, stopped on close.
   registerOrgSettingsRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0212 (P12 b/c): model rate limits, their org opt-in, and per-modality agent prices
+  registerModelRateLimitRoutes(app, db);
   // ADR-0202 decision 4 — the demo beats' simulated fallback; admin-only (not in NON_ADMIN_ROUTES), audited
   registerDemoBeatRoutes(app, db);
   registerPosturePresetRoutes(app, db, { sink: anchorSink, bootstrapConfigured: Boolean(opts.bootstrapToken) });
@@ -5532,6 +5690,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // fetch them), and the admin key lifecycle (off by default; on is a `settings_relax` step-up, rotate and revoke
   // are `key_management` step-ups). The admin routes are admin-only by default (none is in NON_ADMIN_ROUTES).
   registerFederationRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0210: the OIDC-profile identity assertion issuer's public discovery document and ES256 JWKS
+  registerMcpIdentityOidcRoutes(app, db);
   // ADR-0195 SD3 — no-agent endpoint evidence (osquery results, MDM/EDR inventory) imported into an endpoint source,
   // and the endpoint signature seed. Admin-only by default.
   registerEndpointImportRoutes(app, db, {
@@ -5652,6 +5812,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // A8 autonomy, A10 risk tolerance and acceptance (stubs answer 501 until
   // their owner lands).
   registerAssuranceSettingsRoutes(app, db);
+  // ADR-0211 (P17): the default-off switch for transferred and avoided risk treatments
+  registerRiskTreatmentSettingsRoutes(app, db);
   registerConditionMetricRoutes(app, db);
   registerRequiredTestRoutes(app, db);
   registerAutonomyRoutes(app, db);
@@ -5667,6 +5829,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerDecisionRegressionRoutes(app, db);
   registerIncidentRoutes(app, db, { dataKey: opts.dataKey });
   registerFeedbackRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0225 (P13 d): the public trust centre, AI system cards and the auditor portal (shipped off)
+  registerTrustPagesRoutes(app, db);
   registerAiLiteracyRoutes(app, db);
   registerAlertOwnershipRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0186 (batch 4, AgentCoordination §4.9). A: passkeys and step-up (self
@@ -5698,6 +5862,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0187 B5-M: model-artifact upload, list and view (own uploads; an admin sees all), and the
   // runner's artifact stream (the runner's self token, live lease only)
   registerModelArtifactRoutes(app, db, opts.artifactStore === undefined ? {} : { artifactStore: opts.artifactStore });
+  // ADR-0224 (P13 c): records of processing and data-subject requests (admin-only, the default gate)
+  registerPrivacyOpsRoutes(app, db, { dataKey: opts.dataKey });
 
   // ADR-0031 item 2: the audit read surface used to be hard-capped at 100 rows
   // with a userId filter (plus PR #79's deployMode) and nothing else — for a

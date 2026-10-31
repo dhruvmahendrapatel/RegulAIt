@@ -40,18 +40,20 @@ import {
 } from "@regulait/db";
 import {
   AI_RISK_LEVELS,
+  AI_RISK_STATUSES,
   RISK_CATEGORY_DIMENSION,
   TRUST_DIMENSIONS,
   TRUST_DIMENSION_LABELS,
   dimensionForControl,
+  riskStatusCarriesRating,
   type AiRiskCategory,
+  type AiRiskStatus,
   type TrustDimension,
 } from "@regulait/shared";
 import { evaluatePack } from "./compliance-packs.js";
 import { POSTURE_WINDOW_DAYS } from "./posture.js";
 
-const RISK_STATUSES = ["open", "mitigating", "accepted", "closed"] as const;
-type RiskStatus = (typeof RISK_STATUSES)[number];
+type RiskStatus = AiRiskStatus;
 
 export const TRUST_DEFINITIONS = {
   evidenceCoveragePct:
@@ -62,11 +64,17 @@ export const TRUST_DEFINITIONS = {
     "risks that are closed, or live with at least one linked control and a declared residual " +
     "position (ADR-0147). Accepted risks are counted separately — acceptance is a decision to " +
     "carry a risk, not a mitigation.",
+  risksTransferred:
+    "risks recorded as transferred to an insurer or a supplier contract, with the evidence and an " +
+    "owner (ADR-0211). A transfer moves who carries the cost, not whether the harm can happen.",
+  risksAvoided:
+    "risks recorded as avoided: the use that created them stopped, with the decision as evidence and " +
+    "an owner (ADR-0211).",
   risksUnmitigated:
-    "live risks (open or mitigating) that are not yet mitigated. With mitigated and accepted it " +
-    "partitions every risk found: found = mitigated + accepted + unmitigated.",
+    "live risks (open or mitigating) that are not yet mitigated. With mitigated, accepted, transferred " +
+    "and avoided it partitions every risk found: found = mitigated + accepted + transferred + avoided + unmitigated.",
   heatmap:
-    "live (not closed) risks by DECLARED likelihood and impact — human judgments on a three-level " +
+    "risks that still carry a rating (not closed, not avoided) by DECLARED likelihood and impact — human judgments on a three-level " +
     "scale, never arithmetic. `residualHeatmap` uses the declared residual position where one exists.",
   measured:
     "false when no active pack has a control for this dimension — draw a gap, not a zero",
@@ -143,21 +151,25 @@ export async function computeTrustDashboard(
     : new Set<string>();
 
   const risksByDim = new Map<TrustDimension, Record<RiskStatus, number>>(
-    TRUST_DIMENSIONS.map((d) => [d, { open: 0, mitigating: 0, accepted: 0, closed: 0 }]),
+    TRUST_DIMENSIONS.map((d) => [d, Object.fromEntries(AI_RISK_STATUSES.map((st) => [st, 0])) as Record<RiskStatus, number>]),
   );
   const heat = new Map<string, number>();
   const residualHeat = new Map<string, number>();
   let mitigated = 0;
   let accepted = 0;
+  let transferred = 0;
+  let avoided = 0;
   let unmitigated = 0;
   for (const r of riskRows) {
     const dim = RISK_CATEGORY_DIMENSION[r.category as AiRiskCategory] ?? "compliance";
     risksByDim.get(dim)![r.status as RiskStatus] += 1;
-    if (r.status === "accepted") accepted += 1;
     const hasResidual = r.residualLikelihood !== null && r.residualImpact !== null;
-    if (r.status === "closed" || (r.status !== "accepted" && linked.has(r.id) && hasResidual)) mitigated += 1;
-    else if (r.status !== "accepted") unmitigated += 1;
-    if (r.status !== "closed") {
+    if (r.status === "accepted") accepted += 1;
+    else if (r.status === "transferred") transferred += 1;
+    else if (r.status === "avoided") avoided += 1;
+    else if (r.status === "closed" || (linked.has(r.id) && hasResidual)) mitigated += 1;
+    else unmitigated += 1;
+    if (riskStatusCarriesRating(r.status)) {
       const k = `${r.likelihood}|${r.impact}`;
       heat.set(k, (heat.get(k) ?? 0) + 1);
       const rk = hasResidual ? `${r.residualLikelihood}|${r.residualImpact}` : k;
@@ -204,8 +216,10 @@ export async function computeTrustDashboard(
       risksFound: riskRows.length,
       risksMitigated: mitigated,
       risksAccepted: accepted,
+      risksTransferred: transferred,
+      risksAvoided: avoided,
       risksOpen: riskRows.filter((r) => r.status === "open" || r.status === "mitigating").length,
-      // the partition the dashboard tiles show: found = mitigated + accepted + unmitigated.
+      // the partition the dashboard tiles show: found = mitigated + accepted + transferred + avoided + unmitigated.
       // `risksOpen` (every live risk) overlaps `risksMitigated` and must not sit beside it.
       risksUnmitigated: unmitigated,
       evidenceCoveragePct: pct(totalEvidenced, totalApplicable),

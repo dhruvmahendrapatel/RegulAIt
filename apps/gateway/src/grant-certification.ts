@@ -72,14 +72,16 @@ import {
   roleToolGrants,
   roles,
   serverGrants,
+  sql,
   toolGrants,
   users,
   type Db,
   type GrantCertGrantKind,
   type GrantCertificationCampaignRow,
 } from "@regulait/db";
-import { parseRecommendationRuleIds } from "@regulait/shared";
+import { cancelCertificationCampaignSchema, parseRecommendationRuleIds } from "@regulait/shared";
 import { z } from "zod";
+import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
 // ADR-0092 (gap L24): the recommendation-scoped campaign snapshot — the one
 // action path a recommendation has (recommend → review → human decides →
 // revoke-is-real). Imported here as one more scope filter, never a parallel
@@ -150,7 +152,12 @@ export function campaignPastDue(campaign: { dueAt: Date }, now: Date): boolean {
   return campaign.dueAt.getTime() < now.getTime();
 }
 
-export type EffectiveCampaignStatus = "open" | "completed" | "expired-incomplete";
+/** ADR-0208 G9: who cancelled a campaign, when and why (null while it is not cancelled) */
+function cancellationView(c: GrantCertificationCampaignRow): { at: string; reason: string | null; byUserId: string | null } | null {
+  return c.cancelledAt ? { at: c.cancelledAt.toISOString(), reason: c.cancelledReason, byUserId: c.cancelledByUserId } : null;
+}
+
+export type EffectiveCampaignStatus ="open" | "completed" | "expired-incomplete" | "cancelled";
 
 /**
  * The read-time status projection (rule 4 above). Stored status is only ever
@@ -164,6 +171,8 @@ export function campaignEffectiveStatus(
   now: Date,
 ): EffectiveCampaignStatus {
   if (campaign.status === "completed") return "completed";
+  // ADR-0208 G9: an admin cancelled it; its undecided items were withdrawn, its decisions stand
+  if (campaign.status === "cancelled") return "cancelled";
   if (campaignPastDue(campaign, now) && undecidedItems > 0) return "expired-incomplete";
   return "open";
 }
@@ -408,6 +417,16 @@ export async function precheckGrantCertificationDecision(
     .select()
     .from(grantCertificationCampaigns)
     .where(eq(grantCertificationCampaigns.id, item.campaignId));
+  // ADR-0208 G9: a cancelled campaign's pending reviews were withdrawn; none may land late
+  if (campaign && campaign.status === "cancelled") {
+    return {
+      status: 409,
+      body: {
+        error: "campaign_cancelled",
+        detail: "this certification campaign was cancelled — its undecided reviews were withdrawn and the grant stays unattested",
+      },
+    };
+  }
   if (campaign && campaign.status === "open" && campaignPastDue(campaign, new Date())) {
     return {
       status: 409,
@@ -567,11 +586,12 @@ export async function certificationPostureSection(db: Db, now: Date) {
         .groupBy(grantCertificationItems.campaignId)
     : [];
   const undecidedByCampaign = new Map(undecidedRows.map((r) => [r.campaignId, r.n]));
-  const counts = { open: 0, completed: 0, expiredIncomplete: 0 };
+  const counts = { open: 0, completed: 0, expiredIncomplete: 0, cancelled: 0 };
   for (const c of campaigns) {
     const s = campaignEffectiveStatus(c, undecidedByCampaign.get(c.id) ?? 0, now);
     if (s === "open") counts.open += 1;
     else if (s === "completed") counts.completed += 1;
+    else if (s === "cancelled") counts.cancelled += 1;
     else counts.expiredIncomplete += 1;
   }
   return {
@@ -814,6 +834,7 @@ export function registerGrantCertificationRoutes(app: FastifyInstance, db: Db): 
           status: campaignEffectiveStatus(c, undecided, now),
           storedStatus: c.status,
           completedAt: c.completedAt ? c.completedAt.toISOString() : null,
+          cancellation: cancellationView(c),
           createdAt: c.createdAt.toISOString(),
           items: { total: rows.reduce((a, r) => a + r.n, 0), keep: of("keep"), revoke: of("revoke"), undecided },
         };
@@ -857,6 +878,7 @@ export function registerGrantCertificationRoutes(app: FastifyInstance, db: Db): 
       status: campaignEffectiveStatus(campaign, undecided, now),
       storedStatus: campaign.status,
       completedAt: campaign.completedAt ? campaign.completedAt.toISOString() : null,
+      cancellation: cancellationView(campaign),
       createdAt: campaign.createdAt.toISOString(),
       notes: CERTIFICATION_NOTES,
       items: items.map((i) => ({
@@ -872,6 +894,100 @@ export function registerGrantCertificationRoutes(app: FastifyInstance, db: Db): 
         decidedAt: i.decidedAt ? i.decidedAt.toISOString() : null,
         revocation: i.revocationDetail ?? null,
       })),
+    };
+  });
+
+  /**
+   * ADR-0208 G9 — CANCEL an open campaign. Admin-only (the default gate), reason required, `settings_relax` step-up
+   * (it stops a review of standing access part-way). Only a campaign that reads `open` — a completed one is done and
+   * an expired-incomplete one keeps its posture fact (`campaign_not_open`). Every undecided item's queue row leaves the
+   * reviewers' pending queues (`superseded`, the status every other path uses to retire a pending approval); the
+   * item stays undecided and the grant stays unattested. Decisions already made, revocations included, stand.
+   */
+  app.post("/v1/certification-campaigns/:campaignId/cancel", async (req, reply) => {
+    const { campaignId } = campaignIdParam.parse(req.params);
+    const body = cancelCertificationCampaignSchema.parse(req.body);
+    const actor = req.authCtx.userId ?? null;
+    const notOpen = (status: string) =>
+      reply.status(409).send({ error: "campaign_not_open", status, detail: `only an open campaign can be cancelled; this one reads '${status}'` });
+    const readState = async (d: Db) => {
+      const [row] = await d
+        .select({ campaign: grantCertificationCampaigns, pastDue: sql<boolean>`${grantCertificationCampaigns.dueAt} < now()` })
+        .from(grantCertificationCampaigns)
+        .where(eq(grantCertificationCampaigns.id, campaignId));
+      if (!row) return null;
+      const [u] = await d
+        .select({ n: count() })
+        .from(grantCertificationItems)
+        .where(and(eq(grantCertificationItems.campaignId, campaignId), isNull(grantCertificationItems.decision)));
+      const undecided = u?.n ?? 0;
+      // the database clock decides "past due" here
+      const status: EffectiveCampaignStatus =
+        row.campaign.status !== "open" ? row.campaign.status : row.pastDue && undecided > 0 ? "expired-incomplete" : "open";
+      return { campaign: row.campaign, status };
+    };
+    const before = await readState(db);
+    if (!before) return reply.status(404).send({ error: "not_found" });
+    if (before.status !== "open") return notOpen(before.status);
+    const su = await requireStepUp(db, req, reply, {
+      kind: "settings_relax",
+      facts: { op: "certification_campaign_cancel", campaignId, name: before.campaign.name },
+    });
+    if (!su.ok) return reply;
+    const out = await db.transaction(async (tx) => {
+      const t = tx as unknown as Db;
+      await t.select({ id: grantCertificationCampaigns.id }).from(grantCertificationCampaigns).where(eq(grantCertificationCampaigns.id, campaignId)).for("update");
+      const now = await readState(t);
+      if (!now) return { kind: "changed" as const };
+      if (now.status !== "open") return { kind: "not_open" as const, status: now.status };
+      const items = await t
+        .select({ id: grantCertificationItems.id, decision: grantCertificationItems.decision, approvalId: grantCertificationItems.approvalId })
+        .from(grantCertificationItems)
+        .where(eq(grantCertificationItems.campaignId, campaignId));
+      const undecided = items.filter((i) => i.decision === null);
+      const pendingIds = undecided.map((i) => i.approvalId).filter((a): a is string => a !== null);
+      const withdrawn = pendingIds.length
+        ? await t
+            .update(approvals)
+            .set({ status: "superseded", decisionReason: `superseded: certification campaign '${now.campaign.name}' was cancelled` })
+            .where(and(inArray(approvals.id, pendingIds), eq(approvals.status, "pending")))
+            .returning({ id: approvals.id })
+        : [];
+      const [row] = await t
+        .update(grantCertificationCampaigns)
+        .set({ status: "cancelled", cancelledAt: sql`now()`, cancelledReason: body.reason, cancelledByUserId: actor })
+        .where(and(eq(grantCertificationCampaigns.id, campaignId), eq(grantCertificationCampaigns.status, "open")))
+        .returning();
+      const counts = {
+        items: items.length,
+        decided: items.length - undecided.length,
+        kept: items.filter((i) => i.decision === "keep").length,
+        revoked: items.filter((i) => i.decision === "revoke").length,
+        undecided: undecided.length,
+        withdrawn: withdrawn.length,
+      };
+      await t.insert(auditLog).values({
+        userId: actor ?? "00000000-0000-0000-0000-000000000000",
+        objectType: "certification_campaign",
+        objectId: campaignId,
+        detail: { phase: "cancel", name: now.campaign.name, reason: body.reason, ...counts, withdrawnApprovalIds: withdrawn.map((w) => w.id) },
+        effect: "allow",
+        ruleId: "certification-campaign-cancelled",
+        ruleChain: [],
+        reason:
+          `certification campaign '${now.campaign.name}' cancelled: ${body.reason} — ${counts.withdrawn} pending review(s) withdrawn ` +
+          `(those grants stay unattested); ${counts.decided} decision(s) already made stand`,
+      });
+      return { kind: "ok" as const, row: row!, counts };
+    });
+    if (out.kind === "changed") return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
+    if (out.kind === "not_open") return notOpen(out.status);
+    return {
+      cancelled: true,
+      id: out.row.id,
+      status: "cancelled" as const,
+      cancellation: cancellationView(out.row),
+      ...out.counts,
     };
   });
 
@@ -936,6 +1052,10 @@ export function registerGrantCertificationRoutes(app: FastifyInstance, db: Db): 
         error: "item_already_decided",
         detail: "this item is decided — a recorded attestation keeps its reviewer; reassignment moves pending reviews only",
       });
+    }
+    // ADR-0208 G9: a cancelled campaign has no pending review to move
+    if (campaign.status === "cancelled") {
+      return reply.status(409).send({ error: "campaign_not_open", status: "cancelled", detail: "this campaign was cancelled; its pending reviews were withdrawn" });
     }
     if (campaign.status === "open" && campaignPastDue(campaign, new Date())) {
       return reply.status(409).send({

@@ -109,9 +109,9 @@ test.describe("ADR-0169: the auto-hiding rail", () => {
     await expect(rail(page).getByLabel("Filter navigation")).toBeFocused();
     await expect(rail(page)).toHaveAttribute("data-expanded", "true");
     await expect.poll(() => mainX(page)).toBeGreaterThanOrEqual(240);
-    // every destination is reachable by Tab alone
+    // every destination is reachable by Tab alone (a bound on presses, not an exact position: the rail grows)
     let reached = false;
-    for (let i = 0; i < 20 && !reached; i += 1) {
+    for (let i = 0; i < 40 && !reached; i += 1) {
       await page.keyboard.press("Tab");
       reached = await rail(page).getByRole("link", { name: "Risks", exact: true }).evaluate((el) => el === document.activeElement);
     }
