@@ -1022,6 +1022,10 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // --- P0
   "GET /v1/org/settings/assurance-gate-mode": "internal",
   "PUT /v1/org/settings/assurance-gate-mode": "internal",
+  // --- ADR-0211 (P17)
+  "GET /v1/org/settings/risk-treatments": "internal",
+  "PUT /v1/org/settings/risk-treatments": "internal",
+  "POST /v1/risks/:riskId/treatment": "internal",
   // --- A2
   "POST /v1/use-cases/:useCaseId/conditions/:conditionId/evaluate": "internal",
   "POST /v1/use-cases/:useCaseId/conditions/:conditionId/waive": "internal",
@@ -1707,6 +1711,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "PATCH /v1/risks/:riskId": "risks",
   "POST /v1/risks/:riskId/transition": "risks",
   "POST /v1/risks/:riskId/accept": "risks",
+  "POST /v1/risks/:riskId/treatment": "risks",
   "PUT /v1/risks/:riskId/residual": "risks",
   "POST /v1/risks/:riskId/controls": "risks",
   "DELETE /v1/risks/:riskId/controls/:controlRef": "risks",
@@ -2086,6 +2091,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   // --- P0
   "GET /v1/org/settings/assurance-gate-mode": "org",
   "PUT /v1/org/settings/assurance-gate-mode": "org",
+  "GET /v1/org/settings/risk-treatments": "org",
+  "PUT /v1/org/settings/risk-treatments": "org",
   // --- A2
   "POST /v1/use-cases/:useCaseId/conditions/:conditionId/evaluate": "use-cases",
   "POST /v1/use-cases/:useCaseId/conditions/:conditionId/waive": "use-cases",

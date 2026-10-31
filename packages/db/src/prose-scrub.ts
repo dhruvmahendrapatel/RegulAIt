@@ -198,7 +198,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.aiVendors, ["retiredReason"]],
   // ADR-0208 G9 (migration 0225): a campaign's cancel reason
   [s.grantCertificationCampaigns, ["cancelledReason"]],
-  [s.aiRisks, ["acceptanceNote"]],
+  // ADR-0211: a treatment's evidence is typed prose (a contract or policy reference, a decision)
+  [s.aiRisks, ["acceptanceNote", "treatmentEvidence"]],
   // ADR-0157 / ADR-0159 — an alert acknowledgement is operator prose; a
   // remediation's rationale embeds risk and agent titles a person typed.
   [s.governanceAlerts, ["ackNote"]],

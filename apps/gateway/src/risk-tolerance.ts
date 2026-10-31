@@ -75,6 +75,7 @@ import {
   bandExceedsTolerance,
   createRiskAcceptanceSchema,
   effectiveRiskRating,
+  isTreatedRiskStatus,
   maxAcceptanceExpiry,
   maxAcceptanceMonths,
   putRiskTolerancesSchema,
@@ -217,7 +218,8 @@ export const residualPosition: ResidualPositionFn<Db> = async (db, useCaseId, no
   const risks = await db
     .select()
     .from(aiRisks)
-    .where(and(eq(aiRisks.useCaseId, useCaseId), ne(aiRisks.status, "closed")))
+    // ADR-0211: an avoided risk leaves the position as a closed one does; a transferred one stays
+    .where(and(eq(aiRisks.useCaseId, useCaseId), notInArray(aiRisks.status, ["closed", "avoided"])))
     .orderBy(asc(aiRisks.createdAt), asc(aiRisks.id));
   const tolerances = await loadToleranceRows(db);
   const live = await validAcceptances(db, risks.map((r) => r.id), now);
@@ -269,6 +271,14 @@ export async function recordRiskAcceptance(
   const band = residualBandOf(risk);
   if (risk.status === "closed" || band === null) {
     throw new RiskAcceptanceRefusal(409, { error: "risk_terminal", detail: "a closed risk has nothing left to accept" });
+  }
+  // ADR-0211: a transferred or avoided risk carries its own treatment record; accepting it would overwrite that
+  // record, so the risk is reopened (an audited transition) before anyone accepts it
+  if (isTreatedRiskStatus(risk.status)) {
+    throw new RiskAcceptanceRefusal(409, {
+      error: "risk_treated",
+      detail: `a ${risk.status} risk carries its own treatment record — reopen it before recording an acceptance`,
+    });
   }
   const maxExpiresAt = maxAcceptanceExpiry(band, now);
   const expiresAt = input.expiresAt ?? maxExpiresAt;
@@ -674,7 +684,7 @@ export async function residualRiskMonitorInput(
     })
     .from(aiRisks)
     .innerJoin(aiUseCases, eq(aiUseCases.id, aiRisks.useCaseId))
-    .where(and(ne(aiRisks.status, "closed"), notInArray(aiUseCases.status, ["rejected", "retired"])));
+    .where(and(notInArray(aiRisks.status, ["closed", "avoided"]), notInArray(aiUseCases.status, ["rejected", "retired"])));
   const tolerances = await loadToleranceRows(db);
   const live = await validAcceptances(db, rows.map((r) => r.risk.id), now);
   const { tierKeyFor } = await reviewPolicyModule();
@@ -882,8 +892,10 @@ export function registerRiskToleranceRoutes(app: FastifyInstance, db: Db): void 
         maxAcceptanceMonths: position.band ? maxAcceptanceMonths(position.band) : null,
         maxExpiresAt: position.band ? maxAcceptanceExpiry(position.band, now).toISOString() : null,
       },
-      canAccept: refusal === null && position.band !== null,
-      acceptRefusal: refusal?.body.error ?? (position.band === null ? "risk_terminal" : null),
+      canAccept: refusal === null && position.band !== null && !isTreatedRiskStatus(risk.status),
+      acceptRefusal:
+        refusal?.body.error ??
+        (position.band === null ? "risk_terminal" : isTreatedRiskStatus(risk.status) ? "risk_treated" : null),
       acceptances: rows.map((r) => ({
         id: r.id,
         state: stateOf(r, now),

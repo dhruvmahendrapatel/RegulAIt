@@ -1499,6 +1499,13 @@
       "when": 1785184000000,
       "tag": "0249_regulatory_feed_imports",
       "breakpoints": true
+    },
+    {
+      "idx": 250,
+      "version": "7",
+      "when": 1785185000000,
+      "tag": "0250_risk_transferred_avoided",
+      "breakpoints": true
     }
   ]
 }
