@@ -37,7 +37,7 @@ export async function useTestIssuerKey(db: Db): Promise<() => Promise<void>> {
   process.env[IDENTITY_SIGNING_KEY_ENV] = path.join(dir, "issuer.pem");
   const k0 = (await configuredIdentitySigningKeys())[0]!;
   const recorded = await db.select({ kid: identitySigningKeys.kid }).from(identitySigningKeys);
-  const [active] = await db.select().from(identitySigningKeys).where(sql`activated_at is not null and retired_at is null and revoked_at is null`);
+  const [active] = await db.select().from(identitySigningKeys).where(sql`algorithm = 'Ed25519' and activated_at is not null and retired_at is null and revoked_at is null`);
   if (recorded.length > 0 && active?.kid !== k0.kid) await rotateIdentitySigningKey(db, { kid: k0.kid, actorUserId: SYSTEM });
   return async () => {
     await db.execute(sql`update identity_signing_keys set retired_at = now() where kid = ${k0.kid} and activated_at is not null and retired_at is null and revoked_at is null`);
