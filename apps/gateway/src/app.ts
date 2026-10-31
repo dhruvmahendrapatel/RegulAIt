@@ -270,6 +270,16 @@ import {
 } from "./workbench.js";
 import { abacPrincipalFromRequest } from "./abac-principal.js";
 import { listLimitQuery } from "./list-limit.js";
+import {
+  filterParams,
+  parseListExport,
+  parseListPage,
+  runListPage,
+  sendListError,
+  sendListExport,
+  wantsListContract,
+} from "./list-contract.js";
+import { USERS_LIST, usersFilterQuery, usersReader, usersWhere } from "./users-list.js";
 import { evaluateIpEnvelope } from "./net-policy.js";
 import { activeDelegatorsFor, activeDelegationFrom } from "./delegations.js";
 
@@ -1464,8 +1474,33 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // a list endpoint, not only POST. disabledAt rides along (ADR-0022) so the
   // portal can grey deactivated accounts and offer Reactivate.
   // REL-10: bounded — `limit` (default LIST_DEFAULT_LIMIT, max LIST_MAX_LIMIT)
-  app.get("/v1/users", async (req) => ({
-    users: await db
+  //
+  // ADR-0226: with any of sort/dir/cursor/offset/count it answers the shared
+  // list contract (list-contract.ts) with server-side search and filters;
+  // with none of them, exactly the response above.
+  app.get("/v1/users/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const filters = usersFilterQuery.parse(filterParams(q));
+      const ex = parseListExport(USERS_LIST, q);
+      await sendListExport(db, req, reply, USERS_LIST, usersReader(db), usersWhere(filters), ex, filters);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+  app.get("/v1/users", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      try {
+        const q = req.query as Record<string, unknown>;
+        const filters = usersFilterQuery.parse(filterParams(q));
+        const page = parseListPage(USERS_LIST, q);
+        return await runListPage(db, USERS_LIST, usersReader(db), usersWhere(filters), page);
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
+    return { users: await db
       .select({
         id: users.id,
         email: users.email,
@@ -1485,7 +1520,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       .from(users)
       .orderBy(users.createdAt)
       .limit(listLimitQuery.parse(req.query).limit),
-  }));
+    };
+  });
 
   // --- ADR-0022 identity lifecycle (admin-only via the default gate) --------
   // Deactivate ≠ delete: nothing is removed, audit history and FKs survive;
