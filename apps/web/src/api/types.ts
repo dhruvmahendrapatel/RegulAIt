@@ -679,6 +679,34 @@ export interface UsageEventsResponse {
   };
 }
 
+/** `GET /v1/usage-events/summary` — spend aggregated by the server over a window, same scoping as the ledger */
+export interface UsageSummaryResponse {
+  groupBy: "agent" | "connector" | "mcp_tool" | "project" | "day";
+  userId: string | null;
+  /** the half-open window `[from, to)`; `defaulted` when the caller gave no `from` */
+  window: { from: string; to: string; defaulted: boolean };
+  groups: Array<{
+    agentId?: string | null;
+    connectorId?: string | null;
+    name?: string | null;
+    operation?: string | null;
+    toolName?: string | null;
+    projectId?: string | null;
+    /** `groupBy=day`: the UTC date, YYYY-MM-DD */
+    day?: string;
+    costUsd: number;
+    events: number;
+  }>;
+  totals: { events: number; costUsd: number };
+  /** the whole window across every object type; the typed breakdowns plus `other` add up to it */
+  ledger?: {
+    events: number;
+    costUsd: number;
+    byObjectType: Array<{ objectType: string; events: number; costUsd: number }>;
+    other: { events: number; costUsd: number };
+  };
+}
+
 export interface SetupStep {
   key: string;
   title: string;

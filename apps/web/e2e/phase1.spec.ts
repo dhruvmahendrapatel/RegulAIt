@@ -284,9 +284,9 @@ test("spend & savings: a non-admin sees their OWN spend and the optimizer's savi
   await expect(page.getByRole("link", { name: "Cost dashboard" })).toHaveCount(0);
 
   // the seeded dispatches + connector reads make every breakdown real
-  await expect(page.getByText("Spend by project", { exact: true })).toBeVisible();
-  await expect(page.getByText("Spend by agent", { exact: true })).toBeVisible();
-  await expect(page.getByText("Spend by connector", { exact: true })).toBeVisible();
+  await expect(page.getByText(/^Spend by project · /)).toBeVisible();
+  await expect(page.getByText(/^Spend by agent · /)).toBeVisible();
+  await expect(page.getByText(/^Spend by connector · /)).toBeVisible();
   await expect(page.getByRole("cell", { name: "Key used" })).toBeVisible();
   await expect(page.getByRole("img", { name: "Daily spend, last 14 days" })).toBeVisible();
   await shot(page, "13a-spend-overview");

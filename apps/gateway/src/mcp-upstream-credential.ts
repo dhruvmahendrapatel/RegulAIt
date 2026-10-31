@@ -45,6 +45,7 @@ import {
   setMcpUpstreamCredentialSchema,
   type McpUpstreamCredentialScheme,
   type McpUpstreamCredentialView,
+  IDENTITY_ASSERTION_BEARER_CONFLICT,
 } from "@regulait/shared";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { CHANGED_CONCURRENTLY, checkStepUp, type StepUpCheckArgs } from "./step-up.js";
@@ -265,6 +266,10 @@ async function underServerLock<T>(
   }
 }
 
+const BEARER_CONFLICT_DETAIL =
+  "this server sends its identity assertion as Authorization: Bearer (the oidc_bearer profile), so a Bearer credential " +
+  "would collide with it. Use the header scheme, or return the server to the regulait_header profile first";
+
 const isRefusal = (x: unknown): x is Refusal =>
   typeof x === "object" && x !== null && "status" in x && "body" in x && typeof (x as Refusal).status === "number";
 
@@ -288,7 +293,10 @@ export function registerMcpUpstreamCredentialRoutes(app: FastifyInstance, db: Db
       return reply.status(400).send({ error: "invalid_request", detail: "expected { scheme: 'bearer' | 'header', headerName?, secret, rotate? }" });
     }
     const body = parsed.data;
-    const [server] = await db.select({ id: mcpServers.id, name: mcpServers.name, url: mcpServers.url, transport: mcpServers.transport }).from(mcpServers).where(eq(mcpServers.id, serverId));
+    const [server] = await db
+      .select({ id: mcpServers.id, name: mcpServers.name, url: mcpServers.url, transport: mcpServers.transport, identityAssertionProfile: mcpServers.identityAssertionProfile })
+      .from(mcpServers)
+      .where(eq(mcpServers.id, serverId));
     if (!server) return reply.status(404).send({ error: "unknown_server" });
     const label = `MCP server '${server.name}'`;
     const refuse = async (status: number, error: string, code: string, detail: string, extra: Record<string, unknown> = {}) => {
@@ -309,6 +317,10 @@ export function registerMcpUpstreamCredentialRoutes(app: FastifyInstance, db: Db
       const problem = mcpUpstreamHeaderNameProblem(body.headerName ?? "");
       // the name is shape-checked before it is written to the trail
       if (problem) return refuse(400, "mcp_upstream_credential_refused", "header_refused", problem, { headerName: /^[a-z0-9-]{1,64}$/.test(headerName) ? headerName : null });
+    }
+    // ADR-0210: the server's OIDC-profile assertion already rides in Authorization: Bearer (re-checked under the lock)
+    if (body.scheme === "bearer" && server.identityAssertionProfile === "oidc_bearer") {
+      return refuse(409, IDENTITY_ASSERTION_BEARER_CONFLICT, "oidc_bearer_profile", BEARER_CONFLICT_DETAIL);
     }
     const secretProblem = mcpUpstreamSecretProblem(body.secret);
     if (secretProblem) return refuse(400, "mcp_upstream_credential_refused", "secret_refused", secretProblem, { scheme: body.scheme, headerName });
@@ -333,6 +345,11 @@ export function registerMcpUpstreamCredentialRoutes(app: FastifyInstance, db: Db
       setBy: req.authCtx.userId ?? null,
     };
     const out = await underServerLock(db, req, server, stepUp, async (t) => {
+      if (body.scheme === "bearer") {
+        // the row is locked: a concurrent PATCH turning the OIDC profile on is ordered against this write
+        const [now] = await t.select({ profile: mcpServers.identityAssertionProfile }).from(mcpServers).where(eq(mcpServers.id, serverId));
+        if (now?.profile === "oidc_bearer") return { status: 409, body: { error: IDENTITY_ASSERTION_BEARER_CONFLICT, code: "oidc_bearer_profile", detail: BEARER_CONFLICT_DETAIL } };
+      }
       let row: McpServerUpstreamCredentialRow | undefined;
       if (rotate) {
         [row] = await t.update(mcpServerUpstreamCredentials).set(values).where(eq(mcpServerUpstreamCredentials.serverId, serverId)).returning();

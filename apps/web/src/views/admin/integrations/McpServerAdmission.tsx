@@ -12,12 +12,19 @@
  * 2. `GET /v1/users/:userId/servers/:serverId/tools` — the tools a user would
  *    actually see in `tools/list` (entitlement-filtered discovery), as opposed
  *    to the grants the entitlement card lists.
+ *
+ * 3. #609 follow-up — "Sync tools now": `POST /v1/servers/:serverId/tools/sync`
+ *    fetches one server's manifest on demand, through the same admission,
+ *    release-age, egress, transport and scan gates as a proxied call, behind a
+ *    `settings_relax` step-up bound to the server. It sits in the server's own
+ *    tools card, beside the list it refreshes.
  */
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { ApiError, api } from "../../../api/client";
 import type { McpServer, McpTool } from "../../../api/adminTypes";
 import { Badge, Button, Card, EmptyState, Field, Select, Table } from "../../../ui/kit";
+import { RefusalNotice } from "../../../ui/RefusalNotice";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { ReasonModal, optionEls, serverOpts, useAction, useUsers, userOpts } from "../adminKit";
 import a from "../admin.module.css";
@@ -32,8 +39,77 @@ export function McpServerNextSteps() {
       <Link to="/admin/custom-providers" style={{ textDecoration: "underline" }}>egress allow-list</Link>; a new server
       waits out the release-age cooldown unless you allow it sooner on{" "}
       <Link to="/admin/admission" style={{ textDecoration: "underline" }}>Admission review</Link>; and nobody holds a
-      grant until you give one under Tool-level allow-list grants on the Servers tab. The first <code>tools/list</code> call syncs and scans its tools.
+      grant until you give one under Tool-level allow-list grants on the Servers tab. To load its tools, open the server in
+      the registry and choose <strong>Sync tools now</strong>: the manifest is fetched and scanned through the same gates.
     </p>
+  );
+}
+
+/** the sync route's own refusals, in words (pinned to mcp-tool-sync.ts by the test). The release-age cooldown is
+ * not here: it carries its own guidance (api/refusals.ts) with a link to Admission review. */
+export const TOOL_SYNC_REFUSALS: Readonly<Record<string, string>> = {
+  unknown_server: "That MCP server no longer exists. Refresh the list.",
+  mcp_admission_held: "The manifest scan holds this server, so nothing was synced. Review it on Admission review first.",
+  egress_blocked: "This server's address is not on the egress allow-list, so the gateway did not contact it. Nothing was synced.",
+  mcp_upstream_circuit_open: "This server failed several times in a row, so calls to it are paused for a short while. Try again shortly.",
+  mcp_upstream_unreachable: "The server could not be reached. Check that it is running and allowed by egress, then try again.",
+  mcp_upstream_timeout: "The server did not answer in time. Nothing was synced; try again later.",
+  rate_limited: "This server was synced several times in the last minute. Wait a minute and try again.",
+};
+
+export function toolSyncRefusal(e: unknown): string | null {
+  if (!(e instanceof ApiError)) return null;
+  const code = e.payload.error;
+  return typeof code === "string" && Object.hasOwn(TOOL_SYNC_REFUSALS, code) ? TOOL_SYNC_REFUSALS[code]! : null;
+}
+
+/** `POST /v1/servers/:serverId/tools/sync`'s answer */
+interface ToolSyncResult {
+  toolCount: number;
+  added: string[];
+}
+
+export function toolSyncSummary(serverName: string, r: ToolSyncResult): string {
+  const tools = r.toolCount === 1 ? "1 tool" : `${r.toolCount} tools`;
+  return r.added.length > 0 ? `Synced ${tools} from ${serverName} (${r.added.length} new)` : `Synced ${tools} from ${serverName}, no new tools`;
+}
+
+/** "Sync tools now" for one server: step-up, then the governed sync; the tools card re-reads when it lands */
+export function McpSyncToolsButton(props: { server: McpServer }) {
+  const act = useAction();
+  const s = props.server;
+  return (
+    <span className={v.row}>
+      <Button
+        size="sm"
+        // busy is aria-disabled plus a guard, so focus stays on the button
+        aria-disabled={act.busy}
+        aria-label={`Sync tools now on ${s.name}`}
+        onClick={() => {
+          if (act.busy) return;
+          void act.run(async () => {
+            try {
+              const r = await withStepUp((h) => stepUpApi.post<ToolSyncResult>(`/v1/servers/${s.id}/tools/sync`, {}, h));
+              return toolSyncSummary(s.name, r);
+            } catch (e) {
+              const text = toolSyncRefusal(e);
+              throw text ? new Error(text) : e;
+            }
+          });
+        }}
+      >
+        {act.busy ? "Syncing…" : "Sync tools now"}
+      </Button>
+      {act.guidance ? (
+        <RefusalNotice guidance={act.guidance} />
+      ) : (
+        act.error && (
+          <span className={v.errLine} role="alert">
+            {act.error}
+          </span>
+        )
+      )}
+    </span>
   );
 }
 

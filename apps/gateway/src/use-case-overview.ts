@@ -200,6 +200,8 @@ export function registerUseCaseOverviewRoutes(app: FastifyInstance, db: Db): voi
         acceptedByName: r.acceptedByUserId ? (acceptorName.get(r.acceptedByUserId) ?? null) : null,
         acceptedAt: r.acceptedAt,
         acceptanceRationale: r.status === "accepted" ? r.acceptanceNote : null,
+        // ADR-0211: the evidence behind a transferred or avoided risk
+        treatmentEvidence: r.status === "transferred" || r.status === "avoided" ? r.treatmentEvidence : null,
       })),
       summary: {
         risks: risks.length,

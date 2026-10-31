@@ -31,6 +31,8 @@ import {
   EXECUTOR_CHANNEL_ROUTES,
   FEDERATION_DISCOVERY_PATH,
   FEDERATION_JWKS_PATH,
+  MCP_IDENTITY_OIDC_DISCOVERY_PATH,
+  MCP_IDENTITY_OIDC_JWKS_PATH,
   IDENTITY_JWKS_PATH,
   OAUTH_INTROSPECTION_PATH,
   OAUTH_REVOCATION_PATH,
@@ -125,6 +127,11 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // and metadata only. Listed in NON_ADMIN_ROUTES too, so `public`.
   FEDERATION_DISCOVERY_PATH,
   FEDERATION_JWKS_PATH,
+  // ADR-0210 — the OIDC-profile MCP identity assertion issuer's discovery document and ES256 JWKS: public by definition
+  // (an upstream's OIDC validator fetches them, holding no RegulAIt credential). Public keys and metadata only. Listed
+  // in NON_ADMIN_ROUTES too, so `public`.
+  MCP_IDENTITY_OIDC_DISCOVERY_PATH,
+  MCP_IDENTITY_OIDC_JWKS_PATH,
   // ADR-0182 (D4) A13 — a PUBLIC SIGNED FEEDBACK LINK: the one D4 exemption.
   // People outside the organisation, who hold no RegulAIt credential, report a
   // problem or appeal a decision through a link a use-case owner minted. The
@@ -134,6 +141,15 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // rate-limited per token and address, and GET returns only the use case's
   // public name. Listed in NON_ADMIN_ROUTES too, so it is `public`.
   "/v1/feedback/l/:token",
+  // ADR-0225 (P13 d) — the PUBLIC trust centre and the auditor portal. Both answer 404 while
+  // `trust_pages_enabled` is off (the shipped default) and are rate-limited per address. The trust centre is
+  // read-only and serves only what an admin published. The auditor routes authenticate IN-ROUTE: a single-use
+  // link token (only its SHA-256 stored, at most 72 hours) opens a session cookie (HttpOnly, SameSite=Strict,
+  // Path=/v1/auditor, at most an hour); the reads are scoped to the grant's selected items and every view is
+  // audited. Listed in NON_ADMIN_ROUTES too, so they are `public`.
+  "/v1/trust-center",
+  "/v1/auditor/session",
+  "/v1/auditor/items/:slug",
   // ADR-0037 — SCIM is a SEPARATE TRUST PATH, and this exemption is what
   // makes that true rather than aspirational. These routes must never
   // authenticate via a human session cookie or a user's API key: they
@@ -171,6 +187,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // the Streamable HTTP GET probe answers 405 to any authenticated caller
   "GET /mcp/:serverId",
   "POST /v1/agents/:agentId/invoke",
+  // ADR-0219 (P10): any person may ASK; executeGovernedA2aCall decides on their own grant (default-deny)
+  "POST /v1/a2a/agents/:agentId/messages",
   // ADR-0168 amendment item 6 — agent stewardship. The gate is "an admin OR
   // this agent's CURRENT steward", checked inside the handler (403
   // not_agent_steward for anyone else): a steward who is not an admin must be
@@ -417,6 +435,9 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/traces/tags",
   "GET /v1/cost-events",
   "GET /v1/usage-events",
+  // the windowed by-agent / by-connector aggregate of the same ledger; the
+  // handler applies the identical self-scoping (userId forced to self)
+  "GET /v1/usage-events/summary",
   // ADR-0047: a team lead generating and reading THEIR OWN scorecard. Every
   // one of these applies `evaluateReportAccess` inside the handler, which
   // returns the exact project-id list the caller may query and refuses
@@ -601,6 +622,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/me",
   "GET /v1/model-providers/status",
   "GET /v1/runs",
+  // ADR-0226: the Excel export of the same list, under the same scope (a non-admin gets only their own runs)
+  "GET /v1/runs/export.xlsx",
   "GET /v1/workflows/instances",
   "GET /v1/projects",
   "GET /v1/users/directory",
@@ -666,6 +689,12 @@ export const NON_ADMIN_ROUTES = new Set([
   // POST /v1/risks/:riskId/accept.
   "GET /v1/risks/:riskId/acceptances",
   "POST /v1/risks/:riskId/acceptances",
+  //
+  // --- ADR-0211 (P17): transferred and avoided treatments ---------------------
+  // Recording a treatment is owner-or-admin INSIDE the handler, exactly like a
+  // transition, and only while the org switch is on. DELIBERATELY ABSENT, so
+  // ADMIN-ONLY: GET and PUT /v1/org/settings/risk-treatments (the switch).
+  "POST /v1/risks/:riskId/treatment",
 
   // ===== ADR-0182 (ADR-0175 batch D4) — accountability records ==============
   // Each slice's block below is APPEND-ONLY for that slice. Every route a
@@ -690,6 +719,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // aside (not-required, toll), containment (it halts an agent) and the signed
   // export.
   "GET /v1/incidents",
+  // ADR-0226: the register's Excel export, filtered to what the caller may see like the list
+  "GET /v1/incidents/export.xlsx",
   "POST /v1/incidents",
   "GET /v1/incidents/:incidentId",
   "PATCH /v1/incidents/:incidentId",
@@ -715,6 +746,15 @@ export const NON_ADMIN_ROUTES = new Set([
   "DELETE /v1/use-cases/:useCaseId/feedback-links/:linkId",
   "POST /v1/feedback/l/:token",
   "GET /v1/feedback/l/:token",
+  //
+  // --- ADR-0225 (P13 d): the public trust pages ---------------------------------
+  // Everything under /v1/trust/* (drafting, publishing, the heading, auditor grants) is DELIBERATELY ABSENT, so
+  // ADMIN-ONLY. These are the public reads and the auditor portal (also in AUTH_EXEMPT_ROUTES above).
+  "GET /v1/trust-center",
+  "POST /v1/auditor/session",
+  "GET /v1/auditor/session",
+  "DELETE /v1/auditor/session",
+  "GET /v1/auditor/items/:slug",
   //
   // --- A14: AI literacy and acceptable use ------------------------------------
   // A person lists what applies to them, acknowledges for THEMSELVES only (the
@@ -765,6 +805,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/engine-schedules",
   "GET /v1/engine-schedules",
   "PATCH /v1/engine-schedules/:scheduleId",
+  // ADR-0208 G9: soft delete by the schedule's owner or an admin, checked in-handler
+  "DELETE /v1/engine-schedules/:scheduleId",
   "POST /v1/model-artifacts",
   // B5-M: the caller's own uploads (an admin sees all), checked in-handler
   "GET /v1/model-artifacts",
@@ -778,6 +820,9 @@ export const NON_ADMIN_ROUTES = new Set([
   // ADR-0195 SD2b — the cloud federation issuer's public metadata (auth-exempt above too)
   `GET ${FEDERATION_DISCOVERY_PATH}`,
   `GET ${FEDERATION_JWKS_PATH}`,
+  // ADR-0210 — the OIDC-profile identity assertion issuer's public metadata (auth-exempt above too)
+  `GET ${MCP_IDENTITY_OIDC_DISCOVERY_PATH}`,
+  `GET ${MCP_IDENTITY_OIDC_JWKS_PATH}`,
   `POST ${OAUTH_TOKEN_PATH}`,
   `POST ${OAUTH_REVOCATION_PATH}`,
   `POST ${OAUTH_INTROSPECTION_PATH}`,

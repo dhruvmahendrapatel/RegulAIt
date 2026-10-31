@@ -45,6 +45,7 @@ import {
   and,
   asc,
   auditLog,
+  automationRules,
   count,
   desc,
   eq,
@@ -60,6 +61,7 @@ import {
   sql,
   userAgentPolicies,
   users,
+  workflowTemplates,
   type Db,
   type EvalCaseRow,
   type EvalDatasetRow,
@@ -116,6 +118,7 @@ import {
   type EvalScorerConfig,
   type EvalScorerKind,
   type JudgeBackedScorerKind,
+  retireEvalDatasetSchema,
 } from "@regulait/shared";
 import {
   agentProviderToken,
@@ -632,6 +635,10 @@ export async function runEvalSuite(
 ): Promise<EvalRunOutcome> {
   const [dataset] = await db.select().from(evalDatasets).where(eq(evalDatasets.id, opts.datasetId));
   if (!dataset) return { ok: false, status: 404, error: "unknown_dataset" };
+  // ADR-0208 G9: a retired dataset takes no new run — a manual run, a scheduled or config-change re-run, a red-team
+  // run on its materialized dataset, or a workflow quality gate (which then fails closed)
+  const retired = await evalDatasetRetirement(db, dataset.name);
+  if (retired) return { ok: false, status: 409, error: "eval_dataset_retired", detail: evalDatasetRetiredDetail(dataset.name) };
 
   const [agent] = await db.select().from(agents).where(eq(agents.id, opts.agentId));
   if (!agent) return { ok: false, status: 404, error: "unknown_agent" };
@@ -1748,8 +1755,102 @@ export async function datasetIsFrozen(db: Db, dataset: EvalDatasetRow): Promise<
 }
 
 // ---------------------------------------------------------------------------
+// ADR-0208 G9 — RETIRE A DATASET (by name: every version). Past runs and every version stay readable; nothing new
+// may use it. Read by name so a version minted concurrently with the retire is still caught.
+// ---------------------------------------------------------------------------
+
+/** the retirement stamp of a dataset NAME, or null while it is active */
+export async function evalDatasetRetirement(
+  db: Db,
+  name: string,
+): Promise<{ retiredAt: Date; retiredReason: string | null } | null> {
+  const [row] = await db
+    .select({ retiredAt: evalDatasets.retiredAt, retiredReason: evalDatasets.retiredReason })
+    .from(evalDatasets)
+    .where(and(eq(evalDatasets.name, name), sql`${evalDatasets.retiredAt} IS NOT NULL`))
+    .limit(1);
+  return row?.retiredAt ? { retiredAt: row.retiredAt, retiredReason: row.retiredReason } : null;
+}
+
+export function evalDatasetRetiredDetail(name: string): string {
+  return `eval dataset '${name}' is retired: no new run, version, case, quality gate or automation rule may use it (past runs and every version stay readable)`;
+}
+
+/** the 409 body every refusal of new use of a retired dataset sends */
+export function evalDatasetRetiredRefusal(name: string): { error: "eval_dataset_retired"; detail: string; dataset: string } {
+  return { error: "eval_dataset_retired", detail: evalDatasetRetiredDetail(name), dataset: name };
+}
+
+/** the eval dataset NAMES a workflow definition's quality gates bind (stage `evals[].dataset`) */
+export function evalDatasetNamesBoundBy(definition: { stages: ReadonlyArray<{ evals?: ReadonlyArray<{ dataset: string }> | undefined }> }): string[] {
+  return [...new Set(definition.stages.flatMap((st) => (st.evals ?? []).map((e) => e.dataset)))];
+}
+
+/** of `names`, the ones that are retired (one read) */
+export async function retiredEvalDatasetNames(db: Db, names: readonly string[]): Promise<string[]> {
+  if (names.length === 0) return [];
+  const rows = await db
+    .selectDistinct({ name: evalDatasets.name })
+    .from(evalDatasets)
+    .where(and(inArray(evalDatasets.name, [...names]), sql`${evalDatasets.retiredAt} IS NOT NULL`));
+  return rows.map((r) => r.name).sort();
+}
+
+/**
+ * What still uses a dataset name: the ACTIVE workflow templates whose quality gates bind it (by name), and the
+ * automation rules whose `dataset` action names any version of it. A retired template starts no new instance, so it
+ * does not hold the dataset; a paused rule does (it can be resumed).
+ */
+export async function evalDatasetUsage(db: Db, name: string, versionIds: readonly string[]): Promise<{ templates: string[]; automationRules: number }> {
+  const templates = await db
+    .select({ name: workflowTemplates.name })
+    .from(workflowTemplates)
+    .where(
+      and(
+        isNull(workflowTemplates.retiredAt),
+        sql`EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(CASE WHEN jsonb_typeof(${workflowTemplates.definition} -> 'stages') = 'array'
+                                         THEN ${workflowTemplates.definition} -> 'stages' ELSE '[]'::jsonb END) AS st(stage),
+               jsonb_array_elements(CASE WHEN jsonb_typeof(st.stage -> 'evals') = 'array'
+                                         THEN st.stage -> 'evals' ELSE '[]'::jsonb END) AS ev(binding)
+          WHERE ev.binding ->> 'dataset' = ${name}
+        )`,
+      ),
+    )
+    .orderBy(asc(workflowTemplates.name));
+  let rules = 0;
+  if (versionIds.length > 0) {
+    const [row] = await db
+      .select({ n: count() })
+      .from(automationRules)
+      .where(
+        sql`EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(CASE WHEN jsonb_typeof(${automationRules.actions}) = 'array'
+                                         THEN ${automationRules.actions} ELSE '[]'::jsonb END) AS a(action)
+          WHERE a.action ->> 'type' = 'dataset'
+            AND a.action ->> 'datasetId' IN (${sql.join(versionIds.map((v) => sql`${v}`), sql`, `)})
+        )`,
+      );
+    rules = row?.n ?? 0;
+  }
+  return { templates: [...new Set(templates.map((t) => t.name))], automationRules: rules };
+}
+
+// ---------------------------------------------------------------------------
 // ADR-0044 §5 — THE DRIFT SWEEP
 // ---------------------------------------------------------------------------
+
+/** the `note` GET /v1/evals/scorers serves; the Evals page shows it verbatim */
+export const EVAL_SCORERS_NOTE =
+  "Ten of the thirteen scorers are pure functions — same output, same score, no cost, no variance. " +
+  "Three (llm_as_judge, groundedness_judge, answer_relevance_judge) are governed model calls: they " +
+  "cost tokens, they vary run to run, and the judge is itself an agent that can regress. Build a " +
+  "BLOCKING gate on the deterministic ones and treat a judge as corroboration. A run that uses a " +
+  "model-backed scorer is refused when no judge agent is named — " +
+  "these metrics never silently degrade to the lexical estimate under the judged name, because a " +
+  "hallucination rate that was estimated must never be reported as measured.";
 
 export const EVAL_DRIFT_SWEEP_NOTE =
   "The sweep re-runs every PINNED BASELINE pair (dataset version × agent) as the user who pinned it — " +
@@ -2057,14 +2158,7 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
         "written — the deterministic (lexical) metrics never route externally, and nothing ever " +
         "silently substitutes one method for another.",
     },
-    note:
-      "Ten of the thirteen scorers are pure functions — same output, same score, no cost, no variance. " +
-      "Three (llm_as_judge, groundedness_judge, answer_relevance_judge) are governed model calls: they " +
-      "cost tokens, they vary run to run, and the judge is itself an agent that can regress. Build a " +
-      "BLOCKING gate on the deterministic ones and treat a judge as corroboration. ADR-0067: a run whose " +
-      "cases use a model-backed scorer is REFUSED with 422 when no dispatchable judge agent is named — " +
-      "these metrics never silently degrade to the lexical estimate under the judged name, because a " +
-      "hallucination rate that was estimated must never be reported as measured.",
+    note: EVAL_SCORERS_NOTE,
     groundedness: {
       deterministic: ["claim_support", "context_precision", "context_recall", "answer_relevance"],
       modelBacked: ["groundedness_judge", "answer_relevance_judge"],
@@ -2090,6 +2184,7 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
       .groupBy(evalRuns.datasetId);
     const caseMap = new Map(counts.map((c) => [c.datasetId, c.n]));
     const runMap = new Map(runCounts.map((c) => [c.datasetId, c.n]));
+    const retiredNames = new Set(rows.filter((d) => d.retiredAt !== null).map((d) => d.name));
     return {
       datasets: rows.map((d) => {
         // ADR-0187 decision 187: a built-in dataset is read-only and says what it is
@@ -2098,6 +2193,9 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
           ...d,
           caseCount: caseMap.get(d.id) ?? 0,
           runCount: runMap.get(d.id) ?? 0,
+          // ADR-0208 G9: retirement is by name, so a name with any retired version reads retired
+          status: retiredNames.has(d.name) ? ("retired" as const) : ("active" as const),
+          builtIn: isBuiltinEvalDataset(d),
           frozen: (runMap.get(d.id) ?? 0) > 0 || isBuiltinEvalDataset(d),
           builtin: isBuiltinEvalDataset(d)
             ? { key: spec?.key ?? null, sensitivity: spec?.sensitivity ?? "offensive", current: spec?.version === d.version, measures: spec?.measures ?? null }
@@ -2150,7 +2248,16 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
       .from(evalDatasets)
       .where(eq(evalDatasets.name, dataset.name))
       .orderBy(desc(evalDatasets.version));
-    return { dataset, cases, versions, frozen: await datasetIsFrozen(db, dataset) };
+    const retirement = await evalDatasetRetirement(db, dataset.name);
+    return {
+      dataset,
+      cases,
+      versions,
+      frozen: await datasetIsFrozen(db, dataset),
+      // ADR-0208 G9: by name, so every version reads the same
+      status: retirement ? ("retired" as const) : ("active" as const),
+      builtIn: isBuiltinEvalDataset(dataset),
+    };
   });
 
   app.post("/v1/evals/datasets/:id/cases", async (req, reply) => {
@@ -2158,6 +2265,7 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
     const body = createEvalCaseSchema.parse(req.body);
     const [dataset] = await db.select().from(evalDatasets).where(eq(evalDatasets.id, id));
     if (!dataset) return reply.status(404).send({ error: "unknown_dataset" });
+    if (await evalDatasetRetirement(db, dataset.name)) return reply.status(409).send(evalDatasetRetiredRefusal(dataset.name));
     if (await datasetIsFrozen(db, dataset)) {
       return reply.status(409).send({
         error: "dataset_version_frozen",
@@ -2196,6 +2304,8 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
     const { id, caseId } = caseParam.parse(req.params);
     const [dataset] = await db.select().from(evalDatasets).where(eq(evalDatasets.id, id));
     if (!dataset) return reply.status(404).send({ error: "unknown_dataset" });
+    // ADR-0208 G9: a retired dataset is read-only
+    if (await evalDatasetRetirement(db, dataset.name)) return reply.status(409).send(evalDatasetRetiredRefusal(dataset.name));
     if (await datasetIsFrozen(db, dataset)) {
       return reply.status(409).send({ error: "dataset_version_frozen" });
     }
@@ -2218,6 +2328,8 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
         detail: `${dataset.name} is pinned vendored content; a new version comes only with a new upstream pin`,
       });
     }
+    // ADR-0208 G9: a retired dataset mints no new version
+    if (await evalDatasetRetirement(db, dataset.name)) return reply.status(409).send(evalDatasetRetiredRefusal(dataset.name));
     const body = z.object({ note: z.string().max(2000).optional() }).parse(req.body ?? {});
     const [maxRow] = await db
       .select({ max: sql<number>`coalesce(max(${evalDatasets.version}), 0)::int` })
@@ -2262,6 +2374,69 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
       );
     }
     return reply.status(201).send({ dataset: next, copiedCases: cases.length });
+  });
+
+  /**
+   * ADR-0208 G9 — RETIRE a dataset, by NAME (every version). Admin-only (the default gate), reason required, no
+   * step-up: blocking new use only tightens. Refused for a built-in dataset and while an active workflow template's
+   * quality gate or an automation rule still uses it (the person removes those first). Past runs and every version
+   * stay readable; the row stamp and the audit row commit together.
+   */
+  app.post("/v1/evals/datasets/:id/retire", async (req, reply) => {
+    const { id } = idParam.parse(req.params);
+    const body = retireEvalDatasetSchema.parse(req.body);
+    const actor = req.authCtx.userId ?? null;
+    const out = await db.transaction(async (tx) => {
+      const t = tx as unknown as Db;
+      const [dataset] = await t.select().from(evalDatasets).where(eq(evalDatasets.id, id));
+      if (!dataset) return { status: 404, body: { error: "unknown_dataset" } as Record<string, unknown> };
+      if (isBuiltinEvalDataset(dataset)) {
+        return {
+          status: 409,
+          body: { error: "eval_dataset_builtin", detail: `${dataset.name} is shipped, pinned content and cannot be retired` },
+        };
+      }
+      // every version of the name, locked: a template or rule written meanwhile waits for this decision
+      const versions = await t.select().from(evalDatasets).where(eq(evalDatasets.name, dataset.name)).for("update");
+      if (versions.some((v) => v.retiredAt !== null)) {
+        return { status: 409, body: { error: "eval_dataset_already_retired", dataset: dataset.name } };
+      }
+      const usage = await evalDatasetUsage(t, dataset.name, versions.map((v) => v.id));
+      if (usage.templates.length > 0 || usage.automationRules > 0) {
+        return {
+          status: 409,
+          body: {
+            error: "eval_dataset_in_use",
+            detail: `'${dataset.name}' is still used by ${usage.templates.length} workflow template quality gate(s) and ${usage.automationRules} automation rule(s); remove it from those first`,
+            dataset: dataset.name,
+            templates: usage.templates,
+            automationRules: usage.automationRules,
+          },
+        };
+      }
+      const rows = await t
+        .update(evalDatasets)
+        .set({ retiredAt: sql`now()`, retiredReason: body.reason, retiredByUserId: actor })
+        .where(eq(evalDatasets.name, dataset.name))
+        .returning();
+      await t.insert(auditLog).values({
+        userId: actor ?? NIL_UUID,
+        objectType: "eval_run",
+        objectId: dataset.id,
+        detail: {
+          phase: "eval-dataset-retired",
+          datasetName: dataset.name,
+          versions: rows.map((r) => ({ id: r.id, version: r.version })).sort((a, b) => a.version - b.version),
+          reason: body.reason,
+        },
+        effect: "allow",
+        ruleId: "eval-dataset-retired",
+        ruleChain: [],
+        reason: `eval dataset '${dataset.name}' retired (all ${rows.length} version(s)): ${body.reason}`,
+      });
+      return { status: 200, body: { retired: true, dataset: dataset.name, versions: rows.length, retiredAt: rows[0]?.retiredAt ?? null } as Record<string, unknown> };
+    });
+    return reply.status(out.status).send(out.body);
   });
 
   /**

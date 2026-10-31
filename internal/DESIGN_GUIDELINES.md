@@ -134,6 +134,7 @@ helpers and formatters live next to it.
 | `ErrorState` | A failed read, `role="alert"` with Retry | [kit.tsx](../apps/web/src/ui/kit.tsx) |
 | `RecordError` | A missing, refused or failed record | kit.tsx |
 | `Table` | Every table; pass `error` and `onRetry` | kit.tsx |
+| `DataList` | A list that grows: page size, server sort, column picker, Refresh, Excel download (ADR-0226) | [DataList.tsx](../apps/web/src/ui/DataList.tsx) (lazy, loaded with the pages that use it) |
 | `FoldTable` | A table wider than its container | [fold.tsx](../apps/web/src/ui/fold.tsx) (lazy, kept out of the entry bundle) |
 | `RowActions` | Fixed primary/secondary/rest slots per row | kit.tsx |
 | `Badge` with `info` | A status with an explanation, via an `InfoButton` | kit.tsx |
@@ -173,8 +174,8 @@ follow-ups, [session record](memory/sessions/2026-10-24-session-02.md).*
 
 ## Performance
 
-- Stay inside the bundle ceilings in [.size-limit.json](../apps/web/.size-limit.json) (gzip): entry JS 137.7 kB, entry
-  CSS 10.7 kB, lazy `SeriesLineChart` 109 kB, lazy `RunGraphCanvas` 78 kB, all JS 1,040 kB. Raise a ceiling only through
+- Stay inside the bundle ceilings in [.size-limit.json](../apps/web/.size-limit.json) (gzip): entry JS 138.5 kB, entry
+  CSS 10.7 kB, lazy `SeriesLineChart` 109 kB, lazy `RunGraphCanvas` 78 kB, all JS 1,057 kB. Raise a ceiling only through
   an ADR-recorded exception. *ADR-0196. Enforced in [ui-enterprise.yml](../.github/workflows/ui-enterprise.yml).*
 - During freeze week (2026-10-29 to 11-03), raise entry JS plus CSS by at most 1 kB in total, and only for a
   demo blocker recorded in the PR body and in an ADR note. *ADR-0198.*
