@@ -70,3 +70,11 @@ UTC), so whatever they take on starts under the freeze.
   different-vendor reviewer reduces the shared-blind-spot risk ADR-0191 named.
 - **History is kept.** `AgentCoordination.md`, `codexInputs.md` and `geminiInputs.md` stay as records. New findings go
   to the new board's inboxes and to dated files under `internal/reviews/`.
+
+## Addendum (2026-10-31) — Gemini is not used
+
+Later the same day the owner said: "No Gemini, let's only use codex." Decision 2 is withdrawn: Gemini has no role on
+the project. Codex alone joins the Claude sessions, as builder and reviewer under decision 1, and also takes the
+markdown audits that decision 2 gave Gemini, recorded under `internal/reviews/`. The root `GEMINI.md` pointer is
+removed, and the board (`internal/process/AGENT_COORDINATION.md`) lists Claude and Codex only. Everything else in this
+ADR stands.
