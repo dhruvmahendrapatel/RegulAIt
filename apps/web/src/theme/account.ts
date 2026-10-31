@@ -5,7 +5,7 @@
  * the account's palette before the first request.
  */
 import { api } from "../api/client";
-import type { AccountAppearance } from "../api/types";
+import type { AccountAppearance, AuthMeResponse } from "../api/types";
 import { ACCESSIBILITY_PALETTE, currentPalette, isPalette, setPalette, type PaletteId } from "./palette";
 import { setThemeMode, type ThemeMode } from "./mode";
 
@@ -64,6 +64,16 @@ function carryBrowserChoice(a: AccountAppearance): { palette?: PaletteId; mode?:
 /** signed out: nothing is saved anywhere but this browser until the next sign-in */
 export function forgetAccountAppearance(): void {
   toAccount = false;
+}
+
+/**
+ * The session's sync (SessionContext, on every change of `/auth/me`): adopt the account's appearance, or, signed out,
+ * forget it. While a must-change-password or MFA-enrolment gate is open the gateway refuses every other write, saves
+ * included, so nothing is saved until it is passed.
+ */
+export function syncAccountAppearance(auth: AuthMeResponse | null | undefined): void {
+  if (!auth?.appearance) return forgetAccountAppearance();
+  adoptAccountAppearance(auth.appearance, { canSave: !(auth.mustChangePassword || auth.mfaSetupRequired) });
 }
 
 /** save to the account; resolves to what the account now says (null from a gateway that does not report it) */

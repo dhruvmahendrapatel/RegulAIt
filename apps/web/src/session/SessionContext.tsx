@@ -142,20 +142,12 @@ export function SessionProvider(props: { children: ReactNode }) {
     return () => setUnauthorizedHandler(null);
   }, [refresh, forgetSession]);
 
-  // ADR-0218: repaint in the account's palette and mode (the organisation's lock applied); loaded on demand
-  const appearance = auth?.appearance;
-  // while a must-change-password or MFA-enrolment gate is open the gateway refuses every other write, saves included
-  const gated = Boolean(auth?.mustChangePassword || auth?.mfaSetupRequired);
-  const accountTheme = useRef<typeof import("../theme/account") | null>(null);
+  // ADR-0218: repaint in the account's palette and mode (theme/account.ts, loaded on demand once there is an account)
+  const synced = useRef(false);
   useEffect(() => {
-    if (!appearance) return accountTheme.current?.forgetAccountAppearance();
-    void import("../theme/account")
-      .then((m) => {
-        accountTheme.current = m;
-        m.adoptAccountAppearance(appearance, { canSave: !gated });
-      })
-      .catch(() => undefined);
-  }, [appearance, gated]);
+    if ((synced.current ||= Boolean(auth?.appearance)))
+      void import("../theme/account").then((m) => m.syncAccountAppearance(auth)).catch(() => undefined);
+  }, [auth]);
 
   const value = useMemo(
     () => ({ auth, me, refresh, signOut, applyAuth }),
