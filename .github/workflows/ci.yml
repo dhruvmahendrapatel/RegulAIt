@@ -282,6 +282,16 @@ jobs:
       - name: Pre-flight — every gateway route has UI or a reason (route census)
         if: ${{ !cancelled() && (steps.affordances.outcome == 'success' || steps.affordances.outcome == 'failure') }}
         run: node scripts/preflight-ui-route-census.mjs
+      # CONTRIBUTING_PARALLEL_SESSIONS §4.1: a migration added below the base branch's newest `when`
+      # never applies on a database that already ran the base branch (fresh CI databases hide it).
+      - name: Pre-flight — every new migration sits above main's migration watermark
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+          node scripts/migration-watermark-guard.mjs "origin/$BASE_REF"
 
       # internal/process/AgentCoordination.md stays a CURRENT-STATE file: one Live-status row per
       # agent, one Status line per task, inboxes acked within 12h, a line

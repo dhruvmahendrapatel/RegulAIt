@@ -205,6 +205,11 @@ function Loaded(props: { settings: Record<string, unknown> }) {
     recommendationJudgeAgentId: str(s, "recommendationJudgeAgentId"),
   });
 
+  // --- 5d. Framework content and feed imports (ADR-0215) --------------------
+  const frameworkImports = useSection({
+    frameworkImportsEnabled: str(s, "frameworkImportsEnabled") || "false",
+  });
+
   // --- 7. Network access (ADR-0039) ----------------------------------------
   // Not a useSection form: the save needs the confirm-on-lockout retry flow
   // (a 409 ip_policy_lockout opens an explicit confirm modal, and only a
@@ -838,6 +843,41 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               placeholder="registry agent uuid (blank = judged: unavailable)"
               onChange={(e) => recJudge.set("recommendationJudgeAgentId", e.target.value)}
             />
+          </Field>
+        </SectionShell>
+      </Card>
+
+      <Card title="5d · Framework imports">
+        <SectionShell
+          title="Import published framework content and regulatory notices"
+          busy={frameworkImports.act.busy}
+          error={frameworkImports.act.error}
+          submitLabel="Save framework-import setting"
+          onSubmit={() =>
+            void frameworkImports.act.run(
+              () => put({ frameworkImportsEnabled: asBool(frameworkImports.f.frameworkImportsEnabled!) }),
+              "Framework-import setting saved (audited)",
+            )
+          }
+          help={
+            <>
+              <p>OFF (default) means compliance pack control text is only what admins write, and the regulatory feed is the hand-checked entries only. ON lets an admin review published framework content and regulatory notices that ship with RegulAIt (nothing is downloaded) and accept them: a framework becomes a new draft pack version, and accepted notices join the regulatory feed. Turning it on asks you to confirm your identity again.</p>
+            </>
+          }
+          details={
+            <>
+              <p>Every proposal shows its changes before anything is written. An import never overwrites control text an admin changed unless the admin chooses to for that control, never changes how a control is evidenced, and never activates a pack. Each proposal, acceptance and rejection is recorded in the audit log.</p>
+            </>
+          }
+        >
+          <Field label="Framework imports">
+            <Select
+              value={frameworkImports.f.frameworkImportsEnabled}
+              onChange={(e) => frameworkImports.set("frameworkImportsEnabled", e.target.value)}
+            >
+              <option value="false">off — admin-written control text only (default)</option>
+              <option value="true">on — allow reviewed imports</option>
+            </Select>
           </Field>
         </SectionShell>
       </Card>
