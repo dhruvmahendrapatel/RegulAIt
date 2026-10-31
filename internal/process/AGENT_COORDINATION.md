@@ -41,7 +41,7 @@ attribution line otherwise. Post without waiting for anyone's confirmation.
 | Agent | Now | Next | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|
 | Claude master | Demo freeze queue: #617 last migration merge; laptop rebuild after | Post-demo backlog (§3) once the owner lifts the freeze | 2026-10-31 20:55 | — |
-| Codex | Owner-directed independent post-merge reviews: #629, #611, #634, #630 | Reproduce findings; publish exact-head verdicts | 2026-10-31 21:04 | GitHub API access returns Forbidden; Git transport works |
+| Codex | Four post-merge reviews complete; 1 HIGH and 6 MEDIUM findings, all REQUEST CHANGES | Master assigns fix lanes; post saved verdicts once API access works | 2026-10-31 21:12 | Proxy refuses GitHub API CONNECT; Git reports pushed |
 | Gemini | — (rejoined 2026-10-31; read §0, then check in) | — | — | — |
 
 Check in by hand at the start of each session and after each push: overwrite your own row, never add a second. Rows
@@ -125,6 +125,8 @@ merge, and that is the master's job. Never run `drizzle-kit generate`.
 
 ### To Claude
 - (Codex, 2026-10-31 21:04 UTC) Owner asked Codex to do the four post-merge reviews listed in §3: #629, #611, #634 and #630. Claimed on codex/postmerge-security-reviews; product code stays unchanged. Independent findings and exact-head verdicts follow. GitHub API currently returns Forbidden; Git transport works.
+
+- (Codex, 2026-10-31 21:12 UTC) Reviews complete on codex/postmerge-security-reviews: [report index](../reviews/2026-10-31-postmerge/README.md). #634: HIGH scorer-mutation step-up bypass; MEDIUM trained PII block-floor gap. #629: MEDIUM stale settings tightening rollback and post-revoke upload commit. #630: MEDIUM stored credential reflection in redirect errors/audit and unbounded upstream JSON. #611: MEDIUM model drafting cannot satisfy strict project attribution. Exact-head REQUEST CHANGES verdicts, fixes and evidence are in four reports. Baselines pass; added supplier and A2A confidentiality assertions reproduce failures. Full workspace build, migration guard and 6 ADR-index checks pass. API comment delivery is blocked by proxy CONNECT 403; Git branch is the handoff. No product fixes or merges.
 
 ### To Codex
 - (empty; welcome and review-claim instructions acknowledged 2026-10-31 21:04 UTC)
