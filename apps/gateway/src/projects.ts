@@ -79,6 +79,8 @@ import { applyRuleEdit, isRuleEditRefusal } from "./rule-writes.js";
 import { settingTransitions } from "./setting-transitions.js";
 import { isApprovalTeam } from "./approval-pool.js";
 import { approvalRuleStepUp, requireStepUp } from "./step-up.js";
+import { wantsListContract } from "./list-contract.js";
+import { TEAMS_LIST, answerListExport, answerListPage, teamsFilterQuery, teamsReader, teamsWhere } from "./identity-lists.js";
 import {
   carriersForTags,
   profileVersionFacts,
@@ -1435,7 +1437,13 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
   // Purely additive enrichment (same discipline as the approvals list): each
   // team carries its members with names, so the /admin Teams table can show
   // who is on a team without a second endpoint or the raw user-id table.
-  app.get("/v1/teams", async () => {
+  // ADR-0226: with any of sort/dir/cursor/offset/count, the shared list contract (a name search, a member count
+  // sort, and each team's members on the page); with none of them, exactly the response below.
+  app.get("/v1/teams/export.xlsx", async (req, reply) =>
+    answerListExport(db, req, reply, TEAMS_LIST, teamsReader(db), teamsFilterQuery, teamsWhere),
+  );
+  app.get("/v1/teams", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, TEAMS_LIST, teamsReader(db), teamsFilterQuery, teamsWhere);
     const [rows, memberRows] = await Promise.all([
       db.select().from(teams),
       db

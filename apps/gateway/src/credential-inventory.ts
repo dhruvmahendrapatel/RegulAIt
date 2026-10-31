@@ -71,6 +71,15 @@ import {
   type CredentialType,
 } from "@regulait/shared";
 import { loadOrgSettings } from "./org-settings.js";
+import {
+  filterParams,
+  parseListExport,
+  parseListPage,
+  runMemoryListPage,
+  sendListError,
+  sendMemoryListExport,
+  type MemoryListSpec,
+} from "./list-contract.js";
 
 /** how far back the ledger is read for a credential's linked projects/agents */
 export const CREDENTIAL_LINK_WINDOW_DAYS = 90;
@@ -864,13 +873,94 @@ const listQuery = z
   })
   .strict();
 
+/**
+ * ADR-0226: the inventory under the shared list contract. It is computed in the gateway from several stores (its
+ * flags are derived in code), so it is sorted and paged in memory: the same params, response and audited export as
+ * every other list. Never a secret value: no column is one, as the inventory holds none.
+ */
+export const CREDENTIALS_LIST: MemoryListSpec<InventoryRow> = {
+  id: "credentials",
+  sorts: {
+    name: { value: (r) => r.name.toLowerCase() },
+    type: { value: (r) => r.typeLabel.toLowerCase() },
+    owner: { value: (r) => (r.ownerUserId ? (r.ownerName ?? r.ownerUserId).toLowerCase() : null) },
+    scope: { value: (r) => r.scope.toLowerCase() },
+    created: { value: (r) => r.createdAt },
+    used: { value: (r) => (r.lastUsedSignal === "none" ? null : r.lastUsedAt) },
+    expires: { value: (r) => (r.expirySignal === "not_tracked" ? null : r.expiresAt) },
+    rotation: { value: (r) => r.ageSinceRotationDays },
+    flags: { value: (r) => r.flags.length },
+    status: { value: (r) => r.status },
+  },
+  columns: {
+    name: { label: "Credential", value: (r) => r.name },
+    type: { label: "Type", value: (r) => r.typeLabel },
+    status: { label: "Status", value: (r) => r.status },
+    owner: { label: "Owner / creator", value: (r) => (r.ownerUserId ? `${r.ownerName ?? r.ownerUserId}${r.ownerKind === "creator" ? " (creator)" : ""}${r.ownerDisabled ? " · deactivated" : ""}` : "integration (no person)") },
+    scope: { label: "Scope", value: (r) => r.scope },
+    created: { label: "Created", value: (r) => toDate(r.createdAt) },
+    used: { label: "Last used", value: (r) => (r.lastUsedSignal === "none" ? "not recorded" : (toDate(r.lastUsedAt) ?? "never")) },
+    expires: { label: "Expires", value: (r) => (r.expirySignal === "not_tracked" ? "not tracked" : (toDate(r.expiresAt) ?? "never")) },
+    rotation: { label: "Since last set (days)", value: (r) => r.ageSinceRotationDays },
+    links: { label: "Linked", value: (r) => [...r.linkedAgents.map((a) => a.name), ...r.linkedProjects.map((x) => `project ${x.name}`)].join(", ") || null },
+    flags: { label: "Flags", value: (r) => r.flags.map((f) => CREDENTIAL_FLAG_LABELS[f] ?? f).join(", ") || "none" },
+  },
+  filters: ["type", "flag", "includeRevoked"],
+  defaultSort: { col: "flags", dir: "desc" },
+  idOf: (r) => r.id,
+};
+
+function toDate(v: Date | string | null | undefined): Date | null {
+  if (v === null || v === undefined) return null;
+  return v instanceof Date ? v : new Date(v);
+}
+
+const contractFilters = listQuery.pick({ type: true, flag: true, includeRevoked: true }).strict();
+
+/** the legacy route pages by `limit` and `offset`; only sort, dir, cursor or count switch it to the contract */
+const wantsCredentialContract = (q: unknown) =>
+  !!q && typeof q === "object" && ["sort", "dir", "cursor", "count"].some((k) => (q as Record<string, unknown>)[k] !== undefined);
+
+async function filteredInventory(db: Db, f: z.infer<typeof contractFilters>) {
+  const inv = await computeCredentialInventory(db, { includeRevoked: f.includeRevoked === "true" });
+  const matched = inv.credentials.filter(
+    (c) => (!f.type || c.type === f.type) && (!f.flag || (f.flag === "none" ? c.flags.length === 0 : c.flags.includes(f.flag))),
+  );
+  return { inv, matched };
+}
+
 export function registerCredentialInventoryRoutes(app: FastifyInstance, db: Db): void {
+  app.get("/v1/admin/credentials/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const f = contractFilters.parse(filterParams(q));
+      const ex = parseListExport(CREDENTIALS_LIST, q);
+      const { matched } = await filteredInventory(db, f);
+      await sendMemoryListExport(db, req, reply, CREDENTIALS_LIST, matched, ex, f);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
   /**
    * Filtered, then paged (ADR-0175 review fix): `counts`, `types` and the
    * flag counts describe the whole inventory; `credentials` is one page of
    * the filtered list, and `page.total` is how many the filter matched.
    */
-  app.get("/v1/admin/credentials", async (req) => {
+  app.get("/v1/admin/credentials", async (req, reply) => {
+    // ADR-0226: the shared list contract, with the inventory's summary (counts, types, flag labels) beside the page
+    if (wantsCredentialContract(req.query)) {
+      try {
+        const raw = req.query as Record<string, unknown>;
+        const f = contractFilters.parse(filterParams(raw));
+        const page = parseListPage(CREDENTIALS_LIST, raw);
+        const { inv, matched } = await filteredInventory(db, f);
+        const { credentials: _all, ...summary } = inv;
+        return { ...summary, ...runMemoryListPage(CREDENTIALS_LIST, matched, page) };
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
     const q = listQuery.parse(req.query);
     const inv = await computeCredentialInventory(db, { includeRevoked: q.includeRevoked === "true" });
     const matched = inv.credentials.filter(

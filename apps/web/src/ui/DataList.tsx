@@ -76,6 +76,8 @@ export interface DataListProps<T> {
   empty?: ReactNode;
   /** the table to render: the kit Table, or FoldTable where columns fold on narrow widths */
   table?: (props: TableProps<T>) => ReactNode;
+  /** a fixed sentence shown in place of the read's own error (the server's detail never reaches the screen) */
+  errorMessage?: string;
   /** each time rows arrive: the rows on screen and the last response body (for a page's own extras) */
   onRows?: (rows: T[], raw: Record<string, unknown>) => void;
 }
@@ -401,7 +403,7 @@ export function DataList<T>(props: DataListProps<T>) {
         rows={rows}
         rowKey={props.rowKey}
         loading={q.isLoading}
-        error={q.error}
+        error={q.error && props.errorMessage ? new Error(props.errorMessage) : q.error}
         onRetry={refresh}
         onRowClick={props.onRowClick}
         rowLabel={props.rowLabel}

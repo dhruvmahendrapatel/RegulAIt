@@ -256,6 +256,9 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/virtual-keys",
   "GET /v1/virtual-keys",
   "GET /v1/virtual-keys/:keyId/usage",
+  // ADR-0226: the Excel exports of the two lists above, under the same visibility (own keys; 404 for another's)
+  "GET /v1/virtual-keys/export.xlsx",
+  "GET /v1/virtual-keys/:keyId/usage/export.xlsx",
   "PATCH /v1/virtual-keys/:keyId",
   "DELETE /v1/virtual-keys/:keyId",
   "POST /v1/connectors/:connectorId/invoke",

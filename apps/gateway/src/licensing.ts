@@ -96,6 +96,8 @@ import {
 } from "@regulait/shared";
 import { countActiveSeats } from "./billing.js";
 import { errMessage } from "./err-serializer.js";
+import { wantsListContract } from "./list-contract.js";
+import { VERIFICATIONS_LIST, answerListExport, answerListPage, verificationsFilterQuery, verificationsReader, verificationsWhere } from "./identity-lists.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 const idParam = z.object({ id: z.string().uuid() });
@@ -740,7 +742,15 @@ export function registerLicensingRoutes(app: FastifyInstance, db: Db): void {
     };
   });
 
-  app.get("/v1/licenses/verifications", async () => {
+  // ADR-0226: with any of sort/dir/cursor/offset/count, the shared list contract (every verification, not the
+  // latest 100; an `ok` filter); with none of them, exactly the response below.
+  app.get("/v1/licenses/verifications/export.xlsx", async (req, reply) =>
+    answerListExport(db, req, reply, VERIFICATIONS_LIST, verificationsReader(db), verificationsFilterQuery, verificationsWhere),
+  );
+  app.get("/v1/licenses/verifications", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      return answerListPage(db, req, reply, VERIFICATIONS_LIST, verificationsReader(db), verificationsFilterQuery, verificationsWhere, { schedulerPresent: false });
+    }
     const rows = await db
       .select()
       .from(licenseVerifications)

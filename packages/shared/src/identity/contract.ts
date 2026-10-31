@@ -1274,6 +1274,8 @@ export const IDENTITY_ROUTES: ReadonlyArray<{ method: "GET" | "POST" | "PUT" | "
   { method: "POST", path: OAUTH_INTROSPECTION_PATH, cls: "public", slice: "S5" },
   { method: "POST", path: "/v1/delegations/proofs", cls: "user", slice: "S5" },
   { method: "GET", path: "/v1/workload-identities", cls: "admin", slice: "S4" },
+  // ADR-0226: the identity list's Excel export
+  { method: "GET", path: "/v1/workload-identities/export.xlsx", cls: "admin", slice: "S4" },
   { method: "POST", path: "/v1/workload-identities", cls: "admin", slice: "S6" },
   { method: "GET", path: "/v1/workload-identities/:identityId", cls: "admin", slice: "S4" },
   { method: "PATCH", path: "/v1/workload-identities/:identityId", cls: "admin", slice: "S4" },
