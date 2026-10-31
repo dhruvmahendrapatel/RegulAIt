@@ -339,6 +339,9 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       { label: "Compliance packs", to: "/admin/compliance-packs" },
       // ADR-0215 — published framework content accepted as a new draft pack version
       { label: "Framework imports", to: "/admin/compliance-packs/imports" },
+      // ADR-0225 (P13 d): what the organisation publishes outside itself (controls, evidence, AI system cards) and
+      // the auditors it lets read them — beside the packs those controls come from
+      { label: "Trust publishing", to: "/admin/trust-publishing" },
       { label: "Infrastructure", to: "/admin/infrastructure" },
     ],
   },

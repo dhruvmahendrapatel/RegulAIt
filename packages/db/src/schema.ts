@@ -776,6 +776,13 @@ export const mcpServers = pgTable("mcp_servers", {
    * servers); turning it on is a stepped-up, audited relaxation, reset by a url move. Only while
    * `identityPropagation` is `signed_assertion` (CHECK `mcp_servers_disclose_agent_ids_check`). */
   discloseAgentWorkloadIds: boolean("disclose_agent_workload_ids").notNull().default(false),
+  /** ADR-0210 (migration 0228): how an opted-in server receives its assertion. `regulait_header` (the default) is the S8
+   * EdDSA assertion in its own header; `oidc_bearer` is an ES256 assertion under the `/mcp-identity` issuer, with
+   * `identity_assertion_scope` as its `scope` claim, in `Authorization: Bearer`. Turning it on (or changing the scope)
+   * is a stepped-up, audited relaxation, reset by a url move. Only while `identityPropagation` is `signed_assertion`,
+   * and never beside an ADR-0204 Bearer credential (refused by both writers under the server row's lock). */
+  identityAssertionProfile: text("identity_assertion_profile", { enum: ["regulait_header", "oidc_bearer"] }).notNull().default("regulait_header"),
+  identityAssertionScope: text("identity_assertion_scope"),
   /** ADR-0043 (migration 0049): may this server's URL resolve into ordinary
    * private LAN space (RFC1918 / loopback / ULA)? NULL = inherit the org
    * default (org_settings.mcpPrivateRangesDefault, false by default since
@@ -902,6 +909,10 @@ export const mcpServers = pgTable("mcp_servers", {
   check("mcp_servers_transport_check", sql`${t.transport} IN ('streamable_http', 'sse', 'stdio')`),
   check("mcp_servers_execution_profile_check", sql`${t.executionProfileId} IS NULL OR ${t.transport} = 'stdio'`),
   check("mcp_servers_disclose_agent_ids_check", sql`NOT ${t.discloseAgentWorkloadIds} OR ${t.identityPropagation} = 'signed_assertion'`),
+  check(
+    "mcp_servers_identity_assertion_profile_check",
+    sql`(${t.identityAssertionProfile} = 'regulait_header' AND ${t.identityAssertionScope} IS NULL) OR (${t.identityAssertionProfile} = 'oidc_bearer' AND ${t.identityPropagation} = 'signed_assertion' AND length(${t.identityAssertionScope}) BETWEEN 1 AND 512 AND ${t.identityAssertionScope} ~ '^[\\x21\\x23-\\x5B\\x5D-\\x7E]+( [\\x21\\x23-\\x5B\\x5D-\\x7E]+)*$')`,
+  ),
   check(
     "mcp_servers_transport_shape",
     sql`(${t.transport} = 'stdio' AND ${t.url} = 'stdio:' || ${t.name} AND ${t.stdioCommand} IS NOT NULL AND ${t.stdioArgs} IS NOT NULL AND jsonb_typeof(${t.stdioArgs}) = 'array' AND ${t.stdioCommandDigest} IS NOT NULL) OR (${t.transport} <> 'stdio' AND ${t.url} NOT LIKE 'stdio:%' AND ${t.stdioCommand} IS NULL AND ${t.stdioArgs} IS NULL AND ${t.stdioCommandDigest} IS NULL)`,
@@ -1581,6 +1592,12 @@ export const auditLog = pgTable(
         // ADR-0195 SD2b: a federation signing key (generated, activated, rotated, retired, revoked) and federation
         // turned on or off. Plain text column — no DDL.
         "federation_signing_key",
+        // ADR-0225 (P13 d): a trust-page item (objectId = the publication), the trust centre's profile (objectId null)
+        // and a named external auditor's grant, its links, sessions and every view (objectId = the grant). Plain
+        // text column — no DDL.
+        "trust_publication",
+        "trust_center",
+        "auditor_grant",
       ],
     })
       .notNull()
@@ -4724,6 +4741,9 @@ export const orgSettings = pgTable(
      * null (strict) = none named. Deleting it stops automatic filing — there is
      * no fallback to another connection (ADR-0180). */
     alertTicketConnectionId: uuid("alert_ticket_connection_id").references(() => pmConnections.id, { onDelete: "set null" }),
+    /** ADR-0225 (P13 d, migration 0247): the public trust centre and the auditor portal — built, shipped OFF
+     * (ADR-0180). Off, both answer 404 and nothing can be published or granted. */
+    trustPagesEnabled: boolean("trust_pages_enabled").notNull().default(false),
 
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -13696,8 +13716,11 @@ export const identitySigningKeys = pgTable(
   "identity_signing_keys",
   {
     kid: text("kid").primaryKey(),
-    algorithm: text("algorithm", { enum: ["Ed25519"] }).notNull().default("Ed25519"),
-    publicJwk: jsonb("public_jwk").$type<{ kty: "OKP"; crv: "Ed25519"; x: string; kid?: string }>().notNull(),
+    // ADR-0210 (migration 0228): ES256 keys sign only the OIDC-profile MCP identity assertion
+    algorithm: text("algorithm", { enum: ["Ed25519", "ES256"] }).notNull().default("Ed25519"),
+    publicJwk: jsonb("public_jwk")
+      .$type<{ kty: "OKP"; crv: "Ed25519"; x: string; kid?: string } | { kty: "EC"; crv: "P-256"; x: string; y: string; kid?: string }>()
+      .notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     activatedAt: timestamp("activated_at", { withTimezone: true }),
     retiredAt: timestamp("retired_at", { withTimezone: true }),
@@ -13705,17 +13728,18 @@ export const identitySigningKeys = pgTable(
   },
   (t) => [
     check("identity_signing_keys_kid_check", sql`${t.kid} ~ '^[A-Za-z0-9._:-]{1,128}$'`),
-    check("identity_signing_keys_algorithm_check", sql`${t.algorithm} = 'Ed25519'`),
+    check("identity_signing_keys_algorithm_check", sql`${t.algorithm} IN ('Ed25519', 'ES256')`),
     check(
       "identity_signing_keys_public_only_check",
-      sql`COALESCE(jsonb_typeof(${t.publicJwk}) = 'object' AND ${t.publicJwk} ->> 'kty' = 'OKP' AND ${t.publicJwk} ->> 'crv' = 'Ed25519' AND jsonb_typeof(${t.publicJwk} -> 'x') = 'string' AND NOT (${t.publicJwk} ?| ARRAY['d', 'p', 'q', 'dp', 'dq', 'qi', 'oth', 'k']), false)`,
+      sql`COALESCE(jsonb_typeof(${t.publicJwk}) = 'object' AND ((${t.algorithm} = 'Ed25519' AND ${t.publicJwk} ->> 'kty' = 'OKP' AND ${t.publicJwk} ->> 'crv' = 'Ed25519' AND jsonb_typeof(${t.publicJwk} -> 'x') = 'string') OR (${t.algorithm} = 'ES256' AND ${t.publicJwk} ->> 'kty' = 'EC' AND ${t.publicJwk} ->> 'crv' = 'P-256' AND jsonb_typeof(${t.publicJwk} -> 'x') = 'string' AND jsonb_typeof(${t.publicJwk} -> 'y') = 'string')) AND NOT (${t.publicJwk} ?| ARRAY['d', 'p', 'q', 'dp', 'dq', 'qi', 'oth', 'k']), false)`,
     ),
     check(
       "identity_signing_keys_order_check",
       sql`(${t.activatedAt} IS NULL OR ${t.activatedAt} >= ${t.createdAt}) AND (${t.retiredAt} IS NULL OR (${t.activatedAt} IS NOT NULL AND ${t.retiredAt} >= ${t.activatedAt})) AND (${t.revokedAt} IS NULL OR ${t.revokedAt} >= ${t.createdAt})`,
     ),
+    // ADR-0210: one active signer PER ALGORITHM
     uniqueIndex("identity_signing_keys_one_active_uq")
-      .on(sql`(true)`)
+      .on(t.algorithm)
       .where(sql`${t.activatedAt} IS NOT NULL AND ${t.retiredAt} IS NULL AND ${t.revokedAt} IS NULL`),
   ],
 );
@@ -14641,3 +14665,155 @@ export const demoBeatFallbacks = pgTable(
   (t) => [check("demo_beat_fallbacks_beat_id_check", sql`${t.beatId} ~ '^[a-z][a-z0-9-]{1,63}$'`)],
 );
 export type DemoBeatFallbackRow = typeof demoBeatFallbacks.$inferSelect;
+
+/**
+ * ADR-0225 (P13 d, migration 0247) — WHAT AN ADMIN CHOSE TO PUBLISH. Nothing is published by default: every row starts
+ * as a draft, and only a `published` row is ever read by the public trust centre (audience `public`) or, when a grant
+ * selects it, by a named auditor (either audience). The `content` is a REVIEWED SNAPSHOT an admin edited: the public
+ * pages never read the register, the packs or the ledgers live, so nothing reaches them that was not published.
+ * `public_slug` is the only identifier a public page carries; `source_ref` (where the draft came from) never leaves
+ * the admin API. Written only by `apps/gateway/src/trust-pages.ts` (publish and unpublish need a step-up, audited).
+ */
+export const trustPublications = pgTable(
+  "trust_publications",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kind: text("kind", { enum: ["control", "evidence_summary", "ai_card"] }).notNull(),
+    publicSlug: text("public_slug").notNull(),
+    sourceRef: text("source_ref").notNull(),
+    title: text("title").notNull(),
+    content: jsonb("content").$type<Record<string, string>>().notNull(),
+    status: text("status", { enum: ["draft", "published"] }).notNull().default("draft"),
+    audience: text("audience", { enum: ["public", "auditors"] }).notNull().default("public"),
+    version: integer("version").notNull().default(1),
+    publishedAt: timestamp("published_at", { withTimezone: true }),
+    publishedBy: uuid("published_by").references(() => users.id, { onDelete: "set null" }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("trust_publications_public_slug_uq").on(t.publicSlug),
+    check("trust_publications_kind_check", sql`${t.kind} IN ('control', 'evidence_summary', 'ai_card')`),
+    check("trust_publications_status_check", sql`${t.status} IN ('draft', 'published')`),
+    check("trust_publications_audience_check", sql`${t.audience} IN ('public', 'auditors')`),
+    check("trust_publications_slug_check", sql`${t.publicSlug} ~ '^[a-z0-9][a-z0-9-]{2,79}$'`),
+    check("trust_publications_title_check", sql`length(btrim(${t.title})) BETWEEN 1 AND 200`),
+    check("trust_publications_source_check", sql`length(${t.sourceRef}) BETWEEN 1 AND 300`),
+    check("trust_publications_content_check", sql`jsonb_typeof(${t.content}) = 'object'`),
+    check("trust_publications_version_check", sql`${t.version} >= 1`),
+    check("trust_publications_published_check", sql`(${t.status} = 'published') = (${t.publishedAt} IS NOT NULL)`),
+    index("trust_publications_status_idx").on(t.status, t.audience),
+  ],
+);
+export type TrustPublicationRow = typeof trustPublications.$inferSelect;
+
+/** ADR-0225: the trust centre's heading — one row, shown only while trust pages are on. */
+export const trustCenterProfile = pgTable(
+  "trust_center_profile",
+  {
+    id: text("id").primaryKey().default("singleton"),
+    displayName: text("display_name").notNull(),
+    intro: text("intro").notNull().default(""),
+    contactEmail: text("contact_email"),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("trust_center_profile_singleton", sql`${t.id} = 'singleton'`),
+    check("trust_center_profile_name_check", sql`length(btrim(${t.displayName})) BETWEEN 1 AND 120`),
+    check("trust_center_profile_intro_check", sql`length(${t.intro}) <= 2000`),
+  ],
+);
+export type TrustCenterProfileRow = typeof trustCenterProfile.$inferSelect;
+
+/**
+ * ADR-0225 — A NAMED EXTERNAL AUDITOR'S READ-ONLY ACCESS: time-boxed (at most 90 days), scoped to the publications in
+ * `auditor_grant_items` (default-deny: a grant with no item shows nothing), revocable. Access is through a short-lived,
+ * single-use link (`auditor_links`, only its SHA-256 stored) that opens a short browser session (`auditor_sessions`,
+ * HttpOnly cookie, only its SHA-256 stored). Every view is audited under objectType `auditor_grant`.
+ */
+export const auditorGrants = pgTable(
+  "auditor_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    auditorName: text("auditor_name").notNull(),
+    auditorEmail: text("auditor_email").notNull(),
+    auditorOrganisation: text("auditor_organisation"),
+    startsAt: timestamp("starts_at", { withTimezone: true }).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("auditor_grants_name_check", sql`length(btrim(${t.auditorName})) BETWEEN 1 AND 120`),
+    check("auditor_grants_email_check", sql`length(${t.auditorEmail}) BETWEEN 3 AND 254 AND position('@' in ${t.auditorEmail}) > 1`),
+    check("auditor_grants_window_check", sql`${t.expiresAt} > ${t.startsAt} AND ${t.expiresAt} - ${t.startsAt} <= interval '90 days'`),
+  ],
+);
+export type AuditorGrantRow = typeof auditorGrants.$inferSelect;
+
+/** ADR-0225: what one grant may see — a publication not listed here is never shown to that auditor. */
+export const auditorGrantItems = pgTable(
+  "auditor_grant_items",
+  {
+    grantId: uuid("grant_id")
+      .notNull()
+      .references(() => auditorGrants.id, { onDelete: "cascade" }),
+    publicationId: uuid("publication_id")
+      .notNull()
+      .references(() => trustPublications.id, { onDelete: "cascade" }),
+  },
+  (t) => [primaryKey({ columns: [t.grantId, t.publicationId] }), index("auditor_grant_items_publication_idx").on(t.publicationId)],
+);
+
+/** ADR-0225: a single-use sign-in link for one grant (at most 72 hours to redeem; only its SHA-256 stored). */
+export const auditorLinks = pgTable(
+  "auditor_links",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    grantId: uuid("grant_id")
+      .notNull()
+      .references(() => auditorGrants.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("auditor_links_token_hash_uq").on(t.tokenHash),
+    check("auditor_links_token_hash_check", sql`${t.tokenHash} ~ '^[0-9a-f]{64}$'`),
+    check("auditor_links_ttl_check", sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} - ${t.createdAt} <= interval '72 hours'`),
+    index("auditor_links_grant_idx").on(t.grantId),
+  ],
+);
+export type AuditorLinkRow = typeof auditorLinks.$inferSelect;
+
+/** ADR-0225: an auditor's browser session, opened by redeeming a link (the gateway issues 60 minutes, never past the grant;
+ * the CHECK below is an outer limit of 8 hours). Only its SHA-256 is stored. */
+export const auditorSessions = pgTable(
+  "auditor_sessions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    grantId: uuid("grant_id")
+      .notNull()
+      .references(() => auditorGrants.id, { onDelete: "cascade" }),
+    linkId: uuid("link_id")
+      .notNull()
+      .references(() => auditorLinks.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("auditor_sessions_token_hash_uq").on(t.tokenHash),
+    check("auditor_sessions_token_hash_check", sql`${t.tokenHash} ~ '^[0-9a-f]{64}$'`),
+    check("auditor_sessions_ttl_check", sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} - ${t.createdAt} <= interval '8 hours'`),
+    index("auditor_sessions_grant_idx").on(t.grantId),
+  ],
+);
+export type AuditorSessionRow = typeof auditorSessions.$inferSelect;
