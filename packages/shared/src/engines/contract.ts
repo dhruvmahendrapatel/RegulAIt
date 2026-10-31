@@ -625,4 +625,8 @@ export const createEngineScheduleSchema = z
     intervalHours: z.number().int().min(1).max(720),
   })
   .strict();
-export const updateEngineScheduleSchema = z.object({ enabled: z.boolean() }).strict();
+/** ADR-0208 G9: switch on/off and/or change the interval; at least one of the two */
+export const updateEngineScheduleSchema = z
+  .object({ enabled: z.boolean().optional(), intervalHours: z.number().int().min(1).max(720).optional() })
+  .strict()
+  .refine((b) => b.enabled !== undefined || b.intervalHours !== undefined, { message: "send enabled and/or intervalHours" });
