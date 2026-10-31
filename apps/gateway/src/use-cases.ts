@@ -124,6 +124,7 @@ import {
   UNSURE_ANSWER_MUST_COUNT_AS_YES,
   unsureAnswerViolations,
   unsureViolationDetail,
+  isTreatedRiskStatus,
 } from "@regulait/shared";
 import { z } from "zod";
 import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects.js";
@@ -1159,6 +1160,14 @@ export async function precheckRiskAcceptance(
   const closed = rows.filter((r) => r.status === "closed").map((r) => r.id);
   if (closed.length > 0) {
     return { status: 409, body: { error: "risk_terminal", riskIds: closed, detail: "a closed risk has nothing left to accept" } };
+  }
+  // ADR-0211: a transferred or avoided risk carries its own treatment record — a sign-off does not overwrite it
+  const treated = rows.filter((r) => isTreatedRiskStatus(r.status)).map((r) => r.id);
+  if (treated.length > 0) {
+    return {
+      status: 409,
+      body: { error: "risk_treated", riskIds: treated, detail: "a transferred or avoided risk is reopened before it is accepted" },
+    };
   }
   return null;
 }

@@ -168,13 +168,15 @@ test("shell-home-account-03: the Inbox badge counts a status=pending request, na
   await page.goto("/ui/inbox");
   const nav = page.getByRole("complementary", { name: "Primary navigation" });
   await expect(nav.getByRole("link", { name: "Inbox, 2 pending approvals" })).toBeVisible();
-  expect(approvalUrls).toContain("?status=pending");
+  // the server-filtered pending queue, oldest first (the badge shares the Inbox's read); never the unfiltered page
+  expect(approvalUrls).toContain("?status=pending&order=asc");
+  expect(approvalUrls).not.toContain("");
 
   await page.getByRole("button", { name: /^Review team-17/ }).click();
   await page.getByTestId("inbox-item").getByRole("button", { name: "Approve" }).click();
   // the success toast (a status badge now reads "Approved" too)
   await expect(page.locator('[aria-live="polite"]').getByText("Approved", { exact: true })).toBeVisible();
-  // the decide path invalidates ["approvals"], under which the badge's ["approvals","pending"] falls
+  // the decide path invalidates ["approvals"], under which the badge's pending-queue key falls
   await expect(nav.getByRole("link", { name: "Inbox, 1 pending approvals" })).toBeVisible();
 });
 

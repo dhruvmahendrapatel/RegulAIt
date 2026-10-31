@@ -194,6 +194,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // the Streamable HTTP GET probe answers 405 to any authenticated caller
   "GET /mcp/:serverId",
   "POST /v1/agents/:agentId/invoke",
+  // ADR-0219 (P10): any person may ASK; executeGovernedA2aCall decides on their own grant (default-deny)
+  "POST /v1/a2a/agents/:agentId/messages",
   // ADR-0168 amendment item 6 — agent stewardship. The gate is "an admin OR
   // this agent's CURRENT steward", checked inside the handler (403
   // not_agent_steward for anyone else): a steward who is not an admin must be
@@ -440,6 +442,9 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/traces/tags",
   "GET /v1/cost-events",
   "GET /v1/usage-events",
+  // the windowed by-agent / by-connector aggregate of the same ledger; the
+  // handler applies the identical self-scoping (userId forced to self)
+  "GET /v1/usage-events/summary",
   // ADR-0047: a team lead generating and reading THEIR OWN scorecard. Every
   // one of these applies `evaluateReportAccess` inside the handler, which
   // returns the exact project-id list the caller may query and refuses
@@ -688,6 +693,12 @@ export const NON_ADMIN_ROUTES = new Set([
   // POST /v1/risks/:riskId/accept.
   "GET /v1/risks/:riskId/acceptances",
   "POST /v1/risks/:riskId/acceptances",
+  //
+  // --- ADR-0211 (P17): transferred and avoided treatments ---------------------
+  // Recording a treatment is owner-or-admin INSIDE the handler, exactly like a
+  // transition, and only while the org switch is on. DELIBERATELY ABSENT, so
+  // ADMIN-ONLY: GET and PUT /v1/org/settings/risk-treatments (the switch).
+  "POST /v1/risks/:riskId/treatment",
 
   // ===== ADR-0182 (ADR-0175 batch D4) — accountability records ==============
   // Each slice's block below is APPEND-ONLY for that slice. Every route a

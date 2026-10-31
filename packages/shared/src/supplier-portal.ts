@@ -1,7 +1,7 @@
 /**
  * ADR-0221 (PENDING P4) — the supplier portal's shared contract: limits, the cookie and token shapes, and the request
  * schemas of both the admin routes and the supplier routes. The gateway enforces every limit here; the database
- * CHECKs in migrations 0241-0242 repeat the ones a row written around the API must not break.
+ * CHECKs in migrations 0256-0257 repeat the ones a row written around the API must not break.
  */
 import { z } from "zod";
 

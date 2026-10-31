@@ -4,8 +4,8 @@
 - **Date**: 2026-10-30
 - **Driver**: [PENDING.md](../product/PENDING.md) §2c item **P4**, started by the owner on 2026-10-30 (#453 c6527158879;
   common backlog rules c6522850568). UI placement note: #453 c6527271704.
-- **Migrations**: `0241_supplier_portal_access.sql` (the setting, questionnaires, grants, links, sessions),
-  `0242_supplier_submissions.sql` (answers and evidence files).
+- **Migrations**: `0256_supplier_portal_access.sql` (the setting, questionnaires, grants, links, sessions),
+  `0257_supplier_submissions.sql` (answers and evidence files).
 - **Extends**: [ADR-0084](0084-vendor-ai-risk-portal.md) (the vendor registry, the assessment and its attestations),
   [ADR-0180](0180-continuous-assurance-strict-by-default.md) (default-off), [ADR-0186](0186-batch4-approvals-receipts-detection.md) (step-up),
   [ADR-0102](0102-operator-prose-credential-scrub.md) (prose scrub), [ADR-0182](0182-accountability-records-d4.md) A13
@@ -22,7 +22,7 @@ and gets a separate security review.
 
 ## Decision
 
-1. **Default off.** `org_settings.supplier_portal_enabled` ships `false` (migration 0241 records the strict value in
+1. **Default off.** `org_settings.supplier_portal_enabled` ships `false` (migration 0256 records the strict value in
    the migration outbox). Off, every supplier route answers the same 404 body as a route that does not exist, and no
    access can be granted. Turning it on is a relaxation: a `settings_relax` step-up bound to the new value, audited
    with `detail.relaxed`. Turning it off revokes every live supplier session and unused link in the same transaction,
@@ -126,14 +126,14 @@ defence. No magic-link library fits a Fastify gateway with our own session table
   answers can still be accepted, because expiry is the planned end of access. The review list shows each grant's
   state.
 - **Unscanned files (ADR-0180).** A second default-off setting, `supplier_portal_accept_unscanned_files`, is added to
-  migration 0241, still unapplied, in place.
+  migration 0256, still unapplied, in place.
   - With no scanner configured, evidence files are refused. Statement-only answers still work.
   - Accepting unscanned files is a `settings_relax` step-up and is audited as a relaxation.
   - Downloading an unscanned file needs an explicit `acknowledgeUnscanned=1`, which the audit row records.
   - A CSV downloads as plain text (`.txt`), so a spreadsheet application never evaluates its cells.
 - **Storage.**
   - Each grant holds at most one pending answer per item. A newer answer withdraws the older one, which keeps no file
-    (status `withdrawn`, added to 0242 in place).
+    (status `withdrawn`, added to 0257 in place).
   - Each grant is capped at 50 MiB of held file bytes and 500 answers, checked under the grant's row lock.
   - The data-key envelope stays the shared hex format. The custody probe and the re-encryption walk handle every
     `CIPHERTEXT_COLUMNS` entry through that one format, and a second, compact format would fork them. The per-grant

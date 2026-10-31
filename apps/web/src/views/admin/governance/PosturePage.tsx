@@ -47,7 +47,17 @@ interface PostureDoc {
     }>;
     note: string;
   };
-  risks: { open: number; mitigating: number; accepted: number; closed: number; total: number; attestationOnly: number };
+  risks: {
+    open: number;
+    mitigating: number;
+    accepted: number;
+    closed: number;
+    /** absent from a report made before these treatments existed */
+    transferred?: number;
+    avoided?: number;
+    total: number;
+    attestationOnly: number;
+  };
   redteam: {
     measured: boolean;
     runsInWindow: number;
@@ -365,6 +375,8 @@ export default function PosturePage() {
                 line={
                   <>
                     {d.risks.open} open, {d.risks.mitigating} being mitigated, {d.risks.accepted} formally accepted.
+                    {(d.risks.transferred ?? 0) > 0 && <> {d.risks.transferred} transferred to an insurer or supplier.</>}
+                    {(d.risks.avoided ?? 0) > 0 && <> {d.risks.avoided} avoided — the use stopped.</>}
                     {d.risks.attestationOnly > 0 && (
                       <> {d.risks.attestationOnly} rest on attestation only — no ledger measures them.</>
                     )}

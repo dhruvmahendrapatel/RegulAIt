@@ -97,12 +97,12 @@ CREATE INDEX IF NOT EXISTS "supplier_sessions_access_idx" ON "supplier_sessions"
 --> statement-breakpoint
 INSERT INTO "migration_audit_outbox" ("migration", "object_type", "object_id", "rule_id", "reason", "detail")
 SELECT
-  '0241_supplier_portal_access',
+  '0256_supplier_portal_access',
   'org_settings',
   NULL,
   'supplier-portal-setting-strict',
-  'Migration 0241 introduced the supplier portal settings at their STRICT values (off): no supplier can sign in and no ' ||
+  'Migration 0256 introduced the supplier portal settings at their STRICT values (off): no supplier can sign in and no ' ||
     'access can be granted until an admin turns it on, and unscanned files are refused (each audited, with a step-up).',
-  jsonb_build_object('phase', 'migration-0241', 'settings', jsonb_build_object('supplierPortalEnabled', "supplier_portal_enabled",
+  jsonb_build_object('phase', 'migration-0256', 'settings', jsonb_build_object('supplierPortalEnabled', "supplier_portal_enabled",
     'supplierPortalAcceptUnscannedFiles', "supplier_portal_accept_unscanned_files"))
 FROM "org_settings";
