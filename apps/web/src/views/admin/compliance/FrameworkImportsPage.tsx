@@ -86,22 +86,42 @@ function sourceState(s: ImportSource): { label: string; tone: "ok" | "warn" | "i
   return s.accepted.upToDate ? { label: "Up to date", tone: "ok" } : { label: "Newer content available", tone: "info" };
 }
 
+/** which parts of a control's text differ between the pack and the source, in words */
+export function changedParts(current: ControlText | null, incoming: ControlText | null): string[] {
+  if (!current || !incoming) return [];
+  const parts: string[] = [];
+  if (current.title !== incoming.title) parts.push("title");
+  if ((current.description ?? "") !== (incoming.description ?? "")) parts.push("description");
+  return parts;
+}
+
+function TextSide(props: { label: string; text: ControlText; showDescription: boolean }) {
+  return (
+    <div>
+      <p>
+        <span className={v.dim}>{props.label}: </span>
+        {props.text.title}
+      </p>
+      {props.showDescription && (
+        <p>
+          <span className={v.dim}>Description: </span>
+          {props.text.description ?? <span className={v.dim}>none</span>}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** both sides of a control's text: the title, and the description whenever either side has one */
 function TextPair(props: { change: ImportChange }) {
   const { current, incoming } = props.change;
+  const parts = changedParts(current, incoming);
+  const showDescription = Boolean(current?.description || incoming?.description);
   return (
     <div className={v.stack}>
-      {current && (
-        <p>
-          <span className={v.dim}>In your pack: </span>
-          {current.title}
-        </p>
-      )}
-      {incoming && (
-        <p>
-          <span className={v.dim}>From the source: </span>
-          {incoming.title}
-        </p>
-      )}
+      {parts.length > 0 && <p className={v.dim}>Changes: {parts.join(" and ")}</p>}
+      {current && <TextSide label="In your pack" text={current} showDescription={showDescription} />}
+      {incoming && <TextSide label="From the source" text={incoming} showDescription={showDescription} />}
     </div>
   );
 }
