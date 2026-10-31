@@ -119,7 +119,7 @@ const CASES: ListCase[] = [
   { name: "delegations", url: "/v1/delegations", exportUrl: "/v1/delegations/export.xlsx", offsetSort: "from", keyset: true, columns: ["from", "status"], labels: ["From", "Status"], legacyKey: "delegations", access: "admin", seededKey: "delegations" },
   { name: "vendors", url: "/v1/vendors", exportUrl: "/v1/vendors/export.xlsx", offsetSort: "name", keyset: true, columns: ["name", "status"], labels: ["Vendor", "Status"], legacyKey: "vendors", access: "scoped", seededKey: "vendors" },
   { name: "remediations", url: "/v1/governance/remediations", exportUrl: "/v1/governance/remediations/export.xlsx", offsetSort: "title", keyset: true, columns: ["title", "status"], labels: ["Remediation", "Status"], legacyKey: "proposals", access: "admin", seededKey: "remediations" },
-  { name: "alerts", url: "/v1/governance/alerts?status=all", exportUrl: "/v1/governance/alerts/export.xlsx?status=all", offsetSort: "severity", keyset: true, columns: ["title", "severity"], labels: ["Alert", "Severity"], legacyKey: "alerts", access: "admin", seededKey: "alerts" },
+  { name: "alerts", url: "/v1/governance/alerts?status=all", exportUrl: "/v1/governance/alerts/export.xlsx?status=all", offsetSort: "title", keyset: false, columns: ["title", "severity"], labels: ["Alert", "Severity"], legacyKey: "alerts", access: "admin", seededKey: "alerts" },
   { name: "feedback", url: "/v1/feedback", exportUrl: "/v1/feedback/export.xlsx", offsetSort: "status", keyset: true, columns: ["kind", "status"], labels: ["Kind", "Status"], legacyKey: "items", access: "scoped" },
   { name: "model cards", url: "/v1/mrm/cards", exportUrl: "/v1/mrm/cards/export.xlsx", offsetSort: "use", keyset: true, columns: ["use", "state"], labels: ["Intended use", "State"], legacyKey: "cards", access: "admin" },
   { name: "expiring sign-offs", url: "/v1/mrm/expiring", exportUrl: "/v1/mrm/expiring/export.xlsx", offsetSort: "until", keyset: false, columns: ["use", "state"], labels: ["Intended use", "State"], legacyKey: "items", access: "admin" },
@@ -336,6 +336,20 @@ describe("ADR-0219: per-route specifics", () => {
     expect((await get("/v1/receipts?limit=10&sort=nope")).statusCode).toBe(400);
     const file = await get("/v1/receipts/export.xlsx?columns=seq,effect");
     expect(readXlsx(file.rawPayload)[0]).toEqual(["Sequence", "Effect"]);
+  });
+
+  it("alerts default to the triage order: the most severe first, the most recently seen first within a severity", async () => {
+    const rank: Record<string, number> = { critical: 4, high: 3, medium: 2, low: 1 };
+    const mine = new Set(seeded.alerts);
+    const rows = (await walk("/v1/governance/alerts?status=all&limit=10&count=exact", AUTH, "offset")).filter((r) => mine.has(r.id as string));
+    expect(rows).toHaveLength(seeded.alerts!.length);
+    for (let i = 1; i < rows.length; i++) {
+      const [a, b] = [rows[i - 1]!, rows[i]!];
+      const bySeverity = rank[a.severity as string]! - rank[b.severity as string]!;
+      expect(bySeverity, `${a.title} before ${b.title}`).toBeGreaterThanOrEqual(0);
+      if (bySeverity === 0) expect(Date.parse(a.lastDetectedAt as string)).toBeGreaterThanOrEqual(Date.parse(b.lastDetectedAt as string));
+    }
+    expect((await get("/v1/governance/alerts?status=all&limit=10&cursor=abc")).statusCode).toBe(400);
   });
 
   it("delegations filter by state on the server", async () => {

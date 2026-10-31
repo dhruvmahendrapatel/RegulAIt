@@ -224,7 +224,8 @@ export default function GovernanceAlertsPage() {
               queryKey={["governance", "alerts", "list"]}
               legacyKey="alerts"
               filters={alertFilters}
-              defaultSort={{ key: "lastSeen", dir: "desc" }}
+              // the triage order: critical and high first, the most recently seen first within each
+              defaultSort={{ key: "severity", dir: "desc" }}
               columns={ALERT_COLUMNS}
               rowKey={(alert) => alert.id}
               onRowClick={(alert) => setSelectedId(alert.id)}

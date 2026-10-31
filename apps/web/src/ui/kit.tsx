@@ -575,7 +575,8 @@ export function Card(props: CardProps) {
     const check = () => {
       // expanded: keep the Expand trigger until the dialog hands focus back to it
       if (host.parentElement !== el) return;
-      const refused = host.querySelector(KEEP_VISIBLE) != null;
+      // a list's own view controls (page size, columns: [data-list-view]) only change how the rows show, so they never refuse
+      const refused = Array.from(host.querySelectorAll(KEEP_VISIBLE)).some((n) => !n.closest("[data-list-view]"));
       if (refused && !warned && import.meta.env.DEV) {
         warned = true;
         console.warn(`Card "${name}": contain refused, the body holds a form, warning, decision or step-up control`);

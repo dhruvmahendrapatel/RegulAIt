@@ -8,6 +8,11 @@
   min-width: 0;
 }
 
+/* the column picker's wrapper takes no box of its own */
+.viewOnly {
+  display: contents;
+}
+
 .toolbar {
   display: flex;
   flex-wrap: wrap;

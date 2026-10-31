@@ -832,7 +832,8 @@ const alertDate = (v: string | null | undefined) => (v ? new Date(v) : null);
 export const ALERTS_LIST: ListSpec<AlertListRow> = {
   id: "governance-alerts",
   sorts: {
-    severity: { expr: ALERT_SEVERITY_ORDER },
+    // the triage order: the most severe first, and within a severity the most recently seen
+    severity: { expr: ALERT_SEVERITY_ORDER, then: [governanceAlerts.lastDetectedAt] },
     status: { expr: ALERT_STATUS_ORDER },
     title: { expr: sql`lower(${governanceAlerts.title})` },
     rule: { expr: governanceAlerts.ruleId },
@@ -852,7 +853,8 @@ export const ALERTS_LIST: ListSpec<AlertListRow> = {
     acknowledged: { label: "Acknowledged", value: (r) => alertDate(r.acknowledgedAt) },
   },
   filters: ["status"],
-  defaultSort: { col: "lastSeen", dir: "desc" },
+  // as the legacy list: critical and high alerts first (the default view lists only unresolved ones)
+  defaultSort: { col: "severity", dir: "desc" },
   idCol: governanceAlerts.id,
 };
 const idParam = z.object({ alertId: z.string().uuid() });
