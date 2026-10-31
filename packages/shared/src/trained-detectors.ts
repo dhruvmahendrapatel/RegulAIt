@@ -147,18 +147,32 @@ export const trainedDetectorKindSchema = z.enum(TRAINED_DETECTOR_KINDS);
  * the settings_relax step-up. Turning a detector off, lowering its mode,
  * raising its threshold (fewer hits) and moving off fail-closed are each a
  * relaxation; turning one on, raising its mode or lowering its threshold are
- * not. A first enable is never a relaxation.
+ * not. A first enable is never a relaxation unless it fails open.
+ *
+ * Two more, from the PR #634 review:
+ *  - SWAPPING THE SCORER of an enabled detector is a relaxation. Any enabled
+ *    scorer that claims the kind may be named, including one that always
+ *    answers `score: 0`, so a swap can turn a detector off in effect.
+ *  - LOWERING THE TIME LIMIT while the detector fails open is a relaxation:
+ *    with `onFailure: heuristic`, a limit the scorer cannot meet makes every
+ *    call a logged failure, which is close to off.
  */
 export function trainedDetectorRelaxations(
-  before: Pick<TrainedDetectorSetting, "enabled" | "mode" | "threshold" | "onFailure"> | null,
-  after: Pick<TrainedDetectorSetting, "enabled" | "mode" | "threshold" | "onFailure">,
+  before: Pick<TrainedDetectorSetting, "enabled" | "mode" | "threshold" | "onFailure" | "timeoutMs"> & {
+    scorerId: string | null;
+  } | null,
+  after: Pick<TrainedDetectorSetting, "enabled" | "mode" | "threshold" | "onFailure" | "timeoutMs"> & {
+    scorerId: string | null;
+  },
 ): string[] {
   if (!before || !before.enabled) return after.onFailure === "heuristic" ? ["onFailure"] : [];
   const out: string[] = [];
   if (!after.enabled) out.push("enabled");
+  if (after.enabled && after.scorerId !== before.scorerId) out.push("scorerId");
   if (strictestMode(before.mode, after.mode) === before.mode && before.mode !== after.mode) out.push("mode");
   if (after.threshold > before.threshold) out.push("threshold");
   if (before.onFailure === "block" && after.onFailure === "heuristic") out.push("onFailure");
+  if (after.enabled && after.onFailure === "heuristic" && after.timeoutMs < before.timeoutMs) out.push("timeoutMs");
   return out;
 }
 

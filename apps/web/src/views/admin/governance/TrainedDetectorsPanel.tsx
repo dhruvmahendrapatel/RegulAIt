@@ -191,8 +191,8 @@ export function TrainedDetectorsPanel() {
         >
           <strong>{editing.label}</strong>
           <p className={v.faint}>
-            To turn this on you need a scoring service that has passed its connection test, is enabled, and serves{" "}
-            <code>{editing.scorerKind}</code>. Register one on the <Link to="/admin/external-scorers">External scorers</Link>{" "}
+            To turn this on you need a scoring service that has passed its connection test, is enabled, and serves
+            the {editing.label.toLowerCase()} (ticked as <code>{editing.scorerKind}</code> when you register it). Register one on the <Link to="/admin/external-scorers">External scorers</Link>{" "}
             page. Loosening any setting asks you to confirm your identity again, and every change is recorded in the
             audit log.
           </p>

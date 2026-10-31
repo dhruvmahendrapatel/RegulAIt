@@ -37,6 +37,20 @@ MAX_BODY_BYTES = 2 * 1024 * 1024
 log = logging.getLogger("trained-detectors")
 
 
+def pin_offline_public_suffix_list(tldextract_module) -> object:
+    """Replace tldextract's module-level extractor with one that cannot fetch.
+
+    Presidio's email recogniser calls ``tldextract.extract()``, whose default
+    extractor downloads the Public Suffix List on first use (no timeout by
+    default) and caches it under $HOME. An air-gapped service must never try.
+    This one has no URLs and no cache, so it always uses the snapshot bundled
+    in the pinned tldextract wheel. ``tldextract.extract`` reads the module
+    global at call time, so replacing it covers every caller."""
+    extractor = tldextract_module.TLDExtract(suffix_list_urls=(), cache_dir=None, fallback_to_snapshot=True)
+    tldextract_module.tldextract.TLD_EXTRACTOR = extractor
+    return extractor
+
+
 def load_models(wanted: list[str]) -> dict:
     """Load each requested model from its baked directory. Imports are local
     so the pure core and its tests need none of these packages."""
@@ -67,6 +81,10 @@ def load_models(wanted: list[str]) -> dict:
             models["harm"] = classifier(os.path.join(MODELS_DIR, "harm"), multi_label=True)
 
     if "pii" in wanted:
+        import tldextract
+
+        # before any recogniser is built or called: no Public Suffix List fetch, ever
+        pin_offline_public_suffix_list(tldextract)
         from presidio_analyzer import AnalyzerEngine
         from presidio_analyzer.nlp_engine import NlpEngineProvider
 

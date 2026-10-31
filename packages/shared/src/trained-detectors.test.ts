@@ -127,7 +127,7 @@ describe("mergeTrainedOutcomes", () => {
 });
 
 describe("trainedDetectorRelaxations", () => {
-  const on = { enabled: true, mode: "block" as const, threshold: 0.5, onFailure: "block" as const };
+  const on = { enabled: true, mode: "block" as const, threshold: 0.5, onFailure: "block" as const, timeoutMs: 2000, scorerId: "s-1" };
   it("a first strict enable is not a relaxation", () => {
     expect(trainedDetectorRelaxations(null, on)).toEqual([]);
   });
@@ -136,8 +136,19 @@ describe("trainedDetectorRelaxations", () => {
   });
   it("names each loosened field", () => {
     expect(
-      trainedDetectorRelaxations(on, { enabled: false, mode: "warn", threshold: 0.9, onFailure: "heuristic" }),
+      trainedDetectorRelaxations(on, { ...on, enabled: false, mode: "warn", threshold: 0.9, onFailure: "heuristic" }),
     ).toEqual(["enabled", "mode", "threshold", "onFailure"]);
+  });
+  it("swapping the scorer of an enabled detector is a relaxation (review finding)", () => {
+    expect(trainedDetectorRelaxations(on, { ...on, scorerId: "s-2" })).toEqual(["scorerId"]);
+    // choosing a scorer for a detector that is off is not
+    expect(trainedDetectorRelaxations({ ...on, enabled: false }, { ...on, enabled: false, scorerId: "s-2" })).toEqual([]);
+  });
+  it("lowering the time limit while failing open is a relaxation; while failing closed it is not", () => {
+    const open = { ...on, onFailure: "heuristic" as const };
+    expect(trainedDetectorRelaxations(open, { ...open, timeoutMs: 200 })).toEqual(["timeoutMs"]);
+    expect(trainedDetectorRelaxations(on, { ...on, timeoutMs: 200 })).toEqual([]);
+    expect(trainedDetectorRelaxations(open, { ...open, timeoutMs: 5000 })).toEqual([]);
   });
   it("tightening is free", () => {
     expect(trainedDetectorRelaxations({ ...on, mode: "log", threshold: 0.8 }, on)).toEqual([]);

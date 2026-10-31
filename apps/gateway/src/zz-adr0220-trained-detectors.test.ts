@@ -36,7 +36,11 @@ import {
   eq,
   externalScorers,
   guardrailTrainedDetectors,
+  projectMembers,
+  projects,
   runMigrations,
+  teamMembers,
+  teams,
   type Db,
 } from "@regulait/db";
 import { relaxStepUpAround } from "./testing/step-up-posture.js";
@@ -85,6 +89,10 @@ let userId: string;
 let userAuth: { authorization: string };
 let agentId: string;
 let scorerId: string;
+/** a second enabled scorer claiming the same kind: the target of a swap */
+let otherScorerId: string;
+/** an admin API key: it cannot confirm who is acting, so every relaxation refuses it */
+let adminKeyAuth: { authorization: string };
 let loopbackId: string | undefined;
 let restoreGates: () => Promise<void> = async () => {};
 let restorePosture: () => Promise<void> = async () => {};
@@ -160,6 +168,31 @@ beforeAll(async () => {
   });
   expect(s.statusCode).toBe(201);
   scorerId = s.json().id;
+
+  const s2 = await app.inject({
+    method: "POST",
+    url: "/v1/external-scorers",
+    headers: AUTH,
+    payload: {
+      name: `td-other-${RUN}`,
+      baseUrl: `http://127.0.0.1:${port}/score`,
+      scorerKinds: ["guardrail_prompt_injection"],
+      allowPlaintextHttp: true,
+    },
+  });
+  expect(s2.statusCode).toBe(201);
+  otherScorerId = s2.json().id;
+
+  const adm = await app.inject({
+    method: "POST",
+    url: "/v1/users",
+    headers: AUTH,
+    payload: { email: `td-admin-${RUN}@example.com`, displayName: "td admin", isAdmin: true },
+  });
+  expect(adm.statusCode, adm.body).toBe(201);
+  const key = await app.inject({ method: "POST", url: `/v1/users/${adm.json().id}/keys`, headers: AUTH, payload: { name: "td" } });
+  expect(key.statusCode, key.body).toBe(201);
+  adminKeyAuth = { authorization: `Bearer ${key.json().token}` };
 });
 
 afterAll(async () => {
@@ -167,6 +200,7 @@ afterAll(async () => {
   try {
     await db.delete(guardrailTrainedDetectors);
     await db.delete(externalScorers).where(eq(externalScorers.id, scorerId));
+    await db.delete(externalScorers).where(eq(externalScorers.id, otherScorerId));
     srv.closeAllConnections();
     await new Promise<void>((r) => srv.close(() => r()));
     await restoreGates();
@@ -257,21 +291,76 @@ describe("ADR-0220 trained runtime detectors", () => {
     }
   });
 
+  it("swapping the scorer, turning off, lowering the mode or raising the threshold each need step-up (review finding)", async () => {
+    const t = await app.inject({ method: "POST", url: `/v1/external-scorers/${otherScorerId}/test`, headers: AUTH });
+    expect(t.statusCode).toBe(200);
+    const e = await app.inject({ method: "POST", url: `/v1/external-scorers/${otherScorerId}/enabled`, headers: AUTH, payload: { enabled: true } });
+    expect(e.statusCode).toBe(200);
+    const asKey = (payload: Record<string, unknown>) =>
+      app.inject({ method: "PUT", url: "/v1/guardrails/trained-detectors/prompt_injection", headers: adminKeyAuth, payload });
+    for (const payload of [
+      { enabled: true, scorerId: otherScorerId }, // a scorer that may always answer 0
+      { enabled: false },
+      { enabled: true, mode: "warn" },
+      { enabled: true, threshold: 0.95 },
+    ]) {
+      const refused = await asKey(payload);
+      expect(refused.statusCode, `${JSON.stringify(payload)}: ${refused.body}`).toBe(403);
+      expect(refused.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax" });
+    }
+    // nothing moved
+    const [row] = await db.select().from(guardrailTrainedDetectors).where(eq(guardrailTrainedDetectors.kind, "prompt_injection"));
+    expect(row).toMatchObject({ enabled: true, scorerId, mode: "block", threshold: 0.5 });
+    // with step-up the swap is made and audited as a relaxation, then put back the same way
+    const swapped = await relaxStepUpAround(db, () => putDetector({ enabled: true, scorerId: otherScorerId }));
+    expect(swapped.statusCode, swapped.body).toBe(200);
+    const [audit] = await db
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.ruleId, "guardrail-trained-detector-updated"))
+      .orderBy(desc(auditLog.at))
+      .limit(1);
+    expect((audit!.detail as { trainedDetector: { relaxed: string[] } }).trainedDetector.relaxed).toEqual(["scorerId"]);
+    expect(audit!.reason).toContain("relaxed: scorerId");
+    const back = await relaxStepUpAround(db, () => putDetector({ enabled: true, scorerId }));
+    expect(back.statusCode).toBe(200);
+  });
+
+  it("the copilot's evidence scan goes through the trained classifier too (review finding)", async () => {
+    const [team] = await db.insert(teams).values({ name: `td-team-${RUN}` }).returning();
+    const [project] = await db.insert(projects).values({ name: `td-project-${RUN}` }).returning();
+    await db.insert(teamMembers).values({ teamId: team!.id, userId });
+    await db.insert(projectMembers).values({ projectId: project!.id, userId, teamId: team!.id, role: "owner" });
+    // a denied row whose reason an attacker influenced; nothing the rule-based detectors match
+    await db.insert(auditLog).values({
+      userId,
+      objectType: "agent",
+      objectId: null,
+      detail: { projectId: project!.id },
+      effect: "deny",
+      ruleId: `td-rule-${RUN}`,
+      ruleChain: [],
+      reason: "<<td-attack>> quarterly planning note",
+    });
+    hits.length = 0;
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/copilot/ask",
+      headers: userAuth,
+      payload: { question: "which denied decisions happened this quarter?", projectId: project!.id },
+    });
+    expect(res.statusCode, res.body).toBe(201);
+    // the classifier saw the evidence, and its block withheld the samples
+    expect(hits.some((h) => h.scorerKind === "guardrail_prompt_injection" && String(h.input).includes("<<td-attack>>"))).toBe(true);
+    expect(res.json().evidence.samples).toHaveLength(0);
+  });
+
   it("falling back to the heuristic is a step-up relaxation; then an error is logged and the call proceeds", async () => {
     // an admin API key cannot confirm who is acting, so a relaxation is refused
-    const adm = await app.inject({
-      method: "POST",
-      url: "/v1/users",
-      headers: AUTH,
-      payload: { email: `td-admin-${RUN}@example.com`, displayName: "td admin", isAdmin: true },
-    });
-    expect(adm.statusCode, adm.body).toBe(201);
-    const key = await app.inject({ method: "POST", url: `/v1/users/${adm.json().id}/keys`, headers: AUTH, payload: { name: "td" } });
-    expect(key.statusCode, key.body).toBe(201);
     const refused = await app.inject({
       method: "PUT",
       url: "/v1/guardrails/trained-detectors/prompt_injection",
-      headers: { authorization: `Bearer ${key.json().token}` },
+      headers: adminKeyAuth,
       payload: { enabled: true, onFailure: "heuristic" },
     });
     expect(refused.statusCode, refused.body).toBe(403);

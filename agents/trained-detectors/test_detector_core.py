@@ -79,3 +79,52 @@ class Scores(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OfflinePublicSuffixList(unittest.TestCase):
+    """Review finding: Presidio's email recogniser reaches tldextract, whose
+    default extractor fetches the Public Suffix List on first use. The service
+    must pin an extractor with no URLs before any recogniser is built."""
+
+    def test_pins_an_extractor_with_no_urls_and_no_cache(self):
+        import types
+
+        import server
+
+        made = {}
+
+        class FakeExtract:
+            def __init__(self, **kw):
+                made.update(kw)
+
+        inner = types.SimpleNamespace(TLD_EXTRACTOR="the default, which fetches")
+        fake = types.SimpleNamespace(TLDExtract=FakeExtract, tldextract=inner)
+        extractor = server.pin_offline_public_suffix_list(fake)
+        self.assertIs(inner.TLD_EXTRACTOR, extractor)
+        self.assertEqual(tuple(made["suffix_list_urls"]), ())
+        self.assertIsNone(made["cache_dir"])
+        self.assertTrue(made["fallback_to_snapshot"])
+
+    def test_the_real_extractor_never_opens_a_socket(self):
+        """Runs where tldextract is installed (the image, or a dev venv); a
+        socket attempt fails the test instead of reaching the network."""
+        try:
+            import tldextract
+        except ImportError:
+            self.skipTest("tldextract is not installed here")
+        import socket
+
+        import server
+
+        server.pin_offline_public_suffix_list(tldextract)
+        real = socket.socket.connect
+
+        def refuse(*_a, **_k):
+            raise AssertionError("tldextract tried to reach the network")
+
+        socket.socket.connect = refuse
+        try:
+            self.assertEqual(tldextract.extract("mail.example.co.uk").suffix, "co.uk")
+        finally:
+            socket.socket.connect = real
+        self.assertEqual(tuple(tldextract.tldextract.TLD_EXTRACTOR.suffix_list_urls), ())

@@ -50,6 +50,13 @@ docker run -d --name trained-detectors -e DETECTOR_API_KEY=<random> -p 8080:8080
   that discusses these topics. The rule-based detectors always run beside them.
 - Long text is scored in overlapping windows of about 1,500 characters, so very long inputs take longer; the gateway's
   per-call time limit (2 s by default) turns an overrun into a failure, which fails closed by default.
-- One request at a time per instance (a lock around inference). Scale by running more instances behind a load
-  balancer.
+- Each window is cut at 512 tokens. English text of 1,500 characters fits, but dense text (CJK, long runs of digits or
+  symbols) can exceed 512 tokens, and the end of that window is then not scored by the two classifiers. Token-based
+  windows with a stride are a recorded follow-up.
+- One request at a time per instance (a lock around inference), which limits throughput under load. Scale by running
+  more instances behind a load balancer.
+- No network at run time, including the PII path: Presidio's email recogniser uses tldextract, whose default extractor
+  downloads the Public Suffix List on first use. The service replaces it, before any recogniser is built, with one that
+  has no URLs and no cache and so always uses the list bundled in the pinned wheel (`pin_offline_public_suffix_list`,
+  tested with every socket refused).
 - Groundedness is not served yet (see `THIRD_PARTY.md`).
