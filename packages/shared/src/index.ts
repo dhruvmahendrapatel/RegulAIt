@@ -2379,6 +2379,12 @@ export const updateOrgSettingsSchema = z
      * dispatchable judge reports `judged: unavailable` and changes nothing. */
     recommendationJudgeEnabled: z.boolean().optional(),
     recommendationJudgeAgentId: z.string().uuid().nullable().optional(),
+    /** ADR-0213 (migration 0258): may a person ask for drafted answers to a
+     * vendor assessment questionnaire? false (default) = the questionnaire is
+     * filled by hand only. true (a relaxation: step-up, audited) = the vendor
+     * detail offers drafts labelled with their sources; nothing is submitted
+     * or recorded as an attestation until a person does it. */
+    vendorDraftAssistEnabled: z.boolean().optional(),
     /** ADR-0215 (migration 0248): may an admin import vendored framework content
      * (new draft pack versions) and accept imported feed entries? false (default) =
      * the import routes refuse. Turning it on is a relaxation (settings_relax step-up). */
@@ -4025,6 +4031,27 @@ export {
   type RecordVendorAttestationInput,
   type UpdateVendorInput,
 } from "./vendors.js";
+
+// ADR-0213 — the governed vendor-questionnaire drafter (backlog P6)
+export {
+  VENDOR_DRAFT_LIMITS,
+  VENDOR_DRAFT_SOURCE_KINDS,
+  VENDOR_DRAFT_SOURCE_LABELS,
+  VENDOR_QUESTIONNAIRE_SECTIONS,
+  buildVendorDraftPrompt,
+  composeDraftQuestionnaire,
+  parseVendorDraft,
+  splitQuestionnaire,
+  suggestVendorAnswers,
+  vendorDraftRequestSchema,
+  vendorDraftSources,
+  type VendorDraftGrounding,
+  type VendorDraftRequest,
+  type VendorDraftSection,
+  type VendorDraftSource,
+  type VendorDraftSourceKind,
+  type VendorQuestionnaireSectionId,
+} from "./vendor-draft.js";
 
 // ---------------------------------------------------------------------------
 // ADR-0085 — EU AI Act risk-tier screening (gap L10): the questionnaire

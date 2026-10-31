@@ -148,3 +148,17 @@ rather than current — this ADR is the correction of record.
   obvious next step, named here rather than implied as shipped.
 - **The checklist needs an active pack.** A framework with no active `compliance_packs` row
   renders an honest empty checklist, not an error and not a built-in fallback.
+
+## Addendum (2026-10-30, ADR-0213)
+
+Backlog P6 narrows §2's "nothing is pre-filled by a model" (the original text above stands as the record of what was
+decided on 2026-08-20). [ADR-0213](0213-vendor-questionnaire-drafts.md) adds governed drafts for this questionnaire,
+off by default (an admin turns them on with step-up, audited). The narrowed rule is:
+
+> Nothing in the questionnaire is pre-filled. A person may ask for drafted answers; each drafted answer is labelled
+> with the sources it came from, enters the questionnaire only when that person uses it, and counts only once they
+> submit the questionnaire. A drafted answer is never recorded as an attestation until a person records it through
+> `POST /v1/vendors/:vendorId/attestations`.
+
+Everything else here is unchanged: answers remain vendor attestations, never platform evidence; an approval still
+approves the assessment, not the vendor's claims; and the attestation write path and its attribution are untouched.

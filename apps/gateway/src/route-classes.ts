@@ -391,6 +391,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/vendors/:vendorId",
   "PATCH /v1/vendors/:vendorId",
   "POST /v1/vendors/:vendorId/attestations",
+  // ADR-0213: owner-or-admin in the handler; drafts only, nothing is written but an audit row
+  "POST /v1/vendors/:vendorId/questionnaire/draft",
   "POST /v1/workflows/instances",
   "POST /v1/workflows/instances/:instanceId/artifacts",
   "POST /v1/workflows/instances/:instanceId/advance",

@@ -25,6 +25,11 @@ describe("refusalGuidance (ADR-0183 2.3)", () => {
     expect(refusalGuidance(500, { error: "custom_provider_disabled" })).toBeNull();
   });
 
+  it("ADR-0213: a disabled vendor drafter is guided to the organization settings", () => {
+    expect(refusalGuidance(409, { error: "vendor_draft_disabled" })).toBe(REFUSAL_GUIDANCE.vendorDraftDisabled);
+    expect(refusalGuidance(403, { error: "vendor_draft_disabled" })).toBeNull();
+  });
+
   it("403 mcp_release_age_cooldown: an admin can allow the server sooner on Admission review", () => {
     expect(refusalGuidance(403, { error: "mcp_release_age_cooldown", detail: "x" })).toBe(REFUSAL_GUIDANCE.releaseAgeCooldown);
     expect(refusalGuidance(500, { error: "mcp_release_age_cooldown" })).toBeNull();
@@ -41,7 +46,7 @@ describe("refusalGuidance (ADR-0183 2.3)", () => {
 
   it("every guidance links to an Account section or admin page that exists", () => {
     for (const g of Object.values(REFUSAL_GUIDANCE)) {
-      expect(g.to).toMatch(/^(\/account\?section=(mfa|ai-policies)|\/admin\/custom-providers|\/admin\/admission)$/);
+      expect(g.to).toMatch(/^(\/account\?section=(mfa|ai-policies)|\/admin\/(custom-providers|organization|model-policy|admission))$/);
     }
   });
 });

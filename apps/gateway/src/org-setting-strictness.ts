@@ -284,6 +284,8 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   dsrSlaDays: atMost(30),
   recommendationJudgeEnabled: exempt("adds a model-judged annotation to the deterministic findings; it refuses and allows nothing"),
   recommendationJudgeAgentId: exempt("names the judge of the annotation above; it refuses and allows nothing"),
+  // ADR-0213: turning the vendor questionnaire drafter on sends supplier material to a model
+  vendorDraftAssistEnabled: notEqual(false),
   // ADR-0215: off = the framework-import and feed-import routes refuse; on lets an admin propose and accept imports
   frameworkImportsEnabled: notEqual(false),
   // ADR-0225 (P13 d): public trust pages and auditor access ship off; turning them on publishes outside the org

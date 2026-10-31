@@ -49,6 +49,7 @@ const DECISION_WRITERS = [
   "redteam.ts",
   "use-case-gate.ts",
   "use-cases.ts",
+  "vendors.ts", // ADR-0213: the vendor questionnaire drafter's refused model use (insert(auditLog), chained handle)
   "workbench.ts",
 ].sort();
 
