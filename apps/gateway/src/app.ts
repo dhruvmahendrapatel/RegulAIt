@@ -143,6 +143,10 @@ import { governedEvaluate } from "./governed-evaluate.js";
 import { checkMcpTransportWrite, refuseMcpServerWrite } from "./mcp-egress.js";
 import {
   agentIdDisclosureUpdate,
+  assertionProfileUpdate,
+  auditAssertionProfileChange,
+  refuseAssertionProfile,
+  refuseBearerConflict,
   auditAgentIdDisclosureChange,
   auditIdentityPropagationChange,
   identityPropagationUpdate,
@@ -509,6 +513,7 @@ import {
   approvingPrincipals,
   decidedByViewerCondition,
   poolVisibilityCondition,
+  previewToolApprovalQueue,
   registerApprovalSigningRoutes,
 } from "./approval-signatures.js";
 import { registerDecisionReceiptRoutes } from "./decision-receipts.js";
@@ -545,6 +550,7 @@ import { registerShadowAiRoutes } from "./shadow-ai.js";
 import { registerDiscoveryRoutes } from "./discovery-routes.js";
 import { registerContentTrustRoutes } from "./content-trust-routes.js";
 import { registerFederationRoutes } from "./federation-routes.js";
+import { registerMcpIdentityOidcRoutes } from "./mcp-identity-oidc-routes.js";
 import { registerEndpointImportRoutes } from "./endpoint-import-routes.js";
 import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
@@ -2157,7 +2163,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       });
     }
     // ADR-0188 S8: a stdio server cannot carry an identity assertion, nor the agent IDs inside one (409, nothing saved)
-    const identityRefusal = refuseIdentityPropagationOnStdio(isStdio, body.identityPropagation, body.discloseAgentWorkloadIds);
+    const identityRefusal = refuseIdentityPropagationOnStdio(isStdio, body.identityPropagation, body.discloseAgentWorkloadIds, body.identityAssertionProfile);
     if (identityRefusal) return reply.status(identityRefusal.status).send(identityRefusal.body);
     const label = `MCP server '${before.name}'`;
     const nextUrl = body.url ?? before.url;
@@ -2234,15 +2240,27 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const disclosure = agentIdDisclosureUpdate(before, body, identity);
     const disclosureRefusal = refuseAgentIdDisclosureWithoutAssertion(disclosure);
     if (disclosureRefusal) return reply.status(disclosureRefusal.status).send(disclosureRefusal.body);
+    // ADR-0210: the OIDC profile (an ES256 assertion as the Bearer token, with an admin-set scope) is a further
+    // relaxation, only while an assertion is sent and only with a valid scope (else refused before any step-up); a url
+    // move or propagation turning off returns it to the default. Never beside an ADR-0204 Bearer credential.
+    const profile = assertionProfileUpdate(before, body, identity);
+    const profileRefusal = refuseAssertionProfile(profile);
+    if (profileRefusal) return reply.status(profileRefusal.status).send(profileRefusal.body);
+    if (profile.relaxed) {
+      const conflict = await refuseBearerConflict(db, serverId);
+      if (conflict) return reply.status(conflict.status).send(conflict.body);
+    }
     const relaxedValues =
-      rangesRelaxed || identity.relaxed || disclosure.relaxed ? { ...rangesRelaxed, ...identity.relaxed, ...disclosure.relaxed } : null;
+      rangesRelaxed || identity.relaxed || disclosure.relaxed || profile.relaxed
+        ? { ...rangesRelaxed, ...identity.relaxed, ...disclosure.relaxed, ...profile.relaxed }
+        : null;
     const rangesStepUpArgs = relaxedValues
       ? {
           kind: "settings_relax" as const,
           facts: {
             op: "mcp_server_update",
             serverId,
-            ...(body.url !== undefined || identity.relaxed || disclosure.relaxed ? { url: nextUrl } : {}),
+            ...(body.url !== undefined || identity.relaxed || disclosure.relaxed || profile.relaxed ? { url: nextUrl } : {}),
             values: relaxedValues,
           },
         }
@@ -2300,6 +2318,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         : {}),
       ...(identity.write !== null ? { identityPropagation: identity.write } : {}),
       ...(disclosure.write !== null ? { discloseAgentWorkloadIds: disclosure.write } : {}),
+      ...(profile.write !== null ? profile.write : {}),
       ...stdioPatch,
       ...(ownerChanges ? { ownerUserId: ownerTarget } : {}),
     };
@@ -2316,13 +2335,23 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // the same transaction, on its connection, AFTER that compare-and-set, so a 409 never burns them; a refused
       // claim throws and rolls the write back.
       const touchesPosture =
-        body.allowPrivateRanges !== undefined || body.url !== undefined || identity.write !== null || disclosure.write !== null;
+        body.allowPrivateRanges !== undefined ||
+        body.url !== undefined ||
+        identity.write !== null ||
+        disclosure.write !== null ||
+        profile.write !== null;
       type Patched = { row: typeof mcpServers.$inferSelect } | { refused: { status: number; body: Record<string, unknown> } };
       const out = await db.transaction(async (tx): Promise<Patched> => {
         if (identity.relaxed) {
           await lockIdentityAudiences(tx);
           const shared = await refuseSharedIdentityAudience(tx, serverId, nextUrl);
           if (shared) return { refused: { status: shared.status, body: shared.body } };
+        }
+        if (profile.relaxed) {
+          // ADR-0210: re-checked under the server row's lock, which the credential's writers take too
+          await tx.select({ id: mcpServers.id }).from(mcpServers).where(eq(mcpServers.id, serverId)).for("update");
+          const conflict = await refuseBearerConflict(tx, serverId);
+          if (conflict) return { refused: { status: conflict.status, body: conflict.body } };
         }
         const [written] = await tx
           .update(mcpServers)
@@ -2338,6 +2367,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
                     eq(mcpServers.url, before.url),
                     eq(mcpServers.identityPropagation, before.identityPropagation),
                     eq(mcpServers.discloseAgentWorkloadIds, before.discloseAgentWorkloadIds),
+                    eq(mcpServers.identityAssertionProfile, before.identityAssertionProfile),
+                    sql`${mcpServers.identityAssertionScope} IS NOT DISTINCT FROM ${before.identityAssertionScope}`,
                   ]
                 : []),
               ...(ownerChanges ? [sql`${mcpServers.ownerUserId} IS NOT DISTINCT FROM ${before.ownerUserId}`] : []),
@@ -2431,6 +2462,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             url: written.url,
             update: disclosure,
             stepUp: disclosure.relaxed ? rangesStepUp : null,
+          });
+        }
+        // ADR-0210: every change of the assertion profile or scope, and a url move that keeps it on, on the trail
+        if (profile.write !== null || profile.relaxed) {
+          await auditAssertionProfileChange(tx, {
+            userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+            serverId,
+            label,
+            from: { identityAssertionProfile: before.identityAssertionProfile, identityAssertionScope: before.identityAssertionScope },
+            to: { identityAssertionProfile: written.identityAssertionProfile, identityAssertionScope: written.identityAssertionScope },
+            url: written.url,
+            update: profile,
+            stepUp: profile.relaxed ? rangesStepUp : null,
           });
         }
         if (stdioChange) {
@@ -3448,7 +3492,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
     // Full governed evaluation, but decision-only: unlike the proxy path this
     // endpoint never creates queue entries or consumes approvals.
-    const { decision } = await governedEvaluate(
+    const { decision: evaluated, matchedApprovalRuleIds } = await governedEvaluate(
       db,
       body.userId,
       body.serverId,
@@ -3467,6 +3511,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       undefined,
       { actor: null }, // ADR-0188 S4: the person's own decision; agent paths decide with their delegation grant in the governed core
     );
+    // ADR-0186 A — the queue-time quorum and signature-mode check, run read-only:
+    // a `require_approval` the queue would refuse (no pool can ever sign it)
+    // previews as that same deny, so the preview and the gateway agree.
+    const decision = await previewToolApprovalQueue(db, {
+      callerUserId: body.userId,
+      decision: evaluated,
+      matchedApprovalRuleIds: matchedApprovalRuleIds ?? [],
+      projectId: null,
+      toolName: body.toolName,
+    });
 
     // ADR-0127 — MARKED ADVISORY. This route answers "what would you decide"
     // and executes nothing, but it wrote an `allow` row indistinguishable from
@@ -5665,6 +5719,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // fetch them), and the admin key lifecycle (off by default; on is a `settings_relax` step-up, rotate and revoke
   // are `key_management` step-ups). The admin routes are admin-only by default (none is in NON_ADMIN_ROUTES).
   registerFederationRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0210: the OIDC-profile identity assertion issuer's public discovery document and ES256 JWKS
+  registerMcpIdentityOidcRoutes(app, db);
   // ADR-0195 SD3 — no-agent endpoint evidence (osquery results, MDM/EDR inventory) imported into an endpoint source,
   // and the endpoint signature seed. Admin-only by default.
   registerEndpointImportRoutes(app, db, {
