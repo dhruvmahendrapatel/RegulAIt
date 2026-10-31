@@ -4610,7 +4610,7 @@ export const orgSettings = pgTable(
      * choice, never widen entitlement. NULL while enabled = `judged:
      * unavailable` with `judge_required`, never a silent no-annotation run. */
     recommendationJudgeAgentId: uuid("recommendation_judge_agent_id"),
-    /** ADR-0215 (migration 0233): may an admin import vendored framework content as new
+    /** ADR-0215 (migration 0248): may an admin import vendored framework content as new
      * draft pack versions, and accept imported regulatory feed entries? false (default) =
      * the import routes refuse and the feed is the hand-curated list only. */
     frameworkImportsEnabled: boolean("framework_imports_enabled").notNull().default(false),
@@ -8216,7 +8216,7 @@ export type CompliancePackAttestationRow = typeof compliancePackAttestations.$in
 export type CompliancePackReportRow = typeof compliancePackReports.$inferSelect;
 
 // ---------------------------------------------------------------------------
-// ADR-0215 (migrations 0233, 0234) — FRAMEWORK CONTENT IMPORTS AND THE IMPORTED FEED
+// ADR-0215 (migrations 0248, 0249) — FRAMEWORK CONTENT IMPORTS AND THE IMPORTED FEED
 // ---------------------------------------------------------------------------
 //
 // An import is a PROPOSAL an admin reviews. Accepting a framework import inserts a

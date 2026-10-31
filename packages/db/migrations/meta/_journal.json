@@ -1487,17 +1487,17 @@
       "breakpoints": true
     },
     {
-      "idx": 233,
+      "idx": 248,
       "version": "7",
       "when": 1785183000000,
-      "tag": "0233_framework_import_proposals",
+      "tag": "0248_framework_import_proposals",
       "breakpoints": true
     },
     {
-      "idx": 234,
+      "idx": 249,
       "version": "7",
       "when": 1785184000000,
-      "tag": "0234_regulatory_feed_imports",
+      "tag": "0249_regulatory_feed_imports",
       "breakpoints": true
     }
   ]

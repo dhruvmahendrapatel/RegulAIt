@@ -4,8 +4,8 @@
 - **Date**: 2026-10-30
 - **Related**: ADR-0058/0087 (packs as rows, versioning, the version diff), ADR-0158 (the regulatory feed),
   ADR-0176 (open source first, licences, air-gapped), ADR-0180 (secure by default), PENDING.md row P5
-- **Migrations**: 0233 (`framework_import_proposals`, `org_settings.framework_imports_enabled`),
-  0234 (`regulatory_feed_imports`)
+- **Migrations**: 0248 (`framework_import_proposals`, `org_settings.framework_imports_enabled`),
+  0249 (`regulatory_feed_imports`)
 
 ## Context
 

@@ -2366,7 +2366,7 @@ export const updateOrgSettingsSchema = z
      * dispatchable judge reports `judged: unavailable` and changes nothing. */
     recommendationJudgeEnabled: z.boolean().optional(),
     recommendationJudgeAgentId: z.string().uuid().nullable().optional(),
-    /** ADR-0215 (migration 0233): may an admin import vendored framework content
+    /** ADR-0215 (migration 0248): may an admin import vendored framework content
      * (new draft pack versions) and accept imported feed entries? false (default) =
      * the import routes refuse. Turning it on is a relaxation (settings_relax step-up). */
     frameworkImportsEnabled: z.boolean().optional(),

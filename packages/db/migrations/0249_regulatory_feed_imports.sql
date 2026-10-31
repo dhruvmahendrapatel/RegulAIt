@@ -5,7 +5,7 @@
 -- 2. The ADR-0158 feed reads the hand-curated entries plus the ONE accepted row per source (partial unique index). A
 --    curated entry wins a key collision. Nothing joins the feed until an admin accepts it, audited in the same
 --    transaction; accepting supersedes the previous accepted row.
--- 3. Gated by `org_settings.framework_imports_enabled` (0233). No functions and no triggers.
+-- 3. Gated by `org_settings.framework_imports_enabled` (0248). No functions and no triggers.
 
 CREATE TABLE IF NOT EXISTS "regulatory_feed_imports" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
