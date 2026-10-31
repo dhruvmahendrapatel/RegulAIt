@@ -83,7 +83,7 @@ already covers each node, and that check feeds the lanes.
 
 | # | Gap | What it would take |
 |---|---|---|
-| **P18** | **No node-by-node coverage check against a full governance framework map.** Packs, controls and roles have grown ADR by ADR. Nobody has checked them against one complete map of the field, so coverage gaps and overlaps are not visible in one place. The map's nodes are listed after this table. | **Step 1, an audit (Gemini, markdown only, ADR-0227):** for each node, record built / partial / missing, with the evidence (ADR, file, pack ID) and, for gaps, a one-line scope. Record it under `internal/reviews/`, with no new claims of compliance or certification. **Step 2, the master:** turn confirmed gaps into lanes, each with its own ADR. Use the order of ADR-0176 open-source-first imports first, then packs, then controls. Content licensed share-alike or non-commercial is cited by ID only (as P5). |
+| **P18** | **No node-by-node coverage check against a full governance framework map.** Packs, controls and roles have grown ADR by ADR. Nobody has checked them against one complete map of the field, so coverage gaps and overlaps are not visible in one place. The map's nodes are listed after this table. | **Step 1, an audit (Codex, markdown only, ADR-0227):** for each node, record built / partial / missing, with the evidence (ADR, file, pack ID) and, for gaps, a one-line scope. Record it under `internal/reviews/`, with no new claims of compliance or certification. **Step 2, the master:** turn confirmed gaps into lanes, each with its own ADR. Use the order of ADR-0176 open-source-first imports first, then packs, then controls. Content licensed share-alike or non-commercial is cited by ID only (as P5). |
 
 **Map nodes to check:**
 

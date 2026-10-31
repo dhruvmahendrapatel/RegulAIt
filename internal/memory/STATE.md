@@ -5424,7 +5424,9 @@ text changed in link targets only. The index now ends at 0201, with 196 files an
 `codex/<lane>` branches as HOLD draft PRs and may review Claude lanes. Gemini writes markdown audits only. The Claude
 master still assigns lanes, reserves numbers, renumbers migrations at merge and releases PRs. The live board is
 [internal/process/AGENT_COORDINATION.md](../process/AGENT_COORDINATION.md), and root `AGENTS.md` and `GEMINI.md`
-point both agents at it. The demo freeze binds every agent.
+point both agents at it. The demo freeze binds every agent. **Amended the same day:** the owner said "No Gemini, let's
+only use codex", so Gemini is not used, Codex also takes the markdown audits, and `GEMINI.md` is removed (ADR-0227
+addendum).
 
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);

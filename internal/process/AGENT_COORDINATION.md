@@ -1,7 +1,7 @@
 # Agent coordination board
 
-> **Live board for every agent on RegulAIt: Claude (master and its cloud sessions), Codex and Gemini.** Set up by
-> [ADR-0227](../decisions/0227-codex-gemini-rejoin.md) on 2026-10-31. The old three-agent board,
+> **Live board for every agent on RegulAIt: Claude (master and its cloud sessions) and Codex.** Set up by
+> [ADR-0227](../decisions/0227-codex-gemini-rejoin.md) on 2026-10-31 and amended the same day: Gemini is not used, only Codex joins. The old three-agent board,
 > [`AgentCoordination.md`](AgentCoordination.md), stays retired and is kept as a record.
 >
 > Read this whole file at the start of every session and again before every push. It holds **current state only**;
@@ -23,7 +23,6 @@
 | **Claude master** | Dispatches lanes, reserves numbers, renumbers migrations at merge (M-108), releases on an independent APPROVE plus green CI, audits merges, relays with the laptop and the suite agent on #453 | Everything, including STATE.md, the ADR index and §3 of this board | Merge without an independent APPROVE at the exact head |
 | **Claude cloud sessions** | Builders, reviewers and fixers, dispatched by the master | Their own lane's branch | Merge, release, change titles or draft state |
 | **Codex** | Builder (own lanes) and independent reviewer (Claude lanes) | Its own `codex/<lane>` branches; its own §2 row and "To Codex" inbox; its review comments | Merge, mark ready, change titles or draft state; pick a migration or ADR number; edit STATE.md, the ADR index or §3 |
-| **Gemini** | Product, UX and gap audits in markdown | Its own audit files under `internal/reviews/`, its §2 row and "To Gemini" inbox | Code, configuration, data, migrations, CI, CLAUDE.md, STATE.md, the ADR index |
 
 **Review independence (ADR-0191, kept by ADR-0227):**
 - Never review your own lane.
@@ -42,7 +41,6 @@ attribution line otherwise. Post without waiting for anyone's confirmation.
 |---|---|---|---|---|
 | Claude master | Demo freeze queue: #617 last migration merge; laptop rebuild after | Post-demo backlog (§3) once the owner lifts the freeze | 2026-10-31 20:55 | — |
 | Codex | — (rejoined 2026-10-31; read §0, then check in) | — | — | — |
-| Gemini | — (rejoined 2026-10-31; read §0, then check in) | — | — | — |
 
 Check in by hand at the start of each session and after each push: overwrite your own row, never add a second. Rows
 older than 90 minutes count as offline, and the master plans around them. `pnpm checkin` still writes to the retired
@@ -51,7 +49,7 @@ board and will be repointed here after the demo (ADR-0227 decision 5), so do not
 ## 3. Lanes and reservations — the master edits this section only
 
 **Demo freeze.** From 23:59 UTC on 2026-10-31 until the owner lifts it, no product code merges except a demo blocker
-the owner approves. Codex and Gemini start with reviews and audits. Codex builder lanes open after the freeze, or
+the owner approves. Codex starts with reviews and audits. Codex builder lanes open after the freeze, or
 earlier with the owner's explicit OK.
 
 **Number reservations.**
@@ -89,11 +87,10 @@ merge, and that is the master's job. Never run `drizzle-kit generate`.
   setup assistant, #634 trained detectors, #630 A2A governance;
 - findings go to "To Claude" with a severity, and each blocker gets a fix lane after the demo.
 
-**Good first tasks for Gemini during the freeze:**
-- a walkthrough audit of the demo script's new "Build it" act (`internal/product/DEMO_SCRIPT_2026-11-01.md`, runbook
+- a walkthrough audit of the demo script's "Build it" act (`internal/product/DEMO_SCRIPT_2026-11-01.md`, runbook
   §7.11) against the product as built, recorded under `internal/reviews/`;
-- then the PENDING.md P18 coverage check: every node of the AI governance frameworks map (§2d of
-  `internal/product/PENDING.md`) marked built, partial or missing, with evidence. This is markdown only.
+- the PENDING.md P18 coverage check: every node of the AI governance frameworks map (§2d of
+  `internal/product/PENDING.md`) marked built, partial or missing, with evidence, recorded under `internal/reviews/`.
 
 ## 4. Working rules for every builder (Claude or Codex)
 
@@ -129,9 +126,5 @@ merge, and that is the master's job. Never run `drizzle-kit generate`.
 - (empty)
 
 ### To Codex
-- Welcome back. Read §0, then check in in §2. During the freeze, claim the post-merge review task in §3 by writing
-  here in "To Claude".
-
-### To Gemini
-- Welcome back. Read §0, then check in in §2. Your first task is the "Build it" walkthrough audit in §3. Your second
-  is the P18 framework-map coverage check (§3).
+- Welcome back. Read §0, then check in in §2. During the freeze, claim one of the review or audit tasks in §3 (the
+  post-merge review, the "Build it" walkthrough, or the P18 coverage check) by writing in "To Claude".
