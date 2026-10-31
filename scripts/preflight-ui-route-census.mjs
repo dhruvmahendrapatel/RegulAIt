@@ -174,11 +174,11 @@ export const INDIRECT_UI_CALLS = new Map([
     ["GET /v1/virtual-keys/export.xlsx", "apps/web/src/views/admin/identity/VirtualKeysPage.tsx"],
     ["GET /v1/virtual-keys/:keyId/usage/export.xlsx", "apps/web/src/views/admin/identity/VirtualKeysPage.tsx"],
     ["GET /v1/admin/credentials/export.xlsx", "apps/web/src/views/admin/identity/CredentialsPage.tsx"],
-    ["GET /v1/workload-identities/export.xlsx", "apps/web/src/views/admin/identity/WorkloadIdentitiesPage.tsx"],
-    ["GET /v1/auth/link-requests/export.xlsx", "apps/web/src/views/admin/identity/SsoPage.tsx"],
-    ["GET /v1/chatops/identity-links/export.xlsx", "apps/web/src/views/admin/governance/ChatOpsPage.tsx"],
-    ["GET /v1/agents/export.xlsx", "apps/web/src/views/admin/integrations/AgentsPage.tsx"],
-    ["GET /v1/licenses/verifications/export.xlsx", "apps/web/src/views/admin/settings/LicensingPage.tsx"],
+    ["GET /v1/workload-identities/export.xlsx", "apps/web/src/views/admin/identity/WorkloadIdentitySubpages.tsx"],
+    ["GET /v1/auth/link-requests/export.xlsx", "apps/web/src/views/admin/identity/LinkRequestsPage.tsx"],
+    ["GET /v1/chatops/identity-links/export.xlsx", "apps/web/src/views/admin/governance/ChatIdentityLinksPage.tsx"],
+    ["GET /v1/agents/export.xlsx", "apps/web/src/views/admin/integrations/AgentCatalogPage.tsx"],
+    ["GET /v1/licenses/verifications/export.xlsx", "apps/web/src/views/admin/settings/LicenceVerificationsPage.tsx"],
   ].map(([r, page]) => [
     r,
     {

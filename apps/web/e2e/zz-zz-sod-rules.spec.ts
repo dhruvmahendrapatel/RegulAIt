@@ -135,6 +135,8 @@ test("declare a rule, get refused at the real grant form, escalate, arm's-length
 
   // --- the REAL grant form refuses, verbatim -------------------------------
   await page.goto("/ui/admin/agents");
+  // P3: grants are under the "Grants & policy" settings tab
+  await page.getByRole("tab", { name: /^Grants & policy/ }).click();
   const grantCard = page.locator("section").filter({ hasText: "Grant an agent" });
   await grantCard.getByLabel("User").selectOption({ label: "zz sod holder · zz-sod-holder@example.com" });
   await grantCard.getByLabel("Agent").selectOption({ label: "zz-sod-vendor · mock · tier 1" });

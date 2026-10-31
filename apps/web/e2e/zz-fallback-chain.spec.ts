@@ -74,6 +74,8 @@ test("an admin builds, reorders and prunes a fallback chain", async ({ page }) =
   await signIn(page, "admin@regulait.local", [ADMIN_PASSWORD, state.passwords.admin], ADMIN_PASSWORD);
 
   await page.goto("/ui/admin/agents");
+  // P3: the fallback chain is under the "Fallbacks" settings tab
+  await page.getByRole("tab", { name: /^Fallbacks/ }).click();
   const card = page.locator("section", { hasText: "Fallback chain — what runs when the primary cannot" }).first();
   await expect(card).toBeVisible();
 

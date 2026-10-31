@@ -37,6 +37,8 @@ import {
   type StewardshipFilter,
 } from "./agentStewardshipModel";
 import st from "./agentStewardship.module.css";
+import { Link } from "react-router-dom";
+import { PREVIEW_ROWS, previewHeading } from "../../../ui/ListPreview";
 import v from "../../views.module.css";
 
 type Row = AdminAgent & AgentStewardship;
@@ -69,6 +71,41 @@ function personCell(name: string | null | undefined, deactivated: boolean | unde
     </>
   ) : (
     name
+  );
+}
+
+/**
+ * P3 (#453 c6527514889): the agents overview keeps this preview, at most five agents (those needing attention first)
+ * with the orphaned and review-overdue counts in its heading; the full stewardship list has its own page.
+ */
+export function StewardshipPreview(props: { agents: Row[] | undefined; loading: boolean; failed: boolean }) {
+  if (props.failed) return null;
+  const rows = props.agents ?? [];
+  const orphaned = rows.filter((a) => matchesFilter(a, "orphaned")).length;
+  const overdue = rows.filter((a) => matchesFilter(a, "overdue")).length;
+  const first = [...rows].sort((x, y) => Number(!!y.orphaned) - Number(!!x.orphaned) || Number(!!y.reviewOverdue) - Number(!!x.reviewOverdue)).slice(0, PREVIEW_ROWS);
+  const heading = props.agents ? ` · ${previewHeading(rows.length, "agents", [{ label: "orphaned", count: orphaned }, { label: "review overdue", count: overdue }])}` : "";
+  return (
+    <Card
+      title={`Stewardship${heading}`}
+      actions={
+        <Link to="/admin/agents/stewardship" aria-label="View all agents' stewardship">
+          View all →
+        </Link>
+      }
+    >
+      <Table<Row>
+        columns={[
+          { key: "agent", header: "Agent", render: (a) => a.name },
+          { key: "steward", header: "Steward", render: (a) => personCell(a.stewardName, a.stewardDeactivated, "No steward") },
+          { key: "flags", header: "Flags", render: (a) => <Flags a={a} /> },
+        ]}
+        rows={props.agents ? first : undefined}
+        rowKey={(a) => a.id}
+        loading={props.loading}
+        empty={<EmptyState title="No agents registered" body="Register the first agent in the Register tab." />}
+      />
+    </Card>
   );
 }
 
