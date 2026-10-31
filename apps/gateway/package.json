@@ -85,6 +85,7 @@
     "pkijs": "3.4.1",
     "re2js": "2.8.8",
     "standardwebhooks": "1.1.1",
+    "write-excel-file": "4.1.1",
     "zod": "4.6.6"
   },
   "devDependencies": {
@@ -92,6 +93,7 @@
     "@regulait/engine-modelscan": "workspace:*",
     "@regulait/engine-promptfoo": "workspace:*",
     "@types/node": "26.1.1",
+    "fflate": "0.8.3",
     "simple-statistics": "7.12.1",
     "vitest": "^4.1.11",
     "xml-crypto": "6.1.2"

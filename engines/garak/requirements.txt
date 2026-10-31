@@ -19,6 +19,8 @@
 # sdists with the setuptools pinned here (no build isolation, so no unhashed build dependency).
 # packages/engine-garak/src/image.test.ts keeps this file, the Dockerfile and the manifest in lockstep;
 # the licence gate (licence-gate.mjs) runs on what this installs.
+# 2026-10-31: pyasn1 0.6.4 -> 0.6.5 (BSD-2-Clause) for CVE-2026-119194..119197 (high, fixed in 0.6.5); pyasn1-modules 0.4.2
+# accepts pyasn1>=0.6.1,<0.7.0, so no other pin moved. The hash is the py3-none-any wheel from PyPI's JSON API.
 accelerate==1.15.0 \
     --hash=sha256:97eacca0b73e45cb867dbf8c5d5d4dc32219544300e0c8992c7334dc2ef33cec
 aiohappyeyeballs==2.7.1 \
@@ -251,8 +253,8 @@ py-markdown-table==2.0.0 \
     --hash=sha256:ff56dffa8d7b00bc88ac5faa42652debcde19fed46179f3637e3df9364c9aa78
 pyarrow==26.0.0 \
     --hash=sha256:6a628922ba20705fa964ca73e4ef959c2fb2f14b9bbec5589a6a1e68e6257c85
-pyasn1==0.6.4 \
-    --hash=sha256:deda9277cfd454080ec40b207fb6df82206a3a2688735233cdcd8d3d565f088b
+pyasn1==0.6.5 \
+    --hash=sha256:4017b0fce125096b8573b39c989fdb1a4b19cf761e683398184550fea0e66587
 pyasn1-modules==0.4.2 \
     --hash=sha256:29253a9207ce32b64c3ac6600edc75368f98473906e8fd1043bd6b5b1de2c14a
 pycparser==3.11 \
