@@ -805,3 +805,134 @@ UI: `apps/web/src/views/admin/governance/ContentTrustPage.tsx`.
 
 A failed live call never leaves an empty screen (ADR-0197 decision 7): move to the next path at once rather than
 retrying in front of the audience.
+
+---
+
+## Addendum (2026-10-31): Act 3 — Build it
+
+**Owner request (2026-10-31, through the master session):** show (1) creating agents, including Claude-assisted agent
+setup; (2) linking agents to tasks and to other agents in a run; (3) the owner's own Claude key working in the
+playground, chat and builder; (4) guardrails working on real calls. Nothing above this addendum is changed: the 25
+minutes and their timing table stand. This act runs **after G8 and before the Close**. It must come after G1, because
+B2 signs off the `claude-opus` model card, and G1's **Stack** tab on S4's use case is meant to read **Not signed off**
+for that agent (`DEMO_RUNBOOK.md` §7.3, row "S4 Link stack pairing").
+
+Set-up, limits and the fallback for every beat are in `DEMO_RUNBOOK.md` §7.11. The presenter reads §7.11 "What the act
+must never claim" before the run.
+
+**Sat 10-31:** LIVE, and it changes state (an agent is registered, a model card is signed off, a run is planned and
+run). Rehearse it on the FALLBACK stack only, where every call is a mock.
+
+**Mock vs. live in this act.** The model provider is **live** for the `claude-opus` agent only, through the org key
+the owner entered at set-up. The three `*-mock` agents stay mocks. So the Close's mock-vs-live sentence changes for
+this act: say "in the last act, the agent called Claude through our gateway with our own key; everything else used a
+mock model".
+
+### Timing
+
+| # | Beat | Persona | Minutes | Clock after G8 (24.5) |
+|---|---|---|---|---|
+| B1 | Create agents: the registry, Claude-assisted set-up (if present), a builder agent | Ada | 2.0 | 26.5 |
+| B2 | Real Claude: the refusal, the model card sign-off, then playground, chat and builder chat | Ada, Avery | 2.5 | 29.0 |
+| B3 | The task graph: a lead agent plans, a person edits, agents run in parallel waves, a person accepts | Ada | 2.5 | 31.5 |
+| B4 | Guardrails on real traffic | Ada | 1.0 | 32.5 |
+| — | Close (unchanged) | — | 0.5 | 33.0 |
+
+The act adds 8 minutes, so the demo runs to about 33 minutes before Q&A. **Cutting order inside the act:** B4, then
+B1's builder agent, then B2's builder chat. Never cut B2's refusal: an unreviewed model being refused is the point.
+
+### B1. Create agents — Ada — 2 minutes
+
+UI: `apps/web/src/views/admin/integrations/AgentsPage.tsx`; builder `BuilderAgentsPage.tsx`, `BuilderUi.tsx`,
+`AgentConfigure.tsx`.
+
+1. **`/ui/admin/agents`** (header **Agents**). Point at the **Catalog**: the three `*-mock` agents and `claude-opus`.
+   Then the **Register an agent** card: **Name**, **Provider**, **Tier (0 = cheapest)**, **Model id (blank = not
+   dispatchable)**, **$/MTok in** and **$/MTok out**, and the optional admin system prompt. Register nothing new here
+   unless the set-up assistant below is present.
+2. **Claude-assisted set-up (only if the panel is present).** It ships in PR #611 (ADR-0205) behind the org switch
+   `agent_setup_assist_enabled`, off by default. If #611 is not merged, or the switch is off, skip this step and say
+   nothing about it. If present: in the panel on **Register an agent**, type a one-line description of the agent you
+   want (for example "an agent that drafts replies to supplier invoices"). The draft labels every field with its
+   source, *rules*, *mock* or *model*. Point at the suggested risk tier and grant advice. Press **Use this draft in the
+   form**, then **Register agent**.
+   - **Say:** "Claude helps write the set-up: the name, the prompt, a risk tier, which grants it needs. A model can
+     raise the risk tier but never lower it, and nothing is saved until an admin presses Register."
+3. **Grant it.** The **Grant an agent** card on the same page: **User** Ada, **Agent** the new agent, **Grant**.
+   Point at the **Per-user entitlement** card: every agent a person can use is a grant to that person.
+4. **A builder agent.** **`/ui/builder/agents`** (header **Your agents**) → **New agent**: **Name your agent**,
+   **Describe what it should do**, **Bill to project** `demo-project`; under **Advanced**, **Model** `claude-opus`.
+   **Create agent**. In its editor, add one tool and point at the **Ask first** switch, which is on.
+   - **Say:** "Anyone can build an agent, but only from what they are entitled to: the model must be one of their
+     grants, and the toolbox is limited to their own tool grants, admins included. Every new tool starts on **Ask
+     first**: the agent stops and asks the person before that exact call runs."
+   - The strict-governance profile (`apps/gateway/src/demo-strict-governance.ts`) notes that the demo builds no
+     builder agent and leaves builder ask-first on. This beat builds one and keeps ask-first on, which is the strict
+     default being shown, not relaxed.
+
+### B2. Real Claude — Ada, then Avery — 2.5 minutes
+
+UI: `ChatPage.tsx`, `ModelRiskPage.tsx`, `BuilderPlaygroundPage.tsx`, `BuilderChatPage.tsx`; Avery's **Inbox**.
+
+| Time | Where | What happens | What is on screen |
+|---|---|---|---|
+| 0:00-0:20 | Profile A, `/ui/chat` | **Agent** `claude-opus`, **Bill to** `demo-project`, a one-line question | the call is refused: `mrm_approval_required` (no signed-off model card). Exact wording **to confirm at rehearsal** |
+| 0:20-0:45 | Profile A, `/ui/admin/model-risk` | **Author a model card**: **Agent** `claude-opus`, **Intended use** from the presenter notes → **Create card**. Open it under **Model cards**: **Request sign-off from** Avery, **Recertify by** a month ahead → **Request** | the card, waiting on Avery. The page has no approve button: the requester cannot sign it here |
+| 0:45-1:10 | Profile B, **Inbox** | Avery opens the sign-off request and approves it with a reason | the request leaves his queue |
+| 1:10-1:30 | Profile A, `/ui/chat` | the same question again | Claude's answer, with its cost |
+| 1:30-2:00 | Profile A, `/ui/builder/playground` | **Model** `claude-opus`, **Bill to project** `demo-project`, a short prompt → **Run** | the output, tokens and cost |
+| 2:00-2:30 | Profile A, `/ui/builder` (**Agent chat**) | pick B1's builder agent, ask one question | Claude's answer through the builder agent |
+
+- **Say (at the refusal):** "This is our own Claude key, stored encrypted on the server. But a model nobody has
+  reviewed does not get to answer: there is no signed-off model card, so the gateway refuses the call."
+- **Say (after the retry):** "Ada wrote the card, Avery signed it off, and Ada could not do that herself. Now the same
+  call goes through, and it is entitled, budgeted, metered and in the audit log like every other call."
+- **Never say** that a person can sign off their own model card here; never show the key or the credentials page with
+  a key in it.
+- **Fallback:** if the retry fails with a provider or network error (not the MRM refusal), say "the provider is not
+  answering, so I'll switch this to a mock agent", pick `balanced-mock` in **Agent** and continue. An explicitly chosen
+  mock always serves. Skip the playground and builder chat steps.
+
+### B3. The task graph — Ada — 2.5 minutes
+
+UI: `apps/web/src/views/runs/RunsPage.tsx`, `RunDetailPage.tsx`. API: `POST /v1/runs/decompose`, `POST /v1/runs`,
+`POST /v1/runs/:runId/auto`.
+
+1. **`/ui/runs`**, card **Plan a run**. **Describe the goal** (from the presenter notes; a goal with two independent
+   parts shows a parallel wave). **Lead agent** `claude-opus`. Press **Draft plan with a lead agent**.
+2. The draft is a table: **Node · Title · Owner agent · Depends on · Suggested cap · Instruction**. Point at **Depends
+   on** (the edges) and **Owner agent** (which agent does each task). If the lead suggested an agent Ada is not granted,
+   a line says it was swapped for one she is. Change one node's **Owner agent** to show the human edits the plan;
+   the list offers only Ada's own grants.
+3. **Plan run**. Nothing ran before this press: the lead only proposed.
+4. On the run page, untick **auto-accept reviews**, then **Auto-advance**. **Live worker output** shows one pane per
+   active node; nodes in the same wave stream together. The pass stops at *stopped: review required*.
+5. Press **Accept** on each node in review, then **Auto-advance** again until the run is complete. Open
+   `/ui/admin/audit`: each node's dispatch is a row.
+- **Say:** "A lead agent drafts the plan and names an agent for each task, but only from the agents I am entitled to:
+  a suggestion outside my grants is swapped and the swap is shown. I can change it, and nothing runs until I plan it.
+  Each task is a real governed call under my entitlements and my run budget, independent tasks run in parallel, and
+  review is a person, not a model."
+- **Never say** that a builder agent can own a task (graph nodes reference registry agents only), that builder
+  sub-agents run (they are configuration only), or that agents talk to each other freely. Do not claim the lead can
+  widen anyone's access.
+- **Fallback:** if the lead's draft fails or the provider is slow, pick `balanced-mock` as **Lead agent** and draft
+  again; set each **Owner agent** to a mock agent before **Plan run**, and say so. The mock lead returns a fixed
+  four-node plan.
+
+### B4. Guardrails — Ada — 1 minute
+
+UI: `apps/web/src/views/admin/governance/GuardrailsPage.tsx` (header **Guardrails**).
+
+1. **`/ui/admin/guardrails`**. Point at the detectors in **Deployment defaults** (prompt injection, jailbreak,
+   toxicity, semantic DLP, PII) and their modes (off, log, warn, block), and at **Per-agent / per-connector
+   overrides**.
+2. **Try a sample**: paste the injection sample from the presenter notes → **Detect**. The finding badges appear.
+3. **Recent guardrail decisions**: point at the newest rows from the act.
+- **Say:** "These detectors run on every governed call, per agent or per connector, set to log, warn or block. PII on
+  a model call is blocked, warned or logged; redaction is applied only on tool calls through MCP and connectors, never
+  inside a model call."
+- **Never say** that a model call is redacted, or that the sample tester changes anything: it forces every detector to
+  log and enforces nothing.
+- The playground's API answer carries the PII and guardrails verdicts, but the playground page does not show them, so
+  do not point at the playground for this.

@@ -359,6 +359,7 @@ export {
   MIN_FORECAST_DAYS,
   MIN_FORECAST_ELAPSED_FRACTION,
   FORECAST_DISCLAIMER,
+  FORECAST_LIMITS,
   ANOMALY_DISCLAIMER,
   spendMonitorPolicySchema,
   scheduledSpendChangeSchema,
@@ -2312,6 +2313,8 @@ export const updateOrgSettingsSchema = z
      * MCP URLs work with zero ceremony (a relaxation, stepped up and audited).
      * IMDS/link-local stays unconditionally blocked either way. */
     mcpPrivateRangesDefault: z.boolean().optional(),
+    /** ADR-0219 (P10): calls to remote agents over A2A. Strict false; true relaxes it (settings_relax step-up). */
+    a2aEnabled: z.boolean().optional(),
     /** ADR-0097: the MCP ADMISSION posture ('enforce' is the strict default since ADR-0181). 'off' = no manifest
      * scan runs at all and behaviour is byte-identical to pre-0097. 'log' =
      * every manifest sync is scanned and the verdict/findings are recorded on
@@ -2360,6 +2363,13 @@ export const updateOrgSettingsSchema = z
      * of `useCaseGateMode` by construction: this acts only where projectId is
      * null, that one only where it is not. */
     dispatchAttributionRequired: z.boolean().optional(),
+    /** ADR-0224 (P13 c, migration 0251): the privacy processing limit. false (shipped, owner 10-30) = nothing is
+     * limited. true = personal data the PII detector finds in a governed dispatch must be a category an active
+     * record of processing permits for the dispatch's project, or the dispatch is refused 409
+     * `processing_not_permitted`. Turning it off again is an audited relaxation. */
+    privacyOpsEnabled: z.boolean().optional(),
+    /** ADR-0224: days from a data-subject request's receipt to its due date (1–90; 30 is the strict default) */
+    dsrSlaDays: z.number().int().min(1).max(90).optional(),
     /** ADR-0092 amendment (migration 0100, L6c): may the deterministic
      * access-recommendation findings carry a MODEL-JUDGED annotation? false
      * (default) = the report is the six deterministic rules and nothing else.
@@ -3742,6 +3752,15 @@ export {
   AI_RISK_LEVELS,
   AI_RISK_REGISTER_DISCLAIMER,
   AI_RISK_STATUSES,
+  AI_RISK_TREATMENTS,
+  LIVE_RISK_STATUSES,
+  isTreatedRiskStatus,
+  riskStatusCarriesRating,
+  recordRiskTreatmentSchema,
+  setRiskTreatmentsEnabledSchema,
+  type AiRiskTreatment,
+  type RecordRiskTreatmentInput,
+  type SetRiskTreatmentsEnabledInput,
   DEFAULT_RISK_LIBRARY,
   RISK_CATEGORY_DIMENSION,
   RISK_CATEGORY_EVIDENCE,
@@ -4787,6 +4806,8 @@ export * from "./mcp-upstream-credential.js";
 export * from "./library-lifecycle.js";
 // ADR-0220: trained runtime detectors (PII recogniser, injection classifier, harm model) behind the external-scorer contract
 export * from "./trained-detectors.js";
+// ADR-0224 (P13 c): privacy operations — records of processing, data-subject requests, the processing limit
+export * from "./privacy-ops.js";
 
 // ===== ADR-0215 (P5) — framework content imports and the imported regulatory feed =====
 export * from "./framework-imports.js";

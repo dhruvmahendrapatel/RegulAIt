@@ -20,7 +20,7 @@
  * count; accepted risks DO — accepting a risk is a decision to carry it, and
  * a graph that hid carried risk would be the one place it disappears.
  */
-import { AI_RISK_LEVELS, type AiRiskLevel, type AiRiskStatus } from "./risks.js";
+import { AI_RISK_LEVELS, riskStatusCarriesRating, type AiRiskLevel, type AiRiskStatus } from "./risks.js";
 
 export const GRAPH_NODE_TYPES = [
   "use_case",
@@ -85,7 +85,8 @@ export interface GraphRiskInput {
 export function effectiveRiskRating(
   r: GraphRiskInput,
 ): (RiskRating & { basis: "residual" | "inherent" }) | null {
-  if (r.status === "closed") return null;
+  // ADR-0211: an avoided risk carries no rating either; a transferred one still does
+  if (!riskStatusCarriesRating(r.status)) return null;
   if (r.residualLikelihood && r.residualImpact) {
     return { ...rateRisk(r.residualLikelihood, r.residualImpact), basis: "residual" };
   }

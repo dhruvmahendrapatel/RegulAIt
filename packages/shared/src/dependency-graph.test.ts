@@ -29,6 +29,12 @@ describe("ADR-0156 risk rating", () => {
     expect(effectiveRiskRating({ ...base, status: "accepted" })).toMatchObject({ score: 9 });
     expect(effectiveRiskRating({ ...base, status: "closed" })).toBeNull();
   });
+
+  it("ADR-0211: an avoided risk carries no rating; a transferred one keeps its rating", () => {
+    const base = { id: "r", title: "t", likelihood: "high", impact: "high", residualLikelihood: null, residualImpact: null } as const;
+    expect(effectiveRiskRating({ ...base, status: "avoided" })).toBeNull();
+    expect(effectiveRiskRating({ ...base, status: "transferred" })).toMatchObject({ score: 9, basis: "inherent" });
+  });
 });
 
 describe("ADR-0156 propagation", () => {

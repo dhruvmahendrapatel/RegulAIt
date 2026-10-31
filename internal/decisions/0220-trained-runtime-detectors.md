@@ -19,7 +19,7 @@ each opt-in per organisation, falling back in a fail-closed way, and logging no 
 
 1. **Three trained detectors, opt-in per organisation.** `pii` (a PII recogniser), `prompt_injection` (an injection
    classifier) and `harm` (a toxicity classifier). Each has one optional row in `guardrail_trained_detectors`
-   (migration 0240). No row means off; nothing is backfilled (ADR-0180).
+   (migration 0255). No row means off; nothing is backfilled (ADR-0180).
 2. **Served through the ADR-0088 contract, by a registered external scorer.** The external-scorer registration gains
    three claimable kinds, `guardrail_pii`, `guardrail_prompt_injection` and `guardrail_harm`, beside the judge-backed
    evaluation kinds. A detector names one scorer; turning it on requires that the scorer exists, claims the kind and is

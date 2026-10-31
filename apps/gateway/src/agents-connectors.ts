@@ -119,6 +119,7 @@ import {
   useCaseDispatchGate,
   type DispatchUseCaseGate,
 } from "./use-case-gate.js";
+import { privacyDispatchGate } from "./privacy-ops.js";
 // ADR-0079: pillar 2 §2 stage 2 — the invoke→instance join point and the
 // plan-only refusal it makes possible.
 import { guardInstanceAttributedCall } from "./plan-only.js";
@@ -1626,6 +1627,30 @@ async function dispatchAttempt(
       sink.auditLogId = piiRow?.id ?? null;
       return { ok: false, status: 403, error: "pii_blocked", detail: reason, pii };
     }
+  }
+
+  // ADR-0224 (P13 c) — THE PROCESSING LIMIT, directly after the PII-mode rung
+  // and before any provider work: personal data the same detector finds must
+  // be a category an active record of processing permits for the attributed
+  // project, or the dispatch is refused 409 `processing_not_permitted`,
+  // audited with categories only. Behind `org_settings.privacy_ops_enabled`
+  // (shipped off); off, it is one settings read. A cascade `block` already
+  // refused above, so this decides only what warn/log let through.
+  const privacyRefusal = await privacyDispatchGate(db, {
+    userId,
+    agentId: served.id,
+    agentName: served.name,
+    projectId: args.projectId ?? null,
+    input: args.input,
+  });
+  if (privacyRefusal) {
+    sink.auditLogId = privacyRefusal.auditLogId;
+    return {
+      ok: false,
+      status: privacyRefusal.status,
+      error: privacyRefusal.error,
+      detail: privacyRefusal.detail,
+    };
   }
 
   // ADR-0042 GUARDRAIL ENGINE (pillar 1/3). The SAME interception point and the
@@ -4103,6 +4128,21 @@ export function registerAgentConnectorRoutes(
           return reply
             .status(inputBlock.status)
             .send({ decision, error: inputBlock.error, detail: inputBlock.detail, pii: inputBlock.pii, ...suppressionFlag });
+        }
+        // ADR-0224 (P13 c): the processing limit, hoisted for the same reason as the PII rung above: a repeat of an
+        // input carrying a category no record permits must be refused and audited, not answered from the semantic
+        // cache. dispatchAttempt keeps its own call for the orchestration and worker paths that never reach here.
+        const privacyRefusal = await privacyDispatchGate(db, {
+          userId,
+          agentId: agent.id,
+          agentName: agent.name,
+          projectId: projectId ?? null,
+          input: body.input ?? "",
+        });
+        if (privacyRefusal) {
+          return reply
+            .status(privacyRefusal.status)
+            .send({ decision, error: privacyRefusal.error, detail: privacyRefusal.detail, ...suppressionFlag });
         }
       }
       // PILLAR 6 §8/§10 SEMANTIC CACHING (REAL cache) — opt-in per-(user,agent)

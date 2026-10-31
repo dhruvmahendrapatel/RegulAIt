@@ -154,6 +154,11 @@ function Loaded(props: { settings: Record<string, unknown> }) {
     mcpPrivateRangesDefault: str(s, "mcpPrivateRangesDefault"),
   });
 
+  // --- 2c1. Remote agents over A2A (ADR-0219) -------------------------------
+  const a2a = useSection({
+    a2aEnabled: str(s, "a2aEnabled"),
+  });
+
   // --- 2d. Deployment egress posture (ADR-0062) ----------------------------
   const compiledEgress = useSection({
     egressCompiledDefaultPolicy: str(s, "egressCompiledDefaultPolicy"),
@@ -187,6 +192,12 @@ function Loaded(props: { settings: Record<string, unknown> }) {
   // Its own admin-only, audited route (the general org PUT does not take it).
   const assuranceGate = useSection({
     assuranceGateMode: str(s, "assuranceGateMode") || "enforce",
+  });
+
+  // --- 5b1a. Risk treatments: transferred and avoided (ADR-0211) -----------
+  // Its own admin-only, audited route; OFF by default, turning it on is a step-up.
+  const riskTreatments = useSection({
+    riskTreatmentsEnabled: str(s, "riskTreatmentsEnabled") || "false",
   });
 
   // --- 5b2. Attribution mandate (ADR-0080 B6b amendment) -------------------
@@ -509,6 +520,31 @@ function Loaded(props: { settings: Record<string, unknown> }) {
         </SectionShell>
       </Card>
 
+      <Card title="3b1 · Remote agents (A2A)">
+        <SectionShell
+          title="Calls to remote agents"
+          busy={a2a.act.busy}
+          error={a2a.act.error}
+          submitLabel="Save remote agent setting"
+          onSubmit={() =>
+            void a2a.act.run(() => put({ a2aEnabled: asBool(a2a.f.a2aEnabled!) }), "Remote agent setting saved (audited)")
+          }
+          help={
+            <>
+              <p>Off (default) = no remote agent can be registered or called. On = admins may register remote agents on the Agents page, in its Remote agents (A2A) tab; turning it on loosens a security setting, so you will be asked to confirm it's you, and it is audited.</p>
+              <p>Even when on, nobody may call a remote agent until an admin gives them access, and every call is checked, costed and recorded. Remote agents are reached under the same network rules as MCP servers.</p>
+            </>
+          }
+        >
+          <Field label="Calls to remote agents">
+            <Select value={a2a.f.a2aEnabled} onChange={(e) => a2a.set("a2aEnabled", e.target.value)}>
+              <option value="false">off (default — no remote agent can be registered or called)</option>
+              <option value="true">on (admins may register remote agents — relaxed)</option>
+            </Select>
+          </Field>
+        </SectionShell>
+      </Card>
+
       <Card title="3c · Compiled vendor endpoints">
         <SectionShell
           title="Deployment egress posture"
@@ -710,6 +746,41 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               <option value="enforce">enforce — hold the release (strict default)</option>
               <option value="warn">warn — report the checks, do not hold</option>
               <option value="off">off — skip the checks (the gate says so)</option>
+            </Select>
+          </Field>
+        </SectionShell>
+      </Card>
+
+      <Card title="5b1a · Risk treatments: transferred and avoided">
+        <SectionShell
+          title="May a risk be recorded as transferred or avoided?"
+          helpLabel="risk treatments"
+          busy={riskTreatments.act.busy}
+          error={riskTreatments.act.error}
+          submitLabel="Save risk treatments"
+          onSubmit={() =>
+            void riskTreatments.act.run(
+              () =>
+                withStepUp((h) => stepUpApi.put("/v1/org/settings/risk-treatments", {
+                  enabled: riskTreatments.f.riskTreatmentsEnabled === "true",
+                }, h)),
+              "Risk treatments saved (audited)",
+            )
+          }
+          help={
+            <>
+              <p>The strict default is off: a risk is open, mitigating, accepted or closed. Turned on, a risk's owner or an admin can also record it as transferred (to an insurer or a supplier contract) or avoided (the use stopped). Each needs its evidence and an owner, and each is on the audit trail.</p>
+              <p>A transferred risk keeps its rating and stays in the tolerance check. An avoided risk leaves the ratings. Turning this on asks you to confirm it's you; turning it off leaves recorded treatments as they are.</p>
+            </>
+          }
+        >
+          <Field label="Transferred and avoided treatments">
+            <Select
+              value={riskTreatments.f.riskTreatmentsEnabled}
+              onChange={(e) => riskTreatments.set("riskTreatmentsEnabled", e.target.value)}
+            >
+              <option value="false">off — open, mitigating, accepted or closed only (strict default)</option>
+              <option value="true">on — owners and admins may record a transfer or an avoidance</option>
             </Select>
           </Field>
         </SectionShell>
