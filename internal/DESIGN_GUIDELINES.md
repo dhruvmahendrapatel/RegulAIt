@@ -168,6 +168,9 @@ follow-ups, [session record](memory/sessions/2026-10-24-session-02.md).*
 - Let a palette redefine only Signal, the field and the canvas, never ink or severity. *T1 palettes,
   [palettes.css](../apps/web/src/theme/palettes.css), checked for AA by `palette.test.ts`.*
 - Read stored preferences inside `try`/`catch`, and keep the UI working when storage is blocked. *ADR-0169.*
+- Save a person's palette and mode to their account and keep the browser copy only as the pre-paint cache; an
+  organisation's theme lock never takes High contrast away. *ADR-0218. Enforced by `appearance.test.ts` (gateway) and
+  `designer-themes-account.mock.spec.ts`.*
 
 ## Performance
 

@@ -494,6 +494,7 @@ import {
   registerOrgSettingsRoutes,
   startAuditPruneScheduler,
 } from "./org-settings.js";
+import { registerAppearanceRoutes } from "./appearance.js";
 import { registerModelRateLimitRoutes } from "./model-rate-limits.js";
 // ADR-0202 decision 4 — the per-beat simulated fallback for the hosted demo (admin-only, audited)
 import { registerDemoBeatRoutes } from "./demo-beats.js";
@@ -5300,6 +5301,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // provider CRUD.
   registerAuthRoutes(app, db, { bootstrapToken: opts.bootstrapToken, dataKey: opts.dataKey });
   registerSamlRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0218: a person saves their own palette and mode to their account
+  registerAppearanceRoutes(app, db);
   // ADR-0037 — SCIM 2.0 provisioning. TWO registrations on purpose, because
   // they live on two different trust paths: `registerScimRoutes` mounts
   // /scim/v2 inside its own encapsulated scope that authenticates ONLY on

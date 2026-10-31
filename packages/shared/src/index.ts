@@ -34,6 +34,8 @@ import { IDENTITY_ASSERTION_PROFILES, IDENTITY_ASSERTION_SCOPE_MAX } from "./ide
 import { bomOrgSettingsFields } from "./bom/settings.js";
 // ADR-0190 (batch 6 item 3): the isolation settings ride the same PUT
 import { isolationOrgSettingsFields } from "./isolation/settings.js";
+// ADR-0218: the organisation default palette and the theme lock
+import { appearanceOrgSettingsFields } from "./appearance.js";
 
 export { detectPII, redactPII, PII_REDACTION_VERSION, type PiiHit, type PiiCategory, type BasePiiCategory } from "./pii.js";
 export {
@@ -2536,6 +2538,8 @@ export const updateOrgSettingsSchema = z
     ...bomOrgSettingsFields,
     // ADR-0190 (batch 6 item 3): isolation enforcement, the class floors and the executor attestation lifetime
     ...isolationOrgSettingsFields,
+    // ADR-0218 (migration 0256): the organisation default palette and the theme lock (High contrast stays open)
+    ...appearanceOrgSettingsFields,
     // ADR-0225 (P13 d): the public trust pages and auditor access, shipped off
     ...trustPagesOrgSettingsFields,
     /** ADR-0039 self-lockout guard (mirrors the sso_only guard): saving
@@ -4789,6 +4793,7 @@ export * from "./identity/index.js";
 export * from "./bom/index.js";
 // ADR-0190 (batch 6 item 3): isolation and execution profiles
 export * from "./isolation/index.js";
+export * from "./appearance.js";
 export {
   injectionText,
   vendoredCompileProblems,

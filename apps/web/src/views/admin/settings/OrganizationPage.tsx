@@ -5,17 +5,21 @@
  * the previous release. Sign-in & sessions lives in Identity & Access → SSO &
  * sessions.
  */
-import { useState, type ReactNode } from "react";
+import { lazy, Suspense, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../../api/client";
 import type { OrgSettingsResponse } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
-import { Button, Card, ConfirmModal, Field, InfoButton, Input, Select, Textarea } from "../../../ui/kit";
+import { Button, Card, ConfirmModal, Field, InfoButton, Input, Select, SkeletonBlock, Textarea } from "../../../ui/kit";
 import { QueryGate, agentOpts, optionEls, useAction, useAgents } from "../adminKit";
 import { useToast } from "../../../ui/toast";
 import v from "../../views.module.css";
 import { api as stepUpApi, putOrgSettings, withStepUp } from "../../../stepup/stepUp";
 import { OrgSettingsCard } from "./OrgSettingsCard";
+import { CardBoundary } from "../../../ui/CardBoundary";
+
+// ADR-0218: the organisation default theme and lock, loaded only when this page opens
+const ThemesCard = lazy(() => import("./ThemesCard"));
 
 const CLEAR = "__clear__";
 
@@ -1048,6 +1052,12 @@ function Loaded(props: { settings: Record<string, unknown> }) {
           onConfirm={() => void saveNet(true)}
         />
       </Card>
+
+      <CardBoundary title="8 · Themes">
+        <Suspense fallback={<SkeletonBlock lines={3} />}>
+          <ThemesCard settings={s} />
+        </Suspense>
+      </CardBoundary>
     </div>
   );
 }

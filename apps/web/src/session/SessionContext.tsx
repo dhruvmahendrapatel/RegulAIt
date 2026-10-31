@@ -142,6 +142,13 @@ export function SessionProvider(props: { children: ReactNode }) {
     return () => setUnauthorizedHandler(null);
   }, [refresh, forgetSession]);
 
+  // ADR-0218: repaint in the account's palette and mode (theme/account.ts, loaded on demand once there is an account)
+  const synced = useRef(false);
+  useEffect(() => {
+    if ((synced.current ||= Boolean(auth?.appearance)))
+      void import("../theme/account").then((m) => m.syncAccountAppearance(auth)).catch(() => undefined);
+  }, [auth]);
+
   const value = useMemo(
     () => ({ auth, me, refresh, signOut, applyAuth }),
     [auth, me, refresh, signOut, applyAuth],
