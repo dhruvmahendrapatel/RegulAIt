@@ -95,6 +95,8 @@ export const APPROVAL_OBJECT_TYPES = [
   "engine_run",
   // ADR-0187 decision 190: an eval run of an offensive built-in dataset (bound to the run request's digest)
   "eval_run",
+  // ADR-0208 (G7): a proposed compliance-profile version, applied only when its named reviewer approves
+  "compliance_profile",
 ] as const;
 export type ApprovalObjectType = (typeof APPROVAL_OBJECT_TYPES)[number];
 
@@ -115,6 +117,7 @@ export const APPROVAL_OBJECT_TYPE_LABELS: Record<ApprovalObjectType, string> = {
   connector_call: "connector write",
   engine_run: "engine run (sensitive set or large budget)",
   eval_run: "eval run (offensive built-in dataset)",
+  compliance_profile: "compliance profile change",
 };
 
 /**

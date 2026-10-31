@@ -594,6 +594,12 @@ describe("6. the covered / NOT-covered inventory", () => {
     "vendor_account_aliases.reason",
     "vendor_domain_rules.reason",
     "workflow_templates.retired_reason",
+    // ADR-0208 (migration 0223)
+    "compliance_profiles.retired_reason",
+    // ADR-0208 G9 (migration 0225): retire and cancel reasons of the libraries
+    "eval_datasets.retired_reason",
+    "redteam_libraries.retired_reason",
+    "grant_certification_campaigns.cancelled_reason",
     // ADR-0182 (D4, migration 0162): every new free-text column of the
     // accountability records (feedback bodies are ciphertext, not prose)
     "decision_regression_cases.label",
@@ -618,6 +624,9 @@ describe("6. the covered / NOT-covered inventory", () => {
     "webauthn_credentials.revoke_reason",
     // ADR-0202 decision 4 (migration 0213)
     "demo_beat_fallbacks.reason",
+    // ADR-0208 G8 (migration 0224)
+    "infra_resources.retired_reason",
+    "infra_policies.retired_reason",
   ];
 
   it("covers exactly the enumerated columns — the ADR's list is this list", () => {
