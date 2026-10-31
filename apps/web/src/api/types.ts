@@ -540,6 +540,11 @@ export interface ProjectCosts {
   byAgent?: Array<{ agentId?: string; model?: string; costUsd: number }>;
   byConnector?: Array<{ name?: string; operation?: string; costUsd: number }>;
   byMcpTool?: Array<{ toolName?: string; costUsd: number }>;
+  /** model spend split by modality; `notSplit` is spend the provider gave no split for */
+  byModality?: {
+    split: Array<{ modality: "text" | "image" | "audio"; inputTokens: number; outputTokens: number; costUsd: number }>;
+    notSplit: { events: number; costUsd: number };
+  };
   estimatedSavings?: Array<{ technique: string; estimatedCostSavedUsd: number }>;
 }
 
