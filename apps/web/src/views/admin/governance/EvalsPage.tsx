@@ -52,6 +52,7 @@ import { EngineRunsPanel } from "./EngineRunsPanel";
 import { QueryGate, RemoveButton, Stat, agentOpts, optionEls, projectOpts, useAction, useAgents, useProjects } from "../adminKit";
 import a from "../admin.module.css";
 import { EvalsSummaryCard } from "./EvalsSummaryCard";
+import { ReasonedAction } from "./ReasonedAction";
 import v from "../../views.module.css";
 
 interface ScorerInfo {
@@ -78,7 +79,11 @@ interface DatasetRow {
   runCount: number;
   frozen: boolean;
   createdAt: string;
+  /** ADR-0208 G9: a shipped dataset cannot be retired; a retired one is read-only (retirement is by name) */
+  builtIn: boolean;
+  status: DatasetStatus;
 }
+type DatasetStatus = "active" | "retired";
 interface CaseRow {
   id: string;
   input: string;
@@ -239,10 +244,12 @@ export default function EvalsPage() {
     queryKey: ["admin", "eval-dataset", selectedDataset],
     enabled: Boolean(selectedDataset),
     queryFn: () =>
-      api.get<{ dataset: DatasetRow; cases: CaseRow[]; frozen: boolean }>(
+      api.get<{ dataset: DatasetRow; cases: CaseRow[]; frozen: boolean; status: DatasetStatus; builtIn: boolean }>(
         `/v1/evals/datasets/${selectedDataset}`,
       ),
   });
+  // ADR-0208 G9: a retired dataset (retired by name, every version) is read-only
+  const retiredDetail = detail.data?.status === "retired";
   const runDetail = useQuery({
     queryKey: ["admin", "eval-run", selectedRun],
     enabled: Boolean(selectedRun),
@@ -549,7 +556,9 @@ export default function EvalsPage() {
                   sortable: true,
                   required: "Whether a dataset can still change is always shown",
                   render: (r) =>
-                    r.frozen ? (
+                    r.status === "retired" ? (
+                      <Badge tone="neutral">retired</Badge>
+                    ) : r.frozen ? (
                       <Badge tone="info" title="A run has scored against this version, so its cases can no longer change.">
                         frozen
                       </Badge>
@@ -557,8 +566,52 @@ export default function EvalsPage() {
                       <Badge tone="neutral">editable</Badge>
                     ),
                 },
+                {
+                  key: "status",
+                  header: "Status",
+                  main: true,
+                  sortable: true,
+                  required: "Whether a dataset is retired is always shown",
+                  render: (r) => (r.status === "retired" ? <Badge tone="neutral">retired</Badge> : <Badge tone="ok">active</Badge>),
+                },
                 { key: "created", header: "Created", sortable: true, render: (r) => ago(r.createdAt) },
                 { key: "note", header: "Note", render: (r) => r.note ?? "—" },
+                {
+                  key: "actions",
+                  header: "Actions",
+                  action: true,
+                  render: (r) =>
+                    r.status === "retired" ? (
+                      <span className={v.faint}>Read-only</span>
+                    ) : r.builtIn ? (
+                      <span className={v.faint}>Built in</span>
+                    ) : (
+                      <ReasonedAction
+                        label="Retire dataset"
+                        ariaLabel={`Retire dataset ${r.name}`}
+                        title={`Retire dataset “${r.name}”?`}
+                        body={<p className={v.flush}>No new runs or quality gates can use ‘{r.name}’. Past runs and every version stay readable.</p>}
+                        submit={(reason) => api.post(`/v1/evals/datasets/${r.id}/retire`, { reason })}
+                        done={`Dataset “${r.name}” retired`}
+                        refusal={(code, payload) => {
+                          if (code !== "eval_dataset_in_use") return null;
+                          const templates = (payload.templates as string[] | undefined) ?? [];
+                          const rules = Number(payload.automationRules ?? 0);
+                          return (
+                            <>
+                              Still in use. Remove it from these first, then retire it:
+                              <ul style={{ margin: "var(--s1) 0 0", paddingLeft: "var(--s3)" }}>
+                                {templates.map((t) => (
+                                  <li key={t}>workflow template “{t}” (quality gate)</li>
+                                ))}
+                                {rules > 0 && <li>{rules} automation {rules === 1 ? "rule" : "rules"}</li>}
+                              </ul>
+                            </>
+                          );
+                        }}
+                      />
+                    ),
+                },
               ]}
             />
           </Card>
@@ -573,7 +626,12 @@ export default function EvalsPage() {
                 </Button>
               }
             >
-              {detail.data.frozen ? (
+              {retiredDetail ? (
+                <p className={v.faint} style={{ marginBottom: "var(--s2)" }}>
+                  This dataset is retired: no new runs, versions, cases or quality gates can use it. Past runs and every
+                  version stay readable.
+                </p>
+              ) : detail.data.frozen ? (
                 <div className={v.faint} style={{ marginBottom: "var(--s2)" }}>
                   This version has been scored by a run and is immutable. Mint the next version to
                   change its cases — the old version keeps standing behind every gate result that
@@ -710,7 +768,9 @@ export default function EvalsPage() {
                         // longer exists — the comparison the gate relies on
                         // would silently be against a different measurement.
                         disabledReason={
-                          detail.data?.frozen
+                          retiredDetail
+                            ? "this dataset is retired and read-only."
+                            : detail.data?.frozen
                             ? "this dataset version is frozen — a run has scored against it, so its cases cannot change. Create a new version to edit the suite."
                             : undefined
                         }
@@ -788,9 +848,10 @@ export default function EvalsPage() {
                   <Field label="Tolerance">
                     <Input value={runTolerance} onChange={(e) => setRunTolerance(e.target.value)} />
                   </Field>
-                  <Button type="submit" variant="primary" disabled={act.busy || !runAgent || panelProblem !== null}>
+                  <Button type="submit" variant="primary" disabled={act.busy || !runAgent || panelProblem !== null || retiredDetail}>
                     Run now
                   </Button>
+                  {retiredDetail && <span className={v.hint}>A retired dataset takes no new run.</span>}
                 </form>
                 {/* ADR-0173 batch 2c — the weighted judge panel */}
                 <fieldset className={v.stack} data-testid="judge-panel" style={{ border: 0, padding: 0, margin: "var(--s2) 0 0" }}>

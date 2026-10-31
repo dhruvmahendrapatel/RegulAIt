@@ -685,7 +685,7 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
     });
   });
 
-  // ADR-0219: with any of sort/dir/cursor/offset/count the import history and
+  // ADR-0226: with any of sort/dir/cursor/offset/count the import history and
   // one batch's lines answer the shared list contract (every batch, every
   // line, a total); with none of them, exactly the responses below. Neither
   // export carries the stored refusals, scan findings or account keys: the
@@ -1518,7 +1518,7 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
 }
 
 // ---------------------------------------------------------------------------
-// ADR-0219: import history and one batch's lines under the shared list contract
+// ADR-0226: import history and one batch's lines under the shared list contract
 // ---------------------------------------------------------------------------
 
 export const COST_IMPORTS_LIST: ListSpec<typeof costImportBatches.$inferSelect> = {

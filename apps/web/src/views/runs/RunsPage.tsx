@@ -141,7 +141,7 @@ const runProgress = (r: RunSummary) => {
   return { total: Object.keys(st).length, done: Object.values(st).filter((x) => x === "done").length };
 };
 
-/** ADR-0219: the runs list's columns; the ids and sortable ones match the gateway's RUNS_LIST */
+/** ADR-0226: the runs list's columns; the ids and sortable ones match the gateway's RUNS_LIST */
 export const RUN_COLUMNS: Array<DataColumn<RunSummary>> = [
   { key: "name", header: "Run", main: true, sortable: true, render: (r) => <span style={{ fontWeight: 550 }}>{r.name}</span> },
   { key: "status", header: "Status", main: true, sortable: true, required: "Status is always shown", render: (r) => <StatusBadge status={r.status} /> },

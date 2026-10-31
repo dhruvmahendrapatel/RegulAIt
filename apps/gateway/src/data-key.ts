@@ -1015,7 +1015,7 @@ export function registerDataKeyRoutes(
     };
   });
 
-  // ADR-0219: with any of sort/dir/cursor/offset/count the attestation
+  // ADR-0226: with any of sort/dir/cursor/offset/count the attestation
   // history answers the shared list contract for the same key (the running
   // key, or the recorded one); with none of them, the whole-history response.
   const attestationsList: ContractList<typeof dataKeyAttestations.$inferSelect, Record<string, never>> = {
@@ -1136,7 +1136,7 @@ export function registerDataKeyRoutes(
   });
 }
 
-/** ADR-0219: data-key custody attestations under the shared list contract (claims only; never key material) */
+/** ADR-0226: data-key custody attestations under the shared list contract (claims only; never key material) */
 export const DATA_KEY_ATTESTATIONS_LIST: ListSpec<typeof dataKeyAttestations.$inferSelect> = {
   id: "data-key-attestations",
   sorts: {

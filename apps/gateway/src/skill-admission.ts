@@ -450,7 +450,7 @@ export async function runSkillAdmissionRescan(db: Db, opts: { limit?: number } =
 // ---------------------------------------------------------------------------
 
 export function registerSkillAdmissionRoutes(app: FastifyInstance, db: Db) {
-  // ADR-0219: with any of sort/dir/cursor/offset/count the review queue
+  // ADR-0226: with any of sort/dir/cursor/offset/count the review queue
   // answers the shared list contract for one of its two lists (`view=held`:
   // held, refused or admitted; `view=shares`: requests to share with the
   // workspace); with none of them, exactly the whole-queue response below.
@@ -654,7 +654,7 @@ export function registerSkillAdmissionRoutes(app: FastifyInstance, db: Db) {
 }
 
 // ---------------------------------------------------------------------------
-// ADR-0219: the skill review queue under the shared list contract
+// ADR-0226: the skill review queue under the shared list contract
 // ---------------------------------------------------------------------------
 
 function reviewSkillView(s: BuilderSkillRow, ownerName: string | null) {

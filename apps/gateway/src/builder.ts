@@ -1604,7 +1604,7 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     };
   };
 
-  // ADR-0219: with any of sort/dir/cursor/offset/count the inbox answers the
+  // ADR-0226: with any of sort/dir/cursor/offset/count the inbox answers the
   // shared list contract, with the search (`q`) on the server; with none of
   // them, exactly the response below (the command palette's newest 200).
   // Threads stay personal: the WHERE always starts with the viewer's own id.
@@ -2248,7 +2248,7 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
 }
 
 // ---------------------------------------------------------------------------
-// ADR-0219: the inbox's threads under the shared list contract
+// ADR-0226: the inbox's threads under the shared list contract
 // ---------------------------------------------------------------------------
 
 type ThreadSummaryRow = Awaited<ReturnType<typeof threadSummaries>>[number] & { createdAt: string };

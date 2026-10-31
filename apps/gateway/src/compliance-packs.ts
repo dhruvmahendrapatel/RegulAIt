@@ -1484,7 +1484,7 @@ export function registerCompliancePackRoutes(app: FastifyInstance, db: Db): void
     });
   });
 
-  // ADR-0219: with any of sort/dir/cursor/offset/count the stored reports
+  // ADR-0226: with any of sort/dir/cursor/offset/count the stored reports
   // answer the shared list contract; with none of them, exactly the response
   // below. A non-admin's narrowing is the same rule, moved into the WHERE.
   const packReportsList: ContractList<PackReportListRow, { packId?: string }> = {
@@ -1582,7 +1582,7 @@ export function registerCompliancePackRoutes(app: FastifyInstance, db: Db): void
 }
 
 // ---------------------------------------------------------------------------
-// ADR-0219: stored pack reports under the shared list contract
+// ADR-0226: stored pack reports under the shared list contract
 // ---------------------------------------------------------------------------
 
 const PACK_REPORT_LIST_COLUMNS = {

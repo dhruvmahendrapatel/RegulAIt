@@ -892,7 +892,7 @@ export function registerModelArtifactRoutes(app: FastifyInstance, db: Db, opts: 
   });
 
   // ---- GET /v1/model-artifacts (the caller's own; an admin sees all) ------------
-  // ADR-0219: with any of sort/dir/cursor/offset/count the artifacts list
+  // ADR-0226: with any of sort/dir/cursor/offset/count the artifacts list
   // answers the shared list contract (every artifact the caller may see, a
   // total) with each row's newest scan; with none of them, exactly the
   // newest-200 response below. Never the storage key.
@@ -990,7 +990,7 @@ export function registerModelArtifactRoutes(app: FastifyInstance, db: Db, opts: 
 }
 
 // ---------------------------------------------------------------------------
-// ADR-0219: model artifacts under the shared list contract
+// ADR-0226: model artifacts under the shared list contract
 // ---------------------------------------------------------------------------
 
 type ArtifactListRow = ReturnType<typeof artifactView> & { latestScan: { verdict: string; format: string | null; issues: number } | null };

@@ -44,7 +44,7 @@ import {
   agents,
   evalDatasets,
 } from "@regulait/db";
-import { runEvalSuite } from "./evals.js";
+import { evalDatasetNamesBoundBy, evalDatasetRetiredDetail, retiredEvalDatasetNames, runEvalSuite } from "./evals.js";
 import {
   resolveProvider,
   gitDefaultBaseUrl,
@@ -1137,6 +1137,11 @@ async function runStageEvalChecks(
       fail(
         `eval dataset '${binding.dataset}'${binding.version ? ` v${binding.version}` : ""} does not exist — the quality gate could not run, so it does not pass`,
       );
+      continue;
+    }
+    // ADR-0208 G9: a gate that still names a retired dataset fails closed (the runner refuses it too)
+    if (versions.some((d) => d.retiredAt !== null)) {
+      fail(`${evalDatasetRetiredDetail(binding.dataset)} — the quality gate could not run, so it does not pass`, { error: "eval_dataset_retired" });
       continue;
     }
     const [agentRow] = await db.select().from(agents).where(eq(agents.name, binding.agent));
@@ -2545,6 +2550,19 @@ export async function createWorkflowTemplateValidated(
   | { ok: false; status: number; body: Record<string, unknown> }
 > {
   const definition = validateDefinition(body.definition);
+  // ADR-0208 G9: a new quality gate may not bind a retired eval dataset (bindings name the dataset by NAME)
+  const retiredBound = await retiredEvalDatasetNames(db, evalDatasetNamesBoundBy(definition));
+  if (retiredBound.length > 0) {
+    return {
+      ok: false,
+      status: 409,
+      body: {
+        error: "eval_dataset_retired",
+        detail: `the quality gate binds retired eval dataset(s) ${retiredBound.map((n) => `'${n}'`).join(", ")}: choose an active dataset`,
+        datasets: retiredBound,
+      },
+    };
+  }
   const named = definition.stages
     .flatMap((st) => st.approvers ?? [])
     .filter((a) => a !== "requesting_user" && a !== APPROVER_ADMIN_NOT_INITIATOR);
@@ -3767,7 +3785,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
 
   // …and the list view: fleet for admins, own instances for everyone else.
   //
-  // ADR-0219: with any of sort/dir/cursor/offset/count it answers the shared
+  // ADR-0226: with any of sort/dir/cursor/offset/count it answers the shared
   // list contract (every row, a total, server sort) beside the intake form's
   // changeTypes and routes; with none of them, exactly the response below
   // (the Home preview's newest 100). The scope is the one predicate for the
@@ -3868,7 +3886,7 @@ const changeText = (r: WorkflowInstanceRow, key: "description" | "changeType" | 
   const v = (r.change as Record<string, unknown> | null)?.[key];
   return typeof v === "string" ? v : null;
 };
-/** ADR-0219: the change-requests list under the shared contract; the ids match the Workflows page's columns */
+/** ADR-0226: the change-requests list under the shared contract; the ids match the Workflows page's columns */
 export const WORKFLOWS_LIST: ListSpec<WorkflowInstanceRow> = {
   id: "workflows",
   sorts: {

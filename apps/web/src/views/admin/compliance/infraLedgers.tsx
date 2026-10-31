@@ -13,6 +13,7 @@ import type { DataColumn } from "../../../ui/DataList";
 import type { ListSort } from "../../../ui/listState";
 import { optionEls, useAction, useUsers, userOpts } from "../adminKit";
 import { putOrgSettings } from "../../../stepup/stepUp";
+import { ResourceActions } from "./InfraRowActions";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -56,15 +57,28 @@ export type Propose = (title: string, body: string, url: string) => void;
 
 const actionCol = <T,>(render: (r: T) => ReactNode): DataColumn<T> => ({ key: "actions", action: true, header: "", srHeader: "Actions", align: "right", render });
 
-export function resourceColumns(): Array<DataColumn<InfraResource>> {
+/** the resources ledger's columns; `withActions` adds the ADR-0208 G8 Edit / Retire row actions (the full list, not the preview) */
+export function resourceColumns(withActions = false): Array<DataColumn<InfraResource>> {
   return [
-    { key: "name", main: true, sortable: true, header: "Name", render: (r) => r.name },
+    {
+      key: "name",
+      main: true,
+      sortable: true,
+      header: "Name",
+      render: (r) => (
+        <span className={v.row}>
+          {r.name}
+          {r.status === "retired" && <Badge tone="neutral">retired</Badge>}
+        </span>
+      ),
+    },
     { key: "kind", main: true, sortable: true, header: "Kind", render: (r) => r.kind },
     { key: "provider", main: true, sortable: true, header: "Provider", render: (r) => r.provider },
     { key: "classifications", main: true, sortable: true, header: "Classifications", render: (r) => (r.classifications ?? []).join(", ") || "—" },
     { key: "auto", main: true, header: "Auto ceiling", render: (r) => r.effectivePolicy?.autoRemediateMaxSeverity ?? "never" },
     { key: "backupFloor", main: true, header: "Backup floor (d)", align: "right", render: (r) => r.effectivePolicy?.backupRetentionDaysFloor ?? "—" },
     { key: "patchCeiling", main: true, header: "Patch ceiling (d)", align: "right", render: (r) => r.effectivePolicy?.patchCadenceDaysCeiling ?? "—" },
+    ...(withActions ? [actionCol<InfraResource>((r) => <ResourceActions resource={r} />)] : []),
   ];
 }
 

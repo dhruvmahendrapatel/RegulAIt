@@ -892,7 +892,7 @@ export function registerSpendMonitorRoutes(app: FastifyInstance, db: Db): void {
 
   // --- anomalies (NON-ADMIN reachable READ, entitlement-scoped) ------------
 
-  // ADR-0219: with any of sort/dir/cursor/offset/count the anomaly signals
+  // ADR-0226: with any of sort/dir/cursor/offset/count the anomaly signals
   // and the decided changes answer the shared list contract; with none of
   // them, exactly the responses below (the overview's newest 25). The
   // project narrowing for a non-admin is the same WHERE as the old route's.
@@ -1175,7 +1175,7 @@ export function registerSpendMonitorRoutes(app: FastifyInstance, db: Db): void {
 }
 
 // ---------------------------------------------------------------------------
-// ADR-0219: anomaly signals and decided changes under the shared list contract
+// ADR-0226: anomaly signals and decided changes under the shared list contract
 // ---------------------------------------------------------------------------
 
 const ANOMALY_NOTE =

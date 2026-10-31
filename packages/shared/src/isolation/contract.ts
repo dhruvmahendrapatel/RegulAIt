@@ -728,7 +728,7 @@ export const ISOLATION_ROUTES: ReadonlyArray<{ method: "GET" | "POST" | "PUT"; p
   { method: "POST", path: "/v1/executors", cls: "admin", slice: "I3", built: true },
   { method: "GET", path: "/v1/executors/:executorId", cls: "admin", slice: "I3", built: true },
   { method: "GET", path: "/v1/executors/:executorId/attestations", cls: "admin", slice: "I3", built: true },
-  // ADR-0219: the self-test history as Excel, with the list's own authorisation
+  // ADR-0226: the self-test history as Excel, with the list's own authorisation
   { method: "GET", path: "/v1/executors/:executorId/attestations/export.xlsx", cls: "admin", slice: "I3", built: true },
   { method: "POST", path: "/v1/executors/:executorId/quarantine", cls: "admin", slice: "I3", built: true },
   { method: "POST", path: "/v1/executors/:executorId/reenable", cls: "admin", slice: "I3", built: true },

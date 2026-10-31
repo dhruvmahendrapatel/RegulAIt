@@ -27,7 +27,7 @@ import { useSession } from "../../session/SessionContext";
 import { AbortWorkflowDialog, canAbort } from "./workflowAbort";
 import v from "../views.module.css";
 
-/** ADR-0219: the change-requests list's columns; the ids and sortable ones match the gateway's WORKFLOWS_LIST */
+/** ADR-0226: the change-requests list's columns; the ids and sortable ones match the gateway's WORKFLOWS_LIST */
 export const WORKFLOW_COLUMNS: Array<DataColumn<WorkflowInstanceSummary>> = [
   { key: "change", header: "Change", main: true, sortable: true, render: (i) => <span style={{ fontWeight: 550 }}>{i.change?.description ?? ""}</span> },
   { key: "status", header: "Status", main: true, sortable: true, required: "Status is always shown", render: (i) => <StatusBadge status={i.status} /> },

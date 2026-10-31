@@ -14,12 +14,15 @@ import { DataList } from "../../../ui/DataList";
 import { ApiError, api } from "../../../api/client";
 import { ago, fmtAt } from "../../../api/format";
 import { useSession } from "../../../session/SessionContext";
-import { Badge, Button, Card, ConfirmModal, EmptyState, Field, IdChip, Input } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, Field, IdChip, Input, Modal, RowActions } from "../../../ui/kit";
 import { useAction } from "../adminKit";
 import {
   SCHEDULE_INTERVAL_LIMITS,
   SCHEDULE_REFUSALS,
+  parseIntervalHours,
   scheduleBody,
+  scheduleDeletable,
+  scheduleEditable,
   scheduleRequestSummary,
   scheduleToggle,
   type EngineSchedule,
@@ -49,11 +52,18 @@ export function EngineSchedulesCard(props: {
 }) {
   const { auth } = useSession();
   const me = auth?.userId ?? null;
+  const isAdmin = auth?.isAdmin === true;
   const create = useAction();
   const toggle = useAction();
   const [interval, setIntervalHours] = useState("24");
   const [problem, setProblem] = useState<string | null>(null);
   const [turningOn, setTurningOn] = useState<EngineSchedule | null>(null);
+  // ADR-0208 G9: the owner edits the interval; the owner or an admin deletes (soft, audited)
+  const [editing, setEditing] = useState<EngineSchedule | null>(null);
+  const [editProblem, setEditProblem] = useState<string | null>(null);
+  const [editHours, setEditHours] = useState("");
+  const [deleting, setDeleting] = useState<EngineSchedule | null>(null);
+  const edit = useAction();
   const helpId = useId();
 
   const setEnabled = (s: EngineSchedule, enabled: boolean) =>
@@ -158,11 +168,43 @@ export function EngineSchedulesCard(props: {
           { key: "state", header: "State", main: true, sortable: true, required: "Whether a schedule is on is always shown", render: (s) => (s.enabled ? <Badge tone="ok">on</Badge> : <Badge tone="neutral">off</Badge>) },
           { key: "created", header: "Created", sortable: true, render: (s) => ago(s.createdAt) },
           {
-            key: "toggle",
-            header: "Switch",
+            key: "actions",
+            header: "Actions",
+            // ADR-0208 G9: Edit, the on/off switch and Delete; each mutation runs through useAction, whose
+            // admin-prefix invalidation refreshes this DataList's query key
             action: true,
-            align: "right",
-            render: (s) => <ToggleCell schedule={s} me={me} busy={toggle.busy} onOff={() => setEnabled(s, false)} onOn={() => setTurningOn(s)} />,
+            render: (s) => (
+              <RowActions
+                slot="4rem"
+                primary={
+                  <Button
+                    size="sm"
+                    aria-label={`Edit schedule every ${s.intervalHours} h`}
+                    disabled={!scheduleEditable(s, me)}
+                    title={scheduleEditable(s, me) ? undefined : "Only the person this schedule runs as can change how often it runs."}
+                    onClick={() => {
+                      setEditHours(String(s.intervalHours));
+                      setEditProblem(null);
+                      setEditing(s);
+                    }}
+                  >
+                    Edit
+                  </Button>
+                }
+                secondary={
+                  <span style={{ display: "inline-block", maxWidth: "16rem", whiteSpace: "normal" }}>
+                    <ToggleCell schedule={s} me={me} busy={toggle.busy} onOff={() => setEnabled(s, false)} onOn={() => setTurningOn(s)} />
+                  </span>
+                }
+                rest={
+                  scheduleDeletable(s, me, isAdmin) ? (
+                    <Button size="sm" variant="ghost" aria-label={`Delete schedule every ${s.intervalHours} h`} onClick={() => setDeleting(s)}>
+                      Delete schedule
+                    </Button>
+                  ) : null
+                }
+              />
+            ),
           },
         ]}
       />
@@ -171,6 +213,58 @@ export function EngineSchedulesCard(props: {
           {toggle.error}
         </p>
       )}
+      <Modal
+        open={editing !== null}
+        title="Edit recurring run"
+        onClose={() => setEditing(null)}
+        actions={
+          <>
+            <Button onClick={() => setEditing(null)}>Cancel</Button>
+            <Button
+              variant="primary"
+              disabled={edit.busy}
+              onClick={() => {
+                const s = editing;
+                if (!s) return;
+                const hours = parseIntervalHours(editHours);
+                if (hours === null) {
+                  setEditProblem(`The interval must be a whole number of hours from ${SCHEDULE_INTERVAL_LIMITS.min} to ${SCHEDULE_INTERVAL_LIMITS.max}.`);
+                  return;
+                }
+                setEditProblem(null);
+                void edit
+                  .run(() => scheduleCall(() => api.patch(`/v1/engine-schedules/${s.id}`, { intervalHours: hours })), `Schedule now runs every ${hours} h; the next run moves to match`)
+                  .then((ok) => ok && setEditing(null));
+              }}
+            >
+              Save schedule
+            </Button>
+          </>
+        }
+      >
+        <Field label="Every (hours)">
+          <Input type="number" min={SCHEDULE_INTERVAL_LIMITS.min} max={SCHEDULE_INTERVAL_LIMITS.max} step={1} value={editHours} onChange={(e) => setEditHours(e.target.value)} />
+        </Field>
+        <p className={v.faint}>Runs more often spend more. Each run is still checked before it starts. A run already in progress keeps going.</p>
+        {(editProblem ?? edit.error) && (
+          <p className={v.errLine} role="alert">
+            {editProblem ?? edit.error}
+          </p>
+        )}
+      </Modal>
+      <ConfirmModal
+        open={deleting !== null}
+        danger
+        title={`Delete the schedule that runs every ${deleting?.intervalHours ?? ""} h?`}
+        confirmLabel="Delete schedule"
+        body={<p>No further runs start from this schedule. A run already in progress keeps going; cancel it from Runs. The deletion is audited.</p>}
+        onCancel={() => setDeleting(null)}
+        onConfirm={() => {
+          const s = deleting;
+          setDeleting(null);
+          if (s) void toggle.run(() => scheduleCall(() => api.del(`/v1/engine-schedules/${s.id}`)), "Schedule deleted; no further runs start from it");
+        }}
+      />
       <ConfirmModal
         open={turningOn !== null}
         title="Switch this schedule back on?"

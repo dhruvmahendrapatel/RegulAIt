@@ -569,7 +569,7 @@ export function registerMcpAdmissionRoutes(app: FastifyInstance, db: Db) {
    * can see WHAT is held, WHY, and under which scanner version, without
    * needing a second tool.
    */
-  // ADR-0219: with any of sort/dir/cursor/offset/count the review queue
+  // ADR-0226: with any of sort/dir/cursor/offset/count the review queue
   // answers the shared list contract (`state` narrows, e.g. `held`); with
   // none of them, exactly the response below. Never the server URL: the
   // held list does not show it, and a URL can carry a credential.
@@ -731,7 +731,7 @@ export function registerMcpAdmissionRoutes(app: FastifyInstance, db: Db) {
 }
 
 // ---------------------------------------------------------------------------
-// ADR-0219: the MCP admission queue under the shared list contract
+// ADR-0226: the MCP admission queue under the shared list contract
 // ---------------------------------------------------------------------------
 
 const HELD_SERVER_COLUMNS = {

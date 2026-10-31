@@ -696,7 +696,7 @@ export function registerBillingRoutes(app: FastifyInstance, db: Db): void {
     });
   });
 
-  // ADR-0219: with any of sort/dir/cursor/offset/count the statements list
+  // ADR-0226: with any of sort/dir/cursor/offset/count the statements list
   // answers the shared list contract; with none of them, exactly the response
   // below (the overview's newest 25). A non-admin's narrowing is the same
   // rule, moved into the WHERE so the page, the total and the export agree.
@@ -1045,7 +1045,7 @@ export function registerBillingRoutes(app: FastifyInstance, db: Db): void {
 }
 
 // ---------------------------------------------------------------------------
-// ADR-0219: billing statements under the shared list contract
+// ADR-0226: billing statements under the shared list contract
 // ---------------------------------------------------------------------------
 
 const STATEMENT_LIST_COLUMNS = {

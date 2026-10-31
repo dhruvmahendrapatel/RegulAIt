@@ -1,5 +1,5 @@
 /**
- * ADR-0219 — the list control's markup, rendered with react-dom/server: the kit Table under a server sort (rows are
+ * ADR-0226 — the list control's markup, rendered with react-dom/server: the kit Table under a server sort (rows are
  * not re-sorted in the browser, the active header carries aria-sort, headers are buttons), and DataList's toolbar
  * (named icon buttons with their tips, the page-size control, the main columns only, a not-sortable column saying so).
  */

@@ -62,7 +62,7 @@ export function InfraResourcesPage() {
     <LedgerPage<InfraResource>
       ledger={LEDGERS.resources}
       sub="Every monitored resource with the backup, patch and auto-remediation floors its classifications cascade onto it."
-      columns={resourceColumns()}
+      columns={resourceColumns(true)}
       rowKey={(r) => r.id}
       empty={<EmptyState title="No monitored resources" body="Register one on the Infrastructure page — mock scans deterministically." />}
     />

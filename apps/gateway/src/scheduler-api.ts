@@ -98,7 +98,7 @@ export function registerSchedulerRoutes(app: FastifyInstance, db: Db, opts: Sche
   });
 
   /** one job's history — the ledger that answers "and what did it do?" */
-  // ADR-0219: with any of sort/dir/cursor/offset/count one job's run ledger
+  // ADR-0226: with any of sort/dir/cursor/offset/count one job's run ledger
   // answers the shared list contract (every pass, a total); with none of
   // them, exactly the newest-`limit` response below.
   const jobRunsList: ContractList<typeof schedulerRuns.$inferSelect, { outcome?: string }> = {
@@ -217,7 +217,7 @@ export function registerSchedulerRoutes(app: FastifyInstance, db: Db, opts: Sche
   });
 }
 
-/** ADR-0219: one scheduler job's run ledger under the shared list contract (never its detail blob) */
+/** ADR-0226: one scheduler job's run ledger under the shared list contract (never its detail blob) */
 export const SCHEDULER_RUNS_LIST: ListSpec<typeof schedulerRuns.$inferSelect> = {
   id: "scheduler-runs",
   sorts: {
