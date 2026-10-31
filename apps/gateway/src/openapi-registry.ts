@@ -982,6 +982,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/vendors/:vendorId": "internal",
   "PATCH /v1/vendors/:vendorId": "internal",
   "POST /v1/vendors/:vendorId/attestations": "internal",
+  "POST /v1/vendors/:vendorId/questionnaire/draft": "internal",
   "POST /v1/vendors/:vendorId/retire": "internal",
   // ADR-0221 (P4): the supplier portal
   "GET /v1/supplier-portal/settings": "internal",
@@ -2102,6 +2103,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/vendors/:vendorId": "vendors",
   "PATCH /v1/vendors/:vendorId": "vendors",
   "POST /v1/vendors/:vendorId/attestations": "vendors",
+  "POST /v1/vendors/:vendorId/questionnaire/draft": "vendors",
   "POST /v1/vendors/:vendorId/retire": "vendors",
   // ADR-0221 (P4): the supplier portal
   "GET /v1/supplier-portal/settings": "vendors",

@@ -1555,6 +1555,13 @@
       "when": 1785192000000,
       "tag": "0257_supplier_submissions",
       "breakpoints": true
+    },
+    {
+      "idx": 258,
+      "version": "7",
+      "when": 1785193000000,
+      "tag": "0258_vendor_draft_assist",
+      "breakpoints": true
     }
   ]
 }
