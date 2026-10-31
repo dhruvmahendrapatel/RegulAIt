@@ -1470,9 +1470,9 @@
       "version": "7",
       "when": 1785165000000,
       "tag": "0230_gateway_modality_pricing_model_rate_limits",
-        "breakpoints": true
-      },
-      {
+      "breakpoints": true
+    },
+    {
       "idx": 237,
       "version": "7",
       "when": 1785172000000,
@@ -1529,10 +1529,17 @@
       "breakpoints": true
     },
     {
-      "idx": 238,
+      "idx": 254,
       "version": "7",
-      "when": 1809149000000,
-      "tag": "0238_theme_account_org_lock",
+      "when": 1785189000000,
+      "tag": "0254_agent_setup_assist",
+      "breakpoints": true
+    },
+    {
+      "idx": 255,
+      "version": "7",
+      "when": 1785190000000,
+      "tag": "0255_theme_account_org_lock",
       "breakpoints": true
     }
   ]

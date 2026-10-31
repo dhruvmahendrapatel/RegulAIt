@@ -1,9 +1,9 @@
 /**
- * ADR-0218 (themes phase 2, migration 0238): a person's palette and light/dark mode saved to their account, an
+ * ADR-0218 (themes phase 2, migration 0255): a person's palette and light/dark mode saved to their account, an
  * organisation default palette, and an admin lock.
  *
  * The palette ids are the six the web app ships (apps/web/src/theme/palette.ts; `appearance.test.ts` there pins that
- * the two lists agree). The database CHECKs in migration 0238 repeat this list, so a row written around the API cannot
+ * the two lists agree). The database CHECKs in migration 0255 repeat this list, so a row written around the API cannot
  * name a palette the app does not have either.
  *
  * The one rule that matters: High contrast (`contrast`) is an accessibility palette, so it stays selectable by
