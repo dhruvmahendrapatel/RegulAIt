@@ -1541,6 +1541,20 @@
       "when": 1785190000000,
       "tag": "0255_guardrail_trained_detectors",
       "breakpoints": true
+    },
+    {
+      "idx": 256,
+      "version": "7",
+      "when": 1785191000000,
+      "tag": "0256_supplier_portal_access",
+      "breakpoints": true
+    },
+    {
+      "idx": 257,
+      "version": "7",
+      "when": 1785192000000,
+      "tag": "0257_supplier_submissions",
+      "breakpoints": true
     }
   ]
 }
