@@ -1369,3 +1369,141 @@ date).
 **Test:** `apps/gateway/src/zz-demo-build-it-task-graph.test.ts` runs B3's chain on the demo's three mock agents
 against real Postgres: decompose, the ungranted suggestion swapped, the edited plan refused and audited, the run created
 and auto-advanced to completion, every node done through a metered, audited governed dispatch.
+
+### 7.12 Act 4 "What's new": set-up checklist (2026-10-31 addendum)
+
+The beats are in `DEMO_SCRIPT_2026-11-01.md`, "Addendum (2026-10-31, owner): Act 4 — What's new". Every row is
+**pending execution**.
+
+**Rules that still apply:**
+- The keep-in-order rule of §7.3 and §7.11: `demo:relax-e` at T-24h before any E rehearsal, and the Claude key after
+  the `demo:traffic` re-run.
+- The owner enters keys only in the UI. No row here asks for, writes or echoes a secret, and Act 4 needs no new key.
+- The SAP gateway is shown as intake use cases only, never as governed. Act 4 does not touch it.
+
+**Where the switches are.** Every org switch below is done signed in as Ada, on LIVE, at T-24h, after the §7.11 rows.
+A "step-up" is Ada's fresh authenticator code. Each change writes an audited old → new row. Most switches are on
+`/ui/admin/organization` (nav **Settings** → **Organization**); the rows say where the others are.
+
+**Seed status.** None of the Act 4 switches is turned on by `demo:prepare`. The data the beats need comes from:
+- the seed (`apps/gateway/src/seed.ts`);
+- the `demo:intake` step that `demo:prepare` runs (`apps/gateway/src/demo-prepare-steps.ts`,
+  `demo-intake-seed-lib.ts`, fixtures in `packages/shared/src/demo-intake/fixtures.ts`);
+- the live steps below.
+
+| When | Beat | Switch, default, step-up | Data the beat needs, and whether the seed provides it | Status |
+|---|---|---|---|---|
+| T-24h | V1 | `/ui/admin/organization` → card **5e · Vendor questionnaire drafts**: set **Vendor questionnaire drafts** to *on — offer labelled drafts* and press **Save vendor draft setting**. Default **off**; turning it on is a relaxation: step-up, audited | `demo:intake` seeds five vendors and leaves one *proposed*. Write its name in the presenter notes; do not read it aloud. No model is needed: the beat uses **records only** | pending execution |
+| T-24h | V2 | `/ui/admin/vendors/questionnaires` (from **Vendors**, the header link **Supplier questionnaires**) → card **Supplier portal**: press **Turn the portal on**. Default **off**; step-up, audited. Leave **Accept unscanned files** off (default off) | `demo:intake` leaves one vendor *under assessment* with its questionnaire submitted. Write its name in the presenter notes; confirm at rehearsal that it is the only one. An active pack is needed for **Framework**: `demo:prepare` activates the NIST and EU packs under the ephemeral demo licence (§1, step 4). Put a reserved test address (`…@example.test`) for the supplier contact in the presenter notes. The private window (profile C) must have no session | pending execution |
+| T-24h | V3 | `/ui/admin/organization` → card **5d · Framework imports**: set **Framework imports** to *on — allow reviewed imports* and press **Save framework-import setting**. Default **off**; step-up, audited | Nothing to seed: the sources ship inside the build (`packages/shared/src/framework-imports-data/`), with no download at run time. Do **not** propose an import before the demo, or the stage shows **Review import** only | pending execution |
+| — | R1 | None: always on | The seed and `demo:intake` feed it. Check at T-1h that the **Posture estimate** section renders with a figure and a **What to fix first** list | pending execution |
+| T-24h | R2 | `/ui/admin/organization` → card **5b1a · Risk treatments: transferred and avoided**: set **Transferred and avoided treatments** to *on* and press **Save risk treatments**. Default **off**; step-up, audited | `demo:intake` seeds use-case risks that are *open* and *mitigating*. Pick one open risk that no Act 1–3 beat uses (not on S4's use case). Write its title and a placeholder policy reference ("<demo-policy-ref>, clause 7", never a real policy) in the presenter notes | pending execution |
+| — | R3 | `/ui/admin/model-risk` → card **Re-test after a model change**. Default **off**. **Leave it off on LIVE**: the beat only shows it | Nothing. **R3/I3 model-change rule:** never save a model or price change on `/ui/admin/agents` on LIVE from T-24h onward, except the §7.11 `claude-opus` model-id check. A change counts as a "model or configuration change" in the drift of that agent's model card. Whether it then holds the agent's dispatch is **to confirm at rehearsal** on FALLBACK | pending execution |
+| — | D1 | No org switch: one row per detector, absent = off. **Leave all three off.** Turning one on needs a scoring service registered on **External scorers** that has passed its connection test, plus an egress entry (step-up) | The reference service (`agents/trained-detectors/`, about 2 GB) is not in the product image or CI. **Do not set it up for the demo**; the beat is show-only | pending execution |
+| — | D2 | `/ui/admin/organization` → card **3b1 · Remote agents (A2A)**, setting `a2aEnabled`. Default **off**; turning it on is a step-up relaxation. **Leave it off**: the beat shows the **Off (default)** badge | Registration fetches the remote agent's card live, so it needs a reachable A2A endpoint and an egress entry. Calls are API only. **Skip any registration** unless a test endpoint is set up and rehearsed on FALLBACK first | pending execution |
+| T-24h | I1 | None for sync. Each **Sync tools now** asks for a step-up and is audited; the limit is 6 per server per minute | Seeded: `repo-tools` and `data-warehouse`, back-dated past the 7-day release waiting period, with a loopback egress entry; `demo:setup` points them at the `demo:mcp` server (§1, step 3). **The `demo:mcp` server must be running.** Do not register a new server on stage: it would hit `mcp_release_age_cooldown`. One rehearsal sync on FALLBACK only | pending execution |
+| — | I2 | None (read-only) | Seeded: one connector on the mock adapter and one governance-only connector. Never type a credential on stage | pending execution |
+| On stage, then teardown | I3 | `/ui/admin/rules` → **Per-model limits**: **Turn enforcement on** (`modelRateLimitsEnabled`, default **off**). The step-up is asked in both directions, and the change is audited | Seeded `fast-mock`. The limit (User Ada, `fast-mock`, 1 call per 60 s) is added on stage. Check at T-24h that `fast-mock` explicitly chosen in `/ui/chat` still serves after the Claude key is stored. §7.11 says an explicitly chosen mock always serves | pending execution |
+| T-24h | P1 | The processing limit (`privacyOpsEnabled`) is switched **on stage** on `/ui/admin/privacy`: **Turn the processing limit on**. Default **off**; turning it on needs no step-up, turning it off is a step-up relaxation | **Not seeded.** At T-24h on `/ui/admin/privacy` → **Add a record**: **Name** "Claims triage", **Lawful basis** any, **Retention (days)** 30, **Project** `hipaa-project`, **Data categories** *Email address*, a one-line **Purpose**, then **Add record** (step-up). Leave the limit **off** until the beat. Put a placeholder e-mail address (`…@example.test`) in the presenter notes. At rehearsal, on FALLBACK, confirm that the chat in P1 step 3 is refused `processing_not_permitted`, not first by the PII guardrail | pending execution |
+| T-24h | P2 | `/ui/admin/trust-publishing` → card **Public trust pages**: tick **Public trust pages and auditor access** and press **Save**. Default **off**; step-up, audited | **Not seeded.** At T-24h: **Trust centre heading** tab, using the demo org's placeholder name. Then **AI system cards** → **Start an AI system card from the register**: pick a seeded use case (not S4's), **Draft card**, **Edit** the fields in plain words with no claim words, **Save draft**, **Publish**, **Who can see it**: *Anyone, on the public trust centre* (step-up). Check `/ui/trust` in the private window. Do **not** create an auditor grant before the demo | pending execution |
+| T-1h | All | — | The private window (profile C) is open with no session. The `demo:mcp` server is running. The presenter notes hold every name and placeholder above | pending execution |
+
+**The laptop after `demo:prepare` (FALLBACK).** A re-prepare puts every Act 4 switch back to its default and drops the
+T-24h records. After each `demo:prepare` on FALLBACK, repeat the T-24h rows for V1, V2, V3, R2, P1 and P2. Then
+rehearse Act 4 there, never on LIVE.
+
+**Fallback, per beat** (switch at once; never retry in front of the audience; always say it):
+
+| Beat | If it fails | Say |
+|---|---|---|
+| V1, V3, R2 | Switch missed or refused: show the off notice and move on | "this is off by default; an admin turns it on with a second factor" |
+| V2 | Grant refused: show the **Supplier portal** card; the link fails: move on | "it needs an active framework and a vendor under assessment" / "the link is single-use, which is the point" |
+| I1 | Sync fails: open `/ui/admin/audit` | "the tool server isn't answering, and the refusal is audited" |
+| I3, P1 | No refusal: open `/ui/admin/audit` | "we'll see it in the audit" |
+| P2 | `/ui/trust` unavailable: show the tabs only; auditor link fails: **New link** once (step-up) | "it is off by default" / "it's single-use" |
+| R1, R3, D1, D2, I2 | Read-only; nothing to fall back to | — |
+| Everything | Switch to the FALLBACK stack, prepared and set up as above | "this is the same product on a prepared copy" |
+
+**What Act 4 must never claim** (each is a limit in an ADR or in the code on `main` on 2026-10-31):
+
+- **Vendor drafts (ADR-0213):** a draft never submits, attests or changes the vendor's status. Draft quality against a
+  real model is not measured. Supplier documents are pasted text only.
+- **Supplier portal (ADR-0221):**
+  - no e-mail and no supplier MFA;
+  - no malware scanner, so files are refused by default;
+  - supplier reads are not audited;
+  - an accepted answer is a claim the vendor made, not verified evidence;
+  - answers do not flow into the questionnaire artifact;
+  - no row-level security: isolation comes from the route class and grant-keyed queries;
+  - the step-up prompt still reads "changing an agent identity".
+- **Framework imports (ADR-0215):**
+  - accepting does not activate a pack;
+  - new controls start unmapped, and feed entries map to no control;
+  - no scheduled refresh;
+  - no US state-law packs, no SP 800-53 catalogue and no AI RMF Playbook actions.
+- **Posture estimate (ADR-0214):**
+  - an estimate of the records, not a compliance verdict, audit opinion or certification;
+  - fixed weights;
+  - org-wide only;
+  - deterministic, with no AI;
+  - an unmeasured objective counts as 0.
+- **Risk treatments (ADR-0211):**
+  - transfer keeps the rating, the heat map, the tolerance check and the deploy-gate hold;
+  - a treated risk can only be reopened or closed;
+  - "avoided" is not "resolved";
+  - switching off does not undo treatments.
+- **Re-test (ADR-0217):**
+  - signs nothing off and clears no drift;
+  - hourly, not instant;
+  - reruns existing baselines and red-team libraries only (up to 10 suites);
+  - no custom-provider cards;
+  - spends tokens and is refused over budget.
+- **Trained detectors (ADR-0220):**
+  - not in the product image or the air-gapped bundle yet;
+  - no accuracy figures;
+  - **Try a sample** is rule-based only;
+  - injection is scanned on input only;
+  - groundedness is not a run-time detector;
+  - fails closed by default.
+- **A2A (ADR-0219):**
+  - API-only calls;
+  - orchestration does not call remote agents;
+  - the card signature is not verified;
+  - no policy-kernel or PII check on message text or replies;
+  - a skill grant is advisory;
+  - no streaming, polling, cancellation or A2A rate limit.
+- **MCP sync (#609, #625):**
+  - the button is **Register**;
+  - registering grants no one;
+  - a sync goes through every gate;
+  - discovery classifies supplied evidence only, and stdio servers never show up.
+- **Connectors (#616):** the governance-only connector executes nothing, and a credential is never shown again.
+- **Modality pricing and per-model limits (ADR-0212):**
+  - modality spend is measured, never estimated, and some providers report no split;
+  - limits can be overrun by in-flight calls;
+  - role and team limits count per user;
+  - no fallback on refusal;
+  - no back-fill.
+- **Privacy (ADR-0224):**
+  - not consent tracking: consent is one lawful basis, and the limit is per project or use case;
+  - only governed model dispatch is limited, not connectors, MCP tools or training ingest;
+  - objections are not enforced per person;
+  - **Locate data** searches four RegulAIt stores only;
+  - erasure replaces the identifier as typed, and audit rows are tombstoned, not edited.
+- **Trust pages (ADR-0225):**
+  - never "certified", "compliant", "accredited" or "guarantee";
+  - no auditor e-mail or MFA;
+  - no download or export;
+  - an unpublish may stay cached for up to 5 minutes;
+  - a republished item does not reach existing grants.
+- **MCP identity assertion (ADR-0210, PR #612):** no beat. API only, no UI control, and it needs an operator-provisioned
+  signing key.
+
+**Teardown (after the demo, not on stage):**
+1. Remove the `fast-mock` per-model limit, or **Turn enforcement off** (step-up).
+2. **Turn the processing limit off** (step-up).
+3. Revoke the auditor and the supplier: **Revoke**, then **Revoke access** in **Auditors with access**, and the
+   revoke in **Supplier access**.
+4. Unpublish the trust-centre item.
+5. Set the T-24h switches back to off, or leave them on if the owner wants them kept. Each change is a step-up and
+   audited.
