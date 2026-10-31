@@ -12,3 +12,6 @@ export { default as ShadowAiPage } from "../views/admin/governance/ShadowAiPage"
 export { default as UseCaseOverviewPage } from "../views/admin/governance/UseCaseOverviewPage";
 export { default as UseCasesPage } from "../views/admin/governance/UseCasesPage";
 export { default as VendorsPage } from "../views/admin/governance/VendorsPage";
+// P3 (#453): the Discovery sources area (overview + full runs/tokens/devices lists) as one lazy chunk reached through
+// this screen, so the sub-pages add nothing to the entry bundle (its module owns the nested <Routes>; see App.tsx).
+export { DiscoverySourcesArea } from "../views/admin/governance/DiscoveryListPages";

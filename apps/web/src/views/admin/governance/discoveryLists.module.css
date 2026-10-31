@@ -1,0 +1,34 @@
+/* P3: a preview card's heading names the list, then its count and what needs attention */
+.previewTitle {
+  margin: 0;
+  font: inherit;
+  font-weight: 600;
+}
+.previewCount {
+  font-weight: 400;
+  color: var(--text-dim);
+}
+.viewAll {
+  white-space: nowrap;
+}
+
+/* a list page's trail back to Discovery sources: the shell's breadcrumb look, with the parent a link */
+.crumbs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s0-5);
+  margin: 0 0 var(--s0-5);
+  padding: 0;
+  list-style: none;
+  font-family: var(--rg-font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--rg-ink-muted);
+}
+.crumbs li + li::before {
+  content: "/";
+  margin-right: var(--s0-5);
+  color: var(--rg-ink-faint);
+}

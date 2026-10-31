@@ -90,7 +90,7 @@ const ApprovalsAdminPage = screen(() => import("./screens/admin-approvals-audit"
 const ReviewWorkbenchPage = screen(() => import("./screens/admin-approvals-audit"), "ReviewWorkbenchPage");
 const AuditLogPage = screen(() => import("./screens/admin-approvals-audit"), "AuditLogPage");
 const ShadowAiPage = screen(() => import("./screens/admin-ai-governance"), "ShadowAiPage");
-const DiscoverySourcesPage = screen(() => import("./screens/admin-ai-governance"), "DiscoverySourcesPage");
+const DiscoverySourcesArea = screen(() => import("./screens/admin-ai-governance"), "DiscoverySourcesArea");
 const CopilotPage = screen(() => import("./screens/admin-overview"), "CopilotPage");
 const ChatOpsPage = screen(() => import("./screens/admin-approvals-audit"), "ChatOpsPage");
 const LineagePage = screen(() => import("./screens/admin-approvals-audit"), "LineagePage");
@@ -296,7 +296,8 @@ function ApplicationRoutes() {
                 {/* ADR-0055 */}
                 <Route path="shadow-ai" element={<ShadowAiPage />} />
                 {/* ADR-0195 SD0 */}
-                <Route path="shadow-ai/discovery-sources" element={<DiscoverySourcesPage />} />
+                {/* P3 (#453): one lazy chunk owns the overview and its full lists (see DiscoveryListPages) */}
+                <Route path="shadow-ai/discovery-sources/*" element={<DiscoverySourcesArea />} />
                 {/* ADR-0056 */}
                 <Route path="copilot" element={<CopilotPage />} />
                 {/* ADR-0061 */}
