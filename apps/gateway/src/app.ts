@@ -376,6 +376,7 @@ export interface BuildAppOptions {
 import { z } from "zod";
 import { boundTargetsForApprovals, registerMcpProxy } from "./mcp-proxy.js";
 import { clearUpstreamCredentialOnUrlMove, registerMcpUpstreamCredentialRoutes } from "./mcp-upstream-credential.js";
+import { registerA2aRoutes } from "./a2a.js";
 import { registerPrivacyOpsRoutes } from "./privacy-ops.js";
 import { ExternalEffectBlockedError } from "./external-effects.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
@@ -5602,6 +5603,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0204 — a server's static upstream credential: set, rotate, clear (admin-only through the default gate, each a
   // settings_relax step-up, audited); reads show only whether one is set, its header and last four characters
   registerMcpUpstreamCredentialRoutes(app, db, { dataKey: opts.dataKey });
+  registerA2aRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0097 part A — the admission review queue and the reason-required,
   // audited clear. Admin-only through the default gate, like the MCP registry
   // writes it sits beside.

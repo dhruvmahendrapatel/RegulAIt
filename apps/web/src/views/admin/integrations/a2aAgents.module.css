@@ -1,0 +1,6 @@
+/* ADR-0219: the Remote agents (A2A) tab (tokens only). */
+
+/* a link inside a sentence is underlined, never told apart by colour alone */
+.inlineLink {
+  text-decoration: underline;
+}

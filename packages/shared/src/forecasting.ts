@@ -159,10 +159,18 @@ export const MIN_FORECAST_ELAPSED_FRACTION = 0.1;
 
 export const FORECAST_DISCLAIMER =
   "A FORECAST IS NOT A COMMITMENT. This is a deterministic extrapolation of measured history " +
-  "(usage_events, priced at published list price per GOVERNANCE_LAYER_SPEC §10.4). It models no " +
+  "(the usage ledger, priced at the provider's published list price). It models no " +
   "day-of-week or seasonal effect, no undeclared future change, and no step change it has not " +
   "already observed. Treat the confidence interval as the honest width of the answer, not the " +
   "point estimate as the answer.";
+
+/** "Where this breaks" on every forecast; the Spend monitor shows these verbatim */
+export const FORECAST_LIMITS: readonly string[] = [
+  "no day-of-week or seasonal effect is modelled — a weekday-only team measured from a weekend under-projects, and vice versa",
+  "a step change not yet observed (a newly granted expensive agent, a new team onboarding) is invisible to the extrapolation",
+  "the confidence interval covers sampling variation in the daily rate ONLY; it does not cover the rate itself changing",
+  "spend is a list-price ESTIMATE, so the forecast inherits that basis and is not invoice-grade",
+];
 
 export const ANOMALY_DISCLAIMER =
   "AN ANOMALY IS A SIGNAL FOR HUMAN REVIEW, NEVER PROOF OF WRONGDOING. It states that an " +
@@ -385,12 +393,7 @@ export function forecastSpend(input: ForecastInput): ForecastResult {
     "every day in the remaining period behaves like the days already measured",
     "only DECIDED changes recorded as scheduled deltas are added on top; nothing else is anticipated",
   ];
-  const limits = [
-    "no day-of-week or seasonal effect is modelled — a weekday-only team measured from a weekend under-projects, and vice versa",
-    "a step change not yet observed (a newly granted expensive agent, a new team onboarding) is invisible to the extrapolation",
-    "the confidence interval covers sampling variation in the daily rate ONLY; it does not cover the rate itself changing",
-    "spend is a list-price ESTIMATE (GOVERNANCE_LAYER_SPEC §10.4), so the forecast inherits that basis and is not invoice-grade",
-  ];
+  const limits = [...FORECAST_LIMITS];
 
   const insufficient = (reason: string): ForecastResult => ({
     method,

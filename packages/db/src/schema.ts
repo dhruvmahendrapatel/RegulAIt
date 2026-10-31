@@ -952,6 +952,75 @@ export const mcpServerUpstreamCredentials = pgTable(
 export type McpServerUpstreamCredentialRow = typeof mcpServerUpstreamCredentials.$inferSelect;
 
 /**
+ * ADR-0219 (P10, migration 0253) — A REMOTE AGENT reached over the agent-to-agent (A2A) protocol. Registered by an
+ * admin only while `org_settings.a2a_enabled`; its card was read through the guarded fetch and is kept as a bounded
+ * snapshot. Every call goes through `executeGovernedA2aCall` (a2a.ts): the person's grant (default-deny), the lead
+ * ceiling, the egress guard, the cost ledger and the audit row. `allowPrivateRanges` NULL inherits
+ * `org_settings.mcpPrivateRangesDefault`, exactly like `mcp_servers`.
+ */
+export const a2aAgents = pgTable(
+  "a2a_agents",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    url: text("url").notNull(),
+    card: jsonb("card").notNull().$type<Record<string, unknown>>(),
+    cardFetchedAt: timestamp("card_fetched_at", { withTimezone: true }).notNull().defaultNow(),
+    allowPrivateRanges: boolean("allow_private_ranges"),
+    /** pillar 5: the flat price of one call; null = unpriced, never invented */
+    pricePerCallUsd: doublePrecision("price_per_call_usd"),
+    enabled: boolean("enabled").notNull().default(true),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [unique("a2a_agents_name_uq").on(t.name)],
+);
+export type A2aAgentRow = typeof a2aAgents.$inferSelect;
+
+/** ADR-0219 — the optional static credential sent to ONE remote agent; its own table so no agent read carries it. */
+export const a2aAgentCredentials = pgTable(
+  "a2a_agent_credentials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => a2aAgents.id, { onDelete: "cascade" }),
+    scheme: text("scheme", { enum: ["bearer", "header"] }).notNull(),
+    headerName: text("header_name").notNull(),
+    secretCiphertext: text("secret_ciphertext").notNull(),
+    secretLast4: text("secret_last4").notNull(),
+    setBy: uuid("set_by").references(() => users.id, { onDelete: "set null" }),
+    secretSetAt: timestamp("secret_set_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [unique("a2a_agent_credentials_agent_uq").on(t.agentId)],
+);
+export type A2aAgentCredentialRow = typeof a2aAgentCredentials.$inferSelect;
+
+/** ADR-0219 — who may call which remote agent. No row = no call; `skillId` null = every skill on the card. */
+export const a2aAgentGrants = pgTable(
+  "a2a_agent_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => a2aAgents.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    skillId: text("skill_id"),
+    grantedBy: uuid("granted_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("a2a_agent_grants_uq").on(t.agentId, t.userId, sql`COALESCE(${t.skillId}, '')`),
+    index("a2a_agent_grants_user_idx").on(t.userId, t.agentId),
+  ],
+);
+export type A2aAgentGrantRow = typeof a2aAgentGrants.$inferSelect;
+
+/**
  * ADR-0101 — an upstream MCP registry an operator configured. A fresh install
  * has ZERO rows here, so federation is off because there is nothing to
  * federate rather than because a flag says so, and `enabled` defaults false on
@@ -1193,6 +1262,9 @@ export const auditLog = pgTable(
         // (the audited refusal a re-pointed or pre-0049 row now gets). Plain
         // text column — no DDL needed.
         "mcp_server",
+        // ADR-0219 (P10): an admin registering, re-carding, crediting, granting or removing a remote A2A agent,
+        // and every governed A2A call (allowed or refused). Plain text column — no DDL needed.
+        "a2a_agent",
         // ADR-0037: SCIM group sync. Group CRUD and every membership
         // add/remove audits here; SCIM USER provisioning keeps objectType
         // "user" so "what happened to this account" stays one query. Plain
@@ -4420,6 +4492,9 @@ export const orgSettings = pgTable(
      * ceremony; an admin may relax to it (audited).
      * Link-local/IMDS stays unconditionally blocked in BOTH postures. */
     mcpPrivateRangesDefault: boolean("mcp_private_ranges_default").notNull().default(false),
+    /** ADR-0219 (P10, migration 0253): calls to remote agents over A2A. FALSE (the default, ADR-0180) = no remote
+     * agent can be registered or called; an admin may turn it on (settings_relax step-up, audited). */
+    a2aEnabled: boolean("a2a_enabled").notNull().default(false),
     /** ADR-0097 (migration 0103): the MCP ADMISSION posture. 'enforce'
      * (DEFAULT since ADR-0181, migration 0159) refuses a `held` server BEFORE
      * any upstream connect and keeps it out of tool discovery until an admin

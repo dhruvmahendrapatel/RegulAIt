@@ -23,6 +23,7 @@ import {
   useUsers,
   userOpts,
 } from "../adminKit";
+import type { AgentsTabSlot } from "./AgentsScreen";
 import { StewardshipCard } from "./AgentStewardship";
 // ADR-0205: part of this lazy route chunk (screens/admin-integrations), so the entry bundle carries none of it
 import AgentSetupAssistant from "./AgentSetupAssistant";
@@ -37,7 +38,7 @@ const CLEAR = "__clear__";
 
 const AiBomPanel = lazy(() => import("../governance/BomEvidencePanel").then((m) => ({ default: m.AiBomPanel })));
 
-export default function AgentsPage() {
+export default function AgentsPage(props: { slot?: AgentsTabSlot }) {
   const agents = useAgents();
   const users = useUsers();
   const customProviders = useCustomProviders();
@@ -71,7 +72,8 @@ export default function AgentsPage() {
         title="Agents"
         info={<p>The global catalog is decoupled from entitlement: registering an agent grants nobody anything. Pricing feeds the cost meters; the tier feeds cost-aware routing.</p>}
       />
-      <div className={v.stack}>
+      {props.slot?.tabs}
+      <div className={v.stack} {...props.slot?.panel}>
         <StewardshipCard
           agents={agents.data?.agents}
           users={users.data?.users}
