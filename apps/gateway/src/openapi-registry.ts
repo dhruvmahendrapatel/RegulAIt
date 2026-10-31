@@ -875,6 +875,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/teams/:teamId/members": "internal",
   "DELETE /v1/teams/:teamId/members/:userId": "internal",
   "GET /v1/usage-events": "public-stable",
+  "GET /v1/usage-events/summary": "public-beta",
   // ADR-0080 — the AI use-case registry: new surface, internal until the shape settles
   "GET /v1/use-cases": "internal",
   "POST /v1/use-cases": "internal",
@@ -1983,6 +1984,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/teams/:teamId/members": "teams",
   "DELETE /v1/teams/:teamId/members/:userId": "teams",
   "GET /v1/usage-events": "usage-events",
+  "GET /v1/usage-events/summary": "usage-events",
   "GET /v1/use-cases": "use-cases",
   "POST /v1/use-cases": "use-cases",
   "POST /v1/use-cases/intake/assist": "use-cases",
