@@ -861,7 +861,7 @@ const itemsQuery = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional(),
 });
 const exportQuery = z.object({ from: z.coerce.date().optional(), to: z.coerce.date().optional() });
-// ---- ADR-0219: a queue's items under the shared list contract (ids and states only, never a preview)
+// ---- ADR-0226: a queue's items under the shared list contract (ids and states only, never a preview)
 const itemsFilterQuery = z.object({ status: z.enum(["open", "completed"]).optional() }).strict();
 type AnnotationItemListRow = ReturnType<typeof itemView> & { reviewedByUserIds: string[] };
 export const ANNOTATION_ITEMS_LIST: ListSpec<AnnotationItemListRow> = {
@@ -1156,7 +1156,7 @@ export function registerAnnotationRoutes(app: FastifyInstance, db: Db, opts: { d
   };
   const annotationItemsWhere = (queueId: string, f: z.infer<typeof itemsFilterQuery>): SQLL =>
     and(eq(annotationItems.queueId, queueId), f.status ? eq(annotationItems.status, f.status) : undefined)!;
-  // ADR-0219: with any of sort/dir/cursor/offset/count the queue's items answer the shared list contract; admin only
+  // ADR-0226: with any of sort/dir/cursor/offset/count the queue's items answer the shared list contract; admin only
   app.get("/v1/annotation-queues/:queueId/items/export.xlsx", async (req, reply) => {
     try {
       const { queueId } = queueParam.parse(req.params);

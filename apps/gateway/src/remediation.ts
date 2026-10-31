@@ -369,7 +369,7 @@ const remediationsReader = (db: Db): ListReader<RemediationListRow> => ({
   idOf: (r) => r.id,
 });
 const isoOrNull = (v: string | null) => (v ? new Date(v) : null);
-/** ADR-0219: every remediation proposal across all alerts, under the shared list contract */
+/** ADR-0226: every remediation proposal across all alerts, under the shared list contract */
 export const REMEDIATIONS_LIST: ListSpec<RemediationListRow> = {
   id: "remediations",
   sorts: {
@@ -537,7 +537,7 @@ export function registerRemediationRoutes(app: FastifyInstance, db: Db): void {
     return reply.status(201).send(serialize(created));
   });
 
-  // ADR-0219: with any of sort/dir/cursor/offset/count it answers the shared
+  // ADR-0226: with any of sort/dir/cursor/offset/count it answers the shared
   // list contract; with none of them, exactly the response below. Admin only.
   app.get("/v1/governance/remediations/export.xlsx", async (req, reply) => {
     try {

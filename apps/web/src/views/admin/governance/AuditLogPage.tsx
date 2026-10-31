@@ -1,7 +1,7 @@
 /**
  * Audit log — the single trail every pillar writes into. Filterable by user
  * and by A4's deploy-mode dimension, full-trail CSV export (the screen pages
- * through every row under the shared list control, ADR-0219), and the §8.4 retention floor + governed prune (owned
+ * through every row under the shared list control, ADR-0226), and the §8.4 retention floor + governed prune (owned
  * confirm, itself audited).
  *
  * DEPLOY-MODE HONESTY (ADR-0027 §2a). `deploy_mode` is written only by
@@ -116,7 +116,7 @@ export default function AuditLogPage() {
     queryKey: ["admin", "audit-retention"],
     queryFn: () => api.get<AuditRetention>("/v1/audit/retention"),
   });
-  // ADR-0219: the trail pages on the server under the shared list control. Its default sort is the same
+  // ADR-0226: the trail pages on the server under the shared list control. Its default sort is the same
   // (at DESC, id DESC) keyset the trail always paged by, so "Next" walks the same cursor; the count is bounded
   // ("of 1,000+") because the trail grows a row per governed call.
   const auditFilters = useMemo(

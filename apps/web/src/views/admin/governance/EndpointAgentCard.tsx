@@ -75,7 +75,7 @@ export function EndpointAgentCard({ sources }: { sources: readonly DiscoverySour
   const [alsoDevices, setAlsoDevices] = useState(false);
   const chosen = targets.find((s) => s.id === sourceId) ?? null;
 
-  // ADR-0219: tokens and devices page on the server; the device figures come with each page, across the source
+  // ADR-0226: tokens and devices page on the server; the device figures come with each page, across the source
   const [deviceSummary, setDeviceSummary] = useState<DevicesView["summary"] | null>(null);
 
   const issue = () => {

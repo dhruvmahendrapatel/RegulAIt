@@ -214,7 +214,7 @@ function BlastRadiusPanel() {
   const [sim, setSim] = useState<{ simulation: SimulationRow; samples: FlipRow[]; fidelity: string; abacCannotGrant: string } | null>(
     null,
   );
-  // ADR-0219: the preview history pages on the server; the fidelity statement comes with each page
+  // ADR-0226: the preview history pages on the server; the fidelity statement comes with each page
   const [fidelity, setFidelity] = useState<string | null>(null);
 
   return (

@@ -44,6 +44,7 @@ import type { ArtifactScan } from "./modelArtifacts";
 import { SpdxFieldsPanel } from "./SpdxFieldsPanel";
 import { OrgSettingsCard } from "../settings/OrgSettingsCard";
 import { ModelCardEditButton } from "./ModelCardEditButton";
+import { RetestResults, retestTally, type Retest } from "./RetestResults";
 
 // ADR-0189 B6: an agent's model card shows that agent's AI BOM (R25: a card approval snapshots its agent)
 const AiBomPanel = lazy(() => import("./BomEvidencePanel").then((m) => ({ default: m.AiBomPanel })));
@@ -71,6 +72,8 @@ interface SignOff {
   decisionReason: string | null;
   supersedesId: string | null;
   requestedAt: string;
+  /** the automatic re-tests attached to this request after a model change */
+  retests?: Retest[];
 }
 interface Evidence {
   id: string;
@@ -101,6 +104,8 @@ interface ModelCard {
   subjectName?: string | null;
   subjectModel?: string | null;
   approvals: SignOff[];
+  /** automatic re-tests run since the last request, attached to the next one */
+  retestsAwaitingRequest?: Retest[];
   evidence: Evidence[];
   completeness: {
     complete: boolean;
@@ -215,7 +220,7 @@ const stateTone = (s: CardState) =>
   s === "approved" ? "ok" : s === "expiring" ? "warn" : s === "pending" ? "info" : "danger";
 
 type ExpiringRow = ExpiringView["items"][number] & { effectiveStatus?: string; daysUntilExpiry?: number | null };
-/** ADR-0219: the expiring sign-offs' columns; the ids and sortable ones match the gateway's MRM_EXPIRING_LIST */
+/** ADR-0226: the expiring sign-offs' columns; the ids and sortable ones match the gateway's MRM_EXPIRING_LIST */
 const EXPIRING_COLUMNS: Array<DataColumn<ExpiringRow>> = [
   { key: "use", header: "Intended use", main: true, sortable: true, render: (r) => r.intendedUse ?? r.cardId },
   {
@@ -240,7 +245,7 @@ export default function ModelRiskPage() {
     queryKey: ["admin", "mrm-status"],
     queryFn: () => api.get<StatusView>("/v1/mrm/status"),
   });
-  // ADR-0219: the cards and the expiring sign-offs page on the server; the open card is read from the page on screen
+  // ADR-0226: the cards and the expiring sign-offs page on the server; the open card is read from the page on screen
   const queryClient = useQueryClient();
   const [pageCards, setPageCards] = useState<ModelCard[]>([]);
 
@@ -434,6 +439,9 @@ export default function ModelRiskPage() {
 
           {/* the warn window, writable through PUT /v1/org/settings (U3) */}
           <OrgSettingsCard title="Expiry warning window" keys={["mrmExpiryWarnDays"]} testId="mrm-expiry-warn" />
+          {/* beside the recertification controls: re-runs a changed model's tests and attaches the results to its
+              re-certification request; off by default, and turning it on asks for a step-up */}
+          <OrgSettingsCard title="Re-test after a model change" keys={["mrmAutoRetestEnabled"]} testId="mrm-auto-retest" />
 
           {/* ---------------- expiring work ---------------- */}
           <Card title="Expiring and lapsed sign-offs">
@@ -885,7 +893,16 @@ export default function ModelRiskPage() {
                     { key: "dec", header: "Decided", render: (r) => (r.decidedAt ? ago(r.decidedAt) : "—") },
                     { key: "why", header: "Reason", render: (r) => r.decisionReason ?? "—" },
                     { key: "sup", header: "Supersedes", render: (r) => (r.supersedesId ? "yes" : "—") },
+                    { key: "retests", header: "Re-tests", render: (r) => retestTally(r.retests ?? []) },
                   ]}
+                />
+                <RetestResults
+                  title="Re-tests attached to the pending request."
+                  rows={detail.approvals.find((r) => r.effectiveStatus === "pending")?.retests ?? []}
+                />
+                <RetestResults
+                  title="Re-tests run after a model change. They are attached to the next sign-off request."
+                  rows={detail.retestsAwaitingRequest ?? []}
                 />
 
                 {detail.approvals.some((r) => r.effectiveStatus === "approved") && (

@@ -121,7 +121,7 @@ test.describe("U4: decision receipts", () => {
       "GET /v1/receipts/status": { state: "signing", lastSeq: 27, lagRows: 0 },
       "GET /v1/audit": { entries: [], pageSize: 100, hasMore: false, nextCursor: null },
       "GET /v1/audit/retention": { days: 365, oldestAt: null, count: 0 },
-      // ADR-0219: the receipts list under the shared list contract (fromSeq stays a filter; offset paging by seq)
+      // ADR-0226: the receipts list under the shared list contract (fromSeq stays a filter; offset paging by seq)
       "GET /v1/receipts": (_b: Json, url: URL) => {
         const from = Number(url.searchParams.get("fromSeq") ?? 1);
         const limit = Number(url.searchParams.get("limit"));

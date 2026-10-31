@@ -295,7 +295,7 @@ test("UIA-02: the audit log says how many rows are shown and pages through older
     if (p === "/v1/me") return json(route, { userId: USER_A.id, isAdmin: true, user: USER_A });
     if (p === "/v1/audit/retention") return json(route, { retainedDays: null, prunable: 0, floorSource: [] });
     if (p === "/v1/audit") {
-      // ADR-0219: the list contract, keyset-paged on the default sort
+      // ADR-0226: the list contract, keyset-paged on the default sort
       asked.push(url);
       const limit = Number(url.searchParams.get("limit"));
       const start = url.searchParams.get("cursor") ? Number(url.searchParams.get("cursor")) : 0;

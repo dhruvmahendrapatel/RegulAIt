@@ -89,7 +89,7 @@ test("FS-3: a keyboard-opened drawer heading draws the focus ring", async ({ pag
 });
 
 test("FS-4: a sortable header is reached with Tab and sorts with Enter", async ({ page }) => {
-  // ADR-0219: the registry sorts on the server, so Enter asks the server for that order
+  // ADR-0226: the registry sorts on the server, so Enter asks the server for that order
   const asked: URL[] = [];
   page.on("request", (r) => {
     const u = new URL(r.url());

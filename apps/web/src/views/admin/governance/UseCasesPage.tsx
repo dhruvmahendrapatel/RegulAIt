@@ -52,7 +52,7 @@ interface RegistrySummary {
   owners: Array<{ id: string; name: string }>;
 }
 
-/** ADR-0219: the registry's columns; the ids and sortable ones match the gateway's USE_CASES_LIST */
+/** ADR-0226: the registry's columns; the ids and sortable ones match the gateway's USE_CASES_LIST */
 const USE_CASE_COLUMNS: Array<DataColumn<UseCaseRow>> = [
   {
     key: "name",

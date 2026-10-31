@@ -1,5 +1,5 @@
 /**
- * The one list control (ADR-0219, owner-approved on #453): page size (10, 50, 100 or All, remembered per list in this
+ * The one list control (ADR-0226, owner-approved on #453): page size (10, 50, 100 or All, remembered per list in this
  * browser), where you are ("11–20 of 1,284"), Previous and Next, Refresh, server-side sort on every column the server
  * can sort, a column picker, and an Excel download built by the gateway. Built on the kit `Table`; pages pass the
  * columns, the endpoint and their filters, and keep their own cards, filters and actions.

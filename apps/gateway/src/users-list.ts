@@ -1,5 +1,5 @@
 /**
- * ADR-0219 — the admin users table under the shared list contract
+ * ADR-0226 — the admin users table under the shared list contract
  * (list-contract.ts): its sortable columns, export columns, filters and
  * default sort. The route stays admin-only through the default gate
  * (route-classes.ts), and so does its Excel export.

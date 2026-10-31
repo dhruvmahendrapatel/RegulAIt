@@ -144,7 +144,7 @@ export default function GuardrailsPage() {
       return api.get<EffectiveView>(`/v1/guardrails/effective?${q.toString()}`);
     },
   });
-  // ADR-0219: the decisions page on the server; the totals come with each page, across every decision
+  // ADR-0226: the decisions page on the server; the totals come with each page, across every decision
   const [totals, setTotals] = useState<Record<string, number> | null>(null);
   const violationFilters = useMemo(() => ({ outcome: outcome || undefined }), [outcome]);
 

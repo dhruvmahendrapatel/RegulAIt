@@ -202,7 +202,7 @@ function integer(value: unknown, fallback: number): number | null {
   const n = Number(value);
   return Number.isSafeInteger(n) ? n : null;
 }
-// ---- ADR-0219: the receipts list (a receipt carries no reason or detail text; the file carries no signature)
+// ---- ADR-0226: the receipts list (a receipt carries no reason or detail text; the file carries no signature)
 type ReceiptListRow = SignedDecisionReceipt;
 const receiptsFilterQuery = z.object({ fromSeq: z.coerce.number().int().min(1).max(Number.MAX_SAFE_INTEGER).default(1) }).strict();
 const rp = (r: ReceiptListRow) => (r.payload && typeof r.payload === "object" ? (r.payload as unknown as Record<string, unknown>) : {});
@@ -235,7 +235,7 @@ export const RECEIPTS_LIST: ListSpec<ReceiptListRow> = {
 };
 
 export function registerDecisionReceiptRoutes(app: FastifyInstance, db: Db, _opts: { dataKey?: string } = {}): void {
-  // ADR-0219: the receipts list under the shared list contract. The list pages by `fromSeq`, so the switch is any of
+  // ADR-0226: the receipts list under the shared list contract. The list pages by `fromSeq`, so the switch is any of
   // sort/dir/offset/count/cursor; `fromSeq` stays a filter. Every page is audited, as the list always was.
   const receiptsReader: ListReader<ReceiptListRow> = {
     fetch: async (q) => {

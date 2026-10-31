@@ -97,7 +97,7 @@ const KIND_LABELS: Record<CapKind, string> = {
 const statusTone = (s: OverrideRow["status"]): Tone =>
   s === "approved" ? "ok" : s === "denied" ? "danger" : "info";
 
-/** ADR-0219: the override requests' columns; the ids and sortable ones match the gateway's SOD_OVERRIDES_LIST */
+/** ADR-0226: the override requests' columns; the ids and sortable ones match the gateway's SOD_OVERRIDES_LIST */
 const OVERRIDE_COLUMNS: Array<DataColumn<OverrideRow>> = [
   { key: "label", header: "Request", main: true, sortable: true, render: (r) => r.label },
   { key: "rule", header: "Overrides rule", main: true, sortable: true, render: (r) => r.ruleName ?? "—" },

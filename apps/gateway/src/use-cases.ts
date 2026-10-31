@@ -1511,7 +1511,7 @@ async function riskViewsFor(db: Db, useCaseId: string) {
   }));
 }
 
-// ---- ADR-0219: the AI registry under the shared list contract ---------------
+// ---- ADR-0226: the AI registry under the shared list contract ---------------
 const UC_OPEN_CONDITIONS = sql<number>`(select count(*)::int from ${useCaseConditions} where ${useCaseConditions.useCaseId} = ${aiUseCases.id} and ${useCaseConditions.status} = 'open')`;
 /** the owner choices offered beside the list (by name) */
 const UC_OWNER_CHOICES = 500;
@@ -2387,7 +2387,7 @@ export function registerUseCaseRoutes(
     return reply.status(201).send({ ...outcome.body, ...(aiBomSnapshotWarning ? { aiBomSnapshotWarning } : {}) });
   });
 
-  // ADR-0219: the registry under the shared list contract. The registry's filters (search, status chip, tier,
+  // ADR-0226: the registry under the shared list contract. The registry's filters (search, status chip, tier,
   // owner) run on the server, and the headline and chip counts and the owner choices come with every page, across
   // the caller's whole scope (fleet for an admin, own use cases otherwise), so they never count the page on screen.
   const useCasesScope = (req: FastifyRequest): SQL | undefined | null => {

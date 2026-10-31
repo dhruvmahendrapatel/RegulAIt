@@ -168,7 +168,7 @@ function FeedList(props: { title: string; edges: FeedEdgeView[]; direction: "out
 }
 
 export default function InventoryPage() {
-  // ADR-0219: the registered agents page on the server; the window comes with each page
+  // ADR-0226: the registered agents page on the server; the window comes with each page
   const [days, setDays] = useState(90);
   const [openId, setOpenId] = useState<string | null>(null);
   const detail = useQuery({

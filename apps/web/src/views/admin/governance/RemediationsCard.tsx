@@ -1,6 +1,6 @@
 /**
  * ADR-0159 — every remediation proposal across all alerts
- * (`GET /v1/governance/remediations`), under the shared list control (ADR-0219), filterable by status.
+ * (`GET /v1/governance/remediations`), under the shared list control (ADR-0226), filterable by status.
  * A proposal is approval-gated: this list says where each one stands and
  * links to the approval that decides it; it never applies anything itself.
  */
@@ -53,7 +53,7 @@ export const remediationTone = (status: string): Tone =>
 
 export type OrgRemediationRow = OrgRemediation & { proposedByName?: string | null; decidedByName?: string | null };
 
-/** ADR-0219: the remediations list's columns; the ids and sortable ones match the gateway's REMEDIATIONS_LIST */
+/** ADR-0226: the remediations list's columns; the ids and sortable ones match the gateway's REMEDIATIONS_LIST */
 export const REMEDIATION_COLUMNS: Array<DataColumn<OrgRemediationRow>> = [
   { key: "title", header: "Remediation", main: true, sortable: true, render: (r) => <span>{r.title}</span> },
   { key: "kind", header: "Kind", main: true, sortable: true, render: (r) => <span title={r.kind}>{humanize(r.kind)}</span> },

@@ -4,7 +4,7 @@
  * Audit log page beside the receipt status, export and verify controls.
  *
  * Both reads are audited by the gateway, so neither runs on page load: the
- * list (under the shared list control, ADR-0219) is fetched when the person asks for it, and a receipt when they
+ * list (under the shared list control, ADR-0226) is fetched when the person asks for it, and a receipt when they
  * open one. A receipt carries no reason or detail text (ADR-0186 R), so the
  * dialog shows exactly the signed payload and says so.
  */
@@ -82,7 +82,7 @@ export function ReceiptDialog(props: { auditId: string; onClose: () => void }) {
   );
 }
 
-/** ADR-0219: the receipts list's columns; the ids and sortable ones match the gateway's RECEIPTS_LIST */
+/** ADR-0226: the receipts list's columns; the ids and sortable ones match the gateway's RECEIPTS_LIST */
 function receiptColumns(open: (auditId: string) => void): Array<DataColumn<ReceiptEnvelope>> {
   return [
     { key: "seq", header: "Sequence", main: true, sortable: true, render: (e) => <span className={v.num}>{e.receiptSeq}</span> },

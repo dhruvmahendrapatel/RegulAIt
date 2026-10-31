@@ -158,7 +158,7 @@ export const INDIRECT_UI_CALLS = new Map([
       reason: "propose(…) keeps the path in state; the confirm dialog posts it",
     },
   ]),
-  // ADR-0219: the shared list control downloads the Excel file from the path its page hands it (`exportPath`)
+  // ADR-0226: the shared list control downloads the Excel file from the path its page hands it (`exportPath`)
   ...[
     ["GET /v1/runs/export.xlsx", "apps/web/src/views/runs/RunsPage.tsx"],
     ["GET /v1/incidents/export.xlsx", "apps/web/src/views/incidents/IncidentsPage.tsx"],
@@ -172,7 +172,7 @@ export const INDIRECT_UI_CALLS = new Map([
       reason: "the page passes the export path to DataList, whose Download Excel button fetches it",
     },
   ]),
-  // ADR-0219 (P2 batch A): the governance and Shadow AI lists' Excel exports, through DataList's Download Excel
+  // ADR-0226 (P2 batch A): the governance and Shadow AI lists' Excel exports, through DataList's Download Excel
   ...[
     ["GET /v1/audit/export.xlsx", "apps/web/src/views/admin/governance/AuditLogPage.tsx"],
     ["GET /v1/delegations/export.xlsx", "apps/web/src/views/admin/governance/ApprovalsAdminPage.tsx"],
@@ -209,7 +209,7 @@ export const INDIRECT_UI_CALLS = new Map([
       reason: "the page passes the export path to DataList, whose Download Excel button fetches it",
     },
   ]),
-  // ADR-0219 (P2 batch A): the lists DataList reads page by page from the endpoint its page hands it (`endpoint`)
+  // ADR-0226 (P2 batch A): the lists DataList reads page by page from the endpoint its page hands it (`endpoint`)
   ...[
     ["GET /v1/delegations", "apps/web/src/views/admin/governance/ApprovalsAdminPage.tsx"],
     ["GET /v1/guardrails/violations", "apps/web/src/views/admin/governance/GuardrailsPage.tsx"],

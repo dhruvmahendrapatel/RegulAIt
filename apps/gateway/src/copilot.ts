@@ -1948,7 +1948,7 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
     });
   });
 
-  // ADR-0219: the one predicate for each list, its count and its Excel export: a non-admin's own rows only
+  // ADR-0226: the one predicate for each list, its count and its Excel export: a non-admin's own rows only
   const queriesScope = (req: FastifyRequest): SQLL | undefined =>
     req.authCtx.isAdmin ? undefined : eq(copilotQueries.userId, req.authCtx.userId ?? ZERO_UUID);
   const proposalsScope = (req: FastifyRequest): SQLL | undefined =>
@@ -2543,7 +2543,7 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
   });
 }
 
-// ---- ADR-0219: recent questions and proposals under the shared list contract
+// ---- ADR-0226: recent questions and proposals under the shared list contract
 type CopilotQueryListRow = typeof copilotQueries.$inferSelect;
 type CopilotProposalListRow = typeof copilotProposals.$inferSelect & { approvalStatus: string | null };
 /** the state of the approval a proposal rests on, read from the one queue */

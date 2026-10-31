@@ -91,7 +91,7 @@ function RoleControl(props: { useCaseId: string }) {
 }
 
 type UseCaseIncidentRow = IncidentListResponse["incidents"][number];
-/** ADR-0219: a use case's incidents through the register's own list contract (the ids match INCIDENTS_LIST) */
+/** ADR-0226: a use case's incidents through the register's own list contract (the ids match INCIDENTS_LIST) */
 const USE_CASE_INCIDENT_COLUMNS: Array<DataColumn<UseCaseIncidentRow>> = [
   { key: "ref", header: "Incident", main: true, sortable: true, render: (r) => <Link to={`/incidents/${r.id}`}>{`${r.ref} · ${r.title}`}</Link> },
   {

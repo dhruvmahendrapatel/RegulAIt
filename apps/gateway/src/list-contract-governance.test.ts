@@ -1,5 +1,5 @@
 /**
- * ADR-0219 — the shared list contract on the governance and Shadow AI lists (P2 batch A).
+ * ADR-0226 — the shared list contract on the governance and Shadow AI lists (P2 batch A).
  *
  * For every converted route:
  *  - paging returns every row exactly once (keyset on the default sort, offset on another), and `count=exact`
@@ -27,6 +27,9 @@ import {
   desc,
   eq,
   governanceAlerts,
+  grantCertificationCampaigns,
+  grantCertificationItems,
+  inArray,
   remediationProposals,
   runMigrations,
   shadowAiFindings,
@@ -221,7 +224,7 @@ afterAll(async () => {
   await restoreMfa?.();
 });
 
-describe.each(CASES)("ADR-0219: $name", (c) => {
+describe.each(CASES)("ADR-0226: $name", (c) => {
   const ownRows = async (headers: Record<string, string>) => walk(`${c.url}${sep(c.url)}limit=10&count=exact`, headers, c.keyset ? "cursor" : "offset");
 
   it("pages every row exactly once, and count=exact is the true total", async () => {
@@ -285,7 +288,7 @@ describe.each(CASES)("ADR-0219: $name", (c) => {
   });
 });
 
-describe("ADR-0219: per-route specifics", () => {
+describe("ADR-0226: per-route specifics", () => {
   it("the Shadow AI findings status filter runs on the server, with figures across every finding", async () => {
     const all = (await get("/v1/shadow-ai/findings?limit=10&count=exact")).json();
     const open = await walk("/v1/shadow-ai/findings?limit=10&status=open&sort=subject", AUTH, "offset");
@@ -355,5 +358,92 @@ describe("ADR-0219: per-route specifics", () => {
   it("delegations filter by state on the server", async () => {
     const active = await walk("/v1/delegations?limit=10&status=expired&sort=from", AUTH, "offset");
     expect(active.every((d) => !d.active && new Date(d.endsAt).getTime() <= Date.now())).toBe(true);
+  });
+});
+
+describe("ADR-0226 batch A: certification campaigns filter by status, with per-status counts (ADR-0208 G9)", () => {
+  const STATUSES = ["open", "completed", "expired-incomplete", "cancelled"] as const;
+  let mine: string[] = [];
+
+  beforeAll(async () => {
+    const day = 86_400_000;
+    const now = Date.now();
+    // two of each effective status; the cancelled ones are past due with an undecided item, and still read cancelled
+    const spec = [
+      ...[0, 1].map((i) => ({ i, status: "open" as const, dueAt: new Date(now + 30 * day), undecided: true })),
+      ...[2, 3].map((i) => ({ i, status: "completed" as const, dueAt: new Date(now - 30 * day), undecided: false })),
+      ...[4, 5].map((i) => ({ i, status: "open" as const, dueAt: new Date(now - day), undecided: true })),
+      ...[6, 7].map((i) => ({ i, status: "cancelled" as const, dueAt: new Date(now - day), undecided: true })),
+    ];
+    const rows = await db
+      .insert(grantCertificationCampaigns)
+      .values(
+        spec.map((c) => ({
+          name: `lcg campaign ${RUN} ${c.i}`,
+          scopeKind: "all" as const,
+          openedByUserId: who.a.id,
+          dueAt: c.dueAt,
+          status: c.status,
+          completedAt: c.status === "completed" ? new Date(now - 31 * day) : null,
+          cancelledAt: c.status === "cancelled" ? new Date(now - 2 * day) : null,
+          cancelledReason: c.status === "cancelled" ? "Scope was wrong; reopened" : null,
+          cancelledByUserId: c.status === "cancelled" ? who.a.id : null,
+        })),
+      )
+      .returning({ id: grantCertificationCampaigns.id });
+    mine = rows.map((r) => r.id);
+    await db.insert(grantCertificationItems).values(
+      spec.flatMap((c, k) => [
+        // one decided item each, and an undecided one where the spec says so
+        { campaignId: mine[k]!, grantKind: "agent" as const, grantId: crypto.randomUUID(), holderUserId: who.b.id, holderLabel: "Dana Developer", objectLabel: "Credit-limit-increase assistant", reviewerUserId: who.a.id, decision: "keep" as const, decidedByUserId: who.a.id, decidedAt: new Date(now - 2 * day) },
+        ...(c.undecided ? [{ campaignId: mine[k]!, grantKind: "agent" as const, grantId: crypto.randomUUID(), holderUserId: who.b.id, holderLabel: "Jordan Owner", objectLabel: "Credit-limit-increase assistant", reviewerUserId: who.a.id }] : []),
+      ]),
+    );
+  });
+
+  afterAll(async () => {
+    if (mine.length) await db.delete(grantCertificationCampaigns).where(inArray(grantCertificationCampaigns.id, mine));
+  });
+
+  /** what the route has always said each campaign's status is (computed in code, not SQL) */
+  const legacyStatuses = async () => new Map(((await get("/v1/certification-campaigns")).json().campaigns as Json[]).map((c) => [c.id as string, c.status as string]));
+
+  it("the status filter returns exactly the campaigns of that status, by the same rule the old response uses", async () => {
+    const legacy = await legacyStatuses();
+    for (const id of mine) expect(STATUSES).toContain(legacy.get(id));
+    expect(mine.map((id) => legacy.get(id))).toEqual(["open", "open", "completed", "completed", "expired-incomplete", "expired-incomplete", "cancelled", "cancelled"]);
+    for (const status of STATUSES) {
+      const rows = await walk(`/v1/certification-campaigns?limit=10&status=${status}&sort=name`, AUTH, "offset");
+      expect(new Set(rows.map((r) => r.id)), status).toEqual(new Set([...legacy].filter(([, s]) => s === status).map(([id]) => id)));
+      expect(rows.every((r) => r.status === status)).toBe(true);
+      // the page's row carries the cancellation the old response carries
+      if (status === "cancelled") expect(rows.filter((r) => mine.includes(r.id)).every((r) => r.cancellation?.reason === "Scope was wrong; reopened")).toBe(true);
+    }
+  });
+
+  it("returns the per-status counts across every campaign as `summary`, whatever the filter", async () => {
+    const legacy = await legacyStatuses();
+    const expected = Object.fromEntries(STATUSES.map((s) => [s, [...legacy.values()].filter((v) => v === s).length]));
+    expect(expected.cancelled).toBeGreaterThanOrEqual(2);
+    for (const filter of ["", "&status=open", "&status=cancelled"]) {
+      const body = (await get(`/v1/certification-campaigns?limit=10&count=exact${filter}`)).json() as Json;
+      expect(body.summary, filter).toEqual({ statusCounts: expected });
+      if (filter) expect(body.total).toBe(expected[filter.split("=")[1]!]);
+    }
+    expect(Object.values(expected).reduce((a, b) => a + b, 0)).toBe(legacy.size);
+  });
+
+  it("an unknown status is a 400, never interpolated; the export takes the same filter; a non-admin is refused", async () => {
+    for (const bad of ["nope", "open' or '1'='1", "Cancelled"]) {
+      const res = await get(`/v1/certification-campaigns?limit=10&count=exact&status=${encodeURIComponent(bad)}`);
+      expect(res.statusCode, bad).toBe(400);
+    }
+    const file = await get(`/v1/certification-campaigns/export.xlsx?columns=name,status&status=cancelled`);
+    expect(file.statusCode, file.body.slice(0, 300)).toBe(200);
+    const rows = readXlsx(file.rawPayload);
+    expect(rows[0]).toEqual(["Campaign", "Status"]);
+    expect(rows.slice(1).every((r) => r[1] === "cancelled")).toBe(true);
+    expect(rows.slice(1).map((r) => r[0])).toEqual(expect.arrayContaining([`lcg campaign ${RUN} 6`, `lcg campaign ${RUN} 7`]));
+    expect((await get(`/v1/certification-campaigns?limit=10&count=exact&status=open`, who.a.auth)).statusCode).toBe(403);
   });
 });

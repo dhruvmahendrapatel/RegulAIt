@@ -76,7 +76,7 @@ export default function DiscoverySourcesPage() {
     queryKey: ["admin", "discovery", "sources"],
     queryFn: () => api.get<{ sources: DiscoverySourceView[]; posture: DiscoveryPostureView }>("/v1/discovery/sources"),
   });
-  // ADR-0219: the runs page on the server; one small page carries the total and the failed count across every run
+  // ADR-0226: the runs page on the server; one small page carries the total and the failed count across every run
   const runs = useQuery({
     queryKey: ["admin", "discovery", "runs", "summary"],
     queryFn: () => api.get<{ items: DiscoveryRunView[]; total: number | null; totalIsEstimate: boolean; failed?: number }>("/v1/discovery/runs?limit=10&count=estimate&sort=when&dir=desc"),

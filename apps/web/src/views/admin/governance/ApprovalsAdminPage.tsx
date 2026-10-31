@@ -485,7 +485,7 @@ const delegationState = (d: Delegation) =>
   d.active ? "active" : new Date(d.endsAt).getTime() < Date.now() ? "expired" : "scheduled";
 const windowText = (at: string) => String(at).slice(0, 16).replace("T", " ");
 
-/** ADR-0219: the delegations list's columns; the ids and sortable ones match the gateway's DELEGATIONS_LIST */
+/** ADR-0226: the delegations list's columns; the ids and sortable ones match the gateway's DELEGATIONS_LIST */
 export const DELEGATION_COLUMNS: Array<DataColumn<Delegation>> = [
   { key: "from", header: "From", main: true, sortable: true, render: (d) => d.fromName ?? d.fromUserId },
   { key: "to", header: "To", main: true, sortable: true, render: (d) => d.toName ?? d.toUserId },

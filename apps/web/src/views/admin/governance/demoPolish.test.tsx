@@ -54,7 +54,7 @@ function renderDiscovery(
     posture: { sourcesTotal: 1, sourcesEnabled: [], staticCredentials: [], staleCredentials: [], writeScopeUnverified: [], credentialWarningAgeDays: 90, endpointRetentionDays: 90, statement: "Nothing is scanned." },
   });
   const runs = opts.runs === undefined ? [run] : opts.runs;
-  // ADR-0219: a small summary page (the total and the failed count) and DataList's own first page
+  // ADR-0226: a small summary page (the total and the failed count) and DataList's own first page
   const firstPage = ["admin", "discovery", "runs", "list", "page", { filters: "[]", sort: { key: "when", dir: "desc" }, limit: 10, page: 0, start: {} }];
   if (runs === "fail") {
     failQuery(qc, ["admin", "discovery", "runs", "summary"]);

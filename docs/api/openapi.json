@@ -198,7 +198,7 @@
       },
       "get": {
         "operationId": "getV1Users",
-        "summary": "List users, with sign-in posture flags (never a hash or a secret). Bounded: `limit` (default 1000, max 5000). With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0219), with `q`, `role` and `status` filters.",
+        "summary": "List users, with sign-in posture flags (never a hash or a secret). Bounded: `limit` (default 1000, max 5000). With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226), with `q`, `role` and `status` filters.",
         "tags": [
           "users"
         ],
@@ -2471,7 +2471,7 @@
       },
       "get": {
         "operationId": "getV1Runs",
-        "summary": "Orchestration runs, newest first. Bounded: `limit` (default 200, max 1000); `status` narrows. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0219).",
+        "summary": "Orchestration runs, newest first. Bounded: `limit` (default 200, max 1000); `status` narrows. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226).",
         "tags": [
           "runs"
         ],
