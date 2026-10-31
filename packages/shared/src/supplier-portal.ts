@@ -23,6 +23,10 @@ export const SUPPLIER_PORTAL_LIMITS = Object.freeze({
   perAddress: { max: 60, windowMs: 15 * 60_000 },
   /** per grant, per 15 minutes, for submissions */
   perAccessSubmissions: { max: 30, windowMs: 15 * 60_000 },
+  /** per grant, in total: answers stored (a withdrawn answer keeps no file but still counts) */
+  perAccessSubmissionsMax: 500,
+  /** per grant, in total: raw bytes of the evidence files still held (withdrawn answers drop theirs) */
+  perAccessFileBytesMax: 50 * 1024 * 1024,
 });
 
 /** the cookie a spent sign-in link becomes; HttpOnly, Secure, SameSite=Strict, scoped to the supplier API path */
@@ -48,7 +52,8 @@ export const SUPPLIER_SESSION_TOKEN_RE = /^rglss_[A-Za-z0-9_-]{43}$/;
 export const SUPPLIER_FILE_TYPES = ["application/pdf", "image/png", "image/jpeg", "text/plain", "text/csv"] as const;
 export type SupplierFileType = (typeof SUPPLIER_FILE_TYPES)[number];
 
-export const SUPPLIER_SUBMISSION_STATUSES = ["submitted", "accepted", "rejected"] as const;
+/** `withdrawn`: the supplier sent a newer answer for the same item before this one was reviewed (it keeps no file) */
+export const SUPPLIER_SUBMISSION_STATUSES = ["submitted", "accepted", "rejected", "withdrawn"] as const;
 export type SupplierSubmissionStatus = (typeof SUPPLIER_SUBMISSION_STATUSES)[number];
 
 /** the one answer every refused supplier sign-in gets, whatever the reason (no enumeration) */
@@ -101,7 +106,14 @@ export const publishSupplierQuestionnaireVersionSchema = z
   })
   .strict();
 
-export const supplierPortalSettingsSchema = z.object({ enabled: z.boolean() }).strict();
+/**
+ * Both switches ship off. `enabled` opens the portal; `acceptUnscannedFiles` lets suppliers attach files while no
+ * scanner is configured (with one, every file is scanned and this has no effect). Turning either on is a relaxation.
+ */
+export const supplierPortalSettingsSchema = z
+  .object({ enabled: z.boolean().optional(), acceptUnscannedFiles: z.boolean().optional() })
+  .strict()
+  .refine((b) => b.enabled !== undefined || b.acceptUnscannedFiles !== undefined, { message: "nothing to change" });
 
 export const createSupplierAccessSchema = z
   .object({

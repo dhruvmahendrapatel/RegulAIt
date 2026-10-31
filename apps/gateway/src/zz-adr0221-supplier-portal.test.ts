@@ -40,6 +40,7 @@ import {
 import { SUPPLIER_LINK_REFUSAL, SUPPLIER_SESSION_COOKIE, SUPPLIER_SESSION_REFUSAL } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { detectSupplierFileType } from "./supplier-portal.js";
+import { recordVendorAttestation } from "./vendors.js";
 import { routeAuthClass } from "./route-classes.js";
 import { hashToken } from "./token-hash.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
@@ -156,7 +157,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await restoreStepUp?.();
-  await db.execute(sql`UPDATE org_settings SET supplier_portal_enabled = false`);
+  await db.execute(sql`UPDATE org_settings SET supplier_portal_enabled = false, supplier_portal_accept_unscanned_files = false`);
   await restoreIdentity?.();
   if (vendorIds.length) await db.delete(aiVendors).where(inArray(aiVendors.id, vendorIds));
   await db.delete(supplierQuestionnaires).where(sql`${supplierQuestionnaires.name} like ${`sp-q-${RUN}%`}`);
@@ -329,6 +330,17 @@ describe("evidence files", () => {
     const { cookie } = await signIn(g.token);
     const post = (file: { name: string; base64: string }) =>
       supplier(cookie, "POST", "/supplier/v1/submissions", { target: { kind: "control", controlRef: CONTROL }, statement: "see file", file });
+    // security review M2: with no scanner configured, files are refused until an admin relaxes it (audited)
+    expect((await supplier(cookie, "GET", "/supplier/v1/assessment")).json().limits.filesAccepted).toBe(false);
+    expect((await post({ name: "evidence.png", base64: PNG.toString("base64") })).json().error).toBe("files_not_accepted");
+    const relax = await app.inject({ method: "PUT", url: "/v1/supplier-portal/settings", headers: admin.auth, payload: { acceptUnscannedFiles: true } });
+    expect(relax.statusCode, relax.body).toBe(200);
+    const [relaxRow] = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.ruleId, "supplier-portal-setting"), sql`${auditLog.detail}->'relaxed' ? 'supplierPortalAcceptUnscannedFiles'`));
+    expect(relaxRow, "the relaxation is audited as one").toBeTruthy();
+    expect((await supplier(cookie, "GET", "/supplier/v1/assessment")).json().limits.filesAccepted).toBe(true);
     const ok = await post({ name: "evidence.png", base64: PNG.toString("base64") });
     expect(ok.statusCode, ok.body).toBe(201);
     expect(ok.json().file).toMatchObject({ contentType: "image/png", size: PNG.length, scanStatus: "not_scanned" });
@@ -349,8 +361,18 @@ describe("evidence files", () => {
     });
     expect(refused.json().error).toBe("file_rejected");
 
-    const dl = await app.inject({ method: "GET", url: `/v1/vendors/${v.id}/supplier-submissions/${ok.json().id}/file`, headers: admin.auth });
+    // an unscanned file is downloaded only with an explicit acknowledgement, which the audit row records
+    const fileUrl = `/v1/vendors/${v.id}/supplier-submissions/${ok.json().id}/file`;
+    const unacked = await app.inject({ method: "GET", url: fileUrl, headers: admin.auth });
+    expect(unacked.statusCode).toBe(409);
+    expect(unacked.json().error).toBe("unscanned_file_acknowledgement_required");
+    const dl = await app.inject({ method: "GET", url: `${fileUrl}?acknowledgeUnscanned=1`, headers: admin.auth });
     expect(dl.statusCode).toBe(200);
+    const [dlAudit] = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.objectId, ok.json().id), eq(auditLog.ruleId, "supplier-file-downloaded")));
+    expect((dlAudit!.detail as { acknowledgedUnscanned: boolean }).acknowledgedUnscanned).toBe(true);
     expect(dl.rawPayload.equals(PNG)).toBe(true);
     expect(dl.headers["content-disposition"]).toBe('attachment; filename="evidence.png"');
     expect(dl.headers["x-content-type-options"]).toBe("nosniff");
@@ -447,5 +469,171 @@ describe("turning the portal off", () => {
     expect(live).toEqual([]);
     await app.inject({ method: "PUT", url: "/v1/supplier-portal/settings", headers: admin.auth, payload: { enabled: true } });
     expect((await supplier(cookie, "GET", "/supplier/v1/assessment")).statusCode).toBe(401);
+  });
+});
+
+describe("review fixes (functional and security review of #629)", () => {
+  /** an accepted answer row that holds a file, written directly (the per-grant caps count stored rows) */
+  async function storedRow(accessId: string, vendorId: string, i: number, fileSize: number) {
+    await db.insert(supplierSubmissions).values({
+      accessId,
+      vendorId,
+      kind: "control",
+      controlRef: `sp:filler-${i}`,
+      statement: "filler",
+      fileName: `f${i}.txt`,
+      fileContentType: "text/plain",
+      fileSize,
+      fileSha256: "a".repeat(64),
+      fileCiphertext: "00.00.00",
+      scanStatus: "not_scanned",
+      status: "accepted",
+      decidedAt: new Date(),
+    });
+  }
+
+  it("functional blocker: two attestation writes from stale snapshots both survive", async () => {
+    const v = await propose("sp-race");
+    await submitQuestionnaire(v.instanceId);
+    const [stale] = await db.select().from(aiVendors).where(eq(aiVendors.id, v.id));
+    // both writers read the vendor before either wrote: the old read-modify-write kept only the last one
+    for (const statement of ["from the platform route", "from a supplier answer"]) {
+      const out = await db.transaction((tx) =>
+        recordVendorAttestation(tx as unknown as Db, stale!, { framework: FRAMEWORK, controlRef: CONTROL, statement, evidenceRef: null, userId: admin.id }),
+      );
+      expect(out.ok).toBe(true);
+    }
+    const [after] = await db.select().from(aiVendors).where(eq(aiVendors.id, v.id));
+    expect(after!.packAttestations.map((x) => x.statement).sort()).toEqual(["from a supplier answer", "from the platform route"]);
+
+    // and through the two real routes at the same moment
+    const { cookie } = await signIn((await grant(v.id)).token);
+    const sub = await supplier(cookie, "POST", "/supplier/v1/submissions", { target: { kind: "control", controlRef: CONTROL }, statement: "concurrent supplier" });
+    await Promise.all([
+      app.inject({ method: "POST", url: `/v1/vendors/${v.id}/supplier-submissions/${sub.json().id}/decision`, headers: admin.auth, payload: { decision: "accept" } }),
+      app.inject({ method: "POST", url: `/v1/vendors/${v.id}/attestations`, headers: admin.auth, payload: { framework: FRAMEWORK, controlRef: CONTROL, statement: "concurrent platform" } }),
+    ]);
+    const [final] = await db.select().from(aiVendors).where(eq(aiVendors.id, v.id));
+    expect(final!.packAttestations.map((x) => x.statement)).toEqual(expect.arrayContaining(["concurrent supplier", "concurrent platform"]));
+    expect(final!.packAttestations).toHaveLength(4);
+  });
+
+  it("security M1: revoking rejects the grant's pending answers, a revoked grant's answer cannot be accepted, and the list shows the grant's state", async () => {
+    const v = await propose("sp-revoked-answers");
+    await submitQuestionnaire(v.instanceId);
+    const g = await grant(v.id);
+    const { cookie } = await signIn(g.token);
+    const sub = await supplier(cookie, "POST", "/supplier/v1/submissions", { target: { kind: "control", controlRef: CONTROL }, statement: "from a leaked link" });
+    const revoke = await app.inject({ method: "POST", url: `/v1/vendors/${v.id}/supplier-access/${g.accessId}/revoke`, headers: admin.auth, payload: { reason: "link leaked" } });
+    expect(revoke.statusCode).toBe(200);
+    const [closed] = await db.select().from(supplierSubmissions).where(eq(supplierSubmissions.id, sub.json().id));
+    expect(closed).toMatchObject({ status: "rejected", decisionReason: "Access revoked: link leaked" });
+    const list = await app.inject({ method: "GET", url: `/v1/vendors/${v.id}/supplier-submissions`, headers: admin.auth });
+    expect(list.json().submissions[0]).toMatchObject({ id: sub.json().id, accessState: "revoked", status: "rejected" });
+
+    // an answer still pending on a revoked grant (written around the revoke route) is refused on accept
+    await db.update(supplierSubmissions).set({ status: "submitted", decidedAt: null, decidedBy: null, decisionReason: null }).where(eq(supplierSubmissions.id, sub.json().id));
+    const accept = await app.inject({ method: "POST", url: `/v1/vendors/${v.id}/supplier-submissions/${sub.json().id}/decision`, headers: admin.auth, payload: { decision: "accept" } });
+    expect(accept.statusCode).toBe(409);
+    expect(accept.json().error).toBe("access_revoked");
+    const [vendor] = await db.select().from(aiVendors).where(eq(aiVendors.id, v.id));
+    expect(vendor!.packAttestations).toEqual([]);
+  });
+
+  it("security M3: one pending answer per item (the older one is withdrawn and drops its file), a byte budget and an answer cap per grant", async () => {
+    await app.inject({ method: "PUT", url: "/v1/supplier-portal/settings", headers: admin.auth, payload: { acceptUnscannedFiles: true } });
+    const v = await propose("sp-quota");
+    const g = await grant(v.id);
+    const { cookie } = await signIn(g.token);
+    const answer = (statement: string, withFile = true) =>
+      supplier(cookie, "POST", "/supplier/v1/submissions", {
+        target: { kind: "control", controlRef: CONTROL },
+        statement,
+        ...(withFile ? { file: { name: "e.png", base64: PNG.toString("base64") } } : {}),
+      });
+    const first = await answer("first");
+    const second = await answer("second");
+    expect(second.statusCode, second.body).toBe(201);
+    const [old] = await db.select().from(supplierSubmissions).where(eq(supplierSubmissions.id, first.json().id));
+    expect(old).toMatchObject({ status: "withdrawn", fileCiphertext: null, fileSize: null });
+    const pending = await db
+      .select()
+      .from(supplierSubmissions)
+      .where(and(eq(supplierSubmissions.accessId, g.accessId), eq(supplierSubmissions.status, "submitted")));
+    expect(pending.map((p) => p.id)).toEqual([second.json().id]);
+
+    // 25 stored files of 2 MiB (50 MiB) are held; any further file passes the budget
+    for (let i = 0; i < 25; i += 1) await storedRow(g.accessId, v.id, i, 2 * 1024 * 1024);
+    const over = await answer("third");
+    expect(over.statusCode).toBe(413);
+    expect(over.json().error).toBe("file_budget_exceeded");
+    // the refusal rolled back the withdrawal it would have made
+    const [stillPending] = await db.select().from(supplierSubmissions).where(eq(supplierSubmissions.id, second.json().id));
+    expect(stillPending!.status).toBe("submitted");
+    expect((await answer("statement only", false)).statusCode).toBe(201);
+
+    // the answer cap
+    await db.execute(sql`INSERT INTO supplier_submissions (access_id, vendor_id, kind, control_ref, statement, status, decided_at)
+      SELECT ${g.accessId}, ${v.id}, 'control', 'sp:cap-' || n, 'cap', 'accepted', now() FROM generate_series(1, 500) n`);
+    const capped = await answer("one too many", false);
+    expect(capped.statusCode).toBe(409);
+    expect(capped.json().error).toBe("submission_limit_reached");
+  });
+
+  it("security L5: a CSV is downloaded as plain text, never as a spreadsheet", async () => {
+    await app.inject({ method: "PUT", url: "/v1/supplier-portal/settings", headers: admin.auth, payload: { acceptUnscannedFiles: true } });
+    const v = await propose("sp-csv");
+    const { cookie } = await signIn((await grant(v.id)).token);
+    const csv = Buffer.from("=HYPERLINK(1),b\n1,2\n");
+    const sub = await supplier(cookie, "POST", "/supplier/v1/submissions", {
+      target: { kind: "control", controlRef: CONTROL },
+      statement: "csv",
+      file: { name: "data.csv", base64: csv.toString("base64") },
+    });
+    expect(sub.statusCode, sub.body).toBe(201);
+    const dl = await app.inject({ method: "GET", url: `/v1/vendors/${v.id}/supplier-submissions/${sub.json().id}/file?acknowledgeUnscanned=1`, headers: admin.auth });
+    expect(dl.headers["content-type"]).toBe("text/plain; charset=utf-8");
+    expect(dl.headers["content-disposition"]).toBe('attachment; filename="data.csv.txt"');
+  });
+
+  it("security L6: a forged session cookie is refused before the body is read", async () => {
+    const forged = `${SUPPLIER_SESSION_COOKIE}=rglss_${"A".repeat(43)}`;
+    // a malformed body: parsed first it would be a 400; refused first it is the uniform 401
+    const res = await app.inject({
+      method: "POST",
+      url: "/supplier/v1/submissions",
+      headers: { cookie: forged, ...CSRF, "content-type": "application/json" },
+      payload: "{not json",
+      remoteAddress: freshIp(),
+    });
+    expect(res.statusCode).toBe(401);
+    expect(res.json()).toEqual(SUPPLIER_SESSION_REFUSAL);
+  });
+
+  it("functional notes: a questionnaire linked to controls outside the framework cannot be granted; a duplicate name is 409, not 500", async () => {
+    const q = await app.inject({
+      method: "POST",
+      url: "/v1/supplier-questionnaires",
+      headers: admin.auth,
+      payload: { name: `sp-q-${RUN}-outside`, questions: [{ id: "x", prompt: "Linked elsewhere", controlRef: "other:9.9" }] },
+    });
+    expect(q.statusCode).toBe(201);
+    const v = await propose("sp-outside");
+    const refused = await app.inject({
+      method: "POST",
+      url: `/v1/vendors/${v.id}/supplier-access`,
+      headers: admin.auth,
+      payload: { email: "x@y.example", framework: FRAMEWORK, questionnaireId: q.json().id },
+    });
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json()).toMatchObject({ error: "questionnaire_controls_not_in_framework", controlRefs: ["other:9.9"] });
+
+    const name = `sp-q-${RUN}-race`;
+    const both = await Promise.all(
+      [0, 1].map(() =>
+        app.inject({ method: "POST", url: "/v1/supplier-questionnaires", headers: admin.auth, payload: { name, questions: [{ id: "a", prompt: "p" }] } }),
+      ),
+    );
+    expect(both.map((r) => r.statusCode).sort()).toEqual([201, 409]);
   });
 });

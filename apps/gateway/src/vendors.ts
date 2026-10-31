@@ -60,6 +60,7 @@ import {
   desc,
   eq,
   inArray,
+  sql,
   users,
   workflowArtifacts,
   workflowInstances,
@@ -745,7 +746,9 @@ export async function recordVendorAttestation(
   };
   const [updated] = await db
     .update(aiVendors)
-    .set({ packAttestations: [...row.packAttestations, attestation], updatedAt: new Date() })
+    // appended in SQL, never from the caller's snapshot: two writers (the platform route and the supplier portal's
+    // accept) can record at the same moment, and a read-modify-write of the array would drop one of them
+    .set({ packAttestations: sql`${aiVendors.packAttestations} || ${JSON.stringify([attestation])}::jsonb`, updatedAt: new Date() })
     .where(eq(aiVendors.id, vendorId))
     .returning();
   await db.insert(auditLog).values({

@@ -15,6 +15,9 @@
 
 ALTER TABLE "org_settings" ADD COLUMN IF NOT EXISTS "supplier_portal_enabled" boolean DEFAULT false NOT NULL;
 --> statement-breakpoint
+-- ADR-0221 security review: files with no scanner configured are refused unless an admin relaxes this (audited)
+ALTER TABLE "org_settings" ADD COLUMN IF NOT EXISTS "supplier_portal_accept_unscanned_files" boolean DEFAULT false NOT NULL;
+--> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "supplier_questionnaires" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
   "name" text NOT NULL,
@@ -98,7 +101,8 @@ SELECT
   'org_settings',
   NULL,
   'supplier-portal-setting-strict',
-  'Migration 0241 introduced the supplier portal setting at its STRICT value (off): no supplier can sign in and no ' ||
-    'access can be granted until an admin turns it on (audited, with a step-up).',
-  jsonb_build_object('phase', 'migration-0241', 'settings', jsonb_build_object('supplierPortalEnabled', "supplier_portal_enabled"))
+  'Migration 0241 introduced the supplier portal settings at their STRICT values (off): no supplier can sign in and no ' ||
+    'access can be granted until an admin turns it on, and unscanned files are refused (each audited, with a step-up).',
+  jsonb_build_object('phase', 'migration-0241', 'settings', jsonb_build_object('supplierPortalEnabled', "supplier_portal_enabled",
+    'supplierPortalAcceptUnscannedFiles', "supplier_portal_accept_unscanned_files"))
 FROM "org_settings";

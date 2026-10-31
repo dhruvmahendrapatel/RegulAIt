@@ -6,6 +6,8 @@
 -- it reaches the vendor's attestations (ADR-0084) only when a platform reviewer accepts it, and the attestation then
 -- names both the supplier who submitted it and the reviewer who recorded it.
 --
+-- A newer answer to the same item withdraws the pending one (status `withdrawn`, its file dropped), so a grant holds
+-- at most one pending answer per item; the gateway also caps answers and file bytes per grant.
 -- An optional evidence file is stored as a data-key envelope (`file_ciphertext`, CIPHERTEXT_COLUMNS) with its
 -- declared name, the type the gateway detected from its bytes, its size and sha256, and the scan hook's verdict.
 -- The file columns are all set or all empty. `decision_reason` is registered with the ADR-0102 prose scrub.
@@ -45,11 +47,13 @@ CREATE TABLE IF NOT EXISTS "supplier_submissions" (
       AND "scan_status" IN ('not_scanned', 'clean'))
   ),
   CONSTRAINT "supplier_submissions_file_name_check" CHECK ("file_name" IS NULL OR char_length("file_name") BETWEEN 1 AND 200),
-  CONSTRAINT "supplier_submissions_status_check" CHECK ("status" IN ('submitted', 'accepted', 'rejected')),
+  CONSTRAINT "supplier_submissions_status_check" CHECK ("status" IN ('submitted', 'accepted', 'rejected', 'withdrawn')),
   CONSTRAINT "supplier_submissions_decision_check" CHECK (
     ("status" = 'submitted' AND "decided_at" IS NULL AND "decision_reason" IS NULL)
-    OR ("status" IN ('accepted', 'rejected') AND "decided_at" IS NOT NULL)
+    OR ("status" IN ('accepted', 'rejected', 'withdrawn') AND "decided_at" IS NOT NULL)
   ),
+  -- a withdrawn answer keeps no evidence file (the per-grant byte budget counts only files still held)
+  CONSTRAINT "supplier_submissions_withdrawn_file_check" CHECK ("status" <> 'withdrawn' OR "file_ciphertext" IS NULL),
   CONSTRAINT "supplier_submissions_reason_check" CHECK (
     "decision_reason" IS NULL OR char_length("decision_reason") BETWEEN 1 AND 2000
   )

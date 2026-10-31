@@ -209,6 +209,13 @@ const vendorParam = z.object({ vendorId: z.string().uuid() });
 const accessParam = z.object({ vendorId: z.string().uuid(), accessId: z.string().uuid() });
 const submissionParam = z.object({ vendorId: z.string().uuid(), submissionId: z.string().uuid() });
 const questionnaireParam = z.object({ questionnaireId: z.string().uuid() });
+const downloadQuery = z.object({ acknowledgeUnscanned: z.literal("1").optional() });
+
+/** a Postgres unique violation, however the driver wraps it */
+function isUniqueViolation(e: unknown): boolean {
+  const err = e as { code?: string; cause?: { code?: string } } | null;
+  return (err?.code ?? err?.cause?.code) === "23505";
+}
 
 // ---------------------------------------------------------------------------------------------------------------
 // rate limits (the feedback-link pattern: @fastify/rate-limit buckets the gateway already registers)
@@ -289,28 +296,46 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
 
   app.get("/v1/supplier-portal/settings", async () => {
     const settings = await loadOrgSettings(db);
-    return { enabled: settings.supplierPortalEnabled };
+    return {
+      enabled: settings.supplierPortalEnabled,
+      acceptUnscannedFiles: settings.supplierPortalAcceptUnscannedFiles,
+      scannerConfigured: Boolean(opts.fileScanner),
+    };
   });
 
-  // Turning the portal ON is a relaxation (a settings_relax step-up bound to the new value); turning it OFF also
-  // revokes every live link and session, so a later re-enable does not wake an old one.
+  // Turning the portal ON, or accepting unscanned files, is a relaxation (a settings_relax step-up bound to the new
+  // values); turning the portal OFF also revokes every live link and session, so a later re-enable does not wake one.
   app.put("/v1/supplier-portal/settings", async (req, reply) => {
     const body = supplierPortalSettingsSchema.parse(req.body);
     const current = await loadOrgSettings(db);
-    if (current.supplierPortalEnabled === body.enabled) return { enabled: body.enabled, changed: false };
-    if (body.enabled) {
+    const next = {
+      enabled: body.enabled ?? current.supplierPortalEnabled,
+      acceptUnscannedFiles: body.acceptUnscannedFiles ?? current.supplierPortalAcceptUnscannedFiles,
+    };
+    const changed: string[] = [];
+    if (next.enabled !== current.supplierPortalEnabled) changed.push("supplierPortalEnabled");
+    if (next.acceptUnscannedFiles !== current.supplierPortalAcceptUnscannedFiles) changed.push("supplierPortalAcceptUnscannedFiles");
+    if (changed.length === 0) return { ...next, changed: false };
+    const relaxed = [
+      ...(next.enabled && !current.supplierPortalEnabled ? ["supplierPortalEnabled"] : []),
+      ...(next.acceptUnscannedFiles && !current.supplierPortalAcceptUnscannedFiles ? ["supplierPortalAcceptUnscannedFiles"] : []),
+    ];
+    if (relaxed.length > 0) {
       const su = await requireStepUp(db, req, reply, {
         kind: "settings_relax",
-        facts: { setting: "supplierPortalEnabled", value: true },
+        facts: { setting: "supplierPortal", relaxed, enabled: next.enabled, acceptUnscannedFiles: next.acceptUnscannedFiles },
       });
       if (!su.ok) return reply;
     }
     await db.transaction(async (rawTx) => {
       const tx = rawTx as unknown as Db;
-      await tx.update(orgSettings).set({ supplierPortalEnabled: body.enabled }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+      await tx
+        .update(orgSettings)
+        .set({ supplierPortalEnabled: next.enabled, supplierPortalAcceptUnscannedFiles: next.acceptUnscannedFiles })
+        .where(eq(orgSettings.id, ORG_SETTINGS_ID));
       let revokedSessions = 0;
       let revokedLinks = 0;
-      if (!body.enabled) {
+      if (current.supplierPortalEnabled && !next.enabled) {
         revokedSessions = (
           await tx.update(supplierSessions).set({ revokedAt: sql`now()` }).where(isNull(supplierSessions.revokedAt)).returning({ id: supplierSessions.id })
         ).length;
@@ -322,25 +347,36 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
             .returning({ id: supplierInvitations.id })
         ).length;
       }
+      const parts = [
+        changed.includes("supplierPortalEnabled")
+          ? next.enabled
+            ? "supplier portal turned ON: suppliers with a granted access can sign in through a single-use link"
+            : `supplier portal turned OFF: ${revokedSessions} live session(s) and ${revokedLinks} unused link(s) revoked`
+          : null,
+        changed.includes("supplierPortalAcceptUnscannedFiles")
+          ? next.acceptUnscannedFiles
+            ? "unscanned supplier files ACCEPTED while no scanner is configured"
+            : "unscanned supplier files refused again"
+          : null,
+      ].filter(Boolean);
       await audit(tx, {
         userId: req.authCtx.userId,
         objectType: "org_settings",
         objectId: null,
         ruleId: "supplier-portal-setting",
-        reason: body.enabled
-          ? "supplier portal turned ON: suppliers with a granted access can sign in through a single-use link (relaxation)"
-          : `supplier portal turned OFF: ${revokedSessions} live session(s) and ${revokedLinks} unused link(s) revoked`,
+        reason: parts.join("; ") + (relaxed.length ? " (relaxation)" : ""),
         detail: {
           phase: "updated",
-          fields: ["supplierPortalEnabled"],
-          supplierPortalEnabled: body.enabled,
-          relaxed: body.enabled ? ["supplierPortalEnabled"] : [],
+          fields: changed,
+          supplierPortalEnabled: next.enabled,
+          supplierPortalAcceptUnscannedFiles: next.acceptUnscannedFiles,
+          relaxed,
           revokedSessions,
           revokedLinks,
         },
       });
     });
-    return { enabled: body.enabled, changed: true };
+    return { ...next, changed: true };
   });
 
   // ---- custom questionnaires: a row is one version; editing publishes the next one ----
@@ -377,6 +413,11 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
         detail: "A questionnaire with this name exists. Publish a new version of it instead.",
       });
     }
+    const taken = () =>
+      reply.status(409).send({
+        error: "questionnaire_name_taken",
+        detail: "A questionnaire with this name exists. Publish a new version of it instead.",
+      });
     const row = await db.transaction(async (rawTx) => {
       const tx = rawTx as unknown as Db;
       const [q] = await tx
@@ -392,7 +433,12 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
         detail: { phase: "published", name: body.name, version: 1, questions: body.questions.length },
       });
       return q!;
+    }).catch((e: unknown) => {
+      // two creates with one name at the same moment: the (name, version) unique constraint decides
+      if (isUniqueViolation(e)) return null;
+      throw e;
     });
+    if (!row) return taken();
     return reply.status(201).send(row);
   });
 
@@ -543,7 +589,7 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
     if (!vendor.workflowInstanceId) {
       return reply.status(409).send({ error: "no_assessment", detail: "This vendor has no assessment to answer." });
     }
-    const { pack } = await activeControls(body.framework);
+    const { pack, controls } = await activeControls(body.framework);
     if (!pack) {
       return reply.status(409).send({
         error: "no_active_pack_for_framework",
@@ -555,10 +601,28 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
       if (!q || q.retiredAt) {
         return reply.status(409).send({ error: "questionnaire_not_available", detail: "That questionnaire version is retired or does not exist." });
       }
+      // a question linked to a control the framework does not have could never be accepted: refuse it here
+      const refs = new Set(controls.map((c) => c.controlRef));
+      const outside = [...new Set(q.questions.map((x) => x.controlRef).filter((r): r is string => r !== null && !refs.has(r)))];
+      if (outside.length > 0) {
+        return reply.status(409).send({
+          error: "questionnaire_controls_not_in_framework",
+          detail: `This questionnaire links questions to controls that ${body.framework} does not have: ${outside.join(", ")}. Publish a version that links them to this framework's controls, or leave them unlinked.`,
+          controlRefs: outside,
+        });
+      }
     }
     const su = await requireStepUp(db, req, reply, {
       kind: "identity_manage",
-      facts: { op: "supplier_access_grant", vendorId, email: body.email, framework: body.framework, accessDays: body.accessDays },
+      facts: {
+        op: "supplier_access_grant",
+        vendorId,
+        email: body.email,
+        framework: body.framework,
+        questionnaireId: body.questionnaireId,
+        accessDays: body.accessDays,
+        inviteHours: body.inviteHours,
+      },
     });
     if (!su.ok) return reply;
     const out = await db.transaction(async (rawTx) => {
@@ -632,7 +696,7 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
     }
     const a = await liveGrant(reply, vendorId, accessId);
     if (!a) return reply;
-    const su = await requireStepUp(db, req, reply, { kind: "identity_manage", facts: { op: "supplier_link_issue", accessId } });
+    const su = await requireStepUp(db, req, reply, { kind: "identity_manage", facts: { op: "supplier_link_issue", accessId, inviteHours: body.inviteHours } });
     if (!su.ok) return reply;
     const link = await db.transaction(async (rawTx) => {
       const tx = rawTx as unknown as Db;
@@ -680,13 +744,22 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
         .update(supplierInvitations)
         .set({ revokedAt: sql`now()` })
         .where(and(eq(supplierInvitations.accessId, accessId), isNull(supplierInvitations.revokedAt), isNull(supplierInvitations.usedAt)));
+      // answers still waiting for review come from a grant nobody trusts any more: they are closed, never left to be
+      // accepted later (a leaked link is the usual reason to revoke)
+      const closed = await tx
+        .update(supplierSubmissions)
+        .set({ status: "rejected", decidedBy: req.authCtx.userId, decidedAt: sql`now()`, decisionReason: `Access revoked: ${body.reason}` })
+        .where(and(eq(supplierSubmissions.accessId, accessId), eq(supplierSubmissions.status, "submitted")))
+        .returning({ id: supplierSubmissions.id });
       await audit(tx, {
         userId: req.authCtx.userId,
         objectType: "supplier_access",
         objectId: accessId,
         ruleId: "supplier-access-revoked",
-        reason: `supplier access for ${a.supplierEmail} revoked (${sessions.length} live session(s) ended): ${body.reason}`,
-        detail: { phase: "revoked", vendorId, sessionsEnded: sessions.length, reason: body.reason, stepUp: su.method },
+        reason:
+          `supplier access for ${a.supplierEmail} revoked (${sessions.length} live session(s) ended, ` +
+          `${closed.length} pending answer(s) rejected): ${body.reason}`,
+        detail: { phase: "revoked", vendorId, sessionsEnded: sessions.length, answersRejected: closed.length, reason: body.reason, stepUp: su.method },
       });
       return u?.revokedAt ?? new Date();
     });
@@ -700,14 +773,21 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
     const [vendor] = await db.select({ id: aiVendors.id }).from(aiVendors).where(eq(aiVendors.id, vendorId));
     if (!vendor) return reply.status(404).send({ error: "not_found" });
     const rows = await db
-      .select({ s: supplierSubmissions, email: supplierAccess.supplierEmail, framework: supplierAccess.framework })
+      .select({ s: supplierSubmissions, access: supplierAccess })
       .from(supplierSubmissions)
       .innerJoin(supplierAccess, eq(supplierAccess.id, supplierSubmissions.accessId))
       .where(eq(supplierSubmissions.vendorId, vendorId))
       .orderBy(desc(supplierSubmissions.createdAt))
       .limit(500);
+    const now = new Date();
     return {
-      submissions: rows.map(({ s, email, framework }) => ({ ...submissionView(s), accessId: s.accessId, supplierEmail: email, framework })),
+      submissions: rows.map(({ s, access }) => ({
+        ...submissionView(s),
+        accessId: s.accessId,
+        accessState: accessState(access, now),
+        supplierEmail: access.supplierEmail,
+        framework: access.framework,
+      })),
       disclaimer: AI_VENDOR_ATTESTATION_DISCLAIMER,
     };
   });
@@ -722,18 +802,27 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
     if (!opts.dataKey) {
       return reply.status(503).send({ error: "data_key_unavailable", detail: "The data key is not loaded, so the file cannot be opened." });
     }
+    const acknowledged = downloadQuery.parse(req.query).acknowledgeUnscanned === "1";
+    if (s.scanStatus !== "clean" && !acknowledged) {
+      return reply.status(409).send({
+        error: "unscanned_file_acknowledgement_required",
+        detail: "This file has not been scanned for malware. Confirm that you will open it with care before downloading it.",
+      });
+    }
     const bytes = Buffer.from(decryptSecret(opts.dataKey, s.fileCiphertext), "base64");
+    // a CSV opened in a spreadsheet application can run formulas a supplier wrote: it is served as plain text
+    const csv = s.fileContentType === "text/csv";
     await audit(db, {
       userId: req.authCtx.userId,
       objectType: "supplier_submission",
       objectId: s.id,
       ruleId: "supplier-file-downloaded",
       reason: `supplier evidence file '${dispositionName(s.fileName)}' downloaded (${s.scanStatus === "clean" ? "scanned clean" : "not scanned"})`,
-      detail: { phase: "file-downloaded", vendorId, sha256: s.fileSha256, scanStatus: s.scanStatus },
+      detail: { phase: "file-downloaded", vendorId, sha256: s.fileSha256, scanStatus: s.scanStatus, acknowledgedUnscanned: acknowledged },
     });
     return reply
-      .header("content-type", s.fileContentType ?? "application/octet-stream")
-      .header("content-disposition", `attachment; filename="${dispositionName(s.fileName)}"`)
+      .header("content-type", csv ? "text/plain; charset=utf-8" : (s.fileContentType ?? "application/octet-stream"))
+      .header("content-disposition", `attachment; filename="${dispositionName(s.fileName)}${csv ? ".txt" : ""}"`)
       .header("x-content-type-options", "nosniff")
       .header("content-security-policy", "sandbox; default-src 'none'")
       .header("cache-control", "no-store")
@@ -768,6 +857,14 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
           throw new Refusal(409, { error: "vendor_retired", detail: "A retired vendor's record is closed." });
         }
         const [a] = await tx.select().from(supplierAccess).where(eq(supplierAccess.id, s.accessId));
+        // a revoked grant's answers never become attestations (revoking also rejects them; this holds for any that
+        // reached here another way). An EXPIRED grant's answers can still be accepted: expiry is the planned end.
+        if (body.decision === "accept" && a!.revokedAt) {
+          throw new Refusal(409, {
+            error: "access_revoked",
+            detail: "This answer came through an access that has since been revoked, so it cannot be accepted.",
+          });
+        }
         let attestation: AiVendorPackAttestation | null = null;
         if (body.decision === "accept") {
           let controlRef = s.controlRef;
@@ -842,13 +939,10 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
   const clearCookie = (req: FastifyRequest) => sessionCookie("", requestIsSecure(req), 0);
 
   /** the live session and its grant, or null with the uniform refusal sent */
-  async function supplierSession(req: FastifyRequest, reply: FastifyReply) {
+  /** the live session a cookie names, with its grant and vendor, or undefined (database clock throughout) */
+  async function liveSession(req: FastifyRequest) {
     const token = readCookie(req.headers.cookie, SUPPLIER_SESSION_COOKIE);
-    const refuse = async () => {
-      await reply.status(401).header("set-cookie", clearCookie(req)).send(SUPPLIER_SESSION_REFUSAL);
-      return null;
-    };
-    if (!token || !SUPPLIER_SESSION_TOKEN_RE.test(token)) return refuse();
+    if (!token || !SUPPLIER_SESSION_TOKEN_RE.test(token)) return undefined;
     const idle = L.sessionIdleMinutes;
     const [row] = await db
       .select({ session: supplierSessions, access: supplierAccess, vendorName: aiVendors.name, vendorStatus: aiVendors.status })
@@ -865,7 +959,15 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
           gt(supplierSessions.lastSeenAt, sql`now() - make_interval(mins => ${idle})`),
         ),
       );
-    if (!row || row.vendorStatus === "retired") return refuse();
+    return row && row.vendorStatus !== "retired" ? row : undefined;
+  }
+
+  async function supplierSession(req: FastifyRequest, reply: FastifyReply) {
+    const row = await liveSession(req);
+    if (!row) {
+      await reply.status(401).header("set-cookie", clearCookie(req)).send(SUPPLIER_SESSION_REFUSAL);
+      return null;
+    }
     await db.update(supplierSessions).set({ lastSeenAt: sql`now()` }).where(eq(supplierSessions.id, row.session.id));
     return row;
   }
@@ -984,17 +1086,29 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
       controls,
       questionnaire: q ? { name: q.name, version: q.version, description: q.description, questions: q.questions } : null,
       submissions: mine.map(submissionView),
-      limits: { fileMaxBytes: L.fileMaxBytes, statementMax: L.statementMax, fileTypes: SUPPLIER_FILE_TYPES },
+      limits: {
+        fileMaxBytes: L.fileMaxBytes,
+        statementMax: L.statementMax,
+        fileTypes: SUPPLIER_FILE_TYPES,
+        filesAccepted: await filesAccepted(),
+        fileBytesBudget: L.perAccessFileBytesMax,
+      },
     });
   });
 
-  // the one route with a large body: refuse before the body is read when the portal is off or no supplier cookie of
-  // the right shape is present, so an anonymous caller cannot make the gateway parse 2.8 MB for nothing
+  /** files are accepted only with a scanner, or when an admin has relaxed the unscanned-files setting */
+  async function filesAccepted(): Promise<boolean> {
+    if (!opts.dataKey) return false;
+    if (opts.fileScanner) return true;
+    return (await loadOrgSettings(db)).supplierPortalAcceptUnscannedFiles;
+  }
+
+  // the one route with a large body: refuse before the body is read when the portal is off or the cookie does not
+  // name a live session (one indexed lookup), so an anonymous caller cannot make the gateway parse 2.8 MB for nothing
   async function beforeBody(req: FastifyRequest, reply: FastifyReply) {
     const settings = await loadOrgSettings(db);
     if (!settings.supplierPortalEnabled) return reply.status(404).send(notFoundBody(req.method, req.url));
-    const token = readCookie(req.headers.cookie, SUPPLIER_SESSION_COOKIE);
-    if (!token || !SUPPLIER_SESSION_TOKEN_RE.test(token)) {
+    if (!(await liveSession(req))) {
       return reply.status(401).header("set-cookie", clearCookie(req)).send(SUPPLIER_SESSION_REFUSAL);
     }
   }
@@ -1036,8 +1150,11 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
     let file: { name: string; type: SupplierFileType; size: number; sha256: string; ciphertext: string; scan: "not_scanned" | "clean" } | null = null;
     if (body.file) {
       if (!allowFile) return reply.status(422).send({ error: "file_not_allowed", detail: "This question does not take a file." });
-      if (!opts.dataKey) {
-        return reply.status(503).send({ error: "file_storage_unavailable", detail: "Files cannot be accepted right now. Submit your answer without one." });
+      if (!(await filesAccepted())) {
+        return reply.status(422).send({
+          error: "files_not_accepted",
+          detail: "Files cannot be attached to answers here. Submit your answer without one, and send the document to your contact.",
+        });
       }
       const b64 = body.file.base64;
       if (b64.length % 4 !== 0 || !BASE64_RE.test(b64)) {
@@ -1076,12 +1193,56 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
         type,
         size: bytes.length,
         sha256: createHash("sha256").update(bytes).digest("hex"),
-        ciphertext: encryptSecret(opts.dataKey, b64),
+        ciphertext: encryptSecret(opts.dataKey!, b64),
         scan,
       };
     }
+    const sameTarget =
+      body.target.kind === "control"
+        ? eq(supplierSubmissions.controlRef, body.target.controlRef)
+        : and(eq(supplierSubmissions.questionId, body.target.questionId), eq(supplierSubmissions.questionnaireId, questionnaireId!));
     const saved = await db.transaction(async (rawTx) => {
       const tx = rawTx as unknown as Db;
+      // one grant's submissions are serialised here, so the caps below cannot be raced past
+      await tx.select({ id: supplierAccess.id }).from(supplierAccess).where(eq(supplierAccess.id, a.id)).for("update");
+      const [{ n }] = (await tx
+        .select({ n: sql<number>`count(*)::int` })
+        .from(supplierSubmissions)
+        .where(eq(supplierSubmissions.accessId, a.id))) as [{ n: number }];
+      if (n >= L.perAccessSubmissionsMax) {
+        throw new Refusal(409, {
+          error: "submission_limit_reached",
+          detail: `This access has reached its limit of ${L.perAccessSubmissionsMax} answers. Ask your contact for help.`,
+        });
+      }
+      // a newer answer to the same item replaces the one still waiting for review, and that one's file is dropped
+      const withdrawn = await tx
+        .update(supplierSubmissions)
+        .set({
+          status: "withdrawn",
+          decidedAt: sql`now()`,
+          decisionReason: "Replaced by a newer answer from the supplier",
+          fileName: null,
+          fileContentType: null,
+          fileSize: null,
+          fileSha256: null,
+          fileCiphertext: null,
+          scanStatus: null,
+        })
+        .where(and(eq(supplierSubmissions.accessId, a.id), eq(supplierSubmissions.status, "submitted"), sameTarget))
+        .returning({ id: supplierSubmissions.id });
+      if (file) {
+        const [{ held }] = (await tx
+          .select({ held: sql<number>`coalesce(sum(${supplierSubmissions.fileSize}), 0)::bigint` })
+          .from(supplierSubmissions)
+          .where(and(eq(supplierSubmissions.accessId, a.id), sql`${supplierSubmissions.fileCiphertext} IS NOT NULL`))) as [{ held: number }];
+        if (Number(held) + file.size > L.perAccessFileBytesMax) {
+          throw new Refusal(413, {
+            error: "file_budget_exceeded",
+            detail: `This access can hold at most ${L.perAccessFileBytesMax / (1024 * 1024)} MB of files. Submit your answer without a file, or ask your contact for help.`,
+          });
+        }
+      }
       const [s] = await tx
         .insert(supplierSubmissions)
         .values({
@@ -1111,12 +1272,17 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
           vendorId: a.vendorId,
           accessId: a.id,
           kind: body.target.kind,
+          replaced: withdrawn.map((w) => w.id),
           file: file ? { type: file.type, size: file.size, sha256: file.sha256, scanStatus: file.scan } : null,
           actor: "supplier",
         },
       });
       return s!;
+    }).catch((e: unknown) => {
+      if (e instanceof Refusal) return e;
+      throw e;
     });
+    if (saved instanceof Refusal) return reply.status(saved.status).send(saved.body);
     return reply.status(201).send(submissionView(saved));
     },
   );

@@ -4725,6 +4725,8 @@ export const orgSettings = pgTable(
     feedbackRetentionDays: integer("feedback_retention_days").notNull().default(365),
     /** ADR-0221 (migration 0241): the supplier portal — built, shipped OFF; turning it on is a relaxation */
     supplierPortalEnabled: boolean("supplier_portal_enabled").notNull().default(false),
+    /** ADR-0221 (migration 0241): with no scanner configured, evidence files are refused unless this is on (a relaxation) */
+    supplierPortalAcceptUnscannedFiles: boolean("supplier_portal_accept_unscanned_files").notNull().default(false),
     /** A14: a human-originated governed call by a person not current on an applicable published document is refused */
     literacyGateMode: text("literacy_gate_mode", { enum: ACCOUNTABILITY_GATE_MODES }).notNull().default("enforce"),
     literacyDefaultValidityDays: integer("literacy_default_validity_days").notNull().default(365),
@@ -14902,7 +14904,7 @@ export const supplierSubmissions = pgTable(
     /** a data-key envelope (CIPHERTEXT_COLUMNS); returned only by the admin download route */
     fileCiphertext: text("file_ciphertext"),
     scanStatus: text("scan_status").$type<"not_scanned" | "clean">(),
-    status: text("status").$type<"submitted" | "accepted" | "rejected">().notNull().default("submitted"),
+    status: text("status").$type<"submitted" | "accepted" | "rejected" | "withdrawn">().notNull().default("submitted"),
     decidedBy: uuid("decided_by").references(() => users.id, { onDelete: "set null" }),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
     decisionReason: text("decision_reason"),
@@ -14913,7 +14915,7 @@ export const supplierSubmissions = pgTable(
       "supplier_submissions_kind_check",
       sql`(${t.kind} = 'control' AND ${t.controlRef} IS NOT NULL AND ${t.questionId} IS NULL AND ${t.questionnaireId} IS NULL) OR (${t.kind} = 'question' AND ${t.questionId} IS NOT NULL AND ${t.questionnaireId} IS NOT NULL)`,
     ),
-    check("supplier_submissions_status_check", sql`${t.status} IN ('submitted', 'accepted', 'rejected')`),
+    check("supplier_submissions_status_check", sql`${t.status} IN ('submitted', 'accepted', 'rejected', 'withdrawn')`),
     index("supplier_submissions_vendor_idx").on(t.vendorId, t.createdAt),
     index("supplier_submissions_access_idx").on(t.accessId),
   ],
