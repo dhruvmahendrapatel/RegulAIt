@@ -2366,6 +2366,10 @@ export const updateOrgSettingsSchema = z
      * dispatchable judge reports `judged: unavailable` and changes nothing. */
     recommendationJudgeEnabled: z.boolean().optional(),
     recommendationJudgeAgentId: z.string().uuid().nullable().optional(),
+    /** ADR-0215 (migration 0248): may an admin import vendored framework content
+     * (new draft pack versions) and accept imported feed entries? false (default) =
+     * the import routes refuse. Turning it on is a relaxation (settings_relax step-up). */
+    frameworkImportsEnabled: z.boolean().optional(),
     // budgets
     budgetEnforcement: budgetEnforcementSchema.optional(),
     budgetHardBlockPct: z.number().int().min(1).max(100).optional(),
@@ -4780,6 +4784,9 @@ export * from "./provenance/index.js";
 // ADR-0204: a static upstream credential per MCP server (header refusals, the write contract, the read view)
 export * from "./mcp-upstream-credential.js";
 export * from "./library-lifecycle.js";
+
+// ===== ADR-0215 (P5) — framework content imports and the imported regulatory feed =====
+export * from "./framework-imports.js";
 
 // ===== ADR-0221 (PENDING P4) — the supplier portal =========================
 export * from "./supplier-portal.js";

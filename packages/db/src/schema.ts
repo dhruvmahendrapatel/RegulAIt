@@ -1344,6 +1344,11 @@ export const auditLog = pgTable(
         // control is auto-evidenced and a human statement must not stand in for
         // ledger evidence. Plain text column — no DDL needed.
         "compliance_pack",
+        // ADR-0215: framework content imports and imported regulatory feed
+        // entries — each proposal, acceptance and rejection, and each write
+        // refused because imports are off. Plain text column — no DDL needed.
+        "framework_import",
+        "regulatory_feed_import",
         // ADR-0056: the governance COPILOT. Every question asked of it, with
         // the exact entitlement scope its retrieval was narrowed to; every
         // narration dispatch; every proposal it opened in the Approvals Queue;
@@ -4610,6 +4615,10 @@ export const orgSettings = pgTable(
      * choice, never widen entitlement. NULL while enabled = `judged:
      * unavailable` with `judge_required`, never a silent no-annotation run. */
     recommendationJudgeAgentId: uuid("recommendation_judge_agent_id"),
+    /** ADR-0215 (migration 0248): may an admin import vendored framework content as new
+     * draft pack versions, and accept imported regulatory feed entries? false (default) =
+     * the import routes refuse and the feed is the hand-curated list only. */
+    frameworkImportsEnabled: boolean("framework_imports_enabled").notNull().default(false),
 
     // --- ADR-0046 (migration 0058): review-workbench bulk fences ------------
     /** hard cap on items per bulk approve/deny/reassign. Not a UI convenience:
@@ -8214,6 +8223,72 @@ export type CompliancePackRow = typeof compliancePacks.$inferSelect;
 export type CompliancePackControlRow = typeof compliancePackControls.$inferSelect;
 export type CompliancePackAttestationRow = typeof compliancePackAttestations.$inferSelect;
 export type CompliancePackReportRow = typeof compliancePackReports.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0215 (migrations 0248, 0249) — FRAMEWORK CONTENT IMPORTS AND THE IMPORTED FEED
+// ---------------------------------------------------------------------------
+//
+// An import is a PROPOSAL an admin reviews. Accepting a framework import inserts a
+// NEW draft pack version (`compliance_packs`); it never updates a pack row. The
+// accepted proposal's `snapshot` is the baseline the next import compares
+// against, which is how a control an admin edited is told apart from one the
+// last import wrote. Accepting a feed import adds its entries to the ADR-0158
+// feed. One pending and one accepted row per source.
+
+export const frameworkImportProposals = pgTable(
+  "framework_import_proposals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceId: text("source_id").notNull(),
+    framework: text("framework").notNull(),
+    sourceVersion: text("source_version").notNull(),
+    contentSha256: text("content_sha256").notNull(),
+    /** the vendored snapshot exactly as planned (source + controls) */
+    snapshot: jsonb("snapshot").$type<Record<string, unknown>>().notNull(),
+    /** the pack version the plan was computed against; no FK, a draft may be deleted */
+    basePackId: uuid("base_pack_id"),
+    basePackVersion: integer("base_pack_version"),
+    plan: jsonb("plan").$type<Record<string, unknown>>().notNull(),
+    status: text("status", { enum: ["pending", "accepted", "rejected", "superseded"] }).notNull().default("pending"),
+    /** the edited controls an admin chose to overwrite with the imported text */
+    takeIncoming: jsonb("take_incoming").$type<string[]>().notNull().default([]),
+    resultingPackId: uuid("resulting_pack_id"),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    decidedByUserId: uuid("decided_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("framework_import_proposals_one_pending_uq").on(t.sourceId).where(sql`status = 'pending'`),
+    uniqueIndex("framework_import_proposals_one_accepted_uq").on(t.sourceId).where(sql`status = 'accepted'`),
+    index("framework_import_proposals_source_idx").on(t.sourceId, t.createdAt),
+  ],
+);
+export type FrameworkImportProposalRow = typeof frameworkImportProposals.$inferSelect;
+
+export const regulatoryFeedImports = pgTable(
+  "regulatory_feed_imports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceId: text("source_id").notNull(),
+    sourceVersion: text("source_version").notNull(),
+    contentSha256: text("content_sha256").notNull(),
+    source: jsonb("source").$type<Record<string, unknown>>().notNull(),
+    entries: jsonb("entries").$type<Array<Record<string, unknown>>>().notNull(),
+    diff: jsonb("diff").$type<Record<string, unknown>>().notNull(),
+    status: text("status", { enum: ["pending", "accepted", "rejected", "superseded"] }).notNull().default("pending"),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    decidedByUserId: uuid("decided_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("regulatory_feed_imports_one_pending_uq").on(t.sourceId).where(sql`status = 'pending'`),
+    uniqueIndex("regulatory_feed_imports_one_accepted_uq").on(t.sourceId).where(sql`status = 'accepted'`),
+    index("regulatory_feed_imports_source_idx").on(t.sourceId, t.createdAt),
+  ],
+);
+export type RegulatoryFeedImportRow = typeof regulatoryFeedImports.$inferSelect;
 
 // ---------------------------------------------------------------------------
 // ADR-0056 (migration 0072) — THE AI GOVERNANCE COPILOT

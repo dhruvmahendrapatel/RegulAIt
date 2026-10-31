@@ -197,6 +197,7 @@ import { registerGovernanceMonitorRoutes } from "./governance-monitor.js";
 import { registerCredentialInventoryRoutes } from "./credential-inventory.js";
 import { registerEnergyRoutes } from "./energy.js";
 import { registerRegulatoryIntelRoutes } from "./regulatory-intel.js";
+import { registerFrameworkImportRoutes } from "./framework-imports.js";
 import {
   REMEDIATION_PREFIX as GOVERNANCE_REMEDIATION_PREFIX,
   applyRemediationDecision,
@@ -5576,6 +5577,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerEnergyRoutes(app, db);
   // ADR-0158 — regulatory intelligence joined to our packs and use cases
   registerRegulatoryIntelRoutes(app, db);
+  // ADR-0215 (P5): vendored framework-content and feed imports, proposed and accepted by an admin
+  registerFrameworkImportRoutes(app, db);
   // ADR-0159 — remediation proposals for monitor alerts
   registerRemediationRoutes(app, db);
   // ADR-0160 — continuous trace evaluation
