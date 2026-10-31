@@ -117,6 +117,10 @@ const OptimizationPage = screen(() => import("./screens/admin-cost-optimization"
 const ComplianceProfilesPage = screen(() => import("./screens/admin-compliance-infra"), "ComplianceProfilesPage");
 const CompliancePacksPage = screen(() => import("./screens/admin-compliance-infra"), "CompliancePacksPage");
 const InfrastructurePage = screen(() => import("./screens/admin-compliance-infra"), "InfrastructurePage");
+const TrustPublishingPage = screen(() => import("./screens/admin-compliance-infra"), "TrustPublishingPage");
+// ADR-0225 (P13 d): the public trust centre and the auditor portal (their own chunk, no app shell)
+const TrustCenterPage = screen(() => import("./screens/trust"), "TrustCenterPage");
+const AuditorPortalPage = screen(() => import("./screens/trust"), "AuditorPortalPage");
 const ProcessingRecordsPage = screen(() => import("./screens/admin-privacy"), "ProcessingRecordsPage");
 const DataSubjectRequestsPage = screen(() => import("./screens/admin-privacy"), "DataSubjectRequestsPage");
 const OrganizationPage = screen(() => import("./screens/admin-settings"), "OrganizationPage");
@@ -191,6 +195,9 @@ function ApplicationRoutes() {
       {/* ADR-0182 A13: a PUBLIC signed feedback link — no app chrome, no
           session; the gateway authenticates the link itself (shipped off) */}
       <Route path="/f/:token" element={<FeedbackFormPage public />} />
+      {/* ADR-0225 (P13 d): PUBLIC, no app chrome, no session; the gateway answers 404 while the pages are off */}
+      <Route path="/trust" element={<TrustCenterPage />} />
+      <Route path="/audit" element={<AuditorPortalPage />} />
       <Route element={<Protected />}>
         <Route path="/" element={<HomePage />} />
         <Route path="/chat" element={<ChatPage />} />
@@ -328,6 +335,8 @@ function ApplicationRoutes() {
                 <Route path="compliance" element={<ComplianceProfilesPage />} />
                 {/* ADR-0058 */}
                 <Route path="compliance-packs" element={<CompliancePacksPage />} />
+                {/* ADR-0225 (P13 d) */}
+                <Route path="trust-publishing" element={<TrustPublishingPage />} />
                 <Route path="infrastructure" element={<InfrastructurePage />} />
                 {/* ADR-0224 (P13 c) */}
                 <Route path="privacy/processing" element={<ProcessingRecordsPage />} />

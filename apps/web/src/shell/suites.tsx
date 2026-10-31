@@ -335,6 +335,9 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // because a pack DRIVES that cascade rather than forking it: one tag, one
       // cascade, one audit trail.
       { label: "Compliance packs", to: "/admin/compliance-packs" },
+      // ADR-0225 (P13 d): what the organisation publishes outside itself (controls, evidence, AI system cards) and
+      // the auditors it lets read them — beside the packs those controls come from
+      { label: "Trust publishing", to: "/admin/trust-publishing" },
       { label: "Infrastructure", to: "/admin/infrastructure" },
     ],
   },
