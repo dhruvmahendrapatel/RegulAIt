@@ -17,7 +17,7 @@ import { fmtAt } from "../../api/format";
 import { PageHeader } from "../../shell/AppShell";
 import { putOrgSettings, withStepUp, api as stepUpApi } from "../../stepup/stepUp";
 import { RefusalNotice } from "../../ui/RefusalNotice";
-import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Modal, RowActions, Select, Table, Tabs, Textarea, tabIds } from "../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, Field, InfoButton, Input, Modal, RowActions, Select, Table, Tabs, Textarea, tabIds } from "../../ui/kit";
 import { KV, QueryGate, RevealCard, useAction, type RevealedSecret } from "../admin/adminKit";
 import v from "../views.module.css";
 import t from "./trust.module.css";
@@ -173,6 +173,8 @@ function PublicationsTab(props: { query: ReturnType<typeof useQuery<Publications
   const act = useAction();
   const [editing, setEditing] = useState<TrustPublication | null>(null);
   const [publishing, setPublishing] = useState<TrustPublication | null>(null);
+  // review of #631: deleting a draft discards the admin's edited text, so it is confirmed, naming the draft
+  const [deleting, setDeleting] = useState<TrustPublication | null>(null);
   const rows = (props.query.data?.items ?? []).filter((p) => props.kinds.includes(p.kind));
   const enabled = props.query.data?.enabled ?? false;
   const refresh = () => void props.query.refetch();
@@ -195,6 +197,11 @@ function PublicationsTab(props: { query: ReturnType<typeof useQuery<Publications
         {!enabled && !props.query.isLoading && (
           <p className={v.dim}>Public trust pages are off, so drafts can be prepared but not published. Turn them on above to publish.</p>
         )}
+        <p className={v.faint}>
+          Unpublishing removes an item from the public page and from every auditor&apos;s access at once. A copy of the public page
+          may stay in shared web caches for up to five minutes. To show an auditor the item again after republishing, give them
+          new access.
+        </p>
         <Refusal act={act} />
         <Table<TrustPublication>
           rows={rows}
@@ -231,17 +238,17 @@ function PublicationsTab(props: { query: ReturnType<typeof useQuery<Publications
                 p.status === "draft" ? (
                   <RowActions
                     primary={
-                      <GuardedButton size="sm" variant="primary" blocked={!enabled || act.busy} onClick={() => setPublishing(p)}>
+                      <GuardedButton size="sm" variant="primary" blocked={!enabled || act.busy} aria-label={`Publish ${p.title}`} onClick={() => setPublishing(p)}>
                         Publish
                       </GuardedButton>
                     }
                     secondary={
-                      <Button size="sm" onClick={() => setEditing(p)}>
+                      <Button size="sm" aria-label={`Edit ${p.title}`} onClick={() => setEditing(p)}>
                         Edit
                       </Button>
                     }
                     rest={
-                      <GuardedButton size="sm" variant="ghost" blocked={act.busy} onClick={() => remove(p)}>
+                      <GuardedButton size="sm" variant="ghost" blocked={act.busy} aria-label={`Delete draft ${p.title}`} onClick={() => setDeleting(p)}>
                         Delete
                       </GuardedButton>
                     }
@@ -249,7 +256,7 @@ function PublicationsTab(props: { query: ReturnType<typeof useQuery<Publications
                 ) : (
                   <RowActions
                     primary={
-                      <GuardedButton size="sm" blocked={act.busy} onClick={() => unpublish(p)}>
+                      <GuardedButton size="sm" blocked={act.busy} aria-label={`Unpublish ${p.title}`} onClick={() => unpublish(p)}>
                         Unpublish
                       </GuardedButton>
                     }
@@ -260,6 +267,19 @@ function PublicationsTab(props: { query: ReturnType<typeof useQuery<Publications
         />
       </Card>
       {editing && <EditModal item={editing} onClose={() => setEditing(null)} onSaved={refresh} />}
+      <ConfirmModal
+        open={deleting !== null}
+        title={`Delete draft "${deleting?.title ?? ""}"?`}
+        body="Your edits to this draft are lost. Nothing published is affected."
+        confirmLabel="Delete draft"
+        danger
+        onCancel={() => setDeleting(null)}
+        onConfirm={() => {
+          const p = deleting;
+          setDeleting(null);
+          if (p) remove(p);
+        }}
+      />
       {publishing && (
         <PublishModal
           item={publishing}
@@ -483,6 +503,8 @@ function AuditorsTab(props: { published: TrustPublication[] }) {
   const act = useAction();
   const [reveal, setReveal] = useState<RevealedSecret | null>(null);
   const [detail, setDetail] = useState<string | null>(null);
+  // review of #631: revoking cannot be undone (a new grant needs a step-up and a new link), so it is confirmed
+  const [revoking, setRevoking] = useState<AuditorGrant | null>(null);
   const enabled = grants.data?.enabled ?? false;
   const refresh = () => void grants.refetch();
   const showLink = (who: string, link: { path: string; expiresAt: string }) =>
@@ -548,19 +570,19 @@ function AuditorsTab(props: { published: TrustPublication[] }) {
                 <RowActions
                   primary={
                     g.state === "active" || g.state === "scheduled" ? (
-                      <GuardedButton size="sm" variant="primary" blocked={!enabled || act.busy} onClick={() => newLink(g)}>
+                      <GuardedButton size="sm" variant="primary" blocked={!enabled || act.busy} aria-label={`New link for ${g.auditorName}`} onClick={() => newLink(g)}>
                         New link
                       </GuardedButton>
                     ) : undefined
                   }
                   secondary={
-                    <Button size="sm" onClick={() => setDetail(g.id)}>
+                    <Button size="sm" aria-label={`Activity of ${g.auditorName}`} onClick={() => setDetail(g.id)}>
                       Activity
                     </Button>
                   }
                   rest={
                     g.state === "active" || g.state === "scheduled" ? (
-                      <GuardedButton size="sm" variant="ghost" blocked={act.busy} onClick={() => revoke(g)}>
+                      <GuardedButton size="sm" variant="ghost" blocked={act.busy} aria-label={`Revoke ${g.auditorName}`} onClick={() => setRevoking(g)}>
                         Revoke
                       </GuardedButton>
                     ) : undefined
@@ -572,6 +594,19 @@ function AuditorsTab(props: { published: TrustPublication[] }) {
         />
       </Card>
       {detail && <GrantDetailModal grantId={detail} onClose={() => setDetail(null)} />}
+      <ConfirmModal
+        open={revoking !== null}
+        title={`Revoke access for ${revoking?.auditorName ?? ""}?`}
+        body="Their open session ends now and their links stop working. To give access again, create a new grant."
+        confirmLabel="Revoke access"
+        danger
+        onCancel={() => setRevoking(null)}
+        onConfirm={() => {
+          const g = revoking;
+          setRevoking(null);
+          if (g) revoke(g);
+        }}
+      />
     </div>
   );
 }

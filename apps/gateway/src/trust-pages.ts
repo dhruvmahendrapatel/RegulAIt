@@ -13,8 +13,10 @@
  *    unpublish needs the `settings_relax` step-up), the trust centre's heading, and auditor grants (creating one and
  *    issuing a sign-in link need the step-up; revoking does not, it only takes access away). Every write is audited
  *    in its own transaction.
- *  - Anyone: `GET /v1/trust-center`, the published public items, cacheable for five minutes. 404 while the setting is
- *    off, so the surface is indistinguishable from one that does not exist.
+ *  - Anyone: `GET /v1/trust-center`, the published public items, cacheable for five minutes. While the setting is off
+ *    every public route (the portal's sign-out included) answers the same `404 not_found`, and nothing is served.
+ *  - Turning the setting off revokes every auditor session and unused link in the settings write's own transaction
+ *    (`trust-pages-revoke.ts`); turning it on again revives none. Unpublishing an item removes it from every grant.
  *  - A named auditor: redeems a single-use link (at most 72 hours old) for a browser session of at most an hour,
  *    held in an HttpOnly, SameSite=Strict cookie scoped to `/v1/auditor`, then reads the items the grant selected
  *    (default-deny) while they stay published and the grant's window is open. Every view is audited. Nothing is
@@ -81,6 +83,7 @@ import { evaluatePack } from "./compliance-packs.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { POSTURE_WINDOW_DAYS } from "./posture.js";
 import { requireStepUp } from "./step-up.js";
+import { trustPagesStillOn } from "./trust-pages-revoke.js";
 import { hashToken } from "./token-hash.js";
 
 export const TRUST_RULE_IDS = {
@@ -93,6 +96,7 @@ export const TRUST_RULE_IDS = {
   profileUpdated: "trust-center-profile-updated",
   grantCreated: "auditor-grant-created",
   grantRevoked: "auditor-grant-revoked",
+  grantItemRemoved: "auditor-grant-item-removed",
   linkIssued: "auditor-link-issued",
   linkRedeemed: "auditor-link-redeemed",
   linkRefused: "auditor-link-refused",
@@ -664,13 +668,29 @@ export function registerTrustPagesRoutes(app: FastifyInstance, db: Db): void {
         )
         .returning();
       if (!u) return null;
+      // review M2: a grant approved THIS snapshot. Unpublishing takes the item out of every grant, so a later edit and
+      // republish never reaches an auditor nobody re-selected it for (a new grant, with a step-up, is needed)
+      const dropped = await tx
+        .delete(auditorGrantItems)
+        .where(eq(auditorGrantItems.publicationId, p.id))
+        .returning({ grantId: auditorGrantItems.grantId });
+      for (const d of dropped) {
+        await audit(tx, {
+          userId: req.authCtx.userId,
+          objectType: "auditor_grant",
+          objectId: d.grantId,
+          ruleId: TRUST_RULE_IDS.grantItemRemoved,
+          reason: `"${p.title}" was unpublished, so it is removed from this auditor's access; republishing does not restore it`,
+          detail: { publicationId: p.id, slug: p.publicSlug },
+        });
+      }
       await audit(tx, {
         userId: req.authCtx.userId,
         objectType: "trust_publication",
         objectId: p.id,
         ruleId: TRUST_RULE_IDS.unpublished,
         reason: `trust page item "${p.title}" unpublished; it is no longer shown publicly or to auditors`,
-        detail: { kind: p.kind, audience: p.audience, slug: p.publicSlug, stepUp: stepUp.method },
+        detail: { kind: p.kind, audience: p.audience, slug: p.publicSlug, grantsAffected: dropped.map((d) => d.grantId), stepUp: stepUp.method },
       });
       return u;
     });
@@ -856,6 +876,8 @@ export function registerTrustPagesRoutes(app: FastifyInstance, db: Db): void {
     if (!stepUp.ok) return reply;
     const out = await db.transaction(async (rawTx) => {
       const tx = rawTx as unknown as Db;
+      // review M1: a grant never commits after the pages were turned off under it
+      if (!(await trustPagesStillOn(tx))) return null;
       const [g] = await tx
         .insert(auditorGrants)
         .values({
@@ -889,6 +911,7 @@ export function registerTrustPagesRoutes(app: FastifyInstance, db: Db): void {
       });
       return { grant: g!, ...issued };
     });
+    if (!out) return reply.status(409).send(DISABLED);
     return reply.status(201).send({
       grant: grantView(out.grant, now, { items: body.publicationIds.length, views: 0, lastViewedAt: null }),
       link: { path: `/ui/audit#${out.token}`, expiresAt: out.link.expiresAt.toISOString(), shownOnce: true },
@@ -911,6 +934,7 @@ export function registerTrustPagesRoutes(app: FastifyInstance, db: Db): void {
     if (!stepUp.ok) return reply;
     const out = await db.transaction(async (rawTx) => {
       const tx = rawTx as unknown as Db;
+      if (!(await trustPagesStillOn(tx))) return null;
       const issued = await issueLink(tx, grantId, body.linkTtlHours, req.authCtx.userId, now);
       await audit(tx, {
         userId: req.authCtx.userId,
@@ -922,6 +946,7 @@ export function registerTrustPagesRoutes(app: FastifyInstance, db: Db): void {
       });
       return issued;
     });
+    if (!out) return reply.status(409).send(DISABLED);
     return reply.status(201).send({ link: { path: `/ui/audit#${out.token}`, expiresAt: out.link.expiresAt.toISOString(), shownOnce: true } });
   });
 
@@ -1052,6 +1077,8 @@ export function registerTrustPagesRoutes(app: FastifyInstance, db: Db): void {
     const session = generateAuditorSessionToken();
     const ok = await db.transaction(async (rawTx) => {
       const tx = rawTx as unknown as Db;
+      // review M1: no session commits after the pages were turned off under this request
+      if (!(await trustPagesStillOn(tx))) return false;
       // single use: only the first redemption of a live link wins
       const [spent] = await tx
         .update(auditorLinks)
@@ -1154,6 +1181,8 @@ export function registerTrustPagesRoutes(app: FastifyInstance, db: Db): void {
 
   app.delete("/v1/auditor/session", async (req, reply) => {
     noStore(reply);
+    // review L1: while off, every portal route answers the same 404 (turning off already revoked every session)
+    if (!(await loadOrgSettings(db)).trustPagesEnabled) return reply.status(404).send(notFoundBody);
     if (req.headers[CSRF_HEADER] !== "1") {
       return reply.status(403).send({ error: "csrf_header_required", detail: `requests must carry ${CSRF_HEADER}: 1` });
     }

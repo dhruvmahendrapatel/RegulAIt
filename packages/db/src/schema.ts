@@ -14702,7 +14702,8 @@ export const auditorLinks = pgTable(
 );
 export type AuditorLinkRow = typeof auditorLinks.$inferSelect;
 
-/** ADR-0225: an auditor's browser session, opened by redeeming a link (at most 8 hours; only its SHA-256 stored). */
+/** ADR-0225: an auditor's browser session, opened by redeeming a link (the gateway issues 60 minutes, never past the grant;
+ * the CHECK below is an outer limit of 8 hours). Only its SHA-256 is stored. */
 export const auditorSessions = pgTable(
   "auditor_sessions",
   {

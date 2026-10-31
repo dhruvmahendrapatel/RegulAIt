@@ -15,7 +15,9 @@
  *    SHA-256, single use, needs the CSRF header, and opens an HttpOnly SameSite=Strict cookie scoped to
  *    /v1/auditor; the portal lists and serves only the grant's items (default-deny, a refusal is audited), every
  *    view is audited; unpublishing an item hides it from the auditor; revoking the grant ends the session; an
- *    expired link is refused; turning the setting off closes everything;
+ *    expired link is refused; turning the setting off closes everything, sign-out included (L1);
+ *  - review of #631: turning the setting off revokes every session and unused link for good, so on again revives none
+ *    (M1); unpublishing removes the item from every grant, so an edit and republish never reaches an old grant (M2);
  *  - the route classes: the five portal routes are public, everything under /v1/trust is admin-only.
  *
  * Global state (M-068): the trust setting is put back to off and step-up to strict in afterAll; every row this file
@@ -502,7 +504,49 @@ describe("auditor access", () => {
     expect((await inject("GET", "/v1/auditor/session", { cookie })).statusCode).toBe(401);
   });
 
-  it("turning the setting off closes the public page and the portal at once", async () => {
+  it("M2 (review of #631): unpublish -> edit -> republish never reaches an existing grant; a new grant is needed", async () => {
+    const d = await draftCard("m2");
+    const p1 = await publish(d.id, d.version, "auditors");
+    expect(p1.statusCode, p1.body).toBe(200);
+    const g = await grant([d.id, auditorsOnly.id]);
+    expect(g.statusCode, g.body).toBe(201);
+    const gr = g.json().grant;
+    const ok = await redeem(tokenOf(g.json().link.path));
+    const cookie = cookieOf(ok);
+    expect((await inject("GET", `/v1/auditor/items/${d.slug}`, { cookie })).statusCode).toBe(200);
+
+    // unpublish, edit, republish (to a different audience): the old grant must not see the new content
+    const un = await admin("POST", `/v1/trust/publications/${d.id}/unpublish`, { expectedVersion: p1.json().version });
+    expect(un.statusCode, un.body).toBe(200);
+    expect(un.json()).toMatchObject({ status: "draft" });
+    const removed = await lastAudit(TRUST_RULE_IDS.grantItemRemoved, gr.id);
+    expect((removed!.detail as { publicationId: string }).publicationId).toBe(d.id);
+    const ed = await admin("PATCH", `/v1/trust/publications/${d.id}`, {
+      expectedVersion: un.json().version,
+      content: { ...d.content, purpose: "New wording nobody selected for this auditor." },
+    });
+    expect(ed.statusCode, ed.body).toBe(200);
+    const re = await publish(d.id, ed.json().version, "public");
+    expect(re.statusCode, re.body).toBe(200);
+
+    const view = await inject("GET", `/v1/auditor/items/${d.slug}`, { cookie });
+    expect(view.statusCode).toBe(404);
+    expect(view.body).not.toContain("New wording");
+    const listed = (await inject("GET", "/v1/auditor/session", { cookie })).json();
+    expect(listed.items.map((i: { slug: string }) => i.slug)).toEqual([auditorsOnly.slug]);
+    const detail = (await admin("GET", `/v1/trust/auditor-grants/${gr.id}`)).json();
+    expect(detail.items.map((i: { id: string }) => i.id)).toEqual([auditorsOnly.id]);
+
+    // a new grant for the republished item is the way back, and it shows the new content
+    const g2 = await grant([d.id]);
+    expect(g2.statusCode, g2.body).toBe(201);
+    const c2 = cookieOf(await redeem(tokenOf(g2.json().link.path)));
+    const v2 = await inject("GET", `/v1/auditor/items/${d.slug}`, { cookie: c2 });
+    expect(v2.statusCode).toBe(200);
+    expect(v2.json().content.purpose).toBe("New wording nobody selected for this auditor.");
+  });
+
+  it("turning the setting off closes the public page and the portal at once; sign-out answers 404 too (L1)", async () => {
     const g = await grant([auditorsOnly.id]);
     const ok = await redeem(tokenOf(g.json().link.path));
     const cookie = cookieOf(ok);
@@ -510,5 +554,34 @@ describe("auditor access", () => {
     expect((await inject("GET", "/v1/trust-center", {})).statusCode).toBe(404);
     expect((await inject("GET", "/v1/auditor/session", { cookie })).statusCode).toBe(404);
     expect((await inject("GET", `/v1/auditor/items/${auditorsOnly.slug}`, { cookie })).statusCode).toBe(404);
+    const out = await inject("DELETE", "/v1/auditor/session", { cookie, ...CSRF });
+    expect(out.statusCode).toBe(404);
+    expect(out.json()).toEqual({ error: "not_found" });
+  });
+
+  it("M1 (review of #631): off ends every session and unused link for good; on again revives none", async () => {
+    await setTrustPages(true);
+    const g = await grant([auditorsOnly.id]);
+    const cookie = cookieOf(await redeem(tokenOf(g.json().link.path)));
+    // a second grant whose link is still unused
+    const g2 = await grant([auditorsOnly.id]);
+    const unused = tokenOf(g2.json().link.path);
+    expect((await inject("GET", "/v1/auditor/session", { cookie })).statusCode).toBe(200);
+
+    await setTrustPages(false);
+    const off = await lastAudit("auditor-access-revoked-pages-off");
+    expect((off!.detail as { sessionsRevoked: number }).sessionsRevoked).toBeGreaterThanOrEqual(1);
+    expect((off!.detail as { linksRevoked: number }).linksRevoked).toBeGreaterThanOrEqual(1);
+    const [link] = await db.select().from(auditorLinks).where(eq(auditorLinks.tokenHash, hashToken(unused)));
+    expect(link!.revokedAt).not.toBeNull();
+
+    await setTrustPages(true);
+    expect((await inject("GET", "/v1/auditor/session", { cookie })).statusCode).toBe(401);
+    expect((await redeem(unused)).statusCode).toBe(401);
+    // the way back is a new link, with a step-up
+    const fresh = await admin("POST", `/v1/trust/auditor-grants/${g.json().grant.id}/links`, {});
+    expect(fresh.statusCode, fresh.body).toBe(201);
+    expect((await redeem(tokenOf(fresh.json().link.path))).statusCode).toBe(201);
+    await setTrustPages(false);
   });
 });

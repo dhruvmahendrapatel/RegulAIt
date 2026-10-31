@@ -28,9 +28,21 @@ for this lane (#453 c6527158879): migration 0247, ADR 0225, branch `builder/p13d
 
 **One org setting, off.** `trust_pages_enabled` (migration 0247, strict default `false`, ADR-0180). It rides the audited
 `PUT /v1/org/settings`; turning it on is a relaxation in the strictness registry, so it needs the `settings_relax`
-step-up. While it is off, the public routes answer 404 (indistinguishable from no route), and publishing and granting
-answer 409 `trust_pages_disabled`. Drafting still works, so an admin can prepare before turning it on. Turning it off
-closes the trust centre and every auditor session on the next request.
+step-up. While it is off, every public route (the portal's sign-out included) answers the same `404 not_found`, and
+publishing and granting answer 409 `trust_pages_disabled`. Drafting still works, so an admin can prepare before turning
+it on.
+
+Turning it off is a kill switch, not a pause (security review M1 of #631). It works in two parts:
+- The settings write revokes every open auditor session and every unused sign-in link in its own transaction, and
+  audits it as `auditor-access-revoked-pages-off`. Turning the pages on again restores none of them.
+- The writers that create access (redeeming a link, creating a grant, issuing a link) re-read the setting `FOR SHARE`
+  inside their transaction. The settings writer holds that row `FOR UPDATE`, so a redeem cannot commit a session after
+  a disable it raced.
+
+The off state is not hidden perfectly (review L1). An unknown `/v1` route answers `401 unauthenticated`, because the
+auth hook runs before routing. These routes are exempt from that hook, so they answer `404`. A prober can therefore
+tell that the build has the feature, but nothing is served and no data is exposed. We accepted that rather than send
+`401 unauthenticated`, which the SPA reads as a lost session.
 
 **Publications are reviewed snapshots.** `trust_publications` holds what an admin chose. Each row has a kind (control,
 evidence summary, AI system card), a title and content fields, a status (`draft` or `published`) and an audience
@@ -71,11 +83,15 @@ footnote, and nothing else.
 - *The sign-in link.* The brief allowed "MFA or short-TTL magic link"; this slice builds the link. It is single use,
   carries 256 random bits and is valid for 1 to 72 hours (24 by default). Only its SHA-256 is stored, and the admin
   sees it once. The token travels in the URL fragment (`/ui/audit#rgal_…`), which browsers never send to a server, so
-  it reaches no access log and no Referer. Redeeming it needs the CSRF header and opens a session of at most an hour
+  it reaches no access log and no Referer. Redeeming it needs the CSRF header and opens a session of at most an hour (the table's CHECK allows up to 8 hours as an outer limit; the gateway issues 60
+  minutes)
   (never past the grant's end). The session token is stored only as its SHA-256 and held in an HttpOnly, SameSite=Strict
   cookie scoped to `Path=/v1/auditor`. No token is kept in browser storage.
 - *What the auditor can see.* Responses are `no-store`. The auditor sees the grant's items while they stay published.
-  Unpublishing an item hides it from the auditor at once. Every portal open, item view and refused view is audited
+  Unpublishing an item takes it out of every grant in the same transaction, audited per grant as
+  `auditor-grant-item-removed` (security review M2 of #631). A grant approved one snapshot for one auditor, so editing
+  and republishing never reaches an existing grant; showing it again needs a new grant, with a step-up. Every portal
+  open, item view and refused view is audited
   under objectType `auditor_grant`, and the admin's grant view lists them. The portal serves the same text snapshots as
   the trust centre: there is no file, export or ledger row to download.
 

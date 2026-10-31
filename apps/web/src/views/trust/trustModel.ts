@@ -86,13 +86,24 @@ export const LINK_TTL = { min: 1, max: 72, default: 24 } as const;
  */
 const CLAIM_PATTERNS: ReadonlyArray<{ re: RegExp; word: string }> = [
   { re: /\bcertified\b/i, word: "certified" },
+  { re: /\bcertificated\b/i, word: "certificated" },
   { re: /\bcompliant\b/i, word: "compliant" },
   { re: /\bnon-compliant\b/i, word: "non-compliant" },
   { re: /\baccredited\b/i, word: "accredited" },
   { re: /\bguarantee[sd]?\b/i, word: "guarantee" },
   { re: /\bcompl(?:y|ies)\s+with\b/i, word: "complies with" },
-  { re: /\bin\s+compliance\s+with\b/i, word: "in compliance with" },
+  { re: /\bcompliance\s+with\b/i, word: "compliance with" },
+  { re: /\bconform(?:s|ed|ing)?\s+to\b/i, word: "conforms to" },
   { re: /\bfully\s+meets?\b/i, word: "fully meets" },
+  { re: /\bmeets?\s+(?:all\s+)?(?:of\s+)?(?:the\s+)?requirements\b/i, word: "meets the requirements" },
+  { re: /\bcertificate\s+of\s+(?:compliance|conformity)\b/i, word: "certificate of compliance" },
+  // a named standard's certificate or certification ("ISO 27001 certification", "SOC 2 certificate")
+  { re: /\b(?:iso(?:\/iec)?\s*\d{4,5}|soc\s*[123]|pci[\s-]*dss|hitrust|fedramp)\s+certific(?:ate|ation)\b/i, word: "a standard's certification" },
+  // holding or winning one ("we hold the certification", "achieved ... certification")
+  {
+    re: /\b(?:hold|holds|held|achieved|obtained|awarded|attained|earned)\s+(?:an?\s+|the\s+|our\s+)?(?:[\w./-]+\s+){0,4}certific(?:ate|ation)\b/i,
+    word: "holds a certification",
+  },
 ];
 
 export function claimWords(text: string): string[] {

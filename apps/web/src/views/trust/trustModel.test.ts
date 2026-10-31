@@ -32,3 +32,35 @@ describe("trust model", () => {
     expect(absoluteLink("https://regulait.<domain>/", "/ui/audit#x")).toBe("https://regulait.<domain>/ui/audit#x");
   });
 });
+
+// the SPA does not depend on @regulait/shared, so the gateway's guard is loaded from source here (as bomModel.test.ts does)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const sharedTrust = async (): Promise<any> =>
+  import(/* @vite-ignore */ new URL("../../../../../packages/shared/src/trust-pages.ts", import.meta.url).pathname);
+
+describe("the claim words match the gateway's guard (review of #631)", () => {
+  const corpus = [
+    "We are ISO 27001 certified.",
+    "We hold ISO 27001 certification.",
+    "Our SOC 2 certificate is available on request.",
+    "The service conforms to ISO/IEC 42001.",
+    "This process ensures compliance with the Act.",
+    "The system meets the requirements of Article 9.",
+    "Fully compliant and accredited; we guarantee review.",
+    "In compliance with the regulation.",
+    "Certificate rotation runs every 30 days; 4 evidence records on file.",
+    "Quarterly access certification campaigns; 12 evidence records.",
+    "Approved through the organisation's AI review on 2026-10-30.",
+    "A certificate of conformity was issued.",
+    "We achieved the HITRUST certification last year.",
+  ];
+  it("every sentence gives the same words in the SPA and the gateway", async () => {
+    const s = await sharedTrust();
+    for (const text of corpus) expect(claimWords(text), text).toEqual(s.claimWordingProblems(text));
+  });
+  it("the factual sentences pass and the claims are caught", () => {
+    expect(claimWords("Certificate rotation runs every 30 days; 4 evidence records on file.")).toEqual([]);
+    expect(claimWords("Quarterly access certification campaigns; 12 evidence records.")).toEqual([]);
+    for (const text of corpus.slice(0, 8)) expect(claimWords(text).length, text).toBeGreaterThan(0);
+  });
+});

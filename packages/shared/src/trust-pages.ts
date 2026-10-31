@@ -136,18 +136,30 @@ export const trustProfileSchema = z
 /**
  * Words that would make a trust page CLAIM a certification, an accreditation, compliance or a guarantee. A trust page
  * says what a control is and what evidence is on record; whether that amounts to compliance is an auditor's judgement,
- * never ours. Matching is whole-word and case-insensitive. "Certification" alone is not here: it also names an access
- * review ("certification campaign") and states no claim.
+ * never ours. Matching is whole-word and case-insensitive. "Certification" and "certificate" alone are not here: they
+ * also name an access review ("certification campaign") and a control ("certificate rotation") and state no claim; a
+ * named standard's certificate or certification, and holding or achieving one, are.
  */
 const CLAIM_PATTERNS: ReadonlyArray<{ re: RegExp; word: string }> = [
   { re: /\bcertified\b/i, word: "certified" },
+  { re: /\bcertificated\b/i, word: "certificated" },
   { re: /\bcompliant\b/i, word: "compliant" },
   { re: /\bnon-compliant\b/i, word: "non-compliant" },
   { re: /\baccredited\b/i, word: "accredited" },
   { re: /\bguarantee[sd]?\b/i, word: "guarantee" },
   { re: /\bcompl(?:y|ies)\s+with\b/i, word: "complies with" },
-  { re: /\bin\s+compliance\s+with\b/i, word: "in compliance with" },
+  { re: /\bcompliance\s+with\b/i, word: "compliance with" },
+  { re: /\bconform(?:s|ed|ing)?\s+to\b/i, word: "conforms to" },
   { re: /\bfully\s+meets?\b/i, word: "fully meets" },
+  { re: /\bmeets?\s+(?:all\s+)?(?:of\s+)?(?:the\s+)?requirements\b/i, word: "meets the requirements" },
+  { re: /\bcertificate\s+of\s+(?:compliance|conformity)\b/i, word: "certificate of compliance" },
+  // a named standard's certificate or certification ("ISO 27001 certification", "SOC 2 certificate")
+  { re: /\b(?:iso(?:\/iec)?\s*\d{4,5}|soc\s*[123]|pci[\s-]*dss|hitrust|fedramp)\s+certific(?:ate|ation)\b/i, word: "a standard's certification" },
+  // holding or winning one ("we hold the certification", "achieved ... certification")
+  {
+    re: /\b(?:hold|holds|held|achieved|obtained|awarded|attained|earned)\s+(?:an?\s+|the\s+|our\s+)?(?:[\w./-]+\s+){0,4}certific(?:ate|ation)\b/i,
+    word: "holds a certification",
+  },
 ];
 
 /** the claim words found in `text` (empty when it states facts only) */
