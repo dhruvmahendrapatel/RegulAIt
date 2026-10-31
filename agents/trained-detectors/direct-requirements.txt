@@ -1,0 +1,9 @@
+# ADR-0220: the trained-detector service's direct dependencies. requirements.txt is the hash-locked closure
+# (uv pip compile --generate-hashes, linux x86_64, CPython 3.12); the image installs ONLY from it.
+presidio-analyzer
+spacy
+torch
+transformers
+safetensors
+sentencepiece
+protobuf

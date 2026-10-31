@@ -105,7 +105,7 @@ import {
   guardrailOutcome,
   recordGuardrailDecision,
   resolveGuardrailPolicy,
-  runGuardrails,
+  runGuardrailsAsync,
   flattenFindings,
   type DispatchGuardrails,
   type GuardrailPolicy,
@@ -1668,12 +1668,12 @@ async function dispatchAttempt(
     projectId: args.projectId ?? null,
     agentId: served.id,
   });
-  let guardrailInput: ReturnType<typeof runGuardrails> | null = null;
+  let guardrailInput: Awaited<ReturnType<typeof runGuardrailsAsync>> | null = null;
   if (guardrails.active) {
     // INPUT phase, BEFORE any provider work — a block costs nothing: no
     // dispatch, no usage row, no tokens. Identical placement to the PII input
     // check immediately above.
-    guardrailInput = runGuardrails(guardrails, "input", args.input);
+    guardrailInput = await runGuardrailsAsync(guardrails, "input", args.input);
     const outcome = guardrailOutcome(guardrailInput);
     if (outcome) {
       sink.auditLogId = await recordGuardrailDecision(db, {
@@ -1739,7 +1739,7 @@ async function dispatchAttempt(
     }
 
     const guardrailOutput = guardrails.active
-      ? runGuardrails(guardrails, "output", cached.outputText)
+      ? await runGuardrailsAsync(guardrails, "output", cached.outputText)
       : null;
     if (guardrailOutput) {
       const outcome = guardrailOutcome(guardrailOutput);
@@ -2320,10 +2320,10 @@ async function dispatchAttempt(
   // ADR-0042 OUTPUT phase. The call already ran, so a block here is the same
   // BILL-AND-WITHHOLD the PII path performs: the usage row below records the
   // honest spend, and the text is replaced by a counts-only marker.
-  let guardrailOutput: ReturnType<typeof runGuardrails> | null = null;
+  let guardrailOutput: Awaited<ReturnType<typeof runGuardrailsAsync>> | null = null;
   let guardrailWithheld = false;
   if (guardrails.active) {
-    guardrailOutput = runGuardrails(guardrails, "output", outputForPolicy);
+    guardrailOutput = await runGuardrailsAsync(guardrails, "output", outputForPolicy);
     if (guardrailOutput.action === "block") {
       guardrailWithheld = true;
       // the guardrail marker wins over the PII one when both fired: both are
