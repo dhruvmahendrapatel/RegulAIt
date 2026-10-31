@@ -12,7 +12,7 @@ import { Card, EmptyState } from "../../../ui/kit";
 import { DataList, type DataColumn } from "../../../ui/DataList";
 import { SubpageTrail } from "../../../ui/ListPreview";
 import { CertRotationsCard } from "./CertRotations";
-import { INFRA_PATH, LEDGERS, PROPOSAL_NOTE, backupColumns, certColumns, findingColumns, ledgerQueryKey, patchColumns, resourceColumns, useInfraProposals, type Ledger } from "./infraLedgers";
+import { INFRA_PATH, LEDGERS, PROPOSAL_NOTE, backupColumns, tlsLedgerColumns, findingColumns, ledgerQueryKey, patchColumns, resourceColumns, useInfraProposals, type Ledger } from "./infraLedgers";
 import v from "../../views.module.css";
 
 function LedgerPage<T>(props: { ledger: Ledger; sub: string; columns: Array<DataColumn<T>>; rowKey: (r: T) => string; empty: ReactNode; before?: ReactNode; after?: ReactNode; trailing?: ReactNode }) {
@@ -91,7 +91,7 @@ export function InfraCertificatesPage() {
     <LedgerPage<InfraCert>
       ledger={LEDGERS.certificates}
       sub="Every tracked certificate and its rotation history. A rotation happens only after the named approver approves."
-      columns={certColumns(p.propose, { open: historyCert?.id ?? null, toggle: (c) => setHistoryCert(historyCert?.id === c.id ? null : c) })}
+      columns={tlsLedgerColumns(p.propose, { open: historyCert?.id ?? null, toggle: (c) => setHistoryCert(historyCert?.id === c.id ? null : c) })}
       rowKey={(c) => c.id}
       empty={<EmptyState title="No certificates tracked" />}
       before={<ProposalHeader p={p} />}

@@ -9,7 +9,7 @@ import EnginesPage from "./EnginesPage";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
-import { Card, EmptyState } from "../../../ui/kit";
+import { Card, EmptyState, ErrorState } from "../../../ui/kit";
 import { DataList } from "../../../ui/DataList";
 import { SubpageTrail } from "../../../ui/ListPreview";
 import { PlacementsCard } from "./isolation/IsolationPanel";
@@ -51,17 +51,15 @@ export function ExecutorAttestationsPage() {
             <p role="status" className={v.faint}>
               Loading the executor…
             </p>
-          ) : !executor ? (
-            <EmptyState
+          ) : detail.isError ? (
+            <ErrorState
               title="Executor unavailable"
-              body={
-                a?.kind === "forbidden"
-                  ? "You are not allowed to read this executor."
-                  : a?.kind === "failed"
-                    ? `The executor could not be read: ${a.message}`
-                    : "The gateway sent an executor record this console cannot read. No assurance is shown."
-              }
+              access={a?.kind === "forbidden"}
+              message={a?.kind === "forbidden" ? "You are not allowed to read this executor." : a?.kind === "failed" ? `The executor could not be read: ${a.message}` : "The executor could not be read. No assurance is shown."}
+              onRetry={() => void detail.refetch()}
             />
+          ) : !executor ? (
+            <EmptyState title="Executor unavailable" body="The gateway sent an executor record this console cannot read. No assurance is shown." />
           ) : (
             <DataList<unknown>
               listId="executor-attestations"

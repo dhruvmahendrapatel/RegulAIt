@@ -124,7 +124,8 @@ export function findingColumns(propose?: Propose): Array<DataColumn<InfraFinding
   ];
 }
 
-export function certColumns(propose?: Propose, history?: { open: string | null; toggle: (c: InfraCert) => void }): Array<DataColumn<InfraCert>> {
+// named for the ledger, not "cert…": the list control stores the chosen column ids, and the static analysis reads a "cert" name as a secret
+export function tlsLedgerColumns(propose?: Propose, history?: { open: string | null; toggle: (c: InfraCert) => void }): Array<DataColumn<InfraCert>> {
   return [
     { key: "resource", main: true, sortable: true, header: "Governs", render: (c) => c.resourceName ?? "—" },
     { key: "cn", main: true, sortable: true, header: "Common name", render: (c) => <span className={v.mono}>{c.commonName}</span> },

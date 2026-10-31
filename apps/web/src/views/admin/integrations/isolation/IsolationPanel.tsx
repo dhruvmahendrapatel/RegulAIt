@@ -19,7 +19,7 @@ import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-quer
 import { api } from "../../../../api/client";
 import { ago, fmtAt, fmtDateTime } from "../../../../api/format";
 import { api as stepUpApi, withStepUp } from "../../../../stepup/stepUp";
-import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Modal, RowActions, Select, Table } from "../../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, Input, Modal, RowActions, Select, Table } from "../../../../ui/kit";
 import { useAction } from "../../adminKit";
 import {
   assignableProfiles,
@@ -108,7 +108,8 @@ const unreadableKey = (r: Unreadable) => `unreadable-${r.index}`;
 
 function ReadFailure(props: { what: string; q: { isError: boolean; error: unknown; isPending: boolean }; parsed: unknown }) {
   const { q } = props;
-  if (q.isError) return <EmptyState title={`${props.what[0]!.toUpperCase()}${props.what.slice(1)} unavailable`} body={unavailableText(props.what, availabilityOf(q.error))} />;
+  // a failed read is announced as an error, not shown as an empty list
+  if (q.isError) return <ErrorState title={`${props.what[0]!.toUpperCase()}${props.what.slice(1)} unavailable`} message={unavailableText(props.what, availabilityOf(q.error))} />;
   if (!q.isPending && props.parsed === null)
     return <EmptyState title={`${props.what[0]!.toUpperCase()}${props.what.slice(1)} unavailable`} body={`The gateway's ${props.what} could not be read. Nothing is shown rather than a guessed value.`} />;
   return null;

@@ -315,8 +315,9 @@ test("chat answers through the governed core with its cost, and the thread is in
   // Agent inbox → All: the thread, and opening it shows the conversation
   await page.goto("/ui/builder/inbox?tab=all");
   await expect(page.getByRole("heading", { level: 1, name: "Agent inbox" })).toBeVisible();
-  const list = page.getByRole("list", { name: "Threads" });
-  await list.getByRole("button", { name: /Which intake requests are missing a data owner\?/ }).first().click();
+  // ADR-0219: the threads are a list-control table; each row is a link named for its thread
+  const list = page.locator('[data-list="builder-threads"]');
+  await list.getByRole("link", { name: /^Open thread Which intake requests are missing a data owner\?/ }).first().click();
   await expect(page).toHaveURL(new RegExp(`thread=${thread}`));
   await expect(page.getByText(`${AGENT}:`).first()).toBeVisible();
   track.assertClean("chat and inbox");

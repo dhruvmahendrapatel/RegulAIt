@@ -23,7 +23,7 @@ import {
   LEDGERS,
   PROPOSAL_NOTE,
   backupColumns,
-  certColumns,
+  tlsLedgerColumns,
   findingColumns,
   ledgerPath,
   ledgerQueryKey,
@@ -165,7 +165,7 @@ export default function InfrastructurePage() {
           {tab === "ledgers" ? (
             <>
                 {preview("findings", findingColumns() as Array<DataColumn<never>>, [{ label: "open", count: posture.data ? (p.open ?? 0) : null }])}
-                {preview("certificates", certColumns() as Array<DataColumn<never>>)}
+                {preview("certificates", tlsLedgerColumns() as Array<DataColumn<never>>)}
                 {preview("patches", patchColumns() as Array<DataColumn<never>>)}
 
                 {preview("backups", backupColumns() as Array<DataColumn<never>>, [{ label: "missed", count: posture.data ? (p.backup?.missed ?? 0) : null }])}
