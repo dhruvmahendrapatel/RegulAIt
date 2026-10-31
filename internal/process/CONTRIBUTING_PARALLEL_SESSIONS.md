@@ -85,6 +85,15 @@ Two related traps from the same mechanism:
   developer's database permanently on the pre-merge schema. After editing any applied migration,
   drop and re-migrate the database — do not trust that it caught up.
 
+> **Addendum (2026-10-31): reserved numbers do not reserve the watermark.** Lanes reserved migration
+> numbers ahead with `when` set by formula (`1785149000000 + (N−214)×1,000,000`). That is safe only if
+> lanes merge in number order. When 0237 merged before 0223–0225 and 0228, any database that ran main in
+> between would skip the lower ones, because the watermark rule above applies to them too. From now on,
+> a lane merging after a higher number re-stamps its entries to main's newest `when` plus 1,000,000 each,
+> appended at the end of the journal. The file name and number stay as reserved. CI enforces this with
+> `scripts/migration-watermark-guard.mjs`, which refuses any new entry not above the base branch's newest
+> `when`.
+
 ### 4.2 Same-number files that merge with **zero** conflict
 
 Two sessions each take migration `0101` (or ADR `0097`) with different descriptive slugs. Git sees
