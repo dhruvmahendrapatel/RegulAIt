@@ -4696,7 +4696,7 @@ export const orgSettings = pgTable(
      * draft pack versions, and accept imported regulatory feed entries? false (default) =
      * the import routes refuse and the feed is the hand-curated list only. */
     frameworkImportsEnabled: boolean("framework_imports_enabled").notNull().default(false),
-    /** ADR-0213 (migration 0231) — the vendor questionnaire drafter. FALSE
+    /** ADR-0213 (migration 0258) — the vendor questionnaire drafter. FALSE
      * (default) = the questionnaire is filled by hand only and the draft route
      * refuses `vendor_draft_disabled`. TRUE (an admin relaxation: step-up and
      * audited) = drafts labelled with their sources; nothing is submitted or
@@ -5040,7 +5040,7 @@ export const MODEL_POLICY_FEATURE_VALUES = [
   "builder",
   "copilot",
   "intake_assist",
-  // ADR-0213 (migration 0231): the vendor questionnaire drafter
+  // ADR-0213 (migration 0258): the vendor questionnaire drafter
   "vendor_draft",
   "evals",
   "orchestration",

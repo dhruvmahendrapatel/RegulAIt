@@ -1473,13 +1473,6 @@
       "breakpoints": true
     },
     {
-      "idx": 231,
-      "version": "7",
-      "when": 1785166000000,
-      "tag": "0231_vendor_draft_assist",
-      "breakpoints": true
-    },
-    {
       "idx": 237,
       "version": "7",
       "when": 1785172000000,
@@ -1540,6 +1533,13 @@
       "version": "7",
       "when": 1785189000000,
       "tag": "0254_agent_setup_assist",
+      "breakpoints": true
+    },
+    {
+      "idx": 258,
+      "version": "7",
+      "when": 1785193000000,
+      "tag": "0258_vendor_draft_assist",
       "breakpoints": true
     }
   ]

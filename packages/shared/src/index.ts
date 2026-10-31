@@ -2378,7 +2378,7 @@ export const updateOrgSettingsSchema = z
      * dispatchable judge reports `judged: unavailable` and changes nothing. */
     recommendationJudgeEnabled: z.boolean().optional(),
     recommendationJudgeAgentId: z.string().uuid().nullable().optional(),
-    /** ADR-0213 (migration 0231): may a person ask for drafted answers to a
+    /** ADR-0213 (migration 0258): may a person ask for drafted answers to a
      * vendor assessment questionnaire? false (default) = the questionnaire is
      * filled by hand only. true (a relaxation: step-up, audited) = the vendor
      * detail offers drafts labelled with their sources; nothing is submitted

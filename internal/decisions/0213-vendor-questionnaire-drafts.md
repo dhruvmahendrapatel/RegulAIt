@@ -8,7 +8,7 @@ Related: ADR-0149 (governed intake assistant, the pattern reused), ADR-0056
 (secure by default), ADR-0186 A (`settings_relax` step-up)
 Driver: backlog P6 (`internal/product/PENDING.md`); owner decision of 2026-10-30
 on #453 (wave 1)
-Migration: `0231_vendor_draft_assist.sql`
+Migration: `0258_vendor_draft_assist.sql` (first reserved as 0231; renumbered above main's watermark under M-108 before merge)
 
 ## Context
 
