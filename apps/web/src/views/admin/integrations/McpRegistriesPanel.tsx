@@ -18,7 +18,7 @@ import { useId, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ApiError, api } from "../../../api/client";
 import { ago, fmtAt } from "../../../api/format";
-import { Badge, Button, Card, ConfirmModal, EmptyState, Field, IdChip, Input, Modal, Select, Table } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, Field, IdChip, Input, Modal, RowActions, Select, Table } from "../../../ui/kit";
 import { useAction } from "../adminKit";
 import { McpServerNextSteps } from "./McpServerAdmission";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
@@ -80,6 +80,9 @@ export function McpRegistriesPanel() {
   const [browsing, setBrowsing] = useState<string | null>(null);
   const [lastSync, setLastSync] = useState<RegistrySyncResult | null>(null);
   const sync = useAction();
+  // ADR-0207 (G4): a registry is deleted only once it is disabled (no scheduled pull in flight)
+  const remove = useAction();
+  const [deleting, setDeleting] = useState<McpRegistry | null>(null);
   const registries = list.data?.registries ?? [];
   const browsed = registries.find((r) => r.id === browsing) ?? null;
 
@@ -136,19 +139,49 @@ export function McpRegistriesPanel() {
             {
               key: "actions",
               header: "Actions",
-              align: "right",
               render: (r) => (
-                <span className={v.row}>
-                  <Button size="sm" variant="ghost" aria-label={`Edit registry ${r.name}`} onClick={() => setEditing(r)}>
-                    Edit
-                  </Button>
-                  <Button size="sm" variant="ghost" aria-label={`Sync now: registry ${r.name}`} disabled={sync.busy} onClick={() => void runSync(r)}>
-                    Sync now
-                  </Button>
-                  <Button size="sm" variant="ghost" aria-label={`Browse entries of ${r.name}`} aria-pressed={browsing === r.id} onClick={() => setBrowsing(browsing === r.id ? null : r.id)}>
-                    Entries
-                  </Button>
-                </span>
+                <RowActions
+                  slot="6rem"
+                  primary={
+                    <Button size="sm" aria-label={`Sync now: registry ${r.name}`} disabled={sync.busy} onClick={() => void runSync(r)}>
+                      Sync now
+                    </Button>
+                  }
+                  secondary={
+                    <span className={v.row} style={{ gap: "var(--s1)", flexWrap: "nowrap" }}>
+                      <Button size="sm" variant="ghost" aria-label={`Edit registry ${r.name}`} onClick={() => setEditing(r)}>
+                        Edit
+                      </Button>
+                      <Button size="sm" variant="ghost" aria-label={`Browse entries of ${r.name}`} aria-pressed={browsing === r.id} onClick={() => setBrowsing(browsing === r.id ? null : r.id)}>
+                        Entries
+                      </Button>
+                    </span>
+                  }
+                  rest={
+                    r.enabled ? (
+                      <span className={v.row} style={{ gap: "var(--s1)", flexWrap: "nowrap" }}>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          aria-disabled
+                          title="Disable it first"
+                          aria-label={`Delete registry ${r.name}, unavailable: disable it first`}
+                          style={{ opacity: 0.5, cursor: "not-allowed" }}
+                          onClick={(e) => e.preventDefault()}
+                        >
+                          Delete registry
+                        </Button>
+                        <span className={v.faint} style={{ whiteSpace: "nowrap" }}>
+                          Disable it first
+                        </span>
+                      </span>
+                    ) : (
+                      <Button size="sm" variant="danger" aria-label={`Delete registry ${r.name}`} disabled={remove.busy} onClick={() => setDeleting(r)}>
+                        Delete registry
+                      </Button>
+                    )
+                  }
+                />
               ),
             },
           ]}
@@ -168,6 +201,19 @@ export function McpRegistriesPanel() {
       </Card>
       {browsed && <RegistryEntriesCard key={browsed.id} registry={browsed} />}
       {editing && <EditRegistryDialog registry={editing} onClose={() => setEditing(null)} />}
+      <ConfirmModal
+        open={deleting !== null}
+        title={`Delete registry “${deleting?.name}”?`}
+        body="Its catalogue entries are removed. Servers already imported keep running but lose their registry link. The removal is recorded in the audit log."
+        danger
+        confirmLabel="Delete registry"
+        onCancel={() => setDeleting(null)}
+        onConfirm={() => {
+          const r = deleting;
+          setDeleting(null);
+          if (r) void remove.run(() => registryCall(() => api.del(`/v1/mcp-registries/${r.id}`)), `Registry “${r.name}” deleted`);
+        }}
+      />
     </div>
   );
 }

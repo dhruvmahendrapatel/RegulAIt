@@ -4,7 +4,7 @@
  * records inbound webhook state as drift. The webhook secret is shown exactly
  * once at creation (one-time reveal), stored hashed + encrypted.
  */
-import { useState } from "react";
+import { Suspense, lazy, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { PmConnection } from "../../../api/adminTypes";
@@ -15,6 +15,20 @@ import { RefusalNotice } from "../../../ui/RefusalNotice";
 import { RevealCard, useAction, type RevealedSecret } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+
+/** "30 Oct, 15:10" — the end of a rotation's grace window, in the reader's time */
+const graceEnd = (iso: string) => {
+  const d = new Date(iso);
+  const day = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short" }).format(d);
+  const time = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false }).format(d);
+  return `${day}, ${time}`;
+};
+
+
+// ADR-0207: the edit, token and rotation dialogs load only when one is opened
+const RotateSecretDialog = lazy(() => import("./IntegrationEditDialogs").then((m) => ({ default: m.RotateSecretDialog })));
+const EditPmDialog = lazy(() => import("./IntegrationEditDialogs").then((m) => ({ default: m.EditPmDialog })));
+const ReplaceTokenDialog = lazy(() => import("./IntegrationEditDialogs").then((m) => ({ default: m.ReplaceTokenDialog })));
 
 const PROVIDERS = [
   { v: "mock", l: "mock (demo — touches nothing real)" },
@@ -35,6 +49,10 @@ export default function PmConnectionsPage() {
 
   const [reveal, setReveal] = useState<RevealedSecret | null>(null);
   const [deleting, setDeleting] = useState<PmConnection | null>(null);
+  // ADR-0207 (G6): rotate the inbound webhook secret with a 24-hour grace window; edit and replace the token in place
+  const [rotating, setRotating] = useState<PmConnection | null>(null);
+  const [editing, setEditing] = useState<PmConnection | null>(null);
+  const [replacing, setReplacing] = useState<PmConnection | null>(null);
   const [f, setF] = useState({ name: "", provider: "mock", project: "", baseUrl: "", apiVersion: "", token: "" });
   const set = (k: keyof typeof f, val: string) => setF((s) => ({ ...s, [k]: val }));
   const needsBase = ["jira", "azure_devops", "generic_webhook"].includes(f.provider);
@@ -160,7 +178,19 @@ export default function PmConnectionsPage() {
         <Card flush title="Connections">
           <Table<PmConnection>
             columns={[
-              { key: "name", header: "Name", sort: (c) => c.name, render: (c) => c.name },
+              {
+                key: "name",
+                header: "Name",
+                sort: (c) => c.name,
+                render: (c) => (
+                  <span className={v.row} style={{ gap: "var(--s1)" }}>
+                    {c.name}
+                    {c.previousSecretValidUntil && new Date(c.previousSecretValidUntil) > new Date() && (
+                      <Badge tone="warn">previous secret valid until {graceEnd(c.previousSecretValidUntil)}</Badge>
+                    )}
+                  </span>
+                ),
+              },
               {
                 key: "provider",
                 header: "Provider",
@@ -181,7 +211,23 @@ export default function PmConnectionsPage() {
                 srHeader: "Actions",
                 render: (c) => (
                   <RowActions
-                    slot="0"
+                    slot="8rem"
+                    stacked
+                    primary={
+                      <Button size="sm" variant="primary" aria-label={`Rotate webhook secret: ${c.name}`} disabled={act.busy} onClick={() => setRotating(c)}>
+                        Rotate secret
+                      </Button>
+                    }
+                    secondary={
+                      <span className={v.row} style={{ gap: "var(--s1)", flexWrap: "nowrap" }}>
+                        <Button size="sm" aria-label={`Edit ${c.name}`} disabled={act.busy} onClick={() => setEditing(c)}>
+                          Edit
+                        </Button>
+                        <Button size="sm" aria-label={`Replace token: ${c.name}`} disabled={act.busy} onClick={() => setReplacing(c)}>
+                          Replace token
+                        </Button>
+                      </span>
+                    }
                     rest={
                       <Button size="sm" variant="danger" disabled={act.busy} onClick={() => setDeleting(c)}>
                         Delete connection
@@ -222,6 +268,20 @@ export default function PmConnectionsPage() {
             );
         }}
       />
+      <Suspense fallback={null}>
+        {rotating && (
+          <RotateSecretDialog
+            connection={rotating}
+            onClose={() => setRotating(null)}
+            onRotated={(r) => {
+              setRotating(null);
+              setReveal(r);
+            }}
+          />
+        )}
+        {editing && <EditPmDialog connection={editing} onClose={() => setEditing(null)} />}
+        {replacing && <ReplaceTokenDialog kind="pm" connection={replacing} onClose={() => setReplacing(null)} />}
+      </Suspense>
     </>
   );
 }

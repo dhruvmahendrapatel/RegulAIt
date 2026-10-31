@@ -532,6 +532,8 @@ describe("6. the covered / NOT-covered inventory", () => {
     "config_canary_observations.failure_reason",
     "config_canary_observations.served_reason",
     "connector_revocations.reason",
+    // ADR-0207: why an admin disabled a connector or an MCP server
+    "connectors.disabled_reason",
     "copilot_proposals.rationale",
     "cost_import_batches.reason",
     "data_key_attestations.note",
@@ -554,6 +556,7 @@ describe("6. the covered / NOT-covered inventory", () => {
     "license_verifications.reason",
     "mcp_registry_entries.catalogue_reason",
     "mcp_servers.admission_clear_reason",
+    "mcp_servers.disabled_reason",
     "model_card_approvals.decision_reason",
     "model_card_evidence.note",
     "model_cards.note",

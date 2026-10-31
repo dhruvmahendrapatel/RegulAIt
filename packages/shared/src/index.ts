@@ -1947,6 +1947,52 @@ export const createPmConnectionSchema = z
 
 export const pmSyncSchema = z.object({ connectionName: z.string().min(1) });
 
+// ---------------------------------------------------------------------------
+// ADR-0207 — lifecycle for integrations (G3–G6). Every body is `.strict()`, so a field the contract does not name
+// (a new name, a provider, a secret in the wrong slot) is a 400 rather than silently ignored.
+// ---------------------------------------------------------------------------
+
+/** the reason a lifecycle act records: required to disable, 10 to 1000 characters (the database CHECK repeats it) */
+export const lifecycleReasonSchema = z.string().trim().min(10).max(1000);
+
+/** `POST /v1/connectors/:connectorId/enabled` and `POST /v1/servers/:serverId/enabled`. Disabling needs a reason;
+ * enabling again is a relaxation, answered with a settings_relax step-up, and takes an optional reason. */
+export const setIntegrationEnabledSchema = z
+  .object({ enabled: z.boolean(), reason: lifecycleReasonSchema.optional() })
+  .strict()
+  .superRefine((body, ctx) => {
+    if (!body.enabled && body.reason === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a reason is required to disable", path: ["reason"] });
+    }
+  });
+
+/** `PATCH /v1/git/connections/:name`: only the base URL. The name and provider are fixed (stages name the
+ * connection). `null` returns to the provider default. */
+export const updateGitConnectionSchema = z.object({ baseUrl: z.string().url().max(2048).nullable() }).strict();
+
+/** `POST /v1/git/connections/:name/token` and `POST /v1/pm/connections/:name/token`: replaced in place, never returned */
+export const replaceConnectionTokenSchema = z.object({ token: z.string().min(1).max(512) }).strict();
+
+/** `PATCH /v1/pm/connections/:name`: the name (part of the webhook address) and the provider are fixed */
+export const updatePmConnectionSchema = z
+  .object({
+    project: z.string().min(1).max(256).optional(),
+    baseUrl: z.string().url().max(2048).nullable().optional(),
+    /** jira only, as on create: 2 or 3, or null for the provider default */
+    apiVersion: z.coerce.number().int().nullable().optional(),
+    driftResolution: z.enum(["manual", "prefer_pm", "prefer_regulait"]).optional(),
+  })
+  .strict()
+  .superRefine((body, ctx) => {
+    if (body.apiVersion != null && body.apiVersion !== 2 && body.apiVersion !== 3) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "apiVersion must be 2 or 3", path: ["apiVersion"] });
+    }
+  });
+
+/** `POST /v1/pm/connections/:name/webhook-secret/rotate`. The previous secret keeps working for 24 hours unless
+ * `immediate`; a second rotation inside that window is refused unless `immediate`. */
+export const rotatePmWebhookSecretSchema = z.object({ immediate: z.boolean().optional() }).strict();
+
 // EPIC-06 §4 decision records. The decision maker is the authenticated
 // caller — never a body field.
 export const createDecisionSchema = z.object({

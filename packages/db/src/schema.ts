@@ -892,6 +892,12 @@ export const mcpServers = pgTable("mcp_servers", {
   /** ADR-0185 I9 — the accountable owner; default the registering admin.
    * ON DELETE SET NULL: the server reads `unowned`/`orphaned`, it is never
    * deleted with its owner. */
+  /** ADR-0207 (migration 0220): NULL = enabled. Disabling refuses every tool call on the server, for agents and people; it is audited and
+   * needs a reason (10 to 1000 characters, CHECK); enabling again is a stepped-up relaxation. A delete is
+   * allowed only while disabled. */
+  disabledAt: timestamp("disabled_at", { withTimezone: true }),
+  disabledReason: text("disabled_reason"),
+  disabledBy: uuid("disabled_by").references(() => users.id, { onDelete: "set null" }),
   ownerUserId: uuid("owner_user_id").references(() => users.id, { onDelete: "set null" }),
   /** ADR-0190 decision 7 item 5 (migration 0194): the execution profile VERSION a stdio server's sandbox runs
    * under. Stdio servers only (a remote server runs on its own host: `external`, never a class). NULL = the
@@ -2578,6 +2584,12 @@ export const connectors = pgTable("connectors", {
   /** ADR-0185 I9 (migration 0169) — the accountable owner; default the
    * registering admin. ON DELETE SET NULL, like mcp_servers.owner_user_id. */
   ownerUserId: uuid("owner_user_id").references(() => users.id, { onDelete: "set null" }),
+  /** ADR-0207 (migration 0219): NULL = enabled. Disabling refuses every governed call to the connector; it is audited and
+   * needs a reason (10 to 1000 characters, CHECK); enabling again is a stepped-up relaxation. A delete is
+   * allowed only while disabled. */
+  disabledAt: timestamp("disabled_at", { withTimezone: true }),
+  disabledReason: text("disabled_reason"),
+  disabledBy: uuid("disabled_by").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -3038,6 +3050,11 @@ export const pmConnections = pgTable("pm_connections", {
   })
     .notNull()
     .default("manual"),
+  /** ADR-0207 (migration 0221): the previous webhook secret after a rotation, accepted until
+   * `previousWebhookSecretValidUntil` (database clock, 24 h after the rotation). All three set together or all NULL. */
+  previousWebhookSecretHash: text("previous_webhook_secret_hash"),
+  previousWebhookSecretCiphertext: text("previous_webhook_secret_ciphertext"),
+  previousWebhookSecretValidUntil: timestamp("previous_webhook_secret_valid_until", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

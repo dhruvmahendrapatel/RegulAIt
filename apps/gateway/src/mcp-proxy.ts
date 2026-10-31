@@ -277,6 +277,38 @@ export async function refuseStdioWithoutEntitlement(
   return decision;
 }
 
+/** ADR-0207 (G4): the rule id of the refusal a disabled MCP server answers with (one deny audit row per refused call) */
+export const MCP_SERVER_DISABLED_RULE_ID = "mcp-server-disabled-refused";
+
+/** the refusal, with its deny audit row, for any call on a disabled server */
+export async function refuseDisabledServer(
+  db: Db,
+  args: {
+    userId: string;
+    serverRow: { id: string; name: string; disabledAt: Date | null; disabledReason: string | null };
+    toolName?: string | null;
+    projectId?: string | null;
+    phase: "tools/list" | "tools/call" | "mcp";
+  },
+): Promise<Decision> {
+  const decision: Decision = {
+    effect: "deny",
+    ruleId: MCP_SERVER_DISABLED_RULE_ID,
+    ruleChain: [],
+    reason:
+      `MCP server '${args.serverRow.name}' is disabled (since ${args.serverRow.disabledAt?.toISOString() ?? "an unknown time"}): ` +
+      "every call on it is refused until an admin enables it again",
+  };
+  await db.insert(auditLog).values({
+    userId: args.userId,
+    serverId: args.serverRow.id,
+    toolName: args.toolName ?? null,
+    detail: { phase: "server-disabled", method: args.phase, projectId: args.projectId ?? null, receiptClass: "decision" },
+    ...decision,
+  });
+  return decision;
+}
+
 export async function connectUpstream(
   db: Db,
   serverRow: McpUpstreamRow,
@@ -768,6 +800,9 @@ async function executeGovernedToolCallInner(
   const piiIntl = await piiInternationalCategories(db);
   const [serverRow] = await db.select().from(mcpServers).where(eq(mcpServers.id, serverId));
   if (!serverRow) return { kind: "unknown_tool" };
+  // ADR-0207 (G4): a disabled server refuses every tool call, for people, agents and delegated workers alike. Checked
+  // before any connect, grant or approval lookup, so nothing is attempted upstream and no approval is queued or spent.
+  if (serverRow.disabledAt) return { kind: "denied", decision: await refuseDisabledServer(db, { userId, serverRow, toolName, projectId, phase: "tools/call" }) };
 
   const [toolRow] = await db
     .select()
@@ -2187,6 +2222,12 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
     const [serverRow] = await db.select().from(mcpServers).where(eq(mcpServers.id, serverId));
     if (!serverRow) {
       return reply.status(404).send({ error: "unknown_server" });
+    }
+    // ADR-0207 (G4): refused before the reply is hijacked into an MCP transport, with a plain HTTP error and its
+    // deny audit row; no upstream connect, manifest sync or process start happens for a disabled server
+    if (serverRow.disabledAt) {
+      const refused = await refuseDisabledServer(db, { userId, serverRow, phase: "mcp" });
+      return reply.status(403).send({ error: "mcp_server_disabled", ruleId: refused.ruleId, detail: refused.reason });
     }
 
     // ADR-0019 pillar-5 attribution. Validated EXACTLY like the invoke paths

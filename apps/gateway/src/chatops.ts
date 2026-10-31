@@ -826,6 +826,10 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
   ): Promise<{ ok: true; messageRef: string | null } | { ok: false; status: number; body: Record<string, unknown> }> {
     const [connector] = await db.select().from(connectors).where(eq(connectors.id, conn.connectorId));
     if (!connector) return { ok: false, status: 400, body: { error: "invalid_reference", detail: "the ChatOps connector was deleted" } };
+    // ADR-0207 (G3): a disabled connector carries nothing, the product's own cards and mails included
+    if (connector.disabledAt) {
+      return { ok: false, status: 403, body: { error: "connector_disabled", detail: `connector '${connector.name}' is disabled` } };
+    }
     // ADR-0113 — TEAMS OUTBOUND EXISTS NOW. `connector-provider` grew a real
     // Bot Framework Connector adapter, so the courier routes through the
     // RESOLVED provider for the connection's own provider rather than assuming

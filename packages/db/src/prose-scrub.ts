@@ -102,7 +102,7 @@ export const PROSE_SCRUB: (text: string) => string = scrubAuditText;
  */
 const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   // --- the S5 reproduction itself ---
-  [s.mcpServers, ["admissionClearReason"]],
+  [s.mcpServers, ["admissionClearReason", "disabledReason"]],
   // ADR-0175 — the same kind of admin override, for a held builder skill and
   // for the release-age cooldown: free prose typed beside a review decision
   [s.builderSkills, ["admitReason"]],
@@ -121,6 +121,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.approvalDelegations, ["reason"]],
   [s.agentRevocations, ["reason"]],
   [s.connectorRevocations, ["reason"]],
+  // ADR-0207 — why an admin disabled a connector (the server twin is on the mcp_servers entry above)
+  [s.connectors, ["disabledReason"]],
   // ADR-0124 — the emergency-stop reasons. Operator free prose typed under
   // incident pressure, which is exactly when somebody pastes the credential
   // they are rotating into the explanation. Same reasoning as

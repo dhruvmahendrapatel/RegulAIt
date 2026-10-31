@@ -4,7 +4,7 @@
  * real adapter; per-provider credential hints tell the admin exactly which
  * token to mint.
  */
-import { useState } from "react";
+import { Suspense, lazy, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { GitConnection } from "../../../api/adminTypes";
@@ -15,6 +15,10 @@ import { RefusalNotice } from "../../../ui/RefusalNotice";
 import { useAction } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+
+// ADR-0207: the edit and token dialogs load only when one is opened
+const ReplaceTokenDialog = lazy(() => import("./IntegrationEditDialogs").then((m) => ({ default: m.ReplaceTokenDialog })));
+const EditGitDialog = lazy(() => import("./IntegrationEditDialogs").then((m) => ({ default: m.EditGitDialog })));
 
 const PROVIDERS: Array<{ v: string; l: string; hint: string; needsBase?: string }> = [
   { v: "mock", l: "mock (demo — touches nothing real)", hint: "No token semantics — any placeholder works. Exercises the full flow against an in-memory repo." },
@@ -37,6 +41,9 @@ export default function GitConnectionsPage() {
   const [token, setToken] = useState("");
   const selected = PROVIDERS.find((p) => p.v === provider)!;
   const [deleting, setDeleting] = useState<GitConnection | null>(null);
+  // ADR-0207 (G5): replace the token in place, edit the base URL (the name is referenced by stages)
+  const [replacing, setReplacing] = useState<GitConnection | null>(null);
+  const [editing, setEditing] = useState<GitConnection | null>(null);
 
   return (
     <>
@@ -137,7 +144,17 @@ export default function GitConnectionsPage() {
                 srHeader: "Actions",
                 render: (c) => (
                   <RowActions
-                    slot="0"
+                    slot="8rem"
+                    primary={
+                      <Button size="sm" variant="primary" aria-label={`Replace token: ${c.name}`} disabled={act.busy} onClick={() => setReplacing(c)}>
+                        Replace token
+                      </Button>
+                    }
+                    secondary={
+                      <Button size="sm" aria-label={`Edit ${c.name}`} disabled={act.busy} onClick={() => setEditing(c)}>
+                        Edit
+                      </Button>
+                    }
                     rest={
                       <Button size="sm" variant="danger" disabled={act.busy} onClick={() => setDeleting(c)}>
                         Delete connection
@@ -178,6 +195,10 @@ export default function GitConnectionsPage() {
             );
         }}
       />
+      <Suspense fallback={null}>
+        {replacing && <ReplaceTokenDialog kind="git" connection={replacing} onClose={() => setReplacing(null)} />}
+        {editing && <EditGitDialog connection={editing} onClose={() => setEditing(null)} />}
+      </Suspense>
     </>
   );
 }

@@ -358,6 +358,7 @@ export interface BuildAppOptions {
 import { z } from "zod";
 import { boundTargetsForApprovals, registerMcpProxy } from "./mcp-proxy.js";
 import { clearUpstreamCredentialOnUrlMove, registerMcpUpstreamCredentialRoutes } from "./mcp-upstream-credential.js";
+import { registerIntegrationLifecycleRoutes, withLifecycle } from "./integration-lifecycle.js";
 import { ExternalEffectBlockedError } from "./external-effects.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
 import { registerCustomProviderRoutes } from "./custom-providers.js";
@@ -2061,6 +2062,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const body = updateServerSchema.parse(req.body);
     const [before] = await db.select().from(mcpServers).where(eq(mcpServers.id, serverId));
     if (!before) return reply.status(404).send({ error: "unknown_server" });
+    // ADR-0207 (G4): a disabled server is read-only; enable it (a stepped-up relaxation) before changing its settings
+    if (before.disabledAt) {
+      return reply.status(409).send({ error: "mcp_server_disabled", detail: "enable the MCP server before editing it" });
+    }
     const isStdio = before.transport === "stdio";
     // ADR-0185 G4 — a server's transport is fixed at registration; a stdio
     // block applies to a stdio server only, and a stdio server has no url or
@@ -2318,6 +2323,23 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
               (rangesRelaxed ? " — a relaxation of the strict default" : ""),
           });
         }
+        // ADR-0207 (G4): a rename or a url move is on the trail with both values, in this transaction
+        if (written.name !== before.name || written.url !== before.url) {
+          await tx.insert(auditLog).values({
+            userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+            serverId,
+            objectType: "mcp_server",
+            objectId: serverId,
+            detail: { phase: "update", from: { name: before.name, url: before.url }, to: { name: written.name, url: written.url }, receiptClass: "configuration" },
+            effect: "allow",
+            ruleId: "mcp-server-updated",
+            ruleChain: [],
+            reason:
+              `MCP server '${before.name}' updated` +
+              (written.name !== before.name ? `: renamed to '${written.name}'` : "") +
+              (written.url !== before.url ? `${written.name !== before.name ? ";" : ":"} url ${before.url} → ${written.url}` : ""),
+          });
+        }
         // ADR-0204: a url move clears the server's upstream credential (audited here), after the row update above, so
         // the row lock orders it against a concurrent set: the secret never follows the url to a new destination
         if (body.url !== undefined && written.url !== before.url) {
@@ -2400,7 +2422,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   });
 
   app.get("/v1/servers", async () => ({
-    servers: (await withOwnership(db, await db.select().from(mcpServers))).map(mcpServerView),
+    servers: (await withLifecycle(db, await withOwnership(db, await db.select().from(mcpServers)))).map(mcpServerView),
   }));
 
   app.get("/v1/servers/:serverId/tools", async (req) => {
@@ -5447,6 +5469,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0204 — a server's static upstream credential: set, rotate, clear (admin-only through the default gate, each a
   // settings_relax step-up, audited); reads show only whether one is set, its header and last four characters
   registerMcpUpstreamCredentialRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0207: disable, enable and delete connectors and MCP servers; delete MCP registries
+  registerIntegrationLifecycleRoutes(app, db);
   // ADR-0097 part A — the admission review queue and the reason-required,
   // audited clear. Admin-only through the default gate, like the MCP registry
   // writes it sits beside.
