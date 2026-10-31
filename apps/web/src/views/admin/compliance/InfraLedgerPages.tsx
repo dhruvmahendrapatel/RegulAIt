@@ -4,6 +4,8 @@
  * keeps a five-row preview of each, worst first, with what needs attention counted in its heading.
  */
 import { useState, type ReactNode } from "react";
+import { Route, Routes } from "react-router-dom";
+import InfrastructurePage from "./InfrastructurePage";
 import type { InfraBackup, InfraCert, InfraFinding, InfraPatch, InfraResource } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
 import { Card, EmptyState } from "../../../ui/kit";
@@ -126,5 +128,23 @@ export function InfraBackupsPage() {
       before={<ProposalHeader p={p} />}
       trailing={p.modal}
     />
+  );
+}
+
+/**
+ * The Infrastructure area: the overview (with its five-row previews) at the index, each ledger's full list on its own
+ * nested route. One lazy chunk mounted at `infrastructure/*`, so the overview and the ledger pages add nothing to the
+ * entry bundle (ADR-0196 U4; the SPA route census follows this module — scripts/ui-spa-routes.mjs).
+ */
+export function InfrastructureArea() {
+  return (
+    <Routes>
+      <Route index element={<InfrastructurePage />} />
+      <Route path="resources" element={<InfraResourcesPage />} />
+      <Route path="findings" element={<InfraFindingsPage />} />
+      <Route path="certificates" element={<InfraCertificatesPage />} />
+      <Route path="patches" element={<InfraPatchesPage />} />
+      <Route path="backups" element={<InfraBackupsPage />} />
+    </Routes>
   );
 }

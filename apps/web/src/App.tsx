@@ -104,30 +104,21 @@ const ModelCredentialsPage = screen(() => import("./screens/admin-integrations")
 const CustomProvidersPage = screen(() => import("./screens/admin-integrations"), "CustomProvidersPage");
 const ExternalScorersPage = screen(() => import("./screens/admin-quality-security"), "ExternalScorersPage");
 const ConnectorsPage = screen(() => import("./screens/admin-integrations"), "ConnectorsPage");
-const McpServersPage = screen(() => import("./screens/admin-integrations"), "McpServersPage");
+// P3 (#453 c6527514889): each long operations/cost area is one lazy chunk whose module owns its nested <Routes> — the
+// overview at the index, each full list on its own page — so the sub-pages add nothing to the entry bundle.
+const McpServersArea = screen(() => import("./screens/admin-integrations"), "McpServersArea");
 const GitConnectionsPage = screen(() => import("./screens/admin-integrations"), "GitConnectionsPage");
 const PmConnectionsPage = screen(() => import("./screens/admin-integrations"), "PmConnectionsPage");
 const DeployTargetsPage = screen(() => import("./screens/admin-integrations"), "DeployTargetsPage");
-const EnginesPage = screen(() => import("./screens/admin-integrations"), "EnginesPage");
+const EnginesArea = screen(() => import("./screens/admin-integrations"), "EnginesArea");
 const CostDashboardPage = screen(() => import("./screens/admin-cost-optimization"), "CostDashboardPage");
-const CostConsolidationPage = screen(() => import("./screens/admin-cost-optimization"), "CostConsolidationPage");
+const CostConsolidationArea = screen(() => import("./screens/admin-cost-optimization"), "CostConsolidationArea");
 const SpendMonitorPage = screen(() => import("./screens/admin-cost-optimization"), "SpendMonitorPage");
 const BillingPage = screen(() => import("./screens/admin-cost-optimization"), "BillingPage");
 const OptimizationPage = screen(() => import("./screens/admin-cost-optimization"), "OptimizationPage");
 const ComplianceProfilesPage = screen(() => import("./screens/admin-compliance-infra"), "ComplianceProfilesPage");
 const CompliancePacksPage = screen(() => import("./screens/admin-compliance-infra"), "CompliancePacksPage");
-const InfrastructurePage = screen(() => import("./screens/admin-compliance-infra"), "InfrastructurePage");
-// P3 (#453 c6527514889): the long operations and cost pages' full lists, each on its own page, one chunk per parent
-const CostImportsPage = screen(() => import("./views/admin/cost/CostImportsPages"), "CostImportsPage");
-const CostImportLinesPage = screen(() => import("./views/admin/cost/CostImportsPages"), "CostImportLinesPage");
-const PlacementDecisionsPage = screen(() => import("./views/admin/integrations/EnginesSubpages"), "PlacementDecisionsPage");
-const ExecutorAttestationsPage = screen(() => import("./views/admin/integrations/EnginesSubpages"), "ExecutorAttestationsPage");
-const McpRegistryEntriesPage = screen(() => import("./views/admin/integrations/McpRegistrySubpages"), "McpRegistryEntriesPage");
-const InfraResourcesPage = screen(() => import("./views/admin/compliance/InfraLedgerPages"), "InfraResourcesPage");
-const InfraFindingsPage = screen(() => import("./views/admin/compliance/InfraLedgerPages"), "InfraFindingsPage");
-const InfraCertificatesPage = screen(() => import("./views/admin/compliance/InfraLedgerPages"), "InfraCertificatesPage");
-const InfraPatchesPage = screen(() => import("./views/admin/compliance/InfraLedgerPages"), "InfraPatchesPage");
-const InfraBackupsPage = screen(() => import("./views/admin/compliance/InfraLedgerPages"), "InfraBackupsPage");
+const InfrastructureArea = screen(() => import("./screens/admin-compliance-infra"), "InfrastructureArea");
 const OrganizationPage = screen(() => import("./screens/admin-settings"), "OrganizationPage");
 const RetentionPage = screen(() => import("./screens/admin-settings"), "RetentionPage");
 const GettingStartedPage = screen(() => import("./screens/admin-settings"), "GettingStartedPage");
@@ -319,8 +310,7 @@ function ApplicationRoutes() {
                 {/* ADR-0088 */}
                 <Route path="external-scorers" element={<ExternalScorersPage />} />
                 <Route path="connectors" element={<ConnectorsPage />} />
-                <Route path="mcp-servers" element={<McpServersPage />} />
-                <Route path="mcp-servers/registries/:registryId/entries" element={<McpRegistryEntriesPage />} />
+                <Route path="mcp-servers/*" element={<McpServersArea />} />
                 {/* ADR-0173 batch 2b */}
                 <Route path="webhooks" element={<WebhooksPage />} />
                 <Route path="admission" element={<AdmissionReviewPage />} />
@@ -328,26 +318,17 @@ function ApplicationRoutes() {
                 <Route path="pm-connections" element={<PmConnectionsPage />} />
                 <Route path="deploy-targets" element={<DeployTargetsPage />} />
                 {/* ADR-0187 (X26) */}
-                <Route path="engines" element={<EnginesPage />} />
-                <Route path="engines/placements" element={<PlacementDecisionsPage />} />
-                <Route path="engines/executors/:executorId/attestations" element={<ExecutorAttestationsPage />} />
+                <Route path="engines/*" element={<EnginesArea />} />
                 <Route path="cost" element={<CostDashboardPage />} />
                 {/* ADR-0069 */}
-                <Route path="cost-consolidation" element={<CostConsolidationPage />} />
-                <Route path="cost-consolidation/imports" element={<CostImportsPage />} />
-                <Route path="cost-consolidation/imports/:importId" element={<CostImportLinesPage />} />
+                <Route path="cost-consolidation/*" element={<CostConsolidationArea />} />
                 <Route path="spend-monitor" element={<SpendMonitorPage />} />
                 <Route path="billing" element={<BillingPage />} />
                 <Route path="optimization" element={<OptimizationPage />} />
                 <Route path="compliance" element={<ComplianceProfilesPage />} />
                 {/* ADR-0058 */}
                 <Route path="compliance-packs" element={<CompliancePacksPage />} />
-                <Route path="infrastructure" element={<InfrastructurePage />} />
-                <Route path="infrastructure/resources" element={<InfraResourcesPage />} />
-                <Route path="infrastructure/findings" element={<InfraFindingsPage />} />
-                <Route path="infrastructure/certificates" element={<InfraCertificatesPage />} />
-                <Route path="infrastructure/patches" element={<InfraPatchesPage />} />
-                <Route path="infrastructure/backups" element={<InfraBackupsPage />} />
+                <Route path="infrastructure/*" element={<InfrastructureArea />} />
                 <Route path="organization" element={<OrganizationPage />} />
                 <Route path="retention" element={<RetentionPage />} />
                 <Route path="licensing" element={<LicensingPage />} />

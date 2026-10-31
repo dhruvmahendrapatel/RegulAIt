@@ -4,7 +4,8 @@
  * five-row preview of each, with what needs attention counted in its heading.
  */
 import { useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
+import { Route, Routes, useParams } from "react-router-dom";
+import EnginesPage from "./EnginesPage";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
@@ -78,5 +79,20 @@ export function ExecutorAttestationsPage() {
         </Card>
       </div>
     </>
+  );
+}
+
+/**
+ * The Engines area: the Engines page (with its placement and attestation previews) at the index, the full placement
+ * and self-test lists on their own nested routes. One lazy chunk mounted at `engines/*` so it adds nothing to the
+ * entry bundle (ADR-0196 U4; the SPA route census follows this module — scripts/ui-spa-routes.mjs).
+ */
+export function EnginesArea() {
+  return (
+    <Routes>
+      <Route index element={<EnginesPage />} />
+      <Route path="placements" element={<PlacementDecisionsPage />} />
+      <Route path="executors/:executorId/attestations" element={<ExecutorAttestationsPage />} />
+    </Routes>
   );
 }

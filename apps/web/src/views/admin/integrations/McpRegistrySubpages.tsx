@@ -2,7 +2,8 @@
  * A federated registry's catalogue on its own page (P3, #453 c6527514889): every entry with the shared list control,
  * the catalogue's search and kind filter, and Import. The registries tab keeps a five-row preview.
  */
-import { useParams } from "react-router-dom";
+import { Route, Routes, useParams } from "react-router-dom";
+import McpServersPage from "./McpServersPage";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
@@ -38,5 +39,19 @@ export function McpRegistryEntriesPage() {
         </QueryGate>
       </div>
     </>
+  );
+}
+
+/**
+ * The MCP servers area: the MCP servers page (servers, tools and the registries tab with its five-row preview) at the
+ * index, a registry's full catalogue on its own nested route. One lazy chunk mounted at `mcp-servers/*` so it adds
+ * nothing to the entry bundle (ADR-0196 U4; the SPA route census follows this module — scripts/ui-spa-routes.mjs).
+ */
+export function McpServersArea() {
+  return (
+    <Routes>
+      <Route index element={<McpServersPage />} />
+      <Route path="registries/:registryId/entries" element={<McpRegistryEntriesPage />} />
+    </Routes>
   );
 }

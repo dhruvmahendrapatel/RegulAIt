@@ -4,7 +4,8 @@
  * lists with the shared list control, the history's filters, Open and Revoke.
  */
 import { useMemo, useState } from "react";
-import { useParams } from "react-router-dom";
+import { Route, Routes, useParams } from "react-router-dom";
+import CostConsolidationPage from "./CostConsolidationPage";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
@@ -183,5 +184,21 @@ export function CostImportLinesPage() {
         )}
       </div>
     </>
+  );
+}
+
+/**
+ * The cross-vendor consolidation area: the consolidation overview (with its five-row import-history preview) at the
+ * index, the full import history and one batch's imported lines on their own nested routes. One lazy chunk mounted at
+ * `cost-consolidation/*` so it adds nothing to the entry bundle (ADR-0196 U4; the SPA route census follows this
+ * module — scripts/ui-spa-routes.mjs).
+ */
+export function CostConsolidationArea() {
+  return (
+    <Routes>
+      <Route index element={<CostConsolidationPage />} />
+      <Route path="imports" element={<CostImportsPage />} />
+      <Route path="imports/:importId" element={<CostImportLinesPage />} />
+    </Routes>
   );
 }
