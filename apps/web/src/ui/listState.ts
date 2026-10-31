@@ -1,5 +1,5 @@
 /**
- * The shared list control's state, without React (ADR-0219): the remembered page size and column choice, which
+ * The shared list control's state, without React (ADR-0226): the remembered page size and column choice, which
  * columns show and in what order, the next sort, the request URLs and the "11–20 of 1,284" wording. DataList.tsx
  * renders it; listState.test.ts pins it.
  *

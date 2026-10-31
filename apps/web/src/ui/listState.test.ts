@@ -1,5 +1,5 @@
 /**
- * ADR-0219 — the list control's state: page-size memory, the column picker's required columns and order, the sort
+ * ADR-0226 — the list control's state: page-size memory, the column picker's required columns and order, the sort
  * a header click asks for, the request URLs and the "where you are" wording.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";

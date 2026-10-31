@@ -1,4 +1,4 @@
-/* The shared list control (DataList.tsx, ADR-0219). Tokens only: spacing from the --s scale, colour from --rg-* and
+/* The shared list control (DataList.tsx, ADR-0226). Tokens only: spacing from the --s scale, colour from --rg-* and
    the kit aliases. */
 
 .list {

@@ -1722,7 +1722,7 @@ const budgetNum = (r: RunRow, key: "measuredSpentUsd" | "capUsd"): number | null
   const v = (r.budget as Record<string, unknown> | null)?.[key];
   return typeof v === "number" ? v : null;
 };
-/** ADR-0219: the runs list under the shared contract (sortable columns, export columns, default sort) */
+/** ADR-0226: the runs list under the shared contract (sortable columns, export columns, default sort) */
 export const RUNS_LIST: ListSpec<RunRow> = {
   id: "runs",
   sorts: {
@@ -3027,7 +3027,7 @@ export function registerOrchestrationRoutes(
   // Newest first, `limit` (default RUNS_LIST_DEFAULT_LIMIT, max
   // RUNS_LIST_MAX_LIMIT); `status` narrows before the cap applies.
   //
-  // ADR-0219: with any of sort/dir/cursor/offset/count it answers the shared
+  // ADR-0226: with any of sort/dir/cursor/offset/count it answers the shared
   // list contract instead (list-contract.ts); with none of them, exactly the
   // response it always gave. The scope below is the one predicate for the
   // list, its count and the Excel export.
