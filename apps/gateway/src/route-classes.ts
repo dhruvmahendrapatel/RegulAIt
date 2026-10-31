@@ -764,6 +764,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/engine-schedules",
   "GET /v1/engine-schedules",
   "PATCH /v1/engine-schedules/:scheduleId",
+  // ADR-0208 G9: soft delete by the schedule's owner or an admin, checked in-handler
+  "DELETE /v1/engine-schedules/:scheduleId",
   "POST /v1/model-artifacts",
   // B5-M: the caller's own uploads (an admin sees all), checked in-handler
   "GET /v1/model-artifacts",

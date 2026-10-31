@@ -667,6 +667,25 @@ export interface ComplianceProfile extends ComplianceProfileCarriedFloors {
   patchCadenceDays: number | null;
 }
 
+/** ADR-0208 (G7): who carries a profile's tag today, by name */
+export interface ComplianceProfileUsage {
+  projects: string[];
+  pendingProjects: string[];
+  teams: string[];
+  resources: string[];
+}
+
+/** ADR-0208 (G7): a profile as GET /v1/compliance/profiles lists it — its active version, lifecycle and reach */
+export interface ComplianceProfileRecord extends ComplianceProfile {
+  id: string;
+  version: number;
+  status: "active" | "retired";
+  retiredAt: string | null;
+  retiredReason: string | null;
+  usage: ComplianceProfileUsage;
+  pendingReview: { approvalId: string; version: number; reviewerUserId: string } | null;
+}
+
 export interface ProjectCompliance {
   classifications: string[];
   pendingClassifications: string[] | null;
@@ -682,13 +701,20 @@ export interface ProjectCompliance {
   enforcement: Record<string, string>;
 }
 
+/** ADR-0208 G8: a retired resource or policy stays readable and is read-only */
+export type InfraLifecycleStatus = "active" | "retired";
+
 export interface InfraResource {
   id: string;
   name: string;
   kind: string;
   provider: string;
   classifications?: string[] | null;
+  status: InfraLifecycleStatus;
+  retiredAt?: string | null;
+  retiredReason?: string | null;
   effectivePolicy?: {
+    policyId?: string | null;
     autoRemediateMaxSeverity?: string | null;
     backupRetentionDaysFloor?: number | null;
     patchCadenceDaysCeiling?: number | null;
@@ -696,13 +722,29 @@ export interface InfraResource {
 }
 
 export interface InfraPolicy {
-  id?: string;
+  id: string;
+  /** null = the fleet policy (every resource's fallback; edited, never retired) */
   resourceId: string | null;
   patchCadenceDays: number | null;
   certRotationDaysBeforeExpiry: number | null;
   backupSchedule: string | null;
   backupRetentionDays: number | null;
   autoRemediateMaxSeverity: string | null;
+  status: InfraLifecycleStatus;
+  retiredAt?: string | null;
+  retiredReason?: string | null;
+}
+
+/** POST /v1/infra/policies/:id/retire — the retired policy and the active fleet policy its resource now follows */
+export interface InfraPolicyRetireResponse {
+  policy: InfraPolicy;
+  fallback: (Omit<InfraPolicy, "id" | "retiredAt" | "retiredReason"> & { policyId: string }) | null;
+}
+
+/** POST /v1/infra/resources/:id/retire — the retired resource and the ids of the policies retired with it */
+export interface InfraResourceRetireResponse {
+  resource: InfraResource;
+  policiesRetired: string[];
 }
 
 export interface InfraFinding {

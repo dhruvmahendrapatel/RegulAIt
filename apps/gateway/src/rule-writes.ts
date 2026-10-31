@@ -423,3 +423,22 @@ async function applyRuleEditLocked<T>(
 
   return { ok: true, row: after, plan, mintedVersion, note, aiBomSignoff };
 }
+
+/**
+ * ADR-0208 (G7): mint the next version of a rule/compliance artifact as a DRAFT, for review. Nothing is activated
+ * and the row is not touched; the version becomes enforced only through `activateVersion` when its reviewer approves
+ * it. It lives here so this module stays the one place that mints versions of a rule artifact (rule-write-guard).
+ */
+export async function proposeRuleVersion(
+  db: DbOrTxDeep,
+  args: {
+    artifactType: ConfigArtifactType;
+    artifactId: string;
+    body: Record<string, unknown>;
+    label: string;
+    authorUserId: string | null;
+    reason?: string | null;
+  },
+) {
+  return newVersion(db, { ...args, activate: false });
+}
