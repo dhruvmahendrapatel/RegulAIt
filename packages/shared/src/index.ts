@@ -358,6 +358,7 @@ export {
   MIN_FORECAST_DAYS,
   MIN_FORECAST_ELAPSED_FRACTION,
   FORECAST_DISCLAIMER,
+  FORECAST_LIMITS,
   ANOMALY_DISCLAIMER,
   spendMonitorPolicySchema,
   scheduledSpendChangeSchema,
