@@ -197,6 +197,7 @@ import { registerGovernanceMonitorRoutes } from "./governance-monitor.js";
 import { registerCredentialInventoryRoutes } from "./credential-inventory.js";
 import { registerEnergyRoutes } from "./energy.js";
 import { registerRegulatoryIntelRoutes } from "./regulatory-intel.js";
+import { registerFrameworkImportRoutes } from "./framework-imports.js";
 import {
   REMEDIATION_PREFIX as GOVERNANCE_REMEDIATION_PREFIX,
   applyRemediationDecision,
@@ -421,6 +422,7 @@ import {
   registerMcpAdmissionRoutes,
   REGISTRATION_ADMISSION_STATE,
 } from "./mcp-admission.js";
+import { registerMcpToolSyncRoutes } from "./mcp-tool-sync.js";
 // ADR-0101 — federated MCP registries. Admin-only through the default gate;
 // a sync writes only the catalogue and an import is an explicit operator act.
 import { privateRangesRelaxation, registerMcpRegistryRoutes } from "./mcp-registry.js";
@@ -569,6 +571,7 @@ import { registerEuAiActRoleRoutes } from "./eu-ai-act-role.js";
 import { registerDecisionRegressionRoutes } from "./decision-regression.js";
 import { registerIncidentRoutes } from "./incidents.js";
 import { registerFeedbackRoutes } from "./feedback.js";
+import { registerTrustPagesRoutes } from "./trust-pages.js";
 import { registerAiLiteracyRoutes } from "./ai-literacy.js";
 import { registerAlertOwnershipRoutes } from "./alert-ownership.js";
 import { builderStepsAwaitingApproval, resumeBuilderAfterApproval } from "./builder-runtime.js";
@@ -5572,6 +5575,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerEnergyRoutes(app, db);
   // ADR-0158 — regulatory intelligence joined to our packs and use cases
   registerRegulatoryIntelRoutes(app, db);
+  // ADR-0215 (P5): vendored framework-content and feed imports, proposed and accepted by an admin
+  registerFrameworkImportRoutes(app, db);
   // ADR-0159 — remediation proposals for monitor alerts
   registerRemediationRoutes(app, db);
   // ADR-0160 — continuous trace evaluation
@@ -5597,6 +5602,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // audited clear. Admin-only through the default gate, like the MCP registry
   // writes it sits beside.
   registerMcpAdmissionRoutes(app, db);
+  // #609 follow-up: an admin's on-demand manifest sync for one server — admin-only through the default gate, rate
+  // limited per server, a settings_relax step-up, and the live path's admission, egress, transport and scan gates
+  registerMcpToolSyncRoutes(app, db);
   // ADR-0101 — configure an upstream MCP registry, pull its catalogue, and
   // import ONE entry as a federated `mcp_servers` row that is `unscanned`,
   // ungranted and subject to the same ADR-0097 admission and ADR-0043 egress
@@ -5806,6 +5814,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerDecisionRegressionRoutes(app, db);
   registerIncidentRoutes(app, db, { dataKey: opts.dataKey });
   registerFeedbackRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0225 (P13 d): the public trust centre, AI system cards and the auditor portal (shipped off)
+  registerTrustPagesRoutes(app, db);
   registerAiLiteracyRoutes(app, db);
   registerAlertOwnershipRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0186 (batch 4, AgentCoordination §4.9). A: passkeys and step-up (self

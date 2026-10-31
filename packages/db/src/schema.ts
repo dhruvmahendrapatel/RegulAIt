@@ -1344,6 +1344,11 @@ export const auditLog = pgTable(
         // control is auto-evidenced and a human statement must not stand in for
         // ledger evidence. Plain text column — no DDL needed.
         "compliance_pack",
+        // ADR-0215: framework content imports and imported regulatory feed
+        // entries — each proposal, acceptance and rejection, and each write
+        // refused because imports are off. Plain text column — no DDL needed.
+        "framework_import",
+        "regulatory_feed_import",
         // ADR-0056: the governance COPILOT. Every question asked of it, with
         // the exact entitlement scope its retrieval was narrowed to; every
         // narration dispatch; every proposal it opened in the Approvals Queue;
@@ -1587,6 +1592,12 @@ export const auditLog = pgTable(
         // ADR-0195 SD2b: a federation signing key (generated, activated, rotated, retired, revoked) and federation
         // turned on or off. Plain text column — no DDL.
         "federation_signing_key",
+        // ADR-0225 (P13 d): a trust-page item (objectId = the publication), the trust centre's profile (objectId null)
+        // and a named external auditor's grant, its links, sessions and every view (objectId = the grant). Plain
+        // text column — no DDL.
+        "trust_publication",
+        "trust_center",
+        "auditor_grant",
       ],
     })
       .notNull()
@@ -4599,6 +4610,10 @@ export const orgSettings = pgTable(
      * choice, never widen entitlement. NULL while enabled = `judged:
      * unavailable` with `judge_required`, never a silent no-annotation run. */
     recommendationJudgeAgentId: uuid("recommendation_judge_agent_id"),
+    /** ADR-0215 (migration 0248): may an admin import vendored framework content as new
+     * draft pack versions, and accept imported regulatory feed entries? false (default) =
+     * the import routes refuse and the feed is the hand-curated list only. */
+    frameworkImportsEnabled: boolean("framework_imports_enabled").notNull().default(false),
 
     // --- ADR-0046 (migration 0058): review-workbench bulk fences ------------
     /** hard cap on items per bulk approve/deny/reassign. Not a UI convenience:
@@ -4729,6 +4744,9 @@ export const orgSettings = pgTable(
      * null (strict) = none named. Deleting it stops automatic filing — there is
      * no fallback to another connection (ADR-0180). */
     alertTicketConnectionId: uuid("alert_ticket_connection_id").references(() => pmConnections.id, { onDelete: "set null" }),
+    /** ADR-0225 (P13 d, migration 0247): the public trust centre and the auditor portal — built, shipped OFF
+     * (ADR-0180). Off, both answer 404 and nothing can be published or granted. */
+    trustPagesEnabled: boolean("trust_pages_enabled").notNull().default(false),
 
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -8199,6 +8217,72 @@ export type CompliancePackRow = typeof compliancePacks.$inferSelect;
 export type CompliancePackControlRow = typeof compliancePackControls.$inferSelect;
 export type CompliancePackAttestationRow = typeof compliancePackAttestations.$inferSelect;
 export type CompliancePackReportRow = typeof compliancePackReports.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0215 (migrations 0248, 0249) — FRAMEWORK CONTENT IMPORTS AND THE IMPORTED FEED
+// ---------------------------------------------------------------------------
+//
+// An import is a PROPOSAL an admin reviews. Accepting a framework import inserts a
+// NEW draft pack version (`compliance_packs`); it never updates a pack row. The
+// accepted proposal's `snapshot` is the baseline the next import compares
+// against, which is how a control an admin edited is told apart from one the
+// last import wrote. Accepting a feed import adds its entries to the ADR-0158
+// feed. One pending and one accepted row per source.
+
+export const frameworkImportProposals = pgTable(
+  "framework_import_proposals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceId: text("source_id").notNull(),
+    framework: text("framework").notNull(),
+    sourceVersion: text("source_version").notNull(),
+    contentSha256: text("content_sha256").notNull(),
+    /** the vendored snapshot exactly as planned (source + controls) */
+    snapshot: jsonb("snapshot").$type<Record<string, unknown>>().notNull(),
+    /** the pack version the plan was computed against; no FK, a draft may be deleted */
+    basePackId: uuid("base_pack_id"),
+    basePackVersion: integer("base_pack_version"),
+    plan: jsonb("plan").$type<Record<string, unknown>>().notNull(),
+    status: text("status", { enum: ["pending", "accepted", "rejected", "superseded"] }).notNull().default("pending"),
+    /** the edited controls an admin chose to overwrite with the imported text */
+    takeIncoming: jsonb("take_incoming").$type<string[]>().notNull().default([]),
+    resultingPackId: uuid("resulting_pack_id"),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    decidedByUserId: uuid("decided_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("framework_import_proposals_one_pending_uq").on(t.sourceId).where(sql`status = 'pending'`),
+    uniqueIndex("framework_import_proposals_one_accepted_uq").on(t.sourceId).where(sql`status = 'accepted'`),
+    index("framework_import_proposals_source_idx").on(t.sourceId, t.createdAt),
+  ],
+);
+export type FrameworkImportProposalRow = typeof frameworkImportProposals.$inferSelect;
+
+export const regulatoryFeedImports = pgTable(
+  "regulatory_feed_imports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceId: text("source_id").notNull(),
+    sourceVersion: text("source_version").notNull(),
+    contentSha256: text("content_sha256").notNull(),
+    source: jsonb("source").$type<Record<string, unknown>>().notNull(),
+    entries: jsonb("entries").$type<Array<Record<string, unknown>>>().notNull(),
+    diff: jsonb("diff").$type<Record<string, unknown>>().notNull(),
+    status: text("status", { enum: ["pending", "accepted", "rejected", "superseded"] }).notNull().default("pending"),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    decidedByUserId: uuid("decided_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("regulatory_feed_imports_one_pending_uq").on(t.sourceId).where(sql`status = 'pending'`),
+    uniqueIndex("regulatory_feed_imports_one_accepted_uq").on(t.sourceId).where(sql`status = 'accepted'`),
+    index("regulatory_feed_imports_source_idx").on(t.sourceId, t.createdAt),
+  ],
+);
+export type RegulatoryFeedImportRow = typeof regulatoryFeedImports.$inferSelect;
 
 // ---------------------------------------------------------------------------
 // ADR-0056 (migration 0072) — THE AI GOVERNANCE COPILOT
@@ -14598,3 +14682,155 @@ export const demoBeatFallbacks = pgTable(
   (t) => [check("demo_beat_fallbacks_beat_id_check", sql`${t.beatId} ~ '^[a-z][a-z0-9-]{1,63}$'`)],
 );
 export type DemoBeatFallbackRow = typeof demoBeatFallbacks.$inferSelect;
+
+/**
+ * ADR-0225 (P13 d, migration 0247) — WHAT AN ADMIN CHOSE TO PUBLISH. Nothing is published by default: every row starts
+ * as a draft, and only a `published` row is ever read by the public trust centre (audience `public`) or, when a grant
+ * selects it, by a named auditor (either audience). The `content` is a REVIEWED SNAPSHOT an admin edited: the public
+ * pages never read the register, the packs or the ledgers live, so nothing reaches them that was not published.
+ * `public_slug` is the only identifier a public page carries; `source_ref` (where the draft came from) never leaves
+ * the admin API. Written only by `apps/gateway/src/trust-pages.ts` (publish and unpublish need a step-up, audited).
+ */
+export const trustPublications = pgTable(
+  "trust_publications",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kind: text("kind", { enum: ["control", "evidence_summary", "ai_card"] }).notNull(),
+    publicSlug: text("public_slug").notNull(),
+    sourceRef: text("source_ref").notNull(),
+    title: text("title").notNull(),
+    content: jsonb("content").$type<Record<string, string>>().notNull(),
+    status: text("status", { enum: ["draft", "published"] }).notNull().default("draft"),
+    audience: text("audience", { enum: ["public", "auditors"] }).notNull().default("public"),
+    version: integer("version").notNull().default(1),
+    publishedAt: timestamp("published_at", { withTimezone: true }),
+    publishedBy: uuid("published_by").references(() => users.id, { onDelete: "set null" }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("trust_publications_public_slug_uq").on(t.publicSlug),
+    check("trust_publications_kind_check", sql`${t.kind} IN ('control', 'evidence_summary', 'ai_card')`),
+    check("trust_publications_status_check", sql`${t.status} IN ('draft', 'published')`),
+    check("trust_publications_audience_check", sql`${t.audience} IN ('public', 'auditors')`),
+    check("trust_publications_slug_check", sql`${t.publicSlug} ~ '^[a-z0-9][a-z0-9-]{2,79}$'`),
+    check("trust_publications_title_check", sql`length(btrim(${t.title})) BETWEEN 1 AND 200`),
+    check("trust_publications_source_check", sql`length(${t.sourceRef}) BETWEEN 1 AND 300`),
+    check("trust_publications_content_check", sql`jsonb_typeof(${t.content}) = 'object'`),
+    check("trust_publications_version_check", sql`${t.version} >= 1`),
+    check("trust_publications_published_check", sql`(${t.status} = 'published') = (${t.publishedAt} IS NOT NULL)`),
+    index("trust_publications_status_idx").on(t.status, t.audience),
+  ],
+);
+export type TrustPublicationRow = typeof trustPublications.$inferSelect;
+
+/** ADR-0225: the trust centre's heading — one row, shown only while trust pages are on. */
+export const trustCenterProfile = pgTable(
+  "trust_center_profile",
+  {
+    id: text("id").primaryKey().default("singleton"),
+    displayName: text("display_name").notNull(),
+    intro: text("intro").notNull().default(""),
+    contactEmail: text("contact_email"),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("trust_center_profile_singleton", sql`${t.id} = 'singleton'`),
+    check("trust_center_profile_name_check", sql`length(btrim(${t.displayName})) BETWEEN 1 AND 120`),
+    check("trust_center_profile_intro_check", sql`length(${t.intro}) <= 2000`),
+  ],
+);
+export type TrustCenterProfileRow = typeof trustCenterProfile.$inferSelect;
+
+/**
+ * ADR-0225 — A NAMED EXTERNAL AUDITOR'S READ-ONLY ACCESS: time-boxed (at most 90 days), scoped to the publications in
+ * `auditor_grant_items` (default-deny: a grant with no item shows nothing), revocable. Access is through a short-lived,
+ * single-use link (`auditor_links`, only its SHA-256 stored) that opens a short browser session (`auditor_sessions`,
+ * HttpOnly cookie, only its SHA-256 stored). Every view is audited under objectType `auditor_grant`.
+ */
+export const auditorGrants = pgTable(
+  "auditor_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    auditorName: text("auditor_name").notNull(),
+    auditorEmail: text("auditor_email").notNull(),
+    auditorOrganisation: text("auditor_organisation"),
+    startsAt: timestamp("starts_at", { withTimezone: true }).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("auditor_grants_name_check", sql`length(btrim(${t.auditorName})) BETWEEN 1 AND 120`),
+    check("auditor_grants_email_check", sql`length(${t.auditorEmail}) BETWEEN 3 AND 254 AND position('@' in ${t.auditorEmail}) > 1`),
+    check("auditor_grants_window_check", sql`${t.expiresAt} > ${t.startsAt} AND ${t.expiresAt} - ${t.startsAt} <= interval '90 days'`),
+  ],
+);
+export type AuditorGrantRow = typeof auditorGrants.$inferSelect;
+
+/** ADR-0225: what one grant may see — a publication not listed here is never shown to that auditor. */
+export const auditorGrantItems = pgTable(
+  "auditor_grant_items",
+  {
+    grantId: uuid("grant_id")
+      .notNull()
+      .references(() => auditorGrants.id, { onDelete: "cascade" }),
+    publicationId: uuid("publication_id")
+      .notNull()
+      .references(() => trustPublications.id, { onDelete: "cascade" }),
+  },
+  (t) => [primaryKey({ columns: [t.grantId, t.publicationId] }), index("auditor_grant_items_publication_idx").on(t.publicationId)],
+);
+
+/** ADR-0225: a single-use sign-in link for one grant (at most 72 hours to redeem; only its SHA-256 stored). */
+export const auditorLinks = pgTable(
+  "auditor_links",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    grantId: uuid("grant_id")
+      .notNull()
+      .references(() => auditorGrants.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("auditor_links_token_hash_uq").on(t.tokenHash),
+    check("auditor_links_token_hash_check", sql`${t.tokenHash} ~ '^[0-9a-f]{64}$'`),
+    check("auditor_links_ttl_check", sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} - ${t.createdAt} <= interval '72 hours'`),
+    index("auditor_links_grant_idx").on(t.grantId),
+  ],
+);
+export type AuditorLinkRow = typeof auditorLinks.$inferSelect;
+
+/** ADR-0225: an auditor's browser session, opened by redeeming a link (the gateway issues 60 minutes, never past the grant;
+ * the CHECK below is an outer limit of 8 hours). Only its SHA-256 is stored. */
+export const auditorSessions = pgTable(
+  "auditor_sessions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    grantId: uuid("grant_id")
+      .notNull()
+      .references(() => auditorGrants.id, { onDelete: "cascade" }),
+    linkId: uuid("link_id")
+      .notNull()
+      .references(() => auditorLinks.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("auditor_sessions_token_hash_uq").on(t.tokenHash),
+    check("auditor_sessions_token_hash_check", sql`${t.tokenHash} ~ '^[0-9a-f]{64}$'`),
+    check("auditor_sessions_ttl_check", sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} - ${t.createdAt} <= interval '8 hours'`),
+    index("auditor_sessions_grant_idx").on(t.grantId),
+  ],
+);
+export type AuditorSessionRow = typeof auditorSessions.$inferSelect;

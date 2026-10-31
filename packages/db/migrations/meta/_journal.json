@@ -1485,6 +1485,27 @@
       "when": 1785172000000,
       "tag": "0237_mrm_auto_retest",
       "breakpoints": true
+    },
+    {
+      "idx": 247,
+      "version": "7",
+      "when": 1785182000000,
+      "tag": "0247_trust_pages",
+      "breakpoints": true
+    },
+    {
+      "idx": 248,
+      "version": "7",
+      "when": 1785183000000,
+      "tag": "0248_framework_import_proposals",
+      "breakpoints": true
+    },
+    {
+      "idx": 249,
+      "version": "7",
+      "when": 1785184000000,
+      "tag": "0249_regulatory_feed_imports",
+      "breakpoints": true
     }
   ]
 }
