@@ -29,7 +29,7 @@ export interface ApiKey {
   expiresAt?: string | null;
   /** ADR-0098: derived by the gateway — active, expiring, expired or revoked */
   state?: "active" | "expiring" | "expired" | "revoked";
-  /** ADR-0219: the holder's email, joined by the list contract */
+  /** ADR-0226: the holder's email, joined by the list contract */
   userEmail?: string | null;
 }
 
@@ -193,7 +193,7 @@ export interface Role {
 }
 
 export interface RoleAssignment {
-  /** ADR-0219: the assignment's own id (a holder can be listed twice: directly and through a group) */
+  /** ADR-0226: the assignment's own id (a holder can be listed twice: directly and through a group) */
   id?: string;
   origin?: "direct" | "group";
   userId: string;
@@ -222,7 +222,7 @@ export interface Team {
   defaultClassifications?: string[] | null;
   members?: Array<{ userId: string; name: string }>;
   createdAt?: string;
-  /** ADR-0219: the member count, from the list contract */
+  /** ADR-0226: the member count, from the list contract */
   memberCount?: number;
 }
 
@@ -238,7 +238,7 @@ export interface McpRevocation {
   id: string;
   userId: string;
   serverId: string;
-  /** ADR-0219: joined by the list contract */
+  /** ADR-0226: joined by the list contract */
   serverName?: string | null;
   toolName: string | null;
   scope?: RevocationScope;
@@ -680,6 +680,25 @@ export interface ComplianceProfile extends ComplianceProfileCarriedFloors {
   patchCadenceDays: number | null;
 }
 
+/** ADR-0208 (G7): who carries a profile's tag today, by name */
+export interface ComplianceProfileUsage {
+  projects: string[];
+  pendingProjects: string[];
+  teams: string[];
+  resources: string[];
+}
+
+/** ADR-0208 (G7): a profile as GET /v1/compliance/profiles lists it — its active version, lifecycle and reach */
+export interface ComplianceProfileRecord extends ComplianceProfile {
+  id: string;
+  version: number;
+  status: "active" | "retired";
+  retiredAt: string | null;
+  retiredReason: string | null;
+  usage: ComplianceProfileUsage;
+  pendingReview: { approvalId: string; version: number; reviewerUserId: string } | null;
+}
+
 export interface ProjectCompliance {
   classifications: string[];
   pendingClassifications: string[] | null;
@@ -695,13 +714,20 @@ export interface ProjectCompliance {
   enforcement: Record<string, string>;
 }
 
+/** ADR-0208 G8: a retired resource or policy stays readable and is read-only */
+export type InfraLifecycleStatus = "active" | "retired";
+
 export interface InfraResource {
   id: string;
   name: string;
   kind: string;
   provider: string;
   classifications?: string[] | null;
+  status: InfraLifecycleStatus;
+  retiredAt?: string | null;
+  retiredReason?: string | null;
   effectivePolicy?: {
+    policyId?: string | null;
     autoRemediateMaxSeverity?: string | null;
     backupRetentionDaysFloor?: number | null;
     patchCadenceDaysCeiling?: number | null;
@@ -709,13 +735,29 @@ export interface InfraResource {
 }
 
 export interface InfraPolicy {
-  id?: string;
+  id: string;
+  /** null = the fleet policy (every resource's fallback; edited, never retired) */
   resourceId: string | null;
   patchCadenceDays: number | null;
   certRotationDaysBeforeExpiry: number | null;
   backupSchedule: string | null;
   backupRetentionDays: number | null;
   autoRemediateMaxSeverity: string | null;
+  status: InfraLifecycleStatus;
+  retiredAt?: string | null;
+  retiredReason?: string | null;
+}
+
+/** POST /v1/infra/policies/:id/retire — the retired policy and the active fleet policy its resource now follows */
+export interface InfraPolicyRetireResponse {
+  policy: InfraPolicy;
+  fallback: (Omit<InfraPolicy, "id" | "retiredAt" | "retiredReason"> & { policyId: string }) | null;
+}
+
+/** POST /v1/infra/resources/:id/retire — the retired resource and the ids of the policies retired with it */
+export interface InfraResourceRetireResponse {
+  resource: InfraResource;
+  policiesRetired: string[];
 }
 
 export interface InfraFinding {

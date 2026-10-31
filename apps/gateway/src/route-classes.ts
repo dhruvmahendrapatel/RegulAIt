@@ -256,7 +256,7 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/virtual-keys",
   "GET /v1/virtual-keys",
   "GET /v1/virtual-keys/:keyId/usage",
-  // ADR-0219: the Excel exports of the two lists above, under the same visibility (own keys; 404 for another's)
+  // ADR-0226: the Excel exports of the two lists above, under the same visibility (own keys; 404 for another's)
   "GET /v1/virtual-keys/export.xlsx",
   "GET /v1/virtual-keys/:keyId/usage/export.xlsx",
   "PATCH /v1/virtual-keys/:keyId",
@@ -601,7 +601,7 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/me",
   "GET /v1/model-providers/status",
   "GET /v1/runs",
-  // ADR-0219: the Excel export of the same list, under the same scope (a non-admin gets only their own runs)
+  // ADR-0226: the Excel export of the same list, under the same scope (a non-admin gets only their own runs)
   "GET /v1/runs/export.xlsx",
   "GET /v1/workflows/instances",
   "GET /v1/projects",
@@ -692,7 +692,7 @@ export const NON_ADMIN_ROUTES = new Set([
   // aside (not-required, toll), containment (it halts an agent) and the signed
   // export.
   "GET /v1/incidents",
-  // ADR-0219: the register's Excel export, filtered to what the caller may see like the list
+  // ADR-0226: the register's Excel export, filtered to what the caller may see like the list
   "GET /v1/incidents/export.xlsx",
   "POST /v1/incidents",
   "GET /v1/incidents/:incidentId",
@@ -769,6 +769,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/engine-schedules",
   "GET /v1/engine-schedules",
   "PATCH /v1/engine-schedules/:scheduleId",
+  // ADR-0208 G9: soft delete by the schedule's owner or an admin, checked in-handler
+  "DELETE /v1/engine-schedules/:scheduleId",
   "POST /v1/model-artifacts",
   // B5-M: the caller's own uploads (an admin sees all), checked in-handler
   "GET /v1/model-artifacts",

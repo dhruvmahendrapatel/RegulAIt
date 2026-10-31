@@ -81,6 +81,12 @@ import { isApprovalTeam } from "./approval-pool.js";
 import { approvalRuleStepUp, requireStepUp } from "./step-up.js";
 import { wantsListContract } from "./list-contract.js";
 import { TEAMS_LIST, answerListExport, answerListPage, teamsFilterQuery, teamsReader, teamsWhere } from "./identity-lists.js";
+import {
+  carriersForTags,
+  profileVersionFacts,
+  retiredTagRefusal,
+  retiredTagsAmong,
+} from "./compliance-profile-facts.js";
 
 type ProjectRow = typeof projects.$inferSelect;
 
@@ -625,10 +631,14 @@ export async function reapplyReclassificationToInFlight(
   projectId: string,
   previousTags: string[],
   deciderUserId: string,
+  /** ADR-0208: the templates the project required before a PROFILE change (its tags did not move, so they cannot say) */
+  oldRequiredOverride?: string[],
 ): Promise<{ applied: number; manual: number }> {
   const [newRequired, oldRequired] = await Promise.all([
     requiredTemplateIdsFor(db, projectId),
-    profilesForTags(db, previousTags).then((p) => effectiveCompliancePolicy(p).requiredTemplateIds),
+    oldRequiredOverride
+      ? Promise.resolve(oldRequiredOverride)
+      : profilesForTags(db, previousTags).then((p) => effectiveCompliancePolicy(p).requiredTemplateIds),
   ]);
   const relaxed = oldRequired.filter((id) => !newRequired.includes(id));
   const instances = (
@@ -1414,6 +1424,9 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
 
   app.post("/v1/teams", async (req, reply) => {
     const body = createTeamSchema.parse(req.body);
+    // ADR-0208: a retired profile takes no new carrier
+    const retired = await retiredTagsAmong(db, body.defaultClassifications ?? []);
+    if (retired.length > 0) return reply.status(409).send(retiredTagRefusal(retired));
     const [row] = await db
       .insert(teams)
       .values({ name: body.name, defaultClassifications: body.defaultClassifications ?? null })
@@ -1424,7 +1437,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
   // Purely additive enrichment (same discipline as the approvals list): each
   // team carries its members with names, so the /admin Teams table can show
   // who is on a team without a second endpoint or the raw user-id table.
-  // ADR-0219: with any of sort/dir/cursor/offset/count, the shared list contract (a name search, a member count
+  // ADR-0226: with any of sort/dir/cursor/offset/count, the shared list contract (a name search, a member count
   // sort, and each team's members on the page); with none of them, exactly the response below.
   app.get("/v1/teams/export.xlsx", async (req, reply) =>
     answerListExport(db, req, reply, TEAMS_LIST, teamsReader(db), teamsFilterQuery, teamsWhere),
@@ -2165,15 +2178,23 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     if (created) return reply.status(201).send(created);
 
     const [existing] = await db
-      .select({ id: complianceProfiles.id })
+      .select({ id: complianceProfiles.id, status: complianceProfiles.status })
       .from(complianceProfiles)
       .where(eq(complianceProfiles.tag, body.tag));
     if (!existing) return reply.status(409).send({ error: "compliance_profile_write_conflict" });
+    // ADR-0208: a retired profile is read-only; re-posting its tag never revives it
+    if (existing.status === "retired") {
+      return reply.status(409).send({ error: "compliance_profile_retired", detail: `profile '${body.tag}' is retired and read-only` });
+    }
 
-    // Every versioned field is passed, including the explicit nulls — this
-    // route's semantics have always been TOTAL REPLACE, and expressing that as
-    // a version keeps it visible and rollback-able instead of changing it.
-    const { tag: _tag, ...versioned } = values;
+    // ADR-0208 (#602's server half): an update writes only the fields the body
+    // names. An OMITTED field keeps its stored value, so a caller that does not
+    // know a floor (an older form, a script) can never clear it; an explicit
+    // null still removes it, and that loosening needs the step-up below.
+    const { tag: _tag, ...allVersioned } = values;
+    const versioned = Object.fromEntries(
+      Object.entries(allVersioned).filter(([k]) => Object.prototype.hasOwnProperty.call(body, k)),
+    );
     const res = await applyRuleEdit<ComplianceProfileRow>(db, {
       // ADR-0186 decision 29 (finding 52): an edit that loosens what the framework forces
       // (rule-loosening.ts) needs the settings_relax step-up
@@ -2192,9 +2213,22 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     return reply.status(201).send({ ...res.row, versionMinted: res.mintedVersion, note: res.note });
   });
 
-  app.get("/v1/compliance/profiles", async () => ({
-    profiles: await db.select().from(complianceProfiles),
-  }));
+  // ADR-0208: each profile with its active version, its status, what carries its tag (by name) and a pending review
+  app.get("/v1/compliance/profiles", async () => {
+    const rows = await db.select().from(complianceProfiles).orderBy(complianceProfiles.tag);
+    const [carriers, facts] = await Promise.all([
+      carriersForTags(db, rows.map((r) => r.tag)),
+      profileVersionFacts(db, rows.map((r) => r.id)),
+    ]);
+    return {
+      profiles: rows.map((r) => ({
+        ...r,
+        version: facts.get(r.id)?.version ?? 1,
+        pendingReview: facts.get(r.id)?.pendingReview ?? null,
+        usage: carriers.get(r.tag)!,
+      })),
+    };
+  });
 
   // §8.4 audit-log retention: audit_log has NO projectId column, so retention
   // is a single GLOBAL floor = the MAX auditRetentionDays across ALL compliance
@@ -2311,6 +2345,9 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
     if (!project) return reply.status(404).send({ error: "unknown_project" });
     const current = (project.classifications ?? []) as string[];
+    // ADR-0208: a retired profile takes no new carrier (a tag the project already holds may stay while it is moved off)
+    const retiredNew = await retiredTagsAmong(db, body.classifications.filter((t) => !current.includes(t)));
+    if (retiredNew.length > 0) return reply.status(409).send(retiredTagRefusal(retiredNew));
 
     if (current.length === 0) {
       await db

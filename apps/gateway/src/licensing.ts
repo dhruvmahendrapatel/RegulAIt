@@ -742,7 +742,7 @@ export function registerLicensingRoutes(app: FastifyInstance, db: Db): void {
     };
   });
 
-  // ADR-0219: with any of sort/dir/cursor/offset/count, the shared list contract (every verification, not the
+  // ADR-0226: with any of sort/dir/cursor/offset/count, the shared list contract (every verification, not the
   // latest 100; an `ok` filter); with none of them, exactly the response below.
   app.get("/v1/licenses/verifications/export.xlsx", async (req, reply) =>
     answerListExport(db, req, reply, VERIFICATIONS_LIST, verificationsReader(db), verificationsFilterQuery, verificationsWhere),

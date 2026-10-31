@@ -155,7 +155,7 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * Registered agents/models. Bounded: `limit` (default 1000, max 5000). With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0219), with `q`, `id` and `enabled` filters and an honest total.
+ * Registered agents/models. Bounded: `limit` (default 1000, max 5000). With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226), with `q`, `id` and `enabled` filters and an honest total.
  * @stability public-stable — auth: admin
    */
   getV1Agents<T = unknown>(options?: RequestOptions): Promise<T> {
@@ -319,7 +319,7 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * List API keys (metadata only — never the token). With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0219), with `userId` and `state` filters.
+ * List API keys (metadata only — never the token). With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226), with `userId` and `state` filters.
  * @stability public-stable — auth: admin
    */
   getV1Keys<T = unknown>(options?: RequestOptions): Promise<T> {
@@ -465,7 +465,7 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * The users currently holding a role. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0219).
+ * The users currently holding a role. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226).
  * @stability public-stable — auth: admin
    */
   getV1RolesByRoleIdAssignments<T = unknown>(roleId: string, options?: RequestOptions): Promise<T> {
@@ -481,7 +481,7 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * Orchestration runs, newest first. Bounded: `limit` (default 200, max 1000); `status` narrows. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0219).
+ * Orchestration runs, newest first. Bounded: `limit` (default 200, max 1000); `status` narrows. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226).
  * @stability public-beta — auth: user
    */
   getV1Runs<T = unknown>(options?: RequestOptions): Promise<T> {
@@ -547,7 +547,7 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * List users, with sign-in posture flags (never a hash or a secret). Bounded: `limit` (default 1000, max 5000). With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0219), with `q`, `role` and `status` filters.
+ * List users, with sign-in posture flags (never a hash or a secret). Bounded: `limit` (default 1000, max 5000). With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226), with `q`, `role` and `status` filters.
  * @stability public-stable — auth: admin
    */
   getV1Users<T = unknown>(options?: RequestOptions): Promise<T> {
@@ -645,7 +645,7 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * Virtual keys the caller may see (an admin every key, anyone else their own); never a token. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0219).
+ * Virtual keys the caller may see (an admin every key, anyone else their own); never a token. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226).
  * @stability public-beta — auth: user
    */
   getV1VirtualKeys<T = unknown>(options?: RequestOptions): Promise<T> {
@@ -679,7 +679,7 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * A virtual key's spend from the usage ledger. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0219) over the ledger rows that reference the key, newest first.
+ * A virtual key's spend from the usage ledger. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226) over the ledger rows that reference the key, newest first.
  * @stability public-beta — auth: user
    */
   getV1VirtualKeysByKeyIdUsage<T = unknown>(keyId: string, options?: RequestOptions): Promise<T> {

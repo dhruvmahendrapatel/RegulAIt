@@ -874,7 +874,7 @@ const listQuery = z
   .strict();
 
 /**
- * ADR-0219: the inventory under the shared list contract. It is computed in the gateway from several stores (its
+ * ADR-0226: the inventory under the shared list contract. It is computed in the gateway from several stores (its
  * flags are derived in code), so it is sorted and paged in memory: the same params, response and audited export as
  * every other list. Never a secret value: no column is one, as the inventory holds none.
  */
@@ -948,7 +948,7 @@ export function registerCredentialInventoryRoutes(app: FastifyInstance, db: Db):
    * the filtered list, and `page.total` is how many the filter matched.
    */
   app.get("/v1/admin/credentials", async (req, reply) => {
-    // ADR-0219: the shared list contract, with the inventory's summary (counts, types, flag labels) beside the page
+    // ADR-0226: the shared list contract, with the inventory's summary (counts, types, flag labels) beside the page
     if (wantsCredentialContract(req.query)) {
       try {
         const raw = req.query as Record<string, unknown>;

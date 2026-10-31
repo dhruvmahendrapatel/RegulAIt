@@ -99,7 +99,7 @@ export default function LicensingPage() {
     queryKey: ["admin", "license-history"],
     queryFn: () => api.get<{ licenses: LicenseRow[] }>("/v1/licenses"),
   });
-  // ADR-0219: the verification trail is a DataList under this key; a check or an install refreshes it
+  // ADR-0226: the verification trail is a DataList under this key; a check or an install refreshes it
   const qc = useQueryClient();
   const checks = { refetch: () => qc.invalidateQueries({ queryKey: ["admin", "license-verifications"] }) };
 

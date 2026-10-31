@@ -192,7 +192,7 @@ function inventoryPage(alerting: boolean, many: boolean, search: URLSearchParams
       (!flag || (flag === "none" ? (c.flags as string[]).length === 0 : (c.flags as string[]).includes(flag))),
   );
   const { credentials: _all, ...summary } = inv;
-  // ADR-0219: the list control asks with sort/dir/count and reads the shared list contract beside the summary
+  // ADR-0226: the list control asks with sort/dir/count and reads the shared list contract beside the summary
   if (search.get("sort")) {
     return {
       ...summary,

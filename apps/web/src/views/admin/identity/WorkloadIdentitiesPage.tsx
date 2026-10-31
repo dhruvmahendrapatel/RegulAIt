@@ -94,7 +94,7 @@ import { OrgSettingsCard } from "../settings/OrgSettingsCard";
 import { fmtDateTime } from "../../../api/format";
 import { DataList } from "../../../ui/DataList";
 
-/** ADR-0219: an identity row under the list contract, with its stewards' names joined by the gateway */
+/** ADR-0226: an identity row under the list contract, with its stewards' names joined by the gateway */
 type WorkloadIdentityRow = WorkloadIdentityView & { stewardNames?: string | null };
 
 const dateLabel = (value: string | null) => fmtDateTime(value, "Unmeasured");

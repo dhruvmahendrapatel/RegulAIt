@@ -684,7 +684,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
   // Admin: the identity link — the trust artifact
   // =======================================================================
 
-  // ADR-0219: with any of sort/dir/cursor/offset/count, the shared list contract (the workspace name joined,
+  // ADR-0226: with any of sort/dir/cursor/offset/count, the shared list contract (the workspace name joined,
   // a verification filter); with none of them, exactly the response below.
   app.get("/v1/chatops/identity-links/export.xlsx", async (req, reply) =>
     answerListExport(db, req, reply, CHAT_LINKS_LIST, chatLinksReader(db), chatLinksFilterQuery, chatLinksWhere),

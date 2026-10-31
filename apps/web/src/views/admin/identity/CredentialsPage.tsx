@@ -90,7 +90,7 @@ const FLAG_TONE: Record<Flag, Tone> = {
 const ALL = "__all__";
 const day = (iso: string | null) => (iso ? iso.slice(0, 10) : "");
 
-/** ADR-0219: the inventory's columns; the ids and sortable ones match the gateway's CREDENTIALS_LIST */
+/** ADR-0226: the inventory's columns; the ids and sortable ones match the gateway's CREDENTIALS_LIST */
 function credentialColumns(inv: CredentialInventory | null): Array<DataColumn<CredentialRow>> {
   return [
     {

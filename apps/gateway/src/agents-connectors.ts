@@ -3392,7 +3392,7 @@ export function registerAgentConnectorRoutes(
 
   // REL-10: bounded — `limit` (default LIST_DEFAULT_LIMIT, max LIST_MAX_LIMIT)
   //
-  // ADR-0219: with any of sort/dir/cursor/offset/count it answers the shared list contract (a name or model search,
+  // ADR-0226: with any of sort/dir/cursor/offset/count it answers the shared list contract (a name or model search,
   // one agent by id for a deep link, an enabled filter) with an honest total in place of the silent bound; with none
   // of them, exactly the response below.
   app.get("/v1/agents/export.xlsx", async (req, reply) =>
