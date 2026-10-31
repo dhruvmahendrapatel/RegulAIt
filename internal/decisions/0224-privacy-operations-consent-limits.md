@@ -131,3 +131,8 @@ Further honest limits:
 - `conversation_messages.detail` (jsonb) is neither searched nor erased.
 - Training-corpus ingest (`regulait-llm.ts`) sends scanned corpora to trainers without the processing limit, like the
   connector and MCP paths.
+6. **Entry bundle (2026-10-31).** After main was merged, the entry chunk was 44 B over its 138.5 kB ceiling. The two
+   privacy pages now ship in the existing Compliance & infra lazy chunk, not a chunk of their own, and Records of
+   processing lives at `/admin/privacy` (the requests page stays at `/admin/privacy/requests`). Main's own entry is
+   138.36 kB, so this lane fits with about 5 B to spare. The next lane that grows the entry will need the owner's
+   ceiling decision.

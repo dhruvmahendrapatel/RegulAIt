@@ -351,7 +351,7 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
     // processing and data-subject requests are their own job, done by a privacy lead rather than a platform admin.
     group: "Privacy",
     items: [
-      { label: "Records of processing", to: "/admin/privacy/processing" },
+      { label: "Records of processing", to: "/admin/privacy" },
       { label: "Data subject requests", to: "/admin/privacy/requests" },
     ],
   },
@@ -509,7 +509,7 @@ export const SUITES: Suite[] = [
   {
     id: "compliance-infra",
     name: "Compliance & infra",
-    purpose: "Compliance profiles and packs, privacy operations, and this installation's own infrastructure.",
+    purpose: "Compliance profiles and packs, and this installation's own infrastructure.",
     admin: true,
     sections: sectionsOf("Compliance & infra", "Privacy"),
   },
