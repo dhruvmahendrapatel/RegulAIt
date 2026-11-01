@@ -5428,6 +5428,13 @@ point both agents at it. The demo freeze binds every agent. **Amended the same d
 only use codex", so Gemini is not used, Codex also takes the markdown audits, and `GEMINI.md` is removed (ADR-0227
 addendum).
 
+**ADR-0228 (owner, 2026-11-01): the demo host moves to one hardened EC2 instance.** The owner asked to deploy on AWS so
+"nothing depends on my laptop" and chose "EC2 now, Fargate after". This amends ADR-0203 decision 1. The host runs in a
+new member account of the company Organization (`infra/environments/demo-host/{account,baseline,host}`), behind the
+same Cloudflare Tunnel and hostname, with the security baseline, no SSH and no inbound rule, KMS-encrypted volumes and
+nightly encrypted backups. Infra-only freeze exception; demo environment, not production. Not applied: the owner runs
+every plan and apply (DEMO_RUNBOOK.md §8). Fargate, RDS, WAF and HA come after the demo.
+
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
 (b) standing policy for future scaffolds recorded (ADR-0006, no implementation yet — nothing to
