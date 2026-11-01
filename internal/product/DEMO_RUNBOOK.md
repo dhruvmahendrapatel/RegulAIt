@@ -1641,8 +1641,8 @@ aws organizations list-aws-service-access-for-organization --profile <profile> `
 ```
 
 **e. The operator: a least-privilege permission set, with MFA (security-team addendum).** Run `apply` as this
-permission set, **not** `Admin-BreakGlass` or `AdministratorAccess`. It allows what the three stacks and the
-bootstrap call in the management account, and the one role it may assume in a member account. It also explicitly
+permission set, **not** `Admin-BreakGlass` or `AdministratorAccess`, for every stack except the one-time baseline
+apply (8.4 step 2, break-glass). It allows what the bootstrap, account and host stacks call in the management account, and the one role it may assume in a member account. It also explicitly
 denies anything that would weaken the audit trail or the guardrails, whatever else it allows:
 
 - **IAM writes are limited to `regulait-*` roles and policies.** Managed-policy attachment is limited to
@@ -1650,11 +1650,19 @@ denies anything that would weaken the audit trail or the guardrails, whatever el
   Budgets. Nothing can be created under the name `OrganizationAccountAccessRole` in this account.
 - **`sts:AssumeRole` only reaches `OrganizationAccountAccessRole` in member accounts,** never one in the management
   account.
-- **Explicit denies:**
-  - CloudTrail: stop, delete or update the trail.
-  - GuardDuty, Security Hub and Config: delete or disable them.
-  - KMS: delete or disable a key, or turn its rotation off.
-  - The CloudTrail bucket: delete objects, the bucket or its policy, add a lifecycle rule, or change an ACL.
+- **Detection is read-only for this permission set.** `demo-host/baseline` (CloudTrail, GuardDuty, Security Hub,
+  Config) is applied **once, as break-glass** (8.4 step 2), because it is the audit stack and is stood up once. This
+  permission set can then only read CloudTrail, GuardDuty, Security Hub, Config, Access Analyzer and Inspector in the
+  management account.
+- **Explicit denies,** which hold even if an allow is widened later:
+  - CloudTrail: stop, delete or update the trail, or change its event or insight selectors.
+  - GuardDuty, Security Hub and Config: delete, disable **or mute** them. That covers suppression filters, trusted-IP
+    lists, automation rules, finding updates, organization auto-enable, and replacing the recorder, the delivery
+    channel or the retention.
+  - KMS: delete or disable any key, or turn its rotation off. For the **trail's key** (`alias/regulait-cloudtrail`),
+    also change its policy, create or revoke grants, or move or delete its alias.
+  - The CloudTrail bucket: write, delete or re-ACL objects, or change the bucket's policy, versioning, ownership,
+    public-access block, encryption, replication, notification, lifecycle or lock settings, or delete it.
   - Organizations: detach, delete or update an SCP, or disable a policy type, a service's trusted access or a
     delegated administrator.
 
@@ -1675,9 +1683,15 @@ $Policy = @'
         "organizations:UntagResource", "organizations:CloseAccount", "organizations:MoveAccount",
         "organizations:CreatePolicy", "organizations:AttachPolicy", "organizations:EnablePolicyType",
         "organizations:EnableAWSServiceAccess", "organizations:RegisterDelegatedAdministrator"], "Resource": "*" },
-    { "Sid": "BaselineServices", "Effect": "Allow", "Action": [
-        "cloudtrail:*", "guardduty:*", "securityhub:*", "config:*", "budgets:*", "access-analyzer:*", "inspector2:*",
-        "kms:*", "s3:*", "dynamodb:*", "logs:*", "sns:*"], "Resource": "*" },
+    { "Sid": "StateAccountAndHostServices", "Effect": "Allow", "Action": [
+        "budgets:*", "kms:*", "s3:*", "dynamodb:*", "logs:*", "sns:*"], "Resource": "*" },
+    { "Sid": "DetectionReadOnly", "Effect": "Allow", "Action": [
+        "cloudtrail:Describe*", "cloudtrail:Get*", "cloudtrail:List*", "cloudtrail:LookupEvents",
+        "guardduty:Get*", "guardduty:List*", "guardduty:Describe*",
+        "securityhub:Get*", "securityhub:List*", "securityhub:Describe*",
+        "config:Describe*", "config:Get*", "config:List*", "config:Select*",
+        "access-analyzer:Get*", "access-analyzer:List*", "inspector2:BatchGet*", "inspector2:Get*", "inspector2:List*"],
+      "Resource": "*" },
     { "Sid": "IamRead", "Effect": "Allow", "Action": ["iam:Get*", "iam:List*"], "Resource": "*" },
     { "Sid": "IamWriteOnlyRegulaitRolesAndPolicies", "Effect": "Allow", "Action": [
         "iam:CreateRole", "iam:DeleteRole", "iam:TagRole", "iam:UntagRole", "iam:UpdateAssumeRolePolicy",
@@ -1708,19 +1722,34 @@ $Policy = @'
       "Resource": "arn:aws:iam::MGMT_ACCOUNT_ID:role/OrganizationAccountAccessRole" },
     { "Sid": "DenyWeakeningTheTrail", "Effect": "Deny", "Action": [
         "cloudtrail:StopLogging", "cloudtrail:DeleteTrail", "cloudtrail:UpdateTrail",
-        "cloudtrail:PutEventSelectors", "cloudtrail:RemoveTags"], "Resource": "*" },
-    { "Sid": "DenyDisablingDetection", "Effect": "Deny", "Action": [
+        "cloudtrail:PutEventSelectors", "cloudtrail:PutInsightSelectors", "cloudtrail:RemoveTags"], "Resource": "*" },
+    { "Sid": "DenyDisablingOrMutingDetection", "Effect": "Deny", "Action": [
         "guardduty:DeleteDetector", "guardduty:UpdateDetector", "guardduty:DisassociateMembers",
         "guardduty:DeleteMembers", "guardduty:StopMonitoringMembers", "guardduty:DisableOrganizationAdminAccount",
+        "guardduty:CreateFilter", "guardduty:UpdateFilter", "guardduty:CreateIPSet", "guardduty:UpdateIPSet",
+        "guardduty:UpdateOrganizationConfiguration", "guardduty:UpdateMalwareScanSettings",
         "securityhub:DisableSecurityHub", "securityhub:BatchDisableStandards", "securityhub:DisassociateMembers",
         "securityhub:DeleteMembers", "securityhub:DisableOrganizationAdminAccount",
+        "securityhub:CreateAutomationRule", "securityhub:BatchUpdateAutomationRules", "securityhub:BatchUpdateFindings",
+        "securityhub:UpdateOrganizationConfiguration", "securityhub:UpdateStandardsControl",
         "config:StopConfigurationRecorder", "config:DeleteConfigurationRecorder", "config:DeleteDeliveryChannel",
-        "config:DeleteConfigurationAggregator"], "Resource": "*" },
+        "config:DeleteConfigurationAggregator", "config:PutConfigurationRecorder", "config:PutDeliveryChannel",
+        "config:PutRetentionConfiguration", "config:DeleteRetentionConfiguration"], "Resource": "*" },
     { "Sid": "DenyDestroyingKeys", "Effect": "Deny", "Action": [
         "kms:ScheduleKeyDeletion", "kms:DisableKey", "kms:DisableKeyRotation"], "Resource": "*" },
+    { "Sid": "DenyChangingTheTrailKey", "Effect": "Deny", "Action": [
+        "kms:PutKeyPolicy", "kms:CreateGrant", "kms:RevokeGrant", "kms:RetireGrant", "kms:UpdateAlias",
+        "kms:DeleteAlias", "kms:ScheduleKeyDeletion", "kms:DisableKey", "kms:DisableKeyRotation",
+        "kms:UpdatePrimaryRegion", "kms:ReplicateKey"], "Resource": "*",
+      "Condition": { "ForAnyValue:StringEquals": { "kms:ResourceAliases": "alias/regulait-cloudtrail" } } },
+    { "Sid": "DenyMovingTheTrailAlias", "Effect": "Deny", "Action": ["kms:UpdateAlias", "kms:DeleteAlias", "kms:CreateAlias"],
+      "Resource": "arn:aws:kms:*:MGMT_ACCOUNT_ID:alias/regulait-cloudtrail" },
     { "Sid": "DenyTouchingTrailLogs", "Effect": "Deny", "Action": [
-        "s3:DeleteObject", "s3:DeleteObjectVersion", "s3:DeleteBucket", "s3:DeleteBucketPolicy",
-        "s3:PutLifecycleConfiguration", "s3:PutObjectAcl", "s3:PutBucketAcl"],
+        "s3:DeleteObject", "s3:DeleteObjectVersion", "s3:PutObject", "s3:PutObjectAcl", "s3:PutObjectRetention",
+        "s3:PutObjectLegalHold", "s3:DeleteBucket", "s3:PutBucketPolicy", "s3:DeleteBucketPolicy",
+        "s3:PutLifecycleConfiguration", "s3:PutBucketAcl", "s3:PutBucketVersioning", "s3:PutBucketOwnershipControls",
+        "s3:PutBucketPublicAccessBlock", "s3:DeleteBucketPublicAccessBlock", "s3:PutEncryptionConfiguration",
+        "s3:PutReplicationConfiguration", "s3:PutBucketObjectLockConfiguration", "s3:PutBucketNotification"],
       "Resource": ["arn:aws:s3:::regulait-cloudtrail-logs-*", "arn:aws:s3:::regulait-cloudtrail-logs-*/*"] },
     { "Sid": "DenyRemovingGuardrails", "Effect": "Deny", "Action": [
         "organizations:DetachPolicy", "organizations:DeletePolicy", "organizations:UpdatePolicy",
@@ -1731,12 +1760,35 @@ $Policy = @'
 '@
 $Policy = $Policy.Replace('MGMT_ACCOUNT_ID', $Mgmt)
 $PolicyFile = New-TemporaryFile; [IO.File]::WriteAllText($PolicyFile.FullName, $Policy)
-# Proof, before assigning it: the escalation paths are denied (IAM's policy simulator; it changes nothing).
+# Proof, before assigning it (IAM's policy simulator; it changes nothing). The simulator only knows the context keys it
+# is given, so each call names the account and alias the real request would carry.
+# 1. escalation into the management account
 aws iam simulate-custom-policy --profile <profile> --policy-input-list "file://$($PolicyFile.FullName)" `
   --action-names iam:CreateRole iam:AttachRolePolicy sts:AssumeRole cloudtrail:StopLogging organizations:DetachPolicy kms:ScheduleKeyDeletion `
   --resource-arns "arn:aws:iam::$($Mgmt):role/OrganizationAccountAccessRole" `
+  --context-entries "ContextKeyName=aws:ResourceAccount,ContextKeyValues=$Mgmt,ContextKeyType=string" `
   --query 'EvaluationResults[].[EvalActionName,EvalDecision]' --output text
 # Success: every line ends in implicitDeny or explicitDeny (none says allowed)
+# 2. erasing or silencing the trail's evidence
+aws iam simulate-custom-policy --profile <profile> --policy-input-list "file://$($PolicyFile.FullName)" `
+  --action-names s3:PutBucketPolicy s3:PutBucketVersioning s3:PutLifecycleConfiguration s3:DeleteBucket `
+  --resource-arns "arn:aws:s3:::regulait-cloudtrail-logs-$Mgmt" `
+  --query 'EvaluationResults[].[EvalActionName,EvalDecision]' --output text
+aws iam simulate-custom-policy --profile <profile> --policy-input-list "file://$($PolicyFile.FullName)" `
+  --action-names kms:PutKeyPolicy kms:RevokeGrant kms:ScheduleKeyDeletion kms:DisableKey `
+  --resource-arns "arn:aws:kms:<region>:$($Mgmt):key/00000000-0000-0000-0000-000000000000" `
+  --context-entries "ContextKeyName=kms:ResourceAliases,ContextKeyValues=alias/regulait-cloudtrail,ContextKeyType=stringList" `
+  --query 'EvaluationResults[].[EvalActionName,EvalDecision]' --output text
+aws iam simulate-custom-policy --profile <profile> --policy-input-list "file://$($PolicyFile.FullName)" `
+  --action-names guardduty:CreateFilter securityhub:CreateAutomationRule config:PutConfigurationRecorder cloudtrail:PutEventSelectors `
+  --query 'EvaluationResults[].[EvalActionName,EvalDecision]' --output text
+# Success: every line of the three calls ends in explicitDeny
+# 3. the one thing it should be able to assume: the org role in a MEMBER account
+aws iam simulate-custom-policy --profile <profile> --policy-input-list "file://$($PolicyFile.FullName)" `
+  --action-names sts:AssumeRole --resource-arns "arn:aws:iam::<host account id or any member id>:role/OrganizationAccountAccessRole" `
+  --context-entries "ContextKeyName=aws:ResourceAccount,ContextKeyValues=<that member id>,ContextKeyType=string" `
+  --query 'EvaluationResults[].[EvalActionName,EvalDecision]' --output text
+# Success: sts:AssumeRole  allowed
 $Ic = aws sso-admin list-instances --profile <profile> --query 'Instances[0].InstanceArn' --output text
 $Dep = aws sso-admin create-permission-set --profile <profile> --instance-arn $Ic --name RegulAItDemoDeployer `
   --session-duration PT4H --description 'ADR-0228 demo host deployer' --query PermissionSet.PermissionSetArn --output text
@@ -1813,12 +1865,17 @@ terraform apply tfplan
 $HostAccount = terraform output -raw host_account_id   # put it into ../baseline and ../host terraform.tfvars
 Set-Location ../../../..
 
-# 2. the security baseline (15 to 30 minutes; Config and Security Hub are slow)
+# 2. the security baseline (15 to 30 minutes; Config and Security Hub are slow). BREAK-GLASS, ONCE: this is the audit
+#    stack, and RegulAItDemoDeployer may only read CloudTrail, GuardDuty, Security Hub and Config (8.2 e). Apply it with
+#    the admin Identity Center profile of 8.2 b/c: in baseline/terraform.tfvars set
+#    management_sso_profile = "<break-glass profile>". Note in the session record that break-glass was used, and why.
 Set-Location infra/environments/demo-host/baseline
-terraform init -backend-config=backend.hcl
+aws sso login --profile <break-glass profile>
+terraform init -backend-config=backend.hcl -backend-config="profile=<break-glass profile>"
 terraform plan -out=tfplan      # Success: CloudTrail, GuardDuty, Security Hub, Config, SCPs, budget; "0 to destroy"
 terraform apply tfplan
 Set-Location ../../../..
+# Back to the deployer for everything else. Any later baseline change or destroy is break-glass again.
 
 # 3. the host (about 5 minutes, then about 5 minutes of boot)
 Set-Location infra/environments/demo-host/host
@@ -1863,9 +1920,11 @@ show `No changes`.
 **A helper for host commands (paste once per PowerShell window).** It sends commands to the host through
 `aws ssm send-command`, waits, and prints the status and output. It uses no SSH and no inbound port. Run Command is
 the second operator channel next to Session Manager, and Session Manager's preferences do not cover it, so every
-`send-command` in this section passes `--cloud-watch-output-config`: the commands' output lands in the KMS-encrypted
-log group `/regulait/demo-host/run-command`, and CloudTrail records each `SendCommand` call and who made it. Never
-call `send-command` without it.
+`send-command` this runbook issues passes `--cloud-watch-output-config`: the helper below, the patch install, and
+`infra/scripts/install-pg-backup.sh` (8.6, through `REGULAIT_RUN_COMMAND_LOG_GROUP`). Their output lands in the
+KMS-encrypted log group `/regulait/demo-host/run-command`, and CloudTrail records each `SendCommand` call and who made
+it. AWS has no account default or IAM condition that forces the flag, so a call made outside this runbook without it
+is still recorded by CloudTrail but its output is not; never call `send-command` without it.
 
 ```powershell
 function Invoke-DemoHost {
@@ -2073,8 +2132,9 @@ Invoke-DemoHost 'cd /opt/app && docker compose exec -T -e REGULAIT_DEMO_KEY_DIR=
 # Success: prints the key's path and fingerprint (never the key)
 
 $env:ENV_DIR = 'infra/environments/demo-host/host'; $env:AWS_PROFILE = 'regulait-demo-host'; $env:AWS_REGION = '<region>'
+$env:REGULAIT_RUN_COMMAND_LOG_GROUP = '/regulait/demo-host/run-command'   # its send-command is logged too
 & "$env:ProgramFiles\Git\bin\bash.exe" infra/scripts/install-pg-backup.sh
-Remove-Item Env:ENV_DIR; $env:AWS_PROFILE = '<profile>'
+Remove-Item Env:ENV_DIR, Env:REGULAIT_RUN_COMMAND_LOG_GROUP; $env:AWS_PROFILE = '<profile>'
 Invoke-DemoHost '/usr/local/sbin/regulait-pg-backup.sh --run', '/usr/local/sbin/regulait-pg-backup.sh --check'
 # Success: RESULT=OK, and the newest object listed under s3://<backup bucket>/postgres/
 ```
