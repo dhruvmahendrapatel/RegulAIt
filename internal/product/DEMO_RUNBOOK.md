@@ -1534,8 +1534,9 @@ volumes untouched until teardown (8.11). The laptop is the rollback (8.10).
 
 ### 8.0 How to read this section
 
-- **Every step is a terminal command.** Nothing is done in the AWS console, except the one step AWS offers no CLI
-  for, enabling the IAM Identity Center organization instance (8.2). That step is marked **CONSOLE FALLBACK**.
+- **Every step is a terminal command.** Nothing is done in the AWS console, except three IAM Identity Center steps
+  in 8.2 that AWS offers no CLI or API for: enabling the organization instance, setting the first password, and
+  requiring MFA. Each is marked **CONSOLE FALLBACK**.
 - **The laptop is Windows, so commands are PowerShell** (5.1 or 7), run from the repository checkout. Where the shell
   matters, a **bash** block follows for macOS or Linux. Commands marked **on the host** run in the instance's SSM
   shell (Amazon Linux bash), whatever the laptop runs.
@@ -2418,7 +2419,7 @@ Keep the laptop stack until the host's backups are confirmed. After that, the la
 | KMS key, CloudWatch logs (30 days), backups (30 days) | under USD 5 |
 | baseline: Config, Security Hub, GuardDuty, CloudTrail | about USD 5 to 15 |
 | NAT gateway (one, plus data) | about USD 35 |
-| 5 interface VPC endpoints, one AZ | about USD 37 |
+| 6 interface VPC endpoints (ssm, ssmmessages, ec2messages, kms, logs, sts), one AZ | about USD 44 |
 | flow logs, Inspector, DLM snapshots (7 days) | about USD 5 to 10 |
 
 That is about USD 7 to 8 a day while the host runs. The demo-host account's budget alert is USD 100, with 80 % and

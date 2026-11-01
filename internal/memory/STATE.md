@@ -5434,7 +5434,12 @@ new member account of the company Organization (`infra/environments/demo-host/{a
 same Cloudflare Tunnel and hostname, with the security baseline, no SSH and no inbound rule, KMS-encrypted volumes and
 nightly encrypted backups. Infra-only freeze exception; demo environment, not production. Not applied: the owner runs
 every plan and apply (DEMO_RUNBOOK.md §8, terminal only, PowerShell first). **The demo is Monday morning 2026-11-02**;
-the owner steps run on Sunday 2026-11-01. Fargate, RDS, WAF and HA come after the demo.
+the owner steps run on Sunday 2026-11-01. Fargate, RDS, WAF and HA come after the demo. The security-team addendum
+adds a dedicated VPC with no public IP, egress 443/7844 only, VPC endpoints, flow logs, logged SSM sessions, Cloudflare
+Access and a least-privilege deployer (DEMO_HOST_SECURITY_BRIEF.md). Addendum 2 anchors the audit chain (beat G8) in an
+S3 Object Lock COMPLIANCE bucket through a dedicated anchor role with 1-hour credentials (ADR-0060 amendment
+2026-11-01); the locked bucket outlives teardown by up to its retention (7 days by default). Addendum 3 applies the security
+review: a truly least-privilege deployer, Run Command logged as the second operator channel, a versioned source bucket.
 
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
