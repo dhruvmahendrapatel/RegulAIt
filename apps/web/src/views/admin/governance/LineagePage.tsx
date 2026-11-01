@@ -9,8 +9,9 @@
  * whenever a traversal was narrowed by the caller's own entitlement, and
  * `truncated` is shown rather than silently swallowed.
  */
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
@@ -83,6 +84,75 @@ export default function LineagePage() {
   });
 
   const byId = new Map((result?.nodes ?? []).map((n) => [n.id, n]));
+
+  // I-2: one empty state while nothing is recorded. Both reads must have answered, and answered empty; a failed
+  // read falls through to the page as it is, where it says it failed.
+  const census = overview.data;
+  const nothingYet =
+    !projectId &&
+    !result &&
+    overview.isSuccess &&
+    nodes.isSuccess &&
+    (census?.byProject ?? []).length === 0 &&
+    (census?.nodesByKind ?? []).every((k) => k.n === 0) &&
+    (census?.edgesByKind ?? []).every((k) => k.n === 0) &&
+    (nodes.data?.nodes ?? []).length === 0;
+
+  const coverage: ReactNode = (
+    <div className={v.row}>
+      <Badge
+        tone="warn"
+        infoLabel="what is captured, and what is not"
+        info={
+          <p>
+            <strong>What is captured, and what is not.</strong> {census?.captureNote}
+          </p>
+        }
+      >
+        Limited coverage
+      </Badge>
+      <Badge
+        tone={census?.contentLevelLineageEnabled ? "warn" : "ok"}
+        infoLabel="content-level lineage"
+        info={
+          <p>
+            The default is metadata-only, preserving the control-plane/agent-plane boundary and the BYOC
+            &ldquo;content never leaves&rdquo; guarantee.
+          </p>
+        }
+      >
+        Content-level lineage: {census?.contentLevelLineageEnabled ? "ENABLED" : "off"}
+      </Badge>
+    </div>
+  );
+
+  if (nothingYet) {
+    return (
+      <>
+        <PageHeader
+          title="Data lineage"
+          info={<p>Which inputs the gateway SUPPLIED to a dispatch, and what that dispatch produced — chained across runs through the shared context store's versioned items. This is supplied-inputs provenance, NOT intra-model attribution: it does not claim which of those inputs influenced the output, because that is not observable from outside a model. Completeness is bounded by gateway visibility, node granularity, and the metadata-by-default posture.</p>}
+        />
+        <div className={v.stack}>
+          <Card title="Get started">
+            <div className={v.stack}>
+              {coverage}
+              <EmptyState
+                title="No lineage recorded yet"
+                body="Nothing has been captured: no governed context write or run dispatch has happened in a project yet, so there is no node to trace. Lineage records itself as a project's agents run; once it does, pick a project and a node here to trace backward or forward."
+                action={
+                  <Link to="/projects">
+                    <Button variant="primary">Open projects</Button>
+                  </Link>
+                }
+              />
+            </div>
+          </Card>
+          <RunLineageCard runId={runId} onRunId={setRunId} />
+        </div>
+      </>
+    );
+  }
 
   return (
     <>
@@ -227,31 +297,7 @@ export default function LineagePage() {
         <QueryGate loading={overview.isLoading} error={overview.error} onRetry={() => void overview.refetch()}>
           <Card title="Graph census">
             <div className={v.stack}>
-              <div className={v.row}>
-                <Badge
-                  tone="warn"
-                  infoLabel="what is captured, and what is not"
-                  info={
-                    <p>
-                      <strong>What is captured, and what is not.</strong> {overview.data?.captureNote}
-                    </p>
-                  }
-                >
-                  Limited coverage
-                </Badge>
-                <Badge
-                  tone={overview.data?.contentLevelLineageEnabled ? "warn" : "ok"}
-                  infoLabel="content-level lineage"
-                  info={
-                    <p>
-                      The default is metadata-only, preserving the control-plane/agent-plane boundary and the BYOC
-                      &ldquo;content never leaves&rdquo; guarantee.
-                    </p>
-                  }
-                >
-                  Content-level lineage: {overview.data?.contentLevelLineageEnabled ? "ENABLED" : "off"}
-                </Badge>
-              </div>
+              {coverage}
               <Table
                 rows={overview.data?.byProject ?? []}
                 rowKey={(r) => r.projectId}

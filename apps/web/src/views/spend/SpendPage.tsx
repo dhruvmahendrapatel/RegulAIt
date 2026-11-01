@@ -38,7 +38,7 @@ import {
 import { useToast } from "../../ui/toast";
 import v from "../views.module.css";
 import s from "./spend.module.css";
-import { MyConsolidatedSpendCard } from "./MyConsolidatedSpendCard";
+import { MyConsolidatedSpendCard, ownSubject, type MyConsolidated } from "./MyConsolidatedSpendCard";
 import {
   CHART_DAYS,
   RECENT_ROWS,
@@ -138,6 +138,12 @@ export default function SpendPage() {
     enabled: Boolean(userId),
     queryFn: () => api.get<{ connectors: MyConnector[] }>(`/v1/users/${userId}/connectors`),
   });
+  // the same read the consolidated card makes (one request, shared): imported bill lines count as something existing
+  const consolidatedQ = useQuery({
+    queryKey: ["my-cost-consolidated", userId],
+    enabled: Boolean(userId),
+    queryFn: () => api.get<MyConsolidated>(`/v1/users/${encodeURIComponent(userId ?? "")}/cost-consolidated`),
+  });
 
   const agentName = useMemo(
     () => new Map((agentsQ.data?.agents ?? []).map((a) => [a.agentId, a.name])),
@@ -226,6 +232,22 @@ export default function SpendPage() {
     );
   }
 
+  // I-2: one empty state while nothing exists. Every read that feeds a card must have answered, and answered
+  // empty; a failed read falls through to the page as it is, where its own card says it failed.
+  const summaryQs = [byDayQ, byProjectQ, byAgentQ, byConnectorQ, byMcpQ];
+  const ledgerEmpty =
+    (totals.events ?? 0) === 0 && events.length === 0 && techniques.length === 0 && (costQ.data?.events?.length ?? 0) === 0;
+  // only the first answer is waited for: a card that later refetches a read never flips the page back
+  const settling =
+    ledgerEmpty && userId !== null && [...summaryQs, consolidatedQ].some((q) => q.dataUpdatedAt === 0 && q.errorUpdatedAt === 0);
+  const nothingYet =
+    ledgerEmpty &&
+    userId !== null &&
+    summaryQs.every((q) => q.isSuccess && (q.data?.totals?.events ?? 0) === 0 && (q.data?.groups?.length ?? 0) === 0) &&
+    consolidatedQ.isSuccess &&
+    consolidatedQ.data !== undefined &&
+    ownSubject(consolidatedQ.data, userId) === null;
+
   return (
     <>
       <PageHeader
@@ -263,6 +285,34 @@ export default function SpendPage() {
         }
       />
 
+      {settling ? (
+        <Card>
+          <SkeletonBlock lines={6} />
+        </Card>
+      ) : nothingYet ? (
+        <Card title="Get started">
+          <EmptyState
+            title="Nothing spent or saved yet"
+            body={
+              <>
+                No metered call, no imported bill line and no saving is attributed to you yet, so there is nothing to
+                break down. Say something in Chat: every dispatch is governed, metered and attributed to you, and a
+                project picked in Chat puts your spend against its budget.{" "}
+                <InfoButton label="estimated and measured savings">
+                  Estimated savings come from the optimization ledger: each technique records what it believes it
+                  avoided at the moment it fired. Measured savings are computed after the fact from the usage ledger.
+                  The two are different numbers on purpose and are never added together.
+                </InfoButton>
+              </>
+            }
+            action={
+              <Link to="/chat">
+                <Button variant="primary">Open Chat</Button>
+              </Link>
+            }
+          />
+        </Card>
+      ) : (
       <div className={v.stack}>
         <div className={v.grid4}>
           <Card>
@@ -564,6 +614,7 @@ export default function SpendPage() {
           </>
         )}
       </div>
+      )}
     </>
   );
 }
