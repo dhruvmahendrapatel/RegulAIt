@@ -56,3 +56,7 @@ output "ingress_rule_count" {
   description = "Number of ingress rules on the security group. 0 with ingress_enabled = false."
   value       = length(aws_security_group.app.ingress)
 }
+
+output "egress_rule_count" {
+  value = length(aws_security_group.app.egress)
+}

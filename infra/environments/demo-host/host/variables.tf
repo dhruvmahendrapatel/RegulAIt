@@ -23,12 +23,6 @@ variable "host_access_role_name" {
   default = "OrganizationAccountAccessRole"
 }
 
-variable "vpc_id" {
-  description = "VPC for the host. Empty uses the account's default VPC (a public subnet: the instance has a public IPv4 for outbound traffic only, and no inbound rule)."
-  type        = string
-  default     = ""
-}
-
 variable "instance_type" {
   description = "t3.xlarge (4 vCPU, 16 GiB): the full demo stack, built on the host, with headroom. See DEMO_RUNBOOK §8.12 for the cost."
   type        = string
@@ -110,4 +104,36 @@ variable "power_schedule_timezone" {
 variable "teardown_after" {
   type    = string
   default = "2026-11-30"
+}
+
+variable "vpc_cidr" {
+  description = "CIDR of the host's dedicated VPC."
+  type        = string
+  default     = "10.42.0.0/16"
+}
+
+variable "session_log_group_name" {
+  type    = string
+  default = "/regulait/demo-host/ssm-sessions"
+}
+
+variable "session_log_retention_days" {
+  type    = number
+  default = 90
+}
+
+variable "ssm_idle_timeout_minutes" {
+  description = "Session Manager idle timeout (1-60)."
+  type        = number
+  default     = 20
+  validation {
+    condition     = var.ssm_idle_timeout_minutes >= 1 && var.ssm_idle_timeout_minutes <= 60
+    error_message = "ssm_idle_timeout_minutes must be 1 to 60."
+  }
+}
+
+variable "ssm_max_session_minutes" {
+  description = "Session Manager maximum session length."
+  type        = number
+  default     = 240
 }

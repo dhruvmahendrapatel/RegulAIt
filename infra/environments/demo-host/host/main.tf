@@ -32,6 +32,16 @@ locals {
   name       = "regulait-demo-host"
   ssm_prefix = "/regulait/demo-host"
 
+  # Outbound only what the host needs: HTTPS (AWS endpoints, package and image
+  # registries, the model provider and the demo integrations) and cloudflared's
+  # 7844 over QUIC (udp) or HTTP/2 (tcp). DNS and time use the VPC's link-local
+  # resolver and time service, which security groups do not filter.
+  egress_rules = [
+    { description = "https", from_port = 443, to_port = 443, protocol = "tcp", cidr_blocks = ["0.0.0.0/0"] },
+    { description = "cloudflared-tcp", from_port = 7844, to_port = 7844, protocol = "tcp", cidr_blocks = ["0.0.0.0/0"] },
+    { description = "cloudflared-udp", from_port = 7844, to_port = 7844, protocol = "udp", cidr_blocks = ["0.0.0.0/0"] },
+  ]
+
   tags = {
     Project     = "RegulAIt"
     Environment = "demo"
@@ -39,6 +49,8 @@ locals {
     ManagedBy   = "terraform"
     Stack       = "demo-host-host"
     Teardown    = var.teardown_after
+    # DLM takes daily encrypted snapshots of every volume with this tag (detection.tf).
+    Snapshot = "regulait-demo-host"
   }
 }
 
@@ -57,10 +69,10 @@ data "aws_iam_policy_document" "kms" {
     }
   }
 
-  # CloudWatch Logs encrypts the container log group with this key, and only
-  # that group.
+  # CloudWatch Logs encrypts this stack's log groups (containers, Session
+  # Manager transcripts, VPC flow logs) with this key, and nothing else.
   statement {
-    sid       = "CloudWatchLogsForThisLogGroup"
+    sid       = "CloudWatchLogsForThisStacksLogGroups"
     actions   = ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:Describe*"]
     resources = ["*"]
     principals {
@@ -68,9 +80,9 @@ data "aws_iam_policy_document" "kms" {
       identifiers = ["logs.${local.region}.amazonaws.com"]
     }
     condition {
-      test     = "ArnEquals"
+      test     = "ArnLike"
       variable = "kms:EncryptionContext:aws:logs:arn"
-      values   = ["arn:${local.partition}:logs:${local.region}:${local.account_id}:log-group:${var.log_group_name}"]
+      values   = ["arn:${local.partition}:logs:${local.region}:${local.account_id}:log-group:/regulait/demo-host/*"]
     }
   }
 }
@@ -113,11 +125,19 @@ module "app" {
   log_group_name      = aws_cloudwatch_log_group.containers.name
   swap_gb             = var.swap_gb
 
-  # Pin after the first apply (see the module's ami_id note): the data volume
-  # survives a replacement, but a replacement still costs a redeploy.
+  # Latest AL2023 through the SSM public parameter when ami_id is null (the
+  # default). Pinning it after the first apply stops a new AMI release from
+  # proposing a replacement mid-demo; the data volume survives either way.
   ami_id        = var.ami_id
   instance_type = var.instance_type
-  vpc_id        = var.vpc_id
+
+  # Private subnet, no public IPv4, egress 443/tcp and 7844/tcp+udp only.
+  vpc_id                      = module.vpc.vpc_id
+  subnet_id                   = module.vpc.private_subnets[0]
+  associate_public_ip_address = false
+  egress_rules                = local.egress_rules
+  # A demo host: termination protection off so teardown is one destroy.
+  disable_api_termination = false
 
   source_bucket_name = "${local.name}-source-${local.account_id}"
   # The tunnel needs no stable public address: no Elastic IP.
@@ -126,7 +146,11 @@ module "app" {
   tags = local.tags
 }
 
-# The instance's own extra permissions, each scoped to one resource.
+# The instance's own extra permissions, each scoped to one resource. With
+# AmazonSSMManagedInstanceCore (attached by the module) and the backup module's
+# write-only grant, this is the role's whole policy. Beyond the security team's
+# list (core, the parameter path, Decrypt on one key) it has only: read its own
+# source bundle (module), write to two log groups, and write backups.
 data "aws_iam_policy_document" "host" {
   statement {
     sid     = "ReadOwnParameters"
@@ -137,21 +161,28 @@ data "aws_iam_policy_document" "host" {
     ]
   }
 
+  # SecureString parameters, Session Manager session data and the source bundle
+  # are all encrypted with this one key.
   statement {
-    sid       = "DecryptParametersThroughSsmOnly"
+    sid       = "DecryptWithThisKeyOnly"
     actions   = ["kms:Decrypt"]
     resources = [aws_kms_key.host.arn]
-    condition {
-      test     = "StringEquals"
-      variable = "kms:ViaService"
-      values   = ["ssm.${local.region}.amazonaws.com"]
-    }
   }
 
   statement {
-    sid       = "WriteContainerLogs"
-    actions   = ["logs:CreateLogStream", "logs:PutLogEvents", "logs:DescribeLogStreams"]
-    resources = ["${aws_cloudwatch_log_group.containers.arn}:*"]
+    sid     = "WriteContainerAndSessionLogs"
+    actions = ["logs:CreateLogStream", "logs:PutLogEvents", "logs:DescribeLogStreams"]
+    resources = [
+      "${aws_cloudwatch_log_group.containers.arn}:*",
+      "${aws_cloudwatch_log_group.sessions.arn}:*",
+    ]
+  }
+
+  # The SSM agent checks the session log group exists before streaming.
+  statement {
+    sid       = "FindLogGroups"
+    actions   = ["logs:DescribeLogGroups"]
+    resources = ["*"]
   }
 }
 

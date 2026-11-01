@@ -49,7 +49,7 @@ data "aws_region" "current" {}
 # The subnet the instance lands in, read back so the data volume can be created
 # in the same availability zone before the instance exists.
 data "aws_subnet" "chosen" {
-  id = data.aws_subnets.in_vpc.ids[0]
+  id = var.subnet_id != "" ? var.subnet_id : data.aws_subnets.in_vpc.ids[0]
 }
 
 data "aws_ssm_parameter" "al2023_ami" {
@@ -189,11 +189,17 @@ resource "aws_security_group" "app" {
     }
   }
 
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+  # ADR-0228: egress_rules narrows outbound traffic; the default keeps the
+  # original allow-all for existing callers.
+  dynamic "egress" {
+    for_each = var.egress_rules
+    content {
+      description = egress.value.description
+      from_port   = egress.value.from_port
+      to_port     = egress.value.to_port
+      protocol    = egress.value.protocol
+      cidr_blocks = egress.value.cidr_blocks
+    }
   }
 
   # With the on-box TLS front, the app port is loopback-only on the host and
@@ -218,6 +224,10 @@ resource "aws_instance" "app" {
   vpc_security_group_ids = [aws_security_group.app.id]
   iam_instance_profile   = aws_iam_instance_profile.instance.name
   tags                   = merge(var.tags, { Name = var.name })
+
+  # null keeps the subnet's own setting; false gives the instance no public IPv4.
+  associate_public_ip_address = var.associate_public_ip_address
+  disable_api_termination     = var.disable_api_termination
 
   metadata_options {
     http_endpoint               = "enabled"

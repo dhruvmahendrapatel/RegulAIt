@@ -1552,11 +1552,11 @@ volumes untouched until teardown (8.11). The laptop is the rollback (8.10).
 
 | When (Sunday) | Steps | Time |
 | --- | --- | --- |
-| Morning | 8.2 tools and Identity Center, 8.3 backend, 8.4 Terraform apply | 1.5 to 2.5 h |
-| Late morning | 8.5 secrets, 8.6 deploy the stack | about 45 min |
-| Midday | 8.7 move the tunnel | 5 min |
+| Morning | 8.2 tools, Identity Center, the deployer permission set and MFA; 8.3 backend; 8.4 Terraform apply, patch, security-control checks | 2 to 3 h |
+| Late morning | 8.5 secrets, 8.6 deploy the stack (secrets in tmpfs, container hardening) | about 45 min |
+| Midday | 8.7 move the tunnel; 8.7 b Cloudflare Access, TLS and rate limit | 30 min |
 | Afternoon | 8.8 live prepare, discovery trust, §7.11, §7.12, `demo:relax-e`, then 8.9 rehearsal on the instance | 2 to 3 h |
-| Evening | **Buffer.** Fix anything the rehearsal found, take a backup, and rehearse the rollback command (8.10) up to the point of running it | — |
+| Evening | **Buffer.** 8.13 rotate the demo password; 8.9 a go-live posture checklist; a backup; rehearse the rollback command (8.10) up to the point of running it | 1 h |
 | Monday 2026-11-02 | The demo, on the host. 8.10 stays ready in an open PowerShell window | — |
 
 ### 8.2 Tools, sign-in and IAM Identity Center (about 20 to 40 minutes)
@@ -1638,6 +1638,64 @@ aws organizations list-aws-service-access-for-organization --profile <profile> `
   --query 'EnabledServicePrincipals[].ServicePrincipal' --output text
 # Success: all five names listed
 ```
+
+**e. The operator: a least-privilege permission set, with MFA (security-team addendum).** Run `apply` as this
+permission set, **not** `Admin-BreakGlass` or `AdministratorAccess`. Its policy covers what the three stacks and the
+bootstrap call in the management account, and the one role it may assume in a member account:
+
+```powershell
+$Policy = @'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Sid": "OrgAndAccount", "Effect": "Allow", "Action": [
+        "organizations:Describe*", "organizations:List*", "organizations:CreateAccount", "organizations:TagResource",
+        "organizations:CloseAccount", "organizations:MoveAccount", "organizations:CreatePolicy", "organizations:UpdatePolicy",
+        "organizations:DeletePolicy", "organizations:AttachPolicy", "organizations:DetachPolicy",
+        "organizations:EnablePolicyType", "organizations:EnableAWSServiceAccess", "organizations:RegisterDelegatedAdministrator",
+        "organizations:UntagResource"], "Resource": "*" },
+    { "Sid": "BaselineServices", "Effect": "Allow", "Action": [
+        "cloudtrail:*", "guardduty:*", "securityhub:*", "config:*", "budgets:*", "access-analyzer:*", "inspector2:*",
+        "kms:*", "s3:*", "dynamodb:*", "logs:*", "sns:*"], "Resource": "*" },
+    { "Sid": "IamForServiceRolesOnly", "Effect": "Allow", "Action": [
+        "iam:Get*", "iam:List*", "iam:CreateRole", "iam:DeleteRole", "iam:TagRole", "iam:UntagRole", "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy", "iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:PassRole", "iam:CreatePolicy",
+        "iam:DeletePolicy", "iam:CreatePolicyVersion", "iam:DeletePolicyVersion", "iam:CreateServiceLinkedRole",
+        "iam:UpdateAssumeRolePolicy"], "Resource": "*" },
+    { "Sid": "DenyHumanCredentials", "Effect": "Deny", "Action": [
+        "iam:CreateUser", "iam:CreateAccessKey", "iam:CreateLoginProfile", "iam:UpdateLoginProfile"], "Resource": "*" },
+    { "Sid": "IntoMemberAccountsOnlyThroughTheOrgRole", "Effect": "Allow", "Action": "sts:AssumeRole",
+      "Resource": "arn:aws:iam::*:role/OrganizationAccountAccessRole" },
+    { "Sid": "ReadPublicParameters", "Effect": "Allow", "Action": ["ssm:GetParameter", "ssm:GetParameters"],
+      "Resource": "arn:aws:ssm:*::parameter/aws/service/*" }
+  ]
+}
+'@
+$PolicyFile = New-TemporaryFile; [IO.File]::WriteAllText($PolicyFile.FullName, $Policy)
+$Ic = aws sso-admin list-instances --profile <profile> --query 'Instances[0].InstanceArn' --output text
+$Dep = aws sso-admin create-permission-set --profile <profile> --instance-arn $Ic --name RegulAItDemoDeployer `
+  --session-duration PT4H --description 'ADR-0228 demo host deployer' --query PermissionSet.PermissionSetArn --output text
+aws sso-admin put-inline-policy-to-permission-set --profile <profile> --instance-arn $Ic --permission-set-arn $Dep `
+  --inline-policy "file://$($PolicyFile.FullName)"
+Remove-Item $PolicyFile
+$Me = aws identitystore list-users --profile <profile> --identity-store-id (aws sso-admin list-instances --profile <profile> --query 'Instances[0].IdentityStoreId' --output text) `
+  --filter 'AttributePath=UserName,AttributeValue=<your-user-name>' --query 'Users[0].UserId' --output text
+aws sso-admin create-account-assignment --profile <profile> --instance-arn $Ic --target-id <company account id> `
+  --target-type AWS_ACCOUNT --permission-set-arn $Dep --principal-type USER --principal-id $Me
+aws configure sso --profile regulait-deployer   # choose the RegulAItDemoDeployer role; use it as <profile> from 8.3 on
+```
+
+**Success:** `aws sts get-caller-identity --profile regulait-deployer --query Arn --output text` shows
+`AWSReservedSSO_RegulAItDemoDeployer_...`.
+
+What this does not narrow: inside the member account, Terraform acts as `OrganizationAccountAccessRole`, which
+Organizations creates with administrator rights. A scoped deploy role there is part of the ADR-0013 successor
+(DEMO_HOST_SECURITY_BRIEF.md, residual risks).
+
+**CONSOLE FALLBACK for MFA (about 1 minute):** there is no CLI or API for Identity Center's MFA settings. Go to **IAM
+Identity Center** › **Settings** › **Authentication** › **Multi-factor authentication** and set **Every time they sign
+in**, with **Require them to register an MFA device at sign-in**. **Check:** your next `aws sso login` asks for the
+MFA code.
 
 ### 8.3 State backend bootstrap (about 5 minutes)
 
@@ -1777,6 +1835,45 @@ Invoke-DemoHost 'tail -2 /var/log/app-boot.log', 'mountpoint /var/lib/docker', '
 # Success: status Success; "app-boot: host ready ..."; "/var/lib/docker is a mountpoint"; "Docker Compose version v2.29.7"
 ```
 
+**Patch the host now, before anything is deployed** (the daily association only scans, so nothing reboots the host
+during the demo):
+
+```powershell
+$PatchCmd = aws ssm send-command --profile regulait-demo-host --instance-ids $env:DEMO_INSTANCE --document-name AWS-RunPatchBaseline `
+  --parameters 'Operation=Install,RebootOption=RebootIfNeeded' --query Command.CommandId --output text
+Start-Sleep 300
+aws ssm list-command-invocations --profile regulait-demo-host --command-id $PatchCmd --query 'CommandInvocations[0].Status' --output text   # Success: Success
+aws ssm describe-instance-patch-states --profile regulait-demo-host --instance-ids $env:DEMO_INSTANCE `
+  --query 'InstancePatchStates[0].[MissingCount,FailedCount,InstalledPendingRebootCount]' --output text                              # Success: 0  0  0
+```
+
+**If the Session Manager preferences document already exists** (someone opened the preferences page in the console),
+the host apply fails on `SSM-SessionManagerRunShell`. Adopt it, then apply again:
+`terraform import aws_ssm_document.session_preferences SSM-SessionManagerRunShell`.
+
+**Check the security controls (the evidence the security team will ask for; DEMO_HOST_SECURITY_BRIEF.md):**
+
+```powershell
+$H = 'regulait-demo-host'
+aws ec2 describe-instances --profile $H --instance-ids $env:DEMO_INSTANCE --query 'Reservations[0].Instances[0].[PublicIpAddress,SubnetId]' --output text
+# Success: None  subnet-...   (no public IPv4)
+aws ec2 describe-security-groups --profile $H --filters Name=group-name,Values=regulait-demo-host-app `
+  --query 'SecurityGroups[0].[length(IpPermissions),IpPermissionsEgress[].[IpProtocol,FromPort]]' --output json
+# Success: 0 ingress rules; egress tcp 443, tcp 7844, udp 7844 only
+aws ec2 describe-vpc-endpoints --profile $H --query 'VpcEndpoints[].[ServiceName,VpcEndpointType,State]' --output text
+# Success: ssm, ssmmessages, ec2messages, kms, logs (Interface) and s3 (Gateway), all available
+aws ec2 describe-flow-logs --profile $H --query 'FlowLogs[].[ResourceId,TrafficType,FlowLogStatus]' --output text   # Success: vpc-...  ALL  ACTIVE
+aws ssm get-document --profile $H --name SSM-SessionManagerRunShell --query Content --output text | ConvertFrom-Json |
+  Select-Object -ExpandProperty inputs | Select-Object cloudWatchLogGroupName,cloudWatchEncryptionEnabled,kmsKeyId,idleSessionTimeout
+# Success: /regulait/demo-host/ssm-sessions  True  <key id>  20
+aws kms get-key-rotation-status --profile $H --key-id alias/regulait-demo-host --query KeyRotationEnabled   # Success: true
+aws accessanalyzer list-analyzers --profile $H --type ACCOUNT --query 'analyzers[].status' --output text   # Success: ACTIVE
+aws inspector2 batch-get-account-status --profile $H --query 'accounts[0].resourceState.[ec2.status,ecr.status]' --output text   # Success: ENABLED ENABLED
+aws guardduty list-detectors --profile $H --query 'DetectorIds' --output text                            # Success: a detector id
+aws securityhub get-enabled-standards --profile $H --query 'StandardsSubscriptions[].StandardsArn' --output text   # Success: FSBP and CIS
+aws dlm get-lifecycle-policies --profile $H --query 'Policies[].[PolicyId,State]' --output text           # Success: policy-...  ENABLED
+```
+
 ### 8.5 Secrets into SSM Parameter Store (about 10 minutes)
 
 There are five parameters under `/regulait/demo-host/`. Each secret is a **SecureString encrypted with
@@ -1799,7 +1896,7 @@ function Put-DemoSecret([string]$Name, [string]$Value) {
   $f = New-TemporaryFile
   try {
     [IO.File]::WriteAllText($f.FullName, $Value)
-    aws ssm put-parameter --profile $P --name "$D/$Name" --type SecureString --key-id $K --value "file://$($f.FullName)" --query Version --output text
+    aws ssm put-parameter --profile $P --name "$D/$Name" --type SecureString --key-id $K --value "file://$($f.FullName)" --overwrite --query Version --output text
   } finally { Remove-Item $f -Force }
 }
 function New-HexSecret([int]$Bytes) {
@@ -1814,7 +1911,7 @@ Remove-Variable s
 Put-DemoSecret 'data-key'        (New-HexSecret 32)
 Put-DemoSecret 'bootstrap-token' (New-HexSecret 24)
 Put-DemoSecret 'db-password'     (New-HexSecret 24)
-# Success: each put-parameter prints 1 (the version)
+# Success: each put-parameter prints its version (1 the first time)
 ```
 
 ```bash
@@ -1895,6 +1992,20 @@ Invoke-DemoHost '/usr/local/sbin/regulait-pg-backup.sh --run', '/usr/local/sbin/
 # Success: RESULT=OK, and the newest object listed under s3://<backup bucket>/postgres/
 ```
 
+**Secrets in tmpfs at every boot, and the hardening fallback.** `write` puts the env file in `/run/regulait` (tmpfs)
+and links `/opt/app/.env` to it. Install the boot unit once, so a reboot rebuilds it from SSM before Docker starts:
+
+```powershell
+Invoke-DemoHost 'cd /opt/app && bash infra/scripts/demo-host-env.sh install-boot', 'stat -f -c %T /run', 'readlink /opt/app/.env', 'systemctl is-enabled regulait-env.service'
+# Success: "regulait-env.service enabled"; tmpfs; /run/regulait/env; enabled
+```
+
+The override adds `no-new-privileges` and dropped capabilities to `gateway`, `db` and the object store. These are
+untested on a real host. **If a container fails to start** (`docker compose ps` shows it restarting), rebuild the
+override without them and record it on #453:
+`Invoke-DemoHost 'cd /opt/app && bash infra/scripts/demo-host-env.sh write --no-harden && bash infra/scripts/demo-host-env.sh compose --profile tunnel up -d'`.
+**Never `cat` or print `.env` in an SSM shell:** session transcripts go to CloudWatch.
+
 **A later redeploy** of a new `<sha>` repeats this step. It goes into a new `/opt/releases/<sha>` and re-points the
 symlink, and the fixed project name keeps the same containers and volumes. Before 8.8 that is safe; after 8.8, run
 `--run` (a backup) first. Never `docker compose ... down -v` on the host after 8.8, for the same reason as §7.6
@@ -1924,6 +2035,67 @@ Invoke-DemoHost 'cd /opt/app && docker compose ps cloudflared --format "{{.State
 
 From now until a rollback, **never run `docker compose --profile tunnel up -d` on the laptop without
 `--scale cloudflared=0`**, or the laptop rejoins the tunnel.
+
+### 8.7 b Cloudflare edge: Access, TLS and a rate limit (about 20 minutes)
+
+Put **Cloudflare Access** in front of the hostname, so only the security team and the presenters reach it. Run these
+from PowerShell with a **Cloudflare API token** that has *Access: Apps and Policies Edit*, *Zone Settings Edit* and
+*Zone WAF Edit*. Read the token at a hidden prompt; it lives only in this window. Account id, zone id, e-mail
+addresses and the security team's addresses go into the variables here and nowhere in the repository.
+
+```powershell
+$cf = Read-Host -AsSecureString 'Cloudflare API token'
+$Hd = @{ Authorization = 'Bearer ' + [Net.NetworkCredential]::new('', $cf).Password; 'Content-Type' = 'application/json' }
+Remove-Variable cf
+$Acct = '<cloudflare account id>'; $Zone = '<zone id>'; $Hn = 'regulait.<domain>'
+$Api = 'https://api.cloudflare.com/client/v4'
+
+# 1. who may in: named people (or swap in the security team's IdP group, or an IP list)
+$allow = @{ name = 'regulait-demo-allow'; decision = 'allow'; session_duration = '8h'
+  include = @(@{ email = @{ email = '<presenter@company>' } }, @{ email_domain = @{ domain = '<security team e-mail domain>' } }) } | ConvertTo-Json -Depth 6
+$AllowId = (Invoke-RestMethod -Method Post -Uri "$Api/accounts/$Acct/access/policies" -Headers $Hd -Body $allow).result.id
+$bypass = @{ name = 'regulait-machine-paths'; decision = 'bypass'; include = @(@{ everyone = @{} }) } | ConvertTo-Json -Depth 6
+$BypassId = (Invoke-RestMethod -Method Post -Uri "$Api/accounts/$Acct/access/policies" -Headers $Hd -Body $bypass).result.id
+
+# 2. the app for people
+$app = @{ name = 'regulait-demo'; type = 'self_hosted'; domain = $Hn; session_duration = '8h'
+  app_launcher_visible = $false; policies = @(@{ id = $AllowId; precedence = 1 }) } | ConvertTo-Json -Depth 6
+Invoke-RestMethod -Method Post -Uri "$Api/accounts/$Acct/access/apps" -Headers $Hd -Body $app | Select-Object success
+
+# 3. machine paths that must stay reachable without a browser sign-in. Each is authenticated by RegulAIt itself:
+#    the federation issuer (AWS and Azure fetch its JWKS), the MCP endpoint (the agent beat), PM and chat-ops webhooks
+#    (signed). Without these, live discovery and the agent beats fail.
+foreach ($path in '/federation', '/mcp', '/v1/pm/webhooks', '/v1/chatops') {
+  $b = @{ name = "regulait-bypass$($path -replace '/','-')"; type = 'self_hosted'; domain = "$Hn$path"
+    policies = @(@{ id = $BypassId; precedence = 1 }) } | ConvertTo-Json -Depth 6
+  Invoke-RestMethod -Method Post -Uri "$Api/accounts/$Acct/access/apps" -Headers $Hd -Body $b | Select-Object success
+}
+
+# 4. TLS Full (strict) and TLS 1.2 minimum
+Invoke-RestMethod -Method Patch -Uri "$Api/zones/$Zone/settings/ssl" -Headers $Hd -Body '{"value":"strict"}' | Select-Object success
+Invoke-RestMethod -Method Patch -Uri "$Api/zones/$Zone/settings/min_tls_version" -Headers $Hd -Body '{"value":"1.2"}' | Select-Object success
+
+# 5. a rate limit on the hostname (free-plan limits: 10-second period and timeout; raise both on a paid plan)
+$rl = @{ rules = @(@{ description = 'regulait-demo rate limit'; action = 'block'
+  expression = "(http.host eq `"$Hn`")"
+  ratelimit = @{ characteristics = @('ip.src', 'cf.colo.id'); period = 10; requests_per_period = 100; mitigation_timeout = 10 } }) } | ConvertTo-Json -Depth 8
+Invoke-RestMethod -Method Put -Uri "$Api/zones/$Zone/rulesets/phases/http_ratelimit/entrypoint" -Headers $Hd -Body $rl | Select-Object success
+Remove-Variable Hd
+```
+
+**Success:** every call prints `success: True`. **Check:**
+
+```powershell
+(Invoke-WebRequest -UseBasicParsing -Uri 'https://regulait.<domain>/ui' -MaximumRedirection 0 -ErrorAction SilentlyContinue).StatusCode
+# Success: 302 (to the Access sign-in) in a fresh window with no Access cookie
+(Invoke-WebRequest -UseBasicParsing -Uri 'https://regulait.<domain>/federation/.well-known/openid-configuration').StatusCode
+# Success: 200 (the issuer stays public, after federation is on in 8.8 step 4)
+```
+
+The laptop's §7.10 calls (`GW=https://regulait.<domain>`) are now behind Access. Run them **on the host** with
+`GW=http://127.0.0.1:3000` (the gateway is published on the host's loopback only), or authenticate the laptop's
+terminal with `cloudflared access login`. **Rollback of the edge:** delete the five Access apps in the same way (`DELETE
+$Api/accounts/$Acct/access/apps/<id>`). The tunnel itself is unchanged.
 
 ### 8.8 Live prepare and checks over SSM (about 60 to 90 minutes)
 
@@ -2024,6 +2196,22 @@ aws cloudwatch describe-alarms --profile regulait-demo-host --alarm-name-prefix 
 database, data key and volumes onto the host. That keeps the source ids, the federation key and the MFA enrolments, so
 8.8 step 4's re-apply is not needed. It is a manual data migration with its own risk. Decide before 8.8.
 
+### 8.9 a Go-live posture checklist (Sunday evening; every row must pass)
+
+Run these on the host in an SSM shell, as root in `/opt/app`, with `BOOT` read as in 8.8 step 5 and
+`GW=http://127.0.0.1:3000`. No command prints a secret.
+
+| # | Check | Command (on the host) | Pass |
+| --- | --- | --- | --- |
+| 1 | **Step-up on** (it is off on the laptop stacks) | `curl -fsS -H "authorization: Bearer $BOOT" $GW/v1/org/settings \| jq -r .step_up_mode` | `required`. If not, set **Step-up** to required on `/ui/admin/organization` as Ada (a tightening, so no step-up is asked) |
+| 2 | **Admin MFA** on `admin` and `morgan` (8.8 step 2) | sign in as each in a private window | the 6-digit code screen appears |
+| 3 | **Synthetic data only** | `grep -c '^REGULAIT_DEMO_LICENSE' .env` is `0`, and the seed's fictional company names only; no customer data was imported | `0`; reviewed |
+| 4 | **Demo password rotated** after any rehearsal it was shown in (8.13) | `demo-set-passwords.js` re-run in 8.13 | done Sunday evening |
+| 5 | **Strict CSP and CORS** | `curl -sSI $GW/ui \| grep -i '^content-security-policy'` and `curl -sSI -H 'Origin: https://evil.invalid' $GW/v1/org/posture \| grep -ci '^access-control-allow-origin'` | a CSP with no `unsafe-inline` in `script-src`; `0` |
+| 6 | **Bootstrap token posture** | `curl -fsS -H "authorization: Bearer $BOOT" $GW/v1/org/posture \| jq .` | review `bootstrap_token_configured`; rotate it after set-up (8.13) |
+| 7 | **No public IP, no ingress, egress 3 rules, endpoints, flow logs, session logging** | 8.4 "Check the security controls" | all as stated there |
+| 8 | **Backups and snapshots** | `/usr/local/sbin/regulait-pg-backup.sh --check`; `aws dlm get-lifecycle-policies` (laptop) | a backup from today; ENABLED |
+
 ### 8.10 Rollback to the laptop (about 2 minutes; keep this window open on Monday)
 
 ```powershell
@@ -2070,10 +2258,47 @@ Keep the laptop stack until the host's backups are confirmed. After that, the la
 | --- | --- |
 | `t3.xlarge` (4 vCPU, 16 GiB), always on | USD 120 |
 | EBS gp3, 40 GB root and 60 GB data | USD 8 |
-| public IPv4 (outbound only) | USD 4 |
+| public IPv4 (the NAT gateway's only; the instance has none) | USD 4 |
 | KMS key, CloudWatch logs (30 days), backups (30 days) | under USD 5 |
 | baseline: Config, Security Hub, GuardDuty, CloudTrail | about USD 5 to 15 |
+| NAT gateway (one, plus data) | about USD 35 |
+| 5 interface VPC endpoints, one AZ | about USD 37 |
+| flow logs, Inspector, DLM snapshots (7 days) | about USD 5 to 10 |
 
-That is about USD 4 to 5 a day while the host runs. The demo-host account's budget alert is USD 100, with 80 % and
+That is about USD 7 to 8 a day while the host runs. The demo-host account's budget alert is USD 100, with 80 % and
 forecast alerts. A `t3.large` (8 GiB) halves the instance cost but leaves little headroom for the on-host build. **The
 sandbox keeps its USD 50 cap** (ADR-0197): the host does not count against it and does not change it.
+
+### 8.13 Rotation and revocation (demo password, tunnel token, model API key)
+
+Each secret has a rotate step, which keeps the demo running, and a revoke step, which runs after the demo or on any
+suspicion of exposure.
+
+**Demo password.** Rotate it Sunday evening, after the last rehearsal, and again after the demo. On the host, in an
+SSM shell, re-run 8.8 step 2. It reads the new password at a hidden prompt, sets it for every persona, and clears the
+two admins' lockouts. **Revoke:** the same command with a long random value nobody records. **Check:** signing in with
+the old password fails.
+
+**Tunnel token.** **Rotate:** in Cloudflare, refresh the tunnel's token (TUNNEL.md, "Stopping and rolling back"), then:
+
+```powershell
+$s = Read-Host -AsSecureString 'New tunnel token'
+Put-DemoSecret 'cf-tunnel-token' ([Net.NetworkCredential]::new('', $s).Password)   # 8.5's helper (it overwrites)
+Remove-Variable s
+Invoke-DemoHost 'cd /opt/app && bash infra/scripts/demo-host-env.sh compose --profile tunnel up -d --force-recreate cloudflared'
+```
+
+**Check:** the connector registers again (8.7), and the old token no longer connects. **Revoke:** delete the tunnel
+(TUNNEL.md) and the parameter (8.11). The laptop's copy of the token in the password manager is then dead too.
+
+**Model API key (the Claude key of §7.10 and §7.11).** Use a **dedicated** key, created for the demo in the provider's
+console with a **spend limit** set there. It is entered only in the RegulAIt UI (§7.11), which stores it encrypted with
+the data key. It is never in SSM, a file or a terminal. **Rotate:** create a new key in the provider console, replace
+the credential in the UI (step-up), and delete the old key in the console. **Revoke after the demo:** delete the key
+in the provider's console, then delete the credential in the UI. **Check:** the provider console lists no active demo
+key.
+
+**Data key, bootstrap token, database password.** They are not rotated during the demo: rotating the data key needs
+the product's re-encryption procedure. After the demo, 8.11 deletes them with the host. The bootstrap token is the
+full-admin credential: after set-up, remove it from use by deleting the parameter and recreating the gateway without
+it, or leave it until teardown and list it as a residual (DEMO_HOST_SECURITY_BRIEF.md).

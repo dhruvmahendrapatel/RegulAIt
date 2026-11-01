@@ -59,3 +59,20 @@ output "backup_env_file" {
 output "power_schedule" {
   value = module.power_schedule.window_summary
 }
+
+output "egress_rule_count" {
+  description = "Must be 3 (443/tcp, 7844/tcp, 7844/udp)."
+  value       = module.app.egress_rule_count
+}
+
+output "vpc_id" {
+  value = module.vpc.vpc_id
+}
+
+output "session_log_group" {
+  value = aws_cloudwatch_log_group.sessions.name
+}
+
+output "flow_log_destination_arn" {
+  value = module.vpc.vpc_flow_log_destination_arn
+}

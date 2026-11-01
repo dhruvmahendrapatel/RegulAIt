@@ -8,6 +8,17 @@
 #   sudo bash infra/scripts/demo-host-env.sh write [--sso]        # write .env + override
 #   sudo bash infra/scripts/demo-host-env.sh tunnel-check [--sso] # hosted-config.sh tunnel-check
 #   sudo bash infra/scripts/demo-host-env.sh compose <args...>    # docker compose <args...>
+#   sudo bash infra/scripts/demo-host-env.sh install-boot         # rebuild .env in tmpfs at every boot
+#
+# Secrets live only in tmpfs: `write` puts the env file at /run/regulait/env
+# (tmpfs, cleared at power-off) and makes $APP_DIR/.env a symlink to it, so no
+# secret is written to an EBS volume by this script. `install-boot` adds a
+# systemd unit that rebuilds it from SSM before Docker starts on every boot.
+# (Docker itself keeps each container's environment in its config on the
+# encrypted data volume; DEMO_HOST_SECURITY_BRIEF.md lists that residual.)
+#
+# `write --no-harden` leaves out the container-hardening block of the override
+# (fallback if an image refuses to start with it; see DEMO_RUNBOOK.md §8.6).
 #
 # Reads every parameter under PREFIX (default /regulait/demo-host) with
 # decryption, through the instance role. It never prints a value: tracing is
@@ -29,15 +40,44 @@ set +x
 
 PREFIX="${REGULAIT_SSM_PREFIX:-/regulait/demo-host}"
 APP_DIR="${APP_DIR:-$(pwd)}"
-usage() { echo "usage: $0 check|write|tunnel-check [--sso]  |  $0 compose <docker compose args...>" >&2; exit 2; }
+usage() { echo "usage: $0 check|write|tunnel-check [--sso] [--no-harden]  |  $0 compose <docker compose args...>  |  $0 install-boot" >&2; exit 2; }
 MODE="${1:-}"; [ -n "$MODE" ] || usage; shift
 SSO=false
+HARDEN=true
 case "$MODE" in
   check|write|tunnel-check)
-    for a in "$@"; do case "$a" in --sso) SSO=true ;; *) usage ;; esac; done ;;
+    for a in "$@"; do case "$a" in --sso) SSO=true ;; --no-harden) HARDEN=false ;; *) usage ;; esac; done ;;
   compose) [ $# -gt 0 ] || usage ;;
+  install-boot) [ $# -eq 0 ] || usage ;;
   *) usage ;;
 esac
+
+if [ "$MODE" = install-boot ]; then
+  [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
+  install -m 0700 "$0" /usr/local/sbin/regulait-demo-host-env
+  cat > /etc/systemd/system/regulait-env.service <<'UNIT'
+[Unit]
+Description=RegulAIt demo host: rebuild the env file in tmpfs from SSM (ADR-0228)
+Wants=network-online.target
+After=network-online.target
+Before=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/app
+Environment=APP_DIR=/opt/app
+ExecStart=/usr/local/sbin/regulait-demo-host-env write
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable regulait-env.service
+  echo "demo-host-env: regulait-env.service enabled (runs before docker at every boot)"
+  exit 0
+fi
 
 fail() { echo "demo-host-env: REFUSED: $*" >&2; exit 1; }
 [ "$(id -u)" = 0 ] || fail "run as root (sudo)"
@@ -90,6 +130,9 @@ case "$MODE" in
 esac
 
 umask 077
+ENV_DIR=/run/regulait
+mkdir -p "$ENV_DIR"; chmod 700 "$ENV_DIR"
+[ "$(stat -f -c %T /run)" = tmpfs ] || fail "/run is not tmpfs; refusing to write secrets to disk"
 {
   echo "# Written by infra/scripts/demo-host-env.sh from SSM $PREFIX. Never print, copy or commit this file."
   # Fixed, so every release folder drives the SAME containers and volumes:
@@ -107,9 +150,10 @@ umask 077
   echo "REGULAIT_BOOTSTRAP_TOKEN=$BT"
   echo "REGULAIT_DB_PASSWORD=$DBP"
   echo "REGULAIT_DATABASE_URL=postgres://regulait:$DBP@db:5432/regulait"
-} > "$APP_DIR/.env.new"
-mv -f "$APP_DIR/.env.new" "$APP_DIR/.env"
-chmod 600 "$APP_DIR/.env"
+} > "$ENV_DIR/env.new"
+mv -f "$ENV_DIR/env.new" "$ENV_DIR/env"
+chmod 600 "$ENV_DIR/env"
+ln -sfn "$ENV_DIR/env" "$APP_DIR/.env"
 
 # The export-signing and keyring lines of DEMO_RUNBOOK.md §7.6 step 2; the data
 # key and bootstrap token come from .env above, not from this file.
@@ -121,7 +165,25 @@ services:
       REGULAIT_EXPORT_SIGNING_KEY_ID: regulait-demo-export
       REGULAIT_LICENSE_KEYRING: /app/demo-license-keys
 YAML
+if [ "$HARDEN" = true ]; then
+  # Host-only container hardening (ADR-0228) for the services docker-compose.yml
+  # does not already harden. The gateway image runs as the non-root `node` user;
+  # postgres keeps only the capabilities its entrypoint needs to drop to its own
+  # user. Merged by compose into the base file; the laptop stack is unchanged.
+  cat >> "$APP_DIR/docker-compose.override.yml" <<'YAML'
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+  db:
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+  objectstore:
+    security_opt: ["no-new-privileges:true"]
+  objectstore-init:
+    security_opt: ["no-new-privileges:true"]
+YAML
+fi
 chmod 600 "$APP_DIR/docker-compose.override.yml"
 unset HOST TUN DK BT DBP
 
-echo "demo-host-env: wrote $APP_DIR/.env and docker-compose.override.yml (0600); values not shown"
+echo "demo-host-env: wrote $ENV_DIR/env (tmpfs, 0600; $APP_DIR/.env links to it) and docker-compose.override.yml (hardening: $HARDEN); values not shown"

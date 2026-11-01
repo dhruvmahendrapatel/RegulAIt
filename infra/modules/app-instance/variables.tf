@@ -170,3 +170,33 @@ variable "compose_plugin_sha256" {
   type        = string
   default     = "383ce6698cd5d5bbf958d2c8489ed75094e34a77d340404d9f32c4ae9e12baf0"
 }
+
+variable "subnet_id" {
+  description = "Subnet for the instance (and the data volume's AZ). Empty uses the first subnet of vpc_id. Set vpc_id too."
+  type        = string
+  default     = ""
+}
+
+variable "associate_public_ip_address" {
+  description = "false gives the instance no public IPv4 (it then needs a NAT gateway for egress). null keeps the subnet's setting."
+  type        = bool
+  default     = null
+}
+
+variable "egress_rules" {
+  description = "Security-group egress rules. The default is the original allow-all; ADR-0228's host passes 443/tcp and 7844/tcp+udp only."
+  type = list(object({
+    description = string
+    from_port   = number
+    to_port     = number
+    protocol    = string
+    cidr_blocks = list(string)
+  }))
+  default = [{ description = "all", from_port = 0, to_port = 0, protocol = "-1", cidr_blocks = ["0.0.0.0/0"] }]
+}
+
+variable "disable_api_termination" {
+  description = "EC2 termination protection."
+  type        = bool
+  default     = false
+}

@@ -92,11 +92,11 @@ re-apply; it is listed in §8.9 as an owner choice and is not scripted here.
   the backups run in AWS.
 - **Owner steps** are in DEMO_RUNBOOK.md §8 (terminal only, PowerShell first): about 5 to 7 hours on Sunday
   2026-11-01 including the rehearsal, most of it waiting on account creation, the baseline apply and the first build.
-- **Cost.** One `t3.xlarge` running all month is about USD 120 on demand in `us-east-1`, plus about USD 8 of EBS,
-  under USD 4 of public IPv4, and a few dollars of KMS, logs, Config and Security Hub. The demo-host account's budget
-  alert defaults to USD 100. The sandbox keeps ADR-0197's USD 50 cap, which this ADR does not change.
-- **Accepted for the demo:** one instance, in a public subnet of the default VPC (it needs a public IPv4 for outbound
-  traffic, and there is no inbound rule), no NAT gateway, no WAF, no HA, Postgres in a container. The demo data passes
+- **Cost.** About USD 7 to 8 a day (DEMO_RUNBOOK §8.12). That is a `t3.xlarge` (about USD 120 a month), EBS, one NAT
+  gateway (about USD 35), five interface endpoints (about USD 37), and a few dollars each of KMS, logs, flow logs,
+  Inspector, snapshots, Config and Security Hub. The demo-host account's budget alert defaults to USD 100. The sandbox keeps ADR-0197's USD 50 cap, which this ADR does not change.
+- **Accepted for the demo:** one instance in one AZ, behind one NAT gateway, with no WAF, no HA, and Postgres in a
+  container (see the security addendum for the network). The demo data passes
   through Cloudflare's edge, as under ADR-0203.
 - **Module changes.** `modules/app-instance` gains `ingress_enabled` (default **false**, ADR-0180), `boot_mode
   = host_only`, KMS encryption of the root volume (now always encrypted) and the source bucket, an optional data
@@ -107,3 +107,45 @@ re-apply; it is listed in §8.9 as an owner choice and is not scripted here.
   `--write-backend-config` mode serves a backend an earlier run already created.
 - **Not verified without AWS access:** `terraform plan` against any account, the user-data on a real instance, the SSM
   parameter read, the data-volume mount by NVMe serial, the awslogs driver, and the end-to-end tunnel switch.
+
+## Addendum: 2026-11-01, security-team hardening (owner request, relayed by the master session)
+
+The Monday audience is the company Security Team, and the demo is how they decide whether to approve. The owner asked
+for the host to be as secure as possible. Added in the same PR:
+
+- **Network.** A dedicated VPC (`terraform-aws-modules/vpc` 6.7.3, Apache-2.0). The instance sits in a private subnet
+  with **no public IPv4** and **zero ingress rules**, and its egress is **443/tcp and 7844/tcp+udp only**, through one
+  NAT gateway. Interface endpoints for ssm, ssmmessages, ec2messages, kms and logs, plus an S3 gateway endpoint, keep
+  AWS control traffic private. VPC Flow Logs capture all traffic to a KMS-encrypted log group. The default security
+  group is taken over with no rules.
+- **Instance.** IMDSv2 with hop limit 1 and no key pair (both already in place). The latest AL2023 is resolved through
+  the SSM public parameter, and pinning it after the first apply is optional. EBS uses the CMK, with rotation on.
+  Termination protection is explicitly off.
+- **Access.** The account's Session Manager preferences stream every session to a KMS-encrypted log group, encrypt
+  session data with the CMK, set a 20-minute idle timeout and a 240-minute maximum, and disable run-as. The instance
+  role is `AmazonSSMManagedInstanceCore`, `ssm:GetParameter(s)` on `/regulait/demo-host/*`, and `kms:Decrypt` on the
+  one key. **Deviation, stated:** the role also writes to its two log groups (containers and sessions; the agent
+  needs `logs:DescribeLogGroups` to stream), reads its own source bundle, and writes but never reads backups. Each is
+  scoped to one resource.
+- **Detection.** The baseline already provided CloudTrail across all regions with validation and KMS on a TLS-only,
+  public-access-blocked bucket, plus GuardDuty, Security Hub (FSBP and CIS), Config and budgets. The host account adds
+  an account IAM Access Analyzer, Inspector for EC2 and ECR, an AL2023 patch baseline with a daily scan (install is an
+  owner step, so nothing reboots during the demo), and DLM daily encrypted snapshots kept for 7 days.
+- **Secrets.** Every secret is a hand-made SecureString. The host rebuilds its env file into **tmpfs**
+  (`/run/regulait`) at every boot, through a systemd unit, before Docker starts. §8.13 gives rotation and revocation
+  for the demo password, the tunnel token and the model API key. The model key is a dedicated key with a spend limit,
+  entered only in the RegulAIt UI (stored encrypted with the data key), never in SSM, and revoked after the demo.
+- **Edge.** §8.7 b covers Cloudflare Access (an allow-list or SSO), TLS Full (strict), TLS 1.2 minimum and a rate
+  limit, all through the Cloudflare API from PowerShell. The federation issuer, MCP and webhook paths **bypass**
+  Access; without that, live discovery and the agent beats fail. Each bypassed path is authenticated by the app.
+- **Containers.** Third-party images were already pinned by digest. The host override adds no-new-privileges and
+  dropped capabilities to `gateway` (non-root) and `db`, and no-new-privileges to the object store. There is a
+  `--no-harden` fallback. **Deferred:** read-only root filesystems for `gateway`, `db` and the object store. They
+  cannot be tested before Monday, and a wrong guess breaks the demo.
+- **Operator.** The owner applies as a least-privilege Identity Center permission set (`RegulAItDemoDeployer`, policy
+  in §8.2 e), with MFA required. MFA settings have no API, so that is a console fallback. Inside the member account,
+  Terraform still acts as `OrganizationAccountAccessRole`; a scoped deploy role comes after the demo.
+- **Evidence.** [`DEMO_HOST_SECURITY_BRIEF.md`](../product/DEMO_HOST_SECURITY_BRIEF.md) has the architecture and
+  data-flow boundary, the control table with a CLI proof per control, a one-page STRIDE model, residual risks and the
+  teardown plan. §8.9 a is the app posture checklist: step-up required, admin MFA, synthetic data, demo password
+  rotated, strict CSP and CORS.
