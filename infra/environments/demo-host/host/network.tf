@@ -42,9 +42,16 @@ module "vpc" {
   default_security_group_ingress = []
   default_security_group_egress  = []
 
-  enable_flow_log                                 = true
-  create_flow_log_cloudwatch_log_group            = true
-  create_flow_log_cloudwatch_iam_role             = true
+  enable_flow_log                      = true
+  create_flow_log_cloudwatch_log_group = true
+  create_flow_log_cloudwatch_iam_role  = true
+  # A fixed regulait-demo-host-* name and the boundary: the deployer may only
+  # create roles with that prefix and that boundary (ADR-0228).
+  vpc_flow_log_iam_role_name                      = "${local.name}-flow-logs"
+  vpc_flow_log_iam_role_use_name_prefix           = false
+  vpc_flow_log_permissions_boundary               = local.boundary_arn
+  vpc_flow_log_iam_policy_name                    = "${local.name}-flow-logs"
+  vpc_flow_log_iam_policy_use_name_prefix         = false
   flow_log_traffic_type                           = "ALL"
   flow_log_max_aggregation_interval               = 60
   flow_log_cloudwatch_log_group_name_prefix       = "/regulait/demo-host/flow-logs/"

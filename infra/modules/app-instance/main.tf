@@ -115,7 +115,10 @@ resource "aws_s3_bucket_public_access_block" "source" {
 
 resource "aws_iam_role" "instance" {
   name = "${var.name}-instance"
-  tags = var.tags
+  # ADR-0228: a caller whose deployer may only create bounded roles passes the
+  # boundary here; null (the default) keeps the original unbounded role.
+  permissions_boundary = var.permissions_boundary
+  tags                 = var.tags
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"

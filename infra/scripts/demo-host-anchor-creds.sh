@@ -12,7 +12,10 @@
 #   sudo bash infra/scripts/demo-host-anchor-creds.sh refresh   # what the timer runs
 #   sudo bash infra/scripts/demo-host-anchor-creds.sh check     # expiry and caller only; never prints a key
 #
-# Files (tmpfs, owned by the gateway image's `node` user, uid 1000, read-only):
+# Files (tmpfs, owned by root, group ANCHOR_GID, mode 0440). ANCHOR_GID is a
+# group no host user belongs to; only the gateway container is given it
+# (`group_add` in demo-host-env.sh), so neither ec2-user nor ssm-user can read
+# them without sudo:
 #   /run/regulait/anchor/creds.json   credential_process output (Version 1)
 #   /run/regulait/anchor/config       [default] credential_process = cat /aws-anchor/creds.json
 # demo-host-env.sh mounts /run/regulait/anchor at /aws-anchor in the gateway.
@@ -21,7 +24,7 @@ set +x
 
 PREFIX="${REGULAIT_SSM_PREFIX:-/regulait/demo-host}"
 DIR=/run/regulait/anchor
-GATEWAY_UID="${GATEWAY_UID:-1000}"
+ANCHOR_GID="${ANCHOR_GID:-61042}"
 
 fail() { echo "demo-host-anchor-creds: REFUSED: $*" >&2; exit 1; }
 [ "$(id -u)" = 0 ] || fail "run as root (sudo)"
@@ -40,7 +43,8 @@ refresh() {
   [ "$(stat -f -c %T /run)" = tmpfs ] || fail "/run is not tmpfs"
   mkdir -p "$DIR"
   chmod 0750 "$DIR"
-  chown "root:$GATEWAY_UID" "$DIR"
+  getent group "$ANCHOR_GID" >/dev/null && fail "gid $ANCHOR_GID already belongs to a host group; pick another ANCHOR_GID"
+  chown "root:$ANCHOR_GID" "$DIR"
   umask 077
   out=$(aws sts assume-role --region "$r" --role-arn "$arn" --role-session-name regulait-anchor \
     --duration-seconds 3600 --output json \
@@ -49,8 +53,8 @@ refresh() {
   printf '%s\n' "$out" > "$DIR/creds.json.new"
   unset out
   printf '[default]\ncredential_process = cat /aws-anchor/creds.json\nregion = %s\n' "$r" > "$DIR/config.new"
-  chown "$GATEWAY_UID:$GATEWAY_UID" "$DIR/creds.json.new" "$DIR/config.new"
-  chmod 0400 "$DIR/creds.json.new" "$DIR/config.new"
+  chown "root:$ANCHOR_GID" "$DIR/creds.json.new" "$DIR/config.new"
+  chmod 0440 "$DIR/creds.json.new" "$DIR/config.new"
   mv -f "$DIR/creds.json.new" "$DIR/creds.json"
   mv -f "$DIR/config.new" "$DIR/config"
   echo "demo-host-anchor-creds: refreshed (expires $(jq -r .Expiration "$DIR/creds.json"))"
@@ -61,7 +65,7 @@ case "${1:-}" in
   check)
     [ -f "$DIR/creds.json" ] || fail "no credentials yet: run install"
     echo "expires: $(jq -r .Expiration "$DIR/creds.json")"
-    stat -c '%U %a %n' "$DIR/creds.json" "$DIR/config"
+    stat -c '%U:%g %a %n' "$DIR/creds.json" "$DIR/config"
     systemctl is-active regulait-anchor-creds.timer
     ;;
   install)

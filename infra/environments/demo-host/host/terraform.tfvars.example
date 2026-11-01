@@ -1,6 +1,6 @@
 # Copy to terraform.tfvars (git-ignored) and fill in. Never commit real values.
-management_sso_profile = "<company-account-sso-profile-name>"
-host_account_id        = "<12-digit-demo-host-account-id>"
-# aws_region           = "us-east-1"
-# instance_type        = "t3.xlarge"
-# ami_id               = "<pin after the first apply>"
+host_account_id  = "<12-digit-demo-host-account-id>"
+host_sso_profile = "regulait-demo-host"   # the RegulAItDemoDeployer profile in the host account (§8.4 step 3)
+# aws_region     = "us-east-1"
+# instance_type  = "t3.xlarge"
+# ami_id         = "<pin after the first apply>"

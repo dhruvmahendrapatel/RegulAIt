@@ -193,6 +193,9 @@ if [ -n "$ANCHOR_BUCKET" ]; then
       REGULAIT_AUDIT_ANCHOR_S3_SECRET_ACCESS_KEY: ""
       AWS_CONFIG_FILE: /aws-anchor/config
       AWS_SHARED_CREDENTIALS_FILE: /dev/null
+    # The anchor credentials are root:61042 0440 on the host
+    # (demo-host-anchor-creds.sh); only this container gets that group.
+    group_add: ["61042"]
     volumes:
       - /run/regulait/anchor:/aws-anchor:ro
 YAML

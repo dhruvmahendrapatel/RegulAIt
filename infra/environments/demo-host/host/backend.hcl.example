@@ -1,8 +1,11 @@
-# Copy to backend.hcl (git-ignored), or let infra/bootstrap/bootstrap-backend.sh write it.
-bucket         = "regulait-terraform-state-<company-account-id>"
+# Write ../host/backend.hcl (git-ignored) from the break-glass baseline's output:
+#   terraform -chdir=infra/environments/demo-host/baseline output -raw host_backend_hcl
+# The state lives in the demo-host account, so the deployer never needs the
+# management account. Shape:
+bucket         = "regulait-demo-host-tfstate-<host-account-id>"
 key            = "demo-host/host/terraform.tfstate"
-dynamodb_table = "regulait-terraform-locks"
-kms_key_id     = "<kms-key-id-from-bootstrap-output>"
+dynamodb_table = "regulait-demo-host-tfstate-lock"
+kms_key_id     = "<kms key arn from the baseline output>"
 region         = "<aws-region>"
 encrypt        = true
-profile        = "<company-account-sso-profile-name>"
+profile        = "regulait-demo-host"

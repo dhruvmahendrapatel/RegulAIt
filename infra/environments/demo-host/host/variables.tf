@@ -4,9 +4,10 @@ variable "aws_region" {
   default     = "us-east-1"
 }
 
-variable "management_sso_profile" {
-  description = "AWS CLI Identity Center profile for the company (management) account."
+variable "host_sso_profile" {
+  description = "AWS CLI Identity Center profile of the RegulAItDemoDeployer permission set in the demo-host account (DEMO_RUNBOOK.md §8.4 step 3). Break-glass profile for teardown only."
   type        = string
+  default     = "regulait-demo-host"
 }
 
 variable "host_account_id" {
@@ -16,11 +17,6 @@ variable "host_account_id" {
     condition     = can(regex("^[0-9]{12}$", var.host_account_id))
     error_message = "host_account_id must be 12 digits."
   }
-}
-
-variable "host_access_role_name" {
-  type    = string
-  default = "OrganizationAccountAccessRole"
 }
 
 variable "instance_type" {

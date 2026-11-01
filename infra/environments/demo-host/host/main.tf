@@ -25,12 +25,21 @@ data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
 data "aws_partition" "current" {}
 
+# Fails the plan, clearly, if the break-glass baseline has not created it yet.
+data "aws_iam_policy" "host_role_boundary" {
+  name = "regulait-demo-host-boundary"
+}
+
 locals {
   account_id = data.aws_caller_identity.current.account_id
   region     = data.aws_region.current.region
   partition  = data.aws_partition.current.partition
   name       = "regulait-demo-host"
   ssm_prefix = "/regulait/demo-host"
+
+  # Created by the break-glass baseline (../baseline/host-foundation.tf). The
+  # deployer may only create roles that carry it.
+  boundary_arn = data.aws_iam_policy.host_role_boundary.arn
 
   # Outbound only what the host needs: HTTPS (AWS endpoints, package and image
   # registries, the model provider and the demo integrations) and cloudflared's
@@ -117,6 +126,8 @@ module "app" {
 
   # No inbound rule at all (ADR-0228): SSM and the tunnel are outbound only.
   ingress_enabled = false
+
+  permissions_boundary = local.boundary_arn
 
   boot_mode           = "host_only"
   kms_key_arn         = aws_kms_key.host.arn
@@ -231,6 +242,8 @@ module "db_backup" {
 # --- power schedule: present, OFF by default -------------------------------------
 module "power_schedule" {
   source = "../../../modules/scheduled-power"
+
+  permissions_boundary = local.boundary_arn
 
   name         = local.name
   instance_ids = [module.app.instance_id]

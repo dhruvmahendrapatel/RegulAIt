@@ -37,9 +37,12 @@ locals {
 # --- the role EventBridge Scheduler assumes -----------------------------------
 
 resource "aws_iam_role" "scheduler" {
-  name        = "${var.name}-scheduler"
-  description = "Assumed by EventBridge Scheduler to stop/start ${var.name} instances."
-  tags        = var.tags
+  name = "${var.name}-scheduler"
+  # ADR-0228: a caller whose deployer may only create bounded roles passes the
+  # boundary here; null (the default) keeps the original unbounded role.
+  permissions_boundary = var.permissions_boundary
+  description          = "Assumed by EventBridge Scheduler to stop/start ${var.name} instances."
+  tags                 = var.tags
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"

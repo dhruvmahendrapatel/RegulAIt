@@ -200,3 +200,9 @@ variable "disable_api_termination" {
   type        = bool
   default     = false
 }
+
+variable "permissions_boundary" {
+  description = "ARN of an IAM permissions boundary for the role this module creates. null means none."
+  type        = string
+  default     = null
+}

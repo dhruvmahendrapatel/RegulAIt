@@ -33,8 +33,11 @@ case "${1:-}" in
   *) echo "Usage: $0 [--preflight-only | --write-backend-config]" >&2; exit 2 ;;
 esac
 
-# Every stack whose backend.hcl this script writes (never overwritten).
-STACKS=(demo-sandbox/account demo-sandbox/aws demo-host/account demo-host/baseline demo-host/host)
+# Every stack whose backend.hcl this script writes (never overwritten). Not
+# demo-host/host: its state lives in the demo-host account, created by the
+# break-glass baseline, so the deployer never needs this management-account
+# backend (ADR-0228; demo-host/baseline output host_backend_hcl).
+STACKS=(demo-sandbox/account demo-sandbox/aws demo-host/account demo-host/baseline)
 
 write_backend_files() {
   local env_root target

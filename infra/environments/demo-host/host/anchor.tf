@@ -47,8 +47,10 @@ locals {
 }
 
 resource "aws_iam_role" "anchor" {
-  name        = "${local.name}-anchor"
-  description = "Audit-chain anchor writer for the demo gateway; assumed by the instance role only"
+  name = "${local.name}-anchor"
+  # Every role this stack creates carries the boundary (ADR-0228).
+  permissions_boundary = local.boundary_arn
+  description          = "Audit-chain anchor writer for the demo gateway; assumed by the instance role only"
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{

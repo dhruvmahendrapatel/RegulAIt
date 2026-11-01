@@ -59,7 +59,8 @@ resource "aws_ssm_association" "patch_scan" {
 # Daily snapshots of every volume tagged Snapshot=<name>, kept 7 days. Snapshots of
 # a CMK-encrypted volume stay encrypted with the same key.
 resource "aws_iam_role" "dlm" {
-  name = "${local.name}-dlm"
+  name                 = "${local.name}-dlm"
+  permissions_boundary = local.boundary_arn
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{

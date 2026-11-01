@@ -203,3 +203,38 @@ The independent security review asked for five blocking changes. All five are ma
 3. **The brief's S1 proof** names the three non-secret `String` parameters that Terraform creates for the anchor.
 4. **The go-live checklist** has rows for the dedicated, spend-limited model key and for revoking the laptop's old key.
 5. **The source bundle bucket is versioned**, as the brief already stated.
+
+## Addendum 4 (2026-11-01): two privilege levels (security review round 3)
+
+Two independent reviews found that a single "limited" deployer permission set in the management account kept leaking.
+It could create a role named like the budget-action role, with any trust and any inline policy. It could also rewrite
+an existing role's trust or a managed policy's version, erase Config evidence, or assume the administrator role in any
+member account. The master session asked for a change of design, not of the deny list.
+
+- **The management-account bootstrap is a one-time privileged action, run under break-glass, with MFA, and recorded
+  by CloudTrail. It is not least-privilege, and it does not pretend to be.** It covers the state backend, the member
+  account, the baseline (Organizations, the organization trail, GuardDuty, Security Hub and Config delegation, the
+  SCPs, the budget-action role), the deployer's permission set, the sandbox trust re-apply, and teardown.
+- **The recurring deploy runs as `RegulAItDemoDeployer`, assigned only in the demo-host account**, with no access to
+  the management account. Its Terraform state lives in the host account
+  (`demo-host/baseline/host-foundation.tf`, created by the break-glass baseline).
+- **Every role the deployer creates carries the `regulait-demo-host-boundary` permissions boundary.** The
+  break-glass baseline creates the boundary, and the deployer cannot change or remove it. It denies IAM,
+  Organizations, any role assumption except the audit-anchor role, CloudTrail, Config, GuardDuty and Security Hub
+  writes, KMS key administration, and evidence weakening or erasure. `modules/app-instance` and
+  `modules/scheduled-power` gain an optional `permissions_boundary`, and the VPC module's flow-log role, the anchor
+  role and the DLM role set it.
+- **The deployer's own limits:**
+  - It may create roles only with that boundary and only under the `regulait-demo-host-*` prefix.
+  - It may never call `UpdateAssumeRolePolicy`.
+  - It may change policy versions only on `regulait-demo-host-*` policies. Those can be attached only to bounded
+    roles, so the boundary caps any new version.
+  - `sts:AssumeRole` is denied outside the host account, and so is any action on the management account's trail,
+    Config and state buckets.
+  - It cannot delete host evidence: backups, anchors, logs, keys, snapshots, flow logs, detection, or the Session
+    Manager logging preferences.
+- **Config's delivery bucket is now versioned** (`modules/aws-security-baseline`).
+- **Teardown keeps the backups and anchors readable only if the host key is kept too.** Otherwise they last only
+  for the key's 30-day deletion window. Destroying a bucket's dependents removes its bucket-level controls, and the
+  brief now says so.
+- **IAM simulator proofs** (DEMO_RUNBOOK §8.4 step 3) cover each escalation path the reviewers named.
