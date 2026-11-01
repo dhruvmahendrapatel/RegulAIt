@@ -694,3 +694,85 @@ report's window, the condition-metric sweep and route and the deploy gate (whose
 windows), and the builder runtime's step lookup. Day-scale windows (org-settings retention, reporting periods)
 still take the process clock: a skew of seconds does not move them. Tests: `audit-chain.test.ts`
 ("M-075: audit_log.at is stamped on the database clock").
+
+## Amendment — 2026-11-01: the terraform writer grant matches the S3 sink
+
+**Problem.** `infra/modules/audit-anchor-worm-s3` granted its writer roles
+`s3:PutObject` and a prefix-limited `s3:ListBucket` only, and its bucket policy
+explicitly **denied** them `s3:PutObjectRetention`. The gateway's
+`S3ObjectLockSink` (`apps/gateway/src/audit-chain.ts`) PUTs every anchor with
+`ObjectLockMode: "COMPLIANCE"` and an explicit `ObjectLockRetainUntilDate`, which
+S3 authorises as `s3:PutObjectRetention` as well. It also reads the anchor back
+by `VersionId`, reads its retention, lists object versions, and reads the
+bucket's Object Lock configuration to **grade** tamper resistance. So any stack
+that passed `writer_role_names` got a gateway whose locked PUT was refused and
+whose `/v1/audit/verify` and `/v1/audit/anchors` reported the anchor as NOT
+tamper-resistant. The demo-host stack (ADR-0228 addendum 2, PR #652) worked
+around it with `writer_role_names = []` and its own role policy.
+
+**Decision.**
+
+1. **The writer grant is the sink's exact calls**: `PutObject`,
+   `PutObjectRetention`, `GetObject`, `GetObjectVersion`, `GetObjectRetention`
+   on `<bucket>/<prefix>/*`; `ListBucket` + `ListBucketVersions` on the bucket
+   with `s3:prefix` = `<prefix>/*`; `GetBucketObjectLockConfiguration` on the
+   bucket.
+2. **KMS through S3 only** when `kms_key_arn` is set: `kms:GenerateDataKey` and
+   `kms:Decrypt` on that key, conditioned on `kms:ViaService` =
+   `s3.<region>.amazonaws.com` and `kms:EncryptionContext:aws:s3:arn` = this
+   bucket. Before, the module granted no KMS permission at all, so an SSE-KMS
+   bucket refused the writer unless the key policy granted it separately.
+3. **`s3:PutObjectRetention` leaves the blanket Deny; the Deny is narrowed, not
+   removed.** Shortening an existing version's retention is impossible for the
+   writer in both modes. In COMPLIANCE, S3 refuses it for every principal. In
+   GOVERNANCE, S3 refuses it unless the request carries
+   `x-amz-bypass-governance-retention` *and* the caller holds
+   `s3:BypassGovernanceRetention`, which stays explicitly denied. The writer can
+   therefore only extend a retention, or raise GOVERNANCE to COMPLIANCE. The
+   remaining weakening was a **new** version written with a weaker explicit lock
+   than the bucket default. Two bucket-policy Denies now close it:
+   - `WriterLockModeNoWeakerThanBucket` refuses `PutObject` or
+     `PutObjectRetention` whose `s3:object-lock-mode` is not in
+     `{COMPLIANCE, <bucket mode>}`. So on a COMPLIANCE bucket only COMPLIANCE is
+     accepted.
+   - `WriterRetentionNoShorterThanBucket` refuses one whose
+     `s3:object-lock-remaining-retention-days` < `retention_days − 1`.
+
+   Both carry a `Null = false` condition, so a PUT without lock headers (which
+   takes the bucket default) is untouched. The one day of slack absorbs clock
+   skew and S3's whole-day rounding.
+4. **The blanket Deny gains** `s3:PutBucketPolicy`, `s3:DeleteBucketPolicy` and
+   `s3:DeleteBucket`, matching the demo-host reference, so the writer cannot
+   remove the policy that constrains it.
+5. **The writer may now read anchors.** The original module comment kept reads
+   on a separate verifier credential. The sink as built verifies on the gateway
+   itself (ADR-0189 R44), so reads are required. Anchors are hashes, and a read
+   cannot alter a locked version.
+
+**Operator consequence.** Set the gateway's
+`REGULAIT_AUDIT_ANCHOR_S3_RETENTION_DAYS` to at least the module's
+`retention_days`. A shorter value is refused by the bucket policy, and each
+anchor row then records `failed` with the reason. This is deliberate: an anchor
+that expires before its rows leaves them unprovable.
+
+**Secure by default (ADR-0180).** The narrowing tightens what a stolen writer
+credential can do compared with simply removing the Deny. The module's
+GOVERNANCE default (amendment 2026-08-13) is unchanged.
+
+**Open-source first (ADR-0176).** Nothing to adopt: the change is IAM and
+bucket-policy text sized to our own sink's calls, not a solved general problem.
+Replacing the module's bucket resources with a community S3 module was not
+evaluated here and is out of scope for this fix.
+
+**Not done here.**
+
+- `infra/environments/demo-host/host/anchor.tf` still carries its own policy.
+  It lives only on the held PR #652, owned by another session. The follow-up is
+  to set `writer_role_names = [aws_iam_role.anchor.name]` there and drop
+  `data.aws_iam_policy_document.anchor` and `aws_iam_role_policy.anchor`. The
+  anchor role is in the same account, so the module's name-to-ARN mapping holds.
+- `terraform fmt -check` / `validate` could not be run in the authoring session:
+  there is no terraform binary, and downloading one was refused by that
+  session's sandbox. No environment on `main` consumes the module. Run both
+  before applying.
+- Nothing was applied. The owner applies.
