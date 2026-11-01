@@ -1743,6 +1743,14 @@ Set-Location ../../../..
 If the baseline's first apply fails on an organization prerequisite, the error names the service. Enable its trusted
 access (8.2 d) and apply again.
 
+**If the host account existed before the baseline** (not created by step 1), Security Hub's organization
+configuration does not enrol it on its own. Add it as a member, break-glass, from the management account:
+`aws securityhub create-members --profile <break-glass profile> --account-details AccountId=$HostAccount`, then
+apply again. If `cis_management` timed out while its subscription sat in `PENDING`, Terraform marks it tainted and
+would replace it. Wait until `aws securityhub get-enabled-standards --profile <break-glass profile>` shows CIS as
+`READY`, then
+`terraform untaint 'module.security_baseline.aws_securityhub_standards_subscription.cis_management[0]'` and apply again.
+
 **3. BREAK-GLASS. The deployer permission set, assigned only in the host account (about 10 minutes).** The policy
 names the host account and the boundary, nothing else. The proofs below run IAM's policy simulator, which changes
 nothing. They must show each escalation path the security reviewers named as denied before the permission set is
@@ -1893,6 +1901,17 @@ aws iam simulate-principal-policy --profile regulait-demo-host --policy-source-a
 # Success: the anchor role allowed; OrganizationAccountAccessRole explicitDeny
 ```
 
+**If the host apply times out or fails part-way:**
+
+- A resource that timed out while being created is marked **tainted**, and the next plan proposes to replace it. The
+  deployer may not delete detection or evidence resources, so that replacement stops with `AccessDenied`. Do not
+  re-run blindly. Wait until the service reports the resource as enabled (for Inspector:
+  `aws inspector2 batch-get-account-status --profile regulait-demo-host --query 'accounts[0].resourceState.[ec2.status,ecr.status]' --output text`
+  shows `ENABLED ENABLED`), then `terraform untaint <address>` (the address is in the error, for example
+  `aws_inspector2_enabler.this`), `terraform plan -out=tfplan` and apply again.
+- A KMS error on a CloudWatch log group (`AccessDeniedException ... KMS key`) is eventual consistency on the new key
+  policy: wait a minute and run the plan and apply again.
+
 **5. BREAK-GLASS, about 3 minutes, right after the first host apply: lock the evidence configuration.** The first
 apply has to set the backup and anchor buckets' policy, versioning, encryption and lifecycle, and the log groups'
 retention. So the deployer could not be denied those calls before it ran. Now that they are set, this step adds the
@@ -1906,7 +1925,8 @@ $Dep = aws sso-admin list-permission-sets --profile <break-glass profile> --inst
   ForEach-Object { $_ -split "`t" } | Where-Object {
     (aws sso-admin describe-permission-set --profile <break-glass profile> --instance-arn $Ic --permission-set-arn $_ --query PermissionSet.Name --output text) -eq 'RegulAItDemoDeployer' }
 $Lock = '{"Sid": "DenyChangingEvidenceConfigurationAfterFirstApply", "Effect": "Deny", "Action": ["s3:PutBucketPolicy", "s3:PutBucketVersioning", "s3:PutEncryptionConfiguration", "s3:PutLifecycleConfiguration", "s3:PutBucketObjectLockConfiguration", "s3:PutBucketPublicAccessBlock", "s3:PutBucketOwnershipControls", "logs:PutRetentionPolicy"], "Resource": ["arn:aws:s3:::regulait-demo-host-db-backup-*", "arn:aws:s3:::regulait-demo-host-audit-anchor-*", "arn:aws:logs:*:HOST_ACCOUNT_ID:log-group:/regulait/demo-host/*"]}'.Replace('HOST_ACCOUNT_ID', $HostAccount)
-$Cur = (aws sso-admin get-inline-policy-for-permission-set --profile <break-glass profile> --instance-arn $Ic --permission-set-arn $Dep --query InlinePolicy --output text).Trim()
+# -join: the CLI can return the policy as several lines, which PowerShell would read as an array
+$Cur = ((aws sso-admin get-inline-policy-for-permission-set --profile <break-glass profile> --instance-arn $Ic --permission-set-arn $Dep --query InlinePolicy --output text) -join "`n").Trim()
 if ($Cur -match 'DenyChangingEvidenceConfigurationAfterFirstApply') { 'already locked' } else {
   $New = $Cur.Substring(0, $Cur.LastIndexOf(']')).TrimEnd() + ', ' + $Lock + ']}'
   $F = New-TemporaryFile; [IO.File]::WriteAllText($F.FullName, $New)
@@ -1925,16 +1945,19 @@ if ($Cur -match 'DenyChangingEvidenceConfigurationAfterFirstApply') { 'already l
 aws sso logout
 ```
 
-**Check** (non-destructive: IAM's simulator, run against the deployer's real role, changes nothing):
+**Check** (non-destructive: IAM's simulator, run against the deployer's real role, changes nothing). Run it with
+the **host break-glass profile** `regulait-demo-host-breakglass` (create it now as in 8.11 if you have not): the
+deployer is denied every `iam:*` action on `aws-reserved` roles, its own included, so it cannot simulate itself.
 
 ```powershell
-aws sso login --profile regulait-demo-host
-$DepRole = aws iam list-roles --profile regulait-demo-host --path-prefix /aws-reserved/sso.amazonaws.com/ `
+aws sso login --profile <break-glass profile>
+$DepRole = aws iam list-roles --profile regulait-demo-host-breakglass --path-prefix /aws-reserved/sso.amazonaws.com/ `
   --query "Roles[?starts_with(RoleName,'AWSReservedSSO_RegulAItDemoDeployer_')].Arn | [0]" --output text
-aws iam simulate-principal-policy --profile regulait-demo-host --policy-source-arn $DepRole `
+aws iam simulate-principal-policy --profile regulait-demo-host-breakglass --policy-source-arn $DepRole `
   --action-names logs:PutRetentionPolicy --resource-arns "arn:aws:logs:<region>:$($HostAccount):log-group:/regulait/demo-host/ssm-sessions" `
   --query 'EvaluationResults[].[EvalActionName,EvalDecision]' --output text
 # Success: logs:PutRetentionPolicy  explicitDeny
+aws sso logout
 ```
 
 **Check (SSM only, no SSH, no inbound rule, IMDSv2):**
@@ -1974,10 +1997,14 @@ function Invoke-DemoHost {
     --cloud-watch-output-config 'CloudWatchOutputEnabled=true,CloudWatchLogGroupName=/regulait/demo-host/run-command' `
     --query Command.CommandId --output text
   Remove-Item $f
+  if (-not $id) { throw 'send-command returned no command id (see the error above); nothing was run' }
+  $n = 0
   do {
     Start-Sleep 10
+    $n++
     $s = aws ssm get-command-invocation --profile regulait-demo-host --command-id $id --instance-id $env:DEMO_INSTANCE --query Status --output text 2>$null
-  } while ($s -in @('Pending', 'InProgress', 'Delayed', $null, ''))
+    if ($n -ge 120) { throw "command $id still '$s' after 20 minutes; check it with get-command-invocation, and its full output in the /regulait/demo-host/run-command log group" }
+  } while ($s -in @('Pending', 'InProgress', 'Delayed'))
   aws ssm get-command-invocation --profile regulait-demo-host --command-id $id --instance-id $env:DEMO_INSTANCE `
     --query '{status:Status,out:StandardOutputContent,err:StandardErrorContent}' --output yaml
 }
@@ -2001,6 +2028,9 @@ demo_host() {
 }
 ```
 
+The invocation output is truncated at 24,000 characters (stderr at 8,000). The full stdout and stderr of every
+command are in the CloudWatch log group `/regulait/demo-host/run-command`, one stream per command id.
+
 **Check the host is prepared:**
 
 ```powershell
@@ -2023,8 +2053,12 @@ aws ssm describe-instance-patch-states --profile regulait-demo-host --instance-i
 ```
 
 **If the Session Manager preferences document already exists** (someone opened the preferences page in the console),
-the host apply fails on `SSM-SessionManagerRunShell`. Adopt it, then apply again:
-`terraform import aws_ssm_document.session_preferences SSM-SessionManagerRunShell`.
+the host apply fails on `SSM-SessionManagerRunShell`. Adopt it **as break-glass** (the import and that one apply
+change the logged session document, which the deployer may not do): in `infra/environments/demo-host/host`,
+`aws sso login --profile <break-glass profile>`, then
+`terraform import -var 'host_sso_profile=regulait-demo-host-breakglass' aws_ssm_document.session_preferences SSM-SessionManagerRunShell`,
+`terraform plan -var 'host_sso_profile=regulait-demo-host-breakglass' -out=tfplan`, `terraform apply tfplan`,
+`aws sso logout`. Record it on #453 (who, when, why).
 
 **Check the security controls (the evidence the security team will ask for; DEMO_HOST_SECURITY_BRIEF.md):**
 
@@ -2049,6 +2083,12 @@ aws kms get-key-rotation-status --profile $H --key-id alias/regulait-demo-host -
 aws accessanalyzer list-analyzers --profile $H --type ACCOUNT --query 'analyzers[].status' --output text   # Success: ACTIVE
 aws inspector2 batch-get-account-status --profile $H --query 'accounts[0].resourceState.[ec2.status,ecr.status]' --output text   # Success: ENABLED ENABLED
 aws guardduty list-detectors --profile $H --query 'DetectorIds' --output text                            # Success: a detector id
+# If it prints nothing: the host account existed before the organization's GuardDuty configuration, so it was not
+# auto-enrolled (the same as Security Hub in 8.4 step 2). BREAK-GLASS, from the management account (the GuardDuty
+# administrator), then re-run the check above:
+#   $MgDet = aws guardduty list-detectors --profile <break-glass profile> --query 'DetectorIds[0]' --output text
+#   aws guardduty create-members --profile <break-glass profile> --detector-id $MgDet --account-details AccountId=$HostAccount,Email=<host account e-mail>
+#   aws sso logout
 aws securityhub get-enabled-standards --profile $H --query 'StandardsSubscriptions[].StandardsArn' --output text   # Success: FSBP and CIS
 aws dlm get-lifecycle-policies --profile $H --query 'Policies[].[PolicyId,State]' --output text           # Success: policy-...  ENABLED
 ```
@@ -2156,6 +2196,10 @@ Invoke-DemoHost @(
 
 In bash, use `demo_host` with the same strings, written without the PowerShell backticks before `$(`.
 
+**Confirm the anchor credentials** (the "refreshed" line goes to the journal, so it may be missing from the output
+above): `Invoke-DemoHost 'cd /opt/app && bash infra/scripts/demo-host-anchor-creds.sh check'`. Success: status Success
+and `expires: <a time in the future>`, then `active` for the refresh timer.
+
 **Check:**
 
 ```powershell
@@ -2189,7 +2233,7 @@ The override adds `no-new-privileges` and dropped capabilities to `gateway`, `db
 untested on a real host. **If a container fails to start** (`docker compose ps` shows it restarting), rebuild the
 override without them, **reinstall the boot unit with the same flag** so a reboot (patching, the power schedule)
 does not bring the hardening back, and record it on #453:
-`Invoke-DemoHost 'cd /opt/app && bash infra/scripts/demo-host-env.sh write --no-harden && bash infra/scripts/demo-host-env.sh install-boot --no-harden && bash infra/scripts/demo-host-env.sh compose --profile tunnel up -d', 'systemctl cat regulait-env.service | grep ExecStart'`
+`Invoke-DemoHost 'cd /opt/app && bash infra/scripts/demo-host-env.sh write --no-harden && bash infra/scripts/demo-host-env.sh install-boot --no-harden && bash infra/scripts/demo-host-env.sh compose --profile tunnel up -d --scale cloudflared=0', 'systemctl cat regulait-env.service | grep ExecStart'`
 (Success: the `ExecStart` line ends in `write --no-harden`).
 **Never `cat` or print `.env` in an SSM shell:** session transcripts go to CloudWatch.
 
@@ -2261,6 +2305,9 @@ foreach ($path in '/federation/', '/mcp/', '/v1/pm/webhooks/', '/v1/chatops/*/ev
 }
 
 # 4. TLS Full (strict) and TLS 1.2 minimum
+#    WARNING: this is a ZONE-WIDE setting. It applies to every hostname on the zone, not only the demo one. Any other
+#    proxied record whose origin has no valid certificate starts failing with 526. List the zone's DNS records first
+#    (GET $Api/zones/$Zone/dns_records) and check each proxied origin; if any cannot do strict, stop and decide.
 Invoke-RestMethod -Method Patch -Uri "$Api/zones/$Zone/settings/ssl" -Headers $Hd -Body '{"value":"strict"}' | Select-Object success
 Invoke-RestMethod -Method Patch -Uri "$Api/zones/$Zone/settings/min_tls_version" -Headers $Hd -Body '{"value":"1.2"}' | Select-Object success
 
