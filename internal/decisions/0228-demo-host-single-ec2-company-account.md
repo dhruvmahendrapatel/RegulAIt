@@ -15,7 +15,10 @@ deleted. The demo then depends on the laptop being on, awake and online. The own
 > "For the demo, should we deploy this on AWS instead? with AWS Fargate and all the security features enabled? This is
 > to ensure nothing depends on my laptop"
 
-Offered the choice, the owner chose **"EC2 now, Fargate after"**.
+Offered the choice, the owner chose **"EC2 now, Fargate after"**. Later the same day the owner said "let us do all the
+steps using the CLI" and chose **"Terminal only, keep Terraform"**. The owner also set the demo date: **Monday morning,
+2026-11-02**. That supersedes the 2026-10-31 date in ADR-0203's addendum and every earlier 11-03 date for this
+environment.
 
 ## Decision
 
@@ -52,7 +55,16 @@ Offered the choice, the owner chose **"EC2 now, Fargate after"**.
    process that needs it and is never written to a file (as `docs/deployment/TUNNEL.md` requires on the laptop).
 7. **Freeze exception.** This is an owner-approved exception to the ADR-0202 freeze, for infrastructure only. It
    changes no product code.
-8. **After the demo**, Fargate, RDS, WAF and high availability are built as the ADR-0013 successor, as a separate
+8. **Terminal only, Terraform kept.** Every owner step in DEMO_RUNBOOK §8 is a copy-paste terminal command, given in
+   PowerShell for the owner's Windows laptop, with bash where the shell matters. Each step has a success line and a
+   check command. Terraform still builds everything (ADR-0003 unchanged). The one exception is enabling the
+   IAM Identity Center **organization** instance, which AWS offers no CLI or API for. That step and setting the first
+   Identity Center password are short console fallbacks. Commands that run before any Identity Center session exists
+   use AWS CloudShell, which uses the sign-in's short-lived credentials, so no access key is created (ADR-0004).
+9. **Schedule.** The owner runs every step on Sunday 2026-11-01: apply, deploy, move the tunnel, live prepare, then
+   rehearse on the instance. Sunday evening is buffer. The demo is on the host on Monday 2026-11-02, with the laptop
+   rollback ready.
+10. **After the demo**, Fargate, RDS, WAF and high availability are built as the ADR-0013 successor, as a separate
    decision. They are not built now.
 
 ## The issuer URL and the Shadow AI sandbox trust (verified against the code)
@@ -67,19 +79,19 @@ issuer, the OIDC provider and the key trust need no re-pointing.**
 
 **What does change.** Each trust also pins one subject, `regulait:discovery-source:<source id>`
 (`demo-sandbox/aws/main.tf:100`, `demo-sandbox/azure/main.tf:79`). The source id is a database row id. A host
-prepared on a fresh database (the plan in DEMO_RUNBOOK §8 g) gets new source ids and a new federation signing key. The
+prepared on a fresh database (the plan in DEMO_RUNBOOK §8.8) gets new source ids and a new federation signing key. The
 new key needs nothing (JWKS is fetched live). The new source ids do: `demo-sandbox/aws` and `demo-sandbox/azure` are
 re-applied with `aws_discovery_source_id` and `azure_discovery_source_id` changed, which edits only the role trust
 subject and the federated credential subject. This is the existing "Once only" rule (DEMO_RUNBOOK §7.1). The
 alternative, restoring the laptop's live database and its data key onto the host, keeps the ids and needs no
-re-apply; it is listed in §8 as an owner choice and is not scripted here.
+re-apply; it is listed in §8.9 as an owner choice and is not scripted here.
 
 ## Consequences
 
 - **The laptop is needed only as the browser used to present.** The stack, the database, the tunnel connector and
   the backups run in AWS.
-- **Owner steps** are in DEMO_RUNBOOK.md §8: about 2.5 to 3.5 hours end to end, most of it waiting on account
-  creation, the baseline apply and the first build.
+- **Owner steps** are in DEMO_RUNBOOK.md §8 (terminal only, PowerShell first): about 5 to 7 hours on Sunday
+  2026-11-01 including the rehearsal, most of it waiting on account creation, the baseline apply and the first build.
 - **Cost.** One `t3.xlarge` running all month is about USD 120 on demand in `us-east-1`, plus about USD 8 of EBS,
   under USD 4 of public IPv4, and a few dollars of KMS, logs, Config and Security Hub. The demo-host account's budget
   alert defaults to USD 100. The sandbox keeps ADR-0197's USD 50 cap, which this ADR does not change.

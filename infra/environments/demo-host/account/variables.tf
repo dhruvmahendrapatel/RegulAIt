@@ -42,7 +42,7 @@ variable "parent_id" {
 }
 
 variable "budget_limit_usd" {
-  description = "Budget for the demo-host account from budget_period_start; the 80% alert and the forecast alert go to budget_notification_emails. Separate from the sandbox's USD 50 cap (ADR-0197). The default covers about two months of the default instance size (DEMO_RUNBOOK §8 i)."
+  description = "Budget for the demo-host account from budget_period_start; the 80% alert and the forecast alert go to budget_notification_emails. Separate from the sandbox's USD 50 cap (ADR-0197). At the default instance size (about USD 4 to 5 a day) the 80% alert fires after about two to three weeks (DEMO_RUNBOOK §8.12)."
   type        = number
   default     = 100
 }

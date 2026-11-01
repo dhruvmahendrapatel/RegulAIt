@@ -5433,7 +5433,8 @@ addendum).
 new member account of the company Organization (`infra/environments/demo-host/{account,baseline,host}`), behind the
 same Cloudflare Tunnel and hostname, with the security baseline, no SSH and no inbound rule, KMS-encrypted volumes and
 nightly encrypted backups. Infra-only freeze exception; demo environment, not production. Not applied: the owner runs
-every plan and apply (DEMO_RUNBOOK.md §8). Fargate, RDS, WAF and HA come after the demo.
+every plan and apply (DEMO_RUNBOOK.md §8, terminal only, PowerShell first). **The demo is Monday morning 2026-11-02**;
+the owner steps run on Sunday 2026-11-01. Fargate, RDS, WAF and HA come after the demo.
 
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);

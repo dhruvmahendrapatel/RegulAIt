@@ -18,7 +18,7 @@
 #     sleep through the demo.
 #
 # Secrets are never in this stack: the tunnel token and the stack's secrets are
-# SecureString parameters the owner creates by hand (DEMO_RUNBOOK.md §8 d), so
+# SecureString parameters the owner creates by hand (DEMO_RUNBOOK.md §8.5), so
 # they are not in Terraform state, user-data or the repository.
 
 data "aws_caller_identity" "current" {}

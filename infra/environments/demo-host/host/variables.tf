@@ -30,7 +30,7 @@ variable "vpc_id" {
 }
 
 variable "instance_type" {
-  description = "t3.xlarge (4 vCPU, 16 GiB): the full demo stack, built on the host, with headroom. See DEMO_RUNBOOK §8 i for the cost."
+  description = "t3.xlarge (4 vCPU, 16 GiB): the full demo stack, built on the host, with headroom. See DEMO_RUNBOOK §8.12 for the cost."
   type        = string
   default     = "t3.xlarge"
 }

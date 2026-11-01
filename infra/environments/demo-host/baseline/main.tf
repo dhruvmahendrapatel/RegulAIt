@@ -9,7 +9,7 @@
 #
 # Its own state, so tearing the host down never removes the audit trail.
 # One-time prerequisites (trusted access for the Organization's services) are
-# in DEMO_RUNBOOK.md §8 step c.
+# in DEMO_RUNBOOK.md §8.2 d.
 
 module "security_baseline" {
   source = "../../../modules/aws-security-baseline"

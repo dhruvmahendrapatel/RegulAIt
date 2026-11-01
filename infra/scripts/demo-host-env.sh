@@ -18,7 +18,7 @@
 # `tunnel-check` and `compose` forms read it from SSM and hand it to that one
 # child process's environment only, the way the laptop keeps it in one shell.
 #
-# Parameters (the owner creates them by hand, DEMO_RUNBOOK.md §8 step d):
+# Parameters (the owner creates them by hand, DEMO_RUNBOOK.md §8.5):
 #   public-host       String        regulait.<domain> (no scheme)
 #   cf-tunnel-token   SecureString  the Cloudflare Tunnel token (the same tunnel as the laptop)
 #   data-key          SecureString  64 hex characters (REGULAIT_DATA_KEY)

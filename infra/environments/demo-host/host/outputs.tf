@@ -9,7 +9,7 @@ output "source_bucket" {
 }
 
 output "kms_key_alias" {
-  description = "Pass to `aws ssm put-parameter --key-id` for every SecureString (DEMO_RUNBOOK §8 d)."
+  description = "Pass to `aws ssm put-parameter --key-id` for every SecureString (DEMO_RUNBOOK §8.5)."
   value       = aws_kms_alias.host.name
 }
 
