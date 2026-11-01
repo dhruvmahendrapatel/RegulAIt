@@ -1,5 +1,5 @@
 /**
- * ADR-0218 (themes phase 2, migration 0256) — a person's palette and light/dark mode, saved to their account.
+ * ADR-0218 (themes phase 2, migration 0259) — a person's palette and light/dark mode, saved to their account.
  *
  * - `appearanceFor` is what `/auth/me` carries, so the console repaints in the account's palette on any browser.
  * - `PUT /auth/appearance` writes the CALLER's own row. There is no user id in the path or body: the row is keyed by

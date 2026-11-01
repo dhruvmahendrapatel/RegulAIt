@@ -225,6 +225,11 @@ function Loaded(props: { settings: Record<string, unknown> }) {
     frameworkImportsEnabled: str(s, "frameworkImportsEnabled") || "false",
   });
 
+  // --- 5e. Vendor questionnaire drafts (ADR-0213) ---------------------------
+  const vendorDraft = useSection({
+    vendorDraftAssistEnabled: str(s, "vendorDraftAssistEnabled") || "false",
+  });
+
   // --- 7. Network access (ADR-0039) ----------------------------------------
   // Not a useSection form: the save needs the confirm-on-lockout retry flow
   // (a 409 ip_policy_lockout opens an explicit confirm modal, and only a
@@ -952,6 +957,34 @@ function Loaded(props: { settings: Record<string, unknown> }) {
             >
               <option value="false">off — admin-written control text only (default)</option>
               <option value="true">on — allow reviewed imports</option>
+            </Select>
+          </Field>
+        </SectionShell>
+      </Card>
+
+      <Card title="5e · Vendor questionnaire drafts">
+        <SectionShell
+          title="Drafted answers for vendor assessment questionnaires"
+          busy={vendorDraft.act.busy}
+          error={vendorDraft.act.error}
+          submitLabel="Save vendor draft setting"
+          onSubmit={() =>
+            void vendorDraft.act.run(
+              () => put({ vendorDraftAssistEnabled: asBool(vendorDraft.f.vendorDraftAssistEnabled!) }),
+              "Vendor draft setting saved (audited)",
+            )
+          }
+          help={
+            <p>Off (default): filled in by hand. On: assessors can ask for drafts labelled with their sources; nothing is submitted until a person does it. Needs step-up; audited.</p>
+          }
+        >
+          <Field label="Vendor questionnaire drafts">
+            <Select
+              value={vendorDraft.f.vendorDraftAssistEnabled}
+              onChange={(e) => vendorDraft.set("vendorDraftAssistEnabled", e.target.value)}
+            >
+              <option value="false">off (default)</option>
+              <option value="true">on — offer labelled drafts</option>
             </Select>
           </Field>
         </SectionShell>

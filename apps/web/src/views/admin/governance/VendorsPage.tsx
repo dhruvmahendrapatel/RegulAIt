@@ -18,17 +18,21 @@
  *    the framework's active compliance pack; nothing here writes into the
  *    org's own attestations or reports.
  */
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, Input, Select, SkeletonBlock, Table, Textarea, type Tone } from "../../../ui/kit";
 import { QueryGate, useAction, useCustomProviders } from "../adminKit";
 import { EditVendorButton, vendorEditBlocked } from "../editForms";
+import { VendorDraftPanel } from "./VendorDraftPanel";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+
+// ADR-0221: the supplier portal's grants, links and review, loaded only when a vendor is opened
+const SupplierAccessPanel = lazy(() => import("./SupplierAccessPanel"));
 
 type VendorStatus = "proposed" | "under_assessment" | "approved" | "rejected" | "retired";
 
@@ -145,6 +149,7 @@ export default function VendorsPage() {
       <PageHeader
         title="Vendors"
         sub="Everything a vendor supplies is an attestation — a recorded claim, never verified by this platform."
+        actions={<Link to="/admin/vendors/questionnaires">Supplier questionnaires</Link>}
         info={<p>Third-party AI as a governed object: a proposed vendor starts a real assessment workflow — plan, questionnaire, human sign-off on the one Approvals queue. Everything a vendor supplies is an attestation: a recorded claim with attribution, never verified by this platform and never blended into computed evidence.</p>}
       />
       <div className={v.stack}>
@@ -319,10 +324,16 @@ export default function VendorsPage() {
                     <Card title="Assessment questionnaire — record the vendor's answers and submit">
                       <div className={v.stack}>
                         <div className={v.faint}>
-                          Every answer below is the vendor&apos;s claim, recorded by you — nothing is pre-filled by a
-                          model and nothing is verified by this platform. Submitting stores it as the instance&apos;s
-                          versioned artifact and sends the vendor to assessment review.
+                          Every answer below is the vendor&apos;s claim, recorded by you — nothing is verified by this
+                          platform, and a drafted answer counts only once you submit it. Submitting stores it as the
+                          instance&apos;s versioned artifact and sends the vendor to assessment review.
                         </div>
+                        <VendorDraftPanel
+                          vendorId={d.vendor.id}
+                          current={answers || d.questionnaireTemplate || ""}
+                          template={d.questionnaireTemplate || ""}
+                          onChange={setAnswers}
+                        />
                         <Textarea
                           rows={14}
                           value={answers || d.questionnaireTemplate || ""}
@@ -442,6 +453,22 @@ export default function VendorsPage() {
                         ))}
                     </div>
                   </Card>
+
+                  {/* supplier access (ADR-0221): beside the checklist the supplier's accepted answers land in */}
+                  <Suspense
+                    fallback={
+                      <Card title="Supplier access">
+                        <SkeletonBlock lines={3} />
+                      </Card>
+                    }
+                  >
+                    <SupplierAccessPanel
+                      vendorId={d.vendor.id}
+                      vendorName={d.vendor.name}
+                      vendorStatus={d.vendor.status}
+                      frameworks={activeFrameworks}
+                    />
+                  </Suspense>
 
                   {/* retire (admin) */}
                   {d.vendor.status !== "retired" && (

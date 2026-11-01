@@ -1,5 +1,5 @@
 /**
- * ADR-0218 (themes phase 2, migration 0256) — a person's palette saved to the account, the organisation default and
+ * ADR-0218 (themes phase 2, migration 0259) — a person's palette saved to the account, the organisation default and
  * the admin lock.
  *
  * PASS CRITERIA, WRITTEN BEFORE THE RUN (M-023):

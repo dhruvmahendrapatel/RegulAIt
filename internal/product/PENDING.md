@@ -56,9 +56,9 @@ version before it is pinned.
 | # | Gap | What it would take |
 |---|---|---|
 | **P3** | **Ranked actions and an explainable score.** *Org-wide estimate, objective cards and ranked actions built in [ADR-0214](../decisions/0214-posture-estimate-and-ranked-actions.md) (2026-10-30); a score per asset remains open.* The [ADR-0082](../decisions/0082-inventory-and-posture.md) posture report already covers pack coverage, open risks, red-team, evals, audit anchoring, governance activity over a 30-day window, and spend against budget for the current month. It does not rank what to fix first or give one score. | Objective cards with an outcome metric, a ranked action list with a link to fix each item, and one score per asset and per organisation whose weights an admin can open and read, so the score always explains itself. Builds on the ADR-0082 report. |
-| **P4** | **A supplier-facing portal.** [ADR-0084](../decisions/0084-vendor-ai-risk-portal.md) already runs a versioned assessment workflow per vendor and records the vendor's answers as attributed attestations against pack controls. A platform user types in what the supplier sent, because no external sign-in surface exists. | A scoped portal where a supplier signs in and submits evidence against the applied framework directly, plus a builder for custom questionnaires. Supplier access is default-deny, scoped to one vendor and expires (ADR-0180). Results flow into the existing ADR-0084 attestations and approvals. |
+| **P4** | **A supplier-facing portal.** [ADR-0084](../decisions/0084-vendor-ai-risk-portal.md) already runs a versioned assessment workflow per vendor and records the vendor's answers as attributed attestations against pack controls. A platform user types in what the supplier sent, because no external sign-in surface exists. | A scoped portal where a supplier signs in and submits evidence against the applied framework directly, plus a builder for custom questionnaires. Supplier access is default-deny, scoped to one vendor and expires (ADR-0180). Results flow into the existing ADR-0084 attestations and approvals. **In build (2026-10-30, `builder/p4-supplier-portal`, [ADR-0221](../decisions/0221-supplier-portal.md), migrations 0256-0257): first slice delivered behind a default-off setting; follow-ups (e-mail links, supplier MFA, a scanner behind the hook) listed in the ADR.** |
 | **P5** | **Framework content imports and a wider regulatory feed.** [ADR-0158](../decisions/0158-regulatory-intelligence-impact.md) already ships a curated regulatory feed joined to the organisation's active packs and use cases. Control text in compliance packs is still typed by hand, and the feed is curated by hand. | Versioned imports from public-domain and permissively licensed sources: MITRE ATLAS, the NIST AI RMF Playbook data and OSCAL catalogs. Add a feed that is not curated by hand, and packs for US state laws. Extends ADR-0158. Content licensed share-alike or non-commercial is cited by ID only. |
-| **P6** | **AI-drafted vendor questionnaire answers.** [ADR-0149](../decisions/0149-governed-intake-assistant.md) already lets a model draft the use-case intake narrative through governed dispatch, labelling each section's source, and the [ADR-0056](../decisions/0056-ai-governance-copilot.md) copilot proposes configuration changes. The vendor questionnaire in [ADR-0084](../decisions/0084-vendor-ai-risk-portal.md) is deliberately not prefilled by any model, so a person reads each supplier document and types the answers. | Draft vendor questionnaire answers from the documents a supplier provides, the same way ADR-0149 drafts intake: governed dispatch, each answer's source and reasoning shown, accept or edit per answer, and a human sign-off. Lifting the ADR-0084 rule is part of this item's ADR. Separately, the template comments in `apps/gateway/src/use-cases.ts` that still say intake is "not pre-filled by any model" are stale after ADR-0149. |
+| **P6** | **AI-drafted vendor questionnaire answers.** [ADR-0149](../decisions/0149-governed-intake-assistant.md) already lets a model draft the use-case intake narrative through governed dispatch, labelling each section's source, and the [ADR-0056](../decisions/0056-ai-governance-copilot.md) copilot proposes configuration changes. The vendor questionnaire in [ADR-0084](../decisions/0084-vendor-ai-risk-portal.md) is deliberately not prefilled by any model, so a person reads each supplier document and types the answers. | Draft vendor questionnaire answers from the documents a supplier provides, the same way ADR-0149 drafts intake: governed dispatch, each answer's source and reasoning shown, accept or edit per answer, and a human sign-off. Lifting the ADR-0084 rule is part of this item's ADR. Separately, the template comments in `apps/gateway/src/use-cases.ts` that still say intake is "not pre-filled by any model" are stale after ADR-0149. **In progress (2026-10-30):** [ADR-0213](../decisions/0213-vendor-questionnaire-drafts.md), lane `builder/p6-vendor-drafts` — governed, source-labelled drafts behind a default-off setting; the ADR-0084 rule is narrowed there. |
 | **P7** | **Trained runtime detectors.** The [ADR-0042](../decisions/0042-guardrail-engine.md) detectors are heuristic, and fairness under [ADR-0045](../decisions/0045-model-risk-management.md) is a declared slot rather than a measurement (§3). | Run permissively licensed models and libraries behind the existing external-scorer shim: a PII recogniser, an injection classifier and a harm and groundedness model. Each runs air-gapped with its weights baked into the image. Fairness metrics come from a permissively licensed library once the owner settles scope (P13). **First slice built ([ADR-0220](../decisions/0220-trained-runtime-detectors.md), lane `builder/p7-trained-detectors`, 2026-10-30):** the PII recogniser, injection classifier and harm classifier, opt-in per organisation, at every enforcement site, fail closed, with a reference service in `agents/trained-detectors/`. Still open: groundedness at run time, an ONNX image and a CI build of it, the owner decision on the transitive licences in its `THIRD_PARTY.md`, and trained detectors in the tuning sandbox and training-corpus scan. |
 | **P8** | **One policy language.** ABAC already evaluates on `@cedar-policy/cedar-wasm` in `packages/policy-kernel`, but allow-lists, approval rules and rate limits are still hand-written evaluators. Team and Shared Project membership is stored in tables ([ADR-0011](../decisions/0011-shared-projects-on-one-project-entity.md)) but not evaluated by a relationship-based engine. | Assess moving the remaining rule types onto the Cedar engine already in use, keeping every existing test. Evaluate a relationship-based store (Zanzibar model) for pillar-4 membership, used alongside Cedar rather than instead of it. |
 | **P9** | **Wider discovery sources.** [ADR-0195](../decisions/0195-shadow-ai-active-discovery.md) scans repos, clouds and machines. It already covers the three clouds' native ML services, but not SaaS apps, identity-provider app grants or standalone ML platforms outside those clouds. Findings already have an admin disposition, and a finding can be registered as a use case. | Add those sources as read-only, default-deny scanners that feed the existing finding lifecycle. Assess whether reconciling a finding into the asset inventory, not only into a use case, needs its own step. |
@@ -73,6 +73,46 @@ version before it is pinned.
 | **P17** | **Full risk treatment.** A risk can be open, mitigating, accepted or closed (`packages/shared/src/risks.ts`). Risk management standards also expect "transferred" (for example, to insurance or a supplier contract) and "avoided" (the use stopped). | Add transferred and avoided treatments, each with required evidence (the contract or the decision that stopped the use) and an owner, recorded through the existing acceptance and audit path. A database migration is needed, written by hand. |
 
 ---
+
+## 2d. Coverage check against an AI governance frameworks map — post-demo backlog (owner, 2026-10-31)
+
+On 2026-10-31 the owner shared a one-page map of AI governance frameworks and asked for it to go into future work. The map
+groups the laws, standards, roles and controls behind enterprise AI governance. Its nodes are listed below so this item
+does not depend on the image. Nothing is built before the demo. The first step is a check of how far the product
+already covers each node, and that check feeds the lanes.
+
+| # | Gap | What it would take |
+|---|---|---|
+| **P18** | **No node-by-node coverage check against a full governance framework map.** Packs, controls and roles have grown ADR by ADR. Nobody has checked them against one complete map of the field, so coverage gaps and overlaps are not visible in one place. The map's nodes are listed after this table. | **Step 1, an audit (Codex, markdown only, ADR-0227):** for each node, record built / partial / missing, with the evidence (ADR, file, pack ID) and, for gaps, a one-line scope. Record it under `internal/reviews/`, with no new claims of compliance or certification. **Step 2, the master:** turn confirmed gaps into lanes, each with its own ADR. Use the order of ADR-0176 open-source-first imports first, then packs, then controls. Content licensed share-alike or non-commercial is cited by ID only (as P5). |
+
+**Map nodes to check:**
+
+- **Regulation:**
+  - AI-specific laws:
+    - the EU AI Act: prohibited practices, high-risk systems, transparency obligations and general-purpose AI models;
+    - other jurisdictions: South Korea's AI Basic Act, Japan's AI Promotion Act, China's generative AI measures and the
+      Council of Europe AI Convention.
+  - Related laws:
+    - privacy: GDPR, CCPA, India's DPDP Act and Brazil's LGPD;
+    - sector rules: financial model risk, medical devices, hiring and employment, and consumer protection.
+  - Cyber and resilience: NIS2, DORA and the Cyber Resilience Act.
+- **Standards:**
+  - ISO/IEC 42001 (management system), 23894 (risk management), 42005 (impact assessment) and 22989 (terminology);
+  - the NIST AI RMF 1.0 (Govern, Map, Measure, Manage) and its Generative AI Profile;
+  - principles: the OECD AI Principles, UNESCO AI Ethics and the G7 Hiroshima Code;
+  - AI security: the OWASP LLM Top 10, the OWASP Agentic Top 10 and MITRE ATLAS.
+- **Roles:**
+  - EU AI Act operators: provider, deployer, importer and distributor;
+  - in the organisation: AI governance board, data protection officer, model owner, chief AI officer, CISO and
+    internal audit.
+- **Controls:**
+  - AI inventory;
+  - risk assessment: risk tiering and impact assessment;
+  - model assurance: evaluations, bias testing and red teaming;
+  - data controls: classification, lineage, DLP and retention;
+  - monitoring and audit: logging, audit trail and incident response;
+  - human oversight;
+  - agent controls: agent identity, least privilege and tool permissions.
 
 ## 3. Structural gaps — the ADR shipped, a named half did not
 

@@ -2381,6 +2381,12 @@ export const updateOrgSettingsSchema = z
      * dispatchable judge reports `judged: unavailable` and changes nothing. */
     recommendationJudgeEnabled: z.boolean().optional(),
     recommendationJudgeAgentId: z.string().uuid().nullable().optional(),
+    /** ADR-0213 (migration 0258): may a person ask for drafted answers to a
+     * vendor assessment questionnaire? false (default) = the questionnaire is
+     * filled by hand only. true (a relaxation: step-up, audited) = the vendor
+     * detail offers drafts labelled with their sources; nothing is submitted
+     * or recorded as an attestation until a person does it. */
+    vendorDraftAssistEnabled: z.boolean().optional(),
     /** ADR-0215 (migration 0248): may an admin import vendored framework content
      * (new draft pack versions) and accept imported feed entries? false (default) =
      * the import routes refuse. Turning it on is a relaxation (settings_relax step-up). */
@@ -2538,7 +2544,7 @@ export const updateOrgSettingsSchema = z
     ...bomOrgSettingsFields,
     // ADR-0190 (batch 6 item 3): isolation enforcement, the class floors and the executor attestation lifetime
     ...isolationOrgSettingsFields,
-    // ADR-0218 (migration 0256): the organisation default palette and the theme lock (High contrast stays open)
+    // ADR-0218 (migration 0259): the organisation default palette and the theme lock (High contrast stays open)
     ...appearanceOrgSettingsFields,
     // ADR-0225 (P13 d): the public trust pages and auditor access, shipped off
     ...trustPagesOrgSettingsFields,
@@ -4030,6 +4036,27 @@ export {
   type UpdateVendorInput,
 } from "./vendors.js";
 
+// ADR-0213 — the governed vendor-questionnaire drafter (backlog P6)
+export {
+  VENDOR_DRAFT_LIMITS,
+  VENDOR_DRAFT_SOURCE_KINDS,
+  VENDOR_DRAFT_SOURCE_LABELS,
+  VENDOR_QUESTIONNAIRE_SECTIONS,
+  buildVendorDraftPrompt,
+  composeDraftQuestionnaire,
+  parseVendorDraft,
+  splitQuestionnaire,
+  suggestVendorAnswers,
+  vendorDraftRequestSchema,
+  vendorDraftSources,
+  type VendorDraftGrounding,
+  type VendorDraftRequest,
+  type VendorDraftSection,
+  type VendorDraftSource,
+  type VendorDraftSourceKind,
+  type VendorQuestionnaireSectionId,
+} from "./vendor-draft.js";
+
 // ---------------------------------------------------------------------------
 // ADR-0085 — EU AI Act risk-tier screening (gap L10): the questionnaire
 // vocabulary, the frozen v1 rule set, the deterministic classifier, the
@@ -4834,3 +4861,6 @@ export * from "./privacy-ops.js";
 
 // ===== ADR-0215 (P5) — framework content imports and the imported regulatory feed =====
 export * from "./framework-imports.js";
+
+// ===== ADR-0221 (PENDING P4) — the supplier portal =========================
+export * from "./supplier-portal.js";
