@@ -117,6 +117,12 @@ variable "session_log_group_name" {
   default = "/regulait/demo-host/ssm-sessions"
 }
 
+variable "run_command_log_group_name" {
+  description = "KMS-encrypted log group for Run Command output (send-command); the runbook's helpers pass it on every call."
+  type        = string
+  default     = "/regulait/demo-host/run-command"
+}
+
 variable "session_log_retention_days" {
   type    = number
   default = 90

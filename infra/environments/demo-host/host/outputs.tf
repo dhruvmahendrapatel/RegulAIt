@@ -73,6 +73,11 @@ output "session_log_group" {
   value = aws_cloudwatch_log_group.sessions.name
 }
 
+output "run_command_log_group" {
+  description = "Pass to --cloud-watch-output-config on every send-command (DEMO_RUNBOOK.md §8.4)."
+  value       = aws_cloudwatch_log_group.run_command.name
+}
+
 output "flow_log_destination_arn" {
   value = module.vpc.vpc_flow_log_destination_arn
 }

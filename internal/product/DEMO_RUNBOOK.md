@@ -1640,38 +1640,102 @@ aws organizations list-aws-service-access-for-organization --profile <profile> `
 ```
 
 **e. The operator: a least-privilege permission set, with MFA (security-team addendum).** Run `apply` as this
-permission set, **not** `Admin-BreakGlass` or `AdministratorAccess`. Its policy covers what the three stacks and the
-bootstrap call in the management account, and the one role it may assume in a member account:
+permission set, **not** `Admin-BreakGlass` or `AdministratorAccess`. It allows what the three stacks and the
+bootstrap call in the management account, and the one role it may assume in a member account. It also explicitly
+denies anything that would weaken the audit trail or the guardrails, whatever else it allows:
+
+- **IAM writes are limited to `regulait-*` roles and policies.** Managed-policy attachment is limited to
+  `AWS_ConfigRole`, inline policies are limited to the budget-action role, and `PassRole` is limited to Config and
+  Budgets. Nothing can be created under the name `OrganizationAccountAccessRole` in this account.
+- **`sts:AssumeRole` only reaches `OrganizationAccountAccessRole` in member accounts,** never one in the management
+  account.
+- **Explicit denies:**
+  - CloudTrail: stop, delete or update the trail.
+  - GuardDuty, Security Hub and Config: delete or disable them.
+  - KMS: delete or disable a key, or turn its rotation off.
+  - The CloudTrail bucket: delete objects, the bucket or its policy, add a lifecycle rule, or change an ACL.
+  - Organizations: detach, delete or update an SCP, or disable a policy type, a service's trusted access or a
+    delegated administrator.
+
+  SCPs do not apply to the management account, so these denies are the only guard there. Changing or removing these
+  controls (the §8.11 account teardown, a trail change) is a break-glass action and is recorded by CloudTrail.
+  The first apply of each stack only creates resources, and none of the denied calls is used to create them. If an
+  apply still stops on `AccessDenied` naming one of the `Deny*` statements, stop. Re-run that one apply as
+  break-glass, and record which call it was in the session notes.
 
 ```powershell
+$Mgmt = '<company account id>'
 $Policy = @'
 {
   "Version": "2012-10-17",
   "Statement": [
     { "Sid": "OrgAndAccount", "Effect": "Allow", "Action": [
         "organizations:Describe*", "organizations:List*", "organizations:CreateAccount", "organizations:TagResource",
-        "organizations:CloseAccount", "organizations:MoveAccount", "organizations:CreatePolicy", "organizations:UpdatePolicy",
-        "organizations:DeletePolicy", "organizations:AttachPolicy", "organizations:DetachPolicy",
-        "organizations:EnablePolicyType", "organizations:EnableAWSServiceAccess", "organizations:RegisterDelegatedAdministrator",
-        "organizations:UntagResource"], "Resource": "*" },
+        "organizations:UntagResource", "organizations:CloseAccount", "organizations:MoveAccount",
+        "organizations:CreatePolicy", "organizations:AttachPolicy", "organizations:EnablePolicyType",
+        "organizations:EnableAWSServiceAccess", "organizations:RegisterDelegatedAdministrator"], "Resource": "*" },
     { "Sid": "BaselineServices", "Effect": "Allow", "Action": [
         "cloudtrail:*", "guardduty:*", "securityhub:*", "config:*", "budgets:*", "access-analyzer:*", "inspector2:*",
         "kms:*", "s3:*", "dynamodb:*", "logs:*", "sns:*"], "Resource": "*" },
-    { "Sid": "IamForServiceRolesOnly", "Effect": "Allow", "Action": [
-        "iam:Get*", "iam:List*", "iam:CreateRole", "iam:DeleteRole", "iam:TagRole", "iam:UntagRole", "iam:PutRolePolicy",
-        "iam:DeleteRolePolicy", "iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:PassRole", "iam:CreatePolicy",
-        "iam:DeletePolicy", "iam:CreatePolicyVersion", "iam:DeletePolicyVersion", "iam:CreateServiceLinkedRole",
-        "iam:UpdateAssumeRolePolicy"], "Resource": "*" },
+    { "Sid": "IamRead", "Effect": "Allow", "Action": ["iam:Get*", "iam:List*"], "Resource": "*" },
+    { "Sid": "IamWriteOnlyRegulaitRolesAndPolicies", "Effect": "Allow", "Action": [
+        "iam:CreateRole", "iam:DeleteRole", "iam:TagRole", "iam:UntagRole", "iam:UpdateAssumeRolePolicy",
+        "iam:DetachRolePolicy", "iam:DeleteRolePolicy", "iam:CreatePolicy", "iam:DeletePolicy",
+        "iam:CreatePolicyVersion", "iam:DeletePolicyVersion", "iam:TagPolicy", "iam:UntagPolicy"],
+      "Resource": ["arn:aws:iam::MGMT_ACCOUNT_ID:role/regulait-*", "arn:aws:iam::MGMT_ACCOUNT_ID:policy/regulait-*"] },
+    { "Sid": "AttachOnlyTheConfigServicePolicy", "Effect": "Allow", "Action": "iam:AttachRolePolicy",
+      "Resource": "arn:aws:iam::MGMT_ACCOUNT_ID:role/regulait-*",
+      "Condition": { "ArnEquals": { "iam:PolicyARN": "arn:aws:iam::aws:policy/service-role/AWS_ConfigRole" } } },
+    { "Sid": "InlinePolicyOnlyOnTheBudgetActionRole", "Effect": "Allow", "Action": "iam:PutRolePolicy",
+      "Resource": "arn:aws:iam::MGMT_ACCOUNT_ID:role/regulait-*-budget-action" },
+    { "Sid": "PassRoleOnlyToConfigAndBudgets", "Effect": "Allow", "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::MGMT_ACCOUNT_ID:role/regulait-*",
+      "Condition": { "StringEquals": { "iam:PassedToService": ["config.amazonaws.com", "budgets.amazonaws.com"] } } },
+    { "Sid": "ServiceLinkedRolesForTheBaselineOnly", "Effect": "Allow", "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "*", "Condition": { "StringEquals": { "iam:AWSServiceName": [
+        "cloudtrail.amazonaws.com", "guardduty.amazonaws.com", "securityhub.amazonaws.com", "config.amazonaws.com",
+        "access-analyzer.amazonaws.com", "inspector2.amazonaws.com", "organizations.amazonaws.com"] } } },
+    { "Sid": "IntoMemberAccountsOnlyThroughTheOrgRole", "Effect": "Allow", "Action": "sts:AssumeRole",
+      "Resource": "arn:aws:iam::*:role/OrganizationAccountAccessRole",
+      "Condition": { "StringNotEquals": { "aws:ResourceAccount": "MGMT_ACCOUNT_ID" } } },
+    { "Sid": "ReadPublicParameters", "Effect": "Allow", "Action": ["ssm:GetParameter", "ssm:GetParameters"],
+      "Resource": "arn:aws:ssm:*::parameter/aws/service/*" },
+
     { "Sid": "DenyHumanCredentials", "Effect": "Deny", "Action": [
         "iam:CreateUser", "iam:CreateAccessKey", "iam:CreateLoginProfile", "iam:UpdateLoginProfile"], "Resource": "*" },
-    { "Sid": "IntoMemberAccountsOnlyThroughTheOrgRole", "Effect": "Allow", "Action": "sts:AssumeRole",
-      "Resource": "arn:aws:iam::*:role/OrganizationAccountAccessRole" },
-    { "Sid": "ReadPublicParameters", "Effect": "Allow", "Action": ["ssm:GetParameter", "ssm:GetParameters"],
-      "Resource": "arn:aws:ssm:*::parameter/aws/service/*" }
+    { "Sid": "DenyAnyIamOnTheOrgAccessRoleNameHere", "Effect": "Deny", "Action": "iam:*",
+      "Resource": "arn:aws:iam::MGMT_ACCOUNT_ID:role/OrganizationAccountAccessRole" },
+    { "Sid": "DenyWeakeningTheTrail", "Effect": "Deny", "Action": [
+        "cloudtrail:StopLogging", "cloudtrail:DeleteTrail", "cloudtrail:UpdateTrail",
+        "cloudtrail:PutEventSelectors", "cloudtrail:RemoveTags"], "Resource": "*" },
+    { "Sid": "DenyDisablingDetection", "Effect": "Deny", "Action": [
+        "guardduty:DeleteDetector", "guardduty:UpdateDetector", "guardduty:DisassociateMembers",
+        "guardduty:DeleteMembers", "guardduty:StopMonitoringMembers", "guardduty:DisableOrganizationAdminAccount",
+        "securityhub:DisableSecurityHub", "securityhub:BatchDisableStandards", "securityhub:DisassociateMembers",
+        "securityhub:DeleteMembers", "securityhub:DisableOrganizationAdminAccount",
+        "config:StopConfigurationRecorder", "config:DeleteConfigurationRecorder", "config:DeleteDeliveryChannel",
+        "config:DeleteConfigurationAggregator"], "Resource": "*" },
+    { "Sid": "DenyDestroyingKeys", "Effect": "Deny", "Action": [
+        "kms:ScheduleKeyDeletion", "kms:DisableKey", "kms:DisableKeyRotation"], "Resource": "*" },
+    { "Sid": "DenyTouchingTrailLogs", "Effect": "Deny", "Action": [
+        "s3:DeleteObject", "s3:DeleteObjectVersion", "s3:DeleteBucket", "s3:DeleteBucketPolicy",
+        "s3:PutLifecycleConfiguration", "s3:PutObjectAcl", "s3:PutBucketAcl"],
+      "Resource": ["arn:aws:s3:::regulait-cloudtrail-logs-*", "arn:aws:s3:::regulait-cloudtrail-logs-*/*"] },
+    { "Sid": "DenyRemovingGuardrails", "Effect": "Deny", "Action": [
+        "organizations:DetachPolicy", "organizations:DeletePolicy", "organizations:UpdatePolicy",
+        "organizations:DisablePolicyType", "organizations:DisableAWSServiceAccess",
+        "organizations:DeregisterDelegatedAdministrator", "organizations:LeaveOrganization"], "Resource": "*" }
   ]
 }
 '@
+$Policy = $Policy.Replace('MGMT_ACCOUNT_ID', $Mgmt)
 $PolicyFile = New-TemporaryFile; [IO.File]::WriteAllText($PolicyFile.FullName, $Policy)
+# Proof, before assigning it: the escalation paths are denied (IAM's policy simulator; it changes nothing).
+aws iam simulate-custom-policy --profile <profile> --policy-input-list "file://$($PolicyFile.FullName)" `
+  --action-names iam:CreateRole iam:AttachRolePolicy sts:AssumeRole cloudtrail:StopLogging organizations:DetachPolicy kms:ScheduleKeyDeletion `
+  --resource-arns "arn:aws:iam::$($Mgmt):role/OrganizationAccountAccessRole" `
+  --query 'EvaluationResults[].[EvalActionName,EvalDecision]' --output text
+# Success: every line ends in implicitDeny or explicitDeny (none says allowed)
 $Ic = aws sso-admin list-instances --profile <profile> --query 'Instances[0].InstanceArn' --output text
 $Dep = aws sso-admin create-permission-set --profile <profile> --instance-arn $Ic --name RegulAItDemoDeployer `
   --session-duration PT4H --description 'ADR-0228 demo host deployer' --query PermissionSet.PermissionSetArn --output text
@@ -1688,9 +1752,13 @@ aws configure sso --profile regulait-deployer   # choose the RegulAItDemoDeploye
 **Success:** `aws sts get-caller-identity --profile regulait-deployer --query Arn --output text` shows
 `AWSReservedSSO_RegulAItDemoDeployer_...`.
 
-What this does not narrow: inside the member account, Terraform acts as `OrganizationAccountAccessRole`, which
-Organizations creates with administrator rights. A scoped deploy role there is part of the ADR-0013 successor
-(DEMO_HOST_SECURITY_BRIEF.md, residual risks).
+What this does not narrow:
+- **Inside the member account,** Terraform acts as `OrganizationAccountAccessRole`, which Organizations creates
+  with administrator rights. A scoped deploy role there is part of the ADR-0013 successor
+  (DEMO_HOST_SECURITY_BRIEF.md, residual risks).
+- **In the management account,** `s3:*`, `kms:*` and the service wildcards stay broad on every resource except the
+  denied ones, because the stacks create those resources.
+- **The budget-action role** may attach the spend-cap SCP, which is its purpose (ADR-0197).
 
 **CONSOLE FALLBACK for MFA (about 1 minute):** there is no CLI or API for Identity Center's MFA settings. Go to **IAM
 Identity Center** › **Settings** › **Authentication** › **Multi-factor authentication** and set **Every time they sign
@@ -1792,7 +1860,11 @@ Then **pin the AMI**: put the `ami-...` value into `ami_id` in `host/terraform.t
 show `No changes`.
 
 **A helper for host commands (paste once per PowerShell window).** It sends commands to the host through
-`aws ssm send-command`, waits, and prints the status and output. It uses no SSH and no inbound port.
+`aws ssm send-command`, waits, and prints the status and output. It uses no SSH and no inbound port. Run Command is
+the second operator channel next to Session Manager, and Session Manager's preferences do not cover it, so every
+`send-command` in this section passes `--cloud-watch-output-config`: the commands' output lands in the KMS-encrypted
+log group `/regulait/demo-host/run-command`, and CloudTrail records each `SendCommand` call and who made it. Never
+call `send-command` without it.
 
 ```powershell
 function Invoke-DemoHost {
@@ -1801,7 +1873,9 @@ function Invoke-DemoHost {
   $f = New-TemporaryFile
   [IO.File]::WriteAllText($f.FullName, $json)
   $id = aws ssm send-command --profile regulait-demo-host --instance-ids $env:DEMO_INSTANCE `
-    --document-name AWS-RunShellScript --parameters "file://$($f.FullName)" --query Command.CommandId --output text
+    --document-name AWS-RunShellScript --parameters "file://$($f.FullName)" `
+    --cloud-watch-output-config 'CloudWatchOutputEnabled=true,CloudWatchLogGroupName=/regulait/demo-host/run-command' `
+    --query Command.CommandId --output text
   Remove-Item $f
   do {
     Start-Sleep 10
@@ -1818,7 +1892,9 @@ demo_host() {
   local json id s
   json=$(jq -n --args '{commands: $ARGS.positional, executionTimeout: ["3600"]}' "$@")
   id=$(aws ssm send-command --profile regulait-demo-host --instance-ids "$DEMO_INSTANCE" \
-    --document-name AWS-RunShellScript --parameters "$json" --query Command.CommandId --output text)
+    --document-name AWS-RunShellScript --parameters "$json" \
+    --cloud-watch-output-config 'CloudWatchOutputEnabled=true,CloudWatchLogGroupName=/regulait/demo-host/run-command' \
+    --query Command.CommandId --output text)
   while sleep 10; do
     s=$(aws ssm get-command-invocation --profile regulait-demo-host --command-id "$id" --instance-id "$DEMO_INSTANCE" --query Status --output text 2>/dev/null)
     case "$s" in Pending|InProgress|Delayed|"") ;; *) break ;; esac
@@ -1840,7 +1916,9 @@ during the demo):
 
 ```powershell
 $PatchCmd = aws ssm send-command --profile regulait-demo-host --instance-ids $env:DEMO_INSTANCE --document-name AWS-RunPatchBaseline `
-  --parameters 'Operation=Install,RebootOption=RebootIfNeeded' --query Command.CommandId --output text
+  --parameters 'Operation=Install,RebootOption=RebootIfNeeded' `
+  --cloud-watch-output-config 'CloudWatchOutputEnabled=true,CloudWatchLogGroupName=/regulait/demo-host/run-command' `
+  --query Command.CommandId --output text
 Start-Sleep 300
 aws ssm list-command-invocations --profile regulait-demo-host --command-id $PatchCmd --query 'CommandInvocations[0].Status' --output text   # Success: Success
 aws ssm describe-instance-patch-states --profile regulait-demo-host --instance-ids $env:DEMO_INSTANCE `
@@ -1866,6 +1944,10 @@ aws ec2 describe-flow-logs --profile $H --query 'FlowLogs[].[ResourceId,TrafficT
 aws ssm get-document --profile $H --name SSM-SessionManagerRunShell --query Content --output text | ConvertFrom-Json |
   Select-Object -ExpandProperty inputs | Select-Object cloudWatchLogGroupName,cloudWatchEncryptionEnabled,kmsKeyId,idleSessionTimeout
 # Success: /regulait/demo-host/ssm-sessions  True  <key id>  20
+aws logs describe-log-groups --profile $H --log-group-name-prefix /regulait/demo-host/run-command --query 'logGroups[].[logGroupName,kmsKeyId]' --output text
+# Success: /regulait/demo-host/run-command  arn:aws:kms:...   (Run Command output, KMS-encrypted)
+aws logs describe-log-streams --profile $H --log-group-name /regulait/demo-host/run-command --query 'length(logStreams)'
+# Success: more than 0 once the patch install above has run (its output is the first stream)
 aws kms get-key-rotation-status --profile $H --key-id alias/regulait-demo-host --query KeyRotationEnabled   # Success: true
 aws accessanalyzer list-analyzers --profile $H --type ACCOUNT --query 'analyzers[].status' --output text   # Success: ACTIVE
 aws inspector2 batch-get-account-status --profile $H --query 'accounts[0].resourceState.[ec2.status,ecr.status]' --output text   # Success: ENABLED ENABLED
@@ -2247,6 +2329,8 @@ Run these on the host in an SSM shell, as root in `/opt/app`, with `BOOT` read a
 | 7 | **No public IP, no ingress, egress 3 rules, endpoints, flow logs, session logging** | 8.4 "Check the security controls" | all as stated there |
 | 8 | **Backups and snapshots** | `/usr/local/sbin/regulait-pg-backup.sh --check`; `aws dlm get-lifecycle-policies` (laptop) | a backup from today; ENABLED |
 | 9 | **G8 anchor grade** | 8.8 step 8 | `sink.mode` `compliance`, `tamperResistant` `true` |
+| 10 | **Dedicated, spend-limited model key** (8.13) | In the provider console, list the API keys and check the demo key's spend limit. On the host: `curl -fsS -H "authorization: Bearer $BOOT" $GW/v1/model-credentials \| jq -r '.credentials[] \| [.provider, .createdAt] \| @tsv'` (provider and date only; no key material) | The console shows exactly one active key named for the demo, with a spend limit set. The host lists exactly one `anthropic` credential, created after the host went up |
+| 11 | **The laptop's old model key is revoked** | In the provider console, find the key the laptop stack used (§7.10 and §7.11) and delete it. On the laptop, delete that credential in the laptop UI too, or stop the laptop stack | The console lists that key as deleted, or no longer lists it. Signing in on the laptop UI shows no model credential |
 
 ### 8.10 Rollback to the laptop (about 2 minutes; keep this window open on Monday)
 
@@ -2307,6 +2391,9 @@ aws ssm delete-parameters --profile regulait-demo-host --names /regulait/demo-ho
 #        aws s3api delete-objects ...; aws s3api delete-bucket ...
 #      and close the account with (a). The KMS key's 30-day deletion window is longer than the 7-day retention,
 #      so the anchors stay readable until then.
+#  Either way, the account's terraform destroy detaches and deletes its SCPs, which RegulAItDemoDeployer denies
+#  (8.2 e). Run that one destroy with the break-glass permission set (CloudTrail records it), and sign out of it
+#  right after.
 Set-Location infra/environments/demo-host/account; terraform plan -destroy -out=tfplan; terraform apply tfplan; Set-Location ../../../..
 ```
 
@@ -2363,7 +2450,9 @@ Invoke-DemoHost 'cd /opt/app && bash infra/scripts/demo-host-env.sh compose --pr
 **Model API key (the Claude key of §7.10 and §7.11).** Use a **dedicated** key, created for the demo in the provider's
 console with a **spend limit** set there. It is entered only in the RegulAIt UI (§7.11), which stores it encrypted with
 the data key. It is never in SSM, a file or a terminal. **Rotate:** create a new key in the provider console, replace
-the credential in the UI (step-up), and delete the old key in the console. **Revoke after the demo:** delete the key
+the credential in the UI (step-up), and delete the old key in the console. **Before go-live, revoke the laptop's key:**
+the key the laptop stack used before the move is not the demo key. Delete it in the provider console on Sunday,
+before the posture checklist (8.9 a rows 10 and 11). **Revoke after the demo:** delete the key
 in the provider's console, then delete the credential in the UI. **Check:** the provider console lists no active demo
 key.
 

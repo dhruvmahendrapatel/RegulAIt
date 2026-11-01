@@ -183,3 +183,23 @@ own answer, and only COMPLIANCE mode counts as tamper-resistant (`apps/gateway/s
 - **The runbook** gains §8.8 step 8 (the G8 grade must read COMPLIANCE before the rehearsal), a posture-checklist row,
   and a teardown note: COMPLIANCE objects cannot be deleted by anyone until their retention ends, so the anchor
   bucket outlives the stack by up to `anchor_retention_days`.
+
+## Addendum 3 (2026-11-01): security review fixes (PR #652)
+
+The independent security review asked for five blocking changes. All five are made:
+
+1. **The deployer permission set (§8.2 e) is now actually least-privilege.**
+   - IAM writes are limited to `regulait-*` roles and policies. Managed-policy attachment is limited to
+     `AWS_ConfigRole`, the inline policy to the budget-action role, and `PassRole` to Config and Budgets.
+   - `sts:AssumeRole` reaches `OrganizationAccountAccessRole` in member accounts only. Before this, the operator could
+     create a role with that name in the management account, attach admin and assume it.
+   - Explicit denies cover stopping or weakening CloudTrail, GuardDuty, Security Hub and Config, deleting or disabling
+     KMS keys, touching the trail bucket's logs, and detaching or editing SCPs. SCPs do not apply to the management
+     account, so these denies are its only guard.
+   - Teardown of the account stack and any trail change are break-glass steps.
+2. **Run Command is named as the second operator channel and logged.** A KMS-encrypted
+   `/regulait/demo-host/run-command` log group exists, and the instance role may write to it. Every runbook
+   `send-command` passes `--cloud-watch-output-config`.
+3. **The brief's S1 proof** names the three non-secret `String` parameters that Terraform creates for the anchor.
+4. **The go-live checklist** has rows for the dedicated, spend-limited model key and for revoking the laptop's old key.
+5. **The source bundle bucket is versioned**, as the brief already stated.

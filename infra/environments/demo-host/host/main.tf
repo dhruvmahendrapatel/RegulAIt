@@ -150,7 +150,7 @@ module "app" {
 # AmazonSSMManagedInstanceCore (attached by the module) and the backup module's
 # write-only grant, this is the role's whole policy. Beyond the security team's
 # list (core, the parameter path, Decrypt on one key) it has only: read its own
-# source bundle (module), write to two log groups, and write backups.
+# source bundle (module), write to three log groups, and write backups.
 data "aws_iam_policy_document" "host" {
   statement {
     sid     = "ReadOwnParameters"
@@ -170,11 +170,12 @@ data "aws_iam_policy_document" "host" {
   }
 
   statement {
-    sid     = "WriteContainerAndSessionLogs"
+    sid     = "WriteContainerSessionAndRunCommandLogs"
     actions = ["logs:CreateLogStream", "logs:PutLogEvents", "logs:DescribeLogStreams"]
     resources = [
       "${aws_cloudwatch_log_group.containers.arn}:*",
       "${aws_cloudwatch_log_group.sessions.arn}:*",
+      "${aws_cloudwatch_log_group.run_command.arn}:*",
     ]
   }
 

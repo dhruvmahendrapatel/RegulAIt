@@ -16,6 +16,16 @@ resource "aws_cloudwatch_log_group" "sessions" {
   kms_key_id        = aws_kms_key.host.arn
 }
 
+# Run Command (`aws ssm send-command`, the runbook's Invoke-DemoHost) is the second
+# operator channel. Session preferences do not cover it, so every command's output
+# goes to this KMS-encrypted log group instead (the runbook passes
+# --cloud-watch-output-config on every send-command; DEMO_RUNBOOK.md §8.4).
+resource "aws_cloudwatch_log_group" "run_command" {
+  name              = var.run_command_log_group_name
+  retention_in_days = var.session_log_retention_days
+  kms_key_id        = aws_kms_key.host.arn
+}
+
 resource "aws_ssm_document" "session_preferences" {
   name            = "SSM-SessionManagerRunShell"
   document_type   = "Session"

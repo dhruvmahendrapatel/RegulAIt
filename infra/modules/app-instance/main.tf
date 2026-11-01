@@ -77,6 +77,15 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "source" {
   }
 }
 
+# Versioned: an overwritten or deleted bundle stays recoverable, so the deployed
+# commit can always be matched to the object it came from (ADR-0228).
+resource "aws_s3_bucket_versioning" "source" {
+  bucket = aws_s3_bucket.source.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
 # TLS only: every request over plain HTTP is refused (security checklist).
 resource "aws_s3_bucket_policy" "source_tls_only" {
   bucket = aws_s3_bucket.source.id
