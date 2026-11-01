@@ -29,7 +29,7 @@ done
 
 # Format only a blank disk: a re-attached volume keeps its data.
 if ! blkid "$DEV" >/dev/null 2>&1; then
-  mkfs.xfs -L regulait-data "$DEV"
+  mkfs.xfs -L regulaitdata "$DEV"
 fi
 UUID=$(blkid -s UUID -o value "$DEV")
 mkdir -p "${data_volume_mount}"
