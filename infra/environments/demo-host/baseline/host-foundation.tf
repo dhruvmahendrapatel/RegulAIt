@@ -2,12 +2,16 @@
 #
 # The recurring deployer (`RegulAItDemoDeployer`, DEMO_RUNBOOK.md §8.4 step 3) is
 # assigned only in the demo-host account and has no access to the management
-# account. So the two things it must rely on, but must never be able to change,
-# are created here by the one-time privileged bootstrap:
+# account. So the two things it must rely on are created here by the one-time
+# privileged bootstrap:
 #
 #   1. its Terraform state backend, in the host account (S3 + DynamoDB lock,
-#      KMS, versioned, TLS-only, no public access);
-#   2. the permissions boundary every IAM role it creates must carry.
+#      KMS, versioned, TLS-only, no public access). The deployer reads and
+#      writes state, but its permission set denies deleting state versions,
+#      changing the bucket's policy, versioning, lifecycle or encryption, and
+#      deleting or changing the lock table (DEMO_RUNBOOK.md §8.4 step 3);
+#   2. the permissions boundary every IAM role it creates must carry, which
+#      the deployer cannot change at all.
 #
 # The boundary caps any role the deployer creates, whatever policy is attached
 # to it later: no IAM, no Organizations, no role assumption except the anchor
@@ -95,13 +99,28 @@ data "aws_iam_policy_document" "host_role_boundary" {
       "logs:DeleteLogGroup", "logs:DeleteLogStream", "logs:PutRetentionPolicy",
       "logs:DeleteRetentionPolicy", "logs:DisassociateKmsKey", "logs:AssociateKmsKey",
       "logs:PutResourcePolicy", "logs:DeleteResourcePolicy", "logs:DeleteDataProtectionPolicy",
-      # Not ec2:DeleteSnapshot: DLM expires its own snapshots after 7.
-      "ec2:DeleteFlowLogs",
+      # ec2:DeleteSnapshot is handled below: only the DLM role may expire snapshots.
+      "ec2:DeleteFlowLogs", "ec2:ModifySnapshotAttribute",
       "dlm:DeleteLifecyclePolicy", "dlm:UpdateLifecyclePolicy",
       "ssm:DeleteDocument", "ssm:UpdateDocument", "ssm:UpdateDocumentDefaultVersion",
       "ssm:PutParameter", "ssm:DeleteParameter", "ssm:DeleteParameters",
     ]
     resources = ["*"]
+  }
+
+  # Snapshots: DLM must delete its own expired snapshots, and no other deployed
+  # role may delete any (a deployer could otherwise grant ec2:DeleteSnapshot to
+  # the instance role and run it from the host).
+  statement {
+    sid       = "OnlyDlmDeletesSnapshots"
+    effect    = "Deny"
+    actions   = ["ec2:DeleteSnapshot"]
+    resources = ["*"]
+    condition {
+      test     = "ArnNotEquals"
+      variable = "aws:PrincipalArn"
+      values   = ["arn:aws:iam::${var.host_account_id}:role/${local.host_prefix}-dlm"]
+    }
   }
 }
 

@@ -231,10 +231,35 @@ member account. The master session asked for a change of design, not of the deny
     roles, so the boundary caps any new version.
   - `sts:AssumeRole` is denied outside the host account, and so is any action on the management account's trail,
     Config and state buckets.
-  - It cannot delete host evidence: backups, anchors, logs, keys, snapshots, flow logs, detection, or the Session
-    Manager logging preferences.
+  - It cannot delete host evidence directly: backup and anchor objects, log groups, keys, snapshots, flow logs,
+    detection, or the Session Manager logging preferences. Addendum 5 closes the configuration paths.
 - **Config's delivery bucket is now versioned** (`modules/aws-security-baseline`).
 - **Teardown keeps the backups and anchors readable only if the host key is kept too.** Otherwise they last only
   for the key's 30-day deletion window. Destroying a bucket's dependents removes its bucket-level controls, and the
   brief now says so.
 - **IAM simulator proofs** (DEMO_RUNBOOK §8.4 step 3) cover each escalation path the reviewers named.
+
+## Addendum 5 (2026-11-01): evidence by configuration, and session documents (security review round 4)
+
+Round 3 denied the deployer the direct deletes but left configuration paths open. The deployer could erase evidence
+with a lifecycle rule on the backup bucket, a one-day log retention, a DLM retain count of 1, a log group's new KMS
+key, or a bounded role given `ec2:DeleteSnapshot` and run from the host. It could also bypass session logging with
+a custom Session document or a port-forwarding session.
+
+- **Denied from the start:**
+  - `logs:AssociateKmsKey` and `dlm:UpdateLifecyclePolicy`;
+  - snapshot sharing, and KMS grants to principals (only grants for AWS resources remain);
+  - Inspector suppression filters and Access Analyzer finding updates;
+  - any change to the host state backend's configuration or lock table;
+  - `ssm:StartSession` on any document other than `SSM-SessionManagerRunShell`, which also denies port forwarding;
+  - creating or updating any other SSM document.
+- **The boundary now lets only the DLM role delete snapshots.**
+- **A break-glass lock step right after the first host apply** (DEMO_RUNBOOK §8.4 step 5) denies the deployer the
+  evidence buckets' policy, versioning, encryption, lifecycle, lock, public-access block and ownership, and
+  `logs:PutRetentionPolicy` on `/regulait/demo-host/*`. The first apply needs those calls, so they cannot be denied
+  earlier. A later change to them is break-glass.
+- **What remains is stated as residuals:** the first-apply window before the lock; termination of the instance and
+  its data volume; and a bounded role trusted by an outside account. The detective controls are the organization
+  CloudTrail trail in the management account, which the deployer cannot reach, and the COMPLIANCE-locked anchors.
+- **Teardown step 2a now removes only the two buckets' own resources and the key from state.** The writer policies,
+  their attachments and the alarm stay in state, so the roles delete cleanly and the destroy completes.

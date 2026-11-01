@@ -1663,8 +1663,10 @@ aws organizations list-aws-service-access-for-organization --profile <profile> `
      - administer KMS keys;
      - weaken or erase evidence, such as bucket policy, versioning, lifecycle or lock settings, deletes, or log-group
        deletion and retention.
-   - It cannot update a trust policy, cannot assume a role outside the host account, and cannot delete the host's
-     evidence: backups, anchors, logs, keys and snapshots. That is why teardown (8.11) is break-glass.
+   - It cannot update a trust policy, and cannot assume a role outside the host account.
+   - It may open a session only through the logged default document: no custom Session document, no port
+     forwarding.
+   - **Evidence:** From the lock step (DEMO_RUNBOOK §8.4 step 5) on, the deployer cannot delete or expire the host's evidence. It cannot delete backup or anchor objects, versions or buckets, or change those buckets' policy, versioning, encryption, lifecycle, lock, public-access block or ownership. It cannot delete log groups or streams, or change their retention or key. It cannot disable, delete or re-key the host key, or rewrite its policy. It cannot delete or share snapshots, or change the DLM policy. It cannot delete flow logs, or mute GuardDuty, Security Hub, Config, Inspector or Access Analyzer. During the first host apply, before the lock step, the bucket-configuration and log-retention calls are allowed, because that apply needs them. It can still terminate the instance and delete its data volume (`ec2:*`), which loses the live database but not the backups, snapshots or anchors. **Detective controls:** the organization CloudTrail trail, in the management account the deployer cannot reach, records every one of these calls; the anchors are in S3 Object Lock COMPLIANCE mode, so no one, root included, can erase them before their retention ends. That is why teardown (8.11) is break-glass.
    - Its policy is in 8.4 step 3, with the IAM simulator proofs of each escalation path the security reviewers named.
 
 **CONSOLE FALLBACK for MFA (about 1 minute):** there is no CLI or API for Identity Center's MFA settings. Go to **IAM
@@ -1766,11 +1768,15 @@ $Policy = @'
     {"Sid": "DenyAssumingAnyRoleOutsideTheHostAccount", "Effect": "Deny", "Action": "sts:AssumeRole", "Resource": "*", "Condition": {"StringNotEquals": {"aws:ResourceAccount": "HOST_ACCOUNT_ID"}}},
     {"Sid": "DenyManagementAccountEvidenceBuckets", "Effect": "Deny", "Action": "s3:*", "Resource": ["arn:aws:s3:::regulait-cloudtrail-logs-*", "arn:aws:s3:::regulait-cloudtrail-logs-*/*", "arn:aws:s3:::regulait-config-recordings-*", "arn:aws:s3:::regulait-config-recordings-*/*", "arn:aws:s3:::regulait-terraform-state-*", "arn:aws:s3:::regulait-terraform-state-*/*"]},
     {"Sid": "DenyErasingHostEvidence", "Effect": "Deny", "Action": ["s3:DeleteBucket", "s3:DeleteBucketPolicy", "s3:DeleteObject", "s3:DeleteObjectVersion", "s3:BypassGovernanceRetention", "s3:PutObjectLegalHold"], "Resource": ["arn:aws:s3:::regulait-demo-host-db-backup-*", "arn:aws:s3:::regulait-demo-host-db-backup-*/*", "arn:aws:s3:::regulait-demo-host-audit-anchor-*", "arn:aws:s3:::regulait-demo-host-audit-anchor-*/*", "arn:aws:s3:::regulait-demo-host-tfstate-*"]},
-    {"Sid": "DenyErasingHostLogs", "Effect": "Deny", "Action": ["logs:DeleteLogGroup", "logs:DeleteLogStream", "logs:DeleteRetentionPolicy", "logs:DisassociateKmsKey"], "Resource": "arn:aws:logs:*:HOST_ACCOUNT_ID:log-group:/regulait/demo-host/*"},
+    {"Sid": "DenyErasingHostLogs", "Effect": "Deny", "Action": ["logs:DeleteLogGroup", "logs:DeleteLogStream", "logs:DeleteRetentionPolicy", "logs:DisassociateKmsKey", "logs:AssociateKmsKey"], "Resource": "arn:aws:logs:*:HOST_ACCOUNT_ID:log-group:/regulait/demo-host/*"},
     {"Sid": "DenyDestroyingAnyKey", "Effect": "Deny", "Action": ["kms:ScheduleKeyDeletion", "kms:DisableKey", "kms:DisableKeyRotation"], "Resource": "*"},
     {"Sid": "DenyRewritingTheHostKeyPolicy", "Effect": "Deny", "Action": ["kms:PutKeyPolicy", "kms:UpdateAlias", "kms:DeleteAlias", "kms:ReplicateKey"], "Resource": "*", "Condition": {"ForAnyValue:StringEquals": {"kms:ResourceAliases": ["alias/regulait-demo-host", "alias/regulait-demo-host-tfstate"]}}},
-    {"Sid": "DenyMutingDetectionAndAudit", "Effect": "Deny", "Action": ["cloudtrail:Create*", "cloudtrail:Delete*", "cloudtrail:Update*", "cloudtrail:Put*", "cloudtrail:StopLogging", "config:Put*", "config:Delete*", "config:Stop*", "guardduty:Create*", "guardduty:Update*", "guardduty:Delete*", "guardduty:Disassociate*", "guardduty:Archive*", "securityhub:Create*", "securityhub:Update*", "securityhub:Delete*", "securityhub:Batch*", "securityhub:Disable*", "securityhub:Disassociate*", "inspector2:Disable*", "access-analyzer:DeleteAnalyzer", "access-analyzer:CreateArchiveRule", "access-analyzer:UpdateArchiveRule", "access-analyzer:ApplyArchiveRule", "ec2:DeleteFlowLogs", "dlm:DeleteLifecyclePolicy", "ssm:DeleteDocument", "ec2:DeleteSnapshot"], "Resource": "*"},
-    {"Sid": "DenyChangingSessionLoggingPreferences", "Effect": "Deny", "Action": ["ssm:UpdateDocument", "ssm:UpdateDocumentDefaultVersion", "ssm:DeleteDocument", "ssm:UpdateDocumentMetadata"], "Resource": "arn:aws:ssm:*:HOST_ACCOUNT_ID:document/SSM-SessionManagerRunShell"}
+    {"Sid": "DenyMutingDetectionAndAudit", "Effect": "Deny", "Action": ["cloudtrail:Create*", "cloudtrail:Delete*", "cloudtrail:Update*", "cloudtrail:Put*", "cloudtrail:StopLogging", "config:Put*", "config:Delete*", "config:Stop*", "guardduty:Create*", "guardduty:Update*", "guardduty:Delete*", "guardduty:Disassociate*", "guardduty:Archive*", "securityhub:Create*", "securityhub:Update*", "securityhub:Delete*", "securityhub:Batch*", "securityhub:Disable*", "securityhub:Disassociate*", "inspector2:Disable*", "access-analyzer:DeleteAnalyzer", "access-analyzer:CreateArchiveRule", "access-analyzer:UpdateArchiveRule", "access-analyzer:ApplyArchiveRule", "ec2:DeleteFlowLogs", "dlm:DeleteLifecyclePolicy", "ssm:DeleteDocument", "ec2:DeleteSnapshot", "dlm:UpdateLifecyclePolicy", "access-analyzer:UpdateFindings", "inspector2:CreateFilter", "inspector2:UpdateFilter", "ec2:ModifySnapshotAttribute"], "Resource": "*"},
+    {"Sid": "DenyChangingSessionLoggingPreferences", "Effect": "Deny", "Action": ["ssm:UpdateDocument", "ssm:UpdateDocumentDefaultVersion", "ssm:DeleteDocument", "ssm:UpdateDocumentMetadata"], "Resource": "arn:aws:ssm:*:HOST_ACCOUNT_ID:document/SSM-SessionManagerRunShell"},
+    {"Sid": "DenyChangingTheStateBackend", "Effect": "Deny", "Action": ["s3:DeleteObjectVersion", "s3:PutBucketPolicy", "s3:PutBucketVersioning", "s3:PutLifecycleConfiguration", "s3:PutEncryptionConfiguration", "dynamodb:DeleteTable", "dynamodb:UpdateTable", "dynamodb:UpdateContinuousBackups", "dynamodb:DeleteBackup"], "Resource": ["arn:aws:s3:::regulait-demo-host-tfstate-*", "arn:aws:s3:::regulait-demo-host-tfstate-*/*", "arn:aws:dynamodb:*:HOST_ACCOUNT_ID:table/regulait-demo-host-tfstate-lock"]},
+    {"Sid": "DenySessionsOnAnyOtherDocument", "Effect": "Deny", "Action": "ssm:StartSession", "NotResource": ["arn:aws:ssm:*:HOST_ACCOUNT_ID:document/SSM-SessionManagerRunShell", "arn:aws:ec2:*:HOST_ACCOUNT_ID:instance/*", "arn:aws:ssm:*:HOST_ACCOUNT_ID:managed-instance/*"]},
+    {"Sid": "DenyCreatingAnyOtherDocument", "Effect": "Deny", "Action": ["ssm:CreateDocument", "ssm:UpdateDocument", "ssm:UpdateDocumentDefaultVersion"], "NotResource": "arn:aws:ssm:*:HOST_ACCOUNT_ID:document/SSM-SessionManagerRunShell"},
+    {"Sid": "DenyKeyGrantsToPrincipals", "Effect": "Deny", "Action": "kms:CreateGrant", "Resource": "*", "Condition": {"Bool": {"kms:GrantIsForAWSResource": "false"}}}
   ]
 }
 '@
@@ -1801,10 +1807,22 @@ Sim s3:PutBucketPolicy,s3:DeleteObject "arn:aws:s3:::regulait-cloudtrail-logs-$M
 Sim sts:AssumeRole "arn:aws:iam::$($Mgmt):role/OrganizationAccountAccessRole" "ContextKeyName=aws:ResourceAccount,ContextKeyValues=$Mgmt,ContextKeyType=string"
 Sim kms:ScheduleKeyDeletion,kms:DisableKey "arn:aws:kms:<region>:$($HostAccount):key/00000000-0000-0000-0000-000000000000"
 Sim cloudtrail:StopLogging,config:PutConfigurationRecorder,guardduty:CreateFilter,securityhub:CreateAutomationRule "*"
-# Success for P1 to P4: every line ends in explicitDeny or implicitDeny; none says allowed.
+# P6. Erasing or redirecting evidence by configuration, and the state backend
+Sim logs:AssociateKmsKey,logs:DeleteLogGroup "arn:aws:logs:<region>:$($HostAccount):log-group:/regulait/demo-host/ssm-sessions"
+Sim dlm:UpdateLifecyclePolicy,dlm:DeleteLifecyclePolicy "arn:aws:dlm:<region>:$($HostAccount):policy/policy-00000000000000000"
+Sim ec2:ModifySnapshotAttribute,ec2:DeleteSnapshot "arn:aws:ec2:<region>::snapshot/snap-00000000000000000"
+Sim kms:CreateGrant "arn:aws:kms:<region>:$($HostAccount):key/00000000-0000-0000-0000-000000000000" "ContextKeyName=kms:GrantIsForAWSResource,ContextKeyValues=false,ContextKeyType=boolean"
+Sim s3:PutBucketPolicy,s3:PutBucketVersioning,s3:PutLifecycleConfiguration "arn:aws:s3:::regulait-demo-host-tfstate-$($HostAccount)"
+Sim dynamodb:DeleteTable,dynamodb:UpdateContinuousBackups "arn:aws:dynamodb:<region>:$($HostAccount):table/regulait-demo-host-tfstate-lock"
+Sim access-analyzer:UpdateFindings,inspector2:CreateFilter,inspector2:UpdateFilter "*"
+# P7. Sessions only through the logged default document: no custom Session document, no port forwarding
+Sim ssm:StartSession "arn:aws:ssm:<region>::document/AWS-StartPortForwardingSession"
+Sim ssm:StartSession,ssm:CreateDocument "arn:aws:ssm:<region>:$($HostAccount):document/regulait-x-unlogged-shell"
+# Success for P1 to P4, P6 and P7: every line ends in explicitDeny or implicitDeny; none says allowed.
 # P5. The one way to create a role: with the boundary
 Sim iam:CreateRole "arn:aws:iam::$($HostAccount):role/regulait-demo-host-x" "ContextKeyName=iam:PermissionsBoundary,ContextKeyValues=$Bnd,ContextKeyType=string"
-# Success for P5: allowed
+Sim ssm:StartSession "arn:aws:ssm:<region>:$($HostAccount):document/SSM-SessionManagerRunShell"
+# Success for P5: both allowed (a bounded role; a session through the default, logged document)
 
 $Ic = aws sso-admin list-instances --profile <break-glass profile> --query 'Instances[0].InstanceArn' --output text
 $Dep = aws sso-admin create-permission-set --profile <break-glass profile> --instance-arn $Ic --name RegulAItDemoDeployer `
@@ -1863,6 +1881,50 @@ aws iam simulate-principal-policy --profile regulait-demo-host --policy-source-a
   --resource-arns "arn:aws:iam::$($HostAccount):role/regulait-demo-host-anchor" "arn:aws:iam::$($HostAccount):role/OrganizationAccountAccessRole" `
   --query 'EvaluationResults[].[EvalResourceName,EvalDecision]' --output text
 # Success: the anchor role allowed; OrganizationAccountAccessRole explicitDeny
+```
+
+**5. BREAK-GLASS, about 3 minutes, right after the first host apply: lock the evidence configuration.** The first
+apply has to set the backup and anchor buckets' policy, versioning, encryption and lifecycle, and the log groups'
+retention. So the deployer could not be denied those calls before it ran. Now that they are set, this step adds the
+deny. From here on, changing any of them is break-glass (a later host apply that changes them stops with
+`AccessDenied`; re-run that one apply as break-glass and record it).
+
+```powershell
+aws sso login --profile <break-glass profile>
+$Ic  = aws sso-admin list-instances --profile <break-glass profile> --query 'Instances[0].InstanceArn' --output text
+$Dep = aws sso-admin list-permission-sets --profile <break-glass profile> --instance-arn $Ic --output text --query 'PermissionSets' |
+  ForEach-Object { $_ -split "`t" } | Where-Object {
+    (aws sso-admin describe-permission-set --profile <break-glass profile> --instance-arn $Ic --permission-set-arn $_ --query PermissionSet.Name --output text) -eq 'RegulAItDemoDeployer' }
+$Lock = '{"Sid": "DenyChangingEvidenceConfigurationAfterFirstApply", "Effect": "Deny", "Action": ["s3:PutBucketPolicy", "s3:PutBucketVersioning", "s3:PutEncryptionConfiguration", "s3:PutLifecycleConfiguration", "s3:PutBucketObjectLockConfiguration", "s3:PutBucketPublicAccessBlock", "s3:PutBucketOwnershipControls", "logs:PutRetentionPolicy"], "Resource": ["arn:aws:s3:::regulait-demo-host-db-backup-*", "arn:aws:s3:::regulait-demo-host-audit-anchor-*", "arn:aws:logs:*:HOST_ACCOUNT_ID:log-group:/regulait/demo-host/*"]}'.Replace('HOST_ACCOUNT_ID', $HostAccount)
+$Cur = (aws sso-admin get-inline-policy-for-permission-set --profile <break-glass profile> --instance-arn $Ic --permission-set-arn $Dep --query InlinePolicy --output text).Trim()
+if ($Cur -match 'DenyChangingEvidenceConfigurationAfterFirstApply') { 'already locked' } else {
+  $New = $Cur.Substring(0, $Cur.LastIndexOf(']')).TrimEnd() + ', ' + $Lock + ']}'
+  $F = New-TemporaryFile; [IO.File]::WriteAllText($F.FullName, $New)
+  # Proof before it is applied: the locked calls are denied, an ordinary PutObject on the backups is not
+  aws iam simulate-custom-policy --profile <break-glass profile> --policy-input-list "file://$($F.FullName)" `
+    --action-names s3:PutLifecycleConfiguration s3:PutBucketPolicy s3:PutBucketVersioning s3:PutEncryptionConfiguration s3:PutObject `
+    --resource-arns "arn:aws:s3:::regulait-demo-host-db-backup-$HostAccount" --query 'EvaluationResults[].[EvalActionName,EvalDecision]' --output text
+  aws iam simulate-custom-policy --profile <break-glass profile> --policy-input-list "file://$($F.FullName)" `
+    --action-names logs:PutRetentionPolicy --resource-arns "arn:aws:logs:<region>:$($HostAccount):log-group:/regulait/demo-host/ssm-sessions" `
+    --query 'EvaluationResults[].[EvalActionName,EvalDecision]' --output text
+  # Success: the four s3:Put*Bucket*/Lifecycle/Encryption lines and logs:PutRetentionPolicy explicitDeny; s3:PutObject allowed
+  aws sso-admin put-inline-policy-to-permission-set --profile <break-glass profile> --instance-arn $Ic --permission-set-arn $Dep --inline-policy "file://$($F.FullName)"
+  aws sso-admin provision-permission-set --profile <break-glass profile> --instance-arn $Ic --permission-set-arn $Dep --target-type ALL_PROVISIONED_ACCOUNTS
+  Remove-Item $F
+}
+aws sso logout
+```
+
+**Check** (non-destructive: IAM's simulator, run against the deployer's real role, changes nothing):
+
+```powershell
+aws sso login --profile regulait-demo-host
+$DepRole = aws iam list-roles --profile regulait-demo-host --path-prefix /aws-reserved/sso.amazonaws.com/ `
+  --query "Roles[?starts_with(RoleName,'AWSReservedSSO_RegulAItDemoDeployer_')].Arn | [0]" --output text
+aws iam simulate-principal-policy --profile regulait-demo-host --policy-source-arn $DepRole `
+  --action-names logs:PutRetentionPolicy --resource-arns "arn:aws:logs:<region>:$($HostAccount):log-group:/regulait/demo-host/ssm-sessions" `
+  --query 'EvaluationResults[].[EvalActionName,EvalDecision]' --output text
+# Success: logs:PutRetentionPolicy  explicitDeny
 ```
 
 **Check (SSM only, no SSH, no inbound rule, IMDSv2):**
@@ -2417,16 +2479,31 @@ Invoke-DemoHost 'cd /opt/app && docker compose --profile tunnel stop cloudflared
 Set-Location infra/environments/demo-host/host
 terraform init -reconfigure -backend-config=backend.hcl -backend-config="profile=regulait-demo-host-breakglass"
 
-# 2a. ONLY if the backups or anchors must stay readable: take the buckets, the key and its alias out of state first,
-#     so the destroy leaves all of them, with every bucket-level control, intact
-terraform state rm module.db_backup module.anchor aws_kms_key.host aws_kms_alias.host
+# 2a. ONLY if the backups or anchors must stay readable: take ONLY the two buckets' own resources, the key and its
+#     alias out of state, so the destroy leaves all of them, with every bucket-level control, intact. Leave the
+#     modules' writer policies, their role attachments and the freshness alarm in state: the destroy removes them,
+#     which it must do before it can delete the instance and anchor roles (a role with a policy still attached
+#     cannot be deleted).
+$Keep = @(
+  'module.db_backup.aws_s3_bucket.backup', 'module.db_backup.aws_s3_bucket_policy.backup',
+  'module.db_backup.aws_s3_bucket_public_access_block.backup', 'module.db_backup.aws_s3_bucket_ownership_controls.backup',
+  'module.db_backup.aws_s3_bucket_versioning.backup', 'module.db_backup.aws_s3_bucket_server_side_encryption_configuration.backup',
+  'module.db_backup.aws_s3_bucket_lifecycle_configuration.backup',
+  'module.anchor.aws_s3_bucket.anchors', 'module.anchor.aws_s3_bucket_policy.anchors',
+  'module.anchor.aws_s3_bucket_public_access_block.anchors', 'module.anchor.aws_s3_bucket_ownership_controls.anchors',
+  'module.anchor.aws_s3_bucket_versioning.anchors', 'module.anchor.aws_s3_bucket_server_side_encryption_configuration.anchors',
+  'module.anchor.aws_s3_bucket_object_lock_configuration.anchors',
+  'aws_kms_key.host', 'aws_kms_alias.host')
+terraform state rm @Keep
+terraform state list | Select-String 'aws_s3_bucket\.(backup|anchors)$|aws_kms_key\.host$'   # Success: prints nothing
 
 # 2. destroy the host stack
 terraform plan -destroy -var host_sso_profile=regulait-demo-host-breakglass -out=tfplan; terraform apply tfplan
 # Expected WITHOUT 2a: the apply STOPS part-way on the two buckets; everything else is destroyed. The first error may be
 #   "BucketNotEmpty", or on the anchor bucket an error refusing to suspend versioning ("Object Lock" in the message),
 #   because S3 does not allow versioning to be suspended on an Object Lock bucket. Either way, continue with 2b.
-# Expected WITH 2a: "Destroy complete".
+# Expected WITH 2a: "Destroy complete". The writer policies, their attachments and the freshness alarm are destroyed
+#   (the roles then delete cleanly); the two buckets, the key and the alias are not touched.
 
 # 2b. WITHOUT 2a only: the anchor bucket cannot be emptied early (COMPLIANCE: nobody, root included, can delete an
 #     anchor version before its retention ends). Take both buckets out of state; the key then goes in 2c (30-day window).
