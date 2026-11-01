@@ -26,6 +26,8 @@ locals {
 }
 
 data "aws_iam_policy_document" "host_role_boundary" {
+  provider = aws.workload
+
   # A boundary is a ceiling: effective permissions are the role's own policies
   # intersected with this. Allow everything, then carve out what no deployed
   # role may ever do.
