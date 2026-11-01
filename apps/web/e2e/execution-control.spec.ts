@@ -97,6 +97,8 @@ test("1: the page loads and says, plainly, that nothing is stopped", async () =>
 test("2+3: halting one tool asks for a reason, refuses a terse one, then shows it", async () => {
   await openExecutionControl();
 
+  // I-2: the per-tool picker lives on its own tab
+  await page.getByRole("tab", { name: /^One agent or tool/ }).click();
   // the seeded repo-tools server and one of its write tools
   await page.getByLabel("Server", { exact: true }).selectOption({ label: "repo-tools" });
   await page.getByLabel("Tool to halt").selectOption({ label: "write_file (write)" });

@@ -26,15 +26,14 @@
  * is stopped?" and is read in a hurry. The posture page links here when the
  * deployment is restricted.
  */
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Select, Table, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, Select, Table, Tabs, tabIds, type Tone } from "../../../ui/kit";
 import {
   QueryGate,
   ReasonModal,
-  Stat,
   useAction,
   useAgents,
   useServerTools,
@@ -119,6 +118,23 @@ const MODES: Array<{
  * rejected while the box is still open rather than after the round trip */
 const REASON_MIN = 10;
 
+/**
+ * I-2 (#453, pattern 5): one row per thing that can be stopped right now: the deployment dial, then every halted
+ * agent and tool. Fix is the one action that lifts it, so the lift is on the row that says what is stopped.
+ */
+interface StopRow {
+  key: string;
+  label: string;
+  group: string;
+  state: { tone: Tone; text: string };
+  source: ReactNode;
+  fix: ReactNode;
+  refuses: string;
+}
+
+/** a tab label naming what is stopped inside it, or just the name when nothing is */
+const stoppedLabel = (name: string, what: string | null) => (what ? `${name} · ${what}` : name);
+
 export default function ExecutionControlPage() {
   const act = useAction();
   const state = useQuery({
@@ -128,6 +144,7 @@ export default function ExecutionControlPage() {
   const agents = useAgents();
   const servers = useServers();
   const users = useUsers();
+  const [tab, setTab] = useState("deployment");
 
   /** which confirmation is open, if any */
   const [pending, setPending] = useState<
@@ -196,6 +213,71 @@ export default function ExecutionControlPage() {
   // so pick from users — kept simple: the current admin is the default target
   const [approver, setApprover] = useState("");
 
+  const haltedCount = (s?.haltedAgents.length ?? 0) + (s?.haltedTools.length ?? 0);
+  const current = MODES.find((m) => m.mode === s?.mode);
+  const since = (at: string | null, reason: string | null) => (
+    <span className={v.stackTight}>
+      <span>{at ? `An operator, since ${at}` : "Shipped default"}</span>
+      {reason && <span className={v.faint}>{`Reason given: ${reason}`}</span>}
+    </span>
+  );
+  const stopRows: StopRow[] = s
+    ? [
+        {
+          key: "deployment",
+          label: "Deployment-wide mode",
+          group: "Deployment-wide",
+          state: { tone: restricted ? "danger" : "ok", text: s.mode.replace("_", "-") },
+          source: restricted ? since(s.setAt, s.reason) : since(s.setAt, null),
+          fix: restricted ? (
+            <Button size="sm" disabled={act.busy} onClick={() => setPending({ kind: "mode", mode: "normal" })}>
+              Resume
+            </Button>
+          ) : (
+            <span className={v.faint}>Nothing to do</span>
+          ),
+          refuses: restricted ? (current?.blastRadius ?? s.meaning) : "Nothing beyond the ordinary rules.",
+        },
+        ...s.haltedAgents.map((r): StopRow => ({
+          key: `agent:${r.id}`,
+          label: r.name,
+          group: "Halted agents",
+          state: { tone: "danger", text: "halted" },
+          source: since(r.haltedAt, r.reason),
+          fix: (
+            <Button size="sm" disabled={act.busy} onClick={() => setPending({ kind: "unhalt-agent", agentId: r.id, label: r.name })}>
+              Lift
+            </Button>
+          ),
+          refuses: "Every dispatch to this agent, and its use as a routing or fallback target.",
+        })),
+        ...s.haltedTools.map((r): StopRow => ({
+          key: `tool:${r.serverId}|${r.name}`,
+          label: r.name,
+          group: "Halted tools",
+          state: { tone: "danger", text: "halted" },
+          source: (
+            <span className={v.stackTight}>
+              {since(r.haltedAt, r.reason)}
+              <span className={v.faint}>
+                {`Server: ${(servers.data?.servers ?? []).find((sv) => sv.id === r.serverId)?.name ?? r.serverId}`}
+              </span>
+            </span>
+          ),
+          fix: (
+            <Button
+              size="sm"
+              disabled={act.busy}
+              onClick={() => setPending({ kind: "unhalt-tool", serverId: r.serverId, toolName: r.name })}
+            >
+              Lift
+            </Button>
+          ),
+          refuses: "Every call to this tool. Its server and its sibling tools are unaffected.",
+        })),
+      ]
+    : [];
+
   const modalCopy = (): { title: string; body: string; danger: boolean; confirmLabel: string } => {
     const p = pending;
     if (!p) return { title: "", body: "", danger: false, confirmLabel: "Confirm" };
@@ -252,54 +334,14 @@ export default function ExecutionControlPage() {
       <div className={v.stack}>
         <QueryGate loading={state.isLoading} error={state.error} onRetry={() => void refresh()}>
           {/* ── the headline: what is stopped, right now ──────────────── */}
-          <Card title="Right now">
-            <div className={a.statRow}>
-              <Stat
-                value={
-                  <Badge tone={restricted ? "danger" : "ok"}>
-                    {s?.mode.replace("_", "-") ?? "—"}
-                  </Badge>
-                }
-                label="deployment"
-              />
-              <Stat
-                value={
-                  <Badge tone={(s?.haltedAgents.length ?? 0) > 0 ? "danger" : "ok"}>
-                    {s?.haltedAgents.length ?? 0}
-                  </Badge>
-                }
-                label="agents halted"
-              />
-              <Stat
-                value={
-                  <Badge tone={(s?.haltedTools.length ?? 0) > 0 ? "danger" : "ok"}>
-                    {s?.haltedTools.length ?? 0}
-                  </Badge>
-                }
-                label="tools halted"
-              />
-            </div>
-
-            {anythingStopped ? (
-              <EmptyState
-                title={s?.summary ?? "Execution is restricted"}
-                body={
-                  <>
-                    {s?.reason && (
-                      <p>
-                        <strong>Reason given:</strong> {s.reason}
-                      </p>
-                    )}
-                    {s?.setAt && <p className={v.faint}>Set {s.setAt}.</p>}
-                    <p className={v.faint}>{s?.meaning}</p>
-                  </>
-                }
-              />
-            ) : null}
-
+          {/* I-2: the verdict as one row of chips, then the stop itself, the first thing on the page when it is true */}
+          <div className={v.row} role="group" aria-label="Right now">
+            <Badge tone={restricted ? "danger" : "ok"}>{`Deployment: ${s?.mode.replace("_", "-") ?? "—"}`}</Badge>
+            <Badge tone={(s?.haltedAgents.length ?? 0) > 0 ? "danger" : "ok"}>{`Agents halted: ${s?.haltedAgents.length ?? 0}`}</Badge>
+            <Badge tone={(s?.haltedTools.length ?? 0) > 0 ? "danger" : "ok"}>{`Tools halted: ${s?.haltedTools.length ?? 0}`}</Badge>
             {/* The hesitation problem: say what survives, prominently — as chips whose tone follows the dial */}
             {s && (
-              <div className={v.row}>
+                <>
                 {!anythingStopped && (
                   <Badge
                     tone="ok"
@@ -326,261 +368,244 @@ export default function ExecutionControlPage() {
                 >
                   Audit, approvals and governance sweeps keep running
                 </Badge>
-              </div>
+                </>
             )}
-          </Card>
+          </div>
+          {anythingStopped ? (
+            <EmptyState
+              title={s?.summary ?? "Execution is restricted"}
+              body={
+                <>
+                  {s?.reason && (
+                    <p>
+                      <strong>Reason given:</strong> {s.reason}
+                    </p>
+                  )}
+                  {s?.setAt && <p className={v.faint}>Set {s.setAt}.</p>}
+                  <p className={v.faint}>{s?.meaning}</p>
+                </>
+              }
+            />
+          ) : null}
 
-          {/* ── the dial ──────────────────────────────────────────────── */}
-          <Card title="Deployment-wide">
-            <Table
-              rows={MODES}
-              rowKey={(m) => m.mode}
+          {/* ── the matrix: everything stopped, with the one action that lifts it ── */}
+          <Card title="What is stopped">
+            <Table<StopRow>
+              rows={stopRows}
+              rowKey={(r) => r.key}
               columns={[
                 {
-                  key: "mode",
-                  header: "Mode",
-                  render: (m) => (
-                    <>
-                      <Badge tone={s?.mode === m.mode ? m.tone : "neutral"}>{m.label}</Badge>
-                      {s?.mode === m.mode && <span className={v.faint}> — current</span>}
-                    </>
+                  key: "control",
+                  header: "Control",
+                  render: (r) => (
+                    <span className={v.stackTight}>
+                      <strong>{r.label}</strong>
+                      <span className={v.faint}>{r.group}</span>
+                    </span>
                   ),
                 },
+                { key: "state", header: "State", render: (r) => <Badge tone={r.state.tone}>{r.state.text}</Badge> },
+                { key: "source", header: "Source", render: (r) => r.source },
+                { key: "fix", header: "Fix", render: (r) => r.fix },
                 {
-                  key: "radius",
-                  header: "What this does",
-                  render: (m) => <span className={v.faint}>{m.blastRadius}</span>,
-                },
-                {
-                  key: "go",
-                  header: "",
-                  srHeader: "Actions",
-                  render: (m) => (
-                    <Button
-                      size="sm"
-                      variant={m.mode === "halted" ? "danger" : "ghost"}
-                      // require_approval without a named approver is refused by
-                      // the server; disabling here says so before the click
-                      // rather than after the round trip
-                      disabled={
-                        act.busy ||
-                        s?.mode === m.mode ||
-                        (m.mode === "require_approval" && !approver)
-                      }
-                      title={
-                        m.mode === "require_approval" && !approver
-                          ? "pick an approver first — a queued approval has to name a person"
-                          : undefined
-                      }
-                      onClick={() => setPending({ kind: "mode", mode: m.mode })}
-                    >
-                      {s?.mode === m.mode ? "current" : m.mode === "normal" ? "Resume" : "Switch"}
-                    </Button>
-                  ),
+                  key: "refuses",
+                  header: "While on, it refuses",
+                  render: (r) => <span className={v.faint}>{r.refuses}</span>,
                 },
               ]}
             />
-            {/* require_approval cannot be set without naming who signs off —
-                the server refuses it, so the field lives beside the button */}
-            <div className={a.formRow}>
-              <Field
-                label="Approver for 'require approval' mode"
-                helpLabel="the approver"
-                help={
-                  <p>
-                    Required only for <strong>require approval</strong>: a queued approval names a
-                    person, and one nobody is named on is one nobody is accountable for deciding.
-                  </p>
-                }
-              >
-                <Select
-                  aria-label="Approver for require-approval mode"
-                  value={approver}
-                  onChange={(e) => setApprover(e.target.value)}
-                >
-                  <option value="">— pick the human who will sign off —</option>
-                  {(users.data?.users ?? []).map((u) => (
-                    <option key={u.id} value={u.id}>
-                      {u.displayName || u.email}
-                    </option>
-                  ))}
-                </Select>
-              </Field>
-            </div>
           </Card>
 
-          {/* ── stop one thing ────────────────────────────────────────── */}
-          <Card
-            title="Stop one agent or one tool"
-            info={
-              <p>
-                The scope that lets you stop the thing that is actually wrong. A halted subject is
-                refused even while the deployment as a whole is normal.
-              </p>
-            }
-          >
-            <div className={a.formRow}>
-              <Field label="Agent">
-                <Select
-                  aria-label="Agent to halt"
-                  value={agentPick}
-                  onChange={(e) => setAgentPick(e.target.value)}
-                >
-                  <option value="">— choose an agent —</option>
-                  {(agents.data?.agents ?? []).map((ag) => (
-                    <option key={ag.id} value={ag.id}>
-                      {ag.name}
-                    </option>
-                  ))}
-                </Select>
-              </Field>
-              <Button
-                size="sm"
-                variant="danger"
-                disabled={!agentPick || act.busy}
-                onClick={() =>
-                  setPending({
-                    kind: "halt-agent",
-                    agentId: agentPick,
-                    label:
-                      (agents.data?.agents ?? []).find((x) => x.id === agentPick)?.name ?? agentPick,
-                  })
-                }
-              >
-                Halt agent
-              </Button>
-            </div>
-            <div className={a.formRow}>
-              <Field label="Server">
-                <Select
-                  aria-label="Server"
-                  value={serverPick}
-                  onChange={(e) => {
-                    setServerPick(e.target.value);
-                    setToolPick("");
-                  }}
-                >
-                  <option value="">— choose a server —</option>
-                  {(servers.data?.servers ?? []).map((sv) => (
-                    <option key={sv.id} value={sv.id}>
-                      {sv.name}
-                    </option>
-                  ))}
-                </Select>
-              </Field>
-              <Field label="Tool">
-                <Select
-                  aria-label="Tool to halt"
-                  value={toolPick}
-                  onChange={(e) => setToolPick(e.target.value)}
-                  disabled={!serverPick}
-                >
-                  <option value="">— choose a tool —</option>
-                  {(tools.data?.tools ?? []).map((t) => (
-                    <option key={t.id} value={t.name}>
-                      {t.name} ({t.kind})
-                    </option>
-                  ))}
-                </Select>
-              </Field>
-              <Button
-                size="sm"
-                variant="danger"
-                disabled={!serverPick || !toolPick || act.busy}
-                onClick={() =>
-                  setPending({ kind: "halt-tool", serverId: serverPick, toolName: toolPick })
-                }
-              >
-                Halt tool
-              </Button>
-            </div>
-          </Card>
-
-          {/* ── what is halted, and how to lift it ────────────────────── */}
-          {(s?.haltedAgents.length ?? 0) > 0 && (
-            <Card title="Halted agents">
+          {/* I-2: each tab label names what is stopped inside it, so a tab never hides one */}
+          <Tabs
+            label="Execution controls"
+            idPrefix="execution"
+            tabs={[
+              { id: "deployment", label: stoppedLabel("Deployment-wide", restricted ? (s?.mode.replace("_", "-") ?? null) : null) },
+              {
+                id: "one",
+                label: stoppedLabel(
+                  "One agent or tool",
+                  haltedCount > 0 ? `${haltedCount.toLocaleString()} halted` : null,
+                ),
+              },
+            ]}
+            active={tab}
+            onChange={setTab}
+          />
+          {/* every panel stays mounted (hidden when not selected), so a picked approver, agent or tool survives a tab switch */}
+          <ExecutionPanel id="deployment" tab={tab}>
+            {/* ── the dial ──────────────────────────────────────────────── */}
+            <Card title="Deployment-wide">
               <Table
-                rows={s?.haltedAgents ?? []}
-                rowKey={(r) => r.id}
+                rows={MODES}
+                rowKey={(m) => m.mode}
                 columns={[
-                  { key: "name", header: "Agent", render: (r) => r.name },
                   {
-                    key: "reason",
-                    header: "Reason",
-                    render: (r) => <span className={v.faint}>{r.reason ?? "—"}</span>,
+                    key: "mode",
+                    header: "Mode",
+                    render: (m) => (
+                      <>
+                        <Badge tone={s?.mode === m.mode ? m.tone : "neutral"}>{m.label}</Badge>
+                        {s?.mode === m.mode && <span className={v.faint}> — current</span>}
+                      </>
+                    ),
                   },
-                  { key: "since", header: "Since", render: (r) => r.haltedAt },
                   {
-                    key: "lift",
+                    key: "radius",
+                    header: "What this does",
+                    render: (m) => <span className={v.faint}>{m.blastRadius}</span>,
+                  },
+                  {
+                    key: "go",
                     header: "",
                     srHeader: "Actions",
-                    render: (r) => (
+                    render: (m) => (
                       <Button
                         size="sm"
-                        disabled={act.busy}
-                        onClick={() =>
-                          setPending({ kind: "unhalt-agent", agentId: r.id, label: r.name })
+                        variant={m.mode === "halted" ? "danger" : "ghost"}
+                        // require_approval without a named approver is refused by
+                        // the server; disabling here says so before the click
+                        // rather than after the round trip
+                        disabled={
+                          act.busy ||
+                          s?.mode === m.mode ||
+                          (m.mode === "require_approval" && !approver)
                         }
+                        title={
+                          m.mode === "require_approval" && !approver
+                            ? "pick an approver first — a queued approval has to name a person"
+                            : undefined
+                        }
+                        onClick={() => setPending({ kind: "mode", mode: m.mode })}
                       >
-                        Lift
+                        {s?.mode === m.mode ? "current" : m.mode === "normal" ? "Resume" : "Switch"}
                       </Button>
                     ),
                   },
                 ]}
               />
+              {/* require_approval cannot be set without naming who signs off —
+                  the server refuses it, so the field lives beside the button */}
+              <div className={a.formRow}>
+                <Field
+                  label="Approver for 'require approval' mode"
+                  helpLabel="the approver"
+                  help={
+                    <p>
+                      Required only for <strong>require approval</strong>: a queued approval names a
+                      person, and one nobody is named on is one nobody is accountable for deciding.
+                    </p>
+                  }
+                >
+                  <Select
+                    aria-label="Approver for require-approval mode"
+                    value={approver}
+                    onChange={(e) => setApprover(e.target.value)}
+                  >
+                    <option value="">— pick the human who will sign off —</option>
+                    {(users.data?.users ?? []).map((u) => (
+                      <option key={u.id} value={u.id}>
+                        {u.displayName || u.email}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+              </div>
             </Card>
-          )}
-
-          {(s?.haltedTools.length ?? 0) > 0 && (
-            <Card title="Halted tools">
-              <Table
-                rows={s?.haltedTools ?? []}
-                rowKey={(r) => `${r.serverId}|${r.name}`}
-                columns={[
-                  { key: "tool", header: "Tool", render: (r) => r.name },
-                  {
-                    key: "server",
-                    header: "Server",
-                    render: (r) => (
-                      <span className={v.faint}>
-                        {(servers.data?.servers ?? []).find((sv) => sv.id === r.serverId)?.name ??
-                          r.serverId}
-                      </span>
-                    ),
-                  },
-                  {
-                    key: "reason",
-                    header: "Reason",
-                    render: (r) => <span className={v.faint}>{r.reason ?? "—"}</span>,
-                  },
-                  { key: "since", header: "Since", render: (r) => r.haltedAt },
-                  {
-                    key: "lift",
-                    header: "",
-                    srHeader: "Actions",
-                    render: (r) => (
-                      <Button
-                        size="sm"
-                        disabled={act.busy}
-                        onClick={() =>
-                          setPending({
-                            kind: "unhalt-tool",
-                            serverId: r.serverId,
-                            toolName: r.name,
-                          })
-                        }
-                      >
-                        Lift
-                      </Button>
-                    ),
-                  },
-                ]}
-              />
+          </ExecutionPanel>
+          <ExecutionPanel id="one" tab={tab}>
+            {/* ── stop one thing ────────────────────────────────────────── */}
+            <Card
+              title="Stop one agent or one tool"
+              info={
+                <p>
+                  The scope that lets you stop the thing that is actually wrong. A halted subject is
+                  refused even while the deployment as a whole is normal.
+                </p>
+              }
+            >
+              <div className={a.formRow}>
+                <Field label="Agent">
+                  <Select
+                    aria-label="Agent to halt"
+                    value={agentPick}
+                    onChange={(e) => setAgentPick(e.target.value)}
+                  >
+                    <option value="">— choose an agent —</option>
+                    {(agents.data?.agents ?? []).map((ag) => (
+                      <option key={ag.id} value={ag.id}>
+                        {ag.name}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                <Button
+                  size="sm"
+                  variant="danger"
+                  disabled={!agentPick || act.busy}
+                  onClick={() =>
+                    setPending({
+                      kind: "halt-agent",
+                      agentId: agentPick,
+                      label:
+                        (agents.data?.agents ?? []).find((x) => x.id === agentPick)?.name ?? agentPick,
+                    })
+                  }
+                >
+                  Halt agent
+                </Button>
+              </div>
+              <div className={a.formRow}>
+                <Field label="Server">
+                  <Select
+                    aria-label="Server"
+                    value={serverPick}
+                    onChange={(e) => {
+                      setServerPick(e.target.value);
+                      setToolPick("");
+                    }}
+                  >
+                    <option value="">— choose a server —</option>
+                    {(servers.data?.servers ?? []).map((sv) => (
+                      <option key={sv.id} value={sv.id}>
+                        {sv.name}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                <Field label="Tool">
+                  <Select
+                    aria-label="Tool to halt"
+                    value={toolPick}
+                    onChange={(e) => setToolPick(e.target.value)}
+                    disabled={!serverPick}
+                  >
+                    <option value="">— choose a tool —</option>
+                    {(tools.data?.tools ?? []).map((t) => (
+                      <option key={t.id} value={t.name}>
+                        {t.name} ({t.kind})
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                <Button
+                  size="sm"
+                  variant="danger"
+                  disabled={!serverPick || !toolPick || act.busy}
+                  onClick={() =>
+                    setPending({ kind: "halt-tool", serverId: serverPick, toolName: toolPick })
+                  }
+                >
+                  Halt tool
+                </Button>
+              </div>
             </Card>
-          )}
+          </ExecutionPanel>
 
           {act.error && <div className={v.errLine}>{act.error}</div>}
         </QueryGate>
+        {/* outside the gate, so a beat can be switched even when the execution state fails to load */}
         <Suspense fallback={null}>
           <DemoBeatsCard />
         </Suspense>
@@ -606,5 +631,14 @@ export default function ExecutionControlPage() {
         onCancel={() => setPending(null)}
       />
     </>
+  );
+}
+
+function ExecutionPanel(props: { id: string; tab: string; children: ReactNode }) {
+  const ids = tabIds("execution", props.id);
+  return (
+    <div role="tabpanel" id={ids.panel} aria-labelledby={ids.tab} hidden={props.tab !== props.id}>
+      {props.children}
+    </div>
   );
 }

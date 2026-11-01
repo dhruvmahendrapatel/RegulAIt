@@ -21,17 +21,17 @@
  *    comes back with its own result — a refused item never hides behind a
  *    successful batch.
  */
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { withStepUp } from "../../../stepup/stepUp";
 import type { Approval } from "../../../api/types";
 import { ago } from "../../../api/format";
-import { pendingQueueQuery, pendingRows } from "../../../api/approvalQueue";
+import { pendingQueueQuery, pendingRows, queueTotal } from "../../../api/approvalQueue";
 import { pendingCapNote } from "../../../api/approvalQueuePages";
 import { useSession } from "../../../session/SessionContext";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Select, Table, Textarea } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, ErrorState, Field, InfoButton, Input, Select, Table, Tabs, Textarea, tabIds } from "../../../ui/kit";
 import { QueryGate, optionEls, useAction, useProjects, useTeams, useUsers, projectOpts, teamOpts, userOpts } from "../adminKit";
 import { McpActionReview } from "../../approvals/McpActionReview";
 import { approvalReviewKey, inspectApprovalAction } from "../../approvals/approvalReview";
@@ -94,6 +94,7 @@ export default function ReviewWorkbenchPage() {
   const { auth } = useSession();
   const me = auth?.userId ?? null;
   const act = useAction();
+  const [tab, setTab] = useState("triage");
   const users = useUsers();
   const teams = useTeams();
   const projects = useProjects();
@@ -152,6 +153,10 @@ export default function ReviewWorkbenchPage() {
   const needsActionReview = () => selectedRows.filter((row) => row.objectType === "mcp_tool" &&
     (inspectApprovalAction(row).blockedReason || reviewed[row.id] !== approvalReviewKey(row)));
   const unreviewedActions = needsActionReview().length;
+  // I-2: the queue's standing facts, read from the same pending rows the Triage tab lists
+  const breached = pending.filter((row) => row.assignment?.slaState === "breached").length;
+  const dueSoon = pending.filter((row) => row.assignment?.slaState === "warning").length;
+  const ofShown = capNote ? ` in the oldest ${pending.length}` : "";
 
   return (
     <>
@@ -165,7 +170,63 @@ export default function ReviewWorkbenchPage() {
           error={policies.error ?? rules.error}
           onRetry={() => void refreshAll()}
         >
+          {/* I-2: the queue's status stays above the tabs, so no tab hides a breach */}
+          <div className={v.row} role="group" aria-label="Review queue status">
+            {queue.data ? (
+              <>
+                <Badge tone="neutral">{`Pending: ${queueTotal(queue.data, pending.length).toLocaleString()}`}</Badge>
+                <Badge tone={breached > 0 ? "danger" : "ok"}>{`SLA breached: ${breached}${ofShown}`}</Badge>
+                <Badge tone={dueSoon > 0 ? "warn" : "neutral"}>{`Due soon: ${dueSoon}${ofShown}`}</Badge>
+              </>
+            ) : queue.error ? (
+              // a failed read is never shown as "nothing breached"
+              <ErrorState
+                title="Couldn't load the pending queue"
+                message={queue.error instanceof Error ? queue.error.message : String(queue.error)}
+                onRetry={() => void queue.refetch()}
+              />
+            ) : null}
+            <span>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() =>
+                  void act.run(async () => {
+                    const r = await api.post<{ evaluated: number; breached: number; warned: number }>(
+                      "/v1/approvals/sla/sweep",
+                      {},
+                    );
+                    await refreshAll();
+                    return `${r.evaluated} evaluated · ${r.breached} newly breached · ${r.warned} newly warned`;
+                  })
+                }
+              >
+                Run SLA sweep
+              </Button>{" "}
+              <InfoButton label="the SLA sweep">
+                Nothing calls this on a timer — there is no in-process scheduler in this deployment. Breach is
+                also evaluated whenever the queue is read or an approval is decided, and the deadlines are a
+                pure function of the request time, so a lazily detected breach is exactly what a timer would
+                have produced.
+              </InfoButton>
+            </span>
+          </div>
+          <Tabs
+            label="Review workbench"
+            idPrefix="workbench"
+            tabs={[
+              { id: "triage", label: "Triage" },
+              { id: "workload", label: "Workload" },
+              { id: "policies", label: "SLA policies" },
+              { id: "rules", label: "Routing rules" },
+            ]}
+            active={tab}
+            onChange={setTab}
+          />
+          {/* every panel stays mounted (hidden when not selected), so a half-typed policy, rule or bulk reason survives a tab switch */}
+
           {/* ---------------- workload ---------------- */}
+          <WorkbenchPanel id="workload" tab={tab}>
           <Card title="Per-reviewer workload">
             <div className={v.faint} style={{ marginBottom: "var(--s2)" }}>
               {workload.data?.note}
@@ -190,31 +251,11 @@ export default function ReviewWorkbenchPage() {
                 ]}
               />
             )}
-            <div style={{ marginTop: "var(--s2)" }}>
-              <Button
-                onClick={() =>
-                  void act.run(async () => {
-                    const r = await api.post<{ evaluated: number; breached: number; warned: number }>(
-                      "/v1/approvals/sla/sweep",
-                      {},
-                    );
-                    await refreshAll();
-                    return `${r.evaluated} evaluated · ${r.breached} newly breached · ${r.warned} newly warned`;
-                  })
-                }
-              >
-                Run SLA sweep
-              </Button>{" "}
-              <InfoButton label="the SLA sweep">
-                Nothing calls this on a timer — there is no in-process scheduler in this deployment. Breach is
-                also evaluated whenever the queue is read or an approval is decided, and the deadlines are a
-                pure function of the request time, so a lazily detected breach is exactly what a timer would
-                have produced.
-              </InfoButton>
-            </div>
           </Card>
+          </WorkbenchPanel>
 
           {/* ---------------- SLA policies ---------------- */}
+          <WorkbenchPanel id="policies" tab={tab}>
           <Card title="SLA policies" info={policies.data?.note ? <p>{policies.data.note}</p> : undefined}>
             <form
               className={a.formRow}
@@ -313,8 +354,10 @@ export default function ReviewWorkbenchPage() {
               />
             )}
           </Card>
+          </WorkbenchPanel>
 
           {/* ---------------- routing rules ---------------- */}
+          <WorkbenchPanel id="rules" tab={tab}>
           <Card title="Routing rules" info={rules.data?.note ? <p>{rules.data.note}</p> : undefined}>
             <form
               className={v.stack}
@@ -468,8 +511,10 @@ export default function ReviewWorkbenchPage() {
               />
             )}
           </Card>
+          </WorkbenchPanel>
 
           {/* ---------------- triage ---------------- */}
+          <WorkbenchPanel id="triage" tab={tab}>
           <Card title="Triage">
             {capNote && <p className={v.faint} data-testid="workbench-cap-note">{capNote}</p>}
             {pending.length === 0 ? (
@@ -638,8 +683,18 @@ export default function ReviewWorkbenchPage() {
               </>
             )}
           </Card>
+          </WorkbenchPanel>
         </QueryGate>
       </div>
     </>
+  );
+}
+
+function WorkbenchPanel(props: { id: string; tab: string; children: ReactNode }) {
+  const ids = tabIds("workbench", props.id);
+  return (
+    <div role="tabpanel" id={ids.panel} aria-labelledby={ids.tab} hidden={props.tab !== props.id}>
+      {props.children}
+    </div>
   );
 }
