@@ -1379,6 +1379,11 @@ The beats are in `DEMO_SCRIPT_2026-11-01.md`, "Addendum (2026-10-31, owner): Act
 - The keep-in-order rule of §7.3 and §7.11: `demo:relax-e` at T-24h before any E rehearsal, and the Claude key after
   the `demo:traffic` re-run.
 - The owner enters keys only in the UI. No row here asks for, writes or echoes a secret, and Act 4 needs no new key.
+  Two beats do create a single-use sign-in link on screen (V2 **Copy link**, P2 **Sign-in link for …**). Each is a
+  bearer credential: copy it with the projector frozen or mirrored off, and never paste it anywhere but the private
+  window.
+- Agent and key names in this section (for example the seeded `claude-opus` agent and the Claude key of §7.11) are for
+  the presenter only. Keep them off screen and out of what is said.
 - The SAP gateway is shown as intake use cases only, never as governed. Act 4 does not touch it.
 
 **Where the switches are.** Every org switch below is done signed in as Ada, on LIVE, at T-24h, after the §7.11 rows.
@@ -1401,11 +1406,11 @@ A "step-up" is Ada's fresh authenticator code. Each change writes an audited old
 | — | R3 | `/ui/admin/model-risk` → card **Re-test after a model change**. Default **off**. **Leave it off on LIVE**: the beat only shows it | Nothing. **R3/I3 model-change rule:** never save a model or price change on `/ui/admin/agents` on LIVE from T-24h onward, except the §7.11 `claude-opus` model-id check. A change counts as a "model or configuration change" in the drift of that agent's model card. Whether it then holds the agent's dispatch is **to confirm at rehearsal** on FALLBACK | pending execution |
 | — | D1 | No org switch: one row per detector, absent = off. **Leave all three off.** Turning one on needs a scoring service registered on **External scorers** that has passed its connection test, plus an egress entry (step-up) | The reference service (`agents/trained-detectors/`, about 2 GB) is not in the product image or CI. **Do not set it up for the demo**; the beat is show-only | pending execution |
 | — | D2 | `/ui/admin/organization` → card **3b1 · Remote agents (A2A)**, setting `a2aEnabled`. Default **off**; turning it on is a step-up relaxation. **Leave it off**: the beat shows the **Off (default)** badge | Registration fetches the remote agent's card live, so it needs a reachable A2A endpoint and an egress entry. Calls are API only. **Skip any registration** unless a test endpoint is set up and rehearsed on FALLBACK first | pending execution |
-| T-24h | I1 | None for sync. Each **Sync tools now** asks for a step-up and is audited; the limit is 6 per server per minute | Seeded: `repo-tools` and `data-warehouse`, back-dated past the 7-day release waiting period, with a loopback egress entry; `demo:setup` points them at the `demo:mcp` server (§1, step 3). **The `demo:mcp` server must be running.** Do not register a new server on stage: it would hit `mcp_release_age_cooldown`. One rehearsal sync on FALLBACK only | pending execution |
+| T-24h | I1 | None for sync. Each **Sync tools now** asks for a step-up; a sync that runs is audited, allowed or refused by a gate, but a rate-limit `429` or a failed step-up writes no sync row. The limit is 6 per server per minute, so press it once | Seeded: `repo-tools` and `data-warehouse`, back-dated past the 7-day release waiting period, with a loopback egress entry; `demo:setup` points them at the `demo:mcp` server (§1, step 3). **The `demo:mcp` server must be running.** Do not register a new server on stage: it would hit `mcp_release_age_cooldown`. One rehearsal sync on FALLBACK only | pending execution |
 | — | I2 | None (read-only) | Seeded: one connector on the mock adapter and one governance-only connector. Never type a credential on stage | pending execution |
 | On stage, then teardown | I3 | `/ui/admin/rules` → **Per-model limits**: **Turn enforcement on** (`modelRateLimitsEnabled`, default **off**). The step-up is asked in both directions, and the change is audited | Seeded `fast-mock`. The limit (User Ada, `fast-mock`, 1 call per 60 s) is added on stage. Check at T-24h that `fast-mock` explicitly chosen in `/ui/chat` still serves after the Claude key is stored. §7.11 says an explicitly chosen mock always serves | pending execution |
-| T-24h | P1 | The processing limit (`privacyOpsEnabled`) is switched **on stage** on `/ui/admin/privacy`: **Turn the processing limit on**. Default **off**; turning it on needs no step-up, turning it off is a step-up relaxation | **Not seeded.** At T-24h on `/ui/admin/privacy` → **Add a record**: **Name** "Claims triage", **Lawful basis** any, **Retention (days)** 30, **Project** `hipaa-project`, **Data categories** *Email address*, a one-line **Purpose**, then **Add record** (step-up). Leave the limit **off** until the beat. Put a placeholder e-mail address (`…@example.test`) in the presenter notes. At rehearsal, on FALLBACK, confirm that the chat in P1 step 3 is refused `processing_not_permitted`, not first by the PII guardrail | pending execution |
-| T-24h | P2 | `/ui/admin/trust-publishing` → card **Public trust pages**: tick **Public trust pages and auditor access** and press **Save**. Default **off**; step-up, audited | **Not seeded.** At T-24h: **Trust centre heading** tab, using the demo org's placeholder name. Then **AI system cards** → **Start an AI system card from the register**: pick a seeded use case (not S4's), **Draft card**, **Edit** the fields in plain words with no claim words, **Save draft**, **Publish**, **Who can see it**: *Anyone, on the public trust centre* (step-up). Check `/ui/trust` in the private window. Do **not** create an auditor grant before the demo | pending execution |
+| T-24h | P1 | The processing limit (`privacyOpsEnabled`) is switched **on stage** on `/ui/admin/privacy`: **Turn the processing limit on**. Default **off**; turning it on needs no step-up, turning it off is a step-up relaxation | **Not seeded.** At T-24h on `/ui/admin/privacy` → **Add a record**: **Name** "Claims triage", **Lawful basis** any, **Retention (days)** 30, **Project** `hipaa-project`, **Data categories** *Email address*, a one-line **Purpose**, then **Add record** (step-up). Leave the limit **off** until the beat. Put a placeholder e-mail address (`…@example.test`) in the presenter notes for the data subject request. **P1 sends no chat:** an e-mail address in a call is refused `pii_blocked` by the org PII mode (*block*) before the processing gate (`enforcePII` runs before `privacyDispatchGate` in `apps/gateway/src/agents-connectors.ts`) | pending execution |
+| T-24h | P2 | `/ui/admin/trust-publishing` → card **Public trust pages**: tick **Public trust pages and auditor access** and press **Save**. Default **off**; step-up, audited | **Not seeded.** At T-24h: **Trust centre heading** tab, using the demo org's placeholder name, then **Save heading** (a step-up while the pages are on). Then **Controls and evidence** → **Start a draft from a control**: pick a control of an active pack, **Publish as** *Evidence summary*, **Create draft**, **Edit** in plain words, **Save draft**, **Publish** to *Anyone, on the public trust centre* (step-up). Without a published control or evidence summary, `/ui/trust` shows no **Controls and evidence** heading. Then **AI system cards** → **Start an AI system card from the register**: pick a seeded use case (not S4's), **Draft card**, **Edit** the fields in plain words with no claim words, **Save draft**, **Publish**, **Who can see it**: *Anyone, on the public trust centre* (step-up). Check `/ui/trust` in the private window. Do **not** create an auditor grant before the demo | pending execution |
 | T-1h | All | — | The private window (profile C) is open with no session. The `demo:mcp` server is running. The presenter notes hold every name and placeholder above | pending execution |
 
 **The laptop after `demo:prepare` (FALLBACK).** A re-prepare puts every Act 4 switch back to its default and drops the
@@ -1419,7 +1424,8 @@ rehearse Act 4 there, never on LIVE.
 | V1, V3, R2 | Switch missed or refused: show the off notice and move on | "this is off by default; an admin turns it on with a second factor" |
 | V2 | Grant refused: show the **Supplier portal** card; the link fails: move on | "it needs an active framework and a vendor under assessment" / "the link is single-use, which is the point" |
 | I1 | Sync fails: open `/ui/admin/audit` | "the tool server isn't answering, and the refusal is audited" |
-| I3, P1 | No refusal: open `/ui/admin/audit` | "we'll see it in the audit" |
+| I3 | No refusal: open `/ui/admin/audit` | "we'll see it in the audit" |
+| P1 | Asked to show the refusal live: do not send personal data | "the PII mode refuses that first; the processing limit is the next check" |
 | P2 | `/ui/trust` unavailable: show the tabs only; auditor link fails: **New link** once (step-up) | "it is off by default" / "it's single-use" |
 | R1, R3, D1, D2, I2 | Read-only; nothing to fall back to | — |
 | Everything | Switch to the FALLBACK stack, prepared and set up as above | "this is the same product on a prepared copy" |
@@ -1435,6 +1441,7 @@ rehearse Act 4 there, never on LIVE.
   - an accepted answer is a claim the vendor made, not verified evidence;
   - answers do not flow into the questionnaire artifact;
   - no row-level security: isolation comes from the route class and grant-keyed queries;
+  - the supplier sees every control in the chosen framework's active pack, not a hand-picked subset;
   - the step-up prompt still reads "changing an agent identity".
 - **Framework imports (ADR-0215):**
   - accepting does not activate a pack;
@@ -1469,7 +1476,8 @@ rehearse Act 4 there, never on LIVE.
   - API-only calls;
   - orchestration does not call remote agents;
   - the card signature is not verified;
-  - no policy-kernel or PII check on message text or replies;
+  - no policy-kernel or guardrail rules on message text; the outgoing message gets the project's PII mode only;
+  - replies are not checked for PII;
   - a skill grant is advisory;
   - no streaming, polling, cancellation or A2A rate limit.
 - **MCP sync (#609, #625):**
@@ -1479,7 +1487,8 @@ rehearse Act 4 there, never on LIVE.
   - discovery classifies supplied evidence only, and stdio servers never show up.
 - **Connectors (#616):** the governance-only connector executes nothing, and a credential is never shown again.
 - **Modality pricing and per-model limits (ADR-0212):**
-  - modality spend is measured, never estimated, and some providers report no split;
+  - modality spend is measured, never estimated; most providers, including the ones in this demo, report no split;
+  - limits bind only once an admin turns enforcement on;
   - limits can be overrun by in-flight calls;
   - role and team limits count per user;
   - no fallback on refusal;
@@ -1489,18 +1498,21 @@ rehearse Act 4 there, never on LIVE.
   - only governed model dispatch is limited, not connectors, MCP tools or training ingest;
   - objections are not enforced per person;
   - **Locate data** searches four RegulAIt stores only;
-  - erasure replaces the identifier as typed, and audit rows are tombstoned, not edited.
+  - erasure replaces the identifier as typed, and audit rows are tombstoned, not edited;
+  - phone numbers are matched as typed, the message `detail` column is not searched, and erasure has no step-up;
+  - open requests stop matching after the data key is rotated.
 - **Trust pages (ADR-0225):**
   - never "certified", "compliant", "accredited" or "guarantee";
   - no auditor e-mail or MFA;
   - no download or export;
   - an unpublish may stay cached for up to 5 minutes;
-  - a republished item does not reach existing grants.
+  - a republished item does not reach existing grants;
+  - an auditor session lasts at most 1 hour.
 - **MCP identity assertion (ADR-0210, PR #612):** no beat. API only, no UI control, and it needs an operator-provisioned
   signing key.
 
 **Teardown (after the demo, not on stage):**
-1. Remove the `fast-mock` per-model limit, or **Turn enforcement off** (step-up).
+1. Remove the `fast-mock` per-model limit (step-up), or **Turn enforcement off** (step-up).
 2. **Turn the processing limit off** (step-up).
 3. Revoke the auditor and the supplier: **Revoke**, then **Revoke access** in **Auditors with access**, and the
    revoke in **Supplier access**.
