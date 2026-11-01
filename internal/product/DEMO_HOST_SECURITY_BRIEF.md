@@ -78,7 +78,7 @@ Run each proof with `--profile H` (the demo-host account) unless it says managem
 | D7 | Budgets alarm | `demo-host/account` (and the baseline's org budget) | management: `aws budgets describe-budgets --account-id <id>` |
 | D9 | Audit-chain anchors in S3 Object Lock **COMPLIANCE** mode (beat G8): versioned, Block Public Access, SSE-KMS with the host key, TLS-only; default retention 7 days; the gateway writes through a dedicated role that cannot delete, bypass or weaken, using 1-hour credentials refreshed by the host (IMDS stays at hop limit 1) | `host/anchor.tf` (reuses `modules/audit-anchor-worm-s3`); `infra/scripts/demo-host-anchor-creds.sh`; existing `REGULAIT_AUDIT_ANCHOR_S3_*` variables | `aws s3api get-object-lock-configuration --bucket <anchor bucket>` → `Enabled COMPLIANCE 7`; on the host `GET /v1/audit/anchors` → `sink.mode compliance`, `tamperResistant true` |
 | D8 | Encrypted snapshots (DLM, daily, 7 kept) and nightly verified `pg_dump` (KMS, versioned, writer cannot read or delete) | `detection.tf`; `module.db_backup`; `infra/scripts/pg-backup.sh` | `aws dlm get-lifecycle-policies`; on the host `/usr/local/sbin/regulait-pg-backup.sh --check`; `aws cloudwatch describe-alarms --alarm-name-prefix regulait-demo-host` |
-| S1 | Secrets only in SSM SecureString (CMK); created at a hidden prompt; never in state, user-data, history or logs | §8.5; `infra/scripts/demo-host-env.sh` (no tracing, never prints a value) | `aws ssm get-parameters-by-path --path /regulait/demo-host --query 'Parameters[].[Name,Type]'` (no decryption); `terraform state list` holds no `aws_ssm_parameter` |
+| S1 | Secrets only in SSM SecureString (CMK); the tunnel token is read at a hidden prompt and the other three are generated; no secret in Terraform state, user-data, shell history or logs | §8.5; `infra/scripts/demo-host-env.sh` (no tracing, never prints a value) | `aws ssm get-parameters-by-path --path /regulait/demo-host --query 'Parameters[].[Name,Type]'` (no decryption) → four SecureString and four String; `terraform state list \| grep aws_ssm_parameter` → only the three non-secret String parameters `anchor_bucket`, `anchor_role_arn`, `anchor_retention_days` (bucket name, role ARN, retention days) |
 | S2 | Secrets fetched at boot into tmpfs | `demo-host-env.sh write` and `install-boot` (`/run/regulait/env`, 0600; `.env` is a symlink) | on the host: `stat -f -c %T /run` → `tmpfs`; `readlink /opt/app/.env` |
 | S3 | Tunnel token never written to a file | `demo-host-env.sh compose` passes it to one process | on the host: `grep -c REGULAIT_CF_TUNNEL_TOKEN /run/regulait/env` → `0` |
 | S4 | Rotation and revocation: demo password, tunnel token, model API key (dedicated, spend-limited, revoked after) | §8.13 | the steps' own checks |
@@ -134,13 +134,17 @@ After the demo (DEMO_RUNBOOK.md §8.11 and §8.13), in this order:
 2. Delete the Cloudflare Access apps and policies, and the tunnel. That revokes the tunnel token.
 3. Take a final verified backup.
 4. Run `terraform destroy` on `demo-host/host`. This terminates the instance and deletes the volumes, VPC, endpoints
-   and NAT gateway. The KMS key enters a 30-day deletion window. The backup bucket refuses deletion while it holds
-   backups. The **audit-anchor bucket cannot be emptied until its COMPLIANCE retention ends**, which is up to 7 days:
-   no principal, root included, can delete a locked anchor. It is removed from state, outlives the stack by up to the
-   retention period, and is deleted by hand afterwards (DEMO_RUNBOOK.md §8.11).
+   and NAT gateway. The KMS key enters a 30-day deletion window. The destroy stops on two buckets, as expected. The
+   backup bucket refuses deletion while it holds backups. The **audit-anchor bucket cannot be emptied until its
+   COMPLIANCE retention ends**, which is up to 7 days: no principal, root included, can delete a locked anchor. Both
+   are removed from Terraform state (the backup bucket is emptied first if its backups are not kept), and the destroy
+   is finished (DEMO_RUNBOOK.md §8.11 steps 2a to 2c).
 5. Delete the SSM parameters.
 6. Keep `demo-host/baseline` (the organization's audit trail) until its successor exists.
-7. Run `terraform destroy` on `demo-host/account`. This closes the account, and AWS keeps it suspended for 90 days.
+7. Close the account with `terraform destroy` on `demo-host/account`. AWS suspends it for 90 days and then deletes it
+   with everything inside, including the locked anchor bucket. If the anchors must stay readable for the reviewers,
+   keep the account until their retention ends, delete the buckets by hand, and close it then (DEMO_RUNBOOK.md §8.11
+   step 5).
 
 **Proof:** `aws ec2 describe-instances` shows the instance `terminated`, and `aws ssm get-parameters-by-path --path
 /regulait/demo-host` returns none.

@@ -1931,7 +1931,9 @@ aws ssm put-parameter --profile $P --name $D/public-host --type String --value '
 
 ```powershell
 aws ssm get-parameters-by-path --profile $P --path $D --query 'Parameters[].[Name,Type]' --output text
-# Success: five names, four SecureString and one String
+# Success: eight names. Four SecureString (cf-tunnel-token, data-key, bootstrap-token, db-password) and four String:
+#          public-host, plus anchor-bucket, anchor-role-arn and anchor-retention-days, which the host apply (8.4)
+#          wrote. Those three are non-secret wiring and are the only parameters in Terraform state.
 ```
 
 (The host's own read is checked in 8.6 by `demo-host-env.sh check`.) The bootstrap token is the full-admin credential
@@ -1995,7 +1997,8 @@ Invoke-DemoHost '/usr/local/sbin/regulait-pg-backup.sh --run', '/usr/local/sbin/
 ```
 
 **Secrets in tmpfs at every boot, and the hardening fallback.** `write` puts the env file in `/run/regulait` (tmpfs)
-and links `/opt/app/.env` to it. Install the boot unit once, so a reboot rebuilds it from SSM before Docker starts:
+and links `/opt/app/.env` to it. Install the boot unit once, so a reboot rebuilds it from SSM before Docker starts.
+The unit replays the flags `install-boot` was given, so pass it the same flags as your last `write`:
 
 ```powershell
 Invoke-DemoHost 'cd /opt/app && bash infra/scripts/demo-host-env.sh install-boot', 'stat -f -c %T /run', 'readlink /opt/app/.env', 'systemctl is-enabled regulait-env.service'
@@ -2004,8 +2007,10 @@ Invoke-DemoHost 'cd /opt/app && bash infra/scripts/demo-host-env.sh install-boot
 
 The override adds `no-new-privileges` and dropped capabilities to `gateway`, `db` and the object store. These are
 untested on a real host. **If a container fails to start** (`docker compose ps` shows it restarting), rebuild the
-override without them and record it on #453:
-`Invoke-DemoHost 'cd /opt/app && bash infra/scripts/demo-host-env.sh write --no-harden && bash infra/scripts/demo-host-env.sh compose --profile tunnel up -d'`.
+override without them, **reinstall the boot unit with the same flag** so a reboot (patching, the power schedule)
+does not bring the hardening back, and record it on #453:
+`Invoke-DemoHost 'cd /opt/app && bash infra/scripts/demo-host-env.sh write --no-harden && bash infra/scripts/demo-host-env.sh install-boot --no-harden && bash infra/scripts/demo-host-env.sh compose --profile tunnel up -d', 'systemctl cat regulait-env.service | grep ExecStart'`
+(Success: the `ExecStart` line ends in `write --no-harden`).
 **Never `cat` or print `.env` in an SSM shell:** session transcripts go to CloudWatch.
 
 **A later redeploy** of a new `<sha>` repeats this step. It goes into a new `/opt/releases/<sha>` and re-points the
@@ -2189,10 +2194,11 @@ answer a prompt.
 
    ```bash
    GW=http://127.0.0.1:3000
-   curl -fsS -X POST -H "authorization: Bearer $BOOT" $GW/v1/audit/anchor | jq '{seq, status, destination}'
-   curl -fsS -H "authorization: Bearer $BOOT" $GW/v1/audit/anchors | jq '{sink, latest: .anchors[0] | {seq, status, destination}}'
-   # Success: sink.mode "compliance", sink.tamperResistant true, sink.destination s3://<anchor bucket>/audit-anchors/,
-   #          and the latest anchor written there (not "failed")
+   curl -fsS -X POST -H "authorization: Bearer $BOOT" $GW/v1/audit/anchor | jq '{seq, status, destination, tamperResistant, error}'
+   # Success: status "flushed", destination "s3_object_lock", tamperResistant true, error null
+   curl -fsS -H "authorization: Bearer $BOOT" $GW/v1/audit/anchors | jq '{sink, disclosure, latest: .anchors[0] | {seq, status, destination}}'
+   # Success: sink = {destination "s3_object_lock", tamperResistant true, mode "compliance"}; latest.status "flushed"
+   #          with the seq of the POST above; disclosure starts "Anchors are written to S3 Object Lock in COMPLIANCE mode"
    bash infra/scripts/demo-host-anchor-creds.sh check   # Success: an expiry about an hour ahead; files owned by uid 1000, mode 400; timer active
    ```
 
@@ -2206,7 +2212,7 @@ answer a prompt.
    ```
 
    **If it reads anything else, stop:** G8 would tell the security team the trail is NOT tamper-resistant. Read
-   `sink.disclosure` in the same response for the reason, which is usually a credential or KMS permission. The
+   the top-level `disclosure` of the second call (and `error` of the first) for the reason, which is usually a credential or KMS permission. The
    rehearsal does not start until this passes.
 
 ### 8.9 Rehearsal on the instance (Sunday afternoon)
@@ -2259,29 +2265,53 @@ to the host, run 8.7 again.
 
 ### 8.11 Teardown after the demo (about 30 minutes)
 
+Run the steps in this order. Steps 2a and 2b are expected: a destroy cannot remove a bucket that still holds
+objects, so it stops part-way, and you finish it by taking those buckets out of Terraform's hands.
+
 ```powershell
 # 1. stop the host's connector; take and check a last backup
 Invoke-DemoHost 'cd /opt/app && docker compose --profile tunnel stop cloudflared', '/usr/local/sbin/regulait-pg-backup.sh --run'
-# 2. the host. The backup bucket refuses to be destroyed while it holds backups (force_destroy = false):
-#    empty it only once the backups are no longer wanted. The KMS key enters a 30-day deletion window.
-Set-Location infra/environments/demo-host/host; terraform plan -destroy -out=tfplan; terraform apply tfplan; Set-Location ../../../..
-# 3. the parameters
+
+# 2. destroy the host stack. The KMS key enters a 30-day deletion window.
+Set-Location infra/environments/demo-host/host
+terraform plan -destroy -out=tfplan; terraform apply tfplan
+# Expected: the apply STOPS with BucketNotEmpty on two buckets; everything else is destroyed.
+#  - the audit-anchor bucket: Object Lock in COMPLIANCE mode stops every principal, the account root included,
+#    from deleting an anchor version until its retention ends (anchor_retention_days, 7 by default);
+#  - the backup bucket (force_destroy = false), while it holds backups.
+
+# 2a. the backup bucket: EITHER keep the backups (take it out of state; it stays, billed for its objects)
+terraform state rm module.db_backup
+#     OR, only once the backups are no longer wanted, empty it (all versions) and keep it in state for 2c.
+
+# 2b. the anchor bucket CANNOT be emptied early. Take it out of state; it stays, locked, billed for a few kilobytes:
+terraform state rm module.anchor
+
+# 2c. finish the destroy
+terraform plan -destroy -out=tfplan; terraform apply tfplan   # Success: "Destroy complete"
+terraform state list                                          # Success: prints nothing
+Set-Location ../../../..
+
+# 3. the five hand-made parameters (Terraform removed its own three anchor parameters in step 2)
 aws ssm delete-parameters --profile regulait-demo-host --names /regulait/demo-host/public-host /regulait/demo-host/cf-tunnel-token /regulait/demo-host/data-key /regulait/demo-host/bootstrap-token /regulait/demo-host/db-password
-#    The audit-anchor bucket CANNOT be emptied early: Object Lock in COMPLIANCE mode stops every principal, the
-#    account root included, from deleting an anchor version until its retention ends (anchor_retention_days, 7 by
-#    default). The destroy stops on that bucket with BucketNotEmpty. Then, to finish the rest of the destroy:
-#      terraform state rm module.anchor   (the bucket stays, locked, and keeps being billed for its few kilobytes)
-#      terraform plan -destroy -out=tfplan; terraform apply tfplan
-#    After the retention ends, delete the versions and the bucket by hand:
-#      aws s3api list-object-versions --bucket <anchor bucket> ...; aws s3api delete-objects ...; aws s3api delete-bucket ...
-#    So the anchor bucket outlives the stack by up to the retention period. The KMS key's 30-day deletion window is
-#    longer than the 7-day retention, so the anchors stay readable until then.
+
 # 4. keep demo-host/baseline until the ADR-0013 successor (Fargate, RDS, WAF, HA) replaces it, or destroy it the same way
-# 5. the member account (closed; AWS keeps it suspended for 90 days)
+
+# 5. the member account. CHOOSE ONE, and decide before Monday:
+#  (a) Close it now: terraform destroy on demo-host/account (below). AWS suspends the account for 90 days and then
+#      deletes it with everything inside, including the locked anchor bucket and any backups you kept in 2a.
+#      Nothing is deleted by hand, and the anchors stop being readable when the account is suspended.
+#  (b) Keep it until the anchors' retention ends (up to anchor_retention_days after the last anchor), if the anchors
+#      or backups must stay readable for the security team. Then delete the bucket contents and the buckets by hand:
+#        aws s3api list-object-versions --profile regulait-demo-host --bucket <anchor bucket> ...
+#        aws s3api delete-objects ...; aws s3api delete-bucket ...
+#      and close the account with (a). The KMS key's 30-day deletion window is longer than the 7-day retention,
+#      so the anchors stay readable until then.
 Set-Location infra/environments/demo-host/account; terraform plan -destroy -out=tfplan; terraform apply tfplan; Set-Location ../../../..
 ```
 
-**Check:**
+**Check** (run it after step 3 and before step 5; once the account is closed, the `regulait-demo-host` profile no
+longer works):
 
 ```powershell
 aws ec2 describe-instances --profile regulait-demo-host --filters Name=tag:Stack,Values=demo-host-host `

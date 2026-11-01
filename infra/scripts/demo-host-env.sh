@@ -8,7 +8,7 @@
 #   sudo bash infra/scripts/demo-host-env.sh write [--sso]        # write .env + override
 #   sudo bash infra/scripts/demo-host-env.sh tunnel-check [--sso] # hosted-config.sh tunnel-check
 #   sudo bash infra/scripts/demo-host-env.sh compose <args...>    # docker compose <args...>
-#   sudo bash infra/scripts/demo-host-env.sh install-boot         # rebuild .env in tmpfs at every boot
+#   sudo bash infra/scripts/demo-host-env.sh install-boot [--sso] [--no-harden]  # rebuild .env in tmpfs at every boot, with the SAME flags
 #
 # Secrets live only in tmpfs: `write` puts the env file at /run/regulait/env
 # (tmpfs, cleared at power-off) and makes $APP_DIR/.env a symlink to it, so no
@@ -40,22 +40,28 @@ set +x
 
 PREFIX="${REGULAIT_SSM_PREFIX:-/regulait/demo-host}"
 APP_DIR="${APP_DIR:-$(pwd)}"
-usage() { echo "usage: $0 check|write|tunnel-check [--sso] [--no-harden]  |  $0 compose <docker compose args...>  |  $0 install-boot" >&2; exit 2; }
+usage() { echo "usage: $0 check|write|tunnel-check [--sso] [--no-harden]  |  $0 compose <docker compose args...>  |  $0 install-boot [--sso] [--no-harden]" >&2; exit 2; }
 MODE="${1:-}"; [ -n "$MODE" ] || usage; shift
 SSO=false
 HARDEN=true
 case "$MODE" in
-  check|write|tunnel-check)
+  check|write|tunnel-check|install-boot)
     for a in "$@"; do case "$a" in --sso) SSO=true ;; --no-harden) HARDEN=false ;; *) usage ;; esac; done ;;
   compose) [ $# -gt 0 ] || usage ;;
-  install-boot) [ $# -eq 0 ] || usage ;;
   *) usage ;;
 esac
 
 if [ "$MODE" = install-boot ]; then
   [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
   install -m 0700 "$0" /usr/local/sbin/regulait-demo-host-env
-  cat > /etc/systemd/system/regulait-env.service <<'UNIT'
+  # The boot unit replays the SAME flags as the last manual `write`, so a reboot
+  # (patching, power schedule) cannot silently bring back hardening that was
+  # turned off with --no-harden, or drop --sso. Re-run install-boot whenever the
+  # write flags change.
+  BOOT_FLAGS=""
+  [ "$SSO" = true ] && BOOT_FLAGS="$BOOT_FLAGS --sso"
+  [ "$HARDEN" = false ] && BOOT_FLAGS="$BOOT_FLAGS --no-harden"
+  cat > /etc/systemd/system/regulait-env.service <<UNIT
 [Unit]
 Description=RegulAIt demo host: rebuild the env file in tmpfs from SSM (ADR-0228)
 Wants=network-online.target
@@ -66,7 +72,7 @@ Before=docker.service
 Type=oneshot
 WorkingDirectory=/opt/app
 Environment=APP_DIR=/opt/app
-ExecStart=/usr/local/sbin/regulait-demo-host-env write
+ExecStart=/usr/local/sbin/regulait-demo-host-env write${BOOT_FLAGS}
 Restart=on-failure
 RestartSec=10
 
@@ -75,7 +81,7 @@ WantedBy=multi-user.target
 UNIT
   systemctl daemon-reload
   systemctl enable regulait-env.service
-  echo "demo-host-env: regulait-env.service enabled (runs before docker at every boot)"
+  echo "demo-host-env: regulait-env.service enabled (runs before docker at every boot; write flags:${BOOT_FLAGS:- none})"
   exit 0
 fi
 
