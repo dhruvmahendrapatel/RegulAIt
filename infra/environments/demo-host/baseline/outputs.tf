@@ -23,3 +23,8 @@ output "host_backend_hcl" {
     "",
   ])
 }
+
+output "host_dlm_role_arn" {
+  description = "The DLM execution role (break-glass only); the host stack's DLM policy uses it by name."
+  value       = aws_iam_role.host_dlm.arn
+}

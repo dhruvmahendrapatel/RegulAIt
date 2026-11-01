@@ -217,3 +217,50 @@ resource "aws_dynamodb_table" "host_state_lock" {
     enabled = true
   }
 }
+
+# --- the DLM execution role, created here under break-glass (ADR-0228 addendum 6) ---
+#
+# The boundary lets only this role delete snapshots (OnlyDlmDeletesSnapshots).
+# If the deployer could create, delete or change it, it could re-create a role
+# with this name and use that exemption to delete every snapshot. So it lives in
+# the break-glass baseline, the deployer is denied every IAM write on it, and it
+# may be passed only to DLM (DEMO_RUNBOOK.md §8.4 step 3). The host stack's DLM
+# policy refers to it by name.
+resource "aws_iam_role" "host_dlm" {
+  provider             = aws.workload
+  name                 = "${local.host_prefix}-dlm"
+  description          = "DLM execution role for the demo host's encrypted snapshots; break-glass only (ADR-0228)"
+  permissions_boundary = aws_iam_policy.host_role_boundary.arn
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "dlm.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+      Condition = { StringEquals = { "aws:SourceAccount" = var.host_account_id } }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "host_dlm" {
+  provider   = aws.workload
+  role       = aws_iam_role.host_dlm.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSDataLifecycleManagerServiceRole"
+}
+
+# The host key does not exist yet when this runs, so the grant is scoped by the
+# alias the host stack gives it (alias/regulait-demo-host), not by its ARN.
+resource "aws_iam_role_policy" "host_dlm_kms" {
+  provider = aws.workload
+  name     = "snapshot-cmk"
+  role     = aws_iam_role.host_dlm.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Action    = ["kms:CreateGrant", "kms:Decrypt", "kms:DescribeKey", "kms:Encrypt", "kms:GenerateDataKey*", "kms:ReEncrypt*"]
+      Resource  = "arn:aws:kms:*:${var.host_account_id}:key/*"
+      Condition = { "ForAnyValue:StringEquals" = { "kms:ResourceAliases" = "alias/${local.host_prefix}" } }
+    }]
+  })
+}

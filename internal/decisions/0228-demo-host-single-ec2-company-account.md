@@ -263,3 +263,16 @@ a custom Session document or a port-forwarding session.
   CloudTrail trail in the management account, which the deployer cannot reach, and the COMPLIANCE-locked anchors.
 - **Teardown step 2a now removes only the two buckets' own resources and the key from state.** The writer policies,
   their attachments and the alarm stay in state, so the roles delete cleanly and the destroy completes.
+
+## Addendum 6 (2026-11-01): the DLM role moves to the break-glass baseline (security review R1)
+
+The boundary lets only `regulait-demo-host-dlm` delete snapshots. The deployer could have re-created a role with that
+name, inside its `regulait-demo-host-*` prefix and with the boundary, and used the exemption to delete every
+snapshot. The fix:
+
+- The role and its two policies move from the host stack to `demo-host/baseline/host-foundation.tf` (break-glass).
+  Its KMS grant is scoped by the host key's alias, because the key does not exist yet when the baseline runs.
+- The host stack's DLM policy reads the role by name.
+- The deployer is denied every IAM create, delete, update, put, attach, detach, tag and untag on that role, and
+  `iam:PassRole` of it to any service but DLM.
+- Simulator proofs P8 expect each of these calls to be denied, and P5 expects passing the role to DLM to be allowed.

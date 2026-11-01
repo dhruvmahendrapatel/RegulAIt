@@ -1666,7 +1666,7 @@ aws organizations list-aws-service-access-for-organization --profile <profile> `
    - It cannot update a trust policy, and cannot assume a role outside the host account.
    - It may open a session only through the logged default document: no custom Session document, no port
      forwarding.
-   - **Evidence:** From the lock step (DEMO_RUNBOOK §8.4 step 5) on, the deployer cannot delete or expire the host's evidence. It cannot delete backup or anchor objects, versions or buckets, or change those buckets' policy, versioning, encryption, lifecycle, lock, public-access block or ownership. It cannot delete log groups or streams, or change their retention or key. It cannot disable, delete or re-key the host key, or rewrite its policy. It cannot delete or share snapshots, or change the DLM policy. It cannot delete flow logs, or mute GuardDuty, Security Hub, Config, Inspector or Access Analyzer. During the first host apply, before the lock step, the bucket-configuration and log-retention calls are allowed, because that apply needs them. It can still terminate the instance and delete its data volume (`ec2:*`), which loses the live database but not the backups, snapshots or anchors. **Detective controls:** the organization CloudTrail trail, in the management account the deployer cannot reach, records every one of these calls; the anchors are in S3 Object Lock COMPLIANCE mode, so no one, root included, can erase them before their retention ends. That is why teardown (8.11) is break-glass.
+   - **Evidence:** From the lock step (DEMO_RUNBOOK §8.4 step 5) on, the deployer cannot delete or expire the host's evidence. It cannot delete backup or anchor objects, versions or buckets, or change those buckets' policy, versioning, encryption, lifecycle, lock, public-access block or ownership. It cannot delete log groups or streams, or change their retention or key. It cannot disable, delete or re-key the host key, or rewrite its policy. It cannot delete or share snapshots, or change the DLM policy; the only role allowed to delete snapshots is the DLM execution role, which break-glass creates and the deployer can neither create, change, delete nor pass to anything but DLM. It cannot delete flow logs, or mute GuardDuty, Security Hub, Config, Inspector or Access Analyzer. During the first host apply, before the lock step, the bucket-configuration and log-retention calls are allowed, because that apply needs them. It can still terminate the instance and delete its data volume (`ec2:*`), which loses the live database but not the backups, snapshots or anchors. **Detective controls:** the organization CloudTrail trail, in the management account the deployer cannot reach, records every one of these calls; the anchors are in S3 Object Lock COMPLIANCE mode, so no one, root included, can erase them before their retention ends. That is why teardown (8.11) is break-glass.
    - Its policy is in 8.4 step 3, with the IAM simulator proofs of each escalation path the security reviewers named.
 
 **CONSOLE FALLBACK for MFA (about 1 minute):** there is no CLI or API for Identity Center's MFA settings. Go to **IAM
@@ -1728,12 +1728,13 @@ Set-Location ../../../..
 
 # 2. BREAK-GLASS. The baseline (15 to 30 minutes; Config and Security Hub are slow): the organization trail,
 #    GuardDuty, Security Hub, Config (its bucket now versioned), the SCPs, and in the host account the deployer's
-#    state backend and the role boundary (baseline/host-foundation.tf).
+#    state backend, the role boundary and the DLM execution role (baseline/host-foundation.tf).
 #    baseline/terraform.tfvars: management_sso_profile = "<break-glass profile>"
 Set-Location infra/environments/demo-host/baseline
 terraform init -backend-config=backend.hcl -backend-config="profile=<break-glass profile>"
 terraform plan -out=tfplan      # Success: CloudTrail, GuardDuty, Security Hub, Config, SCPs, budget, the host-account
-                                #          state bucket, lock table, key and regulait-demo-host-boundary; "0 to destroy"
+                                #          state bucket, lock table, key, regulait-demo-host-boundary and the regulait-demo-host-dlm role
+#          with its two policies; "0 to destroy"
 terraform apply tfplan
 terraform output -raw host_backend_hcl | Out-File -Encoding ascii ../host/backend.hcl   # git-ignored
 Set-Location ../../../..
@@ -1776,7 +1777,9 @@ $Policy = @'
     {"Sid": "DenyChangingTheStateBackend", "Effect": "Deny", "Action": ["s3:DeleteObjectVersion", "s3:PutBucketPolicy", "s3:PutBucketVersioning", "s3:PutLifecycleConfiguration", "s3:PutEncryptionConfiguration", "dynamodb:DeleteTable", "dynamodb:UpdateTable", "dynamodb:UpdateContinuousBackups", "dynamodb:DeleteBackup"], "Resource": ["arn:aws:s3:::regulait-demo-host-tfstate-*", "arn:aws:s3:::regulait-demo-host-tfstate-*/*", "arn:aws:dynamodb:*:HOST_ACCOUNT_ID:table/regulait-demo-host-tfstate-lock"]},
     {"Sid": "DenySessionsOnAnyOtherDocument", "Effect": "Deny", "Action": "ssm:StartSession", "NotResource": ["arn:aws:ssm:*:HOST_ACCOUNT_ID:document/SSM-SessionManagerRunShell", "arn:aws:ec2:*:HOST_ACCOUNT_ID:instance/*", "arn:aws:ssm:*:HOST_ACCOUNT_ID:managed-instance/*"]},
     {"Sid": "DenyCreatingAnyOtherDocument", "Effect": "Deny", "Action": ["ssm:CreateDocument", "ssm:UpdateDocument", "ssm:UpdateDocumentDefaultVersion"], "NotResource": "arn:aws:ssm:*:HOST_ACCOUNT_ID:document/SSM-SessionManagerRunShell"},
-    {"Sid": "DenyKeyGrantsToPrincipals", "Effect": "Deny", "Action": "kms:CreateGrant", "Resource": "*", "Condition": {"Bool": {"kms:GrantIsForAWSResource": "false"}}}
+    {"Sid": "DenyKeyGrantsToPrincipals", "Effect": "Deny", "Action": "kms:CreateGrant", "Resource": "*", "Condition": {"Bool": {"kms:GrantIsForAWSResource": "false"}}},
+    {"Sid": "DenyAnyIamWriteOnTheDlmRole", "Effect": "Deny", "Action": ["iam:Create*", "iam:Delete*", "iam:Update*", "iam:Put*", "iam:Attach*", "iam:Detach*", "iam:Tag*", "iam:Untag*"], "Resource": "arn:aws:iam::HOST_ACCOUNT_ID:role/regulait-demo-host-dlm"},
+    {"Sid": "DenyPassingTheDlmRoleExceptToDlm", "Effect": "Deny", "Action": "iam:PassRole", "Resource": "arn:aws:iam::HOST_ACCOUNT_ID:role/regulait-demo-host-dlm", "Condition": {"StringNotEquals": {"iam:PassedToService": "dlm.amazonaws.com"}}}
   ]
 }
 '@
@@ -1818,11 +1821,18 @@ Sim access-analyzer:UpdateFindings,inspector2:CreateFilter,inspector2:UpdateFilt
 # P7. Sessions only through the logged default document: no custom Session document, no port forwarding
 Sim ssm:StartSession "arn:aws:ssm:<region>::document/AWS-StartPortForwardingSession"
 Sim ssm:StartSession,ssm:CreateDocument "arn:aws:ssm:<region>:$($HostAccount):document/regulait-x-unlogged-shell"
-# Success for P1 to P4, P6 and P7: every line ends in explicitDeny or implicitDeny; none says allowed.
+# P8. The DLM role (break-glass, the only role the boundary lets delete snapshots): no IAM write on it, and passed
+#     to nothing but DLM
+$Dlm = "arn:aws:iam::$($HostAccount):role/regulait-demo-host-dlm"
+Sim iam:DeleteRole,iam:CreateRole,iam:PutRolePolicy,iam:AttachRolePolicy,iam:UpdateAssumeRolePolicy $Dlm "ContextKeyName=iam:PermissionsBoundary,ContextKeyValues=$Bnd,ContextKeyType=string"
+Sim iam:PassRole $Dlm "ContextKeyName=iam:PassedToService,ContextKeyValues=ec2.amazonaws.com,ContextKeyType=string"
+# Success for P1 to P4 and P6 to P8: every line ends in explicitDeny or implicitDeny; none says allowed (P8: explicitDeny)
 # P5. The one way to create a role: with the boundary
 Sim iam:CreateRole "arn:aws:iam::$($HostAccount):role/regulait-demo-host-x" "ContextKeyName=iam:PermissionsBoundary,ContextKeyValues=$Bnd,ContextKeyType=string"
 Sim ssm:StartSession "arn:aws:ssm:<region>:$($HostAccount):document/SSM-SessionManagerRunShell"
-# Success for P5: both allowed (a bounded role; a session through the default, logged document)
+Sim iam:PassRole "arn:aws:iam::$($HostAccount):role/regulait-demo-host-dlm" "ContextKeyName=iam:PassedToService,ContextKeyValues=dlm.amazonaws.com,ContextKeyType=string"
+# Success for P5: all three allowed (a bounded role; a session through the default, logged document; the DLM role
+#   passed to DLM, which the host stack's snapshot policy needs)
 
 $Ic = aws sso-admin list-instances --profile <break-glass profile> --query 'Instances[0].InstanceArn' --output text
 $Dep = aws sso-admin create-permission-set --profile <break-glass profile> --instance-arn $Ic --name RegulAItDemoDeployer `

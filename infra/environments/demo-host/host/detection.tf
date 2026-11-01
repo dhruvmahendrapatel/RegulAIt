@@ -58,40 +58,16 @@ resource "aws_ssm_association" "patch_scan" {
 # --- encrypted EBS snapshots (DLM) -----------------------------------------------
 # Daily snapshots of every volume tagged Snapshot=<name>, kept 7 days. Snapshots of
 # a CMK-encrypted volume stay encrypted with the same key.
-resource "aws_iam_role" "dlm" {
-  name                 = "${local.name}-dlm"
-  permissions_boundary = local.boundary_arn
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect    = "Allow"
-      Principal = { Service = "dlm.amazonaws.com" }
-      Action    = "sts:AssumeRole"
-    }]
-  })
-}
-
-resource "aws_iam_role_policy_attachment" "dlm" {
-  role       = aws_iam_role.dlm.name
-  policy_arn = "arn:${local.partition}:iam::aws:policy/service-role/AWSDataLifecycleManagerServiceRole"
-}
-
-resource "aws_iam_role_policy" "dlm_kms" {
-  name = "snapshot-cmk"
-  role = aws_iam_role.dlm.id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect   = "Allow"
-      Action   = ["kms:CreateGrant", "kms:Decrypt", "kms:DescribeKey", "kms:Encrypt", "kms:GenerateDataKey*", "kms:ReEncrypt*"]
-      Resource = aws_kms_key.host.arn
-    }]
-  })
+# The DLM execution role is created by the break-glass baseline
+# (../baseline/host-foundation.tf), because the boundary lets only it delete
+# snapshots and the deployer must not be able to re-create it. Read here by name.
+data "aws_iam_role" "dlm" {
+  name = "${local.name}-dlm"
 }
 
 resource "aws_dlm_lifecycle_policy" "snapshots" {
   description        = "${local.name} daily encrypted snapshots"
-  execution_role_arn = aws_iam_role.dlm.arn
+  execution_role_arn = data.aws_iam_role.dlm.arn
   state              = "ENABLED"
 
   policy_details {
