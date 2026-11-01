@@ -766,11 +766,11 @@ evaluated here and is out of scope for this fix.
 
 **Not done here.**
 
-- `infra/environments/demo-host/host/anchor.tf` still carries its own policy.
-  It lives only on the held PR #652, owned by another session. The follow-up is
-  to set `writer_role_names = [aws_iam_role.anchor.name]` there and drop
-  `data.aws_iam_policy_document.anchor` and `aws_iam_role_policy.anchor`. The
-  anchor role is in the same account, so the module's name-to-ARN mapping holds.
+- `infra/environments/demo-host/host/anchor.tf` (PR #652) is switched to the
+  module's grant in that PR, by owner request on 2026-11-01. It passes
+  `writer_role_names = [aws_iam_role.anchor.name]` and drops its own role
+  policy. The anchor role is in the same account, so the module's name-to-ARN
+  mapping holds.
 - `terraform fmt -check` / `validate` could not be run in the authoring session:
   there is no terraform binary, and downloading one was refused by that
   session's sandbox. No environment on `main` consumes the module. Run both
