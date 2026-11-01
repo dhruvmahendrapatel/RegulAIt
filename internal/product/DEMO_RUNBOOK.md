@@ -2132,7 +2132,9 @@ aws logs describe-log-groups --profile $H --log-group-name-prefix /regulait/demo
 # Success: /regulait/demo-host/run-command  arn:aws:kms:...   (Run Command output, KMS-encrypted)
 aws logs describe-log-streams --profile $H --log-group-name /regulait/demo-host/run-command --query 'length(logStreams)'
 # Success: more than 0 once the patch install above has run (its output is the first stream)
-aws kms get-key-rotation-status --profile $H --key-id alias/regulait-demo-host --query KeyRotationEnabled   # Success: true
+# get-key-rotation-status does not accept an alias: resolve the key ID first
+$HostKeyId = aws kms describe-key --profile $H --key-id alias/regulait-demo-host --query KeyMetadata.KeyId --output text
+aws kms get-key-rotation-status --profile $H --key-id $HostKeyId --query KeyRotationEnabled   # Success: true
 aws accessanalyzer list-analyzers --profile $H --type ACCOUNT --query 'analyzers[].status' --output text   # Success: ACTIVE
 aws inspector2 batch-get-account-status --profile $H --query 'accounts[0].resourceState.[ec2.status,ecr.status]' --output text   # Success: ENABLED ENABLED
 aws guardduty list-detectors --profile $H --query 'DetectorIds' --output text                            # Success: a detector id
