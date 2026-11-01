@@ -936,3 +936,517 @@ UI: `apps/web/src/views/admin/governance/GuardrailsPage.tsx` (header **Guardrail
   log and enforces nothing.
 - The playground's API answer carries the PII and guardrails verdicts, but the playground page does not show them, so
   do not point at the playground for this.
+
+---
+
+## Addendum (2026-10-31, owner): Act 4 — What's new
+
+**Owner decision (2026-10-31, through the master session):** "If things are already built and working then we need to
+include it in the demo". Asked how, the owner chose **"All in the main flow"**. So every feature that is built, merged
+and reachable in the UI gets a scripted beat here. Nothing above this addendum is changed. Act 1, Act 2, Act 3 and
+their timing tables stand as written.
+
+**Placement.** Act 4 runs **after Act 3 (after B4) and before the Close**. The Close moves to the end of Act 4 and is
+unchanged.
+
+**Set-up.** Set-up, switches, seed status and the fallback for every beat are in `DEMO_RUNBOOK.md` §7.12. Most of the
+switches are turned on at T-24h, so the stage shows the feature rather than the settings page. The presenter reads
+§7.12 "What Act 4 must never claim" before the run.
+
+**Sat 10-31.** LIVE, and it changes state: a questionnaire draft, a supplier link and answer, an import accepted as a
+draft, a risk treated, an MCP tool sync, a rate limit, a processing record, a trust-centre item and an auditor grant.
+Rehearse every state-changing step on FALLBACK only.
+
+**Persona.** All of Act 4 is **Ada** (admin, profile A). A step-up means Ada enters a fresh authenticator code. Two
+beats open a **private window** (profile C) for an outside person, a supplier or an auditor. Use a private window with
+no session, never Ada's profile.
+
+**Mock vs. live in this act.** No beat calls a live model:
+- V1 drafts from records only;
+- I3 and P1 use mock agents chosen explicitly;
+- the other beats call no model at all.
+
+The Close's mock-vs-live sentence from Act 3 still holds.
+
+### Timing
+
+| # | Theme | Beat | Persona | Minutes | Clock after B4 (32.5) |
+|---|---|---|---|---|---|
+| V1 | Supply chain and vendors | Vendor questionnaire drafts from records | Ada | 1.0 | 33.5 |
+| V2 | Supply chain and vendors | Supplier portal: invite, supplier answers, accept | Ada, supplier (private window) | 1.5 | 35.0 |
+| V3 | Supply chain and vendors | Framework content import, reviewed | Ada | 1.0 | 36.0 |
+| R1 | Risk and posture | Posture estimate and what to fix first | Ada | 1.0 | 37.0 |
+| R2 | Risk and posture | A risk transferred | Ada | 1.0 | 38.0 |
+| R3 | Risk and posture | Re-test after a model change (switch and results table; nothing changed on stage) | Ada | 0.5 | 38.5 |
+| D1 | Runtime protection | Trained detectors (show the card) | Ada | 0.5 | 39.0 |
+| D2 | Runtime protection | Remote agents (A2A) (show the registry) | Ada | 0.5 | 39.5 |
+| I1 | Integrations | MCP server registry and **Sync tools now** | Ada | 1.0 | 40.5 |
+| I2 | Integrations | Connectors: catalogue and write-only credentials | Ada | 0.5 | 41.0 |
+| I3 | Integrations | Per-model rate limit (live refusal) and modality prices | Ada | 1.5 | 42.5 |
+| P1 | Privacy and trust | Records of processing, the processing limit, a data subject request | Ada | 1.5 | 44.0 |
+| P2 | Privacy and trust | Trust centre and auditor portal | Ada, auditor (private window) | 1.5 | 45.5 |
+| — | Close (unchanged) | — | — | 0.5 | 46.0 |
+
+The act adds 13 minutes. The demo runs to about **46 minutes** before Q&A. Allow about 2 minutes more for two
+private-window switches and the step-up prompts, so plan for **about 48**.
+
+**Cutting order inside the act** (drop from the top when behind):
+1. D1;
+2. D2;
+3. R3;
+4. I2;
+5. I3's modality-price step;
+6. V3's feed-sources step;
+7. P1's data subject request;
+8. V3 entirely;
+9. R1's "How this is calculated".
+
+Never cut V2's accept step or P2's auditor link: an outside party getting narrow, expiring, read-only access is the
+point of both.
+
+**Feature not given a beat** (not reachable in the UI on `main` on 2026-10-31): the OIDC-compatible MCP identity
+assertion (PR #612, ADR-0210). It is set per server through the API only, the UI control is a named follow-up, and it
+needs an operator-provisioned signing key that no demo script creates. Do not mention it on stage. If asked, say "it is
+built and set per server through the API; the screen for it is next".
+
+---
+
+### Theme 1 — Supply chain and vendors
+
+**Say (to open the theme, one line):** "Your AI risk doesn't stop at your own walls. Here is how we handle suppliers."
+
+### V1. Vendor questionnaire drafts — Ada — 1 minute
+
+UI:
+- `apps/web/src/views/admin/governance/VendorsPage.tsx`;
+- `VendorDraftPanel.tsx`.
+
+Switch: `vendorDraftAssistEnabled`, on at T-24h (§7.12).
+
+1. Nav **AI Governance** → **Vendors** (`/ui/admin/vendors`). Open the seeded vendor that is still *proposed*. Its
+   name is in the presenter notes; do not read the vendor name aloud.
+2. Press **Finish planning**. The card **Assessment questionnaire — record the vendor's answers and submit** appears.
+3. In **Draft with**, leave **records only (default)**. Press **Draft answers**.
+4. Point at the source line on each drafted section (**Drafted from records**) and at the line **N of M sections
+   drafted**. Sections with nothing to draft from are left out. Press **Use drafts in unanswered sections**. Do
+   **not** press **Submit questionnaire**.
+
+- **Say:** "The questionnaire starts from what we already hold about this vendor, and every draft says where it came
+  from. Nothing counts until a person reviews it and submits. Drafting never submits, never attests and never changes
+  the vendor's status."
+- **Never say:**
+  - that the answers are AI answers, or verified: a draft from records is labelled with its source, and the card says
+    nothing is verified by this platform;
+  - that the questionnaire was pre-filled or submitted;
+  - that a model draft has measured quality: it has not been measured against a real model;
+  - that supplier files are read: supplier documents are pasted text only, and the screen takes one.
+- **Fallback:**
+  - If **Draft answers** shows "Drafted answers are off…", the T-24h switch was missed. Say "this is off by default;
+    an admin turns it on, with a second factor", and move to V2.
+  - Never choose **records and a model** on stage.
+
+### V2. Supplier portal — Ada, then the supplier — 1.5 minutes
+
+UI:
+- `SupplierAccessPanel.tsx`, inside the vendor detail on `/ui/admin/vendors`;
+- `SupplierQuestionnairesPage.tsx`;
+- supplier side `apps/web/src/views/supplier/SupplierPortalPage.tsx` (`/ui/supplier`).
+
+Switch: the portal, on at T-24h (§7.12).
+
+1. On `/ui/admin/vendors`, open the seeded vendor that is *under assessment* (named in the presenter notes). Scroll to
+   **Supplier access** → **Invite a supplier**. Fill in:
+   - **Supplier contact's email**: the reserved test address from the presenter notes;
+   - **Framework**: an active pack;
+   - **Access lasts (days, 1 to 30)**: 7;
+   - **Link works for (hours, 1 to 72)**: 24.
+
+   Press **Create access and link** and confirm the step-up. The step-up prompt reads "changing an agent identity";
+   do not read it aloud.
+2. In **Copy the sign-in link**, press **Copy link** with the projector frozen or mirrored off: the link is a
+   single-use credential and must not be shown on screen. Paste it into the **private window**. The page signs the supplier
+   in on its own and removes the link from the address bar.
+3. Supplier side, **Supplier assessment**: point at **Your access ends** and **This session ends**. Under **Controls**,
+   type a one-line answer on one control → **Send answer**.
+4. Back in Ada's window, close the vendor row and click it again to reopen it, which refreshes the list (it does not
+   update by itself). Under **Answers from suppliers**, press **Accept**, then **Accept answer** in the dialog
+   **Accept this answer?**. Rehearse this on FALLBACK.
+
+- **Say:** "The supplier gets one link that works once, for one framework, for a limited time. Their session ends on
+  its own, and they see only this vendor's assessment, for the framework we picked. Their answer comes back to us to accept or reject, and
+  accepting it records what the vendor claims. We haven't verified it."
+- **Never say:**
+  - that we e-mail the supplier: the admin sends the link;
+  - that suppliers use MFA: there is none, the link is the credential;
+  - that uploaded files are scanned: no malware scanner ships, so files are refused by default;
+  - that supplier reads are audited: grants, links, answers and decisions are, reads are not;
+  - that an accepted answer is verified evidence;
+  - that supplier answers flow into the questionnaire artifact;
+  - that supplier data is isolated by row-level security: there is none; isolation comes from the separate route
+    class and grant-keyed queries.
+- **Fallback:**
+  - If **Create access and link** is refused, the vendor is not *proposed* or *under assessment*, or no pack is
+    active. Say "it needs an active framework and a vendor under assessment", and show
+    `/ui/admin/vendors/questionnaires` (the **Supplier portal** card) instead.
+  - If the private window does not sign in, say "the link has been used or has expired, which is the point", and
+    move on.
+
+### V3. Framework content import — Ada — 1 minute
+
+UI:
+- `apps/web/src/views/admin/compliance/FrameworkImportsPage.tsx`;
+- `apps/web/src/views/admin/governance/RegulatoryFeedSourcesPage.tsx`.
+
+Switch: `frameworkImportsEnabled`, on at T-24h (§7.12).
+
+1. Nav **Compliance & infra** → **Framework imports** (`/ui/admin/compliance-packs/imports`). Under **Sources**, press
+   **Propose import** on the row **NIST AI RMF 1.0 (AI 100-1) subcategories**. The review drawer opens by itself.
+2. In the drawer, point at **Controls you edited (N)** and **New and updated controls (N)**. Press **Accept as draft
+   version N**.
+3. If time allows, show nav **AI Governance** → **Regulatory feed sources**. Point at **Propose update**; do not
+   press it.
+
+- **Say:** "Framework text comes in from the published source, shipped inside the product, so it works with no
+  internet. A person reviews every change before it lands. The import never overwrites a control we edited ourselves
+  unless we tick it, and accepting it makes a draft version. Activating that version is a separate, reviewed step."
+- **Never say:**
+  - that accepting activates a pack;
+  - that the import maps controls or changes how they are evidenced: new controls start unmapped;
+  - that imported feed entries map to controls;
+  - that content refreshes on a schedule: refreshing is a developer step;
+  - that we have packs for US state laws, the full SP 800-53 catalogue or the AI RMF Playbook actions.
+- **Fallback:** if the page shows **Imports are off**, say "this is off by default; an admin turns it on with a step-up",
+  and move to R1.
+
+---
+
+### Theme 2 — Risk and posture
+
+### R1. Posture estimate — Ada — 1 minute
+
+UI:
+- `apps/web/src/views/admin/governance/PosturePage.tsx`;
+- `PostureEstimate.tsx`.
+
+Always on, with no switch.
+
+1. **`/ui/admin/posture`** (header **Posture**). The section **Posture estimate** is first. Point at the **Overall**
+   card and its **Estimate** badge, and read the disclaimer under it aloud.
+2. Point at **What to fix first**: each item has a **+N points** badge and a link to the page that fixes it.
+3. Optional: open **How this is calculated** and point at the **Inputs** and **Weight** columns. The table has a
+   column headed **Score**: do not read that word out; say "estimate".
+- Keep R1 **before** R2: R2's transfer raises the "Risk treatment" input, so the figure changes after it.
+
+- **Say:** "One figure, computed only from this deployment's own records: coverage, risk treatment, red-team results,
+  access hygiene, answer quality, audit integrity and spend control. It is an estimate, and the ranked list tells you
+  which fix moves it most. There's no AI in it; the same records give the same figure."
+- **Never say:**
+  - "score", "compliant", "certified", a verdict or an audit opinion: the card says it is none of these;
+  - that it measures real-world exposure: it estimates the records;
+  - that the weights are configurable: they are fixed;
+  - that there is a per-agent or per-project figure: it is org-wide only.
+  - Do not read out the exact figure as a target. An unmeasured objective counts as 0.
+- **Fallback:** none needed (read-only, no model). If the section does not render, show the existing posture sections
+  below it.
+
+### R2. A risk transferred — Ada — 1 minute
+
+UI:
+- `apps/web/src/views/admin/governance/RisksPage.tsx`;
+- `RiskTreatmentPanel.tsx`.
+
+Switch: `riskTreatmentsEnabled`, on at T-24h (§7.12).
+
+1. **`/ui/admin/risks`** (header **Risks**). In **Register**, open the seeded *open* risk named in the presenter notes.
+2. In **Transfer or avoid this risk**, fill in:
+   - **Treatment**: **Transferred**;
+   - **Owner of the arrangement — required**: Ada;
+   - **Contract or policy reference — required**: the placeholder reference from the presenter notes.
+
+   Press **Record transfer**.
+3. Point at the **Transfer record** card: **Contract or policy reference**, **Owner**, **Recorded**.
+
+- **Say:** "An insurer or a supplier now carries the cost. We record who owns that arrangement and the contract it rests
+  on. The risk keeps its rating: it stays on the heat map and in the tolerance check, and if it is above tolerance it
+  still holds the deploy gate."
+- **Never say:**
+  - that transferring lowers the rating, or removes the risk from the gate;
+  - that "avoided" means resolved: it means the use that caused it stopped;
+  - that a treated risk can be edited, accepted or re-treated: it can only be reopened or closed, with a reason
+    (accepting it is refused `risk_treated`);
+  - that turning the switch off undoes recorded treatments.
+- **Fallback:** if the card is missing, the risk is not *open* or *mitigating*, or the switch is off. Open another
+  open risk, or say "this is off by default, and the strict default is open, mitigating, accepted or closed", and move
+  on.
+
+### R3. Re-test after a model change — Ada — 0.5 minutes (show only)
+
+UI: `apps/web/src/views/admin/governance/ModelRiskPage.tsx`, card **Re-test after a model change**, and
+`RetestResults.tsx`.
+
+1. **`/ui/admin/model-risk`** (header **Model risk**). Point at the card **Re-test after a model change**, setting
+   **Re-test automatically after a model change**.
+2. Describe the result column without changing anything. On a sign-off request, a **Re-tests** column reads like "N
+   passed, N failed, N other", leaving out any count that is zero.
+
+- **Say:** "If someone changes the model behind an approved agent, the model card drifts. With this on, the tests
+  already chosen for that agent run again, and the results are attached to the next sign-off request. A pass is evidence for the
+  person signing. It does not sign anything off: the model stays refused until a person decides."
+- **Never say:**
+  - that the re-test signs off, clears drift or lets the model serve;
+  - that it is instant: an hourly job runs it;
+  - that it chooses new tests: it reruns the agent's pinned baselines and the red-team libraries it was already probed
+    with, up to 10 suites;
+  - that it covers custom-provider cards;
+  - that it is free: it spends tokens on the agent's provider, and is refused if the project is over budget.
+- **On stage, never save a model or price change** on `/ui/admin/agents` (§7.12, "R3/I3 model-change rule").
+- **Fallback:** none (read-only).
+
+---
+
+### Theme 3 — Runtime protection
+
+### D1. Trained detectors — Ada — 0.5 minutes (show only, unless set up)
+
+UI: `apps/web/src/views/admin/governance/TrainedDetectorsPanel.tsx`, on the **Guardrails** page from B4.
+
+1. On **`/ui/admin/guardrails`**, scroll from **Deployment defaults** to the card **Trained detectors**. Point at the
+   three rows **PII recogniser**, **Prompt-injection classifier** and **Harm classifier**, and the columns **Scoring
+   service** and **If the service fails**.
+
+- **Say:** "Beside the rule-based detectors you saw, an admin can add trained classifiers, run as a scoring service
+  inside your own network. They only add findings; the rules always run. If that service is down, the default is to
+  treat it as a hit at the detector's mode, which is block by default, so a missing classifier fails closed."
+- **Never say:**
+  - that the trained models ship in the product image or the air-gapped bundle: they don't yet, and the licence
+    decision is pending;
+  - any accuracy, precision or recall figure: none is claimed;
+  - that **Try a sample** uses them: it is rule-based only;
+  - that groundedness is checked at run time;
+  - that the injection classifier scans output: it scans input only.
+- **Fallback:** none (read-only). Show the rows **Off** with **none chosen**. That is the expected state (§7.12).
+
+### D2. Remote agents (A2A) — Ada — 0.5 minutes (show only)
+
+UI:
+- `apps/web/src/views/admin/integrations/AgentsScreen.tsx` (tab **Remote agents (A2A)**);
+- `A2aAgentsPage.tsx`;
+- `OrganizationPage.tsx` card **3b1 · Remote agents (A2A)**.
+
+1. **`/ui/admin/agents`** → tab **Remote agents (A2A)**. Point at the **Registry** card's badge **Off (default)** and
+   the register fields:
+   - **Name**;
+   - **Agent address (its card is read from here)**;
+   - **Price per call (USD, optional)**.
+2. With nothing registered, **Manage**, **Who may call it** and **Give access** are not on screen. Describe them
+   ("each registered agent has a Manage view where an admin gives named people access") without pointing.
+
+- **Say:** "Agents built by other teams or other vendors can be called over the agent-to-agent protocol. It is off by
+  default. When it's on, each remote agent is registered by an admin, and each person is given access to it. Every
+  call is checked: the org switch, the person's grant, the project and its budget, the project's PII mode on the
+  outgoing message, and the egress allow-list. Every call is audited and costed."
+- **Never say:**
+  - that our task graph or orchestration calls remote agents: it doesn't yet;
+  - that there is a button to call one: calls are API only;
+  - that the remote agent's card signature is verified;
+  - that the same checks as a model call apply: there are no guardrails, no policy-kernel rules and no token
+    optimisation on A2A;
+  - that the message text goes through the policy kernel, or that replies are checked for PII;
+  - that a skill grant binds the remote agent: the remote agent chooses its own skill;
+  - that streaming, polling or cancellation are supported;
+  - that there is an A2A-specific rate limit.
+- **Fallback:** none (read-only). Do not register an agent on stage: registration fetches the remote card live
+  (§7.12).
+
+---
+
+### Theme 4 — Integrations
+
+### I1. MCP servers and Sync tools now — Ada — 1 minute
+
+UI:
+- `apps/web/src/views/admin/integrations/McpServersPage.tsx`;
+- `McpServerAdmission.tsx`.
+
+1. Nav **Integrations** → **MCP servers** (`/ui/admin/mcp-servers`), tab **Servers**. Point at the **Server
+   registry** form (**Name**, **Upstream transport**, **URL**, **Private ranges**, **Register**) and its info button
+   **what adding a server grants**. Do not register a new server.
+2. Click the seeded `repo-tools` row. It opens Execution, Identity assertion and Upstream credential first: scroll
+   to **Tools on repo-tools**. Press **Sync tools now** **once**, confirm the step-up, and read the toast ("Synced N
+   tools from …").
+
+- **Say:** "Adding a server gives nobody access to it; tools are granted one by one. Syncing pulls the server's tool
+  list through the same gates as a live call: admission, the release waiting period, the egress allow-list and the
+  manifest scan. It needs a second factor, it's rate-limited, and every sync that runs is audited, whether a gate allows or refuses it."
+- **Never say:**
+  - "Add MCP server": the button is **Register**;
+  - that a sync bypasses admission or egress;
+  - that registering grants access;
+  - that we scan your estate for MCP servers: discovery classifies the evidence it is given, and stdio servers never
+    show up.
+- **Fallback:** if the sync fails, the loopback MCP server from runbook §1 step 3 is down. Say "the tool server isn't
+  answering, and the refusal is audited", open `/ui/admin/audit`, and move on.
+
+### I2. Connectors — Ada — 0.5 minutes (read-only)
+
+UI: `apps/web/src/views/admin/integrations/ConnectorsPage.tsx`.
+
+1. Nav **Connectors** (`/ui/admin/connectors`). In **Catalog**, point at the two seeded connectors:
+   `snowflake-analytics` (mock adapter) and `jira-cloud` (governance-only). FALLBACK also shows
+   `acme-policy-library`, which `demo:shadow` adds; do not point at it.
+2. Point at **Create a connector** and its **Execution adapter** list, and at **Platform credential — write-only, per
+   connector**.
+
+- **Say:** "Connectors to your systems sit behind the same per-user grants, with a mode and a data scope. A
+  connector's credential is write-only: once saved it's never shown again. Creating a connector, and storing,
+  replacing or removing its credential, are each audited."
+- **Never say:**
+  - that the governance-only connector executes anything;
+  - that a stored credential can be read back.
+  - Never type or show a real credential.
+- **Fallback:** none (read-only).
+
+### I3. Per-model rate limit and modality prices — Ada — 1.5 minutes
+
+UI:
+- `apps/web/src/views/admin/governance/ModelRateLimits.tsx` (on `/ui/admin/rules`);
+- `AgentsPage.tsx` (**Model & pricing**);
+- `CostDashboardPage.tsx`.
+
+1. **`/ui/admin/rules`** (header **Rules engine**), card **Rate limits — max calls per window**, section **Per-model
+   limits — max calls to one model per window**. Fill in:
+   - **Scope**: **User**;
+   - **User**: **Ada Admin**;
+   - **Model**: **fast-mock · mock · tier 0**;
+   - **Max calls (1 to 1,000,000)**: 1;
+   - **Window seconds (up to 30 days)**: 60.
+
+   Press **Add per-model limit**. If the badge reads **Not enforced**, press **Turn enforcement on** and confirm the
+   step-up.
+2. **`/ui/chat`**, **Agent** `fast-mock` chosen explicitly, **Bill to** `demo-project`. Send a one-line question
+   twice. The second is refused: badge `model_rate_limited`, then "model rate limit reached for 'fast-mock': 1/1 calls
+   in 60s (user limit)".
+3. Optional (cut first): **`/ui/admin/agents`** → **Model & pricing — dispatch-execution config**. Point at **$/MTok
+   image in**, **$/MTok image out**, **$/MTok audio in** and **$/MTok audio out**. **Do not press Save model &
+   pricing.**
+
+- **Say:** "Limits can be set per model and per person, role or team, and they are enforced at the gateway once an
+  admin turns enforcement on. Image and audio can be priced separately; where a provider reports the split, the
+  dashboard shows it."
+- **Never say:**
+  - that the limit is exact under heavy concurrency: calls already in flight can overrun it;
+  - that a role or team limit is a shared pool: it is counted per user;
+  - that a refusal falls back to another model;
+  - that modality spend is estimated: it is measured only. Most providers, including the ones in this demo, report
+    no split, so all demo spend shows "No split reported by the provider";
+  - that limits bind before an admin turns enforcement on;
+  - that past usage was back-filled.
+- **Fallback:**
+  - If the second call is not refused, say "we'll see it in the audit", and open `/ui/admin/audit`.
+  - Never retry more than once.
+
+---
+
+### Theme 5 — Privacy and trust
+
+### P1. Records of processing and the processing limit — Ada — 1.5 minutes
+
+UI:
+- `apps/web/src/views/admin/compliance/ProcessingRecordsPage.tsx`;
+- `DataSubjectRequestsPage.tsx`.
+
+The record is created at T-24h (§7.12).
+
+1. Nav **Privacy** → **Records of processing** (`/ui/admin/privacy`). Point at the T-24h record in **Records**, at
+   the columns **Linked to** ("Project hipaa-project"), **Lawful basis**, **Data categories** and **Retention**
+   ("30 days").
+2. Press **Turn the processing limit on**. No step-up is needed, because turning it on tightens a setting.
+3. **No live call in this beat.** Describe the refusal; do not demo it. With the limit on, a governed model call
+   whose project has no record for the personal data it carries is refused `processing_not_permitted`, and the message
+   includes "Nothing was sent to a provider and nothing was billed." On this demo an e-mail address never reaches that
+   gate: the org PII mode is *block*, and the PII check runs first and refuses it as `pii_blocked`
+   (`apps/gateway/src/agents-connectors.ts`, `enforcePII` before `privacyDispatchGate`). So never send personal data
+   in a chat to show the limit.
+4. If time allows (cut before the rest of P1): nav **Privacy** → **Data subject requests** → **Record a request**.
+   Fill in:
+   - **Request type**: Access;
+   - **Identify the person by**: Email address, with the placeholder address from the presenter notes.
+
+   Press **Record request**, then **Open**. The identifier is not stored, so type the same placeholder address into
+   **The person's email address**, then press **Locate data**.
+
+- **Say:** "Each AI system can have a record of why it processes personal data and on what basis. With the limit on,
+  a model call carrying personal data that the project has no record for is refused before any provider is called.
+  And when a person asks what we hold on them, we can find it across RegulAIt's own stores and track each request
+  against its due date."
+- **Never say:**
+  - "consent enforcement": consent is one lawful basis in the record, and the limit is per project, not per person;
+  - that connector calls, MCP tool calls or training ingest are limited: only governed model calls are;
+  - that there is a per-call purpose;
+  - that an upheld objection is enforced per person;
+  - that **Locate data** searches beyond RegulAIt's own four stores: accounts, conversations, shared project context
+    and the audit trail;
+  - that erasure finds every detail about a person: it replaces the identifier as typed, and the audit trail keeps
+    tombstoned rows until retention prunes them;
+  - that a phone number in another format is found: numbers are matched as typed;
+  - that message details are searched: the conversation message `detail` column is not;
+  - that erasure needs a step-up: it does not;
+  - that open requests survive a data-key rotation: they stop matching;
+  - any word for the audit trail stronger than "tamper-evident".
+- **Fallback:**
+  - If anyone asks to see the refusal live, do not send personal data: the PII mode refuses first, as `pii_blocked`.
+    Say "the PII mode refuses that first; the processing limit is the next check", and move on.
+  - Turn the limit off only after the demo (§7.12).
+
+### P2. Trust centre and auditor portal — Ada, then the auditor — 1.5 minutes
+
+UI:
+- `apps/web/src/views/trust/TrustPublishingPage.tsx`;
+- public pages `/ui/trust` and `/ui/audit`.
+
+Switch: on at T-24h, with one item published at T-24h (§7.12).
+
+1. Nav **Compliance & infra** → **Trust publishing** (`/ui/admin/trust-publishing`). Point at the tabs:
+   - **Controls and evidence**;
+   - **AI system cards**;
+   - **Auditor access**;
+   - **Trust centre heading**.
+
+   The page opens on **Controls and evidence**. Click **AI system cards**, then point at the published card.
+2. Open **`/ui/trust`** in the private window. No sign-in. Point at **AI systems** and at the line that says this is
+   not a certification. Point at **Controls and evidence** only if the T-24h control summary was published (§7.12);
+   the heading is shown only when a control or evidence summary is published.
+3. Back in Ada's window, tab **Auditor access** → **Give an auditor access**. Fill in:
+   - **Auditor's name**: the placeholder name from the presenter notes;
+   - **Email**: a reserved test address;
+   - **Access for (days, at most 90)**: 30;
+   - **Sign-in link valid for (hours, 1 to 72)**: 24;
+   - **Items the auditor may read**: tick the published item.
+
+   Press **Give access** and confirm the step-up. Copy the link from **Sign-in link for …** with the projector
+   frozen or mirrored off: the link is a single-use credential and must not be shown on screen.
+4. Paste the link into the private window. The portal shows **Signed in as …**, "Read-only. Each item you open is
+   recorded by the organisation.", and **Items shared with you**. Press **Open** on the item.
+5. Back in Ada's window: **Auditors with access** → **Activity**, which shows the auditor's open.
+
+- **Say:** "We choose exactly what to publish, and an admin publishes each item with a second factor. Wording that claims certification or
+  compliance is refused when we publish. An auditor gets a single-use link to a read-only portal that shows only what
+  we chose for them. Their access expires, and every item they open is recorded."
+- **Never say:**
+  - certified, compliant, accredited, guarantee or "complies with": publishing refuses these words, and so do we;
+  - that we e-mail the auditor, or that the auditor uses MFA;
+  - that the auditor can download anything: there is no export;
+  - that unpublishing is instant on the public page: it can stay cached for up to 5 minutes;
+  - that editing a published item updates what an auditor already has: a new grant is needed;
+  - that an auditor session lasts the whole grant: each session lasts at most 1 hour.
+- **Fallback:**
+  - If `/ui/trust` shows "This page is not available", the switch is off. Say "it is off by default", and show the
+    **Trust publishing** tabs only.
+  - If the auditor link fails, say "it's single-use", and press **New link** (step-up) once.
+
+---
+
+### Close (unchanged)
+
+Run the Close as written above. Add one line before it only if the clock allows: "Each switch you saw in that act is
+off by default, and every change to one is in the audit trail."
