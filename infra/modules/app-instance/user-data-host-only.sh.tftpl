@@ -1,0 +1,105 @@
+#!/bin/bash
+# host_only boot script (ADR-0228). Prepares the host and starts NOTHING of the
+# app: the operator deploys the compose stack through an SSM session, with its
+# .env built from SSM Parameter Store, so no secret is ever in user-data, in
+# Terraform state or in this log.
+#
+#   1. the encrypted data volume, found by its NVMe serial, formatted once and
+#      mounted at ${data_volume_mount} (fstab by UUID, so it survives reboots);
+#   2. Docker, ordered after that mount, with container logs to CloudWatch;
+#   3. the Docker Compose plugin, refused unless its SHA-256 matches;
+#   4. optional swap.
+#
+# Runs once per instance (cloud-init). Progress: /var/log/app-boot.log (0600).
+set -euxo pipefail
+touch /var/log/app-boot.log
+chmod 600 /var/log/app-boot.log
+exec >> /var/log/app-boot.log 2>&1
+
+%{ if data_volume_serial != "" ~}
+# --- 1. data volume -------------------------------------------------------------
+# The attachment is created after the instance, so wait for the disk (up to 10 min).
+DEV=""
+for i in $(seq 1 120); do
+  DEV=$(lsblk -dno NAME,SERIAL | awk -v s="${data_volume_serial}" '$2 == s { print "/dev/" $1 }')
+  [ -n "$DEV" ] && break
+  sleep 5
+done
+[ -n "$DEV" ] || { echo "app-boot: FATAL data volume ${data_volume_serial} never attached"; exit 1; }
+
+# Format only a blank disk: a re-attached volume keeps its data.
+if ! blkid "$DEV" >/dev/null 2>&1; then
+  mkfs.xfs -L regulait-data "$DEV"
+fi
+UUID=$(blkid -s UUID -o value "$DEV")
+mkdir -p "${data_volume_mount}"
+grep -q "UUID=$UUID" /etc/fstab || echo "UUID=$UUID ${data_volume_mount} xfs defaults,nofail,x-systemd.device-timeout=60 0 2" >> /etc/fstab
+mount -a
+mountpoint -q "${data_volume_mount}" || { echo "app-boot: FATAL ${data_volume_mount} is not mounted"; exit 1; }
+
+# Docker must never start on the root disk if the data volume is missing.
+mkdir -p /etc/systemd/system/docker.service.d
+cat > /etc/systemd/system/docker.service.d/10-data-volume.conf <<UNIT
+[Unit]
+RequiresMountsFor=${data_volume_mount}
+UNIT
+%{ endif ~}
+
+# --- 2. Docker -------------------------------------------------------------------
+dnf install -y docker
+mkdir -p /etc/docker
+%{ if log_group_name != "" ~}
+# Container stdout/stderr to CloudWatch Logs; the log group is KMS-encrypted and
+# retention-bounded by Terraform. The role may only write to this group.
+cat > /etc/docker/daemon.json <<JSON
+{
+  "log-driver": "awslogs",
+  "log-opts": {
+    "awslogs-region": "${region}",
+    "awslogs-group": "${log_group_name}",
+    "tag": "{{.Name}}",
+    "mode": "non-blocking"
+  },
+  "live-restore": true
+}
+JSON
+%{ else ~}
+cat > /etc/docker/daemon.json <<JSON
+{
+  "log-driver": "json-file",
+  "log-opts": { "max-size": "50m", "max-file": "5" },
+  "live-restore": true
+}
+JSON
+%{ endif ~}
+systemctl daemon-reload
+systemctl enable --now docker
+
+# --- 3. Docker Compose plugin, checksum-pinned -------------------------------------
+mkdir -p /usr/local/lib/docker/cli-plugins
+curl -fsSL "https://github.com/docker/compose/releases/download/${compose_version}/docker-compose-linux-x86_64" \
+  -o /tmp/docker-compose
+echo "${compose_sha256}  /tmp/docker-compose" | sha256sum -c - \
+  || { echo "app-boot: FATAL compose plugin checksum mismatch"; rm -f /tmp/docker-compose; exit 1; }
+install -m 0755 /tmp/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+rm -f /tmp/docker-compose
+docker compose version
+
+# --- 4. swap (the stack builds on the host) --------------------------------------
+if [ "${swap_gb}" -gt 0 ] && [ ! -f /swapfile ]; then
+  fallocate -l "${swap_gb}G" /swapfile
+  chmod 600 /swapfile
+  mkswap /swapfile
+  echo "/swapfile none swap sw 0 0" >> /etc/fstab
+  swapon /swapfile
+fi
+
+# jq for infra/scripts/demo-host-env.sh. No git: the source arrives as a git
+# archive through the source bucket, so the host holds no Git credential.
+dnf install -y jq
+
+# Releases are extracted under /opt/releases/<sha>; /opt/app is a symlink to
+# the current one (pg-backup.sh and the runbook use /opt/app).
+mkdir -p /opt/releases
+chmod 0750 /opt/releases
+echo "app-boot: host ready; deploy the stack through SSM (DEMO_RUNBOOK.md §8)"

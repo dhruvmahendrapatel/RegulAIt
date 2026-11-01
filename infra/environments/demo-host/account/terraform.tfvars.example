@@ -1,0 +1,6 @@
+# Copy to terraform.tfvars (git-ignored) and fill in. Never commit real values.
+management_sso_profile     = "<company-account-sso-profile-name>"
+management_account_id      = "<12-digit-company-account-id>"
+account_email              = "<unique-root-email-for-the-demo-host-account>"
+budget_notification_emails = ["<alert-recipient>"]
+# allowed_regions          = ["us-east-1", "us-east-2"]

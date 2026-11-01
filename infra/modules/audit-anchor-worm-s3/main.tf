@@ -164,7 +164,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "anchors" {
 #   s3:ListBucket, s3:ListBucketVersions         on <bucket>, prefix-limited
 #       — ListObjectVersions under <prefix>/ to find the latest anchor.
 #   s3:GetBucketObjectLockConfiguration          on <bucket>
-#       — the call that GRADES tamper resistance. The grade is observed from
+#       — the call that GRADES tamper resistance. The grade is read from
 #         the bucket, never configured, so without this the gateway reports the
 #         anchor as NOT tamper-resistant even on a COMPLIANCE bucket.
 #   kms:GenerateDataKey, kms:Decrypt             on kms_key_arn, only when set

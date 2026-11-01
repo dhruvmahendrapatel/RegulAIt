@@ -1519,3 +1519,1092 @@ rehearse Act 4 there, never on LIVE.
 4. Unpublish the trust-centre item.
 5. Set the T-24h switches back to off, or leave them on if the owner wants them kept. Each change is a step-up and
    audited.
+
+## 8. AWS demo host (ADR-0228)
+
+Addendum of 2026-11-01. Owner decisions ([ADR-0228](../decisions/0228-demo-host-single-ec2-company-account.md)):
+"EC2 now, Fargate after", and **"Terminal only, keep Terraform"**. The demo stack moves from the laptop to **one
+hardened EC2 instance** in a new member account of the company AWS Organization, behind the **same Cloudflare Tunnel
+and hostname**. It is a demo environment, never production. **The demo is Monday morning, 2026-11-02**; every step
+below runs on **Sunday 2026-11-01**. Every step is **pending execution** and the owner runs it; no agent runs `plan`
+or `apply`. Nothing above this section changes.
+
+**What still depends on the laptop after step 8.7: only the browser used to present.** Keep the laptop stack and its
+volumes untouched until teardown (8.11). The laptop is the rollback (8.10).
+
+### 8.0 How to read this section
+
+- **Every step is a terminal command.** Nothing is done in the AWS console, except three IAM Identity Center steps
+  in 8.2 that AWS offers no CLI or API for: enabling the organization instance, setting the first password, and
+  requiring MFA. Each is marked **CONSOLE FALLBACK**.
+- **The laptop is Windows, so commands are PowerShell** (5.1 or 7), run from the repository checkout. Where the shell
+  matters, a **bash** block follows for macOS or Linux. Commands marked **on the host** run in the instance's SSM
+  shell (Amazon Linux bash), whatever the laptop runs.
+- **Placeholders:** `<profile>` and `<break-glass profile>` are the same thing: the company account's Identity Center CLI profile for the administrator permission set (8.2 b or c), used only for the break-glass steps (8.2 e). `regulait-demo-host` is the deployer's profile in the host account (8.4 step 3); `<region>` is for example
+  `us-east-1`; `<company account id>` and `<host account id>` are 12 digits; `<sha>` is the commit of `main` to deploy;
+  `regulait.<domain>` is the public hostname. Real values go only into git-ignored `terraform.tfvars` and
+  `backend.hcl`, SSM, and the password manager.
+- **Secrets are never typed into a command line, never stored in shell history and never echoed.** Each one is read
+  at a hidden prompt or generated into a temporary file outside the checkout, uploaded with `file://`, and the file
+  is deleted.
+- Each step gives the command, **Success:** (what you should see) and **Check:** (a command that proves it).
+
+### 8.1 Sunday 2026-11-01 plan
+
+| When (Sunday) | Steps | Time |
+| --- | --- | --- |
+| Morning | 8.2 tools, Identity Center, the deployer permission set and MFA; 8.3 backend; 8.4 Terraform apply, patch, security-control checks | 2 to 3 h |
+| Late morning | 8.5 secrets, 8.6 deploy the stack (secrets in tmpfs, container hardening) | about 45 min |
+| Midday | 8.7 move the tunnel; 8.7 b Cloudflare Access, TLS and rate limit | 30 min |
+| Afternoon | 8.8 live prepare, discovery trust, §7.11, §7.12, `demo:relax-e`, then 8.9 rehearsal on the instance | 2 to 3 h |
+| Evening | **Buffer.** 8.13 rotate the demo password; 8.9 a go-live posture checklist; a backup; rehearse the rollback command (8.10) up to the point of running it | 1 h |
+| Monday 2026-11-02 | The demo, on the host. 8.10 stays ready in an open PowerShell window | — |
+
+### 8.2 Tools, sign-in and IAM Identity Center (about 20 to 40 minutes)
+
+**a. Tools on the laptop.** You need AWS CLI v2, the Session Manager plugin, Terraform 1.9 or later, and Git for
+Windows (its bash runs the two bash scripts below).
+
+```powershell
+aws --version                      # Success: aws-cli/2.x
+session-manager-plugin --version   # Success: a version number
+terraform version                  # Success: Terraform v1.9 or later
+git --version
+```
+
+If any is missing, install it with `winget install Amazon.AWSCLI`, `winget install Amazon.SessionManagerPlugin`,
+`winget install Hashicorp.Terraform` or `winget install Git.Git`. Then open a new PowerShell window.
+
+**b. Is Identity Center already set up?** ADR-0203 asked for it. If this succeeds, skip to **d**:
+
+```powershell
+aws configure sso --profile <profile>   # interactive: start URL, region, the company account, the admin permission set
+aws sso login --profile <profile>
+aws sts get-caller-identity --profile <profile> --query Arn --output text
+# Success: arn:aws:sts::<company account id>:assumed-role/AWSReservedSSO_<permission set>_.../<you>
+```
+
+**c. Only if b failed: Organizations and Identity Center from scratch.** There is no Identity Center session yet,
+and ADR-0004 forbids access keys. So run these commands in **AWS CloudShell**, signed in to the company account. It
+is a terminal with your sign-in's own short-lived credentials, and no key is created. Start `pwsh` in it to use the
+PowerShell below.
+
+```powershell
+# Organizations, all features (skip if `aws organizations describe-organization` already answers)
+aws organizations create-organization --feature-set ALL
+aws organizations describe-organization --query 'Organization.[MasterAccountId,FeatureSet]' --output text
+# Success: <company account id>  ALL
+```
+
+**CONSOLE FALLBACK (about 2 minutes):** AWS has no CLI or API call that enables the **organization** instance of IAM
+Identity Center (`aws sso-admin create-instance` creates only a standalone account instance, which is not what
+ADR-0004 needs). In the console, go to **IAM Identity Center** › **Enable**, choosing the region you will use as
+`<region>`. Then return to the terminal:
+
+```powershell
+$Ic  = aws sso-admin list-instances --query 'Instances[0].InstanceArn' --output text
+$Ids = aws sso-admin list-instances --query 'Instances[0].IdentityStoreId' --output text
+# Success: $Ic starts with arn:aws:sso:::instance/ ; $Ids starts with d-
+
+# your user (no password is set here; see the note below)
+$UserId = aws identitystore create-user --identity-store-id $Ids --user-name '<your-user-name>' `
+  --display-name '<Your Name>' --name 'GivenName=<Given>,FamilyName=<Family>' `
+  --emails 'Value=<your-email>,Type=work,Primary=true' --query UserId --output text
+
+# an admin permission set with a 4-hour session, and its assignment to the company account
+$Ps = aws sso-admin create-permission-set --instance-arn $Ic --name RegulAItAdmin --session-duration PT4H `
+  --query PermissionSet.PermissionSetArn --output text
+aws sso-admin attach-managed-policy-to-permission-set --instance-arn $Ic --permission-set-arn $Ps `
+  --managed-policy-arn arn:aws:iam::aws:policy/AdministratorAccess
+aws sso-admin create-account-assignment --instance-arn $Ic --target-id <company account id> --target-type AWS_ACCOUNT `
+  --permission-set-arn $Ps --principal-type USER --principal-id $UserId
+
+# Check:
+aws sso-admin list-account-assignments --instance-arn $Ic --account-id <company account id> --permission-set-arn $Ps `
+  --query 'AccountAssignments[].PrincipalId' --output text
+# Success: prints $UserId
+```
+
+**CONSOLE FALLBACK for the first password (about 2 minutes):** the CLI cannot set or send an Identity Center
+password. In **IAM Identity Center** › **Users** › your user, choose **Reset password** and **Send an email**. Set the
+password and register an MFA device at the link. Then run **b** on the laptop.
+
+**d. Trusted access for the baseline's organization services** (once per Organization):
+
+```powershell
+foreach ($p in 'cloudtrail.amazonaws.com','guardduty.amazonaws.com','securityhub.amazonaws.com','config.amazonaws.com','config-multiaccountsetup.amazonaws.com') {
+  aws organizations enable-aws-service-access --service-principal $p --profile <profile>
+}
+aws organizations list-aws-service-access-for-organization --profile <profile> `
+  --query 'EnabledServicePrincipals[].ServicePrincipal' --output text
+# Success: all five names listed
+```
+
+**e. Who runs what: two privilege levels (security-team addendum, revision 3).**
+
+1. **The management-account bootstrap is a one-time privileged action, run under break-glass, with MFA, and
+   recorded by CloudTrail. It is not least-privilege, and it does not pretend to be.** It covers 8.3 (the state
+   backend), 8.4 steps 1 to 3 (the member account; the baseline with Organizations, the organization trail,
+   GuardDuty, Security Hub and Config delegation, the SCPs and the budget-action role; the deployer's permission set),
+   and later the sandbox trust re-apply (8.8 step 4) and teardown (8.11). Use the administrator permission set of
+   **b** or **c**, called `<break-glass profile>` below. Sign out right after each break-glass step (`aws sso logout`).
+   Write one line in the session record for each use: when, which step, and why.
+2. **The recurring deploy runs as `RegulAItDemoDeployer`, assigned only in the demo-host member account.** It has no
+   assignment in, and no access to, the management account. That is why it can be least-privilege. Its state backend
+   lives in the host account, and it cannot reach the organization trail, the Config bucket or the SCPs at all. Inside
+   the host account:
+   - It may only create IAM roles named `regulait-demo-host-*` that carry the permissions boundary
+     `regulait-demo-host-boundary`. The break-glass baseline creates that boundary, and the deployer cannot change or
+     remove it.
+   - The boundary caps every such role, whatever policy is attached to it later. A role may not:
+     - touch IAM or Organizations;
+     - assume any role except the audit-anchor role;
+     - write to CloudTrail, Config, GuardDuty or Security Hub;
+     - administer KMS keys;
+     - weaken or erase evidence, such as bucket policy, versioning, lifecycle or lock settings, deletes, or log-group
+       deletion and retention.
+   - It cannot update a trust policy, and cannot assume a role outside the host account.
+   - It may open a session only through the logged default document: no custom Session document, no port
+     forwarding.
+   - **Evidence:** From the lock step (DEMO_RUNBOOK §8.4 step 5) on, the deployer cannot delete or expire the host's evidence. It cannot delete backup or anchor objects, versions or buckets, or change those buckets' policy, versioning, encryption, lifecycle, lock, public-access block or ownership. It cannot delete log groups or streams, or change their retention or key. It cannot disable, delete or re-key the host key, or rewrite its policy. It cannot delete or share snapshots, or change the DLM policy; the only role allowed to delete snapshots is the DLM execution role, which break-glass creates and the deployer can neither create, change, delete nor pass to anything but DLM. It cannot delete flow logs, or mute GuardDuty, Security Hub, Config, Inspector or Access Analyzer. During the first host apply, before the lock step, the bucket-configuration and log-retention calls are allowed, because that apply needs them. It can still terminate the instance and delete its data volume (`ec2:*`), which loses the live database but not the backups, snapshots or anchors. **Detective controls:** the organization CloudTrail trail, in the management account the deployer cannot reach, records every one of these calls; the anchors are in S3 Object Lock COMPLIANCE mode, so no one, root included, can erase them before their retention ends. That is why teardown (8.11) is break-glass.
+   - Its policy is in 8.4 step 3, with the IAM simulator proofs of each escalation path the security reviewers named.
+
+**CONSOLE FALLBACK for MFA (about 1 minute):** there is no CLI or API for Identity Center's MFA settings. Go to **IAM
+Identity Center** › **Settings** › **Authentication** › **Multi-factor authentication** and set **Every time they sign
+in**, with **Require them to register an MFA device at sign-in**. **Check:** your next `aws sso login` asks for the
+MFA code.
+
+### 8.3 State backend bootstrap (about 5 minutes)
+
+The July state bucket was deleted. `infra/bootstrap/bootstrap-backend.sh` uses the AWS CLI and holds no account id.
+It creates the backend in the company account and writes `backend.hcl` for the management-account stacks,
+`demo-host/account` and `demo-host/baseline`. **Break-glass:** run it with `<break-glass profile>` as `<profile>`. The
+host stack's own backend is in the host account, and the baseline creates it (8.4 step 4). It is bash, so run it
+through Git for Windows' bash:
+
+```powershell
+$env:AWS_PROFILE = '<profile>'; $env:AWS_REGION = '<region>'; $env:EXPECTED_ACCOUNT_ID = '<company account id>'
+$Bash = "$env:ProgramFiles\Git\bin\bash.exe"
+& $Bash infra/bootstrap/bootstrap-backend.sh --preflight-only
+# Success: "Preflight passed; nothing created (--preflight-only)."
+# If the backend does NOT exist yet:
+& $Bash infra/bootstrap/bootstrap-backend.sh
+# If it ALREADY exists (the demo-sandbox runbook created it), this creates nothing and writes only missing backend.hcl files:
+& $Bash infra/bootstrap/bootstrap-backend.sh --write-backend-config
+```
+
+```bash
+AWS_PROFILE=<profile> AWS_REGION=<region> EXPECTED_ACCOUNT_ID=<company account id> infra/bootstrap/bootstrap-backend.sh --preflight-only
+AWS_PROFILE=<profile> AWS_REGION=<region> EXPECTED_ACCOUNT_ID=<company account id> infra/bootstrap/bootstrap-backend.sh   # or --write-backend-config
+```
+
+**Check:**
+
+```powershell
+Get-ChildItem infra/environments/demo-host/*/backend.hcl | Select-Object FullName   # Success: two files (account, baseline)
+git status --short infra/                                                         # Success: prints nothing (git-ignored)
+aws s3api get-bucket-encryption --bucket "regulait-terraform-state-$env:EXPECTED_ACCOUNT_ID" --profile <profile> `
+  --query 'ServerSideEncryptionConfiguration.Rules[0].ApplyServerSideEncryptionByDefault.SSEAlgorithm' --output text
+# Success: aws:kms
+```
+
+### 8.4 `terraform init`, `plan`, `apply` (about 60 to 90 minutes, mostly waiting)
+
+Steps 1 to 3 are the **management-account bootstrap: break-glass, once** (8.2 e). Step 4 is the recurring deploy, as
+the deployer. In each stack, `Copy-Item terraform.tfvars.example terraform.tfvars`, then fill it in with
+`notepad terraform.tfvars`. **Read every plan before applying it.** The Terraform commands are the same in bash.
+
+```powershell
+aws sso login --profile <break-glass profile>   # MFA prompt; CloudTrail records the session
+
+# 1. BREAK-GLASS. The member account (5 to 15 minutes; account creation is asynchronous).
+#    account/terraform.tfvars: management_sso_profile = "<break-glass profile>"
+Set-Location infra/environments/demo-host/account
+terraform init -backend-config=backend.hcl -backend-config="profile=<break-glass profile>"
+terraform plan -out=tfplan      # Success: creates the account, budget and SCPs; "0 to destroy"
+terraform apply tfplan
+$HostAccount = terraform output -raw host_account_id   # put it into ../baseline and ../host terraform.tfvars
+Set-Location ../../../..
+
+# 2. BREAK-GLASS. The baseline (15 to 30 minutes; Config and Security Hub are slow): the organization trail,
+#    GuardDuty, Security Hub, Config (its bucket now versioned), the SCPs, and in the host account the deployer's
+#    state backend, the role boundary and the DLM execution role (baseline/host-foundation.tf).
+#    baseline/terraform.tfvars: management_sso_profile = "<break-glass profile>"
+Set-Location infra/environments/demo-host/baseline
+terraform init -backend-config=backend.hcl -backend-config="profile=<break-glass profile>"
+terraform plan -out=tfplan      # Success: CloudTrail, GuardDuty, Security Hub, Config, SCPs, budget, the host-account
+                                #          state bucket, lock table, key, regulait-demo-host-boundary and the regulait-demo-host-dlm role
+#          with its two policies; "0 to destroy"
+terraform apply tfplan
+terraform output -raw host_backend_hcl | Out-File -Encoding ascii ../host/backend.hcl   # git-ignored
+Set-Location ../../../..
+```
+
+If the baseline's first apply fails on an organization prerequisite, the error names the service. Enable its trusted
+access (8.2 d) and apply again.
+
+**3. BREAK-GLASS. The deployer permission set, assigned only in the host account (about 10 minutes).** The policy
+names the host account and the boundary, nothing else. The proofs below run IAM's policy simulator, which changes
+nothing. They must show each escalation path the security reviewers named as denied before the permission set is
+assigned.
+
+```powershell
+$Policy = @'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Sid": "HostStackServices", "Effect": "Allow", "Action": ["ec2:*", "s3:*", "kms:*", "logs:*", "ssm:*", "ssmmessages:*", "ec2messages:*", "dlm:*", "scheduler:*", "cloudwatch:*", "sns:*", "dynamodb:*", "inspector2:*", "access-analyzer:*", "sts:GetCallerIdentity"], "Resource": "*"},
+    {"Sid": "DetectionReadOnly", "Effect": "Allow", "Action": ["cloudtrail:Describe*", "cloudtrail:Get*", "cloudtrail:List*", "cloudtrail:LookupEvents", "guardduty:Get*", "guardduty:List*", "guardduty:Describe*", "securityhub:Get*", "securityhub:List*", "securityhub:Describe*", "config:Describe*", "config:Get*", "config:List*", "config:Select*", "organizations:DescribeOrganization", "iam:Get*", "iam:List*", "iam:Simulate*"], "Resource": "*"},
+    {"Sid": "RolesOnlyWithTheBoundary", "Effect": "Allow", "Action": ["iam:CreateRole", "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:PutRolePermissionsBoundary"], "Resource": "arn:aws:iam::HOST_ACCOUNT_ID:role/regulait-demo-host-*", "Condition": {"StringEquals": {"iam:PermissionsBoundary": "arn:aws:iam::HOST_ACCOUNT_ID:policy/regulait-demo-host-boundary"}}},
+    {"Sid": "TagAndDeleteOnlyRegulaitRoles", "Effect": "Allow", "Action": ["iam:TagRole", "iam:UntagRole", "iam:UpdateRoleDescription", "iam:DeleteRole"], "Resource": "arn:aws:iam::HOST_ACCOUNT_ID:role/regulait-demo-host-*"},
+    {"Sid": "ManagedPoliciesOnlyRegulait", "Effect": "Allow", "Action": ["iam:CreatePolicy", "iam:DeletePolicy", "iam:CreatePolicyVersion", "iam:DeletePolicyVersion", "iam:TagPolicy", "iam:UntagPolicy"], "Resource": "arn:aws:iam::HOST_ACCOUNT_ID:policy/regulait-demo-host-*"},
+    {"Sid": "InstanceProfilesOnlyRegulait", "Effect": "Allow", "Action": ["iam:CreateInstanceProfile", "iam:DeleteInstanceProfile", "iam:AddRoleToInstanceProfile", "iam:RemoveRoleFromInstanceProfile", "iam:TagInstanceProfile", "iam:UntagInstanceProfile"], "Resource": "arn:aws:iam::HOST_ACCOUNT_ID:instance-profile/regulait-demo-host-*"},
+    {"Sid": "PassOnlyRegulaitRolesToTheirServices", "Effect": "Allow", "Action": "iam:PassRole", "Resource": "arn:aws:iam::HOST_ACCOUNT_ID:role/regulait-demo-host-*", "Condition": {"StringEquals": {"iam:PassedToService": ["ec2.amazonaws.com", "dlm.amazonaws.com", "scheduler.amazonaws.com", "vpc-flow-logs.amazonaws.com"]}}},
+    {"Sid": "ServiceLinkedRolesForHostServices", "Effect": "Allow", "Action": "iam:CreateServiceLinkedRole", "Resource": "*", "Condition": {"StringEquals": {"iam:AWSServiceName": ["inspector2.amazonaws.com", "access-analyzer.amazonaws.com", "agentless.inspector2.amazonaws.com"]}}},
+    {"Sid": "DenyUpdatingAnyTrustPolicy", "Effect": "Deny", "Action": "iam:UpdateAssumeRolePolicy", "Resource": "*"},
+    {"Sid": "DenyRemovingOrSwappingTheBoundary", "Effect": "Deny", "Action": "iam:DeleteRolePermissionsBoundary", "Resource": "*"},
+    {"Sid": "DenyAnotherBoundary", "Effect": "Deny", "Action": ["iam:PutRolePermissionsBoundary", "iam:CreateRole"], "Resource": "*", "Condition": {"StringNotEquals": {"iam:PermissionsBoundary": "arn:aws:iam::HOST_ACCOUNT_ID:policy/regulait-demo-host-boundary"}}},
+    {"Sid": "DenyTouchingTheBoundaryAndBaselineIdentities", "Effect": "Deny", "Action": "iam:*", "Resource": ["arn:aws:iam::HOST_ACCOUNT_ID:policy/regulait-demo-host-boundary", "arn:aws:iam::HOST_ACCOUNT_ID:role/OrganizationAccountAccessRole", "arn:aws:iam::HOST_ACCOUNT_ID:role/regulait-config-*", "arn:aws:iam::HOST_ACCOUNT_ID:role/aws-reserved/*"]},
+    {"Sid": "DenyHumanCredentials", "Effect": "Deny", "Action": ["iam:CreateUser", "iam:CreateAccessKey", "iam:CreateLoginProfile", "iam:UpdateLoginProfile", "iam:CreateOpenIDConnectProvider", "iam:CreateSAMLProvider"], "Resource": "*"},
+    {"Sid": "DenyAssumingAnyRoleOutsideTheHostAccount", "Effect": "Deny", "Action": "sts:AssumeRole", "Resource": "*", "Condition": {"StringNotEquals": {"aws:ResourceAccount": "HOST_ACCOUNT_ID"}}},
+    {"Sid": "DenyManagementAccountEvidenceBuckets", "Effect": "Deny", "Action": "s3:*", "Resource": ["arn:aws:s3:::regulait-cloudtrail-logs-*", "arn:aws:s3:::regulait-cloudtrail-logs-*/*", "arn:aws:s3:::regulait-config-recordings-*", "arn:aws:s3:::regulait-config-recordings-*/*", "arn:aws:s3:::regulait-terraform-state-*", "arn:aws:s3:::regulait-terraform-state-*/*"]},
+    {"Sid": "DenyErasingHostEvidence", "Effect": "Deny", "Action": ["s3:DeleteBucket", "s3:DeleteBucketPolicy", "s3:DeleteObject", "s3:DeleteObjectVersion", "s3:BypassGovernanceRetention", "s3:PutObjectLegalHold"], "Resource": ["arn:aws:s3:::regulait-demo-host-db-backup-*", "arn:aws:s3:::regulait-demo-host-db-backup-*/*", "arn:aws:s3:::regulait-demo-host-audit-anchor-*", "arn:aws:s3:::regulait-demo-host-audit-anchor-*/*", "arn:aws:s3:::regulait-demo-host-tfstate-*"]},
+    {"Sid": "DenyErasingHostLogs", "Effect": "Deny", "Action": ["logs:DeleteLogGroup", "logs:DeleteLogStream", "logs:DeleteRetentionPolicy", "logs:DisassociateKmsKey", "logs:AssociateKmsKey"], "Resource": "arn:aws:logs:*:HOST_ACCOUNT_ID:log-group:/regulait/demo-host/*"},
+    {"Sid": "DenyDestroyingAnyKey", "Effect": "Deny", "Action": ["kms:ScheduleKeyDeletion", "kms:DisableKey", "kms:DisableKeyRotation"], "Resource": "*"},
+    {"Sid": "DenyRewritingTheHostKeyPolicy", "Effect": "Deny", "Action": ["kms:PutKeyPolicy", "kms:UpdateAlias", "kms:DeleteAlias", "kms:ReplicateKey"], "Resource": "*", "Condition": {"ForAnyValue:StringEquals": {"kms:ResourceAliases": ["alias/regulait-demo-host", "alias/regulait-demo-host-tfstate"]}}},
+    {"Sid": "DenyMutingDetectionAndAudit", "Effect": "Deny", "Action": ["cloudtrail:Create*", "cloudtrail:Delete*", "cloudtrail:Update*", "cloudtrail:Put*", "cloudtrail:StopLogging", "config:Put*", "config:Delete*", "config:Stop*", "guardduty:Create*", "guardduty:Update*", "guardduty:Delete*", "guardduty:Disassociate*", "guardduty:Archive*", "securityhub:Create*", "securityhub:Update*", "securityhub:Delete*", "securityhub:Batch*", "securityhub:Disable*", "securityhub:Disassociate*", "inspector2:Disable*", "access-analyzer:DeleteAnalyzer", "access-analyzer:CreateArchiveRule", "access-analyzer:UpdateArchiveRule", "access-analyzer:ApplyArchiveRule", "ec2:DeleteFlowLogs", "dlm:DeleteLifecyclePolicy", "ssm:DeleteDocument", "ec2:DeleteSnapshot", "dlm:UpdateLifecyclePolicy", "access-analyzer:UpdateFindings", "inspector2:CreateFilter", "inspector2:UpdateFilter", "ec2:ModifySnapshotAttribute"], "Resource": "*"},
+    {"Sid": "DenyChangingSessionLoggingPreferences", "Effect": "Deny", "Action": ["ssm:UpdateDocument", "ssm:UpdateDocumentDefaultVersion", "ssm:DeleteDocument", "ssm:UpdateDocumentMetadata"], "Resource": "arn:aws:ssm:*:HOST_ACCOUNT_ID:document/SSM-SessionManagerRunShell"},
+    {"Sid": "DenyChangingTheStateBackend", "Effect": "Deny", "Action": ["s3:DeleteObjectVersion", "s3:PutBucketPolicy", "s3:PutBucketVersioning", "s3:PutLifecycleConfiguration", "s3:PutEncryptionConfiguration", "dynamodb:DeleteTable", "dynamodb:UpdateTable", "dynamodb:UpdateContinuousBackups", "dynamodb:DeleteBackup"], "Resource": ["arn:aws:s3:::regulait-demo-host-tfstate-*", "arn:aws:s3:::regulait-demo-host-tfstate-*/*", "arn:aws:dynamodb:*:HOST_ACCOUNT_ID:table/regulait-demo-host-tfstate-lock"]},
+    {"Sid": "DenySessionsOnAnyOtherDocument", "Effect": "Deny", "Action": "ssm:StartSession", "NotResource": ["arn:aws:ssm:*:HOST_ACCOUNT_ID:document/SSM-SessionManagerRunShell", "arn:aws:ec2:*:HOST_ACCOUNT_ID:instance/*", "arn:aws:ssm:*:HOST_ACCOUNT_ID:managed-instance/*"]},
+    {"Sid": "DenyCreatingAnyOtherDocument", "Effect": "Deny", "Action": ["ssm:CreateDocument", "ssm:UpdateDocument", "ssm:UpdateDocumentDefaultVersion"], "NotResource": "arn:aws:ssm:*:HOST_ACCOUNT_ID:document/SSM-SessionManagerRunShell"},
+    {"Sid": "DenyKeyGrantsToPrincipals", "Effect": "Deny", "Action": "kms:CreateGrant", "Resource": "*", "Condition": {"Bool": {"kms:GrantIsForAWSResource": "false"}}},
+    {"Sid": "DenyAnyIamWriteOnTheDlmRole", "Effect": "Deny", "Action": ["iam:Create*", "iam:Delete*", "iam:Update*", "iam:Put*", "iam:Attach*", "iam:Detach*", "iam:Tag*", "iam:Untag*"], "Resource": "arn:aws:iam::HOST_ACCOUNT_ID:role/regulait-demo-host-dlm"},
+    {"Sid": "DenyPassingTheDlmRoleExceptToDlm", "Effect": "Deny", "Action": "iam:PassRole", "Resource": "arn:aws:iam::HOST_ACCOUNT_ID:role/regulait-demo-host-dlm", "Condition": {"StringNotEquals": {"iam:PassedToService": "dlm.amazonaws.com"}}}
+  ]
+}
+'@
+$Policy = $Policy.Replace('HOST_ACCOUNT_ID', $HostAccount)
+$PolicyFile = New-TemporaryFile; [IO.File]::WriteAllText($PolicyFile.FullName, $Policy)
+$Pol = "file://$($PolicyFile.FullName)"
+$Bnd = "arn:aws:iam::$($HostAccount):policy/regulait-demo-host-boundary"
+$Mgmt = '<company account id>'
+function Sim([string[]]$Actions, [string]$Resource, [string[]]$Context = @()) {
+  $a = @('iam', 'simulate-custom-policy', '--profile', '<break-glass profile>', '--policy-input-list', $Pol,
+         '--action-names') + $Actions + @('--resource-arns', $Resource)
+  if ($Context.Count) { $a += @('--context-entries') + $Context }
+  aws @a --query 'EvaluationResults[].[EvalActionName,EvalDecision]' --output text
+}
+# P1. A role named like the old budget-action role, or any role, without the boundary
+Sim iam:CreateRole,iam:PutRolePolicy,iam:AttachRolePolicy "arn:aws:iam::$($HostAccount):role/regulait-x-budget-action"
+Sim iam:CreateRole,iam:PutRolePolicy "arn:aws:iam::$($HostAccount):role/regulait-demo-host-x"
+# P2. Rewriting a trust policy, or a new version of the boundary or of any policy outside the regulait prefix
+Sim iam:UpdateAssumeRolePolicy "arn:aws:iam::$($HostAccount):role/regulait-config-recorder"
+Sim iam:UpdateAssumeRolePolicy "arn:aws:iam::$($HostAccount):role/regulait-demo-host-instance"
+Sim iam:CreatePolicyVersion,iam:SetDefaultPolicyVersion,iam:DeletePolicy $Bnd
+Sim iam:CreatePolicyVersion "arn:aws:iam::$($HostAccount):policy/regulait-x-budget-action-policy"
+Sim iam:DeleteRolePermissionsBoundary,iam:DetachRolePolicy "arn:aws:iam::$($HostAccount):role/regulait-config-recorder"
+# P3. The Config and CloudTrail buckets in the management account
+Sim s3:DeleteBucket,s3:PutBucketPolicy,s3:DeleteObject,s3:PutBucketVersioning "arn:aws:s3:::regulait-config-recordings-$Mgmt"
+Sim s3:PutBucketPolicy,s3:DeleteObject "arn:aws:s3:::regulait-cloudtrail-logs-$Mgmt"
+# P4. Any role outside the host account; destroying keys; muting detection
+Sim sts:AssumeRole "arn:aws:iam::$($Mgmt):role/OrganizationAccountAccessRole" "ContextKeyName=aws:ResourceAccount,ContextKeyValues=$Mgmt,ContextKeyType=string"
+Sim kms:ScheduleKeyDeletion,kms:DisableKey "arn:aws:kms:<region>:$($HostAccount):key/00000000-0000-0000-0000-000000000000"
+Sim cloudtrail:StopLogging,config:PutConfigurationRecorder,guardduty:CreateFilter,securityhub:CreateAutomationRule "*"
+# P6. Erasing or redirecting evidence by configuration, and the state backend
+Sim logs:AssociateKmsKey,logs:DeleteLogGroup "arn:aws:logs:<region>:$($HostAccount):log-group:/regulait/demo-host/ssm-sessions"
+Sim dlm:UpdateLifecyclePolicy,dlm:DeleteLifecyclePolicy "arn:aws:dlm:<region>:$($HostAccount):policy/policy-00000000000000000"
+Sim ec2:ModifySnapshotAttribute,ec2:DeleteSnapshot "arn:aws:ec2:<region>::snapshot/snap-00000000000000000"
+Sim kms:CreateGrant "arn:aws:kms:<region>:$($HostAccount):key/00000000-0000-0000-0000-000000000000" "ContextKeyName=kms:GrantIsForAWSResource,ContextKeyValues=false,ContextKeyType=boolean"
+Sim s3:PutBucketPolicy,s3:PutBucketVersioning,s3:PutLifecycleConfiguration "arn:aws:s3:::regulait-demo-host-tfstate-$($HostAccount)"
+Sim dynamodb:DeleteTable,dynamodb:UpdateContinuousBackups "arn:aws:dynamodb:<region>:$($HostAccount):table/regulait-demo-host-tfstate-lock"
+Sim access-analyzer:UpdateFindings,inspector2:CreateFilter,inspector2:UpdateFilter "*"
+# P7. Sessions only through the logged default document: no custom Session document, no port forwarding
+Sim ssm:StartSession "arn:aws:ssm:<region>::document/AWS-StartPortForwardingSession"
+Sim ssm:StartSession,ssm:CreateDocument "arn:aws:ssm:<region>:$($HostAccount):document/regulait-x-unlogged-shell"
+# P8. The DLM role (break-glass, the only role the boundary lets delete snapshots): no IAM write on it, and passed
+#     to nothing but DLM
+$Dlm = "arn:aws:iam::$($HostAccount):role/regulait-demo-host-dlm"
+Sim iam:DeleteRole,iam:CreateRole,iam:PutRolePolicy,iam:AttachRolePolicy,iam:UpdateAssumeRolePolicy $Dlm "ContextKeyName=iam:PermissionsBoundary,ContextKeyValues=$Bnd,ContextKeyType=string"
+Sim iam:PassRole $Dlm "ContextKeyName=iam:PassedToService,ContextKeyValues=ec2.amazonaws.com,ContextKeyType=string"
+# Success for P1 to P4 and P6 to P8: every line ends in explicitDeny or implicitDeny; none says allowed (P8: explicitDeny)
+# P5. The one way to create a role: with the boundary
+Sim iam:CreateRole "arn:aws:iam::$($HostAccount):role/regulait-demo-host-x" "ContextKeyName=iam:PermissionsBoundary,ContextKeyValues=$Bnd,ContextKeyType=string"
+Sim ssm:StartSession "arn:aws:ssm:<region>:$($HostAccount):document/SSM-SessionManagerRunShell"
+Sim iam:PassRole "arn:aws:iam::$($HostAccount):role/regulait-demo-host-dlm" "ContextKeyName=iam:PassedToService,ContextKeyValues=dlm.amazonaws.com,ContextKeyType=string"
+# Success for P5: all three allowed (a bounded role; a session through the default, logged document; the DLM role
+#   passed to DLM, which the host stack's snapshot policy needs)
+
+$Ic = aws sso-admin list-instances --profile <break-glass profile> --query 'Instances[0].InstanceArn' --output text
+$Dep = aws sso-admin create-permission-set --profile <break-glass profile> --instance-arn $Ic --name RegulAItDemoDeployer `
+  --session-duration PT4H --description 'ADR-0228 demo host deployer, host account only' --query PermissionSet.PermissionSetArn --output text
+aws sso-admin put-inline-policy-to-permission-set --profile <break-glass profile> --instance-arn $Ic --permission-set-arn $Dep `
+  --inline-policy $Pol
+Remove-Item $PolicyFile
+$Me = aws identitystore list-users --profile <break-glass profile> --identity-store-id (aws sso-admin list-instances --profile <break-glass profile> --query 'Instances[0].IdentityStoreId' --output text) `
+  --filter 'AttributePath=UserName,AttributeValue=<your-user-name>' --query 'Users[0].UserId' --output text
+# The ONLY assignment: the host account. Never the management account.
+aws sso-admin create-account-assignment --profile <break-glass profile> --instance-arn $Ic --target-id $HostAccount `
+  --target-type AWS_ACCOUNT --permission-set-arn $Dep --principal-type USER --principal-id $Me
+aws sso-admin list-accounts-for-provisioned-permission-set --profile <break-glass profile> --instance-arn $Ic --permission-set-arn $Dep --output text
+# Success: exactly one account id, the host account
+aws sso logout   # end of the management-account bootstrap
+```
+
+Then make the deployer's CLI profile. It is an Identity Center profile in the host account, choosing the
+`RegulAItDemoDeployer` role. Every later command that uses `--profile regulait-demo-host` runs as the deployer.
+
+```powershell
+aws configure sso --profile regulait-demo-host   # the host account, role RegulAItDemoDeployer, region <region>
+aws sso login --profile regulait-demo-host
+aws sts get-caller-identity --profile regulait-demo-host --query Arn --output text
+# Success: arn:aws:sts::<host account id>:assumed-role/AWSReservedSSO_RegulAItDemoDeployer_.../<you>
+aws s3 ls --profile regulait-demo-host "s3://regulait-terraform-state-<company account id>" 2>&1 | Select-Object -First 1
+# Success: AccessDenied (the deployer cannot see the management account)
+```
+
+**4. DEPLOYER. The host (about 5 minutes, then about 5 minutes of boot).**
+
+```powershell
+# host/terraform.tfvars: host_account_id = "<host account id>", host_sso_profile = "regulait-demo-host"
+Set-Location infra/environments/demo-host/host
+terraform init -backend-config=backend.hcl
+terraform plan -out=tfplan      # Success: no ingress block on the security group, no key_name, encrypted = true on both
+                                #          volumes, and every aws_iam_role has permissions_boundary = ...regulait-demo-host-boundary
+terraform apply tfplan
+$env:DEMO_INSTANCE = terraform output -raw instance_id
+$SrcBucket = terraform output -raw source_bucket
+terraform output ingress_rule_count   # Success: 0
+Set-Location ../../../..
+
+# Proof: every role the stack created carries the boundary, and the boundary holds for the instance role
+# (ListRoles does not return the boundary; GetRole does)
+foreach ($r in aws iam list-roles --profile regulait-demo-host --query "Roles[?starts_with(RoleName,'regulait-demo-host-')].RoleName" --output text | ForEach-Object { $_ -split "`t" }) {
+  aws iam get-role --profile regulait-demo-host --role-name $r --query '[Role.RoleName,Role.PermissionsBoundary.PermissionsBoundaryArn]' --output text
+}
+# Success: five roles (instance, scheduler, anchor, dlm, flow-logs), each ending in .../regulait-demo-host-boundary
+$Inst = aws iam get-role --profile regulait-demo-host --role-name regulait-demo-host-instance --query Role.Arn --output text
+aws iam simulate-principal-policy --profile regulait-demo-host --policy-source-arn $Inst `
+  --action-names iam:CreateRole cloudtrail:StopLogging kms:ScheduleKeyDeletion s3:DeleteObject logs:DeleteLogGroup `
+  --query 'EvaluationResults[].[EvalActionName,EvalDecision]' --output text
+# Success: every line ends in explicitDeny or implicitDeny
+aws iam simulate-principal-policy --profile regulait-demo-host --policy-source-arn $Inst --action-names sts:AssumeRole `
+  --resource-arns "arn:aws:iam::$($HostAccount):role/regulait-demo-host-anchor" "arn:aws:iam::$($HostAccount):role/OrganizationAccountAccessRole" `
+  --query 'EvaluationResults[].[EvalResourceName,EvalDecision]' --output text
+# Success: the anchor role allowed; OrganizationAccountAccessRole explicitDeny
+```
+
+**5. BREAK-GLASS, about 3 minutes, right after the first host apply: lock the evidence configuration.** The first
+apply has to set the backup and anchor buckets' policy, versioning, encryption and lifecycle, and the log groups'
+retention. So the deployer could not be denied those calls before it ran. Now that they are set, this step adds the
+deny. From here on, changing any of them is break-glass (a later host apply that changes them stops with
+`AccessDenied`; re-run that one apply as break-glass and record it).
+
+```powershell
+aws sso login --profile <break-glass profile>
+$Ic  = aws sso-admin list-instances --profile <break-glass profile> --query 'Instances[0].InstanceArn' --output text
+$Dep = aws sso-admin list-permission-sets --profile <break-glass profile> --instance-arn $Ic --output text --query 'PermissionSets' |
+  ForEach-Object { $_ -split "`t" } | Where-Object {
+    (aws sso-admin describe-permission-set --profile <break-glass profile> --instance-arn $Ic --permission-set-arn $_ --query PermissionSet.Name --output text) -eq 'RegulAItDemoDeployer' }
+$Lock = '{"Sid": "DenyChangingEvidenceConfigurationAfterFirstApply", "Effect": "Deny", "Action": ["s3:PutBucketPolicy", "s3:PutBucketVersioning", "s3:PutEncryptionConfiguration", "s3:PutLifecycleConfiguration", "s3:PutBucketObjectLockConfiguration", "s3:PutBucketPublicAccessBlock", "s3:PutBucketOwnershipControls", "logs:PutRetentionPolicy"], "Resource": ["arn:aws:s3:::regulait-demo-host-db-backup-*", "arn:aws:s3:::regulait-demo-host-audit-anchor-*", "arn:aws:logs:*:HOST_ACCOUNT_ID:log-group:/regulait/demo-host/*"]}'.Replace('HOST_ACCOUNT_ID', $HostAccount)
+$Cur = (aws sso-admin get-inline-policy-for-permission-set --profile <break-glass profile> --instance-arn $Ic --permission-set-arn $Dep --query InlinePolicy --output text).Trim()
+if ($Cur -match 'DenyChangingEvidenceConfigurationAfterFirstApply') { 'already locked' } else {
+  $New = $Cur.Substring(0, $Cur.LastIndexOf(']')).TrimEnd() + ', ' + $Lock + ']}'
+  $F = New-TemporaryFile; [IO.File]::WriteAllText($F.FullName, $New)
+  # Proof before it is applied: the locked calls are denied, an ordinary PutObject on the backups is not
+  aws iam simulate-custom-policy --profile <break-glass profile> --policy-input-list "file://$($F.FullName)" `
+    --action-names s3:PutLifecycleConfiguration s3:PutBucketPolicy s3:PutBucketVersioning s3:PutEncryptionConfiguration s3:PutObject `
+    --resource-arns "arn:aws:s3:::regulait-demo-host-db-backup-$HostAccount" --query 'EvaluationResults[].[EvalActionName,EvalDecision]' --output text
+  aws iam simulate-custom-policy --profile <break-glass profile> --policy-input-list "file://$($F.FullName)" `
+    --action-names logs:PutRetentionPolicy --resource-arns "arn:aws:logs:<region>:$($HostAccount):log-group:/regulait/demo-host/ssm-sessions" `
+    --query 'EvaluationResults[].[EvalActionName,EvalDecision]' --output text
+  # Success: the four s3:Put*Bucket*/Lifecycle/Encryption lines and logs:PutRetentionPolicy explicitDeny; s3:PutObject allowed
+  aws sso-admin put-inline-policy-to-permission-set --profile <break-glass profile> --instance-arn $Ic --permission-set-arn $Dep --inline-policy "file://$($F.FullName)"
+  aws sso-admin provision-permission-set --profile <break-glass profile> --instance-arn $Ic --permission-set-arn $Dep --target-type ALL_PROVISIONED_ACCOUNTS
+  Remove-Item $F
+}
+aws sso logout
+```
+
+**Check** (non-destructive: IAM's simulator, run against the deployer's real role, changes nothing):
+
+```powershell
+aws sso login --profile regulait-demo-host
+$DepRole = aws iam list-roles --profile regulait-demo-host --path-prefix /aws-reserved/sso.amazonaws.com/ `
+  --query "Roles[?starts_with(RoleName,'AWSReservedSSO_RegulAItDemoDeployer_')].Arn | [0]" --output text
+aws iam simulate-principal-policy --profile regulait-demo-host --policy-source-arn $DepRole `
+  --action-names logs:PutRetentionPolicy --resource-arns "arn:aws:logs:<region>:$($HostAccount):log-group:/regulait/demo-host/ssm-sessions" `
+  --query 'EvaluationResults[].[EvalActionName,EvalDecision]' --output text
+# Success: logs:PutRetentionPolicy  explicitDeny
+```
+
+**Check (SSM only, no SSH, no inbound rule, IMDSv2):**
+
+```powershell
+aws ssm describe-instance-information --profile regulait-demo-host `
+  --query "InstanceInformationList[?InstanceId=='$env:DEMO_INSTANCE'].PingStatus" --output text
+# Success: Online (it can take 5 minutes after the apply)
+aws ec2 describe-instances --profile regulait-demo-host --instance-ids $env:DEMO_INSTANCE `
+  --query 'Reservations[0].Instances[0].[State.Name,KeyName,MetadataOptions.HttpTokens,MetadataOptions.HttpPutResponseHopLimit,ImageId]' --output text
+# Success: running  None  required  1  ami-...
+aws ec2 describe-security-groups --profile regulait-demo-host `
+  --filters Name=group-name,Values=regulait-demo-host-app --query 'SecurityGroups[0].IpPermissions' --output text
+# Success: prints nothing (no inbound rule)
+```
+
+Then **pin the AMI**: put the `ami-...` value into `ami_id` in `host/terraform.tfvars`. `terraform plan` must then
+show `No changes`.
+
+**A helper for host commands (paste once per PowerShell window).** It sends commands to the host through
+`aws ssm send-command`, waits, and prints the status and output. It uses no SSH and no inbound port. Run Command is
+the second operator channel next to Session Manager, and Session Manager's preferences do not cover it, so every
+`send-command` this runbook issues passes `--cloud-watch-output-config`: the helper below, the patch install, and
+`infra/scripts/install-pg-backup.sh` (8.6, through `REGULAIT_RUN_COMMAND_LOG_GROUP`). Their output lands in the
+KMS-encrypted log group `/regulait/demo-host/run-command`, and CloudTrail records each `SendCommand` call and who made
+it. AWS has no account default or IAM condition that forces the flag, so a call made outside this runbook without it
+is still recorded by CloudTrail but its output is not; never call `send-command` without it.
+
+```powershell
+function Invoke-DemoHost {
+  param([Parameter(Mandatory)][string[]]$Commands, [int]$TimeoutSeconds = 3600)
+  $json = ConvertTo-Json -Compress -InputObject @{ commands = $Commands; executionTimeout = @("$TimeoutSeconds") }
+  $f = New-TemporaryFile
+  [IO.File]::WriteAllText($f.FullName, $json)
+  $id = aws ssm send-command --profile regulait-demo-host --instance-ids $env:DEMO_INSTANCE `
+    --document-name AWS-RunShellScript --parameters "file://$($f.FullName)" `
+    --cloud-watch-output-config 'CloudWatchOutputEnabled=true,CloudWatchLogGroupName=/regulait/demo-host/run-command' `
+    --query Command.CommandId --output text
+  Remove-Item $f
+  do {
+    Start-Sleep 10
+    $s = aws ssm get-command-invocation --profile regulait-demo-host --command-id $id --instance-id $env:DEMO_INSTANCE --query Status --output text 2>$null
+  } while ($s -in @('Pending', 'InProgress', 'Delayed', $null, ''))
+  aws ssm get-command-invocation --profile regulait-demo-host --command-id $id --instance-id $env:DEMO_INSTANCE `
+    --query '{status:Status,out:StandardOutputContent,err:StandardErrorContent}' --output yaml
+}
+```
+
+```bash
+# bash equivalent (needs jq); export DEMO_INSTANCE=<instance id> first
+demo_host() {
+  local json id s
+  json=$(jq -n --args '{commands: $ARGS.positional, executionTimeout: ["3600"]}' "$@")
+  id=$(aws ssm send-command --profile regulait-demo-host --instance-ids "$DEMO_INSTANCE" \
+    --document-name AWS-RunShellScript --parameters "$json" \
+    --cloud-watch-output-config 'CloudWatchOutputEnabled=true,CloudWatchLogGroupName=/regulait/demo-host/run-command' \
+    --query Command.CommandId --output text)
+  while sleep 10; do
+    s=$(aws ssm get-command-invocation --profile regulait-demo-host --command-id "$id" --instance-id "$DEMO_INSTANCE" --query Status --output text 2>/dev/null)
+    case "$s" in Pending|InProgress|Delayed|"") ;; *) break ;; esac
+  done
+  aws ssm get-command-invocation --profile regulait-demo-host --command-id "$id" --instance-id "$DEMO_INSTANCE" \
+    --query '{status:Status,out:StandardOutputContent,err:StandardErrorContent}' --output yaml
+}
+```
+
+**Check the host is prepared:**
+
+```powershell
+Invoke-DemoHost 'tail -2 /var/log/app-boot.log', 'mountpoint /var/lib/docker', 'docker compose version'
+# Success: status Success; "app-boot: host ready ..."; "/var/lib/docker is a mountpoint"; "Docker Compose version v2.29.7"
+```
+
+**Patch the host now, before anything is deployed** (the daily association only scans, so nothing reboots the host
+during the demo):
+
+```powershell
+$PatchCmd = aws ssm send-command --profile regulait-demo-host --instance-ids $env:DEMO_INSTANCE --document-name AWS-RunPatchBaseline `
+  --parameters 'Operation=Install,RebootOption=RebootIfNeeded' `
+  --cloud-watch-output-config 'CloudWatchOutputEnabled=true,CloudWatchLogGroupName=/regulait/demo-host/run-command' `
+  --query Command.CommandId --output text
+Start-Sleep 300
+aws ssm list-command-invocations --profile regulait-demo-host --command-id $PatchCmd --query 'CommandInvocations[0].Status' --output text   # Success: Success
+aws ssm describe-instance-patch-states --profile regulait-demo-host --instance-ids $env:DEMO_INSTANCE `
+  --query 'InstancePatchStates[0].[MissingCount,FailedCount,InstalledPendingRebootCount]' --output text                              # Success: 0  0  0
+```
+
+**If the Session Manager preferences document already exists** (someone opened the preferences page in the console),
+the host apply fails on `SSM-SessionManagerRunShell`. Adopt it, then apply again:
+`terraform import aws_ssm_document.session_preferences SSM-SessionManagerRunShell`.
+
+**Check the security controls (the evidence the security team will ask for; DEMO_HOST_SECURITY_BRIEF.md):**
+
+```powershell
+$H = 'regulait-demo-host'
+aws ec2 describe-instances --profile $H --instance-ids $env:DEMO_INSTANCE --query 'Reservations[0].Instances[0].[PublicIpAddress,SubnetId]' --output text
+# Success: None  subnet-...   (no public IPv4)
+aws ec2 describe-security-groups --profile $H --filters Name=group-name,Values=regulait-demo-host-app `
+  --query 'SecurityGroups[0].[length(IpPermissions),IpPermissionsEgress[].[IpProtocol,FromPort]]' --output json
+# Success: 0 ingress rules; egress tcp 443, tcp 7844, udp 7844 only
+aws ec2 describe-vpc-endpoints --profile $H --query 'VpcEndpoints[].[ServiceName,VpcEndpointType,State]' --output text
+# Success: ssm, ssmmessages, ec2messages, kms, logs, sts (Interface) and s3 (Gateway), all available
+aws ec2 describe-flow-logs --profile $H --query 'FlowLogs[].[ResourceId,TrafficType,FlowLogStatus]' --output text   # Success: vpc-...  ALL  ACTIVE
+aws ssm get-document --profile $H --name SSM-SessionManagerRunShell --query Content --output text | ConvertFrom-Json |
+  Select-Object -ExpandProperty inputs | Select-Object cloudWatchLogGroupName,cloudWatchEncryptionEnabled,kmsKeyId,idleSessionTimeout
+# Success: /regulait/demo-host/ssm-sessions  True  <key id>  20
+aws logs describe-log-groups --profile $H --log-group-name-prefix /regulait/demo-host/run-command --query 'logGroups[].[logGroupName,kmsKeyId]' --output text
+# Success: /regulait/demo-host/run-command  arn:aws:kms:...   (Run Command output, KMS-encrypted)
+aws logs describe-log-streams --profile $H --log-group-name /regulait/demo-host/run-command --query 'length(logStreams)'
+# Success: more than 0 once the patch install above has run (its output is the first stream)
+aws kms get-key-rotation-status --profile $H --key-id alias/regulait-demo-host --query KeyRotationEnabled   # Success: true
+aws accessanalyzer list-analyzers --profile $H --type ACCOUNT --query 'analyzers[].status' --output text   # Success: ACTIVE
+aws inspector2 batch-get-account-status --profile $H --query 'accounts[0].resourceState.[ec2.status,ecr.status]' --output text   # Success: ENABLED ENABLED
+aws guardduty list-detectors --profile $H --query 'DetectorIds' --output text                            # Success: a detector id
+aws securityhub get-enabled-standards --profile $H --query 'StandardsSubscriptions[].StandardsArn' --output text   # Success: FSBP and CIS
+aws dlm get-lifecycle-policies --profile $H --query 'Policies[].[PolicyId,State]' --output text           # Success: policy-...  ENABLED
+```
+
+### 8.5 Secrets into SSM Parameter Store (about 10 minutes)
+
+There are five parameters under `/regulait/demo-host/`. Each secret is a **SecureString encrypted with
+`alias/regulait-demo-host`**.
+
+| Name | Type | Value |
+| --- | --- | --- |
+| `public-host` | String | the same hostname as the laptop, `regulait.<domain>` (no scheme) |
+| `cf-tunnel-token` | SecureString | the **same** tunnel's token, from the password manager (TUNNEL.md step 1), read at a hidden prompt |
+| `data-key` | SecureString | 64 hex characters, generated |
+| `bootstrap-token` | SecureString | 48 hex characters, generated |
+| `db-password` | SecureString | 48 hex characters, generated |
+
+```powershell
+$P = 'regulait-demo-host'; $K = 'alias/regulait-demo-host'; $D = '/regulait/demo-host'
+aws ssm put-parameter --profile $P --name "$D/public-host" --type String --value 'regulait.<domain>'
+
+# Each secret goes through a temporary file (your user's temp folder, readable only by you), then the file is deleted.
+function Put-DemoSecret([string]$Name, [string]$Value) {
+  $f = New-TemporaryFile
+  try {
+    [IO.File]::WriteAllText($f.FullName, $Value)
+    aws ssm put-parameter --profile $P --name "$D/$Name" --type SecureString --key-id $K --value "file://$($f.FullName)" --overwrite --query Version --output text
+  } finally { Remove-Item $f -Force }
+}
+function New-HexSecret([int]$Bytes) {
+  $b = New-Object byte[] $Bytes
+  [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b)
+  ($b | ForEach-Object { $_.ToString('x2') }) -join ''
+}
+
+$s = Read-Host -AsSecureString 'Tunnel token'      # paste from the password manager; nothing is shown
+Put-DemoSecret 'cf-tunnel-token' ([Net.NetworkCredential]::new('', $s).Password)
+Remove-Variable s
+Put-DemoSecret 'data-key'        (New-HexSecret 32)
+Put-DemoSecret 'bootstrap-token' (New-HexSecret 24)
+Put-DemoSecret 'db-password'     (New-HexSecret 24)
+# Success: each put-parameter prints its version (1 the first time)
+```
+
+```bash
+P=regulait-demo-host; K=alias/regulait-demo-host; D=/regulait/demo-host
+aws ssm put-parameter --profile $P --name $D/public-host --type String --value 'regulait.<domain>'
+( umask 077; T=$(mktemp)
+  printf 'Tunnel token: '; read -rs v; echo; printf '%s' "$v" > "$T"; unset v
+  aws ssm put-parameter --profile $P --name $D/cf-tunnel-token --type SecureString --key-id $K --value "file://$T"
+  for n in data-key:32 bootstrap-token:24 db-password:24; do
+    openssl rand -hex "${n#*:}" | tr -d '\n' > "$T"
+    aws ssm put-parameter --profile $P --name "$D/${n%%:*}" --type SecureString --key-id $K --value "file://$T"
+  done
+  rm -f "$T" )
+```
+
+**Check (names and types only; never add `--with-decryption` on the laptop):**
+
+```powershell
+aws ssm get-parameters-by-path --profile $P --path $D --query 'Parameters[].[Name,Type]' --output text
+# Success: eight names. Four SecureString (cf-tunnel-token, data-key, bootstrap-token, db-password) and four String:
+#          public-host, plus anchor-bucket, anchor-role-arn and anchor-retention-days, which the host apply (8.4)
+#          wrote. Those three are non-secret wiring and are the only parameters in Terraform state.
+```
+
+(The host's own read is checked in 8.6 by `demo-host-env.sh check`.) The bootstrap token is the full-admin credential
+of §7.10's `BOOT`. When you need it, read it on the host (8.8) and never onto the laptop's screen.
+
+### 8.6 Deploy the stack on the host (about 20 to 30 minutes, mostly the first build)
+
+Ship the exact commit as a `git archive` through the host's own source bucket. The host holds no Git credential.
+
+```powershell
+git fetch origin main
+$Sha = git rev-parse origin/main            # or the commit you choose; check: git branch -r --contains $Sha lists origin/main
+$Tar = Join-Path $env:TEMP "regulait-$Sha.tar.gz"
+git archive --format=tar.gz -o $Tar $Sha
+aws s3 cp $Tar "s3://$SrcBucket/regulait-$Sha.tar.gz" --profile regulait-demo-host --only-show-errors
+Remove-Item $Tar
+aws s3 ls "s3://$SrcBucket/" --profile regulait-demo-host   # Success: regulait-<sha>.tar.gz listed
+```
+
+Extract, write `.env` from SSM, run the checks, and build. The stack starts **without** the tunnel connector, so the
+laptop keeps serving until 8.7:
+
+```powershell
+Invoke-DemoHost @(
+  "set -e",
+  "mkdir -p /opt/releases/$Sha && cd /opt/releases/$Sha",
+  "aws s3 cp s3://$SrcBucket/regulait-$Sha.tar.gz - | tar xz",
+  "ln -sfn /opt/releases/$Sha /opt/app && cd /opt/app",
+  "bash infra/scripts/demo-host-env.sh check",
+  "bash infra/scripts/demo-host-anchor-creds.sh install",
+  "bash infra/scripts/demo-host-env.sh write",
+  "echo project=`$(grep -c '^COMPOSE_PROJECT_NAME=regulait$' .env) demo_license=`$(grep -c '^REGULAIT_DEMO_LICENSE' .env || true) token_in_file=`$(grep -c '^REGULAIT_CF_TUNNEL_TOKEN' .env || true)",
+  "bash infra/scripts/demo-host-env.sh tunnel-check",
+  "bash infra/scripts/demo-host-env.sh compose --profile tunnel up -d --build --scale cloudflared=0",
+  "docker compose ps --format '{{.Service}} {{.State}} {{.Health}}'"
+)
+# Success: status Success; "all five parameters present and well-formed"; "demo-host-anchor-creds: refreshed (expires ...)";
+#          "S3 anchor: on"; project=1 demo_license=0 token_in_file=0;
+#          one tunnel-check "ok" line; gateway running healthy, caddy-tunnel running, no cloudflared
+```
+
+In bash, use `demo_host` with the same strings, written without the PowerShell backticks before `$(`.
+
+**Check:**
+
+```powershell
+Invoke-DemoHost 'cd /opt/app && docker compose logs gateway | grep -c "demo prep" || true'   # Success: 0
+```
+
+**The export-signing key** (§7.6 step 5) and **the nightly backup** (ADR-0035):
+
+```powershell
+Invoke-DemoHost 'cd /opt/app && docker compose exec -T -e REGULAIT_DEMO_KEY_DIR=/app/demo-license-keys/export-signing gateway node apps/gateway/dist/demo-export-key.js'
+# Success: prints the key's path and fingerprint (never the key)
+
+$env:ENV_DIR = 'infra/environments/demo-host/host'; $env:AWS_PROFILE = 'regulait-demo-host'; $env:AWS_REGION = '<region>'
+$env:REGULAIT_RUN_COMMAND_LOG_GROUP = '/regulait/demo-host/run-command'   # its send-command is logged too
+& "$env:ProgramFiles\Git\bin\bash.exe" infra/scripts/install-pg-backup.sh
+Remove-Item Env:ENV_DIR, Env:REGULAIT_RUN_COMMAND_LOG_GROUP; $env:AWS_PROFILE = '<profile>'
+Invoke-DemoHost '/usr/local/sbin/regulait-pg-backup.sh --run', '/usr/local/sbin/regulait-pg-backup.sh --check'
+# Success: RESULT=OK, and the newest object listed under s3://<backup bucket>/postgres/
+```
+
+**Secrets in tmpfs at every boot, and the hardening fallback.** `write` puts the env file in `/run/regulait` (tmpfs)
+and links `/opt/app/.env` to it. Install the boot unit once, so a reboot rebuilds it from SSM before Docker starts.
+The unit replays the flags `install-boot` was given, so pass it the same flags as your last `write`:
+
+```powershell
+Invoke-DemoHost 'cd /opt/app && bash infra/scripts/demo-host-env.sh install-boot', 'stat -f -c %T /run', 'readlink /opt/app/.env', 'systemctl is-enabled regulait-env.service'
+# Success: "regulait-env.service enabled"; tmpfs; /run/regulait/env; enabled
+```
+
+The override adds `no-new-privileges` and dropped capabilities to `gateway`, `db` and the object store. These are
+untested on a real host. **If a container fails to start** (`docker compose ps` shows it restarting), rebuild the
+override without them, **reinstall the boot unit with the same flag** so a reboot (patching, the power schedule)
+does not bring the hardening back, and record it on #453:
+`Invoke-DemoHost 'cd /opt/app && bash infra/scripts/demo-host-env.sh write --no-harden && bash infra/scripts/demo-host-env.sh install-boot --no-harden && bash infra/scripts/demo-host-env.sh compose --profile tunnel up -d', 'systemctl cat regulait-env.service | grep ExecStart'`
+(Success: the `ExecStart` line ends in `write --no-harden`).
+**Never `cat` or print `.env` in an SSM shell:** session transcripts go to CloudWatch.
+
+**A later redeploy** of a new `<sha>` repeats this step. It goes into a new `/opt/releases/<sha>` and re-points the
+symlink, and the fixed project name keeps the same containers and volumes. Before 8.8 that is safe; after 8.8, run
+`--run` (a backup) first. Never `docker compose ... down -v` on the host after 8.8, for the same reason as §7.6
+("Once only").
+
+### 8.7 Move the tunnel connector to the host (about 2 minutes)
+
+The host's `cloudflared` reads the token **from SSM, on the host** (`demo-host-env.sh compose`), and keeps it only in
+that one process's environment. Both connectors use the same token, and Cloudflare would split traffic between two
+databases if both ran. So the laptop's connector stops first.
+
+```powershell
+# laptop, in the checkout
+docker compose --profile tunnel stop cloudflared
+docker compose ps cloudflared --format '{{.State}}'     # Success: exited (or nothing)
+# host
+Invoke-DemoHost 'cd /opt/app && bash infra/scripts/demo-host-env.sh compose --profile tunnel up -d cloudflared', 'sleep 15', 'cd /opt/app && docker compose logs cloudflared | grep -c "Registered tunnel connection"'
+# Success: a number of 1 or more
+```
+
+**Check from the laptop:**
+
+```powershell
+(Invoke-WebRequest -UseBasicParsing -Uri 'https://regulait.<domain>/ui' -Method Head).StatusCode   # Success: 200
+Invoke-DemoHost 'cd /opt/app && docker compose ps cloudflared --format "{{.State}}"'           # Success: running
+```
+
+From now until a rollback, **never run `docker compose --profile tunnel up -d` on the laptop without
+`--scale cloudflared=0`**, or the laptop rejoins the tunnel.
+
+### 8.7 b Cloudflare edge: Access, TLS and a rate limit (about 20 minutes)
+
+Put **Cloudflare Access** in front of the hostname, so only the security team and the presenters reach it. Run these
+from PowerShell with a **Cloudflare API token** that has *Access: Apps and Policies Edit*, *Zone Settings Edit* and
+*Zone WAF Edit*. Read the token at a hidden prompt; it lives only in this window. Account id, zone id, e-mail
+addresses and the security team's addresses go into the variables here and nowhere in the repository.
+
+```powershell
+$cf = Read-Host -AsSecureString 'Cloudflare API token'
+$Hd = @{ Authorization = 'Bearer ' + [Net.NetworkCredential]::new('', $cf).Password; 'Content-Type' = 'application/json' }
+Remove-Variable cf
+$Acct = '<cloudflare account id>'; $Zone = '<zone id>'; $Hn = 'regulait.<domain>'
+$Api = 'https://api.cloudflare.com/client/v4'
+
+# 1. who may in: named people (or swap in the security team's IdP group, or an IP list)
+$allow = @{ name = 'regulait-demo-allow'; decision = 'allow'; session_duration = '8h'
+  include = @(@{ email = @{ email = '<presenter@company>' } }, @{ email_domain = @{ domain = '<security team e-mail domain>' } }) } | ConvertTo-Json -Depth 6
+$AllowId = (Invoke-RestMethod -Method Post -Uri "$Api/accounts/$Acct/access/policies" -Headers $Hd -Body $allow).result.id
+$bypass = @{ name = 'regulait-machine-paths'; decision = 'bypass'; include = @(@{ everyone = @{} }) } | ConvertTo-Json -Depth 6
+$BypassId = (Invoke-RestMethod -Method Post -Uri "$Api/accounts/$Acct/access/policies" -Headers $Hd -Body $bypass).result.id
+
+# 2. the app for people
+$app = @{ name = 'regulait-demo'; type = 'self_hosted'; domain = $Hn; session_duration = '8h'
+  app_launcher_visible = $false; policies = @(@{ id = $AllowId; precedence = 1 }) } | ConvertTo-Json -Depth 6
+Invoke-RestMethod -Method Post -Uri "$Api/accounts/$Acct/access/apps" -Headers $Hd -Body $app | Select-Object success
+
+# 3. machine paths that must stay reachable without a browser sign-in. Each is authenticated by RegulAIt itself:
+#    the federation issuer (AWS and Azure fetch its JWKS), the MCP endpoint (the agent beat), PM and chat-ops webhooks
+#    (signed). Without these, live discovery and the agent beats fail.
+# Trailing slashes and wildcards keep each bypass to exactly the inbound machine paths: "/mcp/" does not match
+# "/mcp-registries", and only chat-ops' signed inbound endpoints bypass, not its admin routes.
+foreach ($path in '/federation/', '/mcp/', '/v1/pm/webhooks/', '/v1/chatops/*/events', '/v1/chatops/*/interactions') {
+  $b = @{ name = "regulait-bypass$($path -replace '/','-')"; type = 'self_hosted'; domain = "$Hn$path"
+    policies = @(@{ id = $BypassId; precedence = 1 }) } | ConvertTo-Json -Depth 6
+  Invoke-RestMethod -Method Post -Uri "$Api/accounts/$Acct/access/apps" -Headers $Hd -Body $b | Select-Object success
+}
+
+# 4. TLS Full (strict) and TLS 1.2 minimum
+Invoke-RestMethod -Method Patch -Uri "$Api/zones/$Zone/settings/ssl" -Headers $Hd -Body '{"value":"strict"}' | Select-Object success
+Invoke-RestMethod -Method Patch -Uri "$Api/zones/$Zone/settings/min_tls_version" -Headers $Hd -Body '{"value":"1.2"}' | Select-Object success
+
+# 5. OPTIONAL: a rate limit. First check the zone's plan and whether it already has rate-limiting rules, because the
+#    PUT below REPLACES the whole http_ratelimit ruleset (any existing rule there is removed):
+(Invoke-RestMethod -Uri "$Api/zones/$Zone" -Headers $Hd).result.plan.name
+try { (Invoke-RestMethod -Uri "$Api/zones/$Zone/rulesets/phases/http_ratelimit/entrypoint" -Headers $Hd).result.rules.Count } catch { 0 }
+#    If the count is not 0, stop here and add the rule in the dashboard instead (Security > WAF > Rate limiting rules).
+#    Free zones accept only a URI-path expression and a 10-second period and timeout; paid zones accept the host.
+$expr = if ((Invoke-RestMethod -Uri "$Api/zones/$Zone" -Headers $Hd).result.plan.legacy_id -eq 'free') {
+  '(starts_with(http.request.uri.path, "/"))' } else { "(http.host eq `"$Hn`")" }
+$rl = @{ rules = @(@{ description = 'regulait-demo rate limit'; action = 'block'; expression = $expr
+  ratelimit = @{ characteristics = @('ip.src', 'cf.colo.id'); period = 10; requests_per_period = 100; mitigation_timeout = 10 } }) } | ConvertTo-Json -Depth 8
+Invoke-RestMethod -Method Put -Uri "$Api/zones/$Zone/rulesets/phases/http_ratelimit/entrypoint" -Headers $Hd -Body $rl | Select-Object success
+#    FALLBACK if the API refuses it (plan limits): skip the rate limit. Access already admits only the allow-list, and
+#    the brief (E3) records it as not set. The demo does not depend on it.
+Remove-Variable Hd
+```
+
+**Success:** every call prints `success: True`. **Check:**
+
+```powershell
+# PowerShell 7: a redirect is not an error with -SkipHttpErrorCheck
+foreach ($path in '/ui', '/v1/org/posture') {
+  (Invoke-WebRequest -Uri "https://regulait.<domain>$path" -MaximumRedirection 0 -SkipHttpErrorCheck).StatusCode
+}
+# Windows PowerShell 5.1 (no -SkipHttpErrorCheck): use curl.exe, which ships with Windows
+foreach ($path in '/ui', '/v1/org/posture') { curl.exe -s -o NUL -w "%{http_code}`n" "https://regulait.<domain>$path" }
+# Success: 302 and 302 (both to the Access sign-in): the UI and an API path are behind Access
+(Invoke-WebRequest -UseBasicParsing -Uri 'https://regulait.<domain>/federation/.well-known/openid-configuration').StatusCode
+# Success: 200 (the issuer stays public, after federation is on in 8.8 step 4)
+```
+
+The laptop's §7.10 calls (`GW=https://regulait.<domain>`) are now behind Access. Run them **on the host** with
+`GW=http://127.0.0.1:3000` (the gateway is published on the host's loopback only), or authenticate the laptop's
+terminal with `cloudflared access login`. **Rollback of the edge:** delete the five Access apps in the same way (`DELETE
+$Api/accounts/$Acct/access/apps/<id>`). The tunnel itself is unchanged.
+
+### 8.8 Live prepare and checks over SSM (about 60 to 90 minutes)
+
+These are the laptop recipes of §7.6, run on the host. Non-interactive steps go through `Invoke-DemoHost`. Steps that
+ask for a password or an authenticator code use an SSM shell (`aws ssm start-session`), because `send-command` cannot
+answer a prompt.
+
+1. **Live prep** (§7.6 step 6):
+
+   ```powershell
+   Invoke-DemoHost 'cd /opt/app && docker compose exec -T gateway node apps/gateway/dist/demo-prepare.js --live'
+   # Success: exactly one FAIL, "1 Real discovery sources"; any other FAIL: stop and report
+   ```
+
+2. **Passwords and admin MFA** (§7.6 step 7). Open an SSM shell. On the host the password is read at a hidden prompt:
+
+   ```powershell
+   aws ssm start-session --profile regulait-demo-host --target $env:DEMO_INSTANCE
+   ```
+
+   ```bash
+   # on the host
+   sudo -i
+   cd /opt/app
+   printf 'Demo password: '; read -rs REGULAIT_DEMO_USER_PASSWORD; echo; export REGULAIT_DEMO_USER_PASSWORD
+   docker compose exec -e REGULAIT_DEMO_USER_PASSWORD gateway node apps/gateway/dist/demo-set-passwords.js
+   unset REGULAIT_DEMO_USER_PASSWORD
+   exit; exit
+   ```
+
+   Then do the `admin` and `morgan` authenticator enrolment in new private browser windows, as in §7.6 step 7.
+
+3. **Check** (§7.6 step 8):
+
+   ```powershell
+   Invoke-DemoHost 'cd /opt/app && docker compose exec -T gateway node apps/gateway/dist/demo-check.js --live'
+   # Success: the single FAIL of step 1, nothing else
+   ```
+
+4. **Discovery and the sandbox trust.** The federation **issuer is unchanged** (ADR-0228: same `REGULAIT_PUBLIC_URL`),
+   so the OIDC provider and the key trust need no re-pointing. The sources, however, are new rows with **new ids**,
+   and each trust pins its source id. So: run `DEMO_REAL_ACCOUNTS.md` step 1b (federation on) and step 2 (create the
+   sources and copy their ids). Then put the new ids into `aws_discovery_source_id` and `azure_discovery_source_id`
+   and re-plan both sandbox stacks:
+
+   ```powershell
+   # BREAK-GLASS: the sandbox stacks run from the management account (8.2 e). aws sso login --profile <break-glass profile>
+   Set-Location infra/environments/demo-sandbox/aws;   terraform plan -out=tfplan
+   # Success: only the role's trust policy changes (the subject). Then:
+   terraform apply tfplan; Set-Location ../../../..
+   Set-Location infra/environments/demo-sandbox/azure; terraform plan -out=tfplan
+   # Success: only the federated credential's subject changes. Then:
+   terraform apply tfplan; Set-Location ../../../..
+   ```
+
+   Enable one source (`DEMO_REAL_ACCOUNTS.md` step 7), then run step 3 again. **Success: 0 FAIL.**
+
+5. **§7.11 (Act 3) and §7.12 (Act 4)** set-up rows, in their stated order (the Claude key goes in after the
+   `demo:traffic` re-run). `GW` is the same `https://regulait.<domain>`. Where §7.10 reads `BOOT` with `read -rs`,
+   read it on the host instead, in an SSM shell, without printing it:
+
+   ```bash
+   # on the host, as root
+   BOOT=$(aws ssm get-parameter --name /regulait/demo-host/bootstrap-token --with-decryption --query Parameter.Value --output text \
+     --region "$(curl -fsS -H "X-aws-ec2-metadata-token: $(curl -fsS -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')" http://169.254.169.254/latest/meta-data/placement/region)")
+   export BOOT
+   ```
+
+6. **`demo:relax-e`** at T-24h, before any E rehearsal (§7.3 row E). Do it either in the UI as Ada, or in an SSM shell:
+
+   ```bash
+   # on the host, as root, in /opt/app
+   printf 'Ada password: '; read -rs REGULAIT_DEMO_ADMIN_PASSWORD; echo; export REGULAIT_DEMO_ADMIN_PASSWORD
+   docker compose exec -e REGULAIT_DEMO_ADMIN_PASSWORD gateway node apps/gateway/dist/demo-relax-e.js
+   unset REGULAIT_DEMO_ADMIN_PASSWORD
+   ```
+
+7. **G3** (§7.6): the stage terminal is an SSM shell on the host. Make the script once:
+
+   ```bash
+   # on the host, as root
+   printf '#!/bin/sh\ncd /opt/app && docker compose exec -T gateway node apps/gateway/dist/demo-gate.js "Real-Time Fraud Detection Engine" staging "${1:-demo-build}"\n' > /root/g3.sh && chmod +x /root/g3.sh
+   /root/g3.sh t24h > /root/real-gate.txt; cat /root/real-gate.txt   # Success: the DENY line and two BLOCK lines
+   ```
+
+8. **G8 anchor grade reads COMPLIANCE (before the rehearsal).** The audit chain is anchored to the host's S3 bucket
+   with Object Lock in COMPLIANCE mode (ADR-0228 addendum 2). The gateway grades the bucket by asking it, and only
+   COMPLIANCE counts as tamper-resistant (`apps/gateway/src/audit-chain.ts`). Write one anchor, then read the grade,
+   in an SSM shell as root in `/opt/app`, with `BOOT` read as in step 5:
+
+   ```bash
+   GW=http://127.0.0.1:3000
+   curl -fsS -X POST -H "authorization: Bearer $BOOT" $GW/v1/audit/anchor | jq '{seq, status, destination, tamperResistant, error}'
+   # Success: status "flushed", destination "s3_object_lock", tamperResistant true, error null
+   curl -fsS -H "authorization: Bearer $BOOT" $GW/v1/audit/anchors | jq '{sink, disclosure, latest: .anchors[0] | {seq, status, destination}}'
+   # Success: sink = {destination "s3_object_lock", tamperResistant true, mode "compliance"}; latest.status "flushed"
+   #          with the seq of the POST above; disclosure starts "Anchors are written to S3 Object Lock in COMPLIANCE mode"
+   bash infra/scripts/demo-host-anchor-creds.sh check   # Success: an expiry about an hour ahead; files "root:61042 440"; timer active
+   ```
+
+   From the laptop, the bucket's own answer:
+
+   ```powershell
+   $Ab = terraform -chdir=infra/environments/demo-host/host output -raw anchor_bucket
+   aws s3api get-object-lock-configuration --profile regulait-demo-host --bucket $Ab `
+     --query 'ObjectLockConfiguration.[ObjectLockEnabled,Rule.DefaultRetention.Mode,Rule.DefaultRetention.Days]' --output text
+   # Success: Enabled  COMPLIANCE  7
+   ```
+
+   **If it reads anything else, stop:** G8 would tell the security team the trail is NOT tamper-resistant. Read
+   the top-level `disclosure` of the second call (and `error` of the first) for the reason, which is usually a credential or KMS permission. The
+   rehearsal does not start until this passes.
+
+### 8.9 Rehearsal on the instance (Sunday afternoon)
+
+Run the run of show (§3) end to end against `https://regulait.<domain>`. Beats that change state go on FALLBACK only
+(§7.3). Then:
+
+```powershell
+Invoke-DemoHost 'cd /opt/app && docker compose exec -T gateway node apps/gateway/dist/demo-check.js --live'   # Success: 0 FAIL
+Invoke-DemoHost '/usr/local/sbin/regulait-pg-backup.sh --run'                                                  # Success: RESULT=OK (Sunday evening's backup)
+aws cloudwatch describe-alarms --profile regulait-demo-host --alarm-name-prefix regulait-demo-host `
+  --query 'MetricAlarms[].[AlarmName,StateValue]' --output text                                                # Success: OK
+```
+
+**Owner alternative, not scripted here:** instead of preparing afresh in 8.8, you could restore the laptop's live
+database, data key and volumes onto the host. That keeps the source ids, the federation key and the MFA enrolments, so
+8.8 step 4's re-apply is not needed. It is a manual data migration with its own risk. Decide before 8.8.
+
+### 8.9 a Go-live posture checklist (Sunday evening; every row must pass)
+
+Run these on the host in an SSM shell, as root in `/opt/app`, with `BOOT` read as in 8.8 step 5 and
+`GW=http://127.0.0.1:3000`. No command prints a secret.
+
+| # | Check | Command (on the host) | Pass |
+| --- | --- | --- | --- |
+| 1 | **Step-up on** (it is off on the laptop stacks) | `curl -fsS -H "authorization: Bearer $BOOT" $GW/v1/org/settings \| jq -r .step_up_mode` | `required`. If not, set **Step-up** to required on `/ui/admin/organization` as Ada (a tightening, so no step-up is asked) |
+| 2 | **Admin MFA** on `admin` and `morgan` (8.8 step 2) | sign in as each in a private window | the 6-digit code screen appears |
+| 3 | **Synthetic data only** | `grep -c '^REGULAIT_DEMO_LICENSE' .env` is `0`, and the seed's fictional company names only; no customer data was imported | `0`; reviewed |
+| 4 | **Demo password rotated** after any rehearsal it was shown in (8.13) | `demo-set-passwords.js` re-run in 8.13 | done Sunday evening |
+| 5 | **Strict CSP and CORS** | `curl -sSI $GW/ui \| grep -i '^content-security-policy'` and `curl -sSI -H 'Origin: https://evil.invalid' $GW/v1/org/posture \| grep -ci '^access-control-allow-origin'` | a CSP with no `unsafe-inline` in `script-src`; `0` |
+| 6 | **Bootstrap token posture** | `curl -fsS -H "authorization: Bearer $BOOT" $GW/v1/org/posture \| jq .` | review `bootstrap_token_configured`; rotate it after set-up (8.13) |
+| 7 | **No public IP, no ingress, egress 3 rules, endpoints, flow logs, session logging** | 8.4 "Check the security controls" | all as stated there |
+| 8 | **Backups and snapshots** | `/usr/local/sbin/regulait-pg-backup.sh --check`; `aws dlm get-lifecycle-policies` (laptop) | a backup from today; ENABLED |
+| 9 | **G8 anchor grade** | 8.8 step 8 | `sink.mode` `compliance`, `tamperResistant` `true` |
+| 10 | **Dedicated, spend-limited model key** (8.13) | In the provider console, list the API keys and check the demo key's spend limit. On the host: `curl -fsS -H "authorization: Bearer $BOOT" $GW/v1/model-credentials \| jq -r '.credentials[] \| [.provider, .createdAt] \| @tsv'` (provider and date only; no key material) | The console shows exactly one active key named for the demo, with a spend limit set. The host lists exactly one `anthropic` credential, created after the host went up |
+| 11 | **The laptop's old model key is revoked** | In the provider console, find the key the laptop stack used (§7.10 and §7.11) and delete it. On the laptop, delete that credential in the laptop UI too, or stop the laptop stack | The console lists that key as deleted, or no longer lists it. Signing in on the laptop UI shows no model credential |
+
+### 8.10 Rollback to the laptop (about 2 minutes; keep this window open on Monday)
+
+```powershell
+Invoke-DemoHost 'cd /opt/app && docker compose --profile tunnel stop cloudflared'   # host connector off
+docker compose --profile tunnel up -d cloudflared                                     # laptop, in the TUNNEL.md window (token set)
+docker compose logs cloudflared | Select-String -Pattern 'Registered tunnel connection' | Measure-Object | Select-Object -ExpandProperty Count
+# Success: 1 or more
+(Invoke-WebRequest -UseBasicParsing -Uri 'https://regulait.<domain>/ui' -Method Head).StatusCode   # Success: 200
+```
+
+The laptop's stack and database were left untouched, so it serves exactly what it served before 8.7. If 8.8 step 4
+re-applied the sandbox trust for the host's source ids, live discovery on the laptop fails until the trust is
+re-applied with the laptop's ids. The seeded discovery dataset remains its fallback (ADR-0203 decision 2). To return
+to the host, run 8.7 again.
+
+### 8.11 Teardown after the demo (about 30 minutes; BREAK-GLASS)
+
+The deployer may not delete evidence (backups, anchors, logs, keys, snapshots), so teardown is break-glass (8.2 e).
+Make a break-glass profile for the host account once. It chains from your break-glass session to the role
+Organizations created there, and it holds no secret:
+
+```powershell
+aws configure set profile.regulait-demo-host-breakglass.source_profile <break-glass profile>
+aws configure set profile.regulait-demo-host-breakglass.role_arn "arn:aws:iam::<host account id>:role/OrganizationAccountAccessRole"
+aws configure set profile.regulait-demo-host-breakglass.region <region>
+aws sso login --profile <break-glass profile>
+```
+
+**Decide first: keep the backups and anchors readable, or not.** Both buckets are encrypted with the host key. If
+Terraform destroys the key, it enters a 30-day deletion window, and after that **every kept backup and anchor is
+permanently unreadable**. To keep them readable, take the key and its alias out of Terraform's hands too (step 2a).
+The kept buckets keep their object-level protections: object versions, and the anchors' COMPLIANCE retention. But step
+2's destroy removes their **bucket-level** controls before it stops: the bucket policy (TLS-only and the anchor-writer
+denies), the public-access block, the default encryption configuration and the lifecycle rule. Step 2a puts back the
+two that matter.
+
+```powershell
+# 1. stop the host's connector; take and check a last backup
+Invoke-DemoHost 'cd /opt/app && docker compose --profile tunnel stop cloudflared', '/usr/local/sbin/regulait-pg-backup.sh --run'
+
+Set-Location infra/environments/demo-host/host
+terraform init -reconfigure -backend-config=backend.hcl -backend-config="profile=regulait-demo-host-breakglass"
+
+# 2a. ONLY if the backups or anchors must stay readable: take ONLY the two buckets' own resources, the key and its
+#     alias out of state, so the destroy leaves all of them, with every bucket-level control, intact. Leave the
+#     modules' writer policies, their role attachments and the freshness alarm in state: the destroy removes them,
+#     which it must do before it can delete the instance and anchor roles (a role with a policy still attached
+#     cannot be deleted).
+$Keep = @(
+  'module.db_backup.aws_s3_bucket.backup', 'module.db_backup.aws_s3_bucket_policy.backup',
+  'module.db_backup.aws_s3_bucket_public_access_block.backup', 'module.db_backup.aws_s3_bucket_ownership_controls.backup',
+  'module.db_backup.aws_s3_bucket_versioning.backup', 'module.db_backup.aws_s3_bucket_server_side_encryption_configuration.backup',
+  'module.db_backup.aws_s3_bucket_lifecycle_configuration.backup',
+  'module.anchor.aws_s3_bucket.anchors', 'module.anchor.aws_s3_bucket_policy.anchors',
+  'module.anchor.aws_s3_bucket_public_access_block.anchors', 'module.anchor.aws_s3_bucket_ownership_controls.anchors',
+  'module.anchor.aws_s3_bucket_versioning.anchors', 'module.anchor.aws_s3_bucket_server_side_encryption_configuration.anchors',
+  'module.anchor.aws_s3_bucket_object_lock_configuration.anchors',
+  'aws_kms_key.host', 'aws_kms_alias.host')
+terraform state rm @Keep
+terraform state list | Select-String 'aws_s3_bucket\.(backup|anchors)$|aws_kms_key\.host$'   # Success: prints nothing
+
+# 2. destroy the host stack
+terraform plan -destroy -var host_sso_profile=regulait-demo-host-breakglass -out=tfplan; terraform apply tfplan
+# Expected WITHOUT 2a: the apply STOPS part-way on the two buckets; everything else is destroyed. The first error may be
+#   "BucketNotEmpty", or on the anchor bucket an error refusing to suspend versioning ("Object Lock" in the message),
+#   because S3 does not allow versioning to be suspended on an Object Lock bucket. Either way, continue with 2b.
+# Expected WITH 2a: "Destroy complete". The writer policies, their attachments and the freshness alarm are destroyed
+#   (the roles then delete cleanly); the two buckets, the key and the alias are not touched.
+
+# 2b. WITHOUT 2a only: the anchor bucket cannot be emptied early (COMPLIANCE: nobody, root included, can delete an
+#     anchor version before its retention ends). Take both buckets out of state; the key then goes in 2c (30-day window).
+terraform state rm module.anchor module.db_backup
+
+# 2c. finish the destroy
+terraform plan -destroy -var host_sso_profile=regulait-demo-host-breakglass -out=tfplan; terraform apply tfplan   # Success: "Destroy complete"
+terraform state list    # Success: prints nothing
+Set-Location ../../../..
+
+# 3. the five hand-made parameters (Terraform removed its own three anchor parameters in step 2)
+aws ssm delete-parameters --profile regulait-demo-host-breakglass --names /regulait/demo-host/public-host /regulait/demo-host/cf-tunnel-token /regulait/demo-host/data-key /regulait/demo-host/bootstrap-token /regulait/demo-host/db-password
+
+# 4. keep demo-host/baseline (the audit trail and the boundary) until the ADR-0013 successor replaces it, or destroy
+#    it the same way, break-glass
+
+# 5. the member account. CHOOSE ONE, and decide before Monday:
+#  (a) Close it now: terraform destroy on demo-host/account (below). AWS suspends the account for 90 days and then
+#      deletes it with everything inside, including any buckets and key kept in 2a. Nothing is deleted by hand, and the
+#      anchors and backups stop being readable when the account is suspended.
+#  (b) Keep it until the anchors' retention ends (up to anchor_retention_days after the last anchor), if the anchors
+#      or backups must stay readable for the security team (2a done). Then delete the bucket contents and the buckets
+#      by hand with the break-glass profile:
+#        aws s3api list-object-versions --profile regulait-demo-host-breakglass --bucket <anchor bucket> ...
+#        aws s3api delete-objects ...; aws s3api delete-bucket ...
+#      schedule the kept key for deletion, and close the account with (a).
+Set-Location infra/environments/demo-host/account; terraform plan -destroy -out=tfplan; terraform apply tfplan; Set-Location ../../../..
+aws sso logout
+```
+
+**Check** (run it after step 3 and before step 5; once the account is closed, the host profiles no longer work):
+
+```powershell
+aws ec2 describe-instances --profile regulait-demo-host-breakglass --filters Name=tag:Stack,Values=demo-host-host `
+  --query 'Reservations[].Instances[].State.Name' --output text   # Success: terminated (or nothing)
+aws ssm get-parameters-by-path --profile regulait-demo-host-breakglass --path /regulait/demo-host --query 'length(Parameters)'   # Success: 0
+# After 2a only: the kept buckets still refuse plain HTTP and public access
+aws s3api get-bucket-policy-status --profile regulait-demo-host-breakglass --bucket <backup bucket> --query PolicyStatus.IsPublic   # Success: false
+```
+
+Keep the laptop stack until the host's backups are confirmed. After that, the laptop holds nothing the demo needs.
+
+### 8.12 Cost
+
+| Item | About, per month (`us-east-1`, on demand) |
+| --- | --- |
+| `t3.xlarge` (4 vCPU, 16 GiB), always on | USD 120 |
+| EBS gp3, 40 GB root and 60 GB data | USD 8 |
+| public IPv4 (the NAT gateway's only; the instance has none) | USD 4 |
+| KMS key, CloudWatch logs (30 days), backups (30 days) | under USD 5 |
+| baseline: Config, Security Hub, GuardDuty, CloudTrail | about USD 5 to 15 |
+| NAT gateway (one, plus data) | about USD 35 |
+| 6 interface VPC endpoints (ssm, ssmmessages, ec2messages, kms, logs, sts), one AZ | about USD 44 |
+| flow logs, Inspector, DLM snapshots (7 days) | about USD 5 to 10 |
+
+That is about USD 7 to 8 a day while the host runs. The demo-host account's budget alert is USD 100, with 80 % and
+forecast alerts. A `t3.large` (8 GiB) halves the instance cost but leaves little headroom for the on-host build. **The
+sandbox keeps its USD 50 cap** (ADR-0197): the host does not count against it and does not change it.
+
+### 8.13 Rotation and revocation (demo password, tunnel token, model API key)
+
+Each secret has a rotate step, which keeps the demo running, and a revoke step, which runs after the demo or on any
+suspicion of exposure.
+
+**Demo password.** Rotate it Sunday evening, after the last rehearsal, and again after the demo. On the host, in an
+SSM shell, re-run 8.8 step 2. It reads the new password at a hidden prompt, sets it for every persona, and clears the
+two admins' lockouts. **Revoke:** the same command with a long random value nobody records. **Check:** signing in with
+the old password fails.
+
+**Tunnel token.** **Rotate:** in Cloudflare, refresh the tunnel's token (TUNNEL.md, "Stopping and rolling back"), then:
+
+```powershell
+$s = Read-Host -AsSecureString 'New tunnel token'
+Put-DemoSecret 'cf-tunnel-token' ([Net.NetworkCredential]::new('', $s).Password)   # 8.5's helper (it overwrites)
+Remove-Variable s
+Invoke-DemoHost 'cd /opt/app && bash infra/scripts/demo-host-env.sh compose --profile tunnel up -d --force-recreate cloudflared'
+```
+
+**Check:** the connector registers again (8.7), and the old token no longer connects. **Revoke:** delete the tunnel
+(TUNNEL.md) and the parameter (8.11). The laptop's copy of the token in the password manager is then dead too.
+
+**Model API key (the Claude key of §7.10 and §7.11).** Use a **dedicated** key, created for the demo in the provider's
+console with a **spend limit** set there. It is entered only in the RegulAIt UI (§7.11), which stores it encrypted with
+the data key. It is never in SSM, a file or a terminal. **Rotate:** create a new key in the provider console, replace
+the credential in the UI (step-up), and delete the old key in the console. **Before go-live, revoke the laptop's key:**
+the key the laptop stack used before the move is not the demo key. Delete it in the provider console on Sunday,
+before the posture checklist (8.9 a rows 10 and 11). **Revoke after the demo:** delete the key
+in the provider's console, then delete the credential in the UI. **Check:** the provider console lists no active demo
+key.
+
+**Data key, bootstrap token, database password.** They are not rotated during the demo: rotating the data key needs
+the product's re-encryption procedure. After the demo, 8.11 deletes them with the host. The bootstrap token is the
+full-admin credential: after set-up, remove it from use by deleting the parameter and recreating the gateway without
+it, or leave it until teardown and list it as a residual (DEMO_HOST_SECURITY_BRIEF.md).

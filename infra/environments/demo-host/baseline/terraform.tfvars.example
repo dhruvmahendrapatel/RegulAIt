@@ -1,0 +1,7 @@
+# Copy to terraform.tfvars (git-ignored) and fill in. Never commit real values.
+management_sso_profile     = "<company-account-sso-profile-name>"
+management_account_id      = "<12-digit-company-account-id>"
+host_account_id            = "<12-digit-demo-host-account-id>"
+organization_id            = "<o-xxxxxxxxxx>"
+organization_root_id       = "<r-xxxx>"
+budget_notification_emails = ["<alert-recipient>"]
