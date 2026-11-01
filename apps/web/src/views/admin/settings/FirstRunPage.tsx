@@ -33,6 +33,8 @@ import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, Field, InfoButton, Meter, Select, Textarea } from "../../../ui/kit";
 import { QueryGate } from "../adminKit";
 import v from "../../views.module.css";
+// I-2 (#453): the Billing set-up stepper's own styles, reused as they are rather than copied
+import bl from "../cost/billing.module.css";
 import { GroupRoleImportCard, ImportHistoryCard } from "./OnboardingImportsCards";
 
 interface WizardStep {
@@ -99,6 +101,8 @@ export default function FirstRunPage() {
   const [csv, setCsv] = useState("email,displayName,groups\n");
   const [importResult, setImportResult] = useState<unknown>(null);
   const [importError, setImportError] = useState<string | null>(null);
+  // I-2: one step at a time; the stepper opens on the step to resume, else the first unfinished one
+  const [chosenStep, setStep] = useState<string | null>(null);
 
   const setStatus = useMutation({
     mutationFn: (args: { key: string; status: string }) =>
@@ -129,6 +133,11 @@ export default function FirstRunPage() {
   });
 
   const d = q.data;
+  const firstOpen =
+    d?.resumeAt && d.steps.some((x) => x.key === d.resumeAt)
+      ? d.resumeAt
+      : (d?.steps.find((x) => x.status !== "done" && x.status !== "skipped") ?? d?.steps[0])?.key ?? null;
+  const step = chosenStep && d?.steps.some((x) => x.key === chosenStep) ? chosenStep : firstOpen;
   return (
     <>
       <PageHeader
@@ -165,7 +174,28 @@ export default function FirstRunPage() {
               </div>
             </Card>
 
-            {d.steps.map((s) => {
+            {d.steps.length > 0 && (
+              <ol className={bl.steps} aria-label="First-run steps">
+                {d.steps.map((x, i) => {
+                  const done = x.status === "done" || x.status === "skipped";
+                  return (
+                    <li key={x.key} className={x.key === step ? bl.stepOn : done && !x.drift ? bl.stepDone : undefined}>
+                      <button type="button" aria-current={x.key === step ? "step" : undefined} onClick={() => setStep(x.key)}>
+                        <span className={bl.stepNum} aria-hidden>{done && !x.drift && x.key !== step ? "✓" : i + 1}</span>
+                        <span>{x.title}</span>
+                        {/* no info buttons here: the status sits inside the step's own button; the step's panel explains it */}
+                        <Badge tone={tone(x)}>{humanize(x.status)}</Badge>
+                        <Badge tone={x.satisfied ? "ok" : "neutral"}>{x.satisfied ? "Verified live" : "Not verified"}</Badge>
+                        {x.drift && <Badge tone="danger">Drift</Badge>}
+                        {x.blockedBy.length > 0 && <Badge tone="warn">Blocked</Badge>}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ol>
+            )}
+
+            {d.steps.filter((s) => s.key === step).map((s) => {
               const link = DEEP_LINK[s.key];
               const blocked = s.blockedBy.length > 0;
               const titleOf = (key: string) => d.steps.find((x) => x.key === key)?.title ?? humanize(key);

@@ -26,7 +26,8 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
 import { BootSchedulerHealth } from "./BootSchedulerHealth";
-import { Badge, Button, Card, EmptyState, Table } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, InfoButton, Table } from "../../../ui/kit";
+import { ExpandableTable } from "../../../ui/ExpandableTable";
 import { QueryGate, Stat, useAction } from "../adminKit";
 import { SchedulerJobHistory } from "./SchedulerJobHistory";
 import a from "../admin.module.css";
@@ -112,6 +113,15 @@ export default function SchedulerPage() {
   const [history, setHistory] = useState<Set<string>>(() => new Set());
   const toggleHistory = (name: string) =>
     setHistory((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  // I-2 (#453): which job rows are open in place
+  const [openJobs, setOpenJobs] = useState<Set<string>>(() => new Set());
+  const toggleJob = (name: string) =>
+    setOpenJobs((prev) => {
       const next = new Set(prev);
       if (next.has(name)) next.delete(name);
       else next.add(name);
@@ -212,104 +222,150 @@ export default function SchedulerPage() {
               <EmptyState title="No jobs registered" body="This gateway registered no scheduler jobs." />
             </Card>
           ) : (
-            jobs.map((job) => (
-              <Card key={job.name} title={job.name} info={job.description ? <p>{withoutRefs(job.description)}</p> : undefined}>
-                <div className={a.statRow}>
-                  <Stat
-                    value={<Badge tone={job.enabled ? "ok" : "warn"}>{job.enabled ? "enabled" : "disabled"}</Badge>}
-                    label="job"
-                  />
-                  <Stat value={cadence(job.intervalSeconds)} label="cadence" />
-                  <Stat
-                    value={
+            <Card title="Jobs">
+              <ExpandableTable
+                rows={jobs}
+                rowKey={(job) => job.name}
+                expand={{
+                  open: (job) => openJobs.has(job.name),
+                  toggle: (job) => toggleJob(job.name),
+                  label: (job) => job.name,
+                  render: (job) => (
+                    <div className={v.stack}>
+                      {job.description ? <p className={v.dim}>{withoutRefs(job.description)}</p> : null}
+                      {!job.registered && (
+                        <EmptyState
+                          title="This job is in the database but not in this gateway's code"
+                          body="Its history is kept rather than deleted — it is the evidence that it used to run — but nothing will claim it."
+                        />
+                      )}
+                      {job.consecutiveFailures > 0 && (
+                        <EmptyState
+                          title={`${job.consecutiveFailures} consecutive failure(s)`}
+                          body={job.lastError ?? "no error recorded"}
+                        />
+                      )}
+
+                      <div className={a.formRow}>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          aria-expanded={history.has(job.name)}
+                          aria-label={`${history.has(job.name) ? "Hide" : "Show"} the full run history of ${job.name}`}
+                          onClick={() => toggleHistory(job.name)}
+                        >
+                          {history.has(job.name) ? "Hide full history" : "Full history"}
+                        </Button>
+                      </div>
+
+                      {history.has(job.name) ? <SchedulerJobHistory name={job.name} /> : null}
+
+                      {job.recentRuns.length === 0 ? (
+                        <div className={v.faint}>No recorded runs.</div>
+                      ) : (
+                        <Table
+                          rows={job.recentRuns}
+                          rowKey={(r) => r.id}
+                          columns={[
+                            { key: "started", header: "Started", render: (r) => r.startedAt },
+                            {
+                              key: "outcome",
+                              header: "Outcome",
+                              render: (r) => <Badge tone={outcomeTone(r.outcome)}>{r.outcome}</Badge>,
+                            },
+                            { key: "trigger", header: "Trigger", render: (r) => <Badge tone="info">{r.trigger}</Badge> },
+                            { key: "items", header: "Items", render: (r) => r.itemsProcessed },
+                            {
+                              key: "ms",
+                              header: "Duration",
+                              render: (r) => (r.durationMs === null ? <span className={v.faint}>—</span> : `${r.durationMs}ms`),
+                            },
+                            {
+                              key: "err",
+                              header: "Error",
+                              render: (r) => r.error ?? <span className={v.faint}>—</span>,
+                            },
+                          ]}
+                        />
+                      )}
+                    </div>
+                  ),
+                }}
+                columns={[
+                  {
+                    key: "name",
+                    header: "Job",
+                    render: (job) => (
+                      <span className={v.row}>
+                        <strong>{job.name}</strong>
+                        {job.description ? <InfoButton label={job.name}>{withoutRefs(job.description)}</InfoButton> : null}
+                      </span>
+                    ),
+                  },
+                  {
+                    key: "state",
+                    header: "State",
+                    render: (job) => (
+                      // the warnings a card used to lead with stay on the row, so a closed row never hides them
+                      <span className={v.row}>
+                        <Badge tone={job.enabled ? "ok" : "warn"}>{job.enabled ? "enabled" : "disabled"}</Badge>
+                        {!job.registered && <Badge tone="warn">not in this gateway's code</Badge>}
+                        {job.consecutiveFailures > 0 && (
+                          <Badge tone="danger">{`${job.consecutiveFailures} consecutive failure(s)`}</Badge>
+                        )}
+                      </span>
+                    ),
+                  },
+                  { key: "cadence", header: "Cadence", render: (job) => cadence(job.intervalSeconds) },
+                  {
+                    key: "outcome",
+                    header: "Last outcome",
+                    render: (job) =>
                       job.lastOutcome ? (
                         <Badge tone={outcomeTone(job.lastOutcome)}>{job.lastOutcome}</Badge>
                       ) : (
                         <span className={v.faint}>never run</span>
-                      )
-                    }
-                    label="last outcome"
-                  />
-                  <Stat
-                    value={job.lastRunAt ?? <span className={v.faint}>—</span>}
-                    label="last run"
-                  />
-                  <Stat
-                    value={
-                      // never render a future time nothing will act on
-                      job.effectiveNextDueAt ?? <span className={v.faint}>— (not scheduled)</span>
-                    }
-                    label="next due"
-                  />
-                  <Stat
-                    value={job.lastItemsProcessed ?? <span className={v.faint}>—</span>}
-                    label="items last pass"
-                  />
-                </div>
-
-                {!job.registered && (
-                  <EmptyState
-                    title="This job is in the database but not in this gateway's code"
-                    body="Its history is kept rather than deleted — it is the evidence that it used to run — but nothing will claim it."
-                  />
-                )}
-                {job.consecutiveFailures > 0 && (
-                  <EmptyState
-                    title={`${job.consecutiveFailures} consecutive failure(s)`}
-                    body={job.lastError ?? "no error recorded"}
-                  />
-                )}
-
-                <div className={a.formRow}>
-                  <Button size="sm" onClick={() => runNow(job)} disabled={act.busy || job.running}>
-                    Run now
-                  </Button>
-                  <Button size="sm" variant="ghost" onClick={() => toggle(job)} disabled={act.busy}>
-                    {job.enabled ? "Disable" : "Enable"}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    aria-expanded={history.has(job.name)}
-                    aria-label={`${history.has(job.name) ? "Hide" : "Show"} the full run history of ${job.name}`}
-                    onClick={() => toggleHistory(job.name)}
-                  >
-                    {history.has(job.name) ? "Hide full history" : "Full history"}
-                  </Button>
-                </div>
-
-                {history.has(job.name) ? <SchedulerJobHistory name={job.name} /> : null}
-
-                {job.recentRuns.length === 0 ? (
-                  <div className={v.faint}>No recorded runs.</div>
-                ) : (
-                  <Table
-                    rows={job.recentRuns}
-                    rowKey={(r) => r.id}
-                    columns={[
-                      { key: "started", header: "Started", render: (r) => r.startedAt },
-                      {
-                        key: "outcome",
-                        header: "Outcome",
-                        render: (r) => <Badge tone={outcomeTone(r.outcome)}>{r.outcome}</Badge>,
-                      },
-                      { key: "trigger", header: "Trigger", render: (r) => <Badge tone="info">{r.trigger}</Badge> },
-                      { key: "items", header: "Items", render: (r) => r.itemsProcessed },
-                      {
-                        key: "ms",
-                        header: "Duration",
-                        render: (r) => (r.durationMs === null ? <span className={v.faint}>—</span> : `${r.durationMs}ms`),
-                      },
-                      {
-                        key: "err",
-                        header: "Error",
-                        render: (r) => r.error ?? <span className={v.faint}>—</span>,
-                      },
-                    ]}
-                  />
-                )}
-              </Card>
-            ))
+                      ),
+                  },
+                  { key: "last", header: "Last run", render: (job) => job.lastRunAt ?? <span className={v.faint}>—</span> },
+                  {
+                    key: "next",
+                    header: "Next due",
+                    // never render a future time nothing will act on
+                    render: (job) => job.effectiveNextDueAt ?? <span className={v.faint}>— (not scheduled)</span>,
+                  },
+                  {
+                    key: "items",
+                    header: "Items last pass",
+                    render: (job) => job.lastItemsProcessed ?? <span className={v.faint}>—</span>,
+                  },
+                  {
+                    key: "actions",
+                    header: "",
+                    srHeader: "Actions",
+                    render: (job) => (
+                      <div className={a.formRow}>
+                        <Button
+                          size="sm"
+                          onClick={() => runNow(job)}
+                          disabled={act.busy || job.running}
+                        >
+                          Run now
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => toggle(job)}
+                          disabled={act.busy}
+                        >
+                          {job.enabled ? "Disable" : "Enable"}
+                        </Button>
+                      </div>
+                    ),
+                  },
+                ]}
+              />
+            </Card>
           )}
           {act.error && <div className={v.faint}>{act.error}</div>}
         </QueryGate>
