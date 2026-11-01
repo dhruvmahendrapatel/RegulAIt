@@ -1938,10 +1938,15 @@ aws iam simulate-principal-policy --profile regulait-demo-host --policy-source-a
   --action-names iam:CreateRole cloudtrail:StopLogging kms:ScheduleKeyDeletion s3:DeleteObject logs:DeleteLogGroup `
   --query 'EvaluationResults[].[EvalActionName,EvalDecision]' --output text
 # Success: every line ends in explicitDeny or implicitDeny
+# One call per role: with several --resource-arns, EvalDecision is the aggregate across them (one line, not two)
 aws iam simulate-principal-policy --profile regulait-demo-host --policy-source-arn $Inst --action-names sts:AssumeRole `
-  --resource-arns "arn:aws:iam::$($HostAccount):role/regulait-demo-host-anchor" "arn:aws:iam::$($HostAccount):role/OrganizationAccountAccessRole" `
+  --resource-arns "arn:aws:iam::$($HostAccount):role/regulait-demo-host-anchor" `
   --query 'EvaluationResults[].[EvalResourceName,EvalDecision]' --output text
-# Success: the anchor role allowed; OrganizationAccountAccessRole explicitDeny
+# Success: the anchor role allowed
+aws iam simulate-principal-policy --profile regulait-demo-host --policy-source-arn $Inst --action-names sts:AssumeRole `
+  --resource-arns "arn:aws:iam::$($HostAccount):role/OrganizationAccountAccessRole" `
+  --query 'EvaluationResults[].[EvalResourceName,EvalDecision]' --output text
+# Success: OrganizationAccountAccessRole explicitDeny
 ```
 
 **Why two passes on the first apply.** `module.app` sets `count` from `var.vpc_id == ""` and `var.kms_key_arn == null`.
