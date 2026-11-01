@@ -5,7 +5,7 @@
  * ADR-0186 A adds Passkeys.
  */
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
 import { withStepUp } from "../../stepup/stepUp";
@@ -15,6 +15,7 @@ import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, IdChip, Input, Table } from "../../ui/kit";
 import { TotpQrCode } from "../../ui/TotpQrCode";
+import { PREVIEW_ROWS } from "../../ui/ListPreview";
 import { useToast } from "../../ui/toast";
 import ModelKeysCard from "./ModelKeysCard";
 import { UsernameForm } from "./UsernameForm";
@@ -115,11 +116,11 @@ export default function AccountPage() {
         </div>
         {auth?.userId && (
           <div ref={passkeysRef} className={a.anchor} data-testid="account-passkeys">
-            <PasskeysCard />
+            <PasskeysCard preview />
           </div>
         )}
         <div ref={sessionsRef} className={a.anchor}>
-          <SessionsCard />
+          <SessionsCard preview />
         </div>
         <div ref={keysRef} className={a.anchor}>
           <ModelKeysCard />
@@ -189,8 +190,12 @@ function AiPoliciesCard(props: { hasUser: boolean }) {
  * account (device label, where it is now, when it was last seen), with
  * per-session revoke and "sign out other devices". The device label is a
  * derived display string, never a security control.
+ *
+ * P3 (#453): on the Account page this is a preview (the first five sessions, the live count in the title, the same
+ * sign-out actions, and a link to the full list); on its own page (`preview` false, AccountSubpages) it is every
+ * session. Both read the same query, so the audited list read is not repeated.
  */
-function SessionsCard() {
+export function SessionsCard(props: { preview?: boolean }) {
   const { toast } = useToast();
   const qc = useQueryClient();
   const [busy, setBusy] = useState(false);
@@ -224,13 +229,20 @@ function SessionsCard() {
           <Badge>{sessions.length} live</Badge>
         </span>
       }
+      actions={
+        props.preview ? (
+          <Link to="/account/sessions" aria-label="View all sessions">
+            View all →
+          </Link>
+        ) : undefined
+      }
     >
       {error && (
         <div className={v.errLine} role="alert" style={{ marginBottom: "var(--s1)" }}>
           {error}
         </div>
       )}
-      <div className={v.stack}>
+      <div className={v.stack} data-preview={props.preview ? "/auth/sessions" : undefined}>
         <Table<OwnSession>
           columns={[
             {
@@ -272,8 +284,11 @@ function SessionsCard() {
                 ),
             },
           ]}
-          rows={sessions}
+          rows={props.preview ? sessions.slice(0, PREVIEW_ROWS) : sessions}
           rowKey={(x) => x.id}
+          loading={q.isLoading}
+          error={q.error}
+          onRetry={() => void q.refetch()}
           empty={<EmptyState title="No live sessions" body="Sessions appear here when you sign in from a browser." />}
         />
         <div className={v.row}>
