@@ -6,11 +6,15 @@
 # store: versioned, Block Public Access, SSE-KMS with the host key, TLS-only,
 # COMPLIANCE default retention of var.anchor_retention_days.
 #
-# Reuses modules/audit-anchor-worm-s3 with NO writer_role_names: the module's
-# writer grant is PutObject only and its bucket policy denies the writer
-# s3:PutObjectRetention, but the gateway's sink PUTs with ObjectLockMode and
-# RetainUntilDate (which needs PutObjectRetention) and reads its anchor back by
-# version. So the grant lives here, sized to the exact calls the sink makes.
+# The anchor role's grant is the module's writer grant (ADR-0060 amendment
+# 2026-11-01): the sink's exact calls — locked PUT (PutObject +
+# PutObjectRetention), read-back by version, GetObjectRetention,
+# ListObjectVersions, GetBucketObjectLockConfiguration — and the host KMS key
+# through S3 only. The module's bucket policy denies the role every delete,
+# governance bypass, legal hold and bucket-weakening call, and any PUT whose
+# lock is weaker or shorter than the bucket's. The gateway's
+# REGULAIT_AUDIT_ANCHOR_S3_RETENTION_DAYS comes from the same
+# anchor_retention_days (demo-host-env.sh), so it meets the retention floor.
 #
 # CREDENTIALS WITHOUT RELAXING IMDS. The gateway runs in a container, and the
 # instance's IMDS hop limit of 1 keeps containers away from the instance role on
@@ -33,7 +37,9 @@ module "anchor" {
   retention_days   = var.anchor_retention_days
   kms_key_arn      = aws_kms_key.host.arn
 
-  writer_role_names = []
+  # Same account, so the module's role-name-to-ARN mapping holds. The reference
+  # also orders the role before the bucket policy that names it as a principal.
+  writer_role_names = [aws_iam_role.anchor.name]
 }
 
 locals {
@@ -52,78 +58,6 @@ resource "aws_iam_role" "anchor" {
     }]
   })
   max_session_duration = 3600
-}
-
-data "aws_iam_policy_document" "anchor" {
-  # The object calls the sink makes: PutObject with ObjectLockMode and
-  # RetainUntilDate (needs PutObjectRetention; in COMPLIANCE mode a retention
-  # can only be extended, never shortened), GetObject by VersionId,
-  # GetObjectRetention.
-  statement {
-    sid = "AnchorObjects"
-    actions = [
-      "s3:PutObject",
-      "s3:PutObjectRetention",
-      "s3:GetObject",
-      "s3:GetObjectVersion",
-      "s3:GetObjectRetention",
-    ]
-    resources = ["${module.anchor.bucket_arn}/${local.anchor_prefix}/*"]
-  }
-
-  # HeadBucket (s3:ListBucket) and ListObjectVersions, under the prefix only.
-  statement {
-    sid       = "ListAnchorPrefix"
-    actions   = ["s3:ListBucket", "s3:ListBucketVersions"]
-    resources = [module.anchor.bucket_arn]
-    condition {
-      test     = "StringLike"
-      variable = "s3:prefix"
-      values   = ["${local.anchor_prefix}/*", ""]
-    }
-  }
-
-  # The grade: the bucket's own Object Lock answer.
-  statement {
-    sid       = "ReadLockConfiguration"
-    actions   = ["s3:GetBucketObjectLockConfiguration"]
-    resources = [module.anchor.bucket_arn]
-  }
-
-  statement {
-    sid       = "UseHostKeyThroughS3Only"
-    actions   = ["kms:GenerateDataKey", "kms:Decrypt"]
-    resources = [aws_kms_key.host.arn]
-    condition {
-      test     = "StringEquals"
-      variable = "kms:ViaService"
-      values   = ["s3.${local.region}.amazonaws.com"]
-    }
-  }
-
-  # Never destroy or weaken, whatever else is granted later.
-  statement {
-    sid    = "NeverDestroyOrWeaken"
-    effect = "Deny"
-    actions = [
-      "s3:DeleteObject",
-      "s3:DeleteObjectVersion",
-      "s3:PutObjectLegalHold",
-      "s3:BypassGovernanceRetention",
-      "s3:PutBucketObjectLockConfiguration",
-      "s3:PutBucketVersioning",
-      "s3:PutLifecycleConfiguration",
-      "s3:PutBucketPolicy",
-      "s3:DeleteBucket",
-    ]
-    resources = [module.anchor.bucket_arn, "${module.anchor.bucket_arn}/*"]
-  }
-}
-
-resource "aws_iam_role_policy" "anchor" {
-  name   = "audit-anchor-writer"
-  role   = aws_iam_role.anchor.id
-  policy = data.aws_iam_policy_document.anchor.json
 }
 
 # Non-secret wiring the host reads (demo-host-env.sh, demo-host-anchor-creds.sh).

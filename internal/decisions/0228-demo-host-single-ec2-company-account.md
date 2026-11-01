@@ -173,9 +173,12 @@ own answer, and only COMPLIANCE mode counts as tamper-resistant (`apps/gateway/s
   `s3:PutObjectRetention` (a PUT with ObjectLockMode needs it; in COMPLIANCE mode retention can only be extended),
   `s3:GetObjectVersion` and `s3:ListBucketVersions` (it reads its anchor back by version), and
   `s3:GetBucketObjectLockConfiguration` (the grade). It also has KMS GenerateDataKey and Decrypt through S3 only. It
-  carries an explicit Deny on delete, bypass and every lock-, versioning-, lifecycle- and policy-weakening call. The
-  module's own writer grant is not used, because its bucket-policy Deny on `s3:PutObjectRetention` would refuse the
-  gateway's locked PUT.
+  carries an explicit Deny on delete, bypass and every lock-, versioning-, lifecycle- and policy-weakening call.
+  **Superseded 2026-11-01:** the module's writer grant now matches the sink (ADR-0060 amendment 2026-11-01, PR #653),
+  so `anchor.tf` passes `writer_role_names = [aws_iam_role.anchor.name]` and its own role policy is gone. The Deny
+  moves to the bucket policy, where no later identity-policy Allow can override it. It also refuses a PUT whose lock
+  mode is weaker than COMPLIANCE or whose retention is shorter than `anchor_retention_days − 1`. HeadBucket is not
+  granted: the sink never calls it, and the list grant is limited to the `audit-anchors/` prefix.
 - **An STS interface endpoint** is added, so the assume-role call stays on the AWS network.
 - **The runbook** gains §8.8 step 8 (the G8 grade must read COMPLIANCE before the rehearsal), a posture-checklist row,
   and a teardown note: COMPLIANCE objects cannot be deleted by anyone until their retention ends, so the anchor
