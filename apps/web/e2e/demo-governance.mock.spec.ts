@@ -252,6 +252,8 @@ test("enterprise governance demo surfaces render and complete their core actions
   await expect(page.getByText("In force", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("No upcoming effective date is present in this feed.")).toBeVisible();
   await expect(page.getByText("pack not active (gap)", { exact: false }).first()).toBeVisible();
+  // I-2 (#453): an entry's impact detail is in its expanded timeline row
+  await page.getByRole("button", { name: /^Details: / }).last().click();
   await page.getByText("Mapped controls and impacted use cases").last().click();
   await expect(page.getByRole("link", { name: "Credit-limit-increase assistant" }).last()).toBeVisible();
   await shotBoth(page, "09-regulatory-intelligence");
