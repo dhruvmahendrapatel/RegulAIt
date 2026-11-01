@@ -25,6 +25,8 @@ module "app" {
   name          = "regulait-dev-app"
   app_port      = 3000 # loopback-only now; Caddy proxies to it over the compose network
   ingress_ports = [80, 443]
+  # ADR-0228 made "no ingress" the module default; this stack serves directly.
+  ingress_enabled = true
   # 80 is not optional: Let's Encrypt's HTTP-01 challenge and every subsequent
   # renewal are served there. Closing it breaks issuance ~60 days later, quietly.
   enable_onbox_tls = true

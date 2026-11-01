@@ -25,6 +25,16 @@ locals {
   # single-port behaviour (open app_port). Callers that terminate TLS on-box
   # pass [80, 443] and app_port stops being an ingress port at all.
   ingress_ports = length(var.ingress_ports) > 0 ? var.ingress_ports : [var.app_port]
+
+  # ADR-0228: with ingress_enabled = false the security group has NO ingress
+  # rule at all (SSM and an outbound-only tunnel need none).
+  effective_ingress_ports = var.ingress_enabled ? local.ingress_ports : []
+
+  host_only = var.boot_mode == "host_only"
+
+  # Nitro instances expose an EBS volume as NVMe with the volume id, minus its
+  # dash, as the serial; user-data finds the data disk by it, never by name.
+  data_volume_serial = var.data_volume_size_gb > 0 ? replace(aws_ebs_volume.data[0].id, "-", "") : ""
 }
 
 data "aws_subnets" "in_vpc" {
@@ -32,6 +42,14 @@ data "aws_subnets" "in_vpc" {
     name   = "vpc-id"
     values = [local.vpc_id]
   }
+}
+
+data "aws_region" "current" {}
+
+# The subnet the instance lands in, read back so the data volume can be created
+# in the same availability zone before the instance exists.
+data "aws_subnet" "chosen" {
+  id = data.aws_subnets.in_vpc.ids[0]
 }
 
 data "aws_ssm_parameter" "al2023_ami" {
@@ -44,6 +62,36 @@ resource "aws_s3_bucket" "source" {
   bucket        = var.source_bucket_name
   force_destroy = true
   tags          = var.tags
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "source" {
+  count  = var.kms_key_arn == null ? 0 : 1
+  bucket = aws_s3_bucket.source.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = var.kms_key_arn
+    }
+    bucket_key_enabled = true
+  }
+}
+
+# TLS only: every request over plain HTTP is refused (security checklist).
+resource "aws_s3_bucket_policy" "source_tls_only" {
+  bucket = aws_s3_bucket.source.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid       = "DenyInsecureTransport"
+      Effect    = "Deny"
+      Principal = "*"
+      Action    = "s3:*"
+      Resource  = [aws_s3_bucket.source.arn, "${aws_s3_bucket.source.arn}/*"]
+      Condition = { Bool = { "aws:SecureTransport" = "false" } }
+    }]
+  })
+  depends_on = [aws_s3_bucket_public_access_block.source]
 }
 
 resource "aws_s3_bucket_public_access_block" "source" {
@@ -81,7 +129,7 @@ resource "aws_iam_role_policy" "read_source" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
+    Statement = concat([{
       Effect   = "Allow"
       Action   = ["s3:GetObject"]
       Resource = "${aws_s3_bucket.source.arn}/*"
@@ -89,7 +137,13 @@ resource "aws_iam_role_policy" "read_source" {
       Effect   = "Allow"
       Action   = ["s3:ListBucket"]
       Resource = aws_s3_bucket.source.arn
-    }]
+      }], var.kms_key_arn == null ? [] : [{
+      # Read the KMS-encrypted bundle, and only through S3.
+      Effect    = "Allow"
+      Action    = ["kms:Decrypt"]
+      Resource  = var.kms_key_arn
+      Condition = { StringEquals = { "kms:ViaService" = "s3.${data.aws_region.current.region}.amazonaws.com" } }
+    }])
   })
 }
 
@@ -111,7 +165,7 @@ resource "aws_security_group" "app" {
   tags        = var.tags
 
   dynamic "ingress" {
-    for_each = toset(local.ingress_ports)
+    for_each = toset(local.effective_ingress_ports)
     content {
       description = "app-${ingress.value}"
       from_port   = ingress.value
@@ -125,7 +179,7 @@ resource "aws_security_group" "app" {
   # Caddy advertises h3 via Alt-Svc; without this the browser silently falls
   # back to TCP, so it is an optimisation, not a requirement.
   dynamic "ingress" {
-    for_each = contains(local.ingress_ports, 443) ? [443] : []
+    for_each = contains(local.effective_ingress_ports, 443) ? [443] : []
     content {
       description = "http3-quic"
       from_port   = ingress.value
@@ -160,18 +214,25 @@ resource "aws_instance" "app" {
   # lookup is a data-loss hazard on a stateful single-instance stack
   ami                    = coalesce(var.ami_id, nonsensitive(data.aws_ssm_parameter.al2023_ami.value))
   instance_type          = var.instance_type
-  subnet_id              = data.aws_subnets.in_vpc.ids[0]
+  subnet_id              = data.aws_subnet.chosen.id
   vpc_security_group_ids = [aws_security_group.app.id]
   iam_instance_profile   = aws_iam_instance_profile.instance.name
   tags                   = merge(var.tags, { Name = var.name })
 
   metadata_options {
-    http_tokens = "required" # IMDSv2 only
+    http_endpoint               = "enabled"
+    http_tokens                 = "required" # IMDSv2 only
+    http_put_response_hop_limit = var.imds_hop_limit
   }
 
+  # Encrypted always (ADR-0180, ADR-0228); with kms_key_arn null the account's
+  # AWS-managed EBS key is used.
   root_block_device {
-    volume_size = 20
-    volume_type = "gp3"
+    volume_size           = var.root_volume_size_gb
+    volume_type           = "gp3"
+    encrypted             = true
+    kms_key_id            = var.kms_key_arn
+    delete_on_termination = true
   }
 
   # Editing user-data must NOT destroy the box: on aws_instance a user_data
@@ -180,12 +241,31 @@ resource "aws_instance" "app" {
   # through SSM, not through recreating the machine.
   user_data_replace_on_change = false
 
-  user_data = templatefile("${path.module}/user-data.sh.tftpl", {
+  user_data = local.host_only ? templatefile("${path.module}/user-data-host-only.sh.tftpl", {
+    swap_gb            = var.swap_gb
+    data_volume_serial = local.data_volume_serial
+    data_volume_mount  = var.data_volume_mount
+    log_group_name     = var.log_group_name
+    region             = data.aws_region.current.region
+    compose_version    = var.compose_plugin_version
+    compose_sha256     = var.compose_plugin_sha256
+    }) : templatefile("${path.module}/user-data.sh.tftpl", {
     bucket           = aws_s3_bucket.source.bucket
     object_key       = var.source_object_key
     swap_gb          = var.swap_gb
     enable_onbox_tls = var.enable_onbox_tls
   })
+
+  lifecycle {
+    precondition {
+      condition     = !local.host_only || !var.enable_onbox_tls
+      error_message = "boot_mode host_only does not start the stack, so enable_onbox_tls must be false."
+    }
+    precondition {
+      condition     = var.data_volume_size_gb == 0 || local.host_only
+      error_message = "data_volume_size_gb is supported with boot_mode host_only only."
+    }
+  }
 
   # The bundle is uploaded out-of-band after apply; user-data waits for it.
   depends_on = [aws_iam_role_policy.read_source]
@@ -219,4 +299,32 @@ resource "aws_eip_association" "app" {
 
   allocation_id = aws_eip.app[0].id
   instance_id   = aws_instance.app.id
+}
+
+# --- data volume (optional, ADR-0228) -----------------------------------------
+#
+# A separate encrypted EBS volume mounted at data_volume_mount (by default
+# /var/lib/docker, so every container volume, Postgres included, lives on it).
+# It is its own resource, so replacing the instance does NOT destroy it: a new
+# instance re-attaches and mounts the same filesystem.
+resource "aws_ebs_volume" "data" {
+  count = var.data_volume_size_gb > 0 ? 1 : 0
+
+  availability_zone = data.aws_subnet.chosen.availability_zone
+  size              = var.data_volume_size_gb
+  type              = "gp3"
+  encrypted         = true
+  kms_key_id        = var.kms_key_arn
+  tags              = merge(var.tags, { Name = "${var.name}-data" })
+}
+
+resource "aws_volume_attachment" "data" {
+  count = var.data_volume_size_gb > 0 ? 1 : 0
+
+  device_name = "/dev/sdf"
+  volume_id   = aws_ebs_volume.data[0].id
+  instance_id = aws_instance.app.id
+  # Stop the instance before detaching rather than force-detaching a mounted
+  # filesystem under a running database.
+  stop_instance_before_detaching = true
 }

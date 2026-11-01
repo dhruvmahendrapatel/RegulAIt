@@ -103,3 +103,70 @@ variable "ami_id" {
   type        = string
   default     = null
 }
+
+# --- ADR-0228 additions (all backwards-compatible except the two secure
+# defaults called out below) ---------------------------------------------------
+
+variable "ingress_enabled" {
+  description = "Open ingress_ports (or app_port) to ingress_cidrs. Default false: the security group has no ingress rule at all, which is what SSM Session Manager and an outbound-only tunnel need (ADR-0180 secure by default, ADR-0228). A stack that serves traffic directly sets it to true."
+  type        = bool
+  default     = false
+}
+
+variable "boot_mode" {
+  description = "\"bundle\" (the original behaviour: pull source.tar.gz, generate per-boot secrets, compose up) or \"host_only\" (prepare the host: Docker, the compose plugin, the encrypted data volume, container logs to CloudWatch; the operator deploys the stack through SSM)."
+  type        = string
+  default     = "bundle"
+  validation {
+    condition     = contains(["bundle", "host_only"], var.boot_mode)
+    error_message = "boot_mode must be \"bundle\" or \"host_only\"."
+  }
+}
+
+variable "kms_key_arn" {
+  description = "Customer-managed KMS key for the root volume, the data volume and the source bucket. Null uses the AWS-managed keys; the volumes are encrypted either way."
+  type        = string
+  default     = null
+}
+
+variable "root_volume_size_gb" {
+  description = "Root EBS volume size."
+  type        = number
+  default     = 20
+}
+
+variable "data_volume_size_gb" {
+  description = "Size of a separate encrypted EBS data volume mounted at data_volume_mount. 0 (the default) creates none. host_only mode only."
+  type        = number
+  default     = 0
+}
+
+variable "data_volume_mount" {
+  description = "Where the data volume is mounted. The default puts every Docker volume (Postgres included) on it."
+  type        = string
+  default     = "/var/lib/docker"
+}
+
+variable "log_group_name" {
+  description = "CloudWatch log group the Docker daemon ships container logs to (awslogs driver), host_only mode. Empty keeps the default json-file driver. The caller grants the role write access."
+  type        = string
+  default     = ""
+}
+
+variable "imds_hop_limit" {
+  description = "IMDSv2 PUT response hop limit. 1 (the default) means containers on a bridge network cannot reach the instance metadata service, so they cannot take the instance role's credentials."
+  type        = number
+  default     = 1
+}
+
+variable "compose_plugin_version" {
+  description = "Docker Compose plugin release installed in host_only mode."
+  type        = string
+  default     = "v2.29.7"
+}
+
+variable "compose_plugin_sha256" {
+  description = "SHA-256 of docker-compose-linux-x86_64 for compose_plugin_version, from the release's .sha256 file. host_only mode refuses to install a binary that does not match."
+  type        = string
+  default     = "383ce6698cd5d5bbf958d2c8489ed75094e34a77d340404d9f32c4ae9e12baf0"
+}

@@ -1519,3 +1519,280 @@ rehearse Act 4 there, never on LIVE.
 4. Unpublish the trust-centre item.
 5. Set the T-24h switches back to off, or leave them on if the owner wants them kept. Each change is a step-up and
    audited.
+
+## 8. AWS demo host (ADR-0228)
+
+Addendum of 2026-11-01. Owner decision ("EC2 now, Fargate after", [ADR-0228](../decisions/0228-demo-host-single-ec2-company-account.md)):
+the demo stack moves from the laptop to **one hardened EC2 instance** in a new member account of the company AWS
+Organization, behind the **same Cloudflare Tunnel and hostname**. It is a demo environment, never production. Every
+step is **pending execution** and is run by the owner; no agent runs `plan` or `apply`. Nothing above this section is
+changed by it.
+
+**What still depends on the laptop after step f: only the browser used to present.** Keep the laptop stack (and its
+volumes) untouched until step j: it is the rollback (step h).
+
+Run every command in the laptop's bash (Git Bash on Windows, with `export MSYS_NO_PATHCONV=1`), from the repository
+checkout, unless the step says "on the host". Placeholders: `<profile>` is the company account's Identity Center CLI
+profile, `<region>` the region (for example `us-east-1`), `<sha>` the commit of `main` to deploy. Real values (account
+ids, e-mails, the domain, every secret) go only into git-ignored `terraform.tfvars`, `backend.hcl`, SSM and the
+password manager.
+
+### 8 a. Prerequisites (about 20 minutes, once)
+
+1. In the company account: AWS Organizations enabled with all features, IAM Identity Center enabled, and an admin
+   permission set assigned to you (ADR-0203, DEMO_REAL_ACCOUNTS.md "AWS"). No IAM user, no access key.
+2. On the laptop: AWS CLI v2, Terraform 1.9 or later, and the Session Manager plugin for the AWS CLI.
+3. Sign in and check:
+
+   ```bash
+   aws configure sso --profile <profile>        # once
+   aws sso login --profile <profile>
+   aws sts get-caller-identity --profile <profile> --query Arn --output text
+   # check: arn:aws:sts::<company account>:assumed-role/AWSReservedSSO_.../...
+   session-manager-plugin --version               # check: prints a version
+   terraform version                              # check: 1.9 or later
+   ```
+
+4. Trusted access for the baseline's organization services (once per Organization; already done if `regulait-dev`
+   ran in this Organization):
+
+   ```bash
+   for p in cloudtrail.amazonaws.com guardduty.amazonaws.com securityhub.amazonaws.com config.amazonaws.com config-multiaccountsetup.amazonaws.com; do
+     aws organizations enable-aws-service-access --service-principal "$p" --profile <profile>
+   done
+   aws organizations list-aws-service-access-for-organization --profile <profile> --query 'EnabledServicePrincipals[].ServicePrincipal' --output text
+   # check: all five names listed
+   ```
+
+### 8 b. State backend bootstrap (about 5 minutes)
+
+The July state bucket was deleted. `infra/bootstrap/bootstrap-backend.sh` (AWS CLI, no account id in the code)
+creates it in the company account and writes `backend.hcl` for every stack, including the three `demo-host` stacks.
+
+```bash
+AWS_PROFILE=<profile> AWS_REGION=<region> EXPECTED_ACCOUNT_ID=<company account id> infra/bootstrap/bootstrap-backend.sh --preflight-only
+# check: "Preflight passed; nothing created"
+# If the backend does NOT exist yet:
+AWS_PROFILE=<profile> AWS_REGION=<region> EXPECTED_ACCOUNT_ID=<company account id> infra/bootstrap/bootstrap-backend.sh
+# If it ALREADY exists (the demo-sandbox runbook ran it): nothing is created, only missing backend.hcl files written
+AWS_PROFILE=<profile> AWS_REGION=<region> EXPECTED_ACCOUNT_ID=<company account id> infra/bootstrap/bootstrap-backend.sh --write-backend-config
+ls infra/environments/demo-host/*/backend.hcl   # check: three files
+git status --short infra/                        # check: prints nothing (backend.hcl is git-ignored)
+```
+
+### 8 c. `terraform init`, `plan`, `apply` (about 60 to 90 minutes, mostly waiting)
+
+Three stacks, in this order. In each, copy `terraform.tfvars.example` to `terraform.tfvars` and fill it in. **Read
+every plan before typing `yes`.**
+
+```bash
+# 1. the member account (about 5 to 15 minutes; account creation is asynchronous)
+cd infra/environments/demo-host/account
+terraform init -backend-config=backend.hcl
+terraform plan -out=tfplan          # check: creates the account, budget and SCPs; destroys nothing
+terraform apply tfplan
+terraform output -raw host_account_id   # copy into ../baseline and ../host terraform.tfvars
+cd ../../../..
+
+# 2. the security baseline (about 15 to 30 minutes; Config and Security Hub are slow)
+cd infra/environments/demo-host/baseline
+terraform init -backend-config=backend.hcl
+terraform plan -out=tfplan          # check: CloudTrail, GuardDuty, Security Hub, Config, SCPs, budget; destroys nothing
+terraform apply tfplan
+cd ../../../..
+
+# 3. the host (about 5 minutes, then about 5 minutes of boot)
+cd infra/environments/demo-host/host
+terraform init -backend-config=backend.hcl
+terraform plan -out=tfplan          # check: no aws_security_group ingress block, no key_name, encrypted = true on both volumes
+terraform apply tfplan
+terraform output ingress_rule_count  # check: 0
+terraform output -raw instance_id    # keep for the steps below as <instance>
+cd ../../../..
+```
+
+If the baseline's first apply fails on an organization prerequisite, the error names the service: enable its trusted
+access (8 a step 4) and apply again. After the host's first apply, pin the AMI: put the instance's `ImageId` (from
+`aws ec2 describe-instances`) into `ami_id` in `host/terraform.tfvars`, then `terraform plan` must show no changes.
+
+Check the host is reachable through SSM only (about 5 minutes after apply):
+
+```bash
+# the host lives in the member account; reach it through the role Organizations created
+aws configure set profile.regulait-demo-host.source_profile <profile>
+aws configure set profile.regulait-demo-host.role_arn arn:aws:iam::<host account id>:role/OrganizationAccountAccessRole
+aws configure set profile.regulait-demo-host.region <region>
+aws ssm describe-instance-information --profile regulait-demo-host --query 'InstanceInformationList[].PingStatus' --output text
+# check: Online
+aws ssm start-session --profile regulait-demo-host --target <instance>
+# on the host:  sudo tail -3 /var/log/app-boot.log   -> "app-boot: host ready ..."
+#               mountpoint /var/lib/docker            -> "is a mountpoint"
+#               docker compose version                -> v2.29.7
+```
+
+(The `regulait-demo-host` CLI profile holds no secret: it chains from your Identity Center session to the role
+Organizations created, as the Terraform provider does.)
+
+### 8 d. Secrets into SSM Parameter Store, by hand (about 10 minutes)
+
+Five parameters under `/regulait/demo-host/`, every secret a **SecureString encrypted with `alias/regulait-demo-host`**.
+Values never go on a command line, into a file in the checkout, or into a chat: each secret is read at a hidden
+prompt or generated straight into a 0600 file outside the checkout, uploaded with `file://`, then deleted.
+
+| Name | Type | Value |
+| --- | --- | --- |
+| `public-host` | String | the same public hostname as the laptop, `regulait.<domain>` (no scheme) |
+| `cf-tunnel-token` | SecureString | the **same** tunnel's token, from the password manager (TUNNEL.md step 1) |
+| `data-key` | SecureString | 64 hex characters, generated |
+| `bootstrap-token` | SecureString | 48 hex characters, generated |
+| `db-password` | SecureString | 48 hex characters, generated |
+
+```bash
+P=regulait-demo-host; K=alias/regulait-demo-host; D=/regulait/demo-host
+aws ssm put-parameter --profile $P --name $D/public-host --type String --value 'regulait.<domain>'
+( umask 077; T=$(mktemp)
+  printf 'Tunnel token: '; read -rs v; echo; printf '%s' "$v" > "$T"; unset v
+  aws ssm put-parameter --profile $P --name $D/cf-tunnel-token --type SecureString --key-id $K --value "file://$T"
+  openssl rand -hex 32 | tr -d '\n' > "$T"; aws ssm put-parameter --profile $P --name $D/data-key        --type SecureString --key-id $K --value "file://$T"
+  openssl rand -hex 24 | tr -d '\n' > "$T"; aws ssm put-parameter --profile $P --name $D/bootstrap-token --type SecureString --key-id $K --value "file://$T"
+  openssl rand -hex 24 | tr -d '\n' > "$T"; aws ssm put-parameter --profile $P --name $D/db-password     --type SecureString --key-id $K --value "file://$T"
+  rm -f "$T" )
+aws ssm get-parameters-by-path --profile $P --path $D --query 'Parameters[].[Name,Type]' --output text
+# check: five names; four SecureString, one String. Never add --with-decryption here.
+```
+
+The bootstrap token is the full-admin credential of §7.10's `BOOT`. When you need it later, read it in an SSM session
+on the host (`aws ssm get-parameter --with-decryption ...` into a variable), never onto the laptop's screen.
+
+### 8 e. Deploy the stack on the host (about 20 to 30 minutes, mostly the first build)
+
+From the laptop, ship the exact commit as a `git archive` through the host's own source bucket (the host holds no
+Git credential):
+
+```bash
+git fetch origin main && git rev-parse origin/main        # choose <sha>; check it is on main
+git archive --format=tar.gz -o /tmp/regulait-<sha>.tar.gz <sha>
+SRC=$(terraform -chdir=infra/environments/demo-host/host output -raw source_bucket)
+aws s3 cp /tmp/regulait-<sha>.tar.gz "s3://$SRC/regulait-<sha>.tar.gz" --profile regulait-demo-host
+rm /tmp/regulait-<sha>.tar.gz
+aws ssm start-session --profile regulait-demo-host --target <instance>
+```
+
+On the host (in the SSM session):
+
+```bash
+sudo -i
+mkdir -p /opt/releases/<sha> && cd /opt/releases/<sha>
+aws s3 cp s3://<source bucket>/regulait-<sha>.tar.gz - | tar xz
+ln -sfn /opt/releases/<sha> /opt/app && cd /opt/app   # /opt/app is always the current release
+bash infra/scripts/demo-host-env.sh check          # check: "all five parameters present and well-formed"
+bash infra/scripts/demo-host-env.sh write          # .env and docker-compose.override.yml, 0600; prints no value
+grep -c '^COMPOSE_PROJECT_NAME=regulait$' .env      # check: 1 (every release drives the same volumes)
+grep -c '^REGULAIT_DEMO_LICENSE' .env              # check: 0 (no sample-data prep on the live stack, §7.6 step 1)
+grep -c '^REGULAIT_CF_TUNNEL_TOKEN' .env           # check: 0 (the token never lands in a file)
+bash infra/scripts/demo-host-env.sh tunnel-check   # check: one "ok" line
+# Build and start everything EXCEPT the tunnel connector, so the laptop keeps serving until step f:
+bash infra/scripts/demo-host-env.sh compose --profile tunnel up -d --build --scale cloudflared=0
+docker compose ps                                   # check: gateway healthy, caddy-tunnel running, no cloudflared
+docker compose logs gateway | grep -c "demo prep"   # check: 0
+```
+
+Then the export-signing key and the nightly backup (§7.6 step 5; ADR-0035):
+
+```bash
+# on the host
+docker compose exec -e REGULAIT_DEMO_KEY_DIR=/app/demo-license-keys/export-signing gateway node apps/gateway/dist/demo-export-key.js
+# on the laptop
+ENV_DIR=infra/environments/demo-host/host AWS_PROFILE=regulait-demo-host AWS_REGION=<region> bash infra/scripts/install-pg-backup.sh
+# check: the output lists regulait-pg-backup.timer with a NEXT time
+```
+
+Do not run `docker compose ... down -v` on the host after step g, for the same reason as §7.6 ("Once only").
+**A later redeploy** of a new `<sha>` repeats this step into a new `/opt/releases/<sha>` and re-points the symlink; the
+fixed project name keeps the same containers and volumes. Before step g it is safe; after it, take a backup first.
+
+### 8 f. Move the tunnel connector from the laptop to the host (about 2 minutes)
+
+Both connectors use the same token, and Cloudflare would split traffic between two databases if both ran, so the
+laptop's goes first:
+
+```bash
+# laptop (in the TUNNEL.md shell)
+docker compose --profile tunnel stop cloudflared
+docker compose ps cloudflared       # check: not running
+# host (SSM session, in /opt/app, as root)
+bash infra/scripts/demo-host-env.sh compose --profile tunnel up -d cloudflared
+docker compose logs cloudflared | grep -c 'Registered tunnel connection'   # check: 1 or more
+```
+
+Check from any browser: `https://regulait.<domain>/ui` shows the sign-in page, and **Zero Trust › Networks › Tunnels** shows one
+connector, with the host's origin IP. From now on, **never run `docker compose --profile tunnel up -d` on the laptop
+without `--scale cloudflared=0`** until rollback (step h), or the laptop rejoins the tunnel.
+
+### 8 g. Prepare the live instance on the host, set up and rehearse (about 60 minutes)
+
+On the host, in the deploy folder, as root. These are the laptop recipes of §7.6 run on the host:
+
+1. **Live prep** (§7.6 step 6): `docker compose exec gateway node apps/gateway/dist/demo-prepare.js --live`. Expect
+   exactly one FAIL, "1 Real discovery sources".
+2. **Passwords and admin MFA** (§7.6 step 7), then **check** (§7.6 step 8).
+3. **Discovery and the sandbox trust.** The federation **issuer is unchanged** (ADR-0228: the same
+   `REGULAIT_PUBLIC_URL`), so the OIDC provider and trust need no re-pointing. The sources are new rows with **new
+   ids**, and each trust pins its source id: `DEMO_REAL_ACCOUNTS.md` step 1b (federation on), step 2 (create the
+   sources; copy their ids), then re-plan `demo-sandbox/aws` and `demo-sandbox/azure` with the new
+   `aws_discovery_source_id` and `azure_discovery_source_id`. Check each plan changes **only** the role trust subject
+   and the federated credential subject, then apply. Enable one source and run §7.6 step 8 again: 0 FAIL.
+4. **§7.11** (Act 3) and **§7.12** (Act 4) set-up rows, in their stated order (the Claude key after the
+   `demo:traffic` re-run). `GW` is the same `https://regulait.<domain>`.
+5. **`demo:relax-e`** at T-24h, before any E rehearsal (§7.3 row E): in the UI as Ada, or
+   `docker compose exec -e REGULAIT_DEMO_ADMIN_PASSWORD gateway node apps/gateway/dist/demo-relax-e.js` after reading
+   the password at a hidden prompt (`read -rs REGULAIT_DEMO_ADMIN_PASSWORD; export REGULAIT_DEMO_ADMIN_PASSWORD`).
+6. **G3 script** (§7.6): on the host, the same `~/g3.sh` one-liner, run in an SSM session. The terminal shown on
+   stage is that session.
+7. **Rehearsal**: the run of show (§3) end to end against `https://regulait.<domain>`, beats that change state on
+   FALLBACK only (§7.3), then `docker compose exec gateway node apps/gateway/dist/demo-check.js --live`: 0 FAIL.
+
+**Owner alternative (not scripted here):** instead of preparing afresh, restore the laptop's live database, its data
+key and its volumes onto the host. That keeps the source ids, the federation key and the MFA enrolments, so step 3's
+re-apply is not needed; it is a manual data migration with its own risk. Decide before step g.
+
+### 8 h. Rollback to the laptop (about 2 minutes)
+
+```bash
+# host (SSM session, in /opt/app, as root)
+docker compose --profile tunnel stop cloudflared
+# laptop (TUNNEL.md shell, token set)
+docker compose --profile tunnel up -d cloudflared
+docker compose logs cloudflared | grep -c 'Registered tunnel connection'   # check: 1 or more
+```
+
+The laptop's stack and database were left untouched, so it serves exactly what it served before step f. If step g
+re-applied the sandbox trust for the host's source ids, live discovery on the laptop fails until the trust is
+re-applied with the laptop's ids; the seeded discovery dataset remains its fallback (ADR-0203 decision 2).
+
+### 8 i. Cost
+
+| Item | About, per month (`us-east-1`, on demand) |
+| --- | --- |
+| `t3.xlarge` (4 vCPU, 16 GiB), always on | USD 120 |
+| EBS gp3, 40 GB root + 60 GB data | USD 8 |
+| public IPv4 (outbound only) | USD 4 |
+| KMS key, CloudWatch logs (30 days), backups (30 days) | under USD 5 |
+| Baseline: Config, Security Hub, GuardDuty, CloudTrail | about USD 5 to 15 |
+
+About USD 4 to 5 a day while it runs. The demo-host account's budget alert is USD 100 (80 % and forecast alerts). A
+`t3.large` (8 GiB) halves the instance cost but leaves little headroom for the on-host build. The **sandbox keeps its
+USD 50 cap** (ADR-0197); this host does not count against it and does not change it.
+
+### 8 j. Teardown after the demo (about 30 minutes)
+
+1. Stop the host's connector (step h, host half). Retire or keep the tunnel (TUNNEL.md "Stopping and rolling back").
+2. Take a last backup and check it: `aws ssm send-command ... '/usr/local/sbin/regulait-pg-backup.sh --run'`.
+3. `terraform destroy` in `demo-host/host`. The backup bucket refuses to be destroyed while it holds backups
+   (`force_destroy = false`); empty it by hand only once the backups are no longer wanted. The KMS key enters its
+   30-day deletion window.
+4. Delete the five SSM parameters: `aws ssm delete-parameters --profile regulait-demo-host --names ...`.
+5. Keep `demo-host/baseline` until the ADR-0013 successor (Fargate, RDS, WAF, HA) replaces it, or destroy it.
+6. `terraform destroy` in `demo-host/account` closes the member account (`close_on_deletion`); AWS keeps it suspended
+   for 90 days.
+7. Keep the laptop stack until the host's backups are confirmed; after that the laptop holds nothing the demo needs.

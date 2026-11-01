@@ -46,3 +46,13 @@ output "security_group_id" {
 output "sslip_hostname" {
   value = local.effective_public_ip == "" ? "" : "${replace(local.effective_public_ip, ".", "-")}.sslip.io"
 }
+
+output "data_volume_id" {
+  description = "The encrypted data volume, or null when data_volume_size_gb is 0."
+  value       = var.data_volume_size_gb > 0 ? aws_ebs_volume.data[0].id : null
+}
+
+output "ingress_rule_count" {
+  description = "Number of ingress rules on the security group. 0 with ingress_enabled = false."
+  value       = length(aws_security_group.app.ingress)
+}

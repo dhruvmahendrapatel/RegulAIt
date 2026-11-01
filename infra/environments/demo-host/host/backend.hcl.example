@@ -1,0 +1,8 @@
+# Copy to backend.hcl (git-ignored), or let infra/bootstrap/bootstrap-backend.sh write it.
+bucket         = "regulait-terraform-state-<company-account-id>"
+key            = "demo-host/host/terraform.tfstate"
+dynamodb_table = "regulait-terraform-locks"
+kms_key_id     = "<kms-key-id-from-bootstrap-output>"
+region         = "<aws-region>"
+encrypt        = true
+profile        = "<company-account-sso-profile-name>"

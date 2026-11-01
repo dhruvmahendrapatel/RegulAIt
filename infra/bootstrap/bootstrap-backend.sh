@@ -9,7 +9,7 @@
 # Run it from Git Bash or any bash, after `aws sso login --profile <profile>`:
 #
 #   AWS_PROFILE=<profile> AWS_REGION=<region> EXPECTED_ACCOUNT_ID=<12 digits> \
-#     infra/bootstrap/bootstrap-backend.sh [--preflight-only]
+#     infra/bootstrap/bootstrap-backend.sh [--preflight-only | --write-backend-config]
 #
 # Fails closed before creating anything when:
 # - the profile resolves to any account other than EXPECTED_ACCOUNT_ID;
@@ -18,14 +18,45 @@
 # - the state bucket, lock table or KMS alias already exists (no re-use of a
 #   half-built or foreign backend; this is a rare, deliberate, human action).
 # --preflight-only runs those checks and the SCP policy-type check, then stops.
+# --write-backend-config (ADR-0228) is for a backend that ALREADY exists (an
+#   earlier run): same account and session checks, then it requires the bucket,
+#   table and alias to exist, creates nothing in AWS, and writes only the
+#   missing backend.hcl files.
 set -euo pipefail
 
 PREFLIGHT_ONLY=false
+WRITE_CONFIG_ONLY=false
 case "${1:-}" in
   "") ;;
   --preflight-only) PREFLIGHT_ONLY=true ;;
-  *) echo "Usage: $0 [--preflight-only]" >&2; exit 2 ;;
+  --write-backend-config) WRITE_CONFIG_ONLY=true ;;
+  *) echo "Usage: $0 [--preflight-only | --write-backend-config]" >&2; exit 2 ;;
 esac
+
+# Every stack whose backend.hcl this script writes (never overwritten).
+STACKS=(demo-sandbox/account demo-sandbox/aws demo-host/account demo-host/baseline demo-host/host)
+
+write_backend_files() {
+  local env_root target
+  env_root="$(cd "$(dirname "$0")/../environments" && pwd)"
+  for STACK in "${STACKS[@]}"; do
+    target="${env_root}/${STACK}/backend.hcl"
+    if [ -e "${target}" ]; then
+      echo "Kept existing ${target}; check it matches the values below."
+      continue
+    fi
+    cat > "${target}" <<BACKEND
+bucket         = "${BUCKET_NAME}"
+key            = "${STACK}/terraform.tfstate"
+dynamodb_table = "${TABLE_NAME}"
+kms_key_id     = "${KEY_ID}"
+region         = "${AWS_REGION}"
+encrypt        = true
+profile        = "${AWS_PROFILE}"
+BACKEND
+    echo "Wrote ${target}"
+  done
+}
 
 fail() { echo "REFUSED: $*" >&2; exit 1; }
 # Text output of the Windows aws.exe under Git Bash ends lines in CR.
@@ -62,8 +93,20 @@ BUCKET_NAME="regulait-terraform-state-${ACCOUNT_ID}"
 TABLE_NAME="regulait-terraform-locks"
 KMS_ALIAS="alias/regulait-terraform-state"
 
+if [ "${WRITE_CONFIG_ONLY}" = true ]; then
+  aws s3api head-bucket --bucket "${BUCKET_NAME}" >/dev/null 2>&1 \
+    || fail "bucket ${BUCKET_NAME} does not exist; run without --write-backend-config first."
+  aws dynamodb describe-table --table-name "${TABLE_NAME}" >/dev/null 2>&1 \
+    || fail "table ${TABLE_NAME} does not exist in ${AWS_REGION}."
+  KEY_ID=$(awsq kms describe-key --key-id "${KMS_ALIAS}" --query KeyMetadata.KeyId --output text) \
+    || fail "KMS alias ${KMS_ALIAS} does not exist in ${AWS_REGION}."
+  write_backend_files
+  echo "Backend config written for account ${ACCOUNT_ID}; nothing created in AWS."
+  exit 0
+fi
+
 if aws s3api head-bucket --bucket "${BUCKET_NAME}" >/dev/null 2>&1; then
-  fail "bucket ${BUCKET_NAME} already exists."
+  fail "bucket ${BUCKET_NAME} already exists (use --write-backend-config for the backend.hcl files)."
 fi
 if aws dynamodb describe-table --table-name "${TABLE_NAME}" >/dev/null 2>&1; then
   fail "table ${TABLE_NAME} already exists in ${AWS_REGION}."
@@ -150,24 +193,7 @@ aws dynamodb create-table \
   --sse-specification Enabled=true,SSEType=KMS,KMSMasterKeyId="${KEY_ID}"
 
 # --- 5. backend.hcl per environment (git-ignored; never overwritten) -------------
-ENV_ROOT="$(cd "$(dirname "$0")/../environments" && pwd)"
-for STACK in demo-sandbox/account demo-sandbox/aws; do
-  TARGET="${ENV_ROOT}/${STACK}/backend.hcl"
-  if [ -e "${TARGET}" ]; then
-    echo "Kept existing ${TARGET}; check it matches the values below."
-    continue
-  fi
-  cat > "${TARGET}" <<BACKEND
-bucket         = "${BUCKET_NAME}"
-key            = "${STACK}/terraform.tfstate"
-dynamodb_table = "${TABLE_NAME}"
-kms_key_id     = "${KEY_ID}"
-region         = "${AWS_REGION}"
-encrypt        = true
-profile        = "${AWS_PROFILE}"
-BACKEND
-  echo "Wrote ${TARGET}"
-done
+write_backend_files
 
 cat <<DONE
 
