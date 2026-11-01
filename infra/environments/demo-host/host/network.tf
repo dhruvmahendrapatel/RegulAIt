@@ -13,6 +13,9 @@
 
 data "aws_availability_zones" "available" {
   state = "available"
+  # use1-az3 does not offer the t3 family; excluding it keeps the instance type
+  # valid whichever AZ names map to this account.
+  exclude_zone_ids = ["use1-az3"]
 }
 
 locals {

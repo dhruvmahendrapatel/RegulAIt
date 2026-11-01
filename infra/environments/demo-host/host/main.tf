@@ -25,11 +25,6 @@ data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
 data "aws_partition" "current" {}
 
-# Fails the plan, clearly, if the break-glass baseline has not created it yet.
-data "aws_iam_policy" "host_role_boundary" {
-  name = "regulait-demo-host-boundary"
-}
-
 locals {
   account_id = data.aws_caller_identity.current.account_id
   region     = data.aws_region.current.region
@@ -38,8 +33,11 @@ locals {
   ssm_prefix = "/regulait/demo-host"
 
   # Created by the break-glass baseline (../baseline/host-foundation.tf). The
-  # deployer may only create roles that carry it.
-  boundary_arn = data.aws_iam_policy.host_role_boundary.arn
+  # deployer may only create roles that carry it. Built, not looked up: the
+  # deployer is denied every iam:* action on the boundary policy, GetPolicy
+  # included, so a data source would fail the plan. If the baseline has not
+  # created the boundary, role creation now fails at apply, not at plan.
+  boundary_arn = "arn:${local.partition}:iam::${local.account_id}:policy/regulait-demo-host-boundary"
 
   # Outbound only what the host needs: HTTPS (AWS endpoints, package and image
   # registries, the model provider and the demo integrations) and cloudflared's
@@ -155,6 +153,10 @@ module "app" {
   assign_elastic_ip = false
 
   tags = local.tags
+
+  # Boot needs the NAT route and the SSM endpoints in place, or the first dnf
+  # and curl calls race the network and user-data fails.
+  depends_on = [module.vpc, module.endpoints]
 }
 
 # The instance's own extra permissions, each scoped to one resource. With
