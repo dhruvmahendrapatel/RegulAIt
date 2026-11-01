@@ -641,3 +641,14 @@ its own page) first declared every sub-page as its own lazy route in `App.tsx`, 
 - The SPA route census (`scripts/ui-spa-routes.mjs`) now follows a splat whose element is such a lazy area module —
   through its screen barrel's `export … from` re-export — into that module's `<Routes>`, so every sub-page is still
   enumerated for the enterprise harness and the census output is unchanged.
+
+## Addendum / As built (2026-11-01) — the P3 account split adds 12 B to the entry bundle
+
+The P3 split on the Account page (devices and sessions, passkeys: a five-row preview each, every row on its own page)
+follows the identity-and-access addendum above: `/account/*` is one lazy route whose module
+(`views/account/AccountSubpages.tsx`) owns a nested `<Routes>` with the Account page at the index and
+`sessions` and `passkeys` beneath it. The route census follows it unchanged. The Organisation settings page has no list
+that grows, so nothing on it moved.
+
+- Entry JS measured 138,097 B before and 138,109 B after on the same lockfile; all JS 1,077,999 B before and
+  1,078,404 B after. No ceiling changes.

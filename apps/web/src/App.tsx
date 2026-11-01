@@ -48,7 +48,9 @@ const ProjectContextPage = screen(() => import("./screens/projects"), "ProjectCo
 const ContextGraphPage = screen(() => import("./screens/projects"), "ContextGraphPage");
 const ContextIndexPage = screen(() => import("./screens/projects"), "ContextIndexPage");
 const SpendPage = lazy(() => import("./views/spend/SpendPage"));
-const AccountPage = lazy(() => import("./views/account/AccountPage"));
+// P3 (#453): the Account area (the Account page + its full sessions and passkeys lists) as one lazy chunk owning its
+// nested <Routes> (views/account/AccountSubpages.tsx); the SPA route census follows it.
+const AccountArea = lazy(() => import("./views/account/AccountSubpages"));
 const UsersPage = screen(() => import("./screens/admin-identity-access"), "UsersPage");
 const RolesPage = screen(() => import("./screens/admin-identity-access"), "RolesPage");
 const TeamsPage = screen(() => import("./screens/admin-identity-access"), "TeamsPage");
@@ -218,7 +220,7 @@ function ApplicationRoutes() {
         <Route path="/projects/:projectId/context/graph" element={<ContextGraphPage />} />
         <Route path="/context" element={<ContextIndexPage />} />
         <Route path="/spend" element={<SpendPage />} />
-        <Route path="/account" element={<AccountPage />} />
+        <Route path="/account/*" element={<AccountArea />} />
         {/* ADR-0182 (D4): outside RequireAdmin — anyone may report an incident
             or a problem; the server filters what each person may see */}
         <Route path="/incidents" element={<IncidentsPage />} />
