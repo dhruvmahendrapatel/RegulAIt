@@ -1554,9 +1554,9 @@ volumes untouched until teardown (8.11). The laptop is the rollback (8.10).
 | When (Sunday) | Steps | Time |
 | --- | --- | --- |
 | Morning | 8.2 tools, Identity Center, the deployer permission set and MFA; 8.3 backend; 8.4 Terraform apply, patch, security-control checks | 2 to 3 h |
-| Late morning | 8.5 secrets, 8.6 deploy the stack (secrets in tmpfs, container hardening) | about 45 min |
+| Late morning | 8.5 secrets (only after 8.4 steps 4 and 5: it needs `alias/regulait-demo-host` and the parameters the host apply writes), 8.6 deploy the stack (secrets in tmpfs, container hardening) | about 45 min |
 | Midday | 8.7 move the tunnel; 8.7 b Cloudflare Access, TLS and rate limit | 30 min |
-| Afternoon | 8.8 live prepare, discovery trust, §7.11, §7.12, `demo:relax-e`, then 8.9 rehearsal on the instance | 2 to 3 h |
+| Afternoon | 8.8 live prepare, discovery trust, §7.11, §7.12, beat E's strict-mode check (8.8 step 6; no relaxation), then 8.9 rehearsal on the instance | 2 to 3 h |
 | Evening | **Buffer.** 8.13 rotate the demo password; 8.9 a go-live posture checklist; a backup; rehearse the rollback command (8.10) up to the point of running it | 1 h |
 | Monday 2026-11-02 | The demo, on the host. 8.10 stays ready in an open PowerShell window | — |
 
@@ -1792,15 +1792,44 @@ $Policy = @'
 }
 '@
 $Policy = $Policy.Replace('HOST_ACCOUNT_ID', $HostAccount)
-$PolicyFile = New-TemporaryFile; [IO.File]::WriteAllText($PolicyFile.FullName, $Policy)
-$Pol = "file://$($PolicyFile.FullName)"
 $Bnd = "arn:aws:iam::$($HostAccount):policy/regulait-demo-host-boundary"
 $Mgmt = '<company account id>'
-function Sim([string[]]$Actions, [string]$Resource, [string[]]$Context = @()) {
-  $a = @('iam', 'simulate-custom-policy', '--profile', '<break-glass profile>', '--policy-input-list', $Pol,
-         '--action-names') + $Actions + @('--resource-arns', $Resource)
-  if ($Context.Count) { $a += @('--context-entries') + $Context }
-  aws @a --query 'EvaluationResults[].[EvalActionName,EvalDecision]' --output text
+# SimulateCustomPolicy accepts at most 2,000 characters per PolicyInputList member, and this policy is about 8.4 KB.
+# So the simulator gets the policy split into several documents, each statement kept whole. The split is equivalent:
+# IAM evaluates the policies in PolicyInputList as the union of their allows, and any explicit Deny wins, so every
+# request gets the same decision as under the single policy. The permission set still gets $Policy, unchanged.
+# Split the policy into simulator-sized documents, each statement whole (simulator only; the permission set gets $Policy unchanged)
+function Split-PolicyDocs([string]$Json) {
+  $stmts = @(($Json | ConvertFrom-Json).Statement)
+  $docs = New-Object System.Collections.Generic.List[string]; $cur = @()
+  foreach ($s in $stmts) {
+    $try = [ordered]@{ Version = '2012-10-17'; Statement = @($cur + $s) } | ConvertTo-Json -Depth 20 -Compress
+    if ($try.Length -gt 1900 -and $cur.Count -gt 0) {
+      $docs.Add(([ordered]@{ Version = '2012-10-17'; Statement = @($cur) } | ConvertTo-Json -Depth 20 -Compress)); $cur = @($s)
+    } else { $cur = @($cur + $s) }
+  }
+  if ($cur.Count) { $docs.Add(([ordered]@{ Version = '2012-10-17'; Statement = @($cur) } | ConvertTo-Json -Depth 20 -Compress)) }
+  $n = 0; foreach ($d in $docs) { $n += @(($d | ConvertFrom-Json).Statement).Count; if ($d.Length -gt 2000) { throw "split doc too long: $($d.Length)" } }
+  if ($n -ne $stmts.Count) { throw "statement count mismatch: $n vs $($stmts.Count)" }
+  "simulator docs: $($docs.Count), statements: $n of $($stmts.Count), longest: $(($docs | ForEach-Object Length | Measure-Object -Maximum).Maximum)" | Write-Host
+  return ,$docs.ToArray()
+}
+$PolDocs = Split-PolicyDocs $Policy
+# Success: a line like "simulator docs: 5, statements: N of N, longest: <2000". If it throws, stop.
+
+# --cli-input-json avoids PowerShell's native-argument quoting problems in 5.1 and 7
+function Sim([string[]]$Actions, [string]$Resource, [string[]]$Context = @(), [string[]]$Docs = $PolDocs) {
+  $req = [ordered]@{ PolicyInputList = @($Docs); ActionNames = @($Actions); ResourceArns = @($Resource) }
+  if ($Context.Count) {
+    $req.ContextEntries = @($Context | ForEach-Object {
+      $kv = @{}; foreach ($p in ($_ -split ',')) { $k, $v = $p -split '=', 2; $kv[$k] = $v }
+      [ordered]@{ ContextKeyName = $kv.ContextKeyName; ContextKeyValues = @($kv.ContextKeyValues); ContextKeyType = $kv.ContextKeyType } })
+  }
+  $f = New-TemporaryFile
+  [IO.File]::WriteAllText($f.FullName, ($req | ConvertTo-Json -Depth 20))
+  aws iam simulate-custom-policy --profile '<break-glass profile>' --cli-input-json "file://$($f.FullName)" `
+    --query 'EvaluationResults[].[EvalActionName,EvalDecision]' --output text
+  Remove-Item $f
 }
 # P1. A role named like the old budget-action role, or any role, without the boundary
 Sim iam:CreateRole,iam:PutRolePolicy,iam:AttachRolePolicy "arn:aws:iam::$($HostAccount):role/regulait-x-budget-action"
@@ -1840,16 +1869,19 @@ Sim iam:CreateRole "arn:aws:iam::$($HostAccount):role/regulait-demo-host-x" "Con
 Sim ssm:StartSession "arn:aws:ssm:<region>:$($HostAccount):document/SSM-SessionManagerRunShell"
 Sim iam:PassRole "arn:aws:iam::$($HostAccount):role/regulait-demo-host-dlm" "ContextKeyName=iam:PassedToService,ContextKeyValues=dlm.amazonaws.com,ContextKeyType=string"
 # Success for P5: all three allowed (a bounded role; a session through the default, logged document; the DLM role
-#   passed to DLM, which the host stack's snapshot policy needs)
+#   passed to DLM, which the host stack's snapshot policy needs). Any allowed outside P5 means stop.
 
 $Ic = aws sso-admin list-instances --profile <break-glass profile> --query 'Instances[0].InstanceArn' --output text
 $Dep = aws sso-admin create-permission-set --profile <break-glass profile> --instance-arn $Ic --name RegulAItDemoDeployer `
   --session-duration PT4H --description 'ADR-0228 demo host deployer, host account only' --query PermissionSet.PermissionSetArn --output text
+# The permission set gets the single, UNCHANGED $Policy (never the split simulator documents), from its own temp file
+$PolicyFile = New-TemporaryFile; [IO.File]::WriteAllText($PolicyFile.FullName, $Policy)
 aws sso-admin put-inline-policy-to-permission-set --profile <break-glass profile> --instance-arn $Ic --permission-set-arn $Dep `
-  --inline-policy $Pol
+  --inline-policy "file://$($PolicyFile.FullName)"
 Remove-Item $PolicyFile
 $Me = aws identitystore list-users --profile <break-glass profile> --identity-store-id (aws sso-admin list-instances --profile <break-glass profile> --query 'Instances[0].IdentityStoreId' --output text) `
   --filter 'AttributePath=UserName,AttributeValue=<your-user-name>' --query 'Users[0].UserId' --output text
+if (-not $Me -or $Me -eq 'None') { throw 'No Identity Center user has that user name: check <your-user-name>. Nothing was assigned.' }
 # The ONLY assignment: the host account. Never the management account.
 aws sso-admin create-account-assignment --profile <break-glass profile> --instance-arn $Ic --target-id $HostAccount `
   --target-type AWS_ACCOUNT --permission-set-arn $Dep --principal-type USER --principal-id $Me
@@ -1876,9 +1908,20 @@ aws s3 ls --profile regulait-demo-host "s3://regulait-terraform-state-<company a
 # host/terraform.tfvars: host_account_id = "<host account id>", host_sso_profile = "regulait-demo-host"
 Set-Location infra/environments/demo-host/host
 terraform init -backend-config=backend.hcl
-terraform plan -out=tfplan      # Success: no ingress block on the security group, no key_name, encrypted = true on both
-                                #          volumes, and every aws_iam_role has permissions_boundary = ...regulait-demo-host-boundary
-terraform apply tfplan
+# AWS_PROFILE and AWS_REGION cleared. The FIRST apply on a fresh stack is two passes (see the note below the block).
+# 4a. Only the two inputs module.app needs: the host key and alias, and the VPC
+Remove-Item .\tfplan -ErrorAction SilentlyContinue
+terraform plan -target='aws_kms_key.host' -target='aws_kms_alias.host' -target='module.vpc' -out tfplan-a
+# Success: creates only the KMS key and alias/regulait-demo-host; the module.vpc resources (VPC, subnets, internet
+#          gateway, NAT gateway and EIP, route tables and associations, the flow log with its log group and its role,
+#          carrying the boundary); and anything Terraform adds as their dependencies. 0 to change, 0 to destroy; no
+#          aws_instance and no security group with ingress. The -target warning is expected.
+terraform apply tfplan-a        # only after the owner has read the plan and said yes
+# 4b. The full plan, read in full
+terraform plan -out=tfplan      # Success: no errors; everything else to add, 0 to change, 0 to destroy; no ingress block
+                                #          on the security group, no key_name, encrypted = true on both volumes, and every
+                                #          aws_iam_role has permissions_boundary = ...regulait-demo-host-boundary
+terraform apply tfplan          # only after the owner has read the plan and said yes
 $env:DEMO_INSTANCE = terraform output -raw instance_id
 $SrcBucket = terraform output -raw source_bucket
 terraform output ingress_rule_count   # Success: 0
@@ -1895,11 +1938,22 @@ aws iam simulate-principal-policy --profile regulait-demo-host --policy-source-a
   --action-names iam:CreateRole cloudtrail:StopLogging kms:ScheduleKeyDeletion s3:DeleteObject logs:DeleteLogGroup `
   --query 'EvaluationResults[].[EvalActionName,EvalDecision]' --output text
 # Success: every line ends in explicitDeny or implicitDeny
+# One call per role: with several --resource-arns, EvalDecision is the aggregate across them (one line, not two)
 aws iam simulate-principal-policy --profile regulait-demo-host --policy-source-arn $Inst --action-names sts:AssumeRole `
-  --resource-arns "arn:aws:iam::$($HostAccount):role/regulait-demo-host-anchor" "arn:aws:iam::$($HostAccount):role/OrganizationAccountAccessRole" `
+  --resource-arns "arn:aws:iam::$($HostAccount):role/regulait-demo-host-anchor" `
   --query 'EvaluationResults[].[EvalResourceName,EvalDecision]' --output text
-# Success: the anchor role allowed; OrganizationAccountAccessRole explicitDeny
+# Success: the anchor role allowed
+aws iam simulate-principal-policy --profile regulait-demo-host --policy-source-arn $Inst --action-names sts:AssumeRole `
+  --resource-arns "arn:aws:iam::$($HostAccount):role/OrganizationAccountAccessRole" `
+  --query 'EvaluationResults[].[EvalResourceName,EvalDecision]' --output text
+# Success: OrganizationAccountAccessRole explicitDeny
 ```
+
+**Why two passes on the first apply.** `module.app` sets `count` from `var.vpc_id == ""` and `var.kms_key_arn == null`.
+On a fresh stack both values come from resources in this same stack, so they are unknown at plan time, and a single
+plan stops with `Invalid count argument`. Pass 1 creates those inputs; pass 2 is the full plan. Later applies on an
+existing stack are one pass (4b alone). **Post-demo follow-up:** change the module to take known booleans instead of
+the null and empty checks, so a fresh stack plans in one pass.
 
 **If the host apply times out or fails part-way:**
 
@@ -1930,14 +1984,13 @@ $Cur = ((aws sso-admin get-inline-policy-for-permission-set --profile <break-gla
 if ($Cur -match 'DenyChangingEvidenceConfigurationAfterFirstApply') { 'already locked' } else {
   $New = $Cur.Substring(0, $Cur.LastIndexOf(']')).TrimEnd() + ', ' + $Lock + ']}'
   $F = New-TemporaryFile; [IO.File]::WriteAllText($F.FullName, $New)
-  # Proof before it is applied: the locked calls are denied, an ordinary PutObject on the backups is not
-  aws iam simulate-custom-policy --profile <break-glass profile> --policy-input-list "file://$($F.FullName)" `
-    --action-names s3:PutLifecycleConfiguration s3:PutBucketPolicy s3:PutBucketVersioning s3:PutEncryptionConfiguration s3:PutObject `
-    --resource-arns "arn:aws:s3:::regulait-demo-host-db-backup-$HostAccount" --query 'EvaluationResults[].[EvalActionName,EvalDecision]' --output text
-  aws iam simulate-custom-policy --profile <break-glass profile> --policy-input-list "file://$($F.FullName)" `
-    --action-names logs:PutRetentionPolicy --resource-arns "arn:aws:logs:<region>:$($HostAccount):log-group:/regulait/demo-host/ssm-sessions" `
-    --query 'EvaluationResults[].[EvalActionName,EvalDecision]' --output text
+  # Proof before it is applied: the locked calls are denied, an ordinary PutObject on the backups is not.
+  # Split-PolicyDocs and Sim are step 3's; in a new window, paste those two functions again first.
+  $NewDocs = Split-PolicyDocs $New
+  Sim s3:PutLifecycleConfiguration,s3:PutBucketPolicy,s3:PutBucketVersioning,s3:PutEncryptionConfiguration,s3:PutObject "arn:aws:s3:::regulait-demo-host-db-backup-$HostAccount" @() $NewDocs
+  Sim logs:PutRetentionPolicy "arn:aws:logs:<region>:$($HostAccount):log-group:/regulait/demo-host/ssm-sessions" @() $NewDocs
   # Success: the four s3:Put*Bucket*/Lifecycle/Encryption lines and logs:PutRetentionPolicy explicitDeny; s3:PutObject allowed
+  # The permission set gets the file holding $New, unchanged (never the split documents)
   aws sso-admin put-inline-policy-to-permission-set --profile <break-glass profile> --instance-arn $Ic --permission-set-arn $Dep --inline-policy "file://$($F.FullName)"
   aws sso-admin provision-permission-set --profile <break-glass profile> --instance-arn $Ic --permission-set-arn $Dep --target-type ALL_PROVISIONED_ACCOUNTS
   Remove-Item $F
@@ -2094,6 +2147,9 @@ aws dlm get-lifecycle-policies --profile $H --query 'Policies[].[PolicyId,State]
 ```
 
 ### 8.5 Secrets into SSM Parameter Store (about 10 minutes)
+
+**Order: 8.5 runs after 8.4 steps 4 and 5, not after step 3.** It encrypts with `alias/regulait-demo-host`, which the
+host stack creates (8.4 step 4a), and its check expects the parameters the host apply writes.
 
 There are five parameters under `/regulait/demo-host/`. Each secret is a **SecureString encrypted with
 `alias/regulait-demo-host`**.
@@ -2413,14 +2469,13 @@ answer a prompt.
    export BOOT
    ```
 
-6. **`demo:relax-e`** at T-24h, before any E rehearsal (§7.3 row E). Do it either in the UI as Ada, or in an SSM shell:
+6. **Beat E runs in strict mode (owner ruling, #453).** Do not run `demo:relax-e` and do not relax either setting on
+   the host. Before any E rehearsal, confirm the strict set-up:
+   - the sensitive-data approval quorum is **2** and tool-call approval signing (passkey) is **on**;
+   - **Avery and Morgan are both named** on the `write_file` approval rule;
+   - **Avery and Morgan each have an enrolled passkey**, in their own browser profiles.
 
-   ```bash
-   # on the host, as root, in /opt/app
-   printf 'Ada password: '; read -rs REGULAIT_DEMO_ADMIN_PASSWORD; echo; export REGULAIT_DEMO_ADMIN_PASSWORD
-   docker compose exec -e REGULAIT_DEMO_ADMIN_PASSWORD gateway node apps/gateway/dist/demo-relax-e.js
-   unset REGULAIT_DEMO_ADMIN_PASSWORD
-   ```
+   `demo:check` row **E Enforce it** FAILs under strict mode. That is expected and is not a blocker.
 
 7. **G3** (§7.6): the stage terminal is an SSM shell on the host. Make the script once:
 
