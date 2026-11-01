@@ -76,3 +76,12 @@ output "session_log_group" {
 output "flow_log_destination_arn" {
   value = module.vpc.vpc_flow_log_destination_arn
 }
+
+output "anchor_bucket" {
+  value = module.anchor.bucket
+}
+
+output "anchor_object_lock" {
+  description = "Must read COMPLIANCE / <anchor_retention_days>."
+  value       = "${module.anchor.object_lock_mode} / ${module.anchor.retention_days}"
+}

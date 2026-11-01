@@ -20,11 +20,12 @@ public hostname, and `H` for the CLI profile of the demo-host account.
  │  VPC (dedicated) ─ private subnet ─ EC2 (no public IPv4, 0 ingress rules, IMDSv2 hop 1)      │
  │      │  docker compose: cloudflared → caddy-tunnel → gateway → postgres / object store       │
  │      │  egress SG: 443/tcp, 7844/tcp+udp only ─► NAT gateway (public subnet) ─► internet       │
- │      └─ VPC endpoints (ssm, ssmmessages, ec2messages, kms, logs; S3 gateway): AWS control     │
+ │      └─ VPC endpoints (ssm, ssmmessages, ec2messages, kms, logs, sts; S3 gateway): AWS control     │
  │         traffic stays on the AWS network                                                      │
  │  KMS CMK (rotation on): EBS root + data, SSM SecureStrings, session data, logs, backups       │
  │  CloudWatch Logs (KMS): containers, SSM session transcripts, VPC flow logs                    │
- │  S3 (KMS, versioned, TLS-only, public access blocked): source bundle, nightly pg_dump         │
+ │  S3 (KMS, versioned, TLS-only, public access blocked): source bundle, nightly pg_dump,       │
+ │     audit-chain anchors (Object Lock COMPLIANCE)                                              │
  └───────────────────────────────────────────────────────────────────────────────────────────────┘
  Organization (management account): CloudTrail all regions + log-file validation (KMS, TLS-only bucket),
  GuardDuty, Security Hub (FSBP + CIS), AWS Config + aggregator, SCPs (region allow-list, no leaving the
@@ -75,6 +76,7 @@ Run each proof with `--profile H` (the demo-host account) unless it says managem
 | D5 | IAM Access Analyzer (account) | `detection.tf` | `aws accessanalyzer list-analyzers --type ACCOUNT` |
 | D6 | Amazon Inspector, EC2 and ECR | `detection.tf` | `aws inspector2 batch-get-account-status` |
 | D7 | Budgets alarm | `demo-host/account` (and the baseline's org budget) | management: `aws budgets describe-budgets --account-id <id>` |
+| D9 | Audit-chain anchors in S3 Object Lock **COMPLIANCE** mode (beat G8): versioned, Block Public Access, SSE-KMS with the host key, TLS-only; default retention 7 days; the gateway writes through a dedicated role that cannot delete, bypass or weaken, using 1-hour credentials refreshed by the host (IMDS stays at hop limit 1) | `host/anchor.tf` (reuses `modules/audit-anchor-worm-s3`); `infra/scripts/demo-host-anchor-creds.sh`; existing `REGULAIT_AUDIT_ANCHOR_S3_*` variables | `aws s3api get-object-lock-configuration --bucket <anchor bucket>` → `Enabled COMPLIANCE 7`; on the host `GET /v1/audit/anchors` → `sink.mode compliance`, `tamperResistant true` |
 | D8 | Encrypted snapshots (DLM, daily, 7 kept) and nightly verified `pg_dump` (KMS, versioned, writer cannot read or delete) | `detection.tf`; `module.db_backup`; `infra/scripts/pg-backup.sh` | `aws dlm get-lifecycle-policies`; on the host `/usr/local/sbin/regulait-pg-backup.sh --check`; `aws cloudwatch describe-alarms --alarm-name-prefix regulait-demo-host` |
 | S1 | Secrets only in SSM SecureString (CMK); created at a hidden prompt; never in state, user-data, history or logs | §8.5; `infra/scripts/demo-host-env.sh` (no tracing, never prints a value) | `aws ssm get-parameters-by-path --path /regulait/demo-host --query 'Parameters[].[Name,Type]'` (no decryption); `terraform state list` holds no `aws_ssm_parameter` |
 | S2 | Secrets fetched at boot into tmpfs | `demo-host-env.sh write` and `install-boot` (`/run/regulait/env`, 0600; `.env` is a symlink) | on the host: `stat -f -c %T /run` → `tmpfs`; `readlink /opt/app/.env` |
@@ -93,7 +95,7 @@ Run each proof with `--profile H` (the demo-host account) unless it says managem
 | Threat | Example against this host | Mitigation | Residual |
 | --- | --- | --- | --- |
 | **Spoofing** | Someone reaches the UI pretending to be a reviewer; a forged federation token | Cloudflare Access in front; app sign-in with admin MFA and step-up; federation tokens signed by the host's key and verified by the clouds against its JWKS | Machine paths (`/federation`, `/mcp`, webhooks) bypass Access and rely on the app's own authentication and signatures |
-| **Tampering** | Altering the instance, its images, or the audit trail | No inbound path; digest-pinned images; IMDS hop limit 1; CloudTrail with log-file validation; the app's tamper-evident audit chain; versioned backups the host cannot delete | Root on the host can alter live containers and the live database |
+| **Tampering** | Altering the instance, its images, or the audit trail | No inbound path; digest-pinned images; IMDS hop limit 1; CloudTrail with log-file validation; the app's tamper-evident audit chain, its head anchored in S3 Object Lock COMPLIANCE mode, so a recomputed chain diverges from an anchor nobody can rewrite; versioned backups the host cannot delete | Root on the host can alter the live database between anchors; the anchor bucket can be destroyed wholesale only after retention, and verification then reports the anchor missing |
 | **Repudiation** | An operator denies a change | Identity Center sign-in with MFA; CloudTrail; every SSM session transcribed to a KMS-encrypted log group; app audit log | The transcript records only what the session shows |
 | **Information disclosure** | Secrets or data leaking via logs, state, disks, or the edge | SecureStrings with a CMK; never in Terraform state or user-data; tmpfs env file; KMS on every volume, log group and bucket; TLS-only buckets; synthetic data only | Cloudflare's edge decrypts traffic; Docker keeps container environment in its config on the encrypted data volume; `AmazonSSMManagedInstanceCore` grants `ssm:GetParameter` on `*` (the account holds only this host's parameters) |
 | **Denial of service** | Flooding the hostname; the host sleeping or being stopped | Cloudflare rate limit and edge; power schedule off; budget alerts; laptop rollback in 2 minutes | Single instance, single AZ, single NAT gateway: no HA before the demo |
@@ -119,7 +121,9 @@ Run each proof with `--profile H` (the demo-host account) unless it says managem
 8. **The bootstrap token** is a full-admin credential, held in SSM until teardown or removal (§8.13).
 9. **Egress to any destination on 443.** Package registries, the model provider and the integrations have no stable
    address list, so there is no domain-level egress filter before the demo.
-10. **Not yet executed.** Nothing here has been applied. The controls are proven only once the owner applies them
+10. **Short anchor retention.** Anchors are kept 7 days (a demo setting). After that they can be deleted, so the
+    proof covers the demo window, not a production retention period.
+11. **Not yet executed.** Nothing here has been applied. The controls are proven only once the owner applies them
     and runs the checks in §8.4 and §8.9 a.
 
 ## 5. Teardown plan
@@ -131,7 +135,9 @@ After the demo (DEMO_RUNBOOK.md §8.11 and §8.13), in this order:
 3. Take a final verified backup.
 4. Run `terraform destroy` on `demo-host/host`. This terminates the instance and deletes the volumes, VPC, endpoints
    and NAT gateway. The KMS key enters a 30-day deletion window. The backup bucket refuses deletion while it holds
-   backups.
+   backups. The **audit-anchor bucket cannot be emptied until its COMPLIANCE retention ends**, which is up to 7 days:
+   no principal, root included, can delete a locked anchor. It is removed from state, outlives the stack by up to the
+   retention period, and is deleted by hand afterwards (DEMO_RUNBOOK.md §8.11).
 5. Delete the SSM parameters.
 6. Keep `demo-host/baseline` (the organization's audit trail) until its successor exists.
 7. Run `terraform destroy` on `demo-host/account`. This closes the account, and AWS keeps it suspended for 90 days.

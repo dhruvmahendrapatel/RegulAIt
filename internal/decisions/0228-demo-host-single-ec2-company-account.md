@@ -149,3 +149,34 @@ for the host to be as secure as possible. Added in the same PR:
   data-flow boundary, the control table with a CLI proof per control, a one-page STRIDE model, residual risks and the
   teardown plan. §8.9 a is the app posture checklist: step-up required, admin MFA, synthetic data, demo password
   rotated, strict CSP and CORS.
+
+## Addendum 2: 2026-11-01, audit-chain anchor in S3 Object Lock COMPLIANCE mode
+
+The security team will see beat G8 (Verify chain, anchor grade). The gateway grades its anchor store by the store's
+own answer, and only COMPLIANCE mode counts as tamper-resistant (`apps/gateway/src/audit-chain.ts`,
+`S3ObjectLockSink.observe` and `resolveAnchorSink`). On the host:
+
+- **The bucket** is `modules/audit-anchor-worm-s3` with `object_lock_mode = "COMPLIANCE"` and
+  `anchor_retention_days` (default 7, limited to 1–30). It is versioned, blocks public access, uses SSE-KMS with the
+  host key, and is TLS-only (`infra/environments/demo-host/host/anchor.tf`).
+- **The wiring** uses only the app's existing variables (`REGULAIT_AUDIT_ANCHOR_S3_BUCKET`, `_REGION`, `_PREFIX`,
+  `_RETENTION_DAYS`, `_ENDPOINT` empty for AWS, and the access-key pair empty so the SDK's provider chain applies),
+  set in the host-only compose override by `demo-host-env.sh`.
+- **Credentials. Deviation, stated:** the brief asked to grant the instance role the anchor calls. The gateway runs in
+  a container, and IMDS hop limit 1 deliberately keeps containers away from the instance role. So the grant is on a
+  **dedicated anchor role**. The instance role may only assume it, and a host timer
+  (`infra/scripts/demo-host-anchor-creds.sh`) hands its 1-hour credentials to the gateway through a tmpfs file read
+  by `credential_process`. The gateway therefore holds the anchor permissions and nothing else, and no long-lived key
+  exists.
+- **Permissions. Deviation, stated:** besides PutObject, GetObject, GetObjectRetention and HeadBucket (`s3:ListBucket`),
+  the role needs every call the sink makes, or the grade reads "could not read" and is NOT tamper-resistant:
+  `s3:PutObjectRetention` (a PUT with ObjectLockMode needs it; in COMPLIANCE mode retention can only be extended),
+  `s3:GetObjectVersion` and `s3:ListBucketVersions` (it reads its anchor back by version), and
+  `s3:GetBucketObjectLockConfiguration` (the grade). It also has KMS GenerateDataKey and Decrypt through S3 only. It
+  carries an explicit Deny on delete, bypass and every lock-, versioning-, lifecycle- and policy-weakening call. The
+  module's own writer grant is not used, because its bucket-policy Deny on `s3:PutObjectRetention` would refuse the
+  gateway's locked PUT.
+- **An STS interface endpoint** is added, so the assume-role call stays on the AWS network.
+- **The runbook** gains §8.8 step 8 (the G8 grade must read COMPLIANCE before the rehearsal), a posture-checklist row,
+  and a teardown note: COMPLIANCE objects cannot be deleted by anyone until their retention ends, so the anchor
+  bucket outlives the stack by up to `anchor_retention_days`.

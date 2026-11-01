@@ -5,7 +5,7 @@
 #     security-group rule; its egress is 443/tcp plus 7844/tcp+udp (cloudflared);
 #   - one NAT gateway in a public subnet carries that egress (the on-host build
 #     pulls packages and images; the tunnel dials Cloudflare);
-#   - interface endpoints for ssm, ssmmessages, ec2messages, kms and logs, and an
+#   - interface endpoints for ssm, ssmmessages, ec2messages, kms, logs and sts, and an
 #     S3 gateway endpoint, keep AWS control traffic on the AWS network;
 #   - VPC Flow Logs (all traffic) to a KMS-encrypted CloudWatch log group.
 # Open source first: terraform-aws-modules/vpc (Apache-2.0), pinned; infra/THIRD_PARTY.md.
@@ -74,7 +74,7 @@ module "endpoints" {
 
   endpoints = merge(
     {
-      for svc in ["ssm", "ssmmessages", "ec2messages", "kms", "logs"] : svc => {
+      for svc in ["ssm", "ssmmessages", "ec2messages", "kms", "logs", "sts"] : svc => {
         service             = svc
         private_dns_enabled = true
         subnet_ids          = module.vpc.private_subnets

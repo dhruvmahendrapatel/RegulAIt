@@ -178,6 +178,14 @@ data "aws_iam_policy_document" "host" {
     ]
   }
 
+  # The host timer (demo-host-anchor-creds.sh) assumes the anchor role and hands
+  # its short-lived credentials to the gateway container (anchor.tf).
+  statement {
+    sid       = "AssumeAnchorRoleOnly"
+    actions   = ["sts:AssumeRole"]
+    resources = [aws_iam_role.anchor.arn]
+  }
+
   # The SSM agent checks the session log group exists before streaming.
   statement {
     sid       = "FindLogGroups"

@@ -98,6 +98,9 @@ TUN=$(get cf-tunnel-token)
 DK=$(get data-key)
 BT=$(get bootstrap-token)
 DBP=$(get db-password)
+# Non-secret anchor wiring that Terraform writes (anchor.tf); optional.
+ANCHOR_BUCKET=$(get anchor-bucket)
+ANCHOR_DAYS=$(get anchor-retention-days)
 unset JSON
 
 missing=()
@@ -165,6 +168,29 @@ services:
       REGULAIT_EXPORT_SIGNING_KEY_ID: regulait-demo-export
       REGULAIT_LICENSE_KEYRING: /app/demo-license-keys
 YAML
+if [ -n "$ANCHOR_BUCKET" ]; then
+  [[ "$ANCHOR_BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] || fail "anchor-bucket is not a bucket name"
+  [[ "$ANCHOR_DAYS" =~ ^[0-9]{1,3}$ ]] || fail "anchor-retention-days is not a number"
+  # ADR-0228 addendum 2: anchor the audit chain to the COMPLIANCE-mode bucket,
+  # using the existing ADR-0060 variables (apps/gateway/src/audit-chain.ts,
+  # resolveS3AnchorConfig). Empty endpoint = real AWS S3; empty keys = the SDK
+  # provider chain, here the anchor role's short-lived credentials from
+  # demo-host-anchor-creds.sh through credential_process.
+  cat >> "$APP_DIR/docker-compose.override.yml" <<YAML
+      REGULAIT_AUDIT_ANCHOR_S3_ENDPOINT: ""
+      REGULAIT_AUDIT_ANCHOR_S3_BUCKET: "$ANCHOR_BUCKET"
+      REGULAIT_AUDIT_ANCHOR_S3_REGION: "$REGION"
+      REGULAIT_AUDIT_ANCHOR_S3_PREFIX: "audit-anchors"
+      REGULAIT_AUDIT_ANCHOR_S3_RETENTION_DAYS: "$ANCHOR_DAYS"
+      REGULAIT_AUDIT_ANCHOR_S3_FORCE_PATH_STYLE: "false"
+      REGULAIT_AUDIT_ANCHOR_S3_ACCESS_KEY_ID: ""
+      REGULAIT_AUDIT_ANCHOR_S3_SECRET_ACCESS_KEY: ""
+      AWS_CONFIG_FILE: /aws-anchor/config
+      AWS_SHARED_CREDENTIALS_FILE: /dev/null
+    volumes:
+      - /run/regulait/anchor:/aws-anchor:ro
+YAML
+fi
 if [ "$HARDEN" = true ]; then
   # Host-only container hardening (ADR-0228) for the services docker-compose.yml
   # does not already harden. The gateway image runs as the non-root `node` user;
@@ -186,4 +212,4 @@ fi
 chmod 600 "$APP_DIR/docker-compose.override.yml"
 unset HOST TUN DK BT DBP
 
-echo "demo-host-env: wrote $ENV_DIR/env (tmpfs, 0600; $APP_DIR/.env links to it) and docker-compose.override.yml (hardening: $HARDEN); values not shown"
+echo "demo-host-env: wrote $ENV_DIR/env (tmpfs, 0600; $APP_DIR/.env links to it) and docker-compose.override.yml (hardening: $HARDEN; S3 anchor: $([ -n "$ANCHOR_BUCKET" ] && echo on || echo off)); values not shown"

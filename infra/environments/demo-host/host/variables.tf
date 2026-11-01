@@ -137,3 +137,13 @@ variable "ssm_max_session_minutes" {
   type        = number
   default     = 240
 }
+
+variable "anchor_retention_days" {
+  description = "COMPLIANCE-mode default retention of the audit-chain anchor bucket. Nothing, root included, can delete an anchor before it ends, so the bucket outlives teardown by this long. Short for a demo."
+  type        = number
+  default     = 7
+  validation {
+    condition     = var.anchor_retention_days >= 1 && var.anchor_retention_days <= 30
+    error_message = "anchor_retention_days must be 1 to 30 for the demo host."
+  }
+}
