@@ -71,11 +71,14 @@ variable "retention_days" {
 
 variable "writer_role_names" {
   description = <<-EOT
-    IAM role NAMES (not ARNs) granted PutObject on `prefix` and nothing else —
-    typically the single instance role of the control-plane host. They are also
-    explicitly DENIED every deletion, retention-shortening and lock-weakening
-    action in the bucket policy, so a later identity-policy Allow cannot
-    resurrect those permissions.
+    IAM role NAMES (not ARNs), in this account, granted exactly the calls the
+    gateway's S3ObjectLockSink makes under `prefix`: a locked PUT (PutObject +
+    PutObjectRetention), read-back by version, ListObjectVersions, the bucket's
+    Object Lock configuration, and — when kms_key_arn is set — the key through
+    S3 only. They are also explicitly DENIED every deletion, governance bypass,
+    legal hold, bucket-weakening action, and any PUT whose lock is weaker or
+    shorter than the bucket default, in the bucket policy, so a later
+    identity-policy Allow cannot resurrect those permissions.
   EOT
   type        = list(string)
   default     = []

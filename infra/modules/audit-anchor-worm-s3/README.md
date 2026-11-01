@@ -53,22 +53,59 @@ commitment, which is why a module default does not make it for you.
 
 ## What the writer can and cannot do
 
-Allowed: `s3:PutObject` under the prefix, and a prefix-limited `s3:ListBucket`
-for the on-box self-check.
+The grant is sized to the calls the gateway's `S3ObjectLockSink`
+(`apps/gateway/src/audit-chain.ts`) actually makes. Before 2026-11-01 it was
+`PutObject` only, with `s3:PutObjectRetention` denied in the bucket policy, so a
+stack that passed `writer_role_names` had every locked PUT refused and could not
+read the lock configuration that grades it (ADR-0060 amendment 2026-11-01).
 
-Explicitly denied — in the **bucket** policy, where a later identity-policy
-`Allow` cannot override it:
+| Sink call | Permission | Scope |
+|---|---|---|
+| `PutObject` with `ObjectLockMode` + `ObjectLockRetainUntilDate` | `s3:PutObject`, `s3:PutObjectRetention` | `<bucket>/<prefix>/*` |
+| `GetObject` by `VersionId` | `s3:GetObject`, `s3:GetObjectVersion` | `<bucket>/<prefix>/*` |
+| `GetObjectRetention` by `VersionId` | `s3:GetObjectRetention` | `<bucket>/<prefix>/*` |
+| `ListObjectVersions` | `s3:ListBucketVersions` (+ `s3:ListBucket`) | bucket, `s3:prefix` = `<prefix>/*` |
+| `GetObjectLockConfiguration` — **grades tamper resistance** | `s3:GetBucketObjectLockConfiguration` | bucket |
+| SSE-KMS, only when `kms_key_arn` is set | `kms:GenerateDataKey`, `kms:Decrypt` | the key, `kms:ViaService` = `s3.<region>.amazonaws.com`, encryption context = this bucket |
+
+Explicitly denied to the writer roles — in the **bucket** policy, where a later
+identity-policy `Allow` cannot override it:
 
 * `s3:DeleteObject`, `s3:DeleteObjectVersion` — the whole point.
-* `s3:PutObjectRetention`, `s3:PutObjectLegalHold`,
-  `s3:BypassGovernanceRetention` — it cannot shorten its own retention or bypass
-  GOVERNANCE mode. Without this, GOVERNANCE mode is decorative against exactly
-  the adversary this exists for.
+* `s3:BypassGovernanceRetention`, `s3:PutObjectLegalHold` — it cannot bypass
+  GOVERNANCE mode or play with legal holds.
 * `s3:PutBucketObjectLockConfiguration`, `s3:PutBucketVersioning`,
-  `s3:PutLifecycleConfiguration` — it cannot weaken the mechanism it writes into.
-* `s3:GetObject` — it never needs to read anchors back. The verifier that does
-  is a separate, human-initiated act with a separate credential, so a
-  compromised gateway host cannot even enumerate the true history.
+  `s3:PutLifecycleConfiguration`, `s3:PutBucketPolicy`, `s3:DeleteBucketPolicy`,
+  `s3:DeleteBucket` — it cannot weaken or remove the mechanism it writes into.
+* A `PutObject`/`PutObjectRetention` whose **lock mode** is weaker than the
+  bucket's (GOVERNANCE on a COMPLIANCE bucket), or whose **remaining retention**
+  is shorter than `retention_days − 1`. These match only when the request
+  carries the header, so a plain PUT taking the bucket default is unaffected.
+
+### Why `s3:PutObjectRetention` is allowed
+
+The sink cannot write a locked anchor without it. Allowing it does not let the
+writer shorten an existing lock:
+
+* **COMPLIANCE** — S3 refuses to shorten or remove a retention, for every
+  principal including root. Only extension is possible.
+* **GOVERNANCE** — S3 refuses to shorten or remove a retention unless the
+  request sends `x-amz-bypass-governance-retention: true` **and** the caller holds
+  `s3:BypassGovernanceRetention`, which stays explicitly denied. So the writer
+  can only extend, or raise the version to COMPLIANCE.
+
+The one real weakening — a *new* version written with a weaker mode or shorter
+date than the bucket default — is what the two conditional denials above close.
+
+**Operator corollary:** set the gateway's `REGULAIT_AUDIT_ANCHOR_S3_RETENTION_DAYS`
+to at least `retention_days`. A shorter value is refused by the bucket policy
+and every anchor row records `failed` — loudly, by design.
+
+### Why the writer can read
+
+The original design kept reads on a separate verifier credential. The sink as
+built verifies on the gateway (it reads back the version it wrote, ADR-0189 R44),
+so it needs reads. Anchors are hashes; reading one cannot alter it.
 
 Plus a blanket `Deny` on non-TLS access.
 
@@ -94,12 +131,13 @@ An anchor is a few hundred bytes. Hourly for a decade is roughly 9 MB. There is
 deliberately **no lifecycle expiration rule**: on a COMPLIANCE bucket it could
 not delete a locked version anyway, and having one would imply anchors age out.
 
-## What is not wired yet
+## Status
 
-The gateway's anchor **emit path** is implemented and tested
-(`apps/gateway/src/audit-chain.ts`), against an `AnchorSink` interface. The
-built-in sink today is `LocalWormSink` — the air-gapped buffer, which reports
-`tamperResistant: false` because a directory on the same host is not WORM. The
-S3 sink that writes into this bucket is a follow-up; shipping a half-configured
-S3 writer that silently no-ops would be exactly the false assurance ADR-0060
-exists to avoid.
+The gateway's S3 sink (`S3ObjectLockSink`, `apps/gateway/src/audit-chain.ts`)
+writes into this bucket when `REGULAIT_AUDIT_ANCHOR_S3_BUCKET` is set; without it
+the gateway uses `LocalWormSink`, which reports `tamperResistant: false`. The
+grade is read from the bucket (`GetObjectLockConfiguration`), so only a
+COMPLIANCE bucket earns "tamper-resistant".
+
+Not applied anywhere. This module has never been `terraform apply`'d by this
+repository; the owner applies.
