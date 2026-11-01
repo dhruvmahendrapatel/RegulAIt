@@ -46,7 +46,17 @@ UNIT
 %{ endif ~}
 
 # --- 2. Docker -------------------------------------------------------------------
-dnf install -y docker
+# The NAT path can lag the first boot by a minute: retry package installs.
+dnf_install() {
+  for attempt in 1 2 3 4 5; do
+    dnf install -y "$@" && return 0
+    echo "app-boot: dnf install $* failed (attempt $attempt/5), retrying in 10 s"
+    sleep 10
+  done
+  echo "app-boot: FATAL dnf install $* failed after 5 attempts"
+  return 1
+}
+dnf_install docker
 mkdir -p /etc/docker
 %{ if log_group_name != "" ~}
 # Container stdout/stderr to CloudWatch Logs; the log group is KMS-encrypted and
@@ -77,7 +87,7 @@ systemctl enable --now docker
 
 # --- 3. Docker Compose plugin, checksum-pinned -------------------------------------
 mkdir -p /usr/local/lib/docker/cli-plugins
-curl -fsSL "https://github.com/docker/compose/releases/download/${compose_version}/docker-compose-linux-x86_64" \
+curl -fsSL --retry 10 --retry-all-errors --retry-delay 6 "https://github.com/docker/compose/releases/download/${compose_version}/docker-compose-linux-x86_64" \
   -o /tmp/docker-compose
 echo "${compose_sha256}  /tmp/docker-compose" | sha256sum -c - \
   || { echo "app-boot: FATAL compose plugin checksum mismatch"; rm -f /tmp/docker-compose; exit 1; }
@@ -96,7 +106,7 @@ fi
 
 # jq for infra/scripts/demo-host-env.sh. No git: the source arrives as a git
 # archive through the source bucket, so the host holds no Git credential.
-dnf install -y jq
+dnf_install jq
 
 # Releases are extracted under /opt/releases/<sha>; /opt/app is a symlink to
 # the current one (pg-backup.sh and the runbook use /opt/app).

@@ -13,6 +13,11 @@ resource "aws_accessanalyzer_analyzer" "account" {
 resource "aws_inspector2_enabler" "this" {
   account_ids    = [local.account_id]
   resource_types = ["EC2", "ECR"]
+
+  # Enabling can sit in ENABLING for several minutes in a fresh account.
+  timeouts {
+    create = "15m"
+  }
 }
 
 # --- patching: a baseline, a daily scan, an install the owner runs (§8.4) --------
