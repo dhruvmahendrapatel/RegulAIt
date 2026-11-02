@@ -1326,6 +1326,7 @@ to Claude: it would be refused by MRM before the card is signed, and would spend
 | T-24h | **A small run budget**, so the live run cannot overspend. On `/ui/admin/agents` → **Per-user agent policy — default, ceiling, routing, run budget**, set Ada's **Run budget USD** to a small amount and **On breach** to *approve* (a run over the cap waits for approval instead of running). There is no per-run field on the run itself: the cap comes from the initiator's policy when the run is planned | pending execution |
 | T-24h | **Project budget headroom.** B2 and B3 bill `demo-project`, which has a small monthly budget that earlier demo traffic already uses (`GET /v1/projects/:projectId/costs`). If there is no headroom the call is refused `project_budget_exceeded`. If needed, an admin raises it on the project's edit form (**Budget USD**, **Save changes**); that change is audited | pending execution |
 | T-24h, only if PR #611 is merged | **Claude-assisted set-up:** turn on `agent_setup_assist_enabled` through the org settings as Ada; it is a relaxation, so it needs a step-up and is audited old → new. Then open `/ui/admin/agents` and check that the set-up panel is on **Register an agent**. If #611 is not merged, B1 skips the step and nobody mentions it | pending execution |
+| T-24h, only if PR #611 is merged | **Set-up assistant project (fixed 2026-11-02, #453):** the model draft is a governed dispatch, so under the strict default `dispatchAttributionRequired` it must name a project. On `/ui/admin/agents`, tick **Also draft with a governed model**, then pick `demo-project` in **Bill the draft to project** (Ada is a member). With no project the draft says `Model draft failed: attribution_required — …` and only the rules draft is shown; that is the gate working, not a bug. Do not relax `dispatchAttributionRequired`. A project Ada is not a member of answers `403 not_a_project_member` | pending execution |
 | T-24h | **Guardrails:** `/ui/admin/guardrails` loads; **Try a sample** with the presenter-notes sample shows a finding. Write the sample and B3's goal into `DEMO_PRESENTER_NOTES_2026-11-01.md` | pending execution |
 | T-1h | One live call as Ada in `/ui/builder/playground` with an explicitly chosen **mock** model, to check the page and the project billing without spending. No live Claude call before the demo on LIVE: the first one is B2's refusal | pending execution |
 
@@ -1333,7 +1334,7 @@ to Claude: it would be refused by MRM before the card is signed, and would spend
 
 | Beat | If the network or the provider fails | Say |
 |---|---|---|
-| B1 set-up assistant | Skip it; register nothing, grant nothing | nothing (the panel is optional) |
+| B1 set-up assistant | Skip it; register nothing, grant nothing. If the draft shows `attribution_required`, no project was picked: pick `demo-project` and draft again, or skip | nothing (the panel is optional) |
 | B1 builder agent | Choose a mock agent under **Advanced → Model** | "I'll build it on a mock model" |
 | B2 chat, playground, builder chat | Choose `balanced-mock` explicitly in the **Agent** / **Model** picker; skip the playground and builder chat | "the provider is not answering, so I'll switch this to a mock agent" |
 | B3 task graph | **Lead agent** `balanced-mock`, then set every **Owner agent** to a mock agent before **Plan run** | "I'll run this plan on mock agents" |

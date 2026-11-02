@@ -853,11 +853,14 @@ UI: `apps/web/src/views/admin/integrations/AgentsPage.tsx`; builder `BuilderAgen
 2. **Claude-assisted set-up (only if the panel is present).** It ships in PR #611 (ADR-0205) behind the org switch
    `agent_setup_assist_enabled`, off by default. If #611 is not merged, or the switch is off, skip this step and say
    nothing about it. If present: in the panel on **Register an agent**, type a one-line description of the agent you
-   want (for example "an agent that drafts replies to supplier invoices"). The draft labels every field with its
-   source, *rules*, *mock* or *model*. Point at the suggested risk tier and grant advice. Press **Use this draft in the
+   want (for example "an agent that drafts replies to supplier invoices"). To draft with Claude, tick **Also draft
+   with a governed model** and pick **Bill the draft to project** `demo-project`: the model draft is an ordinary
+   governed dispatch, and the strict default refuses one that names no project (`attribution_required`; the rules
+   draft still shows). The draft labels every field with its source, *rules*, *mock* or *model*. Point at the suggested risk tier and grant advice. Press **Use this draft in the
    form**, then **Register agent**.
    - **Say:** "Claude helps write the set-up: the name, the prompt, a risk tier, which grants it needs. A model can
-     raise the risk tier but never lower it, and nothing is saved until an admin presses Register."
+     raise the risk tier but never lower it, and nothing is saved until an admin presses Register. Even this helper
+     call is billed to a project I belong to, like every other model call."
 3. **Grant it.** The **Grant an agent** card on the same page: **User** Ada, **Agent** the new agent, **Grant**.
    Point at the **Per-user entitlement** card: every agent a person can use is a grant to that person.
 4. **A builder agent.** **`/ui/builder/agents`** (header **Your agents**) → **New agent**: **Name your agent**,
