@@ -522,7 +522,8 @@ counts: the call needs approval if any rule matches, and the quorum is the highe
 ADR-0229 the winner depended on database order, and on the AWS host the fleet rule won (0 eligible approvers under
 passkey quorum 2). `demo:check` row **E Enforce it** now checks which rule wins, not only the org settings.
 - **If asked "what if two rules disagree?":** "The most specific rule says who signs; the strictest rule says how many
-  must. A broad rule can never be escaped by adding a narrow one."
+  must. And adding a narrow rule that would hand a broad rule's calls to a different set of approvers needs the same
+  step-up as widening that broad rule's approvers directly."
 
 **What runs.** The command issues Dana a one-day key (revoked at the end of the run) and makes her calls over the MCP
 protocol through the running gateway, with the demo project header. The gateway decides every call: nothing in the

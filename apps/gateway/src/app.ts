@@ -3551,7 +3551,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // ADR-0186 A: quorum and approverRoleId are part of the shared create schema
     const body = createApprovalRuleSchema.parse(req.body);
     // the satisfiability guard runs inside createApprovalRuleRow (every create)
-    const row = await createApprovalRuleRow(db, body);
+    const row = await createApprovalRuleRow(db, body, { stepUp: approvalRuleStepUp(db, req) });
     return reply.status(201).send(row);
   });
 

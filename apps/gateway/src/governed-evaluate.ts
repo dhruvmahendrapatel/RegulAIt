@@ -2,6 +2,7 @@ import {
   configVersions,
   and,
   approvalRules,
+  mcpTools,
   asc,
   approvals,
   auditLog,
@@ -253,6 +254,55 @@ export async function deriveDeployContext(db: Db, projectId: string): Promise<st
 }
 
 /**
+ * ADR-0229 amendment (review of #662): the approval rules that would match this call if it were evaluated NOW, as
+ * served to the caller, with their quorums — the same scoping (`scopedRuleWhere`), version resolution and kernel
+ * match `governedEvaluate` uses. The execution recheck (`requiredQuorumNow`) takes the highest quorum over these, so
+ * raising the quorum of ANY matching rule after the call was queued retires consents given under the old one, not
+ * only a raise on the rule that names the approver. null when the tool is gone (nothing to recompute against).
+ */
+export async function approvalRuleQuorumsMatchingNow(
+  db: Db,
+  call: { userId: string; serverId: string; toolName: string; projectId: string | null },
+): Promise<Array<{ id: string; quorum: number }> | null> {
+  const [tool] = await db
+    .select({ kind: mcpTools.kind })
+    .from(mcpTools)
+    .where(and(eq(mcpTools.serverId, call.serverId), eq(mcpTools.name, call.toolName)));
+  if (!tool) return null;
+  const { roleIds, teamIds } = await loadScopeMemberships(db, call.userId);
+  const rows = await db
+    .select()
+    .from(approvalRules)
+    .where(
+      scopedRuleWhere(
+        {
+          scope: approvalRules.scope,
+          serverScope: approvalRules.serverScope,
+          userId: approvalRules.userId,
+          roleId: approvalRules.roleId,
+          teamId: approvalRules.teamId,
+          serverId: approvalRules.serverId,
+        },
+        call.userId,
+        call.serverId,
+        roleIds,
+        teamIds,
+      ),
+    )
+    .orderBy(approvalRules.id);
+  const versionMap = await loadVersionsForArtifacts(db, ["approval_rule"], rows.map((r) => r.id));
+  const served = applyRuleVersions("approval_rule", rows, versionMap, call.userId).served;
+  const deployContext =
+    served.some((r) => r.deployMode != null) && call.projectId ? await deriveDeployContext(db, call.projectId) : null;
+  return matchingApprovalRules(served, {
+    userId: call.userId,
+    serverId: call.serverId,
+    tool: { serverId: call.serverId, name: call.toolName, kind: tool.kind as ToolRef["kind"] },
+    deployContext,
+  }).map((r) => ({ id: r.id, quorum: (r as { quorum?: number }).quorum ?? 1 }));
+}
+
+/**
  * Full §3 evaluation: grants + rate limits (usage counted from audit-log
  * allow rows inside each limit's window) + approval rules, including any
  * already-approved queue entry for exactly this user/server/tool. Pure
@@ -423,8 +473,9 @@ export async function governedEvaluate(
         ),
       )
       // ADR-0229: defence in depth only. The kernel sorts matched rules by
-      // precedence itself; a stable load order keeps every other reader of
-      // this list (logs, the context digest) deterministic too.
+      // precedence itself (so the context digest, built from the matched
+      // rules, follows precedence order, which is total); a stable load order
+      // keeps any reader of the unsorted list deterministic too.
       .orderBy(approvalRules.id),
     db
       .select()

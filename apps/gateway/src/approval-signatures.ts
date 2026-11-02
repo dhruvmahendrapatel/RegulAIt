@@ -114,6 +114,7 @@ export {
 } from "./approval-pool.js";
 import { projectPiiMode } from "./projects.js";
 import { applyRuleVersions, loadVersionsForArtifacts } from "./rule-versions.js";
+import { approvalRuleQuorumsMatchingNow } from "./governed-evaluate.js";
 import { errMessage } from "./err-serializer.js";
 
 type ApprovalRow = typeof approvals.$inferSelect;
@@ -1123,9 +1124,21 @@ export async function requiredQuorumNow(db: Q, row: ApprovalRow): Promise<number
   // a naming rule that no longer resolves is not a lower requirement: fail closed
   if (row.ruleId && UUID_RE.test(row.ruleId) && !served.has(row.ruleId)) return Number.POSITIVE_INFINITY;
   const rule = row.ruleId ? served.get(row.ruleId) : undefined;
+  // ADR-0229 amendment: the queue snapshots the highest quorum over EVERY matched rule, and since ADR-0229 the naming
+  // rule is the most specific one, often not the strictest; so the recheck recomputes that max over the rules
+  // matching the call now, or a raise on a broader rule after queue time would never retire the old consents
+  const matchingNow =
+    row.serverId && row.toolName
+      ? await approvalRuleQuorumsMatchingNow(db as Db, {
+          userId: row.userId,
+          serverId: row.serverId,
+          toolName: row.toolName,
+          projectId: row.projectId ?? null,
+        })
+      : null;
   const sensitive = (await callSensitivity(db, { projectId: row.projectId, callerUserId: row.userId })).length > 0;
   const org = sensitive ? await loadOrgSettings(db as Db) : null;
-  return Math.max(rule?.quorum ?? 1, org ? org.toolApprovalSensitiveQuorum : 1);
+  return Math.max(rule?.quorum ?? 1, ...(matchingNow ?? []).map((r) => r.quorum), org ? org.toolApprovalSensitiveQuorum : 1);
 }
 
 /**

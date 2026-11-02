@@ -1981,7 +1981,7 @@ describe("evaluateConnector — a queueable write under the require_approval dia
 // Dana's repo-tools write_file rule (approver Avery) because the gateway loaded
 // the rules with no ORDER BY and the kernel took the first match.
 // ---------------------------------------------------------------------------
-import { compareApprovalRulePrecedence, matchingApprovalRules } from "./index.js";
+import { approvalRulesMayOverlap, compareApprovalRulePrecedence, compareApprovalRuleSpecificity, matchingApprovalRules } from "./index.js";
 
 describe("approval-rule precedence (ADR-0229)", () => {
   const ADA = "user-ada";
@@ -2053,5 +2053,25 @@ describe("approval-rule precedence (ADR-0229)", () => {
     const legacy: ApprovalRule = { id: "z-legacy", userId: USER, serverId: SERVER, toolName: null, writeOnly: false, approverUserId: AVERY };
     expect(decide([fleet, legacy]).ruleId).toBe("z-legacy");
     expect(decide([legacy, fleet]).ruleId).toBe("z-legacy");
+  });
+
+  it("specificity ignores the id: equal rules tie (0), so a writer can treat a tie like being outranked", () => {
+    expect(compareApprovalRuleSpecificity(fleet, { ...fleet, id: "another-id", approverUserId: "someone-else" } as ApprovalRule)).toBe(0);
+    expect(compareApprovalRuleSpecificity(specific, fleet)).toBeLessThan(0);
+    expect(compareApprovalRuleSpecificity(fleet, specific)).toBeGreaterThan(0);
+  });
+
+  it("overlap is conservative: only provably disjoint subjects, servers, tools or deploy modes separate two rules", () => {
+    const user = (userId: string, over: Partial<ApprovalRule> = {}): ApprovalRule => ({ ...specific, userId, ...over });
+    expect(approvalRulesMayOverlap(fleet, specific)).toBe(true);
+    expect(approvalRulesMayOverlap(user(USER), user(OTHER_USER))).toBe(false);
+    expect(approvalRulesMayOverlap(user(USER), user(USER, { serverId: OTHER_SERVER }))).toBe(false);
+    expect(approvalRulesMayOverlap(user(USER), user(USER, { toolName: "other_tool" }))).toBe(false);
+    expect(approvalRulesMayOverlap(user(USER, { deployMode: "byoc" }), user(USER, { deployMode: "hosted" }))).toBe(false);
+    // role and team membership is not known statically, so they may overlap anything, another role included
+    expect(approvalRulesMayOverlap({ ...fleet, scope: "role", roleId: "r1" }, { ...fleet, scope: "role", roleId: "r2" })).toBe(true);
+    expect(approvalRulesMayOverlap({ ...fleet, scope: "team", teamId: "t1" }, user(OTHER_USER))).toBe(true);
+    // write-only never separates: a write tool matches both
+    expect(approvalRulesMayOverlap({ ...fleet, writeOnly: true }, { ...fleet, writeOnly: false })).toBe(true);
   });
 });

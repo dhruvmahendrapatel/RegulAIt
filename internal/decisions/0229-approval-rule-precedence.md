@@ -66,3 +66,51 @@ strictest quorum across all matches while letting the most specific rule name th
   `apps/gateway/src/demo-relax-e-lib.test.ts` (row E checks the routing, not only the org settings).
 - `demo:check` row E now reads the rules, users and servers and FAILs when the most specific matching rule for Dana's
   `write_file` names anyone but Avery. Before, it claimed the queue went to Avery from the org settings alone.
+
+## Amendment (2026-11-02, review of #662): outranking an overlapping rule is a pool change
+
+**The finding (REQUEST CHANGES at `84e73b7`).** The approver pool comes only from the naming rule
+(`toolApprovalRequirements`: its approver and approver role). Under decision 1 the naming rule is the most specific
+match. So **creating** a narrower rule that overlaps a broader one, with a different pool, reliably hands the broader
+rule's calls to the new pool. Editing the broader rule's own pool the same way is a `pool` loosening (ADR-0186 decision
+28) and needs the `settings_relax` step-up; the create path had no such guard. The same happens on an equal-specificity
+tie, where the arbitrary rule id decides. Decision 2's line "a broad rule cannot be escaped by adding a narrow one" held
+for quorum and approval scope, but not for who signs.
+
+**Options offered:** (a) treat a write that outranks an overlapping rule with a different pool as a pool loosening of
+that rule (`approvalRuleLoosens`, then `requireRuleStepUp`); (b) require approvals to satisfy every matched rule's pool
+(an intersection).
+
+**Decision: (a).**
+
+5. **A write that makes an approval rule take over a narrower pool needs the `settings_relax` step-up.** "Takes over"
+   means: the rule as written may overlap the other rule (`approvalRulesMayOverlap`, conservative: only different users,
+   different one-server ids, different exact tools or different deploy modes are disjoint; role and team rules may
+   overlap anything, because membership is not known statically and changes), it is at least as specific
+   (`compareApprovalRuleSpecificity` ≤ 0; **a tie counts**, since the id that would break it is arbitrary), and its pool
+   loosens the other's (`approvalRuleLoosens`, the comparator an edit of that rule's own pool already uses; quorum is
+   left out because the highest quorum across all matches applies anyway). Covered writes:
+   - **create** (`POST /v1/rules/approvals` and the copilot's `rule_to_approval` applier, through `createApprovalRuleRow`);
+     the step-up is bound to `{ruleId: "new-approval-rule", values: {outranksApprovalRules, approverUserId,
+     approverRoleId}}`. The copilot applier has no request to step up, so it is refused while the policy asks for one
+     (fail closed);
+   - **edit and version activation** (rollback and canary promotion included), through `assertRuleLooseningStepUp`.
+     Only a **new** takeover is owed: an edit that leaves routing and pool as they were owes nothing. A takeover rides
+     the same single step-up as any other loosening in the same write, bound to the merged values.
+6. **The execution recheck takes the highest quorum over every rule matching the call now** (`requiredQuorumNow` via
+   `approvalRuleQuorumsMatchingNow`), not only the naming rule's. The queue already snapshots that maximum; since the
+   naming rule is now the most specific and often not the strictest, a raise on a broader rule after queue time must
+   also retire the old consents (ADR-0186 A). In practice the approval context digest already retires them
+   (`approval_context_stale`); this is the second line.
+
+**Why not (b).** An intersection needs every matched rule's pool snapshotted on the approval row (today one named
+approver and one role), so a migration, plus a new eligibility model in the decide path and the recheck. That is a
+larger change to a security path the day before a demo. (a) reuses the existing comparator and step-up, and an admin
+can still create the narrower rule deliberately, audited, with the step-up. (b) stays open as a stricter option if an
+owner wants "every rule's pool must sign".
+
+**Tests.** `zz-b4-approval-rule-loosen-step-up.test.ts` (a fleet rule with a restricted pool, then a narrower rule with
+a different pool: refused without the step-up and bound to the fleet rule, admitted with it; a narrower rule inside the
+fleet pool, or a role rule with the same pool, needs none; a tie needs it; an edit that moves the approver carries the
+takeover in its one step-up), `zz-b4c4-review-fixes.test.ts` (`requiredQuorumNow` reads a raised quorum on a broader
+matching rule), and kernel tests for `compareApprovalRuleSpecificity` and `approvalRulesMayOverlap`.

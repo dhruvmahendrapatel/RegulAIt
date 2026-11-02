@@ -803,11 +803,27 @@ function argAtPath(args: Record<string, unknown> | undefined, path: string): unk
  * Negative = `a` outranks `b`.
  */
 export function compareApprovalRulePrecedence(a: ApprovalRule, b: ApprovalRule): number {
-  const subject = (r: ApprovalRule) => {
+  const bySpecificity = compareApprovalRuleSpecificity(a, b);
+  if (bySpecificity !== 0) return bySpecificity;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+/** the routing-relevant fields of an approval rule (no id, no approver) */
+export type ApprovalRuleRouting = Pick<
+  ApprovalRule,
+  "userId" | "serverId" | "roleId" | "teamId" | "scope" | "serverScope" | "deployMode" | "toolName" | "writeOnly"
+>;
+
+/**
+ * ADR-0229 precedence WITHOUT the id tie-break: negative = `a` is more specific, 0 = equally specific (the id then
+ * decides, which is arbitrary, so a writer treats a tie like being outranked).
+ */
+export function compareApprovalRuleSpecificity(a: ApprovalRuleRouting, b: ApprovalRuleRouting): number {
+  const subject = (r: ApprovalRuleRouting) => {
     const scope = r.scope ?? "user";
     return scope === "user" ? 2 : scope === "fleet" ? 0 : 1;
   };
-  const keys = (r: ApprovalRule): number[] => [
+  const keys = (r: ApprovalRuleRouting): number[] => [
     subject(r),
     r.toolName != null ? 1 : 0,
     (r.serverScope ?? "server") === "server" ? 1 : 0,
@@ -819,7 +835,25 @@ export function compareApprovalRulePrecedence(a: ApprovalRule, b: ApprovalRule):
   for (let i = 0; i < ka.length; i++) {
     if (ka[i] !== kb[i]) return kb[i]! - ka[i]!;
   }
-  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  return 0;
+}
+
+/**
+ * ADR-0229 amendment: could one governed call match BOTH rules? Conservative (true unless provably disjoint): two
+ * user rules for different users, two one-server rules for different servers, two different exact tools, or two
+ * different deploy modes are disjoint. Role and team membership is not known statically and changes, so a role or
+ * team rule may overlap any rule (including another role's). Write-only never separates: a write tool matches both.
+ */
+export function approvalRulesMayOverlap(a: ApprovalRuleRouting, b: ApprovalRuleRouting): boolean {
+  const sa = a.scope ?? "user";
+  const sb = b.scope ?? "user";
+  if (sa === "user" && sb === "user" && a.userId !== b.userId) return false;
+  if ((a.serverScope ?? "server") === "server" && (b.serverScope ?? "server") === "server" && a.serverId !== b.serverId) {
+    return false;
+  }
+  if (a.toolName != null && b.toolName != null && a.toolName !== b.toolName) return false;
+  if (a.deployMode != null && b.deployMode != null && a.deployMode !== b.deployMode) return false;
+  return true;
 }
 
 /**

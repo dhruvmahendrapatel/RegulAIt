@@ -5447,7 +5447,10 @@ gateway loaded rules unordered and the kernel took the first match, leaving 0 el
 2. The kernel now sorts matches by specificity (user > role = team > fleet, exact tool, one server, write-only, deploy
 mode, then id); the first names the approver and role, while any match still pauses and the quorum and approval scope
 stay the strictest across every match. The gateway orders the load by id as defence in depth; the access preview and
-`demo:check` row E read the same answer.
+`demo:check` row E read the same answer. **Amendment (review of #662):** because the naming rule's pool is the one
+that signs, a create, edit or activation that makes a rule at least as specific as an overlapping rule with a narrower
+pool needs the `settings_relax` step-up (option (a); the intersection option (b) needs a migration and stays open), and
+the execution recheck takes the max quorum over every rule matching the call now.
 
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);

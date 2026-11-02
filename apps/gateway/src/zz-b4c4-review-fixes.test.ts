@@ -68,6 +68,7 @@ import { finishSsoReauth } from "./step-up.js";
 import { SIGN_IN_INVARIANT_LOCK_KEY } from "./break-glass.js";
 import { buildApp } from "./app.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
+import { requiredQuorumNow } from "./approval-signatures.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
@@ -539,5 +540,28 @@ describe("F18: a same-second OIDC re-login completes, through the database", () 
     await expect(
       db.update(ssoReauthRequests).set({ verifiedAt: sql`now()`, authTime: new Date((esec - 1) * 1000) }).where(eq(ssoReauthRequests.id, early.id)),
     ).rejects.toThrow();
+  });
+});
+
+describe("ADR-0229 amendment (review of #662): the execution recheck takes the max quorum over every matching rule", () => {
+  it("requiredQuorumNow reads a raised quorum on a BROADER matching rule, not only the naming rule's", async () => {
+    // End to end, a raise on any matched rule already retires the consent through the context digest
+    // (approval_context_stale); this pins the recheck's own arithmetic, which is the second line of defence.
+    const tool = nextTool();
+    await rule(tool); // the naming rule: the caller's own, the most specific (quorum 1)
+    const [fleet] = await db
+      .insert(approvalRules)
+      .values({ scope: "fleet", serverScope: "server", userId: null, serverId, toolName: tool, writeOnly: false, approverUserId: P.a.id, approverRoleId: roleId, quorum: 1 })
+      .returning({ id: approvalRules.id });
+    try {
+      const id = await queued(tool, { text: "broader rule tightened" });
+      const [row] = await db.select().from(approvals).where(eq(approvals.id, id));
+      expect(row!.quorum).toBe(1);
+      expect(await requiredQuorumNow(db, row!)).toBe(1);
+      await db.update(approvalRules).set({ quorum: 2 }).where(eq(approvalRules.id, fleet!.id));
+      expect(await requiredQuorumNow(db, row!)).toBe(2);
+    } finally {
+      await db.delete(approvalRules).where(eq(approvalRules.id, fleet!.id));
+    }
   });
 });

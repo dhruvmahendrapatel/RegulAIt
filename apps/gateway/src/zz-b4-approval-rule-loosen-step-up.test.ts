@@ -15,7 +15,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
-import { approvalRules, authSessions, createDb, eq, mcpServers, ORG_SETTINGS_ID, roleAssignments, roles, runMigrations, sql, type Db } from "@regulait/db";
+import { approvalRules, authSessions, createDb, eq, inArray, mcpServers, ORG_SETTINGS_ID, roleAssignments, roles, runMigrations, sql, type Db } from "@regulait/db";
 import { STEP_UP_HEADER } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
@@ -210,5 +210,96 @@ describe("ADR-0180: an approval-rule write that loosens dual control needs setti
     // rollback re-activates the quorum-2 version: a loosening
     await provesStepUp("POST", `${base}/rollback`, { reason: "b4q drill" }, id, values(2));
     expect((await quorumOf(id))!.quorum).toBe(2);
+  });
+});
+
+// ADR-0229 amendment (review of #662, blocking finding 1): the most specific matching rule names who signs, so a new
+// rule as specific as (or more than) an overlapping rule with a narrower pool takes that pool over. That is the same
+// loosening as widening the overlapping rule's own pool, and needs the same settings_relax step-up.
+describe("ADR-0229 amendment: outranking an overlapping rule's narrower pool needs settings_relax", () => {
+  /** a fleet rule over every write tool on every server whose pool is A alone (written directly: the guard is under test) */
+  async function fleetRule(): Promise<string> {
+    const [row] = await db
+      .insert(approvalRules)
+      .values({ scope: "fleet", serverScope: "all", userId: null, serverId: null, toolName: null, writeOnly: true, approverUserId: U.a, approverRoleId: null, quorum: 2 })
+      .returning({ id: approvalRules.id });
+    return row!.id;
+  }
+  const narrower = (approverUserId: string, toolName = `b4q_${RUN}_${randomBytes(3).toString("hex")}`) => ({
+    scope: "user",
+    serverScope: "server",
+    userId: U.caller,
+    serverId,
+    toolName,
+    approverUserId,
+    approverRoleId: null,
+    quorum: 1,
+  });
+
+  it("a narrower rule with a different pool is refused without the step-up, bound to the fleet rule it outranks", async () => {
+    const fleetId = await fleetRule();
+    try {
+      const body = narrower(U.e);
+      const action = { kind: "settings_relax", body: { ruleId: "new-approval-rule", values: { outranksApprovalRules: [fleetId], approverUserId: U.e, approverRoleId: null } } };
+      const key = await viaKey("POST", "/v1/rules/approvals", body);
+      expect(key.statusCode, key.body).toBe(403);
+      expect(key.json()).toMatchObject({ error: "step_up_required" });
+      const refused = await asAdmin("POST", "/v1/rules/approvals", body);
+      expect(refused.statusCode, refused.body).toBe(403);
+      expect(refused.json().action).toEqual(action);
+      expect(await db.select().from(approvalRules).where(eq(approvalRules.toolName, body.toolName))).toHaveLength(0);
+      const ok = await asAdmin("POST", "/v1/rules/approvals", body, { [STEP_UP_HEADER]: await grantFor(refused.json().action) });
+      expect(ok.statusCode, ok.body).toBe(201);
+      await db.delete(approvalRules).where(eq(approvalRules.id, ok.json().id));
+    } finally {
+      await db.delete(approvalRules).where(eq(approvalRules.id, fleetId));
+    }
+  });
+
+  it("a narrower rule whose pool stays inside the fleet rule's pool needs none, and neither does a broader rule", async () => {
+    const fleetId = await fleetRule();
+    try {
+      const same = await viaKey("POST", "/v1/rules/approvals", narrower(U.a));
+      expect(same.statusCode, same.body).toBe(201);
+      // a role rule outranks the fleet rule too, but it is not at least as specific as the user rule just created,
+      // and its pool (A) is the fleet rule's: nothing is taken over
+      const role = await viaKey("POST", "/v1/rules/approvals", { scope: "role", roleId, serverScope: "all", writeOnly: true, approverUserId: U.a, quorum: 1 });
+      expect(role.statusCode, role.body).toBe(201);
+      await db.delete(approvalRules).where(inArray(approvalRules.id, [same.json().id, role.json().id]));
+    } finally {
+      await db.delete(approvalRules).where(eq(approvalRules.id, fleetId));
+    }
+  });
+
+  it("a TIE counts: an equally specific overlapping rule with a different pool needs the step-up too", async () => {
+    const fleetId = await fleetRule();
+    try {
+      const tie = await viaKey("POST", "/v1/rules/approvals", { scope: "fleet", serverScope: "all", writeOnly: true, approverUserId: U.e, quorum: 1 });
+      expect(tie.statusCode, tie.body).toBe(403);
+      expect(tie.json()).toMatchObject({ error: "step_up_required" });
+    } finally {
+      await db.delete(approvalRules).where(eq(approvalRules.id, fleetId));
+    }
+  });
+
+  it("an edit that moves the approver outside the fleet pool carries the takeover in its one step-up", async () => {
+    const fleetId = await fleetRule();
+    // the caller's rule on one tool, approver A: inside the fleet pool, so created with no step-up
+    const created = await viaKey("POST", "/v1/rules/approvals", narrower(U.a));
+    expect(created.statusCode, created.body).toBe(201);
+    const id = created.json().id as string;
+    try {
+      // A -> E widens this rule's own pool AND takes the fleet rule's pool over: one step-up, bound to both
+      const refused = await asAdmin("PATCH", `/v1/rules/approvals/${id}`, { approverUserId: U.e });
+      expect(refused.statusCode, refused.body).toBe(403);
+      expect(refused.json().action).toEqual({
+        kind: "settings_relax",
+        body: { ruleId: id, values: { quorum: 1, approverRoleId: null, approverUserId: U.e, outranksApprovalRules: [fleetId] } },
+      });
+      const ok = await asAdmin("PATCH", `/v1/rules/approvals/${id}`, { approverUserId: U.e }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) });
+      expect(ok.statusCode, ok.body).toBe(200);
+    } finally {
+      await db.delete(approvalRules).where(inArray(approvalRules.id, [id, fleetId]));
+    }
   });
 });

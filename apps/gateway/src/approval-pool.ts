@@ -45,6 +45,7 @@ import {
   type Db,
   type SQL,
 } from "@regulait/db";
+import { approvalRulesMayOverlap, compareApprovalRuleSpecificity, type ApprovalRuleRouting } from "@regulait/policy-kernel";
 
 type Q = Pick<Db, "select">;
 
@@ -600,4 +601,85 @@ export async function requireRuleStepUp(
     action: { kind: "settings_relax", body: facts },
     detail,
   });
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0229 amendment — OUTRANKING an overlapping rule is a pool change
+// ---------------------------------------------------------------------------
+
+/** an approval rule's routing fields and dual-control shape, as it stands (or would stand after a write) */
+export type RoutedApprovalRule = ApprovalRuleShape & ApprovalRuleRouting;
+
+/** a rule's routing fields and shape from a row (and a body layered over it) */
+export function routedApprovalRule(r: Record<string, unknown>): RoutedApprovalRule {
+  const str = (v: unknown) => (v == null ? null : String(v));
+  return {
+    ...approvalRuleShape(r),
+    userId: str(r.userId),
+    serverId: str(r.serverId),
+    roleId: str(r.roleId),
+    teamId: str(r.teamId),
+    scope: (str(r.scope) ?? "user") as RoutedApprovalRule["scope"],
+    serverScope: (str(r.serverScope) ?? "server") as RoutedApprovalRule["serverScope"],
+    deployMode: str(r.deployMode) as RoutedApprovalRule["deployMode"],
+    toolName: str(r.toolName),
+    writeOnly: r.writeOnly === true,
+  };
+}
+
+/**
+ * The ids of the existing approval rules whose approver pool `rule` would take over: rules a call could match
+ * together with `rule` (`approvalRulesMayOverlap`), that `rule` outranks or ties under ADR-0229 precedence (a tie is
+ * decided by id, which is arbitrary, so it counts), and whose pool `rule`'s pool loosens (`approvalRuleLoosens`, the
+ * same comparator an edit of that rule's own pool is judged by). Quorum is not part of it: the gateway takes the
+ * highest quorum across every matched rule whatever the precedence, so only the pool is compared.
+ */
+export async function approverPoolsTakenOver(db: Q, rule: RoutedApprovalRule, excludeRuleId: string | null): Promise<string[]> {
+  const rows = await db.select().from(approvalRules);
+  const out: string[] = [];
+  for (const row of rows) {
+    if (row.id === excludeRuleId) continue;
+    const other = routedApprovalRule(row as unknown as Record<string, unknown>);
+    if (!approvalRulesMayOverlap(rule, other)) continue;
+    if (compareApprovalRuleSpecificity(rule, other) > 0) continue; // `other` stays the more specific one
+    const asIfSameQuorum = { ...rule, quorum: Math.max(rule.quorum ?? 1, other.quorum ?? 1) };
+    if (await approvalRuleLoosens(db, other, asIfSameQuorum)) out.push(row.id);
+  }
+  return out.sort();
+}
+
+/**
+ * The step-up facts for a write that makes `after` take over approver pools it did not take over as `before`
+ * (`before` null = a create), or null when it takes over none. Editing a rule without moving its routing or pool
+ * yields the same set before and after, so nothing new is owed.
+ */
+export async function approverPoolTakeoverFacts(
+  db: Q,
+  args: { ruleId: string | null; before: RoutedApprovalRule | null; after: RoutedApprovalRule },
+): Promise<Record<string, unknown> | null> {
+  const now = await approverPoolsTakenOver(db, args.after, args.ruleId);
+  if (now.length === 0) return null;
+  const was = new Set(args.before ? await approverPoolsTakenOver(db, args.before, args.ruleId) : []);
+  const fresh = now.filter((id) => !was.has(id));
+  if (fresh.length === 0) return null;
+  return {
+    outranksApprovalRules: fresh,
+    approverUserId: args.after.approverUserId,
+    approverRoleId: args.after.approverRoleId ?? null,
+  };
+}
+
+export const APPROVER_POOL_TAKEOVER_DETAIL =
+  "this rule is at least as specific as an overlapping approval rule with a narrower approver pool, so under ADR-0229 " +
+  "precedence it would name who signs for that rule's calls: the same loosening as widening that rule's pool, which " +
+  "needs a step-up this write path cannot ask for. Make the change as an admin in RegulAIt";
+
+/** THE CREATE-PATH GUARD: a new rule that takes over a narrower pool needs the `settings_relax` step-up */
+export async function assertApproverPoolTakeoverStepUp(
+  db: Q,
+  args: { ruleId: string | null; before: RoutedApprovalRule | null; after: RoutedApprovalRule; stepUp?: ApprovalRuleStepUp | null },
+): Promise<void> {
+  const values = await approverPoolTakeoverFacts(db, args);
+  if (!values) return;
+  return requireRuleStepUp(db, { ruleId: args.ruleId ?? "new-approval-rule", values }, args.stepUp, APPROVER_POOL_TAKEOVER_DETAIL);
 }
