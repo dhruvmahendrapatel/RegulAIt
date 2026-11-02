@@ -1973,3 +1973,85 @@ describe("evaluateConnector — a queueable write under the require_approval dia
     expect(legacy).toMatchObject({ effect: "deny", ruleId: "execution-require-approval" });
   });
 });
+
+// ---------------------------------------------------------------------------
+// ADR-0229 — approval-rule precedence: the most specific matching rule names the
+// approver, whatever order the rules arrive in. The demo host's bug (#453,
+// 2026-11-02): a seeded fleet rule (all servers, any tool, approver Ada) shadowed
+// Dana's repo-tools write_file rule (approver Avery) because the gateway loaded
+// the rules with no ORDER BY and the kernel took the first match.
+// ---------------------------------------------------------------------------
+import { compareApprovalRulePrecedence, matchingApprovalRules } from "./index.js";
+
+describe("approval-rule precedence (ADR-0229)", () => {
+  const ADA = "user-ada";
+  const AVERY = "user-avery";
+  const writeFile: ToolRef = { serverId: SERVER, name: "write_file", kind: "write" };
+  // ids chosen so the fleet rule sorts FIRST by id: precedence, not the tie-break, must decide
+  const fleet: ApprovalRule = {
+    id: "a-fleet", userId: null, serverId: null, scope: "fleet", serverScope: "all",
+    toolName: null, writeOnly: true, approverUserId: ADA,
+  };
+  const specific: ApprovalRule = {
+    id: "z-dana", userId: USER, serverId: SERVER, scope: "user", serverScope: "server",
+    toolName: "write_file", writeOnly: false, approverUserId: AVERY,
+  };
+  const decide = (rules: ApprovalRule[]) =>
+    evaluate({
+      actor: null, execution: EXEC, userId: USER, serverId: SERVER, tool: writeFile,
+      toolGrants: [toolGrant({ toolName: "write_file" })], serverGrants: [], approvalRules: rules,
+    });
+
+  it("a fleet rule plus a specific rule gives the same decision in both insertion orders", () => {
+    const a = decide([fleet, specific]);
+    const b = decide([specific, fleet]);
+    expect(a.effect).toBe("require_approval");
+    expect(a).toEqual(b);
+    expect(a.ruleId).toBe("z-dana");
+    expect(a.approverUserId).toBe(AVERY);
+  });
+
+  it("the broader rule still pauses the call when it is the only match (precedence never removes a pause)", () => {
+    const d = decide([fleet, { ...specific, userId: OTHER_USER }]);
+    expect(d.effect).toBe("require_approval");
+    expect(d.ruleId).toBe("a-fleet");
+    expect(d.approverUserId).toBe(ADA);
+  });
+
+  it("matchingApprovalRules returns every match, most specific first, for any input order", () => {
+    const role: ApprovalRule = { ...fleet, id: "m-role", scope: "role", roleId: "r1", approverUserId: "user-role" };
+    const ctx = { userId: USER, serverId: SERVER, tool: writeFile };
+    const orders = [[fleet, role, specific], [specific, role, fleet], [role, fleet, specific]];
+    for (const o of orders) {
+      expect(matchingApprovalRules(o, ctx).map((r) => r.id)).toEqual(["z-dana", "m-role", "a-fleet"]);
+    }
+  });
+
+  it("orders each dimension: subject, then tool, then server, then writeOnly, then deploy mode, then id", () => {
+    const base: ApprovalRule = { ...fleet, id: "x" };
+    const sorted = (rs: ApprovalRule[]) => [...rs].sort(compareApprovalRulePrecedence).map((r) => r.id);
+    // subject outranks tool: a user rule on any tool beats a fleet rule on the exact tool
+    expect(sorted([{ ...base, id: "fleet-exact", toolName: "write_file" }, { ...base, id: "user-any", scope: "user", userId: USER }]))
+      .toEqual(["user-any", "fleet-exact"]);
+    // role and team rank equal, above fleet
+    expect(sorted([{ ...base, id: "f" }, { ...base, id: "t", scope: "team", teamId: "t1" }, { ...base, id: "r", scope: "role", roleId: "r1" }]))
+      .toEqual(["r", "t", "f"]);
+    // tool outranks server: exact tool on all servers beats any tool on one server
+    expect(sorted([{ ...base, id: "server-any", serverScope: "server", serverId: SERVER }, { ...base, id: "all-exact", toolName: "write_file" }]))
+      .toEqual(["all-exact", "server-any"]);
+    // server outranks writeOnly
+    expect(sorted([{ ...base, id: "all-wo" }, { ...base, id: "srv", serverScope: "server", serverId: SERVER, writeOnly: false }]))
+      .toEqual(["srv", "all-wo"]);
+    // writeOnly outranks deploy mode
+    expect(sorted([{ ...base, id: "mode", writeOnly: false, deployMode: "byoc" }, { ...base, id: "wo" }]))
+      .toEqual(["wo", "mode"]);
+    // a full tie falls back to the rule id
+    expect(sorted([{ ...base, id: "b" }, { ...base, id: "a" }])).toEqual(["a", "b"]);
+  });
+
+  it("a legacy rule with no scope fields ranks as a user, one-server rule", () => {
+    const legacy: ApprovalRule = { id: "z-legacy", userId: USER, serverId: SERVER, toolName: null, writeOnly: false, approverUserId: AVERY };
+    expect(decide([fleet, legacy]).ruleId).toBe("z-legacy");
+    expect(decide([legacy, fleet]).ruleId).toBe("z-legacy");
+  });
+});
