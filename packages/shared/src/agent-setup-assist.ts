@@ -23,6 +23,11 @@ export const agentSetupAssistRequestSchema = z
     draftWithModel: z.boolean().optional(),
     /** the registry agent to draft with; absent = the `builder` feature's policy default */
     agentId: z.string().uuid().optional(),
+    /**
+     * the project the model draft's spend is billed to; the caller must be a member. Absent = an unattributed
+     * dispatch, which the strict default (`dispatchAttributionRequired`) refuses with `attribution_required`.
+     */
+    projectId: z.string().uuid().optional(),
   })
   .strict();
 export type AgentSetupAssistRequest = z.infer<typeof agentSetupAssistRequestSchema>;
