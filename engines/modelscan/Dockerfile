@@ -33,7 +33,7 @@
 # linux/amd64 ONLY: the hashes in requirements.txt are the cp312 manylinux x86_64 wheels.
 
 # ---- stage 1: the Python closure ----------------------------------------------------------------
-FROM --platform=linux/amd64 node:22-trixie-slim@sha256:8eb619e402eaede1748a3c8173bffab391592812e85136452f781741c7242ddf AS node
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:2117f713a417f3aff682ac8f5bc2ebbdf1beed51f36e67ab1e0fd3866b6d2d8f AS node
 FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS closure
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 WORKDIR /build
@@ -50,7 +50,7 @@ COPY engines/modelscan/modelscan-settings.toml /opt/modelscan/modelscan-settings
 COPY engines/modelscan/npy-header.py /opt/modelscan/npy-header.py
 
 # ---- stage 2: the runner and scanner shim -------------------------------------------------------
-FROM --platform=linux/amd64 node:22-trixie-slim@sha256:8eb619e402eaede1748a3c8173bffab391592812e85136452f781741c7242ddf AS shim
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:2117f713a417f3aff682ac8f5bc2ebbdf1beed51f36e67ab1e0fd3866b6d2d8f AS shim
 RUN corepack enable
 WORKDIR /src
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./

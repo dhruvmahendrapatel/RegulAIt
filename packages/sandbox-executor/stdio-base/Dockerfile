@@ -19,7 +19,7 @@
 # The init needs `unshare` and `dmesg` (util-linux) for two of its probes; a base
 # without them reports those probes as not run, and the gateway fails the report
 # (fail closed, never a pass).
-FROM --platform=linux/amd64 node:22-trixie-slim@sha256:8eb619e402eaede1748a3c8173bffab391592812e85136452f781741c7242ddf
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:2117f713a417f3aff682ac8f5bc2ebbdf1beed51f36e67ab1e0fd3866b6d2d8f
 LABEL org.opencontainers.image.title="regulait-stdio-base"
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
            /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
