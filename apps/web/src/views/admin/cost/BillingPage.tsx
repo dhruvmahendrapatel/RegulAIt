@@ -17,7 +17,7 @@
  *    every statement row, because a subtotal that silently omits unpriced usage
  *    reads as a total.
  */
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago, fmtUsd } from "../../../api/format";
@@ -27,6 +27,7 @@ import { KV, QueryGate, Stat, downloadCsv, optionEls, projectOpts, teamOpts, use
 import { useToast } from "../../../ui/toast";
 import { BillingHistoryCard, RateCardDetail, StatementDetail } from "./BillingHistory";
 import a from "../admin.module.css";
+import bl from "./billing.module.css";
 import v from "../../views.module.css";
 
 interface RateCardEntry {
@@ -195,6 +196,67 @@ export default function BillingPage() {
 
   const o = overview.data;
 
+  // I-2: the three sequential acts as one stepper, each step stating its own status
+  type Step = "rate" | "period" | "statement";
+  const activeCard = o?.rateCards.find((c) => c.status === "active") ?? null;
+  const openPeriods = (o?.periods ?? []).filter((p) => p.status !== "closed").length;
+  const closedPeriods = (o?.periods ?? []).length - openPeriods;
+  const drafts = (o?.statements ?? []).filter((x) => x.status === "draft");
+  const issued = (o?.statements ?? []).filter((x) => x.status === "issued").length;
+  const unpriced = drafts.reduce((n, x) => n + x.unpricedEventCount, 0);
+  const firstOpen: Step = !activeCard ? "rate" : (o?.periods.length ?? 0) === 0 ? "period" : "statement";
+  const [chosenStep, setStep] = useState<Step | null>(null);
+  const step: Step = chosenStep ?? firstOpen;
+  // I-2 (owner amendment): the Statement step cuts for the newest open period, the same act as a Period row's button
+  const newestOpen =
+    [...(o?.periods ?? [])].filter((p) => p.status !== "closed").sort((x, y) => y.periodStart.localeCompare(x.periodStart))[0] ?? null;
+  const cutStatement = (periodId: string) =>
+    void act.run(async () => {
+      const r = await api.post<CutResult>(`/v1/billing/periods/${periodId}/statements`, {});
+      setCut(r);
+      setRecon(null);
+      setStep("statement");
+      await overview.refetch();
+      return "Statement cut (draft)";
+    });
+  const steps: Array<{ id: Step; label: string; done: boolean; status: ReactNode }> = [
+    {
+      id: "rate",
+      label: "Rate card",
+      done: Boolean(activeCard),
+      status: activeCard ? (
+        <Badge tone="ok">{`${activeCard.name} v${activeCard.version} active`}</Badge>
+      ) : (
+        <Badge tone="warn">Unpriced: no rate card</Badge>
+      ),
+    },
+    {
+      id: "period",
+      label: "Period",
+      done: (o?.periods.length ?? 0) > 0,
+      status:
+        (o?.periods.length ?? 0) === 0 ? (
+          <Badge tone="neutral">none yet</Badge>
+        ) : (
+          <Badge tone="info">{`${openPeriods} open · ${closedPeriods} closed`}</Badge>
+        ),
+    },
+    {
+      id: "statement",
+      label: "Statement",
+      done: issued > 0 && drafts.length === 0,
+      status: (
+        <span className={v.row}>
+          <Badge tone={drafts.length ? "info" : "ok"}>{`${issued} issued · ${drafts.length} draft`}</Badge>
+          {unpriced > 0 && (
+            // no info button here: the status sits inside the step's own button, and an unpriced event is explained on the step
+            <Badge tone="warn">{`Unpriced: ${unpriced}, not billed as zero`}</Badge>
+          )}
+        </span>
+      ),
+    },
+  ];
+
   return (
     <>
       <PageHeader
@@ -232,6 +294,19 @@ export default function BillingPage() {
             </div>
           </Card>
 
+          <ol className={bl.steps} aria-label="Billing set-up">
+            {steps.map((x, i) => (
+              <li key={x.id} className={x.id === step ? bl.stepOn : x.done ? bl.stepDone : undefined}>
+                <button type="button" aria-current={x.id === step ? "step" : undefined} onClick={() => setStep(x.id)}>
+                  <span className={bl.stepNum} aria-hidden>{x.done && x.id !== step ? "✓" : i + 1}</span>
+                  <span>{x.label}</span>
+                  {x.status}
+                </button>
+              </li>
+            ))}
+          </ol>
+
+          {step === "rate" && (
           <Card
             title="Rate cards — immutable versions"
             info={
@@ -328,7 +403,9 @@ export default function BillingPage() {
               )}
             </div>
           </Card>
+          )}
 
+          {step === "period" && (
           <Card
             title="Billing periods"
             info={
@@ -415,18 +492,7 @@ export default function BillingPage() {
                       srHeader: "Actions",
                       render: (p) => (
                         <div className={a.formRow}>
-                          <Button
-                            size="sm"
-                            onClick={() =>
-                              void act.run(async () => {
-                                const r = await api.post<CutResult>(`/v1/billing/periods/${p.id}/statements`, {});
-                                setCut(r);
-                                setRecon(null);
-                                await overview.refetch();
-                                return "Statement cut (draft)";
-                              })
-                            }
-                          >
+                          <Button size="sm" onClick={() => cutStatement(p.id)}>
                             Cut statement
                           </Button>
                           <Button
@@ -450,7 +516,10 @@ export default function BillingPage() {
               )}
             </div>
           </Card>
+          )}
 
+          {step === "statement" && (
+          <>
           {cut && (
             <Card title={`Statement v${cut.statement.version} — ${cut.report.periodLabel}`}>
               <div className={v.stack}>
@@ -564,9 +633,28 @@ export default function BillingPage() {
             </Card>
           )}
 
-          <Card title="Statements">
+          <Card
+            title="Statements"
+            actions={
+              <div className={v.row}>
+                <Button
+                  size="sm"
+                  disabled={!newestOpen}
+                  aria-describedby="billing-cut-for"
+                  onClick={() => newestOpen && cutStatement(newestOpen.id)}
+                >
+                  Cut statement
+                </Button>
+                <span id="billing-cut-for" className={v.faint}>
+                  {newestOpen
+                    ? `For the newest open period: ${newestOpen.scopeKind}, ${newestOpen.periodStart.slice(0, 10)} → ${newestOpen.periodEnd.slice(0, 10)}`
+                    : "No open period to cut a statement for. Open one on the Period step first."}
+                </span>
+              </div>
+            }
+          >
             {(o?.statements.length ?? 0) === 0 ? (
-              <EmptyState title="No statements yet" body="Cut one from a period above. A statement is a draft until it is explicitly issued." />
+              <EmptyState title="No statements yet" body="Cut one with the button above, or from a period on the Period step. A statement is a draft until it is explicitly issued." />
             ) : (
               <Table
                 rows={o!.statements}
@@ -656,6 +744,8 @@ export default function BillingPage() {
               )}
             </div>
           </Card>
+          </>
+          )}
           <BillingHistoryCard />
         </QueryGate>
       </div>

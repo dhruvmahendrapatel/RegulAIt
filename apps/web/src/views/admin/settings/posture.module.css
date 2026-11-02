@@ -1,0 +1,8 @@
+/*
+ * The enforcement-posture page's own styles. Kept beside the page rather than borrowed from the Discovery sources
+ * module, so the posture page's chunk carries what it uses and no chunk is split out for it (#453, 2026-10-31).
+ */
+/* a link inside a Fix sentence is underlined, so it is not told apart by colour alone */
+.inlineLinks a {
+  text-decoration: underline;
+}

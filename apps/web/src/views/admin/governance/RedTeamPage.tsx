@@ -22,12 +22,13 @@
 import { withStepUp } from "../../../stepup/stepUp";
 import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { RefusalNotice } from "../../../ui/RefusalNotice";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, SeverityBadge, Table, Textarea } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, ErrorState, Field, InfoButton, Input, Select, SeverityBadge, SkeletonBlock, Table, Tabs, Textarea, tabIds } from "../../../ui/kit";
+import { ENGINE_RUN_PARAM } from "./engineRuns";
 import { EngineRunsPanel } from "./EngineRunsPanel";
 import { ReasonedAction } from "./ReasonedAction";
 import { AttachRunEvidence, RedTeamFindingsCard, RedTeamSummaryCard, RunTrialsSection } from "./RedTeamPosture";
@@ -148,7 +149,11 @@ export default function RedTeamPage() {
   const [selectedRun, setSelectedRun] = useState<string>("");
   const runDetailRef = useRef<HTMLDivElement>(null);
   // a run opened from the posture or findings list: show its detail and take the reader there
+  // I-2: one empty state while nothing exists, and the page's parts behind tabs; a linked engine run opens its tab
+  const [params] = useSearchParams();
+  const [tab, setTab] = useState(() => (params.get(ENGINE_RUN_PARAM) ? "engines" : "overview"));
   const openRun = (id: string) => {
+    setTab("runs");
     setSelectedRun(id);
     requestAnimationFrame(() => runDetailRef.current?.scrollIntoView({ block: "start" }));
   };
@@ -204,14 +209,12 @@ export default function RedTeamPage() {
             void libraries.refetch();
           }}
         >
-          <Card
-            title="What a green run does and does not mean"
-            infoLabel="a green run"
-            info={classes.data?.disclosure ? <p>{classes.data.disclosure}</p> : undefined}
-          >
-            <div style={{ marginBottom: "var(--s2)" }}>A green run: no probe got through, not proof of safety.</div>
+          <div className={v.row} role="group" aria-label="What a green run means">
+            <Badge tone="warn" infoLabel="a green run" info={classes.data?.disclosure ? <p>{classes.data.disclosure}</p> : undefined}>
+              A green run: no probe got through, not proof of safety
+            </Badge>
             {classes.data?.scheduling && (
-              <div className={v.row}>
+              <>
                 <Badge
                   tone={classes.data.scheduling.schedulerEnabled ? "ok" : "neutral"}
                   infoLabel="the continuous sweep"
@@ -220,13 +223,78 @@ export default function RedTeamPage() {
                   continuous sweep: {classes.data.scheduling.schedulerEnabled ? "on" : "off"}
                 </Badge>
                 <span className={v.dim}>{classes.data.scheduling.posture}</span>
-              </div>
+              </>
             )}
-          </Card>
+          </div>
 
-          {/* Batch U4: posture first, then the standing findings below the runs */}
-          <RedTeamSummaryCard onOpenRun={openRun} />
+          {/* every action on the page shares one refusal line, so a refusal is never on a tab you are not on */}
+          <RefusalNotice guidance={act.guidance} />
 
+          <Tabs
+            label="Red-teaming"
+            idPrefix="redteam"
+            tabs={[
+              { id: "overview", label: "Overview" },
+              { id: "libraries", label: libraries.data?.libraries ? `Libraries (${libraries.data.libraries.length})` : "Libraries" },
+              { id: "runs", label: runs.data?.runs ? `Runs (${runs.data.runs.length})` : "Runs" },
+              { id: "engines", label: "Engines" },
+              { id: "classes", label: "Attack classes" },
+            ]}
+            active={tab}
+            onChange={setTab}
+          />
+
+          <div role="tabpanel" id={tabIds("redteam", tab).panel} aria-labelledby={tabIds("redteam", tab).tab} className={v.stack}>
+          {tab === "overview" &&
+            (runs.error && !runs.data ? (
+              <ErrorState
+                title="Couldn't load the red-team runs"
+                message={runs.error instanceof Error ? runs.error.message : String(runs.error)}
+                onRetry={() => void runs.refetch()}
+              />
+            ) : !runs.data ? (
+              <SkeletonBlock />
+            ) : (libraries.data?.libraries?.length ?? 0) === 0 && (runs.data.runs?.length ?? 0) === 0 ? (
+              <Card title="Get started">
+                <EmptyState
+                  title="Nothing has been probed yet"
+                  body={
+                    <>
+                      No library, no run and no finding exist yet, so there is no posture to report. Install the shipped
+                      corpus (or start your own library), publish it, then run it against an agent.{" "}
+                      <InfoButton label="what a run measures">
+                        A run goes through the same governed dispatch as real traffic, so it measures the guardrails and
+                        the model together, as deployed.
+                      </InfoButton>
+                    </>
+                  }
+                  action={
+                    <div className={v.row}>
+                      <Button
+                        variant="primary"
+                        disabled={act.busy}
+                        onClick={() =>
+                          void act.run(async () => {
+                            await api.post("/v1/redteam/libraries/seed", {});
+                            await libraries.refetch();
+                          }, "Shipped corpus installed")
+                        }
+                      >
+                        Install the shipped corpus
+                      </Button>
+                      <Button onClick={() => setTab("libraries")}>Start your own library</Button>
+                    </div>
+                  }
+                />
+              </Card>
+            ) : (
+              <>
+                <RedTeamSummaryCard onOpenRun={openRun} />
+                <RedTeamFindingsCard attackClasses={(classes.data?.attackClasses ?? []).map((c) => c.id)} onOpenRun={openRun} />
+              </>
+            ))}
+
+          {tab === "classes" && (
           <Card title="Attack classes, and what each one cannot tell you">
             <Table
               rows={classes.data?.attackClasses ?? []}
@@ -242,7 +310,10 @@ export default function RedTeamPage() {
               ]}
             />
           </Card>
+          )}
 
+          {tab === "libraries" && (
+          <>
           <Card title="Attack libraries" info={libraries.data?.note ? <p>{libraries.data.note}</p> : undefined}>
             <div className={a.formRow} style={{ marginBottom: "var(--s2)" }}>
               <Button
@@ -473,9 +544,12 @@ export default function RedTeamPage() {
               />
             </Card>
           ) : null}
+          </>
+          )}
 
+          {tab === "runs" && (
+          <>
           <Card title="Run a suite">
-            <RefusalNotice guidance={act.guidance} />
             <form
               className={a.formRow}
               onSubmit={(e) => {
@@ -543,8 +617,6 @@ export default function RedTeamPage() {
             )}
           </Card>
 
-          <RedTeamFindingsCard attackClasses={(classes.data?.attackClasses ?? []).map((c) => c.id)} onOpenRun={openRun} />
-
           <div ref={runDetailRef} />
           {selectedRun && runDetail.data ? (
             <Card
@@ -607,9 +679,12 @@ export default function RedTeamPage() {
               </div>
             </Card>
           ) : null}
+          </>
+          )}
 
           {/* ADR-0187 (X27): sidecar engine runs — run form, run detail, not-run list */}
-          <EngineRunsPanel surface="redteam" />
+          {tab === "engines" && <EngineRunsPanel surface="redteam" />}
+          </div>
         </QueryGate>
       </div>
     </>

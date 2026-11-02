@@ -28,13 +28,14 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, Input, Select, Textarea, type Tone } from "../../../ui/kit";
+import { ExpandableTable } from "../../../ui/ExpandableTable";
 import { QueryGate, optionEls, useAction, useAgents, useProjects, agentOpts } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 import { RiskLibraryPicker } from "./RiskLibraryPicker";
 import { RiskAcceptancePanel } from "./RiskAcceptancePanel";
-import { RiskTolerancePanel } from "./RiskTolerancePanel";
+import { RiskTolerancePanel, riskTolerancesQuery } from "./RiskTolerancePanel";
 import { RecordTreatment, TreatmentRecordCard, type TreatmentRecord } from "./RiskTreatmentPanel";
 import { useSession } from "../../../session/SessionContext";
 
@@ -154,6 +155,12 @@ export default function RisksPage() {
   const [agentId, setAgentId] = useState("");
   const [projectId, setProjectId] = useState("");
 
+  // I-2: the tolerance as one line; the editor, the library and the form open on demand
+  const tolerances = useQuery(riskTolerancesQuery());
+  const [panel, setPanel] = useState<"none" | "tolerance" | "library" | "register">("none");
+  const toggle = (next: typeof panel) => setPanel((cur) => (cur === next ? "none" : next));
+  const relaxed = (tolerances.data?.tolerances ?? []).filter((t) => t.relaxed);
+
   // detail actions
   const [transitionReason, setTransitionReason] = useState("");
   const { auth } = useSession();
@@ -175,156 +182,10 @@ export default function RisksPage() {
   };
   const d = detail.data;
 
-  return (
-    <>
-      <PageHeader
-        title="Risks"
-        info={<p>The register that makes the measurements legible as risk: a named scenario, an owner, the mitigating control we actually enforce, and a residual-risk acceptance record. Evidence is computed live from the real ledgers at read time — never hand-ticked — and likelihood/impact stay declared human judgments beside it, never blended into a score.</p>}
-      />
-      <div className={v.stack}>
-        {auth?.isAdmin ? <RiskTolerancePanel /> : null}
-        <RiskLibraryPicker onAdded={() => void refreshAll()} />
-        {/* ---------------- register ---------------- */}
-        <Card title="Register a risk">
-          <form
-            className={v.stack}
-            onSubmit={(e) => {
-              e.preventDefault();
-              void act.run(async () => {
-                await api.post("/v1/risks", {
-                  title,
-                  description: desc,
-                  category,
-                  likelihood,
-                  impact,
-                  ...(mitigation.trim() ? { mitigation: mitigation.trim() } : {}),
-                  ...(agentId ? { agentId } : {}),
-                  ...(projectId ? { projectId } : {}),
-                });
-                setLibKey("");
-                setTitle("");
-                setDesc("");
-                setMitigation("");
-                await refreshAll();
-              }, "Risk registered — its evidence is computed from the ledgers on every read");
-            }}
-          >
-            <div className={a.formRow}>
-              <Field label="Seed from the risk library (optional)" grow>
-                <Select value={libKey} onChange={(e) => seedFromLibrary(e.target.value)}>
-                  {optionEls(
-                    (library.data?.library ?? []).map((l) => ({ v: l.key, l: l.title })),
-                    "start blank",
-                  )}
-                </Select>
-              </Field>
-              <Field label="Category (the evidence key)">
-                <Select value={category} onChange={(e) => setCategory(e.target.value)}>
-                  <option value="tool_misuse">tool misuse</option>
-                  <option value="scope_drift">scope drift</option>
-                  <option value="prompt_injection">prompt injection</option>
-                  <option value="data_leakage_pii">data leakage / PII</option>
-                  <option value="over_permissioning">over-permissioning</option>
-                  <option value="budget_overrun">budget overrun</option>
-                  <option value="hallucination">hallucination</option>
-                  <option value="shadow_ai">shadow-AI</option>
-                  <option value="third_party_ai">third-party AI (vendors)</option>
-                  <option value="bias_fairness">bias / fairness</option>
-                  <option value="unsafe_output">unsafe output</option>
-                </Select>
-              </Field>
-            </div>
-            <Field label="Risk title">
-              <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="adversarial input steers an agent" required />
-            </Field>
-            <Field label="Scenario description">
-              <Textarea rows={2} value={desc} onChange={(e) => setDesc(e.target.value)} required />
-            </Field>
-            <Field label="Mitigating control — what this deployment actually enforces">
-              <Textarea rows={2} value={mitigation} onChange={(e) => setMitigation(e.target.value)} />
-            </Field>
-            <div className={a.formRow}>
-              <Field label="Likelihood (declared judgment)">
-                <Select value={likelihood} onChange={(e) => setLikelihood(e.target.value)}>
-                  <option value="low">low</option>
-                  <option value="medium">medium</option>
-                  <option value="high">high</option>
-                </Select>
-              </Field>
-              <Field label="Impact (declared judgment)">
-                <Select value={impact} onChange={(e) => setImpact(e.target.value)}>
-                  <option value="low">low</option>
-                  <option value="medium">medium</option>
-                  <option value="high">high</option>
-                </Select>
-              </Field>
-              <Field label="Agent scope (optional)">
-                <Select value={agentId} onChange={(e) => setAgentId(e.target.value)}>
-                  {optionEls(agentOpts(agents.data?.agents), "org-wide")}
-                </Select>
-              </Field>
-              <Field label="Project scope (optional)">
-                <Select value={projectId} onChange={(e) => setProjectId(e.target.value)}>
-                  {optionEls((projects.data?.projects ?? []).map((p) => ({ v: p.id, l: p.name })), "org-wide")}
-                </Select>
-              </Field>
-            </div>
-            <div>
-              <Button type="submit" disabled={act.busy}>Register risk</Button>
-            </div>
-          </form>
-        </Card>
-
-        {/* ---------------- register list ---------------- */}
-        <QueryGate loading={list.isLoading} error={list.error} onRetry={() => void list.refetch()}>
-          <Card title="Register">
-            {(list.data?.risks ?? []).length === 0 ? (
-              <EmptyState
-                title="No risks registered yet"
-                body="Register one above — the library seeds the scenarios this deployment's ledgers can evidence."
-              />
-            ) : (
-              <Table
-                rows={list.data?.risks ?? []}
-                rowKey={(r) => r.id}
-                onRowClick={(r) => setOpenId(openId === r.id ? null : r.id)}
-                columns={[
-                  { key: "title", header: "Risk", render: (r) => r.title },
-                  {
-                    key: "status",
-                    header: "Status",
-                    render: (r) => <Badge tone={statusTone(r.status)}>{r.status}</Badge>,
-                  },
-                  {
-                    key: "category",
-                    header: "Category",
-                    render: (r) => <Badge tone="neutral">{r.category.replace(/_/g, " ")}</Badge>,
-                  },
-                  {
-                    key: "declared",
-                    header: "Declared L/I",
-                    render: (r) => (
-                      <span className={v.faint}>
-                        {r.likelihood} / {r.impact}
-                      </span>
-                    ),
-                  },
-                  { key: "owner", header: "Owner", render: (r) => r.ownerName ?? r.ownerUserId },
-                  { key: "created", header: "Registered", render: (r) => ago(r.createdAt) },
-                ]}
-              />
-            )}
-          </Card>
-        </QueryGate>
-
-        {/* ---------------- detail ---------------- */}
-        {openId && (
-          <QueryGate loading={detail.isLoading} error={detail.error} onRetry={() => void detail.refetch()}>
-            {d && (
-              <Card
-                title={`Risk: ${d.risk.title}`}
-                actions={<Button variant="ghost" onClick={() => setOpenId(null)}>Close</Button>}
-              >
+  // the open risk, shown in place under its register row
+  const renderDetail = () => (
+    <QueryGate loading={detail.isLoading} error={detail.error} onRetry={() => void detail.refetch()}>
+      {d && (
                 <div className={v.stack}>
                   <div>
                     <Badge tone={statusTone(d.risk.status)}>{d.risk.status}</Badge>{" "}
@@ -442,9 +303,209 @@ export default function RisksPage() {
                   {/* ADR-0180 §6: tolerance vs residual, the acceptance history, the time-boxed accept form */}
                   <RiskAcceptancePanel key={d.risk.id} riskId={d.risk.id} onChanged={() => void refreshAll()} />
                 </div>
-              </Card>
+      )}
+    </QueryGate>
+  );
+
+  return (
+    <>
+      <PageHeader
+        title="Risks"
+        info={<p>The register that makes the measurements legible as risk: a named scenario, an owner, the mitigating control we actually enforce, and a residual-risk acceptance record. Evidence is computed live from the real ledgers at read time — never hand-ticked — and likelihood/impact stay declared human judgments beside it, never blended into a score.</p>}
+      />
+      <div className={v.stack}>
+        <div className={v.row} role="group" aria-label="Effective risk tolerance">
+          {tolerances.error ? (
+            <p className={v.errLine} role="alert">
+              Couldn&apos;t load the risk tolerance.{" "}
+              <Button size="sm" onClick={() => void tolerances.refetch()}>
+                Retry
+              </Button>
+            </p>
+          ) : null}
+          {tolerances.data && (
+            <Badge
+              tone={relaxed.length || tolerances.data.source !== "default" ? "warn" : "ok"}
+              infoLabel="the effective tolerance"
+              info={
+                <p>
+                  A risk gets the stricter of its category&apos;s and its tier&apos;s tolerance, and a scope you have not
+                  set counts as {tolerances.data.strictDefault.maxBand}. Relaxing a tolerance is recorded in the audit trail.
+                </p>
+              }
+            >
+              {`Tolerance: residual risk above ${tolerances.data.strictDefault.maxBand} needs a time-limited acceptance` +
+                (relaxed.length
+                  ? ` · relaxed: ${relaxed.map((t) => `${t.scopeKey.replace(/_/g, " ")} up to ${t.maxBand}`).join(", ")}`
+                  : tolerances.data.source !== "default"
+                    ? " · configured"
+                    : "")}
+            </Badge>
+          )}
+          <span className={v.grow} />
+          {auth?.isAdmin ? (
+            <Button size="sm" variant="ghost" aria-expanded={panel === "tolerance"} onClick={() => toggle("tolerance")}>
+              Edit tolerances
+            </Button>
+          ) : null}
+          <Button size="sm" aria-expanded={panel === "library"} onClick={() => toggle("library")}>
+            Add from library
+          </Button>
+          <Button size="sm" variant="primary" aria-expanded={panel === "register"} onClick={() => toggle("register")}>
+            Register a risk
+          </Button>
+        </div>
+        {panel === "tolerance" && auth?.isAdmin ? <RiskTolerancePanel /> : null}
+        {panel === "library" && <RiskLibraryPicker onAdded={() => void refreshAll()} />}
+        {/* ---------------- register ---------------- */}
+        {panel === "register" && (
+        <Card title="Register a risk">
+          <form
+            className={v.stack}
+            onSubmit={(e) => {
+              e.preventDefault();
+              void act.run(async () => {
+                await api.post("/v1/risks", {
+                  title,
+                  description: desc,
+                  category,
+                  likelihood,
+                  impact,
+                  ...(mitigation.trim() ? { mitigation: mitigation.trim() } : {}),
+                  ...(agentId ? { agentId } : {}),
+                  ...(projectId ? { projectId } : {}),
+                });
+                setLibKey("");
+                setTitle("");
+                setDesc("");
+                setMitigation("");
+                await refreshAll();
+              }, "Risk registered — its evidence is computed from the ledgers on every read");
+            }}
+          >
+            <div className={a.formRow}>
+              <Field label="Seed from the risk library (optional)" grow>
+                <Select value={libKey} onChange={(e) => seedFromLibrary(e.target.value)}>
+                  {optionEls(
+                    (library.data?.library ?? []).map((l) => ({ v: l.key, l: l.title })),
+                    "start blank",
+                  )}
+                </Select>
+              </Field>
+              <Field label="Category (the evidence key)">
+                <Select value={category} onChange={(e) => setCategory(e.target.value)}>
+                  <option value="tool_misuse">tool misuse</option>
+                  <option value="scope_drift">scope drift</option>
+                  <option value="prompt_injection">prompt injection</option>
+                  <option value="data_leakage_pii">data leakage / PII</option>
+                  <option value="over_permissioning">over-permissioning</option>
+                  <option value="budget_overrun">budget overrun</option>
+                  <option value="hallucination">hallucination</option>
+                  <option value="shadow_ai">shadow-AI</option>
+                  <option value="third_party_ai">third-party AI (vendors)</option>
+                  <option value="bias_fairness">bias / fairness</option>
+                  <option value="unsafe_output">unsafe output</option>
+                </Select>
+              </Field>
+            </div>
+            <Field label="Risk title">
+              <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="adversarial input steers an agent" required />
+            </Field>
+            <Field label="Scenario description">
+              <Textarea rows={2} value={desc} onChange={(e) => setDesc(e.target.value)} required />
+            </Field>
+            <Field label="Mitigating control — what this deployment actually enforces">
+              <Textarea rows={2} value={mitigation} onChange={(e) => setMitigation(e.target.value)} />
+            </Field>
+            <div className={a.formRow}>
+              <Field label="Likelihood (declared judgment)">
+                <Select value={likelihood} onChange={(e) => setLikelihood(e.target.value)}>
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                </Select>
+              </Field>
+              <Field label="Impact (declared judgment)">
+                <Select value={impact} onChange={(e) => setImpact(e.target.value)}>
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                </Select>
+              </Field>
+              <Field label="Agent scope (optional)">
+                <Select value={agentId} onChange={(e) => setAgentId(e.target.value)}>
+                  {optionEls(agentOpts(agents.data?.agents), "org-wide")}
+                </Select>
+              </Field>
+              <Field label="Project scope (optional)">
+                <Select value={projectId} onChange={(e) => setProjectId(e.target.value)}>
+                  {optionEls((projects.data?.projects ?? []).map((p) => ({ v: p.id, l: p.name })), "org-wide")}
+                </Select>
+              </Field>
+            </div>
+            <div>
+              <Button type="submit" disabled={act.busy}>Register risk</Button>
+            </div>
+          </form>
+        </Card>
+        )}
+
+        {/* ---------------- register list ---------------- */}
+        <QueryGate loading={list.isLoading} error={list.error} onRetry={() => void list.refetch()}>
+          <Card title="Register">
+            {(list.data?.risks ?? []).length === 0 ? (
+              <EmptyState
+                title="No risks registered yet"
+                body="Register one above — the library seeds the scenarios this deployment's ledgers can evidence."
+              />
+            ) : (
+              <ExpandableTable
+                rows={list.data?.risks ?? []}
+                rowKey={(r) => r.id}
+                expand={{
+                  open: (r) => r.id === openId,
+                  toggle: (r) => setOpenId(openId === r.id ? null : r.id),
+                  label: (r) => r.title,
+                  render: () => renderDetail(),
+                }}
+                columns={[
+                  { key: "title", header: "Risk", render: (r) => <strong>{r.title}</strong> },
+                  {
+                    key: "status",
+                    header: "Status",
+                    render: (r) => <Badge tone={statusTone(r.status)}>{r.status}</Badge>,
+                  },
+                  {
+                    key: "category",
+                    header: "Category",
+                    render: (r) => <Badge tone="neutral">{r.category.replace(/_/g, " ")}</Badge>,
+                  },
+                  {
+                    key: "declared",
+                    header: "Declared L/I",
+                    render: (r) => (
+                      <span className={v.faint}>
+                        {r.likelihood} / {r.impact}
+                      </span>
+                    ),
+                  },
+                  { key: "owner", header: "Owner", render: (r) => r.ownerName ?? r.ownerUserId },
+                  { key: "mitigation", header: "Mitigating control", render: (r) => <span className={v.faint}>{r.mitigation ?? "none recorded"}</span> },
+                  { key: "created", header: "Registered", render: (r) => ago(r.createdAt) },
+                ]}
+              />
             )}
-          </QueryGate>
+          </Card>
+        </QueryGate>
+
+        {/* a risk linked to directly that the register list does not show still opens, as its own card */}
+        {openId && list.data && !(list.data.risks ?? []).some((r) => r.id === openId) && (
+          <Card
+            title={d ? `Risk: ${d.risk.title}` : "Risk"}
+            actions={<Button variant="ghost" onClick={() => setOpenId(null)}>Close</Button>}
+          >
+            {renderDetail()}
+          </Card>
         )}
       </div>
     </>

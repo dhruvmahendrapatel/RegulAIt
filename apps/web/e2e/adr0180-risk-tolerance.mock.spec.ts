@@ -239,6 +239,14 @@ test.describe("ADR-0180 §6: risk tolerance and time-boxed acceptance", () => {
   test("the admin tolerance editor reads the strict default and saves the whole set", async ({ page }) => {
     const cap = await mockApi(page);
     await page.goto("/ui/admin/risks");
+    // I-2: the effective tolerance reads as one chip; the editor opens on demand
+    await expect(page.getByRole("group", { name: "Effective risk tolerance" })).toContainText(
+      "Tolerance: residual risk above medium needs a time-limited acceptance",
+    );
+    const edit = page.getByRole("button", { name: "Edit tolerances" });
+    await expect(edit).toHaveAttribute("aria-expanded", "false");
+    await edit.click();
+    await expect(edit).toHaveAttribute("aria-expanded", "true");
     const card = page.locator("section[data-rg-card]").filter({ hasText: "Risk tolerance (admin)" }).first();
     await expect(card).toContainText("With nothing configured, any residual risk above medium needs a valid, time-limited acceptance");
     await expect(card).toContainText("strict default");
