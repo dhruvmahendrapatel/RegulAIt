@@ -26,6 +26,8 @@ export function useTheme(): { theme: "light" | "dark"; toggle: () => void } {
       /* private mode — the toggle still works for the tab */
     }
     listeners.forEach((l) => l());
+    // ADR-0218: saved to the account too, when there is one (loaded on demand)
+    void import("../theme/account").then((m) => m.saveModeQuietly(next)).catch(() => undefined);
   }, []);
   return { theme, toggle };
 }

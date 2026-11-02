@@ -2,7 +2,8 @@
  * T1 Phase 1 (owner decision on #453, 2026-10-21): the colour palette a person picks, kept in this browser beside
  * `regulait.theme` (light / dark). Aurora is tokens.css itself; any other palette loads palettes.css on demand and
  * sets `data-palette` on <html> once that sheet is in, so the page never shows a palette name without its colours.
- * Phase 2 moves the choice to the account, with an organisation default and lock (needs a migration).
+ * Phase 2 (ADR-0218) saves the choice to the account, with an organisation default and lock (account.ts); this
+ * browser's copy stays, so the page paints in the right palette before the first request.
  */
 import { useSyncExternalStore } from "react";
 import sheetUrl from "./palettes.css?url";
@@ -42,7 +43,10 @@ export function loadPaletteSheet(): Promise<void> {
   return sheet;
 }
 
-function isPalette(value: unknown): value is PaletteId {
+/** the accessibility palette an organisation's lock never takes away */
+export const ACCESSIBILITY_PALETTE: PaletteId = "contrast";
+
+export function isPalette(value: unknown): value is PaletteId {
   return PALETTES.some((p) => p.id === value);
 }
 
@@ -60,7 +64,8 @@ let latest: PaletteId = "aurora";
 /** the palette on <html> now */
 let applied: PaletteId = "aurora";
 
-function current(): PaletteId {
+/** the palette picked now (its sheet may still be loading) */
+export function currentPalette(): PaletteId {
   return latest;
 }
 
@@ -107,5 +112,5 @@ export function usePalette(): PaletteId {
   return useSyncExternalStore((cb) => {
     listeners.add(cb);
     return () => listeners.delete(cb);
-  }, current);
+  }, currentPalette);
 }

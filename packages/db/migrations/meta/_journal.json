@@ -1562,6 +1562,13 @@
       "when": 1785193000000,
       "tag": "0258_vendor_draft_assist",
       "breakpoints": true
+    },
+    {
+      "idx": 259,
+      "version": "7",
+      "when": 1785194000000,
+      "tag": "0259_theme_account_org_lock",
+      "breakpoints": true
     }
   ]
 }
