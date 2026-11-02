@@ -421,7 +421,11 @@ export async function governedEvaluate(
           roleIds,
           teamIds,
         ),
-      ),
+      )
+      // ADR-0229: defence in depth only. The kernel sorts matched rules by
+      // precedence itself; a stable load order keeps every other reader of
+      // this list (logs, the context digest) deterministic too.
+      .orderBy(approvalRules.id),
     db
       .select()
       .from(rateLimits)

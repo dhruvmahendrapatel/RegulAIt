@@ -5441,6 +5441,14 @@ S3 Object Lock COMPLIANCE bucket through a dedicated anchor role with 1-hour cre
 2026-11-01); the locked bucket outlives teardown by up to its retention (7 days by default). Addendum 3 applies the security
 review: a truly least-privilege deployer, Run Command logged as the second operator channel, a versioned source bucket.
 
+**ADR-0229 (builder, 2026-11-02): approval-rule precedence.** A demo-host bug (#453): the seeded fleet write rule
+(approver Ada, no role) shadowed Dana's `repo-tools` `write_file` rule (Avery plus an approver role) because the
+gateway loaded rules unordered and the kernel took the first match, leaving 0 eligible approvers under passkey quorum
+2. The kernel now sorts matches by specificity (user > role = team > fleet, exact tool, one server, write-only, deploy
+mode, then id); the first names the approver and role, while any match still pauses and the quorum and approval scope
+stay the strictest across every match. The gateway orders the load by id as defence in depth; the access preview and
+`demo:check` row E read the same answer.
+
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
 (b) standing policy for future scaffolds recorded (ADR-0006, no implementation yet — nothing to

@@ -515,6 +515,15 @@ own MCP route `POST /mcp/:serverId` and ChatOps route `POST /v1/chatops/approval
 `AuditLogPage.tsx`, and on the fallback `SimulationPage.tsx`. Seed: `apps/gateway/src/seed.ts` (Dana's role grant on
 `repo-tools`, her revocation of `search_code`, the approval rule that sends her `write_file` calls to Avery).
 
+**Which rule names the approver (ADR-0229, 2026-11-02).** The seed also has a fleet rule: every write tool on every
+server needs Ada's sign-off. Both rules match Dana's `write_file`. The most specific matching rule names the approver,
+so her own rule wins and the request goes to Avery (and, in strict mode, his approver role). The fleet rule still
+counts: the call needs approval if any rule matches, and the quorum is the highest of all matching rules. Before
+ADR-0229 the winner depended on database order, and on the AWS host the fleet rule won (0 eligible approvers under
+passkey quorum 2). `demo:check` row **E Enforce it** now checks which rule wins, not only the org settings.
+- **If asked "what if two rules disagree?":** "The most specific rule says who signs; the strictest rule says how many
+  must. A broad rule can never be escaped by adding a narrow one."
+
 **What runs.** The command issues Dana a one-day key (revoked at the end of the run) and makes her calls over the MCP
 protocol through the running gateway, with the demo project header. The gateway decides every call: nothing in the
 command evaluates, approves or executes anything itself. `repo-tools` is the demo MCP server (`demo:mcp`), so the

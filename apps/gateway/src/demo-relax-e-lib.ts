@@ -25,6 +25,7 @@
  * leaves no audit row.
  */
 import { STEP_UP_HEADER } from "@regulait/shared";
+import { matchingApprovalRules, type ApprovalRule } from "@regulait/policy-kernel";
 import { DEMO_BEATS_ROUTE, ENFORCE_IT_BEAT_ID, demoTargetRefusal } from "./demo-beat-switch.js";
 import type { DemoCheck } from "./demo-check-lib.js";
 
@@ -147,9 +148,46 @@ function describeRelaxations(): string {
   return "sensitive-data approval quorum 1 and approval signing off (plain sign-off)";
 }
 
+/** the beat E call: Dana · repo-tools · write_file, queued for Avery */
+export const ENFORCE_BEAT_CALL = Object.freeze({
+  callerEmail: "dana@regulait.local",
+  approverEmail: "avery@regulait.local",
+  serverName: "repo-tools",
+  toolName: "write_file",
+});
+
 /**
- * demo:check: can beat E queue Dana's write for Avery? Read-only. On the simulated fallback the queue never happens,
- * so the row only notes it; live, a strict quorum or passkey signing FAILs with the fix.
+ * Which approval rule would name the approver for beat E's call, by the kernel's own precedence (ADR-0229). Read-only:
+ * it reads the rules, users and servers and never asks the gateway to evaluate (which would write an advisory audit
+ * row). Role- and team-scoped rules are counted as matching because membership is not read here; a user-scoped rule
+ * outranks them, so they only decide the answer when Dana has no rule of her own, and then the row says so.
+ */
+export async function enforceBeatApprover(
+  get: (url: string) => Promise<{ status: number; body: Json }>,
+): Promise<{ ok: true; approverEmail: string | null; ruleId: string; byMembership: boolean } | { ok: false; detail: string }> {
+  const [users, servers, rules] = await Promise.all([get("/v1/users"), get("/v1/servers"), get("/v1/rules/approvals")]);
+  if (users.status !== 200 || servers.status !== 200 || rules.status !== 200) {
+    return { ok: false, detail: `cannot read users/servers/approval rules (${users.status}/${servers.status}/${rules.status})` };
+  }
+  const byEmail = new Map(((users.body.users ?? []) as Json[]).map((u) => [String(u.email), String(u.id)]));
+  const dana = byEmail.get(ENFORCE_BEAT_CALL.callerEmail);
+  const server = ((servers.body.servers ?? []) as Json[]).find((s) => s.name === ENFORCE_BEAT_CALL.serverName);
+  if (!dana || !server) return { ok: false, detail: `no ${!dana ? ENFORCE_BEAT_CALL.callerEmail : `'${ENFORCE_BEAT_CALL.serverName}' server`} on this stack` };
+  const top = matchingApprovalRules((rules.body.rules ?? []) as ApprovalRule[], {
+    userId: dana,
+    serverId: String(server.id),
+    tool: { serverId: String(server.id), name: ENFORCE_BEAT_CALL.toolName, kind: "write" },
+  })[0];
+  if (!top) return { ok: false, detail: `no approval rule matches Dana's ${ENFORCE_BEAT_CALL.toolName}, so nothing would queue` };
+  const emailById = new Map([...byEmail].map(([e, id]) => [id, e]));
+  const scope = top.scope ?? "user";
+  return { ok: true, approverEmail: emailById.get(top.approverUserId) ?? null, ruleId: top.id, byMembership: scope === "role" || scope === "team" };
+}
+
+/**
+ * demo:check: can beat E queue Dana's write for Avery? Read-only. It checks both halves: the approval rule that names
+ * the approver (the most specific match, ADR-0229) names Avery, and the org settings let the queue accept it. On the
+ * simulated fallback the queue never happens, so the row only notes it; live, a problem FAILs with the fix.
  */
 export async function checkEnforceBeatPrereqs(get: (url: string) => Promise<{ status: number; body: Json }>): Promise<DemoCheck[]> {
   const fix = "run `pnpm --filter @regulait/gateway demo:relax-e` on this stack (DEMO_RUNBOOK §7.3, row E), then re-run demo:check";
@@ -166,8 +204,16 @@ export async function checkEnforceBeatPrereqs(get: (url: string) => Promise<{ st
   else if (s.approvalSignatureMode !== DEMO_E_RELAXATIONS.approvalSignatureMode) {
     problems.push(`approval signing is ${String(s.approvalSignatureMode)} (Avery would have to step up to decide; the owner chose plain sign-off)`);
   }
+  const routing = await enforceBeatApprover(get);
+  if (!routing.ok) problems.push(routing.detail);
+  else if (routing.approverEmail !== ENFORCE_BEAT_CALL.approverEmail) {
+    problems.push(
+      `the most specific matching approval rule (${routing.ruleId}) names ${routing.approverEmail ?? "an unknown user"}, not Avery` +
+        (routing.byMembership ? " (a role/team rule; Dana has no rule of her own for this call)" : ""),
+    );
+  }
   if (problems.length === 0) {
-    return [{ beat: ENFORCE_BEAT, level: "PASS", detail: "Dana's write_file can queue for Avery: quorum 1, plain sign-off (audited demo relaxation)" }];
+    return [{ beat: ENFORCE_BEAT, level: "PASS", detail: `Dana's write_file queues for Avery under rule ${routing.ok ? routing.ruleId : "?"} (most specific match, ADR-0229): quorum 1, plain sign-off (audited demo relaxation)` }];
   }
   if (simulated) {
     return [{ beat: ENFORCE_BEAT, level: "WARN", detail: `on its simulated fallback, so nothing queues; live it would be refused at queue time: ${problems.join("; ")}`, fix }];

@@ -784,14 +784,54 @@ function argAtPath(args: Record<string, unknown> | undefined, path: string): unk
 }
 
 /**
+ * ADR-0229 — APPROVAL-RULE PRECEDENCE. When several approval rules match one
+ * call, the MOST SPECIFIC one names the approver (and, in the gateway, the
+ * approver role whose members form the pool). Specificity is compared
+ * lexicographically, most significant first:
+ *
+ *   1. subject — user (or a legacy rule with no scope) > role = team > fleet
+ *   2. tool    — an exact tool name > any tool (toolName null)
+ *   3. server  — one server > all servers
+ *   4. writeOnly — narrowed to write tools > every tool kind
+ *   5. deploy mode — bound to one mode > every mode
+ *   6. rule id, ascending — a total order, so the answer never depends on the
+ *      order the rules were loaded in (the database gives none without ORDER BY)
+ *
+ * Precedence chooses WHO approves; it never weakens WHETHER or HOW STRICTLY:
+ * any matching rule still pauses the call, the gateway still takes the highest
+ * quorum and the strictest `approvalScope` across every matched rule.
+ * Negative = `a` outranks `b`.
+ */
+export function compareApprovalRulePrecedence(a: ApprovalRule, b: ApprovalRule): number {
+  const subject = (r: ApprovalRule) => {
+    const scope = r.scope ?? "user";
+    return scope === "user" ? 2 : scope === "fleet" ? 0 : 1;
+  };
+  const keys = (r: ApprovalRule): number[] => [
+    subject(r),
+    r.toolName != null ? 1 : 0,
+    (r.serverScope ?? "server") === "server" ? 1 : 0,
+    r.writeOnly ? 1 : 0,
+    r.deployMode != null ? 1 : 0,
+  ];
+  const ka = keys(a);
+  const kb = keys(b);
+  for (let i = 0; i < ka.length; i++) {
+    if (ka[i] !== kb[i]) return kb[i]! - ka[i]!;
+  }
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+/**
  * The approval-rule MATCH predicate, extracted so there is exactly one.
  *
  * `evaluate` uses it to find the rule that pauses a call; ADR-0104's gateway
  * matcher uses it to read the strictest `approvalScope` across the rules that
  * bound THIS call, so "which rules govern this approval" is one answer computed
- * once, not two answers that can disagree. Order is preserved: the first
- * element is the rule `evaluate` reports as the pausing rule, exactly as the
- * previous `.find` did.
+ * once, not two answers that can disagree. The result is sorted by ADR-0229
+ * precedence (`compareApprovalRulePrecedence`): the first element is the most
+ * specific matching rule, the one `evaluate` reports as the pausing rule,
+ * whatever order the caller passed the rules in.
  */
 export function matchingApprovalRules(
   rules: readonly ApprovalRule[],
@@ -809,7 +849,7 @@ export function matchingApprovalRules(
       ruleAppliesToDeployMode(r, ctx.deployContext ?? null) &&
       matchesScope(r.toolName, ctx.tool.name) &&
       (!r.writeOnly || ctx.tool.kind === "write"),
-  );
+  ).sort(compareApprovalRulePrecedence);
 }
 
 /**
@@ -1183,8 +1223,10 @@ function evaluateTool(input: EvaluationInput): Decision {
     }
   }
 
-  // PILLAR 1: first matching approval rule across any scope pauses the call —
+  // PILLAR 1: any matching approval rule across any scope pauses the call —
   // a broader fleet/role/team rule requires sign-off just as a user rule does.
+  // ADR-0229: the MOST SPECIFIC matching rule is the one reported (and names
+  // the approver); `matchingApprovalRules` returns them in precedence order.
   // The MATCH itself lives in `matchingApprovalRules` (above) because ADR-0104
   // needs the same predicate outside the kernel, to read the strictest
   // `approvalScope` off exactly the rules that bound this call. Two copies of
