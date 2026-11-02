@@ -171,7 +171,7 @@ services:
     # CI starts THIS service (ci.yml, build-and-test), so CI tests exactly what
     # a `docker compose up` runs. Override with REGULAIT_OBJECTSTORE_IMAGE for
     # another SeaweedFS build that has the same /entrypoint.sh.
-    image: ${REGULAIT_OBJECTSTORE_IMAGE:-chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d}
+    image: ${REGULAIT_OBJECTSTORE_IMAGE:-chrislusf/seaweedfs:4.50@sha256:c2658820e763294a9e9de7b36c81e59b879e3459148351aee4e31a126ca64860}
     # `server` runs master + volume + filer + S3 gateway in one process. The
     # image's entrypoint prepends `-dir=/data -master.volumeSizeLimitMB=1024`
     # (and `-volume.max=0` unless one is given); later flags win.
@@ -280,7 +280,7 @@ services:
     # The server image again: it carries curl, whose built-in SigV4 signing
     # (`--aws-sigv4`) speaks the three S3 calls this needs, so no separate
     # client image has to be pulled and pinned.
-    image: ${REGULAIT_OBJECTSTORE_IMAGE:-chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d}
+    image: ${REGULAIT_OBJECTSTORE_IMAGE:-chrislusf/seaweedfs:4.50@sha256:c2658820e763294a9e9de7b36c81e59b879e3459148351aee4e31a126ca64860}
     depends_on:
       objectstore:
         condition: service_healthy
@@ -749,7 +749,7 @@ services:
     # Docker Hub registry API on 2026-10-23 (the tag was rebuilt upstream on
     # 2026-10-10; the 2026-10-04 reading was sha256:b0f60d48...). The digest is what
     # is run. Upgrade deliberately (docs/deployment/SSO_KEYCLOAK.md § Upgrades).
-    image: ${REGULAIT_KC_IMAGE:-keycloak/keycloak:26.8.0@sha256:27b3230fbabb8c9ff3c66c864cf09dcd8a41aca82e5100679d109ef0eeb05741}
+    image: ${REGULAIT_KC_IMAGE:-keycloak/keycloak:26.8.1-1@sha256:a78d6b79572168cb25886b80a8b5b8d4ed4390743e3eecb810538683e209dd6b}
     profiles: ["sso"]
     depends_on:
       keycloak-db-init:
@@ -1090,7 +1090,7 @@ services:
   cloudflared:
     # pinned: cloudflare/cloudflared:2026.10.3 (Apache-2.0), the OCI index digest
     # resolved against Docker Hub on 2026-10-26. infra/THIRD_PARTY.md.
-    image: cloudflare/cloudflared:2026.10.3@sha256:faa8e0a1475f137c910be6025f43c8e4092fdd35461b31e19fd1390657a1ff39
+    image: cloudflare/cloudflared:2026.10.6@sha256:004d843fa5fdc3103983fd580ee19fab4a8fa98add31f87249c1659e848c98e0
     profiles: ["tunnel"]
     depends_on:
       - caddy-tunnel
