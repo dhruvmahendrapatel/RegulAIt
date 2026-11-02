@@ -1136,6 +1136,9 @@ export async function requiredQuorumNow(db: Q, row: ApprovalRow): Promise<number
           projectId: row.projectId ?? null,
         })
       : null;
+  // review round 2, N1: a tool-call approval whose tool is gone cannot be recomputed; that is not a lower
+  // requirement either, so fail closed (the proxy re-syncs a missing tool before deciding, so a live tool is found)
+  if (row.serverId && row.toolName && matchingNow === null) return Number.POSITIVE_INFINITY;
   const sensitive = (await callSensitivity(db, { projectId: row.projectId, callerUserId: row.userId })).length > 0;
   const org = sensitive ? await loadOrgSettings(db as Db) : null;
   return Math.max(rule?.quorum ?? 1, ...(matchingNow ?? []).map((r) => r.quorum), org ? org.toolApprovalSensitiveQuorum : 1);

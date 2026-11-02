@@ -114,3 +114,50 @@ a different pool: refused without the step-up and bound to the fleet rule, admit
 fleet pool, or a role rule with the same pool, needs none; a tie needs it; an edit that moves the approver carries the
 takeover in its one step-up), `zz-b4c4-review-fixes.test.ts` (`requiredQuorumNow` reads a raised quorum on a broader
 matching rule), and kernel tests for `compareApprovalRuleSpecificity` and `approvalRulesMayOverlap`.
+
+## Amendment 2 (2026-11-02, review round 2 of #662 at `b6486a0`)
+
+Two blocking findings, both on paths where who signs moved to a wider pool without the `settings_relax` step-up.
+
+7. **The guard checks both directions (security B1).** Amendment 1 asked only which pools the rule as written takes
+   over. Making a rule *less* specific (tool → any tool, deploy mode → every mode, write-only → every kind) is a
+   tightening by the field comparator, yet it can let an overlapping rule with a wider pool outrank or tie it and take
+   its calls. The guard now also computes the **reverse** set: overlapping rules that `before` strictly outranked,
+   that now outrank or tie `after`, and whose pool loosens `before`'s. Both sets go into one step-up, bound to
+   `{ruleId, values: {outranksApprovalRules?, outrankedByApprovalRules?, approverUserId, approverRoleId}}`. It runs
+   wherever amendment 1 runs: create, plain edit, and every version activation (mint-and-activate, activate,
+   rollback, canary promotion), all through `assertRuleLooseningStepUp` / `activateVersion`.
+8. **The deploy-mode route takes the real step-up for a takeover (review blocker 1).** `PATCH
+   /v1/rules/approvals/:id/deploy-mode` asked its own step-up only when it set a mode, and handed the writer a no-op
+   callback, so clearing a mode (which widens overlap) passed any takeover. The callback now satisfies only the fact
+   the route already stepped up for (the deploy-mode narrowing). A takeover found by the writer goes to
+   `approvalRuleStepUp`, bound to the takeover facts, so the approver sees which pool moves (review non-blocking 4).
+
+**Also settled in this round:**
+- **Served view (N3).** The guard compares the active version body of each candidate rule (overlaid on its row), which
+  is what the kernel is served. Approval-rule canaries are shadow-evaluated (`SHADOW_CANARY_ARTIFACT_TYPES`): a canary
+  body never names an approver, and it reaches the served path only through `activateVersion`, which runs this guard.
+- **Cost (N4).** Candidates are pre-filtered in SQL by the same disjointness `approvalRulesMayOverlap` applies (user on
+  two user rules, one-server id, exact tool, deploy mode) before any pool is loaded.
+- **Concurrency (review non-blocking 3).** Approval-rule writes that run the guard are serialised by a transaction-scoped
+  advisory lock (`regulait:approval-rule-routing`), so two writes cannot each pass against a set the other is changing.
+- **Queue-time pool snapshot (N2).** A queued approval keeps the pool snapshotted when it was queued (its named approver
+  and approver role). A more specific rule created later does not re-route it. That is acceptable because creating or
+  editing such a rule is step-up gated (decisions 5 and 7), and a change to any matched rule retires the consent
+  through the context digest.
+- **Missing tool (N1).** `requiredQuorumNow` fails closed when a tool-call approval's tool is gone. The proxy re-syncs a
+  missing tool before it decides, so a live tool is always found. An MCP protocol method (ADR-0185 G3) has no inventory
+  row and is governed under its grant name; its kind comes from `MCP_PROTOCOL_METHOD_GRANTS`.
+- **Role and team overlap (N5).** Kept conservative: a role or team rule may overlap any rule, whoever holds the role
+  today, so a membership change can never bring an unguarded tie into play. Pinned by a test with a role nobody holds.
+- **Known limitation: a shadowed tightening (review non-blocking 2).** Narrowing a *broader* rule's pool is a tightening
+  and needs no step-up, but a more specific overlapping rule created earlier keeps naming the signer for the calls they
+  share, so the tightening does not take effect there. This is not a bypass of an existing protection. The remedies are
+  a rule-editor warning when a tightened pool is shadowed by a more specific overlapping rule, together with the
+  equal-specificity overlap warning (review round 1, non-blocking 4), and option (b), the intersection of pools. Both
+  are open follow-ups, not part of this PR.
+
+**Tests (round 2).** `zz-b4-approval-rule-loosen-step-up.test.ts`: the four-step reverse sequence (tool → any tool), the
+deploy-mode → every-mode variant through the deploy-mode route, the route blocker (a mode-scoped user rule cleared over a
+fleet rule with a restricted pool in another mode), and N5 (a role rule for a role nobody holds). Each is refused
+without the step-up, bound to the facts above, and admitted with it.

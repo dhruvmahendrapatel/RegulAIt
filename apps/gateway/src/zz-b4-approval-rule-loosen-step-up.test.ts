@@ -303,3 +303,101 @@ describe("ADR-0229 amendment: outranking an overlapping rule's narrower pool nee
     }
   });
 });
+
+// ADR-0229 amendment, review round 2: the reverse takeover (B1), the deploy-mode route (blocker), and the
+// conservative role/team overlap (N5).
+describe("ADR-0229 amendment round 2: who signs can only move to a wider pool with settings_relax", () => {
+  type RuleRow = typeof approvalRules.$inferInsert;
+  const insertRule = async (r: Partial<RuleRow>) =>
+    (
+      await db
+        .insert(approvalRules)
+        .values({ scope: "user", serverScope: "server", userId: U.caller, serverId, toolName: null, writeOnly: false, approverUserId: U.a, approverRoleId: null, quorum: 1, ...r } as RuleRow)
+        .returning({ id: approvalRules.id })
+    )[0]!.id;
+  const tool = () => `b4q_${RUN}_${randomBytes(3).toString("hex")}`;
+
+  it("B1 (four steps): making the narrow rule less specific (tool -> any) lets a wider rule take its calls; needs it", async () => {
+    // 1. N: the caller, this server, tool X, pool {A}
+    const n = await viaKey("POST", "/v1/rules/approvals", { scope: "user", serverScope: "server", userId: U.caller, serverId, toolName: tool(), approverUserId: U.a, approverRoleId: null, quorum: 1 });
+    expect(n.statusCode, n.body).toBe(201);
+    const nId = n.json().id as string;
+    // 2. B: the caller, this server, any WRITE tool, pool {A, B, D}: less specific than N, so no takeover, no step-up
+    const b = await viaKey("POST", "/v1/rules/approvals", { scope: "user", serverScope: "server", userId: U.caller, serverId, writeOnly: true, approverUserId: U.a, approverRoleId: roleId, quorum: 1 });
+    expect(b.statusCode, b.body).toBe(201);
+    const bId = b.json().id as string;
+    try {
+      // 3. N: tool X -> any tool. Widening what a rule matches is a tightening on its own, but B (write-only) now
+      //    outranks N, so B's wider pool would sign for the caller's write calls N named A alone for
+      const url = `/v1/rules/approvals/${nId}`;
+      const key = await viaKey("PATCH", url, { toolName: null });
+      expect(key.statusCode, key.body).toBe(403);
+      expect(key.json()).toMatchObject({ error: "step_up_required" });
+      const refused = await asAdmin("PATCH", url, { toolName: null });
+      expect(refused.statusCode, refused.body).toBe(403);
+      expect(refused.json().action).toEqual({
+        kind: "settings_relax",
+        body: { ruleId: nId, values: { outrankedByApprovalRules: [bId], approverUserId: U.a, approverRoleId: null } },
+      });
+      expect((await quorumOf(nId))!.toolName).not.toBeNull();
+      // 4. with the step-up it is admitted, audited like any loosening
+      const ok = await asAdmin("PATCH", url, { toolName: null }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) });
+      expect(ok.statusCode, ok.body).toBe(200);
+    } finally {
+      await db.delete(approvalRules).where(inArray(approvalRules.id, [nId, bId]));
+    }
+  });
+
+  it("B1, deploy-mode variant: clearing the narrow rule's mode lets an equally specific wider rule tie it; needs it", async () => {
+    const t = tool();
+    const nId = await insertRule({ toolName: t, deployMode: "hosted", approverUserId: U.a });
+    const bId = await insertRule({ toolName: t, deployMode: null, approverUserId: U.a, approverRoleId: roleId });
+    try {
+      const url = `/v1/rules/approvals/${nId}/deploy-mode`;
+      const key = await viaKey("PATCH", url, { deployMode: null });
+      expect(key.statusCode, key.body).toBe(403);
+      const refused = await asAdmin("PATCH", url, { deployMode: null });
+      expect(refused.statusCode, refused.body).toBe(403);
+      expect(refused.json().action.body.values).toMatchObject({ outrankedByApprovalRules: [bId] });
+      const ok = await asAdmin("PATCH", url, { deployMode: null }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) });
+      expect(ok.statusCode, ok.body).toBe(200);
+      expect((await quorumOf(nId))!.deployMode).toBeNull();
+    } finally {
+      await db.delete(approvalRules).where(inArray(approvalRules.id, [nId, bId]));
+    }
+  });
+
+  it("deploy-mode route (review blocker): clearing a user rule's mode over a fleet rule with a restricted pool needs it", async () => {
+    // A: the caller's rule in mode hosted, approver E. F: a fleet rule in mode byoc, pool {A} (the security lead's).
+    // Disjoint while both are mode-scoped; clearing A's mode makes A overlap F and outrank it (user > fleet).
+    const aId = await insertRule({ deployMode: "hosted", approverUserId: U.e });
+    const fId = await insertRule({ scope: "fleet", serverScope: "all", userId: null, serverId: null, writeOnly: true, deployMode: "byoc", approverUserId: U.a, quorum: 2 });
+    try {
+      const url = `/v1/rules/approvals/${aId}/deploy-mode`;
+      const refused = await asAdmin("PATCH", url, { deployMode: null });
+      expect(refused.statusCode, refused.body).toBe(403);
+      // the binding names the pool being taken over (review non-blocking 4)
+      expect(refused.json().action).toEqual({
+        kind: "settings_relax",
+        body: { ruleId: aId, values: { outranksApprovalRules: [fId], approverUserId: U.e, approverRoleId: null } },
+      });
+      expect((await quorumOf(aId))!.deployMode).toBe("hosted");
+      const ok = await asAdmin("PATCH", url, { deployMode: null }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) });
+      expect(ok.statusCode, ok.body).toBe(200);
+    } finally {
+      await db.delete(approvalRules).where(inArray(approvalRules.id, [aId, fId]));
+    }
+  });
+
+  it("N5: a role rule overlaps a fleet rule even for a role nobody holds (membership is never assumed)", async () => {
+    const fId = await insertRule({ scope: "fleet", serverScope: "all", userId: null, serverId: null, writeOnly: true, approverUserId: U.a, quorum: 2 });
+    const [empty] = await db.insert(roles).values({ name: `b4q nobody ${RUN}` }).returning({ id: roles.id });
+    try {
+      const r = await viaKey("POST", "/v1/rules/approvals", { scope: "role", roleId: empty!.id, serverScope: "all", writeOnly: true, approverUserId: U.e, quorum: 1 });
+      expect(r.statusCode, r.body).toBe(403);
+      expect(r.json()).toMatchObject({ error: "step_up_required" });
+    } finally {
+      await db.delete(approvalRules).where(eq(approvalRules.id, fId));
+    }
+  });
+});

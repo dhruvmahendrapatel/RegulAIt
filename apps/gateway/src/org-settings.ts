@@ -80,6 +80,7 @@ import { settingTransitions } from "./setting-transitions.js";
 import { revokeAuditorAccessOnDisable } from "./trust-pages-revoke.js";
 import { databaseNow } from "./db-clock.js";
 import {
+  approvalRuleStepUp,
   breakGlassChange,
   CHANGED_CONCURRENTLY,
   breakGlassStepUpRefusal,
@@ -1047,8 +1048,17 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
       return applyRuleEdit<{ id: string; deployMode: string | null }>(tx, {
       // this route asked its own settings_relax step-up for a narrowing above (the
       // same rule as the edit guard's deploy-mode comparator), decided again on the
-      // locked scope just now — the guard inside the writer is satisfied by it
-      stepUp: async () => {},
+      // locked scope just now — the guard inside the writer is satisfied by it FOR
+      // THAT FACT ONLY. ADR-0229 amendment (review round 2, blocker): on an approval
+      // rule the writer may also find an approver-pool takeover (clearing the mode
+      // makes the rule overlap rules it did not, or lets a wider rule outrank it);
+      // that is a separate loosening, so it gets the real step-up, bound to the
+      // takeover facts, never this route's earlier grant
+      stepUp: async (facts) => {
+        const values = (facts as { values?: Record<string, unknown> }).values ?? {};
+        const takeover = "outranksApprovalRules" in values || "outrankedByApprovalRules" in values;
+        if (kind === "approvals" && takeover) return approvalRuleStepUp(db, req)(facts);
+      },
       artifactType: RULE_ARTIFACT_TYPES[kind],
       artifactId: ruleId,
       patch: { deployMode: body.deployMode ?? null },

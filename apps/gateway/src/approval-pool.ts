@@ -46,6 +46,7 @@ import {
   type SQL,
 } from "@regulait/db";
 import { approvalRulesMayOverlap, compareApprovalRuleSpecificity, type ApprovalRuleRouting } from "@regulait/policy-kernel";
+import { loadVersionsForArtifacts } from "./rule-versions.js";
 
 type Q = Pick<Db, "select">;
 
@@ -628,51 +629,133 @@ export function routedApprovalRule(r: Record<string, unknown>): RoutedApprovalRu
 }
 
 /**
- * The ids of the existing approval rules whose approver pool `rule` would take over: rules a call could match
- * together with `rule` (`approvalRulesMayOverlap`), that `rule` outranks or ties under ADR-0229 precedence (a tie is
- * decided by id, which is arbitrary, so it counts), and whose pool `rule`'s pool loosens (`approvalRuleLoosens`, the
- * same comparator an edit of that rule's own pool is judged by). Quorum is not part of it: the gateway takes the
- * highest quorum across every matched rule whatever the precedence, so only the pool is compared.
+ * ADR-0229 amendment (review round 2, N4): the candidate rules a write can interact with, pre-filtered in SQL by the
+ * same disjointness `approvalRulesMayOverlap` applies (different user on two user rules, different one-server ids,
+ * different exact tools, different deploy modes), for ANY of `shapes` (the rule before and after the write).
+ *
+ * N3 — the SERVED view: each row is overlaid with its ACTIVE version's body, which is what `applyRuleVersions`
+ * serves. Approval-rule canaries are shadow-evaluated (`SHADOW_CANARY_ARTIFACT_TYPES`): a canary body is only ever
+ * a candidate observed beside the served decision, never what names the approver, and it reaches the served path
+ * only through `activateVersion` (promotion), which runs this same guard. So the active body is the whole served
+ * view. (The row is also the read model `activateVersion` writes in the same transaction; the overlay costs one
+ * query and does not rely on that.)
  */
-export async function approverPoolsTakenOver(db: Q, rule: RoutedApprovalRule, excludeRuleId: string | null): Promise<string[]> {
-  const rows = await db.select().from(approvalRules);
+async function servedOverlappingRules(
+  db: Q,
+  shapes: readonly RoutedApprovalRule[],
+  excludeRuleId: string | null,
+): Promise<Array<RoutedApprovalRule & { id: string }>> {
+  const arm = (s: RoutedApprovalRule): SQL => {
+    const conds: SQL[] = [];
+    if ((s.scope ?? "user") === "user") conds.push(or(ne(approvalRules.scope, "user"), eq(approvalRules.userId, s.userId ?? ""))!);
+    if ((s.serverScope ?? "server") === "server") {
+      conds.push(or(eq(approvalRules.serverScope, "all"), eq(approvalRules.serverId, s.serverId ?? ""))!);
+    }
+    if (s.toolName != null) conds.push(or(isNull(approvalRules.toolName), eq(approvalRules.toolName, s.toolName))!);
+    if (s.deployMode != null) conds.push(or(isNull(approvalRules.deployMode), eq(approvalRules.deployMode, s.deployMode))!);
+    return conds.length ? and(...conds)! : sql`true`;
+  };
+  const rows = await db
+    .select()
+    .from(approvalRules)
+    .where(
+      and(
+        or(...shapes.map(arm))!,
+        ...(excludeRuleId ? [ne(approvalRules.id, excludeRuleId)] : []),
+      ),
+    )
+    .orderBy(approvalRules.id);
+  if (rows.length === 0) return [];
+  const versions = await loadVersionsForArtifacts(db as Db, ["approval_rule"], rows.map((r) => r.id));
+  return rows
+    .map((row) => {
+      const active = (versions.get(`approval_rule:${row.id}`) ?? []).find((v) => v.status === "active");
+      return Object.assign(routedApprovalRule({ ...(row as unknown as Record<string, unknown>), ...((active?.body ?? {}) as Record<string, unknown>) }), { id: row.id });
+    })
+    .filter((r) => shapes.some((s) => approvalRulesMayOverlap(s, r)));
+}
+
+/** does `taker`'s pool loosen `held`'s? quorum is left out: the highest quorum over every match applies anyway */
+const poolLoosens = (db: Q, held: RoutedApprovalRule, taker: RoutedApprovalRule) =>
+  approvalRuleLoosens(db, held, { ...taker, quorum: Math.max(taker.quorum ?? 1, held.quorum ?? 1) });
+
+/**
+ * FORWARD: the existing rules whose approver pool `rule` takes over. They may share a call with `rule`, `rule` is at
+ * least as specific (a tie counts: the id that would break it is arbitrary), and `rule`'s pool loosens theirs.
+ */
+async function forwardTakeovers(db: Q, rule: RoutedApprovalRule, others: Array<RoutedApprovalRule & { id?: string }>): Promise<string[]> {
   const out: string[] = [];
-  for (const row of rows) {
-    if (row.id === excludeRuleId) continue;
-    const other = routedApprovalRule(row as unknown as Record<string, unknown>);
+  for (const other of others) {
     if (!approvalRulesMayOverlap(rule, other)) continue;
     if (compareApprovalRuleSpecificity(rule, other) > 0) continue; // `other` stays the more specific one
-    const asIfSameQuorum = { ...rule, quorum: Math.max(rule.quorum ?? 1, other.quorum ?? 1) };
-    if (await approvalRuleLoosens(db, other, asIfSameQuorum)) out.push(row.id);
+    if (await poolLoosens(db, other, rule)) out.push(other.id!);
   }
   return out.sort();
 }
 
 /**
- * The step-up facts for a write that makes `after` take over approver pools it did not take over as `before`
- * (`before` null = a create), or null when it takes over none. Editing a rule without moving its routing or pool
- * yields the same set before and after, so nothing new is owed.
+ * REVERSE (review round 2, B1): the existing rules that take over the calls `before` named the signer for, because
+ * the write makes the rule LESS specific (a tool, a deploy mode or write-only cleared). They shared a call with
+ * `before`, `before` strictly outranked them, they now outrank or tie `after`, and their pool loosens `before`'s.
+ */
+async function reverseTakeovers(
+  db: Q,
+  before: RoutedApprovalRule,
+  after: RoutedApprovalRule,
+  others: Array<RoutedApprovalRule & { id?: string }>,
+): Promise<string[]> {
+  const out: string[] = [];
+  for (const other of others) {
+    if (!approvalRulesMayOverlap(before, other) || !approvalRulesMayOverlap(after, other)) continue;
+    if (compareApprovalRuleSpecificity(other, before) <= 0) continue; // `other` already outranked or tied `before`
+    if (compareApprovalRuleSpecificity(other, after) > 0) continue; // `after` still outranks it
+    if (await poolLoosens(db, before, other)) out.push(other.id!);
+  }
+  return out.sort();
+}
+
+/**
+ * Review round 2, non-blocking 3: approval-rule writes that run this guard are SERIALISED by one transaction-scoped
+ * advisory lock, so two concurrent writes cannot each pass the comparison against a set of rules the other is
+ * changing. Held to commit; outside a transaction it is a no-op, never a refusal.
+ */
+export const APPROVAL_RULE_WRITE_LOCK = "regulait:approval-rule-routing";
+async function lockApprovalRuleRouting(db: Q): Promise<void> {
+  await (db as unknown as Db).execute(sql`select pg_advisory_xact_lock(hashtext(${APPROVAL_RULE_WRITE_LOCK}))`);
+}
+
+/**
+ * The step-up facts for a write that moves who signs for some calls to a wider pool, or null when it moves none:
+ * `outranksApprovalRules`, the rules whose pools `after` newly takes over (a takeover `before` already made is not
+ * owed again), and `outrankedByApprovalRules`, the rules that newly take over `before`'s calls (B1). `before` null
+ * is a create.
  */
 export async function approverPoolTakeoverFacts(
   db: Q,
   args: { ruleId: string | null; before: RoutedApprovalRule | null; after: RoutedApprovalRule },
 ): Promise<Record<string, unknown> | null> {
-  const now = await approverPoolsTakenOver(db, args.after, args.ruleId);
-  if (now.length === 0) return null;
-  const was = new Set(args.before ? await approverPoolsTakenOver(db, args.before, args.ruleId) : []);
+  await lockApprovalRuleRouting(db);
+  const shapes = args.before ? [args.before, args.after] : [args.after];
+  const others = await servedOverlappingRules(db, shapes, args.ruleId);
+  if (others.length === 0) return null;
+  const now = await forwardTakeovers(db, args.after, others);
+  const was = new Set(args.before ? await forwardTakeovers(db, args.before, others) : []);
   const fresh = now.filter((id) => !was.has(id));
-  if (fresh.length === 0) return null;
+  const reverse = args.before ? await reverseTakeovers(db, args.before, args.after, others) : [];
+  if (fresh.length === 0 && reverse.length === 0) return null;
   return {
-    outranksApprovalRules: fresh,
+    ...(fresh.length ? { outranksApprovalRules: fresh } : {}),
+    ...(reverse.length ? { outrankedByApprovalRules: reverse } : {}),
     approverUserId: args.after.approverUserId,
     approverRoleId: args.after.approverRoleId ?? null,
   };
 }
 
 export const APPROVER_POOL_TAKEOVER_DETAIL =
-  "this rule is at least as specific as an overlapping approval rule with a narrower approver pool, so under ADR-0229 " +
-  "precedence it would name who signs for that rule's calls: the same loosening as widening that rule's pool, which " +
-  "needs a step-up this write path cannot ask for. Make the change as an admin in RegulAIt";
+  "under ADR-0229 precedence this write moves who signs for some calls to a wider approver pool (this rule would outrank " +
+  "or tie an overlapping rule with a narrower pool, or an overlapping rule with a wider pool would now outrank or tie " +
+  "this one): the same loosening as widening a pool directly, which needs a step-up this write path cannot ask for. " +
+  "Make the change as an admin in RegulAIt";
 
 /** THE CREATE-PATH GUARD: a new rule that takes over a narrower pool needs the `settings_relax` step-up */
 export async function assertApproverPoolTakeoverStepUp(

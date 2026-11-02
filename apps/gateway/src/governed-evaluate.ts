@@ -32,6 +32,7 @@ import { EVALUATION_ONLY_EXECUTION, killSwitchState, resolveExecutionPosture } f
 import { recordDecision } from "./metrics.js";
 import {
   BATCH4_STRICT_DEFAULTS,
+  MCP_PROTOCOL_METHOD_GRANTS,
   NOT_ADVISORY_SQL,
   approvalArgumentsDigest,
   approvalContextDigest,
@@ -258,7 +259,8 @@ export async function deriveDeployContext(db: Db, projectId: string): Promise<st
  * served to the caller, with their quorums — the same scoping (`scopedRuleWhere`), version resolution and kernel
  * match `governedEvaluate` uses. The execution recheck (`requiredQuorumNow`) takes the highest quorum over these, so
  * raising the quorum of ANY matching rule after the call was queued retires consents given under the old one, not
- * only a raise on the rule that names the approver. null when the tool is gone (nothing to recompute against).
+ * only a raise on the rule that names the approver. null when the tool is gone and the name is no MCP protocol grant
+ * (nothing to recompute against; the recheck fails closed).
  */
 export async function approvalRuleQuorumsMatchingNow(
   db: Db,
@@ -268,7 +270,13 @@ export async function approvalRuleQuorumsMatchingNow(
     .select({ kind: mcpTools.kind })
     .from(mcpTools)
     .where(and(eq(mcpTools.serverId, call.serverId), eq(mcpTools.name, call.toolName)));
-  if (!tool) return null;
+  // an MCP protocol method (ADR-0185 G3) is governed under its grant name and has no inventory row: its kind comes
+  // from the method table (the strictest kind any method under that grant carries)
+  const protocolKinds = Object.values(MCP_PROTOCOL_METHOD_GRANTS)
+    .filter((m) => m.grant === call.toolName)
+    .map((m) => m.kind);
+  const kind = tool?.kind ?? (protocolKinds.length ? (protocolKinds.includes("write") ? "write" : "read") : null);
+  if (!kind) return null;
   const { roleIds, teamIds } = await loadScopeMemberships(db, call.userId);
   const rows = await db
     .select()
@@ -297,7 +305,7 @@ export async function approvalRuleQuorumsMatchingNow(
   return matchingApprovalRules(served, {
     userId: call.userId,
     serverId: call.serverId,
-    tool: { serverId: call.serverId, name: call.toolName, kind: tool.kind as ToolRef["kind"] },
+    tool: { serverId: call.serverId, name: call.toolName, kind: kind as ToolRef["kind"] },
     deployContext,
   }).map((r) => ({ id: r.id, quorum: (r as { quorum?: number }).quorum ?? 1 }));
 }
