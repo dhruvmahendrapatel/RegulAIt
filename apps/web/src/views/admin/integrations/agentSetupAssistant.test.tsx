@@ -5,7 +5,7 @@
  */
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { DraftResultView, draftButtonLabel, type AgentSetupDraft, type AssistResponse } from "./AgentSetupAssistant";
+import { DraftResultView, assistRequestBody, draftButtonLabel, type AgentSetupDraft, type AssistResponse } from "./AgentSetupAssistant";
 
 const f = <T,>(value: T, source: "rules" | "model" | "mock" = "rules") => ({ value, source });
 const draft: AgentSetupDraft = {
@@ -51,5 +51,17 @@ describe("agent setup assistant draft view (ADR-0205)", () => {
   it("labels the draft button while a draft runs, so a slow model call is visible", () => {
     expect(draftButtonLabel(true)).toBe("Drafting…");
     expect(draftButtonLabel(false)).toBe("Draft configuration");
+  });
+
+  it("sends the chosen project with a model draft, and no project without a model draft", () => {
+    expect(assistRequestBody("an agent that drafts replies", true, "agent-1", "proj-1")).toEqual({
+      description: "an agent that drafts replies",
+      draftWithModel: true,
+      agentId: "agent-1",
+      projectId: "proj-1",
+    });
+    // none chosen: the key is absent, so the gateway's attribution refusal applies unchanged
+    expect(assistRequestBody("an agent that drafts replies", true, "", "")).toEqual({ description: "an agent that drafts replies", draftWithModel: true });
+    expect(assistRequestBody("an agent that drafts replies", false, "agent-1", "proj-1")).toEqual({ description: "an agent that drafts replies" });
   });
 });

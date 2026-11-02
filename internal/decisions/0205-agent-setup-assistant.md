@@ -72,3 +72,13 @@ model call reuses our existing governed dispatch and provider packages, so no ne
 - No setting for which provider must be connected. Any stored model credential enables the model option, and the
   dispatch itself fails closed without one.
 - Draft quality against a live model is unmeasured, because the keyless mock cannot exercise it.
+
+## Addendum (2026-11-02, #453, AWS demo host): the model draft names a project
+
+The model draft was dispatched with `projectId: null`, so under the strict default `dispatchAttributionRequired`
+(ADR-0181) it always failed with `attribution_required`. The request body and the panel now carry `projectId` (a
+**Bill the draft to project** selector beside the model picker). The gateway refuses `404 unknown_project`, or `403
+not_a_project_member` unless the caller is an explicit member of the project. Admin rights do not stand in for
+membership here, and a memberless project is not an open bucket, because every caller of this admin-only route is an
+admin and the check would otherwise never bind. With no project the draft is dispatched unattributed as before and
+refused with the existing message, and the rules draft is still returned. The default is not relaxed.
