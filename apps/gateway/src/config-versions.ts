@@ -116,6 +116,7 @@ const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 import {
   approvalRuleShape,
   assertApprovalRuleLooseningStepUp,
+  lockApprovalRuleRouting,
   assertRuleRemovalStepUp,
   assertApprovalRuleWritable,
   type ApprovalRuleStepUp,
@@ -812,6 +813,8 @@ export async function deleteRuleArtifact(
     }
     const versions = await loadVersions(tx, args.artifactType, args.artifactId);
     if (args.artifactType === "approval_rule") {
+      // ADR-0229 amendment (review round 3, non-blocking 1): one serialisation story for every approval-rule write
+      await lockApprovalRuleRouting(tx);
       const active = versions.find((v) => v.status === "active");
       await assertApprovalRuleLooseningStepUp(tx, {
         ruleId: args.artifactId,

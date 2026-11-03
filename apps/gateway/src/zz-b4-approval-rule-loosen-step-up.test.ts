@@ -367,25 +367,59 @@ describe("ADR-0229 amendment round 2: who signs can only move to a wider pool wi
     }
   });
 
-  it("deploy-mode route (review blocker): clearing a user rule's mode over a fleet rule with a restricted pool needs it", async () => {
-    // A: the caller's rule in mode hosted, approver E. F: a fleet rule in mode byoc, pool {A} (the security lead's).
-    // Disjoint while both are mode-scoped; clearing A's mode makes A overlap F and outrank it (user > fleet).
-    const aId = await insertRule({ deployMode: "hosted", approverUserId: U.e });
-    const fId = await insertRule({ scope: "fleet", serverScope: "all", userId: null, serverId: null, writeOnly: true, deployMode: "byoc", approverUserId: U.a, quorum: 2 });
+  it("deploy-mode route: setting a mode that makes the rule take over a narrower pool needs ONE step-up, bound to both facts", async () => {
+    // F: the caller's rule on tool t in mode byoc, pool {A}. R: the same tool in every mode, approver E: F outranks R.
+    // Setting R's mode to hosted narrows R (the route's own step-up) AND makes R tie F, so R would name the signer
+    // for calls in a context holding both modes: both facts ride one binding, met by one step-up header.
+    const t = tool();
+    const fId = await insertRule({ toolName: t, deployMode: "byoc", approverUserId: U.a, quorum: 2 });
+    const rId = await insertRule({ toolName: t, deployMode: null, approverUserId: U.e });
     try {
-      const url = `/v1/rules/approvals/${aId}/deploy-mode`;
-      const refused = await asAdmin("PATCH", url, { deployMode: null });
+      const url = `/v1/rules/approvals/${rId}/deploy-mode`;
+      const refused = await asAdmin("PATCH", url, { deployMode: "hosted" });
       expect(refused.statusCode, refused.body).toBe(403);
-      // the binding names the pool being taken over (review non-blocking 4)
       expect(refused.json().action).toEqual({
         kind: "settings_relax",
-        body: { ruleId: aId, values: { outranksApprovalRules: [fId], approverUserId: U.e, approverRoleId: null } },
+        body: { ruleKind: "approvals", ruleId: rId, values: { deployMode: "hosted", outranksApprovalRules: [fId], approverUserId: U.e, approverRoleId: null } },
       });
-      expect((await quorumOf(aId))!.deployMode).toBe("hosted");
-      const ok = await asAdmin("PATCH", url, { deployMode: null }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) });
+      expect((await quorumOf(rId))!.deployMode).toBeNull();
+      const ok = await asAdmin("PATCH", url, { deployMode: "hosted" }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) });
       expect(ok.statusCode, ok.body).toBe(200);
+      expect((await quorumOf(rId))!.deployMode).toBe("hosted");
     } finally {
-      await db.delete(approvalRules).where(inArray(approvalRules.id, [aId, fId]));
+      await db.delete(approvalRules).where(inArray(approvalRules.id, [rId, fId]));
+    }
+  });
+
+  it("round 3 B1 (five steps): rules in DIFFERENT deploy modes still overlap; the reverse takeover is refused at step 4", async () => {
+    const t = tool();
+    // 1. B: the caller, this server, tool T, mode byoc, pool {A}
+    const bId = await insertRule({ toolName: t, deployMode: "byoc", approverUserId: U.a });
+    // 2. A: the caller, this server, any WRITE tool, pool {A, B, D}: less specific than B, so nothing is taken over
+    const a = await viaKey("POST", "/v1/rules/approvals", { scope: "user", serverScope: "server", userId: U.caller, serverId, writeOnly: true, approverUserId: U.a, approverRoleId: roleId, quorum: 1 });
+    expect(a.statusCode, a.body).toBe(201);
+    const aId = a.json().id as string;
+    try {
+      // 3. A's mode -> hosted, through the route (its own narrowing step-up); B (tool) still outranks A (write-only)
+      const modeUrl = `/v1/rules/approvals/${aId}/deploy-mode`;
+      const narrowing = await asAdmin("PATCH", modeUrl, { deployMode: "hosted" });
+      expect(narrowing.statusCode, narrowing.body).toBe(403);
+      expect(narrowing.json().action.body.values).toEqual({ deployMode: "hosted" });
+      const set = await asAdmin("PATCH", modeUrl, { deployMode: "hosted" }, { [STEP_UP_HEADER]: await grantFor(narrowing.json().action) });
+      expect(set.statusCode, set.body).toBe(200);
+      // 4. B: tool T -> any tool. A (write-only) now outranks B for a call whose context holds hosted AND byoc
+      const url = `/v1/rules/approvals/${bId}`;
+      const key = await viaKey("PATCH", url, { toolName: null });
+      expect(key.statusCode, key.body).toBe(403);
+      const refused = await asAdmin("PATCH", url, { toolName: null });
+      expect(refused.statusCode, refused.body).toBe(403);
+      expect(refused.json().action).toEqual({
+        kind: "settings_relax",
+        body: { ruleId: bId, values: { outrankedByApprovalRules: [aId], approverUserId: U.a, approverRoleId: null } },
+      });
+      expect((await quorumOf(bId))!.toolName).toBe(t);
+    } finally {
+      await db.delete(approvalRules).where(inArray(approvalRules.id, [aId, bId]));
     }
   });
 

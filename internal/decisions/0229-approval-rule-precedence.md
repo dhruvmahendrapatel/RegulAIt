@@ -85,7 +85,7 @@ that rule (`approvalRuleLoosens`, then `requireRuleStepUp`); (b) require approva
 
 5. **A write that makes an approval rule take over a narrower pool needs the `settings_relax` step-up.** "Takes over"
    means: the rule as written may overlap the other rule (`approvalRulesMayOverlap`, conservative: only different users,
-   different one-server ids, different exact tools or different deploy modes are disjoint; role and team rules may
+   different one-server ids or different exact tools are disjoint; never different deploy modes, see amendment 3; role and team rules may
    overlap anything, because membership is not known statically and changes), it is at least as specific
    (`compareApprovalRuleSpecificity` ≤ 0; **a tie counts**, since the id that would break it is arbitrary), and its pool
    loosens the other's (`approvalRuleLoosens`, the comparator an edit of that rule's own pool already uses; quorum is
@@ -138,7 +138,7 @@ Two blocking findings, both on paths where who signs moved to a wider pool witho
   is what the kernel is served. Approval-rule canaries are shadow-evaluated (`SHADOW_CANARY_ARTIFACT_TYPES`): a canary
   body never names an approver, and it reaches the served path only through `activateVersion`, which runs this guard.
 - **Cost (N4).** Candidates are pre-filtered in SQL by the same disjointness `approvalRulesMayOverlap` applies (user on
-  two user rules, one-server id, exact tool, deploy mode) before any pool is loaded.
+  two user rules, one-server id, exact tool; not deploy mode, amendment 3) before any pool is loaded.
 - **Concurrency (review non-blocking 3).** Approval-rule writes that run the guard are serialised by a transaction-scoped
   advisory lock (`regulait:approval-rule-routing`), so two writes cannot each pass against a set the other is changing.
 - **Queue-time pool snapshot (N2).** A queued approval keeps the pool snapshotted when it was queued (its named approver
@@ -161,3 +161,26 @@ Two blocking findings, both on paths where who signs moved to a wider pool witho
 deploy-mode → every-mode variant through the deploy-mode route, the route blocker (a mode-scoped user rule cleared over a
 fleet rule with a restricted pool in another mode), and N5 (a role rule for a role nobody holds). Each is refused
 without the step-up, bound to the facts above, and admitted with it.
+
+## Amendment 3 (2026-11-03, review round 3 of #662 at `3ebc0d4`)
+
+9. **Different deploy modes never make two rules disjoint (security B1).** Amendments 1 and 2 treated a `hosted` rule
+   and a `byoc` rule as unable to share a call, in `approvalRulesMayOverlap` and in the SQL pre-filter. But a call's
+   deploy context is a **set** (`deriveDeployContext`: the mode of every deployment or rollback target across the
+   project's live workflow instances), and a mode-scoped rule matches when the set includes its mode. In a project with
+   a hosted staging target and a BYOC production target, both rules match, so the round-2 reverse takeover still worked
+   once the two rules carried different modes. The deploy-mode clause is removed from both places. A kernel test pins
+   that `approvalRulesMayOverlap` is true whenever `matchingApprovalRules` returns both rules under a two-mode context,
+   and a gateway test runs the reviewer's five-step sequence, refused at step 4 and bound to the outranking rule's id.
+10. **One step-up per deploy-mode write (round 3, non-blocking 2).** One request carries one step-up header, so the
+    deploy-mode route could not be met when it needed both its own narrowing step-up and a separate takeover step-up
+    from inside the writer. On an approval rule the route now computes the takeover facts first and folds them into its
+    own binding, `{ruleKind, ruleId, values: {deployMode?, outranksApprovalRules?, outrankedByApprovalRules?,
+    approverUserId, approverRoleId}}`. The writer recomputes them under the locks; only a different takeover (the
+    state moved in between) is asked again, failing closed.
+11. **The delete path takes the routing lock (round 3, non-blocking 1),** so every approval-rule write shares one
+    serialisation story. A delete was already step-up gated.
+
+**Noted, unchanged (round 3, non-blocking 3).** `poolLoosens` compares the taker's pool with the caller removed when the
+taker is user-scoped (`loadApprovalPool` never lets a caller approve their own call), while a fleet rule's pool has no
+caller to remove. This errs strict: it can ask for a step-up an admin may not expect, never skip one.

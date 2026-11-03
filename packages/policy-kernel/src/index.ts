@@ -840,9 +840,12 @@ export function compareApprovalRuleSpecificity(a: ApprovalRuleRouting, b: Approv
 
 /**
  * ADR-0229 amendment: could one governed call match BOTH rules? Conservative (true unless provably disjoint): two
- * user rules for different users, two one-server rules for different servers, two different exact tools, or two
- * different deploy modes are disjoint. Role and team membership is not known statically and changes, so a role or
- * team rule may overlap any rule (including another role's). Write-only never separates: a write tool matches both.
+ * user rules for different users, two one-server rules for different servers, or two different exact tools are
+ * disjoint. Role and team membership is not known statically and changes, so a role or team rule may overlap any
+ * rule (including another role's). Write-only never separates: a write tool matches both. Deploy mode never
+ * separates either (review round 3, B1): a call's deploy context is a SET (every mode its project's live deployment
+ * targets use), and a mode-scoped rule matches when the set includes its mode, so a `hosted` rule and a `byoc` rule
+ * both match a call whose context holds both.
  */
 export function approvalRulesMayOverlap(a: ApprovalRuleRouting, b: ApprovalRuleRouting): boolean {
   const sa = a.scope ?? "user";
@@ -852,7 +855,6 @@ export function approvalRulesMayOverlap(a: ApprovalRuleRouting, b: ApprovalRuleR
     return false;
   }
   if (a.toolName != null && b.toolName != null && a.toolName !== b.toolName) return false;
-  if (a.deployMode != null && b.deployMode != null && a.deployMode !== b.deployMode) return false;
   return true;
 }
 

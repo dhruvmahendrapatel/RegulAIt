@@ -5452,7 +5452,9 @@ that signs, a create, edit or activation that makes a rule at least as specific 
 pool needs the `settings_relax` step-up (option (a); the intersection option (b) needs a migration and stays open), and
 the execution recheck takes the max quorum over every rule matching the call now. **Amendment 2 (round 2):** the guard
 also covers the reverse takeover (a rule made less specific so a wider overlapping rule outranks it) and the deploy-mode
-route; it reads the served view, pre-filters in SQL and is serialised by an advisory lock. Open follow-ups: a
+route; it reads the served view, pre-filters in SQL and is serialised by an advisory lock. **Amendment 3 (round 3):**
+rules in different deploy modes count as overlapping (a call's deploy context is a set), and the deploy-mode route takes
+one step-up covering both its narrowing and any takeover. Open follow-ups: a
 rule-editor warning for shadowed tightenings and equal-specificity overlaps, and option (b).
 
 ## Open Questions

@@ -631,7 +631,8 @@ export function routedApprovalRule(r: Record<string, unknown>): RoutedApprovalRu
 /**
  * ADR-0229 amendment (review round 2, N4): the candidate rules a write can interact with, pre-filtered in SQL by the
  * same disjointness `approvalRulesMayOverlap` applies (different user on two user rules, different one-server ids,
- * different exact tools, different deploy modes), for ANY of `shapes` (the rule before and after the write).
+ * different exact tools; never deploy mode, which a call carries as a set), for ANY of `shapes` (the rule before and
+ * after the write).
  *
  * N3 — the SERVED view: each row is overlaid with its ACTIVE version's body, which is what `applyRuleVersions`
  * serves. Approval-rule canaries are shadow-evaluated (`SHADOW_CANARY_ARTIFACT_TYPES`): a canary body is only ever
@@ -652,7 +653,7 @@ async function servedOverlappingRules(
       conds.push(or(eq(approvalRules.serverScope, "all"), eq(approvalRules.serverId, s.serverId ?? ""))!);
     }
     if (s.toolName != null) conds.push(or(isNull(approvalRules.toolName), eq(approvalRules.toolName, s.toolName))!);
-    if (s.deployMode != null) conds.push(or(isNull(approvalRules.deployMode), eq(approvalRules.deployMode, s.deployMode))!);
+    // no deploy-mode clause (review round 3, B1): a call's deploy context is a set, so different modes overlap
     return conds.length ? and(...conds)! : sql`true`;
   };
   const rows = await db
@@ -720,7 +721,7 @@ async function reverseTakeovers(
  * changing. Held to commit; outside a transaction it is a no-op, never a refusal.
  */
 export const APPROVAL_RULE_WRITE_LOCK = "regulait:approval-rule-routing";
-async function lockApprovalRuleRouting(db: Q): Promise<void> {
+export async function lockApprovalRuleRouting(db: Q): Promise<void> {
   await (db as unknown as Db).execute(sql`select pg_advisory_xact_lock(hashtext(${APPROVAL_RULE_WRITE_LOCK}))`);
 }
 

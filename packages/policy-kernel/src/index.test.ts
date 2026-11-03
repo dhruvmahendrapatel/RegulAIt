@@ -2061,13 +2061,28 @@ describe("approval-rule precedence (ADR-0229)", () => {
     expect(compareApprovalRuleSpecificity(fleet, specific)).toBeGreaterThan(0);
   });
 
-  it("overlap is conservative: only provably disjoint subjects, servers, tools or deploy modes separate two rules", () => {
+  it("overlap is true whenever matchingApprovalRules returns both rules, including under a two-mode deploy context", () => {
+    const hosted: ApprovalRule = { ...specific, id: "m-hosted", deployMode: "hosted" };
+    const byoc: ApprovalRule = { ...specific, id: "m-byoc", toolName: null, deployMode: "byoc", approverUserId: ADA };
+    const matched = matchingApprovalRules([hosted, byoc], {
+      userId: USER,
+      serverId: SERVER,
+      tool: writeFile,
+      deployContext: ["hosted", "byoc"],
+    });
+    expect(matched.map((r) => r.id).sort()).toEqual(["m-byoc", "m-hosted"]);
+    expect(approvalRulesMayOverlap(hosted, byoc)).toBe(true);
+    expect(approvalRulesMayOverlap(byoc, hosted)).toBe(true);
+  });
+
+  it("overlap is conservative: only provably disjoint subjects, servers or tools separate two rules", () => {
     const user = (userId: string, over: Partial<ApprovalRule> = {}): ApprovalRule => ({ ...specific, userId, ...over });
     expect(approvalRulesMayOverlap(fleet, specific)).toBe(true);
     expect(approvalRulesMayOverlap(user(USER), user(OTHER_USER))).toBe(false);
     expect(approvalRulesMayOverlap(user(USER), user(USER, { serverId: OTHER_SERVER }))).toBe(false);
     expect(approvalRulesMayOverlap(user(USER), user(USER, { toolName: "other_tool" }))).toBe(false);
-    expect(approvalRulesMayOverlap(user(USER, { deployMode: "byoc" }), user(USER, { deployMode: "hosted" }))).toBe(false);
+    // deploy mode never separates (review round 3, B1): a call's deploy context is a set
+    expect(approvalRulesMayOverlap(user(USER, { deployMode: "byoc" }), user(USER, { deployMode: "hosted" }))).toBe(true);
     // role and team membership is not known statically, so they may overlap anything, another role included
     expect(approvalRulesMayOverlap({ ...fleet, scope: "role", roleId: "r1" }, { ...fleet, scope: "role", roleId: "r2" })).toBe(true);
     expect(approvalRulesMayOverlap({ ...fleet, scope: "team", teamId: "t1" }, user(OTHER_USER))).toBe(true);
