@@ -5441,6 +5441,25 @@ S3 Object Lock COMPLIANCE bucket through a dedicated anchor role with 1-hour cre
 2026-11-01); the locked bucket outlives teardown by up to its retention (7 days by default). Addendum 3 applies the security
 review: a truly least-privilege deployer, Run Command logged as the second operator channel, a versioned source bucket.
 
+**ADR-0229 (builder, 2026-11-02): approval-rule precedence.** A demo-host bug (#453): the seeded fleet write rule
+(approver Ada, no role) shadowed Dana's `repo-tools` `write_file` rule (Avery plus an approver role) because the
+gateway loaded rules unordered and the kernel took the first match, leaving 0 eligible approvers under passkey quorum
+2. The kernel now sorts matches by specificity (user > role = team > fleet, exact tool, one server, write-only, deploy
+mode, then id); the first names the approver and role, while any match still pauses and the quorum and approval scope
+stay the strictest across every match. The gateway orders the load by id as defence in depth; the access preview and
+`demo:check` row E read the same answer. **Amendment (review of #662):** because the naming rule's pool is the one
+that signs, a create, edit or activation that makes a rule at least as specific as an overlapping rule with a narrower
+pool needs the `settings_relax` step-up (option (a); the intersection option (b) needs a migration and stays open), and
+the execution recheck takes the max quorum over every rule matching the call now. **Amendment 2 (round 2):** the guard
+also covers the reverse takeover (a rule made less specific so a wider overlapping rule outranks it) and the deploy-mode
+route; it reads the served view, pre-filters in SQL and is serialised by an advisory lock. **Amendment 3 (round 3):**
+rules in different deploy modes count as overlapping (a call's deploy context is a set), and the deploy-mode route takes
+one step-up covering both its narrowing and any takeover. **Amendment 4 (round 4):** ties are decided by the kernel's
+id tie-break, so breaking a tie the edited rule won is a stepped-up takeover. Follow-up: step up deleting a role, team,
+user or server that an approval rule is scoped to (cascade delete). **Amendment 5 (round 5):** widening a rule's
+match re-owes every takeover; option (b) (pool intersection) is the recorded long-term simplification. Open follow-ups: a
+rule-editor warning for shadowed tightenings and equal-specificity overlaps, and option (b).
+
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
 (b) standing policy for future scaffolds recorded (ADR-0006, no implementation yet — nothing to
