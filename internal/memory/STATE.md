@@ -5454,7 +5454,9 @@ the execution recheck takes the max quorum over every rule matching the call now
 also covers the reverse takeover (a rule made less specific so a wider overlapping rule outranks it) and the deploy-mode
 route; it reads the served view, pre-filters in SQL and is serialised by an advisory lock. **Amendment 3 (round 3):**
 rules in different deploy modes count as overlapping (a call's deploy context is a set), and the deploy-mode route takes
-one step-up covering both its narrowing and any takeover. Open follow-ups: a
+one step-up covering both its narrowing and any takeover. **Amendment 4 (round 4):** ties are decided by the kernel's
+id tie-break, so breaking a tie the edited rule won is a stepped-up takeover. Follow-up: step up deleting a role, team,
+user or server that an approval rule is scoped to (cascade delete). Open follow-ups: a
 rule-editor warning for shadowed tightenings and equal-specificity overlaps, and option (b).
 
 ## Open Questions

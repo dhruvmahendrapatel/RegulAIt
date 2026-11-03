@@ -681,36 +681,60 @@ const poolLoosens = (db: Q, held: RoutedApprovalRule, taker: RoutedApprovalRule)
   approvalRuleLoosens(db, held, { ...taker, quorum: Math.max(taker.quorum ?? 1, held.quorum ?? 1) });
 
 /**
- * FORWARD: the existing rules whose approver pool `rule` takes over. They may share a call with `rule`, `rule` is at
- * least as specific (a tie counts: the id that would break it is arbitrary), and `rule`'s pool loosens theirs.
+ * Did rule `a` (id `aId`) name the signer over rule `b` for the calls they share? Exactly the kernel's
+ * `compareApprovalRulePrecedence`: more specific wins, and a tie goes to the lower id (review round 4, B1).
  */
-async function forwardTakeovers(db: Q, rule: RoutedApprovalRule, others: Array<RoutedApprovalRule & { id?: string }>): Promise<string[]> {
+function namesSignerOver(a: RoutedApprovalRule, aId: string, b: RoutedApprovalRule, bId: string): boolean {
+  const bySpecificity = compareApprovalRuleSpecificity(a, b);
+  return bySpecificity < 0 || (bySpecificity === 0 && aId < bId);
+}
+
+/**
+ * FORWARD: the existing rules whose approver pool `rule` takes over. They may share a call with `rule`, `rule` is at
+ * least as specific (a tie counts: for a create the new id is not known yet, and a tie is broken only by an id), and
+ * `rule`'s pool loosens theirs.
+ *
+ * With `asNamedBy` (the rule's id, used for the `before` side of an edit), only rules `rule` actually named the signer
+ * over are returned, by the kernel's own precedence including the id tie-break (review round 4, non-blocking 1): a
+ * tie `before` LOST stays out of "already taken over", so making the rule strictly more specific lists it as fresh.
+ */
+async function forwardTakeovers(
+  db: Q,
+  rule: RoutedApprovalRule,
+  others: Array<RoutedApprovalRule & { id: string }>,
+  asNamedBy?: string,
+): Promise<string[]> {
   const out: string[] = [];
   for (const other of others) {
     if (!approvalRulesMayOverlap(rule, other)) continue;
-    if (compareApprovalRuleSpecificity(rule, other) > 0) continue; // `other` stays the more specific one
-    if (await poolLoosens(db, other, rule)) out.push(other.id!);
+    if (asNamedBy !== undefined ? !namesSignerOver(rule, asNamedBy, other, other.id) : compareApprovalRuleSpecificity(rule, other) > 0) {
+      continue; // `other` names (or stays able to name) the signer
+    }
+    if (await poolLoosens(db, other, rule)) out.push(other.id);
   }
   return out.sort();
 }
 
 /**
- * REVERSE (review round 2, B1): the existing rules that take over the calls `before` named the signer for, because
- * the write makes the rule LESS specific (a tool, a deploy mode or write-only cleared). They shared a call with
- * `before`, `before` strictly outranked them, they now outrank or tie `after`, and their pool loosens `before`'s.
+ * REVERSE (review round 2, B1): the existing rules that take over the calls the edited rule named the signer for,
+ * because the write makes it LESS specific (a tool, a deploy mode or write-only cleared). Decided with the kernel's
+ * own precedence including the id tie-break (review round 4, B1): `other` did NOT name the signer over `before` (a tie
+ * `before` won by id counts as `before` naming it), it DOES name the signer over `after`, and its pool loosens
+ * `before`'s. The id is unchanged by an edit, so a tie on both sides keeps the same winner.
  */
 async function reverseTakeovers(
   db: Q,
+  ruleId: string,
   before: RoutedApprovalRule,
   after: RoutedApprovalRule,
-  others: Array<RoutedApprovalRule & { id?: string }>,
+  others: Array<RoutedApprovalRule & { id: string }>,
 ): Promise<string[]> {
   const out: string[] = [];
   for (const other of others) {
     if (!approvalRulesMayOverlap(before, other) || !approvalRulesMayOverlap(after, other)) continue;
-    if (compareApprovalRuleSpecificity(other, before) <= 0) continue; // `other` already outranked or tied `before`
-    if (compareApprovalRuleSpecificity(other, after) > 0) continue; // `after` still outranks it
-    if (await poolLoosens(db, before, other)) out.push(other.id!);
+    if (namesSignerOver(other, other.id, before, ruleId)) continue; // `other` already named the signer
+    if (!namesSignerOver(other, other.id, after, ruleId)) continue; // the edited rule still names it
+    if (await poolLoosens(db, before, other)) out.push(other.id);
   }
   return out.sort();
 }
@@ -718,7 +742,14 @@ async function reverseTakeovers(
 /**
  * Review round 2, non-blocking 3: approval-rule writes that run this guard are SERIALISED by one transaction-scoped
  * advisory lock, so two concurrent writes cannot each pass the comparison against a set of rules the other is
- * changing. Held to commit; outside a transaction it is a no-op, never a refusal.
+ * changing. Held to commit. Outside a transaction (the deploy-mode route's early computation) it is taken and
+ * released by the one statement, so it serialises nothing there; the writer recomputes under the lock and fails
+ * closed on any difference.
+ *
+ * LOCK ORDER (review round 4, non-blocking 2): always the rule's own artifact row lock (`lockRuleArtifact`) first,
+ * then the approver-role lock (`lockApproverRoles`, inside `assertApprovalRuleWritable`), then this routing lock last.
+ * Create has no artifact lock yet (role, then routing); delete takes no role lock (artifact, then routing). A new
+ * writer must keep this order.
  */
 export const APPROVAL_RULE_WRITE_LOCK = "regulait:approval-rule-routing";
 export async function lockApprovalRuleRouting(db: Q): Promise<void> {
@@ -740,9 +771,9 @@ export async function approverPoolTakeoverFacts(
   const others = await servedOverlappingRules(db, shapes, args.ruleId);
   if (others.length === 0) return null;
   const now = await forwardTakeovers(db, args.after, others);
-  const was = new Set(args.before ? await forwardTakeovers(db, args.before, others) : []);
+  const was = new Set(args.before && args.ruleId ? await forwardTakeovers(db, args.before, others, args.ruleId) : []);
   const fresh = now.filter((id) => !was.has(id));
-  const reverse = args.before ? await reverseTakeovers(db, args.before, args.after, others) : [];
+  const reverse = args.before && args.ruleId ? await reverseTakeovers(db, args.ruleId, args.before, args.after, others) : [];
   if (fresh.length === 0 && reverse.length === 0) return null;
   return {
     ...(fresh.length ? { outranksApprovalRules: fresh } : {}),

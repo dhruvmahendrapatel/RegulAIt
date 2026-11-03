@@ -184,3 +184,33 @@ without the step-up, bound to the facts above, and admitted with it.
 **Noted, unchanged (round 3, non-blocking 3).** `poolLoosens` compares the taker's pool with the caller removed when the
 taker is user-scoped (`loadApprovalPool` never lets a caller approve their own call), while a fleet rule's pool has no
 caller to remove. This errs strict: it can ask for a step-up an admin may not expect, never skip one.
+
+## Amendment 4 (2026-11-03, review round 4 of #662 at `60bbc40`)
+
+12. **Who named the signer before a write is decided with the kernel's full precedence, the id tie-break included
+    (security B1).** The reverse check skipped every candidate that tied the edited rule, as if the other rule had
+    named the signer. But the kernel breaks a tie by the lower id, so the edited rule may have won it. Breaking such a
+    tie (write-only → every kind, tool → any tool, or mode → every mode through the deploy-mode route) then handed its
+    calls to the other rule's wider pool with no step-up. The reverse set is now: overlapping rules that did **not**
+    name the signer over `before` and **do** name it over `after`, both decided exactly as `compareApprovalRulePrecedence`
+    decides (more specific wins, a tie goes to the lower id; an edit keeps its id), whose pool loosens `before`'s. The
+    forward check's "already taken over" set (`was`) uses the same id-aware decision (round 4, non-blocking 1), so a
+    tie `before` lost is listed as fresh when an edit makes the rule strictly more specific. For a create, where the new
+    id is not known yet, the forward check still counts every tie.
+13. **Lock order (round 4, non-blocking 2).** The rule's own artifact row lock first, then the approver-role lock, then
+    the routing advisory lock last. Create has no artifact lock yet (role, then routing); delete takes no role lock
+    (artifact, then routing). Written beside `lockApprovalRuleRouting`.
+
+**Tests (round 4).** `zz-b4-approval-rule-loosen-step-up.test.ts`:
+- the four-step tie sequence with `N.id < W.id` (write-only → every kind), refused and bound to `{outrankedByApprovalRules: [W]}`;
+- a control with `W.id < N.id`, where the same edit needs no step-up;
+- the tool → any tool variant;
+- the deploy-mode-route variant, where the route's one binding names W;
+- a rollback through `activateVersion` to a less specific version (independent review, non-blocking 1);
+- the copilot create path (`createApprovalRuleRow` with no request to step up) failing closed on a takeover.
+
+**Known gap, follow-up (independent review round 4, non-blocking 2).** Approval rules scoped to a user, server, role or
+team are removed by `ON DELETE CASCADE` when that subject is deleted, without `deleteRuleArtifact`'s step-up, and the
+calls fall through to the next (possibly wider) rule. This predates ADR-0229, which only makes the fallback
+deterministic. Role and team deletes are not step-up gated today. Follow-up: require the `settings_relax` step-up for
+deleting a role, team, user or server that is the subject of an approval rule.

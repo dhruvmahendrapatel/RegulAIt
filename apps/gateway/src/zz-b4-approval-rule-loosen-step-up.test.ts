@@ -14,9 +14,11 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { approvalRules, authSessions, createDb, eq, inArray, mcpServers, ORG_SETTINGS_ID, roleAssignments, roles, runMigrations, sql, type Db } from "@regulait/db";
 import { STEP_UP_HEADER } from "@regulait/shared";
+import { createApprovalRuleRow } from "./rule-creates.js";
+import { ApprovalRuleWriteRefusedError } from "./approval-pool.js";
 import { buildApp } from "./app.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
@@ -350,8 +352,10 @@ describe("ADR-0229 amendment round 2: who signs can only move to a wider pool wi
 
   it("B1, deploy-mode variant: clearing the narrow rule's mode lets an equally specific wider rule tie it; needs it", async () => {
     const t = tool();
-    const nId = await insertRule({ toolName: t, deployMode: "hosted", approverUserId: U.a });
-    const bId = await insertRule({ toolName: t, deployMode: null, approverUserId: U.a, approverRoleId: roleId });
+    // after the edit the two rules tie, and the kernel gives a tie to the lower id: B holds it, so B would sign
+    const [lo, hi] = [randomUUID(), randomUUID()].sort() as [string, string];
+    const nId = await insertRule({ id: hi, toolName: t, deployMode: "hosted", approverUserId: U.a });
+    const bId = await insertRule({ id: lo, toolName: t, deployMode: null, approverUserId: U.a, approverRoleId: roleId });
     try {
       const url = `/v1/rules/approvals/${nId}/deploy-mode`;
       const key = await viaKey("PATCH", url, { deployMode: null });
@@ -432,6 +436,139 @@ describe("ADR-0229 amendment round 2: who signs can only move to a wider pool wi
       expect(r.json()).toMatchObject({ error: "step_up_required" });
     } finally {
       await db.delete(approvalRules).where(eq(approvalRules.id, fId));
+    }
+  });
+});
+
+// ADR-0229 amendment 4 (review round 4): a TIE is decided by the lower id, so the edited rule may have been the one
+// naming the signer. Breaking the tie (write-only -> every kind, tool -> any tool, mode -> every mode) hands its calls
+// to the other rule's wider pool, and must be stepped up. Also: a rollback through activateVersion, and the copilot's
+// create path (no request to step up) failing closed.
+describe("ADR-0229 amendment 4: breaking a tie the edited rule won by id needs settings_relax", () => {
+  type RuleRow = typeof approvalRules.$inferInsert;
+  /** two ids, the lower first: whoever holds `lo` wins a tie (the kernel's precedence tie-break) */
+  const orderedIds = () => [randomUUID(), randomUUID()].sort() as [string, string];
+  const put = async (id: string, r: Partial<RuleRow>) => {
+    await db.insert(approvalRules).values({ id, scope: "user", serverScope: "server", userId: U.caller, serverId, toolName: null, writeOnly: false, approverUserId: U.a, approverRoleId: null, quorum: 1, ...r } as RuleRow);
+    return id;
+  };
+  const tool = () => `b4q_${RUN}_${randomBytes(3).toString("hex")}`;
+  const narrowWide = async (shared: Partial<RuleRow>, narrowWins: boolean) => {
+    const [lo, hi] = orderedIds();
+    const [nId, wId] = narrowWins ? [lo, hi] : [hi, lo];
+    await put(nId, { ...shared, approverUserId: U.a }); // narrow pool {A}
+    await put(wId, { ...shared, approverUserId: U.a, approverRoleId: roleId }); // wide pool {A, B, D}
+    return { nId, wId };
+  };
+
+  it("four steps: N won the tie by id; write-only -> every kind lets W take its calls; refused, bound to W", async () => {
+    const { nId, wId } = await narrowWide({ toolName: tool(), writeOnly: true }, true);
+    try {
+      const url = `/v1/rules/approvals/${nId}`;
+      const key = await viaKey("PATCH", url, { writeOnly: false });
+      expect(key.statusCode, key.body).toBe(403);
+      const refused = await asAdmin("PATCH", url, { writeOnly: false });
+      expect(refused.statusCode, refused.body).toBe(403);
+      expect(refused.json().action).toEqual({
+        kind: "settings_relax",
+        body: { ruleId: nId, values: { outrankedByApprovalRules: [wId], approverUserId: U.a, approverRoleId: null } },
+      });
+      expect((await quorumOf(nId))!.writeOnly).toBe(true);
+      const ok = await asAdmin("PATCH", url, { writeOnly: false }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) });
+      expect(ok.statusCode, ok.body).toBe(200);
+    } finally {
+      await db.delete(approvalRules).where(inArray(approvalRules.id, [nId, wId]));
+    }
+  });
+
+  it("control: when W already won the tie by id, the same edit moves nothing and needs none", async () => {
+    const { nId, wId } = await narrowWide({ toolName: tool(), writeOnly: true }, false);
+    try {
+      const ok = await viaKey("PATCH", `/v1/rules/approvals/${nId}`, { writeOnly: false });
+      expect(ok.statusCode, ok.body).toBe(200);
+    } finally {
+      await db.delete(approvalRules).where(inArray(approvalRules.id, [nId, wId]));
+    }
+  });
+
+  it("tool -> any tool on a tied pair N won: refused, bound to W", async () => {
+    const { nId, wId } = await narrowWide({ toolName: tool() }, true);
+    try {
+      const refused = await asAdmin("PATCH", `/v1/rules/approvals/${nId}`, { toolName: null });
+      expect(refused.statusCode, refused.body).toBe(403);
+      expect(refused.json().action.body.values).toEqual({ outrankedByApprovalRules: [wId], approverUserId: U.a, approverRoleId: null });
+    } finally {
+      await db.delete(approvalRules).where(inArray(approvalRules.id, [nId, wId]));
+    }
+  });
+
+  it("deploy-mode route, mode -> every mode on a tied pair N won: the route's one binding names W", async () => {
+    const { nId, wId } = await narrowWide({ toolName: tool(), deployMode: "hosted" }, true);
+    try {
+      const url = `/v1/rules/approvals/${nId}/deploy-mode`;
+      const key = await viaKey("PATCH", url, { deployMode: null });
+      expect(key.statusCode, key.body).toBe(403);
+      const refused = await asAdmin("PATCH", url, { deployMode: null });
+      expect(refused.statusCode, refused.body).toBe(403);
+      expect(refused.json().action).toEqual({
+        kind: "settings_relax",
+        body: { ruleKind: "approvals", ruleId: nId, values: { outrankedByApprovalRules: [wId], approverUserId: U.a, approverRoleId: null } },
+      });
+      const ok = await asAdmin("PATCH", url, { deployMode: null }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) });
+      expect(ok.statusCode, ok.body).toBe(200);
+    } finally {
+      await db.delete(approvalRules).where(inArray(approvalRules.id, [nId, wId]));
+    }
+  });
+
+  it("a ROLLBACK through activateVersion to a less specific version is refused the same way (independent nb1)", async () => {
+    // N (every kind) and W (write-only): W outranks N. v2 of N makes it write-only too: a tie N wins by id.
+    const t = tool();
+    const [nId, wId] = orderedIds();
+    await put(nId, { toolName: t, writeOnly: false, approverUserId: U.a });
+    await put(wId, { toolName: t, writeOnly: true, approverUserId: U.a, approverRoleId: roleId });
+    try {
+      const base = `/v1/config-versions/approval_rule/${nId}`;
+      // write-only narrows what N matches: a loosening of N itself, stepped up as before
+      const mint = await asAdmin("POST", base, { body: { writeOnly: true }, activate: true });
+      expect(mint.statusCode, mint.body).toBe(403);
+      const v2 = await asAdmin("POST", base, { body: { writeOnly: true }, activate: true }, { [STEP_UP_HEADER]: await grantFor(mint.json().action) });
+      expect(v2.statusCode, v2.body).toBe(201);
+      // rolling back to v1 (every kind) breaks the tie N won: W's wider pool would sign
+      const refused = await asAdmin("POST", `${base}/rollback`, { reason: "b4q round 4 drill" });
+      expect(refused.statusCode, refused.body).toBe(403);
+      expect(refused.json().action.body.values).toMatchObject({ outrankedByApprovalRules: [wId] });
+      const ok = await asAdmin("POST", `${base}/rollback`, { reason: "b4q round 4 drill" }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) });
+      expect(ok.statusCode, ok.body).toBe(200);
+    } finally {
+      await db.delete(approvalRules).where(inArray(approvalRules.id, [nId, wId]));
+    }
+  });
+
+  it("the copilot's create path (createApprovalRuleRow with no request to step up) fails closed on a takeover", async () => {
+    const [fleet] = await db
+      .insert(approvalRules)
+      .values({ scope: "fleet", serverScope: "all", userId: null, serverId: null, toolName: null, writeOnly: true, approverUserId: U.a, approverRoleId: null, quorum: 2 })
+      .returning({ id: approvalRules.id });
+    try {
+      const err = await createApprovalRuleRow(db, {
+        scope: "user",
+        serverScope: "server",
+        userId: U.caller,
+        serverId,
+        toolName: tool(),
+        writeOnly: false,
+        approverUserId: U.e,
+        quorum: 1,
+      } as Parameters<typeof createApprovalRuleRow>[1]).then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(ApprovalRuleWriteRefusedError);
+      expect((err as ApprovalRuleWriteRefusedError).status).toBe(403);
+      expect((err as ApprovalRuleWriteRefusedError).body).toMatchObject({ error: "step_up_required", action: { body: { values: { outranksApprovalRules: [fleet!.id] } } } });
+    } finally {
+      await db.delete(approvalRules).where(eq(approvalRules.id, fleet!.id));
     }
   });
 });
