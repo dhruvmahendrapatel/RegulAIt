@@ -114,6 +114,16 @@ already covers each node, and that check feeds the lanes.
   - human oversight;
   - agent controls: agent identity, least privilege and tool permissions.
 
+## 2e. SAP agents and SAP Joule — PRIORITY post-demo backlog (owner, 2026-11-03)
+
+The owner put these at the top of the post-demo backlog on 2026-11-03. P19 and P20 are prioritised together. Each needs
+its own ADR, and open source is checked first (ADR-0176).
+
+| # | Gap | What it would take |
+|---|---|---|
+| **P19** | **SAP business agents.** Agents call SAP business APIs through MCP under governance. The first is Sales Order create (`API_SALES_ORDER_SRV`); after it, anything SAP exposes as an API. regulAIt-ABAP ships development (ADT) tools today, but no business-API write tool. | regulAIt-ABAP: <ul><li>land #78 and #79 after the BTP smoke test, so writes, free SQL and transport writes are off by default;</li><li>add narrowly scoped business tools on its plugin framework, starting with `create_sales_order`, each with an idempotency key;</li><li>add principal propagation through the gateway and the BTP Destination service.</li></ul> Gateway: <ul><li>an approval rule on every SAP write tool (quorum, requester excluded);</li><li>rate limits and a project budget on those tools.</li></ul> |
+| **P20** | **SAP Joule agents as governed remote agents.** SAP exposes Joule agents to third-party clients through its Agent Gateway over A2A (inbound GA, October 2026): ARD discovery, an AgentCard per agent, an OIDC agent identity in SAP Cloud Identity Services, and a client-credentials token for discovery. Invoking an agent needs a user-bound token, and the agent acts within that user's SAP authorisations. RegulAIt already governs A2A remote agents ([ADR-0219](../decisions/0219-a2a-governance.md)), but two gaps block Joule. First, the client accepts only JSON-RPC cards, and SAP's gateway is reported as A2A 0.3.0 over HTTP+JSON. Second, credentials are a single static header, with no per-user token. | Additions to `a2a.ts`: <ul><li>per-user OAuth: client credentials for discovery, and an RFC 8693 token exchange per call, as a new credential kind stored like the others;</li><li>the A2A HTTP+JSON binding, after checking whether `@a2a-js/sdk` supports it;</li><li>an ARD catalogue import, so admins can register the agents the customer's ACL allows.</li></ul> Customer side: <ul><li>register RegulAIt in SAP for Me as an "Agent Gateway Consumer";</li><li>run SAP's identity, trust and ACL formations;</li><li>federate users through an IdP that SAP trusts.</li></ul> Later, the reverse direction: Joule calling RegulAIt agents ("bring your own agent") needs an A2A server endpoint, which RegulAIt does not have, and SAP's outbound A2A is still on its roadmap. Sources: SAP Architecture Center, [Agent Gateway A2A news (2026-10-27)](https://architecture.learning.sap.com/news/2026/10/27/a2a-agent-gateway-interoperability) and [A2A and MCP at SAP](https://architecture.learning.sap.com/docs/ref-arch/76ec36). |
+
 ## 3. Structural gaps — the ADR shipped, a named half did not
 
 These are cases where an ADR is Accepted and genuinely working, but a specific clause is
