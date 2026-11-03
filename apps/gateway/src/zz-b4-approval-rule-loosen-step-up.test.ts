@@ -18,7 +18,8 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { approvalRules, authSessions, createDb, eq, inArray, mcpServers, ORG_SETTINGS_ID, roleAssignments, roles, runMigrations, sql, type Db } from "@regulait/db";
 import { STEP_UP_HEADER } from "@regulait/shared";
 import { createApprovalRuleRow } from "./rule-creates.js";
-import { ApprovalRuleWriteRefusedError } from "./approval-pool.js";
+import { ApprovalRuleWriteRefusedError, approvalRuleMatchWidens, routedApprovalRule } from "./approval-pool.js";
+import { applyRuleEdit } from "./rule-writes.js";
 import { buildApp } from "./app.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
@@ -570,5 +571,116 @@ describe("ADR-0229 amendment 4: breaking a tie the edited rule won by id needs s
     } finally {
       await db.delete(approvalRules).where(eq(approvalRules.id, fleet!.id));
     }
+  });
+});
+
+// ADR-0229 amendment 5 (review round 5, B1): a step-up attests a takeover on the calls the rule matched then. A write
+// that WIDENS the rule's match re-owes every takeover, so an earlier takeover on one tool cannot be stretched to all.
+describe("ADR-0229 amendment 5: widening a rule's match re-owes every takeover", () => {
+  type RuleRow = typeof approvalRules.$inferInsert;
+  const put = async (r: Partial<RuleRow>) =>
+    (
+      await db
+        .insert(approvalRules)
+        .values({ scope: "user", serverScope: "server", userId: U.caller, serverId, toolName: null, writeOnly: false, approverUserId: U.a, approverRoleId: null, quorum: 1, ...r } as RuleRow)
+        .returning({ id: approvalRules.id })
+    )[0]!.id;
+  const tool = () => `b4q_${RUN}_${randomBytes(3).toString("hex")}`;
+  /** R: a fleet rule protecting every call on every server, pool {A} (the security lead's) */
+  const fleetR = () => put({ scope: "fleet", serverScope: "all", userId: null, serverId: null, approverUserId: U.a, quorum: 2 });
+  const owes = (eId: string, rId: string) => ({ ruleId: eId, values: { outranksApprovalRules: [rId], approverUserId: U.e, approverRoleId: null } });
+
+  it("four steps: E already took R's pool over on tool T; tool T -> any tool is refused, bound to R", async () => {
+    const rId = await fleetR();
+    // E: the caller's rule on one tool, approver E. Its create took R's pool over on T (stepped up; written directly here)
+    const eId = await put({ toolName: tool(), approverUserId: U.e });
+    try {
+      const url = `/v1/rules/approvals/${eId}`;
+      const key = await viaKey("PATCH", url, { toolName: null });
+      expect(key.statusCode, key.body).toBe(403);
+      expect(key.json()).toMatchObject({ error: "step_up_required" });
+      const refused = await asAdmin("PATCH", url, { toolName: null });
+      expect(refused.statusCode, refused.body).toBe(403);
+      expect(refused.json().action).toEqual({ kind: "settings_relax", body: owes(eId, rId) });
+      expect((await quorumOf(eId))!.toolName).not.toBeNull();
+      const ok = await asAdmin("PATCH", url, { toolName: null }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) });
+      expect(ok.statusCode, ok.body).toBe(200);
+    } finally {
+      await db.delete(approvalRules).where(inArray(approvalRules.id, [eId, rId]));
+    }
+  });
+
+  it("write-only -> every kind on a rule that already took R over is refused, bound to R", async () => {
+    const rId = await fleetR();
+    const eId = await put({ toolName: tool(), writeOnly: true, approverUserId: U.e });
+    try {
+      const refused = await asAdmin("PATCH", `/v1/rules/approvals/${eId}`, { writeOnly: false });
+      expect(refused.statusCode, refused.body).toBe(403);
+      expect(refused.json().action).toEqual({ kind: "settings_relax", body: owes(eId, rId) });
+    } finally {
+      await db.delete(approvalRules).where(inArray(approvalRules.id, [eId, rId]));
+    }
+  });
+
+  it("deploy-mode route, mode -> every mode on a rule that already took R over: one binding, bound to R", async () => {
+    const rId = await fleetR();
+    const eId = await put({ toolName: tool(), deployMode: "hosted", approverUserId: U.e });
+    try {
+      const url = `/v1/rules/approvals/${eId}/deploy-mode`;
+      const key = await viaKey("PATCH", url, { deployMode: null });
+      expect(key.statusCode, key.body).toBe(403);
+      const refused = await asAdmin("PATCH", url, { deployMode: null });
+      expect(refused.statusCode, refused.body).toBe(403);
+      expect(refused.json().action).toEqual({ kind: "settings_relax", body: { ruleKind: "approvals", ...owes(eId, rId) } });
+      const ok = await asAdmin("PATCH", url, { deployMode: null }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) });
+      expect(ok.statusCode, ok.body).toBe(200);
+    } finally {
+      await db.delete(approvalRules).where(inArray(approvalRules.id, [eId, rId]));
+    }
+  });
+
+  it("the copilot policy_tightening path (applyRuleEdit with no request to step up) fails closed on the widening", async () => {
+    const rId = await fleetR();
+    const eId = await put({ toolName: tool(), approverUserId: U.e });
+    try {
+      // the same call the copilot applier makes (copilot.ts, diff.kind === "policy_tightening"): no stepUp
+      const err = await db
+        .transaction((tx) =>
+          applyRuleEdit(tx as unknown as typeof db, {
+            artifactType: "approval_rule",
+            artifactId: eId,
+            patch: { toolName: null },
+            actorUserId: null,
+            label: "b4q copilot drill",
+            auditObjectType: "restriction_rule",
+            auditRuleId: "copilot-proposal-rule-edit",
+          }),
+        )
+        .then(
+          () => null,
+          (e: unknown) => e,
+        );
+      expect(err).toBeInstanceOf(ApprovalRuleWriteRefusedError);
+      expect((err as ApprovalRuleWriteRefusedError).body).toMatchObject({ error: "step_up_required", action: { body: owes(eId, rId) } });
+      expect((await quorumOf(eId))!.toolName).not.toBeNull();
+    } finally {
+      await db.delete(approvalRules).where(inArray(approvalRules.id, [eId, rId]));
+    }
+  });
+
+  it("approvalRuleMatchWidens: cleared or renamed tool/mode, write-only off, or any subject/server change widens; narrowing does not", () => {
+    const base = routedApprovalRule({ scope: "user", serverScope: "server", userId: "u", serverId: "s", toolName: "t", writeOnly: true, deployMode: "hosted", approverUserId: "a" });
+    const w = (patch: Record<string, unknown>) => approvalRuleMatchWidens(base, routedApprovalRule({ ...base, ...patch }));
+    expect(w({})).toBe(false);
+    expect(w({ toolName: null })).toBe(true);
+    expect(w({ toolName: "other" })).toBe(true);
+    expect(w({ deployMode: null })).toBe(true);
+    expect(w({ deployMode: "byoc" })).toBe(true);
+    expect(w({ writeOnly: false })).toBe(true);
+    expect(w({ serverScope: "all", serverId: null })).toBe(true);
+    expect(w({ userId: "v" })).toBe(true);
+    expect(w({ approverUserId: "b", quorum: 3 })).toBe(false);
+    const open = routedApprovalRule({ ...base, toolName: null, writeOnly: false, deployMode: null });
+    expect(approvalRuleMatchWidens(open, base)).toBe(false); // setting tool, mode and write-only narrows
   });
 });

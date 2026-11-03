@@ -214,3 +214,35 @@ team are removed by `ON DELETE CASCADE` when that subject is deleted, without `d
 calls fall through to the next (possibly wider) rule. This predates ADR-0229, which only makes the fallback
 deterministic. Role and team deletes are not step-up gated today. Follow-up: require the `settings_relax` step-up for
 deleting a role, team, user or server that is the subject of an approval rule.
+
+## Amendment 5 (2026-11-03, review round 5 of #662 at `4b2a785`): widening re-owes
+
+14. **A write that widens an approval rule's match re-owes every takeover (security B1).** The forward check treated a
+    takeover the rule already made (`was`) as "not owed again", by rule id. But a step-up attested "this rule outranks R
+    on the calls it matched then", not everywhere. A rule that took R's pool over on one tool could clear its tool
+    (`toolName T → null`), turn write-only off, or clear its deploy mode, and take R's pool over for every call. These
+    edits are tightenings by the field comparator, so no step-up was asked. `was` is now subtracted only when the write
+    leaves the match unchanged or narrower (`approvalRuleMatchWidens` is false). A widening is a tool or deploy mode
+    cleared or renamed, write-only turned off, or any subject or server change (every writer refuses those today; they
+    are counted anyway). On a widening, every pool in `now` is owed again. This applies on every path the guard runs:
+    `PATCH /v1/rules/approvals/:id`, the deploy-mode route (folded into its one binding), `activateVersion` (mint,
+    activate, rollback, canary promotion), and the copilot `policy_tightening` applier, which has no request to step up
+    and so fails closed with `step_up_required`.
+
+**The long-term simplification stays option (b).** Five review rounds each found a new path by which an incremental
+"which pools does this write move" calculation leaked. The calculation is now closed on every axis the reviews found
+(forward, reverse, ties, deploy-mode sets, widening). It remains the costlier design to keep correct. Option (b),
+requiring a queued approval to satisfy every matched rule's pool (the intersection), removes the question of who names
+the signer, so no write could move it. It needs every matched pool snapshotted on the approval row (a migration) and an
+intersection-aware decide path, and stays the recorded follow-up.
+
+**Noted, unchanged (round 5, non-blocking 1).** The step-up binding names the taken-over rules and the new pool, not the
+extent (tool, write-only, mode) of the takeover. With widening re-owing, a wider extent always asks again, so the
+binding need not carry the extent to be safe. Adding it would only make the prompt more informative.
+
+**Tests (round 5).** `zz-b4-approval-rule-loosen-step-up.test.ts`:
+- the reviewer's four steps (E already took a fleet rule R over on tool T; tool → any tool is refused for the API key and an ungranted session, bound to `{outranksApprovalRules: [R]}`, admitted with the step-up);
+- the write-only → every kind variant;
+- the deploy-mode route variant (one binding);
+- the copilot `policy_tightening` path (`applyRuleEdit` with no step-up) failing closed;
+- a unit test pinning `approvalRuleMatchWidens`.

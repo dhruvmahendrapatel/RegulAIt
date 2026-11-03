@@ -681,6 +681,27 @@ const poolLoosens = (db: Q, held: RoutedApprovalRule, taker: RoutedApprovalRule)
   approvalRuleLoosens(db, held, { ...taker, quorum: Math.max(taker.quorum ?? 1, held.quorum ?? 1) });
 
 /**
+ * ADR-0229 amendment 5: does `after` match ANY call `before` did not? Conservative: a tool or deploy mode cleared or
+ * renamed, write-only turned off, or any change to the subject or server fields (which every writer refuses today,
+ * counted anyway so a future writer cannot reopen this) is a widening. Only an unchanged or strictly narrower match
+ * (a tool or mode set where there was none, write-only turned on) is not.
+ */
+export function approvalRuleMatchWidens(before: RoutedApprovalRule, after: RoutedApprovalRule): boolean {
+  const changed = (a: unknown, b: unknown) => (a ?? null) !== (b ?? null);
+  if (before.toolName != null && changed(before.toolName, after.toolName)) return true;
+  if (before.deployMode != null && changed(before.deployMode, after.deployMode)) return true;
+  if (before.writeOnly && !after.writeOnly) return true;
+  return (
+    changed(before.scope ?? "user", after.scope ?? "user") ||
+    changed(before.serverScope ?? "server", after.serverScope ?? "server") ||
+    changed(before.userId, after.userId) ||
+    changed(before.serverId, after.serverId) ||
+    changed(before.roleId, after.roleId) ||
+    changed(before.teamId, after.teamId)
+  );
+}
+
+/**
  * Did rule `a` (id `aId`) name the signer over rule `b` for the calls they share? Exactly the kernel's
  * `compareApprovalRulePrecedence`: more specific wins, and a tie goes to the lower id (review round 4, B1).
  */
@@ -771,7 +792,15 @@ export async function approverPoolTakeoverFacts(
   const others = await servedOverlappingRules(db, shapes, args.ruleId);
   if (others.length === 0) return null;
   const now = await forwardTakeovers(db, args.after, others);
-  const was = new Set(args.before && args.ruleId ? await forwardTakeovers(db, args.before, others, args.ruleId) : []);
+  // ADR-0229 amendment 5 (review round 5, B1): a takeover the rule already made is "not owed again" only while the
+  // write leaves its MATCH unchanged or narrower. A step-up attested "this rule outranks R on the calls it matched";
+  // when the write widens what the rule matches, the takeover reaches calls nobody attested, so every pool in `now`
+  // is owed again.
+  const was = new Set(
+    args.before && args.ruleId && !approvalRuleMatchWidens(args.before, args.after)
+      ? await forwardTakeovers(db, args.before, others, args.ruleId)
+      : [],
+  );
   const fresh = now.filter((id) => !was.has(id));
   const reverse = args.before && args.ruleId ? await reverseTakeovers(db, args.ruleId, args.before, args.after, others) : [];
   if (fresh.length === 0 && reverse.length === 0) return null;

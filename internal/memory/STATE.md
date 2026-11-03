@@ -5456,7 +5456,8 @@ route; it reads the served view, pre-filters in SQL and is serialised by an advi
 rules in different deploy modes count as overlapping (a call's deploy context is a set), and the deploy-mode route takes
 one step-up covering both its narrowing and any takeover. **Amendment 4 (round 4):** ties are decided by the kernel's
 id tie-break, so breaking a tie the edited rule won is a stepped-up takeover. Follow-up: step up deleting a role, team,
-user or server that an approval rule is scoped to (cascade delete). Open follow-ups: a
+user or server that an approval rule is scoped to (cascade delete). **Amendment 5 (round 5):** widening a rule's
+match re-owes every takeover; option (b) (pool intersection) is the recorded long-term simplification. Open follow-ups: a
 rule-editor warning for shadowed tightenings and equal-specificity overlaps, and option (b).
 
 ## Open Questions
