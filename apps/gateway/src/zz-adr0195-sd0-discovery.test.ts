@@ -194,7 +194,7 @@ describe("ADR-0195 SD0 discovery foundation", () => {
     const k = await inject("GET", "/v1/discovery/scanners", AUTH, undefined, bare);
     expect(k.statusCode).toBe(200);
     const kinds = k.json().kinds as Array<{ kind: string; built: boolean }>;
-    expect(kinds.filter((x) => x.built).map((x) => x.kind).sort()).toEqual(["cloud_aws", "cloud_azure", "cloud_gcp", "endpoint_agent", "endpoint_inventory", "endpoint_osquery", "repo_azure_devops", "repo_bitbucket", "repo_github", "repo_gitlab"]);
+    expect(kinds.filter((x) => x.built).map((x) => x.kind).sort()).toEqual(["cloud_aws", "cloud_azure", "cloud_gcp", "endpoint_agent", "endpoint_inventory", "endpoint_osquery", "idp_entra", "ml_mlflow", "repo_azure_devops", "repo_bitbucket", "repo_github", "repo_gitlab", "saas_inventory_api"]);
     // SD4b built the last kind: every kind has a scanner, and a kind outside the closed set is refused before any write
     expect(kinds.filter((x) => !x.built)).toEqual([]);
     const c = await inject("POST", "/v1/discovery/sources", AUTH, { name: `none-${RUN}`, kind: "endpoint_unknown", target: { fleet: "x" }, scope: { orgLevel: true, include: [] } }, bare);
