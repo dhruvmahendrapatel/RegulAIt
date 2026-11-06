@@ -152,7 +152,7 @@ import {
 
 /**
  * Everything the shipped seed installs: the default signatures, plus each discovery slice's own artifact seed rows
- * (ADR-0195 SD2: `cloud_ai_service`; ADR-0230: `ml_platform_asset`; both matched by `identifier`). SD1 and SD3 add
+ * (ADR-0195 SD2: `cloud_ai_service`; ADR-0235: `ml_platform_asset`; both matched by `identifier`). SD1 and SD3 add
  * theirs here the same way.
  */
 export const SHIPPED_SIGNATURE_SEED: ReadonlyArray<Omit<AiSignature, "lastUpdatedAt">> = Object.freeze([

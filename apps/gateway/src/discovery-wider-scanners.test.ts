@@ -1,5 +1,5 @@
 /**
- * ADR-0230 (P9): the wider discovery scanners against ADR-0195 SD0's Scanner contract, without a database. A fake
+ * ADR-0235 (P9): the wider discovery scanners against ADR-0195 SD0's Scanner contract, without a database. A fake
  * service stands behind `ctx.fetch`; the tests check the worker hooks (throttle before every request, every body
  * digested, token responses never digested, consenting users pseudonymised as `idp_user`), that observations pass
  * the worker's own `checkObservations` for the source kind and match the shipped catalogue rows (detection is data),
@@ -64,7 +64,7 @@ const catalogueRow = (over: Partial<AiSignature> & Pick<AiSignature, "kind" | "v
 });
 const SEED_ROWS: AiSignature[] = ML_PLATFORM_ASSET_SEED.map((r) => catalogueRow({ provider: r.provider, kind: r.kind, value: r.value, matchType: r.matchType, provenance: r.provenance }));
 
-describe("ADR-0230 registration and gating", () => {
+describe("ADR-0235 registration and gating", () => {
   it("every wider kind has a scanner in the production registry, needs a credential, and is switched off by default", () => {
     for (const kind of ["saas_inventory_api", "idp_entra", "ml_mlflow"] as const) {
       expect(DISCOVERY_SCANNERS.get(kind)?.requiresCredential).toBe(true);
@@ -100,7 +100,7 @@ describe("ADR-0230 registration and gating", () => {
   });
 });
 
-describe("ADR-0230 saas_inventory_api", () => {
+describe("ADR-0235 saas_inventory_api", () => {
   const source = {
     id: "s-saas",
     name: "inventory",
@@ -160,7 +160,7 @@ describe("ADR-0230 saas_inventory_api", () => {
   });
 });
 
-describe("ADR-0230 idp_entra", () => {
+describe("ADR-0235 idp_entra", () => {
   const source = { id: "s-entra", name: "entra", kind: "idp_entra" as const, target: { tenantId: TENANT }, scope: { orgLevel: true, include: [] as string[] } };
 
   function fakeEntra(roles: string[]) {
@@ -265,7 +265,7 @@ describe("ADR-0230 idp_entra", () => {
   });
 });
 
-describe("ADR-0230 ml_mlflow", () => {
+describe("ADR-0235 ml_mlflow", () => {
   const source = { id: "s-ml", name: "ml", kind: "ml_mlflow" as const, target: { baseUrl: "https://ml.regulait.example/" }, scope: { orgLevel: true, include: [] as string[] } };
 
   it("lists registered models (paged) and serving endpoints; external providers are their own sightings matched by the seed", async () => {

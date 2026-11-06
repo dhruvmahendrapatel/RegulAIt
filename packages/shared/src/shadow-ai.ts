@@ -171,7 +171,7 @@ export const ARTIFACT_SIGNATURE_KINDS = [
   "browser_extension",
   "local_runtime",
   "assistant_config",
-  // ADR-0230: an OAuth/OIDC client application an identity provider holds consents for (its application id), and an
+  // ADR-0235: an OAuth/OIDC client application an identity provider holds consents for (its application id), and an
   // asset on a standalone ML platform (`mlflow:serving_endpoint`, `mlflow:external_model:<provider>`, ...)
   "oauth_app",
   "ml_platform_asset",

@@ -1,5 +1,5 @@
 /**
- * ADR-0230 (P9): the wider discovery sources, registered against ADR-0195 SD0's `Scanner` interface
+ * ADR-0235 (P9): the wider discovery sources, registered against ADR-0195 SD0's `Scanner` interface
  * (`discovery-scanners.ts`). Each family is also behind its own default-off org switch (`familySwitchProblem`), which
  * the routes and the worker check before a source of it is created, enabled or run.
  *
@@ -559,7 +559,7 @@ const mlRow = (provider: string, value: string, replacementNote: string) =>
   });
 
 /**
- * ADR-0230: seed rows of signature kind `ml_platform_asset`. A registered model or a serving endpoint is an AI asset
+ * ADR-0235: seed rows of signature kind `ml_platform_asset`. A registered model or a serving endpoint is an AI asset
  * outside governance; an endpoint forwarding to an external model provider is AI use leaving the platform. The
  * external-provider keys use the provider names the MLflow external-model configuration documents. An admin may
  * disable any row (an admin edit flips it to provenance `admin`). No `oauth_app` rows are seeded: an application id

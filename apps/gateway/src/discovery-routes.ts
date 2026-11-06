@@ -18,7 +18,7 @@
  *   GET    /v1/discovery/runs                             recent runs, optionally for one source
  *   GET    /v1/discovery/settings                         the warning age and the endpoint retention
  *   PUT    /v1/discovery/settings                         lengthening either is a `settings_relax` step-up (CAS)
- *                                                     turning a wider-source family on (ADR-0230) is the same step-up
+ *                                                     turning a wider-source family on (ADR-0235) is the same step-up
  *   POST   /v1/discovery/pseudonyms/:pseudonym/reveal     a `pseudonym_reveal` step-up, audited
  *
  * THE SECRET NEVER LEAVES. No view below returns `secret_ciphertext` or the
@@ -135,7 +135,7 @@ const settingsSchema = z
     version: z.number().int().min(1),
     credentialWarningAgeDays: z.number().int().min(DISCOVERY_CREDENTIAL_WARNING_MIN_DAYS).max(DISCOVERY_CREDENTIAL_WARNING_MAX_DAYS).optional(),
     endpointRetentionDays: z.number().int().min(DISCOVERY_ENDPOINT_RETENTION_MIN_DAYS).max(DISCOVERY_ENDPOINT_RETENTION_MAX_DAYS).optional(),
-    // ADR-0230: the wider-source family switches; turning one on is a relaxation, turning one off is free
+    // ADR-0235: the wider-source family switches; turning one on is a relaxation, turning one off is free
     families: z
       .object({ saas: z.boolean().optional(), identity: z.boolean().optional(), ml_platform: z.boolean().optional() })
       .strict()
@@ -382,7 +382,7 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
     if (!registry.has(body.kind)) {
       return send(reply, refusal(409, "scanner_not_built", `no scanner is built for ${body.kind} yet (ADR-0195 ${DISCOVERY_KIND_SPECS[body.kind].slice}); a source of this kind cannot be created`));
     }
-    // ADR-0230: a wider-source family is off until an admin turns it on
+    // ADR-0235: a wider-source family is off until an admin turns it on
     const createFamilyOff = familySwitchProblem(body.kind, (await loadDiscoverySettings(db)).families);
     if (createFamilyOff) return send(reply, refusal(409, "family_disabled", createFamilyOff));
     // secure by default: a target the kind's scanner rejects is refused at save time, not at run time
@@ -746,7 +746,7 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
       if (body.endpointRetentionDays !== undefined && body.endpointRetentionDays > row.endpointRetentionDays) {
         relaxed[DISCOVERY_STEP_UP_KEYS.retention] = body.endpointRetentionDays;
       }
-      // ADR-0230: turning a wider-source family ON is a relaxation, bound to exactly the families being turned on
+      // ADR-0235: turning a wider-source family ON is a relaxation, bound to exactly the families being turned on
       const beforeFamilies = { saas: row.saasSourcesEnabled, identity: row.identitySourcesEnabled, ml_platform: row.mlPlatformSourcesEnabled };
       const afterFamilies = { ...beforeFamilies, ...(body.families ?? {}) };
       const turnedOn = DISCOVERY_GATED_FAMILIES.filter((f) => afterFamilies[f] && !beforeFamilies[f]);

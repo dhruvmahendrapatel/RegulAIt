@@ -1,5 +1,5 @@
 /**
- * ADR-0230 (P9) — the wider discovery sources on a real database through the real app (`buildApp`):
+ * ADR-0235 (P9) — the wider discovery sources on a real database through the real app (`buildApp`):
  *
  *  - DEFAULT OFF: after migration 0262 every family switch is off; a source of a switched-off family cannot be
  *    created (409 `family_disabled`), and the settings read says so.
@@ -146,7 +146,7 @@ afterAll(async () => {
   await app?.close();
 });
 
-describe("ADR-0230 wider discovery sources", () => {
+describe("ADR-0235 wider discovery sources", () => {
   it("every family is off by default, and a source of a switched-off family cannot be created", async () => {
     // start from the migration's default for this file (other suites never turn a family on)
     await db.update(discoverySettings).set({ saasSourcesEnabled: false, identitySourcesEnabled: false, mlPlatformSourcesEnabled: false }).where(eq(discoverySettings.id, 1));

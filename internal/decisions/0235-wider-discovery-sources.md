@@ -1,4 +1,4 @@
-# ADR-0230: Wider shadow-AI discovery sources: SaaS app inventories, identity-provider app consents and standalone ML platforms
+# ADR-0235: Wider shadow-AI discovery sources: SaaS app inventories, identity-provider app consents and standalone ML platforms
 
 - **Status**: Accepted (builder lane P9; the owner's backlog decision of 2026-10-30 on #453)
 - **Date**: 2026-10-30
@@ -7,7 +7,8 @@
   APIs" is delivered here for one identity provider.
 - **Migration**: 0262 (`0262_discovery_wider_sources.sql`)
 - **Renumbered on landing (2026-11-06)**: drafted as ADR-0218 and migration 0238. ADR-0218 went to the themes lane
-  (#622), and 0238 sat below main's migration watermark, so both moved (CONTRIBUTING_PARALLEL_SESSIONS §4.1).
+  (#622) and ADR-0230 to ADR-0233 are taken by open PRs, and 0238 sat below main's migration watermark, so both moved
+  (CONTRIBUTING_PARALLEL_SESSIONS §4.1).
 - **Backlog item**: [PENDING.md](../product/PENDING.md) P9
 
 ## Context
@@ -142,5 +143,5 @@ existing `@azure/identity` credential built over the guarded fetch in `@regulait
   catalogue editor. Operator notes: `docs/deployment/WIDER_DISCOVERY.md`.
 - Tests: `discovery-wider-scanners.test.ts` (fake services behind `ctx.fetch`: hooks, paging, same-origin next links,
   scope filters, write-scope refusal before any Graph read, pseudonymised consenting user, catalogue matching through
-  the seed) and `zz-adr0230-wider-discovery.test.ts` (real database: default off, step-up with negative controls,
+  the seed) and `zz-adr0235-wider-discovery.test.ts` (real database: default off, step-up with negative controls,
   findings through the import path, switching off stops create, run, schedule, a queued run and the posture).
