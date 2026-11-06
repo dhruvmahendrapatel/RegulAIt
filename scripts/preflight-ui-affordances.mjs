@@ -21,6 +21,11 @@
  * nothing passes this and fails its e2e spec, which is the right division of
  * labour: this is a census, not a test.
  *
+ * KNOWN BLIND SPOT. Every gateway scan here reads `app.<verb>("…")` with a
+ * double-quoted path. A route registered with a template literal or a variable
+ * (some in supplier-portal.ts and framework-imports.ts) is not seen by the
+ * DELETE census or the G12 remove-parity check.
+ *
  * Exit 0 clean, 1 when an endpoint is unreachable and unlisted, 2 if it could
  * not run at all. Any non-zero fails CI.
  */
@@ -60,11 +65,12 @@ export const NO_REMOVE_BY_DESIGN = new Map([
   ["/v1/shadow-ai/imports", "an import is the evidence batch its findings were drawn from"],
   ["/v1/policy-simulations", "a simulation is a point-in-time blast-radius report"],
   ["/v1/copilot/proposals", "a proposal is an approvals row; it is applied or decided, never deleted"],
-  ["/v1/billing/rate-cards", "rate cards are immutable versions; a new card supersedes the old one and past statements keep pointing at theirs"],
+  ["/v1/billing/rate-cards", "rate cards are versioned and never edited; a new card supersedes the old one and past statements keep pointing at theirs"],
   ["/v1/licenses", "append-only history: installing a licence supersedes the previous one"],
   ["/v1/sod/overrides", "an override request is an escalation into the approvals queue and is decided there"],
   ["/v1/projects/:x/context", "context entries are superseded by newer ones, never deleted, so answers stay traceable to what they used"],
-  ["/v1/discovery/sources/:x/enrolment-tokens", "enrolment tokens expire on their own; the source itself can be disabled or deleted"],
+  ["/v1/discovery/sources/:x/enrolment-tokens", "enrolment tokens expire on their own, and disabling or deleting the source refuses every outstanding token (403 enrolment_disabled)"],
+  ["/v1/ai-bom/:x/:x/snapshots", "a frozen AI BOM snapshot is the point-in-time record drift is measured against; a newer snapshot supersedes it"],
   ["/v1/agents/setup-assist", "not a collection: the POST returns a suggested agent draft and stores nothing but an audit row"],
   ["/v1/privacy/processing-records", "a record of processing is retired with PATCH status \"retired\", not deleted, so past dispatch decisions stay traceable to it"],
   ["/v1/servers/:x/tools", "tools come from the server's manifest; a tool is stopped with halt, and the server's own lifecycle is G4"],
@@ -666,6 +672,28 @@ export const segmentMatch = (route, set) => {
 };
 
 /**
+ * One-directional segment match for the REMOVE side, where both paths come
+ * from the gateway's own route table: a `:x` in a served route may stand for a
+ * literal in `item` (so `DELETE /v1/rules/:kind/:ruleId` clears
+ * `/v1/rules/approvals/:x`), but a `:x` in `item` matches only a `:x`. Matching
+ * both ways would let any literal sibling route mask a real gap: withdrawing an
+ * SPDX field (`/v1/ai-bom/spdx-fields/:x/:x/:x/withdraw`) would count as a way
+ * to remove an AI BOM snapshot (`/v1/ai-bom/:x/:x/snapshots/:x`). The
+ * collection segment must be equal, as in segmentMatch.
+ */
+export const routeCovers = (item, routes) => {
+  if (routes.has(item)) return true;
+  const want = item.split("/");
+  for (const r of routes) {
+    const got = r.split("/");
+    if (got.length !== want.length) continue;
+    if (got[2] !== want[2]) continue;
+    if (got.every((seg, i) => seg === want[i] || seg === ":x")) return true;
+  }
+  return false;
+};
+
+/**
  * Collections the UI lists (a GET it calls) and cannot add to (a POST it never
  * calls), skipping POSTs that are still `notBuilt` stubs.
  */
@@ -704,11 +732,11 @@ export function findRemoveGaps({ posted, gotten, served, mutations, notBuilt = n
     .filter((p) => {
       const item = `${p}/:x`;
       // a singleton (`/credential`) is cleared by a DELETE on its own path
-      if (segmentMatch(item, served) || segmentMatch(p, served)) return false;
+      if (routeCovers(item, served) || routeCovers(p, served)) return false;
       return ![...mutations].some((q) => {
         if (q.split("/").length !== item.split("/").length + 1) return false;
         const tail = q.slice(q.lastIndexOf("/") + 1);
-        return RETIRE_VERBS.includes(tail) && segmentMatch(item, new Set([q.slice(0, q.lastIndexOf("/"))]));
+        return RETIRE_VERBS.includes(tail) && routeCovers(item, new Set([q.slice(0, q.lastIndexOf("/"))]));
       });
     })
     .sort();
@@ -801,12 +829,7 @@ function main() {
     const src = readFileSync(f, "utf8");
     for (const m of src.matchAll(/app\.(?:post|patch|put)\(\s*"([^"]+)"/g)) mutations.add(norm(m[1]));
   }
-  const servedDeletes = new Set();
-  for (const f of walk(gatewaySrc)) {
-    const src = readFileSync(f, "utf8");
-    for (const m of src.matchAll(/app\.delete\(\s*"([^"]+)"/g)) servedDeletes.add(norm(m[1]));
-  }
-  const removeCandidates = findRemoveGaps({ posted, gotten, served: servedDeletes, mutations, notBuilt });
+  const removeCandidates = findRemoveGaps({ posted, gotten, served, mutations, notBuilt });
   const removeGaps = removeCandidates.filter((r) => !NO_REMOVE_BY_DESIGN.has(r) && !KNOWN_REMOVE_GAPS.has(r));
   const staleRemoveEntries = [...NO_REMOVE_BY_DESIGN.keys(), ...KNOWN_REMOVE_GAPS.keys()]
     .filter((r) => !removeCandidates.includes(r))

@@ -158,6 +158,18 @@ describe("remove parity (#453 G12): a collection the API can create into must ha
     }
   });
 
+  it("a parameter in the collection path does not let a literal sibling route clear it (one-directional match)", () => {
+    const deep = { posted: new Set(["/v1/things/:x/:x/items"]), gotten: new Set(["/v1/things/:x/:x/items"]), served: new Set(), mutations: new Set(["/v1/things/:x/:x/items"]) };
+    // the AI BOM shape: withdrawing a field on a literal sibling is not a way to remove an item
+    expect(findRemoveGaps({ ...deep, mutations: new Set([...deep.mutations, "/v1/things/settings/:x/:x/:x/withdraw"]) })).toEqual(["/v1/things/:x/:x/items"]);
+    expect(findRemoveGaps({ ...deep, served: new Set(["/v1/things/settings/:x/:x/:x"]) })).toEqual(["/v1/things/:x/:x/items"]);
+    // a parameter in the ROUTE still stands for a literal in the item (DELETE /v1/rules/:kind/:ruleId)
+    const rules = { posted: new Set(["/v1/rules/approvals"]), gotten: new Set(["/v1/rules/approvals"]), served: new Set(["/v1/rules/:x/:x"]), mutations: new Set(["/v1/rules/approvals"]) };
+    expect(findRemoveGaps(rules)).toEqual([]);
+    // the real retire route on the item still counts
+    expect(findRemoveGaps({ ...deep, mutations: new Set([...deep.mutations, "/v1/things/:x/:x/items/:x/withdraw"]) })).toEqual([]);
+  });
+
   it("accepts a singleton cleared by a DELETE on its own path (a credential)", () => {
     const one = { ...base, posted: new Set(["/v1/c/:x/credential"]), gotten: new Set(["/v1/c/:x/credential"]) };
     expect(findRemoveGaps({ ...one, served: new Set(["/v1/c/:x/credential"]) })).toEqual([]);
