@@ -2,7 +2,7 @@
 #
 # Built from the REPOSITORY ROOT (the shim is a workspace package):
 #
-#   docker build -f engines/promptfoo/Dockerfile -t regulait/engine-promptfoo:0.124.1 .
+#   docker build -f engines/promptfoo/Dockerfile -t regulait/engine-promptfoo:0.125.1 .
 #
 # Signing and the image-level Trivy scan (vulnerabilities and the OS-layer licence scan) join the
 # gateway image's pipeline (ADR-0184: publish-image.yml / security.yml) in a follow-up: they need a
@@ -51,7 +51,7 @@ COPY scripts/engine-images-normalise.mjs /tmp/engine-images-normalise.mjs
 ARG SOURCE_DATE_EPOCH
 RUN node licence-gate.mjs package-lock.json \
  && npm ci --omit=optional --ignore-scripts --no-audit --no-fund \
- && node -e "const v=require('./node_modules/promptfoo/package.json').version; if (v !== '0.124.1') { console.error('expected promptfoo 0.124.1, got ' + v); process.exit(1); }" \
+ && node -e "const v=require('./node_modules/promptfoo/package.json').version; if (v !== '0.125.1') { console.error('expected promptfoo 0.125.1, got ' + v); process.exit(1); }" \
  && npm sbom --omit=optional --sbom-format cyclonedx --sbom-type application > sbom.cdx.json \
  && node /tmp/engine-images-normalise.mjs cyclonedx sbom.cdx.json \
  && rm -rf /root/.npm licence-gate.mjs /tmp/engine-images-normalise.mjs
@@ -78,7 +78,7 @@ RUN NODE_OPTIONS=--max-old-space-size=3072 pnpm install --frozen-lockfile \
 FROM --platform=linux/amd64 node:22-trixie-slim@sha256:8eb619e402eaede1748a3c8173bffab391592812e85136452f781741c7242ddf AS runtime
 LABEL org.opencontainers.image.title="regulait-engine-promptfoo" \
       org.regulait.engine="promptfoo" \
-      org.regulait.engine-version="0.124.1" \
+      org.regulait.engine-version="0.125.1" \
       org.regulait.patches="telemetry-disabled-sends-nothing"
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
            /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
