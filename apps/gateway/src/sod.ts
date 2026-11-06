@@ -86,6 +86,7 @@ import {
   type SodPatternDimension,
   type SodRuleRow,
 } from "@regulait/db";
+import { approverPoolShiftFacts, lockApproverRoles } from "./approval-pool.js";
 import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
 // the CLOSED provider vocabulary agents.provider speaks — the pattern
 // dimension 'provider' validates against it, never against free text
@@ -1048,15 +1049,69 @@ async function executeOverriddenMint(
           .onConflictDoNothing()
           .returning({ id: roleServerGrants.id }),
       );
-    case "role_assignment":
+    case "role_assignment": {
+      // issue #668 (ADR-0229 amendment 6), secure by default (ADR-0180): an approved SoD override is an
+      // approval_decide act, not the settings_relax step-up a direct assignment needs when the role is an approver
+      // role or joining it moves who signs to a wider pool. Decided here under the approver-role lock, then the
+      // routing lock; either refuses, the decision rolls back, and an admin assigns the role directly with the step-up.
+      const userId = body.userId as string;
+      const roleId = body.roleId as string;
+      const approverRole = (await lockApproverRoles(tx, [roleId])).has(roleId);
+      const takeover = approverRole ? null : await approverPoolShiftFacts(tx, { change: "member-add", objectType: "role", objectId: roleId, userId });
+      if (approverRole || takeover) throw new SodRoleMintNeedsStepUpError(userId, roleId, approverRole ? { approverRoleId: roleId } : takeover!);
       return insert("role_assignments", () =>
         tx
           .insert(roleAssignments)
-          .values({ userId: body.userId as string, roleId: body.roleId as string, origin: "direct" })
+          .values({ userId, roleId, origin: "direct" })
           .onConflictDoNothing()
           .returning({ id: roleAssignments.id }),
       );
+    }
   }
+}
+
+/**
+ * Issue #668: an SoD override that would assign an approver role, or a role whose approval rules would move who signs
+ * for the user's calls to a wider pool. Thrown inside the decision's transaction, so nothing is decided or minted; the
+ * decide route audits it and answers 409 `sod_override_role_needs_step_up`.
+ */
+export class SodRoleMintNeedsStepUpError extends Error {
+  context: Record<string, unknown> = {};
+  constructor(
+    readonly userId: string,
+    readonly roleId: string,
+    readonly facts: Record<string, unknown>,
+  ) {
+    super(`an SoD override cannot assign role ${roleId}: it needs the settings_relax step-up of a direct assignment`);
+    this.name = "SodRoleMintNeedsStepUpError";
+  }
+}
+
+/** the 409 body for `SodRoleMintNeedsStepUpError` (no secret in it: ids and the takeover facts only) */
+export function sodRoleMintNeedsStepUpBody(err: SodRoleMintNeedsStepUpError): Record<string, unknown> {
+  return {
+    error: "sod_override_role_needs_step_up",
+    detail:
+      "this role is an approver role, or joining it moves who signs for some calls to a wider approver pool; an SoD " +
+      "override cannot grant that. Deny this override, and assign the role directly as an admin with the settings_relax step-up",
+    userId: err.userId,
+    roleId: err.roleId,
+    facts: err.facts,
+  };
+}
+
+/** the deny row for `SodRoleMintNeedsStepUpError`, written after the decision rolled back */
+export async function auditSodRoleMintNeedsStepUp(db: Db, deciderUserId: string, err: SodRoleMintNeedsStepUpError): Promise<void> {
+  await db.insert(auditLog).values({
+    userId: deciderUserId,
+    objectType: "role",
+    objectId: err.roleId,
+    detail: { phase: "sod-override-role-refused", memberUserId: err.userId, facts: err.facts, ...err.context },
+    effect: "deny",
+    ruleId: "sod-override-role-refused",
+    ruleChain: [],
+    reason: `an approved SoD override was refused: assigning role ${err.roleId} needs the settings_relax step-up of a direct assignment`,
+  });
 }
 
 /**
@@ -1083,7 +1138,9 @@ export async function applySodOverrideDecision(
   const mintDetail = approved
     ? await executeOverriddenMint(tx, request.mintKind, request.mintPayload).catch((err: unknown) => {
         // the refusal's audit row (written by the decide route after rollback) names the request, as the precheck's does
-        if (err instanceof RoleNotFoundError) err.context = { overrideRequestId: request.id, mintKind: request.mintKind };
+        if (err instanceof RoleNotFoundError || err instanceof SodRoleMintNeedsStepUpError) {
+          err.context = { overrideRequestId: request.id, mintKind: request.mintKind };
+        }
         throw err;
       })
     : null;

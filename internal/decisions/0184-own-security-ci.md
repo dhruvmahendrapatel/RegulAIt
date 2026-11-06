@@ -224,3 +224,47 @@ default setup stays off. As built:
 - Follow-ups for the integrator: SHA-pin the actions in `ci.yml`, `demo.yml`, `integrations.yml` and
   `publish-image.yml`; sign and verify in `publish-image.yml`; digest-pin the Postgres service images; mark the
   security jobs as required checks; enable GitHub private vulnerability reporting (SECURITY.md points to it).
+
+## Addendum (2026-11-06): image findings with no fixed version, re-checked by 2026-12-06
+
+**Context.** On 2026-11-03 the Debian 13 base images started carrying 47 HIGH findings. The Trivy gate refused only
+two of them, CVE-2026-109518 in `apt` and `libapt-pkg7.0` (3.0.3, fixed in 3.0.4), and that turned the image jobs red
+on every PR. The other 45 were util-linux (CVE-2026-76642, CVE-2026-78408/9/10) and `libacl1` (CVE-2026-54369). None
+has a fixed Debian version yet, so the gate did not count them. #677 moved the node and python bases to digests that
+ship apt 3.0.4, and every image gate went green.
+
+**Decision.** The rule this ADR already applies stays: `scripts/security-gate.mjs --kind trivy` counts a HIGH or
+CRITICAL finding only when Trivy reports a `FixedVersion`. A finding with no fix does not fail the gate. It is
+reported in the job log (the `trivy convert --format table` step prints the full HIGH and CRITICAL report) and in the
+uploaded `trivy-image.json` artifact, not in the gate script's own output. This addendum makes the rule explicit and
+dates it. It is not an exemption: no CVE id is exempted in the gate or in any allow-list. A fix that is published
+counts at the next scan, which is on the next PR or push, or at the latest the weekly scheduled run (`17 5 * * 1`,
+so at most about a week). From then on the gate stays red until the base or package is patched, as ADR-0200 requires.
+
+- **Re-check by 2026-12-06**, or at the next Debian 13 point release, whichever comes first.
+  - **Owner:** the master session. **Tracked in:** this addendum, the ADR index row for 0184, and STATE.md.
+  - **What it reads:** the latest `trivy-image.json` of each image (the gateway and every engine).
+  - **What it records,** for each no-fix HIGH or CRITICAL finding: whether a fix now exists (taken by a base-image or
+    package bump), and whether the package is reachable at run time.
+  - **Output:** a new dated addendum to this ADR.
+- **Escalation.** At the re-check, the following do not roll forward. Each gets a mitigation in place, or a new ADR
+  that records the decision:
+  - a no-fix CRITICAL;
+  - a no-fix HIGH whose package is reachable at run time.
+
+  Any other finding still unfixed sets the next re-check date, at most 30 days later, in the new addendum.
+- **Cap.** A finding may roll forward at most twice. At the third re-check it is still unfixed, so the distroless
+  base lane (below) is opened as a planned change for the affected images.
+- **Not taken now:**
+  - **A distroless base.** It removes util-linux, but it changes every image: no shell, rewritten entrypoints and
+    healthchecks, a new base to admit under ADR-0176, and the engines' Python closures to re-verify. It stays a
+    candidate hardening lane, and becomes a required one under the cap above.
+  - **Removing util-linux or `libacl1` from the runtime stages.** Both are essential or required packages in
+    Debian. Removing them needs `dpkg --force-remove-essential` and leaves Trivy's package database out of step with
+    the filesystem.
+- **Unchanged:**
+  - The severity threshold: HIGH and CRITICAL.
+  - The rule that Trivy runs from an empty directory, so no `.trivyignore` or `ignore-unfixed` setting in the tree
+    can change the gate.
+  - `security/image-allowlist.json`, which stays empty. Under ADR-0200 a fixable finding is patched, not
+    allow-listed. The file remains only as the gate's fail-closed input format.
