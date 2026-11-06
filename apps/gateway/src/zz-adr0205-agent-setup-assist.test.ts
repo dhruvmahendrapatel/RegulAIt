@@ -16,6 +16,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { agents, auditLog, and, createDb, eq, orgSettings, ORG_SETTINGS_ID, runMigrations, usageEvents, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { ATTRIBUTION_REQUIRED_DETAIL } from "./use-case-gate.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { relaxStepUpForTest } from "./testing/step-up-posture.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
@@ -166,5 +167,63 @@ describe("refusals", () => {
     expect((await post("/v1/agents/setup-assist", member.auth, { description: DESCRIPTION })).statusCode).toBe(403);
     expect((await app.inject({ method: "GET", url: "/v1/agents/setup-assist", headers: member.auth })).statusCode).toBe(403);
     expect((await post("/v1/agents/setup-assist", AUTH, { description: DESCRIPTION })).statusCode).toBe(403);
+  });
+});
+
+// #453 (2026-11-02, AWS demo host): under the strict default `dispatchAttributionRequired`, the model draft was
+// dispatched with projectId null and could never pass. The panel and the body now carry a project the admin is a
+// member of; with none, the existing refusal stands.
+describe("model draft attribution under dispatchAttributionRequired (strict default)", () => {
+  let memberProject = "";
+  let otherProject = "";
+  const setAttribution = (on: boolean) =>
+    db.update(orgSettings).set({ dispatchAttributionRequired: on }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  const mkProject = async (name: string) => {
+    const r = await post("/v1/projects", AUTH, { name: `${name}-${RUN}` });
+    expect(r.statusCode, r.body).toBeLessThan(300);
+    return r.json().id as string;
+  };
+
+  beforeAll(async () => {
+    memberProject = await mkProject("adr0205-member");
+    otherProject = await mkProject("adr0205-other");
+    const m = await post(`/v1/projects/${memberProject}/members`, AUTH, { userId: admin.id, role: "owner" });
+    expect(m.statusCode, m.body).toBeLessThan(300);
+    await setAttribution(true);
+  });
+  afterAll(async () => {
+    await setAttribution(false);
+  });
+
+  it("an attributed draft succeeds and is billed to the chosen project", async () => {
+    const r = await post("/v1/agents/setup-assist", admin.auth, { description: DESCRIPTION, draftWithModel: true, agentId: grantedAgent, projectId: memberProject });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(["drafted", "unparseable"]).toContain(r.json().model.status);
+    const billed = await db.select().from(usageEvents).where(and(eq(usageEvents.userId, admin.id), eq(usageEvents.projectId, memberProject)));
+    expect(billed.length).toBe(1);
+  });
+
+  it("an unattributed draft is refused with the existing message, and nothing is billed", async () => {
+    const usageBefore = (await db.select().from(usageEvents).where(eq(usageEvents.userId, admin.id))).length;
+    const r = await post("/v1/agents/setup-assist", admin.auth, { description: DESCRIPTION, draftWithModel: true, agentId: grantedAgent });
+    expect(r.statusCode, r.body).toBe(200);
+    const m = r.json().model;
+    expect(m.status).toBe("failed");
+    expect(m.reason).toBe(`attribution_required — ${ATTRIBUTION_REQUIRED_DETAIL}`);
+    // the rules draft is still returned
+    expect(r.json().draft.systemPrompt.source).toBe("rules");
+    expect((await db.select().from(usageEvents).where(eq(usageEvents.userId, admin.id))).length).toBe(usageBefore);
+  });
+
+  it("refuses a project the admin is not a member of (admin rights do not stand in for membership)", async () => {
+    const r = await post("/v1/agents/setup-assist", admin.auth, { description: DESCRIPTION, draftWithModel: true, agentId: grantedAgent, projectId: otherProject });
+    expect(r.statusCode, r.body).toBe(403);
+    expect(r.json().error).toBe("not_a_project_member");
+  });
+
+  it("refuses an unknown project", async () => {
+    const r = await post("/v1/agents/setup-assist", admin.auth, { description: DESCRIPTION, draftWithModel: true, projectId: "00000000-0000-4000-8000-000000000000" });
+    expect(r.statusCode, r.body).toBe(404);
+    expect(r.json().error).toBe("unknown_project");
   });
 });

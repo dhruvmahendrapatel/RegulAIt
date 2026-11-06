@@ -11,12 +11,20 @@
  * other call. The agent itself is created only when the admin submits the
  * Register form (`POST /v1/agents`).
  *
+ * Attribution (2026-11-02, #453): the model draft bills to `projectId`, which
+ * the caller must be an explicit member of. Admin rights do not stand in for
+ * membership and a memberless project is not an open bucket here, because
+ * every caller of this admin-only route is an admin and the check would
+ * otherwise never bind. No project = `projectId: null`, which the strict
+ * default `dispatchAttributionRequired` refuses (`attribution_required`); the
+ * default is not relaxed.
+ *
  * Secure by default (ADR-0180): both routes are admin-only (not in
  * NON_ADMIN_ROUTES), and the draft route refuses 409 until an admin turns on
  * `agentSetupAssistEnabled` through PUT /v1/org/settings (step-up, audited).
  */
 import type { FastifyInstance } from "fastify";
-import { agents, auditLog, eq, modelCredentials, type Db } from "@regulait/db";
+import { agents, and, auditLog, eq, modelCredentials, projectMembers, projects, type Db } from "@regulait/db";
 import {
   agentSetupAssistRequestSchema,
   buildAgentSetupPrompt,
@@ -57,6 +65,20 @@ export function registerAgentSetupAssistRoutes(app: FastifyInstance, db: Db, opt
       });
     }
     const body = agentSetupAssistRequestSchema.parse(req.body ?? {});
+    if (body.projectId) {
+      const [project] = await db.select({ id: projects.id }).from(projects).where(eq(projects.id, body.projectId));
+      if (!project) return reply.status(404).send({ error: "unknown_project" });
+      const [member] = await db
+        .select({ userId: projectMembers.userId })
+        .from(projectMembers)
+        .where(and(eq(projectMembers.projectId, body.projectId), eq(projectMembers.userId, userId)));
+      if (!member) {
+        return reply.status(403).send({
+          error: "not_a_project_member",
+          detail: "you can only bill the model draft to a project you are a member of",
+        });
+      }
+    }
     let draft = suggestAgentSetup(body);
 
     type ModelDraft =
@@ -92,7 +114,7 @@ export function registerAgentSetupAssistRoutes(app: FastifyInstance, db: Db, opt
             baseline: null,
             input: buildAgentSetupPrompt(body.description, draft),
             maxTokens: 2048,
-            projectId: null,
+            projectId: body.projectId ?? null,
             modelFeature: GATE,
             detail: { purpose: "agent-setup-assist" },
           });

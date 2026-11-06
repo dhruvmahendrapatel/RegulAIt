@@ -515,6 +515,16 @@ own MCP route `POST /mcp/:serverId` and ChatOps route `POST /v1/chatops/approval
 `AuditLogPage.tsx`, and on the fallback `SimulationPage.tsx`. Seed: `apps/gateway/src/seed.ts` (Dana's role grant on
 `repo-tools`, her revocation of `search_code`, the approval rule that sends her `write_file` calls to Avery).
 
+**Which rule names the approver (ADR-0229, 2026-11-02).** The seed also has a fleet rule: every write tool on every
+server needs Ada's sign-off. Both rules match Dana's `write_file`. The most specific matching rule names the approver,
+so her own rule wins and the request goes to Avery (and, in strict mode, his approver role). The fleet rule still
+counts: the call needs approval if any rule matches, and the quorum is the highest of all matching rules. Before
+ADR-0229 the winner depended on database order, and on the AWS host the fleet rule won (0 eligible approvers under
+passkey quorum 2). `demo:check` row **E Enforce it** now checks which rule wins, not only the org settings.
+- **If asked "what if two rules disagree?":** "The most specific rule says who signs; the strictest rule says how many
+  must. And adding a narrow rule that would hand a broad rule's calls to a different set of approvers needs the same
+  step-up as widening that broad rule's approvers directly."
+
 **What runs.** The command issues Dana a one-day key (revoked at the end of the run) and makes her calls over the MCP
 protocol through the running gateway, with the demo project header. The gateway decides every call: nothing in the
 command evaluates, approves or executes anything itself. `repo-tools` is the demo MCP server (`demo:mcp`), so the
@@ -853,11 +863,14 @@ UI: `apps/web/src/views/admin/integrations/AgentsPage.tsx`; builder `BuilderAgen
 2. **Claude-assisted set-up (only if the panel is present).** It ships in PR #611 (ADR-0205) behind the org switch
    `agent_setup_assist_enabled`, off by default. If #611 is not merged, or the switch is off, skip this step and say
    nothing about it. If present: in the panel on **Register an agent**, type a one-line description of the agent you
-   want (for example "an agent that drafts replies to supplier invoices"). The draft labels every field with its
-   source, *rules*, *mock* or *model*. Point at the suggested risk tier and grant advice. Press **Use this draft in the
+   want (for example "an agent that drafts replies to supplier invoices"). To draft with Claude, tick **Also draft
+   with a governed model** and pick **Bill the draft to project** `demo-project`: the model draft is an ordinary
+   governed dispatch, and the strict default refuses one that names no project (`attribution_required`; the rules
+   draft still shows). The draft labels every field with its source, *rules*, *mock* or *model*. Point at the suggested risk tier and grant advice. Press **Use this draft in the
    form**, then **Register agent**.
    - **Say:** "Claude helps write the set-up: the name, the prompt, a risk tier, which grants it needs. A model can
-     raise the risk tier but never lower it, and nothing is saved until an admin presses Register."
+     raise the risk tier but never lower it, and nothing is saved until an admin presses Register. Even this helper
+     call is billed to a project I belong to, like every other model call."
 3. **Grant it.** The **Grant an agent** card on the same page: **User** Ada, **Agent** the new agent, **Grant**.
    Point at the **Per-user entitlement** card: every agent a person can use is a grant to that person.
 4. **A builder agent.** **`/ui/builder/agents`** (header **Your agents**) → **New agent**: **Name your agent**,

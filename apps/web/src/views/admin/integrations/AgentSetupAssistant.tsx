@@ -12,7 +12,7 @@ import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { Badge, Button, Field, Select, SkeletonBlock, Textarea } from "../../../ui/kit";
-import { agentOpts, optionEls, useAction, useAgents } from "../adminKit";
+import { agentOpts, optionEls, projectOpts, useAction, useAgents, useProjects } from "../adminKit";
 import { putOrgSettings } from "../../../stepup/stepUp";
 import v from "../../views.module.css";
 
@@ -60,6 +60,17 @@ const ROWS: Array<[string, keyof AgentSetupDraft]> = [
   ["Limitations", "limitations"],
 ];
 
+/**
+ * The request body. A model draft carries the project it is billed to (#453, 2026-11-02): with none, the gateway's
+ * strict default `dispatchAttributionRequired` refuses the draft and only the rules draft comes back.
+ */
+export function assistRequestBody(description: string, withModel: boolean, agentId: string, projectId: string) {
+  return {
+    description,
+    ...(withModel ? { draftWithModel: true, ...(agentId ? { agentId } : {}), ...(projectId ? { projectId } : {}) } : {}),
+  };
+}
+
 /** a real model call can take seconds; the button says so while it runs */
 export const draftButtonLabel = (busy: boolean) => (busy ? "Drafting…" : "Draft configuration");
 
@@ -70,10 +81,12 @@ export default function AgentSetupAssistant(props: { onUse: (draft: AgentSetupDr
     queryFn: () => api.get<{ enabled: boolean; connectedProviders: string[] }>("/v1/agents/setup-assist"),
   });
   const agents = useAgents();
+  const projects = useProjects();
   const act = useAction();
   const [description, setDescription] = useState("");
   const [withModel, setWithModel] = useState(false);
   const [agentId, setAgentId] = useState("");
+  const [projectId, setProjectId] = useState("");
   const [result, setResult] = useState<AssistResponse | null>(null);
   const errorLine = act.error && (
     <span className={v.errLine} role="alert">
@@ -133,7 +146,15 @@ export default function AgentSetupAssistant(props: { onUse: (draft: AgentSetupDr
             {optionEls(agentOpts(agents.data?.agents), "Agent builder default")}
           </Select>
         )}
+        {withModel && (
+          <Select value={projectId} onChange={(e) => setProjectId(e.target.value)} aria-label="Bill the draft to project">
+            {optionEls(projectOpts(projects.data?.projects), "Bill to project…")}
+          </Select>
+        )}
       </div>
+      {withModel && !projectId && (
+        <p className={v.faint}>A model draft is billed to a project you are a member of. Without one it is refused.</p>
+      )}
       {!connected && <p className={v.faint}>Add a model credential to draft with a model.</p>}
       <div className={v.row}>
         <Button
@@ -142,10 +163,7 @@ export default function AgentSetupAssistant(props: { onUse: (draft: AgentSetupDr
           onClick={() =>
             void act.run(async () => {
               setResult(
-                await api.post<AssistResponse>("/v1/agents/setup-assist", {
-                  description,
-                  ...(withModel ? { draftWithModel: true, ...(agentId ? { agentId } : {}) } : {}),
-                }),
+                await api.post<AssistResponse>("/v1/agents/setup-assist", assistRequestBody(description, withModel, agentId, projectId)),
               );
             }, null)
           }
