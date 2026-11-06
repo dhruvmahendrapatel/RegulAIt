@@ -33,8 +33,8 @@
 # linux/amd64 ONLY: the hashes in requirements.txt are the cp312 manylinux x86_64 wheels.
 
 # ---- stage 1: the Python closure ----------------------------------------------------------------
-FROM --platform=linux/amd64 node:22-trixie-slim@sha256:8eb619e402eaede1748a3c8173bffab391592812e85136452f781741c7242ddf AS node
-FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS closure
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS node
+FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635c12fcd0a3d74c21a5b93a54 AS closure
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 WORKDIR /build
 COPY engines/modelscan/requirements.txt engines/modelscan/licence-gate.mjs engines/modelscan/licence-allow.json ./
@@ -50,7 +50,7 @@ COPY engines/modelscan/modelscan-settings.toml /opt/modelscan/modelscan-settings
 COPY engines/modelscan/npy-header.py /opt/modelscan/npy-header.py
 
 # ---- stage 2: the runner and scanner shim -------------------------------------------------------
-FROM --platform=linux/amd64 node:22-trixie-slim@sha256:8eb619e402eaede1748a3c8173bffab391592812e85136452f781741c7242ddf AS shim
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS shim
 RUN corepack enable
 WORKDIR /src
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./
@@ -66,7 +66,7 @@ RUN NODE_OPTIONS=--max-old-space-size=3072 pnpm install --frozen-lockfile \
  && node scripts/engine-images-normalise.mjs modules-yaml /out/node_modules/.modules.yaml
 
 # ---- stage 3: runtime ---------------------------------------------------------------------------
-FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS runtime
+FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635c12fcd0a3d74c21a5b93a54 AS runtime
 LABEL org.opencontainers.image.title="regulait-engine-modelscan" \
       org.regulait.engine="modelscan" \
       org.regulait.engine-version="0.8.8" \

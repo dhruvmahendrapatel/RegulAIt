@@ -1564,10 +1564,38 @@
       "breakpoints": true
     },
     {
-      "idx": 268,
+      "idx": 266,
       "version": "7",
-      "when": 1785203000000,
-      "tag": "0268_normalize_n1_foreign_keys",
+      "when": 1785201000000,
+      "tag": "0266_model_signing_supply_chain",
+      "breakpoints": true
+    },
+    {
+      "idx": 267,
+      "version": "7",
+      "when": 1785202000000,
+      "tag": "0267_supply_chain_risk_category",
+      "breakpoints": true
+    },
+    {
+      "idx": 269,
+      "version": "7",
+      "when": 1785204000000,
+      "tag": "0269_discovery_wider_sources",
+      "breakpoints": true
+    },
+    {
+      "idx": 271,
+      "version": "7",
+      "when": 1785206000000,
+      "tag": "0271_fairness_testing",
+      "breakpoints": true
+    },
+    {
+      "idx": 280,
+      "version": "7",
+      "when": 1785215000000,
+      "tag": "0280_normalize_n1_foreign_keys",
       "breakpoints": true
     }
   ]

@@ -150,7 +150,7 @@ describe("the plan: only what this build admits reaches promptfoo", () => {
 
   it("the manifest classes every set that runs and lists the reduced set; the taxonomy maps promptfoo ids", () => {
     const m = ENGINE_MANIFEST.promptfoo;
-    expect(m.version).toBe("0.124.1");
+    expect(m.version).toBe("0.125.1");
     // ENG-IMG: the image digest is the lock's (null until a publish is recorded, and then the engine cannot be enabled)
     expect(m.imageDigest).toBe(ENGINE_IMAGES_LOCK.promptfoo.manifestDigest);
     // B5-P2: the documented switches plus the worker container's own isolation report

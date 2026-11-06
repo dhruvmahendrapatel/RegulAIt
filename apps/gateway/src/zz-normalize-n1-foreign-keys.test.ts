@@ -1,5 +1,5 @@
 /**
- * ADR-0200 addendum (2026-11-06, normalized schema), batch N1: the foreign keys migration 0268 adds exist,
+ * ADR-0200 addendum (2026-11-06, normalized schema), batch N1: the foreign keys migration 0280 adds exist,
  * are VALIDATED (not left NOT VALID), carry the intended delete rule, and actually refuse a dangling write.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -51,7 +51,7 @@ afterAll(async () => {
   }
 });
 
-describe("0268: the N1 foreign keys", () => {
+describe("0280: the N1 foreign keys", () => {
   it("each exists, is validated, points at the right table and has the intended delete rule", async () => {
     const r = await db.execute<{ t: string; c: string; ref: string; del: string; valid: boolean }>(sql`
       select k.conrelid::regclass::text as t, a.attname as c, k.confrelid::regclass::text as ref,
