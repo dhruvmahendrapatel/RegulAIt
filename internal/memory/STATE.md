@@ -5460,6 +5460,16 @@ user or server that an approval rule is scoped to (cascade delete). **Amendment 
 match re-owes every takeover; option (b) (pool intersection) is the recorded long-term simplification. Open follow-ups: a
 rule-editor warning for shadowed tightenings and equal-specificity overlaps, and option (b).
 
+**ADR-0234 (builder, 2026-11-06, Proposed): Postgres row-level security (PENDING S7), batch 1.** No table has an org
+or tenant key (ADR-0041), so on the owner's instruction ("the best, most secure") RLS is keyed on the authenticated
+principal: policies read a transaction-local `regulait.user_id` or a registered `regulait.system_context`, set only by
+`withPrincipal` / `withSystemContext` (`packages/db/src/rls.ts`) with `set_config(..., true)` and a role switch to the
+non-owner `regulait_app` (FORCE on, no UPDATE/DELETE on the evidence tables, migrations run as the owner). A missing
+setting means zero rows. Migration 0272 covers users, auth_mfa_pending, approvals and audit_log; the audit chain reads
+its tip under `audit_chain`. Measured: queue page 24.7 to 39.9 ms on 100k approvals, point lookups +1.5 ms. Batches 2-7
+(gateway adoption, credentials, approval satellites and membership, project-scoped, the rest, runtime login cut-over)
+follow, one PR each. Until batch 7 a non-superuser table-owner runtime is unsupported; none exists.
+
 **ADR-0230 (design, 2026-11-06, Proposed): SAP business agents over MCP (P19).**
 - **Where it lives:** `create_sales_order` (`API_SALES_ORDER_SRV`) goes in the regulAIt-ABAP MCP server, and the gateway's existing MCP path governs it.
 - **Safety:** a required idempotency key; principal propagation with the person's own IdP token (preferred) or a dedicated per-trust RegulAIt key (fallback, never the ADR-0210 key), through the BTP Destination service, with technical users refused for writes; approve-first defaults seeded for `system_class = 'sap_business'` (quorum 2 with the requester excluded, a rate limit, a project budget required).
@@ -5506,6 +5516,26 @@ Non-blocking items also done: the stale `pending` sweep; the HMAC-derived idempo
 - **Open source:** `@xyflow/react` + dagre for the canvas, the step row as the queue (the existing `FOR UPDATE SKIP LOCKED` lease; pg-boss rejected as in `engine-runs.ts`), croner for cron; no full engine fits (licence or a second stateful platform).
 - **Parity:** 67 CPI capabilities, 32 mapped, 32 adapted, 3 N/A. Twelve slices, slice 1 is create, draw, save, run one agent step, see the run.
 - **Open:** eight owner questions (ADR §Open questions), the first being the run-as identity for triggered runs.
+
+**ADR-0200 addendum (owner, 2026-11-06): database tables are normalized.** New and changed tables are in third normal
+form (one fact in one place, foreign keys for every reference, join tables instead of id arrays, no copied mutable
+attributes, one vocabulary per concept). Deliberate exceptions carry a column comment: snapshots and evidence (never
+normalized, ADR-0060), schema-validated config documents, verbatim external payloads, measured read models. Existing
+tables follow in audited expand-contract batches. Rule in CLAUDE.md (Data guidelines); DESIGN_GUIDELINES.md points to it.
+
+**ADR-0233 (builder, 2026-11-06, Proposed): refuse credentials typed into content columns (PENDING S6).** Content
+(`name`, `title`, `description`, `summary`, `body`) is not redacted like ADR-0102's prose; a write that puts
+credential-shaped text into one of the 84 guarded columns is REFUSED with `422 credential_in_content`, naming the
+field, the column and the rule labels, never the value. The detector is `scrubAuditText` by reference (ADR-0042
+rules plus the vendored Apache-2.0 pipelock pack), sited as a third `createDb` wrapper (`withContentGuard`,
+outermost), so imports and raw writes are covered and a refusal inside a transaction rolls it back (compliance-pack
+create is now one transaction). An admin may relax it (`org_settings.content_credential_guard`, migration 0273,
+strictness rule: `settings_relax` step-up, audited). Existing rows are reported by `GET
+/v1/admin/content-credential-report` (ids and rule labels only), never rewritten. The inventory is generated from
+the schema: 151 text columns match the S6 shape (S6 said ~34); 84 guarded, 67 excluded by category (ADR-0102 prose,
+audit, tool references, platform copies, ingested, machine, conversation, signed evidence, check-constrained), pinned
+against `information_schema` and against the ADR's generated block. Open: whether to guard jsonb
+`config_versions.body` string leaves; ingested columns stay a residual.
 
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);

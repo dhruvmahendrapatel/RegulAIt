@@ -25,6 +25,7 @@ import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Table, type Tone } from "../../../ui/kit";
 import { QueryGate } from "../adminKit";
+import { DataList } from "../../../ui/DataList";
 import v from "../../views.module.css";
 
 interface OwnerView {
@@ -167,13 +168,8 @@ function FeedList(props: { title: string; edges: FeedEdgeView[]; direction: "out
 }
 
 export default function InventoryPage() {
-  const list = useQuery({
-    queryKey: ["admin", "inventory"],
-    queryFn: () =>
-      api.get<{ agents: InventoryAgent[]; window: { days: number }; notes: { granted: string; observed: string } }>(
-        "/v1/inventory/agents",
-      ),
-  });
+  // ADR-0226: the registered agents page on the server; the window comes with each page
+  const [days, setDays] = useState(90);
   const [openId, setOpenId] = useState<string | null>(null);
   const detail = useQuery({
     queryKey: ["admin", "inventory", openId],
@@ -181,7 +177,6 @@ export default function InventoryPage() {
     enabled: Boolean(openId),
   });
   const d = detail.data;
-  const days = list.data?.window.days ?? 90;
 
   return (
     <>
@@ -198,18 +193,28 @@ export default function InventoryPage() {
         }
       />
       <div className={v.stack}>
-        <QueryGate loading={list.isLoading} error={list.error} onRetry={() => void list.refetch()}>
-          <Card title="Registered agents">
-            {(list.data?.agents ?? []).length === 0 ? (
-              <EmptyState title="No agents registered" body="The inventory fills in as agents are registered and used." />
-            ) : (
-              <Table
-                rows={list.data?.agents ?? []}
+          <Card title="Registered agents" flush>
+              <DataList<InventoryAgent>
+                listId="inventory-agents"
+                noun="agents"
+                endpoint="/v1/inventory/agents"
+                exportPath="/v1/inventory/agents/export.xlsx"
+                queryKey={["admin", "inventory", "list"]}
+                legacyKey="agents"
+                defaultSort={{ key: "agent", dir: "asc" }}
                 rowKey={(r) => r.id}
                 onRowClick={(r) => setOpenId(openId === r.id ? null : r.id)}
+                rowLabel={(r) => `Open the dependencies of ${r.name}`}
+                onRows={(_rows, raw) => {
+                  const w = raw.window as { days?: number } | undefined;
+                  if (typeof w?.days === "number") setDays(w.days);
+                }}
+                empty={<EmptyState title="No agents registered" body="The inventory fills in as agents are registered and used." />}
                 columns={[
                   {
                     key: "agent",
+                    main: true,
+                    sortable: true,
                     header: "Agent",
                     render: (r) => (
                       <>
@@ -219,6 +224,8 @@ export default function InventoryPage() {
                   },
                   {
                     key: "model",
+                    main: true,
+                    sortable: true,
                     header: "Model / credential",
                     render: (r) => (
                       <span className={v.faint}>
@@ -229,6 +236,9 @@ export default function InventoryPage() {
                   },
                   {
                     key: "owner",
+                    main: true,
+                    sortable: true,
+                    required: "Ownership and lifecycle are always shown",
                     header: "Owner / lifecycle",
                     render: (r) => (
                       <span>
@@ -238,11 +248,14 @@ export default function InventoryPage() {
                   },
                   {
                     key: "alignment",
+                    main: true,
                     header: "Intent alignment",
                     render: (r) => <AlignmentBadge alignment={r.alignment} />,
                   },
                   {
                     key: "card",
+                    main: true,
+                    required: "A missing model card sign-off is always shown",
                     header: "Model card",
                     render: (r) =>
                       r.modelCard.cards === 0 ? (
@@ -255,6 +268,7 @@ export default function InventoryPage() {
                   },
                   {
                     key: "granted",
+                    main: true,
                     header: "Granted (may)",
                     render: (r) => (
                       <span className={v.num}>
@@ -268,6 +282,7 @@ export default function InventoryPage() {
                   },
                   {
                     key: "observed",
+                    main: true,
                     header: "Observed (did)",
                     render: (r) => (
                       <span className={v.num}>
@@ -319,9 +334,7 @@ export default function InventoryPage() {
                   },
                 ]}
               />
-            )}
           </Card>
-        </QueryGate>
 
         {openId && (
           <QueryGate loading={detail.isLoading} error={detail.error} onRetry={() => void detail.refetch()}>
