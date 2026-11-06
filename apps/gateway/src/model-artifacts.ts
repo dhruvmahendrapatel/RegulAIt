@@ -79,6 +79,7 @@ import { loadOrgSettings } from "./org-settings.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
 import { assertProjectAttribution } from "./projects.js";
 import { requireStepUp } from "./step-up.js";
+import { decodeSignatureHeader, MODEL_SIGNATURE_HEADER, recordSignatureTx, supplyChainStates } from "./model-supply-chain.js";
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
@@ -756,6 +757,8 @@ export function registerModelArtifactRoutes(app: FastifyInstance, db: Db, opts: 
           return reply.status(attribution.status).send({ error: attribution.error });
         }
       }
+      // ADR-0216: a signature may ride the upload (base64 of the bundle's JSON); it is verified in the row's transaction
+      const signatureBundle = decodeSignatureHeader(req.headers[MODEL_SIGNATURE_HEADER]);
       const org = await loadOrgSettings(db);
       const limit = org.modelArtifactMaxMegabytes * MIB;
       const filename = displayFilename(q.data.filename);
@@ -875,13 +878,18 @@ export function registerModelArtifactRoutes(app: FastifyInstance, db: Db, opts: 
             ruleChain: [],
             reason: `model artifact uploaded (${size} bytes, sha256 ${sha256}); its format was decided from its content: ${detection.format}`,
           });
-          return { over: null, row: a! };
+          const signature = signatureBundle === undefined ? null : (await recordSignatureTx(tx, a!, signatureBundle, "upload", userId)).row;
+          return { over: null, row: a!, signature };
         });
         if (decided.over) {
           await drainArtifactObjectDeletions(db, store, { keys: [key], actorUserId: userId });
           return refuseQuota(decided.over);
         }
-        return reply.status(201).send({ artifact: artifactView(decided.row!) });
+        const supplyChain = (await supplyChainStates(db, [decided.row!])).get(decided.row!.id)!;
+        return reply.status(201).send({
+          artifact: { ...artifactView(decided.row!), supplyChain },
+          ...(decided.signature ? { signature: { id: decided.signature.id, status: decided.signature.status, failure: decided.signature.failure } } : {}),
+        });
       } finally {
         await rm(dir, { recursive: true, force: true });
       }
@@ -892,7 +900,8 @@ export function registerModelArtifactRoutes(app: FastifyInstance, db: Db, opts: 
   app.get("/v1/model-artifacts", async (req) => {
     const where = req.authCtx.isAdmin ? undefined : eq(modelArtifacts.uploadedByUserId, req.authCtx.userId ?? NO_IDENTITY);
     const rows = await db.select().from(modelArtifacts).where(where).orderBy(desc(modelArtifacts.createdAt)).limit(200);
-    return { artifacts: rows.map(artifactView) };
+    const states = await supplyChainStates(db, rows);
+    return { artifacts: rows.map((a) => ({ ...artifactView(a), supplyChain: states.get(a.id)! })) };
   });
 
   app.get("/v1/model-artifacts/:artifactId", async (req, reply) => {
@@ -900,7 +909,8 @@ export function registerModelArtifactRoutes(app: FastifyInstance, db: Db, opts: 
     const [a] = await db.select().from(modelArtifacts).where(eq(modelArtifacts.id, artifactId));
     if (!a || !artifactAccessible(a, req.authCtx)) return reply.status(404).send({ error: "unknown_artifact" });
     const scans = await db.select().from(artifactScans).where(eq(artifactScans.artifactId, artifactId)).orderBy(desc(artifactScans.createdAt)).limit(100);
-    return { artifact: artifactView(a), scans: scans.map(scanView) };
+    const supplyChain = (await supplyChainStates(db, [a])).get(a.id)!;
+    return { artifact: { ...artifactView(a), supplyChain }, scans: scans.map(scanView) };
   });
 
   // ---- DELETE /v1/model-artifacts/:artifactId (the uploader or an admin, with a step-up) ----
