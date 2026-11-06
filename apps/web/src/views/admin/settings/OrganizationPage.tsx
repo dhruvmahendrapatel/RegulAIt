@@ -1017,6 +1017,7 @@ function Loaded(props: { settings: Record<string, unknown> }) {
             </Select>
           </Field>
         </SectionShell>
+        <ContentCredentialReport />
       </Card>
 
       <Card title="6 · Audit retention">
@@ -1114,6 +1115,58 @@ function Loaded(props: { settings: Record<string, unknown> }) {
           onConfirm={() => void saveNet(true)}
         />
       </Card>
+    </div>
+  );
+}
+
+/** ADR-0233: rows saved before the guard (or while it was off). Reported by row id and rule only, never the value; never rewritten. */
+interface ContentCredentialFinding {
+  table: string;
+  column: string;
+  field: string;
+  rowId: string;
+  rules: string[];
+}
+function ContentCredentialReport() {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [report, setReport] = useState<{ findings: ContentCredentialFinding[]; scannedColumns: number; truncatedColumns: string[] } | null>(null);
+  const run = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setReport(await api.get("/v1/admin/content-credential-report"));
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "The check failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className={v.stack}>
+      <p className={v.faint}>
+        Existing records are never changed. This lists the ones that already contain something credential-shaped, so their owners can edit them.
+      </p>
+      <div className={v.row}>
+        <Button size="sm" onClick={() => void run()} disabled={busy}>
+          {busy ? "Checking…" : "Check existing records"}
+        </Button>
+      </div>
+      {error ? <p className={v.errLine}>{error}</p> : null}
+      {report ? (
+        report.findings.length === 0 ? (
+          <p className={v.faint}>No credential-shaped content found in {report.scannedColumns} checked fields.</p>
+        ) : (
+          <ul>
+            {report.findings.map((f) => (
+              <li key={`${f.table}.${f.column}.${f.rowId}`}>
+                {f.table} · {f.field} · record {f.rowId} · {f.rules.join(", ")}
+              </li>
+            ))}
+            {report.truncatedColumns.length > 0 ? <li>More in: {report.truncatedColumns.join(", ")}</li> : null}
+          </ul>
+        )
+      ) : null}
     </div>
   );
 }
