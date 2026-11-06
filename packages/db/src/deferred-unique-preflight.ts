@@ -181,6 +181,26 @@ export const DEFERRED_UNIQUE_CHECKS: readonly DeferredUniqueCheck[] = [
     groupBy: "finding_id",
     keyExpr: "finding_id::text",
   },
+  {
+    // ADR-0208 G8 (migration 0224) — one ACTIVE policy per resource. Retired policies are history and may repeat.
+    index: "infra_policies_active_resource_uq",
+    table: "infra_policies",
+    key: "resource_id (active)",
+    predicate: "status = 'active' AND resource_id IS NOT NULL",
+    enforced: true,
+    groupBy: "resource_id",
+    keyExpr: "resource_id::text",
+  },
+  {
+    // ADR-0208 G8 (migration 0224) — at most one ACTIVE fleet policy (resource_id IS NULL).
+    index: "infra_policies_active_fleet_uq",
+    table: "infra_policies",
+    key: "fleet (resource_id IS NULL, active)",
+    predicate: "status = 'active' AND resource_id IS NULL",
+    enforced: true,
+    groupBy: "(resource_id IS NULL)",
+    keyExpr: "'fleet'",
+  },
 ];
 
 /** What one check found. */
@@ -199,7 +219,7 @@ export type DeferredUniqueFinding = {
 };
 
 export type DeferredUniquePreflightReport = {
-  /** true when every ENFORCED check is clean — i.e. 0108 and 0109 will apply */
+  /** true when every ENFORCED check is clean — i.e. 0108, 0109 and 0224 will apply */
   readonly clean: boolean;
   /** enforced checks that are NOT clean; empty when `clean` */
   readonly blocking: readonly DeferredUniqueFinding[];
@@ -221,7 +241,7 @@ function rowsOf(res: unknown): Array<Record<string, unknown>> {
 }
 
 /**
- * Run every check and report what would block migration 0108 or 0109.
+ * Run every check and report what would block migration 0108, 0109 or 0224.
  *
  * One round trip per check. Read-only: nothing here writes, locks or takes a
  * transaction, so it is safe against a live deployment.
@@ -271,7 +291,7 @@ export async function runDeferredUniquePreflight(
 /** A plain-text rendering an operator can paste into a ticket. */
 export function formatDeferredUniquePreflight(report: DeferredUniquePreflightReport): string {
   const lines: string[] = [];
-  lines.push("ADR-0109/0110 pre-flight — duplicates that would block migration 0108 or 0109");
+  lines.push("ADR-0109/0110 pre-flight — duplicates that would block migration 0108, 0109 or 0224");
   lines.push("");
   for (const f of report.findings) {
     const tag = f.enforced ? (f.duplicateGroups > 0 ? "BLOCKS" : "ok") : "advisory";
@@ -284,7 +304,7 @@ export function formatDeferredUniquePreflight(report: DeferredUniquePreflightRep
   lines.push("");
   lines.push(
     report.clean
-      ? "CLEAN — migrations 0108 and 0109 will apply."
+      ? "CLEAN — migrations 0108, 0109 and 0224 will apply."
       : `BLOCKED — ${report.blocking.length} constraint(s) cannot be created. ` +
           "These migrations refuse rather than repair: resolve each pair by hand (decide which " +
           "row is the real one and remove or re-key the other) before upgrading. See ADR-0109 " +

@@ -68,6 +68,7 @@ import {
   count,
   desc,
   eq,
+  evalDatasets,
   gte,
   inArray,
   isNotNull,
@@ -1034,6 +1035,30 @@ export function registerAutomationRuleRoutes(
         .where(eq(webhookSubscriptions.id, webhook.subscriptionId));
       if (!sub || !sub.active) {
         return { status: 422, body: { error: "webhook_target_inactive", detail: "the webhook action names no active subscription" } };
+      }
+    }
+    // ADR-0208 G9: a rule may not start feeding a retired eval dataset (retirement is by name: any version of it)
+    const datasetIds = actions.filter((a): a is Extract<AutomationAction, { type: "dataset" }> => a.type === "dataset").map((a) => a.datasetId);
+    if (datasetIds.length > 0) {
+      const [retired] = await db
+        .select({ name: evalDatasets.name })
+        .from(evalDatasets)
+        .where(
+          and(
+            inArray(evalDatasets.id, datasetIds),
+            sql`EXISTS (SELECT 1 FROM eval_datasets r WHERE r.name = ${evalDatasets.name} AND r.retired_at IS NOT NULL)`,
+          ),
+        )
+        .limit(1);
+      if (retired) {
+        return {
+          status: 409,
+          body: {
+            error: "eval_dataset_retired",
+            detail: `eval dataset '${retired.name}' is retired: no new automation rule may add to it`,
+            dataset: retired.name,
+          },
+        };
       }
     }
     return null;

@@ -6,7 +6,8 @@
 ## Context
 
 The owner approved the after-demo lifecycle proposals on 2026-10-29 (#453, comment 6509969403) and unparked the
-G3–G6 set on 2026-10-30 (#453, comment 6522492997, which also reserved migrations 0219–0222 and this ADR number).
+G3–G6 set on 2026-10-30 (#453, comment 6522492997, which also reserved migrations 0219–0222 and this ADR number;
+0219–0221 were renumbered 0262–0264 above main at merge).
 Before this change:
 
 - a connector could not be disabled or removed, only its credential, and saving or removing that credential was not
@@ -38,7 +39,7 @@ All routes are versioned under `/v1`, admin-only through the default gate (none 
 CSRF-checked by the global cookie gate, bounded by `.strict()` zod contracts in `@regulait/shared`, and audited in the
 same transaction as their write. A refusal has its own code. No response or audit row carries a token or secret.
 
-### G3 — connectors (migration 0219)
+### G3 — connectors (migration 0262)
 
 - `POST /v1/connectors/:connectorId/enabled {enabled, reason}`. Disabling needs a reason of 10 to 1000 characters
   (the CHECK `connectors_disabled_check` repeats it), stamps `disabled_at` on the database clock and is audited as a
@@ -55,14 +56,14 @@ same transaction as their write. A refusal has its own code. No response or audi
   audited.
 - `GET /v1/connectors` returns `enabled`, the reason, when, and who disabled it (by email).
 
-### G4 — MCP servers and registries (migration 0220)
+### G4 — MCP servers and registries (migration 0263)
 
 - `POST /v1/servers/:serverId/enabled` as for connectors (`mcp-server-disabled` / `mcp-server-enabled`).
 - A disabled server refuses the proxy route before the transport is hijacked (403 `mcp_server_disabled`) and
   `executeGovernedToolCall`, which delegated workers call directly; each refusal writes a deny row
   (`mcp-server-disabled-refused`). Nothing connects upstream, and no approval is queued or spent. Halts, admission and
   the circuit breaker stay separate facts.
-- 0220 adds a row trigger that advances the policy epoch only when `disabled_at` changes (the proxy rewrites the row
+- 0263 adds a row trigger that advances the policy epoch only when `disabled_at` changes (the proxy rewrites the row
   constantly for breaker state, so a statement trigger would invalidate every in-flight admission), plus a statement
   trigger on delete. It reuses `advance_governance_policy_epoch()`; no new function.
 - `DELETE /v1/servers/:serverId`: 409 `mcp_server_not_disabled`; 409 `mcp_server_in_use` while approvals, agent grants
@@ -88,7 +89,7 @@ same transaction as their write. A refusal has its own code. No response or audi
   unfinished workflow instance has a `git_operation` stage naming the connection (a `jsonb_path_exists` query; at
   most 20 names or ids of each).
 
-### G6 — PM connections (migration 0221)
+### G6 — PM connections (migration 0264)
 
 - `PATCH /v1/pm/connections/:name {project?, baseUrl?, apiVersion?, driftResolution?}`. The name is part of the webhook
   address and the provider picks the adapter, so neither can change. The edited connection must still resolve; a new
@@ -104,11 +105,12 @@ same transaction as their write. A refusal has its own code. No response or audi
 
 ### Migrations, UI and size
 
-- 0219–0221 are hand-written (never `drizzle-kit generate`), with journal `when` = 1785149000000 + (N − 214) × 1,000,000.
+- 0262–0264 (reserved as 0219–0221; renumbered above main at merge) are hand-written (never `drizzle-kit generate`),
+  with journal `when` = 1785197000000 + (N − 262) × 1,000,000.
   0222 is left unused. The two `disabled_reason` columns are registered in `prose-scrub.ts` (ADR-0102).
 - The UI calls each route literally (so the route census and affordance parity see them), and the edit, token and
-  rotation dialogs load lazily from one module. All JS measures 1,055,791 B with main merged in, inside the shared 1,060 kB
-  ceiling main set for the post-demo lanes (ADR-0196 addendum, c6522492997); entry ceilings are unchanged.
+  rotation dialogs load lazily from one module. All JS measures 1,119,655 B with main merged in (2026-11-06), inside the
+  shared 1,150 kB ceiling main set for the backlog lanes (ADR-0196 addendum, c6531626139); entry ceilings are unchanged.
 - Open source first (ADR-0176): no library fits a governance lifecycle rule; these routes reuse Fastify, drizzle, zod
   and the existing step-up, egress and audit helpers.
 

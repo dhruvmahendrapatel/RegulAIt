@@ -150,6 +150,17 @@ const AUDITED_WRITERS: AuditedWriter[] = [
       "nothing and the request falls through to the edit path instead of clobbering it.",
   },
   {
+    file: "compliance-profile-lifecycle.ts",
+    method: "update",
+    expr: "complianceProfiles",
+    why:
+      "ADR-0208 (G7) retire — writes ONLY `status` / `retired_at` / `retired_reason` / `retired_by_user_id`, none " +
+      "of which is in VERSIONED_RULE_FIELDS, so there is no version to mint and nothing is silently discarded at " +
+      "dispatch. It runs under the profile's row lock after a settings_relax step-up, refuses while any carrier " +
+      "holds the tag, and writes its audit row in the same transaction. Profile EDITS mint a draft through " +
+      "`proposeRuleVersion` (rule-writes.ts) and activate through `activateVersion` on approval.",
+  },
+  {
     file: "compliance-packs.ts",
     method: "insert",
     expr: "complianceProfiles",

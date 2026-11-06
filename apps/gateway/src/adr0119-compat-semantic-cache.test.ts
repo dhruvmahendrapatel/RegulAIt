@@ -660,7 +660,8 @@ describe("AER-010 — the cached serve cannot move above the shared dispatch gat
       useCaseDispatchGate: "use_case_approval_required",
       preDispatchProjectGate: "project_budget_exceeded",
       enforcePII: "pii_blocked (input phase)",
-      runGuardrails: "guardrail_blocked (input phase)",
+      // ADR-0220: the enforcement sites call the async runner (heuristic + trained detectors)
+      runGuardrailsAsync: "guardrail_blocked (input phase)",
     };
     const sf = parse("agents-connectors.ts");
     const core = fn(sf, "dispatchAttempt");
@@ -671,7 +672,7 @@ describe("AER-010 — the cached serve cannot move above the shared dispatch gat
     expect(reads.length, "dispatchAttempt must read the cached candidate somewhere").toBeGreaterThan(0);
     const firstRead = Math.min(...reads.map(topIndex));
     const firstReadAt = where(top[firstRead]!);
-    // `enforcePII` / `runGuardrails` run AGAIN on the cached text (and on a live
+    // `enforcePII` / `runGuardrailsAsync` run AGAIN on the cached text (and on a live
     // answer) in their OUTPUT phase; only the input phase is a gate on the ask
     const isOutputPhase = (c: ts.CallExpression) =>
       c.arguments.some(
