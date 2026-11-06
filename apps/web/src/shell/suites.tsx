@@ -138,6 +138,8 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       { label: "Review policy", to: "/admin/governance/review-policy" },
       { label: "Dependency graph", to: "/admin/governance/graph" },
       { label: "Regulatory intelligence", to: "/admin/governance/regulatory" },
+      // ADR-0215 — published notices an admin reviews before they join the feed above
+      { label: "Regulatory feed sources", to: "/admin/governance/regulatory/sources" },
       // ADR-0182 (D4) A11 — before a policy change lands, which past
       // decisions would it change? The golden cases, their runs and the diff.
       { label: "Decision regression", to: "/admin/governance/decision-regression" },
@@ -335,7 +337,22 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // because a pack DRIVES that cascade rather than forking it: one tag, one
       // cascade, one audit trail.
       { label: "Compliance packs", to: "/admin/compliance-packs" },
+      // ADR-0215 — published framework content accepted as a new draft pack version
+      { label: "Framework imports", to: "/admin/compliance-packs/imports" },
+      // ADR-0225 (P13 d): what the organisation publishes outside itself (controls, evidence, AI system cards) and
+      // the auditors it lets read them — beside the packs those controls come from
+      { label: "Trust publishing", to: "/admin/trust-publishing" },
       { label: "Infrastructure", to: "/admin/infrastructure" },
+    ],
+  },
+  {
+    // ADR-0224 (P13 c) — privacy operations. Its own group beside Compliance & infra rather than inside it: the
+    // processing limit reads the same compliance cascade and PII handling mode those pages set, but records of
+    // processing and data-subject requests are their own job, done by a privacy lead rather than a platform admin.
+    group: "Privacy",
+    items: [
+      { label: "Records of processing", to: "/admin/privacy" },
+      { label: "Data subject requests", to: "/admin/privacy/requests" },
     ],
   },
   {
@@ -494,7 +511,7 @@ export const SUITES: Suite[] = [
     name: "Compliance & infra",
     purpose: "Compliance profiles and packs, and this installation's own infrastructure.",
     admin: true,
-    sections: sectionsOf("Compliance & infra"),
+    sections: sectionsOf("Compliance & infra", "Privacy"),
   },
   {
     id: "cost-optimization",

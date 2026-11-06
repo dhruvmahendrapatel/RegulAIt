@@ -134,3 +134,9 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "permissions_boundary" {
+  description = "ARN of an IAM permissions boundary for the role this module creates. null means none."
+  type        = string
+  default     = null
+}

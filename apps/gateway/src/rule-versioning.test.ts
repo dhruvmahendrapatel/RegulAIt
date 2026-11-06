@@ -1,8 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+import { relaxApprovalSigningForTest } from "./testing/approval-signing-posture.js";
 // ADR-0181: this file registers a LOCAL MCP double (127.0.0.1 / localhost, registered seconds ago) to pin
 // unrelated behaviour, not the strict admission defaults — relaxed explicitly here, restored in afterAll.
 let restoreStrictAdmission: (() => Promise<void>) | undefined;
+// ADR-0210 B: /v1/evaluate now previews the queue's signature-mode check, and this suite is about versioning, not
+// signing: approval signing is relaxed for its run (the strict values are restored in afterAll)
+let restoreApprovalSigning: (() => Promise<void>) | undefined;
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -145,6 +149,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
+  restoreApprovalSigning = await relaxApprovalSigningForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT });
 
   const ana = await makeUser("rv-ana@example.com");
@@ -239,6 +244,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await restoreStrictAdmission?.();
+  await restoreApprovalSigning?.();
   const artifacts = [ruleId, limitId, profileId].filter(Boolean);
   if (artifacts.length) {
     await db
