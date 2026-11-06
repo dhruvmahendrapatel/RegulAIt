@@ -366,7 +366,8 @@ export function DataList<T>(props: DataListProps<T>) {
 
   return (
     <div className={d.list} data-list={listId}>
-      <div className={d.toolbar}>
+      {/* data-list-view: the page size and the column picker change only how the list shows, so a folding card keeps its fold */}
+      <div className={d.toolbar} data-list-view="">
         <label className={d.sizeLabel}>
           <span>Rows per page</span>
           <Select className={d.sizeSelect} value={size} onChange={(e) => setSize(e.target.value as PageSize)}>
@@ -426,6 +427,7 @@ export function DataList<T>(props: DataListProps<T>) {
           </Button>
         </div>
       )}
+      <div className={d.viewOnly} data-list-view="">
       <ColumnPicker
         open={pickerOpen}
         noun={props.noun}
@@ -435,6 +437,7 @@ export function DataList<T>(props: DataListProps<T>) {
         onReset={resetLayout}
         onClose={() => setPickerOpen(false)}
       />
+      </div>
     </div>
   );
 }

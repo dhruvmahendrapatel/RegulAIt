@@ -237,6 +237,23 @@ const MARKER_TEST=new RegExp(MARKER_PATTERN.source);
 export function containsAuditScrubMarker(text:string):boolean{
  return MARKER_TEST.test(text);
 }
+/**
+ * S6 (the content-credential guard): the rule labels of every marker `scrubAuditText` ADDED to `before` to
+ * produce `after`, de-duplicated and sorted. The guard refuses a content write instead of storing the
+ * redaction, and names these labels in the refusal so the writer knows WHAT KIND of credential it typed,
+ * never the value. Markers already present in `before` are not counted (they are not a credential). Uses
+ * the one marker grammar above; linear (one character class, no nested quantifiers).
+ */
+export function addedAuditScrubRules(before:string,after:string):string[]{
+ const had=new Set<string>();
+ for(const m of before.matchAll(MARKER_PATTERN))had.add(m[0]);
+ const rules=new Set<string>();
+ for(const m of after.matchAll(MARKER_PATTERN)){
+   if(had.has(m[0]))continue;
+   for(const part of m[1]!.split("+"))rules.add(part);
+ }
+ return [...rules].sort();
+}
 const MARKER_LABELS=new Set([FIELD_RULE_LABEL,...CREDENTIAL_MATERIAL_RULES.map(rule=>shortRuleId(rule.id)),...SCRUB_ONLY_RULES.map(rule=>rule.id),...GENERATED_SECRET_RULES.map(rule=>rule.id)]);
 function knownMarkers(text:string){
  const labels=new Map<string,boolean>();

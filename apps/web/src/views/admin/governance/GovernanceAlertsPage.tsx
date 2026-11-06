@@ -1,6 +1,6 @@
 import { batch4SettingRelaxed, BATCH4_SETTING_COPY, BATCH4_STRICT_DEFAULTS } from "./monitorThresholds";
-import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
 import { ago, fmtDateTime, humanize } from "../../../api/format";
@@ -8,6 +8,7 @@ import { useSession } from "../../../session/SessionContext";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Select, SeverityBadge, tabIds, Tabs, Textarea, type Tone } from "../../../ui/kit";
 import { focusFirst, foldButtonOf } from "../../../ui/focus";
+import { DataList, type DataColumn } from "../../../ui/DataList";
 import { DetailDrawer, DrawerActions } from "../../../ui/DetailDrawer";
 import { QueryGate, useAction, useUsers } from "../adminKit";
 import v from "../../views.module.css";
@@ -97,6 +98,35 @@ const FILTERS = [
   { id: "resolved", label: "Resolved" },
 ];
 
+/** ADR-0226: the alerts list's columns; the ids and sortable ones match the gateway's ALERTS_LIST */
+const ALERT_COLUMNS: Array<DataColumn<GovernanceAlert>> = [
+  { key: "severity", header: "Severity", main: true, sortable: true, required: "Severity is always shown", render: (alert) => <SeverityBadge severity={alert.severity} /> },
+  { key: "status", header: "Status", main: true, sortable: true, required: "Status is always shown", render: (alert) => humanize(alert.status) },
+  { key: "title", header: "Alert", main: true, sortable: true, render: (alert) => <strong>{alert.title}</strong> },
+  { key: "rule", header: "Rule", main: true, sortable: true, render: (alert) => alert.ruleLabel },
+  { key: "lastSeen", header: "Last seen", main: true, sortable: true, render: (alert) => ago(alert.lastDetectedAt) },
+  {
+    key: "owner",
+    header: "Owner",
+    main: true,
+    render: (alert) => (alert.owner === undefined ? "—" : alert.owner ? (alert.owner.name ?? "a user") : <span className={v.faint}>unowned</span>),
+  },
+  {
+    key: "due",
+    header: "Due",
+    main: true,
+    required: "The response deadline is always shown",
+    render: (alert) => (
+      <span className={v.row}>
+        <SlaChip alert={alert} />
+        {alert.sla && alert.sla !== "none" && alert.dueAt ? <span className={v.faint}>due {fmtDateTime(alert.dueAt)}</span> : null}
+      </span>
+    ),
+  },
+  { key: "firstSeen", header: "First seen", sortable: true, render: (alert) => ago(alert.firstDetectedAt) },
+  { key: "acknowledged", header: "Acknowledged", sortable: true, render: (alert) => (alert.acknowledgedAt ? ago(alert.acknowledgedAt) : "—") },
+];
+
 export default function GovernanceAlertsPage() {
   const [status, setStatus] = useState("active");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -104,28 +134,35 @@ export default function GovernanceAlertsPage() {
   const [evaluation, setEvaluation] = useState<EvaluationResult | null>(null);
   const [postResult, setPostResult] = useState<string | null>(null);
   const action = useAction();
-  const alerts = useQuery({
-    queryKey: ["governance", "alerts", status],
-    queryFn: () => api.get<AlertsResponse>(`/v1/governance/alerts?status=${status}`),
-  });
-  const selected = alerts.data?.alerts.find((alert) => alert.id === selectedId) ?? null;
-  const criticalAlerts = (alerts.data?.alerts ?? []).filter((alert) => alert.severity === "critical").length;
-  const refresh = async () => { await alerts.refetch(); };
+  const queryClient = useQueryClient();
+  // ADR-0226: the list pages on the server; the counts and the last evaluation come with each page
+  const [pageRows, setPageRows] = useState<GovernanceAlert[]>([]);
+  const [meta, setMeta] = useState<Pick<AlertsResponse, "counts" | "lastEvaluatedAt"> | null>(null);
+  const [alertTotal, setAlertTotal] = useState<number | null>(null);
+  const alertFilters = useMemo(() => ({ status }), [status]);
+  const onRows = useCallback((rows: GovernanceAlert[], raw: Record<string, unknown>) => {
+    setPageRows(rows);
+    setAlertTotal(typeof raw.total === "number" ? raw.total : rows.length);
+    const body = raw as Partial<AlertsResponse>;
+    if (body.counts) setMeta({ counts: body.counts, lastEvaluatedAt: body.lastEvaluatedAt ?? null });
+  }, []);
+  const selected = pageRows.find((alert) => alert.id === selectedId) ?? null;
+  const refresh = async () => { await queryClient.invalidateQueries({ queryKey: ["governance", "alerts"] }); };
   const closeDetail = useCallback(() => setSelectedId(null), []);
   // L1 (WCAG 2.4.3): an alert that leaves the list (acknowledged under the Open filter) takes its drawer and the
   // row that opened it with it, so focus moves to the alert now in its place, or to the page heading
   const list = useRef<HTMLDivElement>(null);
   const ackedAt = useRef(0);
   useEffect(() => {
-    if (!selectedId || !alerts.data || selected) return;
+    if (!selectedId || !meta || selected) return;
     setSelectedId(null);
     const active = document.activeElement;
     if (active && active !== document.body && active.isConnected) return;
-    const rows = list.current?.querySelectorAll<HTMLElement>(":scope > button");
+    const rows = list.current?.querySelectorAll<HTMLElement>("tbody tr");
     const at = Math.min(ackedAt.current, (rows?.length ?? 0) - 1);
     // M2: a row in a folded section cannot take focus, so the section's fold button, then the heading, follow it
     focusFirst(rows?.[at], foldButtonOf(list.current), document.querySelector<HTMLElement>("h1"));
-  }, [selectedId, selected, alerts.data]);
+  }, [selectedId, selected, meta, pageRows]);
   // M2 (WCAG 2.4.3): under Active the server keeps an acknowledged alert listed, so the drawer stays open while its
   // Acknowledge footer unmounts with focus inside it; focus moves to the drawer heading instead of falling to <body>
   const drawerHeadingId = useId();
@@ -150,9 +187,9 @@ export default function GovernanceAlertsPage() {
           <div className={v.row}>
             <div className={v.kpiStrip} style={{ flex: 1 }}>
               {/* A15: before the read lands, or when it fails, the figures are unknown ("—"), never an all-clear 0 */}
-              <AlertStat label="Open" value={alerts.data?.counts.open ?? null} alarm />
-              <AlertStat label="Acknowledged" value={alerts.data?.counts.acknowledged ?? null} />
-              <AlertStat label="Resolved" value={alerts.data?.counts.resolved ?? null} />
+              <AlertStat label="Open" value={meta?.counts.open ?? null} alarm />
+              <AlertStat label="Acknowledged" value={meta?.counts.acknowledged ?? null} />
+              <AlertStat label="Resolved" value={meta?.counts.resolved ?? null} />
             </div>
             {/* FS-19 (WCAG 2.4.3): aria-disabled, not disabled, while busy, so focus stays on the button */}
             <Button
@@ -171,44 +208,42 @@ export default function GovernanceAlertsPage() {
               Evaluate now
             </Button>
           </div>
-          <p className={v.faint}>Last evaluated: {!alerts.data ? "—" : alerts.data.lastEvaluatedAt ? ago(alerts.data.lastEvaluatedAt) : "not evaluated yet"}</p>
+          <p className={v.faint}>Last evaluated: {!meta ? "—" : meta.lastEvaluatedAt ? ago(meta.lastEvaluatedAt) : "not evaluated yet"}</p>
           {evaluation ? <p className={s.statusLine} role="status">Evaluation raised {evaluation.raised}, refreshed {evaluation.refreshed}, resolved {evaluation.resolved}; {evaluation.active} remain active.</p> : null}
         </Card>
 
         <Tabs tabs={FILTERS} active={status} idPrefix={tabsId} label="Alert state" onChange={(next) => { setStatus(next); setSelectedId(null); }} />
         <div role="tabpanel" id={tabIds(tabsId, status).panel} aria-labelledby={tabIds(tabsId, status).tab}>
-        <QueryGate loading={alerts.isLoading} error={alerts.error} onRetry={() => void alerts.refetch()}>
-          {(alerts.data?.alerts.length ?? 0) === 0 ? (
-            <EmptyState
-              title={`No ${status} alerts`}
-              body={status === "active"
-                ? alerts.data?.lastEvaluatedAt
-                  ? "The latest monitor evaluation found no currently active governance conditions."
-                  : "The governance monitor has not run yet. Select Evaluate now before treating this as an all-clear state."
-                : "Alerts appear here when their lifecycle reaches this state."}
+        <Card flush title="Alerts" count={alertTotal ?? undefined} countNoun={["alert", "alerts"]}>
+          <div ref={list}>
+            <DataList<GovernanceAlert>
+              listId="governance-alerts"
+              noun="alerts"
+              endpoint="/v1/governance/alerts"
+              exportPath="/v1/governance/alerts/export.xlsx"
+              queryKey={["governance", "alerts", "list"]}
+              legacyKey="alerts"
+              filters={alertFilters}
+              // the triage order: critical and high first, the most recently seen first within each
+              defaultSort={{ key: "severity", dir: "desc" }}
+              columns={ALERT_COLUMNS}
+              rowKey={(alert) => alert.id}
+              onRowClick={(alert) => setSelectedId(alert.id)}
+              rowLabel={(alert) => `Open alert ${alert.title}`}
+              onRows={onRows}
+              empty={
+                <EmptyState
+                  title={`No ${status} alerts`}
+                  body={status === "active"
+                    ? meta?.lastEvaluatedAt
+                      ? "The latest monitor evaluation found no currently active governance conditions."
+                      : "The governance monitor has not run yet. Select Evaluate now before treating this as an all-clear state."
+                    : "Alerts appear here when their lifecycle reaches this state."}
+                />
+              }
             />
-          ) : (
-            <Card
-              flush
-              contain
-              foldable
-              title="Alerts"
-              count={alerts.data?.alerts.length ?? 0}
-              countNoun={["alert", "alerts"]}
-              attention={criticalAlerts > 0 ? <Badge tone="danger">{criticalAlerts} critical</Badge> : undefined}
-            >
-            <div ref={list} className={s.alertList}>
-              {alerts.data?.alerts.map((alert) => (
-                <button key={alert.id} className={`${s.alertRow} ${selectedId === alert.id ? s.alertRowActive : ""}`} aria-current={selectedId === alert.id ? "true" : undefined} onClick={() => setSelectedId(alert.id)}>
-                  <span className={s.alertRowHead}><SeverityBadge severity={alert.severity} />{alert.status === "open" ? null : <span className={v.faint}>{humanize(alert.status)}</span>}<SlaChip alert={alert} /></span>
-                  <strong>{alert.title}</strong>
-                  <span className={v.faint}>{alert.ruleLabel} · seen {ago(alert.lastDetectedAt)}{alert.owner !== undefined ? ` · ${alert.owner ? `owner ${alert.owner.name ?? "a user"}` : "unowned"}` : ""}{alert.sla && alert.sla !== "none" && alert.dueAt ? ` · due ${fmtDateTime(alert.dueAt)}` : ""}</span>
-                </button>
-              ))}
-            </div>
-            </Card>
-          )}
-        </QueryGate>
+          </div>
+        </Card>
         </div>
         {/* owner decision on #453: an alert's detail opens in the shared detail drawer (A1), not a split column */}
         {selected ? (
@@ -269,7 +304,7 @@ export default function GovernanceAlertsPage() {
                       await api.post(`/v1/governance/alerts/${selected.id}/acknowledge`, { note: ackNote.trim() });
                       setAckNote("");
                       ackedId.current = selected.id;
-                      ackedAt.current = Math.max(0, alerts.data?.alerts.findIndex((alert) => alert.id === selected.id) ?? 0);
+                      ackedAt.current = Math.max(0, pageRows.findIndex((alert) => alert.id === selected.id));
                       await refresh();
                     }, "Alert acknowledged")}>Acknowledge</Button>
                   </div>
@@ -652,7 +687,8 @@ function SubjectLinks({ alert }: { alert: GovernanceAlert }) {
 export function GovernanceAlertsSnapshot() {
   const alerts = useQuery({
     queryKey: ["governance", "alerts", "active"],
-    queryFn: () => api.get<AlertsResponse>("/v1/governance/alerts?status=active"),
+    // ADR-0226: the counts and the last evaluation come with any page; one small page is enough
+    queryFn: () => api.get<AlertsResponse>("/v1/governance/alerts?status=active&limit=10&sort=lastSeen&dir=desc"),
   });
   const active = (alerts.data?.counts.open ?? 0) + (alerts.data?.counts.acknowledged ?? 0);
   const open = alerts.data?.counts.open ?? 0;

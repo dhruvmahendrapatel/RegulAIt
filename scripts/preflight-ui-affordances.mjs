@@ -21,6 +21,11 @@
  * nothing passes this and fails its e2e spec, which is the right division of
  * labour: this is a census, not a test.
  *
+ * KNOWN BLIND SPOT. Every gateway scan here reads `app.<verb>("…")` with a
+ * double-quoted path. A route registered with a template literal or a variable
+ * (some in supplier-portal.ts and framework-imports.ts) is not seen by the
+ * DELETE census or the G12 remove-parity check.
+ *
  * Exit 0 clean, 1 when an endpoint is unreachable and unlisted, 2 if it could
  * not run at all. Any non-zero fails CI.
  */
@@ -41,6 +46,47 @@ export const DELIBERATELY_API_ONLY = new Map([
   // (none today). A DELETE that is still a 501 `notBuilt` stub needs no entry:
   // a stub deletes nothing, so the census skips it until it becomes a real
   // handler, and an entry for one is reported stale (see staleExemptions).
+]);
+
+/**
+ * Collections whose items are never removed, on purpose (see findRemoveGaps).
+ * The same contract as DELIBERATELY_API_ONLY: a reason a reader can check.
+ * Most are records — evidence, decisions, history — where removing a row
+ * would remove the proof.
+ */
+export const NO_REMOVE_BY_DESIGN = new Map([
+  ["/v1/decisions", "signed approval decisions are evidence; a decision is superseded by a later one, never deleted"],
+  ["/v1/runs", "a run is an execution record the audit trail and cost ledger point at"],
+  ["/v1/evals/runs", "an evaluation run is a result record that model-risk sign-offs cite"],
+  ["/v1/engine-runner/runs/:x/task/frames", "frames are the runner's output stream for one run, append-only"],
+  ["/v1/governance/alerts/:x/remediation", "a remediation plan is part of the alert's record; the alert closes, the plan stays"],
+  ["/v1/security/data-key/attestations", "key attestations are append-only evidence of who held the data key when"],
+  ["/v1/risks/:x/acceptances", "a residual-risk acceptance is signed and time-boxed; it expires, and a new one supersedes it"],
+  ["/v1/shadow-ai/imports", "an import is the evidence batch its findings were drawn from"],
+  ["/v1/policy-simulations", "a simulation is a point-in-time blast-radius report"],
+  ["/v1/copilot/proposals", "a proposal is an approvals row; it is applied or decided, never deleted"],
+  ["/v1/billing/rate-cards", "rate cards are versioned and never edited; a new card supersedes the old one and past statements keep pointing at theirs"],
+  ["/v1/licenses", "append-only history: installing a licence supersedes the previous one"],
+  ["/v1/sod/overrides", "an override request is an escalation into the approvals queue and is decided there"],
+  ["/v1/projects/:x/context", "context entries are superseded by newer ones, never deleted, so answers stay traceable to what they used"],
+  ["/v1/discovery/sources/:x/enrolment-tokens", "enrolment tokens expire on their own, and disabling or deleting the source refuses every outstanding token (403 enrolment_disabled)"],
+  ["/v1/ai-bom/:x/:x/snapshots", "a frozen AI BOM snapshot is the point-in-time record drift is measured against; a newer snapshot supersedes it"],
+  ["/v1/agents/setup-assist", "not a collection: the POST returns a suggested agent draft and stores nothing but an audit row"],
+  ["/v1/privacy/processing-records", "a record of processing is retired with PATCH status \"retired\", not deleted, so past dispatch decisions stay traceable to it"],
+  ["/v1/servers/:x/tools", "tools come from the server's manifest; a tool is stopped with halt, and the server's own lifecycle is G4"],
+]);
+
+/**
+ * Collections that should have a remove or retire route and do not YET. Each
+ * names its #453 gap, so the list shrinks as the work lands: when a route
+ * appears, the entry is reported stale and has to be deleted here.
+ */
+export const KNOWN_REMOVE_GAPS = new Map([
+  ["/v1/projects", "G1 project archive (#604)"],
+  ["/v1/connectors", "G3 connector disable and delete (#605)"],
+  ["/v1/servers", "G4 MCP server disable and delete (#605)"],
+  ["/v1/mcp-registries", "G9 MCP registry remove (#606)"],
+  ["/v1/llm/datasets", "not yet proposed: fine-tuning datasets have no retire; raise on #453"],
 ]);
 
 export const walk = (dir, out = []) => {
@@ -626,12 +672,73 @@ export const segmentMatch = (route, set) => {
 };
 
 /**
+ * One-directional segment match for the REMOVE side, where both paths come
+ * from the gateway's own route table: a `:x` in a served route may stand for a
+ * literal in `item` (so `DELETE /v1/rules/:kind/:ruleId` clears
+ * `/v1/rules/approvals/:x`), but a `:x` in `item` matches only a `:x`. Matching
+ * both ways would let any literal sibling route mask a real gap: withdrawing an
+ * SPDX field (`/v1/ai-bom/spdx-fields/:x/:x/:x/withdraw`) would count as a way
+ * to remove an AI BOM snapshot (`/v1/ai-bom/:x/:x/snapshots/:x`). The
+ * collection segment must be equal, as in segmentMatch.
+ */
+export const routeCovers = (item, routes) => {
+  if (routes.has(item)) return true;
+  const want = item.split("/");
+  for (const r of routes) {
+    const got = r.split("/");
+    if (got.length !== want.length) continue;
+    if (got[2] !== want[2]) continue;
+    if (got.every((seg, i) => seg === want[i] || seg === ":x")) return true;
+  }
+  return false;
+};
+
+/**
  * Collections the UI lists (a GET it calls) and cannot add to (a POST it never
  * calls), skipping POSTs that are still `notBuilt` stubs.
  */
 export function findAddGaps({ posted, gotten, uiPost, uiGet, notBuilt = new Set() }) {
   return [...posted]
     .filter((p) => !notBuilt.has(`POST ${p}`) && !segmentMatch(p, uiPost) && gotten.has(p) && segmentMatch(p, uiGet))
+    .sort();
+}
+
+/**
+ * The item-level verbs that end an object's life without deleting its row: a
+ * governed record is often retired rather than removed (the audit trail keeps
+ * pointing at it), and that counts as the "remove" half. `lifecycle`,
+ * `transition` and `enabled` are state machines whose states include a
+ * terminal one; a route by any other name is not evidence of one.
+ */
+export const RETIRE_VERBS = Object.freeze([
+  "retire", "archive", "revoke", "disable", "enabled", "close", "deactivate", "withdraw", "cancel",
+  "abort", "decommission", "suspend", "lifecycle", "transition", "remove", "delete",
+]);
+
+/**
+ * Collections the gateway can CREATE into (a POST on the same path it lists
+ * with a GET) whose items it can neither delete nor retire. The ADD side above
+ * asks "can the UI add to what it shows?"; this asks the reverse question of
+ * the API itself, because a missing remove route is invisible to the DELETE
+ * census: there is no route to find unreached. That is how Projects shipped
+ * with create and no archive (#453 G1).
+ *
+ * `mutations` holds every POST/PATCH/PUT route, normalised. A collection whose
+ * items end some other way belongs on NO_REMOVE_BY_DESIGN with the reason.
+ */
+export function findRemoveGaps({ posted, gotten, served, mutations, notBuilt = new Set() }) {
+  return [...posted]
+    .filter((p) => !p.endsWith(":x") && gotten.has(p) && !notBuilt.has(`POST ${p}`))
+    .filter((p) => {
+      const item = `${p}/:x`;
+      // a singleton (`/credential`) is cleared by a DELETE on its own path
+      if (routeCovers(item, served) || routeCovers(p, served)) return false;
+      return ![...mutations].some((q) => {
+        if (q.split("/").length !== item.split("/").length + 1) return false;
+        const tail = q.slice(q.lastIndexOf("/") + 1);
+        return RETIRE_VERBS.includes(tail) && routeCovers(item, new Set([q.slice(0, q.lastIndexOf("/"))]));
+      });
+    })
     .sort();
 }
 
@@ -715,6 +822,18 @@ function main() {
   const uiGet = ui.get;
   const notBuilt = scanNotBuilt(gatewaySrc);
   const addGaps = findAddGaps({ posted, gotten, uiPost, uiGet, notBuilt });
+
+  // ---- the REMOVE side of the API itself (#453 G12) ----------------------
+  const mutations = new Set();
+  for (const f of walk(gatewaySrc)) {
+    const src = readFileSync(f, "utf8");
+    for (const m of src.matchAll(/app\.(?:post|patch|put)\(\s*"([^"]+)"/g)) mutations.add(norm(m[1]));
+  }
+  const removeCandidates = findRemoveGaps({ posted, gotten, served, mutations, notBuilt });
+  const removeGaps = removeCandidates.filter((r) => !NO_REMOVE_BY_DESIGN.has(r) && !KNOWN_REMOVE_GAPS.has(r));
+  const staleRemoveEntries = [...NO_REMOVE_BY_DESIGN.keys(), ...KNOWN_REMOVE_GAPS.keys()]
+    .filter((r) => !removeCandidates.includes(r))
+    .sort();
   if (served.size === 0) {
     console.error("preflight-ui-affordances: found no DELETE routes — the scan is broken, not the app");
     return 2;
@@ -758,7 +877,27 @@ function main() {
         "DELIBERATELY_API_ONLY in this file with a reason somebody can check.",
     );
   }
-  return orphans.length > 0 || staleExemptions.length > 0 || addGaps.length > 0 ? 1 : 0;
+  const known = removeCandidates.filter((r) => KNOWN_REMOVE_GAPS.has(r)).length;
+  const byDesign = removeCandidates.filter((r) => NO_REMOVE_BY_DESIGN.has(r)).length;
+  console.log(
+    `remove parity: ${removeCandidates.length} creatable collections with no delete or retire route, ` +
+      `${byDesign} by design, ${known} known gaps, ${removeGaps.length} new`,
+  );
+  for (const r of staleRemoveEntries) {
+    console.error(`  STALE REMOVE ENTRY  ${r} — it now has a delete or retire route (or is gone); remove it from this file`);
+  }
+  for (const r of removeGaps) console.error(`  NO REMOVE ROUTE  ${r}`);
+  if (removeGaps.length > 0) {
+    console.error(
+      "\nEach collection above can be created into and never emptied: no DELETE on\n" +
+        "its items and no retire/archive/disable-style route. Add one, or list it in\n" +
+        "NO_REMOVE_BY_DESIGN with a reason somebody can check (a record that is\n" +
+        "evidence), or in KNOWN_REMOVE_GAPS with the issue that tracks the work.",
+    );
+  }
+  return orphans.length > 0 || staleExemptions.length > 0 || addGaps.length > 0 || removeGaps.length > 0 || staleRemoveEntries.length > 0
+    ? 1
+    : 0;
 }
 
 const invokedDirectly = process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;

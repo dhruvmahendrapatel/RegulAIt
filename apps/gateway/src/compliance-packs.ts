@@ -638,35 +638,39 @@ export async function insertPack(
   input: z.infer<typeof createCompliancePackSchema>,
   createdByUserId: string | null,
 ): Promise<CompliancePackRow> {
-  const [pack] = await db
-    .insert(compliancePacks)
-    .values({
-      framework: input.framework,
-      version: input.version,
-      title: input.title,
-      description: input.description ?? null,
-      provenance: input.provenance as Record<string, unknown>,
-      cascadeTag: input.cascadeTag ?? null,
-      cascadePreset: input.cascadePreset ?? null,
-      status: "draft",
-      createdByUserId,
-    })
-    .returning();
-  await db.insert(compliancePackControls).values(
-    input.controls.map((c) => ({
-      packId: pack!.id,
-      controlRef: c.controlRef,
-      title: c.title,
-      description: c.description ?? null,
-      coverage: c.coverage,
-      collector: c.collector,
-      collectorParams: c.collectorParams as Record<string, unknown>,
-      minEvidenceCount: c.minEvidenceCount,
-      attestationRequired: c.attestationRequired,
-      ownerNote: c.ownerNote ?? null,
-    })),
-  );
-  return pack!;
+  // ADR-0233: one transaction, so a refused control (credential_in_content) leaves no control-less pack behind
+  return db.transaction(async (txRaw) => {
+    const tx = txRaw as unknown as Db;
+    const [pack] = await tx
+      .insert(compliancePacks)
+      .values({
+        framework: input.framework,
+        version: input.version,
+        title: input.title,
+        description: input.description ?? null,
+        provenance: input.provenance as Record<string, unknown>,
+        cascadeTag: input.cascadeTag ?? null,
+        cascadePreset: input.cascadePreset ?? null,
+        status: "draft",
+        createdByUserId,
+      })
+      .returning();
+    await tx.insert(compliancePackControls).values(
+      input.controls.map((c) => ({
+        packId: pack!.id,
+        controlRef: c.controlRef,
+        title: c.title,
+        description: c.description ?? null,
+        coverage: c.coverage,
+        collector: c.collector,
+        collectorParams: c.collectorParams as Record<string, unknown>,
+        minEvidenceCount: c.minEvidenceCount,
+        attestationRequired: c.attestationRequired,
+        ownerNote: c.ownerNote ?? null,
+      })),
+    );
+    return pack!;
+  });
 }
 
 // ---------------------------------------------------------------------------
