@@ -21,7 +21,7 @@
  *    comes back with its own result — a refused item never hides behind a
  *    successful batch.
  */
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { withStepUp } from "../../../stepup/stepUp";
@@ -31,7 +31,7 @@ import { pendingQueueQuery, pendingRows, queueTotal } from "../../../api/approva
 import { pendingCapNote } from "../../../api/approvalQueuePages";
 import { useSession } from "../../../session/SessionContext";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, ErrorState, Field, InfoButton, Input, Select, Table, Tabs, Textarea, tabIds } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, ErrorState, Field, InfoButton, Input, Select, Table, TabPanel, Tabs, Textarea } from "../../../ui/kit";
 import { QueryGate, optionEls, useAction, useProjects, useTeams, useUsers, projectOpts, teamOpts, userOpts } from "../adminKit";
 import { McpActionReview } from "../../approvals/McpActionReview";
 import { approvalReviewKey, inspectApprovalAction } from "../../approvals/approvalReview";
@@ -226,7 +226,7 @@ export default function ReviewWorkbenchPage() {
           {/* every panel stays mounted (hidden when not selected), so a half-typed policy, rule or bulk reason survives a tab switch */}
 
           {/* ---------------- workload ---------------- */}
-          <WorkbenchPanel id="workload" tab={tab}>
+          <TabPanel idPrefix="workbench" id="workload" active={tab}>
           <Card title="Per-reviewer workload">
             <div className={v.faint} style={{ marginBottom: "var(--s2)" }}>
               {workload.data?.note}
@@ -252,10 +252,10 @@ export default function ReviewWorkbenchPage() {
               />
             )}
           </Card>
-          </WorkbenchPanel>
+          </TabPanel>
 
           {/* ---------------- SLA policies ---------------- */}
-          <WorkbenchPanel id="policies" tab={tab}>
+          <TabPanel idPrefix="workbench" id="policies" active={tab}>
           <Card title="SLA policies" info={policies.data?.note ? <p>{policies.data.note}</p> : undefined}>
             <form
               className={a.formRow}
@@ -354,10 +354,10 @@ export default function ReviewWorkbenchPage() {
               />
             )}
           </Card>
-          </WorkbenchPanel>
+          </TabPanel>
 
           {/* ---------------- routing rules ---------------- */}
-          <WorkbenchPanel id="rules" tab={tab}>
+          <TabPanel idPrefix="workbench" id="rules" active={tab}>
           <Card title="Routing rules" info={rules.data?.note ? <p>{rules.data.note}</p> : undefined}>
             <form
               className={v.stack}
@@ -511,10 +511,10 @@ export default function ReviewWorkbenchPage() {
               />
             )}
           </Card>
-          </WorkbenchPanel>
+          </TabPanel>
 
           {/* ---------------- triage ---------------- */}
-          <WorkbenchPanel id="triage" tab={tab}>
+          <TabPanel idPrefix="workbench" id="triage" active={tab}>
           <Card title="Triage">
             {capNote && <p className={v.faint} data-testid="workbench-cap-note">{capNote}</p>}
             {pending.length === 0 ? (
@@ -683,18 +683,10 @@ export default function ReviewWorkbenchPage() {
               </>
             )}
           </Card>
-          </WorkbenchPanel>
+          </TabPanel>
         </QueryGate>
       </div>
     </>
   );
 }
 
-function WorkbenchPanel(props: { id: string; tab: string; children: ReactNode }) {
-  const ids = tabIds("workbench", props.id);
-  return (
-    <div role="tabpanel" id={ids.panel} aria-labelledby={ids.tab} hidden={props.tab !== props.id}>
-      {props.children}
-    </div>
-  );
-}

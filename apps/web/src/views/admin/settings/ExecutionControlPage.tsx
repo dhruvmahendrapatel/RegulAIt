@@ -30,7 +30,7 @@ import { lazy, Suspense, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Select, Table, Tabs, tabIds, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, Select, Table, TabPanel, Tabs, type Tone } from "../../../ui/kit";
 import {
   QueryGate,
   ReasonModal,
@@ -434,7 +434,7 @@ export default function ExecutionControlPage() {
             onChange={setTab}
           />
           {/* every panel stays mounted (hidden when not selected), so a picked approver, agent or tool survives a tab switch */}
-          <ExecutionPanel id="deployment" tab={tab}>
+          <TabPanel idPrefix="execution" id="deployment" active={tab}>
             {/* ── the dial ──────────────────────────────────────────────── */}
             <Card title="Deployment-wide">
               <Table
@@ -513,8 +513,8 @@ export default function ExecutionControlPage() {
                 </Field>
               </div>
             </Card>
-          </ExecutionPanel>
-          <ExecutionPanel id="one" tab={tab}>
+          </TabPanel>
+          <TabPanel idPrefix="execution" id="one" active={tab}>
             {/* ── stop one thing ────────────────────────────────────────── */}
             <Card
               title="Stop one agent or one tool"
@@ -601,7 +601,7 @@ export default function ExecutionControlPage() {
                 </Button>
               </div>
             </Card>
-          </ExecutionPanel>
+          </TabPanel>
 
           {act.error && <div className={v.errLine}>{act.error}</div>}
         </QueryGate>
@@ -634,11 +634,3 @@ export default function ExecutionControlPage() {
   );
 }
 
-function ExecutionPanel(props: { id: string; tab: string; children: ReactNode }) {
-  const ids = tabIds("execution", props.id);
-  return (
-    <div role="tabpanel" id={ids.panel} aria-labelledby={ids.tab} hidden={props.tab !== props.id}>
-      {props.children}
-    </div>
-  );
-}

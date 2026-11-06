@@ -79,6 +79,9 @@ async function openExecutionControl() {
   await page.getByLabel("Filter navigation").fill("Execution control");
   await page.getByRole("link", { name: "Execution control", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Execution control", exact: true })).toBeVisible();
+  // I-2: the page is shared across these tests and the nav click doesn't remount it, so a tab picked by an
+  // earlier test would stay open; every test starts from the deployment-wide dial
+  await page.getByRole("tab", { name: /^Deployment-wide/ }).click();
 }
 
 test("1: the page loads and says, plainly, that nothing is stopped", async () => {
@@ -88,8 +91,12 @@ test("1: the page loads and says, plainly, that nothing is stopped", async () =>
   for (const label of ["Normal", "Read-only", "Require approval", "Halt everything"]) {
     await expect(page.getByText(label, { exact: true }).first()).toBeVisible();
   }
-  // and the page says what SURVIVES a halt — the hesitation problem
-  await expect(page.getByText(/never gated by it|approvals queue/)).toBeVisible();
+  // and the page says what SURVIVES a halt — the hesitation problem. Since I-1 the chip says it and its (i) carries
+  // the server's note, so open the (i) to read it
+  await expect(page.getByText("Audit, approvals and governance sweeps keep running", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "What is what keeps running?" }).click();
+  await expect(page.getByRole("note").filter({ hasText: /never gated by it|approvals queue/ })).toBeVisible();
+  await page.getByRole("button", { name: "Hide help for what keeps running" }).click();
   await shot(page, "execution-control-normal");
   track.assertClean("page load");
 });
@@ -141,7 +148,8 @@ test("4: the deployment dial halts, and the control surface still works", async 
 
   // THE ASSERTION THAT MATTERS: the page that controls the halt survives it.
   await expect(page.getByText(/the deployment is in halted mode/)).toBeVisible();
-  await expect(page.getByText(/suspected prompt-injection campaign/)).toBeVisible();
+  // the reason shows in the "What is stopped" matrix and on the dial's card (I-2)
+  await expect(page.getByText(/suspected prompt-injection campaign/).first()).toBeVisible();
   await shot(page, "execution-control-halted");
   track.assertClean("halt the deployment");
 
