@@ -20,13 +20,13 @@
 # linux/amd64 ONLY: the hashes in requirements.txt are the cp312 manylinux x86_64 wheels.
 
 # ---- stage 1: the pinned model files ---------------------------------------------------------------
-FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS weights
+FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635c12fcd0a3d74c21a5b93a54 AS weights
 WORKDIR /build
 COPY agents/trained-detectors/fetch_models.py agents/trained-detectors/models.lock.json ./
 RUN python3 -I fetch_models.py models.lock.json /opt/models
 
 # ---- stage 2: the Python closure -------------------------------------------------------------------
-FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS closure
+FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635c12fcd0a3d74c21a5b93a54 AS closure
 WORKDIR /build
 COPY agents/trained-detectors/requirements.txt ./
 COPY --from=weights /opt/models/wheels /build/wheels
@@ -39,7 +39,7 @@ RUN python3 -m venv /venv \
  && /venv/bin/pip uninstall -y pip
 
 # ---- stage 3: runtime ------------------------------------------------------------------------------
-FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS runtime
+FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635c12fcd0a3d74c21a5b93a54 AS runtime
 RUN useradd --system --uid 10001 --home-dir /nonexistent --shell /usr/sbin/nologin detector
 COPY --from=closure /venv /venv
 COPY --from=weights --chown=root:root /opt/models/prompt-injection /opt/models/prompt-injection
