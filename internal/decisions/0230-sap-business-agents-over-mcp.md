@@ -49,17 +49,34 @@ gets the same governance) and keeps SAP-specific code out of the gateway.
   custom headers. Values are validated against SAP's field lengths before the call. The tool is annotated
   `readOnlyHint: false`, `destructiveHint: false`, `idempotentHint: true` (true only because of the key below).
 - **Idempotency key (required).** The caller supplies `idempotencyKey` (a UUID). The server:
-  1. checks its own store for the key and, on a hit, returns the original result without calling SAP;
+  1. checks its idempotency store (specified below). A hit under the same principal and the same payload hash returns
+     the original result without calling SAP. A hit under a different principal is refused
+     (`idempotency_key_foreign`) and audited, and nothing about the original order is returned. A hit with the same
+     principal and a different payload hash is refused (`idempotency_key_reused`);
   2. sends the key to SAP as SAP Gateway's idempotency headers where the service is configured for them: `RequestID`
      (the key as a 32-character GUID) and `RepeatabilityCreation`, reading `RepeatabilityResult`
      (`accepted`/`unsupported`/`rejected`; a 412 means not honoured). This is configured per service in SPRO ("Define
      Settings for Idempotent Services"). Verified only on an older SAP Gateway help page; whether S/4HANA honours it
      for `API_SALES_ORDER_SRV`, or the OASIS names `Repeatability-Request-ID`/`-First-Sent`, is **unverified** (open
-     question 4). Where it is not honoured, the purchase-order reference carries the key;
-  3. on a timeout or a 5xx, never re-posts blindly: it first reads back by the key's purchase-order reference and only
-     posts again if no order exists.
+     question 4). The key is **never** written into `PurchaseOrderByCustomer`. That field is not unique in SD, and it
+     belongs to the customer's real purchase-order reference;
+  3. on a timeout or a 5xx, never posts again blindly. It reads back, and treats the order as already created only when
+     an order matches the **full key**: through `RepeatabilityResult` where SAP honours it, or through an optional
+     header extension field the customer adds for the key (open question 4). In every other case, including when no
+     full-key match is possible, the store entry moves to `needs_reconciliation`. The call is refused
+     (`sap_outcome_unknown`) and a person reconciles the order. The server does not post again.
+
   The gateway also binds the key into the approval payload (ADR-0104), so one approval authorises exactly one order.
-  A second call with the same key and different fields is refused (`idempotency_key_reused`).
+- **The idempotency store.** It is durable and safe across replicas:
+  - **Storage:** a table in the ABAP MCP server's own database. It is never in memory and never in a per-replica cache.
+  - **Key:** a unique constraint on (tenant, the assertion's pairwise `sub`, tool, `idempotencyKey`). Each row also
+    stores the payload hash, the state (`pending`, `succeeded`, `failed` or `needs_reconciliation`), the SAP document
+    number on success, and timestamps.
+  - **Write order:** the row is inserted as `pending` **before** the POST. A concurrent second call loses the insert and
+    gets `idempotency_in_progress`.
+  - **Retention:** 30 days by default. An operator can shorten it, but never below 24 hours. Expired rows are deleted;
+    a key presented after expiry is treated as new, and the gateway's approval binding still applies.
+  - **Contents:** no payload body, only its hash.
 - **CSRF handling.** SAP Gateway OData v2 writes need an `X-CSRF-Token` fetched first (`X-CSRF-Token: Fetch` on a
   `HEAD`/`GET`) and sent back with the same session cookies. The server fetches and holds it per user session; it is never cached across users.
 - **Result.** The new sales order number, its overall status and the item count. The full SAP response body is not
@@ -86,11 +103,33 @@ make the allow-list meaningless, because the tool name would no longer say what 
 
 ### 4. Principal propagation: the call runs as the person
 
-- The gateway sends the ADR-0210 `oidc_bearer` assertion to the ABAP MCP server: `sub` (pairwise), `aud` (the server),
-  `scope` (`read` or `read write`, set by the admin), short-lived, ES256.
-- The server exchanges it for an SAP-side user token through the BTP Destination service, using a destination of type
-  `OAuth2JWTBearer` or `OAuth2SAMLBearerAssertion` (principal propagation). The SAP system maps the IdP user to its
-  own business user, and SAP's own authorisation objects (for sales orders, `V_VBAK_VKO`, `V_VBAK_AAT`) decide what
+The ADR-0210 assertion alone cannot do this. Its `sub` is pairwise, and SAP maps users by a stable attribute (login
+name, e-mail or user UUID). So the design names three things: which claim carries the SAP-mappable identifier, how
+that claim is released, and who issues the token SAP trusts.
+
+- **Who issues the token SAP trusts. Two options, in order of preference:**
+  - **(a) Preferred: the person's own corporate IdP token.** The customer's IdP is already trusted by the BTP
+    subaccount or IAS. RegulAIt obtains a token for the person from that IdP, either kept from sign-in or by a token
+    exchange at the IdP, with its audience set to the SAP destination. It passes the token to the ABAP MCP server,
+    which presents it to the `OAuth2JWTBearer` destination. RegulAIt then mints nothing that SAP trusts.
+  - **(b) Fallback: a RegulAIt assertion that SAP trusts.** This is allowed only where (a) is impossible, and only with
+    the controls in the threat model:
+    - a **dedicated signing key per SAP trust**, which is not the general ADR-0210 key, with its own issuer path
+      (`<REGULAIT_PUBLIC_URL>/sap-trust/<connection>`);
+    - ES256, with `aud` pinned to the one SAP target;
+    - `exp` of 60 seconds or less, with a `jti` that the server records and that SAP rejects on replay;
+    - rotation and revocation through the existing key management;
+    - on the SAP side, IAS or the destination's trust restricted to the user group that may be asserted.
+- **Which claim carries the SAP identity.** An admin chooses one attribute of the person's federated identity: login
+  name, e-mail or the IdP user UUID. It is released as the claim `sap_user`. Under option (a) it is the IdP token's own
+  claim; under (b) RegulAIt adds it.
+- **How it is released (S3).** Release is a per-server setting, `mcp_servers.identity_release` (default `none`). Setting
+  it to an attribute is a `settings_relax` step-up bound to the server, its url and the attribute, and it is audited.
+  A url move resets it to `none`, as ADR-0210 does. While it is `none`, the server cannot map the person, so it refuses
+  every business-tool call (`sap_identity_not_released`). Nothing is released implicitly.
+- The server exchanges the token for an SAP-side user token through the BTP Destination service, using a destination
+  of type `OAuth2JWTBearer` or `OAuth2SAMLBearerAssertion` (principal propagation). SAP maps `sap_user` to its own
+  business user, and SAP's own authorisation objects (for sales orders, `V_VBAK_VKO`, `V_VBAK_AAT`) decide what
   that person may do. A technical user is refused for business-tool writes: the server will not run a non-read
   business tool on a destination of type `BasicAuthentication` or `OAuth2ClientCredentials`.
 - RegulAIt's allow-list and SAP's authorisation both have to say yes. Neither replaces the other.
@@ -105,8 +144,10 @@ new, default null), the gateway seeds, in the same transaction and audited:
 1. **An approval rule**: fleet scope, that server, `write_only = true`, `approval_scope = 'action'`, quorum 2, requester
    excluded (the existing separation-of-duties check), approver the registering admin plus an approver role the admin
    must name. Relaxing it (lower quorum, `tool` scope, deleting it) is a `settings_relax` step-up and audited.
-2. **A rate limit**: fleet scope, that server, write tools, 10 calls per user per hour. Raising or removing it is a
-   relaxation.
+2. **A rate limit**: fleet scope, that server, 10 calls per user per hour on its **write** tools. `rate_limits` today
+   has no way to select write tools, so slice A2 adds a `write_only` column (default false), matched by the existing
+   `toolKind` classification as approval rules already do. One write-only row then covers every write tool, including
+   tools discovered later. Raising or removing the limit is a relaxation.
 3. **A project budget requirement**: a write to an SAP business server must be attributed to a project with an active
    budget; an unattributed SAP write is refused (`sap-write-needs-project`). The existing budget gate then applies.
 4. **The tools start unassigned**: no person can call any tool until an admin grants it (the existing default-deny).
@@ -119,7 +160,8 @@ line of defence and stay off unless the server's operator turns them on.
 
 - **Audit**: the existing MCP rows, plus the business fields the reviewer needs: `object_type` `mcp_tool`, the SAP
   service and entity set, the idempotency key, the approval request id, and on success the created document number.
-  Never the full payload's prices or partner addresses; those stay in the approval's bound payload hash.
+  Never the full payload's prices or partner addresses; those stay in the approval's bound payload hash. On an SAP
+  error, the SAP error code is recorded but never SAP's error text.
 - **Cost**: one `usage_events` row per allowed call, `object_type` `mcp_tool`, `operation` `create_sales_order`,
   `cost_usd` from the server's per-tool flat price (null means unpriced, never invented), and the project. A refused
   call (allow-list, approval denied, rate limit, budget) is audited and not costed. A call allowed but failed
@@ -203,8 +245,8 @@ return an empty `to_Item`, so the tool reads back after creating. This is confir
 | Slice | Repo | What | Tests |
 |---|---|---|---|
 | A0 | regulAIt-ABAP | Land #78/#79 after the BTP smoke test. | The repo's own suite plus the smoke-test record. |
-| A1 | regulAIt-ABAP | `create_sales_order` on the plugin framework: schema, CSRF, Destination-service principal propagation (odata2ts plus `oauth4webapi`, or the SAP Cloud SDK if open question 7 allows it), idempotency store and read-back, result projection, refusal on a technical-user destination. | Unit tests against a recorded OData v2 fake (create, duplicate key, key reused with other fields, timeout then read-back, CSRF expiry, technical-user refusal). |
-| A2 | RegulAIt | `mcp_servers.system_class` (migration, renumbered at merge per M-108) and the seeded defaults: approval rule, rate limit, project requirement; relaxations are `settings_relax` step-ups. | Gateway tests: seeding in one transaction, each relaxation needs a step-up and is audited, an unattributed SAP write is refused and audited, not costed. |
+| A1 | regulAIt-ABAP | `create_sales_order` on the plugin framework: schema, CSRF, Destination-service principal propagation (odata2ts plus `oauth4webapi`, or the SAP Cloud SDK if open question 7 allows it), the durable idempotency store and full-key read-back, result projection, refusal on a technical-user destination, refusal without a released `sap_user`. | Unit tests against a recorded OData v2 fake: create; duplicate key under the same principal returns the original result; **the same key under another principal is refused and audited**; a key reused with other fields; two concurrent calls with one key; timeout then full-key read-back; timeout without a full-key match goes to `needs_reconciliation` and is not posted again; CSRF expiry; technical-user refusal. |
+| A2 | RegulAIt | `mcp_servers.system_class` and `identity_release`, and `rate_limits.write_only` (one migration, renumbered at merge per M-108). The seeded defaults: approval rule, write-only rate limit, project requirement. Relaxations are `settings_relax` step-ups. Under option (b), the dedicated SAP-trust key, its issuer path, and `exp` 60 seconds or less with a `jti`. | Gateway tests: seeding in one transaction; a write-only limit covers a write tool added after seeding and ignores read tools; each relaxation, and releasing an identity attribute, needs a step-up and is audited; a url move resets `identity_release`; an unattributed SAP write is refused, audited and not costed; the SAP-trust key never signs ADR-0210 assertions, and the reverse. |
 | A3 | RegulAIt | Audit and usage detail for business tools (service, entity set, idempotency key, document number, `replayed`), and the idempotency key bound into the approval payload. | A key reused with other fields is refused; an approval for one key cannot authorise another; a replay is not charged. |
 | A4 | RegulAIt | End-to-end: the ABAP MCP server image against a fake SAP endpoint in CI, through the real gateway with an approval quorum of 2. | `zz-p19-sap-sales-order.test.ts`. |
 | A5 | Both | The descriptor pattern (section 3), with a second tool (a read: `get_sales_order`) to prove it. | Descriptor validation tests; read tool needs no approval but is still allow-listed and rate-limited. |
@@ -218,6 +260,10 @@ return an empty `to_Item`, so the tool reads back after creating. This is confir
 | Duplicate orders from retries | Required idempotency key, server-side store, read-back before re-post, key bound to the approval. |
 | Confused deputy: the call runs with more SAP rights than the person has | Principal propagation; technical-user destinations refused for writes; SAP authorisation objects still apply. |
 | Token theft between gateway and server | ES256 assertion, short-lived, audience-bound to the server; sent only through the egress guard to the registered origin. |
+| **The RegulAIt signing key becomes an SAP-trusted IdP (option (b))**: a key compromise, or a gateway bug, could mint any SAP business user the mapping covers, beyond the gateway's own grants | Option (a) is preferred, so RegulAIt mints nothing SAP trusts. Under (b): a dedicated key per SAP trust, never the general ADR-0210 key; its own issuer; `aud` pinned to the one SAP target; `exp` 60 seconds or less; a `jti` with replay rejection; rotation and revocation through key management; IAS or the destination's trust restricted to the user group that may be asserted; every assertion minted is audited. |
+| Cross-user replay through the idempotency store | The key is scoped to (tenant, pairwise `sub`, tool). A hit under another principal is refused, audited, and returns nothing. |
+| Identity disclosure to the MCP server | `identity_release` is off by default; releasing an attribute is a step-up and audited; a url move resets it. |
+| A duplicate order after an unknown outcome | No blind re-post. Only a read-back that matches the full key counts as "created"; anything else goes to `needs_reconciliation` for a person. |
 | Arbitrary SAP access through a generic tool | No passthrough tool; each descriptor is a reviewed, narrow schema. |
 | Data leakage back to the model | Result projection; PII mode of the project applies to arguments; full SAP body never returned. |
 | CSRF token reuse across users | Token and cookies held per user session only. |
@@ -253,10 +299,13 @@ return an empty `to_Item`, so the tool reads back after creating. This is confir
 1. **Approval quorum default**: 2 with requester excluded, or 1 plus a named approver role?
 2. **Rate-limit default**: 10 SAP writes per user per hour — right order of magnitude?
 3. **Unattributed SAP writes**: refuse (proposed), or allow and attribute to a default "SAP" project?
-4. **Idempotency on SAP's side**: rely on our server-side store plus read-back by purchase-order reference, or require
-   customers to enable a uniqueness check on the customer reference in SD?
+4. **Full-key read-back on SAP's side** (decided: no blind re-post, unmatched means reconcile by hand). Should the
+   runbook ask customers to enable SAP Gateway idempotency for `API_SALES_ORDER_SRV`, or to add a header extension field
+   for the key, so that fewer timeouts end in manual reconciliation?
 5. **Smoke-test system**: which BTP / S/4HANA trial system is used for A0? (No hostnames in this public repo.)
 6. **Read-only business tools**: should they also default to approve-first, or only allow-list plus rate limit?
 7. **Licence scope for the ABAP MCP server**: does ADR-0176's licence rule bind the regulAIt-ABAP product? If it does,
    the SAP Cloud SDK is out because of its SAP-licensed transitive dependencies, and we use odata2ts plus a small CSRF
    helper of our own. If it does not (it runs only on SAP's own platform), the Cloud SDK is the better fit.
+8. **Which SAP identity attribute by default** when an admin turns release on: login name, e-mail or IdP user UUID?
+   Proposed: no default, so the admin must choose.
