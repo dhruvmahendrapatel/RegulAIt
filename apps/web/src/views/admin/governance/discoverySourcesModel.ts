@@ -8,7 +8,7 @@ import { humanize, providerLabel, titleWords } from "../../../api/format";
 export interface ScannerKindView {
   kind: string;
   label: string;
-  family: "repo" | "cloud" | "endpoint";
+  family: "repo" | "cloud" | "endpoint" | "saas" | "identity" | "ml_platform";
   slice: string;
   /** fed by uploads: no schedule */
   uploadFed?: boolean;
@@ -89,9 +89,42 @@ export interface DiscoveryPostureView {
   statement: string;
 }
 
+/** the source families behind their own org switch, all off by default */
+export const GATED_FAMILIES = ["saas", "identity", "ml_platform"] as const;
+export type GatedFamily = (typeof GATED_FAMILIES)[number];
+export type FamilySwitches = Record<GatedFamily, boolean>;
+export const FAMILY_SWITCH_TEXT: Readonly<Record<GatedFamily, { label: string; help: string }>> = {
+  saas: { label: "SaaS app inventories", help: "Read the SaaS apps your own inventory tool reports, through a JSON API you name." },
+  identity: { label: "Identity-provider app consents", help: "Read the apps people or admins consented to in your identity provider, and the permissions they granted." },
+  ml_platform: { label: "Standalone ML platforms", help: "Read the registered models and serving endpoints of an ML platform outside your cloud accounts." },
+};
+
+export const isGatedFamily = (f: string): f is GatedFamily => (GATED_FAMILIES as readonly string[]).includes(f);
+
+/** is this kind's family switched off? (only the gated families have a switch) */
+export function familySwitchedOff(kind: ScannerKindView | undefined, switches: FamilySwitches | undefined): boolean {
+  if (!kind || !isGatedFamily(kind.family)) return false;
+  return !(switches?.[kind.family] ?? false);
+}
+
+/** the families a save would change, and whether any is turned ON (that asks the admin to confirm it's them) */
+export function familyChanges(current: FamilySwitches, draft: Partial<FamilySwitches>): { changed: Partial<FamilySwitches>; turnsOn: boolean } {
+  const changed: Partial<FamilySwitches> = {};
+  let turnsOn = false;
+  for (const f of GATED_FAMILIES) {
+    const next = draft[f];
+    if (next === undefined || next === current[f]) continue;
+    changed[f] = next;
+    if (next) turnsOn = true;
+  }
+  return { changed, turnsOn };
+}
+
 export interface DiscoverySettingsView {
   credentialWarningAgeDays: number;
   endpointRetentionDays: number;
+  /** absent from a gateway older than the wider sources: read as all off */
+  families?: FamilySwitches;
   version: number;
 }
 
@@ -197,6 +230,7 @@ export const DISCOVERY_REFUSAL_TEXT: Readonly<Record<string, string>> = {
   credential_target_mismatch: "The credential names a different account or tenant than the source's target.",
   credential_refused: "This source's credential grants write access and is refused. Replace it with a read-only one.",
   data_key_unavailable: "The data key is not configured, so secrets cannot be stored or read.",
+  family_disabled: "This kind of source is switched off for your organisation. Turn it on under Settings on this page first.",
 };
 
 /** one sighting on a finding, as the findings API returns it */
