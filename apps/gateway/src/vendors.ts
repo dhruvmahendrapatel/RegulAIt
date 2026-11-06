@@ -54,7 +54,6 @@ import {
   agents,
   aiVendors,
   getTableColumns,
-  sql,
   type SQL,
   and,
   auditLog,
