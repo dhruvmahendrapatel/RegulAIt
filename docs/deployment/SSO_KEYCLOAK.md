@@ -206,7 +206,7 @@ provider ids and display names only — never an issuer, client id, secret or do
 
 ## 6. Upgrades
 
-- The image is pinned (`keycloak/keycloak:26.8.0`). To upgrade: read the Keycloak release notes and upgrading
+- The image is pinned (`keycloak/keycloak:26.8.1-1`; 26.8.0 until 2026-11-06, moved for the 26.8.1 security fixes, about 20 CVEs including a 2FA-enforcement bypass and a `manage-users` → `realm-admin` escalation). The realm import below was verified on 26.8.0 and has not yet been re-run on 26.8.1. To upgrade: read the Keycloak release notes and upgrading
   guide for every version in between, **back up first** (below), set `REGULAIT_KC_IMAGE` to the new tag in a
   staging copy, start it against a restored copy of the database (Keycloak migrates its schema on start),
   run the first-login checklist, then roll production.
