@@ -13,18 +13,18 @@ runtime. They reach only the cloud API hosts an admin allow-lists, through the g
 
 | Component | Version | Licence | Used for, and why |
 |---|---|---|---|
-| `@aws-sdk/client-account` (github.com/aws/aws-sdk-js-v3) | `3.1152.0` | Apache-2.0 | `ListRegions`: the regions an AWS account has enabled. |
-| `@aws-sdk/client-bedrock` | `3.1152.0` | Apache-2.0 | Bedrock custom and imported models, provisioned throughput, guardrails, invocation-logging setting. |
-| `@aws-sdk/client-bedrock-agent` | `3.1152.0` | Apache-2.0 | Bedrock agents and knowledge bases. |
-| `@aws-sdk/client-cloudtrail` | `3.1152.0` | Apache-2.0 | `LookupEvents` for Bedrock invocation events. |
-| `@aws-sdk/client-organizations` | `3.1152.0` | Apache-2.0 | `ListAccounts` (paginated, read-only) for an organisation-level AWS source, called from the management or delegated-admin account (SD2b). |
-| `@aws-sdk/client-s3` | `3.1152.0` | Apache-2.0 | Optional read of the customer's CloudTrail bucket for Bedrock data events. |
-| `@aws-sdk/client-sagemaker` | `3.1152.0` | Apache-2.0 | SageMaker endpoints and models. |
-| `@aws-sdk/client-sts` | `3.1152.0` | Apache-2.0 | `GetCallerIdentity`: the credential's account must equal the source's `accountId` before anything is read. |
-| `@aws-sdk/credential-providers` | `3.1152.0` | Apache-2.0 | `fromWebToken` (AssumeRoleWithWebIdentity) and `fromTemporaryCredentials` (AssumeRole with external id), each given the guarded request handler. |
+| `@aws-sdk/client-account` (github.com/aws/aws-sdk-js-v3) | `3.1160.0` | Apache-2.0 | `ListRegions`: the regions an AWS account has enabled. |
+| `@aws-sdk/client-bedrock` | `3.1160.0` | Apache-2.0 | Bedrock custom and imported models, provisioned throughput, guardrails, invocation-logging setting. |
+| `@aws-sdk/client-bedrock-agent` | `3.1160.0` | Apache-2.0 | Bedrock agents and knowledge bases. |
+| `@aws-sdk/client-cloudtrail` | `3.1160.0` | Apache-2.0 | `LookupEvents` for Bedrock invocation events. |
+| `@aws-sdk/client-organizations` | `3.1160.0` | Apache-2.0 | `ListAccounts` (paginated, read-only) for an organisation-level AWS source, called from the management or delegated-admin account (SD2b). |
+| `@aws-sdk/client-s3` | `3.1160.0` | Apache-2.0 | Optional read of the customer's CloudTrail bucket for Bedrock data events. |
+| `@aws-sdk/client-sagemaker` | `3.1160.0` | Apache-2.0 | SageMaker endpoints and models. |
+| `@aws-sdk/client-sts` | `3.1160.0` | Apache-2.0 | `GetCallerIdentity`: the credential's account must equal the source's `accountId` before anything is read. |
+| `@aws-sdk/credential-providers` | `3.1160.0` | Apache-2.0 | `fromWebToken` (AssumeRoleWithWebIdentity) and `fromTemporaryCredentials` (AssumeRole with external id), each given the guarded request handler. |
 | `@smithy/fetch-http-handler` (github.com/smithy-lang/smithy-typescript) | `5.8.0` | Apache-2.0 | The AWS SDK's own fetch handler; its `customFetch` option is how every AWS call goes through the guarded fetch. |
 | `@smithy/types` | `4.19.0` | Apache-2.0 | AWS credential identity types. |
-| `@azure/identity` (github.com/Azure/azure-sdk-for-js) | `4.14.0` | MIT | `ClientAssertionCredential` (federated) and `ClientSecretCredential` (static relaxation), built with the guarded `HttpClient`. |
+| `@azure/identity` (github.com/Azure/azure-sdk-for-js) | `4.14.1` | MIT | `ClientAssertionCredential` (federated) and `ClientSecretCredential` (static relaxation), built with the guarded `HttpClient`. |
 | `@azure/core-rest-pipeline` | `1.25.0` | MIT | The `HttpClient` interface our guarded adapter implements. |
 | `@azure/core-auth` | `1.11.0` | MIT | `TokenCredential` type. |
 | `@azure/arm-resourcegraph` | `5.0.0` | MIT | Resource Graph queries for Cognitive Services accounts, deployments and ML workspaces. |
@@ -34,8 +34,8 @@ runtime. They reach only the cloud API hosts an admin allow-lists, through the g
 | `@google-cloud/service-usage` (github.com/googleapis/google-cloud-node) | `5.2.0` | Apache-2.0 | `batchGetServices`: is the Vertex AI or Generative Language API enabled. REST fallback mode. |
 | `@google-cloud/asset` | `7.2.0` | Apache-2.0 | `searchAllResources` for Vertex endpoints, models and index endpoints. REST fallback mode. |
 | `@google-cloud/resource-manager` | `7.2.0` | Apache-2.0 | `getIamPolicy`, read only for its audit configuration (are Data Access logs on). REST fallback mode. |
-| `google-auth-library` (github.com/googleapis/google-auth-library-nodejs) | `11.3.1` | Apache-2.0 | `IdentityPoolClient` (workload identity federation with a programmatic subject token) and `JWT` (service-account key relaxation); its Gaxios transporter carries the guarded fetch. Also used directly for the Logging `entries:list` REST call. |
-| `zod` (github.com/colinhacks/zod) | `4.6.6` | MIT | Credential input schemas. |
+| `google-auth-library` (github.com/googleapis/google-auth-library-nodejs) | `11.3.2` | Apache-2.0 | `IdentityPoolClient` (workload identity federation with a programmatic subject token) and `JWT` (service-account key relaxation); its Gaxios transporter carries the guarded fetch. Also used directly for the Logging `entries:list` REST call. |
+| `zod` (github.com/colinhacks/zod) | `4.6.7` | MIT | Credential input schemas. |
 
 ## Notable transitive dependencies
 
@@ -51,7 +51,7 @@ runtime. They reach only the cloud API hosts an admin allow-lists, through the g
 
 | Component | Version | Licence | Used for |
 |---|---|---|---|
-| `@types/node` | `26.1.1` | MIT | Node.js type definitions; build-only. |
+| `@types/node` | `26.6.6` | MIT | Node.js type definitions; build-only. |
 | `vitest` | `4.1.11` | MIT | Test runner; test-only. |
 
 ## What we wrote instead of reusing (ADR-0176 rule 4)
@@ -62,6 +62,6 @@ runtime. They reach only the cloud API hosts an admin allow-lists, through the g
 - **Credential memoisation for AWS** (`memoizeCredentials`, `src/aws.ts`): smithy's `memoize` lives
   under an internal, legacy export path that has moved between minor versions; a stable public equivalent does not
   exist.
-- **The STS transporter fix** (`gcpAuthClient`, `src/gcp.ts`): `google-auth-library` 11.3.1 builds the external
+- **The STS transporter fix** (`gcpAuthClient`, `src/gcp.ts`): `google-auth-library` 11.3.1 (and still 11.3.2, re-read 2026-11-06) builds the external
   account client's `StsCredentials` without the transporter it was given, so the token exchange would bypass the
   guard. We re-point it and fail closed if the internal shape changes. To be reported upstream.
