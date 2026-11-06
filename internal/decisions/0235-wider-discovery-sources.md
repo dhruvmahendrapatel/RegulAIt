@@ -5,9 +5,9 @@
 - **Extends**: [ADR-0195](0195-shadow-ai-active-discovery.md) (active discovery; its framework, credentials, worker,
   pseudonyms and finding lifecycle are reused unchanged). Its follow-up "discovery of SaaS OAuth grants through IdP
   APIs" is delivered here for one identity provider.
-- **Migration**: 0268 (`0268_discovery_wider_sources.sql`)
+- **Migration**: 0269 (`0269_discovery_wider_sources.sql`)
 - **Renumbered on landing (2026-11-06)**: drafted as ADR-0218 and migration 0238. ADR-0218 went to the themes lane
-  (#622) and ADR-0230 to ADR-0233 are taken by open PRs; 0238 sat below main's migration watermark, and 0259–0265 are
+  (#622) and ADR-0230 to ADR-0233 are taken by open PRs; 0238 sat below main's migration watermark, and 0259–0265 and 0268 are
   reserved by other open lanes, so both moved
   (CONTRIBUTING_PARALLEL_SESSIONS §4.1).
 - **Backlog item**: [PENDING.md](../product/PENDING.md) P9

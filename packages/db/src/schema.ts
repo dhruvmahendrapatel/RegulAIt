@@ -7461,7 +7461,7 @@ export const discoverySettings = pgTable(
     id: integer("id").primaryKey().default(1),
     credentialWarningAgeDays: integer("credential_warning_age_days").notNull().default(90),
     endpointRetentionDays: integer("endpoint_retention_days").notNull().default(90),
-    // ADR-0235: the wider-source family switches, all off (migration 0268)
+    // ADR-0235: the wider-source family switches, all off (migration 0269)
     saasSourcesEnabled: boolean("saas_sources_enabled").notNull().default(false),
     identitySourcesEnabled: boolean("identity_sources_enabled").notNull().default(false),
     mlPlatformSourcesEnabled: boolean("ml_platform_sources_enabled").notNull().default(false),
