@@ -5460,6 +5460,14 @@ user or server that an approval rule is scoped to (cascade delete). **Amendment 
 match re-owes every takeover; option (b) (pool intersection) is the recorded long-term simplification. Open follow-ups: a
 rule-editor warning for shadowed tightenings and equal-specificity overlaps, and option (b).
 
+**ADR-0232 (design, 2026-11-06, Proposed): an agent pipeline builder with SAP CPI-style features (owner request 2026-11-06).**
+- **Where it lives:** the Agent builder suite gains Pipelines, Pipeline packages and Pipeline runs (`/builder/pipelines…`); Agent usage stays last.
+- **Model:** a versioned declarative JSON/YAML pipeline (content hash excludes the canvas layout) validated by a new pure `pipeline-kernel`; every step calls an existing governed primitive as the run actor, re-evaluated per step, inside the user's entitlements and the run budget (pillar 7 ceilings reused), with cost per step (new `pipeline_run_id`/`pipeline_step_id` on usage rows) and the optimiser applied.
+- **Safety:** drafts can only be test-run by their author; deployment needs a hash-bound approval; write steps approve-first; no raw HTTP step; secrets only as `secretRef`; `pipelines_enabled` off by default.
+- **Open source:** `@xyflow/react` + dagre for the canvas, pg-boss for the step queue (pending a dbguard migration check), croner for cron; no full engine fits (licence or a second stateful platform).
+- **Parity:** 55 CPI capabilities, 28 mapped, 24 adapted, 3 N/A. Twelve slices, slice 1 is create, draw, save, run one agent step, see the run.
+- **Open:** eight owner questions (ADR §Open questions), the first being the run-as identity for triggered runs.
+
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
 (b) standing policy for future scaffolds recorded (ADR-0006, no implementation yet — nothing to
