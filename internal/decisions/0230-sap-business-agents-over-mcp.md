@@ -76,6 +76,14 @@ gets the same governance) and keeps SAP-specific code out of the gateway.
     number on success, and timestamps.
   - **Write order:** the row is inserted as `pending` **before** the POST. A concurrent second call loses the insert and
     gets `idempotency_in_progress`.
+  - **A stale `pending` row:** this happens if the server dies between the insert and SAP's answer. A row older than
+    the call timeout plus a margin is not left in `idempotency_in_progress` forever. The next call with that key, or
+    a sweeper, runs the full-key read-back. A full-key match moves the row to `succeeded`. Anything else moves it to
+    `needs_reconciliation`, and nothing is posted again.
+  - **Squatting:** a principal who learns someone else's key could otherwise claim it first. To prevent that, the
+    gateway never sends the caller's key as is. It derives the stored key as HMAC-SHA256(per-server secret, tenant ‖
+    pairwise `sub` ‖ caller key). Another principal cannot produce the same stored key, so squatting does not work.
+    The `sub` comparison stays as a second check.
   - **Retention:** 30 days by default. An operator can shorten it, but never below 24 hours. Expired rows are deleted;
     a key presented after expiry is treated as new, and the gateway's approval binding still applies.
   - **Contents:** no payload body, only its hash.
@@ -111,17 +119,38 @@ that claim is released, and who issues the token SAP trusts.
 
 - **Who issues the token SAP trusts. Two options, in order of preference:**
   - **(a) Preferred: the person's own corporate IdP token.** The customer's IdP is already trusted by the BTP
-    subaccount or IAS. RegulAIt obtains a token for the person from that IdP, either kept from sign-in or by a token
-    exchange at the IdP, with its audience set to the SAP destination. It passes the token to the ABAP MCP server,
+    subaccount or IAS. RegulAIt obtains a fresh token for the person from that IdP per call (see "where the
+    token comes from" below), with its audience set to the SAP destination. It passes the token to the ABAP MCP server,
     which presents it to the `OAuth2JWTBearer` destination. RegulAIt then mints nothing that SAP trusts.
     Controls on option (a), because the token is usable at SAP without the gateway:
     - **Timing:** the token is obtained or exchanged **per call**, and only **after** the allow-list, approval,
-      rate-limit and budget checks pass. Under the preferred design it is never kept from sign-in.
+      rate-limit and budget checks pass. It is never kept from sign-in.
     - **Lifetime and audience:** the shortest lifetime the IdP allows, with the audience pinned to the one SAP target.
-    - **Storage:** if a customer's IdP forces keeping a refresh or IdP token, it is stored with the data-key envelope
-      (`CIPHERTEXT_COLUMNS`) and never returned.
+    - **Storage:** by default nothing is kept. A kept refresh token exists only under the off-by-default
+      `subject_token_retention` relaxation below.
     - **Logging:** the token is never logged, audited or passed to the model.
     - **The MCP server:** it uses the token only for the one call it came with, never persists it, and never reuses it.
+    - **Where the token comes from when the approved call runs.** RegulAIt does not keep IdP tokens today (`auth.ts`
+      keeps only the id_token claims), and an approved call can run long after sign-in. There are three sources, in
+      this order:
+      1. **Default: the person's live session.** A call that waited for approval does not run on its own. Once it is
+         approved, it waits in `approved_pending_execution` until the requester confirms it. The confirmation includes
+         a fresh authorisation at their IdP (an OIDC step-up with `max_age`, audience the one SAP target). That gives a
+         short-lived token for this one call, and nothing from it is kept. A call that needs no approval uses the same
+         fresh authorisation inside the person's request. If the person does not confirm within the approval's
+         validity, the call expires and is audited.
+      2. **A kept refresh token, an explicit relaxation (S6).** This is the per-connection setting
+         `subject_token_retention`. It defaults to `none`, which means no IdP or refresh token is ever kept. Setting it
+         to `refresh_token` is a `settings_relax` step-up and audited. When it is on:
+         - the refresh token is requested for the one SAP audience only;
+         - it is stored with the data-key envelope (`CIPHERTEXT_COLUMNS`) and never returned;
+         - it has an absolute lifetime of at most 8 hours from the person's sign-in, whatever the IdP allows;
+         - it is revoked at the IdP (RFC 7009, where supported) and deleted when the person's grant, the connection
+           or the person is removed, and when the setting is turned off;
+         - every use is audited, but never the token itself.
+      3. **Option (b) below**, only where the customer's IdP cannot serve (1).
+    
+      "Kept from sign-in" is not a source.
   - **(b) Fallback: a RegulAIt assertion that SAP trusts.** This is allowed only where (a) is impossible, and only with
     the controls in the threat model:
     - a **dedicated signing key per SAP trust**, which is not the general ADR-0210 key, with its own issuer path
@@ -255,9 +284,9 @@ return an empty `to_Item`, so the tool reads back after creating. This is confir
 
 | Slice | Repo | What | Tests |
 |---|---|---|---|
-| A0 | regulAIt-ABAP | Land #78/#79 after the BTP smoke test. | The repo's own suite plus the smoke-test record. |
+| A0 | regulAIt-ABAP | Land #78/#79 after the BTP smoke test. Confirm against the smoke-test system which subject-token source the destination accepts: the person's own IdP token from a fresh step-up (the default), a kept refresh token, or option (b). Also confirm whether SAP rejects a replayed `jti`. | The repo's own suite plus the smoke-test record, with the subject-token result written into this ADR as an addendum. |
 | A1 | regulAIt-ABAP | `create_sales_order` on the plugin framework: schema, CSRF, Destination-service principal propagation (odata2ts plus `oauth4webapi`, or the SAP Cloud SDK if open question 7 allows it), the durable idempotency store and full-key read-back, result projection, refusal on a technical-user destination, refusal without a released `sap_user`. | Unit tests against a recorded OData v2 fake: create; duplicate key under the same principal returns the original result; **the same key under another principal is refused and audited**; a key reused with other fields; two concurrent calls with one key; timeout then full-key read-back; timeout without a full-key match goes to `needs_reconciliation` and is not posted again; CSRF expiry; technical-user refusal. |
-| A2 | RegulAIt | `mcp_servers.system_class` and `identity_release`, and `rate_limits.write_only` (one migration, renumbered at merge per M-108). The seeded defaults: approval rule, write-only rate limit, project requirement. Relaxations are `settings_relax` step-ups. Under option (b), the dedicated SAP-trust key, its issuer path, and `exp` 60 seconds or less with a `jti`. | Gateway tests: seeding in one transaction; a write-only limit covers a write tool added after seeding and ignores read tools; each relaxation, and releasing an identity attribute, needs a step-up and is audited; a url move resets `identity_release`; an unattributed SAP write is refused, audited and not costed; the SAP-trust key never signs ADR-0210 assertions, and the reverse. |
+| A2 | RegulAIt | `mcp_servers.system_class`, `identity_release` and `subject_token_retention` (default `none`), the `approved_pending_execution` state with confirm-by-fresh-IdP-step-up, the HMAC-derived idempotency key, and `rate_limits.write_only` (one migration, renumbered at merge per M-108). The seeded defaults: approval rule, write-only rate limit, project requirement. Relaxations are `settings_relax` step-ups. Under option (b), the dedicated SAP-trust key, its issuer path, and `exp` 60 seconds or less with a `jti`. | Gateway tests: seeding in one transaction; a write-only limit covers a write tool added after seeding and ignores read tools; each relaxation, and releasing an identity attribute, needs a step-up and is audited; a url move resets `identity_release`; an approved call does not run until the requester confirms with a fresh step-up, and it expires if unconfirmed; with `subject_token_retention = none` no IdP or refresh token is ever stored; turning retention on needs a step-up, and removing the grant, the connection or the person deletes the kept token; two principals with the same caller key get different stored keys; an unattributed SAP write is refused, audited and not costed; the SAP-trust key never signs ADR-0210 assertions, and the reverse. |
 | A3 | RegulAIt | Audit and usage detail for business tools (service, entity set, idempotency key, document number, `replayed`), and the idempotency key bound into the approval payload. | A key reused with other fields is refused; an approval for one key cannot authorise another; a replay is not charged. |
 | A4 | RegulAIt | End-to-end: the ABAP MCP server image against a fake SAP endpoint in CI, through the real gateway with an approval quorum of 2. | `zz-p19-sap-sales-order.test.ts`. |
 | A5 | Both | The descriptor pattern (section 3), with a second tool (a read: `get_sales_order`) to prove it. | Descriptor validation tests; read tool needs no approval but is still allow-listed and rate-limited. |
@@ -272,7 +301,9 @@ return an empty `to_Item`, so the tool reads back after creating. This is confir
 | Confused deputy: the call runs with more SAP rights than the person has | Principal propagation; technical-user destinations refused for writes; SAP authorisation objects still apply. |
 | Token theft between gateway and server | ES256 assertion, short-lived, audience-bound to the server; sent only through the egress guard to the registered origin. |
 | **The RegulAIt signing key becomes an SAP-trusted IdP (option (b))**: a key compromise, or a gateway bug, could mint any SAP business user the mapping covers, beyond the gateway's own grants | Option (a) is preferred, so RegulAIt mints nothing SAP trusts. Under (b): a dedicated key per SAP trust, never the general ADR-0210 key; its own issuer; `aud` pinned to the one SAP target; `exp` 60 seconds or less; a `jti` with replay rejection; rotation and revocation through key management; IAS or the destination's trust restricted to the user group that may be asserted; every assertion minted is audited. |
-| **The person's own IdP token (option (a)) leaks** from the MCP server, a log or transit, and is used at SAP directly, bypassing approval, rate limit and budget | It is obtained per call and only after the gateway's checks pass; it has the shortest lifetime the IdP allows and an audience pinned to the one SAP target; it is never logged or audited; any token that must be kept is stored with the data-key envelope; the MCP server never persists or reuses it. |
+| **The person's own IdP token (option (a)) leaks** from the MCP server, a log or transit, and is used at SAP directly, bypassing approval, rate limit and budget | It is obtained per call and only after the gateway's checks pass; it has the shortest lifetime the IdP allows and an audience pinned to the one SAP target; it is never logged or audited; by default nothing is kept, and an approved call runs only after the person confirms it with a fresh IdP step-up; the MCP server never persists or reuses it. |
+| **A kept refresh token (`subject_token_retention = refresh_token`)** is a long-lived credential SAP honours without RegulAIt | Off by default; turning it on is a step-up and audited; scoped to the one SAP audience; envelope-encrypted and never returned; absolute lifetime of at most 8 hours; revoked and deleted when the grant, the connection or the person is removed, or the setting is turned off; every use audited. |
+| Idempotency key squatting | The stored key is an HMAC of tenant, pairwise `sub` and the caller's key, so another principal cannot claim it; the `sub` comparison remains as a second check. |
 | Cross-user replay through the idempotency store | Uniqueness is on (tenant, tool, key), and `sub` is stored and compared on every hit. A hit under another principal is refused (`idempotency_key_foreign`), audited, and returns nothing. |
 | Identity disclosure to the MCP server | `identity_release` is off by default; releasing an attribute is a step-up and audited; a url move resets it. |
 | A duplicate order after an unknown outcome | No blind re-post. Only a read-back that matches the full key counts as "created"; anything else goes to `needs_reconciliation` for a person. |
@@ -290,7 +321,12 @@ return an empty `to_Item`, so the tool reads back after creating. This is confir
 - **Rate limiting**: seeded per-tool limit on SAP writes.
 - **API secrets server side only**: SAP credentials live in the BTP Destination service, never in RegulAIt or the
   model's context.
-- **JWT pinned algorithm and audience**: the ES256 assertion, `aud` the server.
+- **JWT pinned algorithm and audience**:
+  - gateway to MCP server: the ADR-0210 ES256 assertion, with `aud` set to the server;
+  - option (a): the person's IdP token, with its audience pinned to the one SAP target;
+  - option (b): ES256 with a **dedicated per-SAP-trust key, never the ADR-0210 key**, `aud` pinned to the one SAP
+    target, `exp` of 60 seconds or less and a `jti`.
+- **No auth tokens at rest by default**: `subject_token_retention` defaults to `none`.
 - **SSRF through the guarded fetch**: gateway to server; the server uses named destinations only.
 - **No sensitive data in logs**: audit carries ids and the document number, not prices or addresses.
 - **CSRF on state-changing requests**: SAP's own CSRF token is handled per session.

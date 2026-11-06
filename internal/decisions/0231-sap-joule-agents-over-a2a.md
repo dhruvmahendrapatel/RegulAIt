@@ -149,14 +149,35 @@ envelope, listed in `CIPHERTEXT_COLUMNS`, never returned, last four characters o
   Common to both:
   - The subject token (the `assertion`, or `subject_token`) is a short-lived assertion for the person, issued by the identity provider SAP trusts (the
     customer's IdP, federated with SAP Cloud Identity Services). Two sources, chosen per connection: (a) the person's
-    own IdP token, kept from their RegulAIt sign-in or obtained by a token exchange at that IdP, when the IdP is the one
-    SAP trusts. **This is preferred**, because RegulAIt then mints nothing SAP trusts. Controls on (a):
+    own IdP token, obtained fresh per call (see "where the token comes from" below), when the IdP is the one SAP
+    trusts. **This is preferred**, because RegulAIt then mints nothing SAP trusts. Controls on (a):
     - **Timing:** the subject token is obtained or exchanged per call, and only after every
       `executeGovernedA2aCall` check (grant, ceiling, approval, budget, PII, egress) passes.
     - **Lifetime and audience:** the shortest lifetime the IdP allows, with the audience pinned to the IAS tenant.
-    - **Storage:** an IdP or refresh token that must be kept is stored with the data-key envelope
-      (`CIPHERTEXT_COLUMNS`) and never returned.
+    - **Storage:** by default nothing is kept. It is never kept from sign-in. A kept refresh token exists only under
+      the off-by-default `subject_token_retention` relaxation below.
     - **Logging:** the token is never logged, audited or passed to the model.
+    - **Where the token comes from when the approved call runs.** RegulAIt does not keep IdP tokens today (`auth.ts`
+      keeps only the id_token claims), and an approved call can run long after sign-in. There are three sources, in
+      this order:
+      1. **Default: the person's live session.** A call that waited for approval does not run on its own. Once it is
+         approved, it waits in `approved_pending_execution` until the requester confirms it. The confirmation includes
+         a fresh authorisation at their IdP (an OIDC step-up with `max_age`, audience the IAS tenant). That gives a
+         short-lived token for this one call, and nothing from it is kept. A call that needs no approval uses the same
+         fresh authorisation inside the person's request. If the person does not confirm within the approval's
+         validity, the call expires and is audited.
+      2. **A kept refresh token, an explicit relaxation (S6).** This is the per-connection setting
+         `subject_token_retention`. It defaults to `none`, which means no IdP or refresh token is ever kept. Setting it
+         to `refresh_token` is a `settings_relax` step-up and audited. When it is on:
+         - the refresh token is requested for the one SAP audience only;
+         - it is stored with the data-key envelope (`CIPHERTEXT_COLUMNS`) and never returned;
+         - it has an absolute lifetime of at most 8 hours from the person's sign-in, whatever the IdP allows;
+         - it is revoked at the IdP (RFC 7009, where supported) and deleted when the person's grant, the connection
+           or the person is removed, and when the setting is turned off;
+         - every use is audited, but never the token itself.
+      3. **Option (b) below**, only where the customer's IdP cannot serve (1).
+    
+      "Kept from sign-in" is not a source.
 
     Or (b), only where (a) is
     impossible: a RegulAIt-signed ES256 assertion that the customer's IAS trusts as a corporate IdP, with these
@@ -173,8 +194,10 @@ envelope, listed in `CIPHERTEXT_COLUMNS`, never returned, last four characters o
     as weaker in the UI). These are the three methods SAP documents.
   - Under RFC 8693 only, `actor_token` is RegulAIt's agent identity, matching ADR-0188's actor chain. Under jwt-bearer
     the actor is recorded in our own audit only.
-  - The exchanged token is cached per (person, agent) until shortly before expiry, never shared across people, and
-    never cached across an authorisation decision: a revoked grant stops the next call even with a live token.
+  - The exchanged token is cached **in process memory only, per replica**, keyed per (person, agent), until shortly
+    before it expires. It is never written to the database or a shared cache, and it is lost on restart. It is never
+    shared across people and never reused across an authorisation decision: the grant is re-checked before every use,
+    so a revoked grant stops the next call even while a token is still live.
 - **Library**: `oauth4webapi` 3.8.8, already pinned in the gateway (MIT), does client credentials and the generic
   token-exchange grant. Both grants are generic grant requests. No new dependency.
 - A call whose exchange fails is refused, audited (`a2a-user-token-failed`, with SAP's error code but not its
@@ -245,9 +268,9 @@ ships it.
 
 | Slice | What | Tests |
 |---|---|---|
-| B0 | Spike (no merge): run the SDK's v0.3 REST compatibility transport against SAP's gateway. Confirm, against a trial tenant: SAP's ARD paths, the card shape, the jwt-bearer parameters (`resource`, client authentication) and what the subject token can be. Output: an addendum to this ADR. | — |
+| B0 | Spike (no merge): run the SDK's v0.3 REST compatibility transport against SAP's gateway. Confirm, against a trial tenant: SAP's ARD paths, the card shape, the jwt-bearer parameters (`resource`, client authentication) and what the subject token can be: a fresh IdP step-up token (the default), a kept refresh token, or option (b). Also confirm whether IAS rejects a replayed `jti`. Output: an addendum to this ADR. | — |
 | B1 | HTTP+JSON binding in `a2a.ts`: accept `HTTP+JSON` interfaces on the registered origin; the SDK's `RestTransportFactory`, and `LegacyRestTransport` for 0.3.x cards; legacy-card detection and conversion (`isLegacyAgentCard`, `parseLegacyAgentCard`), storing the normalised card, `card_protocol_version` and the raw-card hash; protocol-version check. | The real-agent loopback test extended with the SDK's REST server half: JSON-RPC and HTTP+JSON both work; **a legacy 0.3 card registers and is called through `LegacyRestTransport`**; a legacy card whose `url` or `additionalInterfaces` point to another origin is refused; cross-origin HTTP+JSON refused; redirect refused; unsupported major version refused. |
-| B2 | Credential kinds `oauth_client_credentials` and `oauth_user_token` (grant `jwt_bearer` or `token_exchange`) (migration, renumbered at merge per M-108): storage, admin routes, step-ups, the per-call exchange with `oauth4webapi`, per (person, agent) cache, refusal audited and not costed. | A fake token endpoint for both grants: success; failure refused and audited; token never in audit or logs; cache keyed per person; grant revocation stops the next call with a live token. |
+| B2 | `a2a_gateway_connections.subject_token_retention` (default `none`) and the confirm-by-fresh-IdP-step-up execution of an approved call. Credential kinds `oauth_client_credentials` and `oauth_user_token` (grant `jwt_bearer` or `token_exchange`) (migration, renumbered at merge per M-108): storage, admin routes, step-ups, the per-call exchange with `oauth4webapi`, per (person, agent) cache, refusal audited and not costed. | A fake token endpoint for both grants. With retention `none`, no IdP or refresh token is stored. An approved call runs only after a fresh step-up, and expires if it is not confirmed. Turning retention on needs a step-up. A kept token is deleted when the grant, the connection or the person is removed. The exchanged-token cache is in-process only. Then: success; failure refused and audited; token never in audit or logs; cache keyed per person; grant revocation stops the next call with a live token. |
 | B3 | `a2a_gateway_connections`, `sap_agent_gateway_enabled`, ARD import and refresh (admin-only, step-up, audited), `pending_card` and acceptance. | A fake catalogue: import lists only ACL-visible cards; nothing is auto-registered; **a changed card is held as pending, and calls keep using the stored card until an admin accepts it**; accepting a widened card needs a step-up; a new skill is not callable until it is granted; a removed skill stops being callable at once; a removed card is disabled; oversize or cross-origin cards are refused. |
 | B4 | `requires_approval` for gateway agents (default true), message bound into the approval payload. A per-agent A2A rate-limit bucket (moved here from the follow-ups because gateway agents can write in SAP): seeded at 30 calls per person per hour for `sap_agent_gateway` agents, and raising it is a relaxation. | Call pauses for approval; approval for one message does not authorise another; the 31st call in an hour is refused, audited and not costed. |
 | B5 | Admin UI: a "Connect SAP Agent Gateway" panel on the Remote agents tab, the import picker, token-kind display; runbook section for the customer setup. | Component tests; entry bundle stays under its ceiling (ADR-0219 placement lesson). |
@@ -261,7 +284,8 @@ ships it.
 | Token leakage | Tokens never stored in plain text, never returned, never logged; sent only to the registered origin through the guarded fetch; short-lived, audience-bound. |
 | Cross-person token reuse | Cache keyed by (person, agent); grant checked before every use. |
 | A changed card redirects our calls or silently widens skills | Interfaces only on the registered origin. A refreshed card is held as pending, and the stored card stays in use until an admin accepts the change (a step-up when it widens). New skills need a grant. |
-| **The person's own IdP token (option (a)) leaks** and is used at SAP directly, bypassing approval, rate limit and budget | It is obtained per call and only after every gateway check passes; it has the shortest lifetime with an audience pinned to the IAS tenant; it is never logged or audited; any token that must be kept is stored with the data-key envelope and never returned. |
+| **The person's own IdP token (option (a)) leaks** and is used at SAP directly, bypassing approval, rate limit and budget | It is obtained per call and only after every gateway check passes; it has the shortest lifetime with an audience pinned to the IAS tenant; it is never logged or audited; by default nothing is kept, and an approved call runs only after the person confirms it with a fresh IdP step-up. |
+| **A kept refresh token (`subject_token_retention = refresh_token`)** is a long-lived credential SAP honours without RegulAIt | Off by default; turning it on is a step-up and audited; scoped to the one SAP audience; envelope-encrypted and never returned; absolute lifetime of at most 8 hours; revoked and deleted when the grant, the connection or the person is removed, or the setting is turned off; every use audited. |
 | **The RegulAIt signing key becomes an IAS-trusted IdP (subject-token option (b))**: a key compromise or a gateway bug could mint any SAP user that IAS maps | Option (a) is preferred. Under (b): a dedicated key per SAP trust, never the general ADR-0210 key; its own issuer; `aud` pinned to the IAS tenant; `exp` 60 seconds or less; a `jti` with replay rejection; rotation and revocation; IAS restricted to the user group that may be asserted; every assertion minted is audited. |
 | Catalogue widening through an SAP ACL change | Admin-only import; nothing auto-registered. |
 | SSRF through the gateway URL or token endpoint | Egress decision at write and call time; guarded fetch; redirects refused. |
