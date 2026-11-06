@@ -89,7 +89,10 @@ export type GroupReconcileResult = {
   /** roles implied by currently-mapped, currently-asserted groups */
   impliedRoleIds: string[];
   added: Array<{ roleId: string; roleName: string | null; viaGroups: string[] }>;
-  removed: Array<{ roleId: string; roleName: string | null }>;
+  /** issue #668: `approverPoolShift` when the removal moved who signs for the user's calls to a wider pool. A removal
+   * is never withheld (revoking access the IdP withdrew comes first); the mapping delete that caused it was the
+   * step-up-gated act, and this records the shift on the reconciliation's audit row. */
+  removed: Array<{ roleId: string; roleName: string | null; approverPoolShift?: Record<string, unknown> }>;
   /** ADR-0186 decision 29: implied roles NOT granted because they are approver roles */
   withheld: Array<{ roleId: string; roleName: string | null; viaGroups: string[] }>;
 };
@@ -285,16 +288,26 @@ export async function reconcileGroupRoles(
   }
   const removed: GroupReconcileResult["removed"] = [];
   for (const roleId of toRemove) {
-    await db
-      .delete(roleAssignments)
-      .where(
-        and(
-          eq(roleAssignments.userId, userId),
-          eq(roleAssignments.roleId, roleId),
-          eq(roleAssignments.origin, "group"),
-        ),
-      );
-    removed.push({ roleId, roleName: nameById.get(roleId) ?? null });
+    const shift = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      // decided under the routing lock, before the row goes (a direct assignment of the same role keeps it held)
+      const [direct] = await tx
+        .select({ id: roleAssignments.id })
+        .from(roleAssignments)
+        .where(and(eq(roleAssignments.userId, userId), eq(roleAssignments.roleId, roleId), eq(roleAssignments.origin, "direct")));
+      const facts = direct ? null : await approverPoolShiftFacts(tx, { change: "member-remove", objectType: "role", objectId: roleId, userId });
+      await tx
+        .delete(roleAssignments)
+        .where(
+          and(
+            eq(roleAssignments.userId, userId),
+            eq(roleAssignments.roleId, roleId),
+            eq(roleAssignments.origin, "group"),
+          ),
+        );
+      return facts;
+    });
+    removed.push({ roleId, roleName: nameById.get(roleId) ?? null, ...(shift ? { approverPoolShift: shift } : {}) });
   }
 
   await auditReconciliation(db, userId, source, event, {

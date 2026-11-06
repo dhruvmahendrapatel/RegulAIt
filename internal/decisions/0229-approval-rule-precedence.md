@@ -279,9 +279,13 @@ Closes the round-4 "known gap" above and the round-5/6 non-blocking finding file
     (revoking access comes first); the mapping delete that causes them is the attested act.
 
 **Known limits.** Conservative facts may ask for a step-up a third, more specific rule makes unnecessary, and a member
-join re-asks for a takeover the rule's create already attested under N5. Both over-ask; neither under-asks. A SoD
-override that executes a role assignment on approval (`sod.ts`) does not run this check; recorded as an open question
-on the PR. Option (b), the intersection of pools, stays the long-term simplification.
+join re-asks for a takeover the rule's create already attested under N5. Both over-ask; neither under-asks. An
+approved SoD override that assigns a role (`sod.ts` `executeOverriddenMint`) is refused, under the approver-role lock
+and then the routing lock, when the role is an approver role or joining it moves a pool: an `approval_decide` is not the
+`settings_relax` step-up a direct assignment needs. The decision rolls back, the refusal is audited
+(`sod-override-role-refused`) and answered 409 `sod_override_role_needs_step_up`; an admin assigns the role directly
+with the step-up (secure by default, ADR-0180; master's direction on #675). An IdP reconciler removal is still never
+withheld, and its reconciliation audit row now records the `approverPoolShift` facts of every removal that moved a pool. Option (b), the intersection of pools, stays the long-term simplification.
 
 **Tests.** `zz-668-approver-pool-shift.test.ts`: role and team delete (refused from an API key and an ungranted
 session, bound to the facts, admitted with the grant, audited); user (subject and named approver) and MCP server

@@ -13,11 +13,13 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createHash, randomBytes } from "node:crypto";
-import { approvalRules, auditLog, authSessions, createDb, eq, mcpServers, ORG_SETTINGS_ID, roleAssignments, roles, runMigrations, sql, teamMembers, teams, type Db } from "@regulait/db";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { approvalRules, approvals, auditLog, authSessions, createDb, eq, mcpServers, ORG_SETTINGS_ID, roleAssignments, roles, runMigrations, sodOverrideRequests, sodRules, sql, teamMembers, teams, type Db } from "@regulait/db";
 import { STEP_UP_HEADER } from "@regulait/shared";
 import { approverPoolShiftFacts, grantJitDefaultRole, sameApproverPoolShift } from "./approval-pool.js";
 import { buildApp } from "./app.js";
+import { reconcileGroupRoles } from "./group-roles.js";
+import { applySodOverrideDecision, SodRoleMintNeedsStepUpError } from "./sod.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
@@ -406,5 +408,55 @@ describe("issue #668: fail closed", () => {
     expect(sameApproverPoolShift(f, structuredClone(f))).toBe(true);
     expect(sameApproverPoolShift(f, null)).toBe(false);
     expect(sameApproverPoolShift(f, { ...f, values: { approverPoolTakeovers: [] } })).toBe(false);
+  });
+
+  it("an SoD override cannot assign a role that moves the pool: the decision refuses and mints nothing", async () => {
+    await withFleet(async (fleetId) => {
+      const roleId = await mkRole("sod");
+      const ruleId = await groupRule("role", roleId);
+      const [rule] = await db
+        .insert(sodRules)
+        .values({ name: `p668 sod ${RUN}`, reason: "p668 fixture", aKind: "agent", aObjectId: randomUUID(), bKind: "agent", bObjectId: randomUUID() })
+        .returning({ id: sodRules.id });
+      const [approval] = await db
+        .insert(approvals)
+        .values({ userId: U.caller, objectType: "sod_override", approverUserId: admin.id, stageId: `p668-sod-${RUN}` })
+        .returning({ id: approvals.id });
+      await db.insert(sodOverrideRequests).values({
+        ruleId: rule!.id,
+        mintKind: "role_assignment",
+        mintPayload: { userId: U.member, roleId },
+        conflictDetail: {},
+        label: "p668 role assignment",
+        requestedByUserId: U.caller,
+        approvalId: approval!.id,
+      });
+      const refused = await db
+        .transaction((tx) => applySodOverrideDecision(tx as unknown as Db, approval!, "approved", admin.id))
+        .then(() => null, (err: unknown) => err);
+      expect(refused).toBeInstanceOf(SodRoleMintNeedsStepUpError);
+      expect((refused as SodRoleMintNeedsStepUpError).facts).toMatchObject({
+        values: { approverPoolTakeovers: [{ ruleId, outranksApprovalRules: [fleetId] }] },
+      });
+      expect(await db.select().from(roleAssignments).where(eq(roleAssignments.roleId, roleId))).toHaveLength(0);
+      const [req] = await db.select().from(sodOverrideRequests).where(eq(sodOverrideRequests.approvalId, approval!.id));
+      expect(req!.status).toBe("pending");
+    });
+  });
+
+  it("an IdP removal is never withheld, and the reconciliation records the pool shift it caused", async () => {
+    await withFleet(async (fleetId) => {
+      const roleId = await mkRole("idp");
+      const ruleId = await groupRule("role", roleId);
+      await db.insert(roleAssignments).values({ userId: U.member, roleId, origin: "group" });
+      const out = await reconcileGroupRoles(db, U.member, "oidc", [], { kind: "oidc-login", actor: "p668" });
+      expect(out.removed).toEqual([
+        expect.objectContaining({
+          roleId,
+          approverPoolShift: expect.objectContaining({ change: "member-remove", values: { approverPoolTakeovers: [{ ruleId, outrankedByApprovalRules: [fleetId] }] } }),
+        }),
+      ]);
+      expect(await db.select().from(roleAssignments).where(eq(roleAssignments.roleId, roleId))).toHaveLength(0);
+    });
   });
 });

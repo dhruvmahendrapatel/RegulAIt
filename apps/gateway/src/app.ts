@@ -239,9 +239,12 @@ import { registerAccessRecommendationRoutes } from "./access-recommendations.js"
 import {
   SOD_OVERRIDE_PREFIX,
   applySodOverrideDecision,
+  auditSodRoleMintNeedsStepUp,
   precheckSodOverrideDecision,
   refuseSodMint,
   registerSodRoutes,
+  SodRoleMintNeedsStepUpError,
+  sodRoleMintNeedsStepUpBody,
 } from "./sod.js";
 import {
   deleteRoleAgentGrantById,
@@ -5194,12 +5197,18 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       return { updated, postCommit, aiBomSignoffs, refusal: null };
     }).catch((err: unknown) => {
       // review follow-up: an SoD override whose role went away after the precheck rolls the decision back
-      if (err instanceof RoleNotFoundError) return err;
+      if (err instanceof RoleNotFoundError || err instanceof SodRoleMintNeedsStepUpError) return err;
       throw err;
     });
     if (outcome instanceof RoleNotFoundError) {
       await auditRoleNotFound(db, { actorUserId: deciderUserId, roleId: outcome.roleId, via: "sod-override-decide", detail: { approvalId, ...outcome.context } });
       return fail(404, roleNotFoundBody(outcome.roleId));
+    }
+    // issue #668: an SoD override cannot assign an approver role or one that moves an approver pool (fail closed)
+    if (outcome instanceof SodRoleMintNeedsStepUpError) {
+      outcome.context = { approvalId, ...outcome.context };
+      await auditSodRoleMintNeedsStepUp(db, deciderUserId, outcome);
+      return fail(409, sodRoleMintNeedsStepUpBody(outcome));
     }
     if (outcome.refusal) return fail(409, outcome.refusal);
     if (!outcome.updated) {
