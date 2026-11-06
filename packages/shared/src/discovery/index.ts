@@ -245,8 +245,42 @@ const SHAPE_PATTERNS: Readonly<Record<Exclude<PublicConfigShape, "https_url">, R
   header_name: /^[A-Za-z][A-Za-z0-9-]{0,63}$/,
 };
 
+/**
+ * Header names a stored API token may never be sent in (ADR-0235, review of #627): hop-by-hop and framing headers,
+ * routing and forwarding headers, cookies and proxy credentials. A token there could steer or leak the request.
+ */
+const REFUSED_AUTH_HEADER_NAMES: ReadonlySet<string> = new Set([
+  "host",
+  "cookie",
+  "set-cookie",
+  "connection",
+  "keep-alive",
+  "content-length",
+  "content-type",
+  "content-encoding",
+  "transfer-encoding",
+  "te",
+  "trailer",
+  "upgrade",
+  "expect",
+  "via",
+  "forwarded",
+  "origin",
+  "referer",
+  "proxy-authorization",
+  "proxy-authenticate",
+  "proxy-connection",
+]);
+
+/** true when `name` may not carry a stored API token (case-insensitive; every `x-forwarded-*` and `proxy-*` name too) */
+export function authHeaderNameRefused(name: string): boolean {
+  const n = name.trim().toLowerCase();
+  return REFUSED_AUTH_HEADER_NAMES.has(n) || n.startsWith("x-forwarded-") || n.startsWith("proxy-") || n === "x-real-ip" || n.startsWith("x-original-");
+}
+
 export function publicConfigShapeOk(shape: PublicConfigShape, value: string): boolean {
   if (value.length === 0 || value.length > 1024) return false;
+  if (shape === "header_name") return SHAPE_PATTERNS.header_name.test(value) && !authHeaderNameRefused(value);
   if (shape !== "https_url") return SHAPE_PATTERNS[shape].test(value);
   let u: URL;
   try {

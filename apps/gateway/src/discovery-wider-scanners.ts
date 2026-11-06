@@ -32,8 +32,8 @@
  *                        scope: organisation-level = every model and endpoint; include = model or endpoint names
  *                        credential: static only; secret = the API token; publicConfig authHeader? as above
  */
-import { azureCredential as entraCredential } from "@regulait/cloud-discovery";
-import { DISCOVERY_READ_OUTCOMES_MAX, type DiscoveryReadOutcome, type DiscoveryReadStatus } from "@regulait/shared";
+import { BodyTooLargeError, azureCredential as entraCredential, readBodyCapped } from "@regulait/cloud-discovery";
+import { DISCOVERY_READ_OUTCOMES_MAX, authHeaderNameRefused, type DiscoveryReadOutcome, type DiscoveryReadStatus } from "@regulait/shared";
 import { dedupedSecretSink, scannerFetch } from "./discovery-cloud-scanners.js";
 import { errMessage } from "./err-serializer.js";
 import type { ScanContext, ScanObservation, ScanResult, Scanner } from "./discovery-scanners.js";
@@ -121,6 +121,8 @@ function tokenHeaders(ctx: ScanContext, kind: string): Record<string, string> {
   const c = ctx.credential;
   if (!c || c.mode !== "static" || !c.secret) throw new WiderSourceConfigError(`${kind}: a static credential with the API token is required`);
   const header = c.publicConfig.authHeader;
+  // checked again at use, not only when the credential was saved: a token never rides a framing, routing or proxy header
+  if (header && authHeaderNameRefused(header)) throw new WiderSourceConfigError(`${kind}: the token may not be sent in the ${header.slice(0, 64)} header`);
   return header && header.toLowerCase() !== "authorization" ? { [header]: c.secret } : { authorization: `Bearer ${c.secret}` };
 }
 
@@ -146,11 +148,21 @@ async function getJson(fetchImpl: typeof fetch, url: string, headers: Record<str
   if (res.status === 404) throw new ReadFailure("not_enabled", "HTTP 404: this API is not available on this service");
   if (res.status < 200 || res.status >= 300) throw new ReadFailure("error", `HTTP ${res.status}`);
   const declared = Number(res.headers.get("content-length") ?? "");
-  if (Number.isFinite(declared) && declared > WIDER_MAX_BODY_BYTES) throw new ReadFailure("error", `the response is larger than ${WIDER_MAX_BODY_BYTES} bytes`);
-  const text = await res.text();
-  if (text.length > WIDER_MAX_BODY_BYTES) throw new ReadFailure("error", `the response is larger than ${WIDER_MAX_BODY_BYTES} bytes`);
+  if (Number.isFinite(declared) && declared > WIDER_MAX_BODY_BYTES) {
+    void res.body?.cancel().catch(() => undefined);
+    throw new ReadFailure("error", `the response is larger than ${WIDER_MAX_BODY_BYTES} bytes`);
+  }
+  // counted in bytes as it streams and cancelled past the cap: a chunked or mislabelled body is never buffered whole
+  let bytes: Uint8Array;
   try {
-    return JSON.parse(text) as unknown;
+    bytes = await readBodyCapped(res.body, WIDER_MAX_BODY_BYTES);
+  } catch (err) {
+    if (err instanceof BodyTooLargeError) throw new ReadFailure("error", `the response is larger than ${WIDER_MAX_BODY_BYTES} bytes`);
+    if (signal.aborted) throw err;
+    throw new ReadFailure("unreachable", "the response was cut off before it was complete");
+  }
+  try {
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
   } catch {
     throw new ReadFailure("error", "the response is not JSON");
   }
@@ -169,27 +181,36 @@ function finish(observations: ScanObservation[], outcomes: DiscoveryReadOutcome[
   return { observations, readOutcomes: sorted, ...(writeScope ? { credentialWriteScope: writeScope } : {}) };
 }
 
-/** run one paged listing, recording its outcome; `page` returns the next URL or null */
+/** returned by a page callback that stopped at `WIDER_MAX_ITEMS`, so the outcome says the listing was cut short */
+const ITEM_CAP = Symbol("item cap");
+
+/** run one paged listing, recording its outcome; `page` returns the next URL, null at the end, or ITEM_CAP */
 async function readListing(
   ctx: ScanContext,
   read: string,
   first: string,
   outcomes: DiscoveryReadOutcome[],
-  page: (body: unknown) => string | null,
+  page: (body: unknown) => string | null | typeof ITEM_CAP,
   fetchPage: (url: string) => Promise<unknown>,
 ): Promise<boolean> {
   let url: string | null = first;
   let pages = 0;
+  let capped = false;
   try {
     while (url && pages < WIDER_MAX_PAGES) {
       if (ctx.signal.aborted || !(await ctx.heartbeat())) {
         outcomes.push({ read, status: "skipped", detail: "the run's lease or time ran out" });
         return false;
       }
-      url = page(await fetchPage(url));
+      const next = page(await fetchPage(url));
       pages++;
+      if (next === ITEM_CAP) {
+        capped = true;
+        url = null;
+      } else url = next;
     }
-    outcomes.push({ read, status: "read", ...(url ? { detail: `stopped after ${WIDER_MAX_PAGES} pages` } : {}) });
+    const detail = capped ? `stopped after ${WIDER_MAX_ITEMS} items: the rest was not read` : url ? `stopped after ${WIDER_MAX_PAGES} pages: the rest was not read` : null;
+    outcomes.push({ read, status: "read", ...(detail ? { detail } : {}) });
     return true;
   } catch (err) {
     if (err instanceof ReadFailure) {
@@ -248,7 +269,7 @@ async function runSaasInventory(ctx: ScanContext): Promise<ScanResult> {
       const items = atPath(body, t.itemsPath ?? "");
       if (!Array.isArray(items)) throw new ReadFailure("error", `'${(t.itemsPath ?? "").slice(0, 60) || "the body"}' is not a list`);
       for (const item of items) {
-        if (seen >= WIDER_MAX_ITEMS) return null;
+        if (seen >= WIDER_MAX_ITEMS) return ITEM_CAP;
         seen++;
         const name = str(atPath(item, nameField), 200);
         const host = hostOf(str(atPath(item, domainField), 512));
@@ -371,7 +392,7 @@ async function runEntra(ctx: ScanContext): Promise<ScanResult> {
       const value = atPath(body, "value");
       if (!Array.isArray(value)) throw new ReadFailure("error", "the service principal listing has no value list");
       for (const sp of value) {
-        if (apps.size >= WIDER_MAX_ITEMS) return null;
+        if (apps.size >= WIDER_MAX_ITEMS) return ITEM_CAP;
         const id = str(atPath(sp, "id"), 64);
         const appId = str(atPath(sp, "appId"), 64);
         if (!id || !appId || !GUID.test(appId)) continue;
@@ -406,7 +427,7 @@ async function runEntra(ctx: ScanContext): Promise<ScanResult> {
         const principal = str(atPath(g, "principalId"), 64);
         if (principal && entry.users.size < 10_000) entry.users.add(principal);
         grants.set(clientId, entry);
-        if (grants.size >= WIDER_MAX_ITEMS) return null;
+        if (grants.size >= WIDER_MAX_ITEMS) return ITEM_CAP;
       }
       return nextLink(body);
     },
@@ -415,9 +436,13 @@ async function runEntra(ctx: ScanContext): Promise<ScanResult> {
 
   const keep = includeSet(ctx);
   const observations: ScanObservation[] = [];
+  let unmatched = 0;
   for (const [spId, g] of grants) {
     const app = apps.get(spId);
-    if (!app) continue;
+    if (!app) {
+      unmatched++;
+      continue;
+    }
     if (keep && !keep.has(app.appId)) continue;
     // the person behind a single-user consent is kept only as a pseudonym (decision 20); never for a tenant-wide one
     const onlyUser = !g.tenantWide && g.users.size === 1 ? [...g.users][0]! : null;
@@ -431,6 +456,10 @@ async function runEntra(ctx: ScanContext): Promise<ScanResult> {
       ...(g.scopes.size ? { names: [...g.scopes].sort() } : {}),
       ...(onlyUser ? { actorPseudonym: await ctx.pseudonymise("idp_user", onlyUser) } : {}),
     });
+  }
+  // a consent whose client application was not in the principal listing (cut short, or unreadable) is not silently dropped
+  if (unmatched > 0) {
+    outcomes.push({ read: "Entra grants matched to applications", status: "skipped", detail: `${unmatched} consented application(s) were not in the service principal listing and are not reported` });
   }
   return finish(observations, outcomes, write.scope);
 }
@@ -479,7 +508,7 @@ async function runMlflow(ctx: ScanContext): Promise<ScanResult> {
       const models = atPath(body, "registered_models") ?? [];
       if (!Array.isArray(models)) throw new ReadFailure("error", "the model listing has no registered_models list");
       for (const m of models) {
-        if (observations.length >= WIDER_MAX_ITEMS) return null;
+        if (observations.length >= WIDER_MAX_ITEMS) return ITEM_CAP;
         const name = str(atPath(m, "name"), 256);
         if (!name || !wanted(name)) continue;
         observations.push({
@@ -505,7 +534,7 @@ async function runMlflow(ctx: ScanContext): Promise<ScanResult> {
       const endpoints = atPath(body, "endpoints") ?? [];
       if (!Array.isArray(endpoints)) throw new ReadFailure("error", "the endpoint listing has no endpoints list");
       for (const e of endpoints) {
-        if (observations.length >= WIDER_MAX_ITEMS) return null;
+        if (observations.length >= WIDER_MAX_ITEMS) return ITEM_CAP;
         const name = str(atPath(e, "name"), 256);
         if (!name || !wanted(name)) continue;
         const entities = atPath(atPath(e, "config"), "served_entities");

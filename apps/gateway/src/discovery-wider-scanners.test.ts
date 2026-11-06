@@ -12,7 +12,7 @@ import { classifyObservation, familySwitchProblem, publicConfigProblem, type AiS
 import type { ScanContext } from "./discovery-scanners.js";
 import { DISCOVERY_SCANNERS } from "./discovery-scanners.js";
 import { checkObservations } from "./discovery-worker.js";
-import { ML_PLATFORM_ASSET_SEED, WIDER_DISCOVERY_SCANNERS, atPath, entraWriteScope, httpsTargetProblem } from "./discovery-wider-scanners.js";
+import { ML_PLATFORM_ASSET_SEED, WIDER_DISCOVERY_SCANNERS, WIDER_MAX_BODY_BYTES, WIDER_MAX_ITEMS, atPath, entraWriteScope, httpsTargetProblem } from "./discovery-wider-scanners.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const CLIENT = "00000000-0000-4000-8000-000000000002";
@@ -22,6 +22,25 @@ const NOW = "2026-10-30T00:00:00.000Z";
 const synthetic = (label: string) => `${label}-${randomBytes(12).toString("hex")}`;
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 const scanner = (kind: string) => WIDER_DISCOVERY_SCANNERS.find((s) => s.kind === kind)!;
+const text = (body: string, status = 200) => new Response(body, { status, headers: { "content-type": "text/html" } });
+/**
+ * A hostile endpoint: a chunked body with no length that never ends on its own. It stops after 64 MiB so a broken
+ * cap fails the test instead of hanging it; `pulled()` says how much the scanner made it produce.
+ */
+function endlessBody() {
+  const chunk = new Uint8Array(1024 * 1024).fill(0x20);
+  let pulled = 0;
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (pulled >= 64 * 1024 * 1024) return controller.close();
+      pulled += chunk.byteLength;
+      controller.enqueue(pulled === chunk.byteLength ? new TextEncoder().encode(`{"value":[${" ".repeat(chunk.byteLength - 10)}`) : chunk);
+    },
+  });
+  return { response: () => new Response(stream, { status: 200, headers: { "content-type": "application/json" } }), pulled: () => pulled };
+}
+/** the body was cut off near the cap, not read to its end */
+const boundedPull = (pulled: number) => expect(pulled).toBeLessThan(WIDER_MAX_BODY_BYTES + 8 * 1024 * 1024);
 const jwt = (claims: Record<string, unknown>) =>
   `${Buffer.from('{"alg":"none"}').toString("base64url")}.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.sig`;
 
@@ -79,6 +98,11 @@ describe("ADR-0235 registration and gating", () => {
     expect(publicConfigProblem("saas_inventory_api", "federated", {})).toMatch(/no external OIDC token/);
     expect(publicConfigProblem("ml_mlflow", "static", { authHeader: "X-Api-Key" })).toBeNull();
     expect(publicConfigProblem("ml_mlflow", "static", { authHeader: "X Api Key: v" })).toMatch(/header_name/);
+    // a token never rides a framing, routing, cookie or proxy header
+    for (const header of ["Host", "cookie", "Connection", "Content-Length", "Transfer-Encoding", "Proxy-Authorization", "X-Forwarded-For", "X-Forwarded-Host", "Forwarded"]) {
+      expect(publicConfigProblem("ml_mlflow", "static", { authHeader: header }), header).toMatch(/header_name/);
+    }
+    expect(publicConfigProblem("saas_inventory_api", "static", { authHeader: "X-Inventory-Token" })).toBeNull();
     expect(publicConfigProblem("saas_inventory_api", "static", { token: "abc" })).toMatch(/not a public config field/);
     expect(publicConfigProblem("idp_entra", "federated", { tenantId: TENANT, clientId: CLIENT })).toBeNull();
     expect(publicConfigProblem("idp_entra", "static", { tenantId: TENANT })).toMatch(/clientId/);
@@ -158,15 +182,51 @@ describe("ADR-0235 saas_inventory_api", () => {
     const { ctx } = ctxFor({ fetch: (async () => json({})) as typeof fetch, source, credential: null });
     await expect(scanner("saas_inventory_api").run(ctx)).rejects.toThrow(/static credential/);
   });
+
+  it("a token header saved around the API that is a framing or proxy header is refused at use, before any request", async () => {
+    const { ctx, calls } = ctxFor({ fetch: (async () => json({})) as typeof fetch, source, credential: { mode: "static", publicConfig: { authHeader: "Host" }, secret: "t" } });
+    await expect(scanner("saas_inventory_api").run(ctx)).rejects.toThrow(/may not be sent in the Host header/);
+    expect(calls.urls).toEqual([]);
+  });
+
+  it("hostile bodies: a chunked body past the cap is cut off, not buffered; non-JSON and wrong shapes fail with a reason", async () => {
+    const endless = endlessBody();
+    const big = ctxFor({ fetch: (async () => endless.response()) as typeof fetch, source, credential: { mode: "static", publicConfig: {}, secret: "t" } });
+    await expect(scanner("saas_inventory_api").run(big.ctx)).rejects.toThrow(/SaaS app inventory error \(the response is larger than/);
+    boundedPull(endless.pulled());
+
+    const html = ctxFor({ fetch: (async () => text("<html>login</html>")) as typeof fetch, source, credential: { mode: "static", publicConfig: {}, secret: "t" } });
+    await expect(scanner("saas_inventory_api").run(html.ctx)).rejects.toThrow(/not JSON/);
+    const shape = ctxFor({ fetch: (async () => json({ data: { apps: "everything" } })) as typeof fetch, source, credential: { mode: "static", publicConfig: {}, secret: "t" } });
+    await expect(scanner("saas_inventory_api").run(shape.ctx)).rejects.toThrow(/'data.apps' is not a list/);
+    const invalidUtf8 = ctxFor({ fetch: (async () => new Response(new Uint8Array([0x7b, 0xff, 0x7d]))) as typeof fetch, source, credential: { mode: "static", publicConfig: {}, secret: "t" } });
+    await expect(scanner("saas_inventory_api").run(invalidUtf8.ctx)).rejects.toThrow(/not JSON/);
+  });
+
+  it("a listing stopped by the item cap says so instead of reporting a full read", async () => {
+    const apps = Array.from({ length: WIDER_MAX_ITEMS + 10 }, (_, i) => ({ name: `App ${i}`, url: `app${i}.regulait.example` }));
+    const f = (async () => json({ data: { apps }, links: { next: "/v1/apps?page=2" } })) as typeof fetch;
+    const { ctx, calls } = ctxFor({ fetch: f, source, credential: { mode: "static", publicConfig: {}, secret: "t" } });
+    const res = await scanner("saas_inventory_api").run(ctx);
+    expect(res.observations).toHaveLength(WIDER_MAX_ITEMS);
+    expect(calls.urls).toHaveLength(1);
+    expect(res.readOutcomes?.find((o) => o.read === "SaaS app inventory")).toEqual({
+      read: "SaaS app inventory",
+      status: "read",
+      detail: `stopped after ${WIDER_MAX_ITEMS} items: the rest was not read`,
+    });
+  });
 });
 
 describe("ADR-0235 idp_entra", () => {
   const source = { id: "s-entra", name: "entra", kind: "idp_entra" as const, target: { tenantId: TENANT }, scope: { orgLevel: true, include: [] as string[] } };
 
-  function fakeEntra(roles: string[]) {
+  function fakeEntra(roles: string[], graph?: (url: URL) => Response | null) {
     const accessToken = jwt({ roles, tid: TENANT });
     const f = (async (input: string | URL | Request) => {
       const url = new URL(String(input instanceof Request ? input.url : input));
+      const override = url.hostname !== "login.microsoftonline.com" ? graph?.(url) : null;
+      if (override) return override;
       if (url.hostname === "login.microsoftonline.com") {
         if (url.pathname.endsWith("/discovery/instance")) {
           return json({
@@ -257,6 +317,55 @@ describe("ADR-0235 idp_entra", () => {
     expect(entraWriteScope("not-a-jwt").scope).toBe("unverified");
   });
 
+  const entraCtx = (f: typeof fetch) => ctxFor({ fetch: f, source, credential: { mode: "static", publicConfig: { tenantId: TENANT, clientId: CLIENT }, secret: "s" } });
+  const READ_ROLES = ["Application.Read.All", "DelegatedPermissionGrant.Read.All"];
+
+  it("hostile Graph: a next link to another origin or over http is never followed", async () => {
+    for (const next of ["https://graph.microsoft.com.attacker.example/v1.0/servicePrincipals?$skiptoken=2", "http://graph.microsoft.com/v1.0/servicePrincipals?$skiptoken=2", "//attacker.example/x"]) {
+      const entra = fakeEntra(READ_ROLES, (url) =>
+        url.pathname === "/v1.0/servicePrincipals" ? json({ value: [{ id: "sp-1", appId: AI_APP, displayName: "AI notetaker" }], "@odata.nextLink": next }) : null,
+      );
+      const { ctx, calls } = entraCtx(entra.f);
+      const res = await scanner("idp_entra").run(ctx);
+      expect(calls.urls.filter((u) => new URL(u).pathname === "/v1.0/servicePrincipals"), next).toHaveLength(1);
+      expect(calls.urls.every((u) => ["login.microsoftonline.com", "graph.microsoft.com"].includes(new URL(u).hostname)), next).toBe(true);
+      expect(res.readOutcomes?.find((o) => o.read === "Entra service principals")).toEqual({ read: "Entra service principals", status: "read" });
+    }
+  });
+
+  it("hostile Graph: non-JSON, wrong shapes and a chunked body past the cap fail that read with a reason, never the worker", async () => {
+    const html = fakeEntra(READ_ROLES, (url) => (url.pathname === "/v1.0/servicePrincipals" ? text("<html>sign in</html>") : null));
+    const r1 = await scanner("idp_entra").run(entraCtx(html.f).ctx);
+    expect(r1.readOutcomes?.find((o) => o.read === "Entra service principals")).toMatchObject({ status: "error", detail: "the response is not JSON" });
+
+    const shape = fakeEntra(READ_ROLES, (url) => (url.pathname === "/v1.0/oauth2PermissionGrants" ? json({ value: { clientId: "sp-1" } }) : null));
+    const r2 = await scanner("idp_entra").run(entraCtx(shape.f).ctx);
+    expect(r2.readOutcomes?.find((o) => o.read === "Entra delegated permission grants")).toMatchObject({ status: "error", detail: "the grant listing has no value list" });
+    expect(r2.observations).toEqual([]);
+
+    const endless = endlessBody();
+    const big = fakeEntra(READ_ROLES, (url) => (url.hostname === "graph.microsoft.com" ? endless.response() : null));
+    await expect(scanner("idp_entra").run(entraCtx(big.f).ctx)).rejects.toThrow(/Entra service principals error \(the response is larger than/);
+    boundedPull(endless.pulled());
+  });
+
+  it("consents whose application was not listed (the principal listing was cut short) are reported, not silently dropped", async () => {
+    const entra = fakeEntra(READ_ROLES, (url) =>
+      url.pathname === "/v1.0/servicePrincipals"
+        ? json({ value: [{ id: "sp-1", appId: AI_APP, displayName: "AI notetaker" }] })
+        : url.pathname === "/v1.0/oauth2PermissionGrants"
+          ? json({ value: [{ clientId: "sp-1", consentType: "AllPrincipals", scope: "User.Read" }, { clientId: "sp-x", consentType: "AllPrincipals", scope: "Mail.Read" }, { clientId: "sp-y", consentType: "AllPrincipals", scope: "Mail.Read" }] })
+          : null,
+    );
+    const res = await scanner("idp_entra").run(entraCtx(entra.f).ctx);
+    expect(res.observations).toHaveLength(1);
+    expect(res.readOutcomes?.find((o) => o.read === "Entra grants matched to applications")).toEqual({
+      read: "Entra grants matched to applications",
+      status: "skipped",
+      detail: "2 consented application(s) were not in the service principal listing and are not reported",
+    });
+  });
+
   it("a credential for another tenant is refused", async () => {
     const entra = fakeEntra(["Application.Read.All"]);
     const other = "00000000-0000-4000-8000-0000000000ff";
@@ -302,6 +411,21 @@ describe("ADR-0235 ml_mlflow", () => {
     const res = await scanner("ml_mlflow").run(ctx);
     expect(res.observations).toEqual([]);
     expect(res.readOutcomes?.[0]).toMatchObject({ read: "serving endpoints", status: "not_enabled" });
+  });
+
+  it("hostile MLflow: non-JSON, wrong shapes and a chunked body past the cap fail that read with a reason", async () => {
+    const run = (f: typeof fetch) => scanner("ml_mlflow").run(ctxFor({ fetch: f, source, credential: { mode: "static", publicConfig: {}, secret: "t" } }).ctx);
+    const modelsOk = (url: URL) => url.pathname.endsWith("/registered-models/search");
+    const html = await run((async (input: string | URL | Request) => (modelsOk(new URL(String(input))) ? json({ registered_models: [{ name: "m" }] }) : text("<html>proxy</html>"))) as typeof fetch);
+    expect(html.readOutcomes?.find((o) => o.read === "serving endpoints")).toMatchObject({ status: "error", detail: "the response is not JSON" });
+    const shape = await run((async (input: string | URL | Request) => (modelsOk(new URL(String(input))) ? json({ registered_models: [{ name: "m" }] }) : json({ endpoints: { name: "chat" } }))) as typeof fetch);
+    expect(shape.readOutcomes?.find((o) => o.read === "serving endpoints")).toMatchObject({ status: "error", detail: "the endpoint listing has no endpoints list" });
+    const models = await run((async () => json({ registered_models: "all" })) as typeof fetch);
+    expect(models.readOutcomes?.find((o) => o.read === "MLflow registered models")).toMatchObject({ status: "error", detail: "the model listing has no registered_models list" });
+    expect(models.observations).toEqual([]);
+    const endless = endlessBody();
+    await expect(run((async () => endless.response()) as typeof fetch)).rejects.toThrow(/MLflow registered models error \(the response is larger than/);
+    boundedPull(endless.pulled());
   });
 
   it("a denied token fails the run with the reason", async () => {
