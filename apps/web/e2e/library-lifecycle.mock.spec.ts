@@ -93,6 +93,8 @@ test("g9 red-team retire version", async ({ page }) => {
     return shell(p, route);
   });
   await page.goto("/ui/admin/redteam");
+  // the libraries sit behind their own tab on the red-teaming page
+  await page.getByRole("tab", { name: "Libraries (3)" }).click();
   await expect(page.getByRole("link", { name: /^Support jailbreak set v2/ })).toBeVisible({ timeout: 30_000 });
   await page.getByRole("link", { name: /^Support jailbreak set v2/ }).click();
   const retire = page.getByRole("button", { name: "Retire version" });
@@ -133,6 +135,8 @@ test("g9 engine schedules edit and delete", async ({ page }) => {
     return json(route, { error: "unexpected" }, 500);
   });
   await page.goto("/ui/admin/redteam");
+  // the engine runs and their schedules sit behind the Engines tab on the red-teaming page
+  await page.getByRole("tab", { name: "Engines", exact: true }).click();
   const card = page.getByText("Recurring runs", { exact: true });
   await expect(card).toBeVisible({ timeout: 30_000 });
   await card.evaluate((el) => el.scrollIntoView({ block: "start" }));
