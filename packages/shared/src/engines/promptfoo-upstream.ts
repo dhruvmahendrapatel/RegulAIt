@@ -2,16 +2,16 @@
  * GENERATED — do not edit. ADR-0187 decision 59: promptfoo's own plugin and strategy lists, read
  * from the pinned package by engines/promptfoo/extract-plugin-lists.mjs (parsed, not executed).
  *
- * Package:  npm `promptfoo@0.124.1`
- * Source:   dist/src/tables-BVddUGSo.js
- * sha256:   0382c7c77897aeaab4055efc003e820ff528860c8d4544ec87d1b80d322ac9a5
+ * Package:  npm `promptfoo@0.125.1`
+ * Source:   dist/src/tables-BONxKPrt.js
+ * sha256:   9ab1b181a0282606e7e5107313093ee6016bf151f24f52e08afeb010c4eafcc5
  *
  * The catalogue (promptfoo.ts) derives its cloud-only list from these, and its tests refuse a
  * catalogue entry that contradicts them; the opt-in drift test re-extracts from an installed
  * package and compares. To update: pin a new release, re-run the extractor, re-read R10.
  */
-export const PROMPTFOO_UPSTREAM_VERSION = "0.124.1";
-export const PROMPTFOO_UPSTREAM_SOURCE_SHA256 = "0382c7c77897aeaab4055efc003e820ff528860c8d4544ec87d1b80d322ac9a5";
+export const PROMPTFOO_UPSTREAM_VERSION = "0.125.1";
+export const PROMPTFOO_UPSTREAM_SOURCE_SHA256 = "9ab1b181a0282606e7e5107313093ee6016bf151f24f52e08afeb010c4eafcc5";
 export const PROMPTFOO_UPSTREAM_REMOTE_ONLY_PLUGINS: readonly string[] = Object.freeze([
   "agentic:memory-poisoning",
   "ascii-smuggling",
@@ -325,6 +325,7 @@ export const PROMPTFOO_UPSTREAM_ALL_PLUGINS: readonly string[] = Object.freeze([
   "xstest",
 ]);
 export const PROMPTFOO_UPSTREAM_ALL_STRATEGIES: readonly string[] = Object.freeze([
+  "arabic-presentation-forms",
   "audio",
   "authoritative-markup-injection",
   "base64",

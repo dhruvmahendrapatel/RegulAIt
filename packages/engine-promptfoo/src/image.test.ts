@@ -72,7 +72,7 @@ describe("the promptfoo image's inputs", () => {
     const inv = gate.licenceInventory(lock);
     expect(inv.denied).toEqual([]);
     expect(new Set(inv.pending.map((p) => p.licence))).toEqual(new Set(["Artistic-2.0", "BlueOak-1.0.0", "Python-2.0"]));
-    expect(inv.pending).toHaveLength(11);
+    expect(inv.pending).toHaveLength(12); // 0.125.1: minimatch 11 adds @isaacs/nonrecursive-glob-match (BlueOak-1.0.0)
     // optional dependencies are not installed and so not counted; the native sqlite binding is direct
     expect(lock.packages["node_modules/@libsql/linux-x64-gnu"]!.optional).toBeUndefined();
   });
