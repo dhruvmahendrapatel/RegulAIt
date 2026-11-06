@@ -4,7 +4,7 @@
 - **Date**: 2026-10-30
 - **Backlog item**: P13(b) in `internal/product/PENDING.md` §2c. Owner decision on #453 (comment 6527069781, 2026-10-30):
   build all four P13 parts, each as its own lane and off by default. Numbers reserved in comment 6527158879
-  (migration 0270, this ADR).
+  (migration 0281, this ADR).
 
 ## Context
 
@@ -100,12 +100,12 @@ re-testing after a model change (#615).
 
 ## As built (2026-10-30)
 
-- Migration `0270_classical_model_drift.sql` (drafted as 0244; renumbered on landing above main's watermark and the numbers other open lanes hold, CONTRIBUTING_PARALLEL_SESSIONS §4.1): `model_drift_settings`, `model_drift_monitors`, `model_drift_reports`,
+- Migration `0281_classical_model_drift.sql` (drafted as 0244, landed as 0270, renumbered to 0281 on 2026-11-06 with `when` 1785208500000, between 0273 and the designer lane's range; renumbered on landing above main's watermark and the numbers other open lanes hold, CONTRIBUTING_PARALLEL_SESSIONS §4.1): `model_drift_settings`, `model_drift_monitors`, `model_drift_reports`,
   `model_explainability_artefacts`. No function or trigger.
 - Gateway: `classical-drift-stats.ts` (pure), `classical-drift-monitor.ts` (settings and the monitor input, kept apart
   so the governance monitor imports it without a cycle), `classical-drift.ts` (routes).
 - Shared: the `classical_model_drift` rule in `MONITOR_RULES` and the `modelDrift` monitor input.
-- Review round (2026-11-06, PR #628): the model-version binding (§6, columns added to the unmerged 0270 in place),
+- Review round (2026-11-06, PR #628): the model-version binding (§6, columns added to the unmerged 0281 in place),
   the small-λ KS fix, SciPy reference values in the tests, canonical hashing, writes refused while off, open episodes
   held while off, and the "not evaluable" streak. Round 2: "not evaluable" moved to its own subject key (it had
   refreshed, and so downgraded, an open drift episode), and the pin is read under a row lock in the transaction.

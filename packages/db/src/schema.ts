@@ -15478,7 +15478,7 @@ export const supplierSubmissions = pgTable(
 export type SupplierSubmissionRow = typeof supplierSubmissions.$inferSelect;
 
 // ---------------------------------------------------------------------------
-// ADR-0223 (migration 0270) — drift and explainability for classical (non-LLM) models. Aggregates only: bin edges
+// ADR-0223 (migration 0281) — drift and explainability for classical (non-LLM) models. Aggregates only: bin edges
 // and counts, category labels and counts, one importance value per feature. Written only by
 // `apps/gateway/src/classical-drift.ts`, each write in the same transaction as its audit row.
 // ---------------------------------------------------------------------------
@@ -15565,7 +15565,7 @@ export const modelDriftReports = pgTable(
     results: jsonb("results").$type<unknown[]>().notNull(),
     status: text("status", { enum: MODEL_DRIFT_STATUSES }).notNull(),
     driftedFeatures: integer("drifted_features").notNull(),
-    /** the model version this summary was checked for (migration 0270 header) */
+    /** the model version this summary was checked for (migration 0281 header) */
     modelVersion: text("model_version").notNull(),
     modelVersionSource: text("model_version_source", { enum: MODEL_VERSION_SOURCES }).notNull(),
     submittedBy: uuid("submitted_by").references(() => users.id, { onDelete: "set null" }),
@@ -15601,7 +15601,7 @@ export const modelExplainabilityArtefacts = pgTable(
     featureCount: integer("feature_count").notNull(),
     payloadSha256: text("payload_sha256").notNull(),
     note: text("note"),
-    /** the model version this artefact explains (migration 0270 header) */
+    /** the model version this artefact explains (migration 0281 header) */
     modelVersion: text("model_version").notNull(),
     modelVersionSource: text("model_version_source", { enum: MODEL_VERSION_SOURCES }).notNull(),
     submittedBy: uuid("submitted_by").references(() => users.id, { onDelete: "set null" }),

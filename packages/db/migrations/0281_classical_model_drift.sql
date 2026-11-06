@@ -1,4 +1,4 @@
--- Migration 0270. ADR-0223 (P13b, owner 2026-10-30): drift and explainability for classical (non-LLM) models.
+-- Migration 0281. ADR-0223 (P13b, owner 2026-10-30): drift and explainability for classical (non-LLM) models.
 -- Hand-authored (never drizzle-kit generate). Re-runnable: every statement is idempotent.
 --
 --   model_drift_settings            one row, absent until an admin first saves it. Absent = OFF (ADR-0180): no
