@@ -14,14 +14,16 @@
  *  - **Nothing runs on a timer.** `lastVerifiedAt` and `schedulerPresent` are
  *    on the page, so a deployment that never wires the cron sees that.
  */
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { ListPreview } from "../../../ui/ListPreview";
 import { VERIFICATION_COLUMNS, VERIFICATIONS_EMPTY, type VerificationRow } from "./licenceVerifications";
-import { Badge, Button, Card, EmptyState, Field, Table, Textarea } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, Table, Tabs, tabIds, Textarea } from "../../../ui/kit";
+import { normalisePage, pageUrl } from "../../../ui/listState";
+import { LICENSING_TABS, licensingTabLabel, type LicensingTab } from "./licensingTabs";
 import { KV, QueryGate, Stat, useAction } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
@@ -75,6 +77,8 @@ interface LicenseRow {
   installedAt: string;
 }
 
+const VERIFICATION_SORT = { key: "at", dir: "desc" } as const;
+
 const stateTone = (s: Status["state"]) =>
   s === "valid" ? "ok" : s === "grace" ? "warn" : s === "absent" ? "neutral" : "danger";
 
@@ -93,6 +97,15 @@ export default function LicensingPage() {
   // ADR-0226: the verification trail is a DataList under this key; a check or an install refreshes it
   const qc = useQueryClient();
   const checks = { refetch: () => qc.invalidateQueries({ queryKey: ["admin", "license-verifications"] }) };
+  // the History tab's label counts refused verifications: the same read (and cache entry) as the trail preview's count
+  const refused = useQuery({
+    queryKey: ["admin", "license-verifications", "preview-count", { ok: "false" }],
+    queryFn: () =>
+      api
+        .get<unknown>(pageUrl("/v1/licenses/verifications", { limit: 10, sort: VERIFICATION_SORT, filters: { ok: "false" }, count: "exact" }))
+        .then((b) => normalisePage<VerificationRow>(b, "verifications")),
+  });
+  const [tab, setTab] = useState<LicensingTab>("classes");
 
   const s = status.data;
 
@@ -143,241 +156,274 @@ export default function LicensingPage() {
             )}
           </Card>
 
-          <Card title="What still works, and what does not" info={s?.posture ? <p>{s.posture}</p> : undefined}>
-            {s && (
-              <Table
-                rows={[
-                  { k: "read", label: "Reads (console, audit, reports)", d: s.actionClasses.read },
-                  {
-                    k: "governance",
-                    label: "Governance / safety / audit (policy evaluation, entitlement checks, approvals, guardrails, audit logging)",
-                    d: s.actionClasses.governance,
-                  },
-                  {
-                    k: "expansion",
-                    label: "Commercial expansion (new seats, agents, connectors, providers, tier features)",
-                    d: s.actionClasses.expansion,
-                  },
-                ]}
-                rowKey={(r) => r.k}
-                columns={[
-                  { key: "c", header: "Action class", render: (r) => r.label },
-                  {
-                    key: "a",
-                    header: "Now",
-                    render: (r) => (
-                      <Badge tone={r.d.allowed ? "ok" : "danger"}>{r.d.allowed ? "permitted" : "refused"}</Badge>
-                    ),
-                  },
-                  { key: "why", header: "Why", render: (r) => <span className={v.faint}>{r.d.reason}</span> },
-                ]}
-              />
-            )}
-          </Card>
-
-          <Card
-            title="Seats"
-            info={
-              <>
-                {s?.seats.definition ? <p>{s.seats.definition}</p> : null}
-                <p>
-                  Seat enforcement is a <strong>growth</strong> gate, never a service gate. Going over cap — which
-                  happens legitimately when a smaller licence is installed onto a larger estate — refuses the next
-                  provisioning and touches nobody who already exists. Nothing here can revoke, disable or degrade a
-                  user for a seat-count reason.
-                </p>
-              </>
-            }
-          >
-            {s && (
-              <>
-                <KV
-                  rows={[
-                    ["Active seats", s.seats.active],
-                    ["Licensed cap", s.seats.cap ?? <span className={v.faint}>none — unlicensed</span>],
-                    [
-                      "Remaining",
-                      s.seats.remaining == null ? (
-                        <span className={v.faint}>n/a</span>
-                      ) : (
-                        <Badge tone={s.seats.remaining > 0 ? "ok" : "danger"}>{s.seats.remaining}</Badge>
-                      ),
-                    ],
-                    [
-                      "Can provision a new user",
-                      <Badge tone={s.seats.canProvision ? "ok" : "danger"}>{s.seats.canProvision ? "yes" : "no"}</Badge>,
-                    ],
-                  ]}
-                />
-                <div className={v.faint}>{s.seats.reason}</div>
-              </>
-            )}
-          </Card>
-
-          <Card
-            title="Tier features"
-            info={
-              <p>
-                Any flag absent from the licence defaults <strong>closed</strong>, so an older licence simply does not
-                unlock newer paid features rather than failing. A flag may cap how many model providers or PM adapters a
-                tier connects — never <em>which</em>: the licence never encodes a preferred vendor at any layer.
-              </p>
-            }
-          >
-            {s && (
-              <Table
-                rows={Object.entries(s.features).map(([k, on]) => ({ k, on }))}
-                rowKey={(r) => r.k}
-                columns={[
-                  { key: "f", header: "Feature", render: (r) => r.k },
-                  {
-                    key: "s",
-                    header: "",
-                    srHeader: "Status",
-                    render: (r) => <Badge tone={r.on ? "ok" : "neutral"}>{r.on ? "granted" : "closed"}</Badge>,
-                  },
-                ]}
-              />
-            )}
-          </Card>
-
-          <Card
-            title="Install a licence"
-            info={
-              <p>
-                Verification is entirely local: the signature is checked against a public key already on this machine.
-                A licence signed by a key this deployment does not pin is refused <strong>even if its signature is
-                internally valid</strong> — that is what pinning means. A tampered or forged artifact is refused
-                outright and never displaces the licence already in force.
-              </p>
-            }
-          >
-            <div className={v.stack}>
-              <Field label="Signed artifact (the JSON scripts/sign-license.sh emits)">
-                <Textarea
-                  rows={6}
-                  value={artifact}
-                  onChange={(e) => setArtifact(e.target.value)}
-                  placeholder='{"documentBase64":"...","signature":"...","signingKeyId":"regulait-license-2026"}'
-                />
-              </Field>
-              <div className={a.formRow}>
-                <Button
-                  disabled={act.busy || !artifact.trim()}
-                  onClick={() =>
-                    void act.run(async () => {
-                      await api.post("/v1/licenses", JSON.parse(artifact));
-                      setArtifact("");
-                      await Promise.all([status.refetch(), history.refetch(), checks.refetch()]);
-                      return "Licence installed";
-                    })
-                  }
-                >
-                  Install
-                </Button>
-                <Button
-                  variant="ghost"
-                  disabled={act.busy}
-                  onClick={() =>
-                    void act.run(async () => {
-                      const r = await api.post<{ ok: boolean; state: string }>("/v1/licenses/verify", {});
-                      await Promise.all([status.refetch(), checks.refetch()]);
-                      return r.ok ? `Verified — ${r.state}` : "VERIFICATION FAILED — see the trail below";
-                    })
-                  }
-                >
-                  Re-verify now
-                </Button>
-              </div>
+          {/* P3 with the I-2 tabs pattern: the current state stays above; each tab's label says what is unresolved inside it */}
+          <Tabs
+            label="Licensing"
+            idPrefix="licensing"
+            tabs={LICENSING_TABS.map((t) => ({
+              id: t.id,
+              label: licensingTabLabel(t.id, { status: s, refusedVerifications: refused.data ? (refused.data.total ?? refused.data.items.length) : null }),
+            }))}
+            active={tab}
+            onChange={(id) => setTab(id as LicensingTab)}
+          />
+          {/* every panel stays mounted (hidden when not selected), so a pasted artifact survives a tab switch */}
+          <LicensingPanel id="classes" tab={tab}>
+            <Card title="What still works, and what does not" info={s?.posture ? <p>{s.posture}</p> : undefined}>
               {s && (
-                <KV
+                <Table
                   rows={[
-                    ["Pinned keyring", <code>{s.keyring.dir}</code>],
-                    ["Pinned key ids", s.keyring.pinnedKeyIds.join(", ") || <span className={v.faint}>none</span>],
-                    [
-                      "Last verified",
-                      s.lastVerifiedAt ? ago(s.lastVerifiedAt) : <span className={v.faint}>never</span>,
-                    ],
-                    [
-                      "In-process scheduler",
-                      <Badge tone={s.schedulerPresent ? "ok" : "warn"}>{s.schedulerPresent ? "yes" : "no"}</Badge>,
-                    ],
-                    ["Enforcement points wired", s.enforcementPointsWired.join(", ")],
+                    { k: "read", label: "Reads (console, audit, reports)", d: s.actionClasses.read },
+                    {
+                      k: "governance",
+                      label: "Governance / safety / audit (policy evaluation, entitlement checks, approvals, guardrails, audit logging)",
+                      d: s.actionClasses.governance,
+                    },
+                    {
+                      k: "expansion",
+                      label: "Commercial expansion (new seats, agents, connectors, providers, tier features)",
+                      d: s.actionClasses.expansion,
+                    },
+                  ]}
+                  rowKey={(r) => r.k}
+                  columns={[
+                    { key: "c", header: "Action class", render: (r) => r.label },
+                    {
+                      key: "a",
+                      header: "Now",
+                      render: (r) => (
+                        <Badge tone={r.d.allowed ? "ok" : "danger"}>{r.d.allowed ? "permitted" : "refused"}</Badge>
+                      ),
+                    },
+                    { key: "why", header: "Why", render: (r) => <span className={v.faint}>{r.d.reason}</span> },
                   ]}
                 />
               )}
-              <div className={v.faint}>{s?.note}</div>
-            </div>
-          </Card>
+            </Card>
 
-          <Card title="Action-class inventory">
-            <div className={v.faint}>
-              Every enforcement point must classify itself as safety (fails open past expiry) or expansion (fails
-              closed). A miscategorised path is a real bug, so the classification is data rather than scattered
-              conditions, and it is served here so it can be reviewed in one screen.
-            </div>
-            {s && (
-              <Table
-                rows={s.inventory}
-                rowKey={(r) => r.action}
-                columns={[
-                  { key: "a", header: "Action", render: (r) => r.label },
-                  {
-                    key: "c",
-                    header: "Class",
-                    render: (r) => (
-                      <Badge tone={r.class === "expansion" ? "warn" : r.class === "governance" ? "ok" : "neutral"}>
-                        {r.class}
-                      </Badge>
-                    ),
-                  },
-                  { key: "w", header: "Why", render: (r) => <span className={v.faint}>{r.why}</span> },
-                ]}
-              />
-            )}
-          </Card>
+            <Card title="Action-class inventory">
+              <div className={v.faint}>
+                Every enforcement point must classify itself as safety (fails open past expiry) or expansion (fails
+                closed). A miscategorised path is a real bug, so the classification is data rather than scattered
+                conditions, and it is served here so it can be reviewed in one screen.
+              </div>
+              {s && (
+                <Table
+                  rows={s.inventory}
+                  rowKey={(r) => r.action}
+                  columns={[
+                    { key: "a", header: "Action", render: (r) => r.label },
+                    {
+                      key: "c",
+                      header: "Class",
+                      render: (r) => (
+                        <Badge tone={r.class === "expansion" ? "warn" : r.class === "governance" ? "ok" : "neutral"}>
+                          {r.class}
+                        </Badge>
+                      ),
+                    },
+                    { key: "w", header: "Why", render: (r) => <span className={v.faint}>{r.why}</span> },
+                  ]}
+                />
+              )}
+            </Card>
+          </LicensingPanel>
 
-          <Card title="Installed licences">
-            {(history.data?.licenses.length ?? 0) === 0 ? (
-              <EmptyState title="No licence has ever been installed" body="The history is append-only: installing a new licence supersedes the previous one and deletes nothing." />
-            ) : (
-              <Table
-                rows={history.data!.licenses}
-                rowKey={(l) => l.id}
-                columns={[
-                  { key: "id", header: "Licence id", render: (l) => l.licenseId },
-                  { key: "t", header: "Tenant", render: (l) => l.tenant },
-                  { key: "tier", header: "Tier", render: (l) => l.tier },
-                  { key: "seats", header: "Seat cap", render: (l) => l.seatCap },
-                  { key: "m", header: "Mode", render: (l) => l.deploymentMode },
-                  { key: "k", header: "Signed by", render: (l) => <code>{l.signingKeyId}</code> },
-                  { key: "e", header: "Expires", render: (l) => l.expiresAt.slice(0, 10) },
-                  {
-                    key: "s",
-                    header: "Status",
-                    render: (l) => <Badge tone={l.status === "active" ? "ok" : "neutral"}>{l.status}</Badge>,
-                  },
-                  { key: "at", header: "Installed", render: (l) => ago(l.installedAt) },
-                ]}
-              />
-            )}
-          </Card>
+          <LicensingPanel id="seats" tab={tab}>
+            <Card
+              title="Seats"
+              info={
+                <>
+                  {s?.seats.definition ? <p>{s.seats.definition}</p> : null}
+                  <p>
+                    Seat enforcement is a <strong>growth</strong> gate, never a service gate. Going over cap — which
+                    happens legitimately when a smaller licence is installed onto a larger estate — refuses the next
+                    provisioning and touches nobody who already exists. Nothing here can revoke, disable or degrade a
+                    user for a seat-count reason.
+                  </p>
+                </>
+              }
+            >
+              {s && (
+                <>
+                  <KV
+                    rows={[
+                      ["Active seats", s.seats.active],
+                      ["Licensed cap", s.seats.cap ?? <span className={v.faint}>none — unlicensed</span>],
+                      [
+                        "Remaining",
+                        s.seats.remaining == null ? (
+                          <span className={v.faint}>n/a</span>
+                        ) : (
+                          <Badge tone={s.seats.remaining > 0 ? "ok" : "danger"}>{s.seats.remaining}</Badge>
+                        ),
+                      ],
+                      [
+                        "Can provision a new user",
+                        <Badge tone={s.seats.canProvision ? "ok" : "danger"}>{s.seats.canProvision ? "yes" : "no"}</Badge>,
+                      ],
+                    ]}
+                  />
+                  <div className={v.faint}>{s.seats.reason}</div>
+                </>
+              )}
+            </Card>
+          </LicensingPanel>
 
-          <ListPreview<VerificationRow>
-            title="Verification trail"
-            noun="verifications"
-            endpoint="/v1/licenses/verifications"
-            legacyKey="verifications"
-            queryKey={["admin", "license-verifications"]}
-            sort={{ key: "at", dir: "desc" }}
-            attention={[{ label: "refused", filters: { ok: "false" } }]}
-            columns={VERIFICATION_COLUMNS}
-            rowKey={(c) => c.id}
-            viewAll="/admin/licensing/verifications"
-            empty={VERIFICATIONS_EMPTY}
-          />
+          <LicensingPanel id="features" tab={tab}>
+            <Card
+              title="Tier features"
+              info={
+                <p>
+                  Any flag absent from the licence defaults <strong>closed</strong>, so an older licence simply does not
+                  unlock newer paid features rather than failing. A flag may cap how many model providers or PM adapters a
+                  tier connects — never <em>which</em>: the licence never encodes a preferred vendor at any layer.
+                </p>
+              }
+            >
+              {s && (
+                <Table
+                  rows={Object.entries(s.features).map(([k, on]) => ({ k, on }))}
+                  rowKey={(r) => r.k}
+                  columns={[
+                    { key: "f", header: "Feature", render: (r) => r.k },
+                    {
+                      key: "s",
+                      header: "",
+                      srHeader: "Status",
+                      render: (r) => <Badge tone={r.on ? "ok" : "neutral"}>{r.on ? "granted" : "closed"}</Badge>,
+                    },
+                  ]}
+                />
+              )}
+            </Card>
+          </LicensingPanel>
+
+          <LicensingPanel id="install" tab={tab}>
+            <Card
+              title="Install a licence"
+              info={
+                <p>
+                  Verification is entirely local: the signature is checked against a public key already on this machine.
+                  A licence signed by a key this deployment does not pin is refused <strong>even if its signature is
+                  internally valid</strong> — that is what pinning means. A tampered or forged artifact is refused
+                  outright and never displaces the licence already in force.
+                </p>
+              }
+            >
+              <div className={v.stack}>
+                <Field label="Signed artifact (the JSON scripts/sign-license.sh emits)">
+                  <Textarea
+                    rows={6}
+                    value={artifact}
+                    onChange={(e) => setArtifact(e.target.value)}
+                    placeholder='{"documentBase64":"...","signature":"...","signingKeyId":"regulait-license-2026"}'
+                  />
+                </Field>
+                <div className={a.formRow}>
+                  <Button
+                    disabled={act.busy || !artifact.trim()}
+                    onClick={() =>
+                      void act.run(async () => {
+                        await api.post("/v1/licenses", JSON.parse(artifact));
+                        setArtifact("");
+                        await Promise.all([status.refetch(), history.refetch(), checks.refetch()]);
+                        return "Licence installed";
+                      })
+                    }
+                  >
+                    Install
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    disabled={act.busy}
+                    onClick={() =>
+                      void act.run(async () => {
+                        const r = await api.post<{ ok: boolean; state: string }>("/v1/licenses/verify", {});
+                        await Promise.all([status.refetch(), checks.refetch()]);
+                        return r.ok ? `Verified — ${r.state}` : "VERIFICATION FAILED — see the trail below";
+                      })
+                    }
+                  >
+                    Re-verify now
+                  </Button>
+                </div>
+                {s && (
+                  <KV
+                    rows={[
+                      ["Pinned keyring", <code>{s.keyring.dir}</code>],
+                      ["Pinned key ids", s.keyring.pinnedKeyIds.join(", ") || <span className={v.faint}>none</span>],
+                      [
+                        "Last verified",
+                        s.lastVerifiedAt ? ago(s.lastVerifiedAt) : <span className={v.faint}>never</span>,
+                      ],
+                      [
+                        "In-process scheduler",
+                        <Badge tone={s.schedulerPresent ? "ok" : "warn"}>{s.schedulerPresent ? "yes" : "no"}</Badge>,
+                      ],
+                      ["Enforcement points wired", s.enforcementPointsWired.join(", ")],
+                    ]}
+                  />
+                )}
+                <div className={v.faint}>{s?.note}</div>
+              </div>
+            </Card>
+          </LicensingPanel>
+
+          <LicensingPanel id="history" tab={tab}>
+            <Card title="Installed licences">
+              {(history.data?.licenses.length ?? 0) === 0 ? (
+                <EmptyState title="No licence has ever been installed" body="The history is append-only: installing a new licence supersedes the previous one and deletes nothing." />
+              ) : (
+                <Table
+                  rows={history.data!.licenses}
+                  rowKey={(l) => l.id}
+                  columns={[
+                    { key: "id", header: "Licence id", render: (l) => l.licenseId },
+                    { key: "t", header: "Tenant", render: (l) => l.tenant },
+                    { key: "tier", header: "Tier", render: (l) => l.tier },
+                    { key: "seats", header: "Seat cap", render: (l) => l.seatCap },
+                    { key: "m", header: "Mode", render: (l) => l.deploymentMode },
+                    { key: "k", header: "Signed by", render: (l) => <code>{l.signingKeyId}</code> },
+                    { key: "e", header: "Expires", render: (l) => l.expiresAt.slice(0, 10) },
+                    {
+                      key: "s",
+                      header: "Status",
+                      render: (l) => <Badge tone={l.status === "active" ? "ok" : "neutral"}>{l.status}</Badge>,
+                    },
+                    { key: "at", header: "Installed", render: (l) => ago(l.installedAt) },
+                  ]}
+                />
+              )}
+            </Card>
+
+            <ListPreview<VerificationRow>
+              title="Verification trail"
+              noun="verifications"
+              endpoint="/v1/licenses/verifications"
+              legacyKey="verifications"
+              queryKey={["admin", "license-verifications"]}
+              sort={VERIFICATION_SORT}
+              attention={[{ label: "refused", filters: { ok: "false" } }]}
+              columns={VERIFICATION_COLUMNS}
+              rowKey={(c) => c.id}
+              viewAll="/admin/licensing/verifications"
+              empty={VERIFICATIONS_EMPTY}
+            />
+          </LicensingPanel>
         </QueryGate>
       </div>
     </>
+  );
+}
+
+function LicensingPanel(props: { id: LicensingTab; tab: LicensingTab; children: ReactNode }) {
+  const ids = tabIds("licensing", props.id);
+  const shown = props.tab === props.id;
+  return (
+    // the stack's display would otherwise override the hidden attribute
+    <div role="tabpanel" id={ids.panel} aria-labelledby={ids.tab} hidden={!shown} className={shown ? v.stack : undefined}>
+      {props.children}
+    </div>
   );
 }

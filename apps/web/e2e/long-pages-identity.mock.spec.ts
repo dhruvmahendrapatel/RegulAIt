@@ -86,6 +86,8 @@ const SPLITS = [
     total: 45,
     back: "Licensing & seats",
     warnings: ["REFUSED"],
+    // the trail sits under the page's History tab, whose label counts the refusals
+    tab: "History · 12 refused",
   },
 ] as const;
 
@@ -94,6 +96,7 @@ for (const P of SPLITS) {
     test("the preview counts, the warnings stay visible, View all opens the full list, and the breadcrumb goes back", async ({ page }) => {
       const cap = await mockApi(page);
       await page.goto(P.path);
+      if ("tab" in P) await page.getByRole("tab", { name: P.tab, exact: true }).click();
       const preview = page.locator(`[data-preview="${P.endpoint}"]`);
       await expect(page.getByText(P.heading, { exact: true })).toBeVisible();
       await expect(preview.locator("tbody tr")).toHaveCount(5);
@@ -125,6 +128,7 @@ for (const P of SPLITS) {
 
       await page.getByRole("navigation", { name: "Breadcrumb" }).getByRole("link", { name: P.back }).click();
       await expect(page).toHaveURL(new RegExp(`${P.path}$`));
+      if ("tab" in P) await page.getByRole("tab", { name: P.tab, exact: true }).click();
       await expect(page.getByText(P.heading, { exact: true })).toBeVisible();
     });
   });
