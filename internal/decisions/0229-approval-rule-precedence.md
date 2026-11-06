@@ -299,3 +299,9 @@ after the facts change, the JIT default role withheld).
 - **Lock order:** role delete takes the role row lock before the routing lock, as decision 16 says.
 - **Shift audits:** they now commit with the write on role assign and on mapping create and delete.
 - **Tests:** the SoD refusal is now tested through the decide route (409 body and `sod-override-role-refused` row), and the IdP removal's reconciliation audit row is asserted.
+
+**Review round 2 of #675 (at `ed53348`).** The round-1 recheck only serialised with writers that also take the routing lock. When the user still held the role directly, the IdP reconciler's removal read the direct row with no lock. It and an admin unassign could then each delete their own row while each still saw the other's: a write-skew. The removal now takes the role row lock and then the routing lock before that read, in decision 16's order, so the two serialise in both orders:
+- unassign first: the reconciler then sees no direct hold and records the shift;
+- reconciler first: the unassign's recheck flips and answers 409.
+
+Both orders are tested against the real `reconcileGroupRoles`, and removing the locks fails both tests.

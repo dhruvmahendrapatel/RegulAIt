@@ -61,7 +61,7 @@ import {
   type Db,
   type GroupSource,
 } from "@regulait/db";
-import { approverPoolShiftFacts, lockApproverRoles } from "./approval-pool.js";
+import { approverPoolShiftFacts, lockApprovalRuleRouting, lockApproverRoles } from "./approval-pool.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -290,7 +290,13 @@ export async function reconcileGroupRoles(
   for (const roleId of toRemove) {
     const shift = await db.transaction(async (rawTx) => {
       const tx = rawTx as unknown as Db;
-      // decided under the routing lock, before the row goes (a direct assignment of the same role keeps it held)
+      // #675 review round 2 (write-skew): ALWAYS take the role row lock, then the routing lock, BEFORE reading the
+      // direct row, so this removal serialises with an admin unassign of the same role in either order (decision 16's
+      // order). Without it, each side could delete "its" row while still seeing the other's, and the role would go
+      // with no step-up and no recorded shift.
+      await lockApproverRoles(tx, [roleId]);
+      await lockApprovalRuleRouting(tx);
+      // decided under the locks, before the row goes (a direct assignment of the same role keeps it held)
       const [direct] = await tx
         .select({ id: roleAssignments.id })
         .from(roleAssignments)

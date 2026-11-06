@@ -486,45 +486,97 @@ describe("issue #668: fail closed", () => {
     });
   });
 
-  it("TOCTOU (finding 1): a group hold dropped while an unassign waits on the routing lock ends in 409, not a silent shift", async () => {
-    await withFleet(async () => {
-      const roleId = await mkRole("toctou");
-      await groupRule("role", roleId);
-      await db.insert(roleAssignments).values([
-        { userId: U.member, roleId, origin: "direct" },
-        { userId: U.member, roleId, origin: "group" },
-      ]);
-      const other = createDb(urlFor(SCRATCH_DB));
-      try {
-        let res: Awaited<ReturnType<typeof asAdmin>> | undefined;
-        await other.transaction(async (rawTx) => {
-          const tx = rawTx as unknown as Db;
-          // the reconciler's side: under the routing lock, the group row goes (not yet committed)
-          await lockApprovalRuleRouting(tx);
-          await tx.delete(roleAssignments).where(and(eq(roleAssignments.roleId, roleId), eq(roleAssignments.origin, "group")));
-          // the admin's unassign reads "still group-held" (decides = false, no step-up asked) and blocks on the lock
-          const pending = asAdmin("DELETE", `/v1/users/${U.member}/roles/${roleId}`, undefined);
-          for (let i = 0; i < 200; i++) {
-            const w = await adminDb.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`);
-            if ((w.rows[0]?.n ?? 0) > 0) break;
-            await new Promise((r) => setTimeout(r, 25));
-          }
-          void pending.then((r) => (res = r));
-          // commit releases the lock (this transaction returns)
-        });
-        for (let i = 0; i < 200 && !res; i++) await new Promise((r) => setTimeout(r, 25));
-        expect(res?.statusCode, res?.body).toBe(409);
-        expect(res!.json()).toMatchObject({ error: "changed_concurrently" });
-        // the direct hold survives: nothing moved without a step-up
-        const held = await db.select().from(roleAssignments).where(eq(roleAssignments.roleId, roleId));
-        expect(held.map((h) => h.origin)).toEqual(["direct"]);
-        // the retry is decided on what is there now, and asks for the step-up
-        const retry = await asAdmin("DELETE", `/v1/users/${U.member}/roles/${roleId}`, undefined);
-        expect(retry.statusCode, retry.body).toBe(403);
-        expect(retry.json()).toMatchObject({ error: "step_up_required", action: { body: { change: "member-remove", objectId: roleId } } });
-      } finally {
+  /** a second connection holding the approval-rule routing lock until `release` */
+  async function holdRoutingLock() {
+    const other = createDb(urlFor(SCRATCH_DB));
+    let release!: () => void;
+    let locked!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const ready = new Promise<void>((r) => (locked = r));
+    const done = other.transaction(async (tx) => {
+      await lockApprovalRuleRouting(tx as unknown as Db);
+      locked();
+      await gate;
+    });
+    await ready;
+    return {
+      release: async () => {
+        release();
+        await done;
         await other.$client.end();
-      }
+      },
+    };
+  }
+  /** wait until at least `n` lock requests in the cluster are waiting (not granted) */
+  async function waitForWaiters(n: number) {
+    for (let i = 0; i < 400; i++) {
+      const w = await adminDb.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM pg_locks WHERE NOT granted`);
+      if ((w.rows[0]?.n ?? 0) >= n) return;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    throw new Error(`fewer than ${n} lock waiters appeared`);
+  }
+  async function bothHolds(label: string) {
+    const roleId = await mkRole(label);
+    const ruleId = await groupRule("role", roleId);
+    await db.insert(roleAssignments).values([
+      { userId: U.member, roleId, origin: "direct" },
+      { userId: U.member, roleId, origin: "group" },
+    ]);
+    return { roleId, ruleId };
+  }
+  const reconcileNoGroups = () => reconcileGroupRoles(db, U.member, "oidc", [], { kind: "oidc-login", actor: "p668" });
+
+  it("race, real reconciler first: the IdP removal commits, the waiting unassign re-decides and answers 409", async () => {
+    await withFleet(async () => {
+      const { roleId } = await bothHolds("race-idp-first");
+      const holder = await holdRoutingLock();
+      // the reconciler takes the role row lock and waits on the routing lock
+      const reconciled = reconcileNoGroups();
+      await waitForWaiters(1);
+      // the unassign's early read still sees the group hold (decides = false, no step-up) and waits on the role row
+      const unassign = asAdmin("DELETE", `/v1/users/${U.member}/roles/${roleId}`, undefined);
+      await waitForWaiters(2);
+      await holder.release();
+      const out = await reconciled;
+      expect(out.removed).toEqual([expect.objectContaining({ roleId })]);
+      expect(out.removed[0]!.approverPoolShift).toBeUndefined(); // the direct hold still kept the role
+      const res = await unassign;
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json()).toMatchObject({ error: "changed_concurrently" });
+      const held = await db.select().from(roleAssignments).where(eq(roleAssignments.roleId, roleId));
+      expect(held.map((h) => h.origin)).toEqual(["direct"]);
+      // the retry is decided on what is there now, and asks for the step-up
+      const retry = await asAdmin("DELETE", `/v1/users/${U.member}/roles/${roleId}`, undefined);
+      expect(retry.statusCode, retry.body).toBe(403);
+      expect(retry.json()).toMatchObject({ error: "step_up_required", action: { body: { change: "member-remove", objectId: roleId } } });
+    });
+  });
+
+  it("race, unassign first: the direct row goes, the waiting real reconciler then sees no direct hold and records the shift", async () => {
+    await withFleet(async (fleetId) => {
+      const { roleId, ruleId } = await bothHolds("race-unassign-first");
+      const holder = await holdRoutingLock();
+      // the unassign (decides = false: still group-held) takes the role row lock and waits on the routing lock
+      const unassign = asAdmin("DELETE", `/v1/users/${U.member}/roles/${roleId}`, undefined);
+      await waitForWaiters(1);
+      // the reconciler waits on the role row the unassign holds
+      const reconciled = reconcileNoGroups();
+      await waitForWaiters(2);
+      await holder.release();
+      const res = await unassign;
+      expect(res.statusCode, res.body).toBe(200);
+      const out = await reconciled;
+      expect(out.removed).toEqual([
+        expect.objectContaining({
+          roleId,
+          approverPoolShift: expect.objectContaining({
+            change: "member-remove",
+            values: { approverPoolTakeovers: [{ ruleId, outrankedByApprovalRules: [fleetId] }] },
+          }),
+        }),
+      ]);
+      expect(await db.select().from(roleAssignments).where(eq(roleAssignments.roleId, roleId))).toHaveLength(0);
     });
   });
 });
