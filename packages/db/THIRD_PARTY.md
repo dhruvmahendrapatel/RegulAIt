@@ -5,7 +5,7 @@ ISC; maintained; pinned; works air-gapped). npm dependencies are pinned exactly 
 
 | Component | Version | Licence | Used for, and why |
 |---|---|---|---|
-| `drizzle-orm` (npm, github.com/drizzle-team/drizzle-orm, © Drizzle Team) | `0.45.3` (exact) | Apache-2.0 | Type-safe SQL query builder and schema layer over `pg` (`src/index.ts`, `src/schema.ts`, audit-chain and BOM-lock queries); runs in process with no network of its own. |
+| `drizzle-orm` (npm, github.com/drizzle-team/drizzle-orm, © Drizzle Team) | `0.45.4` (exact) | Apache-2.0 | Type-safe SQL query builder and schema layer over `pg` (`src/index.ts`, `src/schema.ts`, audit-chain and BOM-lock queries); runs in process with no network of its own. |
 | `pg` (npm, github.com/brianc/node-postgres, © Brian Carlson) | `8.23.1` (exact) | MIT | PostgreSQL client pool that `drizzle-orm/node-postgres` drives in `src/index.ts`; the only connection to the database. |
 | `@types/node` (npm, github.com/DefinitelyTyped/DefinitelyTyped) | `26.6.6` (exact devDependency) | MIT | Type definitions for the Node.js standard library used by the sources and tests; test/build-only, never in a shipped bundle. |
 | `@types/pg` (npm, github.com/DefinitelyTyped/DefinitelyTyped) | `8.23.1` (exact devDependency) | MIT | Type definitions for `pg`; build-only. |
