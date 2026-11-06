@@ -223,8 +223,6 @@ export const INDIRECT_UI_CALLS = new Map([
     ["GET /v1/governance/remediations", "apps/web/src/views/admin/governance/RemediationsCard.tsx"],
     ["GET /v1/certification-campaigns", "apps/web/src/views/admin/governance/CampaignsPage.tsx"],
     ["GET /v1/certification-campaigns/:campaignId/items", "apps/web/src/views/admin/governance/CampaignsPage.tsx"],
-    ["GET /v1/sod/overrides", "apps/web/src/views/admin/governance/SodRulesPage.tsx"],
-    ["GET /v1/policy-simulations", "apps/web/src/views/admin/governance/SimulationPage.tsx"],
     ["GET /v1/copilot/queries", "apps/web/src/views/admin/governance/CopilotPage.tsx"],
     ["GET /v1/copilot/proposals", "apps/web/src/views/admin/governance/CopilotPage.tsx"],
     ["GET /v1/shadow-ai/imports", "apps/web/src/views/admin/governance/ShadowAiPage.tsx"],
