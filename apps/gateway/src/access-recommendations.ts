@@ -1174,7 +1174,7 @@ export const RECOMMENDATION_FINDINGS_LIST: MemoryListSpec<RecommendationFinding>
     holder: { value: (f) => f.holder.label.toLowerCase() },
     object: { value: (f) => grantLabel(f)?.toLowerCase() ?? null },
     why: { value: (f) => f.rationale.toLowerCase() },
-    judged: { value: (f) => f.judged?.verdict ?? null },
+    // no `judged` sort: the list pages the DETERMINISTIC findings (see the route), so it holds no verdict to sort by
   },
   columns: {
     holder: { label: "Holder", value: (f) => f.holder.label },
@@ -1200,9 +1200,16 @@ export function registerAccessRecommendationRoutes(
   opts: AccessRecommendationRouteOptions = {},
 ): void {
   // ADR-0226: with any of sort/dir/cursor/offset/count (and `rule`) the route
-  // answers one rule's findings under the shared list contract, read from the
-  // same report (deterministic first, the judged layer exactly as below); with
-  // none of them, exactly the report. Admin only, like the report.
+  // answers one rule's findings under the shared list contract; with none of
+  // them, exactly the report. Admin only, like the report.
+  //
+  // The list pages the DETERMINISTIC findings only and never dispatches the
+  // judge (#681 review): the page mounts one list per flagged rule and re-reads
+  // it on every sort, page and refocus, so judging there billed one dispatch per
+  // read and could show verdicts that disagree with the report the page is drawn
+  // from. The page overlays the verdicts from its one report read, by key. The
+  // export, a single download the admin asks for, still carries the judged
+  // layer exactly as the report does.
   app.get("/v1/recommendations/access/export.xlsx", async (req, reply) => {
     try {
       const filters = findingsFilterQuery.parse(filterParams(req.query));
@@ -1218,12 +1225,13 @@ export function registerAccessRecommendationRoutes(
     if (wantsListContract(req.query)) {
       try {
         const filters = findingsFilterQuery.parse(filterParams(req.query));
-        const report = await accessReport(req, filters);
+        const report = await computeAccessRecommendations(db, filters.windowDays !== undefined ? { windowDays: filters.windowDays } : {});
         const rule = report.rules.find((r) => r.id === filters.rule);
         return {
           ...pageInMemory(rule?.findings ?? [], req.query, RECOMMENDATION_FINDINGS_LIST),
           rule: filters.rule,
-          judged: report.judged,
+          // said outright, so no one reads a missing verdict here as "not judged"
+          judgedFrom: "report",
         };
       } catch (e) {
         return sendListError(reply, e);

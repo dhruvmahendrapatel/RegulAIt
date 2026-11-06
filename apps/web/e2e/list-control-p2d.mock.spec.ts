@@ -130,9 +130,10 @@ const LISTS: Record<string, ListDef> = {
   },
   "/v1/recommendations/access": {
     rows: FINDINGS,
-    field: { holder: "holder.label", object: "object.label", why: "rationale", judged: "judged.verdict" },
+    // the list pages the deterministic findings: no judged sort, and its verdicts come from the page's report read
+    field: { holder: "holder.label", object: "object.label", why: "rationale" },
     filter: (_r, q) => q.get("rule") === "unused-grant",
-    extra: { judged: REPORT.judged },
+    extra: { judgedFrom: "report" },
   },
   "/v1/approvals": {
     rows: APPROVALS,
@@ -437,6 +438,33 @@ for (const P of PAGES) {
     });
   });
 }
+
+test.describe("access recommendations: a rule's list shows the report's verdicts, never its own (#681 review)", () => {
+  test("the verdict on a row comes from the one report read, by key; the list read carries none", async ({ page }) => {
+    const cap = await mockApi(page);
+    const judged = { method: "model-judged", verdict: "agree", note: "the evidence supports this", judge: "test:judge", judgedAt: at(0) };
+    const key = FINDINGS[0]!.key;
+    // registered after mockApi, so it wins: only the report read is judged
+    await page.route(
+      (u) => u.pathname === "/v1/recommendations/access" && !u.searchParams.get("sort"),
+      (route) =>
+        route.fulfill({
+          contentType: "application/json",
+          body: JSON.stringify({
+            ...REPORT,
+            rules: REPORT.rules.map((r) => ({ ...r, findings: r.findings.map((f) => (f.key === key ? { ...f, judged } : f)) })),
+            judged: { enabled: true, status: "judged", judge: "test:judge", annotated: 1, note: "One finding carries a model-judged annotation." },
+          }),
+        }),
+    );
+    await page.goto("/ui/admin/recommendations");
+    const list = page.locator('[data-list="access-recommendation-findings"]');
+    await expect(list.getByRole("row", { name: new RegExp(FINDINGS[0]!.holder.label) }).getByText("model-judged: agree").first()).toBeVisible();
+    expect(cap.lists.filter((u) => u.pathname === "/v1/recommendations/access").length).toBeGreaterThan(0);
+    // the judged column is not a server sort any more
+    await expect(list.getByRole("button", { name: /Model-judged/ })).toHaveCount(0);
+  });
+});
 
 test.describe("the Inbox's Recently decided folds over the list control (X6b, listControl)", () => {
   const decidedReads = (cap: Capture) => cap.lists.filter((u) => u.pathname === "/v1/approvals");

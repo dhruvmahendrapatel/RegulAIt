@@ -15,8 +15,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { strFromU8, unzipSync } from "fflate";
-import { agentGrants, and, approvals, auditLog, createDb, desc, eq, gte, inArray, runMigrations, usageEvents, type Db } from "@regulait/db";
+import { agentGrants, and, approvals, auditLog, createDb, desc, eq, gte, inArray, orgSettings, runMigrations, usageEvents, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import type { RecommendationJudge } from "@regulait/shared";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxStepUpForTest } from "./testing/step-up-posture.js";
 
@@ -346,7 +347,47 @@ describe("P2d: access recommendations, findings per rule", () => {
     const holders = rows.map((r) => r.holder.label.toLowerCase());
     expect(holders).toEqual([...holders].sort((x, y) => (x < y ? -1 : x > y ? 1 : 0)));
     const page = (await get(`/v1/recommendations/access?rule=unused-grant&limit=10&count=exact`)).json() as Json;
-    expect(page).toMatchObject({ rule: "unused-grant", total: unused.findings.length, judged: report.judged });
+    expect(page).toMatchObject({ rule: "unused-grant", total: unused.findings.length, judgedFrom: "report" });
+  });
+
+  it("list reads never dispatch the judge: only the report read (and an export) does, so the page bills one dispatch", async () => {
+    let calls = 0;
+    const judge: RecommendationJudge = {
+      id: "test:counting-judge",
+      judge: async (reqs) => {
+        calls += 1;
+        return reqs.map((r) => ({ key: r.key, verdict: "agree" as const, note: "counted" }));
+      },
+    };
+    const seam = buildApp(db, { bootstrapToken: BOOT, dataKey: "e".repeat(64), recommendationJudge: judge });
+    const [prior] = await db.select({ on: orgSettings.recommendationJudgeEnabled }).from(orgSettings);
+    await db.update(orgSettings).set({ recommendationJudgeEnabled: true });
+    try {
+      const at = (url: string) => seam.inject({ method: "GET", url, headers: AUTH });
+      const report = (await at("/v1/recommendations/access")).json() as Json;
+      expect(report.judged).toMatchObject({ enabled: true, status: "judged", judge: "test:counting-judge" });
+      expect(calls).toBe(1);
+      // sorting, paging and a second rule's list: no dispatch, and no verdict of their own to disagree with the report
+      for (const url of [
+        "/v1/recommendations/access?rule=unused-grant&limit=10&sort=holder&dir=asc",
+        "/v1/recommendations/access?rule=unused-grant&limit=10&sort=holder&dir=desc&count=exact",
+        "/v1/recommendations/access?rule=unused-grant&limit=10&offset=10",
+      ]) {
+        const res = await at(url);
+        expect(res.statusCode, res.body).toBe(200);
+        for (const f of (res.json() as Json).items) expect(f.judged).toBeUndefined();
+      }
+      expect(calls).toBe(1);
+      expect((await at("/v1/recommendations/access?rule=unused-grant&sort=judged")).json().error).toBe("unknown_sort_column");
+      // the export is a download the admin asks for, and still carries the judged layer
+      const res = await at("/v1/recommendations/access/export.xlsx?rule=unused-grant&sort=holder&columns=holder,judged");
+      expect(res.statusCode, res.body).toBe(200);
+      expect(calls).toBe(2);
+      expect(readXlsx(res.rawPayload)[1]![1]).toMatch(/^model-judged: agree/);
+    } finally {
+      await db.update(orgSettings).set({ recommendationJudgeEnabled: prior?.on ?? false });
+      await seam.close();
+    }
   });
 
   it("needs a known rule, and refuses an unknown sort", async () => {

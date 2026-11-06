@@ -31,7 +31,8 @@ export default function OptimizationPage() {
   const usage = useQuery({
     queryKey: ["admin", "usage-events", userId],
     queryFn: () =>
-      api.get<UsageEventsResponse>(`/v1/usage-events?limit=100${userId ? `&userId=${userId}` : ""}`),
+      // only the totals are read here (the events are the list below), and they cover every row whatever the limit
+      api.get<UsageEventsResponse>(`/v1/usage-events?limit=1${userId ? `&userId=${userId}` : ""}`),
   });
 
   const totals = cost.data?.totals ?? [];
@@ -179,7 +180,7 @@ export default function OptimizationPage() {
   );
 }
 
-type UsageRow = NonNullable<UsageEventsResponse["events"]>[number] & { id: string; userName?: string | null; agentName?: string | null };
+type UsageRow = NonNullable<UsageEventsResponse["events"]>[number] & { id: string; userName?: string | null; agentName?: string | null; projectName?: string | null };
 /** ADR-0226: the usage ledger's columns; the ids and sortable ones match the gateway's USAGE_EVENTS_LIST */
 const USAGE_COLUMNS: Array<DataColumn<UsageRow>> = [
   { key: "at", header: "At", main: true, sortable: true, render: (e) => <span className={v.mono}>{String(e.at).slice(0, 19).replace("T", " ")}</span> },
@@ -194,7 +195,8 @@ const USAGE_COLUMNS: Array<DataColumn<UsageRow>> = [
     main: true,
     sortable: true,
     required: "Unattributed spend is always shown",
-    render: (e) => (e.projectId ? <Badge tone="ok">attributed</Badge> : <Badge tone="warn">unattributed</Badge>),
+    // the column sorts by project name, so the cell shows the name; unattributed spend keeps its warning badge
+    render: (e) => (e.projectId ? (e.projectName ?? e.projectId) : <Badge tone="warn">unattributed</Badge>),
   },
   { key: "user", header: "User", sortable: true, render: (e) => e.userName ?? "—" },
   { key: "agent", header: "Agent", sortable: true, render: (e) => e.agentName ?? "—" },

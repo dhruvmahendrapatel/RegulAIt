@@ -95,8 +95,13 @@ const evidenceLine = (e: Record<string, unknown>): string =>
     .map(([k, val]) => `${k}: ${String(val)}`)
     .join(" · ");
 
-/** ADR-0226: a rule's findings; the ids and sortable ones match the gateway's RECOMMENDATION_FINDINGS_LIST */
-const FINDING_COLUMNS: Array<DataColumn<Finding>> = [
+/**
+ * ADR-0226: a rule's findings; the ids and sortable ones match the gateway's RECOMMENDATION_FINDINGS_LIST. The list
+ * pages the deterministic findings only (the gateway never judges a list read, so sorting or paging bills no judge
+ * dispatch), and each row's verdict comes from the page's one report read, by key, so a list never disagrees with the
+ * report it sits under.
+ */
+const findingColumns = (judgedOf: (r: Finding) => JudgeAnnotation | undefined): Array<DataColumn<Finding>> => [
   { key: "holder", header: "Holder", main: true, sortable: true, render: (r) => r.holder.label },
   {
     key: "object",
@@ -110,30 +115,35 @@ const FINDING_COLUMNS: Array<DataColumn<Finding>> = [
     header: "Why (evidence attached)",
     main: true,
     sortable: true,
-    render: (r) => (
-      <>
-        <div>{r.rationale}</div>
-        <div className={v.faint}>{evidenceLine(r.evidence)}</div>
-        {r.judged && (
-          <div>
-            <Badge tone={verdictTone(r.judged.verdict)}>
-              {r.judged.method}: {r.judged.verdict}
-            </Badge>{" "}
-            <span className={v.faint}>
-              {r.judged.note} — advisory only ({r.judged.judge}); it did not create this finding and cannot change the
-              evidence above.
-            </span>
-          </div>
-        )}
-      </>
-    ),
+    render: (r) => {
+      const judged = judgedOf(r);
+      return (
+        <>
+          <div>{r.rationale}</div>
+          <div className={v.faint}>{evidenceLine(r.evidence)}</div>
+          {judged && (
+            <div>
+              <Badge tone={verdictTone(judged.verdict)}>
+                {judged.method}: {judged.verdict}
+              </Badge>{" "}
+              <span className={v.faint}>
+                {judged.note} — advisory only ({judged.judge}); it did not create this finding and cannot change the
+                evidence above.
+              </span>
+            </div>
+          )}
+        </>
+      );
+    },
   },
   { key: "evidence", header: "Evidence", render: (r) => <span className={v.faint}>{evidenceLine(r.evidence)}</span> },
   {
     key: "judged",
     header: "Model-judged (advisory)",
-    sortable: true,
-    render: (r) => (r.judged ? <Badge tone={verdictTone(r.judged.verdict)}>{`${r.judged.method}: ${r.judged.verdict}`}</Badge> : <span className={v.faint}>—</span>),
+    render: (r) => {
+      const judged = judgedOf(r);
+      return judged ? <Badge tone={verdictTone(judged.verdict)}>{`${judged.method}: ${judged.verdict}`}</Badge> : <span className={v.faint}>—</span>;
+    },
   },
 ];
 
@@ -158,6 +168,9 @@ export default function RecommendationsPage() {
     }, "Campaign opened over exactly the grants this rule flags right now — each item routed to its named reviewer (due in 14 days)");
 
   const d = report.data;
+  // the verdicts of the one report read, by finding key: every rule's list shows these, never a judgement of its own
+  const judgedByKey = new Map((d?.rules ?? []).flatMap((r) => r.findings.flatMap((f) => (f.judged ? [[f.key, f.judged] as const] : []))));
+  const columns = findingColumns((r) => r.judged ?? judgedByKey.get(r.key));
   return (
     <>
       <PageHeader
@@ -241,7 +254,7 @@ export default function RecommendationsPage() {
                           filters={{ rule: rule.id }}
                           defaultSort={{ key: "holder", dir: "asc" }}
                           rowKey={(r) => r.key}
-                          columns={FINDING_COLUMNS}
+                          columns={columns}
                         />
                       )}
                       {rule.notAssessable.length > 0 && (
