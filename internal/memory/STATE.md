@@ -5460,6 +5460,19 @@ user or server that an approval rule is scoped to (cascade delete). **Amendment 
 match re-owes every takeover; option (b) (pool intersection) is the recorded long-term simplification. Open follow-ups: a
 rule-editor warning for shadowed tightenings and equal-specificity overlaps, and option (b).
 
+**ADR-0230 (design, 2026-11-06, Proposed): SAP business agents over MCP (P19).**
+- **Where it lives:** `create_sales_order` (`API_SALES_ORDER_SRV`) goes in the regulAIt-ABAP MCP server, and the gateway's existing MCP path governs it.
+- **Safety:** a required idempotency key; principal propagation from the ADR-0210 assertion through the BTP Destination service, with technical users refused for writes; approve-first defaults seeded for `system_class = 'sap_business'` (quorum 2 with the requester excluded, a rate limit, a project budget required).
+- **Open source:** the SAP Cloud SDK is blocked by `@sap/xssec`'s licence, so odata2ts is proposed.
+- **Order:** it waits for regulAIt-ABAP #78/#79 and the BTP smoke test.
+- **Open:** seven owner questions (ADR §Open questions).
+
+**ADR-0231 (design, 2026-11-06, Proposed): SAP Joule agents over A2A (P20).**
+- **Approach:** builds on ADR-0219, with admin-only ARD import and the SDK 1.3.0 REST transport plus its v0.3 compatibility layer.
+- **Tokens:** client credentials for discovery only, and a per-call user-bound token. SAP documents **RFC 7523 jwt-bearer**, not RFC 8693, so both grants are supported and jwt-bearer is the SAP default.
+- **Defaults:** `sap_agent_gateway_enabled` is off; a call to a gateway agent needs approval.
+- **Open:** six owner questions, the first being jwt-bearer vs RFC 8693.
+
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
 (b) standing policy for future scaffolds recorded (ADR-0006, no implementation yet — nothing to
