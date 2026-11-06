@@ -18,7 +18,7 @@ import { McpCoverage, StdioArguments } from "./Batch3Mcp";
 import { IntegrationOwnership } from "./IntegrationOwnership";
 import { ExecutionProfileSelector, PersonStdioRelaxationControl } from "./isolation/IsolationPanel";
 import { McpRegistriesPanel } from "./McpRegistriesPanel";
-import { McpAdmissionClearButton, McpServerNextSteps, McpVisibleToolsCard } from "./McpServerAdmission";
+import { McpAdmissionClearButton, McpServerNextSteps, McpSyncToolsButton, McpVisibleToolsCard } from "./McpServerAdmission";
 import { IdentityPropagationCell, McpIdentityAssertionCard } from "./McpIdentityPropagation";
 import { McpUpstreamCredentialCard } from "./McpUpstreamCredential";
 import { api } from "../../../api/client";
@@ -484,6 +484,7 @@ function ToolsCard(props: { server: McpServer }) {
   return (
     <Card
       title={`Tools on ${props.server.name}`}
+      actions={<McpSyncToolsButton server={props.server} />}
       infoLabel="tool pricing"
       info={
         <p>
@@ -543,8 +544,8 @@ function ToolsCard(props: { server: McpServer }) {
         onRetry={() => void tools.refetch()}
         empty={
           <EmptyState
-            title="No tools registered on this server"
-            body="Register them below, or let the proxy auto-discover them on first use."
+            title="No tools synced from this server yet"
+            body="Choose Sync tools now above to fetch and scan its manifest, or register a tool by hand below."
           />
         }
       />

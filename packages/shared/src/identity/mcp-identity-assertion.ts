@@ -188,3 +188,117 @@ export function agentIdDisclosureUpdate(
     refused: false,
   };
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0210 — the OIDC-compatible profile (per server, opt-in)
+// ---------------------------------------------------------------------------
+
+/**
+ * How an opted-in server receives its assertion. `regulait_header` (the default) is the S8 format above, unchanged.
+ * `oidc_bearer` is for an upstream that validates a standard OIDC JWT: the assertion is signed ES256 under its own
+ * issuer (`<REGULAIT_PUBLIC_URL>/mcp-identity`, with an OIDC discovery document), carries an admin-set `scope`, and
+ * rides in `Authorization: Bearer` on every request of the governed call's connection.
+ */
+export const IDENTITY_ASSERTION_PROFILES = ["regulait_header", "oidc_bearer"] as const;
+export type IdentityAssertionProfile = (typeof IDENTITY_ASSERTION_PROFILES)[number];
+/** the issuer path of the OIDC profile. Distinct from the workload identity issuer (the base URL) and `/federation`. */
+export const MCP_IDENTITY_OIDC_ISSUER_PATH = "/mcp-identity" as const;
+/** its OpenID Connect Discovery 1.0 document (`{issuer}/.well-known/openid-configuration`) */
+export const MCP_IDENTITY_OIDC_DISCOVERY_PATH = "/mcp-identity/.well-known/openid-configuration" as const;
+/** its JWKS: the ES256 public halves only */
+export const MCP_IDENTITY_OIDC_JWKS_PATH = "/mcp-identity/.well-known/jwks.json" as const;
+/** the JWS `alg` of the OIDC profile (one of the algorithms standard OIDC validators pin) */
+export const MCP_IDENTITY_OIDC_JWS_ALG = "ES256" as const;
+/** every claim an OIDC-profile assertion may carry; `act` only when an agent acts */
+export const MCP_IDENTITY_OIDC_CLAIMS = ["iss", "aud", "sub", "scope", "act", "iat", "exp", "jti"] as const;
+/** the longest scope an admin may set */
+export const IDENTITY_ASSERTION_SCOPE_MAX = 512;
+/**
+ * RFC 6749 §3.3: space-delimited scope tokens, each of `%x21 / %x23-5B / %x5D-7E` (no quote, no backslash, no
+ * control character). One space between tokens, none at either end. Checked by length first, and the token class
+ * has no overlap with the separator, so the match is linear.
+ */
+const SCOPE_PATTERN = /^[\x21\x23-\x5B\x5D-\x7E]+(?: [\x21\x23-\x5B\x5D-\x7E]+)*$/;
+export function identityAssertionScopeProblem(scope: string): string | null {
+  if (scope.length === 0 || scope.length > IDENTITY_ASSERTION_SCOPE_MAX) return `the scope must be 1 to ${IDENTITY_ASSERTION_SCOPE_MAX} characters`;
+  if (!SCOPE_PATTERN.test(scope)) return "the scope must be space-separated RFC 6749 scope tokens (printable ASCII, no quote or backslash)";
+  return null;
+}
+
+/** the audit rule id of every change of a server's assertion profile or scope */
+export const IDENTITY_ASSERTION_PROFILE_CHANGED_RULE_ID = "mcp-server-identity-assertion-profile-changed";
+/** PATCH refusals (409 or 400, nothing saved) */
+export const IDENTITY_ASSERTION_PROFILE_NEEDS_ASSERTION = "identity_assertion_profile_needs_assertion" as const;
+export const IDENTITY_ASSERTION_SCOPE_INVALID = "identity_assertion_scope_invalid" as const;
+/** the OIDC profile's bearer and an ADR-0204 Bearer credential would both claim `Authorization` (409, nothing saved) */
+export const IDENTITY_ASSERTION_BEARER_CONFLICT = "identity_assertion_bearer_conflict" as const;
+
+export interface AssertionProfileUpdate {
+  /** the values to write, or null when neither column changes */
+  write: { identityAssertionProfile: IdentityAssertionProfile; identityAssertionScope: string | null } | null;
+  /** ADR-0180: the relaxation this update makes (part of the request's one `settings_relax` step-up), or null */
+  relaxed: { identityAssertionProfile: "oidc_bearer"; identityAssertionScope: string } | null;
+  /** it was on and returns to the default because the url moved, or because identity propagation turns off */
+  reset: "url_move" | "propagation_off" | null;
+  /** the request cannot be applied: the PATCH answers with this code, nothing saved */
+  refused: { code: typeof IDENTITY_ASSERTION_PROFILE_NEEDS_ASSERTION | typeof IDENTITY_ASSERTION_SCOPE_INVALID; detail: string } | null;
+}
+
+/**
+ * ADR-0210 — what a `PATCH /v1/servers/:id` does to `identityAssertionProfile` and `identityAssertionScope`, given
+ * what it does to `identityPropagation` (`identity`). The same shape as `agentIdDisclosureUpdate`:
+ *  - `oidc_bearer` only while the NEXT propagation is `signed_assertion`, and only with an explicit scope (the
+ *    request's, or the one already set); a scope only with `oidc_bearer`;
+ *  - turning it on, changing the scope, or keeping it on across a url move is a relaxation (the step-up binds the
+ *    values and the url);
+ *  - a url move that does not name the profile, or propagation turning off, returns to the default (audited, no
+ *    step-up), so neither the bearer placement nor the scope ever follows the url to a new destination;
+ *  - returning to `regulait_header` is not a relaxation.
+ */
+export function assertionProfileUpdate(
+  before: { identityPropagation: string; identityAssertionProfile: string; identityAssertionScope: string | null; url: string },
+  body: { identityAssertionProfile?: IdentityAssertionProfile | undefined; identityAssertionScope?: string | null | undefined; url?: string | undefined },
+  identity: IdentityPropagationUpdate,
+): AssertionProfileUpdate {
+  const none = { write: null, relaxed: null, reset: null, refused: null } as const;
+  const urlMoves = body.url !== undefined && body.url !== before.url;
+  const nextPropagation = identity.write ?? before.identityPropagation;
+  const wasBearer = before.identityAssertionProfile === "oidc_bearer";
+  const nextProfile = body.identityAssertionProfile ?? (wasBearer && !urlMoves && nextPropagation === "signed_assertion" ? "oidc_bearer" : "regulait_header");
+  const toDefault = { identityAssertionProfile: "regulait_header" as const, identityAssertionScope: null };
+  if (body.identityAssertionProfile === undefined && body.identityAssertionScope === undefined) {
+    if (!wasBearer) return none;
+    if (urlMoves) return { ...none, write: toDefault, reset: "url_move" };
+    if (nextPropagation !== "signed_assertion") return { ...none, write: toDefault, reset: "propagation_off" };
+    return none;
+  }
+  if (nextProfile === "regulait_header") {
+    if (body.identityAssertionScope !== undefined && body.identityAssertionScope !== null) {
+      return { ...none, refused: { code: IDENTITY_ASSERTION_SCOPE_INVALID, detail: "a scope is sent only with the oidc_bearer profile" } };
+    }
+    if (!wasBearer) return none;
+    return { ...none, write: toDefault, ...(body.identityAssertionProfile === undefined ? { reset: urlMoves ? "url_move" : "propagation_off" } : {}) };
+  }
+  if (nextPropagation !== "signed_assertion") {
+    return {
+      ...none,
+      refused: {
+        code: IDENTITY_ASSERTION_PROFILE_NEEDS_ASSERTION,
+        detail: "the oidc_bearer profile shapes a signed identity assertion, and this server is not set to receive one (identity propagation must be signed_assertion, already or in this request)",
+      },
+    };
+  }
+  const scope = body.identityAssertionScope === undefined ? (wasBearer ? before.identityAssertionScope : null) : body.identityAssertionScope;
+  if (scope === null) {
+    return { ...none, refused: { code: IDENTITY_ASSERTION_SCOPE_INVALID, detail: "the oidc_bearer profile needs an explicit scope (for example \"read\")" } };
+  }
+  const problem = identityAssertionScopeProblem(scope);
+  if (problem) return { ...none, refused: { code: IDENTITY_ASSERTION_SCOPE_INVALID, detail: problem } };
+  const changes = !wasBearer || scope !== before.identityAssertionScope;
+  return {
+    write: changes ? { identityAssertionProfile: "oidc_bearer", identityAssertionScope: scope } : null,
+    relaxed: changes || urlMoves ? { identityAssertionProfile: "oidc_bearer", identityAssertionScope: scope } : null,
+    reset: null,
+    refused: null,
+  };
+}

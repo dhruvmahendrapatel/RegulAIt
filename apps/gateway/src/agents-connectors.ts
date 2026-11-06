@@ -105,7 +105,7 @@ import {
   guardrailOutcome,
   recordGuardrailDecision,
   resolveGuardrailPolicy,
-  runGuardrails,
+  runGuardrailsAsync,
   flattenFindings,
   type DispatchGuardrails,
   type GuardrailPolicy,
@@ -119,6 +119,7 @@ import {
   useCaseDispatchGate,
   type DispatchUseCaseGate,
 } from "./use-case-gate.js";
+import { privacyDispatchGate } from "./privacy-ops.js";
 // ADR-0079: pillar 2 §2 stage 2 — the invoke→instance join point and the
 // plan-only refusal it makes possible.
 import { guardInstanceAttributedCall } from "./plan-only.js";
@@ -1628,6 +1629,30 @@ async function dispatchAttempt(
     }
   }
 
+  // ADR-0224 (P13 c) — THE PROCESSING LIMIT, directly after the PII-mode rung
+  // and before any provider work: personal data the same detector finds must
+  // be a category an active record of processing permits for the attributed
+  // project, or the dispatch is refused 409 `processing_not_permitted`,
+  // audited with categories only. Behind `org_settings.privacy_ops_enabled`
+  // (shipped off); off, it is one settings read. A cascade `block` already
+  // refused above, so this decides only what warn/log let through.
+  const privacyRefusal = await privacyDispatchGate(db, {
+    userId,
+    agentId: served.id,
+    agentName: served.name,
+    projectId: args.projectId ?? null,
+    input: args.input,
+  });
+  if (privacyRefusal) {
+    sink.auditLogId = privacyRefusal.auditLogId;
+    return {
+      ok: false,
+      status: privacyRefusal.status,
+      error: privacyRefusal.error,
+      detail: privacyRefusal.detail,
+    };
+  }
+
   // ADR-0042 GUARDRAIL ENGINE (pillar 1/3). The SAME interception point and the
   // SAME two phases §8.4's PII enforcement uses, generalized to a registry of
   // detectors. PII is deliberately EXCLUDED from the engine's dispatch-time
@@ -1643,12 +1668,12 @@ async function dispatchAttempt(
     projectId: args.projectId ?? null,
     agentId: served.id,
   });
-  let guardrailInput: ReturnType<typeof runGuardrails> | null = null;
+  let guardrailInput: Awaited<ReturnType<typeof runGuardrailsAsync>> | null = null;
   if (guardrails.active) {
     // INPUT phase, BEFORE any provider work — a block costs nothing: no
     // dispatch, no usage row, no tokens. Identical placement to the PII input
     // check immediately above.
-    guardrailInput = runGuardrails(guardrails, "input", args.input);
+    guardrailInput = await runGuardrailsAsync(guardrails, "input", args.input);
     const outcome = guardrailOutcome(guardrailInput);
     if (outcome) {
       sink.auditLogId = await recordGuardrailDecision(db, {
@@ -1714,7 +1739,7 @@ async function dispatchAttempt(
     }
 
     const guardrailOutput = guardrails.active
-      ? runGuardrails(guardrails, "output", cached.outputText)
+      ? await runGuardrailsAsync(guardrails, "output", cached.outputText)
       : null;
     if (guardrailOutput) {
       const outcome = guardrailOutcome(guardrailOutput);
@@ -2295,10 +2320,10 @@ async function dispatchAttempt(
   // ADR-0042 OUTPUT phase. The call already ran, so a block here is the same
   // BILL-AND-WITHHOLD the PII path performs: the usage row below records the
   // honest spend, and the text is replaced by a counts-only marker.
-  let guardrailOutput: ReturnType<typeof runGuardrails> | null = null;
+  let guardrailOutput: Awaited<ReturnType<typeof runGuardrailsAsync>> | null = null;
   let guardrailWithheld = false;
   if (guardrails.active) {
-    guardrailOutput = runGuardrails(guardrails, "output", outputForPolicy);
+    guardrailOutput = await runGuardrailsAsync(guardrails, "output", outputForPolicy);
     if (guardrailOutput.action === "block") {
       guardrailWithheld = true;
       // the guardrail marker wins over the PII one when both fired: both are
@@ -4103,6 +4128,21 @@ export function registerAgentConnectorRoutes(
           return reply
             .status(inputBlock.status)
             .send({ decision, error: inputBlock.error, detail: inputBlock.detail, pii: inputBlock.pii, ...suppressionFlag });
+        }
+        // ADR-0224 (P13 c): the processing limit, hoisted for the same reason as the PII rung above: a repeat of an
+        // input carrying a category no record permits must be refused and audited, not answered from the semantic
+        // cache. dispatchAttempt keeps its own call for the orchestration and worker paths that never reach here.
+        const privacyRefusal = await privacyDispatchGate(db, {
+          userId,
+          agentId: agent.id,
+          agentName: agent.name,
+          projectId: projectId ?? null,
+          input: body.input ?? "",
+        });
+        if (privacyRefusal) {
+          return reply
+            .status(privacyRefusal.status)
+            .send({ decision, error: privacyRefusal.error, detail: privacyRefusal.detail, ...suppressionFlag });
         }
       }
       // PILLAR 6 §8/§10 SEMANTIC CACHING (REAL cache) — opt-in per-(user,agent)

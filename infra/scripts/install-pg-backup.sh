@@ -34,6 +34,15 @@ PROFILE="${AWS_PROFILE:-regulait-admin}"
 INSTANCE="$(tf instance_id)"
 SRC_BUCKET="$(tf source_bucket)"
 ENV_BODY="$(tf backup_env_file)"
+# Optional (ADR-0228): when set, every Run Command this script sends has its
+# output written to that CloudWatch log group. The demo host's runbook sets it to
+# /regulait/demo-host/run-command; unset, the dev stack behaves as before.
+LOG_GROUP="${REGULAIT_RUN_COMMAND_LOG_GROUP:-}"
+CW_ARGS=()
+if [ -n "$LOG_GROUP" ]; then
+  CW_ARGS=(--cloud-watch-output-config "CloudWatchOutputEnabled=true,CloudWatchLogGroupName=$LOG_GROUP")
+fi
+CW_HINT="${LOG_GROUP:+ --cloud-watch-output-config CloudWatchOutputEnabled=true,CloudWatchLogGroupName=$LOG_GROUP}"
 
 echo "instance : $INSTANCE"
 echo "region   : $REGION"
@@ -51,6 +60,7 @@ ENV_B64="$(printf '%s\n' "$ENV_BODY" | base64 -w0)"
 echo "==> sending SSM install command"
 CMD_ID="$(aws ssm send-command \
   --region "$REGION" --profile "$PROFILE" \
+  "${CW_ARGS[@]}" \
   --instance-ids "$INSTANCE" \
   --document-name AWS-RunShellScript \
   --comment "install regulait pg-backup timer (ADR-0035)" \
@@ -80,7 +90,7 @@ cat <<NEXT
 
 Installed. The timer will fire on its own schedule. To prove the whole path now:
 
-  aws ssm send-command --region $REGION --profile $PROFILE \\
+  aws ssm send-command --region $REGION --profile $PROFILE$CW_HINT \\
     --instance-ids $INSTANCE --document-name AWS-RunShellScript \\
     --parameters 'commands=["/usr/local/sbin/regulait-pg-backup.sh --run","/usr/local/sbin/regulait-pg-backup.sh --check"]'
 

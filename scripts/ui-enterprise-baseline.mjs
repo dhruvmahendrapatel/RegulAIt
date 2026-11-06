@@ -67,6 +67,7 @@ export const CEILING_EXCEPTIONS = [
   { name: "all JS", from: "1050 kB", to: "1060 kB", date: "2026-10-30", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6522492997" },
   // backlog lanes P4, P7, P9, P10, P13 and later (#453): one raise for the whole backlog; entry ceilings unchanged
   { name: "all JS", from: "1060 kB", to: "1150 kB", date: "2026-10-30", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6531626139" },
+  { name: "entry JS (index)", from: "138.5 kB", to: "139.5 kB", date: "2026-10-31", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6545733056" },
 ];
 const DECISION_LINK = /^https:\/\/github\.com\/dhruvmahendrapatel\/RegulAIt\/issues\/\d+#issuecomment-\d+$/;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
