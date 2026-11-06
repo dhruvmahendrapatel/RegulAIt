@@ -146,6 +146,8 @@ test("a customer's own attack library can be created, and it starts as a draft",
 
   await page.goto("/ui/admin/redteam");
   await expect(page.getByRole("heading", { name: "Red-teaming" })).toBeVisible();
+  // the libraries sit behind their own tab (I-2); the page opens on Overview
+  await page.getByRole("tab", { name: /^Libraries/ }).click();
   await expect(page.getByText("Attack libraries")).toBeVisible();
 
   const name = `e2e own library ${Date.now()}`;

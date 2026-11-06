@@ -231,6 +231,14 @@ test.describe("I-2: the Risks register expands in place", () => {
     await expect(region).toContainText("Residual risk against tolerance");
     await expectAxeClean(page, "Risks, an expanded register row");
 
+    // Esc while typing in a field inside the detail belongs to the field: the row stays open and the draft stays
+    const reason = region.getByLabel("Transition reason — required and audited");
+    await reason.fill("guardrail rollout under way");
+    await reason.press("Escape");
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
+    await expect(reason).toHaveValue("guardrail rollout under way");
+
+    await region.focus();
     await page.keyboard.press("Escape");
     await expect(toggle).toHaveAttribute("aria-expanded", "false");
     await expect(toggle).toBeFocused();

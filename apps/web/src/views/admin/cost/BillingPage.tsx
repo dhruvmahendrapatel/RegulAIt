@@ -492,7 +492,7 @@ export default function BillingPage() {
                       srHeader: "Actions",
                       render: (p) => (
                         <div className={a.formRow}>
-                          <Button size="sm" onClick={() => cutStatement(p.id)}>
+                          <Button size="sm" disabled={act.busy} onClick={() => cutStatement(p.id)}>
                             Cut statement
                           </Button>
                           <Button
@@ -639,7 +639,7 @@ export default function BillingPage() {
               <div className={v.row}>
                 <Button
                   size="sm"
-                  disabled={!newestOpen}
+                  disabled={act.busy || !newestOpen}
                   aria-describedby="billing-cut-for"
                   onClick={() => newestOpen && cutStatement(newestOpen.id)}
                 >
