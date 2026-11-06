@@ -448,9 +448,9 @@ type CardFold =
       foldable: true;
       contain: true;
       /**
-       * X6b (owner decision, 2026-11-06): the body is one DataList, whose own controls (page size, sort, the column
-       * picker) are no reason to refuse the fold. Every other form control, warning or step-up still refuses it. The
-       * body mounts the first time the section opens, so a list folded at first load is never fetched.
+       * X6b (owner decision, 2026-11-06): the body is one DataList. Its own view controls never refuse the fold on any
+       * card (`data-list-view`); every other form control, warning or step-up still does. With this, the body mounts
+       * the first time the section opens, so a list folded at first load is never fetched, and its count may be null.
        */
       listControl: true;
       /** the list's total once it has loaded; null while it has not, as a folded list is not read */
@@ -590,7 +590,8 @@ export function Card(props: CardProps) {
     const check = () => {
       // expanded: keep the Expand trigger until the dialog hands focus back to it
       if (host.parentElement !== el) return;
-      const refused = holdsKeepVisible(host, listControl);
+      // a list's own view controls (page size, columns: [data-list-view]) only change how the rows show, so they never refuse
+      const refused = holdsKeepVisible(host);
       if (refused && !warned && import.meta.env.DEV) {
         warned = true;
         console.warn(`Card "${name}": contain refused, the body holds a form, warning, decision or step-up control`);
@@ -778,21 +779,21 @@ const KEEP_VISIBLE =
   'form, fieldset, textarea, select, input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]), ' +
   '[role="alert"], [role="alertdialog"], dialog';
 
-/** DataList marks its own toolbar and column picker with this; nothing else may carry it */
-export const LIST_CONTROL_ATTR = "data-rg-list-control";
+/** DataList marks its own view controls (toolbar, column picker) with this; nothing else may carry it */
+export const LIST_CONTROL_ATTR = "data-list-view";
 
 /**
- * Whether a contained body holds something it must never hide. With `listControl`, a match inside a DataList's own
- * controls is no reason (the page-size select is not a draft); any other match still is.
+ * Whether a contained body holds something it must never hide. A match inside a DataList's own view controls is no
+ * reason (the page-size select is not a draft); any other match still is.
  */
-export function holdsKeepVisible(host: Pick<HTMLElement, "querySelectorAll" | "contains">, listControl: boolean): boolean {
+export function holdsKeepVisible(host: Pick<HTMLElement, "querySelectorAll" | "contains">): boolean {
   const found = Array.from(host.querySelectorAll(KEEP_VISIBLE));
   // the mark counts only inside this body, so a mark on an ancestor of the card cannot excuse anything
   const own = (el: Element) => {
     const mark = el.closest(`[${LIST_CONTROL_ATTR}]`);
     return mark != null && host.contains(mark);
   };
-  return listControl ? found.some((el) => !own(el)) : found.length > 0;
+  return found.some((el) => !own(el));
 }
 
 /**

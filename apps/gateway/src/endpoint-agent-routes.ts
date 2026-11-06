@@ -43,6 +43,18 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
+  filterParams,
+  parseListExport,
+  parseListPage,
+  runListPage,
+  sendListError,
+  sendListExport,
+  wantsListContract,
+  type ListReader,
+  type ListSpec,
+} from "./list-contract.js";
+import { sql as sqlL, type SQL as SQLL } from "@regulait/db";
+import {
   and,
   asc,
   auditLog,
@@ -349,6 +361,78 @@ export const enrolmentTokenLongExpiryStepUp = (input: { sourceId: string; label:
   kind: "settings_relax",
   facts: { op: "endpoint_enrolment_token_long_expiry", sourceId: input.sourceId, label: input.label, deviceCap: input.deviceCap, expiresInDays: input.expiresInDays },
 });
+
+// ---- ADR-0226: a source's enrolment tokens and endpoint devices under the shared list contract. A token's secret
+// (and its hash) is never in the row, the page or the file; a device's ticket hash never is either.
+type TokenListRow = ReturnType<typeof tokenView> & { devicesActive: number };
+const TOKEN_ACTIVE_DEVICES = sqlL<number>`(select count(*)::int from ${endpointDevices} where ${endpointDevices.tokenId} = ${endpointEnrolmentTokens.id} and ${endpointDevices.revokedAt} is null)`;
+const TOKEN_STATE = sqlL`case when ${endpointEnrolmentTokens.revokedAt} is not null then 3 when ${endpointEnrolmentTokens.expiresAt} <= now() then 2 else 1 end`;
+const tokenState = (t: TokenListRow) => (t.revokedAt ? "revoked" : new Date(t.expiresAt).getTime() <= Date.now() ? "expired" : "active");
+export const ENROLMENT_TOKENS_LIST: ListSpec<TokenListRow> = {
+  id: "enrolment-tokens",
+  sorts: {
+    label: { expr: sqlL`lower(${endpointEnrolmentTokens.label})` },
+    state: { expr: TOKEN_STATE },
+    devices: { expr: endpointEnrolmentTokens.devicesEnrolled },
+    active: { expr: TOKEN_ACTIVE_DEVICES },
+    created: { expr: endpointEnrolmentTokens.createdAt, keysetAt: endpointEnrolmentTokens.createdAt },
+    expires: { expr: endpointEnrolmentTokens.expiresAt, keysetAt: endpointEnrolmentTokens.expiresAt },
+  },
+  columns: {
+    label: { label: "Label", value: (r) => r.label },
+    state: { label: "State", value: (r) => `${tokenState(r)}${r.expiryRelaxed ? ", expiry relaxed" : ""}` },
+    devices: { label: "Devices enrolled", value: (r) => `${r.devicesEnrolled} of ${r.deviceCap}` },
+    active: { label: "Devices active", value: (r) => r.devicesActive },
+    created: { label: "Created", value: (r) => new Date(r.createdAt) },
+    expires: { label: "Expires", value: (r) => new Date(r.expiresAt) },
+  },
+  filters: [],
+  defaultSort: { col: "created", dir: "desc" },
+  idCol: endpointEnrolmentTokens.id,
+};
+type DeviceListRow = {
+  id: string;
+  tokenId: string | null;
+  devicePseudonym: string;
+  os: string;
+  arch: string;
+  agentVersion: string;
+  createdAt: string;
+  ticketExpiresAt: string;
+  identitiesRegistered: number;
+  identityCap: number;
+  lastReportAt: string | null;
+  revokedAt: string | null;
+  identities: Array<{ keyProtection: string; status: string } & Record<string, unknown>>;
+};
+export const ENDPOINT_DEVICES_LIST: ListSpec<DeviceListRow> = {
+  id: "endpoint-devices",
+  sorts: {
+    device: { expr: endpointDevices.devicePseudonym },
+    platform: { expr: sqlL`${endpointDevices.os} || '/' || ${endpointDevices.arch}` },
+    version: { expr: endpointDevices.agentVersion },
+    identities: { expr: endpointDevices.identitiesRegistered },
+    last: { expr: endpointDevices.lastReportAt },
+    state: { expr: sqlL`(${endpointDevices.revokedAt} is not null)` },
+    created: { expr: endpointDevices.createdAt, keysetAt: endpointDevices.createdAt },
+  },
+  columns: {
+    device: { label: "Device", value: (r) => r.devicePseudonym },
+    platform: { label: "Platform", value: (r) => `${r.os}/${r.arch}, agent ${r.agentVersion}` },
+    version: { label: "Agent version", value: (r) => r.agentVersion },
+    identities: { label: "Identities", value: (r) => `${r.identitiesRegistered} of ${r.identityCap}` },
+    users: {
+      label: "Users (self-reported)",
+      value: (r) => (r.identities.length ? r.identities.map((i) => `${String(i.deviceUserPseudonym)} (${i.keyProtection} key)`).join("; ") : "none registered"),
+    },
+    last: { label: "Last report", value: (r) => (r.lastReportAt ? new Date(r.lastReportAt) : null) },
+    state: { label: "State", value: (r) => (r.revokedAt ? "revoked" : "active") },
+    created: { label: "Enrolled", value: (r) => new Date(r.createdAt) },
+  },
+  filters: [],
+  defaultSort: { col: "created", dir: "desc" },
+  idCol: endpointDevices.id,
+};
 
 function tokenView(t: typeof endpointEnrolmentTokens.$inferSelect) {
   return {
@@ -856,11 +940,124 @@ export function registerEndpointAgentRoutes(app: FastifyInstance, db: Db, opts: 
     });
   });
 
+  const tokensReader: ListReader<TokenListRow> = {
+    fetch: async (q) => {
+      const rows = await db
+        .select({ t: endpointEnrolmentTokens, devicesActive: TOKEN_ACTIVE_DEVICES, _cursorAt: q.cursorAt })
+        .from(endpointEnrolmentTokens)
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset);
+      return rows.map((r) => ({ ...tokenView(r.t), devicesActive: Number(r.devicesActive), _cursorAt: r._cursorAt }));
+    },
+    countable: (where) => db.select({ one: sqlL`1` }).from(endpointEnrolmentTokens).where(where),
+    idOf: (r) => r.id,
+  };
+  const devicesReader: ListReader<DeviceListRow> = {
+    fetch: async (q) => {
+      const rows = await db
+        .select({ d: endpointDevices, _cursorAt: q.cursorAt })
+        .from(endpointDevices)
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset);
+      const views = await devicesView(rows.map((r) => r.d));
+      return views.map((v, i) => ({ ...v, _cursorAt: rows[i]!._cursorAt }));
+    },
+    countable: (where) => db.select({ one: sqlL`1` }).from(endpointDevices).where(where),
+    idOf: (r) => r.id,
+  };
+  /** each device with its identities and their key protection and status (never a key or a ticket) */
+  const devicesView = async (devices: Array<typeof endpointDevices.$inferSelect>) => {
+    const ids = devices.map((d) => d.id);
+    const identities = ids.length
+      ? await db
+          .select({ link: endpointAgentIdentities, status: workloadIdentities.status })
+          .from(endpointAgentIdentities)
+          .innerJoin(workloadIdentities, eq(workloadIdentities.id, endpointAgentIdentities.identityId))
+          .where(inArray(endpointAgentIdentities.deviceId, ids))
+      : [];
+    const byDevice = new Map<string, typeof identities>();
+    for (const i of identities) byDevice.set(i.link.deviceId, [...(byDevice.get(i.link.deviceId) ?? []), i]);
+    return devices.map((d) => ({
+      id: d.id,
+      tokenId: d.tokenId,
+      devicePseudonym: d.devicePseudonym,
+      os: d.os,
+      arch: d.arch,
+      agentVersion: d.agentVersion,
+      createdAt: d.createdAt.toISOString(),
+      ticketExpiresAt: d.ticketExpiresAt.toISOString(),
+      identitiesRegistered: d.identitiesRegistered,
+      identityCap: d.identityCap,
+      lastReportAt: d.lastReportAt?.toISOString() ?? null,
+      revokedAt: d.revokedAt?.toISOString() ?? null,
+      identities: (byDevice.get(d.id) ?? []).map((i) => ({
+        identityId: i.link.identityId,
+        deviceUserPseudonym: i.link.deviceUserPseudonym,
+        keyProtection: i.link.keyProtection,
+        keyProvider: i.link.keyProvider,
+        agentVersion: i.link.agentVersion,
+        registeredAt: i.link.registeredAt.toISOString(),
+        lastReportAt: i.link.lastReportAt?.toISOString() ?? null,
+        status: i.status,
+      })),
+    }));
+  };
+  /** the source the route names, or the reply already sent (400 or the source's own refusal) */
+  const listSource = async (req: FastifyRequest, reply: FastifyReply) => {
+    const p = uuidParam("sourceId").safeParse(req.params);
+    if (!p.success) {
+      void reply.status(400).send({ error: "invalid_request", detail: "sourceId must be a uuid" });
+      return null;
+    }
+    return agentSource(reply, p.data.sourceId as string, false);
+  };
+  // ADR-0226: with any of sort/dir/cursor/offset/count each list answers the shared list contract; admin only
+  app.get("/v1/discovery/sources/:sourceId/enrolment-tokens/export.xlsx", async (req, reply) => {
+    try {
+      const source = await listSource(req, reply);
+      if (!source) return reply;
+      const q = req.query as Record<string, unknown>;
+      z.object({}).strict().parse(filterParams(q));
+      const ex = parseListExport(ENROLMENT_TOKENS_LIST, q);
+      await sendListExport(db, req, reply, ENROLMENT_TOKENS_LIST, tokensReader, eq(endpointEnrolmentTokens.sourceId, source.id), ex, { sourceId: source.id });
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+  app.get("/v1/discovery/sources/:sourceId/endpoint-devices/export.xlsx", async (req, reply) => {
+    try {
+      const source = await listSource(req, reply);
+      if (!source) return reply;
+      const q = req.query as Record<string, unknown>;
+      z.object({}).strict().parse(filterParams(q));
+      const ex = parseListExport(ENDPOINT_DEVICES_LIST, q);
+      await sendListExport(db, req, reply, ENDPOINT_DEVICES_LIST, devicesReader, eq(endpointDevices.sourceId, source.id), ex, { sourceId: source.id });
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+
   app.get("/v1/discovery/sources/:sourceId/enrolment-tokens", async (req, reply) => {
     const p = uuidParam("sourceId").safeParse(req.params);
     if (!p.success) return reply.status(400).send({ error: "invalid_request", detail: "sourceId must be a uuid" });
     const source = await agentSource(reply, p.data.sourceId as string, false);
     if (!source) return reply;
+    if (wantsListContract(req.query)) {
+      try {
+        const q = req.query as Record<string, unknown>;
+        z.object({}).strict().parse(filterParams(q));
+        const page = parseListPage(ENROLMENT_TOKENS_LIST, q);
+        return reply.send(await runListPage(db, ENROLMENT_TOKENS_LIST, tokensReader, eq(endpointEnrolmentTokens.sourceId, source.id), page));
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
     const rows = await db.select().from(endpointEnrolmentTokens).where(eq(endpointEnrolmentTokens.sourceId, source.id)).orderBy(desc(endpointEnrolmentTokens.createdAt)).limit(200);
     // ADR-0197 Q14: how many devices each token enrolled are still unrevoked (what "also revoke its devices" revokes)
     const active = rows.length
@@ -933,6 +1130,29 @@ export function registerEndpointAgentRoutes(app: FastifyInstance, db: Db, opts: 
     if (!p.success) return reply.status(400).send({ error: "invalid_request", detail: "sourceId must be a uuid" });
     const source = await agentSource(reply, p.data.sourceId as string, false);
     if (!source) return reply;
+    if (wantsListContract(req.query)) {
+      try {
+        const q = req.query as Record<string, unknown>;
+        z.object({}).strict().parse(filterParams(q));
+        const page = parseListPage(ENDPOINT_DEVICES_LIST, q);
+        const where = eq(endpointDevices.sourceId, source.id);
+        const [out, [sum]] = await Promise.all([
+          runListPage(db, ENDPOINT_DEVICES_LIST, devicesReader, where, page),
+          // the posture figures across every device of the source, not the page on screen
+          db
+            .select({
+              devices: sqlL<number>`count(*)::int`,
+              revoked: sqlL<number>`count(*) filter (where ${endpointDevices.revokedAt} is not null)::int`,
+              softwareKeys: sqlL<number>`(select count(*)::int from ${endpointAgentIdentities} join ${workloadIdentities} on ${workloadIdentities.id} = ${endpointAgentIdentities.identityId} join ${endpointDevices} d2 on d2.id = ${endpointAgentIdentities.deviceId} where d2.source_id = ${source.id} and ${endpointAgentIdentities.keyProtection} = 'software' and ${workloadIdentities.status} = 'active')`,
+            })
+            .from(endpointDevices)
+            .where(where),
+        ]);
+        return reply.send({ ...out, summary: { devices: Number(sum?.devices ?? 0), revoked: Number(sum?.revoked ?? 0), softwareKeys: Number(sum?.softwareKeys ?? 0) } });
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
     const devices = await db.select().from(endpointDevices).where(eq(endpointDevices.sourceId, source.id)).orderBy(desc(endpointDevices.createdAt)).limit(DEVICES_LISTED);
     const ids = devices.map((d) => d.id);
     const identities = ids.length

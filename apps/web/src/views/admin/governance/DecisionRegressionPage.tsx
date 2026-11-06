@@ -376,8 +376,24 @@ export default function DecisionRegressionPage() {
   );
 }
 
+/** ADR-0226: the regression runs' columns; the ids and sortable ones match the gateway's REGRESSION_RUNS_LIST */
+const REGRESSION_RUN_COLUMNS: Array<DataColumn<RegressionRun>> = [
+  { key: "at", header: "When", main: true, sortable: true, render: (r) => shortDate(r.createdAt) },
+  { key: "subject", header: "Change to", main: true, sortable: true, render: (r) => SUBJECT_LABEL[r.subject] },
+  { key: "trigger", header: "Run", main: true, sortable: true, render: (r) => <Badge tone={r.trigger === "activation" ? "primary" : "neutral"}>{TRIGGER_LABEL[r.trigger]}</Badge> },
+  {
+    key: "changed",
+    header: "Changed outcomes",
+    main: true,
+    sortable: true,
+    required: "Changed outcomes are always shown",
+    render: (r) => <Badge tone={r.changed > 0 ? "warn" : "ok"}>{`${r.changed} of ${r.cases}`}</Badge>,
+  },
+  { key: "by", header: "By", main: true, sortable: true, render: (r) => r.createdByName ?? <span className={v.faint}>system</span> },
+  { key: "digest", header: "Body digest", render: (r) => <code>{r.candidateDigest.slice(0, 12)}</code> },
+];
+
 function RunsSection() {
-  const runs = useQuery({ queryKey: RUNS_KEY, queryFn: () => api.get<{ runs: RegressionRun[] }>("/v1/governance/decision-regression/runs") });
   const [openId, setOpenId] = useState<string | null>(null);
   const detail = useQuery({
     queryKey: [...RUNS_KEY, openId],
@@ -387,27 +403,19 @@ function RunsSection() {
   return (
     <>
       <Card title="Regression runs" contain>
-        <Table
-          rows={runs.data?.runs}
-          loading={runs.isLoading}
-          error={runs.error}
-          onRetry={() => void runs.refetch()}
+        <DataList<RegressionRun>
+          listId="decision-regression-runs"
+          noun="regression runs"
+          endpoint="/v1/governance/decision-regression/runs"
+          exportPath="/v1/governance/decision-regression/runs/export.xlsx"
+          queryKey={[...RUNS_KEY, "list"]}
+          legacyKey="runs"
+          defaultSort={{ key: "at", dir: "desc" }}
+          columns={REGRESSION_RUN_COLUMNS}
           rowKey={(r) => r.id}
           onRowClick={(r) => setOpenId(r.id)}
           rowLabel={(r) => `Open the ${TRIGGER_LABEL[r.trigger].toLowerCase()} run of ${SUBJECT_LABEL[r.subject].toLowerCase()} from ${shortDate(r.createdAt)}`}
           empty={<EmptyState title="No runs yet" body="A run is recorded each time a change is previewed or activated." />}
-          columns={[
-            { key: "at", header: "When", render: (r) => shortDate(r.createdAt), sort: (r) => r.createdAt },
-            { key: "subject", header: "Change to", render: (r) => SUBJECT_LABEL[r.subject] },
-            { key: "trigger", header: "Run", render: (r) => <Badge tone={r.trigger === "activation" ? "primary" : "neutral"}>{TRIGGER_LABEL[r.trigger]}</Badge> },
-            {
-              key: "changed",
-              header: "Changed outcomes",
-              render: (r) => <Badge tone={r.changed > 0 ? "warn" : "ok"}>{`${r.changed} of ${r.cases}`}</Badge>,
-              sort: (r) => r.changed,
-            },
-            { key: "by", header: "By", render: (r) => r.createdByName ?? <span className={v.faint}>system</span> },
-          ]}
         />
       </Card>
       {openId ? (

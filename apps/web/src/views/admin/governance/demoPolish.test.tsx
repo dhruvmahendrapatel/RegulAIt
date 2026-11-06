@@ -54,8 +54,16 @@ function renderDiscovery(
     posture: { sourcesTotal: 1, sourcesEnabled: [], staticCredentials: [], staleCredentials: [], writeScopeUnverified: [], credentialWarningAgeDays: 90, endpointRetentionDays: 90, statement: "Nothing is scanned." },
   });
   const runs = opts.runs === undefined ? [run] : opts.runs;
-  if (runs === "fail") failQuery(qc, ["admin", "discovery", "runs"]);
-  else if (runs) qc.setQueryData(["admin", "discovery", "runs"], { runs });
+  // ADR-0226: a small summary page (the total and the failed count) and DataList's own first page
+  const firstPage = ["admin", "discovery", "runs", "list", "page", { filters: "[]", sort: { key: "when", dir: "desc" }, limit: 10, page: 0, start: {} }];
+  if (runs === "fail") {
+    failQuery(qc, ["admin", "discovery", "runs", "summary"]);
+    failQuery(qc, firstPage as string[]);
+  } else if (runs) {
+    const failed = runs.filter((r) => r.status === "failed").length;
+    qc.setQueryData(["admin", "discovery", "runs", "summary"], { items: runs, total: runs.length, totalIsEstimate: false, failed });
+    qc.setQueryData(firstPage, { items: runs, nextCursor: null, nextOffset: null, total: runs.length, totalIsEstimate: false, raw: { items: runs, failed } });
+  }
   if (opts.settings === "fail") failQuery(qc, ["admin", "discovery", "settings"]);
   else if (opts.settings !== null) qc.setQueryData(["admin", "discovery", "settings"], { credentialWarningAgeDays: 90, endpointRetentionDays: 90, version: 1 });
   if (fed === "fail") failQuery(qc, ["admin", "discovery", "federation"]);

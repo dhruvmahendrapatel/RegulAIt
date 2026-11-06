@@ -383,31 +383,32 @@ function body(root: FakeEl, matches: FakeEl[]) {
   return { host: host as unknown as Pick<HTMLElement, "querySelectorAll" | "contains">, selector: () => selector };
 }
 
-describe("Card listControl — a DataList's own controls may fold, every other form control still refuses (X6b, 2026-11-06)", () => {
-  it("lets a body whose only form controls are the list's own fold, and only with the opt-in", () => {
+describe("contained Card — a DataList's own view controls may fold, every other form control still refuses (X6b, 2026-11-06)", () => {
+  it("lets a body whose only form controls are the list's own view controls fold", () => {
     const root = el(null);
     const toolbar = el(root, LIST_CONTROL_ATTR);
     const pageSize = el(toolbar);
     const b = body(root, [pageSize]);
-    expect(holdsKeepVisible(b.host, true)).toBe(false);
+    expect(LIST_CONTROL_ATTR).toBe("data-list-view");
+    expect(holdsKeepVisible(b.host)).toBe(false);
     // the selector is the kit's whole refusal list: a select, an input, a form, an alert, a dialog
     for (const part of ["select", "textarea", "input:not(", "form", '[role="alert"]', "dialog"]) expect(b.selector()).toContain(part);
-    // without the opt-in, the list's own page-size select still refuses the fold, as before
-    expect(holdsKeepVisible(b.host, false)).toBe(true);
+    // an unmarked select still refuses the fold
+    expect(holdsKeepVisible(body(root, [el(root)]).host)).toBe(true);
   });
 
   it("still refuses for any other input, select or textarea beside the list, so a typed draft is never hidden", () => {
     const root = el(null);
     const toolbar = el(root, LIST_CONTROL_ATTR);
     const reasonInRow = el(el(root));
-    expect(holdsKeepVisible(body(root, [el(toolbar), reasonInRow]).host, true)).toBe(true);
-    expect(holdsKeepVisible(body(root, [reasonInRow]).host, true)).toBe(true);
+    expect(holdsKeepVisible(body(root, [el(toolbar), reasonInRow]).host)).toBe(true);
+    expect(holdsKeepVisible(body(root, [reasonInRow]).host)).toBe(true);
   });
 
   it("never takes the mark from outside the body: a page cannot excuse a form by marking an ancestor of the card", () => {
     const page = el(null, LIST_CONTROL_ATTR);
     const root = el(page);
-    expect(holdsKeepVisible(body(root, [el(el(root))]).host, true)).toBe(true);
+    expect(holdsKeepVisible(body(root, [el(el(root))]).host)).toBe(true);
   });
 
   it("must still say its count (null until the list has loaded), and mounts its body only once opened", () => {

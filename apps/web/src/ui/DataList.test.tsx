@@ -69,14 +69,14 @@ describe("DataList", () => {
     expect(html).toMatch(/<option value="10" selected="">10<\/option><option value="50">50<\/option><option value="100">100<\/option><option value="all">All<\/option>/);
   });
 
-  it("marks only its own toolbar and column picker as list controls, so a listControl card may fold over them", () => {
-    const marked = [...html.matchAll(/data-rg-list-control=""/g)];
+  it("marks only its own toolbar and column picker as view controls, so a contained card may fold over them", () => {
+    const marked = [...html.matchAll(/data-list-view=""/g)];
     expect(marked).toHaveLength(2);
-    const toolbar = html.slice(html.indexOf('data-rg-list-control=""'), html.indexOf("<table"));
+    const toolbar = html.slice(html.indexOf('data-list-view=""'), html.indexOf("<table"));
     expect(toolbar).toContain("<select");
     // the table, where a page's own row controls render, is outside the mark
-    expect(html.indexOf("<table")).toBeGreaterThan(html.indexOf('data-rg-list-control=""'));
-    expect(html.lastIndexOf('data-rg-list-control=""')).toBeGreaterThan(html.indexOf("</table>"));
+    expect(html.indexOf("<table")).toBeGreaterThan(html.indexOf('data-list-view=""'));
+    expect(html.lastIndexOf('data-list-view=""')).toBeGreaterThan(html.indexOf("</table>"));
   });
 
   it("shows the main columns only, sortable ones as buttons, and says which cannot be sorted", () => {
