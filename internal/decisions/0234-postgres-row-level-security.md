@@ -79,7 +79,7 @@ the role split, because it is the only option that protects real boundaries insi
 
    | Reason | Opens |
    |---|---|
-   | `authenticate` | users (read, update), auth_mfa_pending: sign-in and session resolution, before a principal exists |
+   | `authenticate` | users (read only in slice 1; see batch 2), auth_mfa_pending: sign-in and session resolution, before a principal exists |
    | `identity_provisioning` | users (all): SCIM and the seed |
    | `audit_chain` | audit_log (read): the chain writer's tip read, under the append lock |
    | `audit_verify` | audit_log (read): verification, anchoring and export jobs |
@@ -106,14 +106,30 @@ the role split, because it is the only option that protects real boundaries insi
 
 7. **Slice-1 policies.**
    - **users**: any authenticated principal may read the directory (approver pickers, display names need it). A row
-     is writable by its own user or an active admin. INSERT and DELETE need an admin or `identity_provisioning`.
+     is writable by an active admin or `identity_provisioning`, and by its own user only if the new row is not admin
+     and not disabled (no self-promotion, no self-re-enable). `authenticate` has no write path in slice 1. INSERT and
+     DELETE need an admin or `identity_provisioning`.
    - **auth_mfa_pending**: the owning user, or `authenticate`.
    - **approvals**: a superset of every gateway visibility branch: requester, approver, named approver, decider,
      approver-role member, active delegate (ADR-0022), routing assignee by user, role or team (ADR-0046), recorded
      decider (ADR-0186 decision 26). INSERT needs `user_id` to be the principal (or an admin, or the system). The
      gateway's scope condition stays the fine-grained rule.
      - Known widening: review-role rows (ADR-0168) are visible to every principal, because review-role membership lives
-       in JSON configuration, not a table. A later batch narrows this.
+       in JSON configuration, not a table. A later batch narrows this. The widening is READ-only: the review-role
+       branch is not in the UPDATE policy.
+   - **The write side (#682 review).** RLS cannot compare the old row with the new one, so writes are bounded three ways:
+     - approvals UPDATE: `USING` is the participant predicate without the review-role branch; `WITH CHECK` requires the
+       NEW row to be one the principal still takes part in, and refuses a row whose requester is the principal and whose
+       approver or decider is also the principal (no routing or deciding your own request). Admins and
+       `approval_maintenance` pass.
+     - approvals column privileges: `regulait_app` has UPDATE on every column except `id`, `user_id`, `requested_at`,
+       `named_approver_user_id`, `approver_role_id` and `review_role_id`. Nobody re-points the routing identity through
+       the app role; a migration (the owner) can. A column added later is not updatable until its migration grants it.
+     - audit_log INSERT: `user_id` must be the principal, unless the writer is an admin or a registered system path. A
+       principal cannot forge a row about another user.
+     - Residual: a participant who is not the requester (a delegate, a routed assignee, an earlier decider) may still
+       set `approver_user_id` to itself. That is today's claim path (workbench claim) and is bounded to rows it already
+       takes part in. A precise old-versus-new guard lands with batch 2, when the gateway's writes are wrapped.
    - **audit_log**: an admin reads everything; a principal reads the rows about itself. Any principal or system path
      may append. Nobody may update or delete.
      - The chain writer's tip and clock reads run under `audit_chain`. It is entered in the lock statement itself and
@@ -153,6 +169,11 @@ the role split, because it is the only option that protects real boundaries insi
       slice-1 tables run inside `withPrincipal`. System sweeps use `approval_maintenance` and `audit_verify`. The sink is
       wired. `RETURNING` on an audit insert needs a SELECT-visible row, so `authenticate`-time audit appends do not use
       `RETURNING`.
+      - **Hard gate (#682 review):** no `authenticate` write on `users` (failed-login counters, lockout, last login,
+        password rehash) is wired until a column guard lands in the same batch: either column privileges on `users`
+        for a dedicated sign-in path or a guard that refuses a change to `is_admin`, `disabled_at`, `email`,
+        `username`, `scim_external_id` or `cost_center` outside admin and `identity_provisioning`. The 0265 policy
+        gives `authenticate` no UPDATE at all, so wiring it early fails closed.
    2. **Batch 3, credentials.** auth_sessions, api_keys, webauthn_credentials, webauthn_challenges, step_up_grants,
       user_model_credentials, federated_identities, federated_link_requests, sso_reauth_requests,
       chat_identity_links.
@@ -194,9 +215,25 @@ the role split, because it is the only option that protects real boundaries insi
 - It does not defend against code that can run arbitrary SQL on the connection. Such code can call `set_config` itself.
   Parameterised queries (ADR-0200 item 1) stay the control for that. Batch 7 removes the owner and superuser login from
   the runtime, which removes `SET ROLE` back to the owner as an escape.
-- RLS is row-level. A user may update their own `users` row, and a policy cannot stop them setting `is_admin` on it. The
-  gateway's check guards that. A column-change guard trigger is a batch 2 candidate. It is not added here, because a
-  row-level refusal trigger on `users` would bring the 0185 TRUNCATE invariant onto a table the suites truncate.
+- RLS is row-level. A user may update their own `users` row; `WITH CHECK` refuses a new row that is admin or disabled,
+  but other columns (email, cost centre) are still guarded only by the gateway. A column-change guard is part of the
+  batch 2 gate above. It is not a trigger here, because a row-level refusal trigger on `users` would bring the 0185
+  TRUNCATE invariant onto a table the suites truncate.
+
+## Rollback (back-out)
+
+Slice 1 changes no data and no column, so backing it out is a forward migration (never an edit of 0265), run as the
+owner:
+
+1. `ALTER TABLE <t> NO FORCE ROW LEVEL SECURITY; ALTER TABLE <t> DISABLE ROW LEVEL SECURITY;` for users,
+   auth_mfa_pending, approvals and audit_log. Every query then behaves as before 0265, wrapped or not.
+2. `DROP POLICY` each slice-1 policy, then `DROP FUNCTION` the five `regulait_rls_*` helpers.
+3. Keep the `regulait_app` role and its grants: a role that is a member of nothing and owns nothing is inert, and
+   dropping it would fail while any wrapper still switches to it. `withPrincipal` / `withSystemContext` keep working
+   (they only set settings no policy reads).
+4. Revert the `audit-chain.ts` lock statement only if the settings are removed; with RLS off it is harmless.
+
+The same steps per table back out a later batch. No backup restore is needed, because no row is changed.
 
 ## Alternatives rejected
 
@@ -226,11 +263,14 @@ the role split, because it is the only option that protects real boundaries insi
 
 - Migration `0265_rls_foundation_slice1` and `packages/db/src/rls.ts` (exported from `@regulait/db`).
 - `audit-chain.ts` enters `audit_chain` in the lock statement and restores it after the tip and clock reads.
-- `apps/gateway/src/zz-adr0234-rls-slice1.test.ts` (21 tests): inventory and roles; the registry matches;
+- `apps/gateway/src/zz-adr0234-rls-slice1.test.ts` (27 tests): inventory and roles; the registry matches;
   cross-user blocking on all four tables with the app check skipped, each with a superuser positive control; the
   participant branches; admin; zero rows with no setting, including on a reused connection; a clean pool after commit,
   after a throw and after a system context; narrow system contexts; the audit chain under a principal, with its
-  negative control; the later-migration guard.
+  negative control; the later-migration guard; the write side (a non-participant cannot decide or re-point a
+  review-role row, nobody rewrites the routing identity, a requester cannot route or decide its own request, a
+  principal cannot forge an audit row about another user, cannot promote itself, and `authenticate` cannot write
+  users), each with positive controls.
 - `packages/db/bench/rls-cost.mjs` produced the decision 8 table.
 
 ## Appendix: the inventory (2026-11-06, migrated head)

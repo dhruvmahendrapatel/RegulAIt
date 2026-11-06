@@ -149,12 +149,14 @@ CREATE POLICY users_update ON users FOR UPDATE
   USING (
     id = (SELECT regulait_rls_user_id())
     OR (SELECT regulait_rls_is_admin())
-    OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['authenticate', 'identity_provisioning', 'migration'])
+    OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['identity_provisioning', 'migration'])
   )
+  -- #682 review: a principal editing its OWN row can never leave it admin or re-enabled (no self-promotion,
+  -- no self-unlock); `authenticate` has no write path here until batch 2 adds a column guard (ADR-0234 §B2).
   WITH CHECK (
-    id = (SELECT regulait_rls_user_id())
-    OR (SELECT regulait_rls_is_admin())
-    OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['authenticate', 'identity_provisioning', 'migration'])
+    (SELECT regulait_rls_is_admin())
+    OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['identity_provisioning', 'migration'])
+    OR (id = (SELECT regulait_rls_user_id()) AND NOT is_admin AND disabled_at IS NULL)
   );
 --> statement-breakpoint
 CREATE POLICY users_delete ON users FOR DELETE USING (
@@ -223,6 +225,11 @@ CREATE POLICY approvals_insert ON approvals FOR INSERT WITH CHECK (
 -- WITH CHECK is deliberately the same visibility minus nothing: routing may re-point a row away from the
 -- router, so the new row only has to be one the system, an admin or a participant could act on.
 CREATE POLICY approvals_update ON approvals FOR UPDATE
+  -- #682 review: no review-role branch here (seeing a review-role row is not a right to write it); a
+  -- principal writes only rows it takes part in, and the NEW row must still be one it takes part in and
+  -- never route the requester to itself or record the requester as its decider. The routing identity columns are not updatable by the app role
+  -- at all (column privileges below), so nobody re-points named_approver_user_id, approver_role_id,
+  -- review_role_id or user_id through RLS.
   USING (
     (SELECT regulait_rls_system_reason()) = ANY (ARRAY['approval_maintenance', 'migration'])
     OR (SELECT regulait_rls_is_admin())
@@ -230,7 +237,6 @@ CREATE POLICY approvals_update ON approvals FOR UPDATE
     OR approver_user_id = (SELECT regulait_rls_user_id())
     OR named_approver_user_id = (SELECT regulait_rls_user_id())
     OR decided_by = (SELECT regulait_rls_user_id())
-    OR (review_role_id IS NOT NULL AND (SELECT regulait_rls_user_id()) IS NOT NULL)
     OR approver_role_id = ANY ((SELECT regulait_rls_principal_groups())::uuid[])
     OR approver_user_id = ANY ((SELECT regulait_rls_principal_delegators())::uuid[])
     OR named_approver_user_id = ANY ((SELECT regulait_rls_principal_delegators())::uuid[])
@@ -246,8 +252,44 @@ CREATE POLICY approvals_update ON approvals FOR UPDATE
   WITH CHECK (
     (SELECT regulait_rls_system_reason()) = ANY (ARRAY['approval_maintenance', 'migration'])
     OR (SELECT regulait_rls_is_admin())
-    OR (SELECT regulait_rls_user_id()) IS NOT NULL
+    OR (
+      NOT (user_id = (SELECT regulait_rls_user_id())
+           AND (approver_user_id = (SELECT regulait_rls_user_id()) OR decided_by = (SELECT regulait_rls_user_id())))
+      AND (
+        user_id = (SELECT regulait_rls_user_id())
+      OR approver_user_id = (SELECT regulait_rls_user_id())
+      OR named_approver_user_id = (SELECT regulait_rls_user_id())
+      OR decided_by = (SELECT regulait_rls_user_id())
+      OR approver_role_id = ANY ((SELECT regulait_rls_principal_groups())::uuid[])
+      OR approver_user_id = ANY ((SELECT regulait_rls_principal_delegators())::uuid[])
+      OR named_approver_user_id = ANY ((SELECT regulait_rls_principal_delegators())::uuid[])
+      OR id IN (
+        SELECT aa.approval_id FROM approval_assignments aa
+         WHERE aa.assignee_id = (SELECT regulait_rls_user_id())
+            OR aa.escalation_assignee_id = (SELECT regulait_rls_user_id())
+            OR aa.assignee_id = ANY ((SELECT regulait_rls_principal_groups())::uuid[])
+            OR aa.escalation_assignee_id = ANY ((SELECT regulait_rls_principal_groups())::uuid[])
+        UNION ALL
+        SELECT ad.approval_id FROM approval_decisions ad WHERE ad.decider_user_id = (SELECT regulait_rls_user_id()))
+      )
+    )
   );
+--> statement-breakpoint
+-- Column privileges: the app role may UPDATE every approvals column except the routing identity (who
+-- asked, which role or named person decides, the row id and when it was asked). A column added later is
+-- NOT updatable until its migration grants it: the default is closed.
+REVOKE UPDATE ON approvals FROM regulait_app;
+--> statement-breakpoint
+DO $$
+DECLARE cols text;
+BEGIN
+  SELECT pg_catalog.string_agg(pg_catalog.quote_ident(a.attname), ', ' ORDER BY a.attnum) INTO cols
+    FROM pg_catalog.pg_attribute a
+   WHERE a.attrelid = 'public.approvals'::regclass AND a.attnum > 0 AND NOT a.attisdropped
+     AND a.attname NOT IN ('id', 'user_id', 'requested_at', 'named_approver_user_id', 'approver_role_id', 'review_role_id');
+  EXECUTE pg_catalog.format('GRANT UPDATE (%s) ON public.approvals TO regulait_app', cols);
+END
+$$;
 --> statement-breakpoint
 CREATE POLICY approvals_delete ON approvals FOR DELETE USING (
   (SELECT regulait_rls_is_admin())
@@ -269,7 +311,9 @@ CREATE POLICY audit_log_select ON audit_log FOR SELECT USING (
   OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['audit_chain', 'audit_verify', 'migration'])
 );
 --> statement-breakpoint
+-- #682 review: a principal appends rows about ITSELF; an admin or a registered system path may name anyone.
 CREATE POLICY audit_log_insert ON audit_log FOR INSERT WITH CHECK (
-  (SELECT regulait_rls_user_id()) IS NOT NULL
+  user_id = (SELECT regulait_rls_user_id())
+  OR (SELECT regulait_rls_is_admin())
   OR (SELECT regulait_rls_system_reason()) IS NOT NULL
 );

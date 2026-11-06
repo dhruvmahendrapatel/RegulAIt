@@ -42,7 +42,7 @@ export const RLS_APP_ROLE = "regulait_app";
  * blanket bypass: `authenticate` can read users and MFA challenges, and nothing in approvals or audit_log.
  */
 export const RLS_SYSTEM_REASONS = [
-  /** sign-in and session resolution, before a principal exists: users (read, update), auth_mfa_pending */
+  /** sign-in and session resolution, before a principal exists: users (read; no write until ADR-0234 batch 2), auth_mfa_pending */
   "authenticate",
   /** SCIM and the seed: users (all) */
   "identity_provisioning",

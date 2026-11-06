@@ -57,6 +57,7 @@ const ids = {
   aliceApproval: randomUUID(),
   bobApproval: randomUUID(),
   routedApproval: randomUUID(),
+  reviewApproval: randomUUID(), // a review-role row bob is not a participant in
 };
 const bobMfaToken = `rls0234-${randomUUID()}`;
 
@@ -227,6 +228,107 @@ describe("cross-user rows are blocked with the application check skipped", () =>
       expect(rows.length).toBe(2);
       expect(new Set(rows.map((r) => r.userId))).toEqual(new Set([ids.bob]));
     });
+  });
+});
+
+describe("the write side: WITH CHECK and column privileges (#682 review)", () => {
+  // created here, not in the shared fixtures: every principal can SEE a review-role row, which would change the
+  // exact-list assertions above
+  beforeAll(async () => {
+    await su.insert(approvals).values({
+      id: ids.reviewApproval,
+      userId: ids.root,
+      approverUserId: ids.root,
+      reviewRoleId: "rls0234-review",
+      reviewRoleName: "RLS review",
+      reviewRound: 1,
+    });
+  });
+  afterAll(async () => {
+    await su.delete(approvals).where(eq(approvals.id, ids.reviewApproval));
+  });
+
+  const status = async (id: string) =>
+    (await su.select({ status: approvals.status, approver: approvals.approverUserId, named: approvals.namedApproverUserId })
+      .from(approvals).where(eq(approvals.id, id)))[0]!;
+
+  it("finding 1: non-participant bob can SEE a review-role row but can neither decide it nor re-point it to himself", async () => {
+    const before = await status(ids.reviewApproval);
+    await withPrincipal(su, { userId: ids.bob }, async (tx) => {
+      expect((await tx.select({ id: approvals.id }).from(approvals).where(eq(approvals.id, ids.reviewApproval))).length).toBe(1);
+      const decided = await tx
+        .update(approvals)
+        .set({ status: "approved", decidedBy: ids.bob })
+        .where(eq(approvals.id, ids.reviewApproval))
+        .returning({ id: approvals.id });
+      expect(decided).toEqual([]);
+    });
+    const repoint = await pgError(
+      withPrincipal(su, { userId: ids.bob }, (tx) =>
+        tx.update(approvals).set({ namedApproverUserId: ids.bob }).where(eq(approvals.id, ids.reviewApproval)),
+      ),
+    );
+    expect(repoint).toMatch(/permission denied for table approvals/);
+    expect(await status(ids.reviewApproval)).toEqual(before);
+  });
+
+  it("finding 1: even a participant cannot rewrite the routing identity (requester, named approver, roles)", async () => {
+    for (const set of [{ userId: ids.bob }, { namedApproverUserId: ids.alice }, { approverRoleId: ids.role }, { reviewRoleId: null }] as const) {
+      const msg = await pgError(
+        withPrincipal(su, { userId: ids.alice }, (tx) => tx.update(approvals).set(set).where(eq(approvals.id, ids.aliceApproval))),
+      );
+      expect(msg).toMatch(/permission denied for table approvals/);
+    }
+  });
+
+  it("finding 1: the requester cannot route its own approval to itself or record itself as the decider", async () => {
+    for (const set of [{ approverUserId: ids.alice }, { status: "approved", decidedBy: ids.alice }] as const) {
+      const msg = await pgError(
+        withPrincipal(su, { userId: ids.alice }, (tx) => tx.update(approvals).set(set).where(eq(approvals.id, ids.aliceApproval))),
+      );
+      expect(msg).toMatch(/new row violates row-level security policy for table "approvals"/);
+    }
+    expect((await status(ids.aliceApproval)).approver).toBe(ids.root);
+  });
+
+  it("positive controls: a routed role member may claim, approval_maintenance may route, an admin may decide", async () => {
+    const claimed = await withPrincipal(su, { userId: ids.carol }, (tx) =>
+      tx.update(approvals).set({ approverUserId: ids.carol }).where(eq(approvals.id, ids.routedApproval)).returning({ id: approvals.id }),
+    );
+    expect(claimed).toEqual([{ id: ids.routedApproval }]);
+    const routed = await withSystemContext(su, "approval_maintenance", "test.route", (tx) =>
+      tx.update(approvals).set({ approverUserId: ids.bob }).where(eq(approvals.id, ids.routedApproval)).returning({ id: approvals.id }),
+    );
+    expect(routed).toEqual([{ id: ids.routedApproval }]);
+    const decided = await withPrincipal(su, { userId: ids.root }, (tx) =>
+      tx.update(approvals).set({ decisionReason: "rls0234 admin" }).where(eq(approvals.id, ids.reviewApproval)).returning({ id: approvals.id }),
+    );
+    expect(decided).toEqual([{ id: ids.reviewApproval }]);
+  });
+
+  it("finding 2: alice cannot append an audit row attributed to bob", async () => {
+    const forged = await pgError(
+      withPrincipal(su, { userId: ids.alice }, (tx) =>
+        tx.insert(auditLog).values({ userId: ids.bob, effect: "allow", ruleId: "rls0234", ruleChain: [], reason: "rls0234 forged" }),
+      ),
+    );
+    expect(forged).toMatch(/new row violates row-level security policy for table "audit_log"/);
+    expect(
+      await su.execute(sql`select 1 from audit_log where reason = 'rls0234 forged'`).then((r) => r.rows.length),
+    ).toBe(0);
+  });
+
+  it("finding 3: a principal cannot promote or re-enable itself, and `authenticate` has no write path on users", async () => {
+    const promote = await pgError(
+      withPrincipal(su, { userId: ids.alice }, (tx) => tx.update(users).set({ isAdmin: true }).where(eq(users.id, ids.alice))),
+    );
+    expect(promote).toMatch(/new row violates row-level security policy for table "users"/);
+    const viaAuth = await withSystemContext(su, "authenticate", "test.sign-in", (tx) =>
+      tx.update(users).set({ isAdmin: true }).where(eq(users.id, ids.alice)).returning({ id: users.id }),
+    );
+    expect(viaAuth).toEqual([]);
+    const [alice] = await su.select({ isAdmin: users.isAdmin }).from(users).where(eq(users.id, ids.alice));
+    expect(alice!.isAdmin).toBe(false);
   });
 });
 
