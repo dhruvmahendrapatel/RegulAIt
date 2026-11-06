@@ -214,7 +214,7 @@ never taken. Read from PyPI, OSV and the installed wheels on 2026-10-24:
 | Node.js binary, from the gateway image's base `node:22-trixie-slim` | the gateway image's digest (`sha256:be1e2a3d…fb768c6`, Node 22.23.4) | MIT (with its bundled dependencies' notices) | Runs the runner and worker shim. Only the `node` binary is copied in; no npm, npx or corepack. |
 | `zod` (npm, a direct dependency of the shim) | `4.6.5` (the version `@regulait/shared` already locks; ADR-0192) | MIT | Validates the exchange's job and done files and the worker's self-test. |
 | `write-file-atomic` 8.0.0 and `signal-exit` 4.1.0 (npm, through `@regulait/engine-runner`) | as locked | ISC | The runner's key (ADR-0188 S7; it replaced the runner token) and retained results are written durably; see `packages/engine-runner/THIRD_PARTY.md`. |
-| `jose` 6.2.12 (npm, through `@regulait/engine-runner`) | as locked (exact) | MIT | ADR-0188 S7: the runner key's RFC 7638 thumbprint and the compact JWS a key rotation carries. No dependencies; no network. |
+| `jose` 6.2.14 (npm, through `@regulait/engine-runner`) | as locked (exact) | MIT | ADR-0188 S7: the runner key's RFC 7638 thumbprint and the compact JWS a key rotation carries. No dependencies; no network. |
 | `oauth4webapi` 3.8.8 (npm, through `@regulait/engine-runner`) | as locked (exact) | MIT | ADR-0188 S7: the runner's OAuth client (client_credentials with private_key_jwt and DPoP, then DPoP-bound requests). It calls only the gateway it is given; no discovery or JWKS fetch. |
 
 Not shipped: no Hugging Face asset beyond the nine pre-seeded above (the probes that need another are declared

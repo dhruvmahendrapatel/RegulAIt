@@ -180,6 +180,7 @@ test("g9 campaign cancel", async ({ page }) => {
     items: { total: keep + revoke + undecided, keep, revoke, undecided },
   });
   let cancelBody: unknown = null;
+  const listedStatuses: Array<string | null> = [];
   await mockApi(page, (p, m, b, route) => {
     if (p === "/v1/certification-campaigns/c1/cancel" && m === "POST") {
       cancelBody = b;
@@ -188,16 +189,21 @@ test("g9 campaign cancel", async ({ page }) => {
         items: 12, decided: 5, kept: 4, revoked: 1, undecided: 7, withdrawn: 7,
       });
     }
-    if (p === "/v1/certification-campaigns")
-      return json(route, {
-        campaigns: [
-          row("c1", "Q4 grant re-attestation", "open", 4, 1, 7),
-          row("c2", "Q3 grant re-attestation", "completed", 10, 2, 0),
-          row("c3", "Q2 grant re-attestation", "expired-incomplete", 6, 0, 3),
-          row("c4", "Contractor access sweep", "cancelled", 2, 1, 0),
-        ],
-        notes: { scope: "" },
-      });
+    if (p === "/v1/certification-campaigns") {
+      const all = [
+        row("c1", "Q4 grant re-attestation", "open", 4, 1, 7),
+        row("c2", "Q3 grant re-attestation", "completed", 10, 2, 0),
+        row("c3", "Q2 grant re-attestation", "expired-incomplete", 6, 0, 3),
+        row("c4", "Contractor access sweep", "cancelled", 2, 1, 0),
+      ];
+      // the list control asks the server for one status; the counts on the buttons come back as `summary`
+      const status = new URL(route.request().url()).searchParams.get("status");
+      listedStatuses.push(status);
+      const items = status ? all.filter((c) => c.status === status) : all;
+      const statusCounts = { open: 0, completed: 0, "expired-incomplete": 0, cancelled: 0 } as Record<string, number>;
+      for (const c of all) statusCounts[c.status] = (statusCounts[c.status] ?? 0) + 1;
+      return json(route, { items, total: items.length, totalIsEstimate: false, nextCursor: null, nextOffset: null, summary: { statusCounts }, notes: { scope: "" } });
+    }
     if (p === "/v1/certification-campaigns/c1")
       return json(route, {
         id: "c1", name: "Q4 grant re-attestation", scope: { kind: "all", value: null }, openedBy: { userId: ME, name: "Ada Admin" }, dueAt: "2026-11-15T00:00:00.000Z",
@@ -207,6 +213,13 @@ test("g9 campaign cancel", async ({ page }) => {
   });
   await page.goto("/ui/admin/certification");
   await expect(page.getByText("Q4 grant re-attestation")).toBeVisible({ timeout: 30_000 });
+  // ADR-0208 G9: the status buttons count every campaign, and the list shows the chosen status (open first)
+  const filters = page.getByRole("group", { name: "Filter by status" });
+  for (const name of ["Open 1", "Completed 1", "Expired 1", "Cancelled 1"]) await expect(filters.getByRole("button", { name, exact: true })).toBeVisible();
+  await expect(filters.getByRole("button", { name: "Open 1", exact: true })).toHaveAttribute("aria-pressed", "true");
+  expect(listedStatuses).toContain("open");
+  await expect(page.getByText("Q3 grant re-attestation")).toHaveCount(0);
+  await expect(page.getByText("Contractor access sweep")).toHaveCount(0);
   await page.getByText("Q4 grant re-attestation").click();
   await expect(page.getByRole("button", { name: "Cancel campaign" })).toBeVisible();
   await page.getByText("Campaigns", { exact: true }).evaluate((el) => el.scrollIntoView({ block: "start" }));
@@ -230,5 +243,9 @@ test("g9 campaign cancel", async ({ page }) => {
   await expect(again).toBeHidden();
   expect(cancelBody).toEqual({ reason: "Scope was wrong; reopening with contractor grants only" });
   await page.getByRole("button", { name: /^Cancelled/ }).click();
+  await expect(filters.getByRole("button", { name: "Cancelled 1", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByText("Contractor access sweep")).toBeVisible();
+  expect(listedStatuses).toContain("cancelled");
+  await expect(page.getByText("Q3 grant re-attestation")).toHaveCount(0);
   await page.screenshot({ path: test.info().outputPath("g9-campaigns-cancelled.png") });
 });
