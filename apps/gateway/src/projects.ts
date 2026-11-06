@@ -77,8 +77,8 @@ import { ConfigVersionUnresolvableError, resolveRuleVersions } from "./rule-vers
 // goes through the one choke point rather than straight at the read-model.
 import { applyRuleEdit, isRuleEditRefusal } from "./rule-writes.js";
 import { settingTransitions } from "./setting-transitions.js";
-import { isApprovalTeam } from "./approval-pool.js";
-import { approvalRuleStepUp, requireStepUp } from "./step-up.js";
+import { approverPoolShiftFacts, isApprovalTeam, sameApproverPoolShift, type ApproverPoolShift } from "./approval-pool.js";
+import { approvalRuleStepUp, CHANGED_CONCURRENTLY, requireStepUp, requireStepUps, type StepUpCheckArgs } from "./step-up.js";
 import {
   carriersForTags,
   profileVersionFacts,
@@ -1463,23 +1463,68 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     // G2 (B4S-02 owner principle): a team that routes or can claim approvals is
     // an approver pool — adding someone to it needs a settings_relax step-up
     // bound to the team and the new member (a team nobody routes to needs none)
-    if (await isApprovalTeam(db, teamId)) {
-      const facts = { values: { approverTeamMember: { teamId, userId: body.userId } } };
-      if (!(await requireStepUp(db, req, reply, { kind: "settings_relax", facts })).ok) return reply;
-    }
-    const [row] = await db.insert(teamMembers).values({ teamId, userId: body.userId }).returning();
+    // issue #668 (ADR-0229): joining makes the team's approval rules match the member's calls; when one outranks a
+    // rule with a narrower pool, who signs moves to a wider pool: the same step-up, bound to the takeover facts
+    const shift: ApproverPoolShift = { change: "member-add", objectType: "team", objectId: teamId, userId: body.userId };
+    const takeover = await approverPoolShiftFacts(db, shift);
+    const stepUps: StepUpCheckArgs[] = [
+      ...((await isApprovalTeam(db, teamId))
+        ? [{ kind: "settings_relax" as const, facts: { values: { approverTeamMember: { teamId, userId: body.userId } } } }]
+        : []),
+      ...(takeover ? [{ kind: "settings_relax" as const, facts: takeover }] : []),
+    ];
+    if (stepUps.length > 0 && !(await requireStepUps(db, req, reply, stepUps))) return reply;
+    const row = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      // decided again under the routing lock: fail closed when the takeover facts moved
+      if (!sameApproverPoolShift(await approverPoolShiftFacts(tx, shift), takeover)) return null;
+      const [inserted] = await tx.insert(teamMembers).values({ teamId, userId: body.userId }).returning();
+      if (takeover) await auditTeamPoolShift(tx, req.authCtx.userId ?? body.userId, teamId, takeover);
+      return inserted;
+    });
+    if (!row) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     return reply.status(201).send(row);
   });
+
+  /** issue #668: the audit row for an approved team change that moved who signs for some calls to a wider pool */
+  const auditTeamPoolShift = (tx: Db, actor: string, teamId: string, facts: Record<string, unknown>) =>
+    tx.insert(auditLog).values({
+      userId: actor,
+      objectType: "team",
+      objectId: teamId,
+      detail: { phase: "approver-pool-shift", ...facts },
+      effect: "allow",
+      ruleId: "approver-pool-shift",
+      ruleChain: [],
+      reason: `a ${String(facts.change)} on a team moved who signs for some calls to a wider approver pool (ADR-0229), approved with a settings_relax step-up`,
+    });
 
   // ADR-0022: remove a team member. Project memberships keep their provenance
   // teamId (SET NULL only on team deletion); context provenance is FK-free and
   // survives regardless — removal changes future defaults, never history.
   app.delete("/v1/teams/:teamId/members/:userId", async (req, reply) => {
     const params = z.object({ teamId: z.string().uuid(), userId: z.string().uuid() }).parse(req.params);
-    const deleted = await db
-      .delete(teamMembers)
-      .where(and(eq(teamMembers.teamId, params.teamId), eq(teamMembers.userId, params.userId)))
-      .returning({ id: teamMembers.id });
+    // issue #668 (ADR-0229): leaving hands the calls the team's approval rules named the signer for to the next
+    // overlapping rule; when its pool is wider, the step-up, bound to the takeover facts (decided only for a member)
+    const shift: ApproverPoolShift = { change: "member-remove", objectType: "team", objectId: params.teamId, userId: params.userId };
+    const [member] = await db
+      .select({ id: teamMembers.id })
+      .from(teamMembers)
+      .where(and(eq(teamMembers.teamId, params.teamId), eq(teamMembers.userId, params.userId)));
+    if (!member) return reply.status(404).send({ error: "not_a_member" });
+    const takeover = await approverPoolShiftFacts(db, shift);
+    if (takeover && !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: takeover })).ok) return reply;
+    const deleted = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      if (!sameApproverPoolShift(await approverPoolShiftFacts(tx, shift), takeover)) return null;
+      const rows = await tx
+        .delete(teamMembers)
+        .where(and(eq(teamMembers.teamId, params.teamId), eq(teamMembers.userId, params.userId)))
+        .returning({ id: teamMembers.id });
+      if (rows.length > 0 && takeover) await auditTeamPoolShift(tx, req.authCtx.userId ?? params.userId, params.teamId, takeover);
+      return rows;
+    });
+    if (!deleted) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     if (deleted.length === 0) return reply.status(404).send({ error: "not_a_member" });
     await db.insert(auditLog).values({
       userId: req.authCtx.userId ?? params.userId,
@@ -1529,10 +1574,15 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         });
       }
     }
-    await db.delete(teams).where(eq(teams.id, teamId));
-    await db.insert(auditLog).values({
+    // issue #668 (ADR-0229): the delete cascades the approval rules scoped to the team, so the calls they named the
+    // signer for fall to the next overlapping rule; when its pool is wider, the settings_relax step-up, bound to the
+    // takeover facts, decided again under the routing lock before anything is deleted (fail closed on a move)
+    const shift: ApproverPoolShift = { change: "delete", objectType: "team", objectId: teamId };
+    const takeover = await approverPoolShiftFacts(db, shift);
+    if (takeover && !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: takeover })).ok) return reply;
+    const audit = {
       userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
-      objectType: "team",
+      objectType: "team" as const,
       objectId: teamId,
       detail: {
         phase: "team-deleted",
@@ -1540,15 +1590,24 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         contextItems: owned.length,
         ...(body.force ? { force: true } : {}),
         ...(body.reason ? { reason: body.reason } : {}),
+        ...(takeover ? { approverPoolShift: takeover } : {}),
       },
-      effect: "allow",
+      effect: "allow" as const,
       ruleId: "team-deleted",
       ruleChain: [],
       reason:
         owned.length > 0
           ? `team '${team.name}' force-deleted while owning ${owned.length} shared-context revision(s): ${body.reason}`
           : `team '${team.name}' deleted`,
+    };
+    const done = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      if (!sameApproverPoolShift(await approverPoolShiftFacts(tx, shift), takeover)) return false;
+      await tx.delete(teams).where(eq(teams.id, teamId));
+      await tx.insert(auditLog).values(audit);
+      return true;
     });
+    if (!done) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     return { removed: true, contextItems: owned.length };
   });
 
