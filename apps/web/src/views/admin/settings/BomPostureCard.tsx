@@ -187,6 +187,12 @@ const KEY_STATE: Record<ReceiptSigningKeyPosture["state"], { tone: "ok" | "dange
   invalid: { tone: "danger", label: "invalid" },
 };
 
+/** whether the receipt key can sign: null when the gateway does not report it (unknown) */
+export function receiptKeyUsable(posture: ReceiptSigningKeyPosture | undefined): boolean | null {
+  if (!posture || !(posture.state in KEY_STATE)) return null;
+  return posture.state === "install_generated" || posture.state === "operator_managed";
+}
+
 export function ReceiptKeyRow({ posture }: { posture: ReceiptSigningKeyPosture | undefined }) {
   if (!posture || !(posture.state in KEY_STATE)) {
     return <p role="status">This gateway does not report its receipt signing key, so whether BOMs can be signed is unknown.</p>;
@@ -218,6 +224,8 @@ export function ReceiptKeyRow({ posture }: { posture: ReceiptSigningKeyPosture |
 }
 
 const receiptKeysQueryKey = ["admin", "receipt-keys"] as const;
+/** the recorded receipt keys; shared with the posture page's tab label, so both read one cache entry */
+export const receiptKeysQuery = () => ({ queryKey: receiptKeysQueryKey, retry: false, queryFn: () => api.get<unknown>("/v1/receipts/keys") });
 
 /**
  * Every receipt signing key the deployment has recorded, with a RETIRE action (admin, step-up, audited by the
@@ -226,7 +234,7 @@ const receiptKeysQueryKey = ["admin", "receipt-keys"] as const;
  */
 export function ReceiptKeysTable({ inUseKeyId }: { inUseKeyId: string | null }) {
   const qc = useQueryClient();
-  const keys = useQuery({ queryKey: receiptKeysQueryKey, retry: false, queryFn: () => api.get<unknown>("/v1/receipts/keys") });
+  const keys = useQuery(receiptKeysQuery());
   const act = useAction();
   const [pending, setPending] = useState<RecordedReceiptKey | null>(null);
   const parsed = keys.data === undefined ? undefined : parseReceiptKeys(keys.data);
