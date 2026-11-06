@@ -40,6 +40,8 @@ test.describe("ADR-0220: trained detectors on the Guardrails page", () => {
   test("shows each detector and what turning one on needs", async ({ page }) => {
     await mockApi(page, (route) => json(route, {}));
     await page.goto("/ui/admin/guardrails");
+    // I-2: the trained detectors live on their own tab
+    await page.getByRole("tab", { name: /^Trained detectors/ }).click();
     const card = page.locator("section, div").filter({ has: page.getByText("Trained detectors", { exact: true }) }).first();
     await expect(card.getByText("PII recogniser")).toBeVisible();
     await page.getByRole("button", { name: "Edit PII recogniser" }).click();
@@ -51,6 +53,8 @@ test.describe("ADR-0220: trained detectors on the Guardrails page", () => {
   test("a refusal is shown inline", async ({ page }) => {
     await mockApi(page, (route) => json(route, { error: "external_scorer_kind_mismatch", detail: "scorer 'detectors' does not claim 'guardrail_pii'" }, 422));
     await page.goto("/ui/admin/guardrails");
+    // I-2: the trained detectors live on their own tab
+    await page.getByRole("tab", { name: /^Trained detectors/ }).click();
     await page.getByRole("button", { name: "Edit PII recogniser" }).click();
     const form = page.getByRole("form", { name: "Edit PII recogniser" });
     await form.getByRole("button", { name: "Save" }).click();
@@ -66,6 +70,8 @@ test.describe("ADR-0220: trained detectors on the Guardrails page", () => {
       facts: () => ({ values: { "trainedDetectors.prompt_injection.onFailure": "heuristic" } }),
     });
     await page.goto("/ui/admin/guardrails");
+    // I-2: the trained detectors live on their own tab
+    await page.getByRole("tab", { name: /^Trained detectors/ }).click();
     await page.getByRole("button", { name: "Edit Prompt-injection classifier" }).click();
     const form = page.getByRole("form", { name: "Edit Prompt-injection classifier" });
     await form.getByLabel("If the service fails", { exact: true }).selectOption("heuristic");
