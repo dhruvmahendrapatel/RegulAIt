@@ -1564,6 +1564,20 @@
       "breakpoints": true
     },
     {
+      "idx": 266,
+      "version": "7",
+      "when": 1785201000000,
+      "tag": "0266_model_signing_supply_chain",
+      "breakpoints": true
+    },
+    {
+      "idx": 267,
+      "version": "7",
+      "when": 1785202000000,
+      "tag": "0267_supply_chain_risk_category",
+      "breakpoints": true
+    },
+    {
       "idx": 271,
       "version": "7",
       "when": 1785206000000,

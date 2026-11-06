@@ -28,6 +28,7 @@ import { useToast } from "../../../ui/toast";
 import v from "../../views.module.css";
 import m from "./modelArtifacts.module.css";
 import { ScanReasons, ScanStatusBadge } from "./EngineScanChip";
+import { SigningKeysCard, SupplyChainBadge, SupplyChainSection } from "./SupplyChainPanel";
 import {
   DEFAULT_MAX_MEGABYTES,
   DEFAULT_RETENTION_DAYS,
@@ -170,6 +171,7 @@ export default function ModelArtifactsTab(props: {
                 return <ScanStatusBadge status={scanStatus(latestScan(d.data?.scans), a)} />;
               },
             },
+            { key: "supply", header: "Supply chain", render: (a) => <SupplyChainBadge state={a.supplyChain} /> },
             {
               key: "open",
               header: "",
@@ -215,6 +217,7 @@ export default function ModelArtifactsTab(props: {
           }}
         />
       )}
+      <SigningKeysCard />
     </div>
   );
 }
@@ -459,6 +462,8 @@ function ArtifactDetail(props: {
             </div>
           )}
         </div>
+
+        <SupplyChainSection artifactId={a.id} filename={a.filename} state={detail.data?.artifact?.supplyChain ?? a.supplyChain} />
 
         {findings.length > 0 && (
           <Table<{ i: number; kind: string; id: string; severity: unknown }>
