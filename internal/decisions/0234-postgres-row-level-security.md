@@ -172,6 +172,17 @@ the role split, because it is the only option that protects real boundaries insi
         deployment exists: the product is not live (ADR-0180), and every runtime today is the local superuser. This is
         the recorded reason for the interim state.
 
+   **Tables added by open PRs (2026-11-06, master's instruction: listed here, their PRs not edited).** Each is
+   classified again when its PR merges, by the appendix rule, and joins the named batch:
+
+   | PR | Tables | Provisional batch |
+   |---|---|---|
+   | #622 | user_appearance | 6 (user-owned) |
+   | #614 | model_signing_keys, model_artifact_signatures, model_artifact_supply_chain_relaxations | none (deployment-wide evidence) unless a principal key appears |
+   | #628 | model_drift_settings, model_drift_monitors, model_drift_reports, model_explainability_artefacts | none (deployment-wide), or 5 if they carry `project_id` |
+   | #633 | fairness_datasets, fairness_runs | 5 if they carry `project_id`, else none |
+   | #604, #605, #627, #673 | no new tables (columns, guards and triggers only); a new column that names a user is checked against the table's batch | — |
+
    Deployment-wide (191) and actor-stamped (49) tables get no row policy: their rows are not owned by a principal. The
    app role's grants and the gateway's admin checks protect them. If a later need appears, a policy of the form
    "principal or system context is set" can be added per table.
