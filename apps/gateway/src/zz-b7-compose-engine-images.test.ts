@@ -118,7 +118,7 @@ describe("ADR-0190 I5 follow-up: engines in compose", () => {
     expect(m![1]).toMatch(/^postgres:16@sha256:[0-9a-f]{64}$/);
     for (const svc of ["db", "keycloak-db-init"]) expect(block(svc), svc).toMatch(/\n {4}<<: \*postgres\n/);
     expect(compose).not.toMatch(/\n {4}image: postgres:/);
-    expect(block("keycloak")).toMatch(/\n {4}image: \$\{REGULAIT_KC_IMAGE:-keycloak\/keycloak:26\.8\.0@sha256:[0-9a-f]{64}\}\n/);
+    expect(block("keycloak")).toMatch(/\n {4}image: \$\{REGULAIT_KC_IMAGE:-keycloak\/keycloak:26\.8\.1-1@sha256:[0-9a-f]{64}\}\n/);
     // air-gapped runs the bundle's plain tag (a digest reference does not survive docker save/load)
     const install = readFileSync(path.join(root, "scripts/install.sh"), "utf8");
     expect(install).toMatch(/\n {2}db:\n {4}image: postgres:16\n {4}pull_policy: never\n/);
