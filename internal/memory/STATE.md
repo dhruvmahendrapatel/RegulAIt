@@ -5517,6 +5517,12 @@ Non-blocking items also done: the stale `pending` sweep; the HMAC-derived idempo
 - **Parity:** 67 CPI capabilities, 32 mapped, 32 adapted, 3 N/A. Twelve slices, slice 1 is create, draw, save, run one agent step, see the run.
 - **Open:** eight owner questions (ADR §Open questions), the first being the run-as identity for triggered runs.
 
+**ADR-0200 addendum (owner, 2026-11-06): database tables are normalized.** New and changed tables are in third normal
+form (one fact in one place, foreign keys for every reference, join tables instead of id arrays, no copied mutable
+attributes, one vocabulary per concept). Deliberate exceptions carry a column comment: snapshots and evidence (never
+normalized, ADR-0060), schema-validated config documents, verbatim external payloads, measured read models. Existing
+tables follow in audited expand-contract batches. Rule in CLAUDE.md (Data guidelines); DESIGN_GUIDELINES.md points to it.
+
 **ADR-0233 (builder, 2026-11-06, Proposed): refuse credentials typed into content columns (PENDING S6).** Content
 (`name`, `title`, `description`, `summary`, `body`) is not redacted like ADR-0102's prose; a write that puts
 credential-shaped text into one of the 84 guarded columns is REFUSED with `422 credential_in_content`, naming the
