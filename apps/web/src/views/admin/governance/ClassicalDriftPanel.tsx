@@ -9,6 +9,8 @@
  *  - Drift opens an alert on Governance alerts; this tab does not decide anything.
  *  - Explainability artefacts (feature importance, SHAP summaries) come from the customer's tooling and are recorded
  *    as evidence; RegulAIt does not compute them.
+ *  - Every summary and artefact names the model version it covers: the card's pin, or, for an unpinned card, the
+ *    version entered here (or carried in the file). A result the card has moved on from is marked as such.
  */
 import { useState, type ChangeEvent } from "react";
 import { Link } from "react-router-dom";
@@ -33,6 +35,7 @@ import {
   statusTone,
   thresholdsText,
   topImportances,
+  versionNote,
   type DriftMonitor,
   type DriftReport,
   type DriftThresholds,
@@ -108,7 +111,7 @@ export default function ClassicalDriftPanel(props: { cardId: string }) {
           </div>
           <p className={v.faint}>
             {d.settings.enabled
-              ? "Turning it off stops new monitors, summaries and artefacts, and clears open drift alerts on the next monitor pass. What is recorded stays."
+              ? "Turning it off stops every change here and holds open drift alerts as they are until it is turned back on. What is recorded stays."
               : "Turning it on needs a step-up. Pipelines then send summaries with an admin API key; drift opens an alert on Governance alerts."}
           </p>
           <div>
@@ -165,17 +168,19 @@ export default function ClassicalDriftPanel(props: { cardId: string }) {
                       </Button>
                     }
                     rest={
-                      <Button size="sm" variant="danger" aria-label={`Delete ${m.name}`} onClick={() => setConfirm({ kind: "monitor", id: m.id, label: m.name })}>
-                        Delete
-                      </Button>
+                      d.settings.enabled ? (
+                        <Button size="sm" variant="danger" aria-label={`Delete ${m.name}`} onClick={() => setConfirm({ kind: "monitor", id: m.id, label: m.name })}>
+                          Delete
+                        </Button>
+                      ) : undefined
                     }
                   />
                 ),
               },
             ]}
           />
-          {selectedMonitor && <MonitorResults monitor={selectedMonitor} enabled={d.settings.enabled} onChanged={refresh} />}
-          {d.settings.enabled && <RegisterMonitor cardId={props.cardId} strict={d.strictThresholds} onSaved={refresh} />}
+          {selectedMonitor && <MonitorResults monitor={selectedMonitor} enabled={d.settings.enabled} cardModelVersion={d.cardModelVersion} onChanged={refresh} />}
+          {d.settings.enabled && <RegisterMonitor cardId={props.cardId} strict={d.strictThresholds} cardModelVersion={d.cardModelVersion} onSaved={refresh} />}
         </div>
       </Card>
 
@@ -191,6 +196,7 @@ export default function ClassicalDriftPanel(props: { cardId: string }) {
             columns={[
               { key: "kind", header: "Kind", render: (x) => KIND_LABEL[x.kind] },
               { key: "method", header: "Method", render: (x) => x.method },
+              { key: "version", header: "Model version", render: (x) => <VersionCell recorded={x.modelVersion} card={d.cardModelVersion} /> },
               { key: "top", header: "Largest contributions", render: (x) => <TopFeatures artefact={x} /> },
               { key: "when", header: "Recorded", render: (x) => ago(x.createdAt), sort: (x) => x.createdAt },
               {
@@ -201,16 +207,18 @@ export default function ClassicalDriftPanel(props: { cardId: string }) {
                   <RowActions
                     slot="8rem"
                     rest={
-                      <Button size="sm" variant="danger" aria-label={`Delete ${KIND_LABEL[x.kind]} (${x.method})`} onClick={() => setConfirm({ kind: "artefact", id: x.id, label: `${KIND_LABEL[x.kind]} (${x.method})` })}>
-                        Delete
-                      </Button>
+                      d.settings.enabled ? (
+                        <Button size="sm" variant="danger" aria-label={`Delete ${KIND_LABEL[x.kind]} (${x.method})`} onClick={() => setConfirm({ kind: "artefact", id: x.id, label: `${KIND_LABEL[x.kind]} (${x.method})` })}>
+                          Delete
+                        </Button>
+                      ) : undefined
                     }
                   />
                 ),
               },
             ]}
           />
-          {d.settings.enabled && <RecordArtefact cardId={props.cardId} onSaved={refresh} />}
+          {d.settings.enabled && <RecordArtefact cardId={props.cardId} cardModelVersion={d.cardModelVersion} onSaved={refresh} />}
         </div>
       </Card>
 
@@ -238,6 +246,36 @@ export default function ClassicalDriftPanel(props: { cardId: string }) {
         }}
       />
     </div>
+  );
+}
+
+/** the version a result covers; a warning badge when the card has since been pinned to another version */
+function VersionCell(props: { recorded: string; card: string | null }) {
+  const note = versionNote(props.recorded, props.card);
+  return note.stale ? (
+    <span>
+      <Badge tone="warn">Earlier version</Badge> <span className={v.faint}>{note.text}</span>
+    </span>
+  ) : (
+    <span>{props.recorded}</span>
+  );
+}
+
+/**
+ * The model version a submission covers. A pinned card's version is fixed and shown; an unpinned card needs one
+ * entered, or the gateway refuses the submission.
+ */
+function ModelVersionField(props: { cardModelVersion: string | null; value: string; onChange: (value: string) => void; optional?: boolean }) {
+  if (props.cardModelVersion !== null) {
+    return <p className={v.faint}>Recorded for model version {props.cardModelVersion}, the version this card is pinned to.</p>;
+  }
+  return (
+    <Field
+      label={props.optional ? "Model version (optional)" : "Model version"}
+      help="This card has no pinned model version, so name the version this was produced for."
+    >
+      <Input value={props.value} maxLength={200} onChange={(e) => props.onChange(e.target.value)} />
+    </Field>
   );
 }
 
@@ -283,10 +321,12 @@ function ResultsTable(props: { results: FeatureResult[] }) {
   );
 }
 
-function MonitorResults(props: { monitor: DriftMonitor; enabled: boolean; onChanged: () => void }) {
+function MonitorResults(props: { monitor: DriftMonitor; enabled: boolean; cardModelVersion: string | null; onChanged: () => void }) {
   const m = props.monitor;
   const act = useAction();
   const [upload, setUpload] = useState<{ features: unknown[]; windowStart: string; windowEnd: string } | null>(null);
+  const [modelVersion, setModelVersion] = useState("");
+  const needsVersion = props.cardModelVersion === null && modelVersion.trim() === "";
   const [fileError, setFileError] = useState<string | null>(null);
   const [thresholds, setThresholds] = useState<DriftThresholds>(m.thresholds);
   const [older, setOlder] = useState<DriftReport[]>([]);
@@ -310,6 +350,9 @@ function MonitorResults(props: { monitor: DriftMonitor; enabled: boolean; onChan
                 window {new Date(latest.windowStart).toLocaleString("en-GB")} to {new Date(latest.windowEnd).toLocaleString("en-GB")} ·{" "}
                 {latest.source === "upload" ? "uploaded" : "pushed"} {ago(latest.createdAt)}
               </span>
+            </div>
+            <div>
+              <VersionCell recorded={latest.modelVersion} card={props.cardModelVersion} />
             </div>
             {latest.status === "drift" && (
               <p>
@@ -345,6 +388,7 @@ function MonitorResults(props: { monitor: DriftMonitor; enabled: boolean; onChan
             rowKey={(r) => r.id}
             columns={[
               { key: "when", header: "Recorded", render: (r) => new Date(r.createdAt).toLocaleString("en-GB") },
+              { key: "version", header: "Model version", render: (r) => <VersionCell recorded={r.modelVersion} card={props.cardModelVersion} /> },
               { key: "status", header: "Status", render: (r) => <Badge tone={statusTone(r.status)}>{STATUS_LABEL[r.status]}</Badge> },
               { key: "drifted", header: "Features in drift", align: "right", render: (r) => r.driftedFeatures },
               { key: "samples", header: "Samples", align: "right", render: (r) => r.sampleCount.toLocaleString("en-GB") },
@@ -355,7 +399,7 @@ function MonitorResults(props: { monitor: DriftMonitor; enabled: boolean; onChan
 
         {props.enabled && (
           <>
-            <Field label="Upload a production summary (JSON)" help="The same features and bin edges as the reference, with windowStart and windowEnd. Aggregates only.">
+            <Field label="Upload a production summary (JSON)" help="The same features and bin edges as the reference, with windowStart and windowEnd (and modelVersion for an unpinned card). Aggregates only.">
               <Input
                 type="file"
                 accept="application/json,.json"
@@ -369,6 +413,7 @@ function MonitorResults(props: { monitor: DriftMonitor; enabled: boolean; onChan
                     if (!parsed.ok) return setFileError(parsed.error);
                     if (!parsed.value.windowStart || !parsed.value.windowEnd) return setFileError("The file needs windowStart and windowEnd (ISO 8601 times).");
                     setUpload({ features: parsed.value.features, windowStart: parsed.value.windowStart, windowEnd: parsed.value.windowEnd });
+                    if (parsed.value.modelVersion) setModelVersion(parsed.value.modelVersion);
                   })
                 }
               />
@@ -378,13 +423,18 @@ function MonitorResults(props: { monitor: DriftMonitor; enabled: boolean; onChan
                 {fileError}
               </div>
             )}
+            <ModelVersionField cardModelVersion={props.cardModelVersion} value={modelVersion} onChange={setModelVersion} />
             <div>
               <Button
-                aria-disabled={act.busy || !upload}
+                aria-disabled={act.busy || !upload || needsVersion}
                 onClick={() => {
-                  if (act.busy || !upload) return;
+                  if (act.busy || !upload || needsVersion) return;
                   void act.run(async () => {
-                    const r = await api.post<{ report: DriftReport; alertRaised: boolean }>(`/v1/model-drift/monitors/${m.id}/reports`, { source: "upload", ...upload });
+                    const r = await api.post<{ report: DriftReport; alertRaised: boolean }>(`/v1/model-drift/monitors/${m.id}/reports`, {
+                      source: "upload",
+                      ...upload,
+                      ...(props.cardModelVersion === null ? { modelVersion: modelVersion.trim() } : {}),
+                    });
                     setUpload(null);
                     props.onChanged();
                     return `Summary checked: ${STATUS_LABEL[r.report.status]}${r.alertRaised ? " — an alert was opened" : ""}`;
@@ -431,9 +481,10 @@ function MonitorResults(props: { monitor: DriftMonitor; enabled: boolean; onChan
   );
 }
 
-function RegisterMonitor(props: { cardId: string; strict: DriftThresholds; onSaved: () => void }) {
+function RegisterMonitor(props: { cardId: string; strict: DriftThresholds; cardModelVersion: string | null; onSaved: () => void }) {
   const act = useAction();
   const [name, setName] = useState("");
+  const [modelVersion, setModelVersion] = useState("");
   const [reference, setReference] = useState<unknown[] | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   const [thresholds, setThresholds] = useState<DriftThresholds>(props.strict);
@@ -457,6 +508,7 @@ function RegisterMonitor(props: { cardId: string; strict: DriftThresholds; onSav
               const parsed = parseFeatureFile(r.text);
               if (!parsed.ok) return setFileError(parsed.error);
               setReference(parsed.value.features);
+              if (parsed.value.modelVersion) setModelVersion(parsed.value.modelVersion);
             })
           }
         />
@@ -474,6 +526,7 @@ function RegisterMonitor(props: { cardId: string; strict: DriftThresholds; onSav
         ))}
       </div>
       {loosened.length > 0 && <p className={v.faint}>{loosened.join(", ")} above the default alerts later, so registering needs a step-up.</p>}
+      <ModelVersionField cardModelVersion={props.cardModelVersion} value={modelVersion} onChange={setModelVersion} optional />
       <div>
         <Button
           variant="primary"
@@ -481,8 +534,10 @@ function RegisterMonitor(props: { cardId: string; strict: DriftThresholds; onSav
           onClick={() => {
             if (act.busy || !reference || name.trim() === "") return;
             void act.run(async () => {
-              await withStepUp((h) => stepUpApi.post(`/v1/mrm/cards/${props.cardId}/drift-monitors`, { name: name.trim(), reference, thresholds }, h));
+              const declared = props.cardModelVersion === null && modelVersion.trim() !== "" ? { modelVersion: modelVersion.trim() } : {};
+              await withStepUp((h) => stepUpApi.post(`/v1/mrm/cards/${props.cardId}/drift-monitors`, { name: name.trim(), reference, thresholds, ...declared }, h));
               setName("");
+              setModelVersion("");
               setReference(null);
               setThresholds(props.strict);
               props.onSaved();
@@ -496,8 +551,10 @@ function RegisterMonitor(props: { cardId: string; strict: DriftThresholds; onSav
   );
 }
 
-function RecordArtefact(props: { cardId: string; onSaved: () => void }) {
+function RecordArtefact(props: { cardId: string; cardModelVersion: string | null; onSaved: () => void }) {
   const act = useAction();
+  const [modelVersion, setModelVersion] = useState("");
+  const needsVersion = props.cardModelVersion === null && modelVersion.trim() === "";
   const [kind, setKind] = useState<ExplainabilityArtefact["kind"]>("global_importance");
   const [method, setMethod] = useState("");
   const [note, setNote] = useState("");
@@ -542,14 +599,22 @@ function RecordArtefact(props: { cardId: string; onSaved: () => void }) {
       <Field label="Note (optional)">
         <Textarea value={note} maxLength={2000} onChange={(e) => setNote(e.target.value)} />
       </Field>
+      <ModelVersionField cardModelVersion={props.cardModelVersion} value={modelVersion} onChange={setModelVersion} />
       <div>
         <Button
-          aria-disabled={act.busy || !importances || method.trim() === ""}
+          aria-disabled={act.busy || !importances || method.trim() === "" || needsVersion}
           onClick={() => {
-            if (act.busy || !importances || method.trim() === "") return;
+            if (act.busy || !importances || method.trim() === "" || needsVersion) return;
             void act.run(async () => {
-              await api.post(`/v1/mrm/cards/${props.cardId}/explainability`, { kind, method: method.trim(), importances, ...(note.trim() ? { note: note.trim() } : {}) });
+              await api.post(`/v1/mrm/cards/${props.cardId}/explainability`, {
+                kind,
+                method: method.trim(),
+                importances,
+                ...(note.trim() ? { note: note.trim() } : {}),
+                ...(props.cardModelVersion === null ? { modelVersion: modelVersion.trim() } : {}),
+              });
               setMethod("");
+              setModelVersion("");
               setNote("");
               setImportances(null);
               props.onSaved();

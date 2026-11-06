@@ -31,7 +31,10 @@ re-testing after a model change (#615).
    - the **population stability index** (Σ (p − q) · ln(p / q));
    - the **Jensen–Shannon divergence** (nats, 0 … ln 2);
    - for numeric features, the two-sample **Kolmogorov–Smirnov distance** D over the shared bin edges, with its
-     asymptotic p-value. On binned data D is a lower bound on the raw-sample statistic, and the screen says so.
+     asymptotic p-value Q_KS(λ), λ = (√nₑ + 0.12 + 0.11/√nₑ)·D. Q_KS uses the small-λ series below λ = 1.18 and the
+     alternating series above it (Numerical Recipes §6.14), returning 1 if the latter does not converge; the tests
+     pin it to `scipy.stats.kstwobign.sf`. On binned data D is a lower bound on the raw-sample statistic, and the
+     screen says so.
    Empty bins are floored at 10⁻⁴ and renormalised. A feature is `drift` when any statistic reaches its alert
    threshold, `warn` when PSI reaches the warning threshold, and `insufficient` when it has fewer production samples
    than the minimum. The report takes the worst status (drift > insufficient > warn > within).
@@ -43,23 +46,34 @@ re-testing after a model change (#615).
    `governance_alerts` in the same transaction as the report and its audit row, with the owner and due time the
    [ADR-0182](0182-batch-d4-accountability.md) S5 rules derive. The [ADR-0157](0157-governance-monitor.md) monitor
    reads the latest report per monitor and resolves the episode when it is back within thresholds; an `insufficient`
-   latest report holds the episode. ChatOps notification uses the existing courier. This is a monitor, not a control:
-   no dispatch decision reads these rows.
+   latest report holds the episode, and three `insufficient` reports in a row raise it at low severity as "not
+   evaluable", so a pipeline cannot starve the monitor silently. ChatOps notification uses the existing courier. This
+   is a monitor, not a control: no dispatch decision reads these rows.
 5. **Explainability as evidence.** An admin (or the pipeline, with an admin's key) records a *global feature
    importance* or a *SHAP summary* produced by the customer's own tooling on the card: a method label, one value per
-   feature, an optional note. RegulAIt stores and shows it with its SHA-256; it does not compute it.
-6. **Off by default, strict by default (ADR-0180).** A singleton settings row, absent on a first load, means off.
-   With it off, reads work and every write is refused (`409 model_drift_disabled`), and the monitor input reports no
-   breach, so open episodes resolve. Each of these is a `settings_relax` step-up, audited: turning it on, raising the
+   feature, an optional note. RegulAIt stores and shows it with its SHA-256; it does not compute it. Every SHA-256 here
+   is over the audit chain's `canonicalJson` (ADR-0060: sorted keys, `JSON.stringify` number and string rules), so
+   anyone holding the submitted payload can recompute it outside the gateway.
+6. **Bound to a model version.** Every report and artefact records the model version it was produced for
+   (`model_version`, NOT NULL), on the row and in its audit detail: the card's `pinnedModelVersion` at write time
+   (ADR-0175 A4), or, for an unpinned card, the version the submission declares. A declared version that contradicts
+   the pin is refused (`409 model_version_mismatch`), and an unpinned submission without one is refused
+   (`422 model_version_required`). An artefact's hash covers its version. A monitor records the version its reference
+   was built from where one is known. The tab marks a result recorded for a version the card has since moved on from,
+   so an old clean report is never read as current assurance.
+7. **Off by default, strict by default (ADR-0180).** A singleton settings row, absent on a first load, means off.
+   With it off, reads work and every write is refused (`409 model_drift_disabled`): creating, changing or deleting a
+   monitor, a summary, and recording or deleting an artefact. The monitor input HOLDS every open episode while it is
+   off, so switching it off never dismisses an alert, and the settings audit row records how many were open. Each of these is a `settings_relax` step-up, audited: turning it on, raising the
    per-monitor hourly cap above 12, lowering the minimum sample count below 100, a threshold looser than both its
    current and its strict value (PSI warn 0.1, PSI alert 0.25, KS 0.1, JS 0.05), and deleting a monitor or an artefact
    (both remove evidence).
-7. **Ingestion.** The ingestion route is admin-only, like the rest of the register: a pipeline uses an admin's API key
+8. **Ingestion.** The ingestion route is admin-only, like the rest of the register: a pipeline uses an admin's API key
    (a header credential, so not CSRF-able), and a person uses the page's upload (cookie session, CSRF header). It is
    rate-limited by the gateway's per-credential limiter and by a per-monitor hourly cap counted in the database under a
    transaction-scoped advisory lock, so replicas share one count. A window that ends more than five minutes in the
    future, on the database clock, is refused.
-8. **Open source first (ADR-0176).** PSI is the Jeffreys divergence and JS is the Jensen–Shannon divergence; both come
+9. **Open source first (ADR-0176).** PSI is the Jeffreys divergence and JS is the Jensen–Shannon divergence; both come
    from `ml-distance` 5.0.0 (MIT, released 2026-09-08, no install script, no runtime network use; its closure is MIT
    and CC0-1.0). Searched and not used: `@stdlib/stats-kstest` (Apache-2.0) runs KS on raw samples, which this design
    refuses to accept; no maintained package computes KS on binned aggregates, and `simple-statistics` (already
@@ -87,4 +101,7 @@ re-testing after a model change (#615).
 - Gateway: `classical-drift-stats.ts` (pure), `classical-drift-monitor.ts` (settings and the monitor input, kept apart
   so the governance monitor imports it without a cycle), `classical-drift.ts` (routes).
 - Shared: the `classical_model_drift` rule in `MONITOR_RULES` and the `modelDrift` monitor input.
+- Review round (2026-11-06, PR #628): the model-version binding (§6, columns added to the unmerged 0270 in place),
+  the small-λ KS fix, SciPy reference values in the tests, canonical hashing, writes refused while off, open episodes
+  held while off, and the "not evaluable" streak.
 - Web: a lazy-loaded "Drift and explainability" tab on a card in Model risk.

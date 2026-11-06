@@ -4,10 +4,16 @@
  *   `classical-drift-stats.ts`  the validation and the statistics (pure)
  *   THIS FILE                   persistence, the admin API, the ingestion route, and the governance-monitor input
  *
- * OFF BY DEFAULT (ADR-0180). With no `model_drift_settings` row, or `enabled = false`, no monitor can be created, no
- * summary is accepted and no artefact recorded; reads still work, and the monitor input reports no breach, so any
- * open episode resolves. Turning it on, raising the hourly cap, lowering the minimum sample count, loosening a
- * threshold and deleting recorded evidence are each a `settings_relax` step-up.
+ * OFF BY DEFAULT (ADR-0180). With no `model_drift_settings` row, or `enabled = false`, every write is refused (409):
+ * no monitor is created, changed or deleted, no summary accepted and no artefact recorded or deleted. Reads still
+ * work. The monitor input HOLDS every open episode while the feature is off, so switching it off never dismisses an
+ * open alert. Turning it on, raising the hourly cap, lowering the minimum sample count, loosening a threshold and
+ * deleting recorded evidence are each a `settings_relax` step-up.
+ *
+ * MODEL VERSION. Every report and artefact records the model version it was produced for: the card's
+ * `pinnedModelVersion` at write time, or, for an unpinned card, the version the submission declares. A declared
+ * version that differs from the pin is refused (409), and an unpinned card with no declared version is refused (422),
+ * so no result is ever recorded without saying which model it covers.
  *
  * INGESTION. `POST /v1/model-drift/monitors/:monitorId/reports` is admin-only like every route here (the app's
  * global gate): a pipeline uses an admin's API key, a person uses the page's upload. It is rate-limited twice: the
@@ -41,6 +47,7 @@ import {
   type ModelDriftReportRow,
   type ModelDriftSettingsRow,
 } from "@regulait/db";
+import { MODEL_DRIFT_MONITOR_RULE_ID } from "@regulait/shared";
 import { requireStepUp } from "./step-up.js";
 import { databaseNow } from "./db-clock.js";
 import { alertOwnershipAtRaise } from "./alert-ownership.js";
@@ -62,6 +69,7 @@ import {
   payloadSha256,
   personalDataCategories,
   referenceSamples,
+  modelVersionSchema,
   type DriftFeature,
   type DriftFeatureResult,
   type DriftThresholds,
@@ -126,7 +134,13 @@ const thresholdsSchema = z
   })
   .strict();
 const createMonitorBody = z
-  .object({ name: z.string().trim().min(1).max(120), reference: driftFeatureSetSchema, thresholds: thresholdsSchema.optional() })
+  .object({
+    name: z.string().trim().min(1).max(120),
+    reference: driftFeatureSetSchema,
+    thresholds: thresholdsSchema.optional(),
+    /** the version the reference was built from; must equal the card's pin when it has one */
+    modelVersion: modelVersionSchema.optional(),
+  })
   .strict();
 const reportBody = z
   .object({
@@ -134,6 +148,8 @@ const reportBody = z
     windowStart: z.iso.datetime({ offset: true }),
     windowEnd: z.iso.datetime({ offset: true }),
     features: driftFeatureSetSchema,
+    /** required when the card has no pinned model version; must equal the pin when it has one */
+    modelVersion: modelVersionSchema.optional(),
   })
   .strict();
 const cardParam = z.object({ id: z.string().uuid() });
@@ -148,6 +164,38 @@ const DISABLED = {
   error: "model_drift_disabled",
   detail: "Classical model drift is off. An admin turns it on under Model risk, Drift and explainability; that needs a step-up.",
 } as const;
+
+type ModelVersionResolution =
+  | { ok: true; modelVersion: string; source: "card_pinned" | "declared" }
+  | { ok: true; modelVersion: null; source: null }
+  | { ok: false; status: 409 | 422; body: { error: string; detail: string } };
+
+/**
+ * Which model version a write covers: the card's pin at write time, else the version the submission declares. A
+ * declared version that contradicts the pin is refused; with neither, a report or artefact is refused
+ * (`required`), and a monitor records none.
+ */
+export function resolveModelVersion(pinned: string | null, declared: string | undefined, required: boolean): ModelVersionResolution {
+  const pin = pinned?.trim() || null;
+  if (pin && declared !== undefined && declared !== pin) {
+    return {
+      ok: false,
+      status: 409,
+      body: { error: "model_version_mismatch", detail: "the model version sent does not match the version this model card is pinned to" },
+    };
+  }
+  if (pin) return { ok: true, modelVersion: pin, source: "card_pinned" };
+  if (declared !== undefined) return { ok: true, modelVersion: declared, source: "declared" };
+  if (!required) return { ok: true, modelVersion: null, source: null };
+  return {
+    ok: false,
+    status: 422,
+    body: {
+      error: "model_version_required",
+      detail: "This model card has no pinned model version. Send modelVersion, the version this was produced for, or pin one on the card.",
+    },
+  };
+}
 
 function thresholdsOf(m: ModelDriftMonitorRow): DriftThresholds {
   return { psiWarn: m.psiWarn, psiAlert: m.psiAlert, ksAlert: m.ksAlert, jsAlert: m.jsAlert };
@@ -178,6 +226,7 @@ function monitorView(m: ModelDriftMonitorRow, latest: ModelDriftReportRow | unde
     cardId: m.cardId,
     name: m.name,
     thresholds: thresholdsOf(m),
+    referenceModelVersion: m.referenceModelVersion,
     referenceSha256: m.referenceSha256,
     referenceSamples: m.referenceSamples,
     features: reference.map((f) =>
@@ -200,6 +249,8 @@ function reportView(r: ModelDriftReportRow) {
     summarySha256: r.summarySha256,
     status: r.status,
     driftedFeatures: r.driftedFeatures,
+    modelVersion: r.modelVersion,
+    modelVersionSource: r.modelVersionSource,
     results: r.results as DriftFeatureResult[],
     createdAt: r.createdAt,
   };
@@ -232,7 +283,15 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
       minSamples: body.minSamples ?? current.minSamples,
     };
     const userId = req.authCtx.userId ?? null;
+    const switchingOff = current.enabled && !next.enabled;
     const saved = await db.transaction(async (tx) => {
+      // switching off holds open episodes (the monitor input); the audit row says how many were open at that moment
+      const [{ open } = { open: 0 }] = switchingOff
+        ? await tx
+            .select({ open: sql<number>`count(*)::int` })
+            .from(governanceAlerts)
+            .where(and(eq(governanceAlerts.ruleId, MODEL_DRIFT_MONITOR_RULE_ID), ne(governanceAlerts.status, "resolved")))
+        : [];
       const [row] = await tx
         .insert(modelDriftSettings)
         .values({ id: SETTINGS_ID, ...next, updatedBy: userId })
@@ -242,7 +301,13 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
         userId: userId ?? NO_IDENTITY,
         objectType: "org_settings",
         objectId: null,
-        detail: { scope: "model_drift", from: { enabled: current.enabled, maxReportsPerHour: current.maxReportsPerHour, minSamples: current.minSamples }, to: next, relaxed: Object.keys(relaxed) },
+        detail: {
+          scope: "model_drift",
+          from: { enabled: current.enabled, maxReportsPerHour: current.maxReportsPerHour, minSamples: current.minSamples },
+          to: next,
+          relaxed: Object.keys(relaxed),
+          ...(switchingOff ? { openEpisodesHeld: open } : {}),
+        },
         effect: Object.keys(relaxed).length > 0 ? "deny" : "allow",
         ruleId: MODEL_DRIFT_AUDIT_RULE_IDS.settings,
         ruleChain: [],
@@ -256,7 +321,7 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
   /** everything the card's tab shows: settings, monitors with their latest report, explainability artefacts */
   app.get("/v1/mrm/cards/:id/drift", async (req, reply) => {
     const { id } = cardParam.parse(req.params);
-    const [card] = await db.select({ id: modelCards.id }).from(modelCards).where(eq(modelCards.id, id));
+    const [card] = await db.select({ id: modelCards.id, pinnedModelVersion: modelCards.pinnedModelVersion }).from(modelCards).where(eq(modelCards.id, id));
     if (!card) return reply.status(404).send({ error: "unknown_model_card" });
     const monitors = await db.select().from(modelDriftMonitors).where(eq(modelDriftMonitors.cardId, id)).orderBy(modelDriftMonitors.name);
     const latest = await latestReports(db, monitors.map((m) => m.id));
@@ -269,6 +334,8 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
     return {
       settings: await loadDriftSettings(db),
       strictThresholds: STRICT_DRIFT_THRESHOLDS,
+      /** the card's pin now; a result recorded for another version is shown as such */
+      cardModelVersion: card.pinnedModelVersion,
       monitors: monitors.map((m) => monitorView(m, latest.get(m.id))),
       artefacts: artefacts.map((a) => ({
         id: a.id,
@@ -278,6 +345,8 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
         featureCount: a.featureCount,
         payloadSha256: a.payloadSha256,
         note: a.note,
+        modelVersion: a.modelVersion,
+        modelVersionSource: a.modelVersionSource,
         createdAt: a.createdAt,
       })),
     };
@@ -287,9 +356,11 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
     const { id } = cardParam.parse(req.params);
     const body = createMonitorBody.parse(req.body);
     if (!(await loadDriftSettings(db)).enabled) return reply.status(409).send(DISABLED);
-    const [card] = await db.select({ id: modelCards.id }).from(modelCards).where(eq(modelCards.id, id));
+    const [card] = await db.select({ id: modelCards.id, pinnedModelVersion: modelCards.pinnedModelVersion }).from(modelCards).where(eq(modelCards.id, id));
     if (!card) return reply.status(404).send({ error: "unknown_model_card" });
-    const pii = personalDataRefusal([body.name, ...featureTexts(body.reference)]);
+    const version = resolveModelVersion(card.pinnedModelVersion, body.modelVersion, false);
+    if (!version.ok) return reply.status(version.status).send(version.body);
+    const pii = personalDataRefusal([body.name, ...featureTexts(body.reference), ...(body.modelVersion ? [body.modelVersion] : [])]);
     if (pii) return reply.status(422).send(pii);
     const thresholds: DriftThresholds = { ...STRICT_DRIFT_THRESHOLDS, ...body.thresholds };
     const order = thresholdOrderRefusal(thresholds);
@@ -310,6 +381,7 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
             featureCount: body.reference.length,
             referenceSamples: referenceSamples(body.reference),
             ...thresholds,
+            referenceModelVersion: version.modelVersion,
             createdBy: userId,
           })
           .returning();
@@ -317,7 +389,16 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
           userId: userId ?? NO_IDENTITY,
           objectType: "model_card",
           objectId: id,
-          detail: { phase: "drift-monitor", action: "created", monitorId: m!.id, referenceSha256: sha, featureCount: body.reference.length, thresholds, relaxed: Object.keys(relaxed) },
+          detail: {
+            phase: "drift-monitor",
+            action: "created",
+            monitorId: m!.id,
+            referenceSha256: sha,
+            referenceModelVersion: version.modelVersion,
+            featureCount: body.reference.length,
+            thresholds,
+            relaxed: Object.keys(relaxed),
+          },
           effect: "allow",
           ruleId: MODEL_DRIFT_AUDIT_RULE_IDS.monitorCreated,
           ruleChain: [],
@@ -337,6 +418,7 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
   app.patch("/v1/model-drift/monitors/:monitorId", async (req, reply) => {
     const { monitorId } = monitorParam.parse(req.params);
     const body = z.object({ thresholds: thresholdsSchema }).strict().parse(req.body);
+    if (!(await loadDriftSettings(db)).enabled) return reply.status(409).send(DISABLED);
     const [m] = await db.select().from(modelDriftMonitors).where(eq(modelDriftMonitors.id, monitorId));
     if (!m) return reply.status(404).send({ error: "unknown_drift_monitor" });
     const current = thresholdsOf(m);
@@ -371,6 +453,7 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
   /** removes the monitor and every report recorded against it: evidence removal, so a step-up */
   app.delete("/v1/model-drift/monitors/:monitorId", async (req, reply) => {
     const { monitorId } = monitorParam.parse(req.params);
+    if (!(await loadDriftSettings(db)).enabled) return reply.status(409).send(DISABLED);
     const [m] = await db.select().from(modelDriftMonitors).where(eq(modelDriftMonitors.id, monitorId));
     if (!m) return reply.status(404).send({ error: "unknown_drift_monitor" });
     if (!(await stepUp(db, req, reply, { modelDriftMonitorId: monitorId, values: { deleted: true } }))) return reply;
@@ -384,7 +467,7 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
         userId: req.authCtx.userId ?? NO_IDENTITY,
         objectType: "model_card",
         objectId: m.cardId,
-        detail: { phase: "drift-monitor", action: "deleted", monitorId, referenceSha256: m.referenceSha256, reportsRemoved: reports },
+        detail: { phase: "drift-monitor", action: "deleted", monitorId, referenceSha256: m.referenceSha256, referenceModelVersion: m.referenceModelVersion, reportsRemoved: reports },
         effect: "deny",
         ruleId: MODEL_DRIFT_AUDIT_RULE_IDS.monitorDeleted,
         ruleChain: [],
@@ -400,7 +483,7 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
     const settings = await loadDriftSettings(db);
     if (!settings.enabled) return reply.status(409).send(DISABLED);
     const [m] = await db
-      .select({ monitor: modelDriftMonitors, agentId: modelCards.agentId })
+      .select({ monitor: modelDriftMonitors, agentId: modelCards.agentId, pinnedModelVersion: modelCards.pinnedModelVersion })
       .from(modelDriftMonitors)
       .innerJoin(modelCards, eq(modelCards.id, modelDriftMonitors.cardId))
       .where(eq(modelDriftMonitors.id, monitorId));
@@ -408,7 +491,9 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
     const windowStart = new Date(body.windowStart);
     const windowEnd = new Date(body.windowEnd);
     if (!(windowEnd > windowStart)) return reply.status(422).send({ error: "window_invalid", detail: "the window must end after it starts" });
-    const pii = personalDataRefusal(featureTexts(body.features));
+    const version = resolveModelVersion(m.pinnedModelVersion, body.modelVersion, true);
+    if (!version.ok) return reply.status(version.status).send(version.body);
+    const pii = personalDataRefusal([...featureTexts(body.features), ...(body.modelVersion ? [body.modelVersion] : [])]);
     if (pii) return reply.status(422).send(pii);
     let computed: ReturnType<typeof computeDrift>;
     try {
@@ -444,6 +529,8 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
           results: computed.results,
           status: computed.status,
           driftedFeatures: computed.driftedFeatures,
+          modelVersion: version.modelVersion!,
+          modelVersionSource: version.source!,
           submittedBy: userId,
         })
         .returning();
@@ -458,6 +545,8 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
           source: body.source,
           summarySha256: sha,
           referenceSha256: m.monitor.referenceSha256,
+          modelVersion: version.modelVersion,
+          modelVersionSource: version.source,
           status: computed.status,
           driftedFeatures: computed.driftedFeatures,
           sampleCount: computed.sampleCount,
@@ -465,7 +554,7 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
         effect: computed.status === "drift" ? "deny" : "allow",
         ruleId: MODEL_DRIFT_AUDIT_RULE_IDS.report,
         ruleChain: [],
-        reason: `a production summary was checked against drift monitor '${m.monitor.name}': ${computed.status}`,
+        reason: `a production summary for model version '${version.modelVersion}' was checked against drift monitor '${m.monitor.name}': ${computed.status}`,
       });
       let raisedId: string | null = null;
       if (computed.status === "drift") {
@@ -542,11 +631,19 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
     const { id } = cardParam.parse(req.params);
     const body = explainabilitySchema.parse(req.body);
     if (!(await loadDriftSettings(db)).enabled) return reply.status(409).send(DISABLED);
-    const [card] = await db.select({ id: modelCards.id }).from(modelCards).where(eq(modelCards.id, id));
+    const [card] = await db.select({ id: modelCards.id, pinnedModelVersion: modelCards.pinnedModelVersion }).from(modelCards).where(eq(modelCards.id, id));
     if (!card) return reply.status(404).send({ error: "unknown_model_card" });
-    const pii = personalDataRefusal([body.method, ...body.importances.map((x) => x.feature), ...(body.note ? [body.note] : [])]);
+    const version = resolveModelVersion(card.pinnedModelVersion, body.modelVersion, true);
+    if (!version.ok) return reply.status(version.status).send(version.body);
+    const pii = personalDataRefusal([
+      body.method,
+      ...body.importances.map((x) => x.feature),
+      ...(body.note ? [body.note] : []),
+      ...(body.modelVersion ? [body.modelVersion] : []),
+    ]);
     if (pii) return reply.status(422).send(pii);
-    const sha = payloadSha256({ kind: body.kind, method: body.method, importances: body.importances });
+    // the model version is part of the hashed evidence: the artefact cannot be re-attributed to another version
+    const sha = payloadSha256({ kind: body.kind, method: body.method, importances: body.importances, modelVersion: version.modelVersion });
     const userId = req.authCtx.userId ?? null;
     const row = await db.transaction(async (tx) => {
       const [a] = await tx
@@ -559,6 +656,8 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
           featureCount: body.importances.length,
           payloadSha256: sha,
           note: body.note ?? null,
+          modelVersion: version.modelVersion!,
+          modelVersionSource: version.source!,
           submittedBy: userId,
         })
         .returning();
@@ -566,7 +665,16 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
         userId: userId ?? NO_IDENTITY,
         objectType: "model_card",
         objectId: id,
-        detail: { phase: "explainability", action: "recorded", artefactId: a!.id, kind: body.kind, payloadSha256: sha, featureCount: body.importances.length },
+        detail: {
+          phase: "explainability",
+          action: "recorded",
+          artefactId: a!.id,
+          kind: body.kind,
+          payloadSha256: sha,
+          featureCount: body.importances.length,
+          modelVersion: version.modelVersion,
+          modelVersionSource: version.source,
+        },
         effect: "allow",
         ruleId: MODEL_DRIFT_AUDIT_RULE_IDS.artefact,
         ruleChain: [],
@@ -574,11 +682,23 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
       });
       return a!;
     });
-    return reply.status(201).send({ artefact: { id: row.id, kind: row.kind, method: row.method, featureCount: row.featureCount, payloadSha256: row.payloadSha256, createdAt: row.createdAt } });
+    return reply.status(201).send({
+      artefact: {
+        id: row.id,
+        kind: row.kind,
+        method: row.method,
+        featureCount: row.featureCount,
+        payloadSha256: row.payloadSha256,
+        modelVersion: row.modelVersion,
+        modelVersionSource: row.modelVersionSource,
+        createdAt: row.createdAt,
+      },
+    });
   });
 
   app.delete("/v1/mrm/cards/:id/explainability/:artefactId", async (req, reply) => {
     const { id, artefactId } = artefactParam.parse(req.params);
+    if (!(await loadDriftSettings(db)).enabled) return reply.status(409).send(DISABLED);
     const [a] = await db
       .select()
       .from(modelExplainabilityArtefacts)
@@ -591,7 +711,7 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
         userId: req.authCtx.userId ?? NO_IDENTITY,
         objectType: "model_card",
         objectId: id,
-        detail: { phase: "explainability", action: "deleted", artefactId, payloadSha256: a.payloadSha256 },
+        detail: { phase: "explainability", action: "deleted", artefactId, payloadSha256: a.payloadSha256, modelVersion: a.modelVersion },
         effect: "deny",
         ruleId: MODEL_DRIFT_AUDIT_RULE_IDS.artefactDeleted,
         ruleChain: [],

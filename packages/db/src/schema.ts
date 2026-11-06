@@ -15305,6 +15305,8 @@ export const modelDriftMonitors = pgTable(
     psiAlert: doublePrecision("psi_alert").notNull().default(0.25),
     ksAlert: doublePrecision("ks_alert").notNull().default(0.1),
     jsAlert: doublePrecision("js_alert").notNull().default(0.05),
+    /** the model version the reference was built from, where known (the card's pin, or the version declared) */
+    referenceModelVersion: text("reference_model_version"),
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -15319,6 +15321,10 @@ export const modelDriftMonitors = pgTable(
       "model_drift_monitors_thresholds_check",
       sql`${t.psiWarn} > 0 AND ${t.psiAlert} >= ${t.psiWarn} AND ${t.psiAlert} <= 10 AND ${t.ksAlert} > 0 AND ${t.ksAlert} <= 1 AND ${t.jsAlert} > 0 AND ${t.jsAlert} <= 0.7`,
     ),
+    check(
+      "model_drift_monitors_model_version_check",
+      sql`${t.referenceModelVersion} IS NULL OR char_length(${t.referenceModelVersion}) BETWEEN 1 AND 200`,
+    ),
     unique("model_drift_monitors_card_name_uq").on(t.cardId, t.name),
   ],
 );
@@ -15326,6 +15332,8 @@ export type ModelDriftMonitorRow = typeof modelDriftMonitors.$inferSelect;
 
 export const MODEL_DRIFT_REPORT_SOURCES = ["push", "upload"] as const;
 export const MODEL_DRIFT_STATUSES = ["within", "warn", "drift", "insufficient"] as const;
+/** where a report's or artefact's `model_version` came from: the card's pin at write time, or the submission */
+export const MODEL_VERSION_SOURCES = ["card_pinned", "declared"] as const;
 /** one production summary against a monitor, with the statistics the gateway computed from it */
 export const modelDriftReports = pgTable(
   "model_drift_reports",
@@ -15343,6 +15351,9 @@ export const modelDriftReports = pgTable(
     results: jsonb("results").$type<unknown[]>().notNull(),
     status: text("status", { enum: MODEL_DRIFT_STATUSES }).notNull(),
     driftedFeatures: integer("drifted_features").notNull(),
+    /** the model version this summary was checked for (migration 0270 header) */
+    modelVersion: text("model_version").notNull(),
+    modelVersionSource: text("model_version_source", { enum: MODEL_VERSION_SOURCES }).notNull(),
     submittedBy: uuid("submitted_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -15354,6 +15365,8 @@ export const modelDriftReports = pgTable(
     check("model_drift_reports_sha_check", sql`${t.summarySha256} ~ '^[0-9a-f]{64}$'`),
     check("model_drift_reports_status_check", sql`${t.status} IN ('within', 'warn', 'drift', 'insufficient')`),
     check("model_drift_reports_drifted_check", sql`${t.driftedFeatures} >= 0`),
+    check("model_drift_reports_model_version_check", sql`char_length(${t.modelVersion}) BETWEEN 1 AND 200`),
+    check("model_drift_reports_model_version_source_check", sql`${t.modelVersionSource} IN ('card_pinned', 'declared')`),
     index("model_drift_reports_monitor_idx").on(t.monitorId, t.createdAt.desc(), t.id.desc()),
   ],
 );
@@ -15374,6 +15387,9 @@ export const modelExplainabilityArtefacts = pgTable(
     featureCount: integer("feature_count").notNull(),
     payloadSha256: text("payload_sha256").notNull(),
     note: text("note"),
+    /** the model version this artefact explains (migration 0270 header) */
+    modelVersion: text("model_version").notNull(),
+    modelVersionSource: text("model_version_source", { enum: MODEL_VERSION_SOURCES }).notNull(),
     submittedBy: uuid("submitted_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -15384,6 +15400,11 @@ export const modelExplainabilityArtefacts = pgTable(
     check("model_explainability_artefacts_features_check", sql`${t.featureCount} BETWEEN 1 AND 500`),
     check("model_explainability_artefacts_sha_check", sql`${t.payloadSha256} ~ '^[0-9a-f]{64}$'`),
     check("model_explainability_artefacts_note_check", sql`${t.note} IS NULL OR char_length(${t.note}) <= 2000`),
+    check("model_explainability_artefacts_model_version_check", sql`char_length(${t.modelVersion}) BETWEEN 1 AND 200`),
+    check(
+      "model_explainability_artefacts_model_version_source_check",
+      sql`${t.modelVersionSource} IN ('card_pinned', 'declared')`,
+    ),
     index("model_explainability_artefacts_card_idx").on(t.cardId, t.createdAt.desc()),
   ],
 );

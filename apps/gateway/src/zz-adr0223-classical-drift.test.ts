@@ -6,8 +6,11 @@
  *    without a grant, accepted with a grant bound to the same facts. Other writes use an admin API key, as a pipeline
  *    would.
  *  - A drift summary opens a `classical_model_drift` episode on governance_alerts in the same transaction as the
- *    report and the audit rows; the ADR-0157 monitor pass resolves it once a later summary is within thresholds,
- *    and resolves every open episode when the feature is turned off.
+ *    report and the audit rows; the ADR-0157 monitor pass resolves it once a later summary is within thresholds.
+ *    Turning the feature off HOLDS open episodes (never dismisses them), and every write is refused while it is off.
+ *  - Every report and artefact records the model version it covers: the card's pin, or the version the submission
+ *    declares for an unpinned card. A contradicting version is refused, and so is an unpinned submission without one.
+ *  - Three summaries in a row with too few samples raise a low-severity "not evaluable" episode.
  *  - Aggregates only: a label that looks like personal data is refused by category; sizes are bounded.
  *  - The per-monitor hourly cap is enforced in the database.
  */
@@ -19,10 +22,12 @@ import {
   and,
   auditLog,
   createDb,
+  desc,
   eq,
   governanceAlerts,
   inArray,
   modelCards,
+  modelDriftMonitors,
   modelDriftReports,
   modelDriftSettings,
   runMigrations,
@@ -56,6 +61,10 @@ const asSteppedUp = async (facts: Record<string, unknown>) => stepUpRequest(awai
 let agentId: string;
 let cardId: string;
 let monitorId: string;
+/** a second card with no pinned model version */
+let unpinnedCardId: string;
+let unpinnedMonitorId: string;
+const PIN = "scorecard-2026.10";
 
 const reference = [
   { name: "income", kind: "numeric", edges: [0, 10, 20, 30], counts: [300, 400, 300] },
@@ -105,14 +114,17 @@ beforeAll(async () => {
   });
   expect(a.statusCode).toBe(201);
   agentId = a.json().id;
-  const [card] = await db.insert(modelCards).values({ agentId, intendedUse: "credit pre-screening (classical scorecard)" }).returning();
+  const [card] = await db.insert(modelCards).values({ agentId, intendedUse: "credit pre-screening (classical scorecard)", pinnedModelVersion: PIN }).returning();
   cardId = card!.id;
+  const [unpinned] = await db.insert(modelCards).values({ agentId, intendedUse: "collections prioritisation (classical model)" }).returning();
+  unpinnedCardId = unpinned!.id;
 });
 
 afterAll(async () => {
   await db.delete(modelDriftSettings);
   await db.delete(governanceAlerts).where(eq(governanceAlerts.ruleId, "classical_model_drift"));
   if (cardId) await db.delete(modelCards).where(eq(modelCards.id, cardId));
+  if (unpinnedCardId) await db.delete(modelCards).where(eq(modelCards.id, unpinnedCardId));
   for (const r of restores.reverse()) await r();
   await app.close();
 });
@@ -170,6 +182,7 @@ describe("ADR-0223 classical-model drift", () => {
     expect(res.statusCode).toBe(201);
     const m = res.json().monitor;
     monitorId = m.id;
+    expect(m.referenceModelVersion).toBe(PIN);
     expect(m.thresholds).toEqual({ psiWarn: 0.1, psiAlert: 0.25, ksAlert: 0.1, jsAlert: 0.05 });
     expect(m.referenceSha256).toMatch(/^[0-9a-f]{64}$/);
     expect(m.features).toEqual([
@@ -215,6 +228,13 @@ describe("ADR-0223 classical-model drift", () => {
     expect(res.statusCode).toBe(201);
     const r = res.json().report;
     expect(r.status).toBe("within");
+    // bound to the version the card is pinned to at write time, on the row and in the audit detail
+    expect(r).toMatchObject({ modelVersion: PIN, modelVersionSource: "card_pinned" });
+    const [audit] = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.ruleId, MODEL_DRIFT_AUDIT_RULE_IDS.report), eq(auditLog.objectId, cardId)));
+    expect(audit!.detail).toMatchObject({ reportId: r.id, modelVersion: PIN, modelVersionSource: "card_pinned" });
     expect(r.results.map((x: { feature: string }) => x.feature)).toEqual(["income", "region"]);
     expect(r.results[1].ksD).toBeNull();
     expect(res.json().alertRaised).toBe(false);
@@ -265,9 +285,23 @@ describe("ADR-0223 classical-model drift", () => {
       payload: { kind: "shap_summary", method: "mean absolute SHAP value", importances: [{ feature: "income", value: 0.41 }, { feature: "region", value: 0.07 }] },
     });
     expect(res.statusCode).toBe(201);
+    expect(res.json().artefact).toMatchObject({ modelVersion: PIN, modelVersionSource: "card_pinned" });
     const id = res.json().artefact.id as string;
     const view = await app.inject({ method: "GET", url: `/v1/mrm/cards/${cardId}/drift`, headers: KEY });
     expect(view.json().artefacts).toHaveLength(1);
+    expect(view.json().artefacts[0].modelVersion).toBe(PIN);
+    expect(view.json().cardModelVersion).toBe(PIN);
+    const [recorded] = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, MODEL_DRIFT_AUDIT_RULE_IDS.artefact), eq(auditLog.objectId, cardId)));
+    expect(recorded!.detail).toMatchObject({ artefactId: id, modelVersion: PIN });
+    // a version that contradicts the card's pin is refused
+    const wrong = await app.inject({
+      method: "POST",
+      url: `/v1/mrm/cards/${cardId}/explainability`,
+      headers: KEY,
+      payload: { kind: "global_importance", method: "permutation", importances: [{ feature: "income", value: 0.4 }], modelVersion: "scorecard-2025.01" },
+    });
+    expect(wrong.statusCode).toBe(409);
+    expect(wrong.json().error).toBe("model_version_mismatch");
     expect(view.json().monitors[0].latestReport.status).toBe("within");
     const u = `/v1/mrm/cards/${cardId}/explainability/${id}`;
     const refused = await app.inject({ method: "DELETE", url: u, ...(await asSession()) });
@@ -276,14 +310,81 @@ describe("ADR-0223 classical-model drift", () => {
     expect(del.statusCode, del.body).toBe(200);
   });
 
-  it("turning it off resolves an open episode on the next monitor pass", async () => {
+  it("binds every result to a model version: the card's pin, or the version declared for an unpinned card", async () => {
+    const mismatch = await report({ ...within, modelVersion: "scorecard-2025.01" });
+    expect(mismatch.statusCode).toBe(409);
+    expect(mismatch.json().error).toBe("model_version_mismatch");
+
+    const mon = await app.inject({ method: "POST", url: `/v1/mrm/cards/${unpinnedCardId}/drift-monitors`, headers: KEY, payload: { name: "collections", reference } });
+    expect(mon.statusCode, mon.body).toBe(201);
+    unpinnedMonitorId = mon.json().monitor.id;
+    expect(mon.json().monitor.referenceModelVersion).toBeNull();
+    const none = await report(within, unpinnedMonitorId);
+    expect(none.statusCode).toBe(422);
+    expect(none.json().error).toBe("model_version_required");
+    const noneX = await app.inject({
+      method: "POST",
+      url: `/v1/mrm/cards/${unpinnedCardId}/explainability`,
+      headers: KEY,
+      payload: { kind: "global_importance", method: "permutation", importances: [{ feature: "income", value: 0.4 }] },
+    });
+    expect(noneX.json().error).toBe("model_version_required");
+    const declared = await report({ ...within, modelVersion: "collections-v3" }, unpinnedMonitorId);
+    expect(declared.statusCode, declared.body).toBe(201);
+    expect(declared.json().report).toMatchObject({ modelVersion: "collections-v3", modelVersionSource: "declared" });
+
+    // once the card is pinned to a new version, the earlier report still names the version it was produced for
+    await db.update(modelCards).set({ pinnedModelVersion: "collections-v4" }).where(eq(modelCards.id, unpinnedCardId));
+    const view = await app.inject({ method: "GET", url: `/v1/mrm/cards/${unpinnedCardId}/drift`, headers: KEY });
+    expect(view.json().cardModelVersion).toBe("collections-v4");
+    expect(view.json().monitors[0].latestReport.modelVersion).toBe("collections-v3");
+  });
+
+  it("three summaries in a row with too few samples raise a low-severity 'not evaluable' episode", async () => {
+    const thin = {
+      ...within,
+      features: [
+        { name: "income", kind: "numeric", edges: [0, 10, 20, 30], counts: [3, 4, 3] },
+        { name: "region", kind: "categorical", categories: ["north", "south"], counts: [5, 5] },
+      ],
+    };
+    const subject = `agent:${agentId}>model_card:${unpinnedCardId}>model_drift_monitor:${unpinnedMonitorId}`;
+    const forSubject = async () => (await openDriftAlerts()).filter((a) => a.subjectKey === subject);
+    for (let i = 0; i < 2; i++) expect((await report(thin, unpinnedMonitorId)).json().report.status).toBe("insufficient");
+    await runGovernanceMonitor(db);
+    expect(await forSubject()).toHaveLength(0);
+    expect((await report(thin, unpinnedMonitorId)).json().report.status).toBe("insufficient");
+    await runGovernanceMonitor(db);
+    const open = await forSubject();
+    expect(open).toHaveLength(1);
+    expect(open[0]!.severity).toBe("low");
+    expect(open[0]!.detail).toMatchObject({ notEvaluable: true, monitorId: unpinnedMonitorId });
+  });
+
+  it("turning it off holds open episodes, says how many in the audit row, and refuses every write", async () => {
     await put({ maxReportsPerHour: 3 });
     await db.delete(modelDriftReports).where(eq(modelDriftReports.monitorId, monitorId));
     expect((await report(drifted)).json().alertRaised).toBe(true);
-    expect(await openDriftAlerts()).toHaveLength(1);
+    const before = await openDriftAlerts();
+    expect(before.length).toBeGreaterThanOrEqual(2);
     expect((await put({ enabled: false })).statusCode).toBe(200);
+    const [audit] = await db.select().from(auditLog).where(eq(auditLog.ruleId, MODEL_DRIFT_AUDIT_RULE_IDS.settings)).orderBy(desc(auditLog.at)).limit(1);
+    expect(audit!.detail).toMatchObject({ to: { enabled: false }, openEpisodesHeld: before.length });
     await runGovernanceMonitor(db);
-    expect(await openDriftAlerts()).toHaveLength(0);
+    expect((await openDriftAlerts()).map((a) => a.id).sort()).toEqual(before.map((a) => a.id).sort());
+
     expect((await report(within)).statusCode).toBe(409);
+    const patch = await app.inject({ method: "PATCH", url: `/v1/model-drift/monitors/${monitorId}`, headers: KEY, payload: { thresholds: { psiWarn: 0.05 } } });
+    expect(patch.statusCode).toBe(409);
+    const delMonitor = await app.inject({
+      method: "DELETE",
+      url: `/v1/model-drift/monitors/${monitorId}`,
+      ...(await asSteppedUp({ modelDriftMonitorId: monitorId, values: { deleted: true } })),
+    });
+    expect(delMonitor.statusCode).toBe(409);
+    expect(delMonitor.json().error).toBe("model_drift_disabled");
+    expect(await db.select().from(modelDriftMonitors).where(eq(modelDriftMonitors.id, monitorId))).toHaveLength(1);
+    const delArtefact = await app.inject({ method: "DELETE", url: `/v1/mrm/cards/${cardId}/explainability/00000000-0000-4000-8000-000000000000`, headers: KEY });
+    expect(delArtefact.statusCode).toBe(409);
   });
 });

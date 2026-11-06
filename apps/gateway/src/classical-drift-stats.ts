@@ -22,7 +22,7 @@
 import { createHash } from "node:crypto";
 import { distance } from "ml-distance";
 import { z } from "zod";
-import { GUARDRAIL_DETECTOR_IDS, evaluateGuardrails, type GuardrailModes } from "@regulait/shared";
+import { GUARDRAIL_DETECTOR_IDS, canonicalJson, evaluateGuardrails, type GuardrailModes } from "@regulait/shared";
 
 export const DRIFT_LIMITS = {
   features: 200,
@@ -89,6 +89,9 @@ export const driftFeatureSetSchema = z
     }
   });
 
+/** a model version a submission declares: the same bound as a card's `pinnedModelVersion`, printable text only */
+export const modelVersionSchema = z.string().trim().min(1).max(200).regex(LABEL, "no control characters");
+
 export const explainabilitySchema = z
   .object({
     kind: z.enum(["global_importance", "shap_summary"]),
@@ -99,6 +102,8 @@ export const explainabilitySchema = z
       .max(DRIFT_LIMITS.importanceFeatures)
       .refine((xs) => new Set(xs.map((x) => x.feature)).size === xs.length, "feature names must be unique"),
     note: z.string().trim().max(2000).optional(),
+    /** required when the card has no pinned model version; must equal the pin when it has one */
+    modelVersion: modelVersionSchema.optional(),
   })
   .strict();
 export type ExplainabilityInput = z.infer<typeof explainabilitySchema>;
@@ -119,9 +124,13 @@ export function featureTexts(features: readonly DriftFeature[]): string[] {
   return features.flatMap((f) => (f.kind === "categorical" ? [f.name, ...f.categories] : [f.name]));
 }
 
-/** SHA-256 of the canonical JSON of a validated payload: what the audit row and the stored row both carry */
+/**
+ * SHA-256 of the canonical JSON of a validated payload: what the audit row and the stored row both carry. The
+ * serialisation is the audit chain's `canonicalJson` (ADR-0060: sorted keys, JSON.stringify's number and string
+ * rules), so anyone holding the submitted summary can recompute the hash outside the gateway, in any key order.
+ */
 export function payloadSha256(value: unknown): string {
-  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  return createHash("sha256").update(canonicalJson(value), "utf8").digest("hex");
 }
 
 export interface DriftThresholds {
@@ -171,16 +180,31 @@ function smoothed(counts: readonly number[]): number[] {
   return floored.map((p) => p / total);
 }
 
-/** Q_KS(λ) = 2 Σ (−1)^(j−1) e^(−2 j² λ²), the Kolmogorov survival function */
-function kolmogorovQ(lambda: number): number {
-  if (lambda < 1e-3) return 1;
+/**
+ * Q_KS(λ), the Kolmogorov survival function (the asymptotic two-sample KS p-value). Two series, each used where it
+ * converges fast (Numerical Recipes, 3rd ed., §6.14):
+ *   λ < 1.18   Q = 1 − (√(2π) / λ) Σ_{j≥1} e^(−(2j−1)² π² / (8 λ²))   (the CDF series; underflows to Q = 1 for small λ)
+ *   λ ≥ 1.18   Q = 2 Σ_{j≥1} (−1)^(j−1) e^(−2 j² λ²)                 (the alternating series)
+ * Pinned against `scipy.stats.kstwobign.sf` in the tests. The alternating series alone is wrong for small λ (it
+ * returned 0.078 at λ = 0.002, where the true value is 1), which is why the split exists.
+ */
+export function kolmogorovQ(lambda: number): number {
+  if (!Number.isFinite(lambda) || lambda < 0) throw new RangeError("lambda must be a finite, non-negative number");
+  if (lambda === 0) return 1;
+  if (lambda < 1.18) {
+    const y = Math.exp(-(Math.PI * Math.PI) / (8 * lambda * lambda));
+    // Σ y^((2j−1)²) = y + y^9 + y^25 + y^49 + …; the fifth term (y^81) is below 1e-30 of the first for every λ < 1.18
+    const cdf = (Math.sqrt(2 * Math.PI) / lambda) * (y + Math.pow(y, 9) + Math.pow(y, 25) + Math.pow(y, 49));
+    return Math.min(1, Math.max(0, 1 - cdf));
+  }
   let total = 0;
   for (let j = 1; j <= 100; j++) {
     const term = 2 * (j % 2 === 1 ? 1 : -1) * Math.exp(-2 * j * j * lambda * lambda);
     total += term;
-    if (Math.abs(term) < 1e-12) break;
+    if (Math.abs(term) <= 1e-16 * Math.abs(total)) return Math.min(1, Math.max(0, total));
   }
-  return Math.min(1, Math.max(0, total));
+  // not converged: report "no evidence of a difference", as Numerical Recipes' probks does, never a false small p
+  return 1;
 }
 
 /** two-sample KS on binned counts sharing the same edges: D over the bin edges, and its asymptotic p-value */

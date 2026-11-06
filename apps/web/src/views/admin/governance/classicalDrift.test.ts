@@ -9,6 +9,7 @@ import {
   stat,
   statusTone,
   topImportances,
+  versionNote,
 } from "./classicalDrift";
 
 const STRICT = { psiWarn: 0.1, psiAlert: 0.25, ksAlert: 0.1, jsAlert: 0.05 };
@@ -52,5 +53,18 @@ describe("classical drift tab logic", () => {
   it("refuses a file over the gateway's body limit before sending it", () => {
     expect(fileTooLarge({ size: MAX_UPLOAD_BYTES })).toBeNull();
     expect(fileTooLarge({ size: MAX_UPLOAD_BYTES + 1 })).toMatch(/larger than 512 KB/);
+  });
+
+  it("reads a declared model version from a summary file", () => {
+    const list = [{ name: "age", kind: "numeric", edges: [0, 1], counts: [3] }];
+    const parsed = parseFeatureFile(JSON.stringify({ features: list, modelVersion: " scorer-v3 " }));
+    expect(parsed).toEqual({ ok: true, value: { features: list, modelVersion: "scorer-v3" } });
+    expect(parseFeatureFile(JSON.stringify({ features: list, modelVersion: "" }))).toEqual({ ok: true, value: { features: list } });
+  });
+
+  it("says which model version a result covers, and flags one the card has moved on from", () => {
+    expect(versionNote("v3", "v3")).toEqual({ text: "model version v3", stale: false });
+    expect(versionNote("v3", null)).toEqual({ text: "model version v3", stale: false });
+    expect(versionNote("v3", "v4")).toEqual({ text: "model version v3 (the card is now on v4)", stale: true });
   });
 });

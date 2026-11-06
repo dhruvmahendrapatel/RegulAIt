@@ -34,6 +34,8 @@ export interface FeatureResult {
   breached: Array<"psi" | "js" | "ks">;
 }
 
+export type ModelVersionSource = "card_pinned" | "declared";
+
 export interface DriftReport {
   id: string;
   monitorId: string;
@@ -44,6 +46,9 @@ export interface DriftReport {
   summarySha256: string;
   status: DriftStatus;
   driftedFeatures: number;
+  /** the model version this summary was checked for: the card's pin at the time, or the version the pipeline declared */
+  modelVersion: string;
+  modelVersionSource: ModelVersionSource;
   results: FeatureResult[];
   createdAt: string;
 }
@@ -53,6 +58,7 @@ export interface DriftMonitor {
   cardId: string;
   name: string;
   thresholds: DriftThresholds;
+  referenceModelVersion: string | null;
   referenceSha256: string;
   referenceSamples: number;
   features: Array<{ name: string; kind: "numeric" | "categorical"; bins?: number; categories?: number }>;
@@ -69,12 +75,16 @@ export interface ExplainabilityArtefact {
   featureCount: number;
   payloadSha256: string;
   note: string | null;
+  modelVersion: string;
+  modelVersionSource: ModelVersionSource;
   createdAt: string;
 }
 
 export interface DriftView {
   settings: DriftSettings;
   strictThresholds: DriftThresholds;
+  /** the card's pinned model version now; null = unpinned, so each submission names its version */
+  cardModelVersion: string | null;
   monitors: DriftMonitor[];
   artefacts: ExplainabilityArtefact[];
 }
@@ -121,6 +131,15 @@ export function loosenedThresholds(next: DriftThresholds, strict: DriftThreshold
   return THRESHOLD_FIELDS.filter((f) => next[f.key] > strict[f.key]).map((f) => f.label);
 }
 
+/**
+ * The model version a result was recorded for, and whether that is no longer the card's version (the card has been
+ * pinned to another one since), so an old result is never read as current assurance.
+ */
+export function versionNote(recorded: string, cardModelVersion: string | null): { text: string; stale: boolean } {
+  const stale = cardModelVersion !== null && cardModelVersion !== recorded;
+  return { text: stale ? `model version ${recorded} (the card is now on ${cardModelVersion})` : `model version ${recorded}`, stale };
+}
+
 export function thresholdsText(t: DriftThresholds): string {
   return `PSI ${t.psiWarn} / ${t.psiAlert} · KS ${t.ksAlert} · JS ${t.jsAlert}`;
 }
@@ -139,10 +158,10 @@ const isObject = (x: unknown): x is Record<string, unknown> => typeof x === "obj
 
 /**
  * A feature file: either a list of features or an object with a `features` list (a summary file may also carry
- * `windowStart` and `windowEnd`). Each feature is a histogram (`edges`, `counts`) or a category table
+ * `windowStart`, `windowEnd` and `modelVersion`). Each feature is a histogram (`edges`, `counts`) or a category table
  * (`categories`, `counts`).
  */
-export function parseFeatureFile(text: string): Parsed<{ features: unknown[]; windowStart?: string; windowEnd?: string }> {
+export function parseFeatureFile(text: string): Parsed<{ features: unknown[]; windowStart?: string; windowEnd?: string; modelVersion?: string }> {
   const json = parseJson(text);
   if (!json.ok) return json;
   const v = json.value;
@@ -153,9 +172,10 @@ export function parseFeatureFile(text: string): Parsed<{ features: unknown[]; wi
       return { ok: false, error: "Each feature needs a name, a kind (numeric or categorical) and counts." };
     }
   }
-  const out: { features: unknown[]; windowStart?: string; windowEnd?: string } = { features };
+  const out: { features: unknown[]; windowStart?: string; windowEnd?: string; modelVersion?: string } = { features };
   if (isObject(v) && typeof v.windowStart === "string") out.windowStart = v.windowStart;
   if (isObject(v) && typeof v.windowEnd === "string") out.windowEnd = v.windowEnd;
+  if (isObject(v) && typeof v.modelVersion === "string" && v.modelVersion.trim() !== "") out.modelVersion = v.modelVersion.trim();
   return { ok: true, value: out };
 }
 

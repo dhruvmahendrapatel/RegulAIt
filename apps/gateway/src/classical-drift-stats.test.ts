@@ -10,6 +10,8 @@ import {
   driftFeatureSetSchema,
   explainabilitySchema,
   featureTexts,
+  kolmogorovQ,
+  modelVersionSchema,
   payloadSha256,
   personalDataCategories,
   type DriftFeature,
@@ -96,6 +98,49 @@ describe("ADR-0223 drift statistics", () => {
     expect(shape([{ name: "x", kind: "numeric", edges: [0, 1, 3], counts: [1, 1] }])).toBe("bins_mismatch");
   });
 
+  /**
+   * Reference values from an independent implementation (SciPy 1.18.1), not re-derived from the code under test:
+   *   kolmogorovQ(λ)  scipy.stats.kstwobign.sf(λ)
+   *   js              scipy.spatial.distance.jensenshannon(q, p) ** 2   (natural log)
+   *   psi             numpy.sum(scipy.special.rel_entr(p, q) + rel_entr(q, p))
+   *   ks D            scipy.stats.ks_2samp(a, b).statistic, with each count expanded into samples at its bin midpoint
+   */
+  it.each([
+    [0.002, 1.0],
+    [0.005, 1.0],
+    [0.01, 1.0],
+    [0.1, 1.0],
+    [0.3, 0.9999906941986655],
+    [0.5, 0.9639452436648751],
+    [0.8, 0.5441424115741981],
+    [1.0, 0.26999967167735456],
+    [1.18, 0.1234538094297657],
+    [1.2, 0.11224966667072497],
+    [1.5, 0.022217962616525127],
+    [2.0, 0.0006709252557796953],
+    [3.0, 3.045995948942526e-8],
+  ])("the Kolmogorov survival function matches scipy kstwobign.sf at λ = %s", (lambda, expected) => {
+    expect(Math.abs(kolmogorovQ(lambda) - expected)).toBeLessThan(1e-9);
+  });
+
+  it("near-identical distributions at large n have a KS p-value near 1, not a false 'significant' one", () => {
+    // n₁ = n₂ = 10⁶ and D = 10⁻⁵ gives λ ≈ 0.007, where the alternating series alone returned a value well below 1
+    const { d, p } = binnedKs([500_000, 500_000], [500_010, 499_990]);
+    expect(d).toBeCloseTo(1e-5, 12);
+    expect(p).toBe(1);
+    expect(kolmogorovQ(0)).toBe(1);
+    expect(() => kolmogorovQ(-1)).toThrow(RangeError);
+    expect(() => kolmogorovQ(Number.NaN)).toThrow(RangeError);
+  });
+
+  it("PSI, Jensen–Shannon and KS D match SciPy on a five-bin histogram", () => {
+    const out = computeDrift([num("x", [120, 340, 280, 160, 100])], [num("x", [60, 200, 300, 260, 180])], STRICT_DRIFT_THRESHOLDS, 100);
+    const r = out.results[0]!;
+    expect(r.psi).toBeCloseTo(0.2128303581823792, 5);
+    expect(r.js).toBeCloseTo(0.026252604314891168, 5);
+    expect(r.ksD).toBeCloseTo(0.2, 6);
+  });
+
   it("binned KS: D is the largest gap between the cumulative proportions", () => {
     const { d, p } = binnedKs([25, 25, 25, 25], [0, 0, 50, 50]);
     expect(d).toBeCloseTo(0.5, 10);
@@ -131,8 +176,17 @@ describe("ADR-0223 payload rules", () => {
     expect(explainabilitySchema.safeParse({ kind: "other", method: "m", importances: [{ feature: "a", value: 1 }] }).success).toBe(false);
   });
 
-  it("hashes the canonical payload deterministically", () => {
-    expect(payloadSha256([num("x", [1])])).toMatch(/^[0-9a-f]{64}$/);
-    expect(payloadSha256([num("x", [1])])).toBe(payloadSha256([num("x", [1])]));
+  it("hashes the canonical payload: sorted keys, so any key order gives the same hash", () => {
+    // python: hashlib.sha256(json.dumps(o, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    const expected = "2be1e94a66ad074d1d8e041d45ca00506175ec63babe97da207a8c163bf788fa";
+    expect(payloadSha256([{ name: "x", kind: "numeric", edges: [0, 1], counts: [1] }])).toBe(expected);
+    expect(payloadSha256([{ counts: [1], kind: "numeric", edges: [0, 1], name: "x" }])).toBe(expected);
+  });
+
+  it("bounds a declared model version", () => {
+    expect(modelVersionSchema.safeParse("scorecard-2026.10").success).toBe(true);
+    expect(modelVersionSchema.safeParse("").success).toBe(false);
+    expect(modelVersionSchema.safeParse("x".repeat(201)).success).toBe(false);
+    expect(modelVersionSchema.safeParse("v1\nv2").success).toBe(false);
   });
 });

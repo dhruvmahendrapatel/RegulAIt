@@ -15,6 +15,13 @@
 --   model_explainability_artefacts  global feature importance or a SHAP summary the customer's pipeline produced,
 --                                   recorded as evidence on the model card. Aggregates only (one value per feature).
 --
+-- MODEL VERSION. Every report and artefact names the model version it was produced for (`model_version`, NOT NULL),
+-- so an auditor can tell which model a result covered after the card moves to a new version (the P16 path). It is
+-- the card's `pinned_model_version` at write time (`model_version_source = 'card_pinned'`; a submission that declares
+-- a different version is refused), or, for an unpinned card, the version the submission declares
+-- (`'declared'`; a submission without one is refused). A monitor records the version its reference was built from
+-- the same way, where one is known (`reference_model_version`, nullable).
+--
 -- Every write goes through the gateway in the same transaction as its audit row. No function and no trigger is
 -- created here, so the 0185 guard (pinned search_path; TRUNCATE refusal beside a row refusal) has nothing new to
 -- check. The deployment is single-tenant (one org row), so there is no tenant column to put row-level security on.
@@ -43,6 +50,7 @@ CREATE TABLE IF NOT EXISTS "model_drift_monitors" (
   "psi_alert" double precision DEFAULT 0.25 NOT NULL,
   "ks_alert" double precision DEFAULT 0.1 NOT NULL,
   "js_alert" double precision DEFAULT 0.05 NOT NULL,
+  "reference_model_version" text,
   "created_by" uuid REFERENCES "users"("id") ON DELETE SET NULL,
   "created_at" timestamp with time zone DEFAULT now() NOT NULL,
   "updated_at" timestamp with time zone DEFAULT now() NOT NULL,
@@ -56,6 +64,7 @@ CREATE TABLE IF NOT EXISTS "model_drift_monitors" (
     AND "ks_alert" > 0 AND "ks_alert" <= 1
     AND "js_alert" > 0 AND "js_alert" <= 0.7
   ),
+  CONSTRAINT "model_drift_monitors_model_version_check" CHECK ("reference_model_version" IS NULL OR char_length("reference_model_version") BETWEEN 1 AND 200),
   CONSTRAINT "model_drift_monitors_card_name_uq" UNIQUE ("card_id", "name")
 );
 --> statement-breakpoint
@@ -71,6 +80,8 @@ CREATE TABLE IF NOT EXISTS "model_drift_reports" (
   "results" jsonb NOT NULL,
   "status" text NOT NULL,
   "drifted_features" integer NOT NULL,
+  "model_version" text NOT NULL,
+  "model_version_source" text NOT NULL,
   "submitted_by" uuid REFERENCES "users"("id") ON DELETE SET NULL,
   "created_at" timestamp with time zone DEFAULT now() NOT NULL,
   CONSTRAINT "model_drift_reports_source_check" CHECK ("source" IN ('push', 'upload')),
@@ -79,7 +90,9 @@ CREATE TABLE IF NOT EXISTS "model_drift_reports" (
   CONSTRAINT "model_drift_reports_summary_check" CHECK (jsonb_typeof("summary") = 'array' AND jsonb_typeof("results") = 'array'),
   CONSTRAINT "model_drift_reports_sha_check" CHECK ("summary_sha256" ~ '^[0-9a-f]{64}$'),
   CONSTRAINT "model_drift_reports_status_check" CHECK ("status" IN ('within', 'warn', 'drift', 'insufficient')),
-  CONSTRAINT "model_drift_reports_drifted_check" CHECK ("drifted_features" >= 0)
+  CONSTRAINT "model_drift_reports_drifted_check" CHECK ("drifted_features" >= 0),
+  CONSTRAINT "model_drift_reports_model_version_check" CHECK (char_length("model_version") BETWEEN 1 AND 200),
+  CONSTRAINT "model_drift_reports_model_version_source_check" CHECK ("model_version_source" IN ('card_pinned', 'declared'))
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "model_drift_reports_monitor_idx" ON "model_drift_reports" ("monitor_id", "created_at" DESC, "id" DESC);
@@ -93,6 +106,8 @@ CREATE TABLE IF NOT EXISTS "model_explainability_artefacts" (
   "feature_count" integer NOT NULL,
   "payload_sha256" text NOT NULL,
   "note" text,
+  "model_version" text NOT NULL,
+  "model_version_source" text NOT NULL,
   "submitted_by" uuid REFERENCES "users"("id") ON DELETE SET NULL,
   "created_at" timestamp with time zone DEFAULT now() NOT NULL,
   CONSTRAINT "model_explainability_artefacts_kind_check" CHECK ("kind" IN ('global_importance', 'shap_summary')),
@@ -100,7 +115,9 @@ CREATE TABLE IF NOT EXISTS "model_explainability_artefacts" (
   CONSTRAINT "model_explainability_artefacts_importances_check" CHECK (jsonb_typeof("importances") = 'array'),
   CONSTRAINT "model_explainability_artefacts_features_check" CHECK ("feature_count" BETWEEN 1 AND 500),
   CONSTRAINT "model_explainability_artefacts_sha_check" CHECK ("payload_sha256" ~ '^[0-9a-f]{64}$'),
-  CONSTRAINT "model_explainability_artefacts_note_check" CHECK ("note" IS NULL OR char_length("note") <= 2000)
+  CONSTRAINT "model_explainability_artefacts_note_check" CHECK ("note" IS NULL OR char_length("note") <= 2000),
+  CONSTRAINT "model_explainability_artefacts_model_version_check" CHECK (char_length("model_version") BETWEEN 1 AND 200),
+  CONSTRAINT "model_explainability_artefacts_model_version_source_check" CHECK ("model_version_source" IN ('card_pinned', 'declared'))
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "model_explainability_artefacts_card_idx" ON "model_explainability_artefacts" ("card_id", "created_at" DESC);
