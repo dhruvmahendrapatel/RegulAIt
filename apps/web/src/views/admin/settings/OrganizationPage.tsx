@@ -1017,6 +1017,11 @@ function Loaded(props: { settings: Record<string, unknown> }) {
             </Select>
           </Field>
         </SectionShell>
+        {str(s, "contentCredentialGuard") === "false" ? (
+          <p className={v.errLine}>
+            The guard is off for the whole organisation and stays off until someone turns it back on. Credentials typed into names and descriptions are being stored as typed.
+          </p>
+        ) : null}
         <ContentCredentialReport />
       </Card>
 
@@ -1130,7 +1135,13 @@ interface ContentCredentialFinding {
 function ContentCredentialReport() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [report, setReport] = useState<{ findings: ContentCredentialFinding[]; scannedColumns: number; truncatedColumns: string[] } | null>(null);
+  const [report, setReport] = useState<{
+    findings: ContentCredentialFinding[];
+    scannedColumns: number;
+    truncatedColumns: string[];
+    incomplete?: boolean;
+    unscannedColumns?: string[];
+  } | null>(null);
   const run = async () => {
     setBusy(true);
     setError(null);
@@ -1153,6 +1164,11 @@ function ContentCredentialReport() {
         </Button>
       </div>
       {error ? <p className={v.errLine}>{error}</p> : null}
+      {report?.incomplete ? (
+        <p className={v.faint}>
+          The check stopped at its row budget; {(report.unscannedColumns ?? []).length} field(s) were not checked and the list below may be incomplete.
+        </p>
+      ) : null}
       {report ? (
         report.findings.length === 0 ? (
           <p className={v.faint}>No credential-shaped content found in {report.scannedColumns} checked fields.</p>

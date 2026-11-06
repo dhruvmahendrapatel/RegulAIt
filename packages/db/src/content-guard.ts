@@ -404,15 +404,35 @@ export interface ContentCredentialFinding {
  * a bounded number of rows per column (newest-first is not assumed; a full scan is an admin action), and
  * returns where the detector matches. The value never leaves this function.
  */
+export const CONTENT_REPORT_DEFAULT_ROW_BUDGET = 200_000;
+export const CONTENT_REPORT_MAX_ROW_BUDGET = 2_000_000;
+
 export async function contentCredentialReport(
   db: { execute: (q: unknown) => Promise<unknown> },
-  opts: { perColumnLimit?: number } = {},
-): Promise<{ findings: ContentCredentialFinding[]; scannedColumns: number; truncatedColumns: string[] }> {
+  opts: { perColumnLimit?: number; rowBudget?: number } = {},
+): Promise<{
+  findings: ContentCredentialFinding[];
+  scannedColumns: number;
+  truncatedColumns: string[];
+  /** review finding 4: rows read in total, and the columns left unscanned when the budget ran out */
+  scannedRows: number;
+  rowBudget: number;
+  incomplete: boolean;
+  unscannedColumns: string[];
+}> {
   const perColumnLimit = Math.min(Math.max(opts.perColumnLimit ?? 50, 1), 500);
+  const rowBudget = Math.min(Math.max(opts.rowBudget ?? CONTENT_REPORT_DEFAULT_ROW_BUDGET, 500), CONTENT_REPORT_MAX_ROW_BUDGET);
   const findings: ContentCredentialFinding[] = [];
   const truncatedColumns: string[] = [];
+  const unscannedColumns: string[] = [];
   let scannedColumns = 0;
+  let scannedRows = 0;
   for (const { table, column, field } of contentGuardColumns()) {
+    // a column is either scanned to the end (or to its finding cap) or listed as unscanned: never half-reported
+    if (scannedRows >= rowBudget) {
+      unscannedColumns.push(`${table}.${column}`);
+      continue;
+    }
     scannedColumns++;
     let found = 0;
     let truncated = false;
@@ -426,6 +446,7 @@ export async function contentCredentialReport(
             order by id::text limit 500`,
       )) as { rows?: { id: string; v: string }[] };
       const rows = page.rows ?? [];
+      scannedRows += rows.length;
       for (const r of rows) {
         const rules = contentCredentialRules(r.v);
         if (!rules) continue;
@@ -438,8 +459,21 @@ export async function contentCredentialReport(
         found++;
       }
       if (rows.length < 500) break;
+      if (scannedRows >= rowBudget) {
+        // the budget ran out mid-column: say so rather than imply the column is clean
+        truncatedColumns.push(`${table}.${column}`);
+        break;
+      }
       lastId = rows[rows.length - 1]!.id;
     }
   }
-  return { findings, scannedColumns, truncatedColumns };
+  return {
+    findings,
+    scannedColumns,
+    truncatedColumns,
+    scannedRows,
+    rowBudget,
+    incomplete: unscannedColumns.length > 0 || truncatedColumns.length > 0,
+    unscannedColumns,
+  };
 }

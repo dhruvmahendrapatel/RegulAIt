@@ -18,7 +18,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import {
@@ -145,6 +145,22 @@ describe("ADR-0233 inventory (generated from the schema)", () => {
     expect(block).toBe(expected);
   });
 
+  it("every handle built in @regulait/db composes all three wrappers (review finding 1)", () => {
+    const dir = path.resolve(here, "../../../packages/db/src");
+    const sites: string[] = [];
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith(".ts") || f.endsWith(".test.ts")) continue;
+      const text = readFileSync(path.join(dir, f), "utf8");
+      for (const m of text.matchAll(/drizzle\(/g)) {
+        const line = text.slice(text.lastIndexOf("\n", m.index) + 1, text.indexOf("\n", m.index));
+        if (/^\s*(\/\/|\*|import)/.test(line)) continue;
+        sites.push(`${f}: ${line.trim()}`);
+      }
+    }
+    expect(sites.length).toBeGreaterThanOrEqual(2);
+    for (const site of sites) expect(site).toMatch(/withContentGuard\(withProseScrub\(withAuditChain\(drizzle\(/);
+  });
+
   it("uses ONE detector: the guard's detector is ADR-0099's scrubAuditText, by reference", () => {
     expect(CONTENT_GUARD_DETECTOR).toBe(scrubAuditText);
   });
@@ -205,6 +221,50 @@ describe("refused per column family, through the real routes", () => {
     });
     expectRefused(res, "description", AWS_KEY);
     expect(await countWhere("compliance_packs", "framework", framework)).toBe(0);
+  });
+});
+
+describe("refused per remaining column family and through an update route (review finding 3)", () => {
+  it("access control: a role name", async () => {
+    const name = `cg-role-${RUN} ${AWS_KEY}`;
+    const res = await post("/v1/roles", { name, description: "fine" });
+    expectRefused(res, "name", AWS_KEY);
+    expect(await countWhere("roles", "name", name)).toBe(0);
+  });
+
+  it("access control: a role description", async () => {
+    const name = `cg-role-desc-${RUN}`;
+    const res = await post("/v1/roles", { name, description: `deploy with ${RGL_KEY}` });
+    expectRefused(res, "description", RGL_KEY);
+    expect(await countWhere("roles", "name", name)).toBe(0);
+  });
+
+  it("connections and integrations: a connector name", async () => {
+    const name = `cg-conn-${RUN} ${AWS_KEY}`;
+    const res = await post("/v1/connectors", { name, kind: "ticketing" });
+    expectRefused(res, "name", AWS_KEY);
+    expect(await countWhere("connectors", "name", name)).toBe(0);
+  });
+
+  it("evaluation, monitoring and spend: an eval dataset name", async () => {
+    const name = `cg-ds-${RUN} ${AWS_KEY}`;
+    const res = await post("/v1/evals/datasets", { name });
+    expectRefused(res, "name", AWS_KEY);
+    expect(await countWhere("eval_datasets", "name", name)).toBe(0);
+  });
+
+  it("an update route: renaming a project through PATCH /v1/projects/:id", async () => {
+    const created = await post("/v1/projects", { name: `cg-patch-${RUN}` });
+    expect(created.statusCode, created.body).toBe(201);
+    const id = (created.json().project ?? created.json()).id as string;
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/v1/projects/${id}`,
+      headers: AUTH,
+      payload: { name: `cg-patch-${RUN} ${AWS_KEY}` },
+    });
+    expectRefused(res, "name", AWS_KEY);
+    expect(rowsOf(await db.execute(sql`select name from projects where id = ${id}`))[0]!.name).toBe(`cg-patch-${RUN}`);
   });
 });
 
@@ -294,6 +354,18 @@ describe("relaxed by an admin, then reported (never rewritten)", () => {
     expect(rowsOf(await db.execute(sql`select name from projects where id = ${id}`))[0]!.name).toBe(name);
     // tidy the fixture (a clean value passes the guard)
     await db.update(projects).set({ name: `cg-relaxed-${RUN}-cleaned` }).where(eq(projects.id, id));
+  });
+
+  it("the report has a total row budget and says when it stopped early (review finding 4)", async () => {
+    const r = await app.inject({ method: "GET", url: "/v1/admin/content-credential-report?rowBudget=500", headers: AUTH });
+    expect(r.statusCode, r.body).toBe(200);
+    const body = r.json();
+    expect(body.rowBudget).toBe(500);
+    expect(typeof body.scannedRows).toBe("number");
+    expect(typeof body.incomplete).toBe("boolean");
+    if (body.incomplete) expect(body.unscannedColumns.length + body.truncatedColumns.length).toBeGreaterThan(0);
+    const bad = await app.inject({ method: "GET", url: "/v1/admin/content-credential-report?rowBudget=10", headers: AUTH });
+    expect(bad.statusCode).toBe(400);
   });
 
   it("the report is admin-only", async () => {
