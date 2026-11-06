@@ -138,6 +138,14 @@ in the PR body saying why.
   defer non-critical scripts; loading skeletons; compressed API payloads; run a Lighthouse audit on the main screens.
 - **Data:** index the database for real queries; connection pooling; cache expensive computed results; fix N+1 queries;
   server-side caching where safe. Caching never crosses users, tenants or an authorisation decision.
+- **Normalized schema (owner, 2026-11-06; ADR-0200 addendum):** new and changed tables are in third normal form. One
+  fact lives in one place, every reference is a foreign key, a list of references is a join table (never a jsonb or
+  array of ids), and a mutable attribute (a name, an email) is joined for, not copied next to its id. The exceptions
+  are deliberate and commented on the column: point-in-time snapshots and evidence (append-only or hash-chained rows,
+  "as queued" copies), schema-validated configuration documents, verbatim external payloads, and a measured read model
+  that names its source of truth. Existing tables are normalized in batches from an audit with expand-contract
+  migrations (add, backfill, switch readers, drop), hand-written, and evidence rows are never rewritten. A new
+  denormalized column without its exception comment is a review finding.
 
 ## Security checklist — every build and review (owner, 2026-10-24; ADR-0200)
 
