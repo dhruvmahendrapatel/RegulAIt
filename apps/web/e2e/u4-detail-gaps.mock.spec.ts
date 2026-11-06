@@ -453,6 +453,8 @@ test.describe("U4: training job detail", () => {
       },
     });
     await page.goto("/ui/admin/regulait-llm");
+    // I-2: the jobs list lives on the stepper's Training jobs step
+    await page.getByRole("list", { name: "Custom-model steps" }).getByRole("button", { name: /^\d?Training jobs/ }).click();
     await page.getByRole("button", { name: "Details of training job triage-lora" }).click();
     const dialog = page.getByRole("dialog", { name: "Training job — triage-lora" });
     await expect(dialog.getByText("Refused — the backend declined before any work happened; nothing was attempted.", { exact: false })).toBeVisible();

@@ -22,7 +22,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Modal, Table } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, ErrorState, Field, Input, Modal, Table } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
 import { QueryGate, RemoveButton, useAction, useEgressAllowHosts } from "../adminKit";
 import { DataList } from "../../../ui/DataList";
@@ -340,7 +340,17 @@ export default function WebhooksPage() {
               </p>
             }
           >
-            {(hosts.data?.hosts ?? []).length === 0 && <p className={v.faint}>The allow-list is empty, so no endpoint is reachable yet.</p>}
+            {/* I-2 (#453): a failed read of the allow-list is an error with Retry, never "the allow-list is empty" */}
+            {hosts.isError ? (
+              <ErrorState
+                title="Couldn't load the egress allow-list"
+                message={hosts.error instanceof Error ? hosts.error.message : String(hosts.error)}
+                access={(hosts.error as { status?: number }).status === 403}
+                onRetry={() => void hosts.refetch()}
+              />
+            ) : (
+              hosts.isSuccess && (hosts.data?.hosts ?? []).length === 0 && <p className={v.faint}>The allow-list is empty, so no endpoint is reachable yet.</p>
+            )}
             <form
               className={v.stack}
               onSubmit={(e) => {

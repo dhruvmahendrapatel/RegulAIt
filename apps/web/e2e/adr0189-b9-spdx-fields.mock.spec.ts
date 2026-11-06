@@ -341,6 +341,8 @@ test.describe("ADR-0189 B9: SPDX fields on dataset versions", () => {
   test("a training dataset version: the dataset type is a set of SPDX values, recorded sorted", async ({ page }) => {
     const spdx = await setup(page);
     await page.goto("/ui/admin/regulait-llm");
+    // I-2: the datasets live on the stepper's Training data step
+    await page.getByRole("list", { name: "Custom-model steps" }).getByRole("button", { name: /^\d?Training data/ }).click();
     await page.getByRole("link", { name: /^support-corpus v1/ }).click();
     await expect(banner(page)).toContainText("SPDX output for this training dataset version is not_producible");
     await panel(page).getByRole("button", { name: "Set dataset type" }).click();
