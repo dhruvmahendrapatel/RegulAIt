@@ -5491,6 +5491,14 @@ ADR-0230 has an eighth open question: which SAP identity attribute to use.
 - SAP-side `jti` rejection is marked unverified;
 - stale summary text is corrected.
 
+**#670 review round 3 (2026-11-06):** S6 and design finding 1 are fixed with the strict default:
+- an approved call waits in `approved_pending_execution` until the requester confirms it with a fresh IdP step-up, and nothing is kept from sign-in;
+- `subject_token_retention` defaults to `none`; `refresh_token` is a `settings_relax` step-up, audited, scoped to the one SAP audience, envelope-encrypted, with an absolute lifetime of at most 8 h, and revoked and deleted on removal;
+- option (b) remains the last fallback;
+- A0 and B0 confirm which source SAP accepts.
+
+Non-blocking items also done: the stale `pending` sweep; the HMAC-derived idempotency key, which prevents squatting; the 0230 JWT checklist; and the in-process-only token cache.
+
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
 (b) standing policy for future scaffolds recorded (ADR-0006, no implementation yet — nothing to
