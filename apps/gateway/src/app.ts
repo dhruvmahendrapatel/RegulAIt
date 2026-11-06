@@ -241,9 +241,12 @@ import { registerAccessRecommendationRoutes } from "./access-recommendations.js"
 import {
   SOD_OVERRIDE_PREFIX,
   applySodOverrideDecision,
+  auditSodRoleMintNeedsStepUp,
   precheckSodOverrideDecision,
   refuseSodMint,
   registerSodRoutes,
+  SodRoleMintNeedsStepUpError,
+  sodRoleMintNeedsStepUpBody,
 } from "./sod.js";
 import {
   deleteRoleAgentGrantById,
@@ -516,8 +519,8 @@ import { registerSchedulerRoutes } from "./scheduler-api.js";
 // ADR-0186 (batch 4) — the foundation registers every §4.9 route; each module
 // answers 501 not_built until its slice lands (A/B Claude, R/S/V Codex)
 import { registerPasskeyRoutes } from "./passkeys.js";
-import { approvalRuleStepUp, CHANGED_CONCURRENTLY, checkStepUp, ownerChangeStepUpArgs, registerStepUpRoutes, requireStepUp, revocationLiftStepUp, type StepUpCheckArgs } from "./step-up.js";
-import { ApprovalRuleWriteRefusedError, isApproverRole, lockApproverRoles, namedApproverSeatExists } from "./approval-pool.js";
+import { approvalRuleStepUp, CHANGED_CONCURRENTLY, checkStepUp, ownerChangeStepUpArgs, registerStepUpRoutes, requireStepUp, requireStepUps, revocationLiftStepUp, type StepUpCheckArgs } from "./step-up.js";
+import { ApprovalRuleWriteRefusedError, approverPoolShiftFacts, isApproverRole, lockApprovalRuleRouting, lockApproverRoles, namedApproverSeatExists, sameApproverPoolShift, type ApproverPoolShift } from "./approval-pool.js";
 import {
   decisionView,
   decideToolCallApproval,
@@ -2817,44 +2820,94 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // role is an approver pool — adding someone to it needs a settings_relax
     // step-up bound to the user and the role
     const approverRole = await isApproverRole(db, body.roleId);
-    if (
-      approverRole &&
-      !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { userId, values: { approverRoleId: body.roleId } } })).ok
-    ) {
-      return reply;
-    }
+    // issue #668 (ADR-0229): joining a role makes its approval rules match the user's calls — when one outranks a
+    // rule with a narrower pool, who signs moves to a wider pool: the same step-up, bound to the takeover facts
+    const shift: ApproverPoolShift = { change: "member-add", objectType: "role", objectId: body.roleId, userId };
+    const takeover = await approverPoolShiftFacts(db, shift);
+    const stepUps: StepUpCheckArgs[] = [
+      ...(approverRole ? [{ kind: "settings_relax" as const, facts: { userId, values: { approverRoleId: body.roleId } } }] : []),
+      ...(takeover ? [{ kind: "settings_relax" as const, facts: takeover }] : []),
+    ];
+    if (stepUps.length > 0 && !(await requireStepUps(db, req, reply, stepUps))) return reply;
     // ADR-0186 A (Class A): decided again under the approver-role lock — a role that
-    // became an approver role since is refused, never joined without the step-up
+    // became an approver role since is refused, never joined without the step-up;
+    // the takeover facts likewise, under the routing lock (role lock first, then routing)
     const row = await db.transaction(async (tx) => {
       const nowApprover = (await lockApproverRoles(tx as unknown as Db, [body.roleId])).has(body.roleId);
       if (nowApprover && !approverRole) return null;
+      if (!sameApproverPoolShift(await approverPoolShiftFacts(tx as unknown as Db, shift), takeover)) return null;
       const [inserted] = await tx.insert(roleAssignments).values({ userId, roleId: body.roleId, origin: "direct" }).returning();
+      // #675 review finding 4: the shift audit commits with the assignment
+      if (takeover) await auditApproverPoolShift(req.authCtx.userId ?? userId, "role", body.roleId, takeover, tx as unknown as Db);
       return inserted;
     });
     if (!row) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     return reply.status(201).send(row);
   });
 
+  /** issue #668: the audit row for an approved change that moved who signs for some calls to a wider pool */
+  const auditApproverPoolShift = (actor: string, objectType: "role", objectId: string, facts: Record<string, unknown>, tx: Db = db) =>
+    tx.insert(auditLog).values({
+      userId: actor,
+      objectType,
+      objectId,
+      detail: { phase: "approver-pool-shift", ...facts },
+      effect: "allow",
+      ruleId: "approver-pool-shift",
+      ruleChain: [],
+      reason: `a ${String(facts.change)} on ${objectType} moved who signs for some calls to a wider approver pool (ADR-0229), approved with a settings_relax step-up`,
+    });
+
   app.delete("/v1/users/:userId/roles/:roleId", async (req, reply) => {
     const params = z
       .object({ userId: z.string().uuid(), roleId: z.string().uuid() })
       .parse(req.params);
+    // issue #668 (ADR-0229): leaving a role hands the calls its approval rules named the signer for to the next
+    // overlapping rule; when that rule's pool is wider, the same step-up, bound to the takeover facts. Decided only
+    // when a DIRECT assignment exists to remove (a group-held role stays held, so nothing moves)
+    const shift: ApproverPoolShift = { change: "member-remove", objectType: "role", objectId: params.roleId, userId: params.userId };
+    /** does removing the direct row leave the user without the role (so the check applies), read on `q` */
+    const decidesOn = async (q: Db) => {
+      const held = await q
+        .select({ origin: roleAssignments.origin })
+        .from(roleAssignments)
+        .where(and(eq(roleAssignments.userId, params.userId), eq(roleAssignments.roleId, params.roleId)));
+      return held.some((h) => h.origin === "direct") && !held.some((h) => h.origin === "group");
+    };
+    const decides = await decidesOn(db);
+    const takeover = decides ? await approverPoolShiftFacts(db, shift) : null;
+    if (takeover && !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: takeover })).ok) return reply;
     // ADR-0038: unassign removes the ADMIN-DIRECT assignment only. A
     // group-derived one is owned by the reconciler — deleting it here would be
     // undone by the holder's very next login/sync, so the honest answer is to
     // say so and point at the two things that actually work (remove the
     // mapping, or an ADR-0019 per-user revocation, which beats a role a
     // mapping keeps re-adding).
-    const deleted = await db
-      .delete(roleAssignments)
-      .where(
-        and(
-          eq(roleAssignments.userId, params.userId),
-          eq(roleAssignments.roleId, params.roleId),
-          eq(roleAssignments.origin, "direct"),
-        ),
-      )
-      .returning({ id: roleAssignments.id });
+    const outcome = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      // #675 review finding 1 (TOCTOU): ALWAYS take the role row lock, then the routing lock, and re-decide both
+      // whether the check applies and its facts under them. The IdP reconciler removes a group row under the routing
+      // lock, so a group hold dropped since the early read shows up here (decides flips) and fails closed.
+      await lockApproverRoles(tx, [params.roleId]);
+      await lockApprovalRuleRouting(tx);
+      const decidesNow = await decidesOn(tx);
+      const factsNow = decidesNow ? await approverPoolShiftFacts(tx, shift) : null;
+      if (decidesNow !== decides || !sameApproverPoolShift(factsNow, takeover)) return null;
+      const rows = await tx
+        .delete(roleAssignments)
+        .where(
+          and(
+            eq(roleAssignments.userId, params.userId),
+            eq(roleAssignments.roleId, params.roleId),
+            eq(roleAssignments.origin, "direct"),
+          ),
+        )
+        .returning({ id: roleAssignments.id });
+      if (rows.length > 0 && takeover) await auditApproverPoolShift(req.authCtx.userId ?? params.userId, "role", params.roleId, takeover, tx);
+      return rows;
+    });
+    if (!outcome) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
+    const deleted = outcome;
     const groupHeld = await db
       .select({ id: roleAssignments.id })
       .from(roleAssignments)
@@ -2929,10 +2982,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         detail: "force-deleting a held role requires a recorded reason",
       });
     }
-    await db.delete(roles).where(eq(roles.id, roleId));
-    await db.insert(auditLog).values({
+    // issue #668 (ADR-0229): the delete cascades the approval rules scoped to the role, so the calls they named the
+    // signer for fall to the next overlapping rule; when its pool is wider, the settings_relax step-up, bound to the
+    // takeover facts, decided again under the routing lock before anything is deleted (fail closed on a move)
+    const shift: ApproverPoolShift = { change: "delete", objectType: "role", objectId: roleId };
+    const takeover = await approverPoolShiftFacts(db, shift);
+    if (takeover && !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: takeover })).ok) return reply;
+    const audit = {
       userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
-      objectType: "role",
+      objectType: "role" as const,
       objectId: roleId,
       detail: {
         phase: "role-deleted",
@@ -2940,15 +2998,26 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         holders: holders.map((h) => h.email),
         ...(body.force ? { force: true } : {}),
         ...(body.reason ? { reason: body.reason } : {}),
+        ...(takeover ? { approverPoolShift: takeover } : {}),
       },
-      effect: "allow",
+      effect: "allow" as const,
       ruleId: "role-deleted",
       ruleChain: [],
       reason:
         holders.length > 0
           ? `role '${role.name}' force-deleted while held by ${holders.length} user(s): ${body.reason}`
           : `unused role '${role.name}' deleted`,
+    };
+    const done = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      // #675 review finding 3: the role row lock first, then the routing lock (the order every other path takes)
+      await lockApproverRoles(tx, [roleId]);
+      if (!sameApproverPoolShift(await approverPoolShiftFacts(tx, shift), takeover)) return false;
+      await tx.delete(roles).where(eq(roles.id, roleId));
+      await tx.insert(auditLog).values(audit);
+      return true;
     });
+    if (!done) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     return { removed: true, unassigned: holders.length };
   });
 
@@ -5138,12 +5207,18 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       return { updated, postCommit, aiBomSignoffs, refusal: null };
     }).catch((err: unknown) => {
       // review follow-up: an SoD override whose role went away after the precheck rolls the decision back
-      if (err instanceof RoleNotFoundError) return err;
+      if (err instanceof RoleNotFoundError || err instanceof SodRoleMintNeedsStepUpError) return err;
       throw err;
     });
     if (outcome instanceof RoleNotFoundError) {
       await auditRoleNotFound(db, { actorUserId: deciderUserId, roleId: outcome.roleId, via: "sod-override-decide", detail: { approvalId, ...outcome.context } });
       return fail(404, roleNotFoundBody(outcome.roleId));
+    }
+    // issue #668: an SoD override cannot assign an approver role or one that moves an approver pool (fail closed)
+    if (outcome instanceof SodRoleMintNeedsStepUpError) {
+      outcome.context = { approvalId, ...outcome.context };
+      await auditSodRoleMintNeedsStepUp(db, deciderUserId, outcome);
+      return fail(409, sodRoleMintNeedsStepUpBody(outcome));
     }
     if (outcome.refusal) return fail(409, outcome.refusal);
     if (!outcome.updated) {
