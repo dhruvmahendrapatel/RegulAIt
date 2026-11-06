@@ -285,32 +285,39 @@ test("UIA-01: an anchor past the chain head is reported as such — never as a r
   expect(await report.getByText("Anchor past chain head (seq 567)", { exact: true }).count()).toBe(0);
 });
 
-test("UIA-02: the audit log says how many rows are shown and loads older pages on request", async ({ page }) => {
+test("UIA-02: the audit log says how many rows are shown and pages through older rows on the server", async ({ page }) => {
   const entry = (i: number) => ({ id: `e${i}`, at: new Date(Date.UTC(2026, 9, 2, 12, 0, 0) - i * 60_000).toISOString(), userId: USER_A.id, objectType: "mcp_tool", effect: "allow", ruleId: "grant", reason: `row ${i}`, deployMode: null });
-  const page1 = Array.from({ length: 100 }, (_, i) => entry(i));
-  const page2 = Array.from({ length: 6 }, (_, i) => entry(100 + i));
-  let cursorRequests = 0;
+  const all = Array.from({ length: 106 }, (_, i) => entry(i));
+  const asked: URL[] = [];
   await routeApi(page, async (route, p) => {
     const url = new URL(route.request().url());
     if (p === "/auth/me") return json(route, authMe(USER_A));
     if (p === "/v1/me") return json(route, { userId: USER_A.id, isAdmin: true, user: USER_A });
     if (p === "/v1/audit/retention") return json(route, { retainedDays: null, prunable: 0, floorSource: [] });
     if (p === "/v1/audit") {
-      if (url.searchParams.get("cursor") === "c1") { cursorRequests += 1; return json(route, { entries: page2, pageSize: 6, hasMore: false, nextCursor: null }); }
-      return json(route, { entries: page1, pageSize: 100, hasMore: true, nextCursor: "c1" });
+      // ADR-0226: the list contract, keyset-paged on the default sort
+      asked.push(url);
+      const limit = Number(url.searchParams.get("limit"));
+      const start = url.searchParams.get("cursor") ? Number(url.searchParams.get("cursor")) : 0;
+      const more = start + limit < all.length;
+      return json(route, { items: all.slice(start, start + limit), nextCursor: more ? String(start + limit) : null, nextOffset: null, total: all.length, totalIsEstimate: false });
     }
     if (p === "/v1/users") return json(route, { users: [{ id: USER_A.id, email: USER_A.email, displayName: USER_A.displayName }] });
     return json(route, {});
   });
   await page.goto("/ui/admin/audit");
-  const paging = page.getByTestId("audit-paging");
-  await expect(paging).toContainText("Showing the newest 100 rows — older rows exist");
+  const status = page.locator('[data-list="audit-log"]').getByTestId("list-status");
+  await expect(status).toHaveText("1–10 of 106");
   expect(await page.getByRole("cell", { name: "row 105" }).count()).toBe(0);
-  await paging.getByRole("button", { name: "Load older" }).click();
-  await expect(paging).toContainText("Showing all 106 rows");
+  await page.getByLabel("Rows per page").selectOption("100");
+  await expect(status).toHaveText("1–100 of 106");
+  await page.getByRole("button", { name: "Next", exact: true }).click();
+  await expect(status).toHaveText("101–106 of 106");
   await expect(page.getByRole("cell", { name: "row 105" })).toBeVisible();
-  expect(cursorRequests).toBe(1);
-  expect(await paging.getByRole("button", { name: "Load older" }).count()).toBe(0);
+  // older rows come by the trail's own keyset cursor, under the same filters
+  expect(asked.at(-1)!.searchParams.get("cursor")).toBe("100");
+  expect(asked.at(-1)!.searchParams.get("sort")).toBe("at");
+  expect(asked.at(-1)!.searchParams.get("count")).toBe("estimate");
 });
 
 test("UIW-07: an empty change description cannot be started — nothing is posted as 'untitled change'", async ({ page }) => {
@@ -452,7 +459,7 @@ test("UXJ-02: selecting the lowest alert brings its detail into the viewport", a
     return json(route, {});
   });
   await page.goto("/ui/admin/governance/alerts");
-  const last = page.getByRole("button", { name: /without an approved model card/ });
+  const last = page.getByRole("link", { name: /without an approved model card/ });
   await last.scrollIntoViewIfNeeded();
   await last.click();
   const detail = page.getByTestId("alert-detail");

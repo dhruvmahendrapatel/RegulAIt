@@ -181,7 +181,7 @@ test.describe("ADR-0182 A13: feedback and appeal", () => {
     await expect(table.getByRole("row").filter({ hasText: "On time: acknowledge" })).toHaveCount(1);
     await expect(table.getByRole("row").filter({ hasText: "Due soon: acknowledge" })).toHaveCount(1);
     await expect(table.getByRole("row").filter({ hasText: "Overdue: acknowledgement" })).toHaveCount(1);
-    await expect(page.getByRole("status")).toContainText("One item is past a response time.");
+    await expect(page.getByRole("status").filter({ hasText: "past a response time" })).toHaveText("One item is past a response time.");
     // no admin settings for a non-admin
     await expect(page.getByText("Feedback settings (admin)")).toHaveCount(0);
     // FS-46 (G9): the tab set names the panel it shows, and the panel is labelled by its tab
