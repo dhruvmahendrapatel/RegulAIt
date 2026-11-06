@@ -88,6 +88,7 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.scimTokens, ["name"]],
   [s.auditorGrants, ["auditorName"]],
   [s.oidcProviders, ["name"]],
+  [s.modelSigningKeys, ["name"]],
   [s.samlProviders, ["name"]],
   [s.grantCertificationCampaigns, ["name"]],
   // --- connections, servers and integrations ---
@@ -210,6 +211,8 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   "conversations.title": "conversation",
   "ai_bom_snapshots.body": "signed_evidence",
   "decision_boms.body": "signed_evidence",
+  "model_artifact_signatures.resource_name": "signed_evidence",
+  "model_artifact_signatures.signed_name": "signed_evidence",
   "prompt_tags.name": "check_constrained",
 };
 
