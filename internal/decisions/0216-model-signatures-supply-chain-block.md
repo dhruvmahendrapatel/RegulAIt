@@ -79,9 +79,9 @@ never opens a risk entry, and the register has no supply-chain category (PENDING
 
 ## Consequences
 
-- Migrations 0260 (keys, signatures, relaxations, two guard triggers) and 0261 (`supply_chain` category,
+- Migrations 0266 (keys, signatures, relaxations, two guard triggers) and 0267 (`supply_chain` category,
   `ai_risks.model_artifact_id`, the one-open-risk index). Hand-authored, idempotent. First numbered 0235 and 0236;
-  renumbered above main's watermark when the lane landed (CONTRIBUTING_PARALLEL_SESSIONS §4.1 addendum).
+  renumbered above main's watermark and every open lane's reservation when the lane landed (CONTRIBUTING_PARALLEL_SESSIONS §4.1 addendum).
 - New routes: `GET|POST /v1/model-signing-keys`, `POST /v1/model-signing-keys/:keyId/revoke` (admin),
   `POST /v1/model-artifacts/:artifactId/signature` (uploader or admin), `PUT|DELETE
   /v1/model-artifacts/:artifactId/supply-chain-relaxation` (admin). The artifact views carry `supplyChain`.

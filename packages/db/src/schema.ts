@@ -10347,7 +10347,7 @@ export const AI_RISK_CATEGORIES = [
   /** ADR-0147 (migration 0123): the bias and safety trust dimensions */
   "bias_fairness",
   "unsafe_output",
-  /** ADR-0216 (migration 0261): a model file that is unsigned, unscanned or in an unsafe format */
+  /** ADR-0216 (migration 0267): a model file that is unsigned, unscanned or in an unsafe format */
   "supply_chain",
 ] as const;
 export type AiRiskCategory = (typeof AI_RISK_CATEGORIES)[number];
@@ -10392,7 +10392,7 @@ export const aiRisks = pgTable(
      * linked controls operate — same three-level scale, both or neither */
     residualLikelihood: text("residual_likelihood", { enum: AI_RISK_LEVELS }),
     residualImpact: text("residual_impact", { enum: AI_RISK_LEVELS }),
-    /** ADR-0216 (migration 0261): the model artifact whose failing supply-chain check opened this risk */
+    /** ADR-0216 (migration 0267): the model artifact whose failing supply-chain check opened this risk */
     modelArtifactId: uuid("model_artifact_id").references((): AnyPgColumn => modelArtifacts.id, { onDelete: "set null" }),
     /** ADR-0211 (migration 0250): the treatment record of a `transferred` or
      * `avoided` risk — the contract or policy reference, or the decision that
@@ -13627,7 +13627,7 @@ export const artifactScans = pgTable(
 );
 
 // ===========================================================================
-// ADR-0216 (P14 + P15, migration 0260) — model-file signatures and the supply-chain block.
+// ADR-0216 (P14 + P15, migration 0266) — model-file signatures and the supply-chain block.
 // ===========================================================================
 
 export const MODEL_SIGNING_ALGORITHMS = ["ecdsa_p256_sha256"] as const;
