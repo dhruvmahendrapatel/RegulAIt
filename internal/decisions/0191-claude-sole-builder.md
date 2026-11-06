@@ -74,3 +74,10 @@ branches that have not yet merged. The owner has decided to stop using Codex.
   what at the time. `codexInputs.md` and the board's git history remain the evidence for those findings.
 - **The coordination board** keeps its structure for the remaining agents. Codex's live-status row and task blocks stay
   until Claude prunes them as handled.
+
+## Addendum (2026-10-31) — amended by ADR-0227
+
+Decision 1 is amended by [ADR-0227](0227-codex-gemini-rejoin.md). The owner added Codex and Gemini back to the
+project on 2026-10-31. Codex may now take builder lanes and review Claude lanes, and Gemini writes markdown audits.
+The other decisions here stand: independent reviewer agents, specification-only vectors, and web UI ownership by
+default. The live board is now `internal/process/AGENT_COORDINATION.md`.

@@ -5,7 +5,7 @@
  */
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { Route, Routes, useLocation } from "react-router-dom";
-import AgentsPage from "./AgentsPage";
+import AgentsScreen from "./AgentsScreen";
 import AgentStewardshipPage from "./AgentStewardshipPage";
 import type { AdminAgent } from "../../../api/adminTypes";
 import { fmtUsd } from "../../../api/format";
@@ -216,15 +216,16 @@ export default function AgentCatalogPage() {
 }
 
 /**
- * The agents area: the Agents page (with its catalogue and stewardship previews, and the `#agent-<id>` deep-link
- * redirect into the full catalogue) at the index, the full catalogue and the stewardship list each on their own nested
+ * The agents area: the Agents screen (ADR-0219: the catalogue and remote A2A agents as two tabs; the catalogue tab
+ * keeps its catalogue and stewardship previews and the `#agent-<id>` deep-link redirect into the full catalogue) at the
+ * index, the full catalogue and the stewardship list each on their own nested
  * route. One lazy chunk mounted at `agents/*`, reached through the integrations screen barrel, so the sub-pages add
  * nothing to the entry bundle (ADR-0196 U4; the SPA route census follows this module — scripts/ui-spa-routes.mjs).
  */
 export function AgentsArea() {
   return (
     <Routes>
-      <Route index element={<AgentsPage />} />
+      <Route index element={<AgentsScreen />} />
       <Route path="catalog" element={<AgentCatalogPage />} />
       <Route path="stewardship" element={<AgentStewardshipPage />} />
     </Routes>

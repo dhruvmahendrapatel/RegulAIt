@@ -153,6 +153,9 @@ describe("every NIST AI RMF reference in the repository is real and current", ()
     expect(latest.version).toBeGreaterThanOrEqual(3);
     const bad = hits(/nist-ai-rmf:([A-Z]+-\d+\.\d+)/)
       .filter((h) => h.rel !== "packages/shared/src/compliance-packs.ts" && !/\.test\.tsx?$/.test(h.rel))
+      // ADR-0215: the vendored NIST catalog lists every subcategory by design; framework-imports.test.ts holds it
+      // equal to the 72, and an import only reaches a pack through an admin's review
+      .filter((h) => !h.rel.startsWith("packages/shared/src/framework-imports-data/"))
       .filter((h) => !latestRefs.has(`nist-ai-rmf:${h.match[1]}`))
       .map((h) => `${h.rel}:${h.line} ${h.match[0]}`);
     expect(bad, `not a control of nist-ai-rmf v${latest.version} — v1/v2 refs are superseded mappings`).toEqual([]);

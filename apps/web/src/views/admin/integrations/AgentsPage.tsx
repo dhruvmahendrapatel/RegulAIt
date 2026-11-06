@@ -25,7 +25,10 @@ import {
   useUsers,
   userOpts,
 } from "../adminKit";
+import type { AgentsTabSlot } from "./AgentsScreen";
 import { StewardshipPreview } from "./AgentStewardship";
+// ADR-0205: part of this lazy route chunk (screens/admin-integrations), so the entry bundle carries none of it
+import AgentSetupAssistant from "./AgentSetupAssistant";
 import { ExpectedServedModelCard } from "./ExpectedServedModelCard";
 import { ProviderTiles } from "../../../ui/ModelPicker";
 import { providerLabel } from "../../models/modelBindings";
@@ -36,7 +39,7 @@ import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 const CLEAR = "__clear__";
 
 
-export default function AgentsPage() {
+export default function AgentsPage(props: { slot?: AgentsTabSlot }) {
   const agents = useAgents();
   const users = useUsers();
   const [tab, setTab] = useState("register");
@@ -52,7 +55,8 @@ export default function AgentsPage() {
         title="Agents"
         info={<p>The global catalog is decoupled from entitlement: registering an agent grants nobody anything. Pricing feeds the cost meters; the tier feeds cost-aware routing.</p>}
       />
-      <div className={v.stack}>
+      {props.slot?.tabs}
+      <div className={v.stack} {...props.slot?.panel}>
         {/* P3: stewardship is a preview (what needs attention counted in its heading); the full list has its own page */}
         <StewardshipPreview agents={agents.data?.agents} loading={agents.isLoading} failed={!!agents.error && !agents.data} />
         {/* P3: the catalog is a preview; the full catalog, its deep links, AI BOMs and enable/disable have their own page */}
@@ -159,6 +163,7 @@ function RegisterAgentCard() {
   const customProviders = useCustomProviders();
   const [f, setF] = useState(EMPTY_AGENT);
   const set = (k: keyof typeof f, val: string) => setF((s) => ({ ...s, [k]: val }));
+  const [assistOpen, setAssistOpen] = useState(false);
 
   // ADR-0034: ONLY ENABLED ENDPOINTS ARE SELECTABLE. A disabled one is either
   // untested or deliberately switched off; binding an agent to it would build
@@ -171,6 +176,19 @@ function RegisterAgentCard() {
 
   return (
     <Card title="Register an agent">
+      <div className={v.row}>
+        <Button type="button" aria-expanded={assistOpen} onClick={() => setAssistOpen((o) => !o)}>
+          Setup assistant
+        </Button>
+      </div>
+      {assistOpen && (
+        <AgentSetupAssistant
+          onUse={(d) =>
+            // fills the form only; the agent exists once the admin presses Register
+            setF((previous) => ({ ...previous, name: d.name.value, tier: String(d.tier.value), systemPrompt: d.systemPrompt.value }))
+          }
+        />
+      )}
       <form
         className={v.stack}
         onSubmit={(e) => {
