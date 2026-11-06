@@ -14,12 +14,12 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { approvalRules, approvals, auditLog, authSessions, createDb, eq, mcpServers, ORG_SETTINGS_ID, roleAssignments, roles, runMigrations, sodOverrideRequests, sodRules, sql, teamMembers, teams, type Db } from "@regulait/db";
+import { and, approvalRules, approvals, auditLog, authSessions, createDb, eq, groupRoleMappings, mcpServers, ORG_SETTINGS_ID, roleAssignments, roles, runMigrations, sodOverrideRequests, sodRules, sql, teamMembers, teams, type Db } from "@regulait/db";
 import { STEP_UP_HEADER } from "@regulait/shared";
-import { approverPoolShiftFacts, grantJitDefaultRole, sameApproverPoolShift } from "./approval-pool.js";
+import { approverPoolShiftFacts, grantJitDefaultRole, lockApprovalRuleRouting, sameApproverPoolShift } from "./approval-pool.js";
 import { buildApp } from "./app.js";
 import { reconcileGroupRoles } from "./group-roles.js";
-import { applySodOverrideDecision, SodRoleMintNeedsStepUpError } from "./sod.js";
+import { SOD_OVERRIDE_PREFIX } from "./sod.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
@@ -410,7 +410,7 @@ describe("issue #668: fail closed", () => {
     expect(sameApproverPoolShift(f, { ...f, values: { approverPoolTakeovers: [] } })).toBe(false);
   });
 
-  it("an SoD override cannot assign a role that moves the pool: the decision refuses and mints nothing", async () => {
+  it("an SoD override cannot assign a role that moves the pool: the decide route answers 409, audits, mints nothing", async () => {
     await withFleet(async (fleetId) => {
       const roleId = await mkRole("sod");
       const ruleId = await groupRule("role", roleId);
@@ -418,29 +418,35 @@ describe("issue #668: fail closed", () => {
         .insert(sodRules)
         .values({ name: `p668 sod ${RUN}`, reason: "p668 fixture", aKind: "agent", aObjectId: randomUUID(), bKind: "agent", bObjectId: randomUUID() })
         .returning({ id: sodRules.id });
+      const [request] = await db
+        .insert(sodOverrideRequests)
+        .values({ ruleId: rule!.id, mintKind: "role_assignment", mintPayload: { userId: U.member, roleId }, conflictDetail: {}, label: "p668 role assignment", requestedByUserId: U.caller })
+        .returning({ id: sodOverrideRequests.id });
       const [approval] = await db
         .insert(approvals)
-        .values({ userId: U.caller, objectType: "sod_override", approverUserId: admin.id, stageId: `p668-sod-${RUN}` })
+        .values({ userId: U.caller, objectType: "sod_override", approverUserId: admin.id, stageId: `${SOD_OVERRIDE_PREFIX}${request!.id}` })
         .returning({ id: approvals.id });
-      await db.insert(sodOverrideRequests).values({
-        ruleId: rule!.id,
-        mintKind: "role_assignment",
-        mintPayload: { userId: U.member, roleId },
-        conflictDetail: {},
-        label: "p668 role assignment",
-        requestedByUserId: U.caller,
-        approvalId: approval!.id,
+      await db.update(sodOverrideRequests).set({ approvalId: approval!.id }).where(eq(sodOverrideRequests.id, request!.id));
+      const url = `/v1/approvals/${approval!.id}/decide`;
+      let res = await asAdmin("POST", url, { decision: "approved" });
+      if (res.statusCode === 403 && res.json().error === "step_up_required") {
+        res = await asAdmin("POST", url, { decision: "approved" }, { [STEP_UP_HEADER]: await grantFor(res.json().action) });
+      }
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json()).toMatchObject({
+        error: "sod_override_role_needs_step_up",
+        userId: U.member,
+        roleId,
+        facts: { values: { approverPoolTakeovers: [{ ruleId, outranksApprovalRules: [fleetId] }] } },
       });
-      const refused = await db
-        .transaction((tx) => applySodOverrideDecision(tx as unknown as Db, approval!, "approved", admin.id))
-        .then(() => null, (err: unknown) => err);
-      expect(refused).toBeInstanceOf(SodRoleMintNeedsStepUpError);
-      expect((refused as SodRoleMintNeedsStepUpError).facts).toMatchObject({
-        values: { approverPoolTakeovers: [{ ruleId, outranksApprovalRules: [fleetId] }] },
-      });
+      const [audit] = await shiftAudit(roleId, "sod-override-role-refused");
+      expect(audit).toMatchObject({ effect: "deny" });
+      expect(audit!.detail).toMatchObject({ memberUserId: U.member, approvalId: approval!.id, overrideRequestId: request!.id });
       expect(await db.select().from(roleAssignments).where(eq(roleAssignments.roleId, roleId))).toHaveLength(0);
-      const [req] = await db.select().from(sodOverrideRequests).where(eq(sodOverrideRequests.approvalId, approval!.id));
+      const [req] = await db.select().from(sodOverrideRequests).where(eq(sodOverrideRequests.id, request!.id));
       expect(req!.status).toBe("pending");
+      const [appr] = await db.select().from(approvals).where(eq(approvals.id, approval!.id));
+      expect(appr!.status).toBe("pending");
     });
   });
 
@@ -457,6 +463,68 @@ describe("issue #668: fail closed", () => {
         }),
       ]);
       expect(await db.select().from(roleAssignments).where(eq(roleAssignments.roleId, roleId))).toHaveLength(0);
+      // decision (c): the reconciliation audit row carries the shift
+      const rows = (await db.select().from(auditLog).where(eq(auditLog.objectId, U.member))).filter((r) => r.ruleId === "group-role-reconciled");
+      const removed = rows.flatMap((r) => ((r.detail as { assignmentsRemoved?: Array<Record<string, unknown>> }).assignmentsRemoved ?? []));
+      expect(removed).toEqual([expect.objectContaining({ roleId, approverPoolShift: expect.objectContaining({ change: "member-remove" }) })]);
+    });
+  });
+
+  it("an IdP ADD of a role that would move the pool is withheld, audited, and leaves no assignment (finding 2)", async () => {
+    await withFleet(async () => {
+      const roleId = await mkRole("idp-add");
+      await groupRule("role", roleId);
+      const group = `p668-idp-add-${RUN}`;
+      await db.insert(groupRoleMappings).values({ source: "oidc", externalGroup: group, roleId });
+      const out = await reconcileGroupRoles(db, U.member, "oidc", [group], { kind: "oidc-login", actor: "p668" });
+      expect(out.withheld).toEqual([expect.objectContaining({ roleId })]);
+      expect(out.added).toEqual([]);
+      expect(await db.select().from(roleAssignments).where(eq(roleAssignments.roleId, roleId))).toHaveLength(0);
+      const withheld = (await db.select().from(auditLog).where(eq(auditLog.objectId, U.member))).filter((r) => r.ruleId === "group-role-withheld");
+      expect(withheld.map((r) => (r.detail as { roleId?: string }).roleId)).toContain(roleId);
+      await db.delete(groupRoleMappings).where(eq(groupRoleMappings.roleId, roleId));
+    });
+  });
+
+  it("TOCTOU (finding 1): a group hold dropped while an unassign waits on the routing lock ends in 409, not a silent shift", async () => {
+    await withFleet(async () => {
+      const roleId = await mkRole("toctou");
+      await groupRule("role", roleId);
+      await db.insert(roleAssignments).values([
+        { userId: U.member, roleId, origin: "direct" },
+        { userId: U.member, roleId, origin: "group" },
+      ]);
+      const other = createDb(urlFor(SCRATCH_DB));
+      try {
+        let res: Awaited<ReturnType<typeof asAdmin>> | undefined;
+        await other.transaction(async (rawTx) => {
+          const tx = rawTx as unknown as Db;
+          // the reconciler's side: under the routing lock, the group row goes (not yet committed)
+          await lockApprovalRuleRouting(tx);
+          await tx.delete(roleAssignments).where(and(eq(roleAssignments.roleId, roleId), eq(roleAssignments.origin, "group")));
+          // the admin's unassign reads "still group-held" (decides = false, no step-up asked) and blocks on the lock
+          const pending = asAdmin("DELETE", `/v1/users/${U.member}/roles/${roleId}`, undefined);
+          for (let i = 0; i < 200; i++) {
+            const w = await adminDb.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`);
+            if ((w.rows[0]?.n ?? 0) > 0) break;
+            await new Promise((r) => setTimeout(r, 25));
+          }
+          void pending.then((r) => (res = r));
+          // commit releases the lock (this transaction returns)
+        });
+        for (let i = 0; i < 200 && !res; i++) await new Promise((r) => setTimeout(r, 25));
+        expect(res?.statusCode, res?.body).toBe(409);
+        expect(res!.json()).toMatchObject({ error: "changed_concurrently" });
+        // the direct hold survives: nothing moved without a step-up
+        const held = await db.select().from(roleAssignments).where(eq(roleAssignments.roleId, roleId));
+        expect(held.map((h) => h.origin)).toEqual(["direct"]);
+        // the retry is decided on what is there now, and asks for the step-up
+        const retry = await asAdmin("DELETE", `/v1/users/${U.member}/roles/${roleId}`, undefined);
+        expect(retry.statusCode, retry.body).toBe(403);
+        expect(retry.json()).toMatchObject({ error: "step_up_required", action: { body: { change: "member-remove", objectId: roleId } } });
+      } finally {
+        await other.$client.end();
+      }
     });
   });
 });

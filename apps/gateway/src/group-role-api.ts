@@ -62,8 +62,9 @@ export function registerGroupRoleMappingRoutes(app: FastifyInstance, db: Db): vo
     ruleId: string,
     reason: string,
     detail: Record<string, unknown>,
+    q: Db = db,
   ) =>
-    db.insert(auditLog).values({
+    q.insert(auditLog).values({
       userId: actorUserId ?? NIL_UUID,
       objectType: "group_role_mapping",
       objectId,
@@ -126,6 +127,12 @@ export function registerGroupRoleMappingRoutes(app: FastifyInstance, db: Db): vo
       if (nowApprover && !approverRole) return { moved: true as const };
       if (!sameApproverPoolShift(await approverPoolShiftFacts(tx as unknown as Db, shift), takeover)) return { moved: true as const };
       const [inserted] = await tx.insert(groupRoleMappings).values(body).onConflictDoNothing().returning();
+      // #675 review finding 4: the approved pool shift is audited in the transaction that makes it
+      if (inserted && takeover) {
+        await auditAdmin(req.authCtx.userId ?? null, inserted.id, "approver-pool-shift",
+          `mapping ${body.source} group '${body.externalGroup}' to a role moves who signs for its members' calls to a wider approver pool (ADR-0229), approved with a settings_relax step-up`,
+          { approverPoolShift: { ...takeover, group: { source: body.source, externalGroup: body.externalGroup } } }, tx as unknown as Db);
+      }
       return { moved: false as const, row: inserted };
     });
     if (written.moved) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
@@ -181,6 +188,12 @@ export function registerGroupRoleMappingRoutes(app: FastifyInstance, db: Db): vo
       const tx = rawTx as unknown as Db;
       if (!sameApproverPoolShift(await approverPoolShiftFacts(tx, shift), takeover)) return false;
       await tx.delete(groupRoleMappings).where(eq(groupRoleMappings.id, mappingId));
+      // #675 review finding 4: the approved pool shift is audited in the transaction that makes it
+      if (facts) {
+        await auditAdmin(req.authCtx.userId ?? null, mappingId, "approver-pool-shift",
+          `removing the mapping of ${row.source} group '${row.externalGroup}' moves who signs for its members' calls to a wider approver pool (ADR-0229), approved with a settings_relax step-up`,
+          { approverPoolShift: facts }, tx);
+      }
       return true;
     });
     if (!done) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);

@@ -292,3 +292,10 @@ session, bound to the facts, admitted with the grant, audited); user (subject an
 cascades at the helper; role assign/unassign, team add/remove and group→role mapping create/delete, each bound to its
 own facts; no takeover means no step-up (same pool, no survivor, a member's own user rule); fail closed (a stale grant
 after the facts change, the JIT default role withheld).
+
+**Review round 1 of #675 (at `92ec8a7`).**
+- **B1, a TOCTOU on role unassign:** `DELETE /v1/users/:id/roles/:roleId` decided on an unlocked read whether the check applied at all. An IdP removal of the same role's group row in between left neither side checking. The route now always takes the role row lock and then the routing lock, and re-decides inside the transaction both whether the check applies and its facts. Any difference answers 409 `changed_concurrently`.
+- **B2:** the reconciler-add withhold is now tested.
+- **Lock order:** role delete takes the role row lock before the routing lock, as decision 16 says.
+- **Shift audits:** they now commit with the write on role assign and on mapping create and delete.
+- **Tests:** the SoD refusal is now tested through the decide route (409 body and `sod-override-role-refused` row), and the IdP removal's reconciliation audit row is asserted.

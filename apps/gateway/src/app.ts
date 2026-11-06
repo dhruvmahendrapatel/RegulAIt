@@ -518,7 +518,7 @@ import { registerSchedulerRoutes } from "./scheduler-api.js";
 // answers 501 not_built until its slice lands (A/B Claude, R/S/V Codex)
 import { registerPasskeyRoutes } from "./passkeys.js";
 import { approvalRuleStepUp, CHANGED_CONCURRENTLY, checkStepUp, ownerChangeStepUpArgs, registerStepUpRoutes, requireStepUp, requireStepUps, revocationLiftStepUp, type StepUpCheckArgs } from "./step-up.js";
-import { ApprovalRuleWriteRefusedError, approverPoolShiftFacts, isApproverRole, lockApproverRoles, namedApproverSeatExists, sameApproverPoolShift, type ApproverPoolShift } from "./approval-pool.js";
+import { ApprovalRuleWriteRefusedError, approverPoolShiftFacts, isApproverRole, lockApprovalRuleRouting, lockApproverRoles, namedApproverSeatExists, sameApproverPoolShift, type ApproverPoolShift } from "./approval-pool.js";
 import {
   decisionView,
   decideToolCallApproval,
@@ -2834,10 +2834,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       if (nowApprover && !approverRole) return null;
       if (!sameApproverPoolShift(await approverPoolShiftFacts(tx as unknown as Db, shift), takeover)) return null;
       const [inserted] = await tx.insert(roleAssignments).values({ userId, roleId: body.roleId, origin: "direct" }).returning();
+      // #675 review finding 4: the shift audit commits with the assignment
+      if (takeover) await auditApproverPoolShift(req.authCtx.userId ?? userId, "role", body.roleId, takeover, tx as unknown as Db);
       return inserted;
     });
     if (!row) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
-    if (takeover) await auditApproverPoolShift(req.authCtx.userId ?? userId, "role", body.roleId, takeover);
     return reply.status(201).send(row);
   });
 
@@ -2862,17 +2863,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // overlapping rule; when that rule's pool is wider, the same step-up, bound to the takeover facts. Decided only
     // when a DIRECT assignment exists to remove (a group-held role stays held, so nothing moves)
     const shift: ApproverPoolShift = { change: "member-remove", objectType: "role", objectId: params.roleId, userId: params.userId };
-    const [direct] = await db
-      .select({ id: roleAssignments.id })
-      .from(roleAssignments)
-      .where(and(eq(roleAssignments.userId, params.userId), eq(roleAssignments.roleId, params.roleId), eq(roleAssignments.origin, "direct")));
-    const [alsoGroup] = direct
-      ? await db
-          .select({ id: roleAssignments.id })
-          .from(roleAssignments)
-          .where(and(eq(roleAssignments.userId, params.userId), eq(roleAssignments.roleId, params.roleId), eq(roleAssignments.origin, "group")))
-      : [];
-    const decides = !!direct && !alsoGroup;
+    /** does removing the direct row leave the user without the role (so the check applies), read on `q` */
+    const decidesOn = async (q: Db) => {
+      const held = await q
+        .select({ origin: roleAssignments.origin })
+        .from(roleAssignments)
+        .where(and(eq(roleAssignments.userId, params.userId), eq(roleAssignments.roleId, params.roleId)));
+      return held.some((h) => h.origin === "direct") && !held.some((h) => h.origin === "group");
+    };
+    const decides = await decidesOn(db);
     const takeover = decides ? await approverPoolShiftFacts(db, shift) : null;
     if (takeover && !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: takeover })).ok) return reply;
     // ADR-0038: unassign removes the ADMIN-DIRECT assignment only. A
@@ -2883,8 +2882,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // mapping keeps re-adding).
     const outcome = await db.transaction(async (rawTx) => {
       const tx = rawTx as unknown as Db;
-      // under the routing lock, the step-up decision must still describe the state (fail closed on a move)
-      if (decides && !sameApproverPoolShift(await approverPoolShiftFacts(tx, shift), takeover)) return null;
+      // #675 review finding 1 (TOCTOU): ALWAYS take the role row lock, then the routing lock, and re-decide both
+      // whether the check applies and its facts under them. The IdP reconciler removes a group row under the routing
+      // lock, so a group hold dropped since the early read shows up here (decides flips) and fails closed.
+      await lockApproverRoles(tx, [params.roleId]);
+      await lockApprovalRuleRouting(tx);
+      const decidesNow = await decidesOn(tx);
+      const factsNow = decidesNow ? await approverPoolShiftFacts(tx, shift) : null;
+      if (decidesNow !== decides || !sameApproverPoolShift(factsNow, takeover)) return null;
       const rows = await tx
         .delete(roleAssignments)
         .where(
@@ -3002,6 +3007,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     };
     const done = await db.transaction(async (rawTx) => {
       const tx = rawTx as unknown as Db;
+      // #675 review finding 3: the role row lock first, then the routing lock (the order every other path takes)
+      await lockApproverRoles(tx, [roleId]);
       if (!sameApproverPoolShift(await approverPoolShiftFacts(tx, shift), takeover)) return false;
       await tx.delete(roles).where(eq(roles.id, roleId));
       await tx.insert(auditLog).values(audit);
