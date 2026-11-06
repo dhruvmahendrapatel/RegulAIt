@@ -136,7 +136,8 @@ async function overflow(card: Locator): Promise<number> {
 
 const TABLES = [
   { name: "Inventory", url: "/ui/admin/shadow-ai", card: "Inventory" },
-  { name: "Recent runs", url: "/ui/admin/shadow-ai/discovery-sources", card: "Recent runs" },
+  // P3: every run is on the runs page; the overview previews the newest (its fit is checked below)
+  { name: "Recent runs", url: "/ui/admin/shadow-ai/discovery-sources/runs", card: "Runs" },
   { name: "Audit entries", url: "/ui/admin/audit", card: "Entries" },
   { name: "Use-case audit trail", url: `/ui/admin/audit?objectType=ai_use_case&objectId=${USE_CASE}`, card: "Entries" },
 ];
@@ -149,6 +150,17 @@ for (const width of [1440, 1024, 390]) {
       expect(await overflow(await openCard(page, t.card))).toBe(0);
     });
   }
+}
+
+/** the overview's preview of the newest runs (its heading carries the count, so it is found by its list) */
+const runsPreview = (page: Page) => page.getByTestId("preview-discovery-runs").locator("xpath=ancestor::section[@data-rg-card][1]");
+
+for (const width of [1440, 1024, 390]) {
+  test(`the Recent runs preview fits its card at ${width} px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.goto("/ui/admin/shadow-ai/discovery-sources");
+    expect(await overflow(runsPreview(page))).toBe(0);
+  });
 }
 
 async function openDrawer(page: Page) {
@@ -190,7 +202,7 @@ test("on a phone every folded value carries its column name, and each (i) is rea
   await page.goto("/ui/admin/shadow-ai");
   const card = cardOf(page, "Inventory");
   await expect(card.locator("thead th")).toHaveCount(1);
-  await expect(card.locator("thead th")).toContainText("Subject · Severity · Evidence");
+  expect((await heads(card))[0]).toContain("Subject · Severity · Evidence");
   const row = card.locator("tbody tr", { hasText: findings[3]!.subject });
   for (const [key, label] of [["severity", "Severity"], ["sources", "Evidence"], ["confidence", "Confidence"], ["observations", "Seen"], ["disposition", "Status"], ["triage", "Next step"]] as const) {
     await expect(row.locator(`[data-fold="${key}"]`).locator("span").first()).toHaveText(label);
@@ -222,7 +234,7 @@ test("Audit entries on a phone: every value is a labelled line under Event, and 
   await page.goto("/ui/admin/audit");
   const card = cardOf(page, "Entries");
   await expect(card.locator("thead th")).toHaveCount(1);
-  await expect(card.locator("thead th")).toHaveText("Event · At · User · Effect · Deploy mode · Reason · Evidence");
+  expect(await heads(card)).toEqual(["Event · At · User · Effect · Deploy mode · Reason · Evidence"]);
   const row = card.locator("tbody tr").filter({ hasText: "not on the caller's allow-list" });
   for (const [key, label] of [["at", "At"], ["user", "User"], ["effect", "Effect"], ["reason", "Reason"]] as const) {
     await expect(row.locator(`[data-fold="${key}"]`).locator("span").first()).toHaveText(label);
@@ -234,19 +246,20 @@ test("Audit entries on a phone: every value is a labelled line under Event, and 
 
 test("Recent runs takes the full width, with Reveal a pseudonym in its own row below", async ({ page }) => {
   await page.goto("/ui/admin/shadow-ai/discovery-sources");
-  const runsCard = await openCard(page, "Recent runs");
+  const runsCard = runsPreview(page);
   const reveal = page.locator("section[data-rg-card]").filter({ has: page.getByText("Reveal a pseudonym", { exact: true }) });
   const [a, b] = [(await runsCard.boundingBox())!, (await reveal.boundingBox())!];
   expect(Math.abs(a.width - b.width)).toBeLessThanOrEqual(1);
   expect(b.y).toBeGreaterThanOrEqual(a.y + a.height);
   // at 1440 nothing folds: every column has its own header
-  await expect(runsCard.locator("thead th")).toHaveText(["Source", "Status", "Queued", "Observed / matched", "Findings", "Catalogue gaps", "Reads"]);
+  expect(await heads(runsCard)).toEqual(["Source", "Status", "Queued", "Observed / matched", "Findings", "Catalogue gaps", "Reads"]);
   // a read the scanner could not make is still said in the row
   await expect(runsCard.locator("tbody tr").nth(2)).toContainText(/could not read/i);
 });
 
 /** the header texts and each row's folded lines (data-fold key → its label) */
-const heads = (card: Locator) => card.locator("thead th").allInnerTexts().then((all) => all.map((h) => h.replace(/\s+/g, " ").trim()));
+// the server-sorted column carries its arrow (ADR-0226): the header's words are what these tests read
+const heads = (card: Locator) => card.locator("thead th").allInnerTexts().then((all) => all.map((h) => h.replace(/[▲▼]/g, "").replace(/\s+/g, " ").trim()));
 async function foldLabels(row: Locator, labels: Record<string, string>) {
   for (const [key, label] of Object.entries(labels)) await expect(row.locator(`[data-fold="${key}"]`).locator("span").first()).toHaveText(label);
 }
@@ -264,13 +277,12 @@ test("Inventory at 1024 px folds at md: Evidence and Seen under Subject, Confide
   expect(Math.abs(label! - value!)).toBeLessThanOrEqual(4);
 });
 
-test("Recent runs at 1024 px, opened from collapsed, folds at md with every value labelled and no overflow", async ({ page }) => {
+test("Recent runs at 1024 px, on its own page, folds at md with every value labelled and no overflow", async ({ page }) => {
   await page.setViewportSize({ width: 1024, height: 1000 });
-  await page.goto("/ui/admin/shadow-ai/discovery-sources");
-  const card = cardOf(page, "Recent runs");
-  // X6b: the card starts collapsed, so its table measures nothing until it opens
-  await expect(card.locator("tbody tr").first()).toBeHidden();
-  await openCard(page, "Recent runs");
+  await page.goto("/ui/admin/shadow-ai/discovery-sources/runs");
+  const card = cardOf(page, "Runs");
+  // ADR-0226: the card pages under the list control instead of folding, so its table is there from the start
+  await openCard(page, "Runs");
   await expect(card.locator("[data-fold-step]")).toHaveAttribute("data-fold-step", "md");
   expect(await overflow(card)).toBe(0);
   expect(await heads(card)).toEqual(["Source · Queued", "Status · Reads", "Findings · Observed / matched", "Catalogue gaps"]);
@@ -280,8 +292,8 @@ test("Recent runs at 1024 px, opened from collapsed, folds at md with every valu
 
 test("Recent runs on a phone: Findings, Catalogue gaps and the md folds sit under Source, each labelled", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 1000 });
-  await page.goto("/ui/admin/shadow-ai/discovery-sources");
-  const card = await openCard(page, "Recent runs");
+  await page.goto("/ui/admin/shadow-ai/discovery-sources/runs");
+  const card = await openCard(page, "Runs");
   await expect(card.locator("[data-fold-step]")).toHaveAttribute("data-fold-step", "sm");
   expect(await heads(card)).toEqual(["Source · Queued · Observed / matched · Findings · Catalogue gaps", "Status · Reads"]);
   await foldLabels(card.locator("tbody tr").first(), { when: "Queued", counts: "Observed / matched", findings: "Findings", gaps: "Catalogue gaps" });
@@ -308,18 +320,22 @@ test("Audit entries at 1024 px: a folded column keeps its own sort, from its nam
   await foldLabels(card.locator("tbody tr").first(), { user: "User", deployMode: "Deploy mode" });
   const effect = card.locator("thead th", { hasText: "Effect" });
   const rows = card.locator("tbody tr");
-  // the only recorded deploy mode ("byoc") sorts before "not recorded", and after it when reversed
+  // ADR-0226: the folded Deploy mode sorts on the server, ascending then descending
+  const asks = (sort: string, dir: string) => page.waitForRequest((r) => { const q = new URL(r.url()).searchParams; return new URL(r.url()).pathname === "/v1/audit" && q.get("sort") === sort && q.get("dir") === dir; });
+  let asked = asks("deployMode", "asc");
   await effect.getByRole("button", { name: "Deploy mode", exact: true }).click();
+  await asked;
   await expect(effect).toHaveAttribute("aria-sort", "ascending");
-  await expect(rows.first()).toContainText("held for a separate approver");
+  asked = asks("deployMode", "desc");
   await effect.getByRole("button", { name: "Deploy mode", exact: true }).click();
+  await asked;
   await expect(effect).toHaveAttribute("aria-sort", "descending");
-  await expect(rows.last()).toContainText("held for a separate approver");
-  // the host's own header text still sorts the host: by Effect, allow < deny < require approval
+  await expect(rows.first()).toBeVisible();
+  // the host's own header text still sorts the host: by Effect
+  asked = asks("effect", "asc");
   await effect.click({ position: { x: 12, y: 12 } });
+  await asked;
   await expect(effect).toHaveAttribute("aria-sort", "ascending");
-  await expect(rows.nth(4)).toContainText("not on the caller's allow-list");
-  await expect(rows.nth(5)).toContainText("held for a separate approver");
   // one arrow, beside the column that sorts
   await expect(effect.locator("span", { hasText: /^[▲▼]$/ })).toHaveCount(1);
   // a column that is not folded still announces only its own sort
@@ -336,17 +352,19 @@ test("Audit entries at 1024 px: the folded Deploy mode sort works from the keybo
   await expect(effect).not.toHaveAttribute("aria-sort", /.+/);
   await deployMode.focus();
   await expect(deployMode).toBeFocused();
+  const asked = page.waitForRequest((r) => { const q = new URL(r.url()).searchParams; return new URL(r.url()).pathname === "/v1/audit" && q.get("sort") === "deployMode" && q.get("dir") === "asc"; });
   await page.keyboard.press("Enter");
+  await asked;
   await expect(effect).toHaveAttribute("aria-sort", "ascending");
-  await expect(card.locator("tbody tr").first()).toContainText("held for a separate approver");
   await expect(deployMode).toBeFocused();
 });
 
-test("on a phone a foldable card's header wraps: the title keeps one line and the filters move below it (M2)", async ({ page }) => {
+test("on a phone a card's header wraps: the title keeps one line and the filters move below it (M2)", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 1000 });
   await page.goto("/ui/admin/shadow-ai");
   const header = (await openCard(page, "Inventory")).locator(":scope > div").first();
-  const fold = header.locator("button[aria-expanded]");
+  // ADR-0226: the Inventory pages under the list control instead of folding; its title is the header's first span
+  const fold = header.locator(":scope > span").first();
   const filters = header.getByRole("button", { name: /^All/ });
   const [f, a] = [(await fold.boundingBox())!, (await filters.boundingBox())!];
   // one 44 px line: "Inventory 4 findings" is not squeezed onto two

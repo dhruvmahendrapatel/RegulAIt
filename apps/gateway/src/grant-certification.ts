@@ -81,6 +81,19 @@ import {
 } from "@regulait/db";
 import { cancelCertificationCampaignSchema, parseRecommendationRuleIds } from "@regulait/shared";
 import { z } from "zod";
+import type { SQL } from "@regulait/db";
+import {
+  filterParams,
+  parseListExport,
+  parseListPage,
+  runListPage,
+  sendListError,
+  sendListExport,
+  wantsListContract,
+  type ListReader,
+  type ListSpec,
+} from "./list-contract.js";
+import { userNameSql } from "./delegations-list.js";
 import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
 // ADR-0092 (gap L24): the recommendation-scoped campaign snapshot — the one
 // action path a recommendation has (recommend → review → human decides →
@@ -133,6 +146,102 @@ const openCampaignSchema = z.object({
   dueAt: z.string().datetime(),
 });
 const campaignIdParam = z.object({ campaignId: z.string().uuid() });
+
+// ---- ADR-0226: the campaigns list and a campaign's items, under the shared list contract
+// Explicit qualifiers: in a single-table select drizzle renders a column bare, and a bare "id" inside this
+// subquery would bind to grant_certification_items.id rather than the outer campaign row.
+const ITEMS_OF = (decision: "keep" | "revoke" | "undecided" | "all") =>
+  sql<number>`(select count(*)::int from "grant_certification_items" where "grant_certification_items"."campaign_id" = "grant_certification_campaigns"."id"${
+    decision === "all"
+      ? sql``
+      : decision === "undecided"
+        ? sql` and "grant_certification_items"."decision" is null`
+        : sql` and "grant_certification_items"."decision" = ${decision}`
+  })`;
+/** the read-time status (campaignEffectiveStatus) in SQL, for the filter, the per-status counts and the sort */
+const CAMPAIGN_EFFECTIVE_STATUS = sql<EffectiveCampaignStatus>`(case when "grant_certification_campaigns"."status" = 'completed' then 'completed' when "grant_certification_campaigns"."status" = 'cancelled' then 'cancelled' when "grant_certification_campaigns"."due_at" < now() and ${ITEMS_OF("undecided")} > 0 then 'expired-incomplete' else 'open' end)`;
+const CAMPAIGN_STATUS_ORDER = sql`case ${CAMPAIGN_EFFECTIVE_STATUS} when 'cancelled' then 4 when 'completed' then 3 when 'expired-incomplete' then 2 else 1 end`;
+/** ADR-0208 G9 statuses, in the order the page's filter buttons show them */
+export const CAMPAIGN_STATUSES = ["open", "completed", "expired-incomplete", "cancelled"] as const;
+interface CampaignListRow {
+  id: string;
+  name: string;
+  scope: { kind: string; value: string | null };
+  openedBy: { userId: string; name: string | null };
+  dueAt: string;
+  status: EffectiveCampaignStatus;
+  storedStatus: string;
+  completedAt: string | null;
+  cancellation: { at: string; reason: string | null; byUserId: string | null } | null;
+  createdAt: string;
+  items: { total: number; keep: number; revoke: number; undecided: number };
+}
+const campaignsFilterQuery = z.object({ status: z.enum(CAMPAIGN_STATUSES).optional() }).strict();
+export const CAMPAIGNS_LIST: ListSpec<CampaignListRow> = {
+  id: "certification-campaigns",
+  sorts: {
+    name: { expr: sql`lower(${grantCertificationCampaigns.name})` },
+    status: { expr: CAMPAIGN_STATUS_ORDER },
+    scope: { expr: grantCertificationCampaigns.scopeKind },
+    progress: { expr: ITEMS_OF("undecided") },
+    due: { expr: grantCertificationCampaigns.dueAt, keysetAt: grantCertificationCampaigns.dueAt },
+    opened: { expr: sql`lower(${userNameSql(grantCertificationCampaigns.openedByUserId)})` },
+    created: { expr: grantCertificationCampaigns.createdAt, keysetAt: grantCertificationCampaigns.createdAt },
+  },
+  columns: {
+    name: { label: "Campaign", value: (r) => r.name },
+    status: { label: "Status", value: (r) => r.status },
+    scope: { label: "Scope", value: (r) => r.scope.kind.replace(/_/g, " ") },
+    progress: { label: "Items", value: (r) => `${r.items.total}: ${r.items.keep} keep, ${r.items.revoke} revoke, ${r.items.undecided} undecided` },
+    due: { label: "Due", value: (r) => new Date(r.dueAt) },
+    opened: { label: "Opened by", value: (r) => r.openedBy.name ?? r.openedBy.userId },
+    created: { label: "Opened", value: (r) => new Date(r.createdAt) },
+  },
+  filters: ["status"],
+  defaultSort: { col: "created", dir: "desc" },
+  idCol: grantCertificationCampaigns.id,
+};
+// the status is an allow-listed enum (the zod schema above), bound as a parameter, never interpolated
+const campaignsWhere = (f: z.infer<typeof campaignsFilterQuery>): SQL | undefined =>
+  f.status ? sql`${CAMPAIGN_EFFECTIVE_STATUS} = ${f.status}` : undefined;
+interface CampaignItemListRow {
+  id: string;
+  grantKind: string;
+  grantId: string;
+  holder: { userId: string | null; roleId: string | null; label: string };
+  object: { id: string | null; label: string; toolName: string | null };
+  reviewer: { userId: string; name: string | null };
+  approvalId: string | null;
+  decision: "keep" | "revoke" | null;
+  decidedBy: { userId: string; name: string | null } | null;
+  decidedAt: string | null;
+  revocation: unknown;
+}
+const itemsFilterQuery = z.object({ decision: z.enum(["keep", "revoke", "undecided"]).optional() }).strict();
+export const CAMPAIGN_ITEMS_LIST: ListSpec<CampaignItemListRow> = {
+  id: "certification-items",
+  sorts: {
+    holder: { expr: sql`lower(${grantCertificationItems.holderLabel})` },
+    object: { expr: sql`lower(${grantCertificationItems.objectLabel})` },
+    kind: { expr: grantCertificationItems.grantKind },
+    reviewer: { expr: sql`lower(${userNameSql(grantCertificationItems.reviewerUserId)})` },
+    decision: { expr: sql`coalesce(${grantCertificationItems.decision}, '')` },
+    decided: { expr: grantCertificationItems.decidedAt },
+    created: { expr: grantCertificationItems.createdAt, keysetAt: grantCertificationItems.createdAt },
+  },
+  columns: {
+    holder: { label: "Holder", value: (r) => r.holder.label },
+    object: { label: "Grant", value: (r) => r.object.label },
+    kind: { label: "Kind", value: (r) => r.grantKind.replace(/_/g, " ") },
+    reviewer: { label: "Reviewer", value: (r) => r.reviewer.name ?? r.reviewer.userId },
+    decision: { label: "Decision", value: (r) => r.decision ?? "undecided" },
+    decidedBy: { label: "Decided by", value: (r) => (r.decidedBy ? (r.decidedBy.name ?? r.decidedBy.userId) : null) },
+    decided: { label: "Decided", value: (r) => (r.decidedAt ? new Date(r.decidedAt) : null) },
+  },
+  filters: ["decision"],
+  defaultSort: { col: "holder", dir: "asc" },
+  idCol: grantCertificationItems.id,
+};
 
 interface SnapshotItem {
   grantKind: GrantCertGrantKind;
@@ -795,7 +904,147 @@ export function registerGrantCertificationRoutes(app: FastifyInstance, db: Db): 
     return reply.status(201).send({ ...campaign, items: items.length, notes: CERTIFICATION_NOTES });
   });
 
-  app.get("/v1/certification-campaigns", async () => {
+  const campaignsReader: ListReader<CampaignListRow> = {
+    fetch: async (q) => {
+      const rows = await db
+        .select({
+          c: grantCertificationCampaigns,
+          openerName: userNameSql(grantCertificationCampaigns.openedByUserId),
+          total: ITEMS_OF("all"),
+          keep: ITEMS_OF("keep"),
+          revoke: ITEMS_OF("revoke"),
+          undecided: ITEMS_OF("undecided"),
+          _cursorAt: q.cursorAt,
+        })
+        .from(grantCertificationCampaigns)
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset);
+      const now = new Date();
+      return rows.map(({ c, openerName, total, keep, revoke, undecided, _cursorAt }) => ({
+        id: c.id,
+        name: c.name,
+        scope: { kind: c.scopeKind, value: c.scopeValue },
+        openedBy: { userId: c.openedByUserId, name: openerName },
+        dueAt: c.dueAt.toISOString(),
+        status: campaignEffectiveStatus(c, Number(undecided), now),
+        storedStatus: c.status,
+        completedAt: c.completedAt ? c.completedAt.toISOString() : null,
+        cancellation: cancellationView(c),
+        createdAt: c.createdAt.toISOString(),
+        items: { total: Number(total), keep: Number(keep), revoke: Number(revoke), undecided: Number(undecided) },
+        _cursorAt,
+      }));
+    },
+    countable: (where) => db.select({ one: sql`1` }).from(grantCertificationCampaigns).where(where),
+    idOf: (r) => r.id,
+  };
+  /** ADR-0208 G9: how many campaigns are in each status, across every campaign (the list is admin-only, so the
+   * scope is the whole table) — whatever status the page is filtered to, the filter buttons count them all */
+  const campaignsSummary = async (): Promise<{ statusCounts: Record<EffectiveCampaignStatus, number> }> => {
+    const rows = await db
+      .select({ status: CAMPAIGN_EFFECTIVE_STATUS, n: sql<number>`count(*)::int` })
+      .from(grantCertificationCampaigns)
+      .groupBy(CAMPAIGN_EFFECTIVE_STATUS);
+    const statusCounts = Object.fromEntries(CAMPAIGN_STATUSES.map((k) => [k, 0])) as Record<EffectiveCampaignStatus, number>;
+    for (const r of rows) if (Object.hasOwn(statusCounts, r.status)) statusCounts[r.status] = Number(r.n);
+    return { statusCounts };
+  };
+  const itemsReader: ListReader<CampaignItemListRow> = {
+    fetch: async (q) => {
+      const rows = await db
+        .select({
+          i: grantCertificationItems,
+          reviewerName: userNameSql(grantCertificationItems.reviewerUserId),
+          deciderName: userNameSql(grantCertificationItems.decidedByUserId),
+          _cursorAt: q.cursorAt,
+        })
+        .from(grantCertificationItems)
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset);
+      return rows.map(({ i, reviewerName, deciderName, _cursorAt }) => ({
+        id: i.id,
+        grantKind: i.grantKind,
+        grantId: i.grantId,
+        holder: { userId: i.holderUserId, roleId: i.holderRoleId, label: i.holderLabel },
+        object: { id: i.objectId, label: i.objectLabel, toolName: i.toolName },
+        reviewer: { userId: i.reviewerUserId, name: reviewerName },
+        approvalId: i.approvalId,
+        decision: i.decision,
+        decidedBy: i.decidedByUserId ? { userId: i.decidedByUserId, name: deciderName } : null,
+        decidedAt: i.decidedAt ? i.decidedAt.toISOString() : null,
+        revocation: i.revocationDetail ?? null,
+        _cursorAt,
+      }));
+    },
+    countable: (where) => db.select({ one: sql`1` }).from(grantCertificationItems).where(where),
+    idOf: (r) => r.id,
+  };
+  const itemsWhere = (campaignId: string, f: z.infer<typeof itemsFilterQuery>): SQL =>
+    and(
+      eq(grantCertificationItems.campaignId, campaignId),
+      f.decision === "undecided"
+        ? isNull(grantCertificationItems.decision)
+        : f.decision
+          ? eq(grantCertificationItems.decision, f.decision)
+          : undefined,
+    )!;
+
+  // ADR-0226: with any of sort/dir/cursor/offset/count the campaigns list answers the shared list contract; with
+  // none of them, exactly the response it always gave. A campaign's items page through their own route. Admin only.
+  app.get("/v1/certification-campaigns/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const filters = campaignsFilterQuery.parse(filterParams(q));
+      const ex = parseListExport(CAMPAIGNS_LIST, q);
+      await sendListExport(db, req, reply, CAMPAIGNS_LIST, campaignsReader, campaignsWhere(filters), ex, filters);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+  app.get("/v1/certification-campaigns/:campaignId/items", async (req, reply) => {
+    try {
+      const { campaignId } = campaignIdParam.parse(req.params);
+      const [campaign] = await db.select({ id: grantCertificationCampaigns.id }).from(grantCertificationCampaigns).where(eq(grantCertificationCampaigns.id, campaignId));
+      if (!campaign) return reply.status(404).send({ error: "not_found" });
+      const q = req.query as Record<string, unknown>;
+      const filters = itemsFilterQuery.parse(filterParams(q));
+      const page = parseListPage(CAMPAIGN_ITEMS_LIST, q);
+      return await runListPage(db, CAMPAIGN_ITEMS_LIST, itemsReader, itemsWhere(campaignId, filters), page);
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+  app.get("/v1/certification-campaigns/:campaignId/items/export.xlsx", async (req, reply) => {
+    try {
+      const { campaignId } = campaignIdParam.parse(req.params);
+      const [campaign] = await db.select({ id: grantCertificationCampaigns.id }).from(grantCertificationCampaigns).where(eq(grantCertificationCampaigns.id, campaignId));
+      if (!campaign) return reply.status(404).send({ error: "not_found" });
+      const q = req.query as Record<string, unknown>;
+      const filters = itemsFilterQuery.parse(filterParams(q));
+      const ex = parseListExport(CAMPAIGN_ITEMS_LIST, q);
+      await sendListExport(db, req, reply, CAMPAIGN_ITEMS_LIST, itemsReader, itemsWhere(campaignId, filters), ex, { campaignId, ...filters });
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+  app.get("/v1/certification-campaigns", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      try {
+        const q = req.query as Record<string, unknown>;
+        const filters = campaignsFilterQuery.parse(filterParams(q));
+        const page = parseListPage(CAMPAIGNS_LIST, q);
+        const [out, summary] = await Promise.all([runListPage(db, CAMPAIGNS_LIST, campaignsReader, campaignsWhere(filters), page), campaignsSummary()]);
+        return { ...out, summary, notes: CERTIFICATION_NOTES };
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
     const now = new Date();
     const campaigns = await db
       .select()

@@ -55,6 +55,18 @@ import crypto from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
+  filterParams,
+  parseListExport,
+  parseListPage,
+  runListPage,
+  sendListError,
+  sendListExport,
+  wantsListContract,
+  type ListReader,
+  type ListSpec,
+} from "./list-contract.js";
+import { sql as sqlL, type SQL as SQLL } from "@regulait/db";
+import {
   and,
   annotationItems,
   annotationQueueReviewers,
@@ -849,6 +861,36 @@ const itemsQuery = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional(),
 });
 const exportQuery = z.object({ from: z.coerce.date().optional(), to: z.coerce.date().optional() });
+// ---- ADR-0226: a queue's items under the shared list contract (ids and states only, never a preview)
+const itemsFilterQuery = z.object({ status: z.enum(["open", "completed"]).optional() }).strict();
+type AnnotationItemListRow = ReturnType<typeof itemView> & { reviewedByUserIds: string[] };
+export const ANNOTATION_ITEMS_LIST: ListSpec<AnnotationItemListRow> = {
+  id: "annotation-items",
+  sorts: {
+    subject: { expr: annotationItems.subjectId },
+    kind: { expr: annotationItems.subjectKind },
+    status: { expr: annotationItems.status },
+    reviews: { expr: sqlL`(select count(*) from annotation_submissions s where s.item_id = ${annotationItems.id})` },
+    due: { expr: annotationItems.dueAt },
+    sla: { expr: sqlL`(${annotationItems.slaBreachedAt} is not null)` },
+    disagreement: { expr: annotationItems.disagreement },
+    queued: { expr: annotationItems.createdAt, keysetAt: annotationItems.createdAt },
+  },
+  columns: {
+    subject: { label: "Subject", value: (r) => `${r.subjectKind.replace(/_/g, " ")} ${r.subjectId}` },
+    kind: { label: "Kind", value: (r) => r.subjectKind.replace(/_/g, " ") },
+    status: { label: "Status", value: (r) => `${r.status}${r.slaBreached ? ", past deadline" : ""}${r.disagreement ? ", reviewers disagreed" : ""}` },
+    reviews: { label: "Reviews", value: (r) => `${r.submissionCount} of ${r.requiredReviews}` },
+    due: { label: "Due", value: (r) => (r.dueAt ? new Date(r.dueAt) : null) },
+    sla: { label: "Response time", value: (r) => (r.slaBreached ? "overdue" : "on time") },
+    disagreement: { label: "Disagreement", value: (r) => (r.disagreement ? "Yes" : "No") },
+    queued: { label: "Queued", value: (r) => new Date(r.createdAt) },
+    trace: { label: "Trace id", value: (r) => r.traceId },
+  },
+  filters: ["status"],
+  defaultSort: { col: "queued", dir: "desc" },
+  idCol: annotationItems.id,
+};
 
 export function registerAnnotationRoutes(app: FastifyInstance, db: Db, opts: { dataKey?: string | undefined } = {}): void {
   const refuse = (reply: import("fastify").FastifyReply, e: unknown) => {
@@ -1085,8 +1127,64 @@ export function registerAnnotationRoutes(app: FastifyInstance, db: Db, opts: { d
     }
   });
 
+  const itemsWithReviewers = async <R extends AnnotationItemRow>(rows: R[]) => {
+    const subs = rows.length
+      ? await db
+          .select({ itemId: annotationSubmissions.itemId, reviewerUserId: annotationSubmissions.reviewerUserId })
+          .from(annotationSubmissions)
+          .where(inArray(annotationSubmissions.itemId, rows.map((r) => r.id)))
+      : [];
+    return rows.map((r) => {
+      const mine = subs.filter((s) => s.itemId === r.id);
+      return { ...itemView(r, mine.length), reviewedByUserIds: mine.map((s) => s.reviewerUserId) };
+    });
+  };
+  const annotationItemsReader: ListReader<AnnotationItemListRow> = {
+    fetch: async (q) => {
+      const rows = await db
+        .select({ i: annotationItems, _cursorAt: q.cursorAt })
+        .from(annotationItems)
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset);
+      const views = await itemsWithReviewers(rows.map((r) => r.i));
+      return views.map((v, i) => ({ ...v, _cursorAt: rows[i]!._cursorAt }));
+    },
+    countable: (where) => db.select({ one: sqlL`1` }).from(annotationItems).where(where),
+    idOf: (r) => r.id,
+  };
+  const annotationItemsWhere = (queueId: string, f: z.infer<typeof itemsFilterQuery>): SQLL =>
+    and(eq(annotationItems.queueId, queueId), f.status ? eq(annotationItems.status, f.status) : undefined)!;
+  // ADR-0226: with any of sort/dir/cursor/offset/count the queue's items answer the shared list contract; admin only
+  app.get("/v1/annotation-queues/:queueId/items/export.xlsx", async (req, reply) => {
+    try {
+      const { queueId } = queueParam.parse(req.params);
+      const queue = await loadQueue(queueId);
+      if (!queue) return reply.status(404).send({ error: "unknown_queue" });
+      const q = req.query as Record<string, unknown>;
+      const filters = itemsFilterQuery.parse(filterParams(q));
+      const ex = parseListExport(ANNOTATION_ITEMS_LIST, q);
+      await sendListExport(db, req, reply, ANNOTATION_ITEMS_LIST, annotationItemsReader, annotationItemsWhere(queueId, filters), ex, { queueId, ...filters });
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
   app.get("/v1/annotation-queues/:queueId/items", async (req, reply) => {
     const { queueId } = queueParam.parse(req.params);
+    if (wantsListContract(req.query)) {
+      try {
+        const queue = await loadQueue(queueId);
+        if (!queue) return reply.status(404).send({ error: "unknown_queue" });
+        const q = req.query as Record<string, unknown>;
+        const filters = itemsFilterQuery.parse(filterParams(q));
+        const page = parseListPage(ANNOTATION_ITEMS_LIST, q);
+        return await runListPage(db, ANNOTATION_ITEMS_LIST, annotationItemsReader, annotationItemsWhere(queueId, filters), page);
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
     const q = itemsQuery.parse(req.query ?? {});
     const queue = await loadQueue(queueId);
     if (!queue) return reply.status(404).send({ error: "unknown_queue" });

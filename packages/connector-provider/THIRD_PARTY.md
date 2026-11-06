@@ -5,8 +5,8 @@ ISC; maintained; pinned; works air-gapped). npm dependencies are pinned exactly 
 
 | Component | Version | Licence | Used for, and why |
 |---|---|---|---|
-| `zod` (npm, github.com/colinhacks/zod, © Colin McDonnell) | `4.6.6` (exact; ADR-0192) | MIT | Runtime schema and validation for `connectorProviderConfigSchema` and the connector config/kind contracts in `src/index.ts`. |
-| `@types/node` (npm, github.com/DefinitelyTyped/DefinitelyTyped) | `26.1.1` (exact devDependency) | MIT | Type definitions for the Node.js standard library used by the sources and tests; test/build-only, never in a shipped bundle. |
+| `zod` (npm, github.com/colinhacks/zod, © Colin McDonnell) | `4.6.7` (exact; ADR-0192) | MIT | Runtime schema and validation for `connectorProviderConfigSchema` and the connector config/kind contracts in `src/index.ts`. |
+| `@types/node` (npm, github.com/DefinitelyTyped/DefinitelyTyped) | `26.6.6` (exact devDependency) | MIT | Type definitions for the Node.js standard library used by the sources and tests; test/build-only, never in a shipped bundle. |
 | `vitest` (npm, github.com/vitest-dev/vitest, © Anthony Fu and contributors) | `4.1.11` (exact devDependency) | MIT | Test runner for the `*.test.ts` files in `src/`; test-only, never in a shipped bundle. |
 
 **Checked and not used (ADR-0176 rule 4 exception).** `resend` (npm, Resend's official Node SDK), `6.34.1` released

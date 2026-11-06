@@ -12,7 +12,7 @@
  * outside its approver pool cannot override it, and each decision is signed
  * over the exact call with the approver's passkey (the browser prompts once).
  */
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
@@ -41,6 +41,7 @@ import { ReviewPanel } from "../../approvals/ReviewPanel";
 import { intakeUseCaseName, isIntakeSignoff } from "../../approvals/reviewDecision";
 import { QuorumProgress } from "../../approvals/QuorumProgress";
 import { decideApproval, isToolCallApproval, signatureModeOf, signedDecisionErrorText } from "../../approvals/signedDecision";
+import { DataList, type DataColumn } from "../../../ui/DataList";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -480,22 +481,42 @@ function SavedViewsCard(props: {
   );
 }
 
+const delegationState = (d: Delegation) =>
+  d.active ? "active" : new Date(d.endsAt).getTime() < Date.now() ? "expired" : "scheduled";
+const windowText = (at: string) => String(at).slice(0, 16).replace("T", " ");
+
+/** ADR-0226: the delegations list's columns; the ids and sortable ones match the gateway's DELEGATIONS_LIST */
+export const DELEGATION_COLUMNS: Array<DataColumn<Delegation>> = [
+  { key: "from", header: "From", main: true, sortable: true, render: (d) => d.fromName ?? d.fromUserId },
+  { key: "to", header: "To", main: true, sortable: true, render: (d) => d.toName ?? d.toUserId },
+  { key: "starts", header: "Starts", main: true, sortable: true, render: (d) => <span className={v.mono}>{windowText(d.startsAt)}</span> },
+  { key: "ends", header: "Ends", main: true, sortable: true, render: (d) => <span className={v.mono}>{windowText(d.endsAt)}</span> },
+  {
+    key: "status",
+    header: "Status",
+    main: true,
+    sortable: true,
+    required: "Status is always shown",
+    render: (d) => {
+      const s = delegationState(d);
+      return <Badge tone={s === "active" ? "ok" : s === "expired" ? "neutral" : "info"}>{s}</Badge>;
+    },
+  },
+  { key: "reason", header: "Reason", main: true, sortable: true, render: (d) => d.reason ?? "—" },
+  { key: "created", header: "Created", sortable: true, render: (d) => (d.createdAt ? ago(d.createdAt) : "—") },
+];
+
 function DelegationsCard() {
   const users = useUsers();
   const act = useAction();
-  const q = useQuery({
-    queryKey: ["admin", "delegations"],
-    queryFn: () => api.get<{ delegations: Delegation[] }>("/v1/delegations"),
-  });
+  const [stateFilter, setStateFilter] = useState("");
+  const delegationFilters = useMemo(() => ({ status: stateFilter || undefined }), [stateFilter]);
   const [fromUserId, setFrom] = useState("");
   const [toUserId, setTo] = useState("");
   const [startsAt, setStarts] = useState("");
   const [endsAt, setEnds] = useState("");
   const [reason, setReason] = useState("");
   const [endNow, setEndNow] = useState<Delegation | null>(null);
-
-  const status = (d: Delegation) =>
-    d.active ? "active" : new Date(d.endsAt).getTime() < Date.now() ? "expired" : "scheduled";
 
   return (
     <Card
@@ -551,34 +572,33 @@ function DelegationsCard() {
           {act.error}
         </div>
       )}
-      <Table<Delegation>
+      <div className={a.formRow}>
+        <Field label="State">
+          <Select value={stateFilter} onChange={(e) => setStateFilter(e.target.value)}>
+            <option value="">Any</option>
+            <option value="active">Active</option>
+            <option value="scheduled">Scheduled</option>
+            <option value="expired">Expired</option>
+          </Select>
+        </Field>
+      </div>
+      <DataList<Delegation>
+        listId="delegations"
+        noun="delegations"
+        endpoint="/v1/delegations"
+        exportPath="/v1/delegations/export.xlsx"
+        queryKey={["admin", "delegations"]}
+        legacyKey="delegations"
+        filters={delegationFilters}
+        defaultSort={{ key: "created", dir: "desc" }}
         columns={[
-          { key: "from", header: "From", render: (d) => d.fromName ?? d.fromUserId },
-          { key: "to", header: "To", render: (d) => d.toName ?? d.toUserId },
-          {
-            key: "window",
-            header: "Window",
-            render: (d) => (
-              <span className={v.mono}>
-                {String(d.startsAt).slice(0, 16).replace("T", " ")} →{" "}
-                {String(d.endsAt).slice(0, 16).replace("T", " ")}
-              </span>
-            ),
-          },
-          {
-            key: "status",
-            header: "Status",
-            render: (d) => {
-              const s = status(d);
-              return <Badge tone={s === "active" ? "ok" : s === "expired" ? "neutral" : "info"}>{s}</Badge>;
-            },
-          },
-          { key: "reason", header: "Reason", render: (d) => d.reason ?? "—" },
+          ...DELEGATION_COLUMNS,
           {
             key: "actions",
             header: "",
             srHeader: "Actions",
             align: "right",
+            action: true,
             render: (d) => (
               <Button size="sm" variant="danger" onClick={() => setEndNow(d)}>
                 end now
@@ -586,12 +606,8 @@ function DelegationsCard() {
             ),
           },
         ]}
-        rows={q.data?.delegations ?? []}
         rowKey={(d) => d.id}
-        loading={q.isLoading}
-        error={q.error}
-        onRetry={() => void q.refetch()}
-        empty={<EmptyState title="No delegation windows" />}
+        empty={<EmptyState title={stateFilter ? "No delegation in this state" : "No delegation windows"} />}
       />
       <ConfirmModal
         open={endNow !== null}
