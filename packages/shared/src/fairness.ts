@@ -103,8 +103,13 @@ export const FAIRNESS_LIMITS = {
   maxGroupsPerAttribute: 50,
   /** the longest cell the parser accepts */
   maxCellChars: 200,
-  /** a group with fewer rows than this is reported but left out of the metrics */
-  minGroupSize: { min: 1, max: 10_000, default: 30 },
+  /**
+   * a group with fewer rows than this is suppressed: its rows are left out of EVERY attribute's counts, rates and
+   * metrics (so no subtraction recovers them) and it is reported by name only. 30 is a HARD FLOOR (PR #633 security
+   * review): a request below it is refused, because a smaller group's outcomes identify the people in it. Raising it
+   * is a stepped-up relaxation (it leaves more groups out of the metrics).
+   */
+  minGroupSize: { min: 30, max: 10_000, default: 30 },
   /** how long an uploaded dataset is kept (encrypted), in days */
   retentionDays: { min: 1, max: 365, default: 30 },
 } as const;
@@ -207,9 +212,9 @@ export function fairnessSettingsRelaxed(
  *  - leaves a metric out (`fairnessRun.<metric>`: "omitted");
  *  - raises a `max` limit above its default or lowers a `min` limit below it, or sets `flag` where the default is
  *    `fail` (`fairnessRun.<metric>`: its `{ limit, action }`);
- *  - sets a minimum group size other than the default (`fairnessRun.minGroupSize`): above it leaves small groups
- *    out of the metrics; below it brings small groups INTO the stored and returned result, whose outcome counts and
- *    rates can identify the people in a group of one or two (PR #633 security review, round 2). Both need the step-up.
+ *  - raises the minimum group size above the default, which leaves more groups out of the metrics
+ *    (`fairnessRun.minGroupSize`). Below the default is not a relaxation but a refusal: 30 is a hard privacy floor
+ *    (the schema refuses it, and `computeFairness` throws).
  * Omitted fields are the strict defaults. Empty = nothing is relaxed and no step-up is asked.
  */
 export function fairnessRunRelaxed(
@@ -229,7 +234,7 @@ export function fairnessRunRelaxed(
       if (looserLimit || looserAction) out[`fairnessRun.${d.metric}`] = { limit: t.limit, action: t.action };
     }
   }
-  if (minGroupSize !== undefined && minGroupSize !== FAIRNESS_LIMITS.minGroupSize.default) out["fairnessRun.minGroupSize"] = minGroupSize;
+  if (minGroupSize !== undefined && minGroupSize > FAIRNESS_LIMITS.minGroupSize.default) out["fairnessRun.minGroupSize"] = minGroupSize;
   return out;
 }
 
@@ -246,13 +251,16 @@ export interface FairnessRows {
 }
 
 /**
- * One group's counts and rates. A group smaller than the minimum group size keeps only its row count: its
- * outcome counts and rates are null (PR #633 security review), because a group of one or two rows would reveal
- * those people's true outcome and prediction next to their protected attribute, and runs outlive the dataset.
+ * One group's counts and rates. A SUPPRESSED group (fewer rows than the minimum group size) is reported by name
+ * only: its row count, outcome counts and rates are all null, and its rows are left out of every attribute's
+ * counts, rates and metrics (PR #633 security review, rounds 1–3). A group of one or two rows would otherwise
+ * reveal those people's true outcome and prediction next to their protected attribute, directly or by
+ * subtracting the other groups from a total another attribute gives away, and runs outlive the dataset.
  */
 export interface FairnessGroupStats {
   group: string;
-  n: number;
+  /** null when the group is suppressed (never its exact size) */
+  n: number | null;
   /** rows whose true label is favourable (null below the minimum group size) */
   labelPositives: number | null;
   /** rows predicted favourable (null below the minimum group size) */
@@ -263,7 +271,7 @@ export interface FairnessGroupStats {
   truePositiveRate: number | null;
   /** null when the group has no unfavourable labels, or is below the minimum group size */
   falsePositiveRate: number | null;
-  /** false when the group is smaller than the minimum group size */
+  /** false when the group is suppressed (smaller than the minimum group size) */
   included: boolean;
 }
 
@@ -296,6 +304,7 @@ export type FairnessOutcome = (typeof FAIRNESS_OUTCOMES)[number];
 
 export interface FairnessResult {
   metricsVersion: string;
+  /** the rows in the metrics (rows of a suppressed group are left out of every attribute) */
   rowCount: number;
   minGroupSize: number;
   attributes: FairnessAttributeResult[];
@@ -313,10 +322,21 @@ function spread(values: readonly (number | null)[], reasonIfMissing: string): Fa
   return { value: Math.max(...nums) - Math.min(...nums) };
 }
 
-function attributeResult(attribute: string, rows: FairnessRows, groupsOf: readonly string[], minGroupSize: number): FairnessAttributeResult {
+function attributeResult(
+  attribute: string,
+  rows: FairnessRows,
+  groupsOf: readonly string[],
+  keep: readonly boolean[],
+  minGroupSize: number,
+): FairnessAttributeResult {
   const byGroup = new Map<string, { n: number; lp: number; pp: number; tp: number; fp: number }>();
+  const suppressed = new Set<string>();
   for (let i = 0; i < groupsOf.length; i++) {
     const g = groupsOf[i]!;
+    if (!keep[i]) {
+      suppressed.add(g);
+      continue;
+    }
     const s = byGroup.get(g) ?? { n: 0, lp: 0, pp: 0, tp: 0, fp: 0 };
     const y = rows.labels[i] === 1;
     const p = rows.predictions[i] === 1;
@@ -327,10 +347,16 @@ function attributeResult(attribute: string, rows: FairnessRows, groupsOf: readon
     if (!y && p) s.fp += 1;
     byGroup.set(g, s);
   }
-  const groups: FairnessGroupStats[] = [...byGroup.entries()]
+  // a group with no kept row is suppressed (a group with some kept rows has at least minGroupSize of them)
+  for (const g of byGroup.keys()) suppressed.delete(g);
+  const entries: Array<[string, { n: number; lp: number; pp: number; tp: number; fp: number } | null]> = [
+    ...byGroup.entries(),
+    ...[...suppressed].map((g) => [g, null] as [string, null]),
+  ];
+  const groups: FairnessGroupStats[] = entries
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([group, s]): FairnessGroupStats =>
-      s.n >= minGroupSize
+      s !== null && s.n >= minGroupSize
         ? {
             group,
             n: s.n,
@@ -341,8 +367,8 @@ function attributeResult(attribute: string, rows: FairnessRows, groupsOf: readon
             falsePositiveRate: s.n - s.lp > 0 ? s.fp / (s.n - s.lp) : null,
             included: true,
           }
-        : // below the minimum: the count only, never the outcomes (they would identify the people in it)
-          { group, n: s.n, labelPositives: null, predictedPositives: null, selectionRate: null, truePositiveRate: null, falsePositiveRate: null, included: false },
+        : // suppressed: the name only, never the size or the outcomes (they would identify the people in it)
+          { group, n: null, labelPositives: null, predictedPositives: null, selectionRate: null, truePositiveRate: null, falsePositiveRate: null, included: false },
     );
   const used = groups.filter((g) => g.included);
   const sel = used.map((g) => g.selectionRate as number);
@@ -373,6 +399,33 @@ function attributeResult(attribute: string, rows: FairnessRows, groupsOf: readon
 }
 
 /**
+ * Which rows stay in the computation. A row in a group smaller than `minGroupSize` under ANY attribute is left out
+ * of EVERY attribute, repeated until no kept group is too small (leaving rows out can shrink another attribute's
+ * group). Leaving a row out of only its own attribute is not enough: each attribute's counts add up to the dataset's
+ * totals, so another attribute's totals minus the included groups would give the small group's outcomes back
+ * (complementary disclosure, PR #633 security review round 3). With the rows gone from every count, rate, metric
+ * and the row count, nothing stored or returned depends on them.
+ */
+export function suppressSmallGroups(rows: FairnessRows, attributes: readonly string[], minGroupSize: number): boolean[] {
+  const keep: boolean[] = new Array(rows.labels.length).fill(true);
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const a of attributes) {
+      const col = rows.attributes[a]!;
+      const size = new Map<string, number>();
+      for (let i = 0; i < col.length; i++) if (keep[i]) size.set(col[i]!, (size.get(col[i]!) ?? 0) + 1);
+      for (let i = 0; i < col.length; i++) {
+        if (keep[i] && size.get(col[i]!)! < minGroupSize) {
+          keep[i] = false;
+          changed = true;
+        }
+      }
+    }
+  }
+  return keep;
+}
+
+/**
  * Compute every metric for every protected attribute and judge each against
  * its threshold. The outcome is, in order: `fail` when any `fail` threshold is
  * breached; `inconclusive` when a checked metric could not be computed (too few
@@ -386,15 +439,16 @@ export function computeFairness(
 ): FairnessResult {
   const thresholds = opts.thresholds ?? FAIRNESS_DEFAULT_THRESHOLDS;
   const minGroupSize = opts.minGroupSize ?? FAIRNESS_LIMITS.minGroupSize.default;
+  if (!(minGroupSize >= FAIRNESS_LIMITS.minGroupSize.min)) {
+    throw new Error(`the minimum group size may not be below the privacy floor of ${FAIRNESS_LIMITS.minGroupSize.min}`);
+  }
   const n = rows.labels.length;
   if (rows.predictions.length !== n) throw new Error("labels and predictions differ in length");
-  const attributes = Object.keys(rows.attributes)
-    .sort()
-    .map((a) => {
-      const col = rows.attributes[a]!;
-      if (col.length !== n) throw new Error("an attribute column differs in length from the labels");
-      return attributeResult(a, rows, col, minGroupSize);
-    });
+  const names = Object.keys(rows.attributes).sort();
+  for (const a of names) if (rows.attributes[a]!.length !== n) throw new Error("an attribute column differs in length from the labels");
+  const keep = suppressSmallGroups(rows, names, minGroupSize);
+  const attributes = names.map((a) => attributeResult(a, rows, rows.attributes[a]!, keep, minGroupSize));
+  const kept = keep.reduce((c, k) => c + (k ? 1 : 0), 0);
   const evaluations: FairnessEvaluation[] = [];
   for (const attr of attributes) {
     for (const t of thresholds) {
@@ -420,7 +474,7 @@ export function computeFairness(
       : evaluations.some((e) => e.status === "breach")
         ? "flag"
         : "pass";
-  return { metricsVersion: FAIRNESS_METRICS_VERSION, rowCount: n, minGroupSize, attributes, evaluations, outcome };
+  return { metricsVersion: FAIRNESS_METRICS_VERSION, rowCount: kept, minGroupSize, attributes, evaluations, outcome };
 }
 
 /** does a run with this outcome hold the model card while blocking is on? (an inconclusive run never reads as a pass) */

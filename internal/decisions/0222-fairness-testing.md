@@ -32,17 +32,17 @@ result attached to the risk record and able to hold the model.
    That is stricter, and a test covers it.
 3. **Thresholds, with strict defaults.** Each metric has a limit and an action: `fail` (the default) or `flag`. The
    defaults check all four metrics: at most 0.1 for each difference, at least 0.8 for the ratio (the four-fifths
-   rule). A group with fewer rows than the minimum group size (default 30) is reported but left out of the metrics.
+   rule). A group with fewer rows than the minimum group size is **suppressed** (see decision 6). The minimum group
+   size is 30 by default and **30 is a hard privacy floor**: the API, `computeFairness` and a DB CHECK refuse anything
+   lower, even with a step-up (PR #633 security review, round 3). Raising it is a stepped-up relaxation.
    The outcome is `fail` if a failing threshold is breached, otherwise `inconclusive` if a checked metric could not be
    computed (fewer than two groups of the minimum size, or a group with no favourable labels), otherwise `flag` if a
    flag threshold is breached, otherwise `pass`. Inconclusive is never read as a pass. **A run looser than the strict
    defaults is a relaxation (PR #633 review):** a run that leaves a metric out, raises a `max` limit above its default
-   or lowers a `min` limit below it, sets `flag` where the default is `fail`, or sets a minimum group size other than
+   or lowers a `min` limit below it, sets `flag` where the default is `fail`, or raises the minimum group size above
    30 needs a `settings_relax` step-up bound to exactly what it relaxes (`fairnessRunRelaxed`), and the run row
    (`fairness_runs.relaxed`) and its audit row record it. Without this, any admin could lift a hold with a weaker run.
-   A minimum group size *below* 30 counts too (PR #633 security review, round 2): it is statistically stricter, but it
-   brings groups of one or two people into the stored and returned result, whose outcome counts and rates identify
-   them, so it is a privacy relaxation.
+   A minimum group size *below* 30 is not a relaxation an admin can step up to: it is refused (decision 3).
 4. **A failing or inconclusive latest run holds the model card.** While blocking is on (the default), a card whose
    latest run failed or was inconclusive cannot be sent for sign-off (409 `fairness_test_failed`), and dispatch under
    it is refused on the model-risk gate's existing 409 path (`mrm_approval_required`, audit rule
@@ -69,10 +69,14 @@ result attached to the risk record and able to hold the model.
    rows are deleted (ciphertext set to NULL) at the retention date by a scheduled sweep or on an admin's delete; the
    metadata row, the sha256 and every run that cites it stay for the audit trail. Runs store aggregates only. Every
    route is admin-only through the default-deny gate; uploads and runs are rate-limited per person, and that limit
-   fails closed (503) when the counter gives no verdict. **Small groups keep their count only:** a group below the
-   minimum group size stores and returns its row count, with its outcome counts and rates null, because a group of
-   one or two rows would reveal those people's true outcome and prediction next to their protected attribute, and
-   runs outlive the dataset.
+   fails closed (503) when the counter gives no verdict. **Small groups are suppressed, not shown:** a group below
+   the minimum group size is named only, with its size, outcome counts and rates null, and its rows are left out of
+   EVERY attribute's counts, rates, metrics and the run's row count, repeated until no kept group is too small
+   (`suppressSmallGroups`). Hiding a group only within its own attribute is not enough: each attribute's counts add
+   up to the dataset's totals, so another attribute's totals minus the included groups would give a one-person
+   group's outcome back (complementary disclosure). A test proves the stored and returned run is identical whatever
+   the suppressed person's outcome and prediction. This changes fairlearn's numbers only for datasets with
+   suppressed groups (their rows are not measured); the golden dataset has none.
 7. **The run sits on the model card's record.** A run is stored against its card (`fairness_runs.card_id`) with the
    dataset's sha256, the metrics version, the thresholds and the result; its audit row is on the model card. The card
    screen links to its tests, and the hold is read at sign-off and at dispatch. A run is not yet a row in

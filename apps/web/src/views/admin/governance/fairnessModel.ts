@@ -52,7 +52,8 @@ export interface FairnessDatasetView {
 
 export interface FairnessGroupView {
   group: string;
-  n: number;
+  /** null for a suppressed group (below the minimum size): it is named only */
+  n: number | null;
   /** null for a group below the minimum size: only its row count is kept */
   labelPositives: number | null;
   predictedPositives: number | null;

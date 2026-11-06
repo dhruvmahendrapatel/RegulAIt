@@ -10,7 +10,8 @@
 --    retention date or on delete; the row, its sha256 and its runs stay for the audit trail. The purge CHECK makes
 --    "rows kept" and "purged" exclusive.
 -- 3. `fairness_runs`: one computation on one dataset against one model card, aggregates only (group counts and
---    rates, metric values, each threshold's verdict; a group below the minimum size keeps its count only). A
+--    rates, metric values, each threshold's verdict; a group below the minimum size is named only, and its rows
+--    are left out of every attribute). The minimum group size has a hard privacy floor of 30 (CHECK). A
 --    dataset referenced by a run is never deleted (RESTRICT). `card_model_version` snapshots the card's pinned
 --    model version at run time: once the card names another version the run is stale and holds the card.
 --    `relaxed` records how the run's thresholds were looser than the strict defaults (a step-up was given).
@@ -70,7 +71,7 @@ CREATE TABLE IF NOT EXISTS "fairness_runs" (
   "created_by_user_id" uuid REFERENCES "users"("id") ON DELETE SET NULL,
   "created_at" timestamp with time zone DEFAULT now() NOT NULL,
   CONSTRAINT "fairness_runs_outcome_check" CHECK ("outcome" IN ('pass', 'flag', 'fail', 'inconclusive')),
-  CONSTRAINT "fairness_runs_min_group_size_check" CHECK ("min_group_size" BETWEEN 1 AND 10000)
+  CONSTRAINT "fairness_runs_min_group_size_check" CHECK ("min_group_size" BETWEEN 30 AND 10000)
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "fairness_runs_card_created_idx" ON "fairness_runs" ("card_id", "created_at");

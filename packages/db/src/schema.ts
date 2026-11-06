@@ -6144,7 +6144,7 @@ export const fairnessRuns = pgTable(
   },
   (t) => [
     check("fairness_runs_outcome_check", sql`${t.outcome} IN ('pass','flag','fail','inconclusive')`),
-    check("fairness_runs_min_group_size_check", sql`${t.minGroupSize} BETWEEN 1 AND 10000`),
+    check("fairness_runs_min_group_size_check", sql`${t.minGroupSize} BETWEEN 30 AND 10000`),
     index("fairness_runs_card_created_idx").on(t.cardId, t.createdAt),
     index("fairness_runs_dataset_idx").on(t.datasetId),
   ],

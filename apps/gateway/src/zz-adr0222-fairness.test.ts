@@ -247,7 +247,7 @@ describe("ADR-0222: a run measures, and a failing result holds the card", () => 
 
   it("reproduces fairlearn's values through the API, fails under the strict defaults, and is audited", async () => {
     goldenId = datasetIds.at(-1)!;
-    const res = await runTest({ datasetId: goldenId, cardId, minGroupSize: 1 });
+    const res = await runTest({ datasetId: goldenId, cardId });
     expect(res.statusCode).toBe(201);
     const run = res.json().run;
     runId = run.id;
@@ -326,9 +326,6 @@ describe("ADR-0222: a run measures, and a failing result holds the card", () => 
       { body: { thresholds: strict.map((t) => (t.metric === "equalized_odds_difference" ? { ...t, action: "flag" } : t)) }, key: "fairnessRun.equalized_odds_difference" },
       // a minimum group size above 30 leaves small groups out
       { body: { minGroupSize: 31 }, key: "fairnessRun.minGroupSize" },
-      // below 30 it would store and return the outcomes of groups of one or two people
-      { body: { minGroupSize: 1 }, key: "fairnessRun.minGroupSize" },
-      { body: { minGroupSize: 10 }, key: "fairnessRun.minGroupSize" },
     ];
     const before = (await db.select({ id: fairnessRuns.id }).from(fairnessRuns).where(eq(fairnessRuns.cardId, cardId))).length;
     for (const c of lenientCases) {
@@ -343,12 +340,12 @@ describe("ADR-0222: a run measures, and a failing result holds the card", () => 
     expect((await runTest({ datasetId: fairId, cardId }, adminKey)).statusCode).toBe(201);
     const tighter = strict.map((t) => ({ ...t, limit: t.metric === "disparate_impact_ratio" ? 0.9 : 0.05 }));
     expect((await runTest({ datasetId: fairId, cardId, thresholds: tighter, minGroupSize: 30 }, adminKey)).statusCode).toBe(201);
-    // a small minimum group size with the step-up: recorded as relaxed, on the run and its audit row
-    const small = await runTest({ datasetId: fairId, cardId, minGroupSize: 1 });
-    expect(small.statusCode).toBe(201);
-    expect(small.json().run.relaxed).toEqual({ "fairnessRun.minGroupSize": 1 });
-    const [smallAudit] = (await audits(FAIRNESS_RULE_IDS.run)).filter((a) => (a.detail as { fairnessRunId: string }).fairnessRunId === small.json().run.id);
-    expect((smallAudit!.detail as { relaxed: Record<string, unknown> }).relaxed).toEqual({ "fairnessRun.minGroupSize": 1 });
+    // below 30 is a hard privacy floor: refused even with a step-up (the bootstrap token can give one), nothing recorded
+    for (const minGroupSize of [1, 10, 29]) {
+      const refused = await runTest({ datasetId: fairId, cardId, minGroupSize });
+      expect(refused.statusCode, String(minGroupSize)).toBe(400);
+    }
+    expect((await db.select({ id: fairnessRuns.id }).from(fairnessRuns).where(eq(fairnessRuns.cardId, cardId))).length).toBe(before + 2);
     // with the step-up the lenient run is recorded, and the run and its audit row say what was relaxed
     const stepped = await runTest({ datasetId: fairId, cardId, minGroupSize: 40 });
     expect(stepped.statusCode).toBe(201);
@@ -379,14 +376,44 @@ describe("ADR-0222: a run measures, and a failing result holds the card", () => 
     expect(await mrmDispatchGate(db, ctx)).toBeNull();
   });
 
+  it("a one-person group cannot be recovered by subtraction: the run is the same whatever that person's outcome", async () => {
+    // the security review's example: sex M/F all included; ethnicity A large, B one person
+    const csvFor = (bLabel: number, bPrediction: number) => {
+      const lines = ["sex,ethnicity,y,p"];
+      for (let i = 0; i < 200; i++) lines.push(`${i % 2 === 0 ? "M" : "F"},A,${i % 3 === 0 ? 1 : 0},${i % 4 === 0 ? 1 : 0}`);
+      lines.push(`F,B,${bLabel},${bPrediction}`);
+      return lines.join("\n");
+    };
+    const results: string[] = [];
+    for (const [y, p] of [[0, 0], [1, 1], [0, 1], [1, 0]] as const) {
+      const up = await upload({ name: `Subtraction ${y}${p} ${RUN}`, csv: csvFor(y, p), labelColumn: "y", predictionColumn: "p", favourableLabel: "1", protectedAttributes: ["sex", "ethnicity"] });
+      expect(up.statusCode).toBe(201);
+      const run = await runTest({ datasetId: up.json().dataset.id, cardId });
+      expect(run.statusCode).toBe(201);
+      const [stored] = await db.select().from(fairnessRuns).where(eq(fairnessRuns.id, run.json().run.id));
+      expect(stored!.result).toEqual(run.json().run.result);
+      results.push(JSON.stringify(run.json().run.result));
+      const b = run.json().run.result.attributes.find((a: { attribute: string }) => a.attribute === "ethnicity").groups.find((g: { group: string }) => g.group === "B");
+      expect(b).toEqual({ group: "B", n: null, labelPositives: null, predictedPositives: null, selectionRate: null, truePositiveRate: null, falsePositiveRate: null, included: false });
+      expect(run.json().run.result.rowCount).toBe(200);
+    }
+    // nothing stored or returned depends on the suppressed person's outcome or prediction
+    expect(new Set(results).size).toBe(1);
+    // keep the fair dataset last for the tests below
+    const fair = await upload({ name: `Fair again ${RUN}`, csv: fairCsv(), labelColumn: "y", predictionColumn: "p", favourableLabel: "1", protectedAttributes: ["group"] });
+    expect(fair.statusCode).toBe(201);
+    expect((await runTest({ datasetId: fair.json().dataset.id, cardId })).json().run.outcome).toBe("pass");
+  });
+
   it("an inconclusive run holds too: too few rows per group is never a pass", async () => {
     const fairId = datasetIds.at(-1)!;
     const res = await runTest({ datasetId: fairId, cardId, minGroupSize: 1000 });
     expect(res.json().run.outcome).toBe("inconclusive");
-    // groups below the minimum keep their count only: no outcome counts or rates are stored or returned
+    // suppressed groups are named only: no size, outcome counts or rates are stored or returned
     for (const g of res.json().run.result.attributes[0].groups) {
-      expect(g).toMatchObject({ included: false, labelPositives: null, predictedPositives: null, selectionRate: null, truePositiveRate: null, falsePositiveRate: null });
+      expect(g).toMatchObject({ included: false, n: null, labelPositives: null, predictedPositives: null, selectionRate: null, truePositiveRate: null, falsePositiveRate: null });
     }
+    expect(res.json().run.result.rowCount).toBe(0);
     const [stored] = await db.select().from(fairnessRuns).where(eq(fairnessRuns.id, res.json().run.id));
     expect(JSON.stringify(stored!.result)).not.toMatch(/"selectionRate":\d/);
     const ctx = { userId: NO_IDENTITY, agentId, agentName: `fair-agent-${RUN}`, model: null, customProviderId: null };

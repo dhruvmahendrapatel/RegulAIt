@@ -25,7 +25,7 @@ const LIMITS = {
   maxAttributes: 5,
   maxGroupsPerAttribute: 50,
   maxCellChars: 200,
-  minGroupSize: { min: 1, max: 10_000, default: 30 },
+  minGroupSize: { min: 30, max: 10_000, default: 30 },
   retentionDays: { min: 1, max: 365, default: 30 },
 };
 const DEFAULT_THRESHOLDS = [

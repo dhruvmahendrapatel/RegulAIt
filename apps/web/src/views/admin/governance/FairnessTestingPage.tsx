@@ -536,7 +536,7 @@ function RunDetail({ run, cardLabelText, onClose }: { run: FairnessRunView; card
           <Link to="/admin/model-risk">Open Model risk</Link>
         </p>
         <p className={v.faint}>
-          {`${plural(run.result.rowCount, "row")}; groups smaller than ${run.minGroupSize} are left out of the metrics and show their row count only. Computed on the predictions in the file.`}
+          {`${plural(run.result.rowCount, "row")} in the metrics. A group smaller than ${run.minGroupSize} is suppressed: it is named only, and its rows are left out of every attribute so its outcomes cannot be worked out. Computed on the predictions in the file.`}
         </p>
         {Object.keys(run.relaxed ?? {}).length > 0 && (
           <p data-testid="fairness-run-relaxed">
@@ -571,7 +571,7 @@ function RunDetail({ run, cardLabelText, onClose }: { run: FairnessRunView; card
               rowKey={(g) => g.group}
               columns={[
                 { key: "group", header: "Group", render: (g) => g.group },
-                { key: "n", header: "Rows", render: (g) => g.n.toLocaleString() },
+                { key: "n", header: "Rows", render: (g) => (g.n === null ? `fewer than ${run.minGroupSize}` : g.n.toLocaleString()) },
                 { key: "sel", header: "Favourable predictions", render: (g) => <span className={v.mono}>{fmtMetric(g.selectionRate)}</span> },
                 { key: "tpr", header: "True positive rate", render: (g) => <span className={v.mono}>{fmtMetric(g.truePositiveRate)}</span> },
                 { key: "fpr", header: "False positive rate", render: (g) => <span className={v.mono}>{fmtMetric(g.falsePositiveRate)}</span> },
