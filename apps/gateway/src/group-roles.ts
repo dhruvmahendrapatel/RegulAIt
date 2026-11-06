@@ -61,7 +61,7 @@ import {
   type Db,
   type GroupSource,
 } from "@regulait/db";
-import { lockApproverRoles } from "./approval-pool.js";
+import { approverPoolShiftFacts, lockApprovalRuleRouting, lockApproverRoles } from "./approval-pool.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -89,7 +89,10 @@ export type GroupReconcileResult = {
   /** roles implied by currently-mapped, currently-asserted groups */
   impliedRoleIds: string[];
   added: Array<{ roleId: string; roleName: string | null; viaGroups: string[] }>;
-  removed: Array<{ roleId: string; roleName: string | null }>;
+  /** issue #668: `approverPoolShift` when the removal moved who signs for the user's calls to a wider pool. A removal
+   * is never withheld (revoking access the IdP withdrew comes first); the mapping delete that caused it was the
+   * step-up-gated act, and this records the shift on the reconciliation's audit row. */
+  removed: Array<{ roleId: string; roleName: string | null; approverPoolShift?: Record<string, unknown> }>;
   /** ADR-0186 decision 29: implied roles NOT granted because they are approver roles */
   withheld: Array<{ roleId: string; roleName: string | null; viaGroups: string[] }>;
 };
@@ -262,7 +265,9 @@ export async function reconcileGroupRoles(
   //    adds anyone to an APPROVER role (one an approval rule as served names) —
   //    the same rule as the JIT default role (`grantJitDefaultRole`). Decided per
   //    role under the approver-role lock, so a rule edit naming the role cannot
-  //    interleave. Withheld and audited; an admin may assign the role directly,
+  //    interleave. Issue #668: nor to a role whose approval rules would move who
+  //    signs for the user's calls to a wider pool (`approverPoolShiftFacts`).
+  //    Withheld and audited; an admin may assign the role directly,
   //    with the settings_relax step-up a role assignment needs.
   const added: GroupReconcileResult["added"] = [];
   const withheld: GroupReconcileResult["withheld"] = [];
@@ -270,6 +275,10 @@ export async function reconcileGroupRoles(
     const outcome = await db.transaction(async (rawTx) => {
       const tx = rawTx as unknown as Db;
       if ((await lockApproverRoles(tx, [roleId])).has(roleId)) return "withheld" as const;
+      // issue #668: nor one whose approval rules would move who signs for this user's calls to a wider pool
+      if (await approverPoolShiftFacts(tx, { change: "member-add", objectType: "role", objectId: roleId, userId })) {
+        return "withheld" as const;
+      }
       await tx.insert(roleAssignments).values({ userId, roleId, origin: "group" }).onConflictDoNothing();
       return "granted" as const;
     });
@@ -279,16 +288,32 @@ export async function reconcileGroupRoles(
   }
   const removed: GroupReconcileResult["removed"] = [];
   for (const roleId of toRemove) {
-    await db
-      .delete(roleAssignments)
-      .where(
-        and(
-          eq(roleAssignments.userId, userId),
-          eq(roleAssignments.roleId, roleId),
-          eq(roleAssignments.origin, "group"),
-        ),
-      );
-    removed.push({ roleId, roleName: nameById.get(roleId) ?? null });
+    const shift = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      // #675 review round 2 (write-skew): ALWAYS take the role row lock, then the routing lock, BEFORE reading the
+      // direct row, so this removal serialises with an admin unassign of the same role in either order (decision 16's
+      // order). Without it, each side could delete "its" row while still seeing the other's, and the role would go
+      // with no step-up and no recorded shift.
+      await lockApproverRoles(tx, [roleId]);
+      await lockApprovalRuleRouting(tx);
+      // decided under the locks, before the row goes (a direct assignment of the same role keeps it held)
+      const [direct] = await tx
+        .select({ id: roleAssignments.id })
+        .from(roleAssignments)
+        .where(and(eq(roleAssignments.userId, userId), eq(roleAssignments.roleId, roleId), eq(roleAssignments.origin, "direct")));
+      const facts = direct ? null : await approverPoolShiftFacts(tx, { change: "member-remove", objectType: "role", objectId: roleId, userId });
+      await tx
+        .delete(roleAssignments)
+        .where(
+          and(
+            eq(roleAssignments.userId, userId),
+            eq(roleAssignments.roleId, roleId),
+            eq(roleAssignments.origin, "group"),
+          ),
+        );
+      return facts;
+    });
+    removed.push({ roleId, roleName: nameById.get(roleId) ?? null, ...(shift ? { approverPoolShift: shift } : {}) });
   }
 
   await auditReconciliation(db, userId, source, event, {
