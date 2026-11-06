@@ -20,11 +20,13 @@ import {
   REGULATORY_INTEL_NOTES,
   REGULATORY_UPDATE_STATUSES,
   computeRegulatoryImpact,
+  mergeRegulatoryFeeds,
   type ControlEvaluationStatus,
   type EuAiActTier,
   type RegulatoryUpdate,
 } from "@regulait/shared";
 import { evaluatePack } from "./compliance-packs.js";
+import { acceptedImportedFeedEntries } from "./framework-imports.js";
 import { POSTURE_WINDOW_DAYS } from "./posture.js";
 
 /** the G4 dataset, when it is exported; [] until then */
@@ -38,7 +40,11 @@ export async function computeRegulatoryFeed(
   opts: { now?: Date; feed?: RegulatoryUpdate[] } = {},
 ) {
   const now = opts.now ?? new Date();
-  const feed = opts.feed ?? regulatoryFeed();
+  // ADR-0215: the hand-curated entries plus every ACCEPTED feed import (none while imports are off)
+  const curated = opts.feed ?? regulatoryFeed();
+  const imported = opts.feed ? [] : await acceptedImportedFeedEntries(db);
+  const feed = mergeRegulatoryFeeds(curated, imported);
+  const importedCount = feed.length - curated.length;
   const windowStart = new Date(now.getTime() - POSTURE_WINDOW_DAYS * 86_400_000);
 
   const activePacks = await db.select().from(compliancePacks).where(eq(compliancePacks.status, "active"));
@@ -107,7 +113,9 @@ export async function computeRegulatoryFeed(
       feed:
         feed.length === 0
           ? "No regulatory feed is loaded in this build — the list is empty, not 'nothing applies'."
-          : `${feed.length} curated entries.`,
+          : importedCount > 0
+            ? `${curated.length} curated entries and ${importedCount} imported entries an admin accepted.`
+            : `${feed.length} curated entries.`,
     },
   };
 }

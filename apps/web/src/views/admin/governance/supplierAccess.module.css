@@ -1,0 +1,9 @@
+/* ADR-0221 — the supplier portal's admin screens. A link inside a sentence is underlined, so it is told apart
+   from the text around it without relying on colour (WCAG 1.4.1). */
+.inlineLink {
+  text-decoration: underline;
+}
+.prose {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

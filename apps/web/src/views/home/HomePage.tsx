@@ -9,8 +9,8 @@ import { Link, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { CardBoundary } from "../../ui/CardBoundary";
 import { api } from "../../api/client";
+import { pendingQueueQuery, pendingRows, queueTotal, type ApprovalQueuePage } from "../../api/approvalQueue";
 import type {
-  Approval,
   AuditEntry,
   RunSummary,
   SetupStatusResponse,
@@ -85,18 +85,14 @@ const readDismissed = () => {
 };
 
 /**
- * The pending figures count from the server-filtered queue: the full list is
- * capped at 100 rows, so filtering it client-side under-counts a busy queue.
- * Every approval decision invalidates the ["approvals"] prefix, which covers this key.
+ * The pending figures come from the server-filtered queue, oldest first (the same query the Inbox and the nav badge
+ * read, so one fetch serves all three). The page is capped at 100 rows, so the COUNT is the server's `total`, never
+ * the length of the page. Every approval decision invalidates the ["approvals"] prefix, which covers this key.
  */
 function usePendingApprovals() {
-  return useQuery({
-    queryKey: ["approvals", "pending"],
-    queryFn: () => api.get<{ approvals: Approval[] }>("/v1/approvals?status=pending"),
-  });
+  return useQuery(pendingQueueQuery());
 }
-const pendingOf = (data: { approvals?: Approval[] } | undefined): Approval[] =>
-  (Array.isArray(data?.approvals) ? data.approvals : []).filter((a) => a.status === "pending");
+const pendingCountOf = (data: ApprovalQueuePage | undefined): number => queueTotal(data, pendingRows(data).length);
 
 function OrientationCard() {
   const [dismissed, setDismissed] = useState(readDismissed);
@@ -110,7 +106,7 @@ function OrientationCard() {
     queryKey: ["setup-status"],
     queryFn: () => api.get<SetupStatusResponse>("/v1/setup/status"),
   });
-  const pending = pendingOf(approvals.data).length;
+  const pending = pendingCountOf(approvals.data);
   const totals = usage.data?.totals ?? {};
   // Dismissal hides the ORIENTATION (prose + start-here links), never the live
   // numbers — those are a dashboard, not onboarding (owner feedback, 2026-08-21).
@@ -207,7 +203,7 @@ function SuiteLauncher() {
     queryFn: () => api.get<{ runs: RunSummary[] }>("/v1/runs"),
   });
 
-  const pending = pendingOf(approvals.data).length;
+  const pending = pendingCountOf(approvals.data);
   const stat = (suiteId: string): { value: string; label: string } | null => {
     switch (suiteId) {
       case "workspace":
@@ -325,7 +321,8 @@ function ApprovalsCard() {
         <ErrorState message={(q.error as Error).message} onRetry={() => void q.refetch()} />
       </Card>
     );
-  const pending = pendingOf(q.data);
+  const pending = pendingRows(q.data);
+  const pendingTotal = pendingCountOf(q.data);
   return (
     <Card
       title={auth?.isAdmin ? "Pending approvals — org-wide" : "Waiting on you"}
@@ -339,8 +336,8 @@ function ApprovalsCard() {
       ) : (
         <>
           <div className={v.stat} style={{ marginBottom: "var(--s1)" }}>
-            <span className={v.statValue}>{pending.length}</span>
-            <span className={v.statLabel}>pending decision{pending.length === 1 ? "" : "s"}</span>
+            <span className={v.statValue}>{pendingTotal}</span>
+            <span className={v.statLabel}>pending decision{pendingTotal === 1 ? "" : "s"}</span>
           </div>
           {pending.slice(0, 4).map((a) => (
             <Link key={a.id} to="/inbox" className={v.listRow} style={{ color: "inherit", textDecoration: "none" }}>

@@ -135,7 +135,7 @@ export function vendorAiAssessmentDefinition(): WorkflowDefinition {
   };
 }
 
-function builtInShapes(): Array<
+export function builtInShapes(): Array<
   Pick<GalleryEntry, "galleryId" | "title" | "description"> & { definition: WorkflowDefinition }
 > {
   const standardStages: Stage[] = [
@@ -149,7 +149,7 @@ function builtInShapes(): Array<
       galleryId: "standard-change",
       title: "Standard change",
       description:
-        "Intake → forced plan → requirements artifact → human sign-off. The §2 core loop with nothing extra.",
+        "Intake → forced plan → requirements artifact → human sign-off. The standard chain with nothing extra.",
       definition: { workflow: "standard-change", stages: standardStages },
     },
     {
@@ -296,9 +296,7 @@ export async function buildTemplateGallery(
     entries.push({
       galleryId: `compliance-${ps.tag}`,
       title: `Compliance-heavy: ${ps.tag}`,
-      description:
-        `The standard chain merged with every template the '${ps.tag}' profile requires — ` +
-        `the exact flow the §8.3 cascade forces onto a project carrying this tag.`,
+      description: complianceShapeDescription(ps.tag),
       source: "compliance_profile",
       profileTag: ps.tag,
       definition: { ...definition, workflow: `compliance-${ps.tag}` },
@@ -312,6 +310,14 @@ export async function buildTemplateGallery(
 /** a gallery shape with its `requesting_user` placeholder replaced by a named
  * approver (unchanged without one). The one substitution "create from
  * gallery" and the decision-regression preview of a variant both apply. */
+/** the gallery card text for a compliance-heavy shape */
+export function complianceShapeDescription(tag: string): string {
+  return (
+    `The standard chain merged with every template the '${tag}' profile requires — ` +
+    `the exact flow a project with this tag is required to follow.`
+  );
+}
+
 export function galleryDefinitionWithApprover(definition: WorkflowDefinition, approverUserId: string | undefined): WorkflowDefinition {
   if (!approverUserId) return definition;
   return {

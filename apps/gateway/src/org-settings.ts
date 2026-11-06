@@ -27,6 +27,7 @@ import {
   auditLog,
   complianceProfiles,
   connectorRevocations,
+  approvalRules,
   eq,
   inArray,
   isNotNull,
@@ -71,14 +72,17 @@ import { checkCredentialBaseUrl } from "./credential-egress.js";
 // types, so this PATCH may not write the row directly — it goes through the one
 // choke point, which mints and activates a version when the rule is versioned.
 import { applyRuleEdit, currentEffectiveBody, isRuleEditRefusal } from "./rule-writes.js";
+import { approverPoolTakeoverFacts, routedApprovalRule } from "./approval-pool.js";
 import { lockRuleArtifact } from "./config-versions.js";
 import { recordSchedulerFailure, recordSchedulerSuccess } from "./scheduler-health.js";
 import { evaluateIpEnvelope, isValidCidr } from "./net-policy.js";
 import { countEnabledSsoProviders } from "./sso-providers.js";
 import { signInInvariantChecked, signInInvariantWritten, withSignInInvariant } from "./break-glass.js";
 import { settingTransitions } from "./setting-transitions.js";
+import { revokeAuditorAccessOnDisable } from "./trust-pages-revoke.js";
 import { databaseNow } from "./db-clock.js";
 import {
+  approvalRuleStepUp,
   breakGlassChange,
   CHANGED_CONCURRENTLY,
   breakGlassStepUpRefusal,
@@ -976,6 +980,10 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
             : "org settings written with no effective change") +
           (relaxed.length > 0 ? ` — RELAXED from the strict default: ${relaxed.join(", ")}` : ""),
       });
+      // ADR-0225 (review M1): trust pages turned off ends every auditor's access in this same commit; on again revives none
+      if (locked.trustPagesEnabled && !after.trustPagesEnabled) {
+        await revokeAuditorAccessOnDisable(tx as unknown as Db, req.authCtx.userId);
+      }
       return { after };
     });
     if ("status" in out) return reply.status(out.status).send(out.body);
@@ -1025,13 +1033,32 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
     // settings_relax step-up bound to the rule and its new scope. Widening it
     // to every mode (null) needs none.
     const nextMode = body.deployMode ?? null;
-    if (nextMode !== null && nextMode !== beforeMode) {
+    // ADR-0229 amendment (review round 3, non-blocking 2): on an approval rule, a mode change can also move who signs
+    // (the rule's specificity changes). That takeover is folded into THIS route's one binding, so a single step-up
+    // covers both facts: one request carries one step-up header, and a second, separate binding could never be met.
+    // The writer recomputes it under the locks; if it moved since, the writer asks again (fail closed).
+    let routeTakeover: Record<string, unknown> | null = null;
+    if (kind === "approvals" && nextMode !== beforeMode) {
+      const [row] = await db.select().from(approvalRules).where(eq(approvalRules.id, ruleId));
+      if (row) {
+        const effective = { ...(row as unknown as Record<string, unknown>), ...((await currentEffectiveBody(db, "approval_rule", ruleId)) ?? {}) };
+        routeTakeover = await approverPoolTakeoverFacts(db, {
+          ruleId,
+          before: routedApprovalRule(effective),
+          after: routedApprovalRule({ ...effective, deployMode: nextMode }),
+        });
+      }
+    }
+    const narrowing = nextMode !== null && nextMode !== beforeMode;
+    if (narrowing || routeTakeover) {
       const refusal = await stepUpRefusal(db, req, {
         kind: "settings_relax",
-        facts: { ruleKind: kind, ruleId, values: { deployMode: nextMode } },
+        facts: { ruleKind: kind, ruleId, values: { ...(narrowing ? { deployMode: nextMode } : {}), ...(routeTakeover ?? {}) } },
       });
       if (refusal) return reply.status(refusal.status).send(refusal.body);
     }
+    const takeoverKey = (v: Record<string, unknown> | null) =>
+      JSON.stringify([v?.outranksApprovalRules ?? [], v?.outrankedByApprovalRules ?? []]);
     // ADR-0186 A (Class A): the step-up was decided on `beforeMode`; under the rule's own
     // row lock a scope that moved since is refused, never overwritten
     const res = await db.transaction(async (rawTx) => {
@@ -1042,8 +1069,20 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
       return applyRuleEdit<{ id: string; deployMode: string | null }>(tx, {
       // this route asked its own settings_relax step-up for a narrowing above (the
       // same rule as the edit guard's deploy-mode comparator), decided again on the
-      // locked scope just now — the guard inside the writer is satisfied by it
-      stepUp: async () => {},
+      // locked scope just now — the guard inside the writer is satisfied by it FOR
+      // THAT FACT ONLY. ADR-0229 amendment (review round 2, blocker): on an approval
+      // rule the writer may also find an approver-pool takeover (clearing the mode
+      // makes the rule overlap rules it did not, or lets a wider rule outrank it);
+      // that is a separate loosening, so it gets the real step-up, bound to the
+      // takeover facts, never this route's earlier grant
+      stepUp: async (facts) => {
+        const values = (facts as { values?: Record<string, unknown> }).values ?? {};
+        const takeover = "outranksApprovalRules" in values || "outrankedByApprovalRules" in values;
+        // the route's one step-up already covers exactly this takeover; a different one (state moved) is asked again
+        if (kind === "approvals" && takeover && takeoverKey(values) !== takeoverKey(routeTakeover)) {
+          return approvalRuleStepUp(db, req)(facts);
+        }
+      },
       artifactType: RULE_ARTIFACT_TYPES[kind],
       artifactId: ruleId,
       patch: { deployMode: body.deployMode ?? null },

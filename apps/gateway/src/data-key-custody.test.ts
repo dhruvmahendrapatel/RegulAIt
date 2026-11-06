@@ -912,8 +912,8 @@ describe("the ciphertext inventory", () => {
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i]!;
       if (line.includes("pgTable(")) {
-        const inline = /pgTable\(\s*"([a-z_]+)"/.exec(line);
-        table = inline ? inline[1]! : (/"([a-z_]+)"/.exec(lines[i + 1] ?? "")?.[1] ?? null);
+        const inline = /pgTable\(\s*"([a-z0-9_]+)"/.exec(line);
+        table = inline ? inline[1]! : (/"([a-z0-9_]+)"/.exec(lines[i + 1] ?? "")?.[1] ?? null);
       }
       const col = /text\("(\w*_ciphertext)"\)/.exec(line);
       if (col && table) found.add(`${table}.${col[1]}`);
@@ -927,8 +927,8 @@ describe("the ciphertext inventory", () => {
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i]!;
         if (line.includes("pgTable(")) {
-          const inline = /pgTable\(\s*"([a-z_]+)"/.exec(line);
-          inTable = inline ? inline[1]! : (/"([a-z_]+)"/.exec(lines[i + 1] ?? "")?.[1] ?? null);
+          const inline = /pgTable\(\s*"([a-z0-9_]+)"/.exec(line);
+          inTable = inline ? inline[1]! : (/"([a-z0-9_]+)"/.exec(lines[i + 1] ?? "")?.[1] ?? null);
         }
         if (inTable === c.table && line.includes(`text("${c.column}")`)) seen = true;
       }

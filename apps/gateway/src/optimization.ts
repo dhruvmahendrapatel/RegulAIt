@@ -1,8 +1,9 @@
 import type { FastifyInstance } from "fastify";
-import { costEvents, count, desc, eq, sql, usageEvents, type Db, type SQL } from "@regulait/db";
+import { and, connectors, costEvents, count, desc, eq, gte, lt, sql, usageEvents, type Db, type SQL } from "@regulait/db";
 import { z } from "zod";
 import { streamUsageEventsCsv } from "./projects.js";
 import { resolveCsvWindow } from "./csv-export.js";
+import { USAGE_SUMMARY_DEFAULT_DAYS, usageSummaryQuery } from "./list-queries.js";
 
 const listQuery = z.object({
   userId: z.string().uuid().optional(),
@@ -91,4 +92,104 @@ export function registerOptimizationRoutes(app: FastifyInstance, db: Db) {
 
     return { events, totals };
   });
+
+  // PILLAR 5 breakdowns, aggregated IN THE DATABASE over a stated window — so
+  // spend by agent, connector, MCP tool, project and day cover every event in the window,
+  // never a client-side sum over the newest page of `/v1/usage-events`.
+  // Same entitlement scoping as `/v1/usage-events`: a non-admin's `userId` is
+  // forced to self (the query string is not trusted); an admin may name one
+  // user or omit it for the organisation; a bootstrap operator with no user
+  // identity is refused, as there.
+  app.get("/v1/usage-events/summary", async (req, reply) => {
+    const q = usageSummaryQuery.parse(req.query);
+    const userId = req.authCtx.isAdmin ? q.userId : req.authCtx.userId;
+    if (!req.authCtx.isAdmin && !userId) {
+      return reply.status(403).send({ error: "bootstrap_has_no_usage_history" });
+    }
+    const to = q.to ?? new Date();
+    const from = q.from ?? new Date(to.getTime() - USAGE_SUMMARY_DEFAULT_DAYS * 86_400_000);
+    if (from >= to) return reply.status(400).send({ error: "invalid_window", detail: "`from` must be before `to`" });
+    const inWindow = and(
+      ...(userId ? [eq(usageEvents.userId, userId)] : []),
+      gte(usageEvents.at, from),
+      lt(usageEvents.at, to),
+    );
+    const ofType = (t: string) => and(inWindow, eq(usageEvents.objectType, t));
+    const costUsd = sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8`;
+    const events = sql<number>`count(*)::int`;
+    // `agent`, `connector` and `mcp_tool` each read only their own object type
+    // (the price models are not comparable); `project` and `day` span the whole
+    // ledger, as the totals do. Whatever no typed breakdown names (a training
+    // job, say) is reported in `ledger.other`, so the typed breakdowns plus
+    // `other` always add up to `ledger` — nothing drops out silently.
+    const day = sql<string>`to_char(${usageEvents.at} AT TIME ZONE 'UTC', 'YYYY-MM-DD')`;
+    const groupsQuery = (() => {
+      switch (q.groupBy) {
+        case "agent":
+          return db
+            .select({ agentId: usageEvents.agentId, costUsd, events })
+            .from(usageEvents)
+            .where(ofType("agent"))
+            .groupBy(usageEvents.agentId)
+            .orderBy(desc(costUsd));
+        case "connector":
+          return db
+            .select({ connectorId: usageEvents.connectorId, name: connectors.name, operation: usageEvents.operation, costUsd, events })
+            .from(usageEvents)
+            .leftJoin(connectors, eq(usageEvents.connectorId, connectors.id))
+            .where(ofType("connector"))
+            .groupBy(usageEvents.connectorId, connectors.name, usageEvents.operation)
+            .orderBy(desc(costUsd));
+        case "mcp_tool":
+          // an MCP row carries no agent; `operation` is the tool name (the
+          // server id rides the detail jsonb, as in the per-project rollup)
+          return db
+            .select({ toolName: usageEvents.operation, costUsd, events })
+            .from(usageEvents)
+            .where(ofType("mcp_tool"))
+            .groupBy(usageEvents.operation)
+            .orderBy(desc(costUsd));
+        case "project":
+          return db
+            .select({ projectId: usageEvents.projectId, costUsd, events })
+            .from(usageEvents)
+            .where(inWindow)
+            .groupBy(usageEvents.projectId)
+            .orderBy(desc(costUsd));
+        case "day":
+          return db.select({ day, costUsd, events }).from(usageEvents).where(inWindow).groupBy(day).orderBy(day);
+      }
+    })();
+    const [groups, byType] = await Promise.all([
+      groupsQuery,
+      db
+        .select({ objectType: usageEvents.objectType, costUsd, events })
+        .from(usageEvents)
+        .where(inWindow)
+        .groupBy(usageEvents.objectType),
+    ]);
+    const totals = { events: 0, costUsd: 0 };
+    for (const g of groups as ReadonlyArray<{ events: number; costUsd: number }>) {
+      totals.events += g.events;
+      totals.costUsd += g.costUsd;
+    }
+    const sumOf = (rows: typeof byType) =>
+      rows.reduce((a, r) => ({ events: a.events + r.events, costUsd: a.costUsd + r.costUsd }), { events: 0, costUsd: 0 });
+    const ledger = {
+      ...sumOf(byType),
+      byObjectType: byType,
+      other: sumOf(byType.filter((r) => !TYPED_BREAKDOWNS.has(r.objectType))),
+    };
+    return {
+      groupBy: q.groupBy,
+      userId: userId ?? null,
+      window: { from: from.toISOString(), to: to.toISOString(), defaulted: !q.from },
+      groups,
+      totals,
+      ledger,
+    };
+  });
 }
+
+/** the object types that have a breakdown of their own (`groupBy=agent|connector|mcp_tool`) */
+const TYPED_BREAKDOWNS: ReadonlySet<string> = new Set(["agent", "connector", "mcp_tool"]);
