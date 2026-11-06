@@ -512,6 +512,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/governance/alerts/export.xlsx": "internal",
   // ADR-0175 A7 / A15 — the credential inventory and the energy estimate (admin console)
   "GET /v1/admin/credentials": "internal",
+  // ADR-0233 (S6): the existing-rows report for the content-credential guard (admin console)
+  "GET /v1/admin/content-credential-report": "internal",
   "GET /v1/energy/factors": "internal",
   "PUT /v1/energy/factors": "internal",
   "DELETE /v1/energy/factors/:factorId": "internal",
@@ -1760,6 +1762,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/governance/alerts": "reports",
   "GET /v1/governance/alerts/export.xlsx": "reports",
   "GET /v1/admin/credentials": "reports",
+  "GET /v1/admin/content-credential-report": "reports",
   "GET /v1/energy/factors": "reports",
   "PUT /v1/energy/factors": "reports",
   "DELETE /v1/energy/factors/:factorId": "reports",
