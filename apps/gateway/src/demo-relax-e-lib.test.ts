@@ -127,12 +127,46 @@ describe("applyDemoERelaxation", () => {
 });
 
 describe("checkEnforceBeatPrereqs (demo:check row)", () => {
-  const getter = (settings: Json, mode = "live") => async (url: string) =>
+  // the seeded rules: Dana's specific write_file rule (Avery) and the fleet write rule (Ada), fleet FIRST by id and
+  // in the list, so only ADR-0229 precedence (not load order) can route the queue to Avery
+  const USERS = [
+    { id: "u-ada", email: "admin@regulait.local" },
+    { id: "u-dana", email: "dana@regulait.local" },
+    { id: "u-avery", email: "avery@regulait.local" },
+  ];
+  const FLEET = { id: "a-fleet", userId: null, serverId: null, scope: "fleet", serverScope: "all", toolName: null, writeOnly: true, approverUserId: "u-ada" };
+  const DANA_RULE = { id: "z-dana", userId: "u-dana", serverId: "s-repo", scope: "user", serverScope: "server", toolName: "write_file", writeOnly: false, approverUserId: "u-avery" };
+  const getter = (settings: Json, mode = "live", rules: Json[] = [FLEET, DANA_RULE]) => async (url: string) =>
     url === "/v1/demo/beats"
       ? { status: 200, body: { beats: [{ beatId: "enforce-it", mode }] } }
       : url === ORG_SETTINGS_PATH
         ? { status: 200, body: { settings } }
-        : { status: 404, body: {} };
+        : url === "/v1/users"
+          ? { status: 200, body: { users: USERS } }
+          : url === "/v1/servers"
+            ? { status: 200, body: { servers: [{ id: "s-repo", name: "repo-tools" }] } }
+            : url === "/v1/rules/approvals"
+              ? { status: 200, body: { rules } }
+              : { status: 404, body: {} };
+
+  it("PASS names the specific rule even though the fleet rule is listed first (ADR-0229)", async () => {
+    const [row] = await checkEnforceBeatPrereqs(getter({ ...DEMO_E_RELAXATIONS }));
+    expect(row!.level).toBe("PASS");
+    expect(row!.detail).toContain("z-dana");
+  });
+
+  it("FAIL when the most specific matching rule names someone other than Avery", async () => {
+    const [row] = await checkEnforceBeatPrereqs(getter({ ...DEMO_E_RELAXATIONS }, "live", [FLEET]));
+    expect(row!.level).toBe("FAIL");
+    expect(row!.detail).toContain("a-fleet");
+    expect(row!.detail).toContain("admin@regulait.local, not Avery");
+  });
+
+  it("FAIL when no approval rule matches Dana's write_file", async () => {
+    const [row] = await checkEnforceBeatPrereqs(getter({ ...DEMO_E_RELAXATIONS }, "live", []));
+    expect(row!.level).toBe("FAIL");
+    expect(row!.detail).toContain("nothing would queue");
+  });
 
   it("PASS once relaxed", async () => {
     const [row] = await checkEnforceBeatPrereqs(getter({ ...DEMO_E_RELAXATIONS }));

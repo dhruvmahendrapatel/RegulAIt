@@ -629,6 +629,9 @@ describe("6. the covered / NOT-covered inventory", () => {
     // ADR-0208 G8 (migration 0224)
     "infra_resources.retired_reason",
     "infra_policies.retired_reason",
+    // ADR-0221 (migration 0257)
+    "supplier_submissions.statement",
+    "supplier_submissions.decision_reason",
     // ADR-0224 (migration 0252)
     "data_subject_requests.close_note",
     "data_subject_tombstones.reason",

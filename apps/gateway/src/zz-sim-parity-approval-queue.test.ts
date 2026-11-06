@@ -10,7 +10,9 @@
  *      with `approval-quorum-unsatisfiable` and the same reason;
  *  (b) passkey signature mode with an approver who holds no passkey — both
  *      deny; under `step_up` the same rule previews and queues as an approval;
- *  (c) an approvable call still previews `require_approval` and queues.
+ *  (c) an approvable call still previews `require_approval` and queues;
+ *  (d) ADR-0229: a fleet rule beside a specific rule, inserted in either order,
+ *      previews and queues for the specific rule's approver.
  *
  * Runs on its OWN scratch database (prefix `simq_`), dropped in afterAll.
  */
@@ -23,6 +25,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import {
+  approvalRules,
   approvals,
   authSessions,
   complianceProfiles,
@@ -152,7 +155,7 @@ async function rule(tool: string, approverUserId: string) {
   expect(r.statusCode, r.body).toBe(201);
 }
 
-type Decided = { effect: string; ruleId: string; reason: string };
+type Decided = { effect: string; ruleId: string; reason: string; approverUserId?: string };
 const preview = async (tool: string): Promise<Decided> => {
   const r = await withKey(AUTH, "POST", "/v1/evaluate", { userId: P.caller.id, serverId, toolName: tool });
   expect(r.statusCode, r.body).toBe(200);
@@ -268,5 +271,41 @@ describe("the access preview agrees with the approval queue", () => {
     const out = await call(tool);
     expect(out.kind, JSON.stringify(out)).toBe("approval_required");
     expect(await pendingFor(tool)).toHaveLength(1);
+  });
+
+  it("(d) ADR-0229: a fleet rule and a specific rule, inserted in either order, preview and queue for the specific approver", async () => {
+    // The demo-host bug (#453, 2026-11-02): the fleet rule's approver cannot sign (no passkey), the specific rule's can.
+    // Before ADR-0229 the first rule the database returned won, so the call was refused or queued at random.
+    const insertFleet = async () =>
+      (
+        await db
+          .insert(approvalRules)
+          .values({ scope: "fleet", serverScope: "all", userId: null, serverId: null, toolName: null, writeOnly: true, approverUserId: P.unsigned.id })
+          .returning({ id: approvalRules.id })
+      )[0]!.id;
+    const check = async (tool: string) => {
+      const p = await preview(tool);
+      expect(p.effect, p.reason).toBe("require_approval");
+      expect(p.approverUserId).toBe(P.signer.id);
+      const out = await call(tool);
+      expect(out.kind, JSON.stringify(out)).toBe("approval_required");
+      const [queued] = await db.select({ approverUserId: approvals.approverUserId }).from(approvals).where(eq(approvals.toolName, tool));
+      expect(queued?.approverUserId).toBe(P.signer.id);
+    };
+    // fleet first, then the specific rule
+    let fleetId = await insertFleet();
+    try {
+      const first = nextTool();
+      await rule(first, P.signer.id);
+      await check(first);
+      // the specific rule first, then the fleet rule
+      await db.delete(approvalRules).where(eq(approvalRules.id, fleetId));
+      const second = nextTool();
+      await rule(second, P.signer.id);
+      fleetId = await insertFleet();
+      await check(second);
+    } finally {
+      await db.delete(approvalRules).where(eq(approvalRules.id, fleetId));
+    }
   });
 });

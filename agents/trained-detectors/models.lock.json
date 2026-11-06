@@ -1,0 +1,42 @@
+{
+  "schema": "regulait.trained-detectors-models.v1",
+  "note": "ADR-0220: every model file the image bakes, pinned by repository revision and sha256. fetch_models.py downloads exactly these at BUILD time and refuses any mismatch; the running service never downloads.",
+  "models": [
+    {
+      "dir": "prompt-injection",
+      "repo": "protectai/deberta-v3-base-prompt-injection-v2",
+      "revision": "90c9989b1a342275dd0d1a95aad283c04e075671",
+      "licence": "Apache-2.0",
+      "files": {
+        "config.json": "05079f4735092040b780d459027afab413faa6eeb66a548571a58832304b60bb",
+        "model.safetensors": "6521cb8d0ac08148c81464899c424e6148fcc62befa371089fa4061d8b6e0424",
+        "added_tokens.json": "dc046d04c9b0ada7ae6f1dc89c465801799acdf0c9a6aab8c15a1b2d5ca4e91f",
+        "special_tokens_map.json": "9463f61e1b109a8eb4688b829260d7c6b1e6dff04c98ff7269bb89e2b92369b9",
+        "spm.model": "c679fbf93643d19aab7ee10c0b99e460bdbc02fedf34b92b05af343b4af586fd",
+        "tokenizer.json": "f0a66ad0d735d8dca9ecac4ff50fcdef4bb6adbadd2941a926844844d2c2059b",
+        "tokenizer_config.json": "557b3d33d3f41b81ad769244e506549e98a1857d41dd58160aacd4d98d710b5a"
+      }
+    },
+    {
+      "dir": "harm",
+      "repo": "unitary/toxic-bert",
+      "revision": "4d6c22e74ba2fdd26bc4f7238f50766b045a0d94",
+      "licence": "Apache-2.0",
+      "files": {
+        "config.json": "a45f41c1f62793e4d6468d85c40e06f1e59343c7910600c60d465b74dbb3ccfb",
+        "model.safetensors": "2c272885d24138df70bff1b3cd944a999bd6b41dad33209730aa8ba074f6ad09",
+        "special_tokens_map.json": "303df45a03609e4ead04bc3dc1536d0ab19b5358db685b6f3da123d05ec200e3",
+        "tokenizer_config.json": "8823984edea41294b27aac79047c15d33909ac913ecdbcbd30e139326226d29a",
+        "vocab.txt": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
+      }
+    }
+  ],
+  "wheels": [
+    {
+      "name": "en_core_web_sm",
+      "url": "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
+      "sha256": "1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85",
+      "licence": "MIT"
+    }
+  ]
+}

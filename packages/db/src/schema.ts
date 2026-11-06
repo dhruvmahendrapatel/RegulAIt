@@ -1610,6 +1610,11 @@ export const auditLog = pgTable(
         "ai_incident",
         "use_case_feedback",
         "feedback_link",
+        // ADR-0221 (P4): the supplier portal — a grant and its links and sessions, an answer a supplier submitted,
+        // and a custom questionnaire version. Plain text column — no DDL needed.
+        "supplier_access",
+        "supplier_submission",
+        "supplier_questionnaire",
         "ai_policy_document",
         "ai_policy_acknowledgement",
         // ADR-0185 I3: memory retention. A conversation purged by the sweep or
@@ -4479,6 +4484,10 @@ export const orgSettings = pgTable(
      * entirely flips this and an org that never registers one is unaffected. */
     // ADR-0181: OFF by default (was true); an admin enables it, audited.
     customModelProvidersEnabled: boolean("custom_model_providers_enabled").notNull().default(false),
+    /** ADR-0205 (migration 0254): the agent setup assistant. OFF by default; an
+     * admin turns it on through PUT /v1/org/settings (a settings_relax step-up,
+     * audited old -> new). Its model calls take the governed dispatch path. */
+    agentSetupAssistEnabled: boolean("agent_setup_assist_enabled").notNull().default(false),
     /** ADR-0043 (migration 0049): the org default for MCP servers whose
      * allowPrivateRanges is null. FALSE (default since ADR-0181, migration
      * 0159) = strict: every server needs an explicit per-server
@@ -4692,6 +4701,12 @@ export const orgSettings = pgTable(
      * draft pack versions, and accept imported regulatory feed entries? false (default) =
      * the import routes refuse and the feed is the hand-curated list only. */
     frameworkImportsEnabled: boolean("framework_imports_enabled").notNull().default(false),
+    /** ADR-0213 (migration 0258) — the vendor questionnaire drafter. FALSE
+     * (default) = the questionnaire is filled by hand only and the draft route
+     * refuses `vendor_draft_disabled`. TRUE (an admin relaxation: step-up and
+     * audited) = drafts labelled with their sources; nothing is submitted or
+     * recorded as an attestation until a person does it. */
+    vendorDraftAssistEnabled: boolean("vendor_draft_assist_enabled").notNull().default(false),
 
     // --- ADR-0046 (migration 0058): review-workbench bulk fences ------------
     /** hard cap on items per bulk approve/deny/reassign. Not a UI convenience:
@@ -4805,6 +4820,10 @@ export const orgSettings = pgTable(
     feedbackResolveSlaDays: integer("feedback_resolve_sla_days").notNull().default(30),
     /** A13: after this many days a feedback body and contact are deleted (the resolution record stays) */
     feedbackRetentionDays: integer("feedback_retention_days").notNull().default(365),
+    /** ADR-0221 (migration 0241): the supplier portal — built, shipped OFF; turning it on is a relaxation */
+    supplierPortalEnabled: boolean("supplier_portal_enabled").notNull().default(false),
+    /** ADR-0221 (migration 0241): with no scanner configured, evidence files are refused unless this is on (a relaxation) */
+    supplierPortalAcceptUnscannedFiles: boolean("supplier_portal_accept_unscanned_files").notNull().default(false),
     /** ADR-0211 (migration 0250): may a risk be recorded as transferred or
      * avoided? OFF by default (ADR-0180); turning it on is a step-up relaxation */
     riskTreatmentsEnabled: boolean("risk_treatments_enabled").notNull().default(false),
@@ -5030,6 +5049,8 @@ export const MODEL_POLICY_FEATURE_VALUES = [
   "builder",
   "copilot",
   "intake_assist",
+  // ADR-0213 (migration 0258): the vendor questionnaire drafter
+  "vendor_draft",
   "evals",
   "orchestration",
   "compat",
@@ -5454,6 +5475,40 @@ export const guardrailConfigs = pgTable(
 );
 
 export type GuardrailConfigRow = typeof guardrailConfigs.$inferSelect;
+
+/**
+ * ADR-0220 (migration 0255): the trained runtime detectors, one row per kind
+ * (`pii`, `prompt_injection`, `harm`). No row = off (ADR-0180: default-off; a
+ * fresh or upgraded database has none). Each enabled row names the registered
+ * external scorer (ADR-0088) that serves its guardrail kind; the gateway calls
+ * it through the egress-guarded fetch at every enforcement site. The strict
+ * values (mode block, fail closed) are the column defaults; a relaxation needs
+ * a settings_relax step-up and every write is audited in its transaction.
+ * Single-tenant per deployment, like `guardrail_configs`, so no RLS.
+ */
+export const guardrailTrainedDetectors = pgTable(
+  "guardrail_trained_detectors",
+  {
+    kind: text("kind", { enum: ["pii", "prompt_injection", "harm"] }).primaryKey(),
+    enabled: boolean("enabled").notNull().default(false),
+    scorerId: uuid("scorer_id").references(() => externalScorers.id, { onDelete: "set null" }),
+    mode: text("mode", { enum: ["log", "warn", "block"] }).notNull().default("block"),
+    threshold: doublePrecision("threshold").notNull().default(0.5),
+    onFailure: text("on_failure", { enum: ["block", "heuristic"] }).notNull().default("block"),
+    timeoutMs: integer("timeout_ms").notNull().default(2000),
+    updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("guardrail_trained_detectors_kind_check", sql`${t.kind} IN ('pii', 'prompt_injection', 'harm')`),
+    check("guardrail_trained_detectors_mode_check", sql`${t.mode} IN ('log', 'warn', 'block')`),
+    check("guardrail_trained_detectors_on_failure_check", sql`${t.onFailure} IN ('block', 'heuristic')`),
+    check("guardrail_trained_detectors_threshold_check", sql`${t.threshold} > 0 AND ${t.threshold} <= 1`),
+    check("guardrail_trained_detectors_timeout_check", sql`${t.timeoutMs} BETWEEN 200 AND 10000`),
+    check("guardrail_trained_detectors_enabled_scorer_check", sql`NOT ${t.enabled} OR ${t.scorerId} IS NOT NULL`),
+  ],
+);
+export type GuardrailTrainedDetectorRow = typeof guardrailTrainedDetectors.$inferSelect;
 
 // ---------------------------------------------------------------------------
 // ADR-0044 (migration 0056) — THE AGENT EVALUATION & REGRESSION HARNESS.
@@ -10193,6 +10248,9 @@ export interface AiVendorPackAttestation {
   recordedAt: string;
   /** which version of the assessment questionnaire the answer came from */
   questionnaireVersion: number;
+  /** ADR-0221: set when the claim came through the supplier portal. The supplier SUBMITTED it; the
+   * user in `recordedByUserId` reviewed it and recorded it. Absent on every answer typed in by a user. */
+  submittedBySupplier?: { accessId: string; email: string; submissionId: string; submittedAt: string };
 }
 
 export const aiVendors = pgTable(
@@ -15037,3 +15095,170 @@ export const dataSubjectTombstones = pgTable(
   ],
 );
 export type DataSubjectTombstoneRow = typeof dataSubjectTombstones.$inferSelect;
+
+/**
+ * ADR-0221 (migrations 0241-0242, PENDING P4) — the supplier portal. A supplier signs in through a single-use link
+ * and answers ONE vendor's ONE assessment; every answer is held for a reviewer, who accepts it into the vendor's
+ * ADR-0084 attestations or rejects it. Tokens are stored as sha256 only; timestamps are on the database clock.
+ */
+export interface SupplierQuestion {
+  /** stable within the questionnaire, `^[a-z0-9][a-z0-9_-]{0,63}$` */
+  id: string;
+  prompt: string;
+  help: string;
+  required: boolean;
+  /** whether the supplier may (not must) attach one evidence file */
+  allowFile: boolean;
+  /** an answer accepted by a reviewer becomes an attestation against this control, when set */
+  controlRef: string | null;
+}
+
+export const supplierQuestionnaires = pgTable(
+  "supplier_questionnaires",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    version: integer("version").notNull(),
+    description: text("description").notNull().default(""),
+    questions: jsonb("questions").$type<SupplierQuestion[]>().notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+  },
+  (t) => [
+    unique("supplier_questionnaires_name_version_uq").on(t.name, t.version),
+    check("supplier_questionnaires_name_check", sql`char_length(${t.name}) BETWEEN 1 AND 120`),
+    check("supplier_questionnaires_description_check", sql`char_length(${t.description}) <= 2000`),
+    check("supplier_questionnaires_version_check", sql`${t.version} >= 1`),
+    check(
+      "supplier_questionnaires_questions_check",
+      sql`jsonb_typeof(${t.questions}) = 'array' AND jsonb_array_length(${t.questions}) BETWEEN 1 AND 100`,
+    ),
+  ],
+);
+export type SupplierQuestionnaireRow = typeof supplierQuestionnaires.$inferSelect;
+
+export const supplierAccess = pgTable(
+  "supplier_access",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    vendorId: uuid("vendor_id")
+      .notNull()
+      .references(() => aiVendors.id, { onDelete: "cascade" }),
+    workflowInstanceId: uuid("workflow_instance_id")
+      .notNull()
+      .references(() => workflowInstances.id, { onDelete: "cascade" }),
+    framework: text("framework").notNull(),
+    questionnaireId: uuid("questionnaire_id").references(() => supplierQuestionnaires.id, { onDelete: "restrict" }),
+    supplierEmail: text("supplier_email").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: uuid("revoked_by").references(() => users.id, { onDelete: "set null" }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "supplier_access_email_check",
+      sql`char_length(${t.supplierEmail}) BETWEEN 3 AND 254 AND ${t.supplierEmail} = lower(${t.supplierEmail}) AND ${t.supplierEmail} ~ '^[^@[:space:]]+@[^@[:space:]]+$'`,
+    ),
+    check("supplier_access_framework_check", sql`char_length(${t.framework}) BETWEEN 1 AND 120`),
+    check(
+      "supplier_access_ttl_check",
+      sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} - ${t.createdAt} <= interval '30 days'`,
+    ),
+    index("supplier_access_vendor_idx").on(t.vendorId),
+  ],
+);
+export type SupplierAccessRow = typeof supplierAccess.$inferSelect;
+
+export const supplierInvitations = pgTable(
+  "supplier_invitations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accessId: uuid("access_id")
+      .notNull()
+      .references(() => supplierAccess.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("supplier_invitations_token_hash_uq").on(t.tokenHash),
+    check("supplier_invitations_token_hash_check", sql`${t.tokenHash} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "supplier_invitations_ttl_check",
+      sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} - ${t.createdAt} <= interval '72 hours'`,
+    ),
+    index("supplier_invitations_access_idx").on(t.accessId),
+  ],
+);
+export type SupplierInvitationRow = typeof supplierInvitations.$inferSelect;
+
+export const supplierSessions = pgTable(
+  "supplier_sessions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accessId: uuid("access_id")
+      .notNull()
+      .references(() => supplierAccess.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (t) => [
+    unique("supplier_sessions_token_hash_uq").on(t.tokenHash),
+    check("supplier_sessions_token_hash_check", sql`${t.tokenHash} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "supplier_sessions_ttl_check",
+      sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} - ${t.createdAt} <= interval '8 hours'`,
+    ),
+    index("supplier_sessions_access_idx").on(t.accessId),
+  ],
+);
+export type SupplierSessionRow = typeof supplierSessions.$inferSelect;
+
+export const supplierSubmissions = pgTable(
+  "supplier_submissions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accessId: uuid("access_id")
+      .notNull()
+      .references(() => supplierAccess.id, { onDelete: "cascade" }),
+    vendorId: uuid("vendor_id")
+      .notNull()
+      .references(() => aiVendors.id, { onDelete: "cascade" }),
+    kind: text("kind").$type<"control" | "question">().notNull(),
+    controlRef: text("control_ref"),
+    questionnaireId: uuid("questionnaire_id").references(() => supplierQuestionnaires.id, { onDelete: "restrict" }),
+    questionId: text("question_id"),
+    statement: text("statement").notNull(),
+    fileName: text("file_name"),
+    fileContentType: text("file_content_type"),
+    fileSize: integer("file_size"),
+    fileSha256: text("file_sha256"),
+    /** a data-key envelope (CIPHERTEXT_COLUMNS); returned only by the admin download route */
+    fileCiphertext: text("file_ciphertext"),
+    scanStatus: text("scan_status").$type<"not_scanned" | "clean">(),
+    status: text("status").$type<"submitted" | "accepted" | "rejected" | "withdrawn">().notNull().default("submitted"),
+    decidedBy: uuid("decided_by").references(() => users.id, { onDelete: "set null" }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    decisionReason: text("decision_reason"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "supplier_submissions_kind_check",
+      sql`(${t.kind} = 'control' AND ${t.controlRef} IS NOT NULL AND ${t.questionId} IS NULL AND ${t.questionnaireId} IS NULL) OR (${t.kind} = 'question' AND ${t.questionId} IS NOT NULL AND ${t.questionnaireId} IS NOT NULL)`,
+    ),
+    check("supplier_submissions_status_check", sql`${t.status} IN ('submitted', 'accepted', 'rejected', 'withdrawn')`),
+    index("supplier_submissions_vendor_idx").on(t.vendorId, t.createdAt),
+    index("supplier_submissions_access_idx").on(t.accessId),
+  ],
+);
+export type SupplierSubmissionRow = typeof supplierSubmissions.$inferSelect;

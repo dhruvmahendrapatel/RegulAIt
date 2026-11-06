@@ -44,6 +44,7 @@ const SessionContext = createContext<SessionState>({
   applyAuth: () => {},
 });
 
+
 export function useSession() {
   return useContext(SessionContext);
 }
