@@ -1875,3 +1875,16 @@ master: `cmd | tail -5` always exits 0.
 
 Rule: never judge success from a command piped to `tail`, `head` or `grep`. Use `set -o pipefail`, or print the exit
 code separately (`cmd > log 2>&1; echo exit=$?; tail log`). Put the same line in builder briefs.
+
+### M-108 (2026-10-31) - Reserved migration `when` values let lanes merge below the watermark
+
+On 10-30 the master reserved migration numbers 0215–0247 for parallel lanes. It set each journal `when` by formula
+(`1785149000000 + (N−214)×1,000,000`) and allowed "a higher-numbered lane may merge first if its `when` follows the
+formula". But the migrator applies an entry only when its `when` is above the newest migration already applied
+(§4.1), so the formula is safe only for in-order merges. 0237 (#615) merged before 0223–0225 (#606) and 0228 (#612),
+and lanes at 0216–0236 were heading the same way. CI was green because it migrates fresh databases. The #617
+re-review caught it.
+
+Rule: a reserved migration number never reserves a place in the watermark. A lane whose number is below main's
+highest migration is renumbered to the next free numbers above it before merge: file, tag, `idx`, and `when` by
+the formula. A `when`-only re-stamp breaks the placement tests. CI enforces it (`scripts/migration-watermark-guard.mjs`, #646).

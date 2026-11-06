@@ -10,7 +10,7 @@
 // Regenerate with:  REGULAIT_WRITE_API_ARTIFACTS=1 pnpm --filter @regulait/gateway exec vitest run src/openapi.test.ts
 //
 // Spec version: 1.0.0
-// Operations:   73
+// Operations:   74
 //
 // RESPONSES ARE `unknown` BY DESIGN. The gateway's routes declare request
 // schemas but not response schemas, so there is nothing to derive a response
@@ -547,6 +547,14 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
+ * Spend by agent, connector, MCP tool, project or UTC day, aggregated over every usage event in a window (default: the last 30 days). Same scoping as the usage ledger: a non-admin sees only their own events.
+ * @stability public-beta — auth: user
+   */
+  getV1UsageEventsSummary<T = unknown>(options?: RequestOptions): Promise<T> {
+    return this.request<T>("GET", `/v1/usage-events/summary`, undefined, options);
+  }
+
+  /**
  * List users, with sign-in posture flags (never a hash or a secret). Bounded: `limit` (default 1000, max 5000). With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226), with `q`, `role` and `status` filters.
  * @stability public-stable — auth: admin
    */
@@ -983,6 +991,11 @@ export const OPERATIONS: ReadonlyArray<{ id: string; method: string; path: strin
     "id": "getV1UsageEvents",
     "method": "GET",
     "path": "/v1/usage-events"
+  },
+  {
+    "id": "getV1UsageEventsSummary",
+    "method": "GET",
+    "path": "/v1/usage-events/summary"
   },
   {
     "id": "getV1Users",

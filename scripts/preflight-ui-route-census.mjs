@@ -93,6 +93,7 @@ export const MACHINE_ONLY = new Map([
   ["GET /mcp/:serverId", "protocol plumbing: the Streamable HTTP SSE probe MCP clients send after initialize; answers 405 Allow: POST"],
   ["GET /v1/prompts/resolve", "data plane: runtimes and SDKs resolve a prompt@tag reference at call time"],
   ["POST /v1/connectors/:connectorId/invoke", "data plane: an agent runtime invokes a connector through the governance gate"],
+  ["POST /v1/a2a/agents/:agentId/messages", "data plane: a person's client or a worker calls a remote A2A agent through the governance gate (ADR-0219)"],
   ["POST /v1/authz/check", "data plane: the policy decision point external enforcement points call (ADR-0053)"],
 
   // ---- the CI gate ----------------------------------------------------------
@@ -126,6 +127,7 @@ export const SUPERSEDED = new Map([
   ["GET /v1/spend/monitor-policies", { replacement: "GET /v1/spend/monitor-overview", reason: "the monitor overview carries every policy (unpaged, all rows)" }],
   ["GET /v1/scim/tokens", { replacement: "GET /v1/scim/status", reason: "the SCIM status carries the token list" }],
   ["GET /v1/org/settings/assurance-gate-mode", { replacement: "GET /v1/org/settings", reason: "the settings read carries assuranceGateMode; the page writes it through the dedicated PUT" }],
+  ["GET /v1/org/settings/risk-treatments", { replacement: "GET /v1/org/settings", reason: "the settings read carries riskTreatmentsEnabled; the page writes it through the dedicated PUT" }],
   ["POST /v1/agents/:agentId/owner", { replacement: "PATCH /v1/agents/:agentId/stewardship", reason: "ADR-0168 stewardship sets the steward (the ADR-0089 owner column) in one audited save" }],
   ["POST /v1/agents/:agentId/lifecycle", { replacement: "PATCH /v1/agents/:agentId/stewardship", reason: "ADR-0168 stewardship sets the lifecycle status in the same save" }],
   ["GET /v1/licenses/:id", { replacement: "GET /v1/licenses", reason: "the history list carries every full license row the detail returns" }],

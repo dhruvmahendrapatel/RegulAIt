@@ -18,6 +18,7 @@ import { APPROVAL_SCOPES } from "./approval-binding.js";
 import { INTERNATIONAL_PII_CATEGORIES } from "./pii-international.js";
 // ADR-0182 (D4): the accountability settings are spread into updateOrgSettingsSchema below.
 import { accountabilityOrgSettingsFields } from "./accountability.js";
+import { trustPagesOrgSettingsFields } from "./trust-pages.js";
 // ADR-0185 (batch 3): the retention / MCP settings are spread into updateOrgSettingsSchema, and the
 // transport and stdio vocabularies shape the server create/update bodies below.
 import { batch3OrgSettingsFields, MCP_UPSTREAM_TRANSPORTS, mcpStdioSpecSchema } from "./batch3.js";
@@ -138,6 +139,7 @@ export {
   parseExternalScorerResponse,
   externalScorerAvailabilityFor,
   externalScorerKindSchema,
+  EXTERNAL_SCORER_CLAIMABLE_KINDS,
   createExternalScorerSchema,
   updateExternalScorerSchema,
   setExternalScorerEnabledSchema,
@@ -357,6 +359,7 @@ export {
   MIN_FORECAST_DAYS,
   MIN_FORECAST_ELAPSED_FRACTION,
   FORECAST_DISCLAIMER,
+  FORECAST_LIMITS,
   ANOMALY_DISCLAIMER,
   spendMonitorPolicySchema,
   scheduledSpendChangeSchema,
@@ -2304,12 +2307,16 @@ export const updateOrgSettingsSchema = z
     /** ADR-0034: master switch for admin-registered custom LLM providers.
      * false refuses registration/enable and stops every custom dispatch (409). */
     customModelProvidersEnabled: z.boolean().optional(),
+    /** ADR-0205: the agent setup assistant on the Register an agent card; off by default, turning it on is audited */
+    agentSetupAssistEnabled: z.boolean().optional(),
     /** ADR-0043: the org default for MCP servers whose allowPrivateRanges is
      * null. false (the strict default since ADR-0181) = a private-LAN MCP URL
      * needs an explicit per-server flag or an allow entry; true = private-LAN
      * MCP URLs work with zero ceremony (a relaxation, stepped up and audited).
      * IMDS/link-local stays unconditionally blocked either way. */
     mcpPrivateRangesDefault: z.boolean().optional(),
+    /** ADR-0219 (P10): calls to remote agents over A2A. Strict false; true relaxes it (settings_relax step-up). */
+    a2aEnabled: z.boolean().optional(),
     /** ADR-0097: the MCP ADMISSION posture ('enforce' is the strict default since ADR-0181). 'off' = no manifest
      * scan runs at all and behaviour is byte-identical to pre-0097. 'log' =
      * every manifest sync is scanned and the verdict/findings are recorded on
@@ -2358,6 +2365,13 @@ export const updateOrgSettingsSchema = z
      * of `useCaseGateMode` by construction: this acts only where projectId is
      * null, that one only where it is not. */
     dispatchAttributionRequired: z.boolean().optional(),
+    /** ADR-0224 (P13 c, migration 0251): the privacy processing limit. false (shipped, owner 10-30) = nothing is
+     * limited. true = personal data the PII detector finds in a governed dispatch must be a category an active
+     * record of processing permits for the dispatch's project, or the dispatch is refused 409
+     * `processing_not_permitted`. Turning it off again is an audited relaxation. */
+    privacyOpsEnabled: z.boolean().optional(),
+    /** ADR-0224: days from a data-subject request's receipt to its due date (1–90; 30 is the strict default) */
+    dsrSlaDays: z.number().int().min(1).max(90).optional(),
     /** ADR-0092 amendment (migration 0100, L6c): may the deterministic
      * access-recommendation findings carry a MODEL-JUDGED annotation? false
      * (default) = the report is the six deterministic rules and nothing else.
@@ -2365,6 +2379,16 @@ export const updateOrgSettingsSchema = z
      * dispatchable judge reports `judged: unavailable` and changes nothing. */
     recommendationJudgeEnabled: z.boolean().optional(),
     recommendationJudgeAgentId: z.string().uuid().nullable().optional(),
+    /** ADR-0213 (migration 0258): may a person ask for drafted answers to a
+     * vendor assessment questionnaire? false (default) = the questionnaire is
+     * filled by hand only. true (a relaxation: step-up, audited) = the vendor
+     * detail offers drafts labelled with their sources; nothing is submitted
+     * or recorded as an attestation until a person does it. */
+    vendorDraftAssistEnabled: z.boolean().optional(),
+    /** ADR-0215 (migration 0248): may an admin import vendored framework content
+     * (new draft pack versions) and accept imported feed entries? false (default) =
+     * the import routes refuse. Turning it on is a relaxation (settings_relax step-up). */
+    frameworkImportsEnabled: z.boolean().optional(),
     // budgets
     budgetEnforcement: budgetEnforcementSchema.optional(),
     budgetHardBlockPct: z.number().int().min(1).max(100).optional(),
@@ -2518,6 +2542,8 @@ export const updateOrgSettingsSchema = z
     ...bomOrgSettingsFields,
     // ADR-0190 (batch 6 item 3): isolation enforcement, the class floors and the executor attestation lifetime
     ...isolationOrgSettingsFields,
+    // ADR-0225 (P13 d): the public trust pages and auditor access, shipped off
+    ...trustPagesOrgSettingsFields,
     /** ADR-0039 self-lockout guard (mirrors the sso_only guard): saving
      * enforce_continuous with an allow-list that excludes the caller's own
      * current IP is refused (409) unless this explicit confirm rides along.
@@ -3734,6 +3760,15 @@ export {
   AI_RISK_LEVELS,
   AI_RISK_REGISTER_DISCLAIMER,
   AI_RISK_STATUSES,
+  AI_RISK_TREATMENTS,
+  LIVE_RISK_STATUSES,
+  isTreatedRiskStatus,
+  riskStatusCarriesRating,
+  recordRiskTreatmentSchema,
+  setRiskTreatmentsEnabledSchema,
+  type AiRiskTreatment,
+  type RecordRiskTreatmentInput,
+  type SetRiskTreatmentsEnabledInput,
   DEFAULT_RISK_LIBRARY,
   RISK_CATEGORY_DIMENSION,
   RISK_CATEGORY_EVIDENCE,
@@ -3802,6 +3837,22 @@ export {
   type RiskSuggestion,
   type SuggestionSource,
 } from "./intake-assist.js";
+// ADR-0205 — the agent setup assistant's deterministic draft and model-reply merge
+export {
+  AGENT_SETUP_RISK_TIERS,
+  agentSetupAssistRequestSchema,
+  agentSetupGuardLines,
+  buildAgentSetupPrompt,
+  mergeAgentSetupReply,
+  parseAgentSetupReply,
+  suggestAgentSetup,
+  type AgentSetupAssistRequest,
+  type AgentSetupDraft,
+  type AgentSetupField,
+  type AgentSetupModelReply,
+  type AgentSetupRiskTier,
+  type AgentSetupSource,
+} from "./agent-setup-assist.js";
 // demo task G1/C6 — the fixture contract between Gemini's data and the seeder
 export {
   DEMO_DATA_SENSITIVITIES,
@@ -3980,6 +4031,27 @@ export {
   type RecordVendorAttestationInput,
   type UpdateVendorInput,
 } from "./vendors.js";
+
+// ADR-0213 — the governed vendor-questionnaire drafter (backlog P6)
+export {
+  VENDOR_DRAFT_LIMITS,
+  VENDOR_DRAFT_SOURCE_KINDS,
+  VENDOR_DRAFT_SOURCE_LABELS,
+  VENDOR_QUESTIONNAIRE_SECTIONS,
+  buildVendorDraftPrompt,
+  composeDraftQuestionnaire,
+  parseVendorDraft,
+  splitQuestionnaire,
+  suggestVendorAnswers,
+  vendorDraftRequestSchema,
+  vendorDraftSources,
+  type VendorDraftGrounding,
+  type VendorDraftRequest,
+  type VendorDraftSection,
+  type VendorDraftSource,
+  type VendorDraftSourceKind,
+  type VendorQuestionnaireSectionId,
+} from "./vendor-draft.js";
 
 // ---------------------------------------------------------------------------
 // ADR-0085 — EU AI Act risk-tier screening (gap L10): the questionnaire
@@ -4711,6 +4783,8 @@ export { GUARDRAIL_FALLBACK_MODE } from "./guardrails.js";
 // A11 decision-regression, A12 incident-clocks + incidents, A13 feedback,
 // A14 ai-literacy, S5 alert-ownership + isaca-pack.
 export * from "./accountability.js";
+// ADR-0225 (P13 d): outward trust pages
+export * from "./trust-pages.js";
 export * from "./decision-regression.js";
 export * from "./incident-clocks.js";
 export * from "./incidents.js";
@@ -4775,3 +4849,13 @@ export * from "./provenance/index.js";
 // ADR-0204: a static upstream credential per MCP server (header refusals, the write contract, the read view)
 export * from "./mcp-upstream-credential.js";
 export * from "./library-lifecycle.js";
+// ADR-0220: trained runtime detectors (PII recogniser, injection classifier, harm model) behind the external-scorer contract
+export * from "./trained-detectors.js";
+// ADR-0224 (P13 c): privacy operations — records of processing, data-subject requests, the processing limit
+export * from "./privacy-ops.js";
+
+// ===== ADR-0215 (P5) — framework content imports and the imported regulatory feed =====
+export * from "./framework-imports.js";
+
+// ===== ADR-0221 (PENDING P4) — the supplier portal =========================
+export * from "./supplier-portal.js";
