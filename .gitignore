@@ -66,3 +66,7 @@ apps/web/e2e/.e2e-license-keys/
 apps/web/e2e/artifacts/demo/real-*.png
 apps/web/e2e/artifacts/demo/real-gate.txt
 apps/web/e2e/artifacts/demo/fallback-deck.html
+
+# merge leftovers (PR #633 review: a 15k-line schema.ts.orig was committed by accident)
+*.orig
+*.rej
