@@ -2544,7 +2544,7 @@ export const updateOrgSettingsSchema = z
     ...bomOrgSettingsFields,
     // ADR-0190 (batch 6 item 3): isolation enforcement, the class floors and the executor attestation lifetime
     ...isolationOrgSettingsFields,
-    // ADR-0218 (migration 0259): the organisation default palette and the theme lock (High contrast stays open)
+    // ADR-0218 (migration 0274): the organisation default palette and the theme lock (High contrast stays open)
     ...appearanceOrgSettingsFields,
     // ADR-0225 (P13 d): the public trust pages and auditor access, shipped off
     ...trustPagesOrgSettingsFields,
