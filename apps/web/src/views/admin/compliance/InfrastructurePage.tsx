@@ -76,7 +76,7 @@ export default function InfrastructurePage() {
       .join(" · ") || "—";
   // P3 (#453 c6527514889): each ledger keeps five rows here, worst first, and moves whole to its own page. The
   // ledgers have no status filter, so what needs attention is counted from the posture read this page already makes.
-  const preview = (id: LedgerId, columns: Array<DataColumn<never>>, attention: Array<{ label: string; count: number | null }> = []) => {
+  const preview = (id: LedgerId, columns: Array<DataColumn<never>>, attention: Array<{ label: string; count: number | null; failed?: boolean }> = []) => {
     const l = LEDGERS[id];
     return (
       <ListPreview<never>
@@ -165,11 +165,11 @@ export default function InfrastructurePage() {
         <div role="tabpanel" id={panel.panel} aria-labelledby={panel.tab} className={v.stack}>
           {tab === "ledgers" ? (
             <>
-                {preview("findings", findingColumns() as Array<DataColumn<never>>, [{ label: "open", count: posture.data ? (p.open ?? 0) : null }])}
+                {preview("findings", findingColumns() as Array<DataColumn<never>>, [{ label: "open", count: posture.data ? (p.open ?? 0) : null, failed: posture.isError }])}
                 {preview("certificates", tlsLedgerColumns() as Array<DataColumn<never>>)}
                 {preview("patches", patchColumns() as Array<DataColumn<never>>)}
 
-                {preview("backups", backupColumns() as Array<DataColumn<never>>, [{ label: "missed", count: posture.data ? (p.backup?.missed ?? 0) : null }])}
+                {preview("backups", backupColumns() as Array<DataColumn<never>>, [{ label: "missed", count: posture.data ? (p.backup?.missed ?? 0) : null, failed: posture.isError }])}
                 {preview("resources", resourceColumns() as Array<DataColumn<never>>)}
             </>
           ) : (

@@ -454,7 +454,11 @@ function usePlacements() {
  * sensitivity is unresolved (their isolable calls are refused). The same reads (and
  * cache entries) as the cards themselves.
  */
-export function useIsolationAttention(): Array<{ count: number; label: string }> {
+/**
+ * what needs attention on the Isolation tab, for its label. A count whose read failed is `null` ("count unavailable"),
+ * never 0, so a failed read never hides a quarantined executor or a refusal from the label
+ */
+export function useIsolationAttention(): Array<{ count: number | null; label: string }> {
   const ex = useQuery({ queryKey: isolationKeys.executors, retry: false, refetchInterval: 60_000, queryFn: () => api.get<unknown>("/v1/executors") });
   const { q } = usePlacements();
   const pq = useQuery({ queryKey: isolationKeys.projectSensitivities, retry: false, queryFn: () => api.get<unknown>("/v1/execution-project-sensitivities") });
@@ -463,11 +467,14 @@ export function useIsolationAttention(): Array<{ count: number; label: string }>
   const first = q.data?.pages[0] ?? null;
   const read = first ? (first.placements.filter((r) => !isUnreadable(r)) as Placement[]) : [];
   return [
-    { count: (executors ?? []).filter((e) => !("unreadable" in e) && e.status === "quarantined").length, label: "quarantined" },
-    { count: (executors ?? []).filter((e) => "unreadable" in e).length + (first ? first.placements.length - read.length : 0), label: "unreadable" },
-    { count: read.filter((r) => r.outcome === "refused" || r.outcome === "mismatch").length + (first?.unrecorded.length ?? 0), label: "refused" },
-    { count: (projects ?? []).filter((x) => x.effectiveSensitivity === null).length, label: "projects unresolved" },
-  ].filter((x) => x.count > 0);
+    { count: ex.isError ? null : (executors ?? []).filter((e) => !("unreadable" in e) && e.status === "quarantined").length, label: "quarantined" },
+    {
+      count: ex.isError || q.isError ? null : (executors ?? []).filter((e) => "unreadable" in e).length + (first ? first.placements.length - read.length : 0),
+      label: "unreadable",
+    },
+    { count: q.isError ? null : read.filter((r) => r.outcome === "refused" || r.outcome === "mismatch").length + (first?.unrecorded.length ?? 0), label: "refused" },
+    { count: pq.isError ? null : (projects ?? []).filter((x) => x.effectiveSensitivity === null).length, label: "projects unresolved" },
+  ].filter((x) => x.count === null || x.count > 0);
 }
 
 /**

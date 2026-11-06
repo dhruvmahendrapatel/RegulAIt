@@ -4,7 +4,7 @@
  * five-row preview of each, with what needs attention counted in its heading.
  */
 import { useEffect, useState } from "react";
-import { Route, Routes, useParams } from "react-router-dom";
+import { Navigate, Route, Routes, useParams } from "react-router-dom";
 import EnginesPage from "./EnginesPage";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
@@ -17,7 +17,8 @@ import { ATTESTATIONS_NOTE, ATTESTATIONS_SORT, attestationColumns, attestationKe
 import { availabilityOf, parseExecutor } from "./isolation/isolationModel";
 import v from "../../views.module.css";
 
-const PARENT = { parent: "Engines", parentTo: "/admin/engines" };
+// both sub-pages open from the previews on the Isolation tab, so the trail goes back to that tab
+const PARENT = { parent: "Engines: isolation", parentTo: "/admin/engines?tab=isolation" };
 
 export function PlacementDecisionsPage() {
   return (
@@ -91,6 +92,8 @@ export function EnginesArea() {
       <Route index element={<EnginesPage />} />
       <Route path="placements" element={<PlacementDecisionsPage />} />
       <Route path="executors/:executorId/attestations" element={<ExecutorAttestationsPage />} />
+      {/* an unknown sub-path goes back to the area's own page, never a blank page */}
+      <Route path="*" element={<Navigate to="/admin/engines" replace />} />
     </Routes>
   );
 }

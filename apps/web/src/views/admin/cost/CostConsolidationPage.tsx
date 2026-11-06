@@ -31,7 +31,7 @@
  * House pattern: react-router + TanStack Query + the owned kit.
  */
 import { useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ListPreview } from "../../../ui/ListPreview";
 import { normalisePage, pageUrl } from "../../../ui/listState";
@@ -510,7 +510,8 @@ export default function CostConsolidationPage() {
   const reconWarnings = (lastRun?.warnings.length ?? 0) + (lastRun?.outcome === "failed" ? 1 : 0);
   const withCount = (label: string, n: number, what: string) => (n > 0 ? `${label} · ${n.toLocaleString("en-GB")} ${what}` : label);
   const tabs = [
-    { id: "import", label: withCount("Import", refusedCount, "refused") },
+    // a failed count read says so, never that nothing was refused
+    { id: "import", label: refused.isError ? "Import · refused count unavailable" : withCount("Import", refusedCount, "refused") },
     { id: "mapping", label: "Identity mapping" },
     { id: "consolidated", label: withCount("Consolidated view", unattributed, "unattributed") },
     { id: "reconciliation", label: withCount("Reconciliation", reconWarnings, reconWarnings === 1 ? "warning" : "warnings") },
@@ -1285,7 +1286,8 @@ export default function CostConsolidationPage() {
                       <p className={v.dim} data-testid="cc-reconciliation-note">
                         {consolidated.data.reconciliation.supersededLinesExcluded} superseded duplicate line(s) are
                         excluded from the imported side above — marked by a reconciliation pass, never deleted. The
-                        full list is in the reconciliation card below.
+                        full list is on the{" "}
+                        <Link to={{ search: "?tab=reconciliation" }}>Reconciliation tab</Link>.
                       </p>
                     )}
                   </div>

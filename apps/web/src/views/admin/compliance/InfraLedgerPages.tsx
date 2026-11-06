@@ -4,7 +4,7 @@
  * keeps a five-row preview of each, worst first, with what needs attention counted in its heading.
  */
 import { useState, type ReactNode } from "react";
-import { Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes } from "react-router-dom";
 import InfrastructurePage from "./InfrastructurePage";
 import type { InfraBackup, InfraCert, InfraFinding, InfraPatch, InfraResource } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
@@ -145,6 +145,8 @@ export function InfrastructureArea() {
       <Route path="certificates" element={<InfraCertificatesPage />} />
       <Route path="patches" element={<InfraPatchesPage />} />
       <Route path="backups" element={<InfraBackupsPage />} />
+      {/* an unknown sub-path goes back to the area's own page, never a blank page */}
+      <Route path="*" element={<Navigate to={INFRA_PATH} replace />} />
     </Routes>
   );
 }

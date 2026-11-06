@@ -4,7 +4,7 @@
  * lists with the shared list control, the history's filters, Open and Revoke.
  */
 import { useMemo, useState } from "react";
-import { Route, Routes, useParams } from "react-router-dom";
+import { Navigate, Route, Routes, useParams } from "react-router-dom";
 import CostConsolidationPage from "./CostConsolidationPage";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
@@ -199,6 +199,8 @@ export function CostConsolidationArea() {
       <Route index element={<CostConsolidationPage />} />
       <Route path="imports" element={<CostImportsPage />} />
       <Route path="imports/:importId" element={<CostImportLinesPage />} />
+      {/* an unknown sub-path goes back to the area's own page, never a blank page */}
+      <Route path="*" element={<Navigate to="/admin/cost-consolidation" replace />} />
     </Routes>
   );
 }

@@ -68,6 +68,18 @@ test.describe("Cross-vendor consolidation", () => {
     await expectAxeClean(page, "consolidation overview", ['[role="tablist"]', "[data-preview]"]);
   });
 
+  test("a failed refused-count read says the count is unavailable, on the tab and on the preview", async ({ page }) => {
+    await mockOps(page);
+    // only the refused count read fails; the preview's own rows still load
+    await page.route(
+      (u) => u.pathname === "/v1/cost-imports" && u.searchParams.get("status") === "refused",
+      (route) => route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "internal" }) }),
+    );
+    await page.goto("/ui/admin/cost-consolidation");
+    await expect(page.getByRole("tab", { name: "Import · refused count unavailable" })).toBeVisible();
+    await expect(page.getByText("Import history · 37 imports · refused count unavailable")).toBeVisible();
+  });
+
   test("View all opens the import history with the list control, its filter, and a breadcrumb back", async ({ page }) => {
     const cap = await mockOps(page);
     await page.goto("/ui/admin/cost-consolidation");
@@ -96,6 +108,16 @@ test.describe("Cross-vendor consolidation", () => {
     await expectAxeClean(page, "import lines page", ["[data-list]"]);
     await backTo(page, "Import history", "/admin/cost-consolidation/imports");
   });
+
+  test("the consolidated view's superseded-lines note links to the Reconciliation tab, where the list now lives", async ({ page }) => {
+    await mockOps(page);
+    await page.goto("/ui/admin/cost-consolidation?tab=consolidated");
+    const note = page.getByTestId("cc-reconciliation-note");
+    await expect(note).toContainText("3 superseded duplicate line(s)");
+    await note.getByRole("link", { name: "Reconciliation tab" }).click();
+    await expect(page).toHaveURL(/\/ui\/admin\/cost-consolidation\?tab=reconciliation$/);
+    await expect(page.getByRole("tab", { name: /^Reconciliation/ })).toHaveAttribute("aria-selected", "true");
+  });
 });
 
 test.describe("Engines", () => {
@@ -112,6 +134,22 @@ test.describe("Engines", () => {
     await expectAxeClean(page, "engines isolation tab", ['[role="tablist"]', '[role="tabpanel"]']);
   });
 
+  test("an unknown sub-path goes back to the Engines page, never a blank page", async ({ page }) => {
+    await mockOps(page);
+    await page.goto("/ui/admin/engines/no-such-page");
+    await expect(page).toHaveURL(/\/ui\/admin\/engines$/);
+    await expect(page.getByRole("heading", { level: 1, name: "Engines" })).toBeVisible();
+  });
+
+  test("a failed count read says the count is unavailable, never that nothing needs attention", async ({ page }) => {
+    await mockOps(page);
+    // registered after mockOps, so it wins: the executors read fails
+    await page.route((u) => u.pathname === "/v1/executors", (route) => route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "internal" }) }));
+    await page.goto("/ui/admin/engines");
+    await expect(page.getByRole("tab", { name: /^Isolation/ })).toHaveAccessibleName(/quarantined count unavailable/);
+    await expect(page.getByRole("tab", { name: /^Isolation/ })).toHaveAccessibleName(/8 refused/);
+  });
+
   test("placement decisions: View all, every decision with Load older, and a breadcrumb back", async ({ page }) => {
     await mockOps(page);
     await page.goto("/ui/admin/engines?tab=isolation");
@@ -122,7 +160,9 @@ test.describe("Engines", () => {
     await page.getByRole("button", { name: "Load older decisions" }).click();
     await expect(page.getByRole("button", { name: /^Evidence for placement/ })).toHaveCount(60);
     await expect(page.getByText("Refused before any placement")).toBeVisible();
-    await backTo(page, "Engines", "/admin/engines");
+    await backTo(page, "Engines: isolation", "/admin/engines?tab=isolation");
+    // back on the tab the preview sits on, not the Engines tab
+    await expect(page.getByRole("tab", { name: /^Isolation/ })).toHaveAttribute("aria-selected", "true");
   });
 
   test("an executor's self-test history: five rows in its detail, the full list control on its own page", async ({ page }) => {
@@ -134,7 +174,9 @@ test.describe("Engines", () => {
     await expect(page).toHaveURL(new RegExp(`/ui/admin/engines/executors/${EXECUTOR_ID}/attestations$`));
     await expectControl(page, cap, "executor-attestations", `/v1/executors/${EXECUTOR_ID}/attestations`, 26, "Class", "class");
     await expectAxeClean(page, "self-test history page", ["[data-list]"]);
-    await backTo(page, "Engines", "/admin/engines");
+    await backTo(page, "Engines: isolation", "/admin/engines?tab=isolation");
+    // back on the tab the preview sits on, not the Engines tab
+    await expect(page.getByRole("tab", { name: /^Isolation/ })).toHaveAttribute("aria-selected", "true");
   });
 });
 

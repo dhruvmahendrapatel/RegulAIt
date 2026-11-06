@@ -2,7 +2,7 @@
  * A federated registry's catalogue on its own page (P3, #453 c6527514889): every entry with the shared list control,
  * the catalogue's search and kind filter, and Import. The registries tab keeps a five-row preview.
  */
-import { Route, Routes, useParams } from "react-router-dom";
+import { Navigate, Route, Routes, useParams } from "react-router-dom";
 import McpServersPage from "./McpServersPage";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
@@ -52,6 +52,8 @@ export function McpServersArea() {
     <Routes>
       <Route index element={<McpServersPage />} />
       <Route path="registries/:registryId/entries" element={<McpRegistryEntriesPage />} />
+      {/* an unknown sub-path goes back to the area's own page, never a blank page */}
+      <Route path="*" element={<Navigate to="/admin/mcp-servers" replace />} />
     </Routes>
   );
 }

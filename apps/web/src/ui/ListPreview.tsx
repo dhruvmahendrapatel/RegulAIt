@@ -23,14 +23,28 @@ export interface PreviewAttention {
   filters?: Filters;
   /** or a count the page already holds (a posture read), where the route has no filter for it */
   count?: number | null;
+  /** the page's own read behind `count` failed: the heading says the count is unavailable, never that it is zero */
+  failed?: boolean;
 }
 
 const n = (x: number) => x.toLocaleString("en-GB");
 
-/** "27 identities · 2 suspended" (an attention count shows only when something needs it) */
-export function previewHeading(total: number | null, noun: string, attention: Array<{ label: string; count: number | null }>): string {
+/**
+ * "27 identities · 2 suspended" (an attention count shows only when something needs it). A count whose read failed
+ * says so ("suspended count unavailable"), so a failed read never passes for nothing needing attention
+ */
+export function previewHeading(
+  total: number | null,
+  noun: string,
+  attention: Array<{ label: string; count: number | null; failed?: boolean }>,
+): string {
   if (total === null) return "";
-  return [`${n(total)} ${noun}`, ...attention.filter((a) => (a.count ?? 0) > 0).map((a) => `${n(a.count!)} ${a.label}`)].join(" · ");
+  return [
+    `${n(total)} ${noun}`,
+    ...attention
+      .filter((a) => a.failed || (a.count ?? 0) > 0)
+      .map((a) => (a.failed ? `${a.label} count unavailable` : `${n(a.count!)} ${a.label}`)),
+  ].join(" · ");
 }
 
 export function ListPreview<T>(props: {
@@ -79,7 +93,11 @@ export function ListPreview<T>(props: {
   const heading = previewHeading(
     total,
     props.noun,
-    attention.map((a, i) => ({ label: a.label, count: a.filters === undefined ? (a.count ?? null) : (counts[i]?.data?.total ?? null) })),
+    attention.map((a, i) =>
+      a.filters === undefined
+        ? { label: a.label, count: a.count ?? null, failed: a.failed }
+        : { label: a.label, count: counts[i]?.data?.total ?? null, failed: counts[i]?.isError === true },
+    ),
   );
   return (
     <Card

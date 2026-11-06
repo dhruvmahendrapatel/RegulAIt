@@ -188,7 +188,7 @@ export default function EnginesPage() {
           })();
   const tabs = [
     { id: "engines", label: "Engines" },
-    { id: "isolation", label: ["Isolation", ...isolationAttention.map((x) => `${x.count.toLocaleString("en-GB")} ${x.label}`)].join(" · ") },
+    { id: "isolation", label: ["Isolation", ...isolationAttention.map((x) => (x.count === null ? `${x.label} count unavailable` : `${x.count.toLocaleString("en-GB")} ${x.label}`))].join(" · ") },
     { id: "settings", label: settingsNote ? `Run settings · ${settingsNote}` : "Run settings" },
   ];
 
