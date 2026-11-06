@@ -25,7 +25,14 @@
  *    treated as looser anyway, so a writer that ever allowed one fails closed.
  */
 import type { approvalRules, complianceProfiles, dataScopeRules, rateLimits } from "@regulait/db";
-import { approvalRuleLoosens, approvalRuleShape, requireRuleStepUp, type ApprovalRuleStepUp } from "./approval-pool.js";
+import {
+  approvalRuleLoosens,
+  approvalRuleShape,
+  approverPoolTakeoverFacts,
+  requireRuleStepUp,
+  routedApprovalRule,
+  type ApprovalRuleStepUp,
+} from "./approval-pool.js";
 
 type Q = Parameters<typeof approvalRuleLoosens>[0];
 
@@ -228,14 +235,24 @@ export async function assertRuleLooseningStepUp(
     stepUp?: ApprovalRuleStepUp | null;
   },
 ): Promise<void> {
-  const values = await ruleEditLoosening(db, args.artifactType, args.before, args.after);
+  let values = await ruleEditLoosening(db, args.artifactType, args.before, args.after);
+  // ADR-0229 amendment: an approval-rule edit or activation that makes the rule outrank (or tie) an overlapping rule
+  // with a narrower pool takes that pool over; it is the same loosening, so it rides the same single step-up
+  if (args.artifactType === "approval_rule") {
+    const takeover = await approverPoolTakeoverFacts(db, {
+      ruleId: args.ruleId,
+      before: routedApprovalRule(args.before),
+      after: routedApprovalRule(args.after),
+    });
+    if (takeover) values = { ...(values ?? {}), ...takeover };
+  }
   if (!values) return;
   return requireRuleStepUp(
     db,
     { ruleId: args.ruleId, values },
     args.stepUp,
-    "this change loosens what a governance rule enforces (a lower quorum, a wider approver pool, fewer calls matched, " +
-      "a higher limit or a wider scope) and needs a step-up, which this write path cannot ask for: make the change as an " +
+    "this change loosens what a governance rule enforces (a lower quorum, a wider approver pool, taking over a " +
+      "narrower rule's approver pool, fewer calls matched, a higher limit or a wider scope) and needs a step-up, which this write path cannot ask for: make the change as an " +
       "admin in RegulAIt",
   );
 }

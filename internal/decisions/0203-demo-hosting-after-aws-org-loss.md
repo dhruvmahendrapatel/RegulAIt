@@ -75,3 +75,10 @@ re-planning for one date):
   `DEMO_RUNBOOK.md` §7.3).
 
 Both exceptions are built by their own PRs; this addendum only records them.
+
+## Addendum: 2026-11-01, the demo moves to an EC2 host
+
+Owner decision, 2026-11-01 ("EC2 now, Fargate after"): [ADR-0228](0228-demo-host-single-ec2-company-account.md)
+replaces decision 1's laptop hosting with one hardened EC2 instance in a member account of the company Organization,
+reached through the same Cloudflare Tunnel and hostname, and brings forward part of decision 3. Fargate, RDS, WAF and
+HA remain after the demo.

@@ -624,3 +624,15 @@ one `CEILING_EXCEPTIONS` row.
 - Why: main already measures 1,050,176 B, the supplier portal lane alone adds about 13.8 kB, and about ten more UI lanes
   are queued. A raise per lane would make every lane edit the same line.
 - Lanes keep reporting their all-JS bytes; crossing 1,150 kB goes back to the owner.
+
+## Addendum / As built (2026-10-31) — entry JS 138.5 → 139.5 kB (demo freeze window)
+
+The owner decided this raise on 2026-10-31: <https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6545733056>. It is the ADR-recorded exception the `--guard` rule requires, with
+one `CEILING_EXCEPTIONS` row.
+
+- `entry JS (index)` from `138.5 kB` to `139.5 kB` (+1.0 kB). All JS stays at 1,150 kB; entry CSS and the lazy chunks
+  are unchanged.
+- Why: main measures 138,495 B gzip, 5 B under the ceiling. A change to any lazy chunk renames hashed files in the
+  entry's preload map, which moves the gzip size by a few bytes with no new entry code (#630 +3 B, #611 +9 B). The
+  raise fits ADR-0198's freeze-week allowance of at most +1 kB of entry raises.
+- After the demo the entry is trimmed back under 138.5 kB and this ceiling restored.

@@ -511,7 +511,7 @@ export function alertSlaJobDefinitions(): SchedulerJobDefinition[] {
     {
       name: ALERT_SLA_SWEEP_JOB_NAME,
       description:
-        "ADR-0182 S5 (PF-14): marks a governance alert episode past its due time (alert_sla_hours) as breached, once, " +
+        "Marks a governance alert episode past its due time (the alert's response-time target) as breached, once, " +
         "and escalates breached and unowned episodes to the admins, posting to chat with no personal data. Never " +
         "resolves or acknowledges an episode.",
       adr: "ADR-0182",

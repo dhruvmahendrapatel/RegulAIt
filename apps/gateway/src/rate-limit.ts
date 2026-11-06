@@ -94,6 +94,9 @@ export interface RateLimitConfig {
   /** CFG-06: requests per window, per client IP, on the SSO return legs */
   ssoMax: number;
   ssoWindowMs: number;
+  /** #609 follow-up: on-demand MCP tool syncs per window, per SERVER (each one connects upstream) */
+  mcpSyncMax: number;
+  mcpSyncWindowMs: number;
 }
 
 export const RATE_LIMIT_DEFAULTS: Readonly<RateLimitConfig> = Object.freeze({
@@ -118,7 +121,16 @@ export const RATE_LIMIT_DEFAULTS: Readonly<RateLimitConfig> = Object.freeze({
   // attacker would need to matter.
   ssoMax: 120,
   ssoWindowMs: 60_000,
+  // 6 per server per minute: an admin's sync (and its step-up retry) fits, a loop
+  // that would turn the button into an outbound request generator does not
+  mcpSyncMax: 6,
+  mcpSyncWindowMs: 60_000,
 });
+
+/** the per-SERVER bucket of `POST /v1/servers/:serverId/tools/sync`, applied after the admin gate */
+export function mcpSyncRateLimitKey(serverId: string): string {
+  return `mcpsync:${serverId}`;
+}
 
 /** the unauthenticated, credential-accepting endpoints */
 export const AUTH_RATE_LIMIT_ROUTES: ReadonlySet<string> = new Set([
@@ -196,6 +208,8 @@ export function resolveRateLimitConfig(
     ),
     ssoMax: envInt(env, "REGULAIT_SSO_RATE_LIMIT_MAX", RATE_LIMIT_DEFAULTS.ssoMax),
     ssoWindowMs: envInt(env, "REGULAIT_SSO_RATE_LIMIT_WINDOW_MS", RATE_LIMIT_DEFAULTS.ssoWindowMs),
+    mcpSyncMax: envInt(env, "REGULAIT_MCP_SYNC_RATE_LIMIT_MAX", RATE_LIMIT_DEFAULTS.mcpSyncMax),
+    mcpSyncWindowMs: envInt(env, "REGULAIT_MCP_SYNC_RATE_LIMIT_WINDOW_MS", RATE_LIMIT_DEFAULTS.mcpSyncWindowMs),
     ...override,
   };
 }
@@ -266,6 +280,7 @@ export function rateLimitCredentialKey(ctx: AuthContext): string | null {
 export function rateLimitMax(cfg: RateLimitConfig, key: string): number {
   if (key.startsWith("auth:")) return cfg.authMax;
   if (key.startsWith("sso:")) return cfg.ssoMax;
+  if (key.startsWith("mcpsync:")) return cfg.mcpSyncMax;
   if (key.startsWith("cred:scim:")) return cfg.scimMax;
   if (key.startsWith("ipk:") || key.startsWith("cred:")) return cfg.apiKeyMax;
   return cfg.globalMax;
@@ -274,6 +289,7 @@ export function rateLimitMax(cfg: RateLimitConfig, key: string): number {
 export function rateLimitWindowMs(cfg: RateLimitConfig, key: string): number {
   if (key.startsWith("auth:")) return cfg.authWindowMs;
   if (key.startsWith("sso:")) return cfg.ssoWindowMs;
+  if (key.startsWith("mcpsync:")) return cfg.mcpSyncWindowMs;
   if (key.startsWith("cred:scim:")) return cfg.scimWindowMs;
   return cfg.globalWindowMs;
 }
