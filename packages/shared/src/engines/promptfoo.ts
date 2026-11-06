@@ -43,7 +43,7 @@ import {
 } from "./promptfoo-upstream.js";
 
 /** the release the image is built from; equals the vendored OWASP tables' release (ADR-0187) */
-export const PROMPTFOO_ENGINE_VERSION = "0.124.1";
+export const PROMPTFOO_ENGINE_VERSION = "0.125.1";
 
 /** the vocabulary name in `sourceTaxonomy.system` for every promptfoo item */
 export const PROMPTFOO_TAXONOMY_SYSTEM = "promptfoo";
@@ -53,7 +53,7 @@ export const PROMPTFOO_STRATEGY_SET_PREFIX = "strategy:";
 
 /**
  * The usage-data and remote-fetch switches the runner sets, each at the value the self-test
- * requires (env name -> value). Read from the 0.123.1 source (R10), re-checked in the 0.124.1 bundle (ADR-0187 decision 176):
+ * requires (env name -> value). Read from the 0.123.1 source (R10), re-checked in the 0.124.1 bundle (ADR-0187 decision 176) and the 0.125.1 bundle (2026-11-06):
  *   - DISABLE_TELEMETRY: no PostHog client; still sends one "telemetry disabled" event unless
  *     the image's patch is applied (patches/telemetry-disabled-sends-nothing.mjs);
  *   - DISABLE_UPDATE: no version check;

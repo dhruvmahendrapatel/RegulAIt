@@ -1305,6 +1305,8 @@ export const auditLog = pgTable(
         // "no unreviewed model reaches production data" an audited property
         // rather than a slide. Plain text column — no DDL needed.
         "model_card",
+        // ADR-0222 (P13(a)): an uploaded fairness evaluation dataset (its runs audit as the model card they measure)
+        "fairness_dataset",
         // ADR-0046: an admin creating or deleting an approval ROUTING RULE.
         // Authoring one changes whose queue every matching approval lands in
         // from that moment on, so it is a governed act in its own right. The
@@ -1640,6 +1642,8 @@ export const auditLog = pgTable(
         "engine_run",
         "engine_schedule",
         "model_artifact",
+        // ADR-0216: a model signing key (added, revoked). Plain text column — no DDL.
+        "model_signing_key",
         // ADR-0188 (batch 6 item 1) S3: the issuer's signing keys (activate,
         // rotate, revoke; `object_id` NULL, the kid in `detail`) and
         // delegation grants (cascade revocation). Plain text column — no DDL.
@@ -3423,7 +3427,7 @@ export const projects = pgTable("projects", {
    * fact does not resolve: `policy_unresolved`). Set only by `PUT /v1/execution-project-sensitivities/:projectId`
    * (a `settings_relax` step-up, audited). */
   isolationSensitivity: text("isolation_sensitivity"),
-  /** ADR-0206 G1 (migration 0260): set when an admin archives the project. An archived project keeps its spend,
+  /** ADR-0206 G1 (migration 0275): set when an admin archives the project. An archived project keeps its spend,
    * approvals, context and audit history readable, but takes no new members, context or attributed calls (the
    * pre-dispatch gate refuses `project_archived`, so engine keys pinned to it stop working). NULL = active. Written
    * only by the archive/unarchive routes; the CHECK keeps the three columns together. */
@@ -4864,6 +4868,14 @@ export const orgSettings = pgTable(
     /** days from a data-subject request's receipt to its due date; 30 is the strict default, shorter is stricter */
     dsrSlaDays: integer("dsr_sla_days").notNull().default(30),
 
+    /** ADR-0222 (P13(a), migration 0271): fairness testing. Off by default — turning it on starts storing
+     * sensitive attributes, so it needs the `settings_relax` step-up. */
+    fairnessTestingEnabled: boolean("fairness_testing_enabled").notNull().default(false),
+    /** ADR-0222: a failing or inconclusive latest run holds the card's sign-off and dispatch (strict true) */
+    fairnessBlockOnFail: boolean("fairness_block_on_fail").notNull().default(true),
+    /** ADR-0222: an uploaded evaluation dataset's rows are deleted this many days after upload (strict 30) */
+    fairnessDatasetRetentionDays: integer("fairness_dataset_retention_days").notNull().default(30),
+
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -5042,6 +5054,10 @@ export const orgSettings = pgTable(
     check(
       "org_settings_executor_attestation_max_age_minutes_check",
       sql`${t.executorAttestationMaxAgeMinutes} BETWEEN 60 AND 1440`,
+    ),
+    check(
+      "org_settings_fairness_dataset_retention_days_check",
+      sql`${t.fairnessDatasetRetentionDays} BETWEEN 1 AND 365`,
     ),
   ],
 );
@@ -6065,6 +6081,90 @@ export const mrmRetestRuns = pgTable(
   ],
 );
 export type MrmRetestRunRow = typeof mrmRetestRuns.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0222 (P13(a), migration 0271) — FAIRNESS TESTING.
+//
+// A labelled evaluation dataset an admin uploads (true label, the model's
+// prediction and the protected attributes, nothing else is kept), and the
+// fairness runs computed on it against one model card. The rows are enveloped
+// under the data key and deleted at the retention date; the metadata row, its
+// sha256 and every run that cites it stay for the audit trail.
+// ---------------------------------------------------------------------------
+
+export const FAIRNESS_RUN_OUTCOMES = ["pass", "flag", "fail", "inconclusive"] as const;
+
+export const fairnessDatasets = pgTable(
+  "fairness_datasets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    description: text("description"),
+    labelColumn: text("label_column").notNull(),
+    predictionColumn: text("prediction_column").notNull(),
+    favourableLabel: text("favourable_label").notNull(),
+    /** the protected attribute columns, in upload order */
+    protectedAttributes: jsonb("protected_attributes").$type<string[]>().notNull(),
+    rowCount: integer("row_count").notNull(),
+    /** the uploaded CSV's size and sha256 (the sha256 outlives the rows) */
+    csvBytes: integer("csv_bytes").notNull(),
+    csvSha256: text("csv_sha256").notNull(),
+    /** the kept columns only, as JSON, under the data key; null once deleted */
+    rowsCiphertext: text("rows_ciphertext"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    /** when the rows were deleted, and why (`retention` or `deleted`) */
+    purgedAt: timestamp("purged_at", { withTimezone: true }),
+    purgeReason: text("purge_reason"),
+    uploadedByUserId: uuid("uploaded_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("fairness_datasets_row_count_check", sql`${t.rowCount} BETWEEN 1 AND 100000`),
+    check("fairness_datasets_csv_bytes_check", sql`${t.csvBytes} BETWEEN 1 AND 5242880`),
+    check(
+      "fairness_datasets_purge_check",
+      sql`(${t.purgedAt} IS NULL AND ${t.purgeReason} IS NULL AND ${t.rowsCiphertext} IS NOT NULL) OR (${t.purgedAt} IS NOT NULL AND ${t.purgeReason} IN ('retention','deleted') AND ${t.rowsCiphertext} IS NULL)`,
+    ),
+    index("fairness_datasets_expires_idx").on(t.expiresAt).where(sql`${t.rowsCiphertext} IS NOT NULL`),
+  ],
+);
+
+export const fairnessRuns = pgTable(
+  "fairness_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    cardId: uuid("card_id")
+      .notNull()
+      .references(() => modelCards.id, { onDelete: "cascade" }),
+    /** RESTRICT: a dataset row is never deleted, only its ciphertext */
+    datasetId: uuid("dataset_id")
+      .notNull()
+      .references(() => fairnessDatasets.id, { onDelete: "restrict" }),
+    /** the dataset's sha256 at run time, so the run names the exact bytes it measured */
+    datasetSha256: text("dataset_sha256").notNull(),
+    metricsVersion: text("metrics_version").notNull(),
+    thresholds: jsonb("thresholds").notNull(),
+    minGroupSize: integer("min_group_size").notNull(),
+    /** per attribute: group counts and rates, and each metric's value (aggregates only, never a row) */
+    result: jsonb("result").notNull(),
+    outcome: text("outcome", { enum: FAIRNESS_RUN_OUTCOMES }).notNull(),
+    /** the card's pinned model version when the run was made; a run whose version differs from the card's is stale */
+    cardModelVersion: text("card_model_version"),
+    /** how this run's thresholds were looser than the strict defaults (empty = strict); a step-up was given */
+    relaxed: jsonb("relaxed").$type<Record<string, unknown>>().notNull().default({}),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("fairness_runs_outcome_check", sql`${t.outcome} IN ('pass','flag','fail','inconclusive')`),
+    check("fairness_runs_min_group_size_check", sql`${t.minGroupSize} BETWEEN 30 AND 10000`),
+    index("fairness_runs_card_created_idx").on(t.cardId, t.createdAt),
+    index("fairness_runs_dataset_idx").on(t.datasetId),
+  ],
+);
+
+export type FairnessDatasetRow = typeof fairnessDatasets.$inferSelect;
+export type FairnessRunRow = typeof fairnessRuns.$inferSelect;
 
 export type ModelCardRow = typeof modelCards.$inferSelect;
 export type ModelCardApprovalRow = typeof modelCardApprovals.$inferSelect;
@@ -7356,7 +7456,7 @@ export const discoverySources = pgTable(
   (t) => [
     check(
       "discovery_sources_kind_check",
-      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent')`,
+      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow')`,
     ),
     check("discovery_sources_name_check", sql`char_length(${t.name}) BETWEEN 1 AND 120`),
     check("discovery_sources_target_check", sql`jsonb_typeof(${t.target}) = 'object'`),
@@ -7441,7 +7541,7 @@ export const discoveryRuns = pgTable(
     check("discovery_runs_status_check", sql`${t.status} IN ('queued', 'running', 'succeeded', 'failed')`),
     check(
       "discovery_runs_kind_check",
-      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent')`,
+      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow')`,
     ),
     check("discovery_runs_attempt_check", sql`${t.attempt} BETWEEN 0 AND 3`),
     check("discovery_runs_gaps_check", sql`jsonb_typeof(${t.catalogueGaps}) = 'array' AND jsonb_array_length(${t.catalogueGaps}) <= 50`),
@@ -7472,6 +7572,10 @@ export const discoverySettings = pgTable(
     id: integer("id").primaryKey().default(1),
     credentialWarningAgeDays: integer("credential_warning_age_days").notNull().default(90),
     endpointRetentionDays: integer("endpoint_retention_days").notNull().default(90),
+    // ADR-0235: the wider-source family switches, all off (migration 0269)
+    saasSourcesEnabled: boolean("saas_sources_enabled").notNull().default(false),
+    identitySourcesEnabled: boolean("identity_sources_enabled").notNull().default(false),
+    mlPlatformSourcesEnabled: boolean("ml_platform_sources_enabled").notNull().default(false),
     version: integer("version").notNull().default(1),
     updatedBy: uuid("updated_by"),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -7508,7 +7612,7 @@ export const discoveryPseudonyms = pgTable(
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    check("discovery_pseudonyms_kind_check", sql`${t.kind} IN ('device_user', 'commit_author', 'cloud_principal', 'device')`),
+    check("discovery_pseudonyms_kind_check", sql`${t.kind} IN ('device_user', 'commit_author', 'cloud_principal', 'device', 'idp_user')`),
     check("discovery_pseudonyms_pseudonym_check", sql`${t.pseudonym} ~ '^psn:[0-9a-f]{24}$'`),
     check("discovery_pseudonyms_seen_check", sql`${t.firstSeenAt} <= ${t.lastSeenAt}`),
     uniqueIndex("discovery_pseudonyms_pseudonym_uq").on(t.pseudonym),
@@ -10356,6 +10460,8 @@ export const AI_RISK_CATEGORIES = [
   /** ADR-0147 (migration 0123): the bias and safety trust dimensions */
   "bias_fairness",
   "unsafe_output",
+  /** ADR-0216 (migration 0267): a model file that is unsigned, unscanned or in an unsafe format */
+  "supply_chain",
 ] as const;
 export type AiRiskCategory = (typeof AI_RISK_CATEGORIES)[number];
 
@@ -10399,6 +10505,8 @@ export const aiRisks = pgTable(
      * linked controls operate — same three-level scale, both or neither */
     residualLikelihood: text("residual_likelihood", { enum: AI_RISK_LEVELS }),
     residualImpact: text("residual_impact", { enum: AI_RISK_LEVELS }),
+    /** ADR-0216 (migration 0267): the model artifact whose failing supply-chain check opened this risk */
+    modelArtifactId: uuid("model_artifact_id").references((): AnyPgColumn => modelArtifacts.id, { onDelete: "set null" }),
     /** ADR-0211 (migration 0250): the treatment record of a `transferred` or
      * `avoided` risk — the contract or policy reference, or the decision that
      * stopped the use; the accountable owner; who recorded it and when.
@@ -10411,6 +10519,10 @@ export const aiRisks = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    check("ai_risks_model_artifact_category_check", sql`${t.modelArtifactId} IS NULL OR ${t.category} = 'supply_chain'`),
+    uniqueIndex("ai_risks_supply_chain_artifact_open_unique")
+      .on(t.modelArtifactId)
+      .where(sql`${t.modelArtifactId} IS NOT NULL AND ${t.status} <> 'closed'`),
     check("ai_risks_title_check", sql`length(btrim(${t.title})) > 0`),
     check(
       "ai_risks_treatment_check",
@@ -13626,6 +13738,108 @@ export const artifactScans = pgTable(
     uniqueIndex("artifact_scans_engine_run_unique").on(t.engineRunId).where(sql`${t.engineRunId} IS NOT NULL`),
   ],
 );
+
+// ===========================================================================
+// ADR-0216 (P14 + P15, migration 0266) — model-file signatures and the supply-chain block.
+// ===========================================================================
+
+export const MODEL_SIGNING_ALGORITHMS = ["ecdsa_p256_sha256"] as const;
+export const MODEL_SIGNATURE_STATUSES = ["verified", "failed"] as const;
+export const MODEL_SIGNATURE_PHASES = ["upload", "attach"] as const;
+
+/** A trust root for key-based model signatures. Public keys only; never deleted, only revoked (guard trigger). */
+export const modelSigningKeys = pgTable(
+  "model_signing_keys",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    algorithm: text("algorithm", { enum: MODEL_SIGNING_ALGORITHMS }).notNull(),
+    publicKeyPem: text("public_key_pem").notNull(),
+    /** sha256 (hex) of the PEM, as the signing format writes it into the bundle */
+    keyHint: text("key_hint").notNull(),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedByUserId: uuid("revoked_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    check("model_signing_keys_name_check", sql`length(btrim(${t.name})) BETWEEN 1 AND 120`),
+    check("model_signing_keys_algorithm_check", sql`${t.algorithm} IN ('ecdsa_p256_sha256')`),
+    check("model_signing_keys_hint_check", sql`${t.keyHint} ~ '^[0-9a-f]{64}$'`),
+    check("model_signing_keys_pem_check", sql`length(${t.publicKeyPem}) BETWEEN 1 AND 4096`),
+    uniqueIndex("model_signing_keys_hint_unique").on(t.keyHint),
+  ],
+);
+export type ModelSigningKeyRow = typeof modelSigningKeys.$inferSelect;
+
+/** Every signature presented for a model artifact, with the gateway's verdict; the newest is the artifact's. */
+export const modelArtifactSignatures = pgTable(
+  "model_artifact_signatures",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    artifactId: uuid("artifact_id")
+      .notNull()
+      .references(() => modelArtifacts.id, { onDelete: "cascade" }),
+    artifactSha256: text("artifact_sha256").notNull(),
+    bundle: jsonb("bundle").$type<Record<string, unknown>>().notNull(),
+    status: text("status", { enum: MODEL_SIGNATURE_STATUSES }).notNull(),
+    failure: text("failure"),
+    signingKeyId: uuid("signing_key_id").references(() => modelSigningKeys.id, { onDelete: "restrict" }),
+    keyHint: text("key_hint"),
+    signedName: text("signed_name"),
+    resourceName: text("resource_name"),
+    phase: text("phase", { enum: MODEL_SIGNATURE_PHASES }).notNull(),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("model_artifact_signatures_sha256_check", sql`${t.artifactSha256} ~ '^[0-9a-f]{64}$'`),
+    check("model_artifact_signatures_status_check", sql`${t.status} IN ('verified', 'failed')`),
+    check(
+      "model_artifact_signatures_failure_check",
+      sql`(${t.status} = 'verified' AND ${t.failure} IS NULL AND ${t.signingKeyId} IS NOT NULL) OR (${t.status} = 'failed' AND ${t.failure} ~ '^[a-z][a-z0-9_]{0,63}$')`,
+    ),
+    check("model_artifact_signatures_hint_check", sql`${t.keyHint} IS NULL OR ${t.keyHint} ~ '^[0-9a-f]{64}$'`),
+    check("model_artifact_signatures_phase_check", sql`${t.phase} IN ('upload', 'attach')`),
+    index("model_artifact_signatures_artifact_idx").on(t.artifactId, t.createdAt),
+    index("model_artifact_signatures_key_idx").on(t.signingKeyId),
+  ],
+);
+export type ModelArtifactSignatureRow = typeof modelArtifactSignatures.$inferSelect;
+
+/** An admin's per-artifact relaxation of named failing conditions: a reason and at most 30 days (ADR-0180). */
+export const modelArtifactSupplyChainRelaxations = pgTable(
+  "model_artifact_supply_chain_relaxations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    artifactId: uuid("artifact_id")
+      .notNull()
+      .references(() => modelArtifacts.id, { onDelete: "cascade" }),
+    artifactSha256: text("artifact_sha256").notNull(),
+    conditions: text("conditions").array().notNull(),
+    reason: text("reason").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    clearedAt: timestamp("cleared_at", { withTimezone: true }),
+    clearedByUserId: uuid("cleared_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    check("model_artifact_supply_chain_relaxations_sha256_check", sql`${t.artifactSha256} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "model_artifact_supply_chain_relaxations_conditions_check",
+      sql`cardinality(${t.conditions}) BETWEEN 1 AND 3 AND ${t.conditions} <@ ARRAY['unsigned', 'unscanned', 'unsafe_format']::text[]`,
+    ),
+    check("model_artifact_supply_chain_relaxations_reason_check", sql`length(btrim(${t.reason})) BETWEEN 1 AND 1000`),
+    check(
+      "model_artifact_supply_chain_relaxations_expiry_check",
+      sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} <= ${t.createdAt} + interval '30 days'`,
+    ),
+    check("model_artifact_supply_chain_relaxations_cleared_check", sql`${t.clearedByUserId} IS NULL OR ${t.clearedAt} IS NOT NULL`),
+    uniqueIndex("model_artifact_supply_chain_relaxations_active_unique").on(t.artifactId).where(sql`${t.clearedAt} IS NULL`),
+  ],
+);
+export type ModelArtifactSupplyChainRelaxationRow = typeof modelArtifactSupplyChainRelaxations.$inferSelect;
 
 // ===========================================================================
 // ADR-0188 (batch 6 item 1, migration 0180) — per-agent and workload identity,

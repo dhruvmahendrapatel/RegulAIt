@@ -1564,17 +1564,45 @@
       "breakpoints": true
     },
     {
-      "idx": 260,
+      "idx": 266,
       "version": "7",
-      "when": 1785195000000,
-      "tag": "0260_project_archive",
+      "when": 1785201000000,
+      "tag": "0266_model_signing_supply_chain",
       "breakpoints": true
     },
     {
-      "idx": 261,
+      "idx": 267,
       "version": "7",
-      "when": 1785196000000,
-      "tag": "0261_project_archive_write_guard",
+      "when": 1785202000000,
+      "tag": "0267_supply_chain_risk_category",
+      "breakpoints": true
+    },
+    {
+      "idx": 269,
+      "version": "7",
+      "when": 1785204000000,
+      "tag": "0269_discovery_wider_sources",
+      "breakpoints": true
+    },
+    {
+      "idx": 271,
+      "version": "7",
+      "when": 1785206000000,
+      "tag": "0271_fairness_testing",
+      "breakpoints": true
+    },
+    {
+      "idx": 275,
+      "version": "7",
+      "when": 1785210000000,
+      "tag": "0275_project_archive",
+      "breakpoints": true
+    },
+    {
+      "idx": 276,
+      "version": "7",
+      "when": 1785211000000,
+      "tag": "0276_project_archive_write_guard",
       "breakpoints": true
     }
   ]
