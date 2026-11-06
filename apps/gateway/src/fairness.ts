@@ -33,6 +33,12 @@
  *     latest run failed or was inconclusive cannot be sent for sign-off, and
  *     dispatch under it is refused on the model-risk gate's 409 path
  *     (`fairnessHold`, read by mrm.ts). Inconclusive is never read as a pass.
+ *     A run made on another model version than the card now names is stale
+ *     and holds too, so changing the version cannot lift a hold.
+ *  5. A LENIENT RUN IS A RELAXATION. A run whose thresholds or minimum group
+ *     size are looser than the strict defaults (`fairnessRunRelaxed`) needs a
+ *     `settings_relax` step-up, and the run row and its audit row record what
+ *     was relaxed. Otherwise any admin could lift a hold with a weaker run.
  */
 import { createHash } from "node:crypto";
 import { z } from "zod";
@@ -46,7 +52,7 @@ import {
   fairnessDatasets,
   fairnessRuns,
   isNotNull,
-  lt,
+  lte,
   modelCards,
   or,
   orgSettings,
@@ -61,6 +67,7 @@ import {
   computeFairness,
   createFairnessDatasetSchema,
   fairnessOutcomeBlocks,
+  fairnessRunRelaxed,
   fairnessSettingsRelaxed,
   runFairnessTestSchema,
   updateFairnessSettingsSchema,
@@ -259,15 +266,18 @@ export function runView(r: FairnessRunRow) {
 export interface FairnessHold {
   runId: string;
   outcome: FairnessOutcome;
+  /** the latest run was made on another model version than the card now names */
+  stale: boolean;
   createdAt: Date;
   detail: string;
 }
 
 /**
  * The latest run on a card, when it holds the card: fairness testing is on,
- * blocking is on, and the latest run failed or was inconclusive. null = no
- * hold. A card with no run is not held (fairness applies to the models an
- * admin tests; ADR-0222 lists a per-card requirement as a follow-up).
+ * blocking is on, and the latest run failed, was inconclusive, or is stale
+ * (made on another model version than the card now pins, so its result says
+ * nothing about the model in use). null = no hold. A card with no run is not
+ * held: ADR-0222 decision 4 records why, pending the owner's decision.
  */
 export async function fairnessHold(
   db: Db,
@@ -277,18 +287,29 @@ export async function fairnessHold(
   const o = org ?? (await loadOrgSettings(db));
   if (!o.fairnessTestingEnabled || !o.fairnessBlockOnFail) return null;
   const [latest] = await db
-    .select({ id: fairnessRuns.id, outcome: fairnessRuns.outcome, createdAt: fairnessRuns.createdAt })
+    .select({
+      id: fairnessRuns.id,
+      outcome: fairnessRuns.outcome,
+      createdAt: fairnessRuns.createdAt,
+      runVersion: fairnessRuns.cardModelVersion,
+      cardVersion: modelCards.pinnedModelVersion,
+    })
     .from(fairnessRuns)
+    .innerJoin(modelCards, eq(modelCards.id, fairnessRuns.cardId))
     .where(eq(fairnessRuns.cardId, cardId))
     .orderBy(desc(fairnessRuns.createdAt), desc(fairnessRuns.id))
     .limit(1);
-  if (!latest || !fairnessOutcomeBlocks(latest.outcome as FairnessOutcome)) return null;
+  if (!latest) return null;
+  const stale = (latest.runVersion ?? null) !== (latest.cardVersion ?? null);
+  if (!stale && !fairnessOutcomeBlocks(latest.outcome as FairnessOutcome)) return null;
   return {
     runId: latest.id,
     outcome: latest.outcome as FairnessOutcome,
+    stale,
     createdAt: latest.createdAt,
-    detail:
-      latest.outcome === "fail"
+    detail: stale
+      ? "the latest fairness test on this model card was run on a different model version than the card now names; run a test on the current version"
+      : latest.outcome === "fail"
         ? "the latest fairness test on this model card breached a failing threshold; run a passing test, or an admin turns blocking off"
         : "the latest fairness test on this model card was inconclusive (too few rows in a group, or a metric could not be computed); run a test on a fuller dataset",
   };
@@ -297,6 +318,19 @@ export async function fairnessHold(
 // ---------------------------------------------------------------------------
 // The retention sweep
 // ---------------------------------------------------------------------------
+
+/**
+ * A dataset is past retention when its stored expiry has passed, or when the
+ * retention setting NOW in force, applied from the upload, has (an admin who
+ * shortens retention shortens what may still be used). The sweep and the run
+ * path read this one condition, on the database clock.
+ */
+export function fairnessDatasetExpired(retentionDays: number) {
+  return or(
+    lte(fairnessDatasets.expiresAt, sql`now()`),
+    sql`${fairnessDatasets.createdAt} + make_interval(days => ${retentionDays}) <= now()`,
+  )!;
+}
 
 /**
  * Delete the rows of every dataset past its retention date. Retention is the
@@ -311,13 +345,7 @@ export async function runFairnessRetentionSweep(db: Db, opts: { actorUserId?: st
       .update(fairnessDatasets)
       .set({ rowsCiphertext: null, purgedAt: sql`now()`, purgeReason: "retention" })
       .where(
-        and(
-          isNotNull(fairnessDatasets.rowsCiphertext),
-          or(
-            lt(fairnessDatasets.expiresAt, sql`now()`),
-            sql`${fairnessDatasets.createdAt} + make_interval(days => ${org.fairnessDatasetRetentionDays}) < now()`,
-          ),
-        ),
+        and(isNotNull(fairnessDatasets.rowsCiphertext), fairnessDatasetExpired(org.fairnessDatasetRetentionDays)),
       )
       .returning({ id: fairnessDatasets.id, sha: fairnessDatasets.csvSha256 });
     if (purged.length > 0) {
@@ -372,22 +400,52 @@ function settingsView(o: { fairnessTestingEnabled: boolean; fairnessBlockOnFail:
   };
 }
 
+/**
+ * The per-person limit on the two costly writes, FAIL-CLOSED (ADR-0180; PR #633
+ * security review): a counter that answers with an error or no verdict refuses
+ * the write with 503. (The shared store itself falls back to its in-process
+ * count when Postgres is unreachable, so the limit still holds per process;
+ * this closes the remaining gap, a store that reports no count at all.)
+ */
+export async function fairnessRateCheck(
+  limiter: Pick<SharedRateLimitStore, "incr">,
+  key: string,
+  action: "upload" | "run",
+  max = FAIRNESS_WRITE_RATE_PER_MINUTE,
+): Promise<{ ok: true } | { ok: false; status: 429 | 503; retryAfterSeconds: number; body: Record<string, unknown> }> {
+  const verdict = await new Promise<{ current: number; ttl: number } | null>((resolve) => {
+    try {
+      limiter.incr(key, (e, r) => resolve(e || !r || !Number.isFinite(r.current) ? null : r), 60_000, max);
+    } catch {
+      resolve(null);
+    }
+  });
+  if (verdict === null) {
+    return {
+      ok: false,
+      status: 503,
+      retryAfterSeconds: 60,
+      body: { error: "rate_limit_unavailable", detail: `the fairness ${action} rate limit could not be checked; try again shortly` },
+    };
+  }
+  if (verdict.current <= max) return { ok: true };
+  const retry = Math.max(1, Math.ceil(verdict.ttl / 1000));
+  return {
+    ok: false,
+    status: 429,
+    retryAfterSeconds: retry,
+    body: { error: "rate_limited", detail: `too many fairness ${action}s; the limit is ${max} a minute`, retryAfterSeconds: retry },
+  };
+}
+
 export function registerFairnessRoutes(app: FastifyInstance, db: Db, opts: { dataKey?: string | undefined } = {}): void {
   const limiter = new SharedRateLimitStore(db);
   const actor = (req: FastifyRequest) => req.authCtx.userId ?? NO_IDENTITY;
 
-  /** per-person limit on the two costly writes; fail-open on a counter outage, as the global tier does */
   const rateLimited = async (req: FastifyRequest, reply: FastifyReply, action: "upload" | "run"): Promise<boolean> => {
-    const max = FAIRNESS_WRITE_RATE_PER_MINUTE;
-    const verdict = await new Promise<{ current: number; ttl: number }>((resolve) =>
-      limiter.incr(`fairness-${action}:${actor(req)}`, (_e, r) => resolve(r ?? { current: 0, ttl: 0 }), 60_000, max),
-    );
-    if (verdict.current <= max) return false;
-    const retry = Math.max(1, Math.ceil(verdict.ttl / 1000));
-    await reply
-      .status(429)
-      .header("retry-after", String(retry))
-      .send({ error: "rate_limited", detail: `too many fairness ${action}s; the limit is ${max} a minute`, retryAfterSeconds: retry });
+    const out = await fairnessRateCheck(limiter, `fairness-${action}:${actor(req)}`, action);
+    if (out.ok) return false;
+    await reply.status(out.status).header("retry-after", String(out.retryAfterSeconds)).send(out.body);
     return true;
   };
 
@@ -576,11 +634,23 @@ export function registerFairnessRoutes(app: FastifyInstance, db: Db, opts: { dat
     if (!opts.dataKey) {
       return reply.status(503).send({ error: "no_data_key", detail: "datasets are stored encrypted, and this deployment has no data key configured" });
     }
-    const [card] = await db.select({ id: modelCards.id, intendedUse: modelCards.intendedUse }).from(modelCards).where(eq(modelCards.id, body.cardId));
+    // a run looser than the strict defaults can lift a hold, so it is a relaxation: a settings_relax step-up bound
+    // to exactly what is relaxed, recorded on the run and its audit row
+    const relaxed = fairnessRunRelaxed(body.thresholds, body.minGroupSize);
+    if (!(await requireRelaxStepUp(db, req, reply, relaxed))) return reply;
+    const [card] = await db
+      .select({ id: modelCards.id, intendedUse: modelCards.intendedUse, pinnedModelVersion: modelCards.pinnedModelVersion })
+      .from(modelCards)
+      .where(eq(modelCards.id, body.cardId));
     if (!card) return reply.status(404).send({ error: "unknown_model_card" });
-    const [dataset] = await db.select().from(fairnessDatasets).where(eq(fairnessDatasets.id, body.datasetId));
-    if (!dataset) return reply.status(404).send({ error: "unknown_fairness_dataset" });
-    if (dataset.rowsCiphertext === null || dataset.expiresAt.getTime() <= Date.now()) {
+    const [found] = await db
+      .select({ row: fairnessDatasets, expired: sql<boolean>`${fairnessDatasetExpired(org.fairnessDatasetRetentionDays)}` })
+      .from(fairnessDatasets)
+      .where(eq(fairnessDatasets.id, body.datasetId));
+    if (!found) return reply.status(404).send({ error: "unknown_fairness_dataset" });
+    const dataset = found.row;
+    // the sweep's own condition (the current, possibly shortened, retention), not only the stored expiry
+    if (dataset.rowsCiphertext === null || found.expired === true) {
       return reply.status(410).send({
         error: "fairness_dataset_gone",
         detail: "this dataset's rows were deleted or reached the retention date; upload the dataset again to run a test",
@@ -608,6 +678,8 @@ export function registerFairnessRoutes(app: FastifyInstance, db: Db, opts: { dat
           minGroupSize,
           result,
           outcome: result.outcome,
+          cardModelVersion: card.pinnedModelVersion ?? null,
+          relaxed,
           createdByUserId: req.authCtx.userId ?? null,
         })
         .returning();
@@ -624,13 +696,18 @@ export function registerFairnessRoutes(app: FastifyInstance, db: Db, opts: { dat
           datasetSha256: dataset.csvSha256,
           metricsVersion: result.metricsVersion,
           outcome: result.outcome,
+          cardModelVersion: card.pinnedModelVersion ?? null,
+          // what was looser than the strict defaults ({} = strict); a non-empty value means a step-up was given
+          relaxed,
           breaches,
           blocks: org.fairnessBlockOnFail && fairnessOutcomeBlocks(result.outcome),
         },
         effect: fairnessOutcomeBlocks(result.outcome) ? "deny" : "allow",
         ruleId: FAIRNESS_RULE_IDS.run,
         ruleChain: [],
-        reason: `fairness test on model card '${card.intendedUse}': ${result.outcome}`,
+        reason:
+          `fairness test on model card '${card.intendedUse}': ${result.outcome}` +
+          (Object.keys(relaxed).length > 0 ? " (thresholds looser than the strict defaults, stepped up)" : ""),
       });
       return r!;
     });

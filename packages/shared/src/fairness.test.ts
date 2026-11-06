@@ -14,6 +14,7 @@ import {
   computeFairness,
   createFairnessDatasetSchema,
   fairnessOutcomeBlocks,
+  fairnessRunRelaxed,
   fairnessSettingsRelaxed,
   runFairnessTestSchema,
   type FairnessRows,
@@ -117,6 +118,10 @@ describe("computeFairness — outcomes", () => {
     const r = computeFairness(small, { minGroupSize: 30 });
     const b = r.attributes[0]!.groups.find((g) => g.group === "b")!;
     expect(b.included).toBe(false);
+    // a group below the minimum keeps its count only: its outcomes would identify the people in it
+    expect(b).toEqual({ group: "b", n: 5, labelPositives: null, predictedPositives: null, selectionRate: null, truePositiveRate: null, falsePositiveRate: null, included: false });
+    const a = r.attributes[0]!.groups.find((g) => g.group === "a")!;
+    expect(a).toMatchObject({ n: 100, labelPositives: 50, predictedPositives: 50, selectionRate: 0.5, included: true });
     expect(r.attributes[0]!.metrics.demographic_parity_difference.value).toBeNull();
     expect(r.outcome).toBe("inconclusive");
     expect(fairnessOutcomeBlocks("inconclusive")).toBe(true);
@@ -137,6 +142,25 @@ describe("computeFairness — outcomes", () => {
     expect(m.equal_opportunity_difference.reason).toMatch(/no rows with a favourable true label/);
     expect(m.equalized_odds_difference.value).toBeNull();
     expect(r.outcome).toBe("fail"); // selection 0.5 vs 0.125 also breaches: fail outranks inconclusive
+  });
+
+  it("a group with no favourable labels alone makes the run inconclusive (stricter than fairlearn, which returns a number)", () => {
+    // equal selection rates (0.5 each), so the selection metrics pass; group b has no favourable true label
+    const noPositives = rowsOf([
+      ["a", 1, 1, 40],
+      ["a", 0, 0, 40],
+      ["b", 0, 1, 40],
+      ["b", 0, 0, 40],
+    ]);
+    const r = computeFairness(noPositives);
+    const m = r.attributes[0]!.metrics;
+    expect(m.demographic_parity_difference.value).toBe(0);
+    expect(m.disparate_impact_ratio.value).toBe(1);
+    expect(r.attributes[0]!.groups.find((g) => g.group === "b")!.truePositiveRate).toBeNull();
+    expect(m.equal_opportunity_difference.value).toBeNull();
+    expect(m.equalized_odds_difference.value).toBeNull();
+    expect(r.outcome).toBe("inconclusive");
+    expect(fairnessOutcomeBlocks(r.outcome)).toBe(true);
   });
 
   it("the default thresholds check every metric with fail", () => {
@@ -172,6 +196,34 @@ describe("fairnessSettingsRelaxed", () => {
   it("lengthening a retention an admin had shortened is a relaxation even below the default", () => {
     expect(fairnessSettingsRelaxed({ datasetRetentionDays: 14 }, { ...strict, fairnessDatasetRetentionDays: 7 })).toEqual({
       fairnessDatasetRetentionDays: 14,
+    });
+  });
+});
+
+describe("fairnessRunRelaxed", () => {
+  const defaults = FAIRNESS_DEFAULT_THRESHOLDS.map((t) => ({ ...t }));
+  it("the strict defaults, an omitted request and a tighter request relax nothing", () => {
+    expect(fairnessRunRelaxed(undefined, undefined)).toEqual({});
+    expect(fairnessRunRelaxed(defaults, 30)).toEqual({});
+    const tighter = defaults.map((t) => ({ ...t, limit: t.metric === "disparate_impact_ratio" ? 0.9 : 0.05 }));
+    expect(fairnessRunRelaxed(tighter, 1)).toEqual({});
+  });
+  it("an omitted metric, a looser limit in either direction, flag-only and a larger minimum group are each relaxations", () => {
+    expect(fairnessRunRelaxed(defaults.slice(1), undefined)).toEqual({ "fairnessRun.demographic_parity_difference": "omitted" });
+    const looser = defaults.map((t) =>
+      t.metric === "demographic_parity_difference" ? { ...t, limit: 0.3 } : t.metric === "disparate_impact_ratio" ? { ...t, limit: 0.5 } : t,
+    );
+    expect(fairnessRunRelaxed(looser, undefined)).toEqual({
+      "fairnessRun.demographic_parity_difference": { limit: 0.3, action: "fail" },
+      "fairnessRun.disparate_impact_ratio": { limit: 0.5, action: "fail" },
+    });
+    const flagOnly = defaults.map((t) => (t.metric === "equal_opportunity_difference" ? { ...t, action: "flag" as const } : t));
+    expect(fairnessRunRelaxed(flagOnly, undefined)).toEqual({ "fairnessRun.equal_opportunity_difference": { limit: 0.1, action: "flag" } });
+    expect(fairnessRunRelaxed(undefined, 31)).toEqual({ "fairnessRun.minGroupSize": 31 });
+    expect(fairnessRunRelaxed([{ metric: "disparate_impact_ratio", limit: 0.8, action: "fail" }], 30)).toEqual({
+      "fairnessRun.demographic_parity_difference": "omitted",
+      "fairnessRun.equal_opportunity_difference": "omitted",
+      "fairnessRun.equalized_odds_difference": "omitted",
     });
   });
 });

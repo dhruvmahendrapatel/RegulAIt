@@ -10,7 +10,10 @@
 --    retention date or on delete; the row, its sha256 and its runs stay for the audit trail. The purge CHECK makes
 --    "rows kept" and "purged" exclusive.
 -- 3. `fairness_runs`: one computation on one dataset against one model card, aggregates only (group counts and
---    rates, metric values, each threshold's verdict). A dataset referenced by a run is never deleted (RESTRICT).
+--    rates, metric values, each threshold's verdict; a group below the minimum size keeps its count only). A
+--    dataset referenced by a run is never deleted (RESTRICT). `card_model_version` snapshots the card's pinned
+--    model version at run time: once the card names another version the run is stale and holds the card.
+--    `relaxed` records how the run's thresholds were looser than the strict defaults (a step-up was given).
 -- No function and no trigger is added (the 0185 guard has nothing new to check).
 
 ALTER TABLE "org_settings" ADD COLUMN IF NOT EXISTS "fairness_testing_enabled" boolean DEFAULT false NOT NULL;
@@ -62,6 +65,8 @@ CREATE TABLE IF NOT EXISTS "fairness_runs" (
   "min_group_size" integer NOT NULL,
   "result" jsonb NOT NULL,
   "outcome" text NOT NULL,
+  "card_model_version" text,
+  "relaxed" jsonb DEFAULT '{}'::jsonb NOT NULL,
   "created_by_user_id" uuid REFERENCES "users"("id") ON DELETE SET NULL,
   "created_at" timestamp with time zone DEFAULT now() NOT NULL,
   CONSTRAINT "fairness_runs_outcome_check" CHECK ("outcome" IN ('pass', 'flag', 'fail', 'inconclusive')),

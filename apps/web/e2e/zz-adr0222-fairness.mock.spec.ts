@@ -60,6 +60,8 @@ const failingRun = {
   datasetSha256: "a".repeat(64),
   minGroupSize: 30,
   outcome: "fail",
+  cardModelVersion: null,
+  relaxed: {},
   blocks: true,
   createdAt: "2026-10-30T10:05:00.000Z",
   result: {

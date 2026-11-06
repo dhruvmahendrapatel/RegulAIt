@@ -26,18 +26,33 @@ result attached to the risk record and able to hold the model.
 2. **The definitions are fairlearn's.** The four metrics follow the open-source fairlearn library's definitions
    (`demographic_parity_difference`, `demographic_parity_ratio`, `equal_opportunity_difference`,
    `equalized_odds_difference`). A golden test pins our values to fairlearn 0.13.0's on 240 synthetic rows, to 12
-   decimal places; the generator script sits beside the fixture.
+   decimal places; the generator script sits beside the fixture. **One deliberate divergence:** where a group has no
+   favourable true labels (or no unfavourable ones), its true (or false) positive rate is 0/0. fairlearn still returns
+   a number there; we return null, so the metric is not computable and the run is inconclusive, which holds the card.
+   That is stricter, and a test covers it.
 3. **Thresholds, with strict defaults.** Each metric has a limit and an action: `fail` (the default) or `flag`. The
    defaults check all four metrics: at most 0.1 for each difference, at least 0.8 for the ratio (the four-fifths
    rule). A group with fewer rows than the minimum group size (default 30) is reported but left out of the metrics.
    The outcome is `fail` if a failing threshold is breached, otherwise `inconclusive` if a checked metric could not be
    computed (fewer than two groups of the minimum size, or a group with no favourable labels), otherwise `flag` if a
-   flag threshold is breached, otherwise `pass`. Inconclusive is never read as a pass.
+   flag threshold is breached, otherwise `pass`. Inconclusive is never read as a pass. **A run looser than the strict
+   defaults is a relaxation (PR #633 review):** a run that leaves a metric out, raises a `max` limit above its default
+   or lowers a `min` limit below it, sets `flag` where the default is `fail`, or raises the minimum group size above 30
+   needs a `settings_relax` step-up bound to exactly what it relaxes (`fairnessRunRelaxed`), and the run row
+   (`fairness_runs.relaxed`) and its audit row record it. Without this, any admin could lift a hold with a weaker run.
 4. **A failing or inconclusive latest run holds the model card.** While blocking is on (the default), a card whose
    latest run failed or was inconclusive cannot be sent for sign-off (409 `fairness_test_failed`), and dispatch under
    it is refused on the model-risk gate's existing 409 path (`mrm_approval_required`, audit rule
    `fairness-dispatch-held`). A dispatch that evaluates the agent (an eval case or red-team probe) is not held, as with
-   staleness. A card with no run is not held. Turning blocking off records results without holding anything.
+   staleness. A run snapshots the card's pinned model version (`fairness_runs.card_model_version`); once the card names
+   another version the latest run is **stale** and holds the card too, so changing the version cannot lift a hold
+   and an old result never decides for a new model. Turning blocking off records results without holding anything.
+   **A card with no run is not held — open for the owner's decision.** The ADR-0180 reason for leaving it open: fairness
+   testing measures a model against a labelled evaluation dataset the customer must supply, and many cards (for
+   example a general-purpose assistant) have no binary decision to test. Requiring a run while blocking is on would
+   refuse dispatch for every model card the moment the feature is turned on, including cards no dataset could ever
+   cover. The stricter alternative (blocking on requires a run, perhaps per risk tier) is the follow-up below; the
+   owner confirms which.
 5. **Off by default, and turning it on is a relaxation.** Three org settings (migration 0271): fairness testing off,
    blocking on, datasets kept 30 days (1 to 365). Turning the feature on starts storing protected attributes, so it
    needs a `settings_relax` step-up, as do turning blocking off and a longer retention (judged against the strict
@@ -50,14 +65,19 @@ result attached to the risk record and able to hold the model.
    never the CSV parser's own message (which can quote one). Audit rows carry names, counts and the sha256 only. The
    rows are deleted (ciphertext set to NULL) at the retention date by a scheduled sweep or on an admin's delete; the
    metadata row, the sha256 and every run that cites it stay for the audit trail. Runs store aggregates only. Every
-   route is admin-only through the default-deny gate; uploads and runs are rate-limited per person.
+   route is admin-only through the default-deny gate; uploads and runs are rate-limited per person, and that limit
+   fails closed (503) when the counter gives no verdict. **Small groups keep their count only:** a group below the
+   minimum group size stores and returns its row count, with its outcome counts and rates null, because a group of
+   one or two rows would reveal those people's true outcome and prediction next to their protected attribute, and
+   runs outlive the dataset.
 7. **The run sits on the model card's record.** A run is stored against its card (`fairness_runs.card_id`) with the
    dataset's sha256, the metrics version, the thresholds and the result; its audit row is on the model card. The card
    screen links to its tests, and the hold is read at sign-off and at dispatch. A run is not yet a row in
    `model_card_evidence`: that table feeds the signed AI-BOM evidence format (ADR-0189), and adding a kind there
    changes that format, so it is a follow-up below rather than part of this lane.
 8. **The screen sits beside Model risk.** A lazy-loaded "Fairness testing" page in AI Governance, after Model risk
-   (placement note on #453, c6527324508): settings, upload, datasets, run, results.
+   (placement note on #453, c6527324508): settings, upload, datasets, run, results. A run with looser thresholds goes
+   through the step-up dialog, and its result says it was looser than the defaults.
 
 ### Open source first (ADR-0176)
 
@@ -81,6 +101,7 @@ pinned exactly, listed in the gateway's THIRD_PARTY.md. It works air-gapped.
   every other table.
 - Follow-ups, not built in this lane:
   - cite a run in `model_card_evidence` and the signed AI-BOM evidence format (needs an ADR-0189 format change);
-  - optionally require a passing run before a card's sign-off (a per-card or per-risk-tier requirement);
+  - optionally require a passing run before a card's sign-off (a per-card or per-risk-tier requirement; the owner
+    decides whether blocking-on should require one, decision 4);
   - intersectional groups (combinations of attributes), multi-class outcomes and confidence intervals;
   - re-check the open-source exception when P7's scorer sidecar lands.

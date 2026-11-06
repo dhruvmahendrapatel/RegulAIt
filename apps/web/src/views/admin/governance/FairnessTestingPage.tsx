@@ -377,7 +377,10 @@ function RunCard(props: {
 
   const run = () =>
     void act.run(async () => {
-      const out = await api.post<{ run: FairnessRunView }>("/v1/mrm/fairness/runs", { cardId, datasetId, thresholds, minGroupSize: mg });
+      // thresholds or a minimum group size looser than the strict defaults are a relaxation: the gateway asks for a step-up
+      const out = await withStepUp((h) =>
+        stepUpApi.post<{ run: FairnessRunView }>("/v1/mrm/fairness/runs", { cardId, datasetId, thresholds, minGroupSize: mg }, h),
+      );
       props.onRun(out.run.id);
       return `Test recorded: ${OUTCOME_WORDS[out.run.outcome].label.toLowerCase()}`;
     });
@@ -533,8 +536,14 @@ function RunDetail({ run, cardLabelText, onClose }: { run: FairnessRunView; card
           <Link to="/admin/model-risk">Open Model risk</Link>
         </p>
         <p className={v.faint}>
-          {`${plural(run.result.rowCount, "row")}; groups smaller than ${run.minGroupSize} are left out of the metrics. Computed on the predictions in the file.`}
+          {`${plural(run.result.rowCount, "row")}; groups smaller than ${run.minGroupSize} are left out of the metrics and show their row count only. Computed on the predictions in the file.`}
         </p>
+        {Object.keys(run.relaxed ?? {}).length > 0 && (
+          <p data-testid="fairness-run-relaxed">
+            <Badge tone="warn">Looser than the defaults</Badge>{" "}
+            This test used thresholds or a minimum group size looser than the strict defaults, confirmed with a step-up.
+          </p>
+        )}
         {run.result.attributes.map((attr) => (
           <section key={attr.attribute} className={v.stack} aria-label={`Protected attribute ${attr.attribute}`}>
             <h3>{attr.attribute}</h3>

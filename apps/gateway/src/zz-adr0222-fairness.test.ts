@@ -29,9 +29,9 @@ import {
   runMigrations,
   type Db,
 } from "@regulait/db";
-import { FAIRNESS_STRICT_SETTINGS } from "@regulait/shared";
+import { FAIRNESS_DEFAULT_THRESHOLDS, FAIRNESS_STRICT_SETTINGS } from "@regulait/shared";
 import { decryptSecret } from "./secrets.js";
-import { FAIRNESS_RULE_IDS, FAIRNESS_WRITE_RATE_PER_MINUTE, decodeRows, runFairnessRetentionSweep } from "./fairness.js";
+import { FAIRNESS_RULE_IDS, FAIRNESS_WRITE_RATE_PER_MINUTE, decodeRows, fairnessRateCheck, runFairnessRetentionSweep } from "./fairness.js";
 import { mrmDispatchGate } from "./mrm.js";
 import { STRICT_GOVERNANCE_GATES } from "./testing/governance-gates.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
@@ -98,8 +98,8 @@ async function upload(payload: Record<string, unknown>, headers = AUTH) {
   return res;
 }
 
-async function runTest(payload: Record<string, unknown>) {
-  return app.inject({ method: "POST", url: "/v1/mrm/fairness/runs", headers: AUTH, payload });
+async function runTest(payload: Record<string, unknown>, headers = AUTH) {
+  return app.inject({ method: "POST", url: "/v1/mrm/fairness/runs", headers, payload });
 }
 
 async function audits(ruleId: string) {
@@ -309,6 +309,63 @@ describe("ADR-0222: a run measures, and a failing result holds the card", () => 
     expect(fair.statusCode).toBe(201);
     const pass = await runTest({ datasetId: fair.json().dataset.id, cardId });
     expect(pass.json().run.outcome).toBe("pass");
+    expect(pass.json().run.relaxed).toEqual({});
+    expect(await mrmDispatchGate(db, ctx)).toBeNull();
+  });
+
+  it("a run looser than the strict defaults needs a step-up, and records what was relaxed", async () => {
+    const fairId = datasetIds.at(-1)!;
+    const strict = FAIRNESS_DEFAULT_THRESHOLDS.map((t) => ({ ...t }));
+    const lenientCases: Array<{ body: Record<string, unknown>; key: string }> = [
+      // a metric left out
+      { body: { thresholds: strict.slice(1) }, key: "fairnessRun.demographic_parity_difference" },
+      // a max limit raised, and a min limit lowered
+      { body: { thresholds: strict.map((t) => (t.metric === "equal_opportunity_difference" ? { ...t, limit: 0.5 } : t)) }, key: "fairnessRun.equal_opportunity_difference" },
+      { body: { thresholds: strict.map((t) => (t.metric === "disparate_impact_ratio" ? { ...t, limit: 0.5 } : t)) }, key: "fairnessRun.disparate_impact_ratio" },
+      // flag where the default is fail
+      { body: { thresholds: strict.map((t) => (t.metric === "equalized_odds_difference" ? { ...t, action: "flag" } : t)) }, key: "fairnessRun.equalized_odds_difference" },
+      // a minimum group size above 30 leaves small groups out
+      { body: { minGroupSize: 31 }, key: "fairnessRun.minGroupSize" },
+    ];
+    const before = (await db.select({ id: fairnessRuns.id }).from(fairnessRuns).where(eq(fairnessRuns.cardId, cardId))).length;
+    for (const c of lenientCases) {
+      const res = await runTest({ datasetId: fairId, cardId, ...c.body }, adminKey);
+      expect(res.statusCode, c.key).toBe(403);
+      expect(res.json().error).toBe("step_up_required");
+      expect(res.json().actionKind).toBe("settings_relax");
+    }
+    // nothing was recorded, so nothing could lift a hold
+    expect((await db.select({ id: fairnessRuns.id }).from(fairnessRuns).where(eq(fairnessRuns.cardId, cardId))).length).toBe(before);
+    // the strict defaults, or tighter, need no step-up
+    expect((await runTest({ datasetId: fairId, cardId }, adminKey)).statusCode).toBe(201);
+    expect((await runTest({ datasetId: fairId, cardId, minGroupSize: 10 }, adminKey)).statusCode).toBe(201);
+    // with the step-up the lenient run is recorded, and the run and its audit row say what was relaxed
+    const stepped = await runTest({ datasetId: fairId, cardId, minGroupSize: 40 });
+    expect(stepped.statusCode).toBe(201);
+    expect(stepped.json().run.relaxed).toEqual({ "fairnessRun.minGroupSize": 40 });
+    const [audit] = (await audits(FAIRNESS_RULE_IDS.run)).filter((a) => (a.detail as { fairnessRunId: string }).fairnessRunId === stepped.json().run.id);
+    expect((audit!.detail as { relaxed: Record<string, unknown> }).relaxed).toEqual({ "fairnessRun.minGroupSize": 40 });
+    expect(audit!.reason).toMatch(/looser than the strict defaults/);
+  });
+
+  it("a run made on another model version is stale and holds the card until a run on the current version", async () => {
+    const ctx = { userId: NO_IDENTITY, agentId, agentName: `fair-agent-${RUN}`, model: null, customProviderId: null };
+    expect(await mrmDispatchGate(db, ctx)).toBeNull(); // the latest run passed on the current (unpinned) version
+    await db.update(modelCards).set({ pinnedModelVersion: `mock-model-${RUN}-v2` }).where(eq(modelCards.id, cardId));
+    const held = await mrmDispatchGate(db, ctx);
+    expect(held).toMatchObject({ status: 409, error: "mrm_approval_required" });
+    expect(held!.detail).toMatch(/different model version/);
+    const signOff = await app.inject({
+      method: "POST",
+      url: `/v1/mrm/cards/${cardId}/sign-off`,
+      headers: AUTH,
+      payload: { approverUserId: adminId, validUntil: new Date(Date.now() + 30 * 86_400_000).toISOString() },
+    });
+    expect(signOff.statusCode).toBe(409);
+    expect(signOff.json()).toMatchObject({ error: "fairness_test_failed", outcome: "pass", stale: true });
+    // a run on the current version snapshots it and lifts the hold
+    const fresh = await runTest({ datasetId: datasetIds.at(-1)!, cardId });
+    expect(fresh.json().run).toMatchObject({ outcome: "pass", cardModelVersion: `mock-model-${RUN}-v2` });
     expect(await mrmDispatchGate(db, ctx)).toBeNull();
   });
 
@@ -316,6 +373,12 @@ describe("ADR-0222: a run measures, and a failing result holds the card", () => 
     const fairId = datasetIds.at(-1)!;
     const res = await runTest({ datasetId: fairId, cardId, minGroupSize: 1000 });
     expect(res.json().run.outcome).toBe("inconclusive");
+    // groups below the minimum keep their count only: no outcome counts or rates are stored or returned
+    for (const g of res.json().run.result.attributes[0].groups) {
+      expect(g).toMatchObject({ included: false, labelPositives: null, predictedPositives: null, selectionRate: null, truePositiveRate: null, falsePositiveRate: null });
+    }
+    const [stored] = await db.select().from(fairnessRuns).where(eq(fairnessRuns.id, res.json().run.id));
+    expect(JSON.stringify(stored!.result)).not.toMatch(/"selectionRate":\d/);
     const ctx = { userId: NO_IDENTITY, agentId, agentName: `fair-agent-${RUN}`, model: null, customProviderId: null };
     expect(await mrmDispatchGate(db, ctx)).not.toBeNull();
   });
@@ -337,6 +400,20 @@ describe("ADR-0222: retention and delete", () => {
     expect((await runFairnessRetentionSweep(db)).ids).not.toContain(target);
   });
 
+  it("a run applies the current, shortened retention, not only the stored expiry", async () => {
+    const target = datasetIds.at(-1)!;
+    const [row] = await db.select().from(fairnessDatasets).where(eq(fairnessDatasets.id, target));
+    expect(row!.expiresAt.getTime()).toBeGreaterThan(Date.now());
+    await db.update(fairnessDatasets).set({ createdAt: new Date(Date.now() - 2 * 86_400_000) }).where(eq(fairnessDatasets.id, target));
+    expect((await setFairness({ datasetRetentionDays: 1 }, adminKey)).statusCode).toBe(200);
+    const gone = await runTest({ datasetId: target, cardId });
+    expect(gone.statusCode).toBe(410);
+    expect(gone.json().error).toBe("fairness_dataset_gone");
+    expect((await setFairness({ datasetRetentionDays: 30 })).statusCode).toBe(200);
+    await db.update(fairnessDatasets).set({ createdAt: row!.createdAt }).where(eq(fairnessDatasets.id, target));
+    expect((await runTest({ datasetId: target, cardId })).statusCode).toBe(201);
+  });
+
   it("delete removes the rows once, audited; a second delete and an unknown id are refused", async () => {
     const target = datasetIds.at(-1)!;
     const del = await app.inject({ method: "DELETE", url: `/v1/mrm/fairness/datasets/${target}`, headers: AUTH });
@@ -353,5 +430,24 @@ describe("ADR-0222: retention and delete", () => {
       last = (await upload({ name: "r", csv: "g,y,p\n", labelColumn: "y", predictionColumn: "p", favourableLabel: "1", protectedAttributes: ["g"] }, adminKey)).statusCode;
     }
     expect(last).toBe(429);
+  });
+});
+
+describe("ADR-0222: the fairness rate limit fails closed", () => {
+  it("a counter that errors or gives no verdict refuses with 503; a count over the limit is 429", async () => {
+    const erroring = { incr: (_k: string, cb: (e: Error | null, r?: { current: number; ttl: number }) => void) => cb(new Error("counter down")) };
+    expect(await fairnessRateCheck(erroring, "k", "run")).toMatchObject({ ok: false, status: 503, body: { error: "rate_limit_unavailable" } });
+    const silent = { incr: (_k: string, cb: (e: Error | null, r?: { current: number; ttl: number }) => void) => cb(null) };
+    expect(await fairnessRateCheck(silent, "k", "upload")).toMatchObject({ ok: false, status: 503 });
+    const throwing = {
+      incr: () => {
+        throw new Error("boom");
+      },
+    };
+    expect(await fairnessRateCheck(throwing, "k", "run")).toMatchObject({ ok: false, status: 503 });
+    const over = { incr: (_k: string, cb: (e: Error | null, r?: { current: number; ttl: number }) => void) => cb(null, { current: 21, ttl: 5000 }) };
+    expect(await fairnessRateCheck(over, "k", "run")).toMatchObject({ ok: false, status: 429, retryAfterSeconds: 5 });
+    const under = { incr: (_k: string, cb: (e: Error | null, r?: { current: number; ttl: number }) => void) => cb(null, { current: 1, ttl: 5000 }) };
+    expect(await fairnessRateCheck(under, "k", "run")).toEqual({ ok: true });
   });
 });

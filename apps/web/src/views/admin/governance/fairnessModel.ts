@@ -53,9 +53,10 @@ export interface FairnessDatasetView {
 export interface FairnessGroupView {
   group: string;
   n: number;
-  labelPositives: number;
-  predictedPositives: number;
-  selectionRate: number;
+  /** null for a group below the minimum size: only its row count is kept */
+  labelPositives: number | null;
+  predictedPositives: number | null;
+  selectionRate: number | null;
   truePositiveRate: number | null;
   falsePositiveRate: number | null;
   included: boolean;
@@ -78,6 +79,10 @@ export interface FairnessRunView {
   datasetSha256: string;
   minGroupSize: number;
   outcome: FairnessOutcome;
+  /** the card's pinned model version when the run was made */
+  cardModelVersion: string | null;
+  /** how the run was looser than the strict defaults ({} = strict); a step-up was given */
+  relaxed: Record<string, unknown>;
   blocks: boolean;
   createdAt: string;
   result: {

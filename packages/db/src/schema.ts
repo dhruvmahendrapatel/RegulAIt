@@ -6135,6 +6135,10 @@ export const fairnessRuns = pgTable(
     /** per attribute: group counts and rates, and each metric's value (aggregates only, never a row) */
     result: jsonb("result").notNull(),
     outcome: text("outcome", { enum: FAIRNESS_RUN_OUTCOMES }).notNull(),
+    /** the card's pinned model version when the run was made; a run whose version differs from the card's is stale */
+    cardModelVersion: text("card_model_version"),
+    /** how this run's thresholds were looser than the strict defaults (empty = strict); a step-up was given */
+    relaxed: jsonb("relaxed").$type<Record<string, unknown>>().notNull().default({}),
     createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },

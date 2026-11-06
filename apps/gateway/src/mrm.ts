@@ -227,8 +227,8 @@ export async function mrmDispatchGate(
     now,
   });
   if (decision.allowed) {
-    // ADR-0222 (P13(a)): with fairness testing and blocking on, a card whose latest fairness run failed or was
-    // inconclusive holds dispatch on the same 409 path. An evaluation of the agent is not held: a new test needs
+    // ADR-0222 (P13(a)): with fairness testing and blocking on, a card whose latest fairness run failed, was
+    // inconclusive or is stale (another model version) holds dispatch on the same 409 path. An evaluation of the agent is not held: a new test needs
     // fresh evidence, which is what it produces.
     if (decision.cardId && !ctx.evaluation) {
       const hold = await fairnessHold(db, decision.cardId, org);
@@ -247,6 +247,7 @@ export async function mrmDispatchGate(
             modelCardId: decision.cardId,
             fairnessRunId: hold.runId,
             fairnessOutcome: hold.outcome,
+            fairnessStale: hold.stale,
             ...(ctx.projectId ? { projectId: ctx.projectId } : {}),
           },
           effect: "deny",
@@ -1021,13 +1022,15 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
         userId: req.authCtx.userId ?? NO_IDENTITY,
         objectType: "model_card",
         objectId: id,
-        detail: { phase: "sign_off", fairnessRunId: hold.runId, fairnessOutcome: hold.outcome },
+        detail: { phase: "sign_off", fairnessRunId: hold.runId, fairnessOutcome: hold.outcome, fairnessStale: hold.stale },
         effect: "deny",
         ruleId: FAIRNESS_RULE_IDS.signOffHeld,
         ruleChain: [],
         reason: hold.detail,
       });
-      return reply.status(409).send({ error: "fairness_test_failed", detail: hold.detail, fairnessRunId: hold.runId, outcome: hold.outcome });
+      return reply
+        .status(409)
+        .send({ error: "fairness_test_failed", detail: hold.detail, fairnessRunId: hold.runId, outcome: hold.outcome, stale: hold.stale });
     }
 
     const created = await db.transaction(async (tx) => {

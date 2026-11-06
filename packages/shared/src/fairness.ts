@@ -27,6 +27,10 @@
  *   equal opportunity difference    max(TPR) − min(TPR)
  *   equalised odds difference       the larger of the TPR and FPR differences
  *
+ * ONE DELIBERATE DIVERGENCE: where a group has no favourable true labels (or no unfavourable ones), its TPR (or
+ * FPR) is 0/0. fairlearn still returns a number there; we return null, so the metric is "not computable" and the
+ * run is inconclusive, which holds the card. That is stricter, and ADR-0222 decision 2 records it.
+ *
  * Pure: no db, no clock, no I/O.
  */
 import { z } from "zod";
@@ -197,6 +201,37 @@ export function fairnessSettingsRelaxed(
   return out;
 }
 
+/**
+ * The ways a run's request is looser than the strict defaults (PR #633 review: a lenient run must not lift a
+ * hold quietly), as `settings_relax` step-up facts. A run is looser when it:
+ *  - leaves a metric out (`fairnessRun.<metric>`: "omitted");
+ *  - raises a `max` limit above its default or lowers a `min` limit below it, or sets `flag` where the default is
+ *    `fail` (`fairnessRun.<metric>`: its `{ limit, action }`);
+ *  - raises the minimum group size above the default, which leaves small groups out of the metrics
+ *    (`fairnessRun.minGroupSize`).
+ * Omitted fields are the strict defaults. Empty = nothing is relaxed and no step-up is asked.
+ */
+export function fairnessRunRelaxed(
+  thresholds: readonly FairnessThreshold[] | undefined,
+  minGroupSize: number | undefined,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (thresholds) {
+    for (const d of FAIRNESS_DEFAULT_THRESHOLDS) {
+      const t = thresholds.find((x) => x.metric === d.metric);
+      if (!t) {
+        out[`fairnessRun.${d.metric}`] = "omitted";
+        continue;
+      }
+      const looserLimit = FAIRNESS_METRIC_DIRECTION[d.metric] === "max" ? t.limit > d.limit + EPSILON : t.limit < d.limit - EPSILON;
+      const looserAction = d.action === "fail" && t.action !== "fail";
+      if (looserLimit || looserAction) out[`fairnessRun.${d.metric}`] = { limit: t.limit, action: t.action };
+    }
+  }
+  if (minGroupSize !== undefined && minGroupSize > FAIRNESS_LIMITS.minGroupSize.default) out["fairnessRun.minGroupSize"] = minGroupSize;
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // The computation
 // ---------------------------------------------------------------------------
@@ -209,17 +244,23 @@ export interface FairnessRows {
   attributes: Readonly<Record<string, readonly string[]>>;
 }
 
+/**
+ * One group's counts and rates. A group smaller than the minimum group size keeps only its row count: its
+ * outcome counts and rates are null (PR #633 security review), because a group of one or two rows would reveal
+ * those people's true outcome and prediction next to their protected attribute, and runs outlive the dataset.
+ */
 export interface FairnessGroupStats {
   group: string;
   n: number;
-  /** rows whose true label is favourable */
-  labelPositives: number;
-  /** rows predicted favourable */
-  predictedPositives: number;
-  selectionRate: number;
-  /** null when the group has no favourable labels */
+  /** rows whose true label is favourable (null below the minimum group size) */
+  labelPositives: number | null;
+  /** rows predicted favourable (null below the minimum group size) */
+  predictedPositives: number | null;
+  /** null below the minimum group size */
+  selectionRate: number | null;
+  /** null when the group has no favourable labels, or is below the minimum group size */
   truePositiveRate: number | null;
-  /** null when the group has no unfavourable labels */
+  /** null when the group has no unfavourable labels, or is below the minimum group size */
   falsePositiveRate: number | null;
   /** false when the group is smaller than the minimum group size */
   included: boolean;
@@ -287,18 +328,23 @@ function attributeResult(attribute: string, rows: FairnessRows, groupsOf: readon
   }
   const groups: FairnessGroupStats[] = [...byGroup.entries()]
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([group, s]) => ({
-      group,
-      n: s.n,
-      labelPositives: s.lp,
-      predictedPositives: s.pp,
-      selectionRate: s.pp / s.n,
-      truePositiveRate: s.lp > 0 ? s.tp / s.lp : null,
-      falsePositiveRate: s.n - s.lp > 0 ? s.fp / (s.n - s.lp) : null,
-      included: s.n >= minGroupSize,
-    }));
+    .map(([group, s]): FairnessGroupStats =>
+      s.n >= minGroupSize
+        ? {
+            group,
+            n: s.n,
+            labelPositives: s.lp,
+            predictedPositives: s.pp,
+            selectionRate: s.pp / s.n,
+            truePositiveRate: s.lp > 0 ? s.tp / s.lp : null,
+            falsePositiveRate: s.n - s.lp > 0 ? s.fp / (s.n - s.lp) : null,
+            included: true,
+          }
+        : // below the minimum: the count only, never the outcomes (they would identify the people in it)
+          { group, n: s.n, labelPositives: null, predictedPositives: null, selectionRate: null, truePositiveRate: null, falsePositiveRate: null, included: false },
+    );
   const used = groups.filter((g) => g.included);
-  const sel = used.map((g) => g.selectionRate);
+  const sel = used.map((g) => g.selectionRate as number);
   const tpr = used.map((g) => g.truePositiveRate);
   const fpr = used.map((g) => g.falsePositiveRate);
 
