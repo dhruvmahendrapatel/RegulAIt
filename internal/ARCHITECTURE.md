@@ -62,7 +62,7 @@ builds on its own.
 | `optimizer-kernel` | Pillar 6, pure functions: model routing, complexity, token estimates, compaction, prompt-cache planning, lazy tool selection, edit-vs-rewrite, batching, reference preprocessing. |
 | `orchestration-kernel` | Pillar 7, pure task-DAG and delegation core. |
 | `workflow-kernel` | Pillar 2, declarative template validation and stage types. |
-| `db` | Drizzle schema (`schema.ts`), migrations and migrator, the chained audit writer (`audit-chain.ts`), decision facts, the deferred-unique preflight, the prose scrub. |
+| `db` | Drizzle schema (`schema.ts`), migrations and migrator, the chained audit writer (`audit-chain.ts`), decision facts, the deferred-unique preflight, the prose scrub, the content-credential guard (ADR-0232). |
 | `shared` | Zod schemas and pure logic shared by gateway and SPA (approval digests, placement, forecasting, guardrails, demo seeds). |
 | `model-provider` | Real model dispatch behind the agent registry. |
 | `connector-provider` | Connector execution and the actual-spend ledger. |

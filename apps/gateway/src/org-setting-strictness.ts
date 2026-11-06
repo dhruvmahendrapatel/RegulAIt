@@ -286,6 +286,8 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   recommendationJudgeAgentId: exempt("names the judge of the annotation above; it refuses and allows nothing"),
   // ADR-0213: turning the vendor questionnaire drafter on sends supplier material to a model
   vendorDraftAssistEnabled: notEqual(false),
+  // ADR-0232 (S6): the content-credential guard; turning it off stores a pasted secret as typed
+  contentCredentialGuard: notEqual(true),
   // ADR-0215: off = the framework-import and feed-import routes refuse; on lets an admin propose and accept imports
   frameworkImportsEnabled: notEqual(false),
   // ADR-0225 (P13 d): public trust pages and auditor access ship off; turning them on publishes outside the org

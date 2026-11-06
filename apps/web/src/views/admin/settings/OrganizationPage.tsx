@@ -226,6 +226,11 @@ function Loaded(props: { settings: Record<string, unknown> }) {
     vendorDraftAssistEnabled: str(s, "vendorDraftAssistEnabled") || "false",
   });
 
+  // --- 5f. Credentials in content (ADR-0232) ---------------------------------
+  const contentGuard = useSection({
+    contentCredentialGuard: str(s, "contentCredentialGuard") || "true",
+  });
+
   // --- 7. Network access (ADR-0039) ----------------------------------------
   // Not a useSection form: the save needs the confirm-on-lockout retry flow
   // (a 409 ip_policy_lockout opens an explicit confirm modal, and only a
@@ -981,6 +986,34 @@ function Loaded(props: { settings: Record<string, unknown> }) {
             >
               <option value="false">off (default)</option>
               <option value="true">on — offer labelled drafts</option>
+            </Select>
+          </Field>
+        </SectionShell>
+      </Card>
+
+      <Card title="5f · Credentials in names and descriptions">
+        <SectionShell
+          title="Refuse credentials typed into names, titles and descriptions"
+          busy={contentGuard.act.busy}
+          error={contentGuard.act.error}
+          submitLabel="Save content guard setting"
+          onSubmit={() =>
+            void contentGuard.act.run(
+              () => put({ contentCredentialGuard: asBool(contentGuard.f.contentCredentialGuard!) }),
+              "Content guard setting saved (audited)",
+            )
+          }
+          help={
+            <p>On (default): a save that puts an API key, token or other credential into a name, title, description, summary or body is refused, naming the field. Off: such text is stored as typed. Turning it off needs step-up; audited.</p>
+          }
+        >
+          <Field label="Credential guard for content">
+            <Select
+              value={contentGuard.f.contentCredentialGuard}
+              onChange={(e) => contentGuard.set("contentCredentialGuard", e.target.value)}
+            >
+              <option value="true">on — refuse (default)</option>
+              <option value="false">off — store as typed</option>
             </Select>
           </Field>
         </SectionShell>

@@ -5460,6 +5460,20 @@ user or server that an approval rule is scoped to (cascade delete). **Amendment 
 match re-owes every takeover; option (b) (pool intersection) is the recorded long-term simplification. Open follow-ups: a
 rule-editor warning for shadowed tightenings and equal-specificity overlaps, and option (b).
 
+**ADR-0232 (builder, 2026-11-06, Proposed): refuse credentials typed into content columns (PENDING S6).** Content
+(`name`, `title`, `description`, `summary`, `body`) is not redacted like ADR-0102's prose; a write that puts
+credential-shaped text into one of the 81 guarded columns is REFUSED with `422 credential_in_content`, naming the
+field, the column and the rule labels, never the value. The detector is `scrubAuditText` by reference (ADR-0042
+rules plus the vendored Apache-2.0 pipelock pack), sited as a third `createDb` wrapper (`withContentGuard`,
+outermost), so imports and raw writes are covered and a refusal inside a transaction rolls it back (compliance-pack
+create is now one transaction). An admin may relax it (`org_settings.content_credential_guard`, migration 0260,
+strictness rule: `settings_relax` step-up, audited). Existing rows are reported by `GET
+/v1/admin/content-credential-report` (ids and rule labels only), never rewritten. The inventory is generated from
+the schema: 146 text columns match the S6 shape (S6 said ~34); 81 guarded, 65 excluded by category (ADR-0102 prose,
+audit, tool references, platform copies, ingested, machine, conversation, signed evidence, check-constrained), pinned
+against `information_schema` and against the ADR's generated block. Open: whether to guard jsonb
+`config_versions.body` string leaves; ingested columns stay a residual.
+
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
 (b) standing policy for future scaffolds recorded (ADR-0006, no implementation yet — nothing to

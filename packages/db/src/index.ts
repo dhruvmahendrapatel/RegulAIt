@@ -3,6 +3,7 @@ import pg from "pg";
 import * as schema from "./schema.js";
 import { withAuditChain } from "./audit-chain.js";
 import { withProseScrub } from "./prose-scrub.js";
+import { withContentGuard } from "./content-guard.js";
 
 export * from "./schema.js";
 export { schema };
@@ -49,6 +50,22 @@ export { BOM_SUBJECT_LOCK_TIMEOUT_MS, BomSubjectBusyError, withAiBomSubjectSessi
 // ADR-0102 — the operator-prose credential scrub for reason/note columns
 // OUTSIDE `audit_log`. Exported so the covered/not-covered inventory can be
 // asserted by test rather than only claimed in the ADR.
+// ADR-0232 (PENDING S6) — the CONTENT-CREDENTIAL GUARD: refuse (not redact) a credential typed into a
+// name/title/description/summary/body column. Exported so the inventory and the report can be asserted.
+export {
+  CONTENT_COLUMN_PATTERN,
+  CONTENT_GUARD_DETECTOR,
+  CONTENT_GUARD_EXCLUSION_REASONS,
+  CONTENT_GUARD_EXCLUSIONS,
+  ContentCredentialError,
+  contentCredentialReport,
+  contentCredentialRules,
+  contentGuardColumns,
+  contentGuardInventory,
+  withContentGuard,
+  type ContentCredentialFinding,
+  type ContentGuardExclusion,
+} from "./content-guard.js";
 export {
   PROSE_SCRUB,
   PROSE_SCRUB_EXCLUSIONS,
@@ -388,5 +405,6 @@ export function createDb(connectionString: string, override: Partial<DbPoolConfi
       );
     });
   });
-  return withProseScrub(withAuditChain(drizzle(pool, { schema })));
+  // ADR-0232 (S6): the content-credential guard is OUTERMOST, so it sees the value the caller wrote
+  return withContentGuard(withProseScrub(withAuditChain(drizzle(pool, { schema }))));
 }
