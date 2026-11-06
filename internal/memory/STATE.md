@@ -5473,6 +5473,17 @@ rule-editor warning for shadowed tightenings and equal-specificity overlaps, and
 - **Defaults:** `sap_agent_gateway_enabled` is off; a call to a gateway agent needs approval.
 - **Open:** six owner questions, the first being jwt-bearer vs RFC 8693.
 
+**#670 review round 1 (2026-11-06):** both reviews (design and security) are addressed in the two ADRs:
+- the idempotency store is durable and scoped per principal, a key from another principal is refused, and an unknown outcome is never re-posted;
+- the SAP identity is released only through an off-by-default per-server setting;
+- the person's own IdP token is preferred, and any RegulAIt assertion SAP trusts uses a dedicated per-trust key (exp ≤60 s, jti);
+- `rate_limits.write_only` is added;
+- legacy A2A 0.3 cards are normalised before use;
+- a refreshed card is held as pending until an admin accepts it;
+- B4 adds a per-agent A2A rate limit.
+
+ADR-0230 has an eighth open question: which SAP identity attribute to use.
+
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
 (b) standing policy for future scaffolds recorded (ADR-0006, no implementation yet — nothing to
