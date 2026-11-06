@@ -18,6 +18,8 @@
  *  - 409 `custom_provider_disabled` (R167-04): a custom model endpoint is switched
  *    off, so an agent cannot be bound to it (POST /v1/agents) or call it (dispatch);
  *    an administrator tests and enables it on the Custom LLM providers page.
+ *  - 409 `vendor_draft_disabled` (ADR-0213): the vendor questionnaire drafter is off;
+ *    an administrator turns it on under Settings → Organization.
  *
  * The message replaces the generic sentence everywhere an `ApiError` is shown
  * (its `message`), and the surfaces that can carry a link render `to` with
@@ -32,6 +34,8 @@ export interface RefusalGuidance {
     | "ai-literacy-not-current"
     | "step_up_unavailable"
     | "custom_provider_disabled"
+    | "vendor_draft_disabled"
+    | "vendor_draft_no_model"
     | "mcp_release_age_cooldown";
   /** what happened and what to do next, in words */
   message: string;
@@ -92,6 +96,20 @@ export const REFUSAL_GUIDANCE = {
       "test and turn it on under Integrations → Custom LLM providers, then try again.",
     to: "/admin/custom-providers",
     linkLabel: "Open Custom LLM providers (administrators)",
+  },
+  // ADR-0213: the vendor questionnaire drafter is off (the strict default)
+  vendorDraftDisabled: {
+    code: "vendor_draft_disabled",
+    message: "Drafted answers are off. Fill in the questionnaire by hand, or ask an administrator to turn them on.",
+    to: "/admin/organization",
+    linkLabel: "Open Organization settings (administrators)",
+  },
+  // ADR-0213: drafting with a model was asked for, and no model connection may be used for it
+  vendorDraftNoModel: {
+    code: "vendor_draft_no_model",
+    message: "No model connection can draft this for you; only the record-based draft is shown.",
+    to: "/admin/model-policy",
+    linkLabel: "Open Model policy (administrators)",
   },
   // ADR-0175 A5 (#609 review): the release-age cooldown, no longer reported as an admission hold
   releaseAgeCooldown: {
@@ -169,6 +187,7 @@ export function refusalGuidance(status: number, payload: ApiErrorPayload | null 
     if (status === 403) return payload.credential === "api_key" ? REFUSAL_GUIDANCE.apiKeyMfa : REFUSAL_GUIDANCE.sessionMfa;
   }
   if (code === "custom_provider_disabled" && status === 409) return REFUSAL_GUIDANCE.customProviderDisabled;
+  if (code === "vendor_draft_disabled" && status === 409) return REFUSAL_GUIDANCE.vendorDraftDisabled;
   if (code === "mcp_release_age_cooldown" && status === 403) return REFUSAL_GUIDANCE.releaseAgeCooldown;
   return null;
 }

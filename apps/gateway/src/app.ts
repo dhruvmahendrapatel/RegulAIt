@@ -179,6 +179,7 @@ import { registerGroupRoleMappingRoutes } from "./group-role-api.js";
 import { registerAbacRoutes } from "./abac.js";
 import { registerPolicySimulationRoutes } from "./policy-simulation.js";
 import { registerGuardrailRoutes } from "./guardrails.js";
+import { configureTrainedDetectorRuntime, registerTrainedDetectorRoutes } from "./trained-detectors.js";
 import { registerEvalRoutes } from "./evals.js";
 import { applyModelCardApprovalDecision, registerMrmRoutes } from "./mrm.js";
 import { AiBomError } from "./ai-bom.js";
@@ -190,6 +191,7 @@ import { registerTrustDashboardRoutes } from "./trust-dashboard.js";
 import { registerUseCaseOverviewRoutes } from "./use-case-overview.js";
 import { registerUseCaseDraftRoutes } from "./use-case-drafts.js";
 import { registerAgentCardRoutes } from "./agent-card.js";
+import { registerAgentSetupAssistRoutes } from "./agent-setup-assist.js";
 import { registerDependencyGraphRoutes } from "./dependency-graph.js";
 import { registerRunGraphRoutes } from "./run-graph.js";
 import { registerGovernanceMonitorRoutes } from "./governance-monitor.js";
@@ -327,6 +329,11 @@ export interface BuildAppOptions {
   retry?: Partial<RetryConfig>;
   /** hex AES-256 key for encrypting stored git tokens (REGULAIT_DATA_KEY) */
   dataKey?: string;
+  /** ADR-0220 test seams: the egress resolver and fetch the trained-detector
+   * scorer calls ride (process-wide, like `retry` above). Production leaves
+   * both unset, so the real DNS-pinned guarded fetch is used. */
+  trainedDetectorResolve?: import("./egress-guard.js").EgressResolver;
+  trainedDetectorFetch?: typeof fetch;
   /** ADR-0031: which peers may speak for the client via X-Forwarded-*.
    * Defaults to REGULAIT_TRUSTED_PROXIES (which itself defaults to trusting
    * nothing). Exposed so a test can assert both directions. */
@@ -335,6 +342,8 @@ export interface BuildAppOptions {
    * environment (see rate-limit.ts); this override exists so a test can pin
    * tiny windows without touching process.env. */
   rateLimit?: Partial<RateLimitConfig>;
+  /** ADR-0221: the supplier portal's upload scan hook; none by default (files are stored as `not_scanned`) */
+  supplierFileScanner?: SupplierFileScanner;
   /** ADR-0167 (CFG-02): Fastify's logger option. `false` (the default here)
    * keeps the ~100 test files that construct apps silent; `startGateway`
    * passes a redacting pino config resolved from the environment, so the
@@ -475,6 +484,7 @@ import {
   reviewRoleIdsFor,
 } from "./review-policy.js";
 import { registerVendorRoutes, syncVendorForInstance } from "./vendors.js";
+import { registerSupplierPortalRoutes, type SupplierFileScanner } from "./supplier-portal.js";
 // ADR-0081 — the AI risk register (gap L2): evidence computed from the real
 // ledgers at read time; acceptance is an audited record.
 import { registerRiskRoutes } from "./risks.js";
@@ -3541,7 +3551,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // ADR-0186 A: quorum and approverRoleId are part of the shared create schema
     const body = createApprovalRuleSchema.parse(req.body);
     // the satisfiability guard runs inside createApprovalRuleRow (every create)
-    const row = await createApprovalRuleRow(db, body);
+    const row = await createApprovalRuleRow(db, body, { stepUp: approvalRuleStepUp(db, req) });
     return reply.status(201).send(row);
   });
 
@@ -5330,6 +5340,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // through the DEFAULT gate — none appear in NON_ADMIN_ROUTES, because
   // relaxing a content control is exactly a privileged act.
   registerGuardrailRoutes(app, db);
+  // ADR-0220: trained runtime detectors — the settings routes, and the data key
+  // (and test egress seams) the enforcement sites' scorer calls need
+  configureTrainedDetectorRuntime({ dataKey: opts.dataKey, resolve: opts.trainedDetectorResolve, fetchImpl: opts.trainedDetectorFetch });
+  registerTrainedDetectorRoutes(app, db);
   // ADR-0044 — the evaluation harness: golden dataset versions, the scorer
   // registry, runs, per-case results and the baseline comparison. Authoring a
   // dataset or moving a baseline changes what the promotion gate will accept,
@@ -5579,6 +5593,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerUseCaseOverviewRoutes(app, db);
   // demo task C5 — the agent card
   registerAgentCardRoutes(app, db);
+  // ADR-0205 — the agent setup assistant (admin, off by default, suggestion-only)
+  registerAgentSetupAssistRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0156 — the AI-system dependency graph with propagated declared risk
   registerDependencyGraphRoutes(app, db);
   // ADR-0173 batch 2b — the read-only run graph (builder turn, orchestration run, use case)
@@ -5603,6 +5619,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // rails it copies. Propose/list/detail/edit/attest are non-admin
   // (owner-or-admin in-handler); RETIRE stays admin through the default gate.
   registerVendorRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0221 (P4) — the supplier portal beside the vendor registry it answers. Admin routes go through the default
+  // gate; the supplier routes are exempt and authenticate in-route (route-classes.ts).
+  registerSupplierPortalRoutes(app, db, { dataKey: opts.dataKey, fileScanner: opts.supplierFileScanner });
   // ADR-0081 — the AI risk register beside the use-case registry it can
   // reference. Register/list/detail/edit/transition are non-admin
   // (owner-or-admin in-handler, exactly the use-case scoping); ACCEPTANCE is
