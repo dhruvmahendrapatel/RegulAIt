@@ -63,7 +63,7 @@ merge, and that is the master's job. Never run `drizzle-kit generate`.
 |---|---|---|---|---|
 | P6 AI-drafted questionnaire answers | Claude builder | #617 | migration 0258 | Freeze queue: merging main after #629 (vendors.ts), then a delta review and release |
 | P14 + P15 model signatures, blocking risk | Claude builder | #614 | renumber at its turn | After the demo: merge conflicts, two failing checks, open review findings |
-| P9 wider discovery sources | Claude builder | #627 | — | After the demo: stalled, no report |
+| P9 wider discovery sources | Claude builder | #627 | migration 0269, ADR-0235 | Landing: review findings fixed (2026-11-06), awaiting re-review |
 | P13a fairness testing | Claude builder | #633 | — | After the demo: stalled, no report |
 | P13b classical-model drift | Claude builder | #628 | — | After the demo: stalled, no report |
 | Designer prototypes G1/G10, G3–G6 | Claude builders | #604, #605 | — | After the demo |
