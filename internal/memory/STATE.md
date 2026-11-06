@@ -5462,10 +5462,10 @@ rule-editor warning for shadowed tightenings and equal-specificity overlaps, and
 
 **ADR-0230 (design, 2026-11-06, Proposed): SAP business agents over MCP (P19).**
 - **Where it lives:** `create_sales_order` (`API_SALES_ORDER_SRV`) goes in the regulAIt-ABAP MCP server, and the gateway's existing MCP path governs it.
-- **Safety:** a required idempotency key; principal propagation from the ADR-0210 assertion through the BTP Destination service, with technical users refused for writes; approve-first defaults seeded for `system_class = 'sap_business'` (quorum 2 with the requester excluded, a rate limit, a project budget required).
+- **Safety:** a required idempotency key; principal propagation with the person's own IdP token (preferred) or a dedicated per-trust RegulAIt key (fallback, never the ADR-0210 key), through the BTP Destination service, with technical users refused for writes; approve-first defaults seeded for `system_class = 'sap_business'` (quorum 2 with the requester excluded, a rate limit, a project budget required).
 - **Open source:** the SAP Cloud SDK is blocked by `@sap/xssec`'s licence, so odata2ts is proposed.
 - **Order:** it waits for regulAIt-ABAP #78/#79 and the BTP smoke test.
-- **Open:** seven owner questions (ADR §Open questions).
+- **Open:** eight owner questions (ADR §Open questions).
 
 **ADR-0231 (design, 2026-11-06, Proposed): SAP Joule agents over A2A (P20).**
 - **Approach:** builds on ADR-0219, with admin-only ARD import and the SDK 1.3.0 REST transport plus its v0.3 compatibility layer.
@@ -5483,6 +5483,13 @@ rule-editor warning for shadowed tightenings and equal-specificity overlaps, and
 - B4 adds a per-agent A2A rate limit.
 
 ADR-0230 has an eighth open question: which SAP identity attribute to use.
+
+**#670 review round 2 (2026-11-06):** both reviews are addressed:
+- idempotency uniqueness is on (tenant, tool, key), and `sub` is compared on every hit, so a foreign key is refused;
+- option (a), the person's own IdP token, gets the same rigour as (b): it is obtained per call after the checks pass, short-lived, audience-pinned, never logged, and envelope-encrypted if kept;
+- the 0231 checklist no longer names the ADR-0210 key;
+- SAP-side `jti` rejection is marked unverified;
+- stale summary text is corrected.
 
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
