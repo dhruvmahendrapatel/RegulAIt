@@ -8,7 +8,7 @@
  * WHAT A DISABLE DOES. `disabled_at` is read on every governed call: a disabled connector refuses in
  * `executeGovernedConnectorCall` (and the ChatOps courier), a disabled server in the MCP proxy route and in
  * `executeGovernedToolCall` (people, agents and delegated workers alike). Both columns advance the policy epoch
- * (0122's statement trigger on `connectors`, 0263's row trigger on `mcp_servers`), so a call decided before the
+ * (0122's statement trigger on `connectors`, 0278's row trigger on `mcp_servers`), so a call decided before the
  * disable is withheld at its next epoch check, and a call that waited for an approval is refused when it comes back.
  *
  * WHAT A DELETE REFUSES. Evidence is never cascaded away: approvals (and ChatOps connections, which carry decided

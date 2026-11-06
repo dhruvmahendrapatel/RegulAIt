@@ -1564,24 +1564,52 @@
       "breakpoints": true
     },
     {
-      "idx": 262,
+      "idx": 266,
       "version": "7",
-      "when": 1785197000000,
-      "tag": "0262_connector_disable",
+      "when": 1785201000000,
+      "tag": "0266_model_signing_supply_chain",
       "breakpoints": true
     },
     {
-      "idx": 263,
+      "idx": 267,
       "version": "7",
-      "when": 1785198000000,
-      "tag": "0263_mcp_server_disable",
+      "when": 1785202000000,
+      "tag": "0267_supply_chain_risk_category",
       "breakpoints": true
     },
     {
-      "idx": 264,
+      "idx": 269,
       "version": "7",
-      "when": 1785199000000,
-      "tag": "0264_pm_webhook_secret_rotation",
+      "when": 1785204000000,
+      "tag": "0269_discovery_wider_sources",
+      "breakpoints": true
+    },
+    {
+      "idx": 271,
+      "version": "7",
+      "when": 1785206000000,
+      "tag": "0271_fairness_testing",
+      "breakpoints": true
+    },
+    {
+      "idx": 277,
+      "version": "7",
+      "when": 1785212000000,
+      "tag": "0277_connector_disable",
+      "breakpoints": true
+    },
+    {
+      "idx": 278,
+      "version": "7",
+      "when": 1785213000000,
+      "tag": "0278_mcp_server_disable",
+      "breakpoints": true
+    },
+    {
+      "idx": 279,
+      "version": "7",
+      "when": 1785214000000,
+      "tag": "0279_pm_webhook_secret_rotation",
       "breakpoints": true
     }
   ]

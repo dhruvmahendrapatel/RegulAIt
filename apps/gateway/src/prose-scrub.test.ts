@@ -510,6 +510,8 @@ describe("6. the covered / NOT-covered inventory", () => {
     // ADR-0175: a held skill's admission reason and a release-age override reason
     "builder_skills.admit_reason",
     "release_overrides.reason",
+    // ADR-0216: an admin's reason for relaxing a model file's supply-chain check
+    "model_artifact_supply_chain_relaxations.reason",
     // ADR-0175 A15: where an energy factor came from
     "energy_factors.source_note",
     // ADR-0173 batch 2c: an annotation comment, a judge rationale, a rule pause reason
@@ -653,6 +655,8 @@ describe("6. the covered / NOT-covered inventory", () => {
       "engine_run_items.not_run_reason",
       // ADR-0190 I3: a CHECK-constrained five-member decline code
       "execution_offers.decline_reason",
+      // ADR-0222: a CHECK-constrained two-member purge code
+      "fairness_datasets.purge_reason",
       "mcp_registry_entries.conflict_reason",
       "migration_audit_outbox.reason",
       "risk_acceptances.compensating_controls",

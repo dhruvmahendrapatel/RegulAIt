@@ -1364,7 +1364,7 @@ function AddSignatureForm(props: { onAdded: () => void }) {
   const [toolId, setToolId] = useState("");
   const [note, setNote] = useState("");
   const [confidence, setConfidence] = useState<"high" | "medium" | "low">("high");
-  const isArtifact = ["cloud_ai_service", "desktop_app", "ide_extension", "browser_extension", "local_runtime", "assistant_config"].includes(kind);
+  const isArtifact = ["cloud_ai_service", "desktop_app", "ide_extension", "browser_extension", "local_runtime", "assistant_config", "oauth_app", "ml_platform_asset"].includes(kind);
   const [value, setValue] = useState("");
   const [hostMatch, setHostMatch] = useState<"exact_host" | "host_suffix">("host_suffix");
   const [minLength, setMinLength] = useState("20");
@@ -1423,6 +1423,8 @@ function AddSignatureForm(props: { onAdded: () => void }) {
           <option value="browser_extension">Browser extension</option>
           <option value="local_runtime">Local model runtime</option>
           <option value="assistant_config">Assistant config file</option>
+          <option value="oauth_app">Identity-provider app (application id)</option>
+          <option value="ml_platform_asset">ML platform asset</option>
         </Select>
       </Field>
       <Field label="OS (optional)">
