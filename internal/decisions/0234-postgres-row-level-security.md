@@ -59,7 +59,7 @@ the role split, because it is the only option that protects real boundaries insi
    - The principal must be a UUID and is passed as a bind parameter. A malformed value is refused before any SQL runs.
 
 3. **Roles: the app role owns nothing, FORCE is on, and migrations run as the owner.**
-   - Migration 0265 creates `regulait_app` (NOLOGIN, NOINHERIT, no BYPASSRLS). It gets SELECT, INSERT, UPDATE and
+   - Migration 0272 creates `regulait_app` (NOLOGIN, NOINHERIT, no BYPASSRLS). It gets SELECT, INSERT, UPDATE and
      DELETE on the tables, with default privileges for future tables. It gets no TRUNCATE, REFERENCES or TRIGGER.
    - The app role has no UPDATE or DELETE on `audit_log` and `audit_anchors` (ADR-0060 least privilege). The 0060/0185
      triggers stay as the second wall.
@@ -69,7 +69,7 @@ the role split, because it is the only option that protects real boundaries insi
      though the local demo, docker-compose and CI log in as a superuser.
    - Migrations keep running as the owner. A later migration that reads or writes rows of an RLS table must first run
      `select set_config('regulait.system_context', 'migration', true)`. Otherwise, on a non-superuser owner, it touches
-     zero rows. A test fails any migration after 0265 with DML on a slice-1 table that lacks the line.
+     zero rows. A test fails any migration after 0272 with DML on a slice-1 table that lacks the line.
 
 4. **Background jobs and system paths use an explicit, narrow system context, never a blanket bypass.**
    - The reasons are a closed registry, identical in TypeScript (`RLS_SYSTEM_REASONS`) and in
@@ -84,7 +84,7 @@ the role split, because it is the only option that protects real boundaries insi
    | `audit_chain` | audit_log (read): the chain writer's tip read, under the append lock |
    | `audit_verify` | audit_log (read): verification, anchoring and export jobs |
    | `approval_maintenance` | approvals (all): expiry, SLA and routing sweeps |
-   | `rls_membership` | users (read): entered only by the SET clause of the 0265 helper functions |
+   | `rls_membership` | users (read): entered only by the SET clause of the 0272 helper functions |
    | `migration` | every slice-1 table: a later migration's data step |
 
    - `withSystemContext` refuses `rls_membership` and `migration` (they belong to SQL) and any unregistered value.
@@ -172,7 +172,7 @@ the role split, because it is the only option that protects real boundaries insi
       - **Hard gate (#682 review):** no `authenticate` write on `users` (failed-login counters, lockout, last login,
         password rehash) is wired until a column guard lands in the same batch: either column privileges on `users`
         for a dedicated sign-in path or a guard that refuses a change to `is_admin`, `disabled_at`, `email`,
-        `username`, `scim_external_id` or `cost_center` outside admin and `identity_provisioning`. The 0265 policy
+        `username`, `scim_external_id` or `cost_center` outside admin and `identity_provisioning`. The 0272 policy
         gives `authenticate` no UPDATE at all, so wiring it early fails closed.
       - **Audit attribution (#682 round 2):** some gateway appends name the subject, not the actor (for example the
         workbench routing audit, `userId: actorUserId ?? row.userId`). Under `audit_log_insert` each must write the
@@ -182,7 +182,7 @@ the role split, because it is the only option that protects real boundaries insi
       chat_identity_links.
    3. **Batch 4, approval satellites and membership.** approval_assignments, approval_decisions, approval_delegations,
       approval_saved_views, role_assignments, team_members, project_members. Their policies must admit `rls_membership`,
-      or the 0265 helpers stop seeing memberships. Review-role membership moves into SQL here, which narrows the
+      or the 0272 helpers stop seeing memberships. Review-role membership moves into SQL here, which narrows the
       decision 7 widening.
    4. **Batch 5, project-scoped.** The 31 tables, keyed on `project_members` through a `regulait_rls_principal_projects()`
       helper: cost_events, usage_events, traces, conversations, prompts, project_context_items, and the rest.
@@ -225,11 +225,11 @@ the role split, because it is the only option that protects real boundaries insi
 
 ## Rollback (back-out)
 
-Slice 1 changes no data and no column, so backing it out is a forward migration (never an edit of 0265), run as the
+Slice 1 changes no data and no column, so backing it out is a forward migration (never an edit of 0272), run as the
 owner:
 
 1. `ALTER TABLE <t> NO FORCE ROW LEVEL SECURITY; ALTER TABLE <t> DISABLE ROW LEVEL SECURITY;` for users,
-   auth_mfa_pending, approvals and audit_log. Every query then behaves as before 0265, wrapped or not.
+   auth_mfa_pending, approvals and audit_log. Every query then behaves as before 0272, wrapped or not.
 2. `DROP POLICY` each slice-1 policy, then `DROP FUNCTION` the five `regulait_rls_*` helpers.
 3. Keep the `regulait_app` role and its grants: a role that is a member of nothing and owns nothing is inert, and
    dropping it would fail while any wrapper still switches to it. `withPrincipal` / `withSystemContext` keep working
@@ -264,7 +264,7 @@ The same steps per table back out a later batch. No backup restore is needed, be
 
 ## As built (slice 1)
 
-- Migration `0265_rls_foundation_slice1` and `packages/db/src/rls.ts` (exported from `@regulait/db`).
+- Migration `0272_rls_foundation_slice1` and `packages/db/src/rls.ts` (exported from `@regulait/db`).
 - `audit-chain.ts` enters `audit_chain` in the lock statement and restores it after the tip and clock reads.
 - `apps/gateway/src/zz-adr0234-rls-slice1.test.ts` (28 tests): inventory and roles; the registry matches;
   cross-user blocking on all four tables with the app check skipped, each with a superuser positive control; the

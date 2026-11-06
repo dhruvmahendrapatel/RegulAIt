@@ -123,7 +123,7 @@ afterAll(async () => {
   }
 });
 
-describe("0265: the roles and the inventory", () => {
+describe("0272: the roles and the inventory", () => {
   it("every slice-1 table has row-level security ENABLED and FORCED", async () => {
     const r = await su.execute<{ relname: string; on: boolean; forced: boolean }>(sql`
       select relname, relrowsecurity as on, relforcerowsecurity as forced from pg_class
@@ -459,10 +459,10 @@ describe("the audit chain stays one chain under a principal", () => {
 });
 
 describe("later migrations that touch rows of an RLS table enter the migration context", () => {
-  it("every migration after 0265 with DML on a slice-1 table sets regulait.system_context = 'migration'", () => {
+  it("every migration after 0272 with DML on a slice-1 table sets regulait.system_context = 'migration'", () => {
     const dml = new RegExp(`\\b(insert\\s+into|update|delete\\s+from)\\s+(public\\.)?"?(${RLS_TABLES.join("|")})"?\\b`, "i");
     const offenders = readdirSync(migrationsFolder)
-      .filter((f) => /^\d{4}_.*\.sql$/.test(f) && Number(f.slice(0, 4)) > 265)
+      .filter((f) => /^\d{4}_.*\.sql$/.test(f) && Number(f.slice(0, 4)) > 272)
       .filter((f) => {
         const body = readFileSync(path.join(migrationsFolder, f), "utf8");
         return dml.test(body) && !/set_config\(\s*'regulait\.system_context'\s*,\s*'migration'\s*,\s*true\s*\)/i.test(body);

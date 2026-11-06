@@ -1564,13 +1564,6 @@
       "breakpoints": true
     },
     {
-      "idx": 265,
-      "version": "7",
-      "when": 1785200000000,
-      "tag": "0265_rls_foundation_slice1",
-      "breakpoints": true
-    },
-    {
       "idx": 266,
       "version": "7",
       "when": 1785201000000,
@@ -1582,6 +1575,13 @@
       "version": "7",
       "when": 1785202000000,
       "tag": "0267_supply_chain_risk_category",
+      "breakpoints": true
+    },
+    {
+      "idx": 272,
+      "version": "7",
+      "when": 1785207000000,
+      "tag": "0272_rls_foundation_slice1",
       "breakpoints": true
     }
   ]
