@@ -38,6 +38,24 @@ export {
   type AuditActorStamp,
 } from "./audit-chain.js";
 
+// ADR-0234 (PENDING S7) — the row-level security transaction layer: the only way to set the principal or
+// a system context, always transaction-local, so a pooled connection is never left scoped
+export {
+  RLS_APP_ROLE,
+  RLS_PRINCIPAL_SETTING,
+  RLS_SYSTEM_REASONS,
+  RLS_SYSTEM_SETTING,
+  RlsContextError,
+  rlsSystemContextCounts,
+  setRlsSystemContextSink,
+  withPrincipal,
+  withSystemContext,
+  type RlsCallerSystemReason,
+  type RlsPrincipal,
+  type RlsSystemContextEntry,
+  type RlsSystemReason,
+} from "./rls.js";
+
 // ADR-0189 B2 — the shared decision fact writer (called by the audit chain writer)
 export { captureDecisionFacts, loadDecisionCaptureStatus } from "./decision-facts.js";
 // ADR-0190 decision 6 / amendments T and 3 — the one attestation-freshness query (the broker, the facts, the AI BOM)

@@ -183,6 +183,7 @@ import { registerGuardrailRoutes } from "./guardrails.js";
 import { configureTrainedDetectorRuntime, registerTrainedDetectorRoutes } from "./trained-detectors.js";
 import { registerEvalRoutes } from "./evals.js";
 import { applyModelCardApprovalDecision, registerMrmRoutes } from "./mrm.js";
+import { registerFairnessRoutes } from "./fairness.js";
 import { AiBomError } from "./ai-bom.js";
 import { runAiBomSignoffs, type AiBomSignoff } from "./ai-bom-signoff.js";
 import { registerRedTeamRoutes } from "./redteam.js";
@@ -5450,6 +5451,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // here at all: it rides POST /v1/approvals/:approvalId/decide, which the
   // named approver reaches as a non-admin exactly as before.
   registerMrmRoutes(app, db);
+  // ADR-0222 (P13(a)) — fairness testing for a model card: labelled datasets (encrypted, retention-bounded), group
+  // metrics against thresholds, and the hold a failing run puts on the card. Off until an admin turns it on.
+  registerFairnessRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0057 — CONTINUOUS RED-TEAMING. Versioned attack libraries, the shipped
   // corpus, and runs — every one of which is an ADR-0044 eval run underneath,
   // so probes take the same governed dispatch, the same metering and the same
