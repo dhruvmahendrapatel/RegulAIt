@@ -185,6 +185,29 @@ export const INDIRECT_UI_CALLS = new Map([
       reason: "the Decision BOM names its bundle href; bomModel.ts checks it equals this route, then the download fetches it",
     },
   ],
+  // ADR-0226 P2 batch D: the usage ledger, the golden cases and the findings per rule
+  ...[
+    ["GET /v1/usage-events/export.xlsx", "apps/web/src/views/admin/cost/OptimizationPage.tsx"],
+    ["GET /v1/governance/decision-regression/cases/export.xlsx", "apps/web/src/views/admin/governance/DecisionRegressionPage.tsx"],
+    ["GET /v1/recommendations/access/export.xlsx", "apps/web/src/views/admin/governance/RecommendationsPage.tsx"],
+  ].map(([r, page]) => [
+    r,
+    {
+      file: "apps/web/src/ui/DataList.tsx",
+      evidence: "exportUrl(props.exportPath",
+      pathIn: page,
+      reason: "the page passes the export path to DataList, whose Download Excel button fetches it",
+    },
+  ]),
+  ...[["GET /v1/governance/decision-regression/cases", "apps/web/src/views/admin/governance/DecisionRegressionPage.tsx"]].map(([r, page]) => [
+    r,
+    {
+      file: "apps/web/src/ui/DataList.tsx",
+      evidence: "pageUrl(endpoint",
+      pathIn: page,
+      reason: "the page passes the list route to DataList, which reads it page by page",
+    },
+  ]),
 ]);
 
 /**

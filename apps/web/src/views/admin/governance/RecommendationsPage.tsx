@@ -25,7 +25,8 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, InfoButton, Table, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, InfoButton, type Tone } from "../../../ui/kit";
+import { DataList, type DataColumn } from "../../../ui/DataList";
 import { QueryGate, useAction } from "../adminKit";
 import v from "../../views.module.css";
 import { fmtDateTime } from "../../../api/format";
@@ -93,6 +94,48 @@ const evidenceLine = (e: Record<string, unknown>): string =>
     .filter(([, val]) => val !== null && typeof val !== "object")
     .map(([k, val]) => `${k}: ${String(val)}`)
     .join(" · ");
+
+/** ADR-0226: a rule's findings; the ids and sortable ones match the gateway's RECOMMENDATION_FINDINGS_LIST */
+const FINDING_COLUMNS: Array<DataColumn<Finding>> = [
+  { key: "holder", header: "Holder", main: true, sortable: true, render: (r) => r.holder.label },
+  {
+    key: "object",
+    header: "Grant",
+    main: true,
+    sortable: true,
+    render: (r) => r.object?.label ?? (r.grants ? r.grants.map((g) => `${g.side}: ${g.object.label}`).join(" + ") : "—"),
+  },
+  {
+    key: "why",
+    header: "Why (evidence attached)",
+    main: true,
+    sortable: true,
+    render: (r) => (
+      <>
+        <div>{r.rationale}</div>
+        <div className={v.faint}>{evidenceLine(r.evidence)}</div>
+        {r.judged && (
+          <div>
+            <Badge tone={verdictTone(r.judged.verdict)}>
+              {r.judged.method}: {r.judged.verdict}
+            </Badge>{" "}
+            <span className={v.faint}>
+              {r.judged.note} — advisory only ({r.judged.judge}); it did not create this finding and cannot change the
+              evidence above.
+            </span>
+          </div>
+        )}
+      </>
+    ),
+  },
+  { key: "evidence", header: "Evidence", render: (r) => <span className={v.faint}>{evidenceLine(r.evidence)}</span> },
+  {
+    key: "judged",
+    header: "Model-judged (advisory)",
+    sortable: true,
+    render: (r) => (r.judged ? <Badge tone={verdictTone(r.judged.verdict)}>{`${r.judged.method}: ${r.judged.verdict}`}</Badge> : <span className={v.faint}>—</span>),
+  },
+];
 
 export default function RecommendationsPage() {
   const act = useAction();
@@ -187,40 +230,18 @@ export default function RecommendationsPage() {
                   ) : (
                     <>
                       {rule.findings.length > 0 && (
-                        <Table
-                          rows={rule.findings}
+                        // ADR-0226: this rule's findings, sorted, paged and exported by the server from the same report
+                        <DataList<Finding>
+                          listId="access-recommendation-findings"
+                          noun={`findings for ${rule.id}`}
+                          endpoint="/v1/recommendations/access"
+                          exportPath="/v1/recommendations/access/export.xlsx"
+                          queryKey={["admin", "recommendations", "findings", rule.id]}
+                          legacyKey="findings"
+                          filters={{ rule: rule.id }}
+                          defaultSort={{ key: "holder", dir: "asc" }}
                           rowKey={(r) => r.key}
-                          columns={[
-                            { key: "holder", header: "Holder", render: (r) => r.holder.label },
-                            {
-                              key: "object",
-                              header: "Grant",
-                              render: (r) =>
-                                r.object?.label ??
-                                (r.grants ? r.grants.map((g) => `${g.side}: ${g.object.label}`).join(" + ") : "—"),
-                            },
-                            {
-                              key: "why",
-                              header: "Why (evidence attached)",
-                              render: (r) => (
-                                <>
-                                  <div>{r.rationale}</div>
-                                  <div className={v.faint}>{evidenceLine(r.evidence)}</div>
-                                  {r.judged && (
-                                    <div>
-                                      <Badge tone={verdictTone(r.judged.verdict)}>
-                                        {r.judged.method}: {r.judged.verdict}
-                                      </Badge>{" "}
-                                      <span className={v.faint}>
-                                        {r.judged.note} — advisory only ({r.judged.judge}); it did not create this
-                                        finding and cannot change the evidence above.
-                                      </span>
-                                    </div>
-                                  )}
-                                </>
-                              ),
-                            },
-                          ]}
+                          columns={FINDING_COLUMNS}
                         />
                       )}
                       {rule.notAssessable.length > 0 && (

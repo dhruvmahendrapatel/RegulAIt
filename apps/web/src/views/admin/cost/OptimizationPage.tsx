@@ -7,6 +7,7 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { CostEventsResponse } from "../../../api/adminTypes";
+import { DataList, type DataColumn } from "../../../ui/DataList";
 import type { UsageEventsResponse } from "../../../api/types";
 import { fmtUsd } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
@@ -42,10 +43,7 @@ export default function OptimizationPage() {
     () => (cost.data?.events ?? []).map((e, i) => ({ ...e, rowKey: e.id ?? `${e.at}-${i}` })),
     [cost.data],
   );
-  const usageRows = useMemo(
-    () => (usage.data?.events ?? []).map((e, i) => ({ ...e, rowKey: `${e.at}-${i}` })),
-    [usage.data],
-  );
+  const usageFilters = useMemo(() => ({ userId: userId || undefined }), [userId]);
 
   return (
     <>
@@ -159,48 +157,20 @@ export default function OptimizationPage() {
           />
         </Card>
 
-        <Card title="Usage events — measured actuals" contain foldable startCollapsed count={usageRows.length} countIsLimit={usageRows.length >= 100} countNoun={["event", "events"]}>
-          <Table
-            columns={[
-              {
-                key: "at",
-                header: "At",
-                sort: (e: (typeof usageRows)[number]) => e.at,
-                render: (e) => <span className={v.mono}>{String(e.at).slice(0, 19).replace("T", " ")}</span>,
-              },
-              { key: "object", header: "Object", render: (e) => e.objectType ?? "—" },
-              { key: "model", header: "Model", render: (e) => (e.model ? <span className={v.mono}>{e.model}</span> : "—") },
-              {
-                key: "tokens",
-                header: "Tokens in → out",
-                align: "right",
-                render: (e) => `${e.inputTokens ?? 0} → ${e.outputTokens ?? 0}`,
-              },
-              {
-                key: "cost",
-                header: "Cost",
-                align: "right",
-                sort: (e) => e.costUsd ?? 0,
-                render: (e) => <span className={v.num}>{fmtUsd(e.costUsd)}</span>,
-              },
-              {
-                key: "saved",
-                header: "Saved",
-                align: "right",
-                render: (e) => <span className={v.num}>{fmtUsd(e.measuredCostSavedUsd)}</span>,
-              },
-              {
-                key: "attributed",
-                header: "Project",
-                render: (e) =>
-                  e.projectId ? <Badge tone="ok">attributed</Badge> : <Badge tone="warn">unattributed</Badge>,
-              },
-            ]}
-            rows={usageRows}
-            rowKey={(e) => e.rowKey}
-            loading={usage.isLoading}
-            error={usage.error}
-            onRetry={() => void usage.refetch()}
+        <Card title="Usage events — measured actuals" contain count={measured.events ?? 0} countNoun={["event", "events"]}>
+          {/* ADR-0226: every event, paged, sorted and exported by the server under the same per-user filter */}
+          <DataList<UsageRow>
+            listId="usage-events"
+            noun="usage events"
+            endpoint="/v1/usage-events"
+            exportPath="/v1/usage-events/export.xlsx"
+            queryKey={["admin", "usage-events", "list"]}
+            legacyKey="events"
+            count="estimate"
+            filters={usageFilters}
+            defaultSort={{ key: "at", dir: "desc" }}
+            rowKey={(e) => e.id}
+            columns={USAGE_COLUMNS}
             empty={<EmptyState title="No usage events" body="Real dispatches write the measured ledger." />}
           />
         </Card>
@@ -208,3 +178,25 @@ export default function OptimizationPage() {
     </>
   );
 }
+
+type UsageRow = NonNullable<UsageEventsResponse["events"]>[number] & { id: string; userName?: string | null; agentName?: string | null };
+/** ADR-0226: the usage ledger's columns; the ids and sortable ones match the gateway's USAGE_EVENTS_LIST */
+const USAGE_COLUMNS: Array<DataColumn<UsageRow>> = [
+  { key: "at", header: "At", main: true, sortable: true, render: (e) => <span className={v.mono}>{String(e.at).slice(0, 19).replace("T", " ")}</span> },
+  { key: "object", header: "Object", main: true, sortable: true, render: (e) => e.objectType ?? "—" },
+  { key: "model", header: "Model", main: true, sortable: true, render: (e) => (e.model ? <span className={v.mono}>{e.model}</span> : "—") },
+  { key: "tokens", header: "Tokens in → out", main: true, sortable: true, align: "right", render: (e) => `${e.inputTokens ?? 0} → ${e.outputTokens ?? 0}` },
+  { key: "cost", header: "Cost", main: true, sortable: true, align: "right", render: (e) => <span className={v.num}>{fmtUsd(e.costUsd)}</span> },
+  { key: "saved", header: "Saved", main: true, sortable: true, align: "right", render: (e) => <span className={v.num}>{fmtUsd(e.measuredCostSavedUsd)}</span> },
+  {
+    key: "project",
+    header: "Project",
+    main: true,
+    sortable: true,
+    required: "Unattributed spend is always shown",
+    render: (e) => (e.projectId ? <Badge tone="ok">attributed</Badge> : <Badge tone="warn">unattributed</Badge>),
+  },
+  { key: "user", header: "User", sortable: true, render: (e) => e.userName ?? "—" },
+  { key: "agent", header: "Agent", sortable: true, render: (e) => e.agentName ?? "—" },
+  { key: "refusal", header: "Refused", render: (e) => (e.refusal ? <Badge tone="danger">refused</Badge> : "—") },
+];

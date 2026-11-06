@@ -4,6 +4,8 @@ import { z } from "zod";
 import { streamUsageEventsCsv } from "./projects.js";
 import { resolveCsvWindow } from "./csv-export.js";
 import { USAGE_SUMMARY_DEFAULT_DAYS, usageSummaryQuery } from "./list-queries.js";
+import { filterParams, parseListExport, parseListPage, runListPage, sendListError, sendListExport, wantsListContract } from "./list-contract.js";
+import { USAGE_EVENTS_LIST, usageEventsFilterQuery, usageEventsReader, usageEventsWhere } from "./usage-events-list.js";
 
 const listQuery = z.object({
   userId: z.string().uuid().optional(),
@@ -51,9 +53,38 @@ export function registerOptimizationRoutes(app: FastifyInstance, db: Db) {
     return { events, totals };
   });
 
+  // ADR-0226: with any of sort/dir/cursor/offset/count the usage ledger
+  // answers the shared list contract (usage-events-list.ts), with the same
+  // visibility rule; with none of them, exactly the response below.
+  app.get("/v1/usage-events/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const filters = usageEventsFilterQuery.parse(filterParams(q));
+      const ex = parseListExport(USAGE_EVENTS_LIST, q);
+      const where = usageEventsWhere(req, filters);
+      if (where === null) return reply.status(403).send({ error: "bootstrap_has_no_usage_history" });
+      await sendListExport(db, req, reply, USAGE_EVENTS_LIST, usageEventsReader(db), where, ex, filters);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+
   // PILLAR 5 actuals: the measured-spend ledger written by real dispatches.
   // Same visibility rule as cost-events — non-admins see only themselves.
   app.get("/v1/usage-events", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      try {
+        const q = req.query as Record<string, unknown>;
+        const filters = usageEventsFilterQuery.parse(filterParams(q));
+        const page = parseListPage(USAGE_EVENTS_LIST, q);
+        const where = usageEventsWhere(req, filters);
+        if (where === null) return reply.status(403).send({ error: "bootstrap_has_no_usage_history" });
+        return await runListPage(db, USAGE_EVENTS_LIST, usageEventsReader(db), where, page);
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
     const q = listQuery.parse(req.query);
     const userId = req.authCtx.isAdmin ? q.userId : req.authCtx.userId;
     if (!req.authCtx.isAdmin && !userId) {

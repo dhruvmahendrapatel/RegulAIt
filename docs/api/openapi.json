@@ -1173,7 +1173,7 @@
             "description": "Rate limited. Retry after the `retry-after` header."
           },
           "2XX": {
-            "description": "At most 100 rows, newest first by `requestedAt` unless `order=asc`. `status` takes one status or a comma-separated list. `total` counts every row the same filters and visibility match, and `hasMore` is true when `total` exceeds the rows returned."
+            "description": "At most 100 rows, newest first by `requestedAt` unless `order=asc`. `status` takes one status or a comma-separated list. `total` counts every row the same filters and visibility match, and `hasMore` is true when `total` exceeds the rows returned. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226) under the same visibility and filters (`order` is then refused)."
           }
         }
       }
@@ -2463,7 +2463,7 @@
     "/v1/usage-events": {
       "get": {
         "operationId": "getV1UsageEvents",
-        "summary": "The raw usage ledger, one row per governed call (priced or not).",
+        "summary": "The raw usage ledger, one row per governed call (priced or not). With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226), with `userId`, `objectType` and `excludeObjectType` filters.",
         "tags": [
           "usage-events"
         ],

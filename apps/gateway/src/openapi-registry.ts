@@ -538,6 +538,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // queries-with-reasons over the ledgers. Internal: an admin governance
   // read whose rule set is versioned and expected to grow by version.
   "GET /v1/recommendations/access": "internal",
+  "GET /v1/recommendations/access/export.xlsx": "internal",
   // ADR-0091 — toxic-combination SoD: rule CRUD + override escalations.
   // Internal: admin governance over the org's own grant policy (override
   // DECISIONS ride the existing POST /v1/approvals/:approvalId/decide).
@@ -879,6 +880,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/teams/:teamId/members": "internal",
   "DELETE /v1/teams/:teamId/members/:userId": "internal",
   "GET /v1/usage-events": "public-stable",
+  "GET /v1/usage-events/export.xlsx": "internal",
   "GET /v1/usage-events/summary": "public-beta",
   // ADR-0080 — the AI use-case registry: new surface, internal until the shape settles
   "GET /v1/use-cases": "internal",
@@ -1098,6 +1100,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/governance/decision-regression/runs": "internal",
   "GET /v1/governance/decision-regression/runs/:runId": "internal",
   "GET /v1/governance/decision-regression/cases": "internal",
+  "GET /v1/governance/decision-regression/cases/export.xlsx": "internal",
   "POST /v1/governance/decision-regression/cases": "internal",
   "DELETE /v1/governance/decision-regression/cases/:caseId": "internal",
   "GET /v1/use-cases/:useCaseId/decision-records": "internal",
@@ -1723,6 +1726,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/governance/alerts/:alertId/acknowledge": "reports",
   // ADR-0092 — access recommendations (the deterministic half)
   "GET /v1/recommendations/access": "recommendations",
+  "GET /v1/recommendations/access/export.xlsx": "recommendations",
   "GET /v1/reports/definitions": "reports",
   "POST /v1/reports/definitions": "reports",
   "DELETE /v1/reports/definitions/:id": "reports",
@@ -2011,6 +2015,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/teams/:teamId/members": "teams",
   "DELETE /v1/teams/:teamId/members/:userId": "teams",
   "GET /v1/usage-events": "usage-events",
+  "GET /v1/usage-events/export.xlsx": "usage-events",
   "GET /v1/usage-events/summary": "usage-events",
   "GET /v1/use-cases": "use-cases",
   "POST /v1/use-cases": "use-cases",
@@ -2210,6 +2215,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/governance/decision-regression/runs": "use-cases",
   "GET /v1/governance/decision-regression/runs/:runId": "use-cases",
   "GET /v1/governance/decision-regression/cases": "use-cases",
+  "GET /v1/governance/decision-regression/cases/export.xlsx": "use-cases",
   "POST /v1/governance/decision-regression/cases": "use-cases",
   "DELETE /v1/governance/decision-regression/cases/:caseId": "use-cases",
   "GET /v1/use-cases/:useCaseId/decision-records": "use-cases",

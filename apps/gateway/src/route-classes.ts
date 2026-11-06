@@ -444,6 +444,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/traces/tags",
   "GET /v1/cost-events",
   "GET /v1/usage-events",
+  // ADR-0226: the ledger's Excel export, with the identical self-scoping (userId forced to self)
+  "GET /v1/usage-events/export.xlsx",
   // the windowed by-agent / by-connector aggregate of the same ledger; the
   // handler applies the identical self-scoping (userId forced to self)
   "GET /v1/usage-events/summary",

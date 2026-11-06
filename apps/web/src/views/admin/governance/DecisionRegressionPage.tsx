@@ -16,10 +16,10 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Modal, Select, Table, Tabs, Textarea } from "../../../ui/kit";
+import { DataList, type DataColumn } from "../../../ui/DataList";
 import { useToast } from "../../../ui/toast";
 import { QueryGate } from "../adminKit";
 import v from "../../views.module.css";
-import rec from "./record.module.css";
 import { shortDate } from "./useCaseLifecycle";
 import { putOrgSettings } from "../../../stepup/stepUp";
 
@@ -453,7 +453,6 @@ const EXPECTED_TIERS = [
 function CasesSection() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const cases = useQuery({ queryKey: CASES_KEY, queryFn: () => api.get<{ cases: RegressionCase[] }>("/v1/governance/decision-regression/cases") });
   const useCases = useQuery({
     queryKey: ["use-cases", "for-regression"],
     queryFn: () => api.get<{ useCases?: Array<{ id: string; name: string; euAiActTier?: string | null }> }>("/v1/use-cases"),
@@ -509,20 +508,27 @@ function CasesSection() {
           Shipped cases come with regulAIt and change only with its code. A reviewer case replays the answers of a real use
           case and pins the outcome a reviewer decided it must keep.
         </p>
-        <Table
-          rows={cases.data?.cases}
-          loading={cases.isLoading}
-          error={cases.error}
-          onRetry={() => void cases.refetch()}
+        {/* ADR-0226: every live case, sorted, paged and exported by the server */}
+        <DataList<RegressionCase>
+          listId="decision-regression-cases"
+          noun="golden cases"
+          endpoint="/v1/governance/decision-regression/cases"
+          exportPath="/v1/governance/decision-regression/cases/export.xlsx"
+          queryKey={CASES_KEY}
+          legacyKey="cases"
+          defaultSort={{ key: "label", dir: "asc" }}
           rowKey={(c) => c.id}
           empty={<EmptyState title="No cases" body="The shipped golden set could not be read." />}
           columns={[
-            { key: "label", header: "Case", render: (c) => c.label, sort: (c) => c.label },
-            { key: "source", header: "Source", render: (c) => <Badge tone={c.source === "override" ? "info" : "neutral"}>{c.source === "override" ? "Reviewer" : "Shipped"}</Badge> },
-            { key: "tier", header: "Tier now", render: (c) => tierText(c.outcome.tier) },
+            { key: "label", header: "Case", main: true, sortable: true, render: (c) => c.label },
+            { key: "source", header: "Source", main: true, sortable: true, render: (c) => <Badge tone={c.source === "override" ? "info" : "neutral"}>{c.source === "override" ? "Reviewer" : "Shipped"}</Badge> },
+            { key: "tier", header: "Tier now", main: true, sortable: true, render: (c) => tierText(c.outcome.tier) },
             {
               key: "expect",
               header: "Expectation",
+              main: true,
+              sortable: true,
+              required: "Whether the case keeps its expectation is always shown",
               render: (c) =>
                 c.unmetExpectation.length === 0 ? (
                   <Badge tone="ok">Kept</Badge>
@@ -530,9 +536,13 @@ function CasesSection() {
                   <Badge tone="warn">{`Differs: ${c.unmetExpectation.map((f) => FIELD_LABEL[f].toLowerCase()).join(", ")}`}</Badge>
                 ),
             },
+            { key: "created", header: "Added", sortable: true, render: (c) => (c.createdAt ? shortDate(c.createdAt) : <span className={v.faint}>shipped</span>) },
+            { key: "by", header: "Added by", sortable: true, render: (c) => c.createdByName ?? <span className={v.faint}>—</span> },
             {
               key: "act",
-              header: <span className={rec.srOnly}>Actions</span>,
+              header: "",
+              srHeader: "Actions",
+              action: true,
               render: (c) =>
                 c.source === "override" ? (
                   <Button size="sm" variant="ghost" aria-label={`Retire case ${c.label}`} onClick={() => setRetiring(c)}>
@@ -540,7 +550,7 @@ function CasesSection() {
                   </Button>
                 ) : null,
             },
-          ]}
+          ] satisfies Array<DataColumn<RegressionCase>>}
         />
       </Card>
       <Card title="Add a reviewer case from a use case">
