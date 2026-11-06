@@ -197,6 +197,24 @@ export function resolveModelVersion(pinned: string | null, declared: string | un
   };
 }
 
+/** a version refusal raised inside a write transaction (rolls it back); the route turns it into the reply */
+class ModelVersionRefusal extends Error {
+  constructor(readonly status: 409 | 422, readonly body: { error: string; detail: string }) {
+    super(body.error);
+  }
+}
+
+/**
+ * The model version a write covers, decided INSIDE its transaction: the card row is read `FOR SHARE`, so a re-pin
+ * cannot land between this read and the insert, and evidence is never attributed to a pin that has just changed.
+ */
+async function boundModelVersion(tx: Db, cardId: string, declared: string | undefined, required: boolean) {
+  const [card] = await tx.select({ pin: modelCards.pinnedModelVersion }).from(modelCards).where(eq(modelCards.id, cardId)).for("share");
+  const v = resolveModelVersion(card?.pin ?? null, declared, required);
+  if (!v.ok) throw new ModelVersionRefusal(v.status, v.body);
+  return v;
+}
+
 function thresholdsOf(m: ModelDriftMonitorRow): DriftThresholds {
   return { psiWarn: m.psiWarn, psiAlert: m.psiAlert, ksAlert: m.ksAlert, jsAlert: m.jsAlert };
 }
@@ -358,8 +376,9 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
     if (!(await loadDriftSettings(db)).enabled) return reply.status(409).send(DISABLED);
     const [card] = await db.select({ id: modelCards.id, pinnedModelVersion: modelCards.pinnedModelVersion }).from(modelCards).where(eq(modelCards.id, id));
     if (!card) return reply.status(404).send({ error: "unknown_model_card" });
-    const version = resolveModelVersion(card.pinnedModelVersion, body.modelVersion, false);
-    if (!version.ok) return reply.status(version.status).send(version.body);
+    // an early refusal before any step-up; the version recorded is re-decided under the row lock below
+    const early = resolveModelVersion(card.pinnedModelVersion, body.modelVersion, false);
+    if (!early.ok) return reply.status(early.status).send(early.body);
     const pii = personalDataRefusal([body.name, ...featureTexts(body.reference), ...(body.modelVersion ? [body.modelVersion] : [])]);
     if (pii) return reply.status(422).send(pii);
     const thresholds: DriftThresholds = { ...STRICT_DRIFT_THRESHOLDS, ...body.thresholds };
@@ -371,6 +390,7 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
     const userId = req.authCtx.userId ?? null;
     try {
       const row = await db.transaction(async (tx) => {
+        const version = await boundModelVersion(tx as unknown as Db, id, body.modelVersion, false);
         const [m] = await tx
           .insert(modelDriftMonitors)
           .values({
@@ -408,6 +428,7 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
       });
       return reply.status(201).send({ monitor: monitorView(row, undefined) });
     } catch (e) {
+      if (e instanceof ModelVersionRefusal) return reply.status(e.status).send(e.body);
       if (isUniqueViolation(e, "model_drift_monitors_card_name_uq")) {
         return reply.status(409).send({ error: "monitor_name_taken", detail: "this model card already has a drift monitor with that name" });
       }
@@ -491,8 +512,8 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
     const windowStart = new Date(body.windowStart);
     const windowEnd = new Date(body.windowEnd);
     if (!(windowEnd > windowStart)) return reply.status(422).send({ error: "window_invalid", detail: "the window must end after it starts" });
-    const version = resolveModelVersion(m.pinnedModelVersion, body.modelVersion, true);
-    if (!version.ok) return reply.status(version.status).send(version.body);
+    const early = resolveModelVersion(m.pinnedModelVersion, body.modelVersion, true);
+    if (!early.ok) return reply.status(early.status).send(early.body);
     const pii = personalDataRefusal([...featureTexts(body.features), ...(body.modelVersion ? [body.modelVersion] : [])]);
     if (pii) return reply.status(422).send(pii);
     let computed: ReturnType<typeof computeDrift>;
@@ -509,6 +530,14 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
       const tx = rawTx as unknown as Db;
       // one count per monitor across replicas: the lock serialises concurrent submissions to the same monitor
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${"model-drift:" + monitorId}))`);
+      let version: Awaited<ReturnType<typeof boundModelVersion>>;
+      try {
+        version = await boundModelVersion(tx, card.id, body.modelVersion, true);
+      } catch (e) {
+        // nothing is written yet; returning ends the transaction with only the advisory lock taken
+        if (e instanceof ModelVersionRefusal) return { versionRefusal: e };
+        throw e;
+      }
       const now = await databaseNow(tx);
       if (windowEnd.getTime() > now.getTime() + WINDOW_SKEW_MS) return { refused: "window_future" as const };
       const [{ recent } = { recent: 0 }] = await tx
@@ -597,6 +626,7 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
       }
       return { report: report!, raisedId };
     });
+    if ("versionRefusal" in outcome && outcome.versionRefusal) return reply.status(outcome.versionRefusal.status).send(outcome.versionRefusal.body);
     if ("refused" in outcome) {
       return outcome.refused === "rate"
         ? reply.status(429).send({
@@ -633,8 +663,8 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
     if (!(await loadDriftSettings(db)).enabled) return reply.status(409).send(DISABLED);
     const [card] = await db.select({ id: modelCards.id, pinnedModelVersion: modelCards.pinnedModelVersion }).from(modelCards).where(eq(modelCards.id, id));
     if (!card) return reply.status(404).send({ error: "unknown_model_card" });
-    const version = resolveModelVersion(card.pinnedModelVersion, body.modelVersion, true);
-    if (!version.ok) return reply.status(version.status).send(version.body);
+    const early = resolveModelVersion(card.pinnedModelVersion, body.modelVersion, true);
+    if (!early.ok) return reply.status(early.status).send(early.body);
     const pii = personalDataRefusal([
       body.method,
       ...body.importances.map((x) => x.feature),
@@ -642,46 +672,53 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
       ...(body.modelVersion ? [body.modelVersion] : []),
     ]);
     if (pii) return reply.status(422).send(pii);
-    // the model version is part of the hashed evidence: the artefact cannot be re-attributed to another version
-    const sha = payloadSha256({ kind: body.kind, method: body.method, importances: body.importances, modelVersion: version.modelVersion });
     const userId = req.authCtx.userId ?? null;
-    const row = await db.transaction(async (tx) => {
-      const [a] = await tx
-        .insert(modelExplainabilityArtefacts)
-        .values({
-          cardId: id,
-          kind: body.kind,
-          method: body.method,
-          importances: body.importances,
-          featureCount: body.importances.length,
-          payloadSha256: sha,
-          note: body.note ?? null,
-          modelVersion: version.modelVersion!,
-          modelVersionSource: version.source!,
-          submittedBy: userId,
-        })
-        .returning();
-      await tx.insert(auditLog).values({
-        userId: userId ?? NO_IDENTITY,
-        objectType: "model_card",
-        objectId: id,
-        detail: {
-          phase: "explainability",
-          action: "recorded",
-          artefactId: a!.id,
-          kind: body.kind,
-          payloadSha256: sha,
-          featureCount: body.importances.length,
-          modelVersion: version.modelVersion,
-          modelVersionSource: version.source,
-        },
-        effect: "allow",
-        ruleId: MODEL_DRIFT_AUDIT_RULE_IDS.artefact,
-        ruleChain: [],
-        reason: `an explainability artefact (${body.kind === "shap_summary" ? "SHAP summary" : "global feature importance"}) supplied by the customer's pipeline was recorded as evidence on this model card`,
+    let row: typeof modelExplainabilityArtefacts.$inferSelect;
+    try {
+      row = await db.transaction(async (tx) => {
+        const version = await boundModelVersion(tx as unknown as Db, id, body.modelVersion, true);
+        // the model version is part of the hashed evidence: the artefact cannot be re-attributed to another version
+        const sha = payloadSha256({ kind: body.kind, method: body.method, importances: body.importances, modelVersion: version.modelVersion });
+        const [a] = await tx
+          .insert(modelExplainabilityArtefacts)
+          .values({
+            cardId: id,
+            kind: body.kind,
+            method: body.method,
+            importances: body.importances,
+            featureCount: body.importances.length,
+            payloadSha256: sha,
+            note: body.note ?? null,
+            modelVersion: version.modelVersion!,
+            modelVersionSource: version.source!,
+            submittedBy: userId,
+          })
+          .returning();
+        await tx.insert(auditLog).values({
+          userId: userId ?? NO_IDENTITY,
+          objectType: "model_card",
+          objectId: id,
+          detail: {
+            phase: "explainability",
+            action: "recorded",
+            artefactId: a!.id,
+            kind: body.kind,
+            payloadSha256: sha,
+            featureCount: body.importances.length,
+            modelVersion: version.modelVersion,
+            modelVersionSource: version.source,
+          },
+          effect: "allow",
+          ruleId: MODEL_DRIFT_AUDIT_RULE_IDS.artefact,
+          ruleChain: [],
+          reason: `an explainability artefact (${body.kind === "shap_summary" ? "SHAP summary" : "global feature importance"}) supplied by the customer's pipeline was recorded as evidence on this model card`,
+        });
+        return a!;
       });
-      return a!;
-    });
+    } catch (e) {
+      if (e instanceof ModelVersionRefusal) return reply.status(e.status).send(e.body);
+      throw e;
+    }
     return reply.status(201).send({
       artefact: {
         id: row.id,

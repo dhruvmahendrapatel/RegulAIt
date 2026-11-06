@@ -248,7 +248,8 @@ export const MONITOR_RULES = {
       "The latest production summary submitted for a classical model's drift monitor (ADR-0223) moved past an " +
       "alert threshold against its registered reference distribution: population stability index, " +
       "Kolmogorov-Smirnov distance or Jensen-Shannon divergence on at least one feature. A summary with too few " +
-      "samples neither raises nor resolves the episode; three in a row raise it at low severity as not evaluable. " +
+      "samples neither raises nor resolves the episode; three in a row raise a separate low-severity not-evaluable " +
+      "episode for the monitor. " +
       "While the feature is off, open episodes are held.",
   },
 } as const satisfies Record<string, { label: string; severity: MonitorSeverity; description: string }>;

@@ -46,8 +46,11 @@ re-testing after a model change (#615).
    `governance_alerts` in the same transaction as the report and its audit row, with the owner and due time the
    [ADR-0182](0182-batch-d4-accountability.md) S5 rules derive. The [ADR-0157](0157-governance-monitor.md) monitor
    reads the latest report per monitor and resolves the episode when it is back within thresholds; an `insufficient`
-   latest report holds the episode, and three `insufficient` reports in a row raise it at low severity as "not
-   evaluable", so a pipeline cannot starve the monitor silently. ChatOps notification uses the existing courier. This
+   latest report holds the episode however many follow, so an open drift alert keeps its severity, title and feature
+   list. Three `insufficient` reports in a row also raise a separate low-severity "not evaluable" episode under its
+   own subject key (`…>model_drift_monitor:<id>>not_evaluable`), so a pipeline cannot starve the monitor silently,
+   and cannot use starvation to downgrade or rewrite an open drift alert. The streak counts the monitor's latest
+   reports whatever model version they name: the monitor is starved either way. ChatOps notification uses the existing courier. This
    is a monitor, not a control: no dispatch decision reads these rows.
 5. **Explainability as evidence.** An admin (or the pipeline, with an admin's key) records a *global feature
    importance* or a *SHAP summary* produced by the customer's own tooling on the card: a method label, one value per
@@ -58,7 +61,8 @@ re-testing after a model change (#615).
    (`model_version`, NOT NULL), on the row and in its audit detail: the card's `pinnedModelVersion` at write time
    (ADR-0175 A4), or, for an unpinned card, the version the submission declares. A declared version that contradicts
    the pin is refused (`409 model_version_mismatch`), and an unpinned submission without one is refused
-   (`422 model_version_required`). An artefact's hash covers its version. A monitor records the version its reference
+   (`422 model_version_required`). The version is decided inside the write transaction with the card row read
+   `FOR SHARE`, so a concurrent re-pin is waited for and never mis-attributed. An artefact's hash covers its version. A monitor records the version its reference
    was built from where one is known. The tab marks a result recorded for a version the card has since moved on from,
    so an old clean report is never read as current assurance.
 7. **Off by default, strict by default (ADR-0180).** A singleton settings row, absent on a first load, means off.
@@ -103,5 +107,6 @@ re-testing after a model change (#615).
 - Shared: the `classical_model_drift` rule in `MONITOR_RULES` and the `modelDrift` monitor input.
 - Review round (2026-11-06, PR #628): the model-version binding (§6, columns added to the unmerged 0270 in place),
   the small-λ KS fix, SciPy reference values in the tests, canonical hashing, writes refused while off, open episodes
-  held while off, and the "not evaluable" streak.
+  held while off, and the "not evaluable" streak. Round 2: "not evaluable" moved to its own subject key (it had
+  refreshed, and so downgraded, an open drift episode), and the pin is read under a row lock in the transaction.
 - Web: a lazy-loaded "Drift and explainability" tab on a card in Model risk.

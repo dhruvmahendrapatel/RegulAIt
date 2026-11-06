@@ -10,7 +10,8 @@
  *    Turning the feature off HOLDS open episodes (never dismisses them), and every write is refused while it is off.
  *  - Every report and artefact records the model version it covers: the card's pin, or the version the submission
  *    declares for an unpinned card. A contradicting version is refused, and so is an unpinned submission without one.
- *  - Three summaries in a row with too few samples raise a low-severity "not evaluable" episode.
+ *  - Three summaries in a row with too few samples raise a low-severity "not evaluable" episode under its own subject
+ *    key; an open drift episode stays held, untouched. The pin is read under a row lock inside the write.
  *  - Aggregates only: a label that looks like personal data is refused by category; sizes are bounded.
  *  - The per-monitor hourly cap is enforced in the database.
  */
@@ -340,7 +341,29 @@ describe("ADR-0223 classical-model drift", () => {
     expect(view.json().monitors[0].latestReport.modelVersion).toBe("collections-v3");
   });
 
-  it("three summaries in a row with too few samples raise a low-severity 'not evaluable' episode", async () => {
+  it("decides the model version under a lock on the card: a re-pin in flight is waited for, never missed", async () => {
+    await put({ maxReportsPerHour: 10 });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let updated!: () => void;
+    const didUpdate = new Promise<void>((r) => (updated = r));
+    const holder = db.transaction(async (tx) => {
+      await tx.update(modelCards).set({ pinnedModelVersion: "collections-v5" }).where(eq(modelCards.id, unpinnedCardId));
+      updated();
+      await gate;
+    });
+    await didUpdate;
+    // the route's early read sees v4; the insert must wait for the re-pin and record v5
+    const pending = report(within, unpinnedMonitorId);
+    await new Promise((r) => setTimeout(r, 300));
+    release();
+    await holder;
+    const res = await pending;
+    expect(res.statusCode, res.body).toBe(201);
+    expect(res.json().report).toMatchObject({ modelVersion: "collections-v5", modelVersionSource: "card_pinned" });
+  });
+
+  it("a starved monitor never touches an open drift episode; 'not evaluable' is its own low-severity episode", async () => {
     const thin = {
       ...within,
       features: [
@@ -348,17 +371,37 @@ describe("ADR-0223 classical-model drift", () => {
         { name: "region", kind: "categorical", categories: ["north", "south"], counts: [5, 5] },
       ],
     };
-    const subject = `agent:${agentId}>model_card:${unpinnedCardId}>model_drift_monitor:${unpinnedMonitorId}`;
-    const forSubject = async () => (await openDriftAlerts()).filter((a) => a.subjectKey === subject);
+    const driftKey = `agent:${agentId}>model_card:${unpinnedCardId}>model_drift_monitor:${unpinnedMonitorId}`;
+    const notEvaluableKey = `${driftKey}>not_evaluable`;
+    const forSubject = async (k: string) => (await openDriftAlerts()).filter((a) => a.subjectKey === k);
+
+    expect((await report(drifted, unpinnedMonitorId)).json().alertRaised).toBe(true);
+    const [opened] = await forSubject(driftKey);
+    expect(opened!.severity).toBe("high");
     for (let i = 0; i < 2; i++) expect((await report(thin, unpinnedMonitorId)).json().report.status).toBe("insufficient");
     await runGovernanceMonitor(db);
-    expect(await forSubject()).toHaveLength(0);
+    expect(await forSubject(notEvaluableKey)).toHaveLength(0);
     expect((await report(thin, unpinnedMonitorId)).json().report.status).toBe("insufficient");
     await runGovernanceMonitor(db);
-    const open = await forSubject();
-    expect(open).toHaveLength(1);
-    expect(open[0]!.severity).toBe("low");
-    expect(open[0]!.detail).toMatchObject({ notEvaluable: true, monitorId: unpinnedMonitorId });
+
+    // the drift episode is held exactly as it was: same row, high, its title and drifted-feature list intact
+    const [held] = await forSubject(driftKey);
+    expect(held!.id).toBe(opened!.id);
+    expect(held!.severity).toBe("high");
+    expect(held!.title).toBe(opened!.title);
+    expect(held!.detail).toEqual(opened!.detail);
+    expect((held!.detail as { features: unknown[] }).features.length).toBeGreaterThan(0);
+    // the starved monitor is raised separately, at low severity
+    const ne = await forSubject(notEvaluableKey);
+    expect(ne).toHaveLength(1);
+    expect(ne[0]!.severity).toBe("low");
+    expect(ne[0]!.detail).toMatchObject({ notEvaluable: true, monitorId: unpinnedMonitorId });
+
+    // a summary with enough samples resolves "not evaluable", and (being within thresholds) the drift episode too
+    expect((await report(within, unpinnedMonitorId)).statusCode).toBe(201);
+    await runGovernanceMonitor(db);
+    expect(await forSubject(notEvaluableKey)).toHaveLength(0);
+    expect(await forSubject(driftKey)).toHaveLength(0);
   });
 
   it("turning it off holds open episodes, says how many in the audit row, and refuses every write", async () => {
@@ -366,7 +409,7 @@ describe("ADR-0223 classical-model drift", () => {
     await db.delete(modelDriftReports).where(eq(modelDriftReports.monitorId, monitorId));
     expect((await report(drifted)).json().alertRaised).toBe(true);
     const before = await openDriftAlerts();
-    expect(before.length).toBeGreaterThanOrEqual(2);
+    expect(before.length).toBeGreaterThanOrEqual(1);
     expect((await put({ enabled: false })).statusCode).toBe(200);
     const [audit] = await db.select().from(auditLog).where(eq(auditLog.ruleId, MODEL_DRIFT_AUDIT_RULE_IDS.settings)).orderBy(desc(auditLog.at)).limit(1);
     expect(audit!.detail).toMatchObject({ to: { enabled: false }, openEpisodesHeld: before.length });

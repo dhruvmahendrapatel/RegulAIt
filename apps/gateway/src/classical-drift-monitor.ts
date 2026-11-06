@@ -54,6 +54,14 @@ export function driftSubjectKey(card: { id: string; agentId: string | null }, mo
   return `${card.agentId ? `agent:${card.agentId}>` : ""}model_card:${card.id}>model_drift_monitor:${monitorId}`;
 }
 
+/**
+ * The "not evaluable" episode's own subject key, a child of the drift episode's. It is kept apart so that a starved
+ * monitor can never refresh (and so downgrade, retitle or strip the feature list of) an open high drift episode.
+ */
+export function notEvaluableSubjectKey(card: { id: string; agentId: string | null }, monitorId: string): string {
+  return `${driftSubjectKey(card, monitorId)}>not_evaluable`;
+}
+
 export function driftFinding(
   card: { id: string; agentId: string | null },
   monitor: { id: string; name: string },
@@ -100,8 +108,11 @@ async function starvedMonitors(db: Db, monitorIds: string[]): Promise<Set<string
 
 /**
  * ADR-0157 monitor input for `classical_model_drift`: one breach per monitor whose LATEST report drifted. A latest
- * report with too few samples holds its episode, until INSUFFICIENT_STREAK in a row, which raises a low-severity
- * "not evaluable" breach. Off = every open episode is HELD (switching the feature off never dismisses an alert).
+ * report with too few samples HOLDS the drift episode, however many follow: an open drift alert keeps its severity,
+ * title and feature list. INSUFFICIENT_STREAK in a row also raise a separate low-severity "not evaluable" episode
+ * under its own subject key (`notEvaluableSubjectKey`), which resolves once a summary has enough samples. The streak
+ * counts the monitor's latest reports whatever model version they name: the monitor is starved either way.
+ * Off = every open episode is HELD (switching the feature off never dismisses an alert).
  */
 export async function modelDriftMonitorInput(db: Db, _now: Date): Promise<MonitorAssuranceInput> {
   if (!(await loadDriftSettings(db)).enabled) {
@@ -123,16 +134,16 @@ export async function modelDriftMonitorInput(db: Db, _now: Date): Promise<Monito
     const r = latest.get(m.id);
     if (!r) continue;
     const card = { id: m.cardId, agentId: m.agentId };
+    if (r.status === "insufficient") heldSubjectKeys.push(driftSubjectKey(card, m.id));
     if (starved.has(m.id)) {
       breaches.push({
-        subjectKey: driftSubjectKey(card, m.id),
+        subjectKey: notEvaluableSubjectKey(card, m.id),
         title: `Drift monitor '${m.name}' is not evaluable: the last ${INSUFFICIENT_STREAK} summaries had too few samples`,
         severity: "low",
         detail: { cardId: card.id, ...(card.agentId ? { agentId: card.agentId } : {}), monitorId: m.id, reportId: r.id, notEvaluable: true, insufficientStreak: INSUFFICIENT_STREAK },
       });
       continue;
     }
-    if (r.status === "insufficient") heldSubjectKeys.push(driftSubjectKey(card, m.id));
     if (r.status !== "drift") continue;
     const f = driftFinding(card, m, { id: r.id, driftedFeatures: r.driftedFeatures, results: r.results as DriftFeatureResult[] });
     breaches.push({ subjectKey: f.subjectKey, title: f.title, severity: f.severity, detail: f.detail });
