@@ -91,21 +91,44 @@ SAP-specific parts are discovery, the binding and the token, each below.
   reads the gateway's agent catalogue (ARD) through the guarded fetch, and lists the AgentCards the customer's SAP ACL
   allows this client to see. The admin picks which to register; nothing is auto-registered. Each chosen card goes
   through the existing card checks (size cap 60 kB, interfaces only on the registered origin, refusal otherwise).
-- **Refresh** re-reads the catalogue and each card. A card whose skills or interfaces changed is flagged for the
-  admin's review and its grants stay as they were; a card that disappeared from the catalogue is disabled, not
-  deleted, and the change is audited.
+- **Refresh** re-reads the catalogue and each card. **A changed card never replaces the stored card on its own.**
+  - **Where it goes:** the new card is held as `a2a_agents.pending_card`, together with a diff of skills and
+    interfaces, and the change is audited.
+  - **What stays in use:** the stored `card` remains the one calls use until an admin accepts the change. `a2a.ts`
+    already builds the client from the stored `agent.card`, and that does not change.
+  - **Accepting:** acceptance re-runs every card check on the new card (size, origin and version) before it becomes
+    the stored card. If it adds a skill or an interface, acceptance is a `settings_relax` step-up.
+  - **New skills:** they are not callable until someone is granted them; grants on the existing skills stay as they
+    were.
+  - **Removals:** a skill or interface that disappears stops being callable at once, because narrowing needs no
+    review.
+  - **Gone from the catalogue:** the agent is disabled, not deleted, and that change is audited.
 - Discovery calls are audited (`a2a-gateway-discovery`), not costed.
 
 ### 3. The HTTP+JSON binding
 
 - Accept an interface whose `protocolBinding` is `HTTP+JSON` (the A2A REST binding) in addition to `JSONRPC`, under the
   same rule: only on the registered origin, everything else filtered out before the client is built.
+- **Legacy (0.3) cards.** A 0.3 card has no `protocolBinding`. It uses `url`, `preferredTransport` and
+  `additionalInterfaces[].transport`, and its `protocolVersion` is per card, where 1.0 has it per interface.
+  - **The problem:** `cardProblem` and `clientCard` call `AgentCard.fromJSON`, which yields no interfaces for a legacy
+    card. Registration would therefore refuse every Joule card today.
+  - **Detect and convert:** registration and refresh detect a legacy card with the SDK's `isLegacyAgentCard` and
+    convert it with `parseLegacyAgentCard`.
+  - **Store:** they keep the normalised card, its original version (`a2a_agents.card_protocol_version`) and a hash
+    of the raw legacy card.
+  - **Check:** the origin, size and binding checks then run on the normalised card.
+  - **Confirm the names:** slice B0 confirms the exact export names at the pinned version.
 - **Open source first**: the pinned `@a2a-js/sdk` 1.3.0 already ships the HTTP+JSON client. We write no transport.
-  The client gets `RestTransportFactory` beside `JsonRpcTransportFactory`, with `preferredTransports` set to JSON-RPC
-  and then HTTP+JSON, and every transport is given our guarded fetch. There is no version bump.
-- **Version.** SAP speaks A2A **0.3.0**; the 1.x SDK speaks 1.0 by default. A card declaring `protocolVersion` 0.3.x
-  is served through the SDK's opt-in v0.3 compatibility layer (`@a2a-js/sdk/compat/v0_3/client`, `LegacyRestTransport`),
-  chosen from the stored card, never from a header the remote sends at call time. Registration records the card's
+  There is no version bump.
+  - **1.x cards:** `ClientFactory` gets `transports: [JsonRpcTransportFactory, RestTransportFactory]` and
+    `preferredTransports` set to JSON-RPC and then HTTP+JSON. Both factories are given our guarded fetch.
+  - **0.3.x cards:** the v0.3 compatibility export is a transport class (`LegacyRestTransport`), not a factory option.
+    The gateway therefore builds `LegacyRestTransport` directly with the stored interface url and `fetchImpl` set to
+    our guarded fetch. It hands the result to the SDK client through a small factory registered under the `HTTP+JSON`
+    binding. That is a few lines of glue over the SDK's own transport, not a new transport.
+- **Version.** SAP speaks A2A **0.3.0**; the 1.x SDK speaks 1.0 by default. Whether a call uses the legacy transport is
+  decided from the stored `card_protocol_version`, never from a header the remote sends at call time. Registration records the card's
   `protocolVersion`. Any version other than 0.3.x and 1.x is refused, with an audited reason, rather than guessed.
 
 ### 4. Per-user OAuth: two token kinds
@@ -126,9 +149,17 @@ envelope, listed in `CIPHERTEXT_COLUMNS`, never returned, last four characters o
   Common to both:
   - The subject token (the `assertion`, or `subject_token`) is a short-lived assertion for the person, issued by the identity provider SAP trusts (the
     customer's IdP, federated with SAP Cloud Identity Services). Two sources, chosen per connection: (a) the person's
-    own IdP token from their RegulAIt sign-in, when the IdP is the one SAP trusts and the token audience permits it; or
-    (b) a RegulAIt-signed ES256 assertion (ADR-0210 key management) that the customer's IAS is configured to trust as
-    a corporate IdP. Which of these SAP accepts is an open question.
+    own IdP token, kept from their RegulAIt sign-in or obtained by a token exchange at that IdP, when the IdP is the one
+    SAP trusts. **This is preferred**, because RegulAIt then mints nothing SAP trusts. Or (b), only where (a) is
+    impossible: a RegulAIt-signed ES256 assertion that the customer's IAS trusts as a corporate IdP, with these
+    controls:
+    - a **dedicated signing key per SAP trust**, which is not the general ADR-0210 key, with its own issuer path;
+    - `aud` pinned to the one IAS tenant;
+    - `exp` of 60 seconds or less, with a `jti` that is recorded and rejected on replay;
+    - rotation and revocation through key management;
+    - IAS restricted to the user group that this trust may assert.
+
+    Every assertion minted under (b) is audited. Which of (a) and (b) SAP accepts in practice is confirmed in B0.
   - Client authentication: mTLS or a jwt-bearer client assertion (preferred), or a client secret (allowed but flagged
     as weaker in the UI). These are the three methods SAP documents.
   - Under RFC 8693 only, `actor_token` is RegulAIt's agent identity, matching ADR-0188's actor chain. Under jwt-bearer
@@ -206,10 +237,10 @@ ships it.
 | Slice | What | Tests |
 |---|---|---|
 | B0 | Spike (no merge): run the SDK's v0.3 REST compatibility transport against SAP's gateway. Confirm, against a trial tenant: SAP's ARD paths, the card shape, the jwt-bearer parameters (`resource`, client authentication) and what the subject token can be. Output: an addendum to this ADR. | — |
-| B1 | HTTP+JSON binding in `a2a.ts`: accept `HTTP+JSON` interfaces on the registered origin; the SDK's `RestTransportFactory`, and its v0.3 compatibility transport for 0.3.x cards; protocol-version check. | The real-agent loopback test extended with the SDK's REST server half: JSON-RPC and HTTP+JSON both work; cross-origin HTTP+JSON refused; redirect refused; unsupported major version refused. |
+| B1 | HTTP+JSON binding in `a2a.ts`: accept `HTTP+JSON` interfaces on the registered origin; the SDK's `RestTransportFactory`, and `LegacyRestTransport` for 0.3.x cards; legacy-card detection and conversion (`isLegacyAgentCard`, `parseLegacyAgentCard`), storing the normalised card, `card_protocol_version` and the raw-card hash; protocol-version check. | The real-agent loopback test extended with the SDK's REST server half: JSON-RPC and HTTP+JSON both work; **a legacy 0.3 card registers and is called through `LegacyRestTransport`**; a legacy card whose `url` or `additionalInterfaces` point to another origin is refused; cross-origin HTTP+JSON refused; redirect refused; unsupported major version refused. |
 | B2 | Credential kinds `oauth_client_credentials` and `oauth_user_token` (grant `jwt_bearer` or `token_exchange`) (migration, renumbered at merge per M-108): storage, admin routes, step-ups, the per-call exchange with `oauth4webapi`, per (person, agent) cache, refusal audited and not costed. | A fake token endpoint for both grants: success; failure refused and audited; token never in audit or logs; cache keyed per person; grant revocation stops the next call with a live token. |
-| B3 | `a2a_gateway_connections`, `sap_agent_gateway_enabled`, ARD import and refresh (admin-only, step-up, audited). | A fake catalogue: import lists only ACL-visible cards; nothing auto-registered; a changed card is flagged; a removed card is disabled; oversize or cross-origin cards refused. |
-| B4 | `requires_approval` for gateway agents (default true), message bound into the approval payload. | Call pauses for approval; approval for one message does not authorise another. |
+| B3 | `a2a_gateway_connections`, `sap_agent_gateway_enabled`, ARD import and refresh (admin-only, step-up, audited), `pending_card` and acceptance. | A fake catalogue: import lists only ACL-visible cards; nothing is auto-registered; **a changed card is held as pending, and calls keep using the stored card until an admin accepts it**; accepting a widened card needs a step-up; a new skill is not callable until it is granted; a removed skill stops being callable at once; a removed card is disabled; oversize or cross-origin cards are refused. |
+| B4 | `requires_approval` for gateway agents (default true), message bound into the approval payload. A per-agent A2A rate-limit bucket (moved here from the follow-ups because gateway agents can write in SAP): seeded at 30 calls per person per hour for `sap_agent_gateway` agents, and raising it is a relaxation. | Call pauses for approval; approval for one message does not authorise another; the 31st call in an hour is refused, audited and not costed. |
 | B5 | Admin UI: a "Connect SAP Agent Gateway" panel on the Remote agents tab, the import picker, token-kind display; runbook section for the customer setup. | Component tests; entry bundle stays under its ceiling (ADR-0219 placement lesson). |
 | B6 | Live check against a customer or trial tenant (owner-run), recorded as an addendum. | `demo:check`-style row, off by default. |
 
@@ -220,10 +251,11 @@ ships it.
 | Confused deputy: the Joule agent acts with more SAP rights than the person | A user-bound token per person (jwt-bearer or RFC 8693); no shared token; SAP authorises the person. |
 | Token leakage | Tokens never stored in plain text, never returned, never logged; sent only to the registered origin through the guarded fetch; short-lived, audience-bound. |
 | Cross-person token reuse | Cache keyed by (person, agent); grant checked before every use. |
-| A changed card redirects our calls | Interfaces only on the registered origin; refresh flags changes for review. |
+| A changed card redirects our calls or silently widens skills | Interfaces only on the registered origin. A refreshed card is held as pending, and the stored card stays in use until an admin accepts the change (a step-up when it widens). New skills need a grant. |
+| **The RegulAIt signing key becomes an IAS-trusted IdP (subject-token option (b))**: a key compromise or a gateway bug could mint any SAP user that IAS maps | Option (a) is preferred. Under (b): a dedicated key per SAP trust, never the general ADR-0210 key; its own issuer; `aud` pinned to the IAS tenant; `exp` 60 seconds or less; a `jti` with replay rejection; rotation and revocation; IAS restricted to the user group that may be asserted; every assertion minted is audited. |
 | Catalogue widening through an SAP ACL change | Admin-only import; nothing auto-registered. |
 | SSRF through the gateway URL or token endpoint | Egress decision at write and call time; guarded fetch; redirects refused. |
-| Prompt injection driving SAP writes through Joule | Approval per call by default on gateway agents; PII mode; budget; rate limits (gateway-wide tier; a per-agent bucket is a follow-up). |
+| Prompt injection driving SAP writes through Joule | Approval per call by default on gateway agents; PII mode; budget; a per-agent rate-limit bucket (B4). |
 | Replay of an approval | Message bound into the approval payload (ADR-0104). |
 | Unaudited refusals | Every refusal audited, none costed. |
 
@@ -236,7 +268,7 @@ ships it.
 - **SSRF through the guarded fetch**: gateway base URL, token endpoint, catalogue and agent URLs.
 - **No sensitive data in logs**: no tokens, no SAP error text.
 - **MFA for step-up**: connection create, secret rotation, enabling the settings.
-- **Rate limiting**: the gateway-wide tier today; an A2A-specific per-agent bucket is a follow-up.
+- **Rate limiting**: a per-agent bucket for gateway agents (B4), on top of the gateway-wide tier.
 - **Permissions enforced server side**: all checks in `executeGovernedA2aCall`.
 
 ## Consequences
@@ -245,15 +277,14 @@ ships it.
   binding opens every REST-only A2A agent.
 - Harder: per-call token exchange adds latency (mitigated by the per-person cache) and a dependency on the customer's
   IdP federation being right.
-- Follow-ups: streaming and task polling for long-running Joule tasks; PII on the reply; an A2A per-agent rate-limit
-  bucket; the reverse path (section 8).
+- Follow-ups: streaming and task polling for long-running Joule tasks; PII on the reply; the reverse path (section 8).
 
 ## Open questions for the owner
 
 1. **RFC 8693 vs jwt-bearer**: P20 assumed RFC 8693; SAP documents RFC 7523 jwt-bearer. Proposed: support both, with
    jwt-bearer as the SAP default. Agree?
-2. **Subject token source**: the person's own IdP token (needs the customer's IdP to be the one SAP trusts), or a
-   RegulAIt-signed assertion that IAS trusts (needs IAS configuration per customer)? Support both, or pick one first?
+2. **Subject token source**: (a), the person's own IdP token, is preferred. Should (b), a RegulAIt-signed assertion
+   with a dedicated key, be built at all in the first slices, or only when a customer cannot do (a)?
 3. **Approval per call on Joule agents by default** (proposed true): acceptable friction, or default to grant-only for
    read-style agents?
 4. **Pricing**: flat price per call from SAP's commercial terms, or leave unpriced until known?
