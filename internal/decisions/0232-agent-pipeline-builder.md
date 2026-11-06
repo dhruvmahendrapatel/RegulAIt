@@ -5,8 +5,8 @@
 - **Related**: ADR-0172 and ADR-0173 (the agent builder suite), ADR-0219 (governed A2A calls), ADR-0016 (transitive
   per-node budget ceiling), ADR-0064 and ADR-0181 (scheduler), ADR-0070 (traces), ADR-0104 and ADR-0105 (approval payload
   and context binding), ADR-0129 (single-attempt tools), ADR-0176 (open source first), ADR-0180 (secure by default),
-  ADR-0196 (UI enterprise harness), ADR-0200 (engineering guidelines and security checklist), ADR-0214 (MCP upstream
-  credentials), ADR-0226 (list contract)
+  ADR-0196 (UI enterprise harness), ADR-0200 (engineering guidelines and security checklist), ADR-0204 (MCP upstream
+  static credentials), ADR-0226 (list contract)
 
 ## Owner request (verbatim, 2026-11-06)
 
@@ -53,7 +53,7 @@ Two existing models are close but are not this feature:
 
 - **The JSON document is the source of truth, not the canvas.** The canonical form is JSON. YAML is accepted and offered
   for authoring and export. Both parse to the same object, which the new pure package `packages/pipeline-kernel` (zod 4,
-  already used in every kernel) validates. The same zod schema is published as JSON Schema (`z.toJSONSchema`), so that
+  as `orchestration-kernel` and `workflow-kernel` already pin it) validates. The same zod schema is published as JSON Schema (`z.toJSONSchema`), so that
   external tooling and `ajv` (already in the gateway) can validate a file without our code.
 - **Shape** (`apiVersion: regulait.io/pipeline/v1`):
   - `kind: Pipeline`;
@@ -87,7 +87,7 @@ a tool, a connector or a URL itself.
 
 | Group | Step | Built on |
 |---|---|---|
-| Triggers | Manual run, Schedule, Inbound webhook, PM-tool event, Called by a workflow stage, Called by another pipeline | Run API; `scheduler.ts` (cron via croner); the ADR-0173 inbound channel pattern (HMAC plus replay window); pillar 8 inbound sync; pillar 2 |
+| Triggers | Manual run, Schedule, Inbound webhook, PM-tool event, Called by a workflow stage, Called by another pipeline | Run API; `scheduler.ts` (interval-based today) plus **croner** (a new dependency) for cron expressions; the ADR-0173 inbound channel pattern (HMAC plus replay window); pillar 8 inbound sync; pillar 2 |
 | AI | Agent | Builder agent through the governed invoke path (`compat-core.ts`), optimiser applied |
 | AI | Model call | Model binding through the governed invoke path, with an output JSON Schema |
 | AI | Remote agent | `executeGovernedA2aCall` (ADR-0219) |
@@ -103,20 +103,24 @@ a tool, a connector or a URL itself.
 
 ### 3. The execution engine
 
-- **Interpreter.** Our own interpreter, in the new pure `pipeline-kernel`, in the same style as the other three kernels:
+- **Interpreter.** Our own interpreter, in the new pure `pipeline-kernel`, in the same style as the four existing kernels (policy, optimiser, workflow and
+  orchestration):
   - `validate(definition)`;
   - `plan(version)`, which compiles the step graph and checks the limits;
   - `transition(state, event) -> { state, effects }`, with no I/O.
 - **Effects.** The gateway (`apps/gateway/src/pipelines/`) carries out each effect by calling the governed primitive for
   the step, as the run's actor, and feeds the result back in as an event.
-- **Durable dispatch.** Step jobs go through **pg-boss** (MIT, Postgres-only), which gives us queueing, retry with
-  backoff, singleton keys, a deadline per job and dead-lettering. No second stateful service is added. Run state stays
-  in our own tables. pg-boss only holds the work queue.
-  - Before adoption, the slice 5 PR checks that pg-boss's schema can be created from a hand-written migration that obeys
-    `zz-dbguard-0185` (a pinned `search_path` and no `TRUNCATE` on append-only tables), with pg-boss's own migrator turned
-    off.
-  - If that check fails, the fallback is the scheduler's existing `FOR UPDATE` lease pattern, extended to step jobs. That
-    fallback is the narrow exception allowed by ADR-0176 item 4 (multi-replica state under our migration discipline).
+- **Durable dispatch: the step row is the queue.** Pending step attempts are rows in `pipeline_run_steps`, claimed by a
+  lease (`FOR UPDATE SKIP LOCKED`, with a lease expiry from `now()`). This is the pattern `engine-runs.ts` and
+  `scheduler.ts` already use, and it is multi-replica safe. Retry with backoff, a deadline per attempt and
+  dead-lettering (`failed` after the last attempt, visible in the monitor) are columns on that row, not a second store.
+  - **pg-boss is not adopted**, for the reasons `apps/gateway/src/engine-runs.ts` already recorded when it rejected
+    pg-boss and graphile-worker (ADR-0176 check): the queue here *is* the governed evidence record (each attempt carries
+    its decision, approval, usage and trace references), and a job library would keep a second copy of each run's
+    state. Those reasons apply to pipelines unchanged. The one difference from engine runs (the consumer is the
+    gateway itself, not an external container on an HTTP lease) does not change them. This is the narrow exception
+    allowed by ADR-0176 item 4 (multi-replica state under our migration discipline), and it reuses existing code rather
+    than adding any.
 - **Retries never repeat a write.** A step that wrote, or that was approved, is never retried automatically: MCP tools
   are single attempt (ADR-0129), and an approval binds one payload. Automatic retry applies only to steps the catalogue
   marks idempotent (reads, model calls, validation). A manual retry re-runs governance from the start.
@@ -134,6 +138,22 @@ a tool, a connector or a URL itself.
   - **A pipeline never exceeds the initiating user's entitlements (pillar 7).** Each step carries the delegation actor of
     the run. Step ceilings compose with `computeNodeCeiling`, so a pipeline, sub-pipeline or agent team can only narrow
     what that person holds.
+  - **No confused deputy: the ceiling is the intersection of requester and run-as owner.** For a deployed version, each
+    step's effective ceiling is the **intersection** of the run actor's entitlements and those of the person who
+    requested the deployment. Both are re-evaluated at every step, so revoking either one stops the step.
+    - Requesting a deployment is refused if the requester lacks any agent, tool, connector, remote agent or model
+      binding that the version references.
+    - The run-as owner's acceptance task and the deployment approval both show the **per-step entitlement diff**: which
+      steps the requester holds, which the run-as owner holds, and the effective intersection. An approver reviews
+      entitlements, not only a graph.
+    - A manual run of a deployed version by an operator uses the intersection of the operator and the requester.
+  - **Sub-pipelines and called pipelines run as the caller.** A Sub-pipeline step, or a pipeline started by "Called by
+    another pipeline" or by a workflow stage, runs as the **caller's actor**, inside the caller's step ceiling narrowed
+    by `computeNodeCeiling`. It never takes on the callee deployment's run-as owner, so a low-privilege pipeline cannot
+    reach a higher-privilege one's grants. Slices 4 and 6 pin this with a test.
+  - **Pipeline relaxations never override gateway rules.** A deployment that sets a step to `approval: none` removes only
+    the pipeline's own approve-first gate. Any matching pillar-1 approval rule still pauses the call, chosen by the
+    ADR-0229 precedence. Slice 3 pins this with a test that a relaxed step still pauses when a gateway rule matches.
 - **The run budget is a hard ceiling (pillars 5 and 7).**
   - `limits.budgetUsd` is required, with an org default and an org maximum.
   - Per-step `budgetCapUsd` composes as a minimum, as in ADR-0016.
@@ -159,8 +179,12 @@ New tables (migration numbers are reserved by the master session at build time, 
 - `pipeline_run_steps`: append-only. Run, step, attempt, status, governed call reference (decision id, usage id, trace
   span), redacted input and output digest, error.
 - `pipeline_payloads`: optional trace payloads, encrypted with the data key, with a TTL.
-- `pipeline_data_store`: per org and pipeline, key, value, TTL.
-- `pipeline_variables`: scope `run`, `pipeline` or `org`.
+- `pipeline_data_store`: per project and pipeline, key, value, TTL.
+- `pipeline_variables`: scope `run`, `pipeline` or `project`; there is no org scope.
+
+**Project isolation.** Data store entries and variables belong to one project. RLS policies on these tables key on
+project membership, not only on org. Sharing across projects happens only through a Shared Project (pillar 4), under its
+membership and the pillar 3 data-scope defaults.
 
 **Database rules:**
 - Every tenant table gets Postgres row-level security.
@@ -172,8 +196,13 @@ New tables (migration numbers are reserved by the master session at build time, 
 
 - **New pipelines start as drafts.** A new pipeline is a **draft**. Saving overwrites the draft. "Save as version"
   freezes an immutable version with the next semver.
-- **Test runs.** A draft can only be **test-run**, by its author, as the author, with manual trigger only. In a test run
-  every write-class step is approve-first, whatever the deployment setting, and the run is labelled `test` everywhere.
+- **Test runs.** A draft can only be **test-run**, by its author, as the author, with manual trigger only, and the run is
+  labelled `test` everywhere. From slice 3 (when tool, connector and remote-agent steps arrive), every write-class
+  step in a test run is approve-first, whatever the deployment setting. In slice 1, the only step is an Agent step,
+  whose own tool writes are governed only by the existing gateway approval rules, exactly as a builder agent's are today.
+- **No self-approval of a test run's writes.** A test-run write that pauses goes to the approvals queue, whose pool
+  already excludes the caller and anyone delegation-linked to them (`approval-pool.ts`, ADR-0186 A). Slice 3 pins this
+  with a test that the author cannot approve their own test-run write.
 - **Deployment needs approval.** Deploying a version creates an approval in the approvals queue (new action
   `pipeline_deploy`). The approval binds the content hash, the parameter digest, the environment and the run-as owner.
   The requester can never approve their own deployment. The default quorum is 1 from the role holding
@@ -208,6 +237,8 @@ actor and time. Run statuses map to CPI's (CI/message-status):
 - `trace`: payloads are stored encrypted in `pipeline_payloads`. Switching it on needs step-up, ends automatically after
   at most 60 minutes, and the payloads expire after 24 hours. The CPI default (CI/tracing) keeps trace data for 60
   minutes; ours is an org setting with a strict default.
+- **Reading a payload** needs the dedicated `pipeline_payload_read` permission, passes an object-level check against the
+  run's project, and writes an audit row on every read. Payloads hold full data below the redaction layer.
 
 ### 8. Security model (ADR-0180 and the ADR-0200 checklist)
 
@@ -215,6 +246,11 @@ actor and time. Run statuses map to CPI's (CI/message-status):
   the registry marks as writes, plus every remote-agent step) default to `approval: required`. Relaxing a step to
   `none` is a per-deployment admin decision, made under step-up and audited. The feature itself is off for an org until
   an admin enables `pipelines_enabled`, also under step-up and audited.
+- **Trigger data is untrusted.** Webhook and PM-event payloads are labelled untrusted wherever they flow: in step
+  inputs, in the prompt envelope of Agent and Model steps, and in the approval view of any write they lead to. This is
+  a prompt-injection path, and approve-first writes are the mitigation. A webhook trigger's HMAC secret is a `secretRef`
+  to a stored credential, never part of the definition. It is rotatable with an overlap window, and each rotation is
+  audited.
 - **No new egress.** The catalogue has **no raw HTTP step**. Outbound calls only go through registered connectors, MCP
   servers or A2A agents, which already use the guarded fetch and egress guard (SSRF).
 - **No secrets in the definition.**
@@ -242,13 +278,14 @@ actor and time. Run statuses map to CPI's (CI/message-status):
   - Permissions: enforced server side.
   - Row-level security: on every new table.
   - Sensitive data in logs: digests only below `trace`.
-  - Dependencies: pg-boss and croner pinned and listed in `THIRD_PARTY.md`.
+  - Dependencies: croner pinned and listed in `THIRD_PARTY.md`.
 - **Roles.** New permissions, bundled into the role builder:
   - `pipeline_read`, roughly CPI's Read Only;
   - `pipeline_edit`, the Integration Developer;
   - `pipeline_operate` (run, retry, cancel), the Business Expert;
   - `pipeline_deploy_approve`;
-  - `pipeline_admin` (log level, relaxations), the Administrator.
+  - `pipeline_admin` (log level, relaxations), the Administrator;
+  - `pipeline_payload_read` (read trace payloads, audited per read).
 
   None is granted by default. The built-in developer persona gets read and edit only.
 
@@ -256,7 +293,7 @@ actor and time. Run statuses map to CPI's (CI/message-status):
 
 - **Routes:**
   - `/builder/pipelines`: list of pipelines;
-  - `/builder/pipelines/:id`: the editor;
+  - `/builder/pipelines/edit/:id`: the editor (a distinct segment, so it never collides with `packages` or `runs`);
   - `/builder/pipelines/packages`: packages;
   - `/builder/pipelines/runs`: the monitor;
   - `/builder/pipelines/runs/:runId`: run detail.
@@ -313,9 +350,9 @@ Checked on 2026-11-06 against npm and project sites. "From knowledge" means the 
 | Node-RED | Apache-2.0, 2026-10 | **Reject**: a whole runtime with flow files on disk and single-process state, and no per-user governance hook. Used only as UX reference |
 | LangGraph.js, Mastra | MIT; Apache-2.0 (Mastra "ee" subtree unverified) | **Reject as backbone**: they run beside the gateway, not behind it, and would bypass pillars 1, 5 and 6 unless every node were wrapped |
 | XState v5 | MIT | **Not now**: a pure interpreter equivalent to our kernels, with no persistence or distribution. Revisit if the kernel's transition code grows |
-| DBOS Transact (TS) | MIT, 2026-11-04 | **Hold**: the only library-only, Postgres-native durable-step engine. Its own tables and retry semantics would have to fit our migration and audit discipline. Open question 4 |
-| pg-boss 12.x | MIT, 2026-11-05 | **Use** for the step-job queue (retry, backoff, singleton, dead-letter), subject to the slice 5 migration check (§3) |
-| graphile-worker | MIT, 2026-09 | Alternative to pg-boss; pg-boss is preferred for built-in dead-lettering and its release cadence |
+| DBOS Transact (TS) | MIT, 2026-11-04 | **Reject for now**: the only library-only, Postgres-native durable-step engine, but its checkpoint tables are a second copy of run state, the same objection as pg-boss. Revisit only if the lease queue proves insufficient |
+| pg-boss 12.x | MIT, 2026-11-05 | **Reject**, as `engine-runs.ts` already did: the step row is the governed evidence record, and a job library would hold a second copy of run state (§3). The existing `FOR UPDATE SKIP LOCKED` lease is reused |
+| graphile-worker | MIT, 2026-09 | **Reject**, for the same reason as pg-boss (also recorded in `engine-runs.ts`) |
 | BullMQ | MIT | **Reject**: needs Redis |
 | croner | MIT | **Use** for cron triggers (no runtime downloads) |
 | Expression language for Map/Transform/conditions | to be chosen in slice 7 | Candidates must be MIT/Apache, sandboxed (no code execution) and maintained. JSONata is the first to check, and its release cadence must be verified then. If none fits, we fall back to a restricted path-and-operator grammar evaluated by the kernel |
@@ -323,7 +360,8 @@ Checked on 2026-11-06 against npm and project sites. "From knowledge" means the 
 **Conclusion: no full workflow engine fits.** Every server engine either has an excluded licence or is a second
 stateful platform outside the governance interception point. The agent-graph libraries sit beside the gateway rather
 than behind it. We write only the genuinely RegulAIt part: pipeline semantics, governance composition, evidence and UI.
-The canvas, layout, queue, cron and validation are open source.
+The canvas, layout, cron and validation are open source; the queue reuses our existing, already-justified lease
+pattern.
 
 ### 12. Build plan: one reviewable PR per slice, each with tests
 
@@ -337,15 +375,17 @@ The canvas, layout, queue, cron and validation are open source.
    - `pipelines_enabled` off by default. Test run as the author through the governed invoke path, with
      `pipeline_run_id`/`pipeline_step_id` on usage rows.
    - Tests: kernel unit tests; gateway integration (allow, deny shown as a refusal on the step, budget stop, object-level
-     authorisation, RLS); a Playwright mock spec; axe; the nav current-item pin.
+     authorisation, RLS); a Playwright mock spec; axe; the nav current-item pin and a route pin that `packages`,
+     `runs` and `edit/:id` each resolve to their own page.
 2. **Packages, versions and deployment.** Save as version, the deployment approval binding hash, parameters, run-as
    owner and its acceptance, undeploy, externalised parameters with `secretRef`, manual runs of a deployed version.
 3. **Calls and governance steps.** Tool, Connector, Remote agent and Model call steps; approve-first writes; the Approval,
    Guardrail and Budget checkpoint steps.
 4. **Control flow.** Router, Parallel/Join, For each/Gather, bounded Loop, Sub-pipeline, Error handler, Fail/Escalate,
    with ceilings from `orchestration-kernel`.
-5. **Durable execution.** pg-boss (after the migration check), automatic retry for idempotent steps only, resume after a
-   crash, cancel, idempotency keys, the `discarded` status.
+5. **Durable execution.** The step-row lease queue (shared helper with `engine-runs.ts` where practical), automatic
+   retry with backoff for idempotent steps only, dead-letter, resume after a crash, cancel, idempotency keys, the
+   `discarded` status.
 6. **Triggers.** Schedule (croner plus `scheduler.ts`), inbound webhook (HMAC plus replay), PM-tool event; the run-as
    model re-evaluated per step.
 7. **Data steps.** Set, Map, Transform, Validate, Convert, Filter, Lookup; the expression-language decision; data store
@@ -380,7 +420,7 @@ fetch. **Unverified** marks a CPI claim no SAP page confirmed.
 | 4 | Receiver adapters | CI/connectivity-adapters | Tool, Connector, Remote agent, Model call and Agent steps. Protocols live in MCP servers and connectors | Governed MCP, connector, A2A (ADR-0219) and invoke paths | Adapted |
 | 5 | Adapter SDK (custom adapters) | CI/connectivity-adapters | Register an MCP server or connector, then use it as a step | MCP server registry, connectors | Adapted |
 | 6 | Start and end events | CI/define-exception-subprocess | Trigger and End steps | `pipeline-kernel` | Mapped |
-| 7 | Timer start event | CI/define-timer-start-event | Schedule trigger (cron) | `scheduler.ts`, croner | Mapped |
+| 7 | Timer start event | CI/define-timer-start-event | Schedule trigger (cron) | `scheduler.ts` plus croner (new) | Mapped |
 | 8 | Error end and escalation events | CI/define-exception-subprocess, CI/define-escalation-event | Fail and Escalate steps; Escalate opens an approvals-queue item | Approvals queue | Mapped |
 | 9 | Content modifier (headers, properties, body) | CI/define-content-modifier | Set step (run variables, step input) | `pipeline-kernel` | Mapped |
 | 10 | Script step (Groovy/JavaScript) | integration-suite/define-local-script-step | Transform step (sandboxed expression); Code step in a gVisor sandbox, off by default | `sandbox-executor` | Adapted |
@@ -388,7 +428,7 @@ fetch. **Unverified** marks a CPI claim no SAP page confirmed.
 | 12 | Message mapping (graphical) | integration-suite/message-mapping | Map step (declarative field mapping between JSON Schemas), or a Model call with an output schema for fuzzy mapping | `pipeline-kernel`, model bindings | Adapted |
 | 13 | Operation mapping, XSLT mapping, ID mapping | CI/operation-mapping; XSLT and ID mapping (excerpt) | None for XSLT or operation mapping: agent payloads are JSON, and service-interface operations are an SAP PI construct. ID mapping is covered by Lookup | — | N/A |
 | 14 | Router | CI/define-router | Router step (conditions plus a default) | `pipeline-kernel` | Mapped |
-| 15 | Multicast (parallel or sequential) | CI/define-multicast | Parallel step (fork), with sequential as an option | `pipeline-kernel`, pg-boss | Mapped |
+| 15 | Multicast (parallel or sequential) | CI/define-multicast | Parallel step (fork), with sequential as an option | `pipeline-kernel`, step lease queue | Mapped |
 | 16 | Splitters (general, iterating, IDoc, EDI, Zip, PKCS#7) | CI/define-splitter | For each step over an array (bounded). IDoc, EDI and PKCS#7 splitting is N/A (not agent payloads) | `pipeline-kernel` | Adapted |
 | 17 | Gather and Join | CI/define-gather-and-join | Gather (merge results) and Join | `pipeline-kernel` | Mapped |
 | 18 | Aggregator (correlate across messages) | CI/define-aggregator | Aggregator step correlating across runs through the data store, off by default | `pipeline_data_store` | Adapted |
@@ -398,8 +438,8 @@ fetch. **Unverified** marks a CPI claim no SAP page confirmed.
 | 22 | Exception subprocess | CI/define-exception-subprocess | Error handler per step and per pipeline | `pipeline-kernel` | Mapped |
 | 23 | Idempotent process call | CI/define-idempotent-process-call (excerpt) | Step `idempotencyKey`; run idempotency key; `discarded` status | `pipeline_data_store`, ADR-0104 binding | Mapped |
 | 24 | Data store operations (write, get, select, delete) | CI/define-data-store-operations | Data store step with a TTL | `pipeline_data_store`, RLS | Mapped |
-| 25 | Variables (local and global) | CI/define-write-variables | Variables scoped to run, pipeline or org | `pipeline_variables` | Mapped |
-| 26 | JMS queues (asynchronous decoupling) | CI/apply-retry-pattern-with-jms-queue, CI/managing-queues | A durable step queue inside the engine. No user-defined broker queues; asynchronous hand-off between pipelines uses "Called by another pipeline" | pg-boss | Adapted |
+| 25 | Variables (local and global) | CI/define-write-variables | Variables scoped to run, pipeline or project (CPI's tenant-wide global scope is narrowed to the project) | `pipeline_variables`, RLS by project | Adapted |
+| 26 | JMS queues (asynchronous decoupling) | CI/apply-retry-pattern-with-jms-queue, CI/managing-queues | A durable step queue inside the engine. No user-defined broker queues; asynchronous hand-off between pipelines uses "Called by another pipeline" | Step-row lease queue | Adapted |
 | 27 | Persist step and message store | CI/persist-messages, CI/message-stores | Per-step records; trace payloads (encrypted, with a TTL) | `pipeline_run_steps`, `pipeline_payloads` | Mapped |
 | 28 | XML validator (EDI validator) | CI/validating-message-payload-against-xml-schema | Validate step (JSON Schema) | ajv / zod | Adapted |
 | 29 | Encoder and decoder (Base64, MIME, Zip) | integration-suite/define-encoder | Base64 within Convert. MIME and Zip are N/A until a use case needs them | `pipeline-kernel` | Adapted |
@@ -424,7 +464,7 @@ fetch. **Unverified** marks a CPI claim no SAP page confirmed.
 | 38 | Message processing log | CI/message-processing-log | Pipeline runs and run detail | `pipeline_runs`, `pipeline_run_steps`, traces (ADR-0070) | Mapped |
 | 39 | Log levels (Info, Debug, Trace) | CI/tracing-execution-of-integration-flow. **Unverified:** "None" | `info` and `trace` | Deployment setting | Adapted |
 | 40 | Payload trace (kept 60 minutes) | CI/tracing-execution-of-integration-flow | Encrypted payloads with an org-set TTL (default 24 hours) | Data key, `pipeline_payloads` | Mapped |
-| 41 | Retries (JMS backoff, dead letter, manual retry) | CI/apply-retry-pattern-with-jms-queue, CI/tasks-and-permissions | Automatic backoff for idempotent steps only; dead-letter; manual retry under `pipeline_operate`, re-governed | pg-boss, ADR-0129 | Adapted |
+| 41 | Retries (JMS backoff, dead letter, manual retry) | CI/apply-retry-pattern-with-jms-queue, CI/tasks-and-permissions | Automatic backoff for idempotent steps only; dead-letter; manual retry under `pipeline_operate`, re-governed | Step-row lease queue, ADR-0129 | Adapted |
 | 42 | Message status values | CI/message-status | Run statuses (§7) | `pipeline_runs` | Mapped |
 | 43 | External logging | CI/external-logging (excerpt) | Run and step events in the chained audit log and in traces, exported by the existing audit and trace export | Audit chain, `tracing.ts` | Mapped |
 | 44 | — | — | Cost and tokens saved per step | `usage_events`, pillars 5 and 6 | Addition |
@@ -433,7 +473,7 @@ fetch. **Unverified** marks a CPI claim no SAP page confirmed.
 
 | # | CPI capability | Source | Equivalent | Primitive | Status |
 |---|---|---|---|---|---|
-| 45 | Keystore (key pairs, certificates, SSH keys) | CI/managing-keystore-entries | No keystore in pipelines. Keys and certificates stay with the connector or MCP upstream credential that uses them | ADR-0214 upstream credentials, data key | Adapted |
+| 45 | Keystore (key pairs, certificates, SSH keys) | CI/managing-keystore-entries | No keystore in pipelines. Keys and certificates stay with the connector or MCP upstream credential that uses them | ADR-0204 upstream credentials, data key | Adapted |
 | 46 | Security material (credentials, OAuth2 grants, secure parameters, known hosts, PGP) | CI/managing-security-material | `secretRef` to existing credentials or virtual keys, resolved server side | Credentials, virtual keys | Mapped |
 | 47 | Roles and role collections | CI/persona, CI/tasks-and-permissions | `pipeline_read`, `pipeline_edit`, `pipeline_operate`, `pipeline_deploy_approve`, `pipeline_admin` in the role builder | Pillar 1 roles | Mapped |
 
@@ -453,17 +493,41 @@ fetch. **Unverified** marks a CPI claim no SAP page confirmed.
 | 52 | Value mappings | CI/partner-directory-entity-types (excerpt) | Lookup step over a versioned value table | `pipeline-kernel` | Adapted |
 | 53 | Number ranges | CI/tasks-and-permissions (excerpt) | None: business document numbering is not an agent-pipeline need; runs have their own ids | — | N/A |
 | 54 | Edge Integration Cell (hybrid runtime) | integration-suite/isuite-edge-integration-cell (excerpt) | Runs on the agent execution plane in BYOC and air-gapped modes | Pillar 3 deployment modes | Mapped |
-| 55 | Quality of service (exactly once) | CI/quality-of-service-exactly-once (excerpt) | At most once for writes (single attempt plus idempotency key); at least once for idempotent steps | ADR-0129, pg-boss | Adapted |
+| 55 | Quality of service (exactly once) | CI/quality-of-service-exactly-once (excerpt) | At most once for writes (single attempt plus idempotency key); at least once for idempotent steps | ADR-0129, step-row lease queue | Adapted |
 | 56 | Integration Suite siblings (API Management, Event Mesh, Integration Advisor, Trading Partner Management, OData Provisioning …) | integration-suite/what-is-sap-integration-suite | Separate products, outside "CPI for agents" | — | N/A |
 | 57 | AI-assisted iFlow generation | **Unverified** (navigation title only) | "Draft a pipeline from a description" through a governed agent; the result is always a draft | Builder agents | Adapted |
 
+### Additional CPI capabilities (review round 1)
+
+These rows were added after the first design review asked for the remaining CPI steps and operations features. No SAP
+page was loaded for them in this round, so each source is marked **Unverified**: the capability names come from the
+CPI step palette and operations views as the reviewer listed them, and are to be confirmed against help.sap.com in a
+follow-up.
+
+| # | CPI capability | Source | Equivalent | Primitive | Status |
+|---|---|---|---|---|---|
+| 58 | Content Enricher | **Unverified** | Enrich step: calls a governed tool, connector or agent and merges the result into the run data (combine, or merge by key) | Governed call paths, `pipeline-kernel` | Mapped |
+| 59 | Poll Enrich | **Unverified** | A connector or MCP read step (for example, fetch a file listing) used mid-flow. CPI's adapter-level polling is replaced by the registered connector | `connector-call.ts`, MCP | Adapted |
+| 60 | Send (asynchronous, no reply) | **Unverified** | Send step: a governed call whose reply is not awaited, delivered at most once. Write-class sends are approve-first | Governed call paths | Mapped |
+| 61 | Signer and Verifier (PKCS#7, XML signature, PGP) | **Unverified** | No signing keys in pipelines. Signing or verifying runs in a registered connector or MCP tool that holds the key, used as a step | Connectors, ADR-0204 | Adapted |
+| 62 | Encryptor and Decryptor (PKCS#7, PGP) | **Unverified** | As row 61: a connector or MCP tool step. Payloads at rest are already encrypted with the data key | Connectors, data key | Adapted |
+| 63 | Test Connectivity (TLS, SSH, OAuth) | **Unverified** | "Check connections" in the editor runs the existing preflight for each connector and MCP server the version references, as the user, with no payload | MCP upstream preflight, connector checks | Adapted |
+| 64 | Access Policies on artifacts | **Unverified** | Object-level authorisation per package and pipeline, plus ABAC policies | Pillar 1 roles, ABAC (ADR-0040) | Mapped |
+| 65 | Message Locks management | **Unverified** | Stuck step leases and idempotency records are listed in run detail; `pipeline_admin` can release one (audited) | Step-row lease, data store | Adapted |
+| 66 | Script Collections | **Unverified** | Versioned, shared expression and mapping libraries per package (no code), referenced by version from Transform and Map steps | `pipeline-kernel` | Adapted |
+| 67 | Message archiving | **Unverified** | Run and step records are retained under the compliance cascade and can be exported through the existing exports before they are pruned | Pillar 3 retention, exports (ADR-0031) | Adapted |
+| 68 | Alerting | **Unverified** | Alerts on failed, dead-lettered or over-budget runs, through the existing governance alerts and spend monitoring | Governance alerts, `spend-monitor.ts` | Mapped |
+| 69 | Search by custom header | **Unverified** | Run attributes set by a Set step are indexed and filterable in Pipeline runs (allow-listed keys, bounded values, never payload content) | `pipeline_runs`, ADR-0226 list contract | Mapped |
+
 ### Headline
 
-- **55 CPI capabilities assessed:** 28 **Mapped**, 24 **Adapted** and 3 **N/A** (operation/XSLT mapping, number ranges,
-  the Integration Suite sibling products).
+- **67 CPI capabilities assessed:** 32 **Mapped**, 32 **Adapted** and 3 **N/A** (operation/XSLT mapping, number ranges,
+  the Integration Suite sibling products). Round 1 added rows 58 to 69 and moved row 25 (variables) from Mapped to
+  Adapted, because the tenant-wide global scope is narrowed to the project.
 - **Two additions with no CPI equivalent** (rows 32 and 44): governance steps, and per-step cost and savings.
 - **Five CPI details unverified on SAP pages:** BPMN, draft state, the undeploy action, the "None" log level and
-  write-to-log. Also unverified: AI-assisted generation, beyond a navigation title.
+  write-to-log. Also unverified: AI-assisted generation, beyond a navigation title, and the twelve round 1 rows (58 to
+  69), whose sources are still to be confirmed.
 
 ## Alternatives rejected
 
@@ -484,12 +548,11 @@ fetch. **Unverified** marks a CPI claim no SAP page confirmed.
 
 - **What we gain.** A reusable, governed composition layer over every existing primitive, with no new governance path.
   CPI users get familiar concepts: packages, the canvas, externalised parameters, deploy and a message monitor.
-- **New work.** One new kernel package, about nine tables, one new dependency (pg-boss, pending its check) plus croner,
+- **New work.** One new kernel package, about nine tables, one new dependency (croner),
   a lazy editor chunk with its own size ceiling, new permissions, and usage-row columns.
 - **What we give up.** CPI's XML, IDoc and EDI-centric steps, keystore management inside flows, and SAP transport
   systems. Automatic retry is never offered for writes.
-- **Follow-ups:** the `pipeline` workflow stage type, a Serverless Workflow exporter if a customer asks, and the DBOS
-  spike if pg-boss fails its migration check.
+- **Follow-ups:** the `pipeline` workflow stage type, and a Serverless Workflow exporter if a customer asks.
 
 ## Open questions for the owner
 
@@ -498,7 +561,8 @@ fetch. **Unverified** marks a CPI claim no SAP page confirmed.
 2. **Who approves a deployment, and with what quorum?** Recommended: one approver from a role holding
    `pipeline_deploy_approve`, never the requester.
 3. **Code step.** Ship it at all? Recommended: yes, but off by default, gVisor only and admin-enabled under step-up.
-4. **Durable queue.** pg-boss (recommended, subject to the migration check), or a DBOS Transact spike first?
+4. **Durable queue.** Recommended: reuse the `FOR UPDATE SKIP LOCKED` step-row lease, consistent with the earlier
+   rejection of pg-boss and graphile-worker in `engine-runs.ts`. Confirm, or ask for a pg-boss or DBOS spike anyway.
 5. **Phone.** Is the Outline-only editor at phone width acceptable, with the canvas read-only?
 6. **Scope.** Confirm that the XML, IDoc and EDI-centric CPI features (rows 11, 13, 16, 29) and the SAP transport
    systems (row 48) are out of scope unless a use case appears.
