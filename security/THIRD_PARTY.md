@@ -12,7 +12,7 @@ the bump procedure is in `docs/ops/SECURITY_CI.md`.
 | Trivy | 0.74.0 | Apache-2.0 | Container image vulnerability scan and CycloneDX SBOMs of the workspace and the image. Its vulnerability database is downloaded at run time (data from the upstream advisory sources under their own terms). |
 | cosign (Sigstore) | 3.1.3 | Apache-2.0 | Verifies Trivy's release signature; keyless signing and verification of our image. Uses the public Fulcio and Rekor instances. |
 | registry (CNCF Distribution) | 3 (pinned by digest) | Apache-2.0 | A throwaway local registry inside the job, so cosign can sign and verify without publishing anything. |
-| `actions/checkout`, `actions/setup-node`, `actions/upload-artifact`, `actions/download-artifact` | v6.0.3, v6.5.0, v7.0.1, v8.0.1 (pinned by commit) | MIT | Standard GitHub Actions plumbing. |
+| `actions/checkout`, `actions/setup-node`, `actions/upload-artifact`, `actions/download-artifact` | v6.0.3, v6.5.0, v7.0.1, v8.0.2 (pinned by commit) | MIT | Standard GitHub Actions plumbing. |
 
 ## Engine image signing and verification (ADR-0197 Q2)
 
