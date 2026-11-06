@@ -14,3 +14,4 @@ export * from "./garak-upstream.js";
 export * from "./garak-preseed.js";
 export * from "./garak-owasp-2025.js";
 export * from "./images-lock.js";
+export * from "./supply-chain.js";
