@@ -1590,6 +1590,20 @@
       "when": 1785206000000,
       "tag": "0271_fairness_testing",
       "breakpoints": true
+    },
+    {
+      "idx": 272,
+      "version": "7",
+      "when": 1785207000000,
+      "tag": "0272_rls_foundation_slice1",
+      "breakpoints": true
+    },
+    {
+      "idx": 273,
+      "version": "7",
+      "when": 1785208000000,
+      "tag": "0273_content_credential_guard",
+      "breakpoints": true
     }
   ]
 }
