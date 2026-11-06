@@ -107,6 +107,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   // for the release-age cooldown: free prose typed beside a review decision
   [s.builderSkills, ["admitReason"]],
   [s.releaseOverrides, ["reason"]],
+  // ADR-0216 — an admin's reason for relaxing a model file's supply-chain check
+  [s.modelArtifactSupplyChainRelaxations, ["reason"]],
   // ADR-0175 A15 — the admin's note on where an energy factor came from
   [s.energyFactors, ["sourceNote"]],
   // ADR-0173 batch 2c — a reviewer's annotation comment (free prose typed
