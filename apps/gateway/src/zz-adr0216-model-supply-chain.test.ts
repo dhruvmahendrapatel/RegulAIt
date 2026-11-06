@@ -129,6 +129,35 @@ describe("ADR-0216 verification (no database)", () => {
     expect(parseSigningKey(newSigner("P-384").pem)).toBeNull();
     expect(parseSigningKey("not a key")).toBeNull();
   });
+
+  it("a forgery that names the trusted key's hint but is signed by another key fails signature_invalid", () => {
+    const forger = newSigner();
+    const forged = bundleFor({ ...forger, hint: signer.hint }, statementFor([{ name: "model.safetensors", digest }]));
+    expect(verifyModelSignature(forged, digest, trusted)).toMatchObject({ ok: false, failure: "signature_invalid", keyHint: signer.hint });
+  });
+
+  it("a stored trust root that does not parse, or is not P-256, is never trusted: the verdict is a failure, never a throw", () => {
+    const p384 = newSigner("P-384");
+    const rogue = [{ id: trusted[0]!.id, keyHint: p384.hint, publicKeyPem: p384.pem }];
+    expect(verifyModelSignature(signFile(p384, digest), digest, rogue)).toMatchObject({ ok: false, failure: "signature_invalid" });
+    const garbled = [{ ...trusted[0]!, publicKeyPem: "-----BEGIN PUBLIC KEY-----\nnot a key\n-----END PUBLIC KEY-----\n" }];
+    expect(verifyModelSignature(signFile(signer, digest), digest, garbled)).toMatchObject({ ok: false, failure: "signature_invalid" });
+    // a PEM that parses but is not the key the hint names
+    const swapped = [{ ...trusted[0]!, publicKeyPem: newSigner().pem }];
+    expect(verifyModelSignature(signFile(signer, digest), digest, swapped)).toMatchObject({ ok: false, failure: "signature_invalid" });
+  });
+
+  it("a signed statement of the wrong shape is a failure verdict, never a throw", () => {
+    const shaped = (statement: unknown) => verifyModelSignature(bundleFor(signer, statement), digest, trusted);
+    const base = statementFor([{ name: "model.safetensors", digest }]);
+    expect(shaped({ ...base, predicate: { ...base.predicate, resources: [null] } })).toMatchObject({ ok: false, failure: "manifest_inconsistent" });
+    expect(shaped({ ...base, predicate: { ...base.predicate, resources: ["x", 1] } })).toMatchObject({ ok: false, failure: "manifest_inconsistent" });
+    expect(shaped({ ...base, subject: [null] })).toMatchObject({ ok: false, failure: "unsupported_predicate" });
+    expect(shaped({ ...base, subject: [{ name: "a216-model", digest: null }] })).toMatchObject({ ok: false, failure: "unsupported_predicate" });
+    expect(shaped({ ...base, predicate: null })).toMatchObject({ ok: false, failure: "unsupported_predicate" });
+    expect(shaped(null)).toMatchObject({ ok: false, failure: "unsupported_predicate" });
+    expect(shaped([base])).toMatchObject({ ok: false, failure: "unsupported_predicate" });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -329,6 +358,37 @@ describe("ADR-0216 the block", () => {
     } finally {
       await dropCard(card.id);
     }
+  });
+
+  it("a trust root written around the API that is not P-256 never verifies: the read does not 500 and dispatch is refused", async () => {
+    const p384 = newSigner("P-384");
+    const [rogue] = await db.insert(modelSigningKeys).values({ name: `a216 rogue ${RUN}`, algorithm: "ecdsa_p256_sha256", publicKeyPem: p384.pem, keyHint: p384.hint }).returning();
+    const a = await artifactRow("safetensors", "rogue-key");
+    const card = await cardCiting((await scan(a, "clean")).id, "rogue-key");
+    try {
+      const attach = await app.inject({ method: "POST", url: `/v1/model-artifacts/${a.id}/signature`, headers: aliceKey, payload: { bundle: signFile(p384, a.sha256) } });
+      expect(attach.statusCode, attach.body).toBe(422);
+      expect(attach.json()).toMatchObject({ error: "signature_not_verified", signature: { failure: "signature_invalid" } });
+      const list = await app.inject({ method: "GET", url: "/v1/model-artifacts", headers: AUTH });
+      expect(list.statusCode, list.body).toBe(200);
+      expect(await gate()).toMatchObject({ status: 409, error: "model_supply_chain_blocked" });
+    } finally {
+      await dropCard(card.id);
+      await db.update(modelSigningKeys).set({ revokedAt: new Date() }).where(eq(modelSigningKeys.id, rogue!.id));
+    }
+  });
+
+  it("a malformed statement signed by a trusted key does not turn the artifact reads into 500s", async () => {
+    const a = await artifactRow("safetensors", "null-resource");
+    const base = statementFor([{ name: "model.safetensors", digest: a.sha256 }]);
+    const bundle = bundleFor(signer, { ...base, predicate: { ...base.predicate, resources: [null] } });
+    const attach = await app.inject({ method: "POST", url: `/v1/model-artifacts/${a.id}/signature`, headers: aliceKey, payload: { bundle } });
+    expect(attach.statusCode, attach.body).toBe(422);
+    expect(attach.json().signature).toMatchObject({ status: "failed", failure: "manifest_inconsistent" });
+    const view = await app.inject({ method: "GET", url: `/v1/model-artifacts/${a.id}`, headers: aliceKey });
+    expect(view.statusCode, view.body).toBe(200);
+    const list = await app.inject({ method: "GET", url: "/v1/model-artifacts", headers: AUTH });
+    expect(list.statusCode, list.body).toBe(200);
   });
 
   it("an admin's relaxation needs a step-up and a reason, is audited, lets the model through, and expires; clearing is audited", async () => {

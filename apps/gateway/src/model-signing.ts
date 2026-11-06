@@ -86,6 +86,9 @@ export function verifyModelSignature(bundleJson: unknown, artifactSha256: string
   const hint = /^[0-9a-f]{64}$/.test(keyHint) ? keyHint : null;
   const key = keys.find((k) => k.keyHint === keyHint);
   if (!key) return { ok: false, failure: hint && revokedHints.has(hint) ? "key_revoked" : "unknown_key", keyHint: hint };
+  // the curve is re-checked on every use, not only when the key is added: a stored row that is not an ECDSA P-256 key,
+  // or whose PEM no longer yields its hint (written around the API), is never a trust root
+  if (parseSigningKey(key.publicKeyPem)?.keyHint !== key.keyHint) return { ok: false, failure: "signature_invalid", keyHint: key.keyHint };
   try {
     const trust = toTrustMaterial(EMPTY_TRUSTED_ROOT as never, {
       [key.keyHint]: { rawBytes: createPublicKey(key.publicKeyPem).export({ type: "spki", format: "der" }), keyDetails: PKIX_ECDSA_P256_SHA_256 } as never,
@@ -95,7 +98,18 @@ export function verifyModelSignature(bundleJson: unknown, artifactSha256: string
   } catch {
     return { ok: false, failure: "signature_invalid", keyHint: key.keyHint };
   }
-  // the signature holds: now what it says
+  // the signature holds: now what it says. A signed statement of the wrong shape is a verdict, never a throw
+  try {
+    return checkStatement(content.dsseEnvelope.payload, artifactSha256, key);
+  } catch {
+    return { ok: false, failure: "unsupported_predicate", keyHint: key.keyHint };
+  }
+}
+
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** the statement checks, once the signature over it has verified */
+function checkStatement(payload: Buffer, artifactSha256: string, key: TrustedSigningKey): SignatureVerdict {
   let statement: {
     _type?: unknown;
     predicateType?: unknown;
@@ -103,20 +117,22 @@ export function verifyModelSignature(bundleJson: unknown, artifactSha256: string
     predicate?: { resources?: Array<{ name?: unknown; algorithm?: unknown; digest?: unknown }> };
   };
   try {
-    statement = JSON.parse(content.dsseEnvelope.payload.toString("utf8"));
+    statement = JSON.parse(payload.toString("utf8"));
   } catch {
     return { ok: false, failure: "unsupported_predicate", keyHint: key.keyHint };
   }
+  if (!isObject(statement)) return { ok: false, failure: "unsupported_predicate", keyHint: key.keyHint };
   if (statement._type !== IN_TOTO_STATEMENT_TYPE || statement.predicateType !== OMS_PREDICATE_TYPE) {
     return { ok: false, failure: "unsupported_predicate", keyHint: key.keyHint };
   }
-  const subject = Array.isArray(statement.subject) && statement.subject.length === 1 ? statement.subject[0]! : null;
-  const resources = Array.isArray(statement.predicate?.resources) ? statement.predicate!.resources! : [];
-  if (!subject || typeof subject.name !== "string" || typeof subject.digest?.sha256 !== "string" || resources.length === 0) {
+  const subject = Array.isArray(statement.subject) && statement.subject.length === 1 && isObject(statement.subject[0]) ? statement.subject[0] : null;
+  const resources = isObject(statement.predicate) && Array.isArray(statement.predicate.resources) ? statement.predicate.resources : [];
+  if (!subject || typeof subject.name !== "string" || !isObject(subject.digest) || typeof subject.digest.sha256 !== "string" || resources.length === 0) {
     return { ok: false, failure: "unsupported_predicate", keyHint: key.keyHint };
   }
   const root = createHash("sha256");
   for (const r of resources) {
+    if (!isObject(r)) return { ok: false, failure: "manifest_inconsistent", keyHint: key.keyHint };
     if (r.algorithm !== "sha256" || typeof r.digest !== "string" || !/^[0-9a-f]{64}$/.test(r.digest) || typeof r.name !== "string") {
       return { ok: false, failure: "manifest_inconsistent", keyHint: key.keyHint };
     }
