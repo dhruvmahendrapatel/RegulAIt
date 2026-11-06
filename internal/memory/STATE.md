@@ -5460,6 +5460,16 @@ user or server that an approval rule is scoped to (cascade delete). **Amendment 
 match re-owes every takeover; option (b) (pool intersection) is the recorded long-term simplification. Open follow-ups: a
 rule-editor warning for shadowed tightenings and equal-specificity overlaps, and option (b).
 
+**ADR-0234 (builder, 2026-11-06, Proposed): Postgres row-level security (PENDING S7), batch 1.** No table has an org
+or tenant key (ADR-0041), so on the owner's instruction ("the best, most secure") RLS is keyed on the authenticated
+principal: policies read a transaction-local `regulait.user_id` or a registered `regulait.system_context`, set only by
+`withPrincipal` / `withSystemContext` (`packages/db/src/rls.ts`) with `set_config(..., true)` and a role switch to the
+non-owner `regulait_app` (FORCE on, no UPDATE/DELETE on the evidence tables, migrations run as the owner). A missing
+setting means zero rows. Migration 0272 covers users, auth_mfa_pending, approvals and audit_log; the audit chain reads
+its tip under `audit_chain`. Measured: queue page 24.7 to 39.9 ms on 100k approvals, point lookups +1.5 ms. Batches 2-7
+(gateway adoption, credentials, approval satellites and membership, project-scoped, the rest, runtime login cut-over)
+follow, one PR each. Until batch 7 a non-superuser table-owner runtime is unsupported; none exists.
+
 **ADR-0230 (design, 2026-11-06, Proposed): SAP business agents over MCP (P19).**
 - **Where it lives:** `create_sales_order` (`API_SALES_ORDER_SRV`) goes in the regulAIt-ABAP MCP server, and the gateway's existing MCP path governs it.
 - **Safety:** a required idempotency key; principal propagation with the person's own IdP token (preferred) or a dedicated per-trust RegulAIt key (fallback, never the ADR-0210 key), through the BTP Destination service, with technical users refused for writes; approve-first defaults seeded for `system_class = 'sap_business'` (quorum 2 with the requester excluded, a rate limit, a project budget required).
