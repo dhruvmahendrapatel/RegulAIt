@@ -224,6 +224,7 @@ export const CATEGORY_SUGGESTED_CONTROLS: Readonly<Record<AiRiskCategory, readon
   budget_overrun: ["iso-42001:9.1-monitoring-measurement"],
   shadow_ai: ["nist-ai-rmf:GOVERN-1.6", "iso-42001:A.6-ai-system-lifecycle"],
   third_party_ai: ["soc-2:CC9.2-vendor-risk", "nist-ai-rmf:MAP-4.1"],
+  supply_chain: ["soc-2:CC9.2-vendor-risk", "eu-ai-act:art-15-accuracy-robustness"],
 };
 
 const LIB = new Map(DEFAULT_RISK_LIBRARY.map((e) => [e.category, e]));

@@ -35,6 +35,8 @@
  * or fairness. It records declared assessments, tracks their absence, and links
  * evidence (an ADR-0044 eval run, or an external report). No code path here
  * evaluates a model for fairness, and none should be read as if it did.
+ * (ADR-0222 adds measured fairness testing in `fairness.ts`, off by default: group metrics on a labelled
+ * dataset an admin uploads. This file only reads its hold, at sign-off and at dispatch.)
  */
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
@@ -67,6 +69,7 @@ import {
   type ModelCardRow,
 } from "@regulait/db";
 import { scanView } from "./model-artifacts.js";
+import { supplyChainDispatchGate, supplyChainSignOffGate } from "./model-supply-chain.js";
 import {
   ARTIFACT_SCAN_CHIP,
   SCORING_SEMANTICS_VERSION,
@@ -88,6 +91,7 @@ import {
 } from "@regulait/shared";
 import { MRM_AUTO_RETEST_NOTE, attachRetestsToRequest, retestsForCard } from "./mrm-retest-store.js";
 import { loadOrgSettings } from "./org-settings.js";
+import { FAIRNESS_RULE_IDS, fairnessHold } from "./fairness.js";
 import { modelCardSignoffSubjects, prepareAiBomSignoff, runAiBomSignoffs, type AiBomSignoff } from "./ai-bom-signoff.js";
 import { settingTransitions } from "./setting-transitions.js";
 import { summarizeGroundedness } from "./evals.js";
@@ -205,6 +209,10 @@ export async function mrmDispatchGate(
   ctx: MrmGateContext,
   now: Date = new Date(),
 ): Promise<{ status: number; error: string; detail: string } | null> {
+  // ADR-0216: the supply-chain rung comes first and does not depend on the MRM toggle (secure by default): a model
+  // built from a file that is unsigned, unscanned or in an unsafe format is refused unless an admin relaxed that file
+  const supplyChain = await supplyChainDispatchGate(db, ctx, now);
+  if (supplyChain) return supplyChain;
   const org = await loadOrgSettings(db);
   if (!org.mrmEnforced) return null;
 
@@ -224,6 +232,37 @@ export async function mrmDispatchGate(
     now,
   });
   if (decision.allowed) {
+    // ADR-0222 (P13(a)): with fairness testing and blocking on, a card whose latest fairness run failed, was
+    // inconclusive or is stale (another model version) holds dispatch on the same 409 path. An evaluation of the agent is not held: a new test needs
+    // fresh evidence, which is what it produces.
+    if (decision.cardId && !ctx.evaluation) {
+      const hold = await fairnessHold(db, decision.cardId, org);
+      if (hold) {
+        await db.insert(auditLog).values({
+          userId: ctx.userId,
+          objectType: "model_card",
+          objectId: decision.cardId,
+          detail: {
+            phase: "dispatch",
+            agentId: ctx.agentId,
+            agentName: ctx.agentName,
+            model: ctx.model,
+            customProviderId: ctx.customProviderId,
+            mrmReason: "fairness_hold",
+            modelCardId: decision.cardId,
+            fairnessRunId: hold.runId,
+            fairnessOutcome: hold.outcome,
+            fairnessStale: hold.stale,
+            ...(ctx.projectId ? { projectId: ctx.projectId } : {}),
+          },
+          effect: "deny",
+          ruleId: FAIRNESS_RULE_IDS.dispatchHeld,
+          ruleChain: [],
+          reason: hold.detail,
+        });
+        return { status: 409, error: "mrm_approval_required", detail: hold.detail };
+      }
+    }
     // ADR-0086 §3's named follow-up (batch B3) — STALENESS FORCES
     // RECERTIFICATION, as an org opt-in DEEPENING this same gate rather than
     // forking a second one. On by default (ADR-0181); off = ADR-0086 as first
@@ -686,6 +725,8 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
        * dispatch gate (mrmEnforced) — with enforcement off it gates nothing */
       stalenessRecertEnabled: org.mrmStalenessRecertEnabled,
       stalenessRecertThreshold: org.mrmStalenessRecertThreshold,
+      /** ADR-0222 (P13(a)): measured fairness testing, off by default */
+      fairness: { enabled: org.fairnessTestingEnabled, blockOnFail: org.fairnessBlockOnFail },
       /** ADR-0217: off by default; written through PUT /v1/org/settings (a stepped-up relaxation) */
       autoRetestEnabled: org.mrmAutoRetestEnabled,
       autoRetestNote: MRM_AUTO_RETEST_NOTE,
@@ -698,8 +739,12 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
       unsigned: count("unsigned"),
       revoked: count("revoked"),
       note:
-        "Bias/fairness here is a RECORDED DECLARATION, not a measurement — RegulAIt does not run " +
-        "fairness tests. Expiry is ENFORCED AT DISPATCH by recomputing validUntil, never by a " +
+        (org.fairnessTestingEnabled
+          ? "Bias/fairness on a card is a RECORDED DECLARATION; fairness testing is on, so group metrics measured on an " +
+            "uploaded labelled dataset (the predictions in the file) can sit beside it. "
+          : "Bias/fairness here is a RECORDED DECLARATION, not a measurement — RegulAIt does not run " +
+            "fairness tests. ") +
+        "Expiry is ENFORCED AT DISPATCH by recomputing validUntil, never by a " +
         "background job. ADR-0064's scheduler keeps the STORED statuses truthful when it is switched " +
         "on, and POST /v1/mrm/expiry-sweep does the same on demand; a deployment running neither " +
         "still refuses a lapsed card at dispatch.",
@@ -954,6 +999,9 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
       .from(users)
       .where(eq(users.id, body.approverUserId));
     if (!approver) return reply.status(404).send({ error: "unknown_approver" });
+    // ADR-0216: a card citing a file that fails the supply-chain check is not signed off (audited, risk opened)
+    const supplyChain = await supplyChainSignOffGate(db, card, req.authCtx.userId ?? NO_IDENTITY);
+    if (supplyChain) return reply.status(supplyChain.status).send(supplyChain);
 
     const now = new Date();
     const chain = await db
@@ -975,6 +1023,23 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
       });
     }
     const superseding = chain.find((a) => a.status === "approved") ?? null;
+    // ADR-0222 (P13(a)): a failing or inconclusive latest fairness test holds the sign-off request (refused, audited)
+    const hold = await fairnessHold(db, id);
+    if (hold) {
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId ?? NO_IDENTITY,
+        objectType: "model_card",
+        objectId: id,
+        detail: { phase: "sign_off", fairnessRunId: hold.runId, fairnessOutcome: hold.outcome, fairnessStale: hold.stale },
+        effect: "deny",
+        ruleId: FAIRNESS_RULE_IDS.signOffHeld,
+        ruleChain: [],
+        reason: hold.detail,
+      });
+      return reply
+        .status(409)
+        .send({ error: "fairness_test_failed", detail: hold.detail, fairnessRunId: hold.runId, outcome: hold.outcome, stale: hold.stale });
+    }
 
     const created = await db.transaction(async (tx) => {
       const [queued] = await tx

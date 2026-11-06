@@ -246,3 +246,62 @@ binding need not carry the extent to be safe. Adding it would only make the prom
 - the deploy-mode route variant (one binding);
 - the copilot `policy_tightening` path (`applyRuleEdit` with no step-up) failing closed;
 - a unit test pinning `approvalRuleMatchWidens`.
+
+## Amendment 6 (2026-11-06, issue #668): cascade deletes and membership changes move who signs
+
+Closes the round-4 "known gap" above and the round-5/6 non-blocking finding filed as #668.
+
+15. **A change outside the rule writers that moves who signs to a wider pool needs the `settings_relax` step-up,
+    bound to the takeover facts, and is audited.** `approverPoolShiftFacts` (`apps/gateway/src/approval-pool.ts`)
+    decides it with the writers' own comparators (`approvalRulesMayOverlap`, the kernel precedence with its id
+    tie-break, `approvalRuleLoosens` on the pool alone) and is conservative the same way (N5: a group's rules reach
+    every member; every surviving overlapping rule counts as a possible taker). It covers:
+    - **cascade deletes** of a role, team, user (as subject or as named approver) or MCP server: each approval rule the
+      FK cascade removes, against every surviving overlapping rule it named the signer over whose pool loosens its own:
+      `{ruleId: M, outrankedByApprovalRules: [O…]}`. Wired on `DELETE /v1/roles/:id` and `DELETE /v1/teams/:id`. No
+      route hard-deletes a user (SCIM delete deactivates) or an MCP server today; the helper is pinned by tests and any
+      future delete route must call it;
+    - **membership changes**: joining a role or team (`POST /v1/users/:id/roles`, `POST /v1/teams/:id/members`, and a
+      group→role mapping as "any member") is `{ruleId: M, outranksApprovalRules: [O…]}` over the rules that already
+      matched the member's calls (fleet rules, their user rules, and the roles and teams they hold now); leaving
+      (`DELETE /v1/users/:id/roles/:roleId` for a direct-only holder, `DELETE /v1/teams/:id/members/:userId`, a mapping
+      delete) is `{ruleId: M, outrankedByApprovalRules: [O…]}`.
+    The step-up body is `{change, objectType, objectId, userId?, values: {approverPoolTakeovers}}` (a mapping adds
+    `group`). It rides beside any step-up the write already owed (an approver role or approval team, through
+    `requireStepUps`).
+16. **Decided early, re-decided under the lock.** The route decides on an unlocked read, steps up, then recomputes the
+    facts inside its transaction under the routing advisory lock (role row lock first where the route takes one) and
+    writes only when they are identical (`sameApproverPoolShift`); otherwise 409 `changed_concurrently`. A grant for
+    the old facts no longer matches once another rule joins them.
+17. **Paths with no request to step up withhold.** The JIT default role (`grantJitDefaultRole`) and the IdP
+    reconciler's group-derived adds withhold a role whose rules would move the pool, exactly as they withhold an
+    approver role (decision 29); an admin can assign it with the step-up. Reconciler **removals** are never withheld
+    (revoking access comes first); the mapping delete that causes them is the attested act.
+
+**Known limits.** Conservative facts may ask for a step-up a third, more specific rule makes unnecessary, and a member
+join re-asks for a takeover the rule's create already attested under N5. Both over-ask; neither under-asks. An
+approved SoD override that assigns a role (`sod.ts` `executeOverriddenMint`) is refused, under the approver-role lock
+and then the routing lock, when the role is an approver role or joining it moves a pool: an `approval_decide` is not the
+`settings_relax` step-up a direct assignment needs. The decision rolls back, the refusal is audited
+(`sod-override-role-refused`) and answered 409 `sod_override_role_needs_step_up`; an admin assigns the role directly
+with the step-up (secure by default, ADR-0180; master's direction on #675). An IdP reconciler removal is still never
+withheld, and its reconciliation audit row now records the `approverPoolShift` facts of every removal that moved a pool. Option (b), the intersection of pools, stays the long-term simplification.
+
+**Tests.** `zz-668-approver-pool-shift.test.ts`: role and team delete (refused from an API key and an ungranted
+session, bound to the facts, admitted with the grant, audited); user (subject and named approver) and MCP server
+cascades at the helper; role assign/unassign, team add/remove and group→role mapping create/delete, each bound to its
+own facts; no takeover means no step-up (same pool, no survivor, a member's own user rule); fail closed (a stale grant
+after the facts change, the JIT default role withheld).
+
+**Review round 1 of #675 (at `92ec8a7`).**
+- **B1, a TOCTOU on role unassign:** `DELETE /v1/users/:id/roles/:roleId` decided on an unlocked read whether the check applied at all. An IdP removal of the same role's group row in between left neither side checking. The route now always takes the role row lock and then the routing lock, and re-decides inside the transaction both whether the check applies and its facts. Any difference answers 409 `changed_concurrently`.
+- **B2:** the reconciler-add withhold is now tested.
+- **Lock order:** role delete takes the role row lock before the routing lock, as decision 16 says.
+- **Shift audits:** they now commit with the write on role assign and on mapping create and delete.
+- **Tests:** the SoD refusal is now tested through the decide route (409 body and `sod-override-role-refused` row), and the IdP removal's reconciliation audit row is asserted.
+
+**Review round 2 of #675 (at `ed53348`).** The round-1 recheck only serialised with writers that also take the routing lock. When the user still held the role directly, the IdP reconciler's removal read the direct row with no lock. It and an admin unassign could then each delete their own row while each still saw the other's: a write-skew. The removal now takes the role row lock and then the routing lock before that read, in decision 16's order, so the two serialise in both orders:
+- unassign first: the reconciler then sees no direct hold and records the shift;
+- reconciler first: the unassign's recheck flips and answers 409.
+
+Both orders are tested against the real `reconcileGroupRoles`, and removing the locks fails both tests.
