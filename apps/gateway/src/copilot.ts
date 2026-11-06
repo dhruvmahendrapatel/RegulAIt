@@ -170,7 +170,7 @@ import {
   deleteServerGrantById,
   deleteToolGrantById,
 } from "./grant-revocation.js";
-import { resolveGuardrailPolicy, runGuardrails } from "./guardrails.js";
+import { resolveGuardrailPolicy, runGuardrailsAsync } from "./guardrails.js";
 import { callerProjectIds } from "./reporting.js";
 import { applyRuleEdit, isRuleEditRefusal } from "./rule-writes.js";
 // B8c — the remaining two proposal kinds' public choke points, each the exact
@@ -1746,7 +1746,9 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
     // grounded answer is composed from counts, so it survives intact.
     const policy = await resolveGuardrailPolicy(db, { projectId: body.projectId ?? null });
     const sampleText = evidence.samples.map((s) => s.text).join("\n");
-    const guard = sampleText ? runGuardrails(policy, "input", sampleText) : null;
+    // ADR-0220: the same runner as every other enforcement site, so a trained
+    // injection classifier an org has turned on also scans this evidence
+    const guard = sampleText ? await runGuardrailsAsync(policy, "input", sampleText) : null;
     let guardrailAction: string | null = null;
     if (guard && guard.findings.length > 0) {
       guardrailAction = guard.action;

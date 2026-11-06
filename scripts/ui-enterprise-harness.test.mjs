@@ -96,8 +96,8 @@ describe("SPA route census (ADR-0196)", () => {
     expect(paths).toEqual(expect.arrayContaining(["/", "/login", "/f/:token", "/admin/users", "/admin/approvals", "/admin/execution"]));
     expect(paths.some((p) => p.includes("*"))).toBe(false);
     // the public screens are opened signed out; everything else needs the session
-    // ADR-0225 (P13 d): the public trust centre and the auditor portal
-    expect(spaRoutes().filter((r) => r.public).map((r) => r.path)).toEqual(["/login", "/f/:token", "/trust", "/audit"]);
+    // ADR-0225 (P13 d): the public trust centre and the auditor portal; ADR-0221: the supplier portal
+    expect(spaRoutes().filter((r) => r.public).map((r) => r.path)).toEqual(["/login", "/f/:token", "/trust", "/audit", "/supplier"]);
   });
 
   it("slugs a route for a file name", () => {

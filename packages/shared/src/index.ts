@@ -139,6 +139,7 @@ export {
   parseExternalScorerResponse,
   externalScorerAvailabilityFor,
   externalScorerKindSchema,
+  EXTERNAL_SCORER_CLAIMABLE_KINDS,
   createExternalScorerSchema,
   updateExternalScorerSchema,
   setExternalScorerEnabledSchema,
@@ -2306,6 +2307,8 @@ export const updateOrgSettingsSchema = z
     /** ADR-0034: master switch for admin-registered custom LLM providers.
      * false refuses registration/enable and stops every custom dispatch (409). */
     customModelProvidersEnabled: z.boolean().optional(),
+    /** ADR-0205: the agent setup assistant on the Register an agent card; off by default, turning it on is audited */
+    agentSetupAssistEnabled: z.boolean().optional(),
     /** ADR-0043: the org default for MCP servers whose allowPrivateRanges is
      * null. false (the strict default since ADR-0181) = a private-LAN MCP URL
      * needs an explicit per-server flag or an allow entry; true = private-LAN
@@ -2376,6 +2379,12 @@ export const updateOrgSettingsSchema = z
      * dispatchable judge reports `judged: unavailable` and changes nothing. */
     recommendationJudgeEnabled: z.boolean().optional(),
     recommendationJudgeAgentId: z.string().uuid().nullable().optional(),
+    /** ADR-0213 (migration 0258): may a person ask for drafted answers to a
+     * vendor assessment questionnaire? false (default) = the questionnaire is
+     * filled by hand only. true (a relaxation: step-up, audited) = the vendor
+     * detail offers drafts labelled with their sources; nothing is submitted
+     * or recorded as an attestation until a person does it. */
+    vendorDraftAssistEnabled: z.boolean().optional(),
     /** ADR-0215 (migration 0248): may an admin import vendored framework content
      * (new draft pack versions) and accept imported feed entries? false (default) =
      * the import routes refuse. Turning it on is a relaxation (settings_relax step-up). */
@@ -3828,6 +3837,22 @@ export {
   type RiskSuggestion,
   type SuggestionSource,
 } from "./intake-assist.js";
+// ADR-0205 — the agent setup assistant's deterministic draft and model-reply merge
+export {
+  AGENT_SETUP_RISK_TIERS,
+  agentSetupAssistRequestSchema,
+  agentSetupGuardLines,
+  buildAgentSetupPrompt,
+  mergeAgentSetupReply,
+  parseAgentSetupReply,
+  suggestAgentSetup,
+  type AgentSetupAssistRequest,
+  type AgentSetupDraft,
+  type AgentSetupField,
+  type AgentSetupModelReply,
+  type AgentSetupRiskTier,
+  type AgentSetupSource,
+} from "./agent-setup-assist.js";
 // demo task G1/C6 — the fixture contract between Gemini's data and the seeder
 export {
   DEMO_DATA_SENSITIVITIES,
@@ -4006,6 +4031,27 @@ export {
   type RecordVendorAttestationInput,
   type UpdateVendorInput,
 } from "./vendors.js";
+
+// ADR-0213 — the governed vendor-questionnaire drafter (backlog P6)
+export {
+  VENDOR_DRAFT_LIMITS,
+  VENDOR_DRAFT_SOURCE_KINDS,
+  VENDOR_DRAFT_SOURCE_LABELS,
+  VENDOR_QUESTIONNAIRE_SECTIONS,
+  buildVendorDraftPrompt,
+  composeDraftQuestionnaire,
+  parseVendorDraft,
+  splitQuestionnaire,
+  suggestVendorAnswers,
+  vendorDraftRequestSchema,
+  vendorDraftSources,
+  type VendorDraftGrounding,
+  type VendorDraftRequest,
+  type VendorDraftSection,
+  type VendorDraftSource,
+  type VendorDraftSourceKind,
+  type VendorQuestionnaireSectionId,
+} from "./vendor-draft.js";
 
 // ---------------------------------------------------------------------------
 // ADR-0085 — EU AI Act risk-tier screening (gap L10): the questionnaire
@@ -4803,8 +4849,13 @@ export * from "./provenance/index.js";
 // ADR-0204: a static upstream credential per MCP server (header refusals, the write contract, the read view)
 export * from "./mcp-upstream-credential.js";
 export * from "./library-lifecycle.js";
+// ADR-0220: trained runtime detectors (PII recogniser, injection classifier, harm model) behind the external-scorer contract
+export * from "./trained-detectors.js";
 // ADR-0224 (P13 c): privacy operations — records of processing, data-subject requests, the processing limit
 export * from "./privacy-ops.js";
 
 // ===== ADR-0215 (P5) — framework content imports and the imported regulatory feed =====
 export * from "./framework-imports.js";
+
+// ===== ADR-0221 (PENDING P4) — the supplier portal =========================
+export * from "./supplier-portal.js";
