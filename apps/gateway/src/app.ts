@@ -133,13 +133,12 @@ import {
   updateUserSchema,
   advisoryDetail,
   authzCheckRequestSchema,
-  /** B9b — the ten kinds the one queue holds; the `objectType` filter's enum */
-  APPROVAL_OBJECT_TYPES,
   type AuthzDecision,
   // ADR-0173 batch 2c fix round A: the audit-log CSV row formatter
   csvRecord,
 } from "@regulait/shared";
 import { governedEvaluate } from "./governed-evaluate.js";
+import { APPROVALS_PAGE_LIMIT, approvalsListQuery } from "./list-queries.js";
 import { checkMcpTransportWrite, refuseMcpServerWrite } from "./mcp-egress.js";
 import {
   agentIdDisclosureUpdate,
@@ -180,6 +179,7 @@ import { registerGroupRoleMappingRoutes } from "./group-role-api.js";
 import { registerAbacRoutes } from "./abac.js";
 import { registerPolicySimulationRoutes } from "./policy-simulation.js";
 import { registerGuardrailRoutes } from "./guardrails.js";
+import { configureTrainedDetectorRuntime, registerTrainedDetectorRoutes } from "./trained-detectors.js";
 import { registerEvalRoutes } from "./evals.js";
 import { applyModelCardApprovalDecision, registerMrmRoutes } from "./mrm.js";
 import { AiBomError } from "./ai-bom.js";
@@ -191,12 +191,14 @@ import { registerTrustDashboardRoutes } from "./trust-dashboard.js";
 import { registerUseCaseOverviewRoutes } from "./use-case-overview.js";
 import { registerUseCaseDraftRoutes } from "./use-case-drafts.js";
 import { registerAgentCardRoutes } from "./agent-card.js";
+import { registerAgentSetupAssistRoutes } from "./agent-setup-assist.js";
 import { registerDependencyGraphRoutes } from "./dependency-graph.js";
 import { registerRunGraphRoutes } from "./run-graph.js";
 import { registerGovernanceMonitorRoutes } from "./governance-monitor.js";
 import { registerCredentialInventoryRoutes } from "./credential-inventory.js";
 import { registerEnergyRoutes } from "./energy.js";
 import { registerRegulatoryIntelRoutes } from "./regulatory-intel.js";
+import { registerFrameworkImportRoutes } from "./framework-imports.js";
 import {
   REMEDIATION_PREFIX as GOVERNANCE_REMEDIATION_PREFIX,
   applyRemediationDecision,
@@ -327,6 +329,11 @@ export interface BuildAppOptions {
   retry?: Partial<RetryConfig>;
   /** hex AES-256 key for encrypting stored git tokens (REGULAIT_DATA_KEY) */
   dataKey?: string;
+  /** ADR-0220 test seams: the egress resolver and fetch the trained-detector
+   * scorer calls ride (process-wide, like `retry` above). Production leaves
+   * both unset, so the real DNS-pinned guarded fetch is used. */
+  trainedDetectorResolve?: import("./egress-guard.js").EgressResolver;
+  trainedDetectorFetch?: typeof fetch;
   /** ADR-0031: which peers may speak for the client via X-Forwarded-*.
    * Defaults to REGULAIT_TRUSTED_PROXIES (which itself defaults to trusting
    * nothing). Exposed so a test can assert both directions. */
@@ -335,6 +342,8 @@ export interface BuildAppOptions {
    * environment (see rate-limit.ts); this override exists so a test can pin
    * tiny windows without touching process.env. */
   rateLimit?: Partial<RateLimitConfig>;
+  /** ADR-0221: the supplier portal's upload scan hook; none by default (files are stored as `not_scanned`) */
+  supplierFileScanner?: SupplierFileScanner;
   /** ADR-0167 (CFG-02): Fastify's logger option. `false` (the default here)
    * keeps the ~100 test files that construct apps silent; `startGateway`
    * passes a redacting pino config resolved from the environment, so the
@@ -374,6 +383,8 @@ export interface BuildAppOptions {
 import { z } from "zod";
 import { boundTargetsForApprovals, registerMcpProxy } from "./mcp-proxy.js";
 import { clearUpstreamCredentialOnUrlMove, registerMcpUpstreamCredentialRoutes } from "./mcp-upstream-credential.js";
+import { registerA2aRoutes } from "./a2a.js";
+import { registerPrivacyOpsRoutes } from "./privacy-ops.js";
 import { ExternalEffectBlockedError } from "./external-effects.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
 import { registerCustomProviderRoutes } from "./custom-providers.js";
@@ -421,6 +432,7 @@ import {
   registerMcpAdmissionRoutes,
   REGISTRATION_ADMISSION_STATE,
 } from "./mcp-admission.js";
+import { registerMcpToolSyncRoutes } from "./mcp-tool-sync.js";
 // ADR-0101 — federated MCP registries. Admin-only through the default gate;
 // a sync writes only the catalogue and an import is an explicit operator act.
 import { privateRangesRelaxation, registerMcpRegistryRoutes } from "./mcp-registry.js";
@@ -472,6 +484,7 @@ import {
   reviewRoleIdsFor,
 } from "./review-policy.js";
 import { registerVendorRoutes, syncVendorForInstance } from "./vendors.js";
+import { registerSupplierPortalRoutes, type SupplierFileScanner } from "./supplier-portal.js";
 // ADR-0081 — the AI risk register (gap L2): evidence computed from the real
 // ledgers at read time; acceptance is an audited record.
 import { registerRiskRoutes } from "./risks.js";
@@ -559,6 +572,7 @@ import { registerCopilotRoutes } from "./copilot.js";
 import { registerBuilderRoutes } from "./builder.js";
 // ADR-0180 (D3) — continuous assurance: P0's gate-mode setting and each item owner's routes
 import { registerAssuranceSettingsRoutes } from "./assurance-settings.js";
+import { registerRiskTreatmentSettingsRoutes } from "./risk-treatment-settings.js";
 import { decideApprovalWithMeasuredSchema, registerConditionMetricRoutes } from "./condition-metrics.js";
 import { registerRequiredTestRoutes } from "./required-tests.js";
 import { registerAutonomyRoutes } from "./autonomy.js";
@@ -568,6 +582,7 @@ import { registerEuAiActRoleRoutes } from "./eu-ai-act-role.js";
 import { registerDecisionRegressionRoutes } from "./decision-regression.js";
 import { registerIncidentRoutes } from "./incidents.js";
 import { registerFeedbackRoutes } from "./feedback.js";
+import { registerTrustPagesRoutes } from "./trust-pages.js";
 import { registerAiLiteracyRoutes } from "./ai-literacy.js";
 import { registerAlertOwnershipRoutes } from "./alert-ownership.js";
 import { builderStepsAwaitingApproval, resumeBuilderAfterApproval } from "./builder-runtime.js";
@@ -3536,7 +3551,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // ADR-0186 A: quorum and approverRoleId are part of the shared create schema
     const body = createApprovalRuleSchema.parse(req.body);
     // the satisfiability guard runs inside createApprovalRuleRow (every create)
-    const row = await createApprovalRuleRow(db, body);
+    const row = await createApprovalRuleRow(db, body, { stepUp: approvalRuleStepUp(db, req) });
     return reply.status(201).send(row);
   });
 
@@ -3823,13 +3838,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // `approverUserId` is a DISPLAY filter, never a widening: it is intersected
     // with `scopeCondition` below, so a non-admin filtering by somebody else's
     // id sees only the rows they could already see.
-    const { status, objectType, approverUserId } = z
-      .object({
-        status: z.enum(["pending", "approved", "denied", "returned", "consumed", "superseded"]).optional(),
-        objectType: z.enum(APPROVAL_OBJECT_TYPES).optional(),
-        approverUserId: z.string().uuid().optional(),
-      })
-      .parse(req.query);
+    //
+    // `status` takes one status or a comma-separated list (`approved,denied`),
+    // so the inbox's "Recently decided" card is its own server-filtered query
+    // and never shares a capped page with the pending queue. `order` defaults to
+    // newest first (the long-standing behaviour); the pending queue asks for
+    // `asc`, because the oldest waiting decision is the one that matters most.
+    // `total` and `hasMore` say how many rows the SAME filters and scope match,
+    // so a capped page is never mistaken for the whole queue.
+    const { status, objectType, approverUserId, order } = approvalsListQuery.parse(req.query);
     // ADR-0022 delegation widening: a non-admin sees their own rows PLUS the
     // PENDING rows of anyone actively delegating to them (pending only — a
     // delegate covers live decisions, they don't inherit the archive).
@@ -3895,18 +3912,28 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           ],
         );
     const conditions = [
-      status ? eq(approvals.status, status) : undefined,
+      status ? (status.length === 1 ? eq(approvals.status, status[0]!) : inArray(approvals.status, status)) : undefined,
       objectType ? eq(approvals.objectType, objectType) : undefined,
       // ANDed with `scopeCondition`, never substituted for it
       approverUserId ? eq(approvals.approverUserId, approverUserId) : undefined,
       scopeCondition,
     ].filter((c) => c !== undefined);
-    const rows = await db
-      .select()
-      .from(approvals)
-      .where(conditions.length > 0 ? and(...conditions) : undefined)
-      .orderBy(desc(approvals.requestedAt))
-      .limit(100);
+    const listWhere = conditions.length > 0 ? and(...conditions) : undefined;
+    // `id` breaks requested_at ties so the page boundary is stable in either order
+    const [rows, [counted]] = await Promise.all([
+      db
+        .select()
+        .from(approvals)
+        .where(listWhere)
+        .orderBy(
+          ...(order === "asc"
+            ? [asc(approvals.requestedAt), asc(approvals.id)]
+            : [desc(approvals.requestedAt), desc(approvals.id)]),
+        )
+        .limit(APPROVALS_PAGE_LIMIT),
+      db.select({ n: sql<number>`count(*)::int` }).from(approvals).where(listWhere),
+    ]);
+    const total = counted?.n ?? rows.length;
     // ADR-0186 A/B: each tool-call row's per-principal decisions (never the assertion)
     const toolCallRowIds = rows.filter((r) => isToolCallApproval(r)).map((r) => r.id);
     const decisionRows = toolCallRowIds.length
@@ -4348,6 +4375,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           : {}),
         ...contextConflictFor(r),
       })),
+      total,
+      hasMore: total > rows.length,
+      limit: APPROVALS_PAGE_LIMIT,
     };
   });
 
@@ -5310,6 +5340,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // through the DEFAULT gate — none appear in NON_ADMIN_ROUTES, because
   // relaxing a content control is exactly a privileged act.
   registerGuardrailRoutes(app, db);
+  // ADR-0220: trained runtime detectors — the settings routes, and the data key
+  // (and test egress seams) the enforcement sites' scorer calls need
+  configureTrainedDetectorRuntime({ dataKey: opts.dataKey, resolve: opts.trainedDetectorResolve, fetchImpl: opts.trainedDetectorFetch });
+  registerTrainedDetectorRoutes(app, db);
   // ADR-0044 — the evaluation harness: golden dataset versions, the scorer
   // registry, runs, per-case results and the baseline comparison. Authoring a
   // dataset or moving a baseline changes what the promotion gate will accept,
@@ -5559,6 +5593,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerUseCaseOverviewRoutes(app, db);
   // demo task C5 — the agent card
   registerAgentCardRoutes(app, db);
+  // ADR-0205 — the agent setup assistant (admin, off by default, suggestion-only)
+  registerAgentSetupAssistRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0156 — the AI-system dependency graph with propagated declared risk
   registerDependencyGraphRoutes(app, db);
   // ADR-0173 batch 2b — the read-only run graph (builder turn, orchestration run, use case)
@@ -5571,6 +5607,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerEnergyRoutes(app, db);
   // ADR-0158 — regulatory intelligence joined to our packs and use cases
   registerRegulatoryIntelRoutes(app, db);
+  // ADR-0215 (P5): vendored framework-content and feed imports, proposed and accepted by an admin
+  registerFrameworkImportRoutes(app, db);
   // ADR-0159 — remediation proposals for monitor alerts
   registerRemediationRoutes(app, db);
   // ADR-0160 — continuous trace evaluation
@@ -5581,6 +5619,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // rails it copies. Propose/list/detail/edit/attest are non-admin
   // (owner-or-admin in-handler); RETIRE stays admin through the default gate.
   registerVendorRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0221 (P4) — the supplier portal beside the vendor registry it answers. Admin routes go through the default
+  // gate; the supplier routes are exempt and authenticate in-route (route-classes.ts).
+  registerSupplierPortalRoutes(app, db, { dataKey: opts.dataKey, fileScanner: opts.supplierFileScanner });
   // ADR-0081 — the AI risk register beside the use-case registry it can
   // reference. Register/list/detail/edit/transition are non-admin
   // (owner-or-admin in-handler, exactly the use-case scoping); ACCEPTANCE is
@@ -5592,10 +5633,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0204 — a server's static upstream credential: set, rotate, clear (admin-only through the default gate, each a
   // settings_relax step-up, audited); reads show only whether one is set, its header and last four characters
   registerMcpUpstreamCredentialRoutes(app, db, { dataKey: opts.dataKey });
+  registerA2aRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0097 part A — the admission review queue and the reason-required,
   // audited clear. Admin-only through the default gate, like the MCP registry
   // writes it sits beside.
   registerMcpAdmissionRoutes(app, db);
+  // #609 follow-up: an admin's on-demand manifest sync for one server — admin-only through the default gate, rate
+  // limited per server, a settings_relax step-up, and the live path's admission, egress, transport and scan gates
+  registerMcpToolSyncRoutes(app, db);
   // ADR-0101 — configure an upstream MCP registry, pull its catalogue, and
   // import ONE entry as a federated `mcp_servers` row that is `unscanned`,
   // ungranted and subject to the same ADR-0097 admission and ADR-0043 egress
@@ -5788,6 +5833,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // A8 autonomy, A10 risk tolerance and acceptance (stubs answer 501 until
   // their owner lands).
   registerAssuranceSettingsRoutes(app, db);
+  // ADR-0211 (P17): the default-off switch for transferred and avoided risk treatments
+  registerRiskTreatmentSettingsRoutes(app, db);
   registerConditionMetricRoutes(app, db);
   registerRequiredTestRoutes(app, db);
   registerAutonomyRoutes(app, db);
@@ -5803,6 +5850,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerDecisionRegressionRoutes(app, db);
   registerIncidentRoutes(app, db, { dataKey: opts.dataKey });
   registerFeedbackRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0225 (P13 d): the public trust centre, AI system cards and the auditor portal (shipped off)
+  registerTrustPagesRoutes(app, db);
   registerAiLiteracyRoutes(app, db);
   registerAlertOwnershipRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0186 (batch 4, AgentCoordination §4.9). A: passkeys and step-up (self
@@ -5834,6 +5883,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0187 B5-M: model-artifact upload, list and view (own uploads; an admin sees all), and the
   // runner's artifact stream (the runner's self token, live lease only)
   registerModelArtifactRoutes(app, db, opts.artifactStore === undefined ? {} : { artifactStore: opts.artifactStore });
+  // ADR-0224 (P13 c): records of processing and data-subject requests (admin-only, the default gate)
+  registerPrivacyOpsRoutes(app, db, { dataKey: opts.dataKey });
 
   // ADR-0031 item 2: the audit read surface used to be hard-capped at 100 rows
   // with a userId filter (plus PR #79's deployMode) and nothing else — for a

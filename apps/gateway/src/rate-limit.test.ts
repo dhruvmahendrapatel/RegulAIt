@@ -14,6 +14,7 @@ import {
   AUTH_RATE_LIMIT_ROUTES,
   RATE_LIMIT_DEFAULTS,
   SSO_RATE_LIMIT_ROUTES,
+  mcpSyncRateLimitKey,
   rateLimitCredentialKey,
   rateLimitKey,
   rateLimitMax,
@@ -139,6 +140,10 @@ describe("ADR-0031: rate-limit configuration", () => {
     expect(rateLimitWindowMs(cfg, "auth:1.2.3.4")).toBe(cfg.authWindowMs);
     expect(rateLimitWindowMs(cfg, "sso:1.2.3.4")).toBe(cfg.ssoWindowMs);
     expect(rateLimitWindowMs(cfg, "ip:1.2.3.4")).toBe(cfg.globalWindowMs);
+    // #609 follow-up: the on-demand MCP tool sync's per-server bucket
+    expect(rateLimitMax(cfg, mcpSyncRateLimitKey(randomUUID()))).toBe(cfg.mcpSyncMax);
+    expect(rateLimitWindowMs(cfg, mcpSyncRateLimitKey(randomUUID()))).toBe(cfg.mcpSyncWindowMs);
+    expect(cfg.mcpSyncMax).toBeLessThan(cfg.globalMax);
     // the credential endpoints are exactly the unauthenticated ones — ADR-0174
     // added the federated-link proof, which accepts a password and TOTP code,
     // and (security review, finding 11) the broker-hinted start, whose

@@ -5420,6 +5420,46 @@ Owner decision (2026-10-24): ADR-0201 (internal folder) moves project memory and
 and CI `paths-ignore` covers `internal/**`. CLAUDE.md's bootstrap sequence points at the new paths. ADR and session
 text changed in link targets only. The index now ends at 0201, with 196 files and 196 rows.
 
+**ADR-0227 (owner, 2026-10-31): Codex and Gemini rejoin.** This amends ADR-0191 decision 1. Codex may build lanes on
+`codex/<lane>` branches as HOLD draft PRs and may review Claude lanes. Gemini writes markdown audits only. The Claude
+master still assigns lanes, reserves numbers, renumbers migrations at merge and releases PRs. The live board is
+[internal/process/AGENT_COORDINATION.md](../process/AGENT_COORDINATION.md), and root `AGENTS.md` and `GEMINI.md`
+point both agents at it. The demo freeze binds every agent. **Amended the same day:** the owner said "No Gemini, let's
+only use codex", so Gemini is not used, Codex also takes the markdown audits, and `GEMINI.md` is removed (ADR-0227
+addendum).
+
+**ADR-0228 (owner, 2026-11-01): the demo host moves to one hardened EC2 instance.** The owner asked to deploy on AWS so
+"nothing depends on my laptop" and chose "EC2 now, Fargate after". This amends ADR-0203 decision 1. The host runs in a
+new member account of the company Organization (`infra/environments/demo-host/{account,baseline,host}`), behind the
+same Cloudflare Tunnel and hostname, with the security baseline, no SSH and no inbound rule, KMS-encrypted volumes and
+nightly encrypted backups. Infra-only freeze exception; demo environment, not production. Not applied: the owner runs
+every plan and apply (DEMO_RUNBOOK.md §8, terminal only, PowerShell first). **The demo is Monday morning 2026-11-02**;
+the owner steps run on Sunday 2026-11-01. Fargate, RDS, WAF and HA come after the demo. The security-team addendum
+adds a dedicated VPC with no public IP, egress 443/7844 only, VPC endpoints, flow logs, logged SSM sessions, Cloudflare
+Access and a least-privilege deployer (DEMO_HOST_SECURITY_BRIEF.md). Addendum 2 anchors the audit chain (beat G8) in an
+S3 Object Lock COMPLIANCE bucket through a dedicated anchor role with 1-hour credentials (ADR-0060 amendment
+2026-11-01); the locked bucket outlives teardown by up to its retention (7 days by default). Addendum 3 applies the security
+review: a truly least-privilege deployer, Run Command logged as the second operator channel, a versioned source bucket.
+
+**ADR-0229 (builder, 2026-11-02): approval-rule precedence.** A demo-host bug (#453): the seeded fleet write rule
+(approver Ada, no role) shadowed Dana's `repo-tools` `write_file` rule (Avery plus an approver role) because the
+gateway loaded rules unordered and the kernel took the first match, leaving 0 eligible approvers under passkey quorum
+2. The kernel now sorts matches by specificity (user > role = team > fleet, exact tool, one server, write-only, deploy
+mode, then id); the first names the approver and role, while any match still pauses and the quorum and approval scope
+stay the strictest across every match. The gateway orders the load by id as defence in depth; the access preview and
+`demo:check` row E read the same answer. **Amendment (review of #662):** because the naming rule's pool is the one
+that signs, a create, edit or activation that makes a rule at least as specific as an overlapping rule with a narrower
+pool needs the `settings_relax` step-up (option (a); the intersection option (b) needs a migration and stays open), and
+the execution recheck takes the max quorum over every rule matching the call now. **Amendment 2 (round 2):** the guard
+also covers the reverse takeover (a rule made less specific so a wider overlapping rule outranks it) and the deploy-mode
+route; it reads the served view, pre-filters in SQL and is serialised by an advisory lock. **Amendment 3 (round 3):**
+rules in different deploy modes count as overlapping (a call's deploy context is a set), and the deploy-mode route takes
+one step-up covering both its narrowing and any takeover. **Amendment 4 (round 4):** ties are decided by the kernel's
+id tie-break, so breaking a tie the edited rule won is a stepped-up takeover. Follow-up: step up deleting a role, team,
+user or server that an approval rule is scoped to (cascade delete). **Amendment 5 (round 5):** widening a rule's
+match re-owes every takeover; option (b) (pool intersection) is the recorded long-term simplification. Open follow-ups: a
+rule-editor warning for shadowed tightenings and equal-specificity overlaps, and option (b).
+
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
 (b) standing policy for future scaffolds recorded (ADR-0006, no implementation yet — nothing to

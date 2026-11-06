@@ -97,7 +97,7 @@ import {
   guardrailOutcome,
   recordGuardrailDecision,
   resolveGuardrailPolicy,
-  runGuardrails,
+  runGuardrailsAsync,
 } from "./guardrails.js";
 import type { AbacPrincipalContext } from "./abac-principal.js";
 import { recordSpan, type TraceContext } from "./tracing.js";
@@ -589,7 +589,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs, stdioHold: {
   }
   const guardrails = await resolveGuardrailPolicy(db, { projectId });
   if (guardrails.active) {
-    const evaluation = runGuardrails(guardrails, "input", inputText);
+    const evaluation = await runGuardrailsAsync(guardrails, "input", inputText);
     const g = guardrailOutcome(evaluation);
     if (g) {
       await recordGuardrailDecision(db, {
@@ -774,7 +774,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs, stdioHold: {
       });
     }
     if (guardrails.active) {
-      const evaluation = runGuardrails(guardrails, "output", scannableMcpText(result, blobs));
+      const evaluation = await runGuardrailsAsync(guardrails, "output", scannableMcpText(result, blobs));
       const g = guardrailOutcome(evaluation);
       if (g) {
         await recordGuardrailDecision(db, {
@@ -915,7 +915,7 @@ async function scanForRelay(
   } catch {
     return null;
   }
-  if (ctx.guardrails.active && runGuardrails(ctx.guardrails, "output", scannableMcpText(value, blobs)).action === "block") {
+  if (ctx.guardrails.active && (await runGuardrailsAsync(ctx.guardrails, "output", scannableMcpText(value, blobs))).action === "block") {
     return null;
   }
   return value;

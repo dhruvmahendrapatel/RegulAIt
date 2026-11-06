@@ -26,7 +26,7 @@ import { approvalRules } from "@regulait/db";
 import type { DbOrTx, DbOrTxDeep } from "./config-versions.js";
 import type { z } from "zod";
 import type { createApprovalRuleSchema } from "@regulait/shared";
-import { assertApprovalRuleWritable } from "./approval-pool.js";
+import { assertApprovalRuleWritable, assertApproverPoolTakeoverStepUp, routedApprovalRule, type ApprovalRuleStepUp } from "./approval-pool.js";
 
 export type CreateApprovalRuleInput = z.infer<typeof createApprovalRuleSchema>;
 
@@ -58,17 +58,21 @@ export async function createApprovalRuleRow(
   /** ADR-0186 A: `quorum` and `approverRoleId` ride in the body (the shared create schema carries them);
    *  omitted -> the column defaults (quorum 1, no role) */
   body: CreateApprovalRuleInput,
+  /** ADR-0229 amendment: the route's settings_relax step-up, for a create that takes over a narrower rule's
+   *  approver pool (absent -> such a create is refused while the policy asks for one; the copilot applier) */
+  opts: { stepUp?: ApprovalRuleStepUp | null } = {},
 ): Promise<typeof approvalRules.$inferSelect> {
   const dualControl = { quorum: body.quorum, approverRoleId: body.approverRoleId };
   // one transaction (a savepoint inside a caller's): the guard locks the approver
   // role row, and the lock must hold until the rule naming it is written
-  return db.transaction(async (tx) => createApprovalRuleRowLocked(tx as unknown as DbOrTx, body, dualControl));
+  return db.transaction(async (tx) => createApprovalRuleRowLocked(tx as unknown as DbOrTx, body, dualControl, opts.stepUp ?? null));
 }
 
 async function createApprovalRuleRowLocked(
   db: DbOrTx,
   body: CreateApprovalRuleInput,
   dualControl: { quorum?: number | undefined; approverRoleId?: string | null | undefined },
+  stepUp: ApprovalRuleStepUp | null,
 ): Promise<typeof approvalRules.$inferSelect> {
   // ADR-0186 A: THE ONE GUARD — a pool that can never reach the quorum is refused here,
   // for the admin route and the copilot's rule_to_approval applier alike
@@ -78,6 +82,22 @@ async function createApprovalRuleRowLocked(
     quorum: dualControl.quorum ?? 1,
     scope: body.scope ?? "user",
     userId: body.userId ?? null,
+  });
+  // ADR-0229 amendment: a new rule as specific as (or more than) an overlapping rule with a narrower pool would name
+  // who signs for that rule's calls; that is a pool loosening of that rule and needs the settings_relax step-up
+  await assertApproverPoolTakeoverStepUp(db, {
+    ruleId: null,
+    before: null,
+    after: routedApprovalRule({
+      ...scopedRuleColumns(body),
+      toolName: body.toolName ?? null,
+      writeOnly: body.writeOnly ?? false,
+      deployMode: null,
+      approverUserId: body.approverUserId,
+      approverRoleId: dualControl.approverRoleId ?? null,
+      quorum: dualControl.quorum ?? 1,
+    }),
+    stepUp,
   });
   const [row] = await db
     .insert(approvalRules)

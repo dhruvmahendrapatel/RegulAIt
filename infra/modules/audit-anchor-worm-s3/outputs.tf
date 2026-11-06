@@ -28,6 +28,6 @@ output "retention_days" {
 }
 
 output "writer_policy_arn" {
-  description = "ARN of the write-only IAM policy, or null when no writer roles were supplied."
+  description = "ARN of the anchor-writer IAM policy (the sink's exact calls), or null when no writer roles were supplied."
   value       = length(aws_iam_policy.writer) > 0 ? aws_iam_policy.writer[0].arn : null
 }
