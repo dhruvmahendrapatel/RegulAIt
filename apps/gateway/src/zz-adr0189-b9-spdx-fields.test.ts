@@ -284,7 +284,10 @@ describe("B9: the loader and the SPDX renderer (R3, R51)", () => {
 
 describe("B9: the display name is scrubbed like every presented name", () => {
   it("a credential-shaped dataset name is redacted in the GET response (PRESENTATION_SCRUB)", async () => {
-    const [d] = await db.insert(evalDatasets).values({ name: `b9 sk-live-CANARY0123456789abcdefABCD ${RUN}`, version: 1 }).returning({ id: evalDatasets.id });
+    // ADR-0233 refuses this name on a write through the handle, so the row stands for one written before the
+    // guard (or while an admin relaxed it): raw SQL, which is what the presentation scrub still has to cover
+    const inserted = await db.execute(sql`insert into eval_datasets (name, version) values (${`b9 sk-live-CANARY0123456789abcdefABCD ${RUN}`}, 1) returning id`);
+    const d = (inserted as unknown as { rows: { id: string }[] }).rows[0];
     const r = await inject("GET", field("eval_dataset", d!.id), users.admin.auth);
     expect(r.statusCode).toBe(200);
     expect(r.body).not.toContain("sk-live-CANARY");

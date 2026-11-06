@@ -2436,6 +2436,10 @@ export const updateOrgSettingsSchema = z
      * detail offers drafts labelled with their sources; nothing is submitted
      * or recorded as an attestation until a person does it. */
     vendorDraftAssistEnabled: z.boolean().optional(),
+    /** ADR-0233 (PENDING S6): refuse credential-shaped text in name/title/description/
+     * summary/body columns? true (default) = refused with 422 credential_in_content.
+     * false = stored as typed; turning it off is a relaxation (settings_relax step-up). */
+    contentCredentialGuard: z.boolean().optional(),
     /** ADR-0215 (migration 0248): may an admin import vendored framework content
      * (new draft pack versions) and accept imported feed entries? false (default) =
      * the import routes refuse. Turning it on is a relaxation (settings_relax step-up). */
@@ -3066,6 +3070,7 @@ export {
 export {
   AUDIT_SCRUB_FINGERPRINT_HEX,
   AUDIT_SCRUB_MARKER_PREFIX,
+  addedAuditScrubRules,
   containsAuditScrubMarker,
   scrubAuditDetail,
   scrubAuditRow,
