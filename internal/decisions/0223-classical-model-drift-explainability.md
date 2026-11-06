@@ -4,7 +4,7 @@
 - **Date**: 2026-10-30
 - **Backlog item**: P13(b) in `internal/product/PENDING.md` §2c. Owner decision on #453 (comment 6527069781, 2026-10-30):
   build all four P13 parts, each as its own lane and off by default. Numbers reserved in comment 6527158879
-  (migration 0263, this ADR).
+  (migration 0269, this ADR).
 
 ## Context
 
@@ -82,7 +82,7 @@ re-testing after a model change (#615).
 
 ## As built (2026-10-30)
 
-- Migration `0263_classical_model_drift.sql` (drafted as 0244; renumbered above main's watermark on landing, CONTRIBUTING_PARALLEL_SESSIONS §4.1): `model_drift_settings`, `model_drift_monitors`, `model_drift_reports`,
+- Migration `0269_classical_model_drift.sql` (drafted as 0244; renumbered on landing above main's watermark and the numbers other open lanes hold, CONTRIBUTING_PARALLEL_SESSIONS §4.1): `model_drift_settings`, `model_drift_monitors`, `model_drift_reports`,
   `model_explainability_artefacts`. No function or trigger.
 - Gateway: `classical-drift-stats.ts` (pure), `classical-drift-monitor.ts` (settings and the monitor input, kept apart
   so the governance monitor imports it without a cycle), `classical-drift.ts` (routes).
