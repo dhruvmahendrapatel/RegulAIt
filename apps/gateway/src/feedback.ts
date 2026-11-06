@@ -61,6 +61,19 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type {} from "@fastify/rate-limit";
 import { z } from "zod";
 import {
+  filterParams,
+  parseListExport,
+  parseListPage,
+  runListPage,
+  sendListError,
+  sendListExport,
+  wantsListContract,
+  type ListReader,
+  type ListSpec,
+} from "./list-contract.js";
+import {
+  count,
+  type SQL,
   aiUseCases,
   and,
   asc,
@@ -611,6 +624,42 @@ const listQuery = z
   })
   .strict();
 
+/** ADR-0226: the list's filters (the contract's own params ride beside them) */
+const feedbackFilterQuery = listQuery.omit({ limit: true }).strict();
+type FeedbackListRow = ReturnType<typeof listView> & { ownerName: string | null };
+const FB_SLA_DUE = sql`case when ${useCaseFeedback.resolvedAt} is not null then null when ${useCaseFeedback.acknowledgedAt} is null then ${useCaseFeedback.ackDueAt} else ${useCaseFeedback.resolveDueAt} end`;
+/** past a response time, as `feedbackSlaState` says "breached" */
+const FB_BREACHED = sql`(${useCaseFeedback.resolvedAt} is null and ((${useCaseFeedback.acknowledgedAt} is null and ${useCaseFeedback.ackDueAt} <= now()) or ${useCaseFeedback.resolveDueAt} <= now()))`;
+const fbDate = (v: string | null) => (v ? new Date(v) : null);
+/** ADR-0226: the feedback queue (and a use case's feedback tab) under the shared list contract */
+export const FEEDBACK_LIST: ListSpec<FeedbackListRow> = {
+  id: "feedback",
+  sorts: {
+    at: { expr: useCaseFeedback.createdAt, keysetAt: useCaseFeedback.createdAt },
+    uc: { expr: sql`lower(${aiUseCases.name})` },
+    kind: { expr: useCaseFeedback.kind },
+    status: { expr: useCaseFeedback.status },
+    sla: { expr: FB_SLA_DUE },
+    owner: { expr: sql`lower(coalesce(nullif(${users.displayName}, ''), ${users.email}))` },
+    resolved: { expr: useCaseFeedback.resolvedAt },
+  },
+  columns: {
+    at: { label: "Received", value: (r) => fbDate(r.createdAt) },
+    uc: { label: "Use case", value: (r) => r.useCaseName ?? r.useCaseId },
+    kind: { label: "Kind", value: (r) => `${r.kind === "appeal" ? "Appeal" : "Problem report"}${r.channel === "signed_link" ? " (link)" : ""}` },
+    status: { label: "Status", value: (r) => r.status.replace(/_/g, " ") },
+    sla: {
+      label: "Response time",
+      value: (r) => (r.sla.chip === "done" ? "resolved" : `${r.sla.chip.replace(/_/g, " ")}${r.sla.dueAt ? `, due ${r.sla.dueAt}` : ""}`),
+    },
+    owner: { label: "Owner", value: (r) => (r.ownerUserId ? (r.ownerName ?? r.ownerUserId) : "admins") },
+    resolved: { label: "Resolved", value: (r) => fbDate(r.resolvedAt) },
+  },
+  filters: ["scope", "useCaseId", "status", "kind"],
+  defaultSort: { col: "at", dir: "desc" },
+  idCol: useCaseFeedback.id,
+};
+
 export interface FeedbackRouteOptions {
   dataKey?: string | undefined;
 }
@@ -777,15 +826,17 @@ export function registerFeedbackRoutes(app: FastifyInstance, db: Db, opts: Feedb
   });
 
   // ---- the queue -------------------------------------------------------------
-  app.get("/v1/feedback", async (req, reply) => {
-    const q = listQuery.parse(req.query);
+  // ADR-0226: the one predicate for the list, its count and the Excel export —
+  // what the caller submitted, or the items routed to them (every item for an
+  // admin), then the filters. null = a caller with no identity, who sees none.
+  const feedbackScope = (req: FastifyRequest, q: z.infer<typeof feedbackFilterQuery>): SQL | undefined | null => {
     const me = req.authCtx.userId;
-    const conds = [];
+    const conds: SQL[] = [];
     if (q.scope === "submitted") {
-      if (!me) return reply.send({ items: [], scope: q.scope });
+      if (!me) return null;
       conds.push(eq(useCaseFeedback.submitterUserId, me));
     } else if (!req.authCtx.isAdmin) {
-      if (!me) return reply.send({ items: [], scope: q.scope });
+      if (!me) return null;
       conds.push(eq(useCaseFeedback.ownerUserId, me));
     }
     if (q.useCaseId) conds.push(eq(useCaseFeedback.useCaseId, q.useCaseId));
@@ -793,6 +844,67 @@ export function registerFeedbackRoutes(app: FastifyInstance, db: Db, opts: Feedb
     if (q.status === "open") conds.push(isNull(useCaseFeedback.resolvedAt));
     else if (q.status === "resolved") conds.push(isNotNull(useCaseFeedback.resolvedAt));
     else if (q.status !== "all") conds.push(eq(useCaseFeedback.status, q.status));
+    return conds.length ? and(...conds) : undefined;
+  };
+  const feedbackReader: ListReader<FeedbackListRow> = {
+    fetch: async (q) => {
+      const rows = await db
+        .select({ f: useCaseFeedback, useCaseName: aiUseCases.name, ownerName: users.displayName, _cursorAt: q.cursorAt })
+        .from(useCaseFeedback)
+        .innerJoin(aiUseCases, eq(aiUseCases.id, useCaseFeedback.useCaseId))
+        .leftJoin(users, eq(users.id, useCaseFeedback.ownerUserId))
+        .where(q.where)
+        .orderBy(...q.orderBy)
+        .limit(q.limit)
+        .offset(q.offset);
+      const now = new Date();
+      return rows.map((r) => ({ ...listView({ ...r.f, useCaseName: r.useCaseName }, now), ownerName: r.ownerName ?? null, _cursorAt: r._cursorAt }));
+    },
+    countable: (where) =>
+      db
+        .select({ one: sql`1` })
+        .from(useCaseFeedback)
+        .innerJoin(aiUseCases, eq(aiUseCases.id, useCaseFeedback.useCaseId))
+        .leftJoin(users, eq(users.id, useCaseFeedback.ownerUserId))
+        .where(where),
+    idOf: (r) => r.id,
+  };
+  app.get("/v1/feedback/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const filters = feedbackFilterQuery.parse(filterParams(q));
+      const ex = parseListExport(FEEDBACK_LIST, q);
+      const where = feedbackScope(req, filters);
+      // metadata only, never what a person wrote; a caller who may see none gets an empty file
+      await sendListExport(db, req, reply, FEEDBACK_LIST, feedbackReader, where === null ? sql`false` : where, ex, filters);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+
+  app.get("/v1/feedback", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      try {
+        const q = req.query as Record<string, unknown>;
+        const filters = feedbackFilterQuery.parse(filterParams(q));
+        const page = parseListPage(FEEDBACK_LIST, q);
+        const scoped = feedbackScope(req, filters);
+        const where = scoped === null ? sql`false` : scoped;
+        const [out, [over]] = await Promise.all([
+          runListPage(db, FEEDBACK_LIST, feedbackReader, where, page),
+          // past a response time across every matching item, not only the page on screen
+          db.select({ n: count() }).from(useCaseFeedback).where(and(where, FB_BREACHED)),
+        ]);
+        return reply.send({ ...out, scope: filters.scope, overdue: Number(over?.n ?? 0) });
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
+    const q = listQuery.parse(req.query);
+    const scoped = feedbackScope(req, q);
+    if (scoped === null) return reply.send({ items: [], scope: q.scope });
+    const conds = scoped ? [scoped] : [];
     const rows = await db
       .select({ f: useCaseFeedback, useCaseName: aiUseCases.name, ownerName: users.displayName })
       .from(useCaseFeedback)
