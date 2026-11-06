@@ -2,7 +2,7 @@
  * G10 (ADR-0206): rename a role or a team (PATCH /v1/roles/:id, /v1/teams/:id).
  *
  * A plain rename saves with no confirmation. Two refusals are shown in place:
- * the name is taken (a field error), or the old name is matched BY NAME in
+ * the name is taken (a field error), or the old or the new name is matched BY NAME in
  * access policies / routing rules — renaming changes which requests those
  * apply to, so the dialog names them, asks for a reason, and the save becomes
  * a danger "Rename anyway" behind a step-up.
@@ -20,7 +20,10 @@ import v from "../../views.module.css";
 interface Ref {
   id: string;
   name: string;
+  matches?: "from" | "to" | "both";
 }
+/** which name a reference matches, when it is the new one (a rename INTO a matched name is a change too) */
+const matchNote = (r: Ref) => (r.matches === "to" ? " (matches the new name)" : r.matches === "both" ? " (matches both names)" : "");
 interface Referenced {
   policies: Ref[];
   rules: Ref[];
@@ -170,18 +173,18 @@ export function RenameModal(props: {
             data-testid="rename-referenced"
           >
             <strong>
-              This name is used by {counts}, which match on the name, not the {noun}. Renaming changes which
+              The current or the new name is used by {counts}, which match on the name, not the {noun}. Renaming changes which
               requests they apply to until they are updated. Past approvals and audit entries keep the old name.
             </strong>
             <ul className={v.flush} style={{ paddingLeft: "var(--s3)" }}>
               {referenced.policies.map((p) => (
                 <li key={p.id}>
-                  Access policy: {p.name} <span className={v.mono}>{p.id}</span>
+                  Access policy: {p.name}{matchNote(p)} <span className={v.mono}>{p.id}</span>
                 </li>
               ))}
               {referenced.rules.map((r) => (
                 <li key={r.id}>
-                  Routing rule: {r.name} <span className={v.mono}>{r.id}</span>
+                  Routing rule: {r.name}{matchNote(r)} <span className={v.mono}>{r.id}</span>
                 </li>
               ))}
             </ul>

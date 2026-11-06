@@ -182,7 +182,7 @@ test.describe("G1 project archive", () => {
   test("refusal: running work", async ({ page }) => {
     await mockApi(
       page,
-      projectsWorld({ archiveReply: { status: 409, body: { error: "project_has_running_work", runs: [{ id: "run_3F81" }] } } }),
+      projectsWorld({ archiveReply: { status: 409, body: { error: "project_has_running_work", runs: [{ id: "run_3F81", kind: "workflow", status: "running" }] } } }),
     );
     await page.goto("/ui/projects/p-credit");
     await page.getByRole("button", { name: "Archive project" }).click();
@@ -250,7 +250,7 @@ function identityWorld() {
             error: "role_name_referenced",
             policies: [
               { id: "pol_41", name: "Credit context read" },
-              { id: "pol_57", name: "Limit increase over 10k" },
+              { id: "pol_57", name: "Limit increase over 10k", matches: "to" },
             ],
             rules: [{ id: "rr_12", name: "Route limit increases to approvers" }],
           },
@@ -284,6 +284,8 @@ test.describe("G10 rename roles and teams", () => {
     await d2.getByLabel("Name").fill("credit-reviewer");
     await d2.getByRole("button", { name: "Save" }).click();
     await expect(d2.getByTestId("rename-referenced")).toContainText("2 access policies and 1 routing rule");
+    // a policy that matches the NEW name is listed too, and says so (renaming into it moves the holders into it)
+    await expect(d2.getByTestId("rename-referenced")).toContainText("Limit increase over 10k (matches the new name)");
     await d2.getByLabel("Reason (required, audited)").fill("Aligning names with the new credit review process.");
     await page.screenshot({ path: test.info().outputPath("g10-rename-referenced.png") });
   });

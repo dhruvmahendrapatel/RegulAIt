@@ -81,7 +81,7 @@ export const renameRoleSchema = z
   .object({
     name,
     description: z.string().trim().max(1000).nullable().optional(),
-    /** required (with `acknowledgeReferences`) only when the old name is referenced */
+    /** required (with `acknowledgeReferences`) only when the old or the new name is referenced */
     reason: reason.optional(),
     acknowledgeReferences: z.boolean().optional(),
   })
@@ -108,6 +108,8 @@ export type RenameRefusal = (typeof RENAME_REFUSALS)[number];
 export interface NameReference {
   id: string;
   name: string;
+  /** which name it matches: the current one ("from"), the new one ("to") or both; set on a rename refusal */
+  matches?: "from" | "to" | "both";
 }
 
 /** the 409 body of `role_name_referenced` / `team_name_referenced` */

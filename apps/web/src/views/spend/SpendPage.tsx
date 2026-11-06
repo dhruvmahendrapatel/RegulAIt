@@ -123,8 +123,9 @@ export default function SpendPage() {
     queryFn: () => api.get<CostEventsResponse>(`/v1/cost-events?limit=200${mine}`),
   });
   const projectsQ = useQuery({
-    queryKey: ["projects"],
-    queryFn: () => api.get<{ projects: Project[] }>("/v1/projects"),
+    // ADR-0206 G1: archived projects too, so their past spend still shows under the project name
+    queryKey: ["projects", "with-archived"],
+    queryFn: () => api.get<{ projects: Project[] }>("/v1/projects?archived=include"),
   });
   // the caller's OWN granted agents/connectors — non-admin-safe name lookups
   // (the admin catalogs are 403 for a developer, so they are never used here)

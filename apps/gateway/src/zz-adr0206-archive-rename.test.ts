@@ -278,6 +278,22 @@ describe("G1 project archive (ADR-0206)", () => {
       expect(gate).toMatchObject({ ok: false, status: 409, error: "project_archived" });
     });
 
+    it("refuses the isolation-sensitivity setting before its step-up, spending nothing (review of #604, finding 2)", async () => {
+      const facts = { op: "project_isolation_sensitivity", projectId: id, from: null, to: "regulated" };
+      const g = await grantStepUpForTest(db, adminId, { kind: "settings_relax", facts });
+      const res = await app.inject({
+        method: "PUT",
+        url: `/v1/execution-project-sensitivities/${id}`,
+        ...stepUpRequest(g),
+        payload: { sensitivity: "regulated" },
+      });
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json().error).toBe("project_archived");
+      expect(await grantSpent(db, g.grantId)).toBe(false);
+      expect((await db.select().from(projects).where(eq(projects.id, id)))[0]!.isolationSensitivity).toBeNull();
+      expect(await auditsFor("execution-project-sensitivity-set", id)).toHaveLength(0);
+    });
+
     it("the database refuses a new member even past the gateway (migration 0276)", async () => {
       const err = await db
         .insert(projectMembers)
@@ -410,6 +426,92 @@ describe("G10 rename roles and teams (ADR-0206)", () => {
       reason: body.reason,
       stepUp: "totp",
     });
+  });
+
+  it("SECURITY: a rename INTO a name a forbid policy already matches is refused, then needs a reason and a step-up", async () => {
+    // the policy was written for a role nobody holds yet; renaming an unreferenced role to that name would move every
+    // holder of the role out of `forbid ... unless principal.roles.contains(to)` with no warning (review of #604)
+    const from = `adr0206-intern-${RUN}`;
+    const to = `adr0206-cleared-${RUN}`;
+    const id = await createRole(from);
+    const policyId = await policyNaming("roles", to);
+    const refused = await app.inject({ method: "PATCH", url: `/v1/roles/${id}`, headers: adminAuth, payload: { name: to } });
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json()).toMatchObject({ error: "role_name_referenced", policyCount: 1, ruleCount: 0 });
+    expect(refused.json().policies).toEqual([expect.objectContaining({ id: policyId, matches: "to" })]);
+    expect((await db.select().from(roles).where(eq(roles.id, id)))[0]!.name).toBe(from);
+
+    const body = { name: to, acknowledgeReferences: true, reason: "Interns finished the clearance course this month." };
+    const noStepUp = await app.inject({ method: "PATCH", url: `/v1/roles/${id}`, headers: adminAuth, payload: body });
+    expect(noStepUp.statusCode).toBe(403);
+    expect(noStepUp.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax" });
+    expect(await auditsFor(ROLE_RENAMED_RULE_ID, id)).toHaveLength(0);
+
+    const g = await grantStepUpForTest(db, adminId, renameStepUp("role", id, from, to));
+    const ok = await app.inject({ method: "PATCH", url: `/v1/roles/${id}`, ...stepUpRequest(g), payload: body });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect(await grantSpent(db, g.grantId)).toBe(true);
+    const audits = await auditsFor(ROLE_RENAMED_RULE_ID, id);
+    expect(audits).toHaveLength(1);
+    expect(audits[0]!.userId).toBe(adminId);
+    expect(audits[0]!.detail).toMatchObject({
+      from,
+      to,
+      referencedPolicies: [policyId],
+      referenceMatches: { [policyId]: "to" },
+      reason: body.reason,
+      stepUp: "totp",
+    });
+  });
+
+  it("SECURITY: a rename INTO a name a routing rule matches is refused (it would re-route the role's holders)", async () => {
+    const from = `adr0206-junior-${RUN}`;
+    const to = `adr0206-senior-${RUN}`;
+    const id = await createRole(from);
+    const [tpl] = await db.insert(workflowTemplates).values({ name: `adr0206 into ${RUN}`, definition: {} }).returning({ id: workflowTemplates.id });
+    templateIds.push(tpl!.id);
+    const [rule] = await db
+      .insert(workflowAssignmentRules)
+      .values({ templateId: tpl!.id, initiatorRole: to })
+      .returning({ id: workflowAssignmentRules.id });
+    const refused = await app.inject({ method: "PATCH", url: `/v1/roles/${id}`, headers: adminAuth, payload: { name: to } });
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json()).toMatchObject({ error: "role_name_referenced", policyCount: 0, ruleCount: 1 });
+    expect(refused.json().rules).toEqual([expect.objectContaining({ id: rule!.id, matches: "to" })]);
+    // a step-up bound to the rename is still required: the 409 above was not a soft warning
+    const body = { name: to, acknowledgeReferences: true, reason: "Promotion round for the whole cohort." };
+    const noStepUp = await app.inject({ method: "PATCH", url: `/v1/roles/${id}`, headers: adminAuth, payload: body });
+    expect(noStepUp.statusCode).toBe(403);
+    expect((await db.select().from(roles).where(eq(roles.id, id)))[0]!.name).toBe(from);
+  });
+
+  it("SECURITY: a team renamed INTO a name a policy matches is refused as team_name_referenced", async () => {
+    const from = `adr0206 desk ${RUN}`;
+    const to = `adr0206 vetted desk ${RUN}`;
+    const id = await createTeam(from);
+    const policyId = await policyNaming("teams", to);
+    const refused = await app.inject({ method: "PATCH", url: `/v1/teams/${id}`, headers: adminAuth, payload: { name: to } });
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json()).toMatchObject({ error: "team_name_referenced", policyCount: 1 });
+    expect(refused.json().policies).toEqual([expect.objectContaining({ id: policyId, matches: "to" })]);
+    expect((await db.select().from(teams).where(eq(teams.id, id)))[0]!.name).toBe(from);
+  });
+
+  it("a newer inactive draft that names the role counts, even while an older version is live", async () => {
+    const from = `adr0206-drafted-${RUN}`;
+    const id = await createRole(from);
+    // v1 is live and names nobody; v2 is a draft that names the role and could be activated later
+    const policyId = await policyNaming("roles", `adr0206-nobody-${RUN}`);
+    await db.insert(abacPolicyVersions).values({
+      policyId,
+      version: 2,
+      source: `forbid (principal, action, resource) when { principal.roles.contains(${JSON.stringify(from)}) };`,
+      schemaVersion: "1",
+      mode: "forbid",
+    });
+    const res = await app.inject({ method: "PATCH", url: `/v1/roles/${id}`, headers: adminAuth, payload: { name: `${from}-x` } });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().policies).toEqual([expect.objectContaining({ id: policyId, matches: "from" })]);
   });
 
   it("a policy with no live version still counts on its latest version", async () => {

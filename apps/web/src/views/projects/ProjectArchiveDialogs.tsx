@@ -11,7 +11,7 @@ import { api, ApiError } from "../../api/client";
 import type { Project, ProjectArchiveImpact } from "../../api/types";
 import { fmtDay, plural } from "../../api/format";
 import { withStepUp } from "../../stepup/stepUp";
-import { ConfirmModal } from "../../ui/kit";
+import { ConfirmModal, SkeletonBlock } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
 import { ReasonModal } from "../admin/adminKit";
 import a from "../admin/admin.module.css";
@@ -22,6 +22,8 @@ interface ArchiveRefusal {
   message: string;
   ids: string[];
 }
+
+const RUN_NOUN: Record<string, string> = { workflow: "workflow", orchestration: "orchestration run", engine_run: "engine run" };
 
 const itThem = (n: number) => (n === 1 ? "it" : "them");
 
@@ -40,11 +42,14 @@ function archiveRefusal(e: unknown): ArchiveRefusal | null {
     };
   }
   if (code === "project_has_running_work") {
-    const rows = (e.payload.runs as Array<{ id: string }> | undefined) ?? [];
+    const rows = (e.payload.runs as Array<{ id: string; kind?: string }> | undefined) ?? [];
     const n = count(rows);
+    // name the kind of work when it is all one kind; "run" covers a mix of workflows, orchestrations and engine runs
+    const kinds = new Set(rows.map((r) => r.kind));
+    const noun = kinds.size === 1 ? (RUN_NOUN[rows[0]!.kind ?? ""] ?? "run") : "run";
     return {
       code,
-      message: `${plural(n, "workflow")} ${n === 1 ? "is" : "are"} still running. Wait for ${itThem(n)} to finish or cancel ${itThem(n)} first.`,
+      message: `${plural(n, noun)} ${n === 1 ? "is" : "are"} still running. Wait for ${itThem(n)} to finish or cancel ${itThem(n)} first.`,
       ids: rows.map((r) => r.id),
     };
   }
@@ -69,7 +74,7 @@ function PinnedKeys(props: { projectId: string }) {
     queryKey: ["project-archive-impact", props.projectId],
     queryFn: () => api.get<ProjectArchiveImpact>(`/v1/projects/${props.projectId}/archive-impact`),
   });
-  if (q.isLoading) return <div className={v.faint}>Checking engine keys pinned to this project…</div>;
+  if (q.isLoading) return <SkeletonBlock lines={2} />;
   if (q.isError) {
     return (
       <div className={v.errLine} role="alert">

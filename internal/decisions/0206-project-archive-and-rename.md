@@ -34,7 +34,8 @@ team could not be renamed.
    under `FOR UPDATE` on the project row. Nothing the project already holds is deleted or rewritten.
 4. **An archived project takes nothing new.** The gateway answers `409 project_archived` to member adds, role changes
    and removals, context writes and promotions, the settings PATCH (including the copilot's applier, which shares its
-   core) and reclassification. The pre-dispatch gate that every dispatch path calls answers the same refusal, so no
+   core), the isolation-sensitivity setting (`PUT /v1/execution-project-sensitivities/:projectId`, refused before
+   its step-up) and reclassification. The pre-dispatch gate that every dispatch path calls answers the same refusal, so no
    call can be attributed to an archived project and **an engine key pinned to it stops working** without being
    revoked; it works again after an unarchive. Its budget is therefore no longer enforced: there is nothing left to
    enforce it on.
@@ -56,12 +57,16 @@ team could not be renamed.
    `PATCH /v1/teams/:teamId` `{name, reason?, acknowledgeReferences?}`. A taken name is `409 name_taken`.
 9. **What matches by name.** Grants, assignments, memberships and approval routing hold a role or team by id, so a
    rename does not change them. Two things match by name:
-   - an access policy whose live version (or latest version, while none is live) has the old name as a Cedar string
-     literal: `principal.roles` and `principal.teams` carry names;
-   - for a role, a workflow assignment (routing) rule whose `initiator_role` is the old name.
+   - an access policy any of whose versions has the old or the new name as a Cedar string literal: `principal.roles`
+     and `principal.teams` carry names, and activation or rollback can select any version later;
+   - for a role, a workflow assignment (routing) rule whose `initiator_role` is the old or the new name.
+
+   Both names count. Renaming *into* a name a policy or rule already matches moves the holders into it (a
+   `forbid ... unless principal.roles.contains("x")` written before any role was called `x` stops applying to them),
+   which relaxes governance as surely as renaming out of one (review of #604, 2026-11-06).
 10. **A plain rename saves without a reason**, audited (`role-renamed` / `team-renamed`, from and to).
 11. **A referenced rename is refused** with `409 role_name_referenced` / `team_name_referenced`, listing the policies
-    and rules with their counts. The admin then sends `acknowledgeReferences: true` with a reason (`422
+    and rules with their counts, each tagged with the name it matches (`matches`: `from`, `to` or `both`). The admin then sends `acknowledgeReferences: true` with a reason (`422
     rename_reason_required` without one) and a `settings_relax` step-up bound to `{op: "<noun>_rename_referenced", id,
     from, to}`, because the rename can move a forbid policy off the people it was written for. The write re-reads the
     row and the references under the row lock; if either changed, nothing is written (`409 changed_concurrently`). The
@@ -75,8 +80,8 @@ team could not be renamed.
 ## Consequences
 
 - Archiving is reversible and loses nothing; it is the retirement path for a project instead of deletion.
-- A rename cannot silently change who an access policy forbids: the admin sees which policies and rules match the old
-  name and confirms it is them. Updating those policies remains a separate, governed edit.
+- A rename cannot silently change who an access policy forbids: the admin sees which policies and rules match the old or
+  the new name and confirms it is them. Updating those policies remains a separate, governed edit.
 - The step-up uses the existing `settings_relax` kind with an `op` naming the act, so no new kind and no org-settings
   migration were needed.
 

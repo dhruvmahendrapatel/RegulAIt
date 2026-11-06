@@ -8,11 +8,15 @@
  * or team by id, so a rename changes none of them. Two things match by NAME instead, and a rename silently changes
  * which requests they apply to:
  *
- *  - access policies: the Cedar source of a policy's live version (or its latest, when none is live yet) can test
- *    `principal.roles` / `principal.teams`, which carry names (abac.ts). A policy whose source holds the old name as a
- *    string literal is listed.
+ *  - access policies: the Cedar source of any version of a policy can test `principal.roles` / `principal.teams`,
+ *    which carry names (abac.ts). Every version counts, not just the live one: activation and rollback can select any
+ *    version later. A policy whose source holds the name as a string literal is listed.
  *  - routing rules: a workflow assignment rule's `initiator_role` is matched against the initiator's role NAMES
  *    (ADR-0018). Teams have no name-matched rule.
+ *
+ * Both names are checked. The old name: the rename moves its holders out of what matches it. The new name: the rename
+ * moves its holders INTO what already matches it (a forbid ... unless written for a role nobody holds yet would stop
+ * applying to them, a routing rule would re-route them), which is just as much a governance change.
  *
  * An unreferenced rename just saves (audited). A referenced one is refused 409 `role_name_referenced` /
  * `team_name_referenced` with the policies and rules listed; the admin then sends `acknowledgeReferences: true` with
@@ -64,8 +68,8 @@ function cedarLiteral(name: string): string {
 }
 
 /**
- * The access policies and routing rules that match `name` by name. A policy counts on its live version, or on its
- * latest version while none is live (activating it later would otherwise pick up a name nobody was warned about).
+ * The access policies and routing rules that match `name` by name. A policy counts on ANY of its versions: a draft
+ * activated later, or an older version an admin rolls back to, would otherwise pick up a name nobody was warned about.
  */
 export async function findNameReferences(db: DbOrTx, noun: Noun, name: string): Promise<NameReferences> {
   const literal = cedarLiteral(name);
@@ -73,14 +77,7 @@ export async function findNameReferences(db: DbOrTx, noun: Noun, name: string): 
     .select({ id: abacPolicies.id, name: abacPolicies.name })
     .from(abacPolicies)
     .innerJoin(abacPolicyVersions, eq(abacPolicyVersions.policyId, abacPolicies.id))
-    .where(
-      and(
-        sql`(${abacPolicies.activeVersionId} = ${abacPolicyVersions.id}
-             OR (${abacPolicies.activeVersionId} IS NULL AND ${abacPolicyVersions.version} =
-                 (SELECT max(v2."version") FROM "abac_policy_versions" v2 WHERE v2."policy_id" = ${abacPolicies.id})))`,
-        sql`strpos(${abacPolicyVersions.source}, ${literal}) > 0`,
-      ),
-    )
+    .where(sql`strpos(${abacPolicyVersions.source}, ${literal}) > 0`)
     .orderBy(abacPolicies.name);
   const ruleRows =
     noun === "role"
@@ -100,7 +97,19 @@ export async function findNameReferences(db: DbOrTx, noun: Noun, name: string): 
 
 const referenceCount = (r: NameReferences) => r.policies.length + r.rules.length;
 
-function referencedRefusal(noun: Noun, from: string, refs: NameReferences): NameReferencedRefusal {
+/** the references of the old name and of the new one, each tagged with which name it matches */
+async function findRenameReferences(db: DbOrTx, noun: Noun, from: string, to: string): Promise<NameReferences> {
+  const [old, next] = [await findNameReferences(db, noun, from), await findNameReferences(db, noun, to)];
+  const merge = (a: NameReference[], b: NameReference[]): NameReference[] => {
+    const out = new Map<string, NameReference>();
+    for (const r of a) out.set(r.id, { ...r, matches: "from" });
+    for (const r of b) out.set(r.id, { ...r, matches: out.has(r.id) ? "both" : "to" });
+    return [...out.values()];
+  };
+  return { policies: merge(old.policies, next.policies), rules: merge(old.rules, next.rules) };
+}
+
+function referencedRefusal(noun: Noun, from: string, to: string, refs: NameReferences): NameReferencedRefusal {
   return {
     error: noun === "role" ? "role_name_referenced" : "team_name_referenced",
     policies: refs.policies.slice(0, RENAME_REFERENCE_LIST_MAX),
@@ -108,9 +117,9 @@ function referencedRefusal(noun: Noun, from: string, refs: NameReferences): Name
     policyCount: refs.policies.length,
     ruleCount: refs.rules.length,
     detail:
-      `${noun} '${from}' is matched by name in ${refs.policies.length} access policy(ies) and ${refs.rules.length} ` +
-      "routing rule(s); renaming changes which requests they apply to. Send acknowledgeReferences with a reason " +
-      "(and confirm it's you) to rename anyway",
+      `${noun} '${from}' or its new name '${to}' is matched by name in ${refs.policies.length} access policy(ies) and ` +
+      `${refs.rules.length} routing rule(s); renaming changes which requests they apply to. Send acknowledgeReferences ` +
+      "with a reason (and confirm it's you) to rename anyway",
   };
 }
 
@@ -119,9 +128,9 @@ export function renameStepUp(noun: Noun, id: string, from: string, to: string): 
   return { kind: "settings_relax", facts: { op: `${noun}_rename_referenced`, id, from, to } };
 }
 
-const sameRefs = (a: NameReferences, b: NameReferences) =>
-  JSON.stringify([a.policies.map((p) => p.id).sort(), a.rules.map((r) => r.id).sort()]) ===
-  JSON.stringify([b.policies.map((p) => p.id).sort(), b.rules.map((r) => r.id).sort()]);
+const refKey = (r: NameReferences) =>
+  JSON.stringify([r.policies.map((p) => `${p.id}:${p.matches}`).sort(), r.rules.map((x) => `${x.id}:${x.matches}`).sort()]);
+const sameRefs = (a: NameReferences, b: NameReferences) => refKey(a) === refKey(b);
 
 interface RenameArgs {
   noun: Noun;
@@ -147,10 +156,10 @@ async function rename(db: Db, req: FastifyRequest, reply: FastifyReply, args: Re
       .where(and(eq(table.name, to), ne(table.id, id)));
     if (clash) return reply.status(409).send({ error: "name_taken", detail: `a ${noun} called '${to}' already exists` });
   }
-  const refs = nameChanges ? await findNameReferences(db, noun, from) : { policies: [], rules: [] };
+  const refs = nameChanges ? await findRenameReferences(db, noun, from, to) : { policies: [], rules: [] };
   let stepUpMethod: string | null = null;
   if (referenceCount(refs) > 0) {
-    if (!args.acknowledgeReferences) return reply.status(409).send(referencedRefusal(noun, from, refs));
+    if (!args.acknowledgeReferences) return reply.status(409).send(referencedRefusal(noun, from, to, refs));
     if (!args.reason) {
       return reply.status(422).send({
         error: "rename_reason_required",
@@ -165,7 +174,7 @@ async function rename(db: Db, req: FastifyRequest, reply: FastifyReply, args: Re
   const out = await db.transaction(async (tx) => {
     const [locked] = await tx.select().from(table).where(eq(table.id, id)).for("update");
     if (!locked || locked.name !== from) return null;
-    if (nameChanges && !sameRefs(refs, await findNameReferences(tx, noun, from))) return null;
+    if (nameChanges && !sameRefs(refs, await findRenameReferences(tx, noun, from, to))) return null;
     // one literal write per table, so the rule-write guard can see exactly which table each one touches
     const [updated] =
       noun === "role"
@@ -189,6 +198,8 @@ async function rename(db: Db, req: FastifyRequest, reply: FastifyReply, args: Re
           ? {
               referencedPolicies: refs.policies.map((p) => p.id),
               referencedRules: refs.rules.map((r) => r.id),
+              // which name each reference matched: "from" (the old), "to" (the new) or "both"
+              referenceMatches: Object.fromEntries([...refs.policies, ...refs.rules].map((r) => [r.id, r.matches])),
               reason: args.reason,
               stepUp: stepUpMethod,
             }
@@ -199,7 +210,7 @@ async function rename(db: Db, req: FastifyRequest, reply: FastifyReply, args: Re
       ruleChain: [],
       reason:
         referenceCount(refs) > 0
-          ? `${noun} '${from}' renamed to '${to}' while referenced by name in ${referenceCount(refs)} policy(ies)/rule(s): ${args.reason}`
+          ? `${noun} '${from}' renamed to '${to}' while either name is referenced in ${referenceCount(refs)} policy(ies)/rule(s): ${args.reason}`
           : nameChanges
             ? `${noun} '${from}' renamed to '${to}'`
             : `${noun} '${from}' description updated`,
