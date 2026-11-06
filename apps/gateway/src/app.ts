@@ -295,7 +295,6 @@ import { USERS_LIST, usersFilterQuery, usersReader, usersWhere } from "./users-l
 import { DELEGATIONS_LIST, delegationsFilterQuery, delegationsReader, delegationsWhere, userNameSql } from "./delegations-list.js";
 import { evaluateIpEnvelope } from "./net-policy.js";
 import { APPROVALS_LIST, type ApprovalListRow } from "./approvals-list.js";
-import type { ListReader } from "./list-contract.js";
 import { activeDelegatorsFor, activeDelegationFrom } from "./delegations.js";
 
 declare module "fastify" {

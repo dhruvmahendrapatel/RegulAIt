@@ -128,7 +128,7 @@ import {
 } from "@regulait/shared";
 import { loadOrgSettings } from "./org-settings.js";
 import { EU_AI_ACT_TIER_RANK, type EuAiActTier } from "@regulait/shared";
-import { exportInMemory, filterParams, pageInMemory, sendListError, wantsListContract, type MemoryListSpec } from "./list-memory.js";
+import { exportInMemory, pageInMemory, type MemoryListSpec } from "./list-memory.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 const POLICY_ID = "default";
