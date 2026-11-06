@@ -353,6 +353,10 @@ describe("ADR-0195 SD4b: enrolment", () => {
     const revoked = await ticketReq(third.enrolFile.token);
     expect(revoked.statusCode).toBe(403);
     expect(revoked.json()).toEqual({ error: "token_revoked" });
+    // the list contract's figures count every token of the source by state (a preview's heading)
+    const page = await inject("GET", `/v1/discovery/sources/${sourceId}/enrolment-tokens?limit=10&sort=created&dir=desc&count=exact`, AUTH);
+    expect(page.statusCode, page.body).toBe(200);
+    expect(page.json()).toMatchObject({ total: 3, summary: { tokens: 3, expired: 1, revoked: 1 } });
     // the cap alert at 100 % was audited
     const [alert] = await db.select().from(auditLog).where(sql`${auditLog.ruleId} = 'endpoint-enrolment-cap-100' AND ${auditLog.detail}->>'tokenId' = ${token.id}`);
     expect(alert).toBeDefined();

@@ -225,22 +225,23 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
   await test.step("S1 discovery sources", async () => {
     await ada.goto("/ui/admin/shadow-ai/discovery-sources");
     await expect(ada.getByRole("heading", { name: "Discovery sources" })).toBeVisible();
-    // W2: with the one endpoint agent source, its device table shows without a click, counted in words
-    await expect(ada.getByText(/^1 device, 0 revoked, /)).toBeVisible();
+    // W2: with the one endpoint agent source, its devices preview shows without a click, counted in its heading
+    await expect(ada.getByRole("heading", { level: 2, name: /^Endpoint devices 1 device/ })).toBeVisible();
     await expect(ada.getByText("Users (self-reported)", { exact: true })).toBeVisible();
     await expect(ada.getByText(/^psn:[0-9a-f]+$/).first()).toBeVisible();
-    // X6b (#474): Recent runs is a secondary section, folded on a first visit; the script has the presenter open it
-    const recentRuns = ada.getByRole("button", { name: /^Recent runs/ });
-    await expect(recentRuns).toHaveAttribute("aria-expanded", "false");
-    await recentRuns.click();
-    await expect(recentRuns).toHaveAttribute("aria-expanded", "true");
-    await capture(ada, ADA, "ds-s1-discovery-sources", { dark: true, notes: ["Recent runs opened from its fold header (X6b; folded on a first visit)"] });
+    // P3 (#453): Recent runs is a preview of the newest runs, its failures counted in its heading; every run is on its own page
+    await expect(ada.getByRole("heading", { level: 2, name: /^Recent runs/ })).toBeVisible();
+    await capture(ada, ADA, "ds-s1-discovery-sources", { dark: true, notes: ["Recent runs, tokens and devices previewed; each full list on its own page (P3)"] });
   });
-
   let pseudonymHref: string | null = null;
   await test.step("S2 findings, sightings, coverage", async () => {
     await ada.goto("/ui/admin/shadow-ai");
     await expect(ada.getByRole("heading", { name: "Shadow-AI discovery" })).toBeVisible();
+    // the inventory opens at 10 rows, most severe first; the presenter shows every finding on one page, a choice this
+    // browser remembers for the S3 and S4 beats
+    const inventory = ada.locator('[data-list="shadow-ai-findings"]');
+    await inventory.getByLabel("Rows per page").selectOption("50");
+    await expect(inventory.getByTestId("list-status")).toHaveText(/^1–\d+ of \d+$/);
     await expect(ada.getByRole("button", { name: `Plan remediation for ${REMEDIATION_REPO}` })).toBeVisible();
     await capture(ada, ADA, "ds-s2-findings", { dark: true });
     pseudonymHref = await ada.locator('a[href*="discovery-sources?pseudonym="]').first().getAttribute("href", { timeout: 5_000 }).catch(() => null);
@@ -397,7 +398,7 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
     await ada.getByRole("tab", { name: /^Audit\b/ }).click();
     await expect(ada.getByText("Recent use-case audit evidence")).toBeVisible();
     await capture(ada, ADA, "ds-g1c-use-case-audit");
-    await ada.getByRole("link", { name: "Open this use case's full audit trail" }).click();
+    await ada.getByRole("link", { name: "View all of this use case's audit trail" }).click();
     await expect(ada.getByTestId("audit-only-object")).toBeVisible();
     await capture(ada, ADA, "ds-g1d-use-case-audit-trail");
   });
@@ -450,7 +451,10 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
   await test.step("G5 an alert in the shared detail drawer: a side panel above 900 px, a modal at 900 px and below", async () => {
     await ada.goto("/ui/admin/governance/alerts");
     await expect(ada.getByRole("heading", { name: "Governance alerts", exact: true })).toBeVisible();
-    const rows = ada.getByRole("button").filter({ has: ada.locator("strong") }).filter({ hasText: / · seen / });
+    // each alert row in the list is a link named for its alert; it opens the alert in the shared detail drawer
+    const rows = ada.getByRole("link", { name: /^Open alert / });
+    // the list has loaded (a row, or its empty state) before the rows are counted
+    await expect(rows.first().or(ada.getByText("No active alerts", { exact: true }))).toBeVisible();
     if ((await rows.count()) === 0) {
       report.at(-1)?.notes.push("no active alert to open: the drawer was not captured");
       return;

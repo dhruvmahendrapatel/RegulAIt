@@ -230,6 +230,11 @@ function Loaded(props: { settings: Record<string, unknown> }) {
     vendorDraftAssistEnabled: str(s, "vendorDraftAssistEnabled") || "false",
   });
 
+  // --- 5f. Credentials in content (ADR-0233) ---------------------------------
+  const contentGuard = useSection({
+    contentCredentialGuard: str(s, "contentCredentialGuard") || "true",
+  });
+
   // --- 7. Network access (ADR-0039) ----------------------------------------
   // Not a useSection form: the save needs the confirm-on-lockout retry flow
   // (a 409 ip_policy_lockout opens an explicit confirm modal, and only a
@@ -990,6 +995,40 @@ function Loaded(props: { settings: Record<string, unknown> }) {
         </SectionShell>
       </Card>
 
+      <Card title="5f · Credentials in names and descriptions">
+        <SectionShell
+          title="Refuse credentials typed into names, titles and descriptions"
+          busy={contentGuard.act.busy}
+          error={contentGuard.act.error}
+          submitLabel="Save content guard setting"
+          onSubmit={() =>
+            void contentGuard.act.run(
+              () => put({ contentCredentialGuard: asBool(contentGuard.f.contentCredentialGuard!) }),
+              "Content guard setting saved (audited)",
+            )
+          }
+          help={
+            <p>On (default): a save that puts an API key, token or other credential into a name, title, description, summary or body is refused, naming the field. Off: such text is stored as typed. Turning it off needs step-up; audited.</p>
+          }
+        >
+          <Field label="Credential guard for content">
+            <Select
+              value={contentGuard.f.contentCredentialGuard}
+              onChange={(e) => contentGuard.set("contentCredentialGuard", e.target.value)}
+            >
+              <option value="true">on — refuse (default)</option>
+              <option value="false">off — store as typed</option>
+            </Select>
+          </Field>
+        </SectionShell>
+        {str(s, "contentCredentialGuard") === "false" ? (
+          <p className={v.errLine}>
+            The guard is off for the whole organisation and stays off until someone turns it back on. Credentials typed into names and descriptions are being stored as typed.
+          </p>
+        ) : null}
+        <ContentCredentialReport />
+      </Card>
+
       <Card title="6 · Audit retention">
         <SectionShell
           title="Scheduled auto-prune + org default retention"
@@ -1091,6 +1130,69 @@ function Loaded(props: { settings: Record<string, unknown> }) {
           <ThemesCard settings={s} />
         </Suspense>
       </CardBoundary>
+    </div>
+  );
+}
+
+/** ADR-0233: rows saved before the guard (or while it was off). Reported by row id and rule only, never the value; never rewritten. */
+interface ContentCredentialFinding {
+  table: string;
+  column: string;
+  field: string;
+  rowId: string;
+  rules: string[];
+}
+function ContentCredentialReport() {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [report, setReport] = useState<{
+    findings: ContentCredentialFinding[];
+    scannedColumns: number;
+    truncatedColumns: string[];
+    incomplete?: boolean;
+    unscannedColumns?: string[];
+  } | null>(null);
+  const run = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setReport(await api.get("/v1/admin/content-credential-report"));
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "The check failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className={v.stack}>
+      <p className={v.faint}>
+        Existing records are never changed. This lists the ones that already contain something credential-shaped, so their owners can edit them.
+      </p>
+      <div className={v.row}>
+        <Button size="sm" onClick={() => void run()} disabled={busy}>
+          {busy ? "Checking…" : "Check existing records"}
+        </Button>
+      </div>
+      {error ? <p className={v.errLine}>{error}</p> : null}
+      {report?.incomplete ? (
+        <p className={v.faint}>
+          The check stopped at its row budget; {(report.unscannedColumns ?? []).length} field(s) were not checked and the list below may be incomplete.
+        </p>
+      ) : null}
+      {report ? (
+        report.findings.length === 0 ? (
+          <p className={v.faint}>No credential-shaped content found in {report.scannedColumns} checked fields.</p>
+        ) : (
+          <ul>
+            {report.findings.map((f) => (
+              <li key={`${f.table}.${f.column}.${f.rowId}`}>
+                {f.table} · {f.field} · record {f.rowId} · {f.rules.join(", ")}
+              </li>
+            ))}
+            {report.truncatedColumns.length > 0 ? <li>More in: {report.truncatedColumns.join(", ")}</li> : null}
+          </ul>
+        )
+      ) : null}
     </div>
   );
 }
