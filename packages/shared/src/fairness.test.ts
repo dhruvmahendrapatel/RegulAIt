@@ -1,0 +1,300 @@
+/**
+ * ADR-0222 — the fairness metrics, pinned against fairlearn.
+ *
+ * `__fixtures__/fairness-golden.json` holds 240 synthetic rows and the values
+ * fairlearn 0.13.0 computed on them (`__fixtures__/fairness-golden-gen.py`
+ * regenerates it). If a formula here drifts from the library's definition,
+ * the golden case fails rather than a customer's report silently changing.
+ */
+import { readFileSync } from "node:fs";
+import { describe, expect, it } from "vitest";
+import {
+  FAIRNESS_DEFAULT_THRESHOLDS,
+  FAIRNESS_METRICS,
+  computeFairness,
+  createFairnessDatasetSchema,
+  fairnessOutcomeBlocks,
+  fairnessRunRelaxed,
+  fairnessSettingsRelaxed,
+  runFairnessTestSchema,
+  type FairnessRows,
+} from "./fairness.js";
+
+const golden = JSON.parse(readFileSync(new URL("./__fixtures__/fairness-golden.json", import.meta.url), "utf8")) as {
+  fairlearn: string;
+  rows: Array<{ sex: string; age_band: string; label: number; prediction: number }>;
+  expected: Record<string, Record<string, number>>;
+};
+
+const goldenRows: FairnessRows = {
+  labels: golden.rows.map((r) => r.label),
+  predictions: golden.rows.map((r) => r.prediction),
+  attributes: { sex: golden.rows.map((r) => r.sex), age_band: golden.rows.map((r) => r.age_band) },
+};
+
+function rowsOf(spec: Array<[group: string, label: number, prediction: number, count: number]>): FairnessRows {
+  const labels: number[] = [];
+  const predictions: number[] = [];
+  const g: string[] = [];
+  for (const [group, label, prediction, count] of spec) {
+    for (let i = 0; i < count; i++) {
+      labels.push(label);
+      predictions.push(prediction);
+      g.push(group);
+    }
+  }
+  return { labels, predictions, attributes: { group: g } };
+}
+
+describe("computeFairness — the fairlearn definitions", () => {
+  it("matches fairlearn 0.13.0 on every metric and attribute of the golden dataset", () => {
+    expect(golden.fairlearn).toBe("0.13.0");
+    const r = computeFairness(goldenRows);
+    for (const attr of r.attributes) {
+      for (const m of FAIRNESS_METRICS) {
+        expect(attr.metrics[m].value, `${attr.attribute} ${m}`).toBeCloseTo(golden.expected[attr.attribute]![m]!, 12);
+      }
+    }
+    expect(r.rowCount).toBe(240);
+  });
+
+  it("fails the golden dataset under the strict defaults, and names each breach", () => {
+    const r = computeFairness(goldenRows);
+    expect(r.outcome).toBe("fail");
+    const breaches = r.evaluations.filter((e) => e.status === "breach").map((e) => `${e.attribute}:${e.metric}`);
+    // sex: DPD 0.121 > 0.1, DIR 0.777 < 0.8, EOpD 0.101 > 0.1, EOD 0.101 > 0.1; age band: EOpD/EOD 0.144 > 0.1
+    expect(breaches.sort()).toEqual(
+      [
+        "age_band:equal_opportunity_difference",
+        "age_band:equalized_odds_difference",
+        "sex:demographic_parity_difference",
+        "sex:disparate_impact_ratio",
+        "sex:equal_opportunity_difference",
+        "sex:equalized_odds_difference",
+      ].sort(),
+    );
+  });
+});
+
+describe("computeFairness — outcomes", () => {
+  it("passes identical groups, and a ratio exactly on the four-fifths line is not a breach", () => {
+    const equal = rowsOf([
+      ["a", 1, 1, 40],
+      ["a", 0, 0, 40],
+      ["b", 1, 1, 40],
+      ["b", 0, 0, 40],
+    ]);
+    expect(computeFairness(equal).outcome).toBe("pass");
+    // selection 0.4 vs 0.5: ratio 0.8000000000000002 in floating point; only the ratio is checked
+    const fourFifths = rowsOf([
+      ["a", 1, 1, 40],
+      ["a", 0, 0, 60],
+      ["b", 1, 1, 50],
+      ["b", 0, 0, 50],
+    ]);
+    const r = computeFairness(fourFifths, { thresholds: [{ metric: "disparate_impact_ratio", limit: 0.8, action: "fail" }] });
+    expect(r.attributes[0]!.metrics.disparate_impact_ratio.value).toBeCloseTo(0.8, 12);
+    expect(r.outcome).toBe("pass");
+  });
+
+  it("a breach of a flag threshold flags but does not fail", () => {
+    const skew = rowsOf([
+      ["a", 1, 1, 30],
+      ["a", 0, 0, 70],
+      ["b", 1, 1, 60],
+      ["b", 0, 0, 40],
+    ]);
+    const r = computeFairness(skew, { thresholds: [{ metric: "demographic_parity_difference", limit: 0.1, action: "flag" }] });
+    expect(r.outcome).toBe("flag");
+    expect(fairnessOutcomeBlocks(r.outcome)).toBe(false);
+  });
+
+  it("leaves a group below the minimum size out of the metrics, and one group left is inconclusive, never a pass", () => {
+    const small = rowsOf([
+      ["a", 1, 1, 50],
+      ["a", 0, 0, 50],
+      ["b", 1, 0, 5],
+    ]);
+    const r = computeFairness(small, { minGroupSize: 30 });
+    const b = r.attributes[0]!.groups.find((g) => g.group === "b")!;
+    expect(b.included).toBe(false);
+    // a group below the minimum keeps its count only: its outcomes would identify the people in it
+    expect(b).toEqual({ group: "b", n: null, labelPositives: null, predictedPositives: null, selectionRate: null, truePositiveRate: null, falsePositiveRate: null, included: false });
+    expect(r.rowCount).toBe(100);
+    const a = r.attributes[0]!.groups.find((g) => g.group === "a")!;
+    expect(a).toMatchObject({ n: 100, labelPositives: 50, predictedPositives: 50, selectionRate: 0.5, included: true });
+    expect(r.attributes[0]!.metrics.demographic_parity_difference.value).toBeNull();
+    expect(r.outcome).toBe("inconclusive");
+    expect(fairnessOutcomeBlocks("inconclusive")).toBe(true);
+    expect(fairnessOutcomeBlocks("fail")).toBe(true);
+    expect(fairnessOutcomeBlocks("pass")).toBe(false);
+  });
+
+  it("a group with no favourable labels makes the opportunity metrics not computable, with a reason", () => {
+    const noPositives = rowsOf([
+      ["a", 1, 1, 40],
+      ["a", 0, 0, 40],
+      ["b", 0, 0, 70],
+      ["b", 0, 1, 10],
+    ]);
+    const r = computeFairness(noPositives);
+    const m = r.attributes[0]!.metrics;
+    expect(m.equal_opportunity_difference.value).toBeNull();
+    expect(m.equal_opportunity_difference.reason).toMatch(/no rows with a favourable true label/);
+    expect(m.equalized_odds_difference.value).toBeNull();
+    expect(r.outcome).toBe("fail"); // selection 0.5 vs 0.125 also breaches: fail outranks inconclusive
+  });
+
+  it("a group with no favourable labels alone makes the run inconclusive (stricter than fairlearn, which returns a number)", () => {
+    // equal selection rates (0.5 each), so the selection metrics pass; group b has no favourable true label
+    const noPositives = rowsOf([
+      ["a", 1, 1, 40],
+      ["a", 0, 0, 40],
+      ["b", 0, 1, 40],
+      ["b", 0, 0, 40],
+    ]);
+    const r = computeFairness(noPositives);
+    const m = r.attributes[0]!.metrics;
+    expect(m.demographic_parity_difference.value).toBe(0);
+    expect(m.disparate_impact_ratio.value).toBe(1);
+    expect(r.attributes[0]!.groups.find((g) => g.group === "b")!.truePositiveRate).toBeNull();
+    expect(m.equal_opportunity_difference.value).toBeNull();
+    expect(m.equalized_odds_difference.value).toBeNull();
+    expect(r.outcome).toBe("inconclusive");
+    expect(fairnessOutcomeBlocks(r.outcome)).toBe(true);
+  });
+
+  it("the default thresholds check every metric with fail", () => {
+    expect(FAIRNESS_DEFAULT_THRESHOLDS.map((t) => t.metric).sort()).toEqual([...FAIRNESS_METRICS].sort());
+    expect(FAIRNESS_DEFAULT_THRESHOLDS.every((t) => t.action === "fail")).toBe(true);
+  });
+});
+
+describe("the request schemas", () => {
+  const base = { name: "Loans Q3", csv: "a,b,c\n1,1,x\n", labelColumn: "a", predictionColumn: "b", favourableLabel: "1", protectedAttributes: ["c"] };
+  it("refuses a column used twice and an unknown field", () => {
+    expect(createFairnessDatasetSchema.safeParse(base).success).toBe(true);
+    expect(createFairnessDatasetSchema.safeParse({ ...base, protectedAttributes: ["a"] }).success).toBe(false);
+    expect(createFairnessDatasetSchema.safeParse({ ...base, extra: 1 }).success).toBe(false);
+  });
+  it("refuses two thresholds for one metric and a limit outside 0..1", () => {
+    const id = "00000000-0000-4000-8000-000000000001";
+    const t = { metric: "disparate_impact_ratio", limit: 0.8, action: "fail" } as const;
+    expect(runFairnessTestSchema.safeParse({ datasetId: id, cardId: id, thresholds: [t] }).success).toBe(true);
+    expect(runFairnessTestSchema.safeParse({ datasetId: id, cardId: id, thresholds: [t, t] }).success).toBe(false);
+    expect(runFairnessTestSchema.safeParse({ datasetId: id, cardId: id, thresholds: [{ ...t, limit: 1.5 }] }).success).toBe(false);
+  });
+});
+
+describe("fairnessSettingsRelaxed", () => {
+  const strict = { fairnessTestingEnabled: false, fairnessBlockOnFail: true, fairnessDatasetRetentionDays: 30 };
+  it("turning the feature on, blocking off and a longer retention are relaxations; tightening is not", () => {
+    expect(fairnessSettingsRelaxed({ enabled: true }, strict)).toEqual({ fairnessTestingEnabled: true });
+    expect(fairnessSettingsRelaxed({ blockOnFail: false }, strict)).toEqual({ fairnessBlockOnFail: false });
+    expect(fairnessSettingsRelaxed({ datasetRetentionDays: 90 }, strict)).toEqual({ fairnessDatasetRetentionDays: 90 });
+    expect(fairnessSettingsRelaxed({ enabled: false, blockOnFail: true, datasetRetentionDays: 7 }, strict)).toEqual({});
+  });
+  it("lengthening a retention an admin had shortened is a relaxation even below the default", () => {
+    expect(fairnessSettingsRelaxed({ datasetRetentionDays: 14 }, { ...strict, fairnessDatasetRetentionDays: 7 })).toEqual({
+      fairnessDatasetRetentionDays: 14,
+    });
+  });
+});
+
+describe("fairnessRunRelaxed", () => {
+  const defaults = FAIRNESS_DEFAULT_THRESHOLDS.map((t) => ({ ...t }));
+  it("the strict defaults, an omitted request and tighter thresholds relax nothing", () => {
+    expect(fairnessRunRelaxed(undefined, undefined)).toEqual({});
+    expect(fairnessRunRelaxed(defaults, 30)).toEqual({});
+    const tighter = defaults.map((t) => ({ ...t, limit: t.metric === "disparate_impact_ratio" ? 0.9 : 0.05 }));
+    expect(fairnessRunRelaxed(tighter, 30)).toEqual({});
+  });
+  it("a minimum group size below 30 is a hard floor: the schema refuses it and computeFairness throws", () => {
+    const id = "00000000-0000-4000-8000-000000000001";
+    expect(runFairnessTestSchema.safeParse({ datasetId: id, cardId: id, minGroupSize: 29 }).success).toBe(false);
+    expect(runFairnessTestSchema.safeParse({ datasetId: id, cardId: id, minGroupSize: 1 }).success).toBe(false);
+    expect(runFairnessTestSchema.safeParse({ datasetId: id, cardId: id, minGroupSize: 30 }).success).toBe(true);
+    expect(() => computeFairness(goldenRows, { minGroupSize: 29 })).toThrow(/privacy floor/);
+  });
+  it("an omitted metric, a looser limit in either direction, flag-only and a larger minimum group are each relaxations", () => {
+    expect(fairnessRunRelaxed(defaults.slice(1), undefined)).toEqual({ "fairnessRun.demographic_parity_difference": "omitted" });
+    const looser = defaults.map((t) =>
+      t.metric === "demographic_parity_difference" ? { ...t, limit: 0.3 } : t.metric === "disparate_impact_ratio" ? { ...t, limit: 0.5 } : t,
+    );
+    expect(fairnessRunRelaxed(looser, undefined)).toEqual({
+      "fairnessRun.demographic_parity_difference": { limit: 0.3, action: "fail" },
+      "fairnessRun.disparate_impact_ratio": { limit: 0.5, action: "fail" },
+    });
+    const flagOnly = defaults.map((t) => (t.metric === "equal_opportunity_difference" ? { ...t, action: "flag" as const } : t));
+    expect(fairnessRunRelaxed(flagOnly, undefined)).toEqual({ "fairnessRun.equal_opportunity_difference": { limit: 0.1, action: "flag" } });
+    expect(fairnessRunRelaxed(undefined, 31)).toEqual({ "fairnessRun.minGroupSize": 31 });
+    expect(fairnessRunRelaxed([{ metric: "disparate_impact_ratio", limit: 0.8, action: "fail" }], 30)).toEqual({
+      "fairnessRun.demographic_parity_difference": "omitted",
+      "fairnessRun.equal_opportunity_difference": "omitted",
+      "fairnessRun.equalized_odds_difference": "omitted",
+    });
+  });
+});
+
+describe("small-group suppression cannot be undone by subtraction (PR #633 security round 3)", () => {
+  /** the reviewer's example: sex M/F all included; ethnicity A large, B one person */
+  function dataset(bLabel: number, bPrediction: number): FairnessRows {
+    const labels: number[] = [];
+    const predictions: number[] = [];
+    const sex: string[] = [];
+    const ethnicity: string[] = [];
+    for (let i = 0; i < 1000; i++) {
+      labels.push(i % 3 === 0 ? 1 : 0);
+      predictions.push(i % 4 === 0 ? 1 : 0);
+      sex.push(i % 2 === 0 ? "M" : "F");
+      ethnicity.push("A");
+    }
+    labels.push(bLabel);
+    predictions.push(bPrediction);
+    sex.push("F");
+    ethnicity.push("B");
+    return { labels, predictions, attributes: { sex, ethnicity } };
+  }
+
+  it("a suppressed group's rows are left out of every attribute, and it is named without its size", () => {
+    const r = computeFairness(dataset(1, 1));
+    const eth = r.attributes.find((a) => a.attribute === "ethnicity")!;
+    expect(eth.groups.find((g) => g.group === "B")).toEqual({
+      group: "B", n: null, labelPositives: null, predictedPositives: null, selectionRate: null, truePositiveRate: null, falsePositiveRate: null, included: false,
+    });
+    const sex = r.attributes.find((a) => a.attribute === "sex")!;
+    expect(sex.groups.reduce((t, g) => t + (g.n ?? 0), 0)).toBe(1000);
+    expect(r.rowCount).toBe(1000);
+  });
+
+  it("nothing stored or returned depends on the suppressed person's outcome or prediction", () => {
+    const variants = [dataset(0, 0), dataset(0, 1), dataset(1, 0), dataset(1, 1)].map((d) => JSON.stringify(computeFairness(d)));
+    expect(new Set(variants).size).toBe(1);
+  });
+
+  it("repeats until no kept group is too small: leaving rows out can shrink another attribute's group", () => {
+    // x: P has 68 rows, Q has 5 (suppressed). y: R has 43 and S has 30, but 2 of S's rows are Q's, so once Q is
+    // suppressed S has 28 and is suppressed too; R loses Q's 3 rows and keeps 40, and P is left with R's 40
+    const labels: number[] = [];
+    const predictions: number[] = [];
+    const x: string[] = [];
+    const y: string[] = [];
+    const add = (xg: string, yg: string, count: number, label: number) => {
+      for (let i = 0; i < count; i++) {
+        labels.push(label);
+        predictions.push(label);
+        x.push(xg);
+        y.push(yg);
+      }
+    };
+    add("P", "R", 40, 1);
+    add("P", "S", 28, 0);
+    add("Q", "S", 2, 1);
+    add("Q", "R", 3, 0);
+    const r = computeFairness({ labels, predictions, attributes: { x, y } });
+    const ys = r.attributes.find((a) => a.attribute === "y")!;
+    expect(ys.groups.find((g) => g.group === "S")!.included).toBe(false);
+    expect(ys.groups.find((g) => g.group === "R")!).toMatchObject({ n: 40, included: true });
+    expect(r.rowCount).toBe(40);
+  });
+});

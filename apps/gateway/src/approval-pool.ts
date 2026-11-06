@@ -28,6 +28,7 @@ import {
   configVersions,
   groupRoleMappings,
   ne,
+  notInArray,
   eq,
   gt,
   inArray,
@@ -40,6 +41,7 @@ import {
   roleAssignments,
   roles,
   sql,
+  teamMembers,
   users,
   webauthnCredentials,
   type Db,
@@ -184,7 +186,8 @@ export async function lockApproverRoles(tx: Q, roleIds: readonly string[]): Prom
  * ADR-0186 A (PR #198 round 5) — a JIT-provisioned account's default role.
  * Granted only when it is NOT an approver role, decided under the approver-role
  * lock (so a rule edit naming the role cannot interleave): an identity the IdP
- * mints must never join an approver pool silently. Withheld = the caller audits
+ * mints must never join an approver pool silently, nor move who signs for its
+ * calls to a wider pool (issue #668). Withheld = the caller audits
  * it; an admin may then assign the role with the step-up a role assignment needs.
  */
 export async function grantJitDefaultRole(
@@ -195,6 +198,9 @@ export async function grantJitDefaultRole(
   return db.transaction(async (rawTx) => {
     const tx = rawTx as unknown as Q & Pick<Db, "insert">;
     if ((await lockApproverRoles(tx, [roleId])).has(roleId)) return "withheld" as const;
+    // issue #668: nor may it move who signs for the account's calls to a wider pool (a role approval rule that
+    // outranks one with a narrower pool); the JIT path has no request to step up, so it withholds the same way
+    if (await approverPoolShiftFacts(tx, { change: "member-add", objectType: "role", objectId: roleId, userId })) return "withheld" as const;
     await tx.insert(roleAssignments).values({ userId, roleId }).onConflictDoNothing();
     return "granted" as const;
   });
@@ -644,8 +650,9 @@ export function routedApprovalRule(r: Record<string, unknown>): RoutedApprovalRu
 async function servedOverlappingRules(
   db: Q,
   shapes: readonly RoutedApprovalRule[],
-  excludeRuleId: string | null,
+  excludeRuleId: string | readonly string[] | null,
 ): Promise<Array<RoutedApprovalRule & { id: string }>> {
+  const excluded = excludeRuleId == null ? [] : typeof excludeRuleId === "string" ? [excludeRuleId] : [...excludeRuleId];
   const arm = (s: RoutedApprovalRule): SQL => {
     const conds: SQL[] = [];
     if ((s.scope ?? "user") === "user") conds.push(or(ne(approvalRules.scope, "user"), eq(approvalRules.userId, s.userId ?? ""))!);
@@ -662,18 +669,24 @@ async function servedOverlappingRules(
     .where(
       and(
         or(...shapes.map(arm))!,
-        ...(excludeRuleId ? [ne(approvalRules.id, excludeRuleId)] : []),
+        ...(excluded.length ? [notInArray(approvalRules.id, excluded)] : []),
       ),
     )
     .orderBy(approvalRules.id);
+  return (await overlayServed(db, rows)).filter((r) => shapes.some((s) => approvalRulesMayOverlap(s, r)));
+}
+
+/**
+ * N3, the SERVED view of approval-rule rows: each overlaid with its ACTIVE version's body (see
+ * `servedOverlappingRules` for why the active body is the whole served view).
+ */
+async function overlayServed(db: Q, rows: ReadonlyArray<typeof approvalRules.$inferSelect>): Promise<Array<RoutedApprovalRule & { id: string }>> {
   if (rows.length === 0) return [];
   const versions = await loadVersionsForArtifacts(db as Db, ["approval_rule"], rows.map((r) => r.id));
-  return rows
-    .map((row) => {
-      const active = (versions.get(`approval_rule:${row.id}`) ?? []).find((v) => v.status === "active");
-      return Object.assign(routedApprovalRule({ ...(row as unknown as Record<string, unknown>), ...((active?.body ?? {}) as Record<string, unknown>) }), { id: row.id });
-    })
-    .filter((r) => shapes.some((s) => approvalRulesMayOverlap(s, r)));
+  return rows.map((row) => {
+    const active = (versions.get(`approval_rule:${row.id}`) ?? []).find((v) => v.status === "active");
+    return Object.assign(routedApprovalRule({ ...(row as unknown as Record<string, unknown>), ...((active?.body ?? {}) as Record<string, unknown>) }), { id: row.id });
+  });
 }
 
 /** does `taker`'s pool loosen `held`'s? quorum is left out: the highest quorum over every match applies anyway */
@@ -826,4 +839,118 @@ export async function assertApproverPoolTakeoverStepUp(
   const values = await approverPoolTakeoverFacts(db, args);
   if (!values) return;
   return requireRuleStepUp(db, { ruleId: args.ruleId ?? "new-approval-rule", values }, args.stepUp, APPROVER_POOL_TAKEOVER_DETAIL);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #668 (ADR-0229 follow-up) — CASCADE DELETES and MEMBERSHIP CHANGES move who signs
+// ---------------------------------------------------------------------------
+
+/**
+ * A change outside the approval-rule writers that can move who signs for some calls:
+ * - `delete` of a role, team, user or MCP server. The FKs cascade-delete every approval rule scoped to it (and, for a
+ *   user, every rule naming them as the approver), so the calls those rules named the signer for fall to the next
+ *   overlapping rule, which may have a wider pool;
+ * - a role or team `membership` change. Joining makes the group's approval rules match the member's calls (they may
+ *   outrank a rule with a narrower pool); leaving hands the calls they named the signer for to the next rule.
+ *   `userId: null` is "any member" (a group→role mapping, whose members are not known when it is written).
+ */
+export type ApproverPoolShift =
+  | { change: "delete"; objectType: "role" | "team" | "user" | "mcp_server"; objectId: string }
+  | { change: "member-add" | "member-remove"; objectType: "role" | "team"; objectId: string; userId: string | null };
+
+type ShiftTakeover = { ruleId: string; outranksApprovalRules?: string[]; outrankedByApprovalRules?: string[] };
+
+/** the approval rules (served view) that a shift removes or brings into play */
+async function rulesMovedBy(db: Q, shift: ApproverPoolShift): Promise<Array<RoutedApprovalRule & { id: string }>> {
+  const id = shift.objectId;
+  const where =
+    shift.objectType === "role"
+      ? eq(approvalRules.roleId, id)
+      : shift.objectType === "team"
+        ? eq(approvalRules.teamId, id)
+        : shift.objectType === "mcp_server"
+          ? eq(approvalRules.serverId, id)
+          : or(eq(approvalRules.userId, id), eq(approvalRules.approverUserId, id));
+  const rows = await db.select().from(approvalRules).where(where).orderBy(approvalRules.id);
+  const served = await overlayServed(db, rows);
+  // a membership change moves only the rules scoped to the group itself (a role rule's subject is `roleId`, a team
+  // rule's `teamId`); a delete moves every rule the FK cascade removes
+  return shift.change === "delete" ? served : served.filter((r) => r.scope === shift.objectType);
+}
+
+/** can rule `r` match a call by `userId`, as memberships stand now (null = any member: only user rules are ruled out) */
+function matchesMember(r: RoutedApprovalRule, userId: string | null, held: { roles: Set<string>; teams: Set<string> }): boolean {
+  switch (r.scope ?? "user") {
+    case "fleet":
+      return true;
+    case "role":
+      return userId === null || (!!r.roleId && held.roles.has(r.roleId));
+    case "team":
+      return userId === null || (!!r.teamId && held.teams.has(r.teamId));
+    default:
+      return userId === null ? false : r.userId === userId;
+  }
+}
+
+/**
+ * Issue #668: the `settings_relax` step-up facts for a cascade delete or a membership change that moves who signs for
+ * some calls to a wider pool, or null when it moves none. Decided with the same comparators as the rule writers
+ * (`approvalRulesMayOverlap`, the kernel precedence with its id tie-break, `approvalRuleLoosens` on the pool alone)
+ * and CONSERVATIVE in the same way: a group's rules are assumed to reach every member (N5), and every surviving
+ * overlapping rule is counted as a possible taker, even where a third rule would in fact name the signer.
+ *
+ * - delete / member-remove: a moved rule M named the signer over a surviving rule O, and O's pool loosens M's, so O
+ *   now names it: `{ruleId: M, outrankedByApprovalRules: [O…]}`;
+ * - member-add: a moved rule M names the signer over a rule O that already matched the member, and M's pool loosens
+ *   O's: `{ruleId: M, outranksApprovalRules: [O…]}`.
+ *
+ * Takes the approval-rule routing lock (`lockApprovalRuleRouting`), so inside a transaction no approval-rule write
+ * can interleave. A caller decides its step-up on an early read and recomputes this under the lock before it writes,
+ * failing closed (`CHANGED_CONCURRENTLY`) on any difference (`sameApproverPoolShift`).
+ */
+export async function approverPoolShiftFacts(db: Q, shift: ApproverPoolShift): Promise<Record<string, unknown> | null> {
+  await lockApprovalRuleRouting(db);
+  const moved = await rulesMovedBy(db, shift);
+  if (moved.length === 0) return null;
+  const movedIds = moved.map((m) => m.id);
+  let survivors = await servedOverlappingRules(db, moved, movedIds);
+  if (shift.change !== "delete") {
+    const userId = shift.userId;
+    const held = { roles: new Set<string>(), teams: new Set<string>() };
+    if (userId) {
+      const [rs, ts] = await Promise.all([
+        db.select({ id: roleAssignments.roleId }).from(roleAssignments).where(eq(roleAssignments.userId, userId)),
+        db.select({ id: teamMembers.teamId }).from(teamMembers).where(eq(teamMembers.userId, userId)),
+      ]);
+      for (const r of rs) held.roles.add(r.id);
+      for (const t of ts) held.teams.add(t.id);
+    }
+    survivors = survivors.filter((o) => matchesMember(o, userId, held));
+  }
+  const takeovers: ShiftTakeover[] = [];
+  for (const m of moved) {
+    const ids: string[] = [];
+    for (const o of survivors) {
+      if (!approvalRulesMayOverlap(m, o) || !namesSignerOver(m, m.id, o, o.id)) continue;
+      // joining: M takes O's calls, so M's pool must not loosen O's; leaving or deleted: O takes M's calls
+      const loosens = shift.change === "member-add" ? await poolLoosens(db, o, m) : await poolLoosens(db, m, o);
+      if (loosens) ids.push(o.id);
+    }
+    if (ids.length === 0) continue;
+    ids.sort();
+    takeovers.push(shift.change === "member-add" ? { ruleId: m.id, outranksApprovalRules: ids } : { ruleId: m.id, outrankedByApprovalRules: ids });
+  }
+  if (takeovers.length === 0) return null;
+  return {
+    change: shift.change,
+    objectType: shift.objectType,
+    objectId: shift.objectId,
+    ...("userId" in shift ? { userId: shift.userId } : {}),
+    values: { approverPoolTakeovers: takeovers },
+  };
+}
+
+/** did the facts an early step-up decision rested on stay the same under the lock? (both null, or the same facts) */
+export function sameApproverPoolShift(a: Record<string, unknown> | null, b: Record<string, unknown> | null): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
 }
