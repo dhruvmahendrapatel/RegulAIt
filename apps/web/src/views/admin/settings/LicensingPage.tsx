@@ -341,7 +341,7 @@ export default function LicensingPage() {
                       void act.run(async () => {
                         const r = await api.post<{ ok: boolean; state: string }>("/v1/licenses/verify", {});
                         await Promise.all([status.refetch(), checks.refetch()]);
-                        return r.ok ? `Verified — ${r.state}` : "VERIFICATION FAILED — see the trail below";
+                        return r.ok ? `Verified — ${r.state}` : "VERIFICATION FAILED — see the History tab";
                       })
                     }
                   >
