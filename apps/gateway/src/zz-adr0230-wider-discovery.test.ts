@@ -1,7 +1,7 @@
 /**
- * ADR-0218 (P9) — the wider discovery sources on a real database through the real app (`buildApp`):
+ * ADR-0230 (P9) — the wider discovery sources on a real database through the real app (`buildApp`):
  *
- *  - DEFAULT OFF: after migration 0238 every family switch is off; a source of a switched-off family cannot be
+ *  - DEFAULT OFF: after migration 0262 every family switch is off; a source of a switched-off family cannot be
  *    created (409 `family_disabled`), and the settings read says so.
  *  - STEP-UP, with a negative control: turning a family on needs a `settings_relax` step-up bound to exactly the
  *    families being turned on (refused without one, refused with a grant for another family); turning one off is free.
@@ -146,7 +146,7 @@ afterAll(async () => {
   await app?.close();
 });
 
-describe("ADR-0218 wider discovery sources", () => {
+describe("ADR-0230 wider discovery sources", () => {
   it("every family is off by default, and a source of a switched-off family cannot be created", async () => {
     // start from the migration's default for this file (other suites never turn a family on)
     await db.update(discoverySettings).set({ saasSourcesEnabled: false, identitySourcesEnabled: false, mlPlatformSourcesEnabled: false }).where(eq(discoverySettings.id, 1));
@@ -213,7 +213,7 @@ describe("ADR-0218 wider discovery sources", () => {
     expect(finding!.subjectKind).toBe("saas_app");
     expect(finding!.signalSources).toContain("idp_app_grant");
     expect(finding!.evidence[0]).toMatchObject({ source: "idp_app_grant", names: ["Mail.Read"] });
-    // migration 0238 widened the pseudonym kinds for the consenting user
+    // migration 0262 widened the pseudonym kinds for the consenting user
     const def = await db.execute<{ def: string }>(sql`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = 'discovery_pseudonyms_kind_check'`);
     expect(def.rows[0]!.def).toContain("idp_user");
     const postureOn = await inject("GET", "/v1/discovery/sources", adminKey);

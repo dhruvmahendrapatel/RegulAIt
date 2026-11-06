@@ -28,6 +28,11 @@ An admin attaches one secret to one network MCP server, on the MCP servers page 
 
 A stdio server cannot have a credential: it has no HTTP request to carry one.
 
+A `bearer` credential cannot sit beside the identity assertion's OIDC profile (ADR-0210), which sends the assertion as
+`Authorization: Bearer`. Setting one on a server in that profile is refused (409 `identity_assertion_bearer_conflict`,
+audited as `mcp-upstream-credential-refused`), and the reverse is refused too. A `header` credential is unaffected.
+See `MCP_IDENTITY_ASSERTION.md`, "The OIDC profile".
+
 ### Where it goes, and where it never goes
 
 - Only through the gateway's egress-guarded fetch, which checks the destination on every request.

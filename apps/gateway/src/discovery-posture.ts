@@ -21,7 +21,7 @@ import {
 export interface DiscoverySettingsView {
   credentialWarningAgeDays: number;
   endpointRetentionDays: number;
-  /** ADR-0218: the wider-source family switches (all off by default) */
+  /** ADR-0230: the wider-source family switches (all off by default) */
   families: DiscoveryFamilySwitches;
   version: number;
   updatedAt: string | null;
@@ -48,7 +48,7 @@ export async function loadDiscoverySettings(db: Db): Promise<DiscoverySettingsVi
   };
 }
 
-/** the enabled sources, by name; a source whose family is switched off is not scanned, so it is not named (ADR-0218) */
+/** the enabled sources, by name; a source whose family is switched off is not scanned, so it is not named (ADR-0230) */
 export async function activeDiscoverySources(db: Db): Promise<ActiveDiscoverySource[]> {
   const { families } = await loadDiscoverySettings(db);
   const rows = await db
@@ -84,7 +84,7 @@ export interface DiscoveryPosture {
   credentialsRefused: SourceRef[];
   credentialWarningAgeDays: number;
   endpointRetentionDays: number;
-  /** ADR-0218: the wider-source family switches */
+  /** ADR-0230: the wider-source family switches */
   families: DiscoveryFamilySwitches;
   statement: string;
 }
@@ -117,7 +117,7 @@ export async function discoveryPosture(db: Db): Promise<DiscoveryPosture> {
     if (c.writeScope === "refused") credentialsRefused.push(s);
   }
   const staleCredentials = staticCredentials.filter((c) => c.ageDays >= settings.credentialWarningAgeDays);
-  // a source whose family is switched off is never run, so it is not counted as scanning (ADR-0218)
+  // a source whose family is switched off is never run, so it is not counted as scanning (ADR-0230)
   const enabled = sources.filter((s) => s.enabled && familySwitchProblem(s.kind, settings.families) === null);
   return {
     sourcesTotal: sources.length,

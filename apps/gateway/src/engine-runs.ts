@@ -1167,7 +1167,8 @@ export async function runEngineScheduleSweep(db: Db, opts: { now?: Date } = {}) 
   const due = await db
     .select()
     .from(engineSchedules)
-    .where(and(eq(engineSchedules.enabled, true), lt(engineSchedules.nextRunAt, now)))
+    // ADR-0208 G9: a deleted schedule is never due
+    .where(and(eq(engineSchedules.enabled, true), isNull(engineSchedules.deletedAt), lt(engineSchedules.nextRunAt, now)))
     .orderBy(asc(engineSchedules.nextRunAt))
     .limit(100);
   for (const s of due) {
@@ -1178,9 +1179,17 @@ export async function runEngineScheduleSweep(db: Db, opts: { now?: Date } = {}) 
       .set({ nextRunAt: next, updatedAt: now })
       // PR #205 review round 11 [88]: the claim also requires the schedule to be ON now — one switched
       // off after the read above is not claimed and starts nothing
-      .where(and(eq(engineSchedules.id, s.id), eq(engineSchedules.nextRunAt, s.nextRunAt), eq(engineSchedules.enabled, true)))
+      // ADR-0208 G9: and not deleted (a delete after the read above starts nothing)
+      .where(
+        and(
+          eq(engineSchedules.id, s.id),
+          eq(engineSchedules.nextRunAt, s.nextRunAt),
+          eq(engineSchedules.enabled, true),
+          isNull(engineSchedules.deletedAt),
+        ),
+      )
       .returning();
-    if (!claimed) continue; // another sweep took it, or it was switched off
+    if (!claimed) continue; // another sweep took it, or it was switched off or deleted
     let skip: string | null = null;
     let runId: string | null = null;
     const [person] = s.runAsUserId
@@ -1598,35 +1607,124 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
     const rows = await db
       .select()
       .from(engineSchedules)
-      .where(req.authCtx.isAdmin ? undefined : eq(engineSchedules.runAsUserId, req.authCtx.userId ?? NO_IDENTITY))
+      // ADR-0208 G9: a deleted schedule leaves the listing (its audit rows stay)
+      .where(
+        and(
+          isNull(engineSchedules.deletedAt),
+          req.authCtx.isAdmin ? undefined : eq(engineSchedules.runAsUserId, req.authCtx.userId ?? NO_IDENTITY),
+        ),
+      )
       .orderBy(desc(engineSchedules.createdAt))
       .limit(200);
     return { schedules: rows };
   });
 
+  // ADR-0208 G9: switch on/off (owner-only re-enable, as before) and/or edit the interval (owner only: the schedule
+  // spends as them). The next run moves to match on the database clock: the last scheduled point plus the new
+  // interval, never earlier than now. A run already started keeps going.
   app.patch("/v1/engine-schedules/:scheduleId", async (req, reply) => {
     const { scheduleId } = scheduleParam.parse(req.params);
     const body = updateEngineScheduleSchema.parse(req.body);
     // round 11 (sweep): decided and written under the schedule's row lock, with its audit
     const out = await db.transaction(async (tx) => {
-      const [row] = await tx.select().from(engineSchedules).where(eq(engineSchedules.id, scheduleId)).for("update");
+      const [row] = await tx
+        .select()
+        .from(engineSchedules)
+        .where(and(eq(engineSchedules.id, scheduleId), isNull(engineSchedules.deletedAt)))
+        .for("update");
       if (!row || (!req.authCtx.isAdmin && row.runAsUserId !== req.authCtx.userId)) return { kind: "missing" as const };
       // re-enabling a schedule restarts runs as its creator: only the creator may do that
       if (body.enabled && row.runAsUserId !== req.authCtx.userId) return { kind: "owner_only" as const };
-      const [after] = await tx.update(engineSchedules).set({ enabled: body.enabled, updatedAt: new Date() }).where(eq(engineSchedules.id, scheduleId)).returning();
-      await auditEngine(tx as unknown as Db, {
-        userId: req.authCtx.userId ?? NO_IDENTITY,
-        objectType: "engine_schedule",
-        objectId: scheduleId,
-        ruleId: body.enabled ? "engine-schedule-enabled" : "engine-schedule-disabled",
-        detail: { engineId: row.engineId, transitions: { enabled: { from: row.enabled, to: body.enabled } } },
-        reason: `scheduled ${row.engineId} run switched ${body.enabled ? "on" : "off"}`,
-      });
+      // changing how often it spends is the creator's call too
+      if (body.intervalHours !== undefined && row.runAsUserId !== req.authCtx.userId) return { kind: "owner_only_edit" as const };
+      const nextInterval = body.intervalHours;
+      const intervalChanged = nextInterval !== undefined && nextInterval !== row.intervalHours;
+      const [after] = await tx
+        .update(engineSchedules)
+        .set({
+          ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
+          ...(intervalChanged
+            ? {
+                intervalHours: nextInterval,
+                nextRunAt: sql`greatest(now(), ${engineSchedules.nextRunAt} - make_interval(hours => ${row.intervalHours}::int) + make_interval(hours => ${nextInterval}::int))`,
+              }
+            : {}),
+          updatedAt: sql`now()`,
+        })
+        .where(eq(engineSchedules.id, scheduleId))
+        .returning();
+      if (body.enabled !== undefined) {
+        await auditEngine(tx as unknown as Db, {
+          userId: req.authCtx.userId ?? NO_IDENTITY,
+          objectType: "engine_schedule",
+          objectId: scheduleId,
+          ruleId: body.enabled ? "engine-schedule-enabled" : "engine-schedule-disabled",
+          detail: { engineId: row.engineId, transitions: { enabled: { from: row.enabled, to: body.enabled } } },
+          reason: `scheduled ${row.engineId} run switched ${body.enabled ? "on" : "off"}`,
+        });
+      }
+      if (intervalChanged) {
+        await auditEngine(tx as unknown as Db, {
+          userId: req.authCtx.userId ?? NO_IDENTITY,
+          objectType: "engine_schedule",
+          objectId: scheduleId,
+          ruleId: "engine-schedule-updated",
+          detail: {
+            engineId: row.engineId,
+            transitions: {
+              intervalHours: { from: row.intervalHours, to: nextInterval },
+              nextRunAt: { from: row.nextRunAt.toISOString(), to: after!.nextRunAt.toISOString() },
+            },
+          },
+          reason: `scheduled ${row.engineId} run now every ${nextInterval}h (was ${row.intervalHours}h); the next run moved to match`,
+        });
+      }
       return { kind: "ok" as const, after: after! };
     });
     if (out.kind === "missing") return reply.status(404).send({ error: "engine_schedule_not_found" });
     if (out.kind === "owner_only") return reply.status(403).send({ error: "schedule_owner_only", detail: "only the person a schedule runs as can switch it back on" });
+    if (out.kind === "owner_only_edit") {
+      return reply.status(403).send({ error: "schedule_owner_only", detail: "only the person a schedule runs as can change how often it runs" });
+    }
     return { schedule: out.after };
+  });
+
+  // ADR-0208 G9: SOFT delete — the schedule leaves the listing and the sweep never starts a run from it again; a run
+  // already in progress keeps going (cancel it from Runs). Its owner or an admin may delete it; no step-up (stopping
+  // future spend only tightens).
+  app.delete("/v1/engine-schedules/:scheduleId", async (req, reply) => {
+    const { scheduleId } = scheduleParam.parse(req.params);
+    const actor = req.authCtx.userId ?? null;
+    const out = await db.transaction(async (tx) => {
+      const [row] = await tx
+        .select()
+        .from(engineSchedules)
+        .where(and(eq(engineSchedules.id, scheduleId), isNull(engineSchedules.deletedAt)))
+        .for("update");
+      if (!row || (!req.authCtx.isAdmin && (actor === null || row.runAsUserId !== actor))) return { kind: "missing" as const };
+      const [after] = await tx
+        .update(engineSchedules)
+        .set({ deletedAt: sql`now()`, deletedByUserId: actor, enabled: false, updatedAt: sql`now()` })
+        .where(eq(engineSchedules.id, scheduleId))
+        .returning();
+      await auditEngine(tx as unknown as Db, {
+        userId: actor ?? NO_IDENTITY,
+        objectType: "engine_schedule",
+        objectId: scheduleId,
+        ruleId: "engine-schedule-deleted",
+        detail: {
+          engineId: row.engineId,
+          intervalHours: row.intervalHours,
+          runAsUserId: row.runAsUserId,
+          wasEnabled: row.enabled,
+          lastRunId: row.lastRunId,
+        },
+        reason: `scheduled ${row.engineId} run (every ${row.intervalHours}h) deleted; no further runs start from it`,
+      });
+      return { kind: "ok" as const, after: after! };
+    });
+    if (out.kind === "missing") return reply.status(404).send({ error: "engine_schedule_not_found" });
+    return { deleted: true, schedule: out.after };
   });
 
   // POST /v1/model-artifacts is B5-M's (model-artifacts.ts). The runner's artifact route was removed (ENG-IMG

@@ -7,8 +7,15 @@ Root `devDependencies` used only by the scripts in this directory. Nothing here 
 | Package | Version | Licence | Used by | Why |
 |---|---|---|---|---|
 | `dependency-cruiser` | 18.6.0 | MIT | `preflight-import-cycles.mjs` (and the module list of `preflight-import-smoke.mjs`) | ADR-0190 I4 follow-ups: finds the static import cycles of the compiled gateway, for the CI ratchet against new ones. It parses (acorn) and resolves (enhanced-resolve); the script only selects, sorts and compares edges. Works offline, no network at run time. Its transitive runtime closure is 42 packages (39 MIT, 3 ISC; checked 2026-10-16), 34 of them new to the lockfile. |
+| `js-yaml` | 4.3.2 | MIT | `refresh-framework-imports.mjs` | ADR-0215 (P5): parses the MITRE ATLAS YAML release when a developer refreshes the vendored framework-import snapshots. Safe `JSON_SCHEMA` load only (no custom types). The same version was already in the lockfile through other tools; one dependency (`argparse`, Python-2.0 licence, CLI only and not loaded by `load`). Never runs in the product: the product reads the vendored JSON. |
 
 ## Search record (ADR-0176)
+
+YAML parsing for the framework-import refresh, 2026-10-30:
+
+- `js-yaml` 4.3.2 (MIT): chosen. Already in the lockfile at this exact version, maintained, safe schema by default.
+- `yaml` (ISC): equally suitable, but new to the lockfile; no reason to add a second YAML parser.
+- Not parsing YAML at all: ATLAS publishes its release only as YAML.
 
 Import-cycle detection, 2026-10-16:
 

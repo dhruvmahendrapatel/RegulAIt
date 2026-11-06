@@ -21,6 +21,41 @@
   font-size: var(--text-xs);
 }
 
+/* PENDING P3 — the posture estimate. The score is the page's one large figure; tokens only. */
+.sectionHeading {
+  font-size: var(--text-xl);
+  font-weight: 600;
+  margin: 0;
+}
+
+.score {
+  font-size: var(--text-2xl);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.details > summary {
+  cursor: pointer;
+  font-size: var(--text-md);
+}
+
+.details[open] > summary {
+  margin-bottom: var(--s1);
+}
+
+.inputs {
+  margin: 0;
+  padding-left: var(--s2);
+}
+
+.actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  margin: 0;
+  padding-left: var(--s3);
+}
+
 @media print {
   /* hide the app chrome — the posture content IS the document */
   :global(aside),

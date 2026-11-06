@@ -10,7 +10,7 @@
  *    target or scope, storing a static secret, lengthening the warning age or
  *    the endpoint retention, and revealing a pseudonym each ask the admin to
  *    confirm it's them (withStepUp); disabling and revoking never do.
- *  - ADR-0218: the wider kinds (SaaS app inventories, identity-provider app
+ *  - ADR-0230: the wider kinds (SaaS app inventories, identity-provider app
  *    consents, standalone ML platforms) are each behind a family switch in
  *    Settings, off by default; turning one on asks for the step-up, and the
  *    kind picker says when a chosen kind's family is off.
@@ -101,7 +101,7 @@ export default function DiscoverySourcesPage() {
   const [credError, setCredError] = useState<string | null>(null);
   const [warnDays, setWarnDays] = useState("");
   const [retentionDays, setRetentionDays] = useState("");
-  // ADR-0218: the wider-source family switches as edited (unsaved); empty = as saved
+  // ADR-0230: the wider-source family switches as edited (unsaved); empty = as saved
   const [familyDraft, setFamilyDraft] = useState<Partial<FamilySwitches>>({});
   // a finding's sighting links here with ?pseudonym=… (revealing still needs the step-up)
   const [params] = useSearchParams();

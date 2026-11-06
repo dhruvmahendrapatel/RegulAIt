@@ -213,7 +213,7 @@ export const DISCOVERY_SCANNERS: ScannerRegistry = scannerRegistry([
   ...ENDPOINT_IMPORT_SCANNERS,
   // SD4b: endpoint_agent, fed by the agents' signed reports (endpoint-agent-routes.ts)
   ENDPOINT_AGENT_SCANNER,
-  // ADR-0218 (P9): saas_inventory_api, idp_entra, ml_mlflow, each family behind its default-off org switch
+  // ADR-0230 (P9): saas_inventory_api, idp_entra, ml_mlflow, each family behind its default-off org switch
   ...WIDER_DISCOVERY_SCANNERS,
 ]);
 

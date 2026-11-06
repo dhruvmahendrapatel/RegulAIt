@@ -41,7 +41,7 @@ import {
   agents,
   evalDatasets,
 } from "@regulait/db";
-import { runEvalSuite } from "./evals.js";
+import { evalDatasetNamesBoundBy, evalDatasetRetiredDetail, retiredEvalDatasetNames, runEvalSuite } from "./evals.js";
 import {
   resolveProvider,
   gitDefaultBaseUrl,
@@ -1134,6 +1134,11 @@ async function runStageEvalChecks(
       fail(
         `eval dataset '${binding.dataset}'${binding.version ? ` v${binding.version}` : ""} does not exist — the quality gate could not run, so it does not pass`,
       );
+      continue;
+    }
+    // ADR-0208 G9: a gate that still names a retired dataset fails closed (the runner refuses it too)
+    if (versions.some((d) => d.retiredAt !== null)) {
+      fail(`${evalDatasetRetiredDetail(binding.dataset)} — the quality gate could not run, so it does not pass`, { error: "eval_dataset_retired" });
       continue;
     }
     const [agentRow] = await db.select().from(agents).where(eq(agents.name, binding.agent));
@@ -2542,6 +2547,19 @@ export async function createWorkflowTemplateValidated(
   | { ok: false; status: number; body: Record<string, unknown> }
 > {
   const definition = validateDefinition(body.definition);
+  // ADR-0208 G9: a new quality gate may not bind a retired eval dataset (bindings name the dataset by NAME)
+  const retiredBound = await retiredEvalDatasetNames(db, evalDatasetNamesBoundBy(definition));
+  if (retiredBound.length > 0) {
+    return {
+      ok: false,
+      status: 409,
+      body: {
+        error: "eval_dataset_retired",
+        detail: `the quality gate binds retired eval dataset(s) ${retiredBound.map((n) => `'${n}'`).join(", ")}: choose an active dataset`,
+        datasets: retiredBound,
+      },
+    };
+  }
   const named = definition.stages
     .flatMap((st) => st.approvers ?? [])
     .filter((a) => a !== "requesting_user" && a !== APPROVER_ADMIN_NOT_INITIATOR);
