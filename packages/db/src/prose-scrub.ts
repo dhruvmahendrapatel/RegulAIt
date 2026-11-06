@@ -326,7 +326,7 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
  *   `class_below_required`, `capacity`, `quarantined`, `profile_unknown`),
  *   and the channel route accepts only that enum. A credential cannot appear
  *   in a five-member enum.
- * - `fairness_datasets.purge_reason` — ADR-0222 (migration 0264): a DB CHECK
+ * - `fairness_datasets.purge_reason` — ADR-0222 (migration 0270): a DB CHECK
  *   limits it to `'retention'` or `'deleted'`, set only by the retention sweep
  *   and the delete route. A credential cannot appear in a two-member enum.
  */

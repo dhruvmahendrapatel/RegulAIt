@@ -4855,7 +4855,7 @@ export const orgSettings = pgTable(
     /** days from a data-subject request's receipt to its due date; 30 is the strict default, shorter is stricter */
     dsrSlaDays: integer("dsr_sla_days").notNull().default(30),
 
-    /** ADR-0222 (P13(a), migration 0264): fairness testing. Off by default — turning it on starts storing
+    /** ADR-0222 (P13(a), migration 0270): fairness testing. Off by default — turning it on starts storing
      * sensitive attributes, so it needs the `settings_relax` step-up. */
     fairnessTestingEnabled: boolean("fairness_testing_enabled").notNull().default(false),
     /** ADR-0222: a failing or inconclusive latest run holds the card's sign-off and dispatch (strict true) */
@@ -6070,7 +6070,7 @@ export const mrmRetestRuns = pgTable(
 export type MrmRetestRunRow = typeof mrmRetestRuns.$inferSelect;
 
 // ---------------------------------------------------------------------------
-// ADR-0222 (P13(a), migration 0264) — FAIRNESS TESTING.
+// ADR-0222 (P13(a), migration 0270) — FAIRNESS TESTING.
 //
 // A labelled evaluation dataset an admin uploads (true label, the model's
 // prediction and the protected attributes, nothing else is kept), and the

@@ -9,7 +9,7 @@
 says what was assessed and links evidence, but RegulAIt itself measures nothing. PENDING.md §2c P7 and P13 named this
 gap. On 2026-10-30 the owner decided to build all four P13 parts, each as its own default-off lane (#453 c6527069781);
 this ADR is part (a), fairness and bias testing. The reservation is migration 0243 and this ADR number (#453
-c6527158879); it landed as migration 0264, renumbered above main's watermark (CONTRIBUTING_PARALLEL_SESSIONS §4.1). Runtime detectors are P7 and classical-model drift is P13(b); neither is built here.
+c6527158879); it landed as migration 0270, renumbered above main's watermark and the numbers other open lanes hold (CONTRIBUTING_PARALLEL_SESSIONS §4.1). Runtime detectors are P7 and classical-model drift is P13(b); neither is built here.
 
 What a customer needs is the standard group-fairness check a model-risk reviewer asks for: on a labelled evaluation
 dataset, does the model favour one group over another, measured by named metrics against stated thresholds, with the
@@ -38,7 +38,7 @@ result attached to the risk record and able to hold the model.
    it is refused on the model-risk gate's existing 409 path (`mrm_approval_required`, audit rule
    `fairness-dispatch-held`). A dispatch that evaluates the agent (an eval case or red-team probe) is not held, as with
    staleness. A card with no run is not held. Turning blocking off records results without holding anything.
-5. **Off by default, and turning it on is a relaxation.** Three org settings (migration 0264): fairness testing off,
+5. **Off by default, and turning it on is a relaxation.** Three org settings (migration 0270): fairness testing off,
    blocking on, datasets kept 30 days (1 to 365). Turning the feature on starts storing protected attributes, so it
    needs a `settings_relax` step-up, as do turning blocking off and a longer retention (judged against the strict
    default and the stored value). They are written by `PUT /v1/mrm/fairness/settings`, not the general settings PUT,
