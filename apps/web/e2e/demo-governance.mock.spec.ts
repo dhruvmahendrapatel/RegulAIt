@@ -216,14 +216,14 @@ test("enterprise governance demo surfaces render and complete their core actions
   await expect(page.getByText("Recent use-case audit evidence")).toBeVisible();
 
   await page.goto("/ui/admin/governance/alerts");
-  await page.getByRole("button", { name: /inherits a HIGH rating/ }).click();
+  await page.getByRole("link", { name: /inherits a HIGH rating/ }).click();
   await page.getByRole("button", { name: "Post to chat" }).click();
-  await expect(page.getByRole("status")).toContainText("Posted to security-slack · C-GOVERNANCE");
+  await expect(page.getByRole("status").filter({ hasText: "Posted to" })).toHaveText("Posted to security-slack · C-GOVERNANCE");
   // the alert's detail is a drawer over the page: close it to reach Evaluate now, then reopen it
   await page.getByRole("button", { name: "Close alert" }).click();
   await page.getByRole("button", { name: "Evaluate now" }).click();
   await expect(page.getByText(/Evaluation raised 0, refreshed 1/)).toBeVisible();
-  await page.getByRole("button", { name: /inherits a HIGH rating/ }).click();
+  await page.getByRole("link", { name: /inherits a HIGH rating/ }).click();
   const acknowledgement = page.getByLabel("Acknowledgement note — required and audited");
   await acknowledgement.fill("x".repeat(501));
   await expect(acknowledgement).toHaveValue("x".repeat(500));
@@ -268,7 +268,7 @@ test("enterprise governance demo surfaces render and complete their core actions
 });
 
 test("alerts distinguish a monitor that has never run and use a valid agent inventory link", async ({ page }) => {
-  await page.route("**/v1/governance/alerts?status=active", async (route) => {
+  await page.route("**/v1/governance/alerts?status=active*", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -278,8 +278,8 @@ test("alerts distinguish a monitor that has never run and use a valid agent inve
   await page.goto("/ui/admin/governance/alerts");
   await expect(page.getByText("The governance monitor has not run yet. Select Evaluate now before treating this as an all-clear state.")).toBeVisible();
 
-  await page.unroute("**/v1/governance/alerts?status=active");
-  await page.route("**/v1/governance/alerts?status=active", async (route) => {
+  await page.unroute("**/v1/governance/alerts?status=active*");
+  await page.route("**/v1/governance/alerts?status=active*", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -292,12 +292,12 @@ test("alerts distinguish a monitor that has never run and use a valid agent inve
     });
   });
   await page.reload();
-  await page.getByRole("button", { name: /inherits a HIGH rating/ }).click();
+  await page.getByRole("link", { name: /inherits a HIGH rating/ }).click();
   await expect(page.getByRole("link", { name: "Open agent" })).toHaveAttribute("href", `/ui/admin/agents#agent-${AGENT}`);
 });
 
 test("trust dashboard does not show an all-clear badge before the monitor runs", async ({ page }) => {
-  await page.route("**/v1/governance/alerts?status=active", async (route) => {
+  await page.route("**/v1/governance/alerts?status=active*", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -459,7 +459,7 @@ test("ChatOps workspace alert threshold is editable and the exact post refusal i
     await route.fulfill({ status: 502, contentType: "application/json", body: JSON.stringify({ error: "post_failed", detail: "see the chatops-alert-post-failed audit row" }) });
   });
   await page.goto("/ui/admin/governance/alerts");
-  await page.getByRole("button", { name: /inherits a HIGH rating/ }).click();
+  await page.getByRole("link", { name: /inherits a HIGH rating/ }).click();
   await page.getByRole("button", { name: "Post to chat" }).click();
   await expect(page.getByRole("alert")).toContainText("Post failed — see the chatops-alert-post-failed audit row");
 });
@@ -492,8 +492,10 @@ test("use-case Audit tab never shows the capped row count as the total (M1)", as
   const tab = page.getByRole("tab", { name: /^Audit/ });
   await expect(tab).toHaveText("Audit 20+");
   await tab.click();
-  await expect(page.getByTestId("use-case-audit-partial")).toContainText("older rows may exist");
-  await expect(page.getByRole("link", { name: "Open this use case's full audit trail" })).toBeVisible();
+  // a preview: the newest five rows and the count, which says the cap is a lower bound
+  await expect(page.getByTestId("use-case-audit-partial")).toHaveText("Showing the newest 5 of 20+ rows.");
+  await expect(page.getByRole("tabpanel").getByRole("row")).toHaveCount(6);
+  await expect(page.getByRole("link", { name: "View all of this use case's audit trail" })).toBeVisible();
 });
 
 test("use-case Audit tab shows the true total and deep-links to that use case's own trail (owner decision 2026-10-20)", async ({ page }) => {
@@ -509,8 +511,8 @@ test("use-case Audit tab shows the true total and deep-links to that use case's 
   const tab = page.getByRole("tab", { name: /^Audit/ });
   await expect(tab).toHaveText("Audit 57");
   await tab.click();
-  await expect(page.getByTestId("use-case-audit-partial")).toHaveText("Showing the newest 20 of 57 rows. This use case's full audit trail, and its CSV export, hold every row.");
-  const link = page.getByRole("link", { name: "Open this use case's full audit trail" });
+  await expect(page.getByTestId("use-case-audit-partial")).toHaveText("Showing the newest 5 of 57 rows.");
+  const link = page.getByRole("link", { name: "View all of this use case's audit trail" });
   await expect(link).toHaveAttribute("href", `/ui/admin/audit?objectType=ai_use_case&objectId=${ID}`);
   await link.click();
   await expect(page.getByTestId("audit-only-object")).toContainText(`Showing the audit trail of one AI use case, ${ID}.`);
@@ -559,12 +561,12 @@ test("the audit page never sends an object type no console link opens (owner dec
   await expect(page).not.toHaveURL(/objectType=/);
 });
 
-test("use-case Audit tab under the cap shows the exact count and no partial notice (M1)", async ({ page }) => {
+test("use-case Audit tab under the cap shows the exact count, never a capped one (M1)", async ({ page }) => {
   await page.goto(`/ui/admin/governance/use-cases/${ID}`);
   const tab = page.getByRole("tab", { name: /^Audit/ });
   await expect(tab).toHaveText("Audit 1");
   await tab.click();
-  await expect(page.getByTestId("use-case-audit-partial")).toHaveCount(0);
+  await expect(page.getByTestId("use-case-audit-partial")).toHaveText("Showing all 1 row.");
 });
 
 test("trust coverage view is remembered across a reload (L3)", async ({ page }) => {

@@ -35,12 +35,13 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago, evidenceLabel, fmtDateTime, humanize, plural, providerLabel } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, CodeBlock, EmptyState, Field, InfoButton, Input, RowActions, Select, SeverityBadge, Table, Tabs, tabIds, Textarea } from "../../../ui/kit";
 import { FoldTable } from "../../../ui/fold";
+import { DataList, type DataColumn } from "../../../ui/DataList";
 import {
   OutcomePanel,
   QueryGate,
@@ -115,6 +116,14 @@ interface FindingsResponse {
     statement: string;
   };
   posture: string;
+  /** ADR-0226: the figures across every finding, with any contract page */
+  summary?: {
+    bySeverity: Record<string, number>;
+    statusCounts: Record<string, number>;
+    criticalOpen: number;
+    seenAgain: Array<{ id: string; subject: string }>;
+    seenAgainTotal: number;
+  };
 }
 interface ImportRow {
   id: string;
@@ -279,8 +288,13 @@ const OS_LABEL: Record<string, string> = { macos: "macOS", windows: "Windows", l
 
 export default function ShadowAiPage() {
   const catalogue = useQuery({ queryKey: ["shadow-ai", "catalogue"], queryFn: () => api.get<CatalogueResponse>("/v1/shadow-ai/catalogue") });
-  const findings = useQuery({ queryKey: ["shadow-ai", "findings"], queryFn: () => api.get<FindingsResponse>("/v1/shadow-ai/findings") });
-  const imports = useQuery({ queryKey: ["shadow-ai", "imports"], queryFn: () => api.get<{ imports: ImportRow[] }>("/v1/shadow-ai/imports") });
+  // ADR-0226: the inventory pages on the server; this one small page carries the figures, coverage and posture
+  const findings = useQuery({
+    queryKey: ["shadow-ai", "findings", "summary"],
+    queryFn: () => api.get<FindingsResponse>("/v1/shadow-ai/findings?limit=10&sort=severity&dir=desc"),
+  });
+  const queryClient = useQueryClient();
+  const [pageFindings, setPageFindings] = useState<Finding[]>([]);
   const adapters = useQuery({
     queryKey: ["shadow-ai", "adapters"],
     queryFn: () => api.get<AdaptersResponse>("/v1/shadow-ai/adapters"),
@@ -340,8 +354,8 @@ export default function ShadowAiPage() {
 
   const refresh = () => {
     void catalogue.refetch();
-    void findings.refetch();
-    void imports.refetch();
+    void queryClient.invalidateQueries({ queryKey: ["shadow-ai", "findings"] });
+    void queryClient.invalidateQueries({ queryKey: ["shadow-ai", "imports"] });
   };
 
   const selectedAdapter = (adapters.data?.adapters ?? []).find((x) => x.id === rawAdapter) ?? null;
@@ -421,11 +435,9 @@ export default function ShadowAiPage() {
     if (result) setMcpResult(result);
   };
 
-  const bySeverity = useMemo(() => {
-    const out: Record<string, number> = { critical: 0, high: 0, medium: 0, low: 0 };
-    for (const f of findings.data?.findings ?? []) out[f.severity] = (out[f.severity] ?? 0) + 1;
-    return out;
-  }, [findings.data]);
+  // an older gateway answers the whole inventory with no summary: count it as before
+  const summary = useMemo(() => findings.data?.summary ?? (findings.data ? summariseFindings(findings.data.findings ?? []) : undefined), [findings.data]);
+  const bySeverity: Record<string, number> = summary?.bySeverity ?? { critical: 0, high: 0, medium: 0, low: 0 };
 
   const submitEvidence = async (mode: "dry_run" | "apply") => {
     let parsed: Record<string, unknown>;
@@ -442,19 +454,13 @@ export default function ShadowAiPage() {
     if (ok) refresh();
   };
 
-  const criticalOpen = (findings.data?.findings ?? []).filter((f) => f.severity === "critical" && statusGroup(f.disposition) !== "closed").length;
-  const findingRows = (findings.data?.findings ?? []).filter((f) => statusFilter === "all" || statusGroup(f.disposition) === statusFilter);
-  const statusCounts = useMemo(() => {
-    const out: Record<string, number> = { all: 0, open: 0, confirmed: 0, closed: 0 };
-    for (const f of findings.data?.findings ?? []) {
-      out.all = (out.all ?? 0) + 1;
-      const g = statusGroup(f.disposition);
-      out[g] = (out[g] ?? 0) + 1;
-    }
-    return out;
-  }, [findings.data]);
-  const seenAgain = (findings.data?.findings ?? []).filter((f) => f.dispositionStale);
-  const subjectOf = (id: string | null) => findings.data?.findings.find((f) => f.id === id)?.subject ?? "this finding";
+  const criticalOpen = summary?.criticalOpen ?? 0;
+  const statusCounts: Record<string, number> = summary?.statusCounts ?? { all: 0, open: 0, confirmed: 0, closed: 0 };
+  const seenAgain = summary?.seenAgain ?? [];
+  const seenAgainTotal = summary?.seenAgainTotal ?? seenAgain.length;
+  const subjectOf = (id: string | null) =>
+    pageFindings.find((f) => f.id === id)?.subject ?? seenAgain.find((f) => f.id === id)?.subject ?? "this finding";
+  const findingFilters = useMemo(() => ({ status: statusFilter === "all" ? undefined : statusFilter }), [statusFilter]);
   const panel = { id: "shadow", tab: tabIds("shadow", tab) };
 
   return (
@@ -537,8 +543,8 @@ export default function ShadowAiPage() {
       {seenAgain.length > 0 ? (
         <div className={sh.callout} role="note" aria-label="Seen again after closing" data-testid="shadow-seen-again" style={{ flexWrap: "wrap", alignItems: "center" }}>
           <span>
-            <Badge tone="danger">Seen again {seenAgain.length}</Badge>{" "}
-            New evidence arrived after {seenAgain.length === 1 ? "this finding was" : "these findings were"} closed. Review the disposition again.
+            <Badge tone="danger">Seen again {seenAgainTotal}</Badge>{" "}
+            New evidence arrived after {seenAgainTotal === 1 ? "this finding was" : "these findings were"} closed. Review the disposition again.
           </span>
           <span className={v.row}>
             {seenAgain.map((f) => (
@@ -555,11 +561,7 @@ export default function ShadowAiPage() {
         title="Inventory"
         contain
         caption="Every row is a lead for triage, not a verdict."
-        foldable
-        // L2: the header counts what the filtered body shows, out of every finding
-        count={findingRows.length}
-        total={findings.data?.findings.length}
-        countNoun={["finding", "findings"]}
+        flush
         attention={criticalOpen > 0 ? <Badge tone="danger">{criticalOpen} critical</Badge> : undefined}
         actions={
           <div className={v.row} role="group" aria-label="Filter by status">
@@ -571,20 +573,30 @@ export default function ShadowAiPage() {
           </div>
         }
       >
-        <QueryGate loading={findings.isLoading} error={findings.error} onRetry={refresh}>
-          {(findings.data?.findings.length ?? 0) === 0 ? (
-            <EmptyState title="No findings yet" body="Enable a source under Discovery sources, or import an egress-log, code-scan, SaaS or self-reported evidence file under Import evidence." />
-          ) : findingRows.length === 0 ? (
-            <EmptyState title="No finding has this status" body="Choose another status above." />
-          ) : (
-            <FoldTable<Finding>
-              rows={findingRows}
+            <DataList<Finding>
+              listId="shadow-ai-findings"
+              noun="findings"
+              endpoint="/v1/shadow-ai/findings"
+              exportPath="/v1/shadow-ai/findings/export.xlsx"
+              queryKey={["shadow-ai", "findings", "list"]}
+              legacyKey="findings"
+              filters={findingFilters}
+              defaultSort={{ key: "severity", dir: "desc" }}
+              table={FoldTable}
               rowKey={(r) => r.id}
+              onRows={(rows) => setPageFindings(rows)}
+              empty={
+                statusFilter !== "all" ? (
+                  <EmptyState title="No finding has this status" body="Choose another status above." />
+                ) : (
+                  <EmptyState title="No findings yet" body="Enable a source under Discovery sources, or import an egress-log, code-scan, SaaS or self-reported evidence file under Import evidence." />
+                )
+              }
               columns={[
                 // F6/F21 (#453): below 1000 px of table width, Evidence and Seen fold into Subject and Confidence under
                 // Severity; on a phone every column folds into Subject, one labelled line each
-                { key: "severity", header: "Severity", fold: { sm: "subject" }, render: (r) => <SeverityBadge severity={r.severity} /> },
-                { key: "subject", header: "Subject", // a floor so a name never wraps to one word per line
+                { key: "severity", header: "Severity", main: true, sortable: true, required: "Severity is always shown", fold: { sm: "subject" }, render: (r) => <SeverityBadge severity={r.severity} /> },
+                { key: "subject", header: "Subject", main: true, sortable: true, // a floor so a name never wraps to one word per line
                   render: (r) => (
                     <span style={{ display: "inline-block", minWidth: "14ch" }}>
                       {/* a long resource path breaks rather than widening the table (F6) */}
@@ -597,7 +609,7 @@ export default function ShadowAiPage() {
                   ) },
                 // ADR-0195 SD0: where scanners saw it (path, line, commit), names seen, and who (as a pseudonym), under
                 // the evidence badges (F6: Where seen joined Evidence)
-                { key: "sources", header: "Evidence", fold: { md: "subject" },
+                { key: "sources", header: "Evidence", main: true, sortable: true, fold: { md: "subject" },
                   info: "The kinds of evidence behind the finding, then where it was seen: file and line, commit, or log source, and the pseudonymised person involved.",
                   render: (r) => (
                     <span className={v.stackTight} style={{ alignItems: "flex-start" }}>
@@ -605,9 +617,9 @@ export default function ShadowAiPage() {
                       {sightingLines(r.evidence).length > 0 ? <DiscoverySightings evidence={r.evidence} collapsed /> : null}
                     </span>
                   ) },
-                { key: "confidence", header: "Confidence", info: CONFIDENCE_HELP, fold: { md: "severity" },
+                { key: "confidence", header: "Confidence", main: true, sortable: true, info: CONFIDENCE_HELP, fold: { md: "severity" },
                   render: (r) => <Badge tone={r.confidence === "high" ? "ok" : r.confidence === "medium" ? "warn" : "info"}>{humanize(r.confidence)}</Badge> },
-                { key: "observations", header: "Seen", fold: { md: "subject" }, render: (r) => (
+                { key: "observations", header: "Seen", main: true, sortable: true, fold: { md: "subject" }, render: (r) => (
                   <span style={{ whiteSpace: "nowrap" }}>
                     {plural(r.observationCount, "time")}
                     <span className={v.dim} style={{ display: "block" }}>{ago(r.lastSeenAt)}</span>
@@ -616,6 +628,9 @@ export default function ShadowAiPage() {
                 {
                   key: "disposition",
                   header: "Status",
+                  main: true,
+                  sortable: true,
+                  required: "Status, and a finding seen again, are always shown",
                   info: DISPOSITION_HELP,
                   fold: { sm: "subject" },
                   render: (r) => (
@@ -630,6 +645,7 @@ export default function ShadowAiPage() {
                 {
                   key: "triage",
                   header: "Next step",
+                  action: true,
                   fold: { sm: "subject" },
                   render: (r) => {
                     const plan = (
@@ -670,8 +686,6 @@ export default function ShadowAiPage() {
                 },
               ]}
             />
-          )}
-        </QueryGate>
       </Card>
 
         {/* A1: a finding's remediation plan and its triage open in the one shared detail drawer */}
@@ -1285,20 +1299,18 @@ export default function ShadowAiPage() {
         <p className={v.faint}>
           Including refusals — an evidence file that tried to carry a privilege field is recorded, not discarded.
         </p>
-        <QueryGate loading={imports.isLoading} error={imports.error} onRetry={refresh}>
-          <Table<ImportRow>
-            rows={imports.data?.imports ?? []}
-            rowKey={(r) => r.id}
-            columns={[
-              { key: "when", header: "When", render: (r) => <><span style={{ whiteSpace: "nowrap" }}>{fmtDateTime(r.createdAt)}</span><div className={v.faint}>{ago(r.createdAt)}</div></> },
-              { key: "kind", header: "Kind", render: (r) => evidenceLabel(r.kind) },
-              { key: "mode", header: "Mode", render: (r) => (r.mode === "dry_run" ? "Dry run" : r.mode === "apply" ? "Applied" : humanize(r.mode)) },
-              { key: "status", header: "Status", render: (r) => <Badge tone={r.status === "refused" ? "danger" : "ok"}>{humanize(r.status)}</Badge> },
-              { key: "rows", header: "Rows", render: (r) => r.rowCount.toLocaleString() },
-              { key: "outcome", header: "Outcome", render: (r) => <span className={v.dim}>{r.reason}</span> },
-            ]}
-          />
-        </QueryGate>
+        <DataList<ImportRow>
+          listId="shadow-ai-imports"
+          noun="imports"
+          endpoint="/v1/shadow-ai/imports"
+          exportPath="/v1/shadow-ai/imports/export.xlsx"
+          queryKey={["shadow-ai", "imports"]}
+          legacyKey="imports"
+          defaultSort={{ key: "when", dir: "desc" }}
+          columns={IMPORT_COLUMNS}
+          rowKey={(r) => r.id}
+          empty={<EmptyState title="No imports yet" body="Evidence files you analyse or apply under Import evidence are recorded here, refusals included." />}
+        />
       </Card>
       )}
       </div>
@@ -1308,8 +1320,38 @@ export default function ShadowAiPage() {
 
 const TAB_IDS = ["findings", "coverage", "import", "catalogue", "history"];
 
+const statusGroupOf = (d: string): "open" | "confirmed" | "closed" => (d === "open" ? "open" : d === "confirmed" ? "confirmed" : "closed");
+/** the figures an older gateway does not send, counted from the whole inventory it answers instead */
+function summariseFindings(all: readonly Finding[]): NonNullable<FindingsResponse["summary"]> {
+  const bySeverity: Record<string, number> = { critical: 0, high: 0, medium: 0, low: 0 };
+  const statusCounts: Record<string, number> = { all: 0, open: 0, confirmed: 0, closed: 0 };
+  for (const f of all) {
+    bySeverity[f.severity] = (bySeverity[f.severity] ?? 0) + 1;
+    statusCounts.all = (statusCounts.all ?? 0) + 1;
+    const g = statusGroupOf(f.disposition);
+    statusCounts[g] = (statusCounts[g] ?? 0) + 1;
+  }
+  const seenAgain = all.filter((f) => f.dispositionStale).map((f) => ({ id: f.id, subject: f.subject }));
+  return {
+    bySeverity,
+    statusCounts,
+    criticalOpen: all.filter((f) => f.severity === "critical" && statusGroupOf(f.disposition) !== "closed").length,
+    seenAgain,
+    seenAgainTotal: seenAgain.length,
+  };
+}
+
+/** ADR-0226: the import history's columns; the ids and sortable ones match the gateway's SHADOW_IMPORTS_LIST */
+const IMPORT_COLUMNS: Array<DataColumn<ImportRow>> = [
+  { key: "when", header: "When", main: true, sortable: true, render: (r) => <><span style={{ whiteSpace: "nowrap" }}>{fmtDateTime(r.createdAt)}</span><div className={v.faint}>{ago(r.createdAt)}</div></> },
+  { key: "kind", header: "Kind", main: true, sortable: true, render: (r) => evidenceLabel(r.kind) },
+  { key: "mode", header: "Mode", main: true, sortable: true, render: (r) => (r.mode === "dry_run" ? "Dry run" : r.mode === "apply" ? "Applied" : humanize(r.mode)) },
+  { key: "status", header: "Status", main: true, sortable: true, required: "Status, refusals included, is always shown", render: (r) => <Badge tone={r.status === "refused" ? "danger" : "ok"}>{humanize(r.status)}</Badge> },
+  { key: "rows", header: "Rows", main: true, sortable: true, render: (r) => r.rowCount.toLocaleString() },
+  { key: "outcome", header: "Outcome", main: true, sortable: true, render: (r) => <span className={v.dim}>{r.reason}</span> },
+];
+
 type StatusGroup = "all" | "open" | "confirmed" | "closed";
-const statusGroup = (d: string): Exclude<StatusGroup, "all"> => (d === "open" ? "open" : d === "confirmed" ? "confirmed" : "closed");
 const STATUS_GROUP_LABEL: Record<StatusGroup, string> = { all: "All", open: "Open", confirmed: "Confirmed", closed: "Closed" };
 
 const DISPOSITION_LABEL: Record<string, string> = {

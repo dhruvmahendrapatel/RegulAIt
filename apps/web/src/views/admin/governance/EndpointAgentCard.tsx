@@ -1,60 +1,30 @@
 /**
  * ADR-0195 SD4b — the RegulAIt endpoint agent on the Discovery sources page:
  * issue an enrolment token for an enabled endpoint agent source (shown once,
- * as the enrolment file MDM delivers), revoke tokens, and list and revoke the
- * devices that enrolled. Devices and their users appear only as pseudonyms.
+ * as the enrolment file MDM delivers), and preview the tokens and the devices
+ * that enrolled (P3: revoking them, and the full lists, are on their own pages).
+ * Devices and their users appear only as pseudonyms.
  * ADR-0197 Q13: a token lives 30 days at most unless the admin confirms it is
  * them for a longer one (up to 90, audited). Q14: revoking a token stops new
  * enrolments; revoking the devices it enrolled is a separate, unchecked choice.
  */
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { api } from "../../../api/client";
-import { fmtDateTime } from "../../../api/format";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
-import { Badge, Button, Card, CodeBlock, ConfirmModal, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
-import { plural } from "../../../api/format";
+import { Badge, Button, Card, CodeBlock, EmptyState, Field, Input, Select } from "../../../ui/kit";
 import { useAction } from "../adminKit";
 import v from "../../views.module.css";
 import type { DiscoverySourceView } from "./discoverySourcesModel";
+import {
+  DISCOVERY_SOURCES_PATH,
+  ListPreview,
+  deviceColumns,
+  devicesAttention,
+  tokenColumns,
+  tokensAttention,
+  type DeviceView,
+  type TokenView,
+} from "./discoveryLists";
 
-interface TokenView {
-  id: string;
-  label: string;
-  deviceCap: number;
-  devicesEnrolled: number;
-  createdAt: string;
-  expiresAt: string;
-  revokedAt: string | null;
-  /** ADR-0197 Q14: devices it enrolled that are not revoked (absent from a gateway before Q14) */
-  devicesActive?: number;
-}
-interface IdentityView {
-  identityId: string;
-  deviceUserPseudonym: string;
-  keyProtection: "hardware" | "software";
-  keyProvider: string;
-  status: string;
-  lastReportAt: string | null;
-}
-interface DeviceView {
-  id: string;
-  devicePseudonym: string;
-  os: string;
-  arch: string;
-  agentVersion: string;
-  identitiesRegistered: number;
-  identityCap: number;
-  lastReportAt: string | null;
-  revokedAt: string | null;
-  identities: IdentityView[];
-}
-interface DevicesView {
-  devices: DeviceView[];
-  summary: { devices: number; revoked: number; softwareKeys: number };
-}
-
-const when = (iso: string | null) => <span style={{ whiteSpace: "nowrap" }}>{fmtDateTime(iso, "never")}</span>;
 /** ADR-0197 Q13: the default and strict maximum, and the most a step-up relaxation allows */
 const TOKEN_DAYS = 30;
 const TOKEN_RELAXED_DAYS = 90;
@@ -70,21 +40,7 @@ export function EndpointAgentCard({ sources }: { sources: readonly DiscoverySour
   const [days, setDays] = useState("30");
   const [enrolFile, setEnrolFile] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [revoking, setRevoking] = useState<{ kind: "token"; row: TokenView } | { kind: "device"; row: DeviceView } | null>(null);
-  // ADR-0197 Q14: off by default each time the dialog opens
-  const [alsoDevices, setAlsoDevices] = useState(false);
   const chosen = targets.find((s) => s.id === sourceId) ?? null;
-
-  const tokens = useQuery({
-    queryKey: ["admin", "discovery", "enrolment-tokens", sourceId],
-    enabled: !!chosen,
-    queryFn: () => api.get<{ tokens: TokenView[] }>(`/v1/discovery/sources/${sourceId}/enrolment-tokens`),
-  });
-  const devices = useQuery({
-    queryKey: ["admin", "discovery", "endpoint-devices", sourceId],
-    enabled: !!chosen,
-    queryFn: () => api.get<DevicesView>(`/v1/discovery/sources/${sourceId}/endpoint-devices`),
-  });
 
   const issue = () => {
     if (!chosen) return setError("Choose an endpoint agent source.");
@@ -100,27 +56,8 @@ export function EndpointAgentCard({ sources }: { sources: readonly DiscoverySour
       const out = await withStepUp((h) => stepUpApi.post<{ token: TokenView; enrolFile: Record<string, string> }>(`/v1/discovery/sources/${chosen.id}/enrolment-tokens`, body, h));
       setEnrolFile(JSON.stringify(out.enrolFile, null, 2));
       setLabel("");
-      await tokens.refetch();
+      // the action's own refresh reloads the token and device lists (their query keys sit under "admin")
       return `Enrolment token '${out.token.label}' issued`;
-    });
-  };
-
-  const confirmRevoke = () => {
-    const r = revoking;
-    const revokeDevices = alsoDevices;
-    setRevoking(null);
-    setAlsoDevices(false);
-    if (!r) return;
-    void act.run(async () => {
-      if (r.kind === "token") {
-        const out = await api.post<{ devicesRevoked?: number }>(`/v1/discovery/enrolment-tokens/${r.row.id}/revoke`, { revokeDevices });
-        await tokens.refetch();
-        if (revokeDevices) await devices.refetch();
-        return revokeDevices ? `Enrolment token '${r.row.label}' revoked with ${plural(out.devicesRevoked ?? 0, "device")}` : `Enrolment token '${r.row.label}' revoked`;
-      }
-      const out = await api.post<{ identitiesRevoked: number }>(`/v1/discovery/endpoint-devices/${r.row.id}/revoke`, {});
-      await devices.refetch();
-      return `Device ${r.row.devicePseudonym} revoked (${plural(out.identitiesRevoked, "agent identity", "agent identities")})`;
     });
   };
 
@@ -176,113 +113,42 @@ export function EndpointAgentCard({ sources }: { sources: readonly DiscoverySour
                     <CodeBlock>{enrolFile}</CodeBlock>
                   </div>
                 )}
-                <Table<TokenView>
-                  rows={tokens.data?.tokens}
-                  loading={tokens.isPending}
-                  error={tokens.error}
-                  onRetry={() => void tokens.refetch()}
+                {/* P3: the newest few of each list, with what needs attention in the heading; the full lists have their own pages */}
+                <ListPreview<TokenView>
+                  key={`tokens-${sourceId}`}
+                  title="Enrolment tokens"
+                  testId="preview-enrolment-tokens"
+                  endpoint={`/v1/discovery/sources/${sourceId}/enrolment-tokens`}
+                  legacyKey="tokens"
+                  sort={{ key: "created", dir: "desc" }}
+                  queryKey={["admin", "discovery", "enrolment-tokens", sourceId]}
+                  noun={["token", "tokens"]}
+                  attention={tokensAttention}
+                  columns={tokenColumns().filter((c) => c.main)}
                   rowKey={(t) => t.id}
+                  viewAll={`${DISCOVERY_SOURCES_PATH}/tokens?source=${encodeURIComponent(sourceId)}`}
                   empty={<EmptyState title="No enrolment token" body="Issue one above to enrol devices." />}
-                  columns={[
-                    { key: "label", header: "Token", render: (t) => t.label },
-                    { key: "devices", header: "Devices", render: (t) => `${t.devicesEnrolled} / ${t.deviceCap}` },
-                    { key: "expires", header: "Expires", render: (t) => when(t.expiresAt) },
-                    {
-                      key: "state",
-                      header: "State",
-                      render: (t) =>
-                        t.revokedAt ? (
-                          <Badge tone="neutral">revoked</Badge>
-                        ) : (
-                          <Button size="sm" disabled={act.busy} onClick={() => setRevoking({ kind: "token", row: t })}>
-                            Revoke
-                          </Button>
-                        ),
-                    },
-                  ]}
                 />
-                {devices.data ? (
-                  <p className={v.faint}>
-                    {`${plural(devices.data.summary.devices, "device")}, ${devices.data.summary.revoked} revoked, ${plural(devices.data.summary.softwareKeys, "agent identity", "agent identities")} with a software key (no key hardware on the device).`}
-                  </p>
-                ) : devices.isPending ? (
-                  <p className={v.faint} role="status">Loading devices…</p>
-                ) : null}
-                <Table<DeviceView>
-                  rows={devices.data?.devices}
-                  loading={devices.isPending}
-                  error={devices.error}
-                  onRetry={() => void devices.refetch()}
+                <ListPreview<DeviceView>
+                  key={`devices-${sourceId}`}
+                  title="Endpoint devices"
+                  testId="preview-endpoint-devices"
+                  endpoint={`/v1/discovery/sources/${sourceId}/endpoint-devices`}
+                  legacyKey="devices"
+                  sort={{ key: "created", dir: "desc" }}
+                  queryKey={["admin", "discovery", "endpoint-devices", sourceId]}
+                  noun={["device", "devices"]}
+                  attention={devicesAttention}
+                  columns={deviceColumns().filter((c) => c.main)}
                   rowKey={(d) => d.id}
+                  viewAll={`${DISCOVERY_SOURCES_PATH}/devices?source=${encodeURIComponent(sourceId)}`}
                   empty={<EmptyState title="No device has enrolled" body="Devices appear here once their install step redeems an enrolment token." />}
-                  columns={[
-                    { key: "device", header: "Device", render: (d) => <span className={v.mono}>{d.devicePseudonym}</span> },
-                    { key: "platform", header: "Platform", render: (d) => `${d.os}/${d.arch}, agent ${d.agentVersion}` },
-                    {
-                      key: "users",
-                      header: "Users (self-reported)",
-                      render: (d) =>
-                        d.identities.length === 0
-                          ? "none registered"
-                          : d.identities.map((i) => (
-                              <div key={i.identityId}>
-                                <span className={v.mono}>{i.deviceUserPseudonym}</span>{" "}
-                                <Badge tone={i.keyProtection === "hardware" ? "ok" : "warn"}>{`${i.keyProtection} key`}</Badge>
-                              </div>
-                            )),
-                    },
-                    { key: "last", header: "Last report", render: (d) => when(d.lastReportAt) },
-                    {
-                      key: "state",
-                      header: "State",
-                      render: (d) =>
-                        d.revokedAt ? (
-                          <Badge tone="neutral">revoked</Badge>
-                        ) : (
-                          <Button size="sm" disabled={act.busy} onClick={() => setRevoking({ kind: "device", row: d })}>
-                            Revoke
-                          </Button>
-                        ),
-                    },
-                  ]}
                 />
               </>
             )}
           </>
         )}
       </div>
-      <ConfirmModal
-        open={revoking !== null}
-        danger
-        title={revoking?.kind === "device" ? "Revoke this device?" : "Revoke this enrolment token?"}
-        body={
-          revoking?.kind === "device" ? (
-            "Its agent identities, keys and tokens are revoked and it uploads nothing more. Enrolling it again needs a new ticket."
-          ) : (
-            <div className={v.stackTight}>
-              <p>
-                It redeems no new device ticket, and its unexpired tickets register no new user.{" "}
-                {alsoDevices ? "The devices it enrolled are revoked too." : "Devices already enrolled keep reporting."}
-              </p>
-              <label className={v.rowTight}>
-                <input type="checkbox" checked={alsoDevices} onChange={(e) => setAlsoDevices(e.target.checked)} />
-                <span>
-                  {revoking?.kind === "token" && revoking.row.devicesActive !== undefined
-                    ? `Also revoke the ${plural(revoking.row.devicesActive, "device")} it enrolled`
-                    : "Also revoke the devices it enrolled"}
-                  {" "}(their agent identities, keys and tokens; they upload nothing more)
-                </span>
-              </label>
-            </div>
-          )
-        }
-        confirmLabel={revoking?.kind === "token" && alsoDevices ? "Revoke token and devices" : "Revoke"}
-        onConfirm={confirmRevoke}
-        onCancel={() => {
-          setRevoking(null);
-          setAlsoDevices(false);
-        }}
-      />
     </Card>
   );
 }
