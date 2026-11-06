@@ -37,9 +37,12 @@ result attached to the risk record and able to hold the model.
    computed (fewer than two groups of the minimum size, or a group with no favourable labels), otherwise `flag` if a
    flag threshold is breached, otherwise `pass`. Inconclusive is never read as a pass. **A run looser than the strict
    defaults is a relaxation (PR #633 review):** a run that leaves a metric out, raises a `max` limit above its default
-   or lowers a `min` limit below it, sets `flag` where the default is `fail`, or raises the minimum group size above 30
-   needs a `settings_relax` step-up bound to exactly what it relaxes (`fairnessRunRelaxed`), and the run row
+   or lowers a `min` limit below it, sets `flag` where the default is `fail`, or sets a minimum group size other than
+   30 needs a `settings_relax` step-up bound to exactly what it relaxes (`fairnessRunRelaxed`), and the run row
    (`fairness_runs.relaxed`) and its audit row record it. Without this, any admin could lift a hold with a weaker run.
+   A minimum group size *below* 30 counts too (PR #633 security review, round 2): it is statistically stricter, but it
+   brings groups of one or two people into the stored and returned result, whose outcome counts and rates identify
+   them, so it is a privacy relaxation.
 4. **A failing or inconclusive latest run holds the model card.** While blocking is on (the default), a card whose
    latest run failed or was inconclusive cannot be sent for sign-off (409 `fairness_test_failed`), and dispatch under
    it is refused on the model-risk gate's existing 409 path (`mrm_approval_required`, audit rule
@@ -103,5 +106,7 @@ pinned exactly, listed in the gateway's THIRD_PARTY.md. It works air-gapped.
   - cite a run in `model_card_evidence` and the signed AI-BOM evidence format (needs an ADR-0189 format change);
   - optionally require a passing run before a card's sign-off (a per-card or per-risk-tier requirement; the owner
     decides whether blocking-on should require one, decision 4);
+  - staleness for a card with no pinned model version: such a run records a null version and never goes stale when
+    the agent's served model changes; snapshot the resolved serving model instead (PR #633 round-2 review note);
   - intersectional groups (combinations of attributes), multi-class outcomes and confidence intervals;
   - re-check the open-source exception when P7's scorer sidecar lands.

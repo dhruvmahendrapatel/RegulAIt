@@ -202,11 +202,15 @@ describe("fairnessSettingsRelaxed", () => {
 
 describe("fairnessRunRelaxed", () => {
   const defaults = FAIRNESS_DEFAULT_THRESHOLDS.map((t) => ({ ...t }));
-  it("the strict defaults, an omitted request and a tighter request relax nothing", () => {
+  it("the strict defaults, an omitted request and tighter thresholds relax nothing", () => {
     expect(fairnessRunRelaxed(undefined, undefined)).toEqual({});
     expect(fairnessRunRelaxed(defaults, 30)).toEqual({});
     const tighter = defaults.map((t) => ({ ...t, limit: t.metric === "disparate_impact_ratio" ? 0.9 : 0.05 }));
-    expect(fairnessRunRelaxed(tighter, 1)).toEqual({});
+    expect(fairnessRunRelaxed(tighter, 30)).toEqual({});
+  });
+  it("a minimum group size below the default is a relaxation too: it would store small groups' outcomes", () => {
+    expect(fairnessRunRelaxed(undefined, 1)).toEqual({ "fairnessRun.minGroupSize": 1 });
+    expect(fairnessRunRelaxed(defaults, 29)).toEqual({ "fairnessRun.minGroupSize": 29 });
   });
   it("an omitted metric, a looser limit in either direction, flag-only and a larger minimum group are each relaxations", () => {
     expect(fairnessRunRelaxed(defaults.slice(1), undefined)).toEqual({ "fairnessRun.demographic_parity_difference": "omitted" });

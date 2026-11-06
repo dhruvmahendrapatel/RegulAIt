@@ -207,8 +207,9 @@ export function fairnessSettingsRelaxed(
  *  - leaves a metric out (`fairnessRun.<metric>`: "omitted");
  *  - raises a `max` limit above its default or lowers a `min` limit below it, or sets `flag` where the default is
  *    `fail` (`fairnessRun.<metric>`: its `{ limit, action }`);
- *  - raises the minimum group size above the default, which leaves small groups out of the metrics
- *    (`fairnessRun.minGroupSize`).
+ *  - sets a minimum group size other than the default (`fairnessRun.minGroupSize`): above it leaves small groups
+ *    out of the metrics; below it brings small groups INTO the stored and returned result, whose outcome counts and
+ *    rates can identify the people in a group of one or two (PR #633 security review, round 2). Both need the step-up.
  * Omitted fields are the strict defaults. Empty = nothing is relaxed and no step-up is asked.
  */
 export function fairnessRunRelaxed(
@@ -228,7 +229,7 @@ export function fairnessRunRelaxed(
       if (looserLimit || looserAction) out[`fairnessRun.${d.metric}`] = { limit: t.limit, action: t.action };
     }
   }
-  if (minGroupSize !== undefined && minGroupSize > FAIRNESS_LIMITS.minGroupSize.default) out["fairnessRun.minGroupSize"] = minGroupSize;
+  if (minGroupSize !== undefined && minGroupSize !== FAIRNESS_LIMITS.minGroupSize.default) out["fairnessRun.minGroupSize"] = minGroupSize;
   return out;
 }
 

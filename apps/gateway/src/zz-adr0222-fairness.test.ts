@@ -326,6 +326,9 @@ describe("ADR-0222: a run measures, and a failing result holds the card", () => 
       { body: { thresholds: strict.map((t) => (t.metric === "equalized_odds_difference" ? { ...t, action: "flag" } : t)) }, key: "fairnessRun.equalized_odds_difference" },
       // a minimum group size above 30 leaves small groups out
       { body: { minGroupSize: 31 }, key: "fairnessRun.minGroupSize" },
+      // below 30 it would store and return the outcomes of groups of one or two people
+      { body: { minGroupSize: 1 }, key: "fairnessRun.minGroupSize" },
+      { body: { minGroupSize: 10 }, key: "fairnessRun.minGroupSize" },
     ];
     const before = (await db.select({ id: fairnessRuns.id }).from(fairnessRuns).where(eq(fairnessRuns.cardId, cardId))).length;
     for (const c of lenientCases) {
@@ -336,9 +339,16 @@ describe("ADR-0222: a run measures, and a failing result holds the card", () => 
     }
     // nothing was recorded, so nothing could lift a hold
     expect((await db.select({ id: fairnessRuns.id }).from(fairnessRuns).where(eq(fairnessRuns.cardId, cardId))).length).toBe(before);
-    // the strict defaults, or tighter, need no step-up
+    // the strict defaults, or tighter thresholds, need no step-up
     expect((await runTest({ datasetId: fairId, cardId }, adminKey)).statusCode).toBe(201);
-    expect((await runTest({ datasetId: fairId, cardId, minGroupSize: 10 }, adminKey)).statusCode).toBe(201);
+    const tighter = strict.map((t) => ({ ...t, limit: t.metric === "disparate_impact_ratio" ? 0.9 : 0.05 }));
+    expect((await runTest({ datasetId: fairId, cardId, thresholds: tighter, minGroupSize: 30 }, adminKey)).statusCode).toBe(201);
+    // a small minimum group size with the step-up: recorded as relaxed, on the run and its audit row
+    const small = await runTest({ datasetId: fairId, cardId, minGroupSize: 1 });
+    expect(small.statusCode).toBe(201);
+    expect(small.json().run.relaxed).toEqual({ "fairnessRun.minGroupSize": 1 });
+    const [smallAudit] = (await audits(FAIRNESS_RULE_IDS.run)).filter((a) => (a.detail as { fairnessRunId: string }).fairnessRunId === small.json().run.id);
+    expect((smallAudit!.detail as { relaxed: Record<string, unknown> }).relaxed).toEqual({ "fairnessRun.minGroupSize": 1 });
     // with the step-up the lenient run is recorded, and the run and its audit row say what was relaxed
     const stepped = await runTest({ datasetId: fairId, cardId, minGroupSize: 40 });
     expect(stepped.statusCode).toBe(201);
