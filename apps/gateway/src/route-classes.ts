@@ -402,6 +402,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/workflows/instances/:instanceId/abort",
   "GET /v1/workflows/instances/:instanceId",
   "GET /v1/approvals",
+  // ADR-0226: the queue's Excel export, read through the same visibility as the list (never wider)
+  "GET /v1/approvals/export.xlsx",
   // ADR-0046 — the review workbench's REVIEWER-facing surface. Each of these
   // is a non-admin route for the same reason deciding an approval is: the
   // person doing the reviewing is not an admin. Every one of them still

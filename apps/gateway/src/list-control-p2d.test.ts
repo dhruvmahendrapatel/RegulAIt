@@ -1,7 +1,7 @@
 /**
  * ADR-0226 P2 batch D — the shared list contract on four more lists:
  *
- *  - `GET /v1/approvals` (paging, sort and totals; its export waits for the Inbox's list control);
+ *  - `GET /v1/approvals` (paging, sort and totals) and its export, the Inbox's "Recently decided" download;
  *  - `GET /v1/usage-events` (Spend's invocations, Optimization's usage events) and its export;
  *  - `GET /v1/governance/decision-regression/cases` (the golden cases, built in memory) and its export;
  *  - `GET /v1/recommendations/access` with `rule` (one rule's findings, built in memory) and its export.
@@ -170,8 +170,61 @@ describe("P2d: the approvals queue", () => {
     expect((await get(`/v1/approvals?sort=status&cursor=abc`, who.a.auth)).json().error).toBe("cursor_not_supported");
   });
 
-  it("has no Excel export yet (it waits for the Inbox's list control)", async () => {
-    expect((await get(`/v1/approvals/export.xlsx?columns=status`)).statusCode).toBe(404);
+  it("exports only the decided rows the caller may see, with the chosen columns in order, audited", async () => {
+    const res = await get(`/v1/approvals/export.xlsx?status=${DECIDED}&sort=requested&dir=desc&columns=reason,approver,status`, who.a.auth);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.headers["content-type"]).toContain("spreadsheetml");
+    const sheet = readXlsx(res.rawPayload);
+    expect(sheet[0]).toEqual(["Reason", "Approver", "Status"]);
+    expect(sheet).toHaveLength(1 + A_DECIDED);
+    // every row is the caller's own: b's four decided rows and the pending row never export
+    expect(sheet.slice(1).every((r) => r[1] === `Avery Approver ${RUN}` && String(r[0]).startsWith("p2d a "))).toBe(true);
+    expect(sheet.slice(1).some((r) => r[2] === "pending")).toBe(false);
+    // the same sort as the list: newest requested first
+    const listed = await walk(`/v1/approvals?status=${DECIDED}&limit=50&sort=requested&dir=desc`, who.a.auth);
+    expect(sheet.slice(1).map((r) => r[0])).toEqual(listed.map((r) => r.decisionReason));
+    const [audit] = await exportAudits("approvals");
+    expect(audit).toMatchObject({ userId: who.a.id, ruleId: "list-export-xlsx" });
+    expect(audit!.detail).toMatchObject({ listId: "approvals", rows: A_DECIDED, columns: ["reason", "approver", "status"] });
+  });
+
+  it("the export cannot be widened: approverUserId names another person's rows and gets an empty, audited file", async () => {
+    const before = (await exportAudits("approvals")).length;
+    const res = await get(`/v1/approvals/export.xlsx?status=${DECIDED}&approverUserId=${who.b.id}&columns=reason`, who.a.auth);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(readXlsx(res.rawPayload)).toEqual([["Reason"]]);
+    const audits = await exportAudits("approvals");
+    expect(audits).toHaveLength(before + 1);
+    expect(audits[0]!.detail).toMatchObject({ rows: 0, filters: { approverUserId: who.b.id } });
+    // an admin sees b's rows through the same filter
+    const admin = await get(`/v1/approvals/export.xlsx?status=${DECIDED}&approverUserId=${who.b.id}&columns=reason,decider`);
+    expect(admin.statusCode, admin.body).toBe(200);
+    const sheet = readXlsx(admin.rawPayload);
+    expect(sheet).toHaveLength(1 + 4);
+    expect(sheet.slice(1).every((r) => r[1] === `Morgan Reyes ${RUN}`)).toBe(true);
+  });
+
+  it("refuses an unknown or repeated column, an unknown sort and the legacy `order`, and audits nothing", async () => {
+    const before = (await exportAudits("approvals")).length;
+    for (const [url, error] of [
+      ["/v1/approvals/export.xlsx?columns=status,approverUserId", "unknown_column"],
+      ["/v1/approvals/export.xlsx?columns=status,status", "duplicate_column"],
+      ["/v1/approvals/export.xlsx?columns=status&sort=approverUserId", "unknown_sort_column"],
+    ] as const) {
+      const res = await get(url, who.a.auth);
+      expect(res.statusCode, url).toBe(400);
+      expect(res.json().error, url).toBe(error);
+    }
+    expect((await get(`/v1/approvals/export.xlsx?columns=status&order=asc`, who.a.auth)).statusCode).toBe(400);
+    expect((await get(`/v1/approvals/export.xlsx`, who.a.auth)).statusCode).toBe(400);
+    expect(await exportAudits("approvals")).toHaveLength(before);
+  });
+
+  it("an unauthenticated caller is refused and nothing is audited", async () => {
+    const before = (await exportAudits("approvals")).length;
+    const res = await get(`/v1/approvals/export.xlsx?columns=status`, {});
+    expect(res.statusCode).toBe(401);
+    expect(await exportAudits("approvals")).toHaveLength(before);
   });
 
   it("a caller who sends none of the new params gets the capped page it always got", async () => {

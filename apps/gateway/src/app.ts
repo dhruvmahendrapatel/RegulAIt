@@ -4373,8 +4373,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0226: with any of sort/dir/cursor/offset/count the queue answers the
   // shared list contract (the same visibility and filters; `order` is the
   // legacy page's own and is refused there); with none of them, exactly the
-  // capped, oldest- or newest-first page below. The Excel export waits for the
-  // Inbox's list control (P2 batch D: the "Recently decided" fold).
+  // capped, oldest- or newest-first page below. GET /v1/approvals/export.xlsx
+  // is the Inbox list control's download: the same scope, filters and audit row.
   const approvalsFilterQuery = approvalsListQuery.omit({ order: true }).strict();
   const approvalsReader = (me: string, delegators: string[]): ListReader<ApprovalListRow> => ({
     fetch: async (q) => {
@@ -4390,6 +4390,21 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     },
     countable: (where) => db.select({ one: sql`1` }).from(approvals).where(where),
     idOf: (r) => r.id,
+  });
+  // ADR-0226: the queue as an Excel file, read through approvalsScope (the
+  // visibility a non-admin's page has, never wider) and audited before the first
+  // byte by sendListExport (the list-export-xlsx row every list export writes).
+  app.get("/v1/approvals/export.xlsx", async (req, reply) => {
+    try {
+      const q = req.query as Record<string, unknown>;
+      const filters = approvalsFilterQuery.parse(filterParams(q));
+      const ex = parseListExport(APPROVALS_LIST, q);
+      const { listWhere, me, delegators } = await approvalsScope(req, filters);
+      await sendListExport(db, req, reply, APPROVALS_LIST, approvalsReader(me, delegators), listWhere, ex, filters);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
   });
   app.get("/v1/approvals", async (req, reply) => {
     if (wantsListContract(req.query)) {

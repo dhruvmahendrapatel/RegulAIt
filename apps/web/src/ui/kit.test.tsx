@@ -5,7 +5,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../api/client";
-import { Badge, Card, EmptyState, Field, Fieldset, InfoButton, Input, RecordError, RowActions, Table, Tabs, foldPattern, tabIds } from "./kit";
+import { Badge, Card, EmptyState, Field, Fieldset, InfoButton, Input, LIST_CONTROL_ATTR, RecordError, RowActions, Table, Tabs, foldPattern, holdsKeepVisible, tabIds } from "./kit";
 import { FoldTable, foldHosts } from "./fold";
 // Digest lives with the BOM evidence panel; it is tested here with the other shared primitives
 import { Digest } from "../views/admin/governance/BomEvidencePanel";
@@ -354,6 +354,75 @@ describe("Card contain — a long body scrolls in a contained box (X6)", () => {
   it("leaves a card without contain exactly as before", () => {
     const html = renderToStaticMarkup(<Card title="Findings">rows</Card>);
     expect(html).not.toContain('role="region"');
+  });
+});
+
+/** a few elements with parents and attributes, enough for closest() and contains() (the suite renders without a DOM) */
+type FakeEl = { attrs: string[]; parent: FakeEl | null; closest(sel: string): FakeEl | null };
+function el(parent: FakeEl | null, ...attrs: string[]): FakeEl {
+  const self: FakeEl = {
+    attrs,
+    parent,
+    closest(sel) {
+      const want = /^\[([^\]=]+)\]$/.exec(sel)?.[1];
+      for (let at: FakeEl | null = self; at; at = at.parent) if (want && at.attrs.includes(want)) return at;
+      return null;
+    },
+  };
+  return self;
+}
+function body(root: FakeEl, matches: FakeEl[]) {
+  let selector = "";
+  const host = {
+    querySelectorAll: (sel: string) => ((selector = sel), matches),
+    contains: (other: FakeEl | null) => {
+      for (let at = other; at; at = at.parent) if (at === root) return true;
+      return false;
+    },
+  };
+  return { host: host as unknown as Pick<HTMLElement, "querySelectorAll" | "contains">, selector: () => selector };
+}
+
+describe("Card listControl — a DataList's own controls may fold, every other form control still refuses (X6b, 2026-11-06)", () => {
+  it("lets a body whose only form controls are the list's own fold, and only with the opt-in", () => {
+    const root = el(null);
+    const toolbar = el(root, LIST_CONTROL_ATTR);
+    const pageSize = el(toolbar);
+    const b = body(root, [pageSize]);
+    expect(holdsKeepVisible(b.host, true)).toBe(false);
+    // the selector is the kit's whole refusal list: a select, an input, a form, an alert, a dialog
+    for (const part of ["select", "textarea", "input:not(", "form", '[role="alert"]', "dialog"]) expect(b.selector()).toContain(part);
+    // without the opt-in, the list's own page-size select still refuses the fold, as before
+    expect(holdsKeepVisible(b.host, false)).toBe(true);
+  });
+
+  it("still refuses for any other input, select or textarea beside the list, so a typed draft is never hidden", () => {
+    const root = el(null);
+    const toolbar = el(root, LIST_CONTROL_ATTR);
+    const reasonInRow = el(el(root));
+    expect(holdsKeepVisible(body(root, [el(toolbar), reasonInRow]).host, true)).toBe(true);
+    expect(holdsKeepVisible(body(root, [reasonInRow]).host, true)).toBe(true);
+  });
+
+  it("never takes the mark from outside the body: a page cannot excuse a form by marking an ancestor of the card", () => {
+    const page = el(null, LIST_CONTROL_ATTR);
+    const root = el(page);
+    expect(holdsKeepVisible(body(root, [el(el(root))]).host, true)).toBe(true);
+  });
+
+  it("must still say its count (null until the list has loaded), and mounts its body only once opened", () => {
+    // @ts-expect-error a listControl card states its count, or null while the folded list has not been read
+    void (<Card title="Recently decided" contain foldable listControl>rows</Card>);
+    const folded = renderToStaticMarkup(<Card title="Recently decided" contain foldable listControl startCollapsed count={null}>BODY</Card>);
+    expect(folded).toContain('aria-expanded="false"');
+    expect(folded).not.toContain("BODY");
+    expect(folded).not.toMatch(/\d+ rows/);
+    // a plain foldable card keeps its body in the page while folded, as before
+    expect(renderToStaticMarkup(<Card title="Findings" contain foldable startCollapsed count={3}>BODY</Card>)).toContain("BODY");
+    const open = renderToStaticMarkup(<Card title="Recently decided" contain foldable listControl count={7} countNoun={["decision", "decisions"]}>BODY</Card>);
+    expect(open).toContain('aria-expanded="true"');
+    expect(open).toContain("BODY");
+    expect(open).toContain(">7 decisions<");
   });
 });
 

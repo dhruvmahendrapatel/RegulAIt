@@ -263,6 +263,7 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
       "true when `total` exceeds the rows returned. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the " +
       "shared list contract (ADR-0226) under the same visibility and filters (`order` is then refused).",
   },
+  "GET /v1/approvals/export.xlsx": { summary: "The approvals queue as an Excel file: every approval the caller may see (the same visibility as the queue) that matches the filters, in the requested sort, with the requested `columns` in order. Audited." },
   "POST /v1/approvals/:approvalId/decide": {
     summary: "Approve or deny a pending request. Non-admin by design — the named approver is usually not an admin.",
     // ADR-0180 A2: the decide body also accepts measured conditions

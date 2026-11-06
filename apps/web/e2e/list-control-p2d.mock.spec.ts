@@ -4,7 +4,9 @@
  *
  *  - the Optimization page's usage events (GET /v1/usage-events);
  *  - the golden cases (GET /v1/governance/decision-regression/cases, built in memory on the server);
- *  - access recommendations' findings per rule (GET /v1/recommendations/access?rule=…, built in memory).
+ *  - access recommendations' findings per rule (GET /v1/recommendations/access?rule=…, built in memory);
+ *  - the Inbox's "Recently decided" (GET /v1/approvals with the decided statuses), which starts folded, is not read
+ *    until it is opened, and folds again over the list's own controls (the kit's `listControl`, owner 2026-11-06).
  *
  * For each: rows per page 10, 50, 100 and All; a header click asks the server for the sort; the gear hides an
  * optional column and keeps a required one; Download Excel asks for the columns on screen, in order, with the same
@@ -72,6 +74,42 @@ const REPORT = {
   judged: { enabled: false, note: "Model-judged annotations are off." },
 };
 
+const DECIDED_STATUS = "approved,denied,returned,consumed,superseded";
+const OUTCOMES = ["approved", "denied", "returned", "consumed", "superseded"] as const;
+const APPROVALS = [
+  ...Array.from({ length: 37 }, (_, i) => ({
+    id: `44444444-4444-4444-8444-${String(i).padStart(12, "0")}`,
+    status: OUTCOMES[i % 5]!,
+    objectType: i % 3 ? "run" : "project",
+    stageId: i % 3 ? "review" : "__project_budget__",
+    requestedAt: at(i * 2 + 1),
+    decidedAt: at(i * 2),
+    userId: `u-${i % 5}`,
+    approverUserId: "u-admin",
+    requestedByName: `${PEOPLE[i % 5]} ${String(i).padStart(2, "0")}`,
+    approverName: "Ada Admin",
+    decidedByName: PEOPLE[(i + 2) % 5],
+    decisionReason: `Checked against the policy (${i})`,
+    objectLabel: `Decided item ${String(i).padStart(2, "0")}`,
+  })),
+  // pending rows the decided list must never show
+  ...Array.from({ length: 3 }, (_, i) => ({
+    id: `55555555-5555-4555-8555-${String(i).padStart(12, "0")}`,
+    status: "pending",
+    objectType: "run",
+    stageId: "review",
+    requestedAt: at(i),
+    decidedAt: null,
+    userId: "u-1",
+    approverUserId: "u-admin",
+    requestedByName: "Pending requester",
+    approverName: "Ada Admin",
+    decidedByName: null,
+    decisionReason: null,
+    objectLabel: `Pending item ${i}`,
+  })),
+];
+
 interface ListDef {
   rows: Json[];
   field: Record<string, string>;
@@ -95,6 +133,12 @@ const LISTS: Record<string, ListDef> = {
     field: { holder: "holder.label", object: "object.label", why: "rationale", judged: "judged.verdict" },
     filter: (_r, q) => q.get("rule") === "unused-grant",
     extra: { judged: REPORT.judged },
+  },
+  "/v1/approvals": {
+    rows: APPROVALS,
+    keysetSort: "requested",
+    field: { requested: "requestedAt", decided: "decidedAt", status: "status", kind: "objectType", requester: "requestedByName", approver: "approverName", decider: "decidedByName" },
+    filter: (r, q) => (q.get("status") ?? "").split(",").includes(String(r.status)),
   },
 };
 const pick = (r: Json, path: string) => path.split(".").reduce<unknown>((v, k) => (v as Json | null)?.[k], r) as string | number | null;
@@ -164,6 +208,8 @@ async function mockApi(page: Page): Promise<Capture> {
     if (p === "/v1/annotations/inbox") return json(route, { items: [] });
     if (p === "/v1/users") return json(route, { users: [{ id: "u-admin", email: "ada@example.test", displayName: "Ada Admin" }] });
     if (p === "/v1/use-cases") return json(route, { useCases: [] });
+    // the Inbox's pending queue (its own legacy read, oldest first): empty here
+    if (p === "/v1/approvals") return json(route, { approvals: [], total: 0, hasMore: false, limit: 100 });
     return json(route, {});
   });
   return cap;
@@ -244,6 +290,23 @@ const PAGES: PageDef[] = [
     hideId: "object",
     required: "",
     filters: { rule: "unused-grant" },
+  },
+  {
+    name: "Inbox recently decided",
+    path: "/ui/inbox",
+    endpoint: "/v1/approvals",
+    noun: "decisions",
+    total: APPROVALS.filter((a) => a.status !== "pending").length,
+    open: (page) => unfold(page, "Recently decided"),
+    sortHeader: "Requested by",
+    sortId: "requester",
+    sortField: "requestedByName",
+    optional: "Approver",
+    optionalId: "approver",
+    hide: "Reason",
+    hideId: "reason",
+    required: "Status",
+    filters: { status: DECIDED_STATUS },
   },
 ];
 
@@ -374,3 +437,74 @@ for (const P of PAGES) {
     });
   });
 }
+
+test.describe("the Inbox's Recently decided folds over the list control (X6b, listControl)", () => {
+  const decidedReads = (cap: Capture) => cap.lists.filter((u) => u.pathname === "/v1/approvals");
+  const card = (page: Page) => page.locator("section[data-rg-card]").filter({ hasText: "Recently decided" });
+
+  test("starts folded and unread, opens to the list, folds again with its page size kept, and is axe clean", async ({ page }) => {
+    const cap = await mockApi(page);
+    await page.goto("/ui/inbox");
+    const fold = page.getByRole("button", { name: /^Recently decided/ });
+    await expect(fold).toHaveAttribute("aria-expanded", "false");
+    // the first load does not pay for the decided list: nothing is read, and no list or count is on the page
+    await expect(page.getByRole("heading", { name: "Inbox" })).toBeVisible();
+    expect(decidedReads(cap)).toEqual([]);
+    await expect(page.locator("[data-list]")).toHaveCount(0);
+    await expect(fold).not.toContainText(/\d+ decisions?/);
+    await expectAxeClean(page, "Inbox, Recently decided folded");
+
+    await fold.click();
+    await expect(fold).toHaveAttribute("aria-expanded", "true");
+    const total = APPROVALS.filter((a) => a.status !== "pending").length;
+    await expect(status(page)).toHaveText(`1–10 of ${n(total)}`);
+    expect(decidedReads(cap).every((u) => u.searchParams.get("status") === DECIDED_STATUS)).toBe(true);
+    await expect(card(page).getByText("Pending item", { exact: false })).toHaveCount(0);
+    // once read, the folded header keeps the server's count
+    await expect(fold).toContainText(`${total} decisions`);
+
+    // the page-size select does not stop the fold: change it, fold, reopen, and the choice is kept
+    await list(page).getByLabel("Rows per page").selectOption("50");
+    await expect(status(page)).toHaveText(`1–${total} of ${n(total)}`);
+    await fold.click();
+    await expect(fold).toHaveAttribute("aria-expanded", "false");
+    await expect(list(page)).toBeHidden();
+    await expect(fold).toContainText(`${total} decisions`);
+    await fold.click();
+    await expect(list(page).getByLabel("Rows per page")).toHaveValue("50");
+    await expect(status(page)).toHaveText(`1–${total} of ${n(total)}`);
+
+    // sort on the server, then the download asks for the same sort and filters
+    await list(page).getByRole("button", { name: "Decided by", exact: true }).click();
+    await expect.poll(() => lastList(cap, "/v1/approvals").searchParams.get("sort")).toBe("decider");
+    await list(page).getByRole("button", { name: "Download Excel" }).click();
+    await expect.poll(() => cap.exports.length).toBe(1);
+    const ex = cap.exports[0]!;
+    expect(ex.pathname).toBe("/v1/approvals/export.xlsx");
+    expect(ex.searchParams.get("status")).toBe(DECIDED_STATUS);
+    expect(ex.searchParams.get("sort")).toBe("decider");
+    expect(ex.searchParams.get("columns")!.split(",")).toEqual(["item", "status", "requester", "decider", "decided", "reason"]);
+    await expect(page.getByText("Excel file downloaded")).toBeVisible();
+    await expectAxeClean(page, "Inbox, Recently decided open");
+  });
+
+  test("a failed read shows the list's error with Retry, and the section stays open", async ({ page }) => {
+    let fail = true;
+    const cap = await mockApi(page);
+    await page.route(/\/v1\/approvals\?.*sort=/, async (route) => {
+      if (!fail) return route.fallback();
+      return json(route, { error: "unavailable" }, 503);
+    });
+    await page.goto("/ui/inbox");
+    await page.getByRole("button", { name: /^Recently decided/ }).click();
+    const alert = card(page).getByRole("alert");
+    await expect(alert).toContainText("Couldn't load this list");
+    // an error is never folded away: the section has no fold while it shows one
+    await expect(page.getByRole("button", { name: /^Recently decided/ })).toHaveCount(0);
+    fail = false;
+    await alert.getByRole("button", { name: "Retry" }).click();
+    await expect(status(page)).toHaveText(/^1–10 of /);
+    expect(decidedReads(cap).length).toBeGreaterThan(0);
+    await expect(page.getByRole("button", { name: /^Recently decided/ })).toHaveAttribute("aria-expanded", "true");
+  });
+});

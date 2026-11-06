@@ -434,13 +434,27 @@ export function TagPicker(props: {
  * its count (and the caller's worst-status badge): a section with no count cannot hide that something needs attention.
  */
 type CardFold =
-  | { foldable?: false; startCollapsed?: never }
+  | { foldable?: false; startCollapsed?: never; listControl?: never }
   | {
       /** X6b: the title is a fold button that collapses or opens the whole section */
       foldable: true;
       contain: true;
       count: number;
       /** X6b: a secondary section starts collapsed until the viewer opens it */
+      startCollapsed?: boolean;
+      listControl?: false;
+    }
+  | {
+      foldable: true;
+      contain: true;
+      /**
+       * X6b (owner decision, 2026-11-06): the body is one DataList, whose own controls (page size, sort, the column
+       * picker) are no reason to refuse the fold. Every other form control, warning or step-up still refuses it. The
+       * body mounts the first time the section opens, so a list folded at first load is never fetched.
+       */
+      listControl: true;
+      /** the list's total once it has loaded; null while it has not, as a folded list is not read */
+      count: number | null;
       startCollapsed?: boolean;
     };
 
@@ -466,7 +480,7 @@ export type CardProps = CardFold & {
   /** X6b: the worst status, shown in the header even while collapsed (e.g. a "1 critical" badge) */
   attention?: ReactNode;
   /** X6 cue beside the title: how many rows the body holds */
-  count?: number;
+  count?: number | null;
   /** the body is filtered: `count` of `total` rows are shown */
   total?: number;
   /** `count` is a fetch limit that was reached, so more rows exist ("50+ runs") */
@@ -529,6 +543,7 @@ export function Card(props: CardProps) {
   // in the document; `contain` may also switch on after mount. On the server
   // there is no host, so the body renders inline.
   const [fit, setFit] = useState({ scrolls: false, long: false, refused: false, shown: -1 });
+  const listControl = props.listControl === true;
   const countRef = useRef(props.count);
   countRef.current = props.count;
   const [expanded, setExpanded] = useState(false);
@@ -575,7 +590,7 @@ export function Card(props: CardProps) {
     const check = () => {
       // expanded: keep the Expand trigger until the dialog hands focus back to it
       if (host.parentElement !== el) return;
-      const refused = host.querySelector(KEEP_VISIBLE) != null;
+      const refused = holdsKeepVisible(host, listControl);
       if (refused && !warned && import.meta.env.DEV) {
         warned = true;
         console.warn(`Card "${name}": contain refused, the body holds a form, warning, decision or step-up control`);
@@ -592,7 +607,7 @@ export function Card(props: CardProps) {
       if (next.scrolls) {
         // L3: how many rows fit in the box before the reader scrolls ("Showing N of M")
         const top = el.getBoundingClientRect().top - el.scrollTop;
-        const rows = bodyRows(host, countRef.current);
+        const rows = bodyRows(host, countRef.current ?? undefined);
         // F33: a row counts as shown once most of it is in view, so a last row cut by a few pixels is counted
         if (rows.length > 0) next.shown = rows.filter((r) => { const b = r.getBoundingClientRect(); return (b.top + b.bottom) / 2 - top <= el.clientHeight; }).length;
       }
@@ -614,10 +629,14 @@ export function Card(props: CardProps) {
       mo.disconnect();
       window.removeEventListener("resize", check);
     };
-  }, [host, name]);
+  }, [host, name, listControl]);
   const containable = props.contain && !fit.refused;
   const foldable = containable && props.foldable === true;
   const open = !foldable || !collapsed;
+  // listControl: the body mounts the first time the section is open, and stays mounted (its state survives a fold)
+  const [seen, setSeen] = useState(open);
+  if (open && !seen) setSeen(true);
+  const body = !listControl || seen ? props.children : null;
   const contained = containable && open;
   const expand = contained && fit.long && (
     <Button size="sm" onClick={() => setExpanded(true)} aria-haspopup="dialog">
@@ -679,7 +698,7 @@ export function Card(props: CardProps) {
           onFocus={contained ? revealInBox : undefined}
           {...(contained && fit.scrolls ? { tabIndex: 0, role: "region", "aria-label": `${name}, scrollable` } : {})}
         >
-          {host ? createPortal(props.children, host) : typeof document === "undefined" ? props.children : null}
+          {host ? createPortal(body, host) : typeof document === "undefined" ? body : null}
         </div>
       ) : (
         props.children
@@ -758,6 +777,23 @@ function revealInBox(event: ReactFocusEvent<HTMLDivElement>) {
 const KEEP_VISIBLE =
   'form, fieldset, textarea, select, input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]), ' +
   '[role="alert"], [role="alertdialog"], dialog';
+
+/** DataList marks its own toolbar and column picker with this; nothing else may carry it */
+export const LIST_CONTROL_ATTR = "data-rg-list-control";
+
+/**
+ * Whether a contained body holds something it must never hide. With `listControl`, a match inside a DataList's own
+ * controls is no reason (the page-size select is not a draft); any other match still is.
+ */
+export function holdsKeepVisible(host: Pick<HTMLElement, "querySelectorAll" | "contains">, listControl: boolean): boolean {
+  const found = Array.from(host.querySelectorAll(KEEP_VISIBLE));
+  // the mark counts only inside this body, so a mark on an ancestor of the card cannot excuse anything
+  const own = (el: Element) => {
+    const mark = el.closest(`[${LIST_CONTROL_ATTR}]`);
+    return mark != null && host.contains(mark);
+  };
+  return listControl ? found.some((el) => !own(el)) : found.length > 0;
+}
 
 /**
  * X7 (owner rule, 2026-10-19): a row's actions sit in fixed slots so the

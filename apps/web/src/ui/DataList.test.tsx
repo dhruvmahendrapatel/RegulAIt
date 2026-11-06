@@ -69,6 +69,16 @@ describe("DataList", () => {
     expect(html).toMatch(/<option value="10" selected="">10<\/option><option value="50">50<\/option><option value="100">100<\/option><option value="all">All<\/option>/);
   });
 
+  it("marks only its own toolbar and column picker as list controls, so a listControl card may fold over them", () => {
+    const marked = [...html.matchAll(/data-rg-list-control=""/g)];
+    expect(marked).toHaveLength(2);
+    const toolbar = html.slice(html.indexOf('data-rg-list-control=""'), html.indexOf("<table"));
+    expect(toolbar).toContain("<select");
+    // the table, where a page's own row controls render, is outside the mark
+    expect(html.indexOf("<table")).toBeGreaterThan(html.indexOf('data-rg-list-control=""'));
+    expect(html.lastIndexOf('data-rg-list-control=""')).toBeGreaterThan(html.indexOf("</table>"));
+  });
+
   it("shows the main columns only, sortable ones as buttons, and says which cannot be sorted", () => {
     expect(html).toContain(">Run</button>");
     expect(html).toContain(">Status</button>");

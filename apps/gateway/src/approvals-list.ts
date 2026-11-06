@@ -2,9 +2,8 @@
  * ADR-0226 (P2 batch D) — the approvals queue under the shared list contract: the Inbox's "Recently decided" list
  * (and any other read of `/v1/approvals` that sends a contract param). The route keeps its own WHERE (the visibility
  * rules of ADR-0022, ADR-0046, ADR-0168 and ADR-0186, and the status, objectType and approverUserId filters), so
- * the page and its count read through one predicate. The columns are declared for the Excel export, which is not
- * routed yet: it ships with the Inbox's list control, held in P2 batch D because the "Recently decided" card must keep
- * its X6b fold and a card holding the control's page-size select cannot fold.
+ * the page, its count and the Excel export (`GET /v1/approvals/export.xlsx`, the Inbox's "Recently decided" download)
+ * read through one predicate. The card keeps its X6b fold through the kit's `listControl` opt-in.
  */
 import { approvals, sql, type PgColumn, type SQL } from "@regulait/db";
 import type { ListSpec } from "./list-contract.js";

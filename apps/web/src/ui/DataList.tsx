@@ -9,12 +9,16 @@
  * cannot sort says so in its (i) rather than being sorted in the browser.
  *
  * Its own module, loaded only with the screens that use it: the entry bundle does not grow.
+ *
+ * Its toolbar and column picker carry the kit's list-control mark, so a `Card` with `listControl` may still fold over
+ * the list (X6b): the page-size select is not a draft. Nothing else in the list carries the mark, so a form control a
+ * page renders in a row, or the export's row-limit alert, still keeps the card open.
  */
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { useInfiniteQuery, useQuery, keepPreviousData } from "@tanstack/react-query";
 import { api } from "../api/client";
 import { downloadCsv } from "../views/admin/adminKit";
-import { Button, Modal, Select, Table, type Column, type TableProps, type TableSort } from "./kit";
+import { Button, LIST_CONTROL_ATTR, Modal, Select, Table, type Column, type TableProps, type TableSort } from "./kit";
 import { useToast } from "./toast";
 import {
   ALL_CHUNK,
@@ -366,7 +370,7 @@ export function DataList<T>(props: DataListProps<T>) {
 
   return (
     <div className={d.list} data-list={listId}>
-      <div className={d.toolbar}>
+      <div className={d.toolbar} {...{ [LIST_CONTROL_ATTR]: "" }}>
         <label className={d.sizeLabel}>
           <span>Rows per page</span>
           <Select className={d.sizeSelect} value={size} onChange={(e) => setSize(e.target.value as PageSize)}>
@@ -426,15 +430,18 @@ export function DataList<T>(props: DataListProps<T>) {
           </Button>
         </div>
       )}
-      <ColumnPicker
-        open={pickerOpen}
-        noun={props.noun}
-        columns={props.columns.filter((c) => !c.action)}
-        layout={layout}
-        onChange={changeLayout}
-        onReset={resetLayout}
-        onClose={() => setPickerOpen(false)}
-      />
+      {/* no box of its own, so the list's gap is unchanged */}
+      <div style={{ display: "contents" }} {...{ [LIST_CONTROL_ATTR]: "" }}>
+        <ColumnPicker
+          open={pickerOpen}
+          noun={props.noun}
+          columns={props.columns.filter((c) => !c.action)}
+          layout={layout}
+          onChange={changeLayout}
+          onReset={resetLayout}
+          onClose={() => setPickerOpen(false)}
+        />
+      </div>
     </div>
   );
 }

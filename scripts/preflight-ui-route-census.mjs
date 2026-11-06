@@ -190,6 +190,8 @@ export const INDIRECT_UI_CALLS = new Map([
     ["GET /v1/usage-events/export.xlsx", "apps/web/src/views/admin/cost/OptimizationPage.tsx"],
     ["GET /v1/governance/decision-regression/cases/export.xlsx", "apps/web/src/views/admin/governance/DecisionRegressionPage.tsx"],
     ["GET /v1/recommendations/access/export.xlsx", "apps/web/src/views/admin/governance/RecommendationsPage.tsx"],
+    // the Inbox's "Recently decided" (owner decision, 2026-11-06)
+    ["GET /v1/approvals/export.xlsx", "apps/web/src/views/inbox/InboxPage.tsx"],
   ].map(([r, page]) => [
     r,
     {
