@@ -6,7 +6,7 @@
  * reveal, revoke), and the per-user overrides (MCP / agent / connector
  * revocations) that beat every grant.
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
@@ -38,6 +38,7 @@ import {
   IdChip,
   Select,
   Tabs,
+  tabIds,
 } from "../../../ui/kit";
 import { DataList, type DataColumn } from "../../../ui/DataList";
 import { normalisePage } from "../../../ui/listState";
@@ -382,6 +383,12 @@ function UserDetail(props: {
   const { user } = props;
   const lastAdmin = user.isAdmin && !user.disabledAt && props.activeAdmins <= 1;
   const [tab, setTab] = useState("lifecycle");
+  // I-2: a panel mounts the first time its tab opens and then stays mounted, so a draft in it survives a tab switch
+  const [opened, setOpened] = useState<ReadonlySet<string>>(() => new Set(["lifecycle"]));
+  const open = (id: string) => {
+    setTab(id);
+    setOpened((cur) => (cur.has(id) ? cur : new Set([...cur, id])));
+  };
   const qc = useQueryClient();
   const invalidate = () => qc.invalidateQueries({ queryKey: ["admin"] });
   return (
@@ -392,6 +399,14 @@ function UserDetail(props: {
         </span>
       }
     >
+      {/* I-2: the person's standing facts stay above the tabs, so no tab hides a deactivation or the last-admin guard */}
+      <div className={v.row} role="group" aria-label="User status" style={{ marginBottom: "var(--s2)" }}>
+        {user.isAdmin ? <Badge tone="primary">admin</Badge> : <Badge>member</Badge>}
+        {user.disabledAt ? <Badge tone="danger">disabled</Badge> : <Badge tone="ok">active</Badge>}
+        <Badge tone="neutral">{`Sign-in: ${user.hasPassword ? (user.mustChangePassword ? "one-time password" : "password") : "no password"}`}</Badge>
+        <Badge tone="neutral">{user.totpEnabled ? "MFA: TOTP" : "MFA: not enrolled"}</Badge>
+        {lastAdmin && <Badge tone="warn">Last active admin: cannot be demoted or deactivated</Badge>}
+      </div>
       <Tabs
         tabs={[
           { id: "lifecycle", label: "Lifecycle" },
@@ -401,10 +416,13 @@ function UserDetail(props: {
           { id: "overrides", label: "Overrides" },
         ]}
         active={tab}
-        onChange={setTab}
+        onChange={open}
+        idPrefix="user-detail"
+        label={`${user.displayName || user.email}: details`}
       />
+      {/* I-2: each tab names its panel; an opened panel stays mounted, so a half-typed name, username or revocation reason survives a switch */}
       <div style={{ marginTop: "var(--s2)" }}>
-        {tab === "lifecycle" && (
+        <UserPanel id="lifecycle" tab={tab} opened={opened}>
           <div className={v.stack}>
             <RefusalNotice guidance={props.refusal} />
             <div className={v.row}>
@@ -472,13 +490,34 @@ function UserDetail(props: {
               }}
             />
           </div>
-        )}
-        {tab === "sessions" && <SessionsPanel userId={user.id} />}
-        {tab === "passkeys" && <UserPasskeysPanel userId={user.id} userName={user.displayName || user.email} />}
-        {tab === "roles" && <UserRoleProvenancePanel userId={user.id} />}
-        {tab === "overrides" && <OverridesPanel userId={user.id} />}
+        </UserPanel>
+        <UserPanel id="sessions" tab={tab} opened={opened}>
+          <SessionsPanel userId={user.id} />
+        </UserPanel>
+        <UserPanel id="passkeys" tab={tab} opened={opened}>
+          <UserPasskeysPanel userId={user.id} userName={user.displayName || user.email} />
+        </UserPanel>
+        <UserPanel id="roles" tab={tab} opened={opened}>
+          <UserRoleProvenancePanel userId={user.id} />
+        </UserPanel>
+        <UserPanel id="overrides" tab={tab} opened={opened}>
+          <OverridesPanel userId={user.id} />
+        </UserPanel>
       </div>
     </Card>
+  );
+}
+
+/**
+ * I-2: one detail tab's panel, named by its tab. Its content mounts the first time the tab opens (so selecting a person
+ * reads only Lifecycle) and then stays mounted, `hidden`, while another tab is open
+ */
+function UserPanel(props: { id: string; tab: string; opened: ReadonlySet<string>; children: ReactNode }) {
+  const ids = tabIds("user-detail", props.id);
+  return (
+    <div role="tabpanel" id={ids.panel} aria-labelledby={ids.tab} hidden={props.tab !== props.id}>
+      {props.opened.has(props.id) && props.children}
+    </div>
   );
 }
 

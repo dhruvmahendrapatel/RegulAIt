@@ -7,7 +7,7 @@
  * sso_only switch below counts them together, so an admin who could only see
  * one of them would be reasoning about the lockout guard with half the facts.
  */
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { LinkRequest, OidcProvider, OrgSettingsResponse, SamlProvider } from "../../../api/adminTypes";
@@ -19,6 +19,7 @@ import {
   CodeBlock,
   ConfirmModal,
   EmptyState,
+  ErrorState,
   Field,
   Input,
   Modal,
@@ -46,6 +47,9 @@ export default function SsoPage() {
   const saml = useQuery({ queryKey: ["admin", "saml-providers"], queryFn: () => api.get<{ providers: SamlProvider[] }>("/v1/auth/saml-providers") });
   const samlToReview = (saml.data?.providers ?? []).filter((p) => !(p.allowedEmailDomains && p.allowedEmailDomains.length > 0) || p.allowIdpInitiated).length;
   const stepUpToReview = useSettingsToReview(STEP_UP_KEYS);
+  // I-2: the reads the status row counts, with the cards' own query keys (one fetch each, shared)
+  const oidc = useQuery({ queryKey: ["admin", "oidc-providers"], queryFn: () => api.get<{ providers: OidcProvider[] }>("/v1/auth/oidc-providers") });
+  const settings = useQuery({ queryKey: ["admin", "org-settings"], queryFn: () => api.get<OrgSettingsResponse>("/v1/org/settings") });
   return (
     <>
       <PageHeader
@@ -82,6 +86,8 @@ export default function SsoPage() {
           viewAll="/admin/sso/link-requests"
           empty={<EmptyState title="No pending link requests" body="A federated identity that matches an account with its own password waits here; it is never linked silently." />}
         />
+        {/* I-2: OIDC and SAML count together for "SSO only", so both families' facts stay above the tabs, whichever is open */}
+        <SignInStatus oidc={oidc} saml={saml} settings={settings} />
         {/* P3: the providers and the session policy are settings, in tabs; a hidden tab counts what needs review */}
         <Tabs
           tabs={[
@@ -94,21 +100,73 @@ export default function SsoPage() {
           idPrefix="sso"
           label="SSO settings"
         />
-        <div role="tabpanel" id={tabIds("sso", tab).panel} aria-labelledby={tabIds("sso", tab).tab} className={v.stack}>
-          {tab === "oidc" ? (
-            <OidcCard />
-          ) : tab === "saml" ? (
-            <SamlCard />
-          ) : (
-            <>
-              <SessionsPolicyCard />
-              {/* ADR-0186 A: which actions need a fresh second proof, and how long one lasts */}
-              <OrgSettingsCard title="Step-up for sensitive actions" keys={STEP_UP_KEYS} testId="sso-step-up-settings" helpInInfo />
-            </>
-          )}
-        </div>
+        {/* I-2: every panel stays mounted (hidden when not selected), so a half-typed provider or policy survives a tab switch */}
+        <SsoPanel id="oidc" tab={tab}>
+          <OidcCard />
+        </SsoPanel>
+        <SsoPanel id="saml" tab={tab}>
+          <SamlCard />
+        </SsoPanel>
+        <SsoPanel id="sessions" tab={tab}>
+          <SessionsPolicyCard />
+          {/* ADR-0186 A: which actions need a fresh second proof, and how long one lasts */}
+          <OrgSettingsCard title="Step-up for sensitive actions" keys={STEP_UP_KEYS} testId="sso-step-up-settings" helpInInfo />
+        </SsoPanel>
       </div>
     </>
+  );
+}
+
+/** I-2: one tab's panel, named by its tab and kept mounted (`hidden`) while another tab is open */
+function SsoPanel(props: { id: string; tab: string; children: ReactNode }) {
+  const ids = tabIds("sso", props.id);
+  return (
+    <div role="tabpanel" id={ids.panel} aria-labelledby={ids.tab} hidden={props.tab !== props.id}>
+      <div className={v.stack}>{props.children}</div>
+    </div>
+  );
+}
+
+interface StatusRead<T> {
+  data?: T;
+  error: unknown;
+  refetch: () => unknown;
+}
+
+/**
+ * I-2: the sign-in facts no tab may hide: enabled providers of each family (counted together for "SSO only"), and
+ * whether password sign-in is refused. A read that failed is an error with Retry, never "0 enabled" or "off".
+ */
+function SignInStatus(props: {
+  oidc: StatusRead<{ providers: OidcProvider[] }>;
+  saml: StatusRead<{ providers: SamlProvider[] }>;
+  settings: StatusRead<OrgSettingsResponse>;
+}) {
+  const failed = [props.oidc, props.saml, props.settings].filter((r) => !r.data && r.error);
+  if (failed.length > 0) {
+    const first = failed[0]!.error;
+    return (
+      <ErrorState
+        title="Couldn't load the sign-in status"
+        message={first instanceof Error ? first.message : String(first)}
+        onRetry={() => failed.forEach((r) => void r.refetch())}
+      />
+    );
+  }
+  if (!props.oidc.data || !props.saml.data || !props.settings.data) return null;
+  const oidcOn = (props.oidc.data.providers ?? []).filter((p) => p.enabled).length;
+  const samlOn = (props.saml.data.providers ?? []).filter((p) => p.enabled).length;
+  const ssoOnly = props.settings.data.settings?.ssoOnly === true || props.settings.data.settings?.ssoOnly === "true";
+  const breakGlassOnly = props.settings.data.settings?.localSignIn === "break_glass_only";
+  return (
+    <div className={v.row} role="group" aria-label="Sign-in status">
+      <Badge tone="neutral">{`OIDC: ${oidcOn.toLocaleString()} enabled`}</Badge>
+      <Badge tone="neutral">{`SAML: ${samlOn.toLocaleString()} enabled`}</Badge>
+      <Badge tone="neutral">{ssoOnly ? "SSO only: on, password sign-in refused" : "SSO only: off"}</Badge>
+      <Badge tone="neutral">
+        {breakGlassOnly ? "Email sign-in: break-glass admins only" : "Email sign-in: everyone with a password"}
+      </Badge>
+    </div>
   );
 }
 

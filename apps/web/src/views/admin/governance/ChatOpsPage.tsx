@@ -16,7 +16,7 @@
  *  - **Chat is not a re-authenticated session.** `allowFencedDecide` is shown
  *    per workspace with its consequence spelled out, defaulting off.
  */
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
@@ -24,7 +24,7 @@ import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { ListPreview } from "../../../ui/ListPreview";
 import type { IdentityLink } from "./ChatIdentityLinksPage";
-import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Select, Table, Tabs, Textarea, tabIds } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, Input, Select, Table, Tabs, Textarea, tabIds } from "../../../ui/kit";
 import { QueryGate, reconfirmNeeded, StaleAfterWrite, useAction, useConnectors, useSettleAfterWrite, useSingleFlight } from "../adminKit";
 import v from "../../views.module.css";
 import { BuilderRoutesCard, PostApprovalCard } from "./ChatOpsPostAndRoutes";
@@ -265,6 +265,8 @@ export default function ChatOpsPage() {
         empty={<EmptyState title="No identity links yet" body="A chat user acts as a regulAIt person only through a link an administrator makes." />}
       />
 
+      {/* I-2: the workspaces' standing facts stay above the tabs, so the Posting & routes tab never hides a warning */}
+      <WorkspaceStatus connections={connections} onRetry={refresh} />
       {/* P3: the workspaces and the posting settings are settings, in tabs; workspaces (and their warnings) open first */}
       <Tabs
         tabs={[
@@ -276,9 +278,8 @@ export default function ChatOpsPage() {
         idPrefix="chatops"
         label="ChatOps settings"
       />
-      <div role="tabpanel" id={tabIds("chatops", tab).panel} aria-labelledby={tabIds("chatops", tab).tab} className={v.stack}>
-        {tab === "workspaces" ? (
-          <>
+      {/* I-2: both panels stay mounted (hidden when not selected), so a half-typed workspace, recipient list or route survives a tab switch */}
+      <ChatOpsPanel id="workspaces" tab={tab}>
       <Card title="Workspaces">
         <QueryGate loading={connections.isLoading} error={connections.error} onRetry={refresh}>
           {(connections.data?.connections.length ?? 0) === 0 ? (
@@ -540,18 +541,54 @@ export default function ChatOpsPage() {
           </Button>
         </div>
       </Card>
-
-          </>
-        ) : (
-          <>
+      </ChatOpsPanel>
+      <ChatOpsPanel id="routes" tab={tab}>
       {/* mirror one approval into a channel; which channel each builder agent answers on */}
       <PostApprovalCard connections={connections.data?.connections ?? []} />
       <BuilderRoutesCard />
-          </>
-        )}
-      </div>
+      </ChatOpsPanel>
 
     </>
+  );
+}
+
+/** I-2: one tab's panel, named by its tab and kept mounted (`hidden`) while the other tab is open */
+function ChatOpsPanel(props: { id: string; tab: string; children: ReactNode }) {
+  const ids = tabIds("chatops", props.id);
+  return (
+    <div role="tabpanel" id={ids.panel} aria-labelledby={ids.tab} hidden={props.tab !== props.id}>
+      <div className={v.stack}>{props.children}</div>
+    </div>
+  );
+}
+
+/**
+ * I-2: the workspaces' standing facts, from the same read the Workspaces table lists: how many are connected, how many
+ * let a chat tap decide a sensitive approval, and how many cannot be posted to. A failed read is an error with Retry,
+ * never "no workspaces".
+ */
+function WorkspaceStatus(props: { connections: { data?: ConnectionsResponse; error: unknown }; onRetry: () => void }) {
+  const { data, error } = props.connections;
+  if (!data) {
+    return error ? (
+      <ErrorState
+        title="Couldn't load the chat workspaces"
+        message={error instanceof Error ? error.message : String(error)}
+        onRetry={props.onRetry}
+      />
+    ) : null;
+  }
+  const rows = data.connections ?? [];
+  const fenced = rows.filter((r) => r.allowFencedDecide).length;
+  const noSend = rows.filter((r) => r.outboundSupported === false).length;
+  return (
+    <div className={v.row} role="group" aria-label="Workspace status">
+      <Badge tone="neutral">{`Workspaces: ${rows.length.toLocaleString()}`}</Badge>
+      <Badge tone={fenced > 0 ? "warn" : "ok"}>
+        {fenced > 0 ? `Sensitive approvals chat-decidable: ${fenced.toLocaleString()}` : "Sensitive approvals: in-app only"}
+      </Badge>
+      {noSend > 0 && <Badge tone="warn">{`Cannot send cards: ${noSend.toLocaleString()}`}</Badge>}
+    </div>
   );
 }
 
