@@ -58,10 +58,10 @@ describe("security-suppressions (review B1-01)", () => {
 
 describe("security-runtime-contents (the image carries no build tool)", () => {
   it("names build tools by their pnpm store directory, and nothing else", () => {
-    for (const d of ["esbuild@0.25.12", "@esbuild+linux-x64@0.25.12", "vite@6.0.0", "vitest@4.1.11", "typescript@5.8.3", "tsx@4.0.0", "drizzle-kit@0.30.0", "@playwright+test@1.56.1", "@rollup+rollup-linux-x64-gnu@4.0.0"]) {
+    for (const d of ["esbuild@0.25.12", "@esbuild+linux-x64@0.25.12", "vite@8.3.6", "rolldown@1.2.16", "@rolldown+binding-linux-x64-gnu@1.2.16", "lightningcss@1.33.0", "lightningcss-linux-x64-gnu@1.33.0", "vitest@4.1.11", "typescript@5.8.3", "tsx@4.0.0", "drizzle-kit@0.30.0", "@playwright+test@1.56.1", "@rollup+rollup-linux-x64-gnu@4.0.0"]) {
       expect(BUILD_TOOL.test(d), d).toBe(true);
     }
-    for (const d of ["fastify@5.12.5", "drizzle-orm@0.45.3", "pg@8.23.1", "esbuild-plugin-x-not@1.0.0", "zod@3.0.0"]) {
+    for (const d of ["fastify@5.12.5", "drizzle-orm@0.45.3", "pg@8.23.1", "esbuild-plugin-x-not@1.0.0", "lightningcssx@1.0.0", "zod@3.0.0"]) {
       expect(BUILD_TOOL.test(d), d).toBe(false);
     }
   });
