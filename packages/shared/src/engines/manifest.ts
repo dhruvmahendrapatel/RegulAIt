@@ -106,8 +106,9 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     // pinned to the release the vendored OWASP mapping tables come from (ADR-0187: one moves to match the other)
     version: PROMPTFOO_ENGINE_VERSION,
     // round 13 [95]: bump with every build change (version or digest)
-    // B5-P2: 0.123.1 → 0.124.1 (decision 176); ENG-IMG: plus one per recorded publish (the lock moves it)
-    generation: 2 + ENGINE_IMAGES_LOCK.promptfoo.publishGeneration,
+    // B5-P2: 0.123.1 → 0.124.1 (decision 176); 0.124.1 → 0.125.1 (Dependabot #666, 2026-11-06);
+    // ENG-IMG: plus one per recorded publish (the lock moves it)
+    generation: 3 + ENGINE_IMAGES_LOCK.promptfoo.publishGeneration,
     // ENG-IMG: the published image's registry digest from engines/images.lock.json; null until the
     // first publish, so the engine cannot be enabled (secure default)
     imageDigest: ENGINE_IMAGES_LOCK.promptfoo.manifestDigest,
@@ -143,9 +144,9 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     unverified: [
       "image signature at run time: the digest is the keylessly signed publish recorded in engines/images.lock.json, verified at deploy time outside the container; the runner's reported digest is a consistency check only (ADR-0187 decision 55)",
       "maintainer count",
-      "transitive licences: 11 npm packages carry permissive licences outside the ADR-0176 list (Artistic-2.0, BlueOak-1.0.0, Python-2.0) and await an owner decision; the base image OS layer is not yet scanned",
+      "transitive licences: 12 npm packages carry permissive licences outside the ADR-0176 list (Artistic-2.0, BlueOak-1.0.0, Python-2.0) and await an owner decision; the base image OS layer is not yet scanned",
       "runtime behaviour inside the built image (egress test, air-gapped run, and the runner/worker two-container layout of B5-P2 with the worker's own self-test)",
-      "the disabled-telemetry path still attempts a request in 0.124.1 (as in 0.123.1): the image patches it, and network denial stays the control",
+      "the disabled-telemetry path still attempts a request in 0.125.1 (as in 0.123.1 and 0.124.1): the image patches it, and network denial stays the control",
     ],
   },
   modelscan: {
