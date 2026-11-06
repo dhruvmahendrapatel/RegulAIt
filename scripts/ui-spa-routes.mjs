@@ -21,7 +21,7 @@
  *
  * Usage: node scripts/ui-spa-routes.mjs        # prints the list, one `path<TAB>url<TAB>public|signed-in` per line
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
@@ -77,11 +77,87 @@ function containsRoutes(node) {
 
 const join = (prefix, p) => (p.startsWith("/") ? p : `${prefix}${p}`);
 
+/** the module specifier of a lazy import `() => import("…")` anywhere inside `node`, or null */
+function lazyImportSpecifier(node) {
+  let found = null;
+  const walk = (n) => {
+    if (found) return;
+    if (ts.isCallExpression(n) && n.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      const arg = n.arguments[0];
+      if (arg && ts.isStringLiteral(arg)) {
+        found = arg.text;
+        return;
+      }
+    }
+    ts.forEachChild(n, walk);
+  };
+  walk(node);
+  return found;
+}
+
+/** map a top-level lazy component name → { spec, exportName } (`const X = screen(() => import("…"), "Name")` or `lazy(…)`) */
+function lazyModules(sf) {
+  const map = new Map();
+  const walk = (n) => {
+    if (ts.isVariableStatement(n)) {
+      for (const d of n.declarationList.declarations) {
+        if (ts.isIdentifier(d.name) && d.initializer && ts.isCallExpression(d.initializer)) {
+          const callee = d.initializer.expression.getText();
+          if (callee === "screen" || callee === "lazy") {
+            const spec = lazyImportSpecifier(d.initializer);
+            const arg = d.initializer.arguments[1];
+            const exportName = arg && ts.isStringLiteral(arg) ? arg.text : "default";
+            if (spec) map.set(d.name.text, { spec, exportName });
+          }
+        }
+      }
+    }
+    ts.forEachChild(n, walk);
+  };
+  walk(sf);
+  return map;
+}
+
+/** resolve a relative module specifier (relative to `fromFile`) to a source file on disk, or null */
+function resolveModule(spec, fromFile = APP_FILE) {
+  if (!spec || !spec.startsWith(".")) return null;
+  const base = path.resolve(path.dirname(fromFile), spec);
+  for (const ext of [".tsx", ".ts", "/index.tsx", "/index.ts"]) {
+    if (existsSync(base + ext)) return base + ext;
+  }
+  return null;
+}
+
+/** the source file (and the name there) that actually defines `name`, following one-line `export { … } from "…"` re-export
+ *  barrels (`screens/*`) until the definition is reached. Returns null if the chain cannot be resolved. */
+function resolveDefiningFile(file, name, depth = 0) {
+  if (!file || depth > 8) return null;
+  const sf = ts.createSourceFile(path.basename(file), readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let next = null;
+  for (const st of sf.statements) {
+    if (!ts.isExportDeclaration(st) || !st.moduleSpecifier || !ts.isStringLiteral(st.moduleSpecifier)) continue;
+    const spec = st.moduleSpecifier.text;
+    if (st.exportClause && ts.isNamedExports(st.exportClause)) {
+      for (const el of st.exportClause.elements) {
+        if (el.name.text === name) {
+          next = { spec, local: (el.propertyName ?? el.name).text };
+          break;
+        }
+      }
+    }
+    if (next) break;
+  }
+  if (!next) return { file, name }; // defined here (no matching re-export)
+  const resolved = resolveModule(next.spec, file);
+  return resolved ? resolveDefiningFile(resolved, next.local, depth + 1) : null;
+}
+
 /** `[{ path, url, public }]` in source order: `path` is the router pattern, `url` the one the harness opens (under /ui) */
 export function spaRoutes(src = readFileSync(APP_FILE, "utf8")) {
   const sf = ts.createSourceFile("App.tsx", src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   const out = [];
   const seen = new Set();
+  const lazyMap = lazyModules(sf);
 
   const visit = (node, ctx) => {
     if (!(isJsx(node) && tagName(node) === "Route")) {
@@ -95,21 +171,39 @@ export function spaRoutes(src = readFileSync(APP_FILE, "utf8")) {
     const signedIn = ctx.signedIn || (element !== null && SIGNED_IN_LAYOUTS.has(tagName(element)));
     const redirect = element !== null && tagName(element) === "Navigate";
 
-    if (attrs.index) throw new Error(`App.tsx: an index <Route> at ${where(node)} is not handled by the census yet`);
-    // a splat route that renders its screens from another file would drop them all silently: the census reads App.tsx
-    // only, so the `<Routes>` its element renders must be written inline
+    // an index <Route> inside a followed area module (below) is the area's own path; at the top level it is unhandled
+    if (attrs.index) {
+      if (!ctx.area) throw new Error(`App.tsx: an index <Route> at ${where(node)} is not handled by the census yet`);
+      const here = ctx.prefix.replace(/\/$/, "") || "/";
+      if (!seen.has(here)) {
+        seen.add(here);
+        out.push({ path: here, url: here.replace(/:[A-Za-z]+/g, PARAM_FIXTURE), public: !signedIn });
+      }
+      return;
+    }
+    // descendant <Routes> inside the element resolve against this route's path without its trailing `*`
+    const base = full === null ? ctx.prefix : `${full.replace(/\/?\*$/, "").replace(/\/$/, "")}/`;
+    // a splat route that renders its screens from another file would drop them all silently: either it renders its
+    // `<Routes>` inline, or its element is a lazy module the census follows into to read the screens there.
     if (full !== null && full.endsWith("*") && full !== "/*" && full !== "*" && !redirect && !(element && containsRoutes(element))) {
-      throw new Error(`App.tsx: <Route path="${raw}"> at ${where(node)} renders no inline <Routes>; the census cannot see the screens under it`);
+      const name = element && tagName(element);
+      const lazy = name ? lazyMap.get(name) : null;
+      const entry = lazy ? resolveModule(lazy.spec) : null;
+      const defined = entry ? resolveDefiningFile(entry, lazy.exportName) : null;
+      if (!defined) {
+        throw new Error(`App.tsx: <Route path="${raw}"> at ${where(node)} renders no inline <Routes> and its element ${name ?? "(none)"} is not a lazy module the census can follow; the census cannot see the screens under it`);
+      }
+      const areaSf = ts.createSourceFile(path.basename(defined.file), readFileSync(defined.file, "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+      visit(areaSf, { prefix: base, signedIn, area: true });
+      return;
     }
     if (full !== null && !full.includes("*") && !redirect) {
       if (seen.has(full)) throw new Error(`App.tsx routes ${full} twice`);
       seen.add(full);
       out.push({ path: full, url: full.replace(/:[A-Za-z]+/g, PARAM_FIXTURE), public: !signedIn });
     }
-    // descendant <Routes> inside the element resolve against this route's path without its trailing `*`
-    const base = full === null ? ctx.prefix : `${full.replace(/\/?\*$/, "").replace(/\/$/, "")}/`;
-    if (element) visit(element, { prefix: base, signedIn });
-    if (ts.isJsxElement(node)) for (const child of node.children) visit(child, { prefix: base, signedIn });
+    if (element) visit(element, { prefix: base, signedIn: signedIn, area: ctx.area });
+    if (ts.isJsxElement(node)) for (const child of node.children) visit(child, { prefix: base, signedIn, area: ctx.area });
   };
   visit(sf, { prefix: "/", signedIn: false });
 

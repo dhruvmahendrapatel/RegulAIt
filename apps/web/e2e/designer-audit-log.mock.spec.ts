@@ -11,7 +11,7 @@ const entries = [
 ];
 
 // per-test overrides: a full first page with older rows behind it (M2, L4) and evidence states for the folds
-let auditPage: (cursor: string | null) => unknown = () => ({ entries, pageSize: 100, hasMore: false, nextCursor: null });
+let auditPage: (cursor: string | null, q: URLSearchParams) => unknown = () => ({ entries, pageSize: 100, hasMore: false, nextCursor: null });
 let extra: Record<string, unknown> = {};
 const many = (from: number, n: number) => Array.from({ length: n }, (_, i) => ({
   id: `bbbbbbbb-0000-4000-8000-${String(from + i).padStart(12, "0")}`,
@@ -25,7 +25,7 @@ async function mock(route: Route) {
   if (p in extra) body = extra[p];
   else if (p === "/auth/me") body = { userId: ME, isAdmin: true, via: "session", user: { id: ME, email: "ada@example.test", displayName: "Ada Admin" }, mustChangePassword: false, totpEnabled: true, passwordSet: true, mfaSetupRequired: false };
   else if (p === "/v1/me") body = { userId: ME, isAdmin: true, user: { id: ME, email: "ada@example.test", displayName: "Ada Admin" } };
-  else if (p === "/v1/audit") body = auditPage(new URL(route.request().url()).searchParams.get("cursor"));
+  else if (p === "/v1/audit") body = auditPage(new URL(route.request().url()).searchParams.get("cursor"), new URL(route.request().url()).searchParams);
   else if (p === "/v1/audit/retention") body = { retainedDays: null, prunable: 0, floorSource: [] };
   else if (p === "/v1/users") body = { users: [{ id: ME, email: "ada@example.test", displayName: "Ada Admin" }] };
   await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
@@ -67,57 +67,43 @@ test("Audit log: chain state first and never green unasked, entries contained, r
   await expect(page.getByRole("cell", { name: "Not recorded", exact: true })).toHaveCount(1);
 });
 
-test("Audit log at 1440×900 with a full page: rows above the fold, the partial trail said in view, paging outside the scroll box (M2, L4)", async ({ page }) => {
+/** ADR-0226: the trail under the list contract, keyset-paged on its default (at DESC, id DESC) sort */
+const contractTrail = (rows: ReturnType<typeof many>) => (cursor: string | null, q: URLSearchParams) => {
+  const limit = Number(q.get("limit"));
+  const start = cursor ? Number(cursor) : 0;
+  const more = start + limit < rows.length;
+  return { items: rows.slice(start, start + limit), nextCursor: more ? String(start + limit) : null, nextOffset: null, total: rows.length, totalIsEstimate: false };
+};
+
+test("Audit log at 1440×900 with older rows: rows above the fold, where you are said in view, and paging walks the trail's cursor (M2, L4)", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  auditPage = (cursor) => cursor
-    ? { entries: many(100, 3), pageSize: 100, hasMore: false, nextCursor: null }
-    : { entries: many(0, 100), pageSize: 100, hasMore: true, nextCursor: "c1" };
+  auditPage = contractTrail(many(0, 103));
   await page.goto("/ui/admin/audit");
   const card = page.locator("section[data-rg-card]").filter({ hasText: "Entries" });
-  await expect(card.locator("tbody tr")).toHaveCount(100);
+  await expect(card.locator("tbody tr")).toHaveCount(10);
   // the first row is on screen without scrolling
   await expect(card.locator("tbody tr").first()).toBeInViewport();
-  // the header says the trail is partial, in view, while older rows exist
-  const cue = card.getByText("100 newest rows loaded, older rows exist", { exact: true });
-  await expect(cue).toBeInViewport();
-  // the entries scroll inside the card, and the paging line and Load older are never inside that scroll box
-  const region = card.getByRole("region", { name: "Entries, scrollable" });
-  await expect(region).toBeVisible();
-  await expect(region.getByTestId("audit-paging")).toHaveCount(0);
-  await expect(region.getByRole("button", { name: "Load older" })).toHaveCount(0);
-  const paging = card.getByTestId("audit-paging");
-  await expect(paging).toContainText("older rows exist");
-  await paging.getByRole("button", { name: "Load older" }).click();
-  await expect(card.locator("tbody tr")).toHaveCount(103);
-  await expect(card.getByText("103 rows", { exact: true })).toBeVisible();
-  await expect(paging).toContainText("Showing all 103 rows");
+  // the list says how much of the trail this is, in view
+  const status = card.getByTestId("list-status");
+  await expect(status).toHaveText("1–10 of 103");
+  await expect(status).toBeInViewport();
+  await card.getByLabel("Rows per page").selectOption("100");
+  await expect(status).toHaveText("1–100 of 103");
+  await card.getByRole("button", { name: "Next", exact: true }).click();
+  await expect(status).toHaveText("101–103 of 103");
+  await expect(card.locator("tbody tr")).toHaveCount(3);
+  await expect(card.getByRole("button", { name: "Next", exact: true })).toHaveAttribute("aria-disabled", "true");
 });
 
-test("Audit log at 1440×900, Expand: the dialog keeps the partial-trail notice, the count and Load older (M2b)", async ({ page }) => {
+test("Audit log, All: older rows load 500 at a time and the count says how many are loaded (M2b)", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  auditPage = (cursor) => cursor
-    ? { entries: many(100, 3), pageSize: 100, hasMore: false, nextCursor: null }
-    : { entries: many(0, 100), pageSize: 100, hasMore: true, nextCursor: "c1" };
+  auditPage = contractTrail(many(0, 103));
   await page.goto("/ui/admin/audit");
   const card = page.locator("section[data-rg-card]").filter({ hasText: "Entries" });
-  await expect(card.locator("tbody tr")).toHaveCount(100);
-  await card.getByRole("button", { name: "Expand" }).click();
-  const dialog = page.getByRole("dialog");
-  await expect(dialog.locator("tbody tr")).toHaveCount(100);
-  // the count cue rides in the dialog title, and the paging line follows the body in, rendered once
-  await expect(dialog).toContainText("100 newest rows loaded, older rows exist");
-  await expect(page.getByTestId("audit-paging")).toHaveCount(1);
-  const paging = dialog.getByTestId("audit-paging");
-  await expect(paging).toContainText("older rows exist");
-  await paging.getByRole("button", { name: "Load older" }).click();
-  await expect(dialog.locator("tbody tr")).toHaveCount(103);
-  await expect(paging).toContainText("Showing all 103 rows");
-  await expect(dialog.getByRole("button", { name: "Load older" })).toHaveCount(0);
-  // closing hands the footer back to the card, still once
-  await page.keyboard.press("Escape");
-  await expect(dialog).toBeHidden();
-  await expect(page.getByTestId("audit-paging")).toHaveCount(1);
-  await expect(card.getByTestId("audit-paging")).toContainText("Showing all 103 rows");
+  await card.getByLabel("Rows per page").selectOption("all");
+  await expect(card.getByTestId("list-status")).toHaveText("Loaded 103 of 103");
+  await expect(card.locator("tbody tr")).toHaveCount(103);
+  await expect(card.getByRole("button", { name: "Load next 500" })).toHaveCount(0);
 });
 
 test("Audit log folds keep each warning in the closed summary (G8 f)", async ({ page }) => {

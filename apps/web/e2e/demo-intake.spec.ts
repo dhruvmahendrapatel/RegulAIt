@@ -189,8 +189,13 @@ test("seeded credit-assistant journey: discover, register, assess, approve, moni
   // the page shows other status regions (section loading spinners), so target the evaluation summary itself
   await expect(page.getByRole("status").filter({ hasText: "Evaluation raised" })).toBeVisible();
   // the remediation beat needs an alert with an EXECUTABLE candidate — in the demo data that is an
-  // unowned-agent alert (assign an owner); the high alerts carry guidance only
-  const alert = page.locator("button").filter({ hasText: /which is unowned/ }).first();
+  // unowned-agent alert (assign an owner); the high alerts carry guidance only. The list opens at 10 rows, most severe
+  // first, so the presenter shows every active alert on one page; each row is a link, named for its alert, that opens
+  // it in the detail drawer
+  const alertList = page.locator('[data-list="governance-alerts"]');
+  await alertList.getByLabel("Rows per page").selectOption("50");
+  await expect(alertList.getByTestId("list-status")).toHaveText(/^1–\d+ of \d+$/);
+  const alert = page.getByRole("link", { name: /which is unowned/ }).first();
   await expect(alert).toBeVisible();
   await alert.click();
   await page.getByLabel("Acknowledgement note — required and audited").fill("Ada owns the response and is escalating the evidence-backed remediation.");

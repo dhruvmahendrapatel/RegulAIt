@@ -23,11 +23,11 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { EvaluateDecision, RuleTrace } from "../../../api/adminTypes";
-import { UUID_RE } from "../../../api/format";
+import { UUID_RE, ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, CodeBlock, EmptyState, Field, IdChip, Input, Select, Table, type Tone } from "../../../ui/kit";
 import { optionEls, serverOpts, useAction, useServerTools, useServers, useUsers, userOpts } from "../adminKit";
-import { NewestNote } from "../../../ui/fold";
+import { DataList } from "../../../ui/DataList";
 import { PolicySimulationSettingsCard } from "./PolicySimulationSettingsCard";
 import { POLICY_SIMULATION_REFUSALS } from "./policySimulationModel";
 import { withRefusalCopy } from "./refusalCopy";
@@ -214,16 +214,14 @@ function BlastRadiusPanel() {
   const [sim, setSim] = useState<{ simulation: SimulationRow; samples: FlipRow[]; fidelity: string; abacCannotGrant: string } | null>(
     null,
   );
-  const history = useQuery({
-    queryKey: ["admin", "policy-simulations"],
-    queryFn: () => api.get<{ simulations: SimulationRow[]; fidelity: string }>("/v1/policy-simulations?limit=25"),
-  });
+  // ADR-0226: the preview history pages on the server; the fidelity statement comes with each page
+  const [fidelity, setFidelity] = useState<string | null>(null);
 
   return (
     <Card
       title="Blast radius — what would a PROPOSED policy version have changed?"
       infoLabel="the blast-radius dry run"
-      info={history.data?.fidelity ? <p>{history.data.fidelity}</p> : undefined}
+      info={fidelity ? <p>{fidelity}</p> : undefined}
     >
       <form
         className={a.formRow}
@@ -251,7 +249,7 @@ function BlastRadiusPanel() {
             }
             setIncomplete(null);
             setSim(r);
-            await history.refetch();
+            // the action's own refresh reloads the preview history (its query key sits under "admin")
             return "Dry run complete — nothing was executed and nothing was activated";
           });
         }}
@@ -352,20 +350,29 @@ function BlastRadiusPanel() {
       )}
 
       <div className={v.sectionTitle}>Previous previews</div>
-      <NewestNote shown={history.data?.simulations?.length ?? 0} limit={25} noun="previews" />
-      <Table
-        rows={history.data?.simulations ?? []}
+      <DataList<SimulationRow>
+        listId="policy-simulations"
+        noun="previews"
+        endpoint="/v1/policy-simulations"
+        exportPath="/v1/policy-simulations/export.xlsx"
+        queryKey={["admin", "policy-simulations"]}
+        legacyKey="simulations"
+        defaultSort={{ key: "at", dir: "desc" }}
         rowKey={(r) => r.id}
+        onRows={(_rows, raw) => setFidelity(typeof raw.fidelity === "string" ? raw.fidelity : null)}
+        empty={<EmptyState title="No previews yet" body="Run a blast-radius preview above; each one is kept here." />}
         columns={[
-          { key: "p", header: "Policy", render: (r) => `${r.policyName} v${r.policyVersion}` },
-          { key: "win", header: "Window", render: (r) => `${r.windowDays}d` },
-          { key: "considered", header: "Calls examined", render: (r) => r.considered },
-          { key: "blocked", header: "Newly blocked", render: (r) => r.newlyDenied },
-          { key: "users", header: "Users", render: (r) => r.affectedUsers },
+          { key: "p", header: "Policy", main: true, sortable: true, render: (r) => `${r.policyName} v${r.policyVersion}` },
+          { key: "win", header: "Window", main: true, sortable: true, render: (r) => `${r.windowDays}d` },
+          { key: "considered", header: "Calls examined", main: true, sortable: true, render: (r) => r.considered },
+          { key: "blocked", header: "Newly blocked", main: true, sortable: true, required: "Newly blocked calls are always shown", render: (r) => r.newlyDenied },
+          { key: "users", header: "Users", main: true, sortable: true, render: (r) => r.affectedUsers },
+          { key: "at", header: "Previewed", sortable: true, render: (r) => (r.createdAt ? ago(r.createdAt) : "—") },
           {
             key: "open",
             header: "",
             srHeader: "Actions",
+            action: true,
             align: "right",
             render: (r) => (
               <Button
