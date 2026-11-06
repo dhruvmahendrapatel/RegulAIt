@@ -174,6 +174,9 @@ the role split, because it is the only option that protects real boundaries insi
         for a dedicated sign-in path or a guard that refuses a change to `is_admin`, `disabled_at`, `email`,
         `username`, `scim_external_id` or `cost_center` outside admin and `identity_provisioning`. The 0265 policy
         gives `authenticate` no UPDATE at all, so wiring it early fails closed.
+      - **Audit attribution (#682 round 2):** some gateway appends name the subject, not the actor (for example the
+        workbench routing audit, `userId: actorUserId ?? row.userId`). Under `audit_log_insert` each must write the
+        actor's id or run under a named system reason. Unwrapped, it fails closed.
    2. **Batch 3, credentials.** auth_sessions, api_keys, webauthn_credentials, webauthn_challenges, step_up_grants,
       user_model_credentials, federated_identities, federated_link_requests, sso_reauth_requests,
       chat_identity_links.
@@ -263,12 +266,12 @@ The same steps per table back out a later batch. No backup restore is needed, be
 
 - Migration `0265_rls_foundation_slice1` and `packages/db/src/rls.ts` (exported from `@regulait/db`).
 - `audit-chain.ts` enters `audit_chain` in the lock statement and restores it after the tip and clock reads.
-- `apps/gateway/src/zz-adr0234-rls-slice1.test.ts` (27 tests): inventory and roles; the registry matches;
+- `apps/gateway/src/zz-adr0234-rls-slice1.test.ts` (28 tests): inventory and roles; the registry matches;
   cross-user blocking on all four tables with the app check skipped, each with a superuser positive control; the
   participant branches; admin; zero rows with no setting, including on a reused connection; a clean pool after commit,
   after a throw and after a system context; narrow system contexts; the audit chain under a principal, with its
   negative control; the later-migration guard; the write side (a non-participant cannot decide or re-point a
-  review-role row, nobody rewrites the routing identity, a requester cannot route or decide its own request, a
+  review-role row, nobody rewrites the routing identity, a requester cannot route or decide its own request but can update its own pending row, a
   principal cannot forge an audit row about another user, cannot promote itself, and `authenticate` cannot write
   users), each with positive controls.
 - `packages/db/bench/rls-cost.mjs` produced the decision 8 table.

@@ -253,8 +253,12 @@ CREATE POLICY approvals_update ON approvals FOR UPDATE
     (SELECT regulait_rls_system_reason()) = ANY (ARRAY['approval_maintenance', 'migration'])
     OR (SELECT regulait_rls_is_admin())
     OR (
+      -- IS NOT DISTINCT FROM, not `=`: a pending row's NULL decided_by must read as "not me", never as NULL
+      -- (which would make the whole guard NULL and refuse every requester update). A NULL principal still
+      -- leaves the guard NULL, which refuses: it fails closed.
       NOT (user_id = (SELECT regulait_rls_user_id())
-           AND (approver_user_id = (SELECT regulait_rls_user_id()) OR decided_by = (SELECT regulait_rls_user_id())))
+           AND (approver_user_id IS NOT DISTINCT FROM (SELECT regulait_rls_user_id())
+                OR decided_by IS NOT DISTINCT FROM (SELECT regulait_rls_user_id())))
       AND (
         user_id = (SELECT regulait_rls_user_id())
       OR approver_user_id = (SELECT regulait_rls_user_id())

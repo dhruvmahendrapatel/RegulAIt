@@ -291,6 +291,19 @@ describe("the write side: WITH CHECK and column privileges (#682 review)", () =>
     expect((await status(ids.aliceApproval)).approver).toBe(ids.root);
   });
 
+  it("round 2: the requester CAN update its own pending row (NULL decided_by is not a self-route)", async () => {
+    expect((await su.select({ d: approvals.decidedBy }).from(approvals).where(eq(approvals.id, ids.aliceApproval)))[0]!.d).toBeNull();
+    const own = await withPrincipal(su, { userId: ids.alice }, (tx) =>
+      tx.update(approvals).set({ decisionReason: "rls0234 requester note" }).where(eq(approvals.id, ids.aliceApproval)).returning({ id: approvals.id }),
+    );
+    expect(own).toEqual([{ id: ids.aliceApproval }]);
+    // and the guard did not turn fail-open: routing it to herself is still refused
+    const self = await pgError(
+      withPrincipal(su, { userId: ids.alice }, (tx) => tx.update(approvals).set({ approverUserId: ids.alice }).where(eq(approvals.id, ids.aliceApproval))),
+    );
+    expect(self).toMatch(/new row violates row-level security policy for table "approvals"/);
+  });
+
   it("positive controls: a routed role member may claim, approval_maintenance may route, an admin may decide", async () => {
     const claimed = await withPrincipal(su, { userId: ids.carol }, (tx) =>
       tx.update(approvals).set({ approverUserId: ids.carol }).where(eq(approvals.id, ids.routedApproval)).returning({ id: approvals.id }),
