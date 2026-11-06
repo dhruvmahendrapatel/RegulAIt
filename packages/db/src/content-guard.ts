@@ -112,6 +112,7 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.annotationQueues, ["name", "description"]],
   [s.redteamLibraries, ["name"]],
   [s.trainingDatasets, ["name"]],
+  [s.fairnessDatasets, ["name", "description"]],
   [s.trainingJobs, ["name"]],
   [s.monitoringDashboards, ["name"]],
   [s.automationRules, ["name"]],
