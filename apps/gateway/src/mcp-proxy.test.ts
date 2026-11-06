@@ -5989,7 +5989,7 @@ describe("per-project cost rollup (pillar 5): attribution, dashboard, budget enf
     expect(csv.headers["content-disposition"]).toContain("attachment");
     const lines = csv.body.trim().split("\r\n");
     expect(lines[0]).toBe(
-      "at,userId,objectType,agentId,connectorId,model,operation,inputTokens,outputTokens,costUsd,measuredCostSavedUsd,projectId",
+      "at,userId,objectType,agentId,connectorId,model,operation,inputTokens,outputTokens,costUsd,measuredCostSavedUsd,projectId,textCostUsd,imageCostUsd,audioCostUsd",
     );
     expect(lines.length).toBe(1 + 3); // header + 3 usage rows
 

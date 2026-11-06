@@ -26,6 +26,7 @@ import { DEMO_AUP_KEY, DEMO_INCIDENT_TITLE, DEMO_OPEN_INCIDENT_TITLE } from "./d
 import { DEMO_LIVE_STAGING_TARGET, DEMO_REMEDIATION_ENVIRONMENT } from "./demo-live-staging.js";
 import { remediationEnvironmentsFrom, SHADOW_AI_REMEDIATION_TEMPLATE_NAME } from "./shadow-ai-remediation.js";
 import { APPROVER_ADMIN_NOT_INITIATOR } from "./workflow-approvers.js";
+import { checkEnforceBeatPrereqs } from "./demo-relax-e-lib.js";
 
 export type CheckLevel = "PASS" | "WARN" | "FAIL";
 export interface DemoCheck {
@@ -403,6 +404,8 @@ async function runDemoCheckRun(
     );
   }
 
+  // beat E (owner, #453 c6521685462): Dana's write must queue for Avery, not be refused at queue time
+  out.push(...(await checkEnforceBeatPrereqs((url) => call("GET", url, boot))));
   out.push(...(await checkClaudeBeat((url) => call("GET", url, boot))));
 
   return out;

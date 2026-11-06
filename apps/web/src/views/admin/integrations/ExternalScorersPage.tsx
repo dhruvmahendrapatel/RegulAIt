@@ -36,9 +36,18 @@ import a from "../admin.module.css";
 import v from "../../views.module.css";
 import { EditExternalScorerButton } from "../editForms";
 
-/** the judge-backed kinds an instrument may claim — the registration schema
- * refuses anything else, so the lexical metrics are not even expressible */
-const CLAIMABLE_KINDS = ["llm_as_judge", "groundedness_judge", "answer_relevance_judge"] as const;
+/** the judge-backed kinds an instrument may claim, plus (ADR-0220) the three
+ * guardrail kinds a trained-detector service serves on the Guardrails page —
+ * the registration schema refuses anything else, so the lexical metrics are
+ * not even expressible */
+const CLAIMABLE_KINDS = [
+  "llm_as_judge",
+  "groundedness_judge",
+  "answer_relevance_judge",
+  "guardrail_pii",
+  "guardrail_prompt_injection",
+  "guardrail_harm",
+] as const;
 
 const useExternalScorers = () =>
   useQuery({
@@ -178,7 +187,7 @@ export default function ExternalScorersPage() {
                 />
               </Field>
               <div role="group" aria-label="Scorer kinds claimed">
-                <span className={v.faint}>Claims to serve (judge-backed kinds only)</span>
+                <span className={v.faint}>Claims to serve (evaluation kinds, and the guardrail kinds used by trained detectors)</span>
                 <div className={v.stack}>
                   {CLAIMABLE_KINDS.map((k) => (
                     <span key={k} style={{ display: "flex", gap: "var(--s2)", alignItems: "center" }}>

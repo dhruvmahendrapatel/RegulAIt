@@ -25,7 +25,14 @@
  *    treated as looser anyway, so a writer that ever allowed one fails closed.
  */
 import type { approvalRules, complianceProfiles, dataScopeRules, rateLimits } from "@regulait/db";
-import { approvalRuleLoosens, approvalRuleShape, requireRuleStepUp, type ApprovalRuleStepUp } from "./approval-pool.js";
+import {
+  approvalRuleLoosens,
+  approvalRuleShape,
+  approverPoolTakeoverFacts,
+  requireRuleStepUp,
+  routedApprovalRule,
+  type ApprovalRuleStepUp,
+} from "./approval-pool.js";
 
 type Q = Parameters<typeof approvalRuleLoosens>[0];
 
@@ -125,6 +132,11 @@ const GUARDRAIL_RANK: Record<string, number> = { off: 0, log: 1, warn: 2, block:
 export const COMPLIANCE_PROFILE_LOOSENING: Classified<typeof complianceProfiles.$inferSelect> = {
   id: IDENTITY,
   createdAt: IDENTITY,
+  // ADR-0208: lifecycle, written only by the retire route (always a step-up), never part of a version
+  status: { kind: "identity", why: "lifecycle state; never versioned, only the retire route writes it" },
+  retiredAt: { kind: "identity", why: "lifecycle fact; written with status by the retire route" },
+  retiredReason: { kind: "identity", why: "lifecycle fact; written with status by the retire route" },
+  retiredByUserId: { kind: "identity", why: "lifecycle fact; written with status by the retire route" },
   tag: { kind: "selection", why: "the framework tag the profile is for; an edit never re-tags (a new tag is a new profile)" },
   requiredTemplateIds: { kind: "compare", looser: forcedDropped, why: "a workflow template the framework no longer forces" },
   mcpDefaultMode: { kind: "compare", looser: rankLowered({ read_write: 0, read_only: 1 }), why: "read_only -> read_write" },
@@ -223,14 +235,24 @@ export async function assertRuleLooseningStepUp(
     stepUp?: ApprovalRuleStepUp | null;
   },
 ): Promise<void> {
-  const values = await ruleEditLoosening(db, args.artifactType, args.before, args.after);
+  let values = await ruleEditLoosening(db, args.artifactType, args.before, args.after);
+  // ADR-0229 amendment: an approval-rule edit or activation that makes the rule outrank (or tie) an overlapping rule
+  // with a narrower pool takes that pool over; it is the same loosening, so it rides the same single step-up
+  if (args.artifactType === "approval_rule") {
+    const takeover = await approverPoolTakeoverFacts(db, {
+      ruleId: args.ruleId,
+      before: routedApprovalRule(args.before),
+      after: routedApprovalRule(args.after),
+    });
+    if (takeover) values = { ...(values ?? {}), ...takeover };
+  }
   if (!values) return;
   return requireRuleStepUp(
     db,
     { ruleId: args.ruleId, values },
     args.stepUp,
-    "this change loosens what a governance rule enforces (a lower quorum, a wider approver pool, fewer calls matched, " +
-      "a higher limit or a wider scope) and needs a step-up, which this write path cannot ask for: make the change as an " +
+    "this change loosens what a governance rule enforces (a lower quorum, a wider approver pool, taking over a " +
+      "narrower rule's approver pool, fewer calls matched, a higher limit or a wider scope) and needs a step-up, which this write path cannot ask for: make the change as an " +
       "admin in RegulAIt",
   );
 }

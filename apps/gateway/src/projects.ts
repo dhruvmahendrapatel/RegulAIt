@@ -55,6 +55,8 @@ import {
   updateProjectSchema,
   upsertComplianceProfileSchema,
   type PiiHit,
+  MODALITIES,
+  type Modality,
 } from "@regulait/shared";
 import { z } from "zod";
 import {
@@ -77,6 +79,12 @@ import { applyRuleEdit, isRuleEditRefusal } from "./rule-writes.js";
 import { settingTransitions } from "./setting-transitions.js";
 import { isApprovalTeam } from "./approval-pool.js";
 import { approvalRuleStepUp, requireStepUp } from "./step-up.js";
+import {
+  carriersForTags,
+  profileVersionFacts,
+  retiredTagRefusal,
+  retiredTagsAmong,
+} from "./compliance-profile-facts.js";
 
 type ProjectRow = typeof projects.$inferSelect;
 
@@ -113,6 +121,10 @@ export const USAGE_CSV_HEADER = [
   "costUsd",
   "measuredCostSavedUsd",
   "projectId",
+  // ADR-0212 (P12 b): the modality split for chargeback; empty when the provider reported none
+  "textCostUsd",
+  "imageCostUsd",
+  "audioCostUsd",
 ] as const;
 
 /** one already-escaped usage_events data line (no terminator) */
@@ -130,6 +142,9 @@ export function usageEventRow(r: typeof usageEvents.$inferSelect): string {
     r.costUsd,
     r.measuredCostSavedUsd,
     r.projectId,
+    r.modalityUsage?.text.costUsd,
+    r.modalityUsage?.image.costUsd,
+    r.modalityUsage?.audio.costUsd,
   ]
     .map(csvField)
     .join(",");
@@ -163,6 +178,7 @@ export const usageEventColumns = {
   refusal: usageEvents.refusal,
   providerMessageId: usageEvents.providerMessageId,
   projectId: usageEvents.projectId,
+  modalityUsage: usageEvents.modalityUsage,
   detail: usageEvents.detail,
 } as const;
 
@@ -613,10 +629,14 @@ export async function reapplyReclassificationToInFlight(
   projectId: string,
   previousTags: string[],
   deciderUserId: string,
+  /** ADR-0208: the templates the project required before a PROFILE change (its tags did not move, so they cannot say) */
+  oldRequiredOverride?: string[],
 ): Promise<{ applied: number; manual: number }> {
   const [newRequired, oldRequired] = await Promise.all([
     requiredTemplateIdsFor(db, projectId),
-    profilesForTags(db, previousTags).then((p) => effectiveCompliancePolicy(p).requiredTemplateIds),
+    oldRequiredOverride
+      ? Promise.resolve(oldRequiredOverride)
+      : profilesForTags(db, previousTags).then((p) => effectiveCompliancePolicy(p).requiredTemplateIds),
   ]);
   const relaxed = oldRequired.filter((id) => !newRequired.includes(id));
   const instances = (
@@ -1402,6 +1422,9 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
 
   app.post("/v1/teams", async (req, reply) => {
     const body = createTeamSchema.parse(req.body);
+    // ADR-0208: a retired profile takes no new carrier
+    const retired = await retiredTagsAmong(db, body.defaultClassifications ?? []);
+    if (retired.length > 0) return reply.status(409).send(retiredTagRefusal(retired));
     const [row] = await db
       .insert(teams)
       .values({ name: body.name, defaultClassifications: body.defaultClassifications ?? null })
@@ -2147,15 +2170,23 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     if (created) return reply.status(201).send(created);
 
     const [existing] = await db
-      .select({ id: complianceProfiles.id })
+      .select({ id: complianceProfiles.id, status: complianceProfiles.status })
       .from(complianceProfiles)
       .where(eq(complianceProfiles.tag, body.tag));
     if (!existing) return reply.status(409).send({ error: "compliance_profile_write_conflict" });
+    // ADR-0208: a retired profile is read-only; re-posting its tag never revives it
+    if (existing.status === "retired") {
+      return reply.status(409).send({ error: "compliance_profile_retired", detail: `profile '${body.tag}' is retired and read-only` });
+    }
 
-    // Every versioned field is passed, including the explicit nulls — this
-    // route's semantics have always been TOTAL REPLACE, and expressing that as
-    // a version keeps it visible and rollback-able instead of changing it.
-    const { tag: _tag, ...versioned } = values;
+    // ADR-0208 (#602's server half): an update writes only the fields the body
+    // names. An OMITTED field keeps its stored value, so a caller that does not
+    // know a floor (an older form, a script) can never clear it; an explicit
+    // null still removes it, and that loosening needs the step-up below.
+    const { tag: _tag, ...allVersioned } = values;
+    const versioned = Object.fromEntries(
+      Object.entries(allVersioned).filter(([k]) => Object.prototype.hasOwnProperty.call(body, k)),
+    );
     const res = await applyRuleEdit<ComplianceProfileRow>(db, {
       // ADR-0186 decision 29 (finding 52): an edit that loosens what the framework forces
       // (rule-loosening.ts) needs the settings_relax step-up
@@ -2174,9 +2205,22 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     return reply.status(201).send({ ...res.row, versionMinted: res.mintedVersion, note: res.note });
   });
 
-  app.get("/v1/compliance/profiles", async () => ({
-    profiles: await db.select().from(complianceProfiles),
-  }));
+  // ADR-0208: each profile with its active version, its status, what carries its tag (by name) and a pending review
+  app.get("/v1/compliance/profiles", async () => {
+    const rows = await db.select().from(complianceProfiles).orderBy(complianceProfiles.tag);
+    const [carriers, facts] = await Promise.all([
+      carriersForTags(db, rows.map((r) => r.tag)),
+      profileVersionFacts(db, rows.map((r) => r.id)),
+    ]);
+    return {
+      profiles: rows.map((r) => ({
+        ...r,
+        version: facts.get(r.id)?.version ?? 1,
+        pendingReview: facts.get(r.id)?.pendingReview ?? null,
+        usage: carriers.get(r.tag)!,
+      })),
+    };
+  });
 
   // §8.4 audit-log retention: audit_log has NO projectId column, so retention
   // is a single GLOBAL floor = the MAX auditRetentionDays across ALL compliance
@@ -2293,6 +2337,9 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
     if (!project) return reply.status(404).send({ error: "unknown_project" });
     const current = (project.classifications ?? []) as string[];
+    // ADR-0208: a retired profile takes no new carrier (a tag the project already holds may stay while it is moved off)
+    const retiredNew = await retiredTagsAmong(db, body.classifications.filter((t) => !current.includes(t)));
+    if (retiredNew.length > 0) return reply.status(409).send(retiredTagRefusal(retiredNew));
 
     if (current.length === 0) {
       await db
@@ -2394,7 +2441,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     // unexplained gap between the total and agent+connector.
     const mcpWhere = and(where, eq(usageEvents.objectType, "mcp_tool"));
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 3600 * 1000);
-    const [[measured], byUser, byAgent, byConnector, byMcpTool, byTeam, estimated, [recent]] =
+    const [[measured], byUser, byAgent, byConnector, byMcpTool, byTeam, estimated, [recent], modalityRows] =
       await Promise.all([
       db
         .select({
@@ -2490,7 +2537,36 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         .select({ costUsd: sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8` })
         .from(usageEvents)
         .where(and(where, gte(usageEvents.at, sevenDaysAgo))),
+      // ADR-0212 (P12 b): the modality split. Rows whose provider reported no modality
+      // data are summed apart as `notSplit` rather than guessed into "text".
+      db
+        .select({
+          split: sql<boolean>`${usageEvents.modalityUsage} IS NOT NULL`,
+          events: count(),
+          costUsd: sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8`,
+          ...Object.fromEntries(
+            MODALITIES.flatMap((m) => [
+              [`${m}In`, sql<number>`coalesce(sum((${usageEvents.modalityUsage}->${m}->>'inputTokens')::bigint), 0)::float8`],
+              [`${m}Out`, sql<number>`coalesce(sum((${usageEvents.modalityUsage}->${m}->>'outputTokens')::bigint), 0)::float8`],
+              [`${m}Cost`, sql<number>`coalesce(sum((${usageEvents.modalityUsage}->${m}->>'costUsd')::float8), 0)::float8`],
+            ]),
+          ) as Record<`${Modality}${"In" | "Out" | "Cost"}`, SQL<number>>,
+        })
+        .from(usageEvents)
+        .where(agentWhere)
+        .groupBy(sql`${usageEvents.modalityUsage} IS NOT NULL`),
     ]);
+    const splitRow = modalityRows.find((r) => r.split);
+    const unsplitRow = modalityRows.find((r) => !r.split);
+    const byModality = {
+      split: MODALITIES.map((m) => ({
+        modality: m,
+        inputTokens: Number(splitRow?.[`${m}In`] ?? 0),
+        outputTokens: Number(splitRow?.[`${m}Out`] ?? 0),
+        costUsd: Number(splitRow?.[`${m}Cost`] ?? 0),
+      })),
+      notSplit: { events: Number(unsplitRow?.events ?? 0), costUsd: Number(unsplitRow?.costUsd ?? 0) },
+    };
 
     const spentUsd = measured?.costUsd ?? 0;
     // budget window: under a 'monthly' budget the gauge reads only the current
@@ -2535,6 +2611,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       byConnector,
       byMcpTool,
       byTeam,
+      byModality,
       estimatedSavings: estimated,
       budget: {
         budgetUsd: project.budgetUsd,

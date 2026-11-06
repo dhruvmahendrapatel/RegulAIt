@@ -41,6 +41,7 @@
  */
 import { decideApprovalWithMeasuredSchema } from "./condition-metrics.js";
 import { putOverrideSchema } from "./guardrails.js";
+import { approvalsListQuery, usageSummaryQuery } from "./list-queries.js";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
@@ -213,7 +214,8 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
     summary: "The versioning and deprecation policy, plus every route currently on a sunset clock, as machine-readable data.",
   },
 
-  "GET /v1/users": { summary: "List users, with sign-in posture flags (never a hash or a secret). Bounded: `limit` (default 1000, max 5000)." },
+  "GET /v1/users": { summary: "List users, with sign-in posture flags (never a hash or a secret). Bounded: `limit` (default 1000, max 5000). With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226), with `q`, `role` and `status` filters." },
+  "GET /v1/users/export.xlsx": { summary: "The users list as an Excel file: every row matching the filters, in the requested sort, with the requested `columns` in order. Admin only; audited." },
   "POST /v1/users": {
     summary: "Provision a user. Refused when the licensed seat cap is reached (ADR-0052) — a growth gate, never a service gate.",
     body: createUserSchema,
@@ -252,7 +254,14 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
     body: evaluateRequestSchema,
   },
 
-  "GET /v1/approvals": { summary: "The approvals queue, scoped to what the caller may see." },
+  "GET /v1/approvals": {
+    summary: "The approvals queue, scoped to what the caller may see.",
+    query: approvalsListQuery,
+    responseNote:
+      "At most 100 rows, newest first by `requestedAt` unless `order=asc`. `status` takes one status or a " +
+      "comma-separated list. `total` counts every row the same filters and visibility match, and `hasMore` is " +
+      "true when `total` exceeds the rows returned.",
+  },
   "POST /v1/approvals/:approvalId/decide": {
     summary: "Approve or deny a pending request. Non-admin by design — the named approver is usually not an admin.",
     // ADR-0180 A2: the decide body also accepts measured conditions
@@ -267,6 +276,18 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
   "GET /v1/projects/:projectId/costs.csv": { summary: "The same ledger as a streamed CSV export." },
   "GET /v1/cost-events": { summary: "The raw cost ledger, one row per priced gateway call." },
   "GET /v1/usage-events": { summary: "The raw usage ledger, one row per governed call (priced or not)." },
+  "GET /v1/usage-events/summary": {
+    summary:
+      "Spend by agent, connector, MCP tool, project or UTC day, aggregated over every usage event in a window " +
+      "(default: the last 30 days). " +
+      "Same scoping as the usage ledger: a non-admin sees only their own events.",
+    query: usageSummaryQuery,
+    responseNote:
+      "`window` echoes the half-open `[from, to)` range applied (`defaulted` when `from` was omitted); `groups` are " +
+      "sorted by cost (`day` by date); `totals` is the sum over `groups`. `ledger` is the whole window across every " +
+      "object type, with `byObjectType` and `other` (what no typed breakdown names), so the agent, connector and " +
+      "MCP tool breakdowns plus `other` add up to `ledger`.",
+  },
 
   "GET /v1/workflows/instances": { summary: "Workflow instances." },
   "POST /v1/workflows/instances": { summary: "Start a workflow instance from a template." },
@@ -330,7 +351,8 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
   "POST /v1/chat/completions": { summary: "OpenAI-shaped compatibility surface (ADR-0024). Off-the-shelf OpenAI clients point here unchanged." },
   "POST /mcp/:serverId": { summary: "The governed MCP proxy. Speaks the MCP wire protocol; every tool call is entitlement-checked." },
   "POST /v1/runs": { summary: "Start a multi-agent orchestration run (pillar 7)." },
-  "GET /v1/runs": { summary: "Orchestration runs, newest first. Bounded: `limit` (default 200, max 1000); `status` narrows." },
+  "GET /v1/runs": { summary: "Orchestration runs, newest first. Bounded: `limit` (default 200, max 1000); `status` narrows. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226)." },
+  "GET /v1/runs/export.xlsx": { summary: "The runs list as an Excel file: every run the caller may see that matches the filters, in the requested sort, with the requested `columns` in order. Audited." },
   "GET /v1/runs/:runId": { summary: "One orchestration run with its task graph." },
   "POST /v1/runs/decompose": { summary: "Decompose a goal into a task DAG without executing it." },
   "GET /v1/reports/runs": { summary: "Generated report runs the caller may see." },

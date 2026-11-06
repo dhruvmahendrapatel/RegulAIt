@@ -730,7 +730,7 @@ export async function checkMcpTransportWrite(
       422,
       "mcp_transport_disabled",
       `the '${args.transport}' transport is not enabled for this organization (mcp_upstream_transports: ` +
-        `${JSON.stringify(enabled)}). An admin may enable it in the org settings.`,
+        `${JSON.stringify(enabled)}). An admin may enable it under Integrations > MCP servers > MCP protocol coverage (an audited relaxation).`,
       { enabledTransports: enabled },
     );
   }

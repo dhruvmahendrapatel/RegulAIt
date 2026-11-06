@@ -21,6 +21,7 @@ const like = (col: unknown, pattern: string) => sql`${col} like ${pattern}`;
 import { DEMO_INTAKE_FIXTURES } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { G9_BEAT, runDemoCheck, SHADOW_DISCOVERY_BEATS, type DemoCheck } from "./demo-check-lib.js";
+import { ENFORCE_BEAT } from "./demo-relax-e-lib.js";
 import { DEMO_AUP_KEY, seedDemoIntake } from "./demo-intake-seed-lib.js";
 import { runDemoGate } from "./demo-gate-lib.js";
 import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
@@ -110,7 +111,9 @@ describe("demo:check over the real dataset", () => {
   it("no beat FAILs", () => {
     // ADR-0197 decision 7: the Shadow-AI discovery beats need their dataset, whose first phase runs in first-admin
     // setup, which this shared database is not; demo-shadow-seed.test.ts seeds it on a scratch database and pins them
-    const shadow: readonly string[] = SHADOW_DISCOVERY_BEATS;
+    // Beat E's prerequisite is the seed's audited relaxation (seed.ts seedDemoBeatERelaxation), which this suite does
+    // not run; demo-relax-e-enforce.test.ts pins the row FAIL before it and PASS after it on a scratch database
+    const shadow: readonly string[] = [...SHADOW_DISCOVERY_BEATS, ENFORCE_BEAT];
     const failing = checks.filter((c) => c.level === "FAIL" && !shadow.includes(c.beat)).map((c) => `${c.beat}: ${c.detail}`);
     expect(failing).toEqual([]);
   });

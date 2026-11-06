@@ -1,5 +1,5 @@
 /**
- * The enterprise harness's mock API (ADR-0196). Every /v1 and /auth call is answered in the browser, so the
+ * The enterprise harness's mock API (ADR-0196). Every /v1, /auth and /supplier/ (ADR-0221) call is answered in the browser, so the
  * harness needs no gateway, database or seed, the same as the mocked UI suite.
  *
  * The signed-in person is an admin with MFA done, so every screen in the census renders. Beyond the session reads,
@@ -35,7 +35,7 @@ export async function mockApi(page: Page, opts: { mode?: MockMode; signedOut?: b
   await page.route("**/*", async (route: Route) => {
     const req = route.request();
     const p = new URL(req.url()).pathname;
-    if (req.resourceType() === "document" || (!p.startsWith("/v1") && !p.startsWith("/auth"))) return route.continue();
+    if (req.resourceType() === "document" || (!p.startsWith("/v1") && !p.startsWith("/auth") && !p.startsWith("/supplier/"))) return route.continue();
     const key = `${req.method()} ${p}`;
     if (opts.signedOut && (p === "/auth/me" || p === "/v1/me")) return json(route, { error: "unauthorized" }, 401);
     if (key in fixtures) return json(route, fixtures[key]);

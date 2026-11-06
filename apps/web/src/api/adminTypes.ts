@@ -253,6 +253,11 @@ export interface AdminAgent {
   enabled: boolean;
   costPerMTokIn: number | null;
   costPerMTokOut: number | null;
+  /** per-modality list prices; null = priced at the text price */
+  costPerMTokImageIn?: number | null;
+  costPerMTokImageOut?: number | null;
+  costPerMTokAudioIn?: number | null;
+  costPerMTokAudioOut?: number | null;
   systemPrompt: string | null;
   /** ADR-0034: set iff provider === 'custom' — the DB enforces the pair as a
    * discriminated union, so these two fields are never independently valid. */
@@ -494,6 +499,19 @@ export interface RateLimitRule extends RuleBase {
   windowSeconds: number;
 }
 
+/** a rate limit keyed on one model (agent registry entry) for a subject */
+export interface ModelRateLimitRule {
+  id: string;
+  scope: "user" | "role" | "team" | "fleet";
+  userId: string | null;
+  roleId: string | null;
+  teamId: string | null;
+  agentId: string;
+  maxCalls: number;
+  windowSeconds: number;
+  createdAt: string;
+}
+
 export interface RuleTrace {
   rule: string;
   outcome: "allow" | "deny" | "no-match" | "revoked" | "require-approval" | "satisfied-by-approval";
@@ -627,7 +645,18 @@ export interface CostEventsResponse {
 
 // ---- compliance / infra --------------------------------------------------
 
-export interface ComplianceProfile {
+/** the compliance profile floors the profiles page's form does not edit; an update carries them over unchanged */
+export interface ComplianceProfileCarriedFloors {
+  maxProjectBudgetUsd?: number | null;
+  budgetEnforcement?: "block" | "warn_only" | null;
+  guardrailModes?: Record<string, string> | null;
+  redteamGatingClasses?: string[] | null;
+  redteamMinTrials?: number | null;
+  redteamFailOnSeverity?: "low" | "medium" | "high" | "critical" | null;
+  minIsolationClass?: "hardened_container" | "user_space_kernel" | "microvm" | null;
+}
+
+export interface ComplianceProfile extends ComplianceProfileCarriedFloors {
   id?: string;
   tag: string;
   requiredTemplateIds: string[] | null;
@@ -636,6 +665,25 @@ export interface ComplianceProfile {
   piiMode: "block" | "warn" | "log";
   backupRetentionDays: number | null;
   patchCadenceDays: number | null;
+}
+
+/** ADR-0208 (G7): who carries a profile's tag today, by name */
+export interface ComplianceProfileUsage {
+  projects: string[];
+  pendingProjects: string[];
+  teams: string[];
+  resources: string[];
+}
+
+/** ADR-0208 (G7): a profile as GET /v1/compliance/profiles lists it — its active version, lifecycle and reach */
+export interface ComplianceProfileRecord extends ComplianceProfile {
+  id: string;
+  version: number;
+  status: "active" | "retired";
+  retiredAt: string | null;
+  retiredReason: string | null;
+  usage: ComplianceProfileUsage;
+  pendingReview: { approvalId: string; version: number; reviewerUserId: string } | null;
 }
 
 export interface ProjectCompliance {
@@ -653,13 +701,20 @@ export interface ProjectCompliance {
   enforcement: Record<string, string>;
 }
 
+/** ADR-0208 G8: a retired resource or policy stays readable and is read-only */
+export type InfraLifecycleStatus = "active" | "retired";
+
 export interface InfraResource {
   id: string;
   name: string;
   kind: string;
   provider: string;
   classifications?: string[] | null;
+  status: InfraLifecycleStatus;
+  retiredAt?: string | null;
+  retiredReason?: string | null;
   effectivePolicy?: {
+    policyId?: string | null;
     autoRemediateMaxSeverity?: string | null;
     backupRetentionDaysFloor?: number | null;
     patchCadenceDaysCeiling?: number | null;
@@ -667,13 +722,29 @@ export interface InfraResource {
 }
 
 export interface InfraPolicy {
-  id?: string;
+  id: string;
+  /** null = the fleet policy (every resource's fallback; edited, never retired) */
   resourceId: string | null;
   patchCadenceDays: number | null;
   certRotationDaysBeforeExpiry: number | null;
   backupSchedule: string | null;
   backupRetentionDays: number | null;
   autoRemediateMaxSeverity: string | null;
+  status: InfraLifecycleStatus;
+  retiredAt?: string | null;
+  retiredReason?: string | null;
+}
+
+/** POST /v1/infra/policies/:id/retire — the retired policy and the active fleet policy its resource now follows */
+export interface InfraPolicyRetireResponse {
+  policy: InfraPolicy;
+  fallback: (Omit<InfraPolicy, "id" | "retiredAt" | "retiredReason"> & { policyId: string }) | null;
+}
+
+/** POST /v1/infra/resources/:id/retire — the retired resource and the ids of the policies retired with it */
+export interface InfraResourceRetireResponse {
+  resource: InfraResource;
+  policiesRetired: string[];
 }
 
 export interface InfraFinding {
@@ -782,6 +853,8 @@ export interface OrgSettings {
    * null. true (default) = private-LAN MCP URLs work with zero ceremony;
    * false = strict. IMDS/link-local stays blocked either way. */
   mcpPrivateRangesDefault?: boolean;
+  /** ADR-0219: calls to remote agents over A2A. false (default) = none can be registered or called. */
+  a2aEnabled?: boolean;
   /** ADR-0062: TIGHTEN-ONLY dial over the deployment-wide egress posture.
    * 'inherit' (default) defers to the server's REGULAIT_DEPLOY_MODE; 'strict'
    * adjudicates compiled vendor endpoints against the egress allow-list even

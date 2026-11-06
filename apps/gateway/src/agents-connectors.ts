@@ -94,6 +94,7 @@ import {
   setAgentSystemPromptSchema,
   updateAgentConfigSchema,
   setExpectedServedModelSchema,
+  priceDispatchUsage,
 } from "@regulait/shared";
 import type { PiiHit } from "@regulait/shared";
 import { guardrailWithheldMarker, guardrailCategoryList } from "@regulait/shared";
@@ -104,7 +105,7 @@ import {
   guardrailOutcome,
   recordGuardrailDecision,
   resolveGuardrailPolicy,
-  runGuardrails,
+  runGuardrailsAsync,
   flattenFindings,
   type DispatchGuardrails,
   type GuardrailPolicy,
@@ -118,6 +119,7 @@ import {
   useCaseDispatchGate,
   type DispatchUseCaseGate,
 } from "./use-case-gate.js";
+import { privacyDispatchGate } from "./privacy-ops.js";
 // ADR-0079: pillar 2 §2 stage 2 — the invoke→instance join point and the
 // plan-only refusal it makes possible.
 import { guardInstanceAttributedCall } from "./plan-only.js";
@@ -155,6 +157,7 @@ import {
 } from "./conversations.js";
 import { ownerChangeGate, resolveRegistrationOwner, withOwnership } from "./ownership.js";
 import { CHANGED_CONCURRENTLY, checkStepUp, requireStepUp } from "./step-up.js";
+import { checkModelRateLimit } from "./model-rate-limits.js";
 import {
   prepareConversationContext,
   type PreparedConversationContext,
@@ -230,6 +233,8 @@ import { recordDecision } from "./metrics.js";
 const userIdParam = z.object({ userId: z.string().uuid() });
 const agentIdParam = z.object({ agentId: z.string().uuid() });
 const connectorIdParam = z.object({ connectorId: z.string().uuid() });
+// the audit actor when a connector write has no user identity (the bootstrap token), as in workflows.ts and pm.ts
+const CONNECTOR_SYSTEM_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
 export type AgentRow = typeof agents.$inferSelect;
 
@@ -1390,6 +1395,18 @@ async function dispatchAttempt(
         };
   }
 
+  // ADR-0212 (P12 c) — THE MODEL RATE LIMIT. In this one shared core so every
+  // dispatch path inherits it, after the lifecycle gate and before any provider
+  // work: a refusal costs no tokens and writes no usage row (it is audited).
+  // Off until an admin opts in, so by default this is one indexed read.
+  const modelLimit = await checkModelRateLimit(db, {
+    userId,
+    agentId: served.id,
+    agentName: served.name,
+    projectId: args.projectId ?? null,
+  });
+  if (modelLimit) return modelLimit;
+
   // ADR-0066 §2/§3 — THE VIRTUAL-KEY CEILING. Placed FIRST, before the MRM
   // gate and before any provider work, for the same reason every gate below is
   // where it is: a refusal here must cost nothing — no tokens, no usage row, no
@@ -1612,6 +1629,30 @@ async function dispatchAttempt(
     }
   }
 
+  // ADR-0224 (P13 c) — THE PROCESSING LIMIT, directly after the PII-mode rung
+  // and before any provider work: personal data the same detector finds must
+  // be a category an active record of processing permits for the attributed
+  // project, or the dispatch is refused 409 `processing_not_permitted`,
+  // audited with categories only. Behind `org_settings.privacy_ops_enabled`
+  // (shipped off); off, it is one settings read. A cascade `block` already
+  // refused above, so this decides only what warn/log let through.
+  const privacyRefusal = await privacyDispatchGate(db, {
+    userId,
+    agentId: served.id,
+    agentName: served.name,
+    projectId: args.projectId ?? null,
+    input: args.input,
+  });
+  if (privacyRefusal) {
+    sink.auditLogId = privacyRefusal.auditLogId;
+    return {
+      ok: false,
+      status: privacyRefusal.status,
+      error: privacyRefusal.error,
+      detail: privacyRefusal.detail,
+    };
+  }
+
   // ADR-0042 GUARDRAIL ENGINE (pillar 1/3). The SAME interception point and the
   // SAME two phases §8.4's PII enforcement uses, generalized to a registry of
   // detectors. PII is deliberately EXCLUDED from the engine's dispatch-time
@@ -1627,12 +1668,12 @@ async function dispatchAttempt(
     projectId: args.projectId ?? null,
     agentId: served.id,
   });
-  let guardrailInput: ReturnType<typeof runGuardrails> | null = null;
+  let guardrailInput: Awaited<ReturnType<typeof runGuardrailsAsync>> | null = null;
   if (guardrails.active) {
     // INPUT phase, BEFORE any provider work — a block costs nothing: no
     // dispatch, no usage row, no tokens. Identical placement to the PII input
     // check immediately above.
-    guardrailInput = runGuardrails(guardrails, "input", args.input);
+    guardrailInput = await runGuardrailsAsync(guardrails, "input", args.input);
     const outcome = guardrailOutcome(guardrailInput);
     if (outcome) {
       sink.auditLogId = await recordGuardrailDecision(db, {
@@ -1698,7 +1739,7 @@ async function dispatchAttempt(
     }
 
     const guardrailOutput = guardrails.active
-      ? runGuardrails(guardrails, "output", cached.outputText)
+      ? await runGuardrailsAsync(guardrails, "output", cached.outputText)
       : null;
     if (guardrailOutput) {
       const outcome = guardrailOutcome(guardrailOutput);
@@ -2220,12 +2261,11 @@ async function dispatchAttempt(
 
   // Pillar 5 actuals: measured tokens × the served agent's list price. An
   // unpriced agent yields null — a measured token count never becomes an
-  // invented dollar figure.
-  const costUsd =
-    served.costPerMTokIn != null && served.costPerMTokOut != null
-      ? (result.usage.inputTokens / 1e6) * served.costPerMTokIn +
-        (result.usage.outputTokens / 1e6) * served.costPerMTokOut
-      : null;
+  // invented dollar figure. ADR-0212 (P12 b): when the provider reports image or
+  // audio tokens, each modality is priced at its own list price (falling back to
+  // the text price); with no modality data this is the text-only formula, unchanged.
+  const priced = priceDispatchUsage(served, result.usage);
+  const costUsd = priced.costUsd;
   // The measured version of routing's savings claim: what the baseline agent
   // would have cost at the SAME measured token volumes, minus what we paid.
   // B1.5 F1: never priced when a MOCK served against a NON-mock baseline — a
@@ -2233,16 +2273,11 @@ async function dispatchAttempt(
   // saved on work nobody did (the request was not actually served by a model).
   // Mock-vs-mock stays measured: both sides are the same demo economy, so the
   // counterfactual is honest there.
-  const measuredCostSavedUsd =
-    costUsd != null &&
-    baseline &&
-    baseline.costPerMTokIn != null &&
-    baseline.costPerMTokOut != null &&
-    !(served.provider === "mock" && baseline.provider !== "mock")
-      ? (result.usage.inputTokens / 1e6) * baseline.costPerMTokIn +
-        (result.usage.outputTokens / 1e6) * baseline.costPerMTokOut -
-        costUsd
+  const baselineCostUsd =
+    costUsd != null && baseline && !(served.provider === "mock" && baseline.provider !== "mock")
+      ? priceDispatchUsage(baseline, result.usage).costUsd
       : null;
+  const measuredCostSavedUsd = costUsd != null && baselineCostUsd != null ? baselineCostUsd - costUsd : null;
 
   // §8.4 OUTPUT check: the call already ran, so a block here is BILL-AND-
   // WITHHOLD — the usage row below records the honest spend, but the output
@@ -2285,10 +2320,10 @@ async function dispatchAttempt(
   // ADR-0042 OUTPUT phase. The call already ran, so a block here is the same
   // BILL-AND-WITHHOLD the PII path performs: the usage row below records the
   // honest spend, and the text is replaced by a counts-only marker.
-  let guardrailOutput: ReturnType<typeof runGuardrails> | null = null;
+  let guardrailOutput: Awaited<ReturnType<typeof runGuardrailsAsync>> | null = null;
   let guardrailWithheld = false;
   if (guardrails.active) {
-    guardrailOutput = runGuardrails(guardrails, "output", outputForPolicy);
+    guardrailOutput = await runGuardrailsAsync(guardrails, "output", outputForPolicy);
     if (guardrailOutput.action === "block") {
       guardrailWithheld = true;
       // the guardrail marker wins over the PII one when both fired: both are
@@ -2356,6 +2391,8 @@ async function dispatchAttempt(
     outputTokens: result.usage.outputTokens,
     costUsd,
     measuredCostSavedUsd,
+    // ADR-0212 (P12 b): the text/image/audio split; NULL without modality data
+    modalityUsage: priced.modality,
     stopReason: result.stopReason,
     refusal: result.refusal,
     providerMessageId: result.providerMessageId,
@@ -4092,6 +4129,21 @@ export function registerAgentConnectorRoutes(
             .status(inputBlock.status)
             .send({ decision, error: inputBlock.error, detail: inputBlock.detail, pii: inputBlock.pii, ...suppressionFlag });
         }
+        // ADR-0224 (P13 c): the processing limit, hoisted for the same reason as the PII rung above: a repeat of an
+        // input carrying a category no record permits must be refused and audited, not answered from the semantic
+        // cache. dispatchAttempt keeps its own call for the orchestration and worker paths that never reach here.
+        const privacyRefusal = await privacyDispatchGate(db, {
+          userId,
+          agentId: agent.id,
+          agentName: agent.name,
+          projectId: projectId ?? null,
+          input: body.input ?? "",
+        });
+        if (privacyRefusal) {
+          return reply
+            .status(privacyRefusal.status)
+            .send({ decision, error: privacyRefusal.error, detail: privacyRefusal.detail, ...suppressionFlag });
+        }
       }
       // PILLAR 6 §8/§10 SEMANTIC CACHING (REAL cache) — opt-in per-(user,agent)
       // EXACT-MATCH response cache. When enabled, a byte-identical single-turn
@@ -5116,7 +5168,21 @@ export function registerAgentConnectorRoutes(
     }
     const owner = await resolveRegistrationOwner(db, { actorUserId: req.authCtx.userId, requested: (req.body as { ownerUserId?: unknown } | null)?.ownerUserId });
     if (!owner.ok) return reply.status(owner.status).send(owner.body);
-    const [row] = await db.insert(connectors).values({ ...body, ownerUserId: owner.ownerUserId }).returning();
+    // #453 follow-up: a new connected system is on the record, in the same transaction as the row
+    const row = await db.transaction(async (tx) => {
+      const [created] = await tx.insert(connectors).values({ ...body, ownerUserId: owner.ownerUserId }).returning();
+      await tx.insert(auditLog).values({
+        userId: req.authCtx.userId ?? CONNECTOR_SYSTEM_IDENTITY,
+        objectType: "connector",
+        objectId: created!.id,
+        detail: { phase: "created", name: created!.name, kind: created!.kind, providerKind: created!.providerKind ?? null, baseUrl: created!.baseUrl ?? null, receiptClass: "configuration" },
+        effect: "allow",
+        ruleId: "connector-created",
+        ruleChain: [],
+        reason: `connector '${created!.name}' (${created!.providerKind ?? created!.kind}) created`,
+      });
+      return created!;
+    });
     return reply.status(201).send(row);
   });
 
@@ -5197,11 +5263,29 @@ export function registerAgentConnectorRoutes(
       tokenCiphertext: encryptSecret(opts.dataKey, body.token),
       baseUrl: body.baseUrl ?? null,
     };
-    const [row] = await db
-      .insert(connectorCredentials)
-      .values(values)
-      .onConflictDoUpdate({ target: connectorCredentials.connectorId, set: values })
-      .returning(connectorCredCols);
+    const row = await db.transaction(async (tx) => {
+      const [prior] = await tx
+        .select({ id: connectorCredentials.id })
+        .from(connectorCredentials)
+        .where(eq(connectorCredentials.connectorId, connectorId));
+      const [stored] = await tx
+        .insert(connectorCredentials)
+        .values(values)
+        .onConflictDoUpdate({ target: connectorCredentials.connectorId, set: values })
+        .returning(connectorCredCols);
+      // never the token: that one was stored or replaced, its baseUrl, and by whom
+      await tx.insert(auditLog).values({
+        userId: req.authCtx.userId ?? CONNECTOR_SYSTEM_IDENTITY,
+        objectType: "connector",
+        objectId: connectorId,
+        detail: { phase: prior ? "credential_replaced" : "credential_stored", name: connector.name, baseUrl: values.baseUrl, receiptClass: "configuration" },
+        effect: "allow",
+        ruleId: prior ? "connector-credential-replaced" : "connector-credential-stored",
+        ruleChain: [],
+        reason: `connector '${connector.name}' credential ${prior ? "replaced" : "stored"}`,
+      });
+      return stored!;
+    });
     return reply.status(201).send(row);
   });
 
@@ -5217,10 +5301,25 @@ export function registerAgentConnectorRoutes(
 
   app.delete("/v1/connectors/:connectorId/credential", async (req, reply) => {
     const { connectorId } = connectorIdParam.parse(req.params);
-    const deleted = await db
-      .delete(connectorCredentials)
-      .where(eq(connectorCredentials.connectorId, connectorId))
-      .returning({ id: connectorCredentials.id });
+    const deleted = await db.transaction(async (tx) => {
+      const rows = await tx
+        .delete(connectorCredentials)
+        .where(eq(connectorCredentials.connectorId, connectorId))
+        .returning({ id: connectorCredentials.id });
+      if (rows.length > 0) {
+        await tx.insert(auditLog).values({
+          userId: req.authCtx.userId ?? CONNECTOR_SYSTEM_IDENTITY,
+          objectType: "connector",
+          objectId: connectorId,
+          detail: { phase: "credential_removed", receiptClass: "configuration" },
+          effect: "allow",
+          ruleId: "connector-credential-removed",
+          ruleChain: [],
+          reason: `connector credential removed`,
+        });
+      }
+      return rows;
+    });
     if (deleted.length === 0) return reply.status(404).send({ error: "unknown_credential" });
     return { removed: true };
   });
