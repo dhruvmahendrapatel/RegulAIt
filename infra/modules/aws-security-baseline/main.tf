@@ -238,6 +238,16 @@ resource "aws_s3_bucket" "config" {
   bucket   = "${var.project}-config-recordings-${var.management_account_id}"
 }
 
+# Versioned (ADR-0228): an overwritten or deleted Config snapshot or history file
+# stays recoverable as a noncurrent version, as on the CloudTrail bucket.
+resource "aws_s3_bucket_versioning" "config" {
+  provider = aws.management
+  bucket   = aws_s3_bucket.config.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
 resource "aws_s3_bucket_public_access_block" "config" {
   provider                = aws.management
   bucket                  = aws_s3_bucket.config.id

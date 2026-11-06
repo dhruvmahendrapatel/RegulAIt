@@ -94,7 +94,7 @@ import {
   guardrailOutcome,
   recordGuardrailDecision,
   resolveGuardrailPolicy,
-  runGuardrails,
+  runGuardrailsAsync,
   type DispatchGuardrails,
   type GuardrailPolicy,
 } from "./guardrails.js";
@@ -895,9 +895,9 @@ export async function executeGovernedConnectorCall(
       projectId,
       connectorId,
     });
-    let cgInput: ReturnType<typeof runGuardrails> | null = null;
+    let cgInput: Awaited<ReturnType<typeof runGuardrailsAsync>> | null = null;
     if (connectorGuardrails.active) {
-      cgInput = runGuardrails(
+      cgInput = await runGuardrailsAsync(
         connectorGuardrails,
         "input",
         JSON.stringify({ object: body.object ?? null, payload: body.payload ?? null }),
@@ -929,7 +929,7 @@ export async function executeGovernedConnectorCall(
         });
       }
       if (preparedPii) {
-        const effectiveCheck = runGuardrails(connectorGuardrails, "input", JSON.stringify(effectiveInvocation));
+        const effectiveCheck = await runGuardrailsAsync(connectorGuardrails, "input", JSON.stringify(effectiveInvocation));
         if (effectiveCheck.action === "block") {
           await recordGuardrailDecision(db, { userId, objectType: "connector", objectId: connectorId, projectId,
             evaluation: effectiveCheck, outcome: "blocked", detail: { phase: "effective_input", operation: body.operation } });
@@ -1193,12 +1193,12 @@ export async function executeGovernedConnectorCall(
           : null;
 
       // ADR-0042 OUTPUT phase, connector path — bill-and-withhold, same as PII.
-      let cgOutput: ReturnType<typeof runGuardrails> | null = null;
+      let cgOutput: Awaited<ReturnType<typeof runGuardrailsAsync>> | null = null;
       let cgWithheld = false;
       if (!policyChanged && !transformRefused && connectorGuardrails.active) {
-        cgOutput = runGuardrails(connectorGuardrails, "output", JSON.stringify(result.body ?? null));
+        cgOutput = await runGuardrailsAsync(connectorGuardrails, "output", JSON.stringify(result.body ?? null));
         if (piiMode === "redact") {
-          const effectiveCheck = runGuardrails(connectorGuardrails, "output", JSON.stringify(respBody));
+          const effectiveCheck = await runGuardrailsAsync(connectorGuardrails, "output", JSON.stringify(respBody));
           const rank = { allow: 0, log: 1, warn: 2, block: 3 };
           if (rank[effectiveCheck.action] > rank[cgOutput.action]) cgOutput = effectiveCheck;
         }

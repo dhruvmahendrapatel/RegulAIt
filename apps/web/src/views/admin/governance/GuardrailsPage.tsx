@@ -1,4 +1,5 @@
 import { DetectionContentPanel } from "./DetectionContentPanel";
+import { TrainedDetectorsPanel } from "./TrainedDetectorsPanel";
 /**
  * Guardrails (ADR-0042).
  *
@@ -263,6 +264,9 @@ export default function GuardrailsPage() {
               )}
             </form>
           </Card>
+
+          {/* ---------------- trained detectors (ADR-0220) ---------------- */}
+          <TrainedDetectorsPanel />
 
           {/* ---------------- per-object overrides ---------------- */}
           <Card title="Per-agent / per-connector overrides">
