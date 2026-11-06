@@ -159,6 +159,9 @@ test.describe("ADR-0179 UX-AG-1: the fallback chain is saved explicitly", () => 
     expect(puts).toEqual([{ fallbackAgentIds: [GPT, GROK] }]);
     await expect(order(page)).toHaveText(["gpt-5", "grok"]);
     await expect(primary).toBeEnabled();
+    // the page's own header back in view: part-scrolled, the sticky top bar sits over the header's (i) and axe reads
+    // that as a target-size failure (the Agents page, in its tabs, is short enough to stop part-way)
+    await page.evaluate(() => window.scrollTo(0, 0));
     await checkScreen(page, "Fallback chain saved");
   });
 
