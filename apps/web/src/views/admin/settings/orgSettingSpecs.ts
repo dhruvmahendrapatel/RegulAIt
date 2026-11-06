@@ -631,6 +631,17 @@ export const CORE_SPECS: Readonly<Record<string, OrgSettingSpec>> = {
     // exempt in the gateway's registry: no value asks for a step-up
     isRelaxed: () => false,
   },
+  mrmAutoRetestEnabled: {
+    key: "mrmAutoRetestEnabled",
+    label: "Re-test automatically after a model change",
+    strictDefault: false,
+    strict: "Off: a model, prompt or endpoint change asks for a new sign-off, and nobody re-runs its tests unless a person does.",
+    relaxed:
+      "On: the model's tests and red-team libraries are re-run against the change, charged to their projects, and " +
+      "the results are attached to the re-certification request. A person still has to sign it off.",
+    control: onOff("On", "Off"),
+    isRelaxed: notEqual(false),
+  },
 };
 
 export const ALL_SPECS: Readonly<Record<string, OrgSettingSpec>> = {

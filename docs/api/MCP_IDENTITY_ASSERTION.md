@@ -155,9 +155,88 @@ at `exp`).
 document out of band and use `createLocalJWKSet(jwks)` in place of `createRemoteJWKSet`. Refresh the document whenever
 a RegulAIt admin rotates the issuer key.
 
+## The OIDC profile (`oidc_bearer`)
+
+ADR-0210. For an upstream whose validator expects a standard OIDC JWT: a discovery document, a pinned RS256, ES256 or
+PS256 algorithm, the token in `Authorization: Bearer`, `iss` and `aud`, and a `scope` claim. It is **off by default**,
+per server, and only while the server receives a signed assertion. The default profile (`regulait_header`, everything
+above) does not change.
+
+**Turning it on.** `PATCH /v1/servers/:id`:
+
+```json
+{ "identityPropagation": "signed_assertion", "identityAssertionProfile": "oidc_bearer", "identityAssertionScope": "read write" }
+```
+
+- It is a relaxation (ADR-0180): one fresh `settings_relax` step-up bound to the server, its url and these values
+  (combined with turning propagation on, if the same request does). Changing the scope later needs the step-up again.
+  Every change is audited (`mcp-server-identity-assertion-profile-changed`).
+- The scope is required and is sent exactly as set: space-separated RFC 6749 scope tokens, 1 to 512 characters, no
+  quote or backslash. A missing or malformed scope is refused (400 `identity_assertion_scope_invalid`); the profile on
+  a server that does not receive an assertion is refused (409 `identity_assertion_profile_needs_assertion`), and so is
+  a stdio server (409 `identity_propagation_unsupported`).
+- **It cannot sit beside a static Bearer credential (ADR-0204).** Both would use `Authorization`. Turning the profile
+  on while the server has a `bearer` credential is refused (409 `identity_assertion_bearer_conflict`), and so is
+  setting a `bearer` credential while the profile is on. A credential in a named header is unaffected.
+- A url move, or turning propagation off, returns the server to `regulait_header` with no scope (audited). To keep the
+  profile at a new url, an admin steps up again for that url.
+- `GET /v1/servers` shows `identityAssertionProfile` and `identityAssertionScope` for each server.
+
+**The issuer and its metadata.** The issuer is `<public URL>/mcp-identity`, separate from the workload identity issuer
+(the public URL) and from `/federation`. Both documents are public:
+
+| Path | Contents |
+| --- | --- |
+| `GET /mcp-identity/.well-known/openid-configuration` | `issuer`, `jwks_uri`, `id_token_signing_alg_values_supported: ["ES256"]`, `subject_types_supported: ["pairwise"]`, `response_types_supported`, `claims_supported` |
+| `GET /mcp-identity/.well-known/jwks.json` | the ES256 (P-256) public keys only: active, and retired ones inside their overlap; never a revoked key |
+
+The ES256 keys are never listed in `/.well-known/jwks.json`, and the Ed25519 keys are never listed here.
+
+**The token.** Header `alg: ES256`, `typ: JWT`, `kid`. Claims: `iss` (the issuer above), `aud` (the canonical
+audience, as above), `sub` (pairwise, as above), `scope` (the admin's value), `act` (only when an agent acts, as above),
+`iat`, `exp` (60 seconds), `jti`. It rides as `Authorization: Bearer <token>`, and the `RegulAIt-Identity-Assertion`
+header is not sent.
+
+**When it is sent.** Once a governed call is allowed, **every request** on that call's connection carries a freshly
+signed token: `initialize`, notifications, `tools/call` (or the governed protocol method), the event-stream GET and the
+session DELETE. Each has its own `jti` and its own `mcp-identity-assertion-issued` row, which adds `profile:
+"oidc_bearer"`, `placement: "authorization_bearer"`, `scope` and `issuer`. A connection opened before the call is
+decided (the gateway's manifest sync for an unknown tool) carries no token, so an upstream that refuses
+unauthenticated requests cannot be synced that way. The fail-closed rules above apply unchanged, and two more reasons
+refuse a call: no active ES256 key, and no scope.
+
+**The key.** The operator adds a PKCS#8 P-256 private key to the file named by `REGULAIT_IDENTITY_SIGNING_KEY`, beside
+the Ed25519 key. It activates on its first use if no ES256 key was ever recorded; otherwise an admin rotates to it
+(`POST /v1/identity/signing-keys/rotate` with its `kid`, a `key_management` step-up). A rotation retires only the
+active key of the same algorithm. Revoking it (compromise) removes it from the JWKS at once, and the next call to an
+`oidc_bearer` server is refused until an admin rotates to a new ES256 key. Every lifecycle row records the algorithm.
+The install-generated key is Ed25519 only.
+
+**Verifying it.** Any standard OIDC validator, configured with the discovery URL above, the pinned algorithm `ES256`
+and the server's audience. With `jose`:
+
+```js
+import { createRemoteJWKSet, jwtVerify } from "jose";
+
+const issuer = "https://regulait.example.com/mcp-identity";
+const jwks = createRemoteJWKSet(new URL(`${issuer}/.well-known/jwks.json`));
+const { payload } = await jwtVerify(bearerToken, jwks, {
+  issuer,
+  audience: "https://mcp.example.com/mcp",
+  algorithms: ["ES256"],
+  maxTokenAge: "60s",
+  requiredClaims: ["sub", "scope", "jti", "iat", "exp"],
+});
+// payload.scope: "read write"; payload.sub: the pairwise id of the person
+```
+
+The RegulAIt suite verifies the token this way, against the JWKS its discovery document names
+(`apps/gateway/src/zz-adr0210-oidc-identity-assertion.test.ts`).
+
 ## Standards used
 
-RFC 7519 (JWT), RFC 7515 (JWS), RFC 8037 (EdDSA in JOSE), RFC 7517 (JWKS), RFC 8725 §3.11 (explicit typing),
+RFC 7519 (JWT), RFC 7515 (JWS), RFC 8037 (EdDSA in JOSE), RFC 7518 (ES256), OpenID Connect Discovery 1.0 and
+RFC 6749 §3.3 (scope tokens) for the OIDC profile, RFC 7517 (JWKS), RFC 8725 §3.11 (explicit typing),
 RFC 8693 §4.1 (the `act` claim), RFC 8707 (the canonical resource URI as audience), and the MCP authorization
 specification (canonical server URI, and keeping `Authorization` for the upstream's own token). The WIMSE drafts
 (`Workload-Identity-Token` and HTTP message signatures) were considered. ADR-0188 decides not to put them on the wire

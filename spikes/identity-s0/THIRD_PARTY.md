@@ -376,7 +376,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 
-## fast-uri 3.1.8 (BSD-3-Clause)
+## fast-uri 3.1.9 (BSD-3-Clause)
 
 Source: LICENSE
 
@@ -1010,7 +1010,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-## fast-uri 4.2.1 (BSD-3-Clause)
+## fast-uri 4.2.3 (BSD-3-Clause)
 
 Source: LICENSE
 
@@ -1046,7 +1046,7 @@ The complete list of contributors can be found at:
 - https://github.com/garycourt/uri-js/graphs/contributors
 
 
-## fastify 5.12.5 (MIT)
+## fastify 5.12.6 (MIT)
 
 Source: LICENSE
 

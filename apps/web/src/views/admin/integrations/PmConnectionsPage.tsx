@@ -208,7 +208,7 @@ export default function PmConnectionsPage() {
       <ConfirmModal
         open={deleting !== null}
         title={`Delete PM connection “${deleting?.name}”?`}
-        body="Its stored token and inbound webhook secret are destroyed, its work-item links and sync history are removed, and it stops being the alert-ticket connection. Re-creating it mints a new webhook secret, which must be registered again in Jira or Azure DevOps. The removal is recorded in the audit log."
+        body="Its stored token and inbound webhook secret are destroyed, its work-item links and sync history are removed, and it stops being the alert-ticket connection. Re-creating it mints a new webhook secret, which must be registered again in the PM tool. The removal is recorded in the audit log."
         danger
         confirmLabel="Delete connection"
         onCancel={() => setDeleting(null)}

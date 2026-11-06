@@ -1,7 +1,8 @@
 /**
  * #453 — the compliance profile form never clears a floor it does not show (against a mocked gateway).
- * `POST /v1/compliance/profiles` replaces the whole profile, so an update from this form sends back the budget,
- * guardrail, red-team and isolation floors the profile already holds; a new profile starts at the strict defaults.
+ * ADR-0208 (G7) made the card create-only: a new profile starts at the strict defaults, and typing an existing tag
+ * loads its stored values but never posts them (that profile changes through Edit profile, a reviewed version). The
+ * list gating from #602 stays: nothing is created until the list has loaded without error.
  */
 import { expect, test, type Page, type Route } from "@playwright/test";
 
@@ -46,7 +47,7 @@ async function mockApi(page: Page, list: (route: Route) => Promise<void> = (rout
   return { posts };
 }
 
-const form = (page: Page) => page.locator("section", { has: page.getByRole("button", { name: /Save profile|Update profile/ }) });
+const form = (page: Page) => page.locator("section", { has: page.getByRole("button", { name: "Create profile" }) });
 
 test("a new profile starts at the strict defaults", async ({ page }) => {
   const api = await mockApi(page);
@@ -55,37 +56,22 @@ test("a new profile starts at the strict defaults", async ({ page }) => {
   await card.getByLabel("Tag", { exact: true }).fill("pci");
   await expect(card.getByLabel("MCP default mode")).toHaveValue("read_only");
   await expect(card.getByLabel("PII mode")).toHaveValue("block");
-  await card.getByRole("button", { name: "Save profile" }).click();
+  await card.getByRole("button", { name: "Create profile" }).click();
   await expect.poll(() => api.posts.length).toBe(1);
   expect(api.posts[0]).toMatchObject({ tag: "pci", mcpDefaultMode: "read_only", piiMode: "block" });
   expect(api.posts[0]).not.toHaveProperty("guardrailModes");
 });
 
-test("updating an existing tag loads it and sends back every floor the form does not show", async ({ page }) => {
+test("an existing tag loads its stored values and is never posted from the create card", async ({ page }) => {
   const api = await mockApi(page);
   await page.goto("/ui/admin/compliance");
   const card = form(page);
   await card.getByLabel("Tag", { exact: true }).fill("hipaa");
   await expect(card.getByLabel("Audit retention days (blank = none)")).toHaveValue("2190");
-  await expect(card.getByRole("status")).toContainText("keep their current values");
-  await card.getByLabel("Patch cadence days (infra ceiling)").fill("7");
-  await card.getByRole("button", { name: "Update profile" }).click();
-  await expect.poll(() => api.posts.length).toBe(1);
-  expect(api.posts[0]).toEqual({
-    tag: "hipaa",
-    mcpDefaultMode: "read_only",
-    piiMode: "block",
-    auditRetentionDays: 2190,
-    backupRetentionDays: 30,
-    patchCadenceDays: 7,
-    maxProjectBudgetUsd: 500,
-    budgetEnforcement: "block",
-    guardrailModes: { prompt_injection: "block" },
-    redteamGatingClasses: ["prompt_injection"],
-    redteamMinTrials: 3,
-    redteamFailOnSeverity: "high",
-    minIsolationClass: "microvm",
-  });
+  await expect(card.getByRole("status")).toContainText("change it with Edit profile on its row");
+  await expect(card.getByRole("button", { name: "Create profile" })).toBeDisabled();
+  await card.getByLabel("Tag", { exact: true }).press("Enter");
+  expect(api.posts).toHaveLength(0);
 });
 
 test("moving from an existing tag to a new one starts again from the strict defaults", async ({ page }) => {
@@ -103,7 +89,7 @@ test("moving from an existing tag to a new one starts again from the strict defa
   await expect(card.getByLabel("Audit retention days (blank = none)")).toHaveValue("");
   await expect(card.getByLabel("Backup retention days (infra floor)")).toHaveValue("");
   await expect(card.getByLabel("Patch cadence days (infra ceiling)")).toHaveValue("");
-  await card.getByRole("button", { name: "Save profile" }).click();
+  await card.getByRole("button", { name: "Create profile" }).click();
   await expect.poll(() => api.posts.length).toBe(1);
   expect(api.posts[0]).toEqual({
     tag: "hipaa-eu",
@@ -125,13 +111,12 @@ test("saving waits for the profiles list, then loads a tag typed before it arriv
   await page.goto("/ui/admin/compliance");
   const card = form(page);
   await card.getByLabel("Tag", { exact: true }).fill("hipaa");
-  await expect(card.getByRole("button", { name: "Save profile" })).toBeDisabled();
+  await expect(card.getByRole("button", { name: "Create profile" })).toBeDisabled();
   await expect(card.getByText("Loading the existing profiles")).toBeVisible();
   release();
   await expect(card.getByLabel("Audit retention days (blank = none)")).toHaveValue("2190");
-  await card.getByRole("button", { name: "Update profile" }).click();
-  await expect.poll(() => api.posts.length).toBe(1);
-  expect(api.posts[0]).toMatchObject({ tag: "hipaa", auditRetentionDays: 2190, minIsolationClass: "microvm", maxProjectBudgetUsd: 500 });
+  await expect(card.getByRole("button", { name: "Create profile" })).toBeDisabled();
+  expect(api.posts).toHaveLength(0);
 });
 
 test("saving is off while the profiles list has failed to load", async ({ page }) => {
@@ -140,11 +125,11 @@ test("saving is off while the profiles list has failed to load", async ({ page }
   const card = form(page);
   await card.getByLabel("Tag", { exact: true }).fill("hipaa");
   await expect(card.getByRole("alert")).toContainText("did not load");
-  await expect(card.getByRole("button", { name: "Save profile" })).toBeDisabled();
+  await expect(card.getByRole("button", { name: "Create profile" })).toBeDisabled();
   expect(api.posts).toHaveLength(0);
 });
 
-test("a retired template the profile requires stays required when the Select is touched", async ({ page }) => {
+test("a retired template the stored profile requires is shown, disabled, as still required", async ({ page }) => {
   const api = await mockApi(page, (route) => json(route, { profiles: [{ ...HIPAA, requiredTemplateIds: ["tpl-old"] }] }));
   await page.route("**/v1/workflows/templates", (route) =>
     json(route, {
@@ -159,10 +144,9 @@ test("a retired template the profile requires stays required when the Select is 
   await card.getByLabel("Tag", { exact: true }).fill("hipaa");
   const select = card.getByLabel("Required workflow templates (ctrl/cmd-click)");
   await expect(select.locator("option", { hasText: "Old review" })).toBeDisabled();
-  await select.selectOption("tpl-new");
-  await card.getByRole("button", { name: "Update profile" }).click();
-  await expect.poll(() => api.posts.length).toBe(1);
-  expect(api.posts[0].requiredTemplateIds).toEqual(["tpl-old", "tpl-new"]);
+  // the stored profile is shown read-only here (it changes through Edit profile), so nothing is posted
+  await expect(card.getByRole("button", { name: "Create profile" })).toBeDisabled();
+  expect(api.posts).toHaveLength(0);
 });
 
 test("saving stays off while the profiles query is paused offline", async ({ page }) => {
@@ -184,7 +168,7 @@ test("saving stays off while the profiles query is paused offline", async ({ pag
   });
   const card = form(page);
   await card.getByLabel("Tag", { exact: true }).fill("hipaa");
-  await expect(card.getByRole("button", { name: "Save profile" })).toBeDisabled();
+  await expect(card.getByRole("button", { name: "Create profile" })).toBeDisabled();
   await expect(card.getByText("Loading the existing profiles")).toBeVisible();
   expect(api.posts).toHaveLength(0);
 });

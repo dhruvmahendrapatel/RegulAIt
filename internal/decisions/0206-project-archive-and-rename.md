@@ -6,7 +6,7 @@
 ## Context
 
 The owner approved the after-demo lifecycle proposals on 2026-10-29 (#453, comment 6509969403) and unparked them on
-2026-10-30 (#453, comment 6522492997), reserving migrations 0217 and 0218 and this ADR number for G1 and G10. The
+2026-10-30 (#453, comment 6522492997), reserving migrations 0217 and 0218 (renumbered 0260 and 0261 above main at merge) and this ADR number for G1 and G10. The
 decisions, as the owner wrote them:
 
 - **G1 Project archive.** "Admins only. Archived projects are hidden from the default list and shown behind the
@@ -29,7 +29,7 @@ team could not be renamed.
    (workflow instances not yet terminal, planned or running orchestration runs, engine runs not yet terminal) and
    `project_has_open_delegations` (unrevoked, unexpired delegation grants). A second archive is
    `project_already_archived`; unarchiving an active project is `project_not_archived`.
-3. **What an archive does.** It sets `archived_at`, `archived_reason` and `archived_by_user_id` (migration 0217) and
+3. **What an archive does.** It sets `archived_at`, `archived_reason` and `archived_by_user_id` (migration 0260) and
    writes the audit row (`project-archived`, naming the reason and the pinned engine keys) in the same transaction,
    under `FOR UPDATE` on the project row. Nothing the project already holds is deleted or rewritten.
 4. **An archived project takes nothing new.** The gateway answers `409 project_archived` to member adds, role changes
@@ -38,7 +38,7 @@ team could not be renamed.
    call can be attributed to an archived project and **an engine key pinned to it stops working** without being
    revoked; it works again after an unarchive. Its budget is therefore no longer enforced: there is nothing left to
    enforce it on.
-5. **The database holds the line too.** Migration 0218 adds a `BEFORE INSERT` guard on `project_members` and
+5. **The database holds the line too.** Migration 0261 adds a `BEFORE INSERT` guard on `project_members` and
    `project_context_items` that refuses a row for an archived project, reading the project row `FOR SHARE` so a write
    racing an archive either lands first (and the archive sees it) or is refused. Its function pins `search_path`
    (migration 0185). It guards INSERT only, so it is not an append-only trigger and needs no TRUNCATE guard.
@@ -82,8 +82,8 @@ team could not be renamed.
 
 ## As built (2026-10-30)
 
-- Migrations `0217_project_archive.sql` and `0218_project_archive_write_guard.sql`, hand-written, journal `when`
-  1785152000000 and 1785153000000.
+- Migrations `0260_project_archive.sql` and `0261_project_archive_write_guard.sql` (reserved as 0217–0218; renumbered
+  above main at merge), hand-written, journal `when` 1785195000000 and 1785196000000.
 - Gateway: `project-archive.ts`, `role-team-rename.ts`, and the archived check in `projects.ts`
   (`preDispatchProjectGate`, `applyProjectPatch`, the member, context and classification routes).
   Tests: `zz-adr0206-archive-rename.test.ts`.
@@ -91,6 +91,8 @@ team could not be renamed.
   credential pasted into an archive reason is stored redacted, as in the audit row.
 - Web: the archive dialogs (`ProjectArchiveDialogs.tsx`) and the rename dialog are lazily loaded chunks; the projects
   list and pages read `?archived=include`. Mock spec: `e2e/g1-g10-lifecycle.mock.spec.ts`.
-- Bundle: all JS 1,050 → 1,055 kB (ADR-0196 addendum, citing #453 comment 6522492997); entry ceilings unchanged.
+- Bundle: no raise of its own. The 1,050 → 1,055 kB raise this branch first carried is superseded by main's shared
+  all-JS ceiling (1,150 kB, ADR-0196 addendum citing #453 comment 6531626139); with main merged on 2026-11-06 all JS
+  measures 1,118,578 B. Entry ceilings unchanged.
 - Open-source check (ADR-0176): no library fits. These are governance semantics (what an archive refuses, which
   references a rename must disclose) over our own tables; the database guard is plain PostgreSQL.

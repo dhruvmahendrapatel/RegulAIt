@@ -15,7 +15,7 @@
  *                                                    spend attribution and budget enforcement back on
  *
  * Each write and its audit row are one transaction. The archive takes FOR UPDATE on the project row and checks the
- * blockers under it; migration 0218's insert guard reads the row FOR SHARE, so a member or context write racing the
+ * blockers under it; migration 0261's insert guard reads the row FOR SHARE, so a member or context write racing the
  * archive either lands first or is refused.
  */
 import type { FastifyInstance } from "fastify";

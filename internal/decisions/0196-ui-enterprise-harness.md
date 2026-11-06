@@ -602,16 +602,37 @@ the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
 - Freeze week: ADR-0198 §2 covers entry raises only; this raise rests on the owner decision above. ADR-0198's post-demo
   reset applies to it.
 
-## Addendum / As built (2026-10-30) — all JS 1,050 → 1,055 kB (G1 project archive and G10 rename, #604)
+## Addendum / As built (2026-10-30) — all JS 1,050 → 1,060 kB (post-demo backlog lanes)
 
-The owner decided this raise on 2026-10-30, allowing the all-JS ceiling to rise to at most 1,060 kB for the unparked
-lifecycle sets (#604 to #606) while the entry ceilings stay unchanged:
-<https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6522492997>. It is the ADR-recorded exception
-the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
+The owner decided this raise on 2026-10-30, together with unparking the G-lanes and starting the backlog lanes:
+<https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6522492997>. It is the ADR-recorded exception the `--guard` rule requires, with one `CEILING_EXCEPTIONS` row.
 
-- `all JS` from `1050 kB` to `1055 kB` (+5 kB). Entry JS stays at 138.5 kB and entry CSS at 10.7 kB; the lazy chunk
-  ceilings are unchanged.
-- Why: with main merged into #604, total JS measures 1,053,590 B (1,054,715 B after the second merge of main on
-  2026-10-30). The archive dialogs and the rename dialog are their
-  own lazily loaded chunks, so the entry measures 137.83 kB.
-- Headroom: 5 kB of the owner's 10 kB stays for #605 and #606 (M-104). Their raises chain from this row's `to`.
+- `all JS` from `1050 kB` to `1060 kB` (+10 kB), one shared ceiling for every lane in flight. Entry JS stays at 138.5 kB
+  and entry CSS at 10.7 kB; the lazy chunk ceilings are unchanged, and new screens are lazy-loaded.
+- Why: one lane alone measures 1,049,965 B against the 1,050,000 B ceiling, which leaves no room for the other lanes.
+  Raising the ceiling once on main stops each lane from editing the same line.
+- A lane that would take total JS over 1,060 kB stops and goes back to the owner.
+
+## Addendum / As built (2026-10-30) — all JS 1,060 → 1,150 kB (the post-demo backlog as a whole)
+
+The owner decided this raise on 2026-10-30: <https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6531626139>. It is the ADR-recorded exception the `--guard` rule requires, with
+one `CEILING_EXCEPTIONS` row.
+
+- `all JS` from `1060 kB` to `1150 kB` (+90 kB), one shared ceiling for the remaining backlog lanes. Entry JS stays at
+  138.5 kB and entry CSS at 10.7 kB; the lazy chunk ceilings are unchanged, and every new screen is lazy-loaded, so
+  first-load cost is still bounded by the entry ceilings.
+- Why: main already measures 1,050,176 B, the supplier portal lane alone adds about 13.8 kB, and about ten more UI lanes
+  are queued. A raise per lane would make every lane edit the same line.
+- Lanes keep reporting their all-JS bytes; crossing 1,150 kB goes back to the owner.
+
+## Addendum / As built (2026-10-31) — entry JS 138.5 → 139.5 kB (demo freeze window)
+
+The owner decided this raise on 2026-10-31: <https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6545733056>. It is the ADR-recorded exception the `--guard` rule requires, with
+one `CEILING_EXCEPTIONS` row.
+
+- `entry JS (index)` from `138.5 kB` to `139.5 kB` (+1.0 kB). All JS stays at 1,150 kB; entry CSS and the lazy chunks
+  are unchanged.
+- Why: main measures 138,495 B gzip, 5 B under the ceiling. A change to any lazy chunk renames hashed files in the
+  entry's preload map, which moves the gzip size by a few bytes with no new entry code (#630 +3 B, #611 +9 B). The
+  raise fits ADR-0198's freeze-week allowance of at most +1 kB of entry raises.
+- After the demo the entry is trimmed back under 138.5 kB and this ceiling restored.

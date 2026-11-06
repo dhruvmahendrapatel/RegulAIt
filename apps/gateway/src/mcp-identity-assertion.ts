@@ -46,11 +46,24 @@
  * (SPIFFE IDs) instead, exactly as stored. That is a per-server relaxation
  * (stepped up, audited, reset by a url move), read from the server row at
  * the call, and every "issued" row says which form was sent.
+ *
+ * THE OIDC PROFILE (ADR-0210, migration 0228). A server whose
+ * `identity_assertion_profile` is `oidc_bearer` is an upstream that validates a
+ * standard OIDC JWT. Its assertion is the same claim set plus the admin-set
+ * `scope`, signed ES256 by the issuer's P-256 key (`currentIssuerSigner(…,
+ * "ES256")`), with `iss` = `<REGULAIT_PUBLIC_URL>/mcp-identity`, whose OIDC
+ * discovery document and JWKS (ES256 keys only) are public. It rides in
+ * `Authorization: Bearer`, and, because such an upstream authenticates every
+ * request, once armed EVERY request of the call's connection carries a freshly
+ * signed one (its own `jti`, its own "issued" row), not only the armed method.
+ * An unarmed connection (the manifest sync before the decision) carries none: no
+ * identity leaves before the call is decided. Any other `Authorization` value is
+ * removed first. The default profile is unchanged.
  */
 import { createHmac, randomBytes, type KeyObject } from "node:crypto";
 import { SignJWT, type JWTPayload } from "jose";
 import { createMiddleware, type Middleware } from "@modelcontextprotocol/sdk/client/middleware.js";
-import { and, auditLog, eq, mcpServers, ne, sql, type Db } from "@regulait/db";
+import { and, auditLog, eq, mcpServers, mcpServerUpstreamCredentials, ne, sql, type Db } from "@regulait/db";
 import {
   actClaimFromChain,
   AGENT_ID_DISCLOSURE_CHANGED_RULE_ID,
@@ -62,8 +75,16 @@ import {
   IDENTITY_ASSERTION_TYP,
   IDENTITY_ASSERTION_UNAVAILABLE_RULE_ID,
   IDENTITY_AUDIENCE_SHARED,
+  IDENTITY_ASSERTION_BEARER_CONFLICT,
+  IDENTITY_ASSERTION_PROFILE_CHANGED_RULE_ID,
   IDENTITY_PROPAGATION_CHANGED_RULE_ID,
   IDENTITY_PROPAGATION_UNSUPPORTED,
+  MCP_IDENTITY_OIDC_CLAIMS,
+  MCP_IDENTITY_OIDC_ISSUER_PATH,
+  MCP_IDENTITY_OIDC_JWKS_PATH,
+  MCP_IDENTITY_OIDC_JWS_ALG,
+  MCP_UPSTREAM_BEARER_HEADER,
+  type AssertionProfileUpdate,
 } from "@regulait/shared";
 import type { Decision } from "@regulait/policy-kernel";
 import { databaseNow } from "./db-clock.js";
@@ -99,7 +120,8 @@ export function pairwiseActor(pairwiseKey: Buffer, audience: string, identityId:
 
 /**
  * Sign one assertion. Claims are exactly `iss`, `aud`, `sub`, `iat`, `exp`,
- * `jti` and, when `actors` is a non-empty chain (root first, leaf last), `act`.
+ * `jti`, `scope` in the OIDC profile only, and, when `actors` is a non-empty
+ * chain (root first, leaf last), `act`.
  * The caller decides what each actor's `identifier` is (pairwise by default).
  */
 export async function signIdentityAssertion(input: {
@@ -112,12 +134,25 @@ export async function signIdentityAssertion(input: {
   /** seconds since the epoch, from the database clock */
   iat: number;
   jti?: string;
+  /**
+   * ADR-0210: the OIDC profile. Signed ES256 with `typ` `JWT` (what standard OIDC validators expect; the profile's own
+   * issuer and algorithm already keep it apart from our delegated tokens), with the admin-set `scope` claim.
+   */
+  oidc?: { scope: string };
 }): Promise<SignedAssertion> {
   const jti = input.jti ?? randomBytes(32).toString("base64url");
   const exp = input.iat + IDENTITY_ASSERTION_TTL_SECONDS;
   const act = input.actors && input.actors.length > 0 ? actClaimFromChain(input.actors) : undefined;
-  const assertion = await new SignJWT(act ? { act: act as unknown as JWTPayload } : {})
-    .setProtectedHeader({ alg: ISSUER_JWS_ALG, typ: IDENTITY_ASSERTION_TYP, kid: input.signer.kid })
+  const claims: JWTPayload = {
+    ...(input.oidc ? { scope: input.oidc.scope } : {}),
+    ...(act ? { act: act as unknown as JWTPayload } : {}),
+  };
+  const assertion = await new SignJWT(claims)
+    .setProtectedHeader(
+      input.oidc
+        ? { alg: MCP_IDENTITY_OIDC_JWS_ALG, typ: "JWT", kid: input.signer.kid }
+        : { alg: ISSUER_JWS_ALG, typ: IDENTITY_ASSERTION_TYP, kid: input.signer.kid },
+    )
     .setIssuer(input.issuer)
     .setAudience(input.audience)
     .setSubject(input.subject)
@@ -158,6 +193,20 @@ export function jsonRpcRequestMethod(body: unknown): string | null {
   return m.method;
 }
 
+/** ADR-0210: the method of ONE JSON-RPC request or notification, else null (a response, a batch, not JSON) */
+export function jsonRpcMessageMethod(body: unknown): string | null {
+  if (typeof body !== "string" || body.length === 0) return null;
+  let msg: unknown;
+  try {
+    msg = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (!msg || typeof msg !== "object" || Array.isArray(msg)) return null;
+  const m = (msg as { method?: unknown }).method;
+  return typeof m === "string" ? m : null;
+}
+
 const originOf = (input: string | URL): string => {
   try {
     return new URL(typeof input === "string" ? input : input.toString()).origin;
@@ -188,10 +237,13 @@ export class OutboundIdentity {
   /**
    * `audience` is null when the server's URL has no canonical form: such a holder is never armed.
    * `discloseAgentIds`: name agents by their workload identifiers instead of pairwise ids (the server's opt-in).
+   * `oidcBearer`: ADR-0210's profile (ES256, `Authorization: Bearer`, every request of an armed connection), with the
+   * server's scope (null only on a row that cannot exist under the CHECK: arming then refuses).
    */
   constructor(
     readonly audience: string | null,
     readonly discloseAgentIds = false,
+    readonly oidcBearer: { scope: string | null } | null = null,
   ) {}
 
   get origin(): string {
@@ -223,22 +275,35 @@ export class OutboundIdentity {
   async prepare(input: string | URL, init: RequestInit | undefined): Promise<RequestInit> {
     const headers = new Headers(init?.headers);
     headers.delete(IDENTITY_ASSERTION_HEADER);
+    // ADR-0210: in the OIDC profile nothing but the gateway's own assertion rides in Authorization
+    if (this.oidcBearer) headers.delete(MCP_UPSTREAM_BEARER_HEADER);
     const out: RequestInit = { ...init, headers };
     const armed = this.armed;
     if (armed === null) return out;
-    if ((init?.method ?? "GET").toUpperCase() !== "POST") return out;
-    if (jsonRpcRequestMethod(init?.body) !== armed.method) return out;
+    const httpMethod = (init?.method ?? "GET").toUpperCase();
+    // what this request is, for its "issued" row: in the OIDC profile every request of the armed connection carries
+    // an assertion (its JSON-RPC method, or the HTTP method of a stream GET or session DELETE); otherwise only a
+    // request message of the armed method does
+    let sent: string;
+    if (this.oidcBearer) {
+      sent = httpMethod === "POST" ? (jsonRpcMessageMethod(init?.body) ?? "POST") : httpMethod;
+    } else {
+      if (httpMethod !== "POST") return out;
+      if (jsonRpcRequestMethod(init?.body) !== armed.method) return out;
+      sent = armed.method;
+    }
     const requested = originOf(input);
     if (requested !== this.origin) {
-      throw await this.refusal(armed.method, "destination_mismatch", `the request was bound for ${requested}, not ${this.origin}`);
+      throw await this.refusal(sent, "destination_mismatch", `the request was bound for ${requested}, not ${this.origin}`);
     }
     let minted: { assertion: string; record: () => Promise<void> };
     try {
-      minted = await armed.mint(armed.method);
+      minted = await armed.mint(sent);
     } catch {
-      throw await this.refusal(armed.method, "sign_failed", "the assertion could not be signed");
+      throw await this.refusal(sent, "sign_failed", "the assertion could not be signed");
     }
-    headers.set(IDENTITY_ASSERTION_HEADER, minted.assertion);
+    if (this.oidcBearer) headers.set(MCP_UPSTREAM_BEARER_HEADER, `Bearer ${minted.assertion}`);
+    else headers.set(IDENTITY_ASSERTION_HEADER, minted.assertion);
     this.pending.set(out, minted.record);
     return out;
   }
@@ -276,10 +341,16 @@ export function outboundIdentityFor(server: {
   url: string;
   identityPropagation?: string | null;
   discloseAgentWorkloadIds?: boolean | null;
+  identityAssertionProfile?: string | null;
+  identityAssertionScope?: string | null;
 }): OutboundIdentity | null {
   if (server.identityPropagation !== "signed_assertion") return null;
   // strict unless the row says exactly true (a missing or null value is the pairwise default)
-  return new OutboundIdentity(canonicalMcpAudience(server.url), server.discloseAgentWorkloadIds === true);
+  return new OutboundIdentity(
+    canonicalMcpAudience(server.url),
+    server.discloseAgentWorkloadIds === true,
+    server.identityAssertionProfile === "oidc_bearer" ? { scope: server.identityAssertionScope ?? null } : null,
+  );
 }
 
 /**
@@ -356,8 +427,11 @@ export async function armOutboundIdentity(
   if ((ctx.server.transport ?? "streamable_http") === "stdio") {
     return refuse("transport_unsupported", "a stdio upstream has no HTTP request to carry the header");
   }
-  const issuer = identityIssuer(env);
+  const oidc = identity.oidcBearer;
+  // ADR-0210: the OIDC profile has its own issuer (with a discovery document) and signs ES256
+  const issuer = oidc ? mcpIdentityOidcIssuer(env) : identityIssuer(env);
   if (!issuer) return refuse("issuer_not_configured", "REGULAIT_PUBLIC_URL does not name this deployment");
+  if (oidc && !oidc.scope) return refuse("scope_missing", "the server's oidc_bearer profile has no scope");
   const secrets = identitySecretsFor(ctx.dataKey);
   if (!secrets) return refuse("pairwise_key_unavailable", "the gateway data key is not configured");
   const audience = identity.audience;
@@ -365,9 +439,9 @@ export async function armOutboundIdentity(
   // the signer is captured here, once: a send-time re-selection could fail after the call was decided
   let signer: Awaited<ReturnType<typeof currentIssuerSigner>>;
   try {
-    signer = await currentIssuerSigner(ctx.db, env);
+    signer = await currentIssuerSigner(ctx.db, env, oidc ? "ES256" : "Ed25519");
   } catch (err) {
-    if (err instanceof IdentitySigningKeyError) return refuse(err.code, "no active issuer signing key is available");
+    if (err instanceof IdentitySigningKeyError) return refuse(err.code, `no active ${oidc ? "ES256" : "Ed25519"} issuer signing key is available`);
     throw err;
   }
   const subject = pairwiseSubject(secrets.pairwiseKey, audience, ctx.sponsorUserId);
@@ -390,7 +464,7 @@ export async function armOutboundIdentity(
       // the DATABASE clock (M-075), never before the key's activation (the S3 mint rule)
       const now = await databaseNow(ctx.db);
       const iat = Math.max(Math.floor(now.getTime() / 1000), Math.floor(signer.activatedAt.getTime() / 1000));
-      const signed = await signIdentityAssertion({ signer, issuer, audience, subject, actors, iat });
+      const signed = await signIdentityAssertion({ signer, issuer, audience, subject, actors, iat, ...(oidc ? { oidc: { scope: oidc.scope! } } : {}) });
       // every disclosure to a third party is on the trail: what was said (never the token), to whom, for whom
       const record = async () => {
         await ctx.db.insert(auditLog).values({
@@ -411,13 +485,19 @@ export async function armOutboundIdentity(
             // were the agents named by their workload IDs (the server's opt-in) rather than pairwise ids?
             agentIdsDisclosed,
             actorIdForm: disclosed ? "workload_id" : "pairwise",
+            // ADR-0210: which profile, where it rode, and the scope it granted
+            profile: oidc ? "oidc_bearer" : "regulait_header",
+            placement: oidc ? "authorization_bearer" : "header",
+            ...(oidc ? { scope: oidc.scope, issuer } : {}),
             expiresAt: new Date(signed.exp * 1000).toISOString(),
             projectId: ctx.projectId ?? null,
           },
           effect: "allow",
           ruleId: IDENTITY_ASSERTION_ISSUED_RULE_ID,
           ruleChain: [],
-          reason: `signed identity assertion sent to MCP server ${ctx.server.id} for one ${armedMethod} request`,
+          reason:
+            `signed identity assertion sent to MCP server ${ctx.server.id} for one ${armedMethod} request` +
+            (oidc ? ` (OIDC bearer, scope "${oidc.scope}")` : ""),
         });
       };
       return { assertion: signed.assertion, record };
@@ -442,8 +522,9 @@ export function refuseIdentityPropagationOnStdio(
   isStdio: boolean,
   requested: string | undefined,
   discloseAgentIds?: boolean,
+  assertionProfile?: string,
 ): { status: 409; body: { error: typeof IDENTITY_PROPAGATION_UNSUPPORTED; detail: string } } | null {
-  if (!isStdio || (requested !== "signed_assertion" && discloseAgentIds !== true)) return null;
+  if (!isStdio || (requested !== "signed_assertion" && discloseAgentIds !== true && assertionProfile !== "oidc_bearer")) return null;
   return {
     status: 409,
     body: {
@@ -591,6 +672,122 @@ export async function auditAgentIdDisclosureChange(
           ? " — the url moved, and the opt-in does not follow it to a new destination"
           : args.update.reset === "propagation_off"
             ? " — identity propagation was turned off, and the IDs ride only in an assertion"
+            : ""),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0210 — the OIDC profile: its issuer, its discovery document, and the per-server setting
+// ---------------------------------------------------------------------------
+
+export { assertionProfileUpdate, type AssertionProfileUpdate } from "@regulait/shared";
+
+/** `<REGULAIT_PUBLIC_URL>/mcp-identity`, or null when the public URL is unset or invalid (fail closed) */
+export function mcpIdentityOidcIssuer(env: NodeJS.ProcessEnv = process.env): string | null {
+  const base = identityIssuer(env);
+  return base ? `${base.replace(/\/+$/, "")}${MCP_IDENTITY_OIDC_ISSUER_PATH}` : null;
+}
+
+/**
+ * OpenID Connect Discovery 1.0 metadata for the OIDC profile's issuer: what a standard validator reads to find the
+ * JWKS and the pinned algorithm. Its path (`{issuer}/.well-known/openid-configuration`) sits under `/mcp-identity`, so
+ * it never collides with the `/federation` issuer's document, and the base issuer publishes none.
+ */
+export function mcpIdentityOidcDiscoveryDocument(issuer: string): Record<string, unknown> {
+  const origin = issuer.slice(0, issuer.length - MCP_IDENTITY_OIDC_ISSUER_PATH.length);
+  return {
+    issuer,
+    jwks_uri: `${origin}${MCP_IDENTITY_OIDC_JWKS_PATH}`,
+    response_types_supported: ["id_token"],
+    // `sub` is pairwise per audience (OWNER DECISION 6)
+    subject_types_supported: ["pairwise"],
+    id_token_signing_alg_values_supported: [MCP_IDENTITY_OIDC_JWS_ALG],
+    claims_supported: [...MCP_IDENTITY_OIDC_CLAIMS],
+  };
+}
+
+/** the profile cannot be applied (no assertion, or a missing or malformed scope): the refusal, nothing saved */
+export function refuseAssertionProfile(update: Pick<AssertionProfileUpdate, "refused">): {
+  status: 400 | 409;
+  body: { error: string; detail: string };
+} | null {
+  if (!update.refused) return null;
+  return {
+    status: update.refused.code === "identity_assertion_scope_invalid" ? 400 : 409,
+    body: { error: update.refused.code, detail: `${update.refused.detail}. Nothing was saved.` },
+  };
+}
+
+/**
+ * The OIDC profile's bearer and an ADR-0204 Bearer credential would both claim `Authorization`: turning the profile on
+ * while the server has one is refused (409). Called before any step-up, and again inside the write's transaction
+ * after the server row is locked by its update (the credential's writers lock the same row), so the two can never
+ * both be set.
+ */
+export async function refuseBearerConflict(
+  db: DbOrTx,
+  serverId: string,
+): Promise<{ status: 409; body: { error: typeof IDENTITY_ASSERTION_BEARER_CONFLICT; detail: string } } | null> {
+  const [credential] = await db
+    .select({ id: mcpServerUpstreamCredentials.id })
+    .from(mcpServerUpstreamCredentials)
+    .where(and(eq(mcpServerUpstreamCredentials.serverId, serverId), eq(mcpServerUpstreamCredentials.scheme, "bearer")));
+  if (!credential) return null;
+  return {
+    status: 409,
+    body: {
+      error: IDENTITY_ASSERTION_BEARER_CONFLICT,
+      detail:
+        "this server has a static upstream credential sent as Authorization: Bearer, and the oidc_bearer profile sends the " +
+        "identity assertion there. Clear the credential first, or keep the regulait_header profile. Nothing was saved.",
+    },
+  };
+}
+
+/** every change of a server's assertion profile or scope is on the trail with both values; turning it on as a relaxation */
+export async function auditAssertionProfileChange(
+  db: DbOrTx,
+  args: {
+    userId: string;
+    serverId: string;
+    label: string;
+    from: { identityAssertionProfile: string; identityAssertionScope: string | null };
+    to: { identityAssertionProfile: string; identityAssertionScope: string | null };
+    url: string;
+    update: Pick<AssertionProfileUpdate, "relaxed" | "reset">;
+    stepUp: string | null;
+  },
+): Promise<void> {
+  await db.insert(auditLog).values({
+    userId: args.userId,
+    serverId: args.serverId,
+    objectType: "mcp_server",
+    objectId: args.serverId,
+    detail: {
+      phase: "update",
+      from: args.from,
+      to: args.to,
+      url: args.url,
+      audience: canonicalMcpAudience(args.url),
+      relaxation: args.update.relaxed !== null,
+      ...(args.update.relaxed ? { relaxed: args.update.relaxed, stepUp: args.stepUp } : {}),
+      ...(args.update.reset === "url_move" ? { resetByUrlMove: true } : {}),
+      ...(args.update.reset === "propagation_off" ? { resetByPropagationOff: true } : {}),
+    },
+    effect: "allow",
+    ruleId: IDENTITY_ASSERTION_PROFILE_CHANGED_RULE_ID,
+    ruleChain: [],
+    reason:
+      `${args.label}: identity assertion profile ${args.from.identityAssertionProfile}` +
+      (args.from.identityAssertionScope ? ` (scope "${args.from.identityAssertionScope}")` : "") +
+      ` → ${args.to.identityAssertionProfile}` +
+      (args.to.identityAssertionScope ? ` (scope "${args.to.identityAssertionScope}")` : "") +
+      (args.update.relaxed
+        ? " — a relaxation of the strict default: each call's assertion is sent as an OIDC bearer granting this scope"
+        : args.update.reset === "url_move"
+          ? " — the url moved, and the profile does not follow it to a new destination"
+          : args.update.reset === "propagation_off"
+            ? " — identity propagation was turned off"
             : ""),
   });
 }

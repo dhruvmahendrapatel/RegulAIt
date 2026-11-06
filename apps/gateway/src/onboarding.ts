@@ -511,10 +511,14 @@ export function registerOnboardingRoutes(
       profile = created;
     } else {
       const [row] = await db
-        .select({ id: complianceProfiles.id })
+        .select({ id: complianceProfiles.id, status: complianceProfiles.status })
         .from(complianceProfiles)
         .where(eq(complianceProfiles.tag, pack.tag));
       if (!row) return reply.status(409).send({ error: "compliance_profile_write_conflict" });
+      // ADR-0208: a retired profile is read-only and takes no new carrier; applying its pack never revives it
+      if (row.status === "retired") {
+        return reply.status(409).send({ error: "compliance_profile_retired", detail: `profile '${pack.tag}' is retired and read-only` });
+      }
       const { tag: _tag, ...versioned } = values;
       const edit = await applyRuleEdit<ComplianceProfileRow>(db, {
         // ADR-0186 decision 29 (finding 52): re-applying a pack over a profile an admin tightened

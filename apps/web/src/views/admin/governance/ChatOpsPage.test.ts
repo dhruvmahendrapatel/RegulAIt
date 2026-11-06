@@ -12,6 +12,7 @@ import {
   OUTLOOK_RECIPIENT_ALLOW_LIST_MAX,
   canonicalOutlookRecipients,
   chatOpsConnectionBody,
+  chatOpsConnectorsFor,
   outlookRecipientChange,
   chatOpsProviderLabel,
   chatOpsProviderRegistrable,
@@ -74,6 +75,19 @@ describe("ChatOpsPage — ADR-0179 (AER-015): a provider with no outbound sender
   });
 });
 
+describe("ChatOpsPage — the connector picker offers only the chosen provider's connectors", () => {
+  it("a slack workspace cannot be pointed at a resend connector (its credential would be overwritten first)", () => {
+    const list = [
+      { id: "s", providerKind: "slack" },
+      { id: "r", providerKind: "resend" },
+      { id: "g", providerKind: null },
+    ];
+    expect(chatOpsConnectorsFor(list, "slack").map((c) => c.id)).toEqual(["s"]);
+    expect(chatOpsConnectorsFor(list, "resend").map((c) => c.id)).toEqual(["r"]);
+    expect(chatOpsConnectorsFor(list, "teams")).toEqual([]);
+  });
+});
+
 describe("ChatOpsPage — the connection body", () => {
   it("sends the signing secret for providers with an inbound path", () => {
     expect(chatOpsConnectionBody({ ...base, provider: "slack" })).toMatchObject({ provider: "slack", signingSecret: "s3cret-value" });
@@ -87,7 +101,9 @@ describe("ChatOpsPage — the connection body", () => {
     const botOnly = chatOpsConnectionBody({ ...base, signingSecret: "", provider: "teams", botAppId: "app-1" });
     expect(botOnly).not.toHaveProperty("signingSecret");
     expect(chatOpsConnectionBody({ ...base, provider: "slack", botAppId: "app-1" })).not.toHaveProperty("botAppId");
-    expect(chatOpsConnectionBody({ ...base, signingSecret: "", provider: "teams" })).toHaveProperty("signingSecret", "");
+    // an empty secret is omitted, so the API answers `signing_secret_required` instead of a length error
+    expect(chatOpsConnectionBody({ ...base, signingSecret: "", provider: "teams" })).not.toHaveProperty("signingSecret");
+    expect(chatOpsConnectionBody({ ...base, signingSecret: "", provider: "slack" })).not.toHaveProperty("signingSecret");
   });
 
   it("omits it for outlook, which the API would refuse with signing_secret_not_applicable", () => {

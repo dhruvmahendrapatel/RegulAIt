@@ -47,6 +47,7 @@ import {
 import { buildApp } from "./app.js";
 import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
 import { POSTURE_UNMEASURED_REDTEAM } from "./posture.js";
+import { scorePosture, type PostureScore, type PostureScoreInput } from "./posture-score.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -162,6 +163,15 @@ describe("scoping — the posture view is the org-wide read, admin-only (the ADR
     for (const section of ["packs", "risks", "redteam", "evals", "spend", "governance", "auditChain", "useCases"]) {
       expect(res.body, `section ${section} missing`).toHaveProperty(section);
     }
+  });
+
+  it("ADR-0214: carries the explainable estimate, scored from the document's own sections and labelled an estimate", async () => {
+    const body = (await posture()).body as unknown as PostureScoreInput & { score: PostureScore };
+    expect(body.score.estimate).toBe(true);
+    expect(body.score.disclaimer).toMatch(/not a compliance verdict/);
+    expect(body.score.objectives).toHaveLength(7);
+    // the served estimate is exactly the pure function of the served sections — nothing else feeds it
+    expect(body.score).toEqual(scorePosture(body));
   });
 });
 

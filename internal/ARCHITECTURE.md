@@ -153,6 +153,12 @@ sequenceDiagram
   decision row with the policy re-checked inside the transaction, stdio placement into the executor, MCP mode and
   content-trust gates, project budget gate (`preDispatchProjectGate`), guardrails, approval consumption, the
   single-attempt upstream call, output PII, usage and provenance rows.
+- **Remote agent (A2A) call** (ADR-0219) — `POST /v1/a2a/agents/:agentId/messages` → `executeGovernedA2aCall` in
+  `a2a.ts`, the only sender. It checks, in order: the default-off org setting, the agent and its skill, the lead ceiling
+  (it only narrows), the person's own grant (default-deny), project attribution and the budget gate
+  (`preDispatchProjectGate`), and the project's PII mode. Egress is decided on the MCP posture. The A2A SDK
+  client sends through the guarded fetch, with the credential going only to the registered origin. The usage row and
+  the audit row are written in one transaction.
 - **Model/agent call** — `POST /v1/agents/:agentId/invoke` and the IDE compat endpoints (both go through
   `compat-core.ts` into the same primitives): virtual-key allow-list, project attribution, workflow-instance gate,
   grants and revocations, model policy, `evaluateAgent` with the kill switch; **then** the optimiser (routing,
@@ -260,6 +266,7 @@ Key ADRs: [0013](decisions/0013-dev-app-deploy-single-ec2-compose.md),
 | Area | As built | ADRs |
 |---|---|---|
 | Human sign-in | scrypt password hashes with a versioned format and constant-time dummy derivation; HttpOnly `SameSite=Strict` session cookie plus CSRF header; TOTP with replay refusal; passkeys; OIDC, SAML, SCIM, IdP group → role mapping; brokered IdP via Keycloak. | [0025](decisions/0025-secure-human-auth.md), [0028](decisions/0028-session-origin-key-session-password-recovery.md), [0036](decisions/0036-saml-sso.md), [0037](decisions/0037-scim-provisioning.md), [0038](decisions/0038-idp-group-role-mapping.md), [0039](decisions/0039-session-device-management.md), [0174](decisions/0174-enterprise-sign-in-brokered-idp.md) |
+| External sign-in (suppliers) | `supplier-portal.ts`: a separate route class (auth-exempt for the platform hooks, authenticated in-route on its own cookie) behind a default-off setting; single-use hashed links, short hashed sessions scoped to one vendor's assessment, CSRF header, rate limits; answers reach ADR-0084 attestations only through a reviewer. | [0221](decisions/0221-supplier-portal.md) |
 | Step-up | `step-up.ts`: a one-action `rgsu_` token from TOTP, passkey or SSO re-auth, required by sensitive routes. | [0186](decisions/0186-batch4-approvals-receipts-detection.md) |
 | Workload identity and DPoP | An OAuth authorisation server (`oauth/`) issuing DPoP-bound or certificate-bound tokens; client assertions, x509 and SPIFFE; a Cedar actor chain for delegation. | [0188](decisions/0188-batch6-agent-workload-identity.md), [SPIFFE](../docs/deployment/SPIFFE.md) |
 | API and virtual keys | Hashed, with expiry; virtual keys never act as admin. | [0098](decisions/0098-api-key-expiry.md) |
