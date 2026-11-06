@@ -65,6 +65,8 @@ export const NO_REMOVE_BY_DESIGN = new Map([
   ["/v1/sod/overrides", "an override request is an escalation into the approvals queue and is decided there"],
   ["/v1/projects/:x/context", "context entries are superseded by newer ones, never deleted, so answers stay traceable to what they used"],
   ["/v1/discovery/sources/:x/enrolment-tokens", "enrolment tokens expire on their own; the source itself can be disabled or deleted"],
+  ["/v1/agents/setup-assist", "not a collection: the POST returns a suggested agent draft and stores nothing but an audit row"],
+  ["/v1/privacy/processing-records", "a record of processing is retired with PATCH status \"retired\", not deleted, so past dispatch decisions stay traceable to it"],
   ["/v1/servers/:x/tools", "tools come from the server's manifest; a tool is stopped with halt, and the server's own lifecycle is G4"],
 ]);
 
@@ -77,14 +79,7 @@ export const KNOWN_REMOVE_GAPS = new Map([
   ["/v1/projects", "G1 project archive (#604)"],
   ["/v1/connectors", "G3 connector disable and delete (#605)"],
   ["/v1/servers", "G4 MCP server disable and delete (#605)"],
-  ["/v1/compliance/profiles", "G7 compliance profile retire (#606)"],
-  ["/v1/infra/resources", "G8 infrastructure resource retire (#606)"],
-  ["/v1/infra/policies", "G8 infrastructure policy retire (#606)"],
-  ["/v1/evals/datasets", "G9 eval dataset retire (#606)"],
-  ["/v1/redteam/libraries", "G9 red-team library retire (#606)"],
   ["/v1/mcp-registries", "G9 MCP registry remove (#606)"],
-  ["/v1/engine-schedules", "G9 engine schedule delete (#606)"],
-  ["/v1/certification-campaigns", "G9 certification campaign cancel (#606)"],
   ["/v1/llm/datasets", "not yet proposed: fine-tuning datasets have no retire; raise on #453"],
 ]);
 
