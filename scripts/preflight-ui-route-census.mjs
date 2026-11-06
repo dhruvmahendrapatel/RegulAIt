@@ -196,7 +196,6 @@ export const INDIRECT_UI_CALLS = new Map([
   ...[
     ["GET /v1/auth/link-requests", "apps/web/src/views/admin/identity/SsoPage.tsx"],
     ["GET /v1/keys", "apps/web/src/views/admin/identity/UsersPage.tsx"],
-    ["GET /v1/licenses/verifications", "apps/web/src/views/admin/settings/LicensingPage.tsx"],
     ["GET /v1/admin/credentials", "apps/web/src/views/admin/identity/CredentialsPage.tsx"],
     ["GET /v1/revocations", "apps/web/src/views/admin/identity/UsersPage.tsx"],
     ["GET /v1/roles/:roleId/assignments", "apps/web/src/views/admin/identity/RolesPage.tsx"],
