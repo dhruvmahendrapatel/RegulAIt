@@ -186,12 +186,20 @@ export function RenamePasskeyButton(props: { passkey: { id: string; label: strin
 
 // ---- external scorers ---------------------------------------------------------
 
-export const SCORER_KINDS: readonly Choice[] = ["llm_as_judge", "groundedness_judge", "answer_relevance_judge"].map((k) => ({ value: k, label: k }));
+// ADR-0220: the three guardrail kinds a trained-detector service serves
+export const SCORER_KINDS: readonly Choice[] = [
+  "llm_as_judge",
+  "groundedness_judge",
+  "answer_relevance_judge",
+  "guardrail_pii",
+  "guardrail_prompt_injection",
+  "guardrail_harm",
+].map((k) => ({ value: k, label: k }));
 
 export const EXTERNAL_SCORER_FIELDS: readonly PatchField[] = [
   { key: "name", label: "Name", kind: "text", maxLength: 120, required: true },
   { key: "baseUrl", label: "Endpoint URL", kind: "text", maxLength: 2048, required: true, help: "Moving the endpoint disables the scorer until a fresh connection test passes; the egress guard checks the new host first." },
-  { key: "scorerKinds", label: "Claims to serve", kind: "multi", options: SCORER_KINDS, min: 1, max: 3 },
+  { key: "scorerKinds", label: "Claims to serve", kind: "multi", options: SCORER_KINDS, min: 1, max: 6 },
   {
     key: "allowPlaintextHttp",
     label: "Plaintext http",

@@ -5,10 +5,12 @@ export { default as DiscoverySourcesPage } from "../views/admin/governance/Disco
 export { default as IntakeWizardPage } from "../views/admin/governance/IntakeWizardPage";
 export { default as LiteracyPage } from "../views/admin/governance/LiteracyPage";
 export { default as ModelRiskPage } from "../views/admin/governance/ModelRiskPage";
+export { default as RegulatoryFeedSourcesPage } from "../views/admin/governance/RegulatoryFeedSourcesPage";
 export { default as RegulatoryIntelligencePage } from "../views/admin/governance/RegulatoryIntelligencePage";
 export { default as ReviewPolicyPage } from "../views/admin/governance/ReviewPolicyPage";
 export { default as RisksPage } from "../views/admin/governance/RisksPage";
 export { default as ShadowAiPage } from "../views/admin/governance/ShadowAiPage";
+export { default as SupplierQuestionnairesPage } from "../views/admin/governance/SupplierQuestionnairesPage";
 export { default as UseCaseOverviewPage } from "../views/admin/governance/UseCaseOverviewPage";
 export { default as UseCasesPage } from "../views/admin/governance/UseCasesPage";
 export { default as VendorsPage } from "../views/admin/governance/VendorsPage";

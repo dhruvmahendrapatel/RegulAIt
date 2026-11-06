@@ -75,7 +75,10 @@ const UseCaseOverviewPage = screen(() => import("./screens/admin-ai-governance")
 const GovernanceAlertsPage = screen(() => import("./screens/admin-overview"), "GovernanceAlertsPage");
 const DependencyGraphPage = screen(() => import("./screens/admin-ai-governance"), "DependencyGraphPage");
 const RegulatoryIntelligencePage = screen(() => import("./screens/admin-ai-governance"), "RegulatoryIntelligencePage");
+const RegulatoryFeedSourcesPage = screen(() => import("./screens/admin-ai-governance"), "RegulatoryFeedSourcesPage");
 const VendorsPage = screen(() => import("./screens/admin-ai-governance"), "VendorsPage");
+// ADR-0221: the supplier portal switch and the custom supplier questionnaires
+const SupplierQuestionnairesPage = screen(() => import("./screens/admin-ai-governance"), "SupplierQuestionnairesPage");
 const RisksPage = screen(() => import("./screens/admin-ai-governance"), "RisksPage");
 const InventoryPage = screen(() => import("./screens/admin-access-reviews"), "InventoryPage");
 const CampaignsPage = screen(() => import("./screens/admin-access-reviews"), "CampaignsPage");
@@ -116,7 +119,14 @@ const BillingPage = screen(() => import("./screens/admin-cost-optimization"), "B
 const OptimizationPage = screen(() => import("./screens/admin-cost-optimization"), "OptimizationPage");
 const ComplianceProfilesPage = screen(() => import("./screens/admin-compliance-infra"), "ComplianceProfilesPage");
 const CompliancePacksPage = screen(() => import("./screens/admin-compliance-infra"), "CompliancePacksPage");
+const FrameworkImportsPage = screen(() => import("./screens/admin-compliance-infra"), "FrameworkImportsPage");
 const InfrastructurePage = screen(() => import("./screens/admin-compliance-infra"), "InfrastructurePage");
+const TrustPublishingPage = screen(() => import("./screens/admin-compliance-infra"), "TrustPublishingPage");
+// ADR-0225 (P13 d): the public trust centre and the auditor portal (their own chunk, no app shell)
+const TrustCenterPage = screen(() => import("./screens/trust"), "TrustCenterPage");
+const AuditorPortalPage = screen(() => import("./screens/trust"), "AuditorPortalPage");
+const ProcessingRecordsPage = screen(() => import("./screens/admin-compliance-infra"), "ProcessingRecordsPage");
+const DataSubjectRequestsPage = screen(() => import("./screens/admin-compliance-infra"), "DataSubjectRequestsPage");
 const OrganizationPage = screen(() => import("./screens/admin-settings"), "OrganizationPage");
 const RetentionPage = screen(() => import("./screens/admin-settings"), "RetentionPage");
 const GettingStartedPage = screen(() => import("./screens/admin-settings"), "GettingStartedPage");
@@ -133,6 +143,8 @@ const IncidentsPage = screen(() => import("./screens/incidents"), "IncidentsPage
 const IncidentDetailPage = screen(() => import("./screens/incidents"), "IncidentDetailPage");
 const FeedbackPage = screen(() => import("./screens/feedback"), "FeedbackPage");
 const FeedbackFormPage = screen(() => import("./screens/feedback"), "FeedbackFormPage");
+// ADR-0221: the supplier portal, its own small chunk (no admin code, no platform API client)
+const SupplierPortalPage = lazy(() => import("./views/supplier/SupplierPortalPage"));
 
 /** one screen of a ./screens chunk, as a lazy component */
 function screen<M extends Record<K, ComponentType<any>>, K extends keyof M & string>(load: () => Promise<M>, name: K) {
@@ -189,6 +201,12 @@ function ApplicationRoutes() {
       {/* ADR-0182 A13: a PUBLIC signed feedback link — no app chrome, no
           session; the gateway authenticates the link itself (shipped off) */}
       <Route path="/f/:token" element={<FeedbackFormPage public />} />
+      {/* ADR-0225 (P13 d): PUBLIC, no app chrome, no session; the gateway answers 404 while the pages are off */}
+      <Route path="/trust" element={<TrustCenterPage />} />
+      <Route path="/audit" element={<AuditorPortalPage />} />
+      {/* ADR-0221: the SUPPLIER portal — no app chrome, no platform session;
+          the single-use link's token arrives in the fragment (shipped off) */}
+      <Route path="/supplier" element={<SupplierPortalPage />} />
       <Route element={<Protected />}>
         <Route path="/" element={<HomePage />} />
         <Route path="/chat" element={<ChatPage />} />
@@ -267,11 +285,14 @@ function ApplicationRoutes() {
                 <Route path="governance/alerts" element={<GovernanceAlertsPage />} />
                 <Route path="governance/graph" element={<DependencyGraphPage />} />
                 <Route path="governance/regulatory" element={<RegulatoryIntelligencePage />} />
+                <Route path="governance/regulatory/sources" element={<RegulatoryFeedSourcesPage />} />
                 {/* ADR-0182 (D4): A11 decision regression, A14 AI literacy */}
                 <Route path="governance/decision-regression" element={<DecisionRegressionPage />} />
                 <Route path="governance/literacy" element={<LiteracyPage />} />
                 {/* ADR-0084 */}
                 <Route path="vendors" element={<VendorsPage />} />
+                {/* ADR-0221 */}
+                <Route path="vendors/questionnaires" element={<SupplierQuestionnairesPage />} />
                 {/* ADR-0081 */}
                 <Route path="risks" element={<RisksPage />} />
                 {/* ADR-0082 */}
@@ -327,7 +348,13 @@ function ApplicationRoutes() {
                 <Route path="compliance" element={<ComplianceProfilesPage />} />
                 {/* ADR-0058 */}
                 <Route path="compliance-packs" element={<CompliancePacksPage />} />
+                <Route path="compliance-packs/imports" element={<FrameworkImportsPage />} />
+                {/* ADR-0225 (P13 d) */}
+                <Route path="trust-publishing" element={<TrustPublishingPage />} />
                 <Route path="infrastructure" element={<InfrastructurePage />} />
+                {/* ADR-0224 (P13 c) */}
+                <Route path="privacy" element={<ProcessingRecordsPage />} />
+                <Route path="privacy/requests" element={<DataSubjectRequestsPage />} />
                 <Route path="organization" element={<OrganizationPage />} />
                 <Route path="retention" element={<RetentionPage />} />
                 <Route path="licensing" element={<LicensingPage />} />
