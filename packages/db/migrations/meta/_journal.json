@@ -1564,10 +1564,24 @@
       "breakpoints": true
     },
     {
-      "idx": 260,
+      "idx": 266,
       "version": "7",
-      "when": 1785195000000,
-      "tag": "0260_content_credential_guard",
+      "when": 1785201000000,
+      "tag": "0266_model_signing_supply_chain",
+      "breakpoints": true
+    },
+    {
+      "idx": 267,
+      "version": "7",
+      "when": 1785202000000,
+      "tag": "0267_supply_chain_risk_category",
+      "breakpoints": true
+    },
+    {
+      "idx": 272,
+      "version": "7",
+      "when": 1785207000000,
+      "tag": "0272_content_credential_guard",
       "breakpoints": true
     }
   ]

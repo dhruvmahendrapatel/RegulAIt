@@ -9,7 +9,7 @@
   pipelock secret pack), [ADR-0060](0060-tamper-evident-audit.md) (the `createDb` chokepoint),
   [ADR-0112](0112-conversation-presentation-scrub.md) (conversations), [ADR-0180](0180-continuous-assurance-strict-by-default.md)
   (strict defaults), [ADR-0176](0176-open-source-first.md) (open source first)
-- **Migration**: 0260 (`org_settings.content_credential_guard boolean NOT NULL DEFAULT true`). No data migration.
+- **Migration**: 0272 (`org_settings.content_credential_guard boolean NOT NULL DEFAULT true`). No data migration.
 
 ## Context
 

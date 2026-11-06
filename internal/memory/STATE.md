@@ -5513,7 +5513,7 @@ credential-shaped text into one of the 81 guarded columns is REFUSED with `422 c
 field, the column and the rule labels, never the value. The detector is `scrubAuditText` by reference (ADR-0042
 rules plus the vendored Apache-2.0 pipelock pack), sited as a third `createDb` wrapper (`withContentGuard`,
 outermost), so imports and raw writes are covered and a refusal inside a transaction rolls it back (compliance-pack
-create is now one transaction). An admin may relax it (`org_settings.content_credential_guard`, migration 0260,
+create is now one transaction). An admin may relax it (`org_settings.content_credential_guard`, migration 0272,
 strictness rule: `settings_relax` step-up, audited). Existing rows are reported by `GET
 /v1/admin/content-credential-report` (ids and rule labels only), never rewritten. The inventory is generated from
 the schema: 146 text columns match the S6 shape (S6 said ~34); 81 guarded, 65 excluded by category (ADR-0102 prose,
