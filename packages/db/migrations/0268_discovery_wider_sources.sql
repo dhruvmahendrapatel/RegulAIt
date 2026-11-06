@@ -1,4 +1,4 @@
--- Migration 0262. ADR-0235 (P9): wider shadow-AI discovery sources. Hand-authored (never drizzle-kit generate).
+-- Migration 0268. ADR-0235 (P9): wider shadow-AI discovery sources. Hand-authored (never drizzle-kit generate).
 -- Re-runnable: every statement is idempotent.
 --
 -- Adds three read-only source kinds to the ADR-0195 discovery framework, each in a new family behind its own org
