@@ -88,6 +88,8 @@ const SPLITS = [
     warnings: ["REFUSED"],
     // the trail sits under the page's History tab, whose label counts the refusals
     tab: "History · 12 refused",
+    // the breadcrumb goes back to that tab, not the first one
+    backTo: "/ui/admin/licensing?tab=history",
   },
 ] as const;
 
@@ -127,12 +129,33 @@ for (const P of SPLITS) {
       await expectAxeClean(page, `${P.name} full list`);
 
       await page.getByRole("navigation", { name: "Breadcrumb" }).getByRole("link", { name: P.back }).click();
-      await expect(page).toHaveURL(new RegExp(`${P.path}$`));
-      if ("tab" in P) await page.getByRole("tab", { name: P.tab, exact: true }).click();
+      const back = "backTo" in P ? P.backTo : P.path;
+      await expect(page).toHaveURL(new RegExp(`${back.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`));
+      if ("tab" in P) await expect(page.getByRole("tab", { name: P.tab, exact: true })).toHaveAttribute("aria-selected", "true");
       await expect(page.getByText(P.heading, { exact: true })).toBeVisible();
     });
   });
 }
+
+test("Licensing: ?tab=history opens the History tab, and an unknown tab opens the first one", async ({ page }) => {
+  await mockApi(page);
+  await page.goto("/ui/admin/licensing?tab=history");
+  await expect(page.getByRole("tab", { name: "History · 12 refused", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByText("Verification trail · 45 verifications · 12 refused", { exact: true })).toBeVisible();
+  await page.goto("/ui/admin/licensing?tab=nope");
+  await expect(page.getByRole("tab", { name: /^Action classes/ })).toHaveAttribute("aria-selected", "true");
+});
+
+test("Licensing: a failed refused-count read says so on the History tab, never that nothing was refused", async ({ page }) => {
+  await mockApi(page);
+  // registered after mockApi, so it wins: only the refused-count read fails
+  await page.route(
+    (u) => u.pathname === "/v1/licenses/verifications" && u.searchParams.get("ok") === "false",
+    (route) => route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "internal" }) }),
+  );
+  await page.goto("/ui/admin/licensing");
+  await expect(page.getByRole("tab", { name: "History · refused count unavailable", exact: true })).toBeVisible();
+});
 
 test("Agents: stewardship is a preview with its own page; a deep link lands on the agent in the full catalog", async ({ page }) => {
   await mockApi(page);

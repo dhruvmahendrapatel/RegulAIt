@@ -15,6 +15,11 @@ export const LICENSING_TABS = [
 ] as const;
 export type LicensingTab = (typeof LICENSING_TABS)[number]["id"];
 
+/** the tab named by `?tab=`; a missing or unknown value opens the first tab */
+export function licensingTabFrom(value: string | null): LicensingTab {
+  return LICENSING_TABS.find((t) => t.id === value)?.id ?? "classes";
+}
+
 /** the part of `/v1/licenses/status` the labels read */
 export interface LicensingTabStatus {
   seats: { remaining: number | null; canProvision: boolean };
@@ -27,6 +32,8 @@ export interface LicensingTabCounts {
   status: LicensingTabStatus | undefined;
   /** refused verifications on the trail; null while the count is loading */
   refusedVerifications: number | null;
+  /** the refused-count read failed: the label says the count is unavailable, never that nothing was refused */
+  refusedCountFailed?: boolean;
 }
 
 function label(name: string, parts: Array<string | null>): string {
@@ -53,6 +60,7 @@ export function licensingTabLabel(id: LicensingTab, c: LicensingTabCounts): stri
       if (!s) return name;
       return label(name, [!s.schedulerPresent ? plural(1, "warning") : null]);
     case "history":
+      if (c.refusedCountFailed) return label(name, ["refused count unavailable"]);
       return label(name, [c.refusedVerifications ? `${c.refusedVerifications.toLocaleString()} refused` : null]);
     case "features":
       // a closed feature is the licence's terms, not a warning

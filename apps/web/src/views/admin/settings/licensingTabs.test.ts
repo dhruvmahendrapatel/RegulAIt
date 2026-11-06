@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { licensingTabLabel, type LicensingTabStatus } from "./licensingTabs";
+import { licensingTabFrom, licensingTabLabel, type LicensingTabStatus } from "./licensingTabs";
 
 const allow = { allowed: true };
 const ok: LicensingTabStatus = {
@@ -33,5 +33,18 @@ describe("Licensing tab labels", () => {
 
   it("count refused verifications on the trail", () => {
     expect(licensingTabLabel("history", { status: ok, refusedVerifications: 12 })).toBe("History · 12 refused");
+  });
+
+  it("say a failed refused-count read is unavailable, never that nothing was refused", () => {
+    expect(licensingTabLabel("history", { status: ok, refusedVerifications: null, refusedCountFailed: true })).toBe(
+      "History · refused count unavailable",
+    );
+  });
+
+  it("open the tab named by ?tab=, and the first tab for a missing or unknown value", () => {
+    expect(licensingTabFrom("history")).toBe("history");
+    expect(licensingTabFrom("install")).toBe("install");
+    expect(licensingTabFrom(null)).toBe("classes");
+    expect(licensingTabFrom("nope")).toBe("classes");
   });
 });

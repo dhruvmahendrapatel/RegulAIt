@@ -16,6 +16,7 @@
  */
 import { useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
@@ -23,7 +24,7 @@ import { ListPreview } from "../../../ui/ListPreview";
 import { VERIFICATION_COLUMNS, VERIFICATIONS_EMPTY, type VerificationRow } from "./licenceVerifications";
 import { Badge, Button, Card, EmptyState, Field, Table, Tabs, tabIds, Textarea } from "../../../ui/kit";
 import { normalisePage, pageUrl } from "../../../ui/listState";
-import { LICENSING_TABS, licensingTabLabel, type LicensingTab } from "./licensingTabs";
+import { LICENSING_TABS, licensingTabFrom, licensingTabLabel, type LicensingTab } from "./licensingTabs";
 import { KV, QueryGate, Stat, useAction } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
@@ -105,7 +106,19 @@ export default function LicensingPage() {
         .get<unknown>(pageUrl("/v1/licenses/verifications", { limit: 10, sort: VERIFICATION_SORT, filters: { ok: "false" }, count: "exact" }))
         .then((b) => normalisePage<VerificationRow>(b, "verifications")),
   });
-  const [tab, setTab] = useState<LicensingTab>("classes");
+  // the tab lives in ?tab=, so the trail's breadcrumb (and the failure line) can open History directly
+  const [params, setParams] = useSearchParams();
+  const tab = licensingTabFrom(params.get("tab"));
+  const setTab = (id: LicensingTab) =>
+    setParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (id === "classes") next.delete("tab");
+        else next.set("tab", id);
+        return next;
+      },
+      { replace: true },
+    );
 
   const s = status.data;
 
@@ -162,7 +175,11 @@ export default function LicensingPage() {
             idPrefix="licensing"
             tabs={LICENSING_TABS.map((t) => ({
               id: t.id,
-              label: licensingTabLabel(t.id, { status: s, refusedVerifications: refused.data ? (refused.data.total ?? refused.data.items.length) : null }),
+              label: licensingTabLabel(t.id, {
+                status: s,
+                refusedVerifications: refused.data ? (refused.data.total ?? refused.data.items.length) : null,
+                refusedCountFailed: refused.isError,
+              }),
             }))}
             active={tab}
             onChange={(id) => setTab(id as LicensingTab)}
