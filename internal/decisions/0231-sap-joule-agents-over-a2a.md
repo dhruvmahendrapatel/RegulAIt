@@ -68,7 +68,7 @@ Checked 2026-11-06. **Verified** means the page was fetched and says it. **Unver
   - a REST client landed in 0.3.7;
   - 1.0.0 implements A2A v1.0 over JSON-RPC, HTTP+JSON and gRPC;
   - talking to a **0.3.0** server needs the opt-in compatibility layer: `@a2a-js/sdk/compat/v0_3/client`
-    (`LegacyRestTransport`), with v0.3 compatibility on `RestTransportFactory`.
+    (`LegacyRestTransport`, a transport class; see §3 for how it is plugged in).
 
   **Verified** from the changelog. Not yet exercised against SAP.
 
@@ -150,12 +150,21 @@ envelope, listed in `CIPHERTEXT_COLUMNS`, never returned, last four characters o
   - The subject token (the `assertion`, or `subject_token`) is a short-lived assertion for the person, issued by the identity provider SAP trusts (the
     customer's IdP, federated with SAP Cloud Identity Services). Two sources, chosen per connection: (a) the person's
     own IdP token, kept from their RegulAIt sign-in or obtained by a token exchange at that IdP, when the IdP is the one
-    SAP trusts. **This is preferred**, because RegulAIt then mints nothing SAP trusts. Or (b), only where (a) is
+    SAP trusts. **This is preferred**, because RegulAIt then mints nothing SAP trusts. Controls on (a):
+    - **Timing:** the subject token is obtained or exchanged per call, and only after every
+      `executeGovernedA2aCall` check (grant, ceiling, approval, budget, PII, egress) passes.
+    - **Lifetime and audience:** the shortest lifetime the IdP allows, with the audience pinned to the IAS tenant.
+    - **Storage:** an IdP or refresh token that must be kept is stored with the data-key envelope
+      (`CIPHERTEXT_COLUMNS`) and never returned.
+    - **Logging:** the token is never logged, audited or passed to the model.
+
+    Or (b), only where (a) is
     impossible: a RegulAIt-signed ES256 assertion that the customer's IAS trusts as a corporate IdP, with these
     controls:
     - a **dedicated signing key per SAP trust**, which is not the general ADR-0210 key, with its own issuer path;
     - `aud` pinned to the one IAS tenant;
-    - `exp` of 60 seconds or less, with a `jti` that is recorded and rejected on replay;
+    - `exp` of 60 seconds or less, with a `jti` that RegulAIt records and refuses to mint twice (IAS-side rejection of
+      a replayed `jti` is **unverified**; B0 confirms it, and it is treated as an extra control);
     - rotation and revocation through key management;
     - IAS restricted to the user group that this trust may assert.
 
@@ -252,6 +261,7 @@ ships it.
 | Token leakage | Tokens never stored in plain text, never returned, never logged; sent only to the registered origin through the guarded fetch; short-lived, audience-bound. |
 | Cross-person token reuse | Cache keyed by (person, agent); grant checked before every use. |
 | A changed card redirects our calls or silently widens skills | Interfaces only on the registered origin. A refreshed card is held as pending, and the stored card stays in use until an admin accepts the change (a step-up when it widens). New skills need a grant. |
+| **The person's own IdP token (option (a)) leaks** and is used at SAP directly, bypassing approval, rate limit and budget | It is obtained per call and only after every gateway check passes; it has the shortest lifetime with an audience pinned to the IAS tenant; it is never logged or audited; any token that must be kept is stored with the data-key envelope and never returned. |
 | **The RegulAIt signing key becomes an IAS-trusted IdP (subject-token option (b))**: a key compromise or a gateway bug could mint any SAP user that IAS maps | Option (a) is preferred. Under (b): a dedicated key per SAP trust, never the general ADR-0210 key; its own issuer; `aud` pinned to the IAS tenant; `exp` 60 seconds or less; a `jti` with replay rejection; rotation and revocation; IAS restricted to the user group that may be asserted; every assertion minted is audited. |
 | Catalogue widening through an SAP ACL change | Admin-only import; nothing auto-registered. |
 | SSRF through the gateway URL or token endpoint | Egress decision at write and call time; guarded fetch; redirects refused. |
@@ -262,8 +272,10 @@ ships it.
 ### Security checklist items touched (ADR-0200)
 
 - **Object-level authorisation**: the per-person grant, plus SAP's authorisation of the exchanged identity.
-- **JWT and signing secrets out of code, rotatable, algorithm and audience pinned**: the subject assertion (ES256,
-  ADR-0210 keys) and the exchanged token's audience.
+- **JWT and signing secrets out of code, rotatable, algorithm and audience pinned**: under option (b) the subject
+  assertion is ES256 with a **dedicated per-SAP-trust key, never the ADR-0210 key**, `aud` pinned to the IAS tenant
+  and `exp` of 60 seconds or less; under option (a) the IdP token's audience is pinned the same way; and the
+  exchanged token's audience is pinned to the agent gateway.
 - **API secrets server side only**: the client secret encrypted with the data key, never returned.
 - **SSRF through the guarded fetch**: gateway base URL, token endpoint, catalogue and agent URLs.
 - **No sensitive data in logs**: no tokens, no SAP error text.

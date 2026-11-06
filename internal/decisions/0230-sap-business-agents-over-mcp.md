@@ -69,8 +69,10 @@ gets the same governance) and keeps SAP-specific code out of the gateway.
   The gateway also binds the key into the approval payload (ADR-0104), so one approval authorises exactly one order.
 - **The idempotency store.** It is durable and safe across replicas:
   - **Storage:** a table in the ABAP MCP server's own database. It is never in memory and never in a per-replica cache.
-  - **Key:** a unique constraint on (tenant, the assertion's pairwise `sub`, tool, `idempotencyKey`). Each row also
-    stores the payload hash, the state (`pending`, `succeeded`, `failed` or `needs_reconciliation`), the SAP document
+  - **Key:** a unique constraint on (tenant, tool, `idempotencyKey`). `sub` is **not** part of the key; it is a column
+    that holds the assertion's pairwise `sub`. A hit is then compared on `sub` first, and a different `sub` means
+    `idempotency_key_foreign`. That comparison is what enforces the cross-user rule; a key containing `sub` would
+    make a foreign key a silent miss. Each row also stores the payload hash, the state (`pending`, `succeeded`, `failed` or `needs_reconciliation`), the SAP document
     number on success, and timestamps.
   - **Write order:** the row is inserted as `pending` **before** the POST. A concurrent second call loses the insert and
     gets `idempotency_in_progress`.
@@ -112,12 +114,21 @@ that claim is released, and who issues the token SAP trusts.
     subaccount or IAS. RegulAIt obtains a token for the person from that IdP, either kept from sign-in or by a token
     exchange at the IdP, with its audience set to the SAP destination. It passes the token to the ABAP MCP server,
     which presents it to the `OAuth2JWTBearer` destination. RegulAIt then mints nothing that SAP trusts.
+    Controls on option (a), because the token is usable at SAP without the gateway:
+    - **Timing:** the token is obtained or exchanged **per call**, and only **after** the allow-list, approval,
+      rate-limit and budget checks pass. Under the preferred design it is never kept from sign-in.
+    - **Lifetime and audience:** the shortest lifetime the IdP allows, with the audience pinned to the one SAP target.
+    - **Storage:** if a customer's IdP forces keeping a refresh or IdP token, it is stored with the data-key envelope
+      (`CIPHERTEXT_COLUMNS`) and never returned.
+    - **Logging:** the token is never logged, audited or passed to the model.
+    - **The MCP server:** it uses the token only for the one call it came with, never persists it, and never reuses it.
   - **(b) Fallback: a RegulAIt assertion that SAP trusts.** This is allowed only where (a) is impossible, and only with
     the controls in the threat model:
     - a **dedicated signing key per SAP trust**, which is not the general ADR-0210 key, with its own issuer path
       (`<REGULAIT_PUBLIC_URL>/sap-trust/<connection>`);
     - ES256, with `aud` pinned to the one SAP target;
-    - `exp` of 60 seconds or less, with a `jti` that the server records and that SAP rejects on replay;
+    - `exp` of 60 seconds or less, with a `jti` that RegulAIt records and refuses to mint twice. SAP-side rejection of a replayed `jti` is
+      **unverified**; slice A0 confirms it, and it is treated as an extra control, not one we rely on;
     - rotation and revocation through the existing key management;
     - on the SAP side, IAS or the destination's trust restricted to the user group that may be asserted.
 - **Which claim carries the SAP identity.** An admin chooses one attribute of the person's federated identity: login
@@ -261,7 +272,8 @@ return an empty `to_Item`, so the tool reads back after creating. This is confir
 | Confused deputy: the call runs with more SAP rights than the person has | Principal propagation; technical-user destinations refused for writes; SAP authorisation objects still apply. |
 | Token theft between gateway and server | ES256 assertion, short-lived, audience-bound to the server; sent only through the egress guard to the registered origin. |
 | **The RegulAIt signing key becomes an SAP-trusted IdP (option (b))**: a key compromise, or a gateway bug, could mint any SAP business user the mapping covers, beyond the gateway's own grants | Option (a) is preferred, so RegulAIt mints nothing SAP trusts. Under (b): a dedicated key per SAP trust, never the general ADR-0210 key; its own issuer; `aud` pinned to the one SAP target; `exp` 60 seconds or less; a `jti` with replay rejection; rotation and revocation through key management; IAS or the destination's trust restricted to the user group that may be asserted; every assertion minted is audited. |
-| Cross-user replay through the idempotency store | The key is scoped to (tenant, pairwise `sub`, tool). A hit under another principal is refused, audited, and returns nothing. |
+| **The person's own IdP token (option (a)) leaks** from the MCP server, a log or transit, and is used at SAP directly, bypassing approval, rate limit and budget | It is obtained per call and only after the gateway's checks pass; it has the shortest lifetime the IdP allows and an audience pinned to the one SAP target; it is never logged or audited; any token that must be kept is stored with the data-key envelope; the MCP server never persists or reuses it. |
+| Cross-user replay through the idempotency store | Uniqueness is on (tenant, tool, key), and `sub` is stored and compared on every hit. A hit under another principal is refused (`idempotency_key_foreign`), audited, and returns nothing. |
 | Identity disclosure to the MCP server | `identity_release` is off by default; releasing an attribute is a step-up and audited; a url move resets it. |
 | A duplicate order after an unknown outcome | No blind re-post. Only a read-back that matches the full key counts as "created"; anything else goes to `needs_reconciliation` for a person. |
 | Arbitrary SAP access through a generic tool | No passthrough tool; each descriptor is a reviewed, narrow schema. |
