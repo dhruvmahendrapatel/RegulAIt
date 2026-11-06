@@ -236,7 +236,7 @@ export default function RedTeamPage() {
             tabs={[
               { id: "overview", label: "Overview" },
               { id: "libraries", label: libraries.data?.libraries ? `Libraries (${libraries.data.libraries.length})` : "Libraries" },
-              { id: "runs", label: runs.data?.runs ? `Runs (${runs.data.runs.length})` : "Runs" },
+              { id: "runs", label: runs.data?.runs ? `Runs (${runs.data.runs.length >= 100 ? "100+" : runs.data.runs.length})` : "Runs" },
               { id: "engines", label: "Engines" },
               { id: "classes", label: "Attack classes" },
             ]}

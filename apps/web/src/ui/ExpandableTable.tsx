@@ -157,7 +157,10 @@ export function ExpandableTable<T>(props: ExpandableTableProps<T>) {
                             tabIndex={-1}
                             className={x.rowDetail}
                             onKeyDown={(e) => {
-                              if (e.key !== "Escape") return;
+                              if (e.key !== "Escape" || e.defaultPrevented) return;
+                              // Esc inside a field belongs to the field: closing the row would unmount it and drop the draft
+                              const t = e.target as HTMLElement;
+                              if (t !== e.currentTarget && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
                               e.stopPropagation();
                               ex.toggle(row);
                               document.getElementById(`${did}-b`)?.focus();
