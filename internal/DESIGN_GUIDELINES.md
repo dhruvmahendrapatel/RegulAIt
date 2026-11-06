@@ -21,6 +21,9 @@ Sources, in short form:
 "Enforced by" names the test or script that fails when the rule is broken. Where it says **review**, nothing automated
 enforces the rule yet; reviewers check it by hand.
 
+> **Database design** is not in this file (UI only). Normalized tables are the rule for new and changed schema:
+> CLAUDE.md, Engineering guidelines, "Normalized schema", and the ADR-0200 addendum of 2026-11-06.
+
 ## Brand
 
 - Spell the wordmark exactly `regulAIt`; never "Regulait", "regulait" or "RegulAIt". *ADR-0075. Enforced by

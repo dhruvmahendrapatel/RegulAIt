@@ -98,7 +98,7 @@ test.beforeEach(async ({ page }) => {
 
 test("unregistered AI traffic: the project subject links to the project and the remediation opens the register flow, prefilled", async ({ page }) => {
   await page.goto("/ui/admin/governance/alerts");
-  await page.getByRole("button", { name: /Project Claims triage: 12 model calls/ }).click();
+  await page.getByRole("link", { name: /Project Claims triage: 12 model calls/ }).click();
   const detail = page.getByTestId("alert-detail");
   await expect(detail.getByRole("link", { name: "Open project" })).toHaveAttribute("href", `/ui/projects/${PROJECT}`);
   const register = detail.getByRole("link", { name: "Register as use case" });
@@ -111,7 +111,7 @@ test("unregistered AI traffic: the project subject links to the project and the 
 
 test("served-model drift: guidance only, the agent subject links to the agent", async ({ page }) => {
   await page.goto("/ui/admin/governance/alerts");
-  await page.getByRole("button", { name: /Claims assistant was served model-b/ }).click();
+  await page.getByRole("link", { name: /Claims assistant was served model-b/ }).click();
   const detail = page.getByTestId("alert-detail");
   await expect(detail.getByText("Confirm why Claims assistant was served model-b")).toBeVisible();
   await expect(detail.getByRole("link", { name: "Open agent" })).toHaveAttribute("href", `/ui/admin/agents#agent-${AGENT}`);

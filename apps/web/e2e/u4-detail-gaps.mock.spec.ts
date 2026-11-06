@@ -121,11 +121,14 @@ test.describe("U4: decision receipts", () => {
       "GET /v1/receipts/status": { state: "signing", lastSeq: 27, lagRows: 0 },
       "GET /v1/audit": { entries: [], pageSize: 100, hasMore: false, nextCursor: null },
       "GET /v1/audit/retention": { days: 365, oldestAt: null, count: 0 },
+      // ADR-0226: the receipts list under the shared list contract (fromSeq stays a filter; offset paging by seq)
       "GET /v1/receipts": (_b: Json, url: URL) => {
-        const from = Number(url.searchParams.get("fromSeq"));
+        const from = Number(url.searchParams.get("fromSeq") ?? 1);
         const limit = Number(url.searchParams.get("limit"));
-        const last = Math.min(27, from + limit - 1);
-        return { receipts: Array.from({ length: Math.max(0, last - from + 1) }, (_, i) => envelope(from + i)) };
+        const offset = Number(url.searchParams.get("offset") ?? 0);
+        const all = Array.from({ length: Math.max(0, 27 - from + 1) }, (_, i) => envelope(from + i));
+        const more = offset + limit < all.length;
+        return { items: all.slice(offset, offset + limit), nextCursor: null, nextOffset: more ? offset + limit : null, total: url.searchParams.get("count") ? all.length : null, totalIsEstimate: false };
       },
       [`GET /v1/receipts/${AUDIT_ID}`]: { receipts: [envelope(2)] },
       [`GET /v1/receipts/${U(9)}`]: { receipts: [] },
@@ -136,14 +139,26 @@ test.describe("U4: decision receipts", () => {
     // audited reads: nothing listed until asked
     expect(calls(m, "GET", "/v1/receipts")).toHaveLength(0);
     await page.getByRole("button", { name: "Show receipts" }).click();
-    await expect(page.getByText("Showing sequences 1–25.")).toBeVisible();
-    expect(calls(m, "GET", "/v1/receipts").map((c) => c.search)).toEqual(["?fromSeq=1&limit=25"]);
-    await page.getByRole("button", { name: "Next page" }).click();
-    await expect(page.getByText("Showing sequences 26–27.")).toBeVisible();
-    await expect(page.getByRole("button", { name: "Next page" })).toHaveCount(0);
-    expect(calls(m, "GET", "/v1/receipts").at(-1)!.search).toBe("?fromSeq=26&limit=25");
+    const receipts = page.locator('[data-list="decision-receipts"]');
+    await expect(receipts.getByTestId("list-status")).toHaveText("1–10 of 27");
+    const asked = () => calls(m, "GET", "/v1/receipts").map((c) => new URLSearchParams(c.search));
+    expect(asked()).toHaveLength(1);
+    expect(Object.fromEntries(asked()[0]!)).toMatchObject({ fromSeq: "1", limit: "10", sort: "seq", dir: "asc" });
+    await receipts.getByRole("button", { name: "Next", exact: true }).click();
+    await expect(receipts.getByTestId("list-status")).toHaveText("11–20 of 27");
+    expect(asked().at(-1)!.get("offset")).toBe("10");
+    await receipts.getByRole("button", { name: "Next", exact: true }).click();
+    await expect(receipts.getByTestId("list-status")).toHaveText("21–27 of 27");
+    await expect(receipts.getByRole("button", { name: "Next", exact: true })).toHaveAttribute("aria-disabled", "true");
+    // a later start is a filter on the server
+    await page.getByLabel("Start at receipt sequence").fill("26");
+    await page.getByRole("button", { name: "Show receipts" }).click();
+    await expect(receipts.getByTestId("list-status")).toHaveText("1–2 of 2");
+    expect(asked().at(-1)!.get("fromSeq")).toBe("26");
+    await page.getByLabel("Start at receipt sequence").fill("1");
+    await page.getByRole("button", { name: "Show receipts" }).click();
+    await expect(receipts.getByTestId("list-status")).toHaveText("1–10 of 27");
 
-    await page.getByRole("button", { name: "Previous page" }).click();
     await page.getByRole("button", { name: "Open receipt 2", exact: true }).click();
     const dialog = page.getByRole("dialog", { name: "Decision receipt" });
     await expect(dialog.getByText("receipt-key-1", { exact: true })).toBeVisible();
@@ -162,7 +177,7 @@ test.describe("U4: decision receipts", () => {
     await expectAxeClean(page, "receipt browser", page.locator("[data-rg-card]").filter({ hasText: "Browse signed receipts" }).first());
   });
 
-  test("a refused page range is named", async ({ page }) => {
+  test("a refused page is said as an error, never as an empty list", async ({ page }) => {
     await mockApi(page, {
       "GET /v1/receipts/status": { state: "signing", lastSeq: 3, lagRows: 0 },
       "GET /v1/audit": { entries: [], pageSize: 100, hasMore: false, nextCursor: null },
@@ -171,7 +186,8 @@ test.describe("U4: decision receipts", () => {
     await page.goto("/ui/admin/audit");
     await page.locator("summary", { hasText: "Signed decision receipts" }).click();
     await page.getByRole("button", { name: "Show receipts" }).click();
-    await expect(page.getByText("Choose a first receipt sequence of 1 or more and a page of at most 500 receipts.")).toBeVisible();
+    await expect(page.locator('[data-list="decision-receipts"]').getByRole("button", { name: "Retry" })).toBeVisible();
+    await expect(page.getByText(/^No receipts from sequence/)).toHaveCount(0);
   });
 });
 
