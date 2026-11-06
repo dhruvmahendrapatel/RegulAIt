@@ -178,7 +178,16 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
   const role = await post("/v1/roles", { name: `bt approvers ${RUN}` });
   const joined = await admin.request.post(`/v1/users/${averyId}/roles`, { headers: CSRF, data: { roleId: role.id } });
   expect(joined.status(), await joined.text()).toBeLessThan(300);
-  await post("/v1/rules/approvals", { userId: d.userId, serverId: wh.id, toolName: "list_schemas", approverUserId: a.userId, approverRoleId: role.id });
+  // ADR-0229 amendment: this rule outranks the seed's fleet write rule (Ada alone) and its pool adds Avery, so it takes
+  // that rule's pool over for Dana's list_schemas: the same settings_relax step-up as widening the fleet rule's pool
+  const ruleRes = await steppedUpAs(admin.request, ADMIN_EMAIL, "POST", "/v1/rules/approvals", {
+    userId: d.userId,
+    serverId: wh.id,
+    toolName: "list_schemas",
+    approverUserId: a.userId,
+    approverRoleId: role.id,
+  });
+  expect(ruleRes.status(), `/v1/rules/approvals: ${await ruleRes.text()}`).toBe(201);
   // ADR-0186 B: tool-call approvals are passkey-signed by default, and this
   // stack has no public URL (no passkey relying party), so the admin's decide
   // below would fail closed. Signing is not what this journey tests: it is

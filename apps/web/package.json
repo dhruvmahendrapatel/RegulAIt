@@ -36,7 +36,7 @@
     "postcss": "8.5.28",
     "size-limit": "14.2.0",
     "typescript": "^5.8.3",
-    "vite": "^6.3.5",
+    "vite": "^6.4.5",
     "web-vitals": "6.2.3"
   }
 }

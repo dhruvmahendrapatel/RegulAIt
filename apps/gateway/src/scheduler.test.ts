@@ -712,6 +712,9 @@ describe("every sweep is registered", () => {
         SCHEDULER_JOB_NAMES.mcpRegistrySync,
         SCHEDULER_JOB_NAMES.mrmExpiry,
         SCHEDULER_JOB_NAMES.redteam,
+        // ADR-0217: re-runs a changed model's chosen suites once per change; a no-op while
+        // mrmAutoRetestEnabled is off. Driven end-to-end in zz-adr0217-mrm-auto-retest.test.ts.
+        SCHEDULER_JOB_NAMES.mrmAutoRetest,
         SCHEDULER_JOB_NAMES.reportSchedules,
         SCHEDULER_JOB_NAMES.spendAnomalies,
         // ADR-0065: remote training jobs run on somebody else's compute for

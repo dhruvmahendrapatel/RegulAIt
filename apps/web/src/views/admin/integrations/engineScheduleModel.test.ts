@@ -1,6 +1,14 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { SCHEDULE_REFUSALS, parseIntervalHours, scheduleBody, scheduleRequestSummary, scheduleToggle } from "./engineScheduleModel";
+import {
+  SCHEDULE_REFUSALS,
+  parseIntervalHours,
+  scheduleBody,
+  scheduleDeletable,
+  scheduleEditable,
+  scheduleRequestSummary,
+  scheduleToggle,
+} from "./engineScheduleModel";
 
 const ME = "00000000-0000-4000-8000-000000000001";
 const OTHER = "00000000-0000-4000-8000-000000000002";
@@ -24,6 +32,16 @@ describe("engine schedules", () => {
     expect(scheduleToggle({ enabled: false, runAsUserId: ME }, ME)).toEqual({ ok: true, next: true });
     expect(scheduleToggle({ enabled: false, runAsUserId: OTHER }, ME)).toMatchObject({ ok: false, reason: expect.stringContaining("Only the person") });
     expect(scheduleToggle({ enabled: false, runAsUserId: null }, ME)).toMatchObject({ ok: false, reason: expect.stringContaining("no longer exists") });
+  });
+
+  it("ADR-0208 G9: only the owner edits; the owner or an admin deletes", () => {
+    expect(scheduleEditable({ runAsUserId: ME }, ME)).toBe(true);
+    expect(scheduleEditable({ runAsUserId: OTHER }, ME)).toBe(false);
+    expect(scheduleEditable({ runAsUserId: null }, null)).toBe(false);
+    expect(scheduleDeletable({ runAsUserId: ME }, ME, false)).toBe(true);
+    expect(scheduleDeletable({ runAsUserId: OTHER }, ME, false)).toBe(false);
+    expect(scheduleDeletable({ runAsUserId: OTHER }, ME, true)).toBe(true);
+    expect(scheduleDeletable({ runAsUserId: null }, ME, true)).toBe(true);
   });
 
   it("reads a stored request defensively", () => {

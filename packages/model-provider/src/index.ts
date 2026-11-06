@@ -232,6 +232,10 @@ export interface ModelDispatchResult {
     reasoningTokens?: number;
     cacheReadInputTokens?: number;
     cacheCreationInputTokens?: number;
+    /** ADR-0212 (P12 b): the image and audio share of the two totals, ONLY when the
+     * provider reports one (absent otherwise — never inferred from the request).
+     * Text is the remainder. Pillar 5 prices each modality from it. */
+    modality?: ModalityTokenCounts;
   };
   /** provider-side message/request identifier for cross-system audit joins */
   providerMessageId: string | null;
@@ -243,6 +247,61 @@ export interface ModelDispatchResult {
    * say — NEVER filled in from the request, because a guess here would hide
    * exactly the change this field exists to show. */
   servedModel?: string | null;
+}
+
+/** ADR-0212: image/audio token counts out of a provider's usage block (structurally the shared type) */
+export interface ModalityTokenCounts {
+  image?: { inputTokens: number; outputTokens: number };
+  audio?: { inputTokens: number; outputTokens: number };
+}
+
+const positiveCount = (n: unknown): number => (typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.trunc(n) : 0);
+
+/** spread into `usage`: `{ modality }` only when some image or audio count is positive */
+function modalityUsage(m: ModalityTokenCounts): { modality?: ModalityTokenCounts } {
+  const out: ModalityTokenCounts = {};
+  for (const k of ["image", "audio"] as const) {
+    const v = m[k];
+    const inputTokens = positiveCount(v?.inputTokens);
+    const outputTokens = positiveCount(v?.outputTokens);
+    if (inputTokens > 0 || outputTokens > 0) out[k] = { inputTokens, outputTokens };
+  }
+  return out.image || out.audio ? { modality: out } : {};
+}
+
+/** OpenAI chat completions: `prompt_tokens_details` / `completion_tokens_details` carry `audio_tokens`
+ * (and, on some compatible endpoints, `image_tokens`) */
+export function openAiChatModality(usage: unknown): { modality?: ModalityTokenCounts } {
+  const u = (usage ?? {}) as {
+    prompt_tokens_details?: { audio_tokens?: unknown; image_tokens?: unknown } | null;
+    completion_tokens_details?: { audio_tokens?: unknown; image_tokens?: unknown } | null;
+  };
+  return modalityUsage({
+    image: {
+      inputTokens: positiveCount(u.prompt_tokens_details?.image_tokens),
+      outputTokens: positiveCount(u.completion_tokens_details?.image_tokens),
+    },
+    audio: {
+      inputTokens: positiveCount(u.prompt_tokens_details?.audio_tokens),
+      outputTokens: positiveCount(u.completion_tokens_details?.audio_tokens),
+    },
+  });
+}
+
+/** Gemini `usageMetadata`: per-modality `promptTokensDetails` / `candidatesTokensDetails` */
+export function geminiModality(meta: GeminiUsageMetadata | undefined): { modality?: ModalityTokenCounts } {
+  const sum = (details: GeminiModalityCount[] | undefined, modality: string) =>
+    (details ?? []).filter((d) => d?.modality === modality).reduce((n, d) => n + positiveCount(d.tokenCount), 0);
+  return modalityUsage({
+    image: {
+      inputTokens: sum(meta?.promptTokensDetails, "IMAGE") + sum(meta?.promptTokensDetails, "VIDEO"),
+      outputTokens: sum(meta?.candidatesTokensDetails, "IMAGE"),
+    },
+    audio: {
+      inputTokens: sum(meta?.promptTokensDetails, "AUDIO"),
+      outputTokens: sum(meta?.candidatesTokensDetails, "AUDIO"),
+    },
+  });
 }
 
 /** the provider's prompt-cache counts, only when positive (see `usage`) */
@@ -723,6 +782,7 @@ async function dispatchChatCompletions(
               inputTokens: chunk.usage.prompt_tokens ?? 0,
               outputTokens: chunk.usage.completion_tokens ?? 0,
               ...cacheUsage(chunk.usage.prompt_tokens_details?.cached_tokens, undefined),
+              ...openAiChatModality(chunk.usage),
             };
           }
         }
@@ -769,6 +829,7 @@ async function dispatchChatCompletions(
           inputTokens: res.usage?.prompt_tokens ?? 0,
           outputTokens: res.usage?.completion_tokens ?? 0,
           ...cacheUsage(res.usage?.prompt_tokens_details?.cached_tokens, undefined),
+          ...openAiChatModality(res.usage),
         },
         providerMessageId: res.id ?? null,
         servedModel: reportedModel(res.model),
@@ -1184,7 +1245,20 @@ interface GeminiChunk {
     finishReason?: string;
   }>;
   promptFeedback?: { blockReason?: string };
-  usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
+  usageMetadata?: GeminiUsageMetadata;
+}
+
+export interface GeminiModalityCount {
+  modality?: string;
+  tokenCount?: number;
+}
+
+export interface GeminiUsageMetadata {
+  promptTokenCount?: number;
+  candidatesTokenCount?: number;
+  /** ADR-0212: per-modality breakdowns (TEXT, IMAGE, VIDEO, AUDIO) */
+  promptTokensDetails?: GeminiModalityCount[];
+  candidatesTokensDetails?: GeminiModalityCount[];
 }
 
 /** JSON-Schema keywords Gemini's Schema dialect shares verbatim — everything
@@ -1454,7 +1528,7 @@ export class GoogleProvider implements ModelProvider {
     let blockReason: string | null = null;
     let id: string | null = null;
     let servedModel: string | null = null;
-    let usage = { inputTokens: 0, outputTokens: 0 };
+    let usage: ModelDispatchResult["usage"] = { inputTokens: 0, outputTokens: 0 };
     const toolCalls: Array<{ id: string; name: string; arguments: unknown }> = [];
     const absorb = (chunk: GeminiChunk) => {
       id = id ?? chunk.responseId ?? null;
@@ -1480,6 +1554,7 @@ export class GoogleProvider implements ModelProvider {
         usage = {
           inputTokens: chunk.usageMetadata.promptTokenCount ?? 0,
           outputTokens: chunk.usageMetadata.candidatesTokenCount ?? 0,
+          ...geminiModality(chunk.usageMetadata),
         };
       }
     };

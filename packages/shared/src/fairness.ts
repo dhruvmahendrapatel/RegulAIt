@@ -87,7 +87,7 @@ export const FAIRNESS_DEFAULT_THRESHOLDS: readonly FairnessThreshold[] = Object.
   { metric: "equalized_odds_difference", limit: 0.1, action: "fail" },
 ] as FairnessThreshold[]);
 
-/** the bounds (zod, the gateway's parser and the DB CHECKs of migration 0243 hold the same numbers) */
+/** the bounds (zod, the gateway's parser and the DB CHECKs of migration 0264 hold the same numbers) */
 export const FAIRNESS_LIMITS = {
   /** the largest CSV an upload may carry, in bytes */
   maxCsvBytes: 5 * 1024 * 1024,
@@ -105,7 +105,7 @@ export const FAIRNESS_LIMITS = {
   retentionDays: { min: 1, max: 365, default: 30 },
 } as const;
 
-/** the org settings this feature adds, at their strict values (the column defaults of migration 0243) */
+/** the org settings this feature adds, at their strict values (the column defaults of migration 0264) */
 export const FAIRNESS_STRICT_SETTINGS = Object.freeze({
   fairnessTestingEnabled: false as boolean,
   fairnessBlockOnFail: true as boolean,

@@ -18,7 +18,13 @@ import { describe, expect, it } from "vitest";
 import {
   AI_RISK_CATEGORIES,
   AI_RISK_REGISTER_DISCLAIMER,
+  AI_RISK_STATUSES,
+  AI_RISK_TREATMENTS,
   DEFAULT_RISK_LIBRARY,
+  LIVE_RISK_STATUSES,
+  isTreatedRiskStatus,
+  recordRiskTreatmentSchema,
+  riskStatusCarriesRating,
   RISK_CATEGORY_DIMENSION,
   RISK_CATEGORY_EVIDENCE,
   RISK_EVIDENCE_RESOLVERS,
@@ -199,5 +205,39 @@ describe("ADR-0180 §6 (A10): tolerance and the acceptance cap, pure", () => {
     ).toBe(false);
     const dup = { scopeKind: "category", scopeKey: "shadow_ai", maxBand: "low" };
     expect(putRiskTolerancesSchema.safeParse({ tolerances: [dup, dup] }).success).toBe(false);
+  });
+});
+
+describe("ADR-0211 — transferred and avoided treatments", () => {
+  it("adds the two statuses after the four existing ones, which keep their order", () => {
+    expect(AI_RISK_STATUSES).toEqual(["open", "mitigating", "accepted", "closed", "transferred", "avoided"]);
+    expect(AI_RISK_TREATMENTS).toEqual(["transferred", "avoided"]);
+    expect(LIVE_RISK_STATUSES).toEqual(["open", "mitigating"]);
+  });
+
+  it("names the treated statuses and nothing else", () => {
+    expect(AI_RISK_STATUSES.filter(isTreatedRiskStatus)).toEqual(["transferred", "avoided"]);
+  });
+
+  it("only closed and avoided drop out of ratings", () => {
+    expect(AI_RISK_STATUSES.filter((s) => !riskStatusCarriesRating(s))).toEqual(["closed", "avoided"]);
+  });
+
+  it("requires evidence and an owner, trims the evidence, and refuses unknown keys", () => {
+    const owner = "00000000-0000-4000-8000-000000000001";
+    expect(recordRiskTreatmentSchema.parse({ treatment: "transferred", evidence: "  policy CY-2026-114  ", ownerUserId: owner }))
+      .toEqual({ treatment: "transferred", evidence: "policy CY-2026-114", ownerUserId: owner });
+    expect(recordRiskTreatmentSchema.safeParse({ treatment: "avoided", evidence: "   ", ownerUserId: owner }).success).toBe(false);
+    expect(recordRiskTreatmentSchema.safeParse({ treatment: "avoided", evidence: "board decision" }).success).toBe(false);
+    expect(recordRiskTreatmentSchema.safeParse({ treatment: "accepted", evidence: "x", ownerUserId: owner }).success).toBe(false);
+    expect(
+      recordRiskTreatmentSchema.safeParse({ treatment: "avoided", evidence: "x", ownerUserId: owner, status: "closed" }).success,
+    ).toBe(false);
+    expect(recordRiskTreatmentSchema.safeParse({ treatment: "avoided", evidence: "x".repeat(2001), ownerUserId: owner }).success).toBe(false);
+  });
+
+  it("the transition schema still refuses the treatments, so they have one write path", () => {
+    expect(transitionRiskSchema.safeParse({ status: "transferred", reason: "r" }).success).toBe(false);
+    expect(transitionRiskSchema.safeParse({ status: "avoided", reason: "r" }).success).toBe(false);
   });
 });

@@ -65,6 +65,16 @@ interface AuditedWriter {
 
 const AUDITED_WRITERS: AuditedWriter[] = [
   {
+    file: "model-rate-limits.ts",
+    method: "update",
+    expr: "agents",
+    why:
+      "ADR-0212 (P12 b): PUT /v1/agents/:agentId/modality-pricing. It writes ONLY the four " +
+      "`cost_per_mtok_{image,audio}_{in,out}` columns, none of which is in VERSIONED_RULE_FIELDS, so there is no " +
+      "version to mint and the dispatch-time resolver reads them straight from the row — nothing is silently " +
+      "discarded. The write and its old -> new audit row share one transaction, under a row lock.",
+  },
+  {
     file: "execution-control.ts",
     method: "update",
     expr: "agents",
@@ -138,6 +148,17 @@ const AUDITED_WRITERS: AuditedWriter[] = [
       "`onConflictDoNothing` (a genuine create, which cannot have versions) plus an explicit edit path through " +
       "applyRuleEdit. The DoNothing is what closes the race: a concurrent create makes this statement return " +
       "nothing and the request falls through to the edit path instead of clobbering it.",
+  },
+  {
+    file: "compliance-profile-lifecycle.ts",
+    method: "update",
+    expr: "complianceProfiles",
+    why:
+      "ADR-0208 (G7) retire — writes ONLY `status` / `retired_at` / `retired_reason` / `retired_by_user_id`, none " +
+      "of which is in VERSIONED_RULE_FIELDS, so there is no version to mint and nothing is silently discarded at " +
+      "dispatch. It runs under the profile's row lock after a settings_relax step-up, refuses while any carrier " +
+      "holds the tag, and writes its audit row in the same transaction. Profile EDITS mint a draft through " +
+      "`proposeRuleVersion` (rule-writes.ts) and activate through `activateVersion` on approval.",
   },
   {
     file: "compliance-packs.ts",

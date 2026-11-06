@@ -109,9 +109,9 @@ test.describe("ADR-0169: the auto-hiding rail", () => {
     await expect(rail(page).getByLabel("Filter navigation")).toBeFocused();
     await expect(rail(page)).toHaveAttribute("data-expanded", "true");
     await expect.poll(() => mainX(page)).toBeGreaterThanOrEqual(240);
-    // every destination is reachable by Tab alone
+    // every destination is reachable by Tab alone (a bound on presses, not an exact position: the rail grows)
     let reached = false;
-    // bounded so a broken rail fails rather than hangs; generous, because the AI Governance group keeps growing
+    // the bound has headroom for the rail as groups grow (ADR-0221 added Supplier questionnaires above Risks; ADR-0222 added Fairness testing)
     for (let i = 0; i < 60 && !reached; i += 1) {
       await page.keyboard.press("Tab");
       reached = await rail(page).getByRole("link", { name: "Risks", exact: true }).evaluate((el) => el === document.activeElement);

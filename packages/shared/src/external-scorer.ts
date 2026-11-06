@@ -39,6 +39,7 @@
 
 import { z } from "zod";
 import { JUDGE_BACKED_SCORER_KINDS } from "./evals.js";
+import { GUARDRAIL_SCORER_KINDS } from "./trained-detectors.js";
 
 // ---------------------------------------------------------------------------
 // method provenance
@@ -224,11 +225,13 @@ export function externalScorerAvailabilityFor(
 // admin write shapes (registration surface)
 // ---------------------------------------------------------------------------
 
-/** the kinds an external scorer may claim — EXACTLY the judge-backed set.
- * A deterministic (lexical) kind is not claimable, so the registration
- * surface cannot even express "route claim_support externally". */
+/** the kinds an external scorer may claim — the judge-backed set, plus
+ * (ADR-0220) the three guardrail kinds a trained-detector service serves at
+ * dispatch time. A deterministic (lexical) kind is not claimable, so the
+ * registration surface cannot even express "route claim_support externally". */
+export const EXTERNAL_SCORER_CLAIMABLE_KINDS = [...JUDGE_BACKED_SCORER_KINDS, ...GUARDRAIL_SCORER_KINDS] as const;
 export const externalScorerKindSchema = z.enum(
-  JUDGE_BACKED_SCORER_KINDS as unknown as [string, ...string[]],
+  EXTERNAL_SCORER_CLAIMABLE_KINDS as unknown as [string, ...string[]],
 );
 
 export const createExternalScorerSchema = z
@@ -238,8 +241,8 @@ export const createExternalScorerSchema = z
     /** null/absent = an endpoint authenticating by network position. Sent as
      * `Authorization: Bearer <key>` when present. */
     apiKey: z.string().min(1).max(4096).nullable().optional(),
-    /** which judge-backed kinds the instrument claims to serve */
-    scorerKinds: z.array(externalScorerKindSchema).min(1).max(3),
+    /** which judge-backed (and, ADR-0220, guardrail) kinds the instrument claims to serve */
+    scorerKinds: z.array(externalScorerKindSchema).min(1).max(EXTERNAL_SCORER_CLAIMABLE_KINDS.length),
     allowPlaintextHttp: z.boolean().optional(),
   })
   .strict();
@@ -250,7 +253,7 @@ export const updateExternalScorerSchema = z
     name: z.string().min(1).max(120).optional(),
     baseUrl: z.string().url().optional(),
     apiKey: z.string().min(1).max(4096).nullable().optional(),
-    scorerKinds: z.array(externalScorerKindSchema).min(1).max(3).optional(),
+    scorerKinds: z.array(externalScorerKindSchema).min(1).max(EXTERNAL_SCORER_CLAIMABLE_KINDS.length).optional(),
     allowPlaintextHttp: z.boolean().optional(),
   })
   .strict()

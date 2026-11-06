@@ -290,9 +290,13 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   { table: "federation_signing_keys", column: "private_key_ciphertext", what: "federation signing private keys" },
   // ADR-0204 (migration 0214): the static credential an admin attached to an MCP server (sent upstream, never returned)
   { table: "mcp_server_upstream_credentials", column: "secret_ciphertext", what: "MCP server upstream credentials" },
-  // ADR-0222 (migration 0243): a fairness evaluation dataset's kept columns (label, prediction, protected
+  // ADR-0222 (migration 0264): a fairness evaluation dataset's kept columns (label, prediction, protected
   // attributes), set to NULL at the retention date or on delete
   { table: "fairness_datasets", column: "rows_ciphertext", what: "fairness evaluation datasets" },
+  // ADR-0221 (migration 0257): an evidence file a supplier uploaded through the portal (download is admin-only)
+  { table: "supplier_submissions", column: "file_ciphertext", what: "supplier evidence files" },
+  // ADR-0219 (migration 0253): the static credential an admin attached to a remote A2A agent (sent, never returned)
+  { table: "a2a_agent_credentials", column: "secret_ciphertext", what: "remote A2A agent credentials" },
 ];
 
 export interface CiphertextProbe {

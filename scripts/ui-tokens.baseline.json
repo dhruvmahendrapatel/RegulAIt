@@ -197,7 +197,7 @@
       "ts-spacing-literal": 3
     },
     "apps/web/src/views/incidents/IncidentsPage.tsx": {
-      "ts-spacing-literal": 4
+      "ts-spacing-literal": 3
     },
     "apps/web/src/views/models/models.module.css": {
       "declaration-property-unit-disallowed-list": 10

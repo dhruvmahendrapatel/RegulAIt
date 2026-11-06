@@ -131,7 +131,9 @@ import {
   type RedTeamProbeOutcome,
   type RedTeamSeverity,
   type RedTeamTrialOutcome,
+  retireRedTeamLibrarySchema,
 } from "@regulait/shared";
+import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
 import { type AgentRow } from "./agents-connectors.js";
 import { buildAgentDecider, runEvalSuite, type EvalRunOutcome } from "./evals.js";
 import { assertProjectAttribution } from "./projects.js";
@@ -147,6 +149,32 @@ import { refuseRunStartWithoutLiteracy } from "./ai-literacy.js";
 import { modelCardSignoffSubjects, prepareAiBomSignoff, runAiBomSignoffs } from "./ai-bom-signoff.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
+
+/** ADR-0208 G9: the refusal of any new use of a retired library version */
+function redTeamLibraryRetiredOutcome(library: { name: string; version: number }) {
+  return {
+    ok: false as const,
+    status: 409,
+    error: "redteam_library_retired",
+    detail: `'${library.name}' v${library.version} is retired: it takes no new run, probe or publish (its runs and findings stay readable)`,
+  };
+}
+
+/** ADR-0208 G9: runs of this library version still in progress (its eval run is `running`) */
+async function redTeamRunsInProgress(db: Db, library: { id: string; evalDatasetId: string | null }): Promise<number> {
+  const [row] = await db
+    .select({ n: count() })
+    .from(evalRuns)
+    .where(
+      and(
+        eq(evalRuns.status, "running"),
+        library.evalDatasetId
+          ? sql`(${evalRuns.datasetId} = ${library.evalDatasetId} OR ${evalRuns.id} IN (SELECT r.eval_run_id FROM redteam_runs r WHERE r.library_id = ${library.id}))`
+          : sql`${evalRuns.id} IN (SELECT r.eval_run_id FROM redteam_runs r WHERE r.library_id = ${library.id})`,
+      ),
+    );
+  return row?.n ?? 0;
+}
 
 /** the tag prefix that binds a materialized eval case back to its probe. Tags
  * (not a join table) because `eval_cases` must stay exactly the shape ADR-0044
@@ -192,6 +220,8 @@ export async function publishRedTeamLibrary(
 ): Promise<PublishOutcome> {
   const [library] = await db.select().from(redteamLibraries).where(eq(redteamLibraries.id, libraryId));
   if (!library) return { ok: false, status: 404, error: "unknown_library" };
+  // ADR-0208 G9: a retired version is never published
+  if (library.status === "retired") return redTeamLibraryRetiredOutcome(library);
   if (library.status === "published") {
     return {
       ok: false,
@@ -526,6 +556,8 @@ export async function runRedTeamSuite(
     .from(redteamLibraries)
     .where(eq(redteamLibraries.id, opts.libraryId));
   if (!library) return { ok: false, status: 404, error: "unknown_library" };
+  // ADR-0208 G9: a retired version takes no new run, manual or scheduled
+  if (library.status === "retired") return redTeamLibraryRetiredOutcome(library);
   if (library.status !== "published" || !library.evalDatasetId) {
     return {
       ok: false,
@@ -1260,7 +1292,8 @@ export function registerRedTeamRoutes(app: FastifyInstance, db: Db, opts: RedTea
       .groupBy(redteamProbes.libraryId);
     const map = new Map(counts.map((c) => [c.libraryId, c.n]));
     return {
-      libraries: rows.map((l) => ({ ...l, probeCount: map.get(l.id) ?? 0, frozen: l.status === "published" })),
+      // ADR-0208 G9: a retired version is frozen too (read-only)
+      libraries: rows.map((l) => ({ ...l, probeCount: map.get(l.id) ?? 0, frozen: l.status !== "draft" })),
       note:
         "A library version freezes on PUBLISH, because publish is the moment it becomes an eval dataset a " +
         "result can be stamped against. Adding attacks is a data update, never a redeploy.",
@@ -1339,7 +1372,7 @@ export function registerRedTeamRoutes(app: FastifyInstance, db: Db, opts: RedTea
       library,
       probes,
       versions,
-      frozen: library.status === "published",
+      frozen: library.status !== "draft",
       coverage: RED_TEAM_ATTACK_CLASSES.map((c) => ({
         attackClass: c,
         probes: probes.filter((p) => p.attackClass === c).length,
@@ -1353,6 +1386,10 @@ export function registerRedTeamRoutes(app: FastifyInstance, db: Db, opts: RedTea
     const body = createRedTeamProbeSchema.parse(req.body);
     const [library] = await db.select().from(redteamLibraries).where(eq(redteamLibraries.id, id));
     if (!library) return reply.status(404).send({ error: "unknown_library" });
+    if (library.status === "retired") {
+      const out = redTeamLibraryRetiredOutcome(library);
+      return reply.status(out.status).send({ error: out.error, detail: out.detail });
+    }
     if (library.status === "published") {
       return reply.status(409).send({
         error: "library_frozen",
@@ -1469,6 +1506,71 @@ export function registerRedTeamRoutes(app: FastifyInstance, db: Db, opts: RedTea
         "existing `evals:` binding and a regression will park the workflow instance at blocked_on_check — " +
         "there is no separate red-team blocking mechanism, by design.",
     });
+  });
+
+  /**
+   * ADR-0208 G9 — RETIRE ONE library version. Admin-only (the default gate), reason required. A PUBLISHED version
+   * needs a `settings_relax` step-up, because retiring it stops the scheduled sweep probing agents with it; a draft
+   * retires without one. Refused while a run of the version is in progress. A retired version takes no new run,
+   * probe or publish and leaves the sweep; its runs and findings stay readable. Row and audit commit together.
+   */
+  app.post("/v1/redteam/libraries/:id/retire", async (req, reply) => {
+    const { id } = idParam.parse(req.params);
+    const body = retireRedTeamLibrarySchema.parse(req.body);
+    const actor = req.authCtx.userId ?? null;
+    const [library] = await db.select().from(redteamLibraries).where(eq(redteamLibraries.id, id));
+    if (!library) return reply.status(404).send({ error: "unknown_library" });
+    if (library.status === "retired") return reply.status(409).send({ error: "redteam_library_already_retired" });
+    const inProgress = await redTeamRunsInProgress(db, library);
+    if (inProgress > 0) {
+      return reply.status(409).send({
+        error: "redteam_run_in_progress",
+        detail: `${inProgress} run(s) of '${library.name}' v${library.version} are still in progress; retire it once they finish`,
+        runs: inProgress,
+      });
+    }
+    if (library.status === "published") {
+      const su = await requireStepUp(db, req, reply, {
+        kind: "settings_relax",
+        facts: { op: "redteam_library_retire", libraryId: library.id, name: library.name, version: library.version, status: library.status },
+      });
+      if (!su.ok) return reply;
+    }
+    const out = await db.transaction(async (tx) => {
+      const t = tx as unknown as Db;
+      const [locked] = await t.select().from(redteamLibraries).where(eq(redteamLibraries.id, id)).for("update");
+      // the step-up (or its absence) was decided on the status read above: a change since then fails closed
+      if (!locked || locked.status !== library.status) return { kind: "changed" as const };
+      if ((await redTeamRunsInProgress(t, locked)) > 0) return { kind: "running" as const };
+      const [row] = await t
+        .update(redteamLibraries)
+        .set({ status: "retired", retiredAt: sql`now()`, retiredReason: body.reason, retiredByUserId: actor })
+        .where(eq(redteamLibraries.id, id))
+        .returning();
+      await t.insert(auditLog).values({
+        userId: actor ?? NIL_UUID,
+        objectType: "eval_run",
+        objectId: locked.id,
+        detail: {
+          phase: "redteam-library-retired",
+          libraryId: locked.id,
+          libraryName: locked.name,
+          libraryVersion: locked.version,
+          previousStatus: locked.status,
+          reason: body.reason,
+        },
+        effect: "allow",
+        ruleId: "redteam-library-retired",
+        ruleChain: [],
+        reason:
+          `red-team attack library '${locked.name}' v${locked.version} retired (was ${locked.status}): ${body.reason}. ` +
+          "It takes no new run and leaves the scheduled sweep; its runs and findings stay readable.",
+      });
+      return { kind: "ok" as const, row: row! };
+    });
+    if (out.kind === "changed") return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
+    if (out.kind === "running") return reply.status(409).send({ error: "redteam_run_in_progress" });
+    return { retired: true, library: out.row };
   });
 
   /**

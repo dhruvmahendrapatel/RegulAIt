@@ -23,6 +23,7 @@ const dbSrc = path.resolve(here, "../../../packages/db/src");
 
 /** every gateway module that writes a `receiptClass: "decision"` audit row (B2's list) */
 const DECISION_WRITERS = [
+  "agent-setup-assist.ts", // ADR-0205: the setup assistant's refused model draft (insert(auditLog) on the chained handle)
   "agents-connectors.ts", // agent dispatch: lifecycle, PII, egress and fallback refusals
   "app.ts", // advisory evaluate callouts and builder approval resumes
   "approval-signatures.ts", // approval decisions (objectType approval)
@@ -41,11 +42,14 @@ const DECISION_WRITERS = [
   "mcp-identity-assertion.ts", // ADR-0188 S8: an opted-in server's call refused because no identity assertion can be made
   "mcp-protocol.ts", // MCP protocol methods
   "mcp-proxy.ts", // MCP tool calls (governed-evaluate.ts decides; its callers write the decision row)
+  "model-rate-limits.ts", // ADR-0212: a dispatch refused by a per-model rate limit (insert(auditLog) on the chained handle)
   "outbound-audience.ts",
   "playground.ts",
+  "privacy-ops.ts", // ADR-0224: the processing limit's dispatch refusal
   "redteam.ts",
   "use-case-gate.ts",
   "use-cases.ts",
+  "vendors.ts", // ADR-0213: the vendor questionnaire drafter's refused model use (insert(auditLog), chained handle)
   "workbench.ts",
 ].sort();
 
