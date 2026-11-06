@@ -90,9 +90,12 @@ export function ReplaceTokenDialog(props: { kind: "git" | "pm"; connection: { na
     void act
       .run(
         () =>
-          props.kind === "git"
-            ? api.post(`/v1/git/connections/${encodeURIComponent(c.name)}/token`, { token })
-            : api.post(`/v1/pm/connections/${encodeURIComponent(c.name)}/token`, { token }),
+          // a credential change: the server asks for a step-up bound to this connection
+          withStepUp((h) =>
+            props.kind === "git"
+              ? stepUpApi.post(`/v1/git/connections/${encodeURIComponent(c.name)}/token`, { token }, h)
+              : stepUpApi.post(`/v1/pm/connections/${encodeURIComponent(c.name)}/token`, { token }, h),
+          ),
         `Token replaced. Revoke the old token in the ${host}.`,
       )
       .then((ok) => ok && props.onClose());
@@ -114,7 +117,8 @@ export function ReplaceTokenDialog(props: { kind: "git" | "pm"; connection: { na
         <p className={v.flush}>
           The stored token is overwritten and the old one is destroyed here.{" "}
           {props.kind === "git" ? "Git stages use the new token from their next step." : "Syncs use the new token from their next call."} The old
-          token still works in the {host} until you revoke it there. The change is recorded in the audit log.
+          token still works in the {host} until you revoke it there. The change is recorded in the audit log, and you will be asked to
+          confirm it's you.
         </p>
         <Field label="New token">
           <Input
@@ -142,15 +146,19 @@ export function EditGitDialog(props: { connection: GitConnection; onClose: () =>
   const act = useAction();
   const c = props.connection;
   const [baseUrl, setBaseUrl] = useState(c.baseUrl ?? "");
+  const [token, setToken] = useState("");
   const [refusal, setRefusal] = useState<string | null>(null);
   const { toast } = useToast();
+  // a new host never gets the stored token: the move carries the new host's token, behind a step-up
+  const moves = (baseUrl.trim() || null) !== (c.baseUrl ?? null);
   const save = () => {
     setRefusal(null);
     let saved = false;
     void act
       .run(async () => {
         try {
-          await api.patch(`/v1/git/connections/${encodeURIComponent(c.name)}`, { baseUrl: baseUrl || null });
+          const body = { baseUrl: baseUrl.trim() || null, ...(moves ? { token } : {}) };
+          await withStepUp((h) => stepUpApi.patch(`/v1/git/connections/${encodeURIComponent(c.name)}`, body, h));
           saved = true;
         } catch (e) {
           // the egress refusal is answered in the dialog, where the URL is
@@ -175,7 +183,7 @@ export function EditGitDialog(props: { connection: GitConnection; onClose: () =>
       actions={
         <>
           <Button onClick={props.onClose}>Cancel</Button>
-          <Button variant="primary" disabled={act.busy} onClick={save}>
+          <Button variant="primary" disabled={act.busy || (moves && !token)} onClick={save}>
             Save
           </Button>
         </>
@@ -194,6 +202,7 @@ export function EditGitDialog(props: { connection: GitConnection; onClose: () =>
         <Field label="Base URL (empty for the provider default)">
           <Input autoFocus value={baseUrl} onChange={(e) => (setBaseUrl(e.target.value), setRefusal(null))} placeholder="https://…" />
         </Field>
+        {moves && <MoveTokenField host="git host" token={token} setToken={setToken} />}
         {refusal ? (
           <div className={v.errLine} role="alert" data-testid="edit-refusal">
             {refusal}
@@ -207,6 +216,21 @@ export function EditGitDialog(props: { connection: GitConnection; onClose: () =>
         )}
       </div>
     </Modal>
+  );
+}
+
+/** G5 / G6, review of #605: a base URL move needs the new host's token; the stored one is never sent to a new host */
+function MoveTokenField(props: { host: string; token: string; setToken: (t: string) => void }) {
+  return (
+    <>
+      <p className={`${v.errLine} ${v.flush}`} role="note">
+        A new base URL needs the token for the new {props.host}: the stored token is replaced and never sent to the new address. You will be
+        asked to confirm it's you.
+      </p>
+      <Field label="Token for the new host">
+        <Input type="password" value={props.token} onChange={(e) => props.setToken(e.target.value)} placeholder="never shown again" autoComplete="off" />
+      </Field>
+    </>
   );
 }
 
@@ -306,17 +330,26 @@ export function EditPmDialog(props: { connection: PmConnection; onClose: () => v
     apiVersion: c.apiVersion ? String(c.apiVersion) : "",
     driftResolution: c.driftResolution ?? "manual",
   });
+  const [token, setToken] = useState("");
   const set = (k: keyof typeof f, val: string) => setF((s) => ({ ...s, [k]: val }));
+  const moves = (f.baseUrl.trim() || null) !== (c.baseUrl ?? null);
   const save = () =>
     void act
       .run(
         () =>
-          api.patch(`/v1/pm/connections/${encodeURIComponent(c.name)}`, {
-            project: f.project,
-            baseUrl: f.baseUrl || null,
-            ...(c.provider === "jira" ? { apiVersion: f.apiVersion ? Number(f.apiVersion) : null } : {}),
-            driftResolution: f.driftResolution,
-          }),
+          withStepUp((h) =>
+            stepUpApi.patch(
+              `/v1/pm/connections/${encodeURIComponent(c.name)}`,
+              {
+                project: f.project,
+                baseUrl: f.baseUrl.trim() || null,
+                ...(c.provider === "jira" ? { apiVersion: f.apiVersion ? Number(f.apiVersion) : null } : {}),
+                driftResolution: f.driftResolution,
+                ...(moves ? { token } : {}),
+              },
+              h,
+            ),
+          ),
         `PM connection “${c.name}” updated`,
       )
       .then((ok) => ok && props.onClose());
@@ -328,7 +361,7 @@ export function EditPmDialog(props: { connection: PmConnection; onClose: () => v
       actions={
         <>
           <Button onClick={props.onClose}>Cancel</Button>
-          <Button variant="primary" disabled={act.busy || !f.project} onClick={save}>
+          <Button variant="primary" disabled={act.busy || !f.project || (moves && !token)} onClick={save}>
             Save
           </Button>
         </>
@@ -347,6 +380,7 @@ export function EditPmDialog(props: { connection: PmConnection; onClose: () => v
         <Field label="Base URL">
           <Input value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)} placeholder="https://…" />
         </Field>
+        {moves && <MoveTokenField host="PM tool" token={token} setToken={setToken} />}
         {c.provider === "jira" && (
           <Field label="API version">
             <Select value={f.apiVersion} onChange={(e) => set("apiVersion", e.target.value)}>

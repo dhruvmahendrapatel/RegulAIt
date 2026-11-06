@@ -925,3 +925,43 @@ describe("ADR-0113: Teams outbound", () => {
     expect(String(res.json().messageRef)).toMatch(/^17850000/);
   });
 });
+
+// ===========================================================================
+// ADR-0207 (G3), review of #605: a disabled connector carries nothing inbound either
+// ===========================================================================
+
+describe("ADR-0207: a workspace whose connector is disabled", () => {
+  it("decides nothing from a validly signed callback, audits the refusal, and takes no new workspace", async () => {
+    const approvalId = await makeApproval({ approverUserId: danaId });
+    await db
+      .update(connectors)
+      .set({ disabledAt: new Date(), disabledReason: "incident 42: workspace token suspected leaked" })
+      .where(eq(connectors.id, connectorId));
+    try {
+      const body = slackBody(approvalId);
+      const res = await callback(body, signedHeaders(body));
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error).toBe("connector_disabled");
+      expect((await approvalRow(approvalId)).status).toBe("pending");
+      const refusals = (await auditRows(CHATOPS_RULE_IDS.connectorDisabledRefused)).filter((r) => r.objectId === connectionId);
+      expect(refusals).toHaveLength(1);
+      expect(refusals[0]!.effect).toBe("deny");
+      // an unsigned packet is still refused at the first wall, with no audit row (cheap to reject)
+      const forged = await callback(body, signedHeaders(body, 0, "not-the-secret"));
+      expect(forged.statusCode).toBe(401);
+      expect((await auditRows(CHATOPS_RULE_IDS.connectorDisabledRefused)).filter((r) => r.objectId === connectionId)).toHaveLength(1);
+      // and no new workspace is registered on the disabled connector
+      const created = await post("/v1/chatops/connections", {
+        name: `${CONNECTION}-while-disabled`,
+        provider: "slack",
+        connectorId,
+        signingSecret: SIGNING_SECRET,
+        defaultChannel: CHANNEL,
+      });
+      expect(created.statusCode).toBe(409);
+      expect(created.json().error).toBe("connector_disabled");
+    } finally {
+      await db.update(connectors).set({ disabledAt: null, disabledReason: null, disabledBy: null }).where(eq(connectors.id, connectorId));
+    }
+  });
+});

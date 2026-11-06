@@ -219,9 +219,13 @@ test("G5 git connections: replace the token, and an egress refusal on edit is an
   await page.getByRole("button", { name: "Edit credit-ops-git" }).click();
   const edit = page.getByRole("dialog", { name: /Edit git connection/ });
   await edit.getByLabel(/Base URL/).fill("https://git.example.test/api/v3");
+  // a move needs the new host's token (review of #605): Save waits for it, and the dialog says why
+  await expect(edit.getByRole("note")).toContainText("the stored token is replaced and never sent to the new address");
+  await expect(edit.getByRole("button", { name: "Save" })).toBeDisabled();
+  await edit.getByLabel("Token for the new host").fill("example-new-host-token");
   await edit.getByRole("button", { name: "Save" }).click();
   await expect(edit.getByTestId("edit-refusal")).toContainText("egress allow-list");
-  expect(sent.find((s) => s.method === "PATCH")?.body).toEqual({ baseUrl: "https://git.example.test/api/v3" });
+  expect(sent.find((s) => s.method === "PATCH")?.body).toEqual({ baseUrl: "https://git.example.test/api/v3", token: "example-new-host-token" });
 });
 
 // ---------------------------------------------------------------- G6

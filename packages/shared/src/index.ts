@@ -1975,8 +1975,11 @@ export const setIntegrationEnabledSchema = z
   });
 
 /** `PATCH /v1/git/connections/:name`: only the base URL. The name and provider are fixed (stages name the
- * connection). `null` returns to the provider default. */
-export const updateGitConnectionSchema = z.object({ baseUrl: z.string().url().max(2048).nullable() }).strict();
+ * connection). `null` returns to the provider default. A CHANGED base URL moves the token to another host, so it
+ * needs `token` (the new host's token, replacing the stored one) and a step-up (ADR-0207, review of #605). */
+export const updateGitConnectionSchema = z
+  .object({ baseUrl: z.string().url().max(2048).nullable(), token: z.string().min(1).max(512).optional() })
+  .strict();
 
 /** `POST /v1/git/connections/:name/token` and `POST /v1/pm/connections/:name/token`: replaced in place, never returned */
 export const replaceConnectionTokenSchema = z.object({ token: z.string().min(1).max(512) }).strict();
@@ -1989,6 +1992,8 @@ export const updatePmConnectionSchema = z
     /** jira only, as on create: 2 or 3, or null for the provider default */
     apiVersion: z.coerce.number().int().nullable().optional(),
     driftResolution: z.enum(["manual", "prefer_pm", "prefer_regulait"]).optional(),
+    /** required with a changed `baseUrl`: the new host's token, replacing the stored one (ADR-0207, review of #605) */
+    token: z.string().min(1).max(512).optional(),
   })
   .strict()
   .superRefine((body, ctx) => {

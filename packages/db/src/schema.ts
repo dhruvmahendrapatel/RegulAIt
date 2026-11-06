@@ -899,13 +899,13 @@ export const mcpServers = pgTable("mcp_servers", {
   /** ADR-0185 I9 — the accountable owner; default the registering admin.
    * ON DELETE SET NULL: the server reads `unowned`/`orphaned`, it is never
    * deleted with its owner. */
+  ownerUserId: uuid("owner_user_id").references(() => users.id, { onDelete: "set null" }),
   /** ADR-0207 (migration 0278): NULL = enabled. Disabling refuses every tool call on the server, for agents and people; it is audited and
    * needs a reason (10 to 1000 characters, CHECK); enabling again is a stepped-up relaxation. A delete is
    * allowed only while disabled. */
   disabledAt: timestamp("disabled_at", { withTimezone: true }),
   disabledReason: text("disabled_reason"),
   disabledBy: uuid("disabled_by").references(() => users.id, { onDelete: "set null" }),
-  ownerUserId: uuid("owner_user_id").references(() => users.id, { onDelete: "set null" }),
   /** ADR-0190 decision 7 item 5 (migration 0194): the execution profile VERSION a stdio server's sandbox runs
    * under. Stdio servers only (a remote server runs on its own host: `external`, never a class). NULL = the
    * shipped default. */

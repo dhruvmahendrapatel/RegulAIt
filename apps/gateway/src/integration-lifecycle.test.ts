@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import http from "node:http";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -25,9 +26,12 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { decryptSecret } from "./secrets.js";
-import { executeGovernedToolCall, MCP_SERVER_DISABLED_RULE_ID } from "./mcp-proxy.js";
+import { executeGovernedToolCall, MCP_SERVER_DISABLED_RULE_ID, resolveNodeToolContext } from "./mcp-proxy.js";
 import { CONNECTOR_DISABLED_RULE_ID } from "./connector-call.js";
+import { connectionMoveStepUp, connectionTokenStepUp } from "./integration-lifecycle.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+import { grantSpent, grantStepUpForTest, stepUpRequest } from "./testing/step-up-grant.js";
 
 /**
  * ADR-0207 — lifecycle for integrations (G3–G6): connectors and MCP servers are disabled (reason, audited), enabled
@@ -54,6 +58,7 @@ let memberId: string;
 let adminAuth: { authorization: string };
 let adminId: string;
 let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 async function mkUser(email: string, isAdmin: boolean) {
   const u = await app.inject({ method: "POST", headers: AUTH, url: "/v1/users", payload: { email, displayName: email.split("@")[0]!.replace(/-/g, " ") } });
@@ -87,6 +92,8 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
+  // the worker-path test below registers a loopback upstream double, as zz-aer022 does
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   const member = await mkUser(`ilc-member-${RUN}@example.com`, false);
   memberId = member.id;
@@ -97,6 +104,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   await restoreAdminKeyMfa?.();
 });
 
@@ -215,6 +223,53 @@ describe("G3 connectors: disable, enable, delete", () => {
 // ---------------------------------------------------------------------------
 
 describe("G4 MCP servers: disable, enable, edit, delete", () => {
+  it("SECURITY: a disabled server is never connected to on the worker-node path or by an on-demand sync (review of #605)", async () => {
+    // a loopback upstream that only counts: any request at all means the gateway connected to it
+    let hits = 0;
+    const upstream = http.createServer((req, res) => {
+      hits++;
+      req.resume();
+      res.writeHead(500).end("counting double");
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = upstream.address();
+      if (!address || typeof address === "string") throw new Error("no upstream address");
+      const reg = await app.inject({ method: "POST", headers: AUTH, url: "/v1/servers", payload: { name: N("s-worker"), url: `http://127.0.0.1:${address.port}/` } });
+      expect(reg.statusCode, reg.body).toBe(201);
+      const id = reg.json().id as string;
+      await db.insert(mcpTools).values({ serverId: id, name: "stored_tool", kind: "read", description: "stored before the disable" });
+
+      // control: while enabled, resolving the node's tools does contact the upstream
+      await resolveNodeToolContext(db, memberId, [id], undefined);
+      expect(hits).toBeGreaterThan(0);
+
+      expect((await disable("/v1/servers", id)).statusCode).toBe(200);
+      const before = hits;
+      const out = await resolveNodeToolContext(db, memberId, [id], undefined);
+      expect(out.toolDefs).toEqual([]);
+      expect(out.serverByTool.size).toBe(0);
+      // the on-demand sync (step-up answered by the bootstrap credential) is refused the same way
+      const sync = await app.inject({ method: "POST", headers: AUTH, url: `/v1/servers/${id}/tools/sync` });
+      expect(sync.statusCode, sync.body).toBe(403);
+      expect(sync.json()).toMatchObject({ error: "mcp_server_disabled", ruleId: MCP_SERVER_DISABLED_RULE_ID });
+      expect(hits).toBe(before);
+      // the stored manifest was not rewritten
+      const tools = await db.select().from(mcpTools).where(eq(mcpTools.serverId, id));
+      expect(tools.map((t) => t.name)).toEqual(["stored_tool"]);
+      // each refusal at the connect gate is a deny audit row
+      const refusals = await db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.serverId, id), eq(auditLog.ruleId, MCP_SERVER_DISABLED_RULE_ID)));
+      expect(refusals.filter((r) => (r.detail as Record<string, unknown>).method === "connect").length).toBeGreaterThanOrEqual(2);
+      expect(refusals.every((r) => r.effect === "deny")).toBe(true);
+    } finally {
+      upstream.closeAllConnections();
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+    }
+  });
+
   it("a disabled server refuses the proxy route and the governed call, each with a deny audit row", async () => {
     const id = await mkServer("s-call");
     await db.insert(mcpTools).values({ serverId: id, name: "read_thing", kind: "read" });
@@ -340,32 +395,89 @@ describe("G5 git connections: edit, replace token, in-use delete", () => {
     return r.json().id as string;
   }
 
-  it("edits the base URL (audited with both values); name and provider cannot change", async () => {
+  it("SECURITY: moving to another host needs the new host's token and a bound step-up; the old token is never kept (review of #605)", async () => {
     const id = await mkGit("g-edit");
+    const url = `/v1/git/connections/${N("g-edit")}`;
+    const from = "https://git.example.test/api";
     // set around the API, so the edit under test (back to the provider default) needs no egress decision
-    await db.update(gitConnections).set({ baseUrl: "https://git.example.test/api" }).where(eq(gitConnections.id, id));
-    const r = await app.inject({ method: "PATCH", headers: adminAuth, url: `/v1/git/connections/${N("g-edit")}`, payload: { baseUrl: null } });
-    expect(r.statusCode).toBe(200);
+    await db.update(gitConnections).set({ baseUrl: from }).where(eq(gitConnections.id, id));
+    const unchanged = async () => {
+      const [g] = await db.select().from(gitConnections).where(eq(gitConnections.id, id));
+      expect(g!.baseUrl).toBe(from);
+      expect(decryptSecret(DATA_KEY, g!.tokenCiphertext)).toBe("old-git-token");
+      expect(await auditRows(id, "git-connection-updated")).toHaveLength(0);
+    };
+
+    // a move that would carry the stored token to the new host is refused
+    const noToken = await app.inject({ method: "PATCH", headers: adminAuth, url, payload: { baseUrl: null } });
+    expect(noToken.statusCode).toBe(422);
+    expect(noToken.json().error).toBe("token_required_for_host_change");
+    await unchanged();
+
+    // with the new token, an API key cannot give the step-up
+    const body = { baseUrl: null, token: "new-host-git-token" };
+    const apiKey = await app.inject({ method: "PATCH", headers: adminAuth, url, payload: body });
+    expect(apiKey.statusCode).toBe(403);
+    expect(apiKey.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax" });
+    expect(apiKey.body).not.toContain("new-host-git-token");
+    await unchanged();
+
+    // a grant for another destination is refused and not spent
+    const wrong = await grantStepUpForTest(db, adminId, connectionMoveStepUp("git_connection", id, from, "https://elsewhere.example.test"));
+    const refused = await app.inject({ method: "PATCH", url, ...stepUpRequest(wrong), payload: body });
+    expect(refused.statusCode).toBeGreaterThanOrEqual(403);
+    expect(refused.json().error).toMatch(/^step_up_/);
+    expect(await grantSpent(db, wrong.grantId)).toBe(false);
+    await unchanged();
+
+    const g = await grantStepUpForTest(db, adminId, connectionMoveStepUp("git_connection", id, from, null));
+    const r = await app.inject({ method: "PATCH", url, ...stepUpRequest(g), payload: body });
+    expect(r.statusCode, r.body).toBe(200);
     expect(r.json()).toMatchObject({ baseUrl: null, provider: "mock", name: N("g-edit") });
+    expect(r.body).not.toContain("new-host-git-token");
+    expect(await grantSpent(db, g.grantId)).toBe(true);
+    const [after] = await db.select().from(gitConnections).where(eq(gitConnections.id, id));
+    expect(decryptSecret(DATA_KEY, after!.tokenCiphertext)).toBe("new-host-git-token");
     const [a] = await auditRows(id, "git-connection-updated");
-    expect(a!.detail).toMatchObject({ from: { baseUrl: "https://git.example.test/api" }, to: { baseUrl: null } });
-    const renamed = await app.inject({ method: "PATCH", headers: adminAuth, url: `/v1/git/connections/${N("g-edit")}`, payload: { baseUrl: null, name: "x" } });
+    expect(a!.userId).toBe(adminId);
+    expect(a!.detail).toMatchObject({ from: { baseUrl: from }, to: { baseUrl: null }, tokenReplaced: true, stepUp: "totp" });
+    expect(JSON.stringify(a)).not.toContain("new-host-git-token");
+
+    // a token with no move belongs on the token route; an unknown field is refused without echoing the body
+    const sameUrl = await app.inject({ method: "PATCH", headers: adminAuth, url, payload: { baseUrl: null, token: "x" } });
+    expect(sameUrl.statusCode).toBe(400);
+    const renamed = await app.inject({ method: "PATCH", headers: adminAuth, url, payload: { baseUrl: null, name: "x", token: "echo-me-not" } });
     expect(renamed.statusCode).toBe(400);
+    expect(renamed.body).not.toContain("echo-me-not");
   });
 
   it("a base URL the egress guard refuses is refused and nothing changes", async () => {
     const id = await mkGit("g-egress");
-    const r = await app.inject({ method: "PATCH", headers: adminAuth, url: `/v1/git/connections/${N("g-egress")}`, payload: { baseUrl: "http://169.254.169.254/latest" } });
+    const r = await app.inject({ method: "PATCH", headers: adminAuth, url: `/v1/git/connections/${N("g-egress")}`, payload: { baseUrl: "http://169.254.169.254/latest", token: "t" } });
     expect(r.statusCode).toBe(400);
     expect(r.json().error).toBe("egress_blocked");
     const [g] = await db.select().from(gitConnections).where(eq(gitConnections.id, id));
     expect(g!.baseUrl).toBeNull();
   });
 
-  it("replaces the token in place; the response never carries it; the audit row is written", async () => {
+  it("SECURITY: replacing the token needs a step-up bound to the connection; the response never carries it; audited", async () => {
     const id = await mkGit("g-token");
-    const r = await app.inject({ method: "POST", headers: adminAuth, url: `/v1/git/connections/${N("g-token")}/token`, payload: { token: "new-git-token" } });
-    expect(r.statusCode).toBe(200);
+    const other = await mkGit("g-token-other");
+    const url = `/v1/git/connections/${N("g-token")}/token`;
+    const apiKey = await app.inject({ method: "POST", headers: adminAuth, url, payload: { token: "new-git-token" } });
+    expect(apiKey.statusCode).toBe(403);
+    expect(apiKey.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax" });
+    // a grant made for another connection is refused and not spent
+    const wrong = await grantStepUpForTest(db, adminId, connectionTokenStepUp("git_connection", other));
+    expect((await app.inject({ method: "POST", url, ...stepUpRequest(wrong), payload: { token: "new-git-token" } })).statusCode).toBeGreaterThanOrEqual(403);
+    expect(await grantSpent(db, wrong.grantId)).toBe(false);
+    const [still] = await db.select().from(gitConnections).where(eq(gitConnections.id, id));
+    expect(decryptSecret(DATA_KEY, still!.tokenCiphertext)).toBe("old-git-token");
+    expect(await auditRows(id, "git-connection-token-rotated")).toHaveLength(0);
+    const grant = await grantStepUpForTest(db, adminId, connectionTokenStepUp("git_connection", id));
+    const r = await app.inject({ method: "POST", url, ...stepUpRequest(grant), payload: { token: "new-git-token" } });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(await grantSpent(db, grant.grantId)).toBe(true);
     expect(r.body).not.toContain("new-git-token");
     const [g] = await db.select().from(gitConnections).where(eq(gitConnections.id, id));
     expect(decryptSecret(DATA_KEY, g!.tokenCiphertext)).toBe("new-git-token");
@@ -419,10 +531,47 @@ describe("G6 PM connections: edit, replace token, rotate the webhook secret", ()
     expect((await app.inject({ method: "PATCH", headers: adminAuth, url: `/v1/pm/connections/${N("p-edit")}`, payload: { apiVersion: 3 } })).statusCode).toBe(400);
   });
 
-  it("replaces the token in place and audits it", async () => {
+  it("SECURITY: moving to another host needs the new host's token and a bound step-up (review of #605)", async () => {
+    const { id } = await mkPm("p-move");
+    const url = `/v1/pm/connections/${N("p-move")}`;
+    const from = "https://pm.example.test";
+    await db.update(pmConnections).set({ baseUrl: from }).where(eq(pmConnections.id, id));
+    const noToken = await app.inject({ method: "PATCH", headers: adminAuth, url, payload: { baseUrl: null } });
+    expect(noToken.statusCode).toBe(422);
+    expect(noToken.json().error).toBe("token_required_for_host_change");
+    const body = { baseUrl: null, token: "new-host-pm-token" };
+    const apiKey = await app.inject({ method: "PATCH", headers: adminAuth, url, payload: body });
+    expect(apiKey.statusCode).toBe(403);
+    expect(apiKey.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax" });
+    const [still] = await db.select().from(pmConnections).where(eq(pmConnections.id, id));
+    expect(still!.baseUrl).toBe(from);
+    expect(decryptSecret(DATA_KEY, still!.tokenCiphertext)).toBe("old-pm-token");
+    expect(await auditRows(id, "pm-connection-updated")).toHaveLength(0);
+    const g = await grantStepUpForTest(db, adminId, connectionMoveStepUp("pm_connection", id, from, null));
+    const r = await app.inject({ method: "PATCH", url, ...stepUpRequest(g), payload: body });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(r.body).not.toContain("new-host-pm-token");
+    expect(await grantSpent(db, g.grantId)).toBe(true);
+    const [after] = await db.select().from(pmConnections).where(eq(pmConnections.id, id));
+    expect(after!.baseUrl).toBeNull();
+    expect(decryptSecret(DATA_KEY, after!.tokenCiphertext)).toBe("new-host-pm-token");
+    const [a] = await auditRows(id, "pm-connection-updated");
+    expect(a!.detail).toMatchObject({ from: { baseUrl: from }, to: { baseUrl: null }, tokenReplaced: true, stepUp: "totp" });
+    expect(JSON.stringify(a)).not.toContain("new-host-pm-token");
+  });
+
+  it("SECURITY: replacing the token needs a step-up bound to the connection, and audits it", async () => {
     const { id } = await mkPm("p-token");
-    const r = await app.inject({ method: "POST", headers: adminAuth, url: `/v1/pm/connections/${N("p-token")}/token`, payload: { token: "new-pm-token" } });
-    expect(r.statusCode).toBe(200);
+    const url = `/v1/pm/connections/${N("p-token")}/token`;
+    const apiKey = await app.inject({ method: "POST", headers: adminAuth, url, payload: { token: "new-pm-token" } });
+    expect(apiKey.statusCode).toBe(403);
+    expect(apiKey.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax" });
+    const [still] = await db.select().from(pmConnections).where(eq(pmConnections.id, id));
+    expect(decryptSecret(DATA_KEY, still!.tokenCiphertext)).toBe("old-pm-token");
+    const grant = await grantStepUpForTest(db, adminId, connectionTokenStepUp("pm_connection", id));
+    const r = await app.inject({ method: "POST", url, ...stepUpRequest(grant), payload: { token: "new-pm-token" } });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(await grantSpent(db, grant.grantId)).toBe(true);
     expect(r.body).not.toContain("new-pm-token");
     const [p] = await db.select().from(pmConnections).where(eq(pmConnections.id, id));
     expect(decryptSecret(DATA_KEY, p!.tokenCiphertext)).toBe("new-pm-token");

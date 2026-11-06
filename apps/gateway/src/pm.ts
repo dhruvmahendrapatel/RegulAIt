@@ -46,6 +46,8 @@ import {
 } from "@regulait/shared";
 import { refuseIfExpansionBlocked } from "./licensing.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
+import { requireStepUp } from "./step-up.js";
+import { connectionMoveStepUp, connectionTokenStepUp, TOKEN_REQUIRED_FOR_MOVE } from "./integration-lifecycle.js";
 import {
   ConnectionEgressBlockedError,
   guardConnectionCall,
@@ -540,16 +542,27 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
   });
 
   // ADR-0207 (G6): edit a connection, replace its token and rotate its webhook secret. The name is part of the webhook
-  // address and the provider decides the adapter, so neither can change. None of these is a relaxation (a new base URL
-  // is adjudicated by the egress guard again, as on create; a rotation only tightens), so none needs a step-up. Each
-  // change is audited in the same transaction as its write, and no response ever carries the token.
+  // address and the provider decides the adapter, so neither can change. A new base URL is adjudicated by the egress
+  // guard again, as on create; a rotation only tightens, so it needs no step-up. Review of #605: a base URL change
+  // would send the stored token to another host, so it needs the new host's token in the same request (the stored one
+  // is replaced, never sent there) and a `settings_relax` step-up bound to the connection and both URLs; replacing the
+  // token needs one bound to the connection. Each change is audited in the same transaction as its write, and no
+  // response ever carries the token.
   const pmName = z.object({ name: z.string().min(1).max(256) });
   app.patch("/v1/pm/connections/:name", async (req, reply) => {
     const { name } = pmName.parse(req.params);
-    const body = updatePmConnectionSchema.parse(req.body);
+    const parsedBody = updatePmConnectionSchema.safeParse(req.body);
+    // the body may hold a token, and a zod issue list could echo it: the messages only, never the values
+    if (!parsedBody.success) return reply.status(400).send({ error: "invalid_request", detail: parsedBody.error.issues.map((i) => i.message).join("; ") });
+    const body = parsedBody.data;
     if (!opts.dataKey) return reply.status(503).send({ error: "pm_connections_require_data_key" });
     const [before] = await db.select().from(pmConnections).where(eq(pmConnections.name, name));
     if (!before) return reply.status(404).send({ error: "unknown_connection" });
+    const moves = body.baseUrl !== undefined && body.baseUrl !== before.baseUrl;
+    if (moves && body.token === undefined) return reply.status(422).send(TOKEN_REQUIRED_FOR_MOVE);
+    if (!moves && body.token !== undefined) {
+      return reply.status(400).send({ error: "invalid_request", detail: "the base URL is unchanged: replace the token with POST /v1/pm/connections/:name/token" });
+    }
     if (body.apiVersion != null && before.provider !== "jira") {
       return reply.status(400).send({ error: "invalid_request", detail: "apiVersion only applies to jira connections" });
     }
@@ -561,7 +574,7 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
     };
     // the edited connection must still resolve, exactly as a new one must
     try {
-      resolvePmProvider({ provider: before.provider, token: decryptSecret(opts.dataKey, before.tokenCiphertext), baseUrl: next.baseUrl, apiVersion: next.apiVersion });
+      resolvePmProvider({ provider: before.provider, token: moves && body.token !== undefined ? body.token : decryptSecret(opts.dataKey, before.tokenCiphertext), baseUrl: next.baseUrl, apiVersion: next.apiVersion });
     } catch (err) {
       if (err instanceof PmProviderError) return reply.status(422).send({ error: "unsupported_pm_provider", detail: err.message });
       throw err;
@@ -583,10 +596,17 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
       const [row] = await db.select(CONNECTION_COLUMNS).from(pmConnections).where(eq(pmConnections.id, before.id));
       return row;
     }
+    let stepUp: string | null = null;
+    if (moves) {
+      const su = await requireStepUp(db, req, reply, connectionMoveStepUp("pm_connection", before.id, before.baseUrl, next.baseUrl));
+      if (!su.ok) return reply;
+      stepUp = su.method;
+    }
+    const dataKey = opts.dataKey;
     const row = await db.transaction(async (tx) => {
       const [r] = await tx
         .update(pmConnections)
-        .set(next)
+        .set({ ...next, ...(moves && body.token !== undefined ? { tokenCiphertext: encryptSecret(dataKey, body.token) } : {}) })
         // compare-and-set on every field the audit row reports as "from"
         .where(
           and(
@@ -609,11 +629,14 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
           provider: before.provider,
           from: Object.fromEntries(changed.map((f) => [f, before[f]])),
           to: Object.fromEntries(changed.map((f) => [f, next[f]])),
+          ...(moves ? { tokenReplaced: true, stepUp } : {}),
         },
         effect: "allow",
         ruleId: "pm-connection-updated",
         ruleChain: [],
-        reason: `PM connection '${name}' updated: ${changed.join(", ")}`,
+        reason:
+          `PM connection '${name}' updated: ${changed.join(", ")}` +
+          (moves ? "; the token was replaced with the new host's (the previous one was never sent there)" : ""),
       });
       return r;
     });
@@ -628,18 +651,23 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
     if (!parsed.success) return reply.status(400).send({ error: "invalid_request", detail: "expected { token } (1 to 512 characters)" });
     if (!opts.dataKey) return reply.status(503).send({ error: "pm_connections_require_data_key" });
     const dataKey = opts.dataKey;
+    const [target] = await db.select({ id: pmConnections.id }).from(pmConnections).where(eq(pmConnections.name, name));
+    if (!target) return reply.status(404).send({ error: "unknown_connection" });
+    // review of #605: a credential change, so a step-up bound to this connection (ADR-0204's credential routes)
+    const su = await requireStepUp(db, req, reply, connectionTokenStepUp("pm_connection", target.id));
+    if (!su.ok) return reply;
     const out = await db.transaction(async (tx) => {
       const [r] = await tx
         .update(pmConnections)
         .set({ tokenCiphertext: encryptSecret(dataKey, parsed.data.token) })
-        .where(eq(pmConnections.name, name))
+        .where(eq(pmConnections.id, target.id))
         .returning({ id: pmConnections.id, provider: pmConnections.provider, secretSetAt: pmConnections.secretSetAt });
       if (!r) return null;
       await tx.insert(auditLog).values({
         userId: req.authCtx.userId ?? SYSTEM_IDENTITY,
         objectType: "pm_connection",
         objectId: r.id,
-        detail: { phase: "token-rotated", name, provider: r.provider },
+        detail: { phase: "token-rotated", name, provider: r.provider, stepUp: su.method },
         effect: "allow",
         ruleId: "pm-connection-token-rotated",
         ruleChain: [],

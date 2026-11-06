@@ -64,7 +64,8 @@ import {
 import { refuseIfFeatureNotLicensed } from "./licensing.js";
 import { decryptSecret, encryptSecret as encryptTokenOnce } from "./secrets.js";
 import { guardConnectionCall, refuseConnectionEgressWrite } from "./connection-egress.js";
-import { CHANGED_CONCURRENTLY } from "./step-up.js";
+import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
+import { connectionMoveStepUp, connectionTokenStepUp, TOKEN_REQUIRED_FOR_MOVE } from "./integration-lifecycle.js";
 // ADR-0062 — the compiled git endpoint, adjudicated under a strict posture.
 import {
   auditCompiledDefaultDenied,
@@ -2839,14 +2840,25 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       .from(gitConnections),
   }));
   // ADR-0207 (G5): edit the base URL and replace the token in place. The name and provider are fixed: workflow stages
-  // name the connection. Neither is a relaxation (a new base URL is adjudicated by the egress guard again, exactly as on
-  // create), so no step-up; each change is audited in the same transaction as the write.
+  // name the connection. A new base URL is adjudicated by the egress guard again, exactly as on create. Review of #605:
+  // a base URL change would send the stored token to another host, so it needs the new host's token in the same request
+  // (the stored one is replaced, never sent there) and a `settings_relax` step-up bound to the connection and both URLs;
+  // replacing the token needs one bound to the connection. Each change is audited in the same transaction as the write.
   const gitName = z.object({ name: z.string().min(1).max(256) });
   app.patch("/v1/git/connections/:name", async (req, reply) => {
     const { name } = gitName.parse(req.params);
-    const body = updateGitConnectionSchema.parse(req.body);
+    const parsed = updateGitConnectionSchema.safeParse(req.body);
+    // the body may hold a token, and a zod issue list could echo it: a fixed sentence instead
+    if (!parsed.success) return reply.status(400).send({ error: "invalid_request", detail: "expected { baseUrl, token? }" });
+    const body = parsed.data;
     const [before] = await db.select({ id: gitConnections.id, provider: gitConnections.provider, baseUrl: gitConnections.baseUrl }).from(gitConnections).where(eq(gitConnections.name, name));
     if (!before) return reply.status(404).send({ error: "unknown_connection" });
+    const moves = body.baseUrl !== before.baseUrl;
+    if (moves && body.token === undefined) return reply.status(422).send(TOKEN_REQUIRED_FOR_MOVE);
+    if (!moves && body.token !== undefined) {
+      return reply.status(400).send({ error: "invalid_request", detail: "the base URL is unchanged: replace the token with POST /v1/git/connections/:name/token" });
+    }
+    if (moves && !opts.dataKey) return reply.status(503).send({ error: "no_data_key", detail: "set REGULAIT_DATA_KEY" });
     if (body.baseUrl) {
       const refusal = await refuseConnectionEgressWrite(db, {
         surface: "git_connection",
@@ -2858,10 +2870,17 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       });
       if (refusal) return reply.status(400).send(refusal);
     }
+    let stepUp: string | null = null;
+    if (moves) {
+      const su = await requireStepUp(db, req, reply, connectionMoveStepUp("git_connection", before.id, before.baseUrl, body.baseUrl));
+      if (!su.ok) return reply;
+      stepUp = su.method;
+    }
+    const dataKey = opts.dataKey;
     const row = await db.transaction(async (tx) => {
       const [r] = await tx
         .update(gitConnections)
-        .set({ baseUrl: body.baseUrl })
+        .set({ baseUrl: body.baseUrl, ...(moves && dataKey && body.token !== undefined ? { tokenCiphertext: encryptTokenOnce(dataKey, body.token) } : {}) })
         // compare-and-set: the audit row's "before" is the value this write replaced
         .where(and(eq(gitConnections.id, before.id), before.baseUrl === null ? isNull(gitConnections.baseUrl) : eq(gitConnections.baseUrl, before.baseUrl)))
         .returning({ id: gitConnections.id, name: gitConnections.name, provider: gitConnections.provider, baseUrl: gitConnections.baseUrl, createdAt: gitConnections.createdAt });
@@ -2870,11 +2889,13 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
         userId: req.authCtx.userId ?? SYSTEM_IDENTITY,
         objectType: "git_connection",
         objectId: r.id,
-        detail: { phase: "updated", name, provider: r.provider, from: { baseUrl: before.baseUrl }, to: { baseUrl: r.baseUrl } },
+        detail: { phase: "updated", name, provider: r.provider, from: { baseUrl: before.baseUrl }, to: { baseUrl: r.baseUrl }, ...(moves ? { tokenReplaced: true, stepUp } : {}) },
         effect: "allow",
         ruleId: "git-connection-updated",
         ruleChain: [],
-        reason: `git connection '${name}' base URL ${before.baseUrl ?? "(provider default)"} → ${r.baseUrl ?? "(provider default)"}`,
+        reason:
+          `git connection '${name}' base URL ${before.baseUrl ?? "(provider default)"} → ${r.baseUrl ?? "(provider default)"}` +
+          (moves ? "; the token was replaced with the new host's (the previous one was never sent there)" : ""),
       });
       return r;
     });
@@ -2889,18 +2910,23 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     if (!parsed.success) return reply.status(400).send({ error: "invalid_request", detail: "expected { token } (1 to 512 characters)" });
     if (!opts.dataKey) return reply.status(503).send({ error: "no_data_key", detail: "set REGULAIT_DATA_KEY" });
     const dataKey = opts.dataKey;
+    const [target] = await db.select({ id: gitConnections.id }).from(gitConnections).where(eq(gitConnections.name, name));
+    if (!target) return reply.status(404).send({ error: "unknown_connection" });
+    // review of #605: a credential change, so a step-up bound to this connection (ADR-0204's credential routes)
+    const su = await requireStepUp(db, req, reply, connectionTokenStepUp("git_connection", target.id));
+    if (!su.ok) return reply;
     const row = await db.transaction(async (tx) => {
       const [r] = await tx
         .update(gitConnections)
         .set({ tokenCiphertext: encryptTokenOnce(dataKey, parsed.data.token) })
-        .where(eq(gitConnections.name, name))
+        .where(eq(gitConnections.id, target.id))
         .returning({ id: gitConnections.id, provider: gitConnections.provider, secretSetAt: gitConnections.secretSetAt });
       if (!r) return null;
       await tx.insert(auditLog).values({
         userId: req.authCtx.userId ?? SYSTEM_IDENTITY,
         objectType: "git_connection",
         objectId: r.id,
-        detail: { phase: "token-rotated", name, provider: r.provider },
+        detail: { phase: "token-rotated", name, provider: r.provider, stepUp: su.method },
         effect: "allow",
         ruleId: "git-connection-token-rotated",
         ruleChain: [],

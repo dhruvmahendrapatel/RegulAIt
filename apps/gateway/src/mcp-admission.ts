@@ -50,6 +50,7 @@ import {
   auditLog,
   desc,
   eq,
+  isNotNull,
   mcpServers,
   ne,
   sql,
@@ -118,6 +119,24 @@ export class McpReleaseQuarantinedError extends McpAdmissionHeldError {
   constructor(serverId: string, state: McpAdmissionState, detail: string, readonly readyAt: string | null) {
     super(serverId, state, [], detail);
     this.name = "McpReleaseQuarantinedError";
+  }
+}
+
+/** ADR-0207 (G4): the rule id of the refusal a disabled MCP server answers with (one deny audit row per refused call) */
+export const MCP_SERVER_DISABLED_RULE_ID = "mcp-server-disabled-refused";
+
+/**
+ * ADR-0207 (G4), review of #605 — a DISABLED server is refused at the connect gate, in every admission mode. A SUBCLASS
+ * of the held error for the same reason as the cooldown's: every connect path (the worker-node tool resolution, the
+ * on-demand and proxy syncs, the health probe, the admission rescan) already treats a held server as our own refusal
+ * that contributes zero tools, is never retried and is never charged to the breaker. So a server an admin disabled
+ * (say, because it is suspected compromised) gets no process started, no socket opened and no manifest rewritten,
+ * whichever path asks.
+ */
+export class McpServerDisabledError extends McpAdmissionHeldError {
+  constructor(serverId: string, state: McpAdmissionState, detail: string) {
+    super(serverId, state, [], detail);
+    this.name = "McpServerDisabledError";
   }
 }
 
@@ -315,8 +334,31 @@ export async function loadAdmissionMode(db: Db): Promise<McpAdmissionMode> {
  *
  * Returns silently when the call may proceed. Throws `McpAdmissionHeldError`
  * with NOTHING having left the box when it may not.
+ *
+ * ADR-0207 (G4): a disabled server is refused FIRST, in every mode (`McpServerDisabledError`, audited as a deny).
  */
 export async function assertAdmitted(db: Db, serverId: string): Promise<void> {
+  const [disabled] = await db
+    .select({ name: mcpServers.name, disabledAt: mcpServers.disabledAt, admissionState: mcpServers.admissionState })
+    .from(mcpServers)
+    .where(and(eq(mcpServers.id, serverId), isNotNull(mcpServers.disabledAt)));
+  if (disabled) {
+    const detail =
+      `MCP server '${disabled.name}' is disabled (since ${disabled.disabledAt?.toISOString() ?? "an unknown time"}): ` +
+      "nothing connects to it, starts it or syncs its tools until an admin enables it again";
+    await db.insert(auditLog).values({
+      userId: NIL_USER,
+      serverId,
+      objectType: "mcp_server",
+      objectId: serverId,
+      detail: { phase: "server-disabled", method: "connect", receiptClass: "decision" },
+      effect: "deny",
+      ruleId: MCP_SERVER_DISABLED_RULE_ID,
+      ruleChain: [],
+      reason: detail,
+    });
+    throw new McpServerDisabledError(serverId, disabled.admissionState as McpAdmissionState, detail);
+  }
   const org = await loadOrgSettings(db);
   const mode = org.mcpAdmissionMode;
   if (mode !== "enforce") {

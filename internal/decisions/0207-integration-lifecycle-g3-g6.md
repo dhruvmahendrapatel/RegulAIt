@@ -47,7 +47,10 @@ same transaction as their write. A refusal has its own code. No response or audi
   audited as `connector-enabled`.
 - A disabled connector refuses every governed call first, in `executeGovernedConnectorCall` (403 `connector_disabled`,
   a deny row `connector-disabled-refused`), so a call that waited for an approval is refused when it comes back. The
-  ChatOps courier refuses to post through it. 0122's statement trigger on `connectors` advances the policy epoch, so a
+  ChatOps courier refuses to post through it. Inbound, a validly signed ChatOps callback (interactions, events,
+  messages) on a workspace whose connector is disabled is refused after its signature check and audited
+  (`chatops-connector-disabled-refused`), and no new ChatOps workspace is registered on a disabled connector (409
+  `connector_disabled`) (review of #605). 0122's statement trigger on `connectors` advances the policy epoch, so a
   call decided before the disable is withheld at its next epoch check.
 - `DELETE /v1/connectors/:connectorId`: 409 `connector_not_disabled` while enabled; 409 `connector_in_use` while
   approvals or ChatOps connections refer to it, with exact counts and at most 20 ids of each. Otherwise grants, role
@@ -61,7 +64,12 @@ same transaction as their write. A refusal has its own code. No response or audi
 - `POST /v1/servers/:serverId/enabled` as for connectors (`mcp-server-disabled` / `mcp-server-enabled`).
 - A disabled server refuses the proxy route before the transport is hijacked (403 `mcp_server_disabled`) and
   `executeGovernedToolCall`, which delegated workers call directly; each refusal writes a deny row
-  (`mcp-server-disabled-refused`). Nothing connects upstream, and no approval is queued or spent. Halts, admission and
+  (`mcp-server-disabled-refused`). Nothing connects upstream, and no approval is queued or spent. Review of #605: the
+  connect gate itself (`assertAdmitted`, which `preflightUpstream` and `connectUpstream` both run) refuses a disabled
+  server first, in every admission mode, as `McpServerDisabledError` (a subclass of the held error, so every path
+  already treats it as our own refusal: zero tools, no retry, no breaker charge). That covers the worker-node tool
+  resolution (`resolveNodeToolContext`), the on-demand sync, the protocol calls, the health probe and the rescan:
+  no process is started, no socket opened and no stored manifest rewritten. Halts, admission and
   the circuit breaker stay separate facts.
 - 0278 adds a row trigger that advances the policy epoch only when `disabled_at` changes (the proxy rewrites the row
   constantly for breaker state, so a statement trigger would invalidate every in-flight admission), plus a statement
@@ -81,10 +89,14 @@ same transaction as their write. A refusal has its own code. No response or audi
 
 ### G5 — git connections (no migration)
 
-- `PATCH /v1/git/connections/:name {baseUrl}`: only the base URL. The name and provider are fixed (stages name the
-  connection). A new URL goes through the egress guard again (400 `egress_blocked`, as on create). Compare-and-set,
-  `git-connection-updated` with both values.
-- `POST /v1/git/connections/:name/token {token}`: replaced in place, `git-connection-token-rotated`.
+- `PATCH /v1/git/connections/:name {baseUrl, token?}`: only the base URL. The name and provider are fixed (stages name
+  the connection). A new URL goes through the egress guard again (400 `egress_blocked`, as on create). Review of #605:
+  a changed base URL would send the stored token to another host, so it needs the new host's `token` in the same
+  request (422 `token_required_for_host_change` without one; the stored token is replaced, never sent there) and a
+  `settings_relax` step-up bound to `{op: "git_connection_move", id, from, to}`. Compare-and-set,
+  `git-connection-updated` with both values (and `tokenReplaced`, `stepUp` on a move).
+- `POST /v1/git/connections/:name/token {token}`: replaced in place behind a `settings_relax` step-up bound to
+  `{op: "git_connection_token_replace", id}` (as ADR-0204's credential routes), `git-connection-token-rotated`.
 - `DELETE /v1/git/connections/:name` (#596) now refuses with 409 `git_connection_in_use` while an active template or an
   unfinished workflow instance has a `git_operation` stage naming the connection (a `jsonb_path_exists` query; at
   most 20 names or ids of each).
@@ -93,8 +105,10 @@ same transaction as their write. A refusal has its own code. No response or audi
 
 - `PATCH /v1/pm/connections/:name {project?, baseUrl?, apiVersion?, driftResolution?}`. The name is part of the webhook
   address and the provider picks the adapter, so neither can change. The edited connection must still resolve; a new
-  base URL is checked by the egress guard. Compare-and-set, `pm-connection-updated` with the changed fields.
-- `POST /v1/pm/connections/:name/token {token}`: replaced in place, `pm-connection-token-rotated`.
+  base URL is checked by the egress guard. A changed base URL needs `token` and a step-up exactly as for git
+  (`{op: "pm_connection_move", id, from, to}`). Compare-and-set, `pm-connection-updated` with the changed fields.
+- `POST /v1/pm/connections/:name/token {token}`: replaced in place behind a step-up bound to
+  `{op: "pm_connection_token_replace", id}`, `pm-connection-token-rotated`.
 - `POST /v1/pm/connections/:name/webhook-secret/rotate {immediate?}`: a new secret, shown once. The previous secret
   moves to a three-column slot (its hash, its data-key envelope in `CIPHERTEXT_COLUMNS`, and
   `previous_webhook_secret_valid_until = now() + 24 hours`). The webhook tries the current secret first and the previous

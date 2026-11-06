@@ -129,7 +129,7 @@ import {
   type Db,
 } from "@regulait/db";
 import type { McpAdmissionMode, McpAdmissionState, McpUpstreamTransport } from "@regulait/shared";
-import { loadAdmissionMode, McpAdmissionHeldError } from "./mcp-admission.js";
+import { loadAdmissionMode, McpAdmissionHeldError, McpServerDisabledError } from "./mcp-admission.js";
 import { connectUpstream, syncUpstreamTools } from "./mcp-proxy.js";
 import { runSkillAdmissionRescan, type SkillRescanResult } from "./skill-admission.js";
 
@@ -304,6 +304,9 @@ export async function runMcpAdmissionRescan(
         await client.close().catch(() => {});
       }
     } catch (err) {
+      // ADR-0207 (G4): a disabled server is refused at the connect gate before anything is fetched. That is neither a
+      // verdict nor an outage: the admission columns stay as they were and the pass moves on.
+      if (err instanceof McpServerDisabledError) continue;
       if (err instanceof McpAdmissionHeldError) {
         // Under `enforce` a dirty manifest makes `syncUpstreamTools` throw
         // AFTER `recordManifestScan` has already persisted the hold. That is

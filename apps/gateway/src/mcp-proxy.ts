@@ -102,6 +102,8 @@ import {
 import {
   assertAdmitted,
   McpAdmissionHeldError,
+  McpServerDisabledError,
+  MCP_SERVER_DISABLED_RULE_ID,
   McpReleaseQuarantinedError,
   recordManifestScan,
   type McpAdmissionTrigger,
@@ -278,8 +280,8 @@ export async function refuseStdioWithoutEntitlement(
   return decision;
 }
 
-/** ADR-0207 (G4): the rule id of the refusal a disabled MCP server answers with (one deny audit row per refused call) */
-export const MCP_SERVER_DISABLED_RULE_ID = "mcp-server-disabled-refused";
+/** ADR-0207 (G4): the rule id of the refusal a disabled MCP server answers with (defined beside the connect gate) */
+export { MCP_SERVER_DISABLED_RULE_ID };
 
 /** the refusal, with its deny audit row, for any call on a disabled server */
 export async function refuseDisabledServer(
@@ -2178,7 +2180,11 @@ export function mcpPreHijackRefusal(err: unknown): { status: 403 | 409; body: Re
     // `mcp_stdio_image_unpinned`, `mcp_transport_disabled`)
     return { status: 403, body: { error: err.error, code: err.decision.code, detail: err.decision.reason } };
   }
-  // ADR-0175 A5 (#609 review): the release-age cooldown is not a scan hold, so it has its own code and names its
+  // ADR-0207 (G4): a disabled server, refused at the connect gate (a subclass of the held error, so checked first)
+  if (err instanceof McpServerDisabledError) {
+    return { status: 403, body: { error: "mcp_server_disabled", ruleId: MCP_SERVER_DISABLED_RULE_ID, detail: err.detail } };
+  }
+    // ADR-0175 A5 (#609 review): the release-age cooldown is not a scan hold, so it has its own code and names its
   // remedy. Checked BEFORE the held branch: the cooldown's error is a subclass of the held one.
   if (err instanceof McpReleaseQuarantinedError) {
     return {

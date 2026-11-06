@@ -38,9 +38,31 @@ import {
   type Db,
 } from "@regulait/db";
 import { setIntegrationEnabledSchema } from "@regulait/shared";
-import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
+import { CHANGED_CONCURRENTLY, requireStepUp, type StepUpCheckArgs } from "./step-up.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
+
+/**
+ * ADR-0207 (G5/G6), review of #605 — the step-ups that guard a git or PM connection's credential:
+ *  - moving the connection to another host (a base URL change) would send its token there, so the move needs a new
+ *    token in the same request (the stored one is replaced, never sent) and a `settings_relax` step-up bound to the
+ *    connection and both URLs;
+ *  - replacing the token needs a `settings_relax` step-up bound to the connection (as ADR-0204's credential routes do).
+ */
+export type ConnectionSurface = "git_connection" | "pm_connection";
+export function connectionMoveStepUp(surface: ConnectionSurface, id: string, from: string | null, to: string | null): StepUpCheckArgs {
+  return { kind: "settings_relax", facts: { op: `${surface}_move`, id, from, to } };
+}
+export function connectionTokenStepUp(surface: ConnectionSurface, id: string): StepUpCheckArgs {
+  return { kind: "settings_relax", facts: { op: `${surface}_token_replace`, id } };
+}
+/** the refusal a host move without a new token answers */
+export const TOKEN_REQUIRED_FOR_MOVE = Object.freeze({
+  error: "token_required_for_host_change",
+  detail:
+    "a new base URL would send this connection's token to another host: give the token for the new host in the same " +
+    "request (the stored token is replaced, never sent there)",
+});
 /** a refusal lists at most this many blocking ids of each kind; the counts are always exact */
 export const IDS_SHOWN = 20;
 
