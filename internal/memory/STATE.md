@@ -5460,6 +5460,45 @@ user or server that an approval rule is scoped to (cascade delete). **Amendment 
 match re-owes every takeover; option (b) (pool intersection) is the recorded long-term simplification. Open follow-ups: a
 rule-editor warning for shadowed tightenings and equal-specificity overlaps, and option (b).
 
+**ADR-0230 (design, 2026-11-06, Proposed): SAP business agents over MCP (P19).**
+- **Where it lives:** `create_sales_order` (`API_SALES_ORDER_SRV`) goes in the regulAIt-ABAP MCP server, and the gateway's existing MCP path governs it.
+- **Safety:** a required idempotency key; principal propagation with the person's own IdP token (preferred) or a dedicated per-trust RegulAIt key (fallback, never the ADR-0210 key), through the BTP Destination service, with technical users refused for writes; approve-first defaults seeded for `system_class = 'sap_business'` (quorum 2 with the requester excluded, a rate limit, a project budget required).
+- **Open source:** the SAP Cloud SDK is blocked by `@sap/xssec`'s licence, so odata2ts is proposed.
+- **Order:** it waits for regulAIt-ABAP #78/#79 and the BTP smoke test.
+- **Open:** eight owner questions (ADR §Open questions).
+
+**ADR-0231 (design, 2026-11-06, Proposed): SAP Joule agents over A2A (P20).**
+- **Approach:** builds on ADR-0219, with admin-only ARD import and the SDK 1.3.0 REST transport plus its v0.3 compatibility layer.
+- **Tokens:** client credentials for discovery only, and a per-call user-bound token. SAP documents **RFC 7523 jwt-bearer**, not RFC 8693, so both grants are supported and jwt-bearer is the SAP default.
+- **Defaults:** `sap_agent_gateway_enabled` is off; a call to a gateway agent needs approval.
+- **Open:** six owner questions, the first being jwt-bearer vs RFC 8693.
+
+**#670 review round 1 (2026-11-06):** both reviews (design and security) are addressed in the two ADRs:
+- the idempotency store is durable and scoped per principal, a key from another principal is refused, and an unknown outcome is never re-posted;
+- the SAP identity is released only through an off-by-default per-server setting;
+- the person's own IdP token is preferred, and any RegulAIt assertion SAP trusts uses a dedicated per-trust key (exp ≤60 s, jti);
+- `rate_limits.write_only` is added;
+- legacy A2A 0.3 cards are normalised before use;
+- a refreshed card is held as pending until an admin accepts it;
+- B4 adds a per-agent A2A rate limit.
+
+ADR-0230 has an eighth open question: which SAP identity attribute to use.
+
+**#670 review round 2 (2026-11-06):** both reviews are addressed:
+- idempotency uniqueness is on (tenant, tool, key), and `sub` is compared on every hit, so a foreign key is refused;
+- option (a), the person's own IdP token, gets the same rigour as (b): it is obtained per call after the checks pass, short-lived, audience-pinned, never logged, and envelope-encrypted if kept;
+- the 0231 checklist no longer names the ADR-0210 key;
+- SAP-side `jti` rejection is marked unverified;
+- stale summary text is corrected.
+
+**#670 review round 3 (2026-11-06):** S6 and design finding 1 are fixed with the strict default:
+- an approved call waits in `approved_pending_execution` until the requester confirms it with a fresh IdP step-up, and nothing is kept from sign-in;
+- `subject_token_retention` defaults to `none`; `refresh_token` is a `settings_relax` step-up, audited, scoped to the one SAP audience, envelope-encrypted, with an absolute lifetime of at most 8 h, and revoked and deleted on removal;
+- option (b) remains the last fallback;
+- A0 and B0 confirm which source SAP accepts.
+
+Non-blocking items also done: the stale `pending` sweep; the HMAC-derived idempotency key, which prevents squatting; the 0230 JWT checklist; and the in-process-only token cache.
+
 **ADR-0232 (design, 2026-11-06, Proposed): an agent pipeline builder with SAP CPI-style features (owner request 2026-11-06).**
 - **Where it lives:** the Agent builder suite gains Pipelines, Pipeline packages and Pipeline runs (`/builder/pipelines…`); Agent usage stays last.
 - **Model:** a versioned declarative JSON/YAML pipeline (content hash excludes the canvas layout) validated by a new pure `pipeline-kernel`; every step calls an existing governed primitive as the run actor, re-evaluated per step, inside the user's entitlements and the run budget (pillar 7 ceilings reused), with cost per step (new `pipeline_run_id`/`pipeline_step_id` on usage rows) and the optimiser applied.
