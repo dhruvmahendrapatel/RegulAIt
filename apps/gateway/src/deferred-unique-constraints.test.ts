@@ -499,7 +499,7 @@ describe("ADR-0109 — non-vacuity: the constraint, not the fixture, is doing th
  * shipping if it agrees with the database it is describing.
  */
 describe("ADR-0109 — the pre-flight report", () => {
-  it("covers exactly the ten enforced constraints, and each check runs", async () => {
+  it("covers exactly the twelve enforced constraints, and each check runs", async () => {
     const { DEFERRED_UNIQUE_CHECKS, runDeferredUniquePreflight, formatDeferredUniquePreflight } =
       await import("@regulait/db");
     const enforced = DEFERRED_UNIQUE_CHECKS.filter((c) => c.enforced);
@@ -510,7 +510,8 @@ describe("ADR-0109 — the pre-flight report", () => {
     // instead of inserting a second one — so the claim became enforceable and
     // the check now BLOCKS. Nothing is advisory today; the `enforced` flag
     // stays because the next deferred constraint will need it.
-    expect(enforced).toHaveLength(10);
+    // TWELVE since ADR-0208 G8 (migration 0224): one active infra policy per resource, one active fleet policy.
+    expect(enforced).toHaveLength(12);
     expect(DEFERRED_UNIQUE_CHECKS.filter((c) => !c.enforced)).toEqual([]);
     expect(enforced.map((c) => c.index)).toContain("backup_runs_finding_uq");
 
@@ -529,7 +530,7 @@ describe("ADR-0109 — the pre-flight report", () => {
     // index it describes.
     expect(report.blocking).toEqual([]);
     expect(report.clean).toBe(true);
-    expect(report.findings).toHaveLength(10);
+    expect(report.findings).toHaveLength(12);
     expect(formatDeferredUniquePreflight(report)).toContain("CLEAN");
   });
 });

@@ -60,7 +60,7 @@ import {
   type EvalTraceSkipReason,
   type JudgeBackedScorerKind,
 } from "@regulait/shared";
-import { datasetIsFrozen } from "./evals.js";
+import { datasetIsFrozen, evalDatasetRetiredDetail, evalDatasetRetirement } from "./evals.js";
 import { emitWebhookEvent } from "./outbound-webhooks.js";
 import { recordTraceScore } from "./trace-scores.js";
 
@@ -196,6 +196,10 @@ export async function addTracesToDataset(db: Db, input: AddTracesToDatasetInput)
   }
   const [dataset] = await db.select().from(evalDatasets).where(eq(evalDatasets.id, input.datasetId));
   if (!dataset) return { ok: false, status: 404, error: "unknown_dataset" };
+  // ADR-0208 G9: a retired dataset takes no new case (an automation rule's dataset action records the refusal)
+  if (await evalDatasetRetirement(db, dataset.name)) {
+    return { ok: false, status: 409, error: "eval_dataset_retired", detail: evalDatasetRetiredDetail(dataset.name) };
+  }
   if (await datasetIsFrozen(db, dataset)) {
     return {
       ok: false,

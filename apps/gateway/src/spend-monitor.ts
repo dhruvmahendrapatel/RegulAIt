@@ -696,11 +696,11 @@ function hourRange(start: number, end: number): number[] {
 // ---------------------------------------------------------------------------
 
 export const SPEND_ANOMALY_SWEEP_NOTE =
-  "ADR-0064's in-process scheduler drives this when it is switched on (REGULAIT_SCHEDULER=on); this " +
-  "endpoint is the manual/on-demand path and calls exactly the same function. A deployment running " +
-  "neither raises NO anomalies, and a policy's `lastEvaluatedAt` staying null is how that stays visible " +
-  "rather than silent. A project below the baseline sample floor is reported as 'baseline building' and " +
-  "makes no claim either way. Spend figures are list-price ESTIMATES computed over usage_events.";
+  "The built-in scheduler runs this when it is on. 'Run evaluator now' does the same thing on demand. " +
+  "A deployment running neither raises no anomalies, and a policy's last-evaluated time staying empty is " +
+  "how that stays visible rather than silent. A project below the baseline sample floor is reported as " +
+  "'baseline building' and makes no claim either way. Spend figures are list-price estimates from the " +
+  "usage ledger.";
 
 /**
  * ONE PASS of the anomaly evaluator over every project (or one named project).

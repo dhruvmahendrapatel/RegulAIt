@@ -266,7 +266,8 @@ describe("the front door runs on pillar-2 rails", () => {
     // the questionnaire is an honest blank form — every answer is a claim
     expect(v.questionnaireTemplate).toContain("Vendor AI assessment questionnaire");
     expect(v.questionnaireTemplate).toContain("vendor attestation");
-    expect(v.questionnaireTemplate).toContain("Nothing is pre-filled by a model");
+    // ADR-0213: drafts may be asked for, but nothing is pre-filled and a draft counts only once submitted
+    expect(v.questionnaireTemplate).toContain("Nothing is pre-filled: a drafted answer");
 
     const inst = await app.inject({
       method: "GET",
