@@ -50,7 +50,7 @@ export { BOM_SUBJECT_LOCK_TIMEOUT_MS, BomSubjectBusyError, withAiBomSubjectSessi
 // ADR-0102 — the operator-prose credential scrub for reason/note columns
 // OUTSIDE `audit_log`. Exported so the covered/not-covered inventory can be
 // asserted by test rather than only claimed in the ADR.
-// ADR-0232 (PENDING S6) — the CONTENT-CREDENTIAL GUARD: refuse (not redact) a credential typed into a
+// ADR-0233 (PENDING S6) — the CONTENT-CREDENTIAL GUARD: refuse (not redact) a credential typed into a
 // name/title/description/summary/body column. Exported so the inventory and the report can be asserted.
 export {
   CONTENT_COLUMN_PATTERN,
@@ -405,6 +405,6 @@ export function createDb(connectionString: string, override: Partial<DbPoolConfi
       );
     });
   });
-  // ADR-0232 (S6): the content-credential guard is OUTERMOST, so it sees the value the caller wrote
+  // ADR-0233 (S6): the content-credential guard is OUTERMOST, so it sees the value the caller wrote
   return withContentGuard(withProseScrub(withAuditChain(drizzle(pool, { schema }))));
 }

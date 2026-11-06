@@ -5460,7 +5460,7 @@ user or server that an approval rule is scoped to (cascade delete). **Amendment 
 match re-owes every takeover; option (b) (pool intersection) is the recorded long-term simplification. Open follow-ups: a
 rule-editor warning for shadowed tightenings and equal-specificity overlaps, and option (b).
 
-**ADR-0232 (builder, 2026-11-06, Proposed): refuse credentials typed into content columns (PENDING S6).** Content
+**ADR-0233 (builder, 2026-11-06, Proposed): refuse credentials typed into content columns (PENDING S6).** Content
 (`name`, `title`, `description`, `summary`, `body`) is not redacted like ADR-0102's prose; a write that puts
 credential-shaped text into one of the 81 guarded columns is REFUSED with `422 credential_in_content`, naming the
 field, the column and the rule labels, never the value. The detector is `scrubAuditText` by reference (ADR-0042

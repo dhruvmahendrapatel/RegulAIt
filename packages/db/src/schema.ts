@@ -4707,7 +4707,7 @@ export const orgSettings = pgTable(
      * audited) = drafts labelled with their sources; nothing is submitted or
      * recorded as an attestation until a person does it. */
     vendorDraftAssistEnabled: boolean("vendor_draft_assist_enabled").notNull().default(false),
-    /** ADR-0232 (migration 0260, PENDING S6): refuse a write that puts credential-shaped
+    /** ADR-0233 (migration 0260, PENDING S6): refuse a write that puts credential-shaped
      * text into a registered name/title/description/summary/body column. TRUE (default) =
      * refused with 422 credential_in_content; FALSE (an admin relaxation: step-up, audited)
      * = stored as typed. Read by `withContentGuard` only when its detector has matched. */

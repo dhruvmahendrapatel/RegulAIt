@@ -5605,7 +5605,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerGovernanceMonitorRoutes(app, db);
   // ADR-0175 A7 — the non-human credential inventory (admin, read-only)
   registerCredentialInventoryRoutes(app, db);
-  // ADR-0232 (S6): report existing credential-shaped content; never rewrite it
+  // ADR-0233 (S6): report existing credential-shaped content; never rewrite it
   registerContentGuardRoutes(app, db);
   // ADR-0175 A15 — energy factors and the energy/emissions estimate (admin)
   registerEnergyRoutes(app, db);
@@ -6224,7 +6224,7 @@ export function handleGatewayError(err: unknown, req: FastifyRequest, reply: Fas
   }
   // ADR-0189 R25 item 6: a sign-off refused because its AI BOM snapshot cannot be
   // signed (409 bom_signing_unavailable); its transaction has already rolled back
-  // ADR-0232 (S6): credential-shaped text in a content column is refused, naming the field and the
+  // ADR-0233 (S6): credential-shaped text in a content column is refused, naming the field and the
   // rule labels, never the value; the caller's transaction has already rolled back
   if (err instanceof ContentCredentialError) {
     return reply.status(422).send({ error: err.code, field: err.field, column: `${err.table}.${err.column}`, rules: err.rules, detail: err.message });

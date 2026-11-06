@@ -1,9 +1,9 @@
 /**
- * ADR-0232 (PENDING S6) — the content-credential guard, proved on the bytes Postgres holds.
+ * ADR-0233 (PENDING S6) — the content-credential guard, proved on the bytes Postgres holds.
  *
  *  1. The inventory: Postgres (information_schema, not the TypeScript) lists every text column named
  *     name/title/description/summary/body; each one is guarded or excluded with a category, never both,
- *     never neither. ADR-0232's inventory table is regenerated from the same registry and must match.
+ *     never neither. ADR-0233's inventory table is regenerated from the same registry and must match.
  *  2. One detector: the guard's detector IS `scrubAuditText`, by reference.
  *  3. Per column family, through the real routes (templates, agents, projects, packs): a credential is
  *     refused with 422 naming the field, nothing is stored, and the refusal never echoes the value.
@@ -51,7 +51,7 @@ const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
 const here = path.dirname(fileURLToPath(import.meta.url));
 const migrationsFolder = path.resolve(here, "../../../packages/db/migrations");
-const ADR = path.resolve(here, "../../../internal/decisions/0232-content-column-credential-guard.md");
+const ADR = path.resolve(here, "../../../internal/decisions/0233-content-column-credential-guard.md");
 
 const BOOT = "cg-bootstrap-token";
 const AUTH = { authorization: `Bearer ${BOOT}` };
@@ -95,7 +95,7 @@ afterAll(async () => {
   await app.close();
 });
 
-describe("ADR-0232 inventory (generated from the schema)", () => {
+describe("ADR-0233 inventory (generated from the schema)", () => {
   it("every text name/title/description/summary/body column is guarded or excluded — not both, not neither", async () => {
     const cols = rowsOf(
       await db.execute(sql`select table_name || '.' || column_name as c from information_schema.columns
@@ -126,10 +126,10 @@ describe("ADR-0232 inventory (generated from the schema)", () => {
     }
   });
 
-  it("ADR-0232's inventory table is the registry, regenerated", () => {
+  it("ADR-0233's inventory table is the registry, regenerated", () => {
     const adr = readFileSync(ADR, "utf8");
     const block = /<!-- content-guard-inventory:start -->\n([\s\S]*?)<!-- content-guard-inventory:end -->/.exec(adr)?.[1];
-    expect(block, "ADR-0232 must carry the generated inventory block").toBeDefined();
+    expect(block, "ADR-0233 must carry the generated inventory block").toBeDefined();
     const expected = [
       `Guarded (${contentGuardInventory().length}): ${contentGuardInventory().map((c) => `\`${c}\``).join(", ")}.`,
       "",

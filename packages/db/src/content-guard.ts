@@ -1,5 +1,5 @@
 /**
- * ADR-0232 (PENDING S6) — the CONTENT-CREDENTIAL GUARD for name/title/description/summary/body columns.
+ * ADR-0233 (PENDING S6) — the CONTENT-CREDENTIAL GUARD for name/title/description/summary/body columns.
  *
  * ADR-0102 scrubs credential shapes out of operator PROSE (reason, note, rationale) at the `createDb` handle,
  * and it deliberately stopped at CONTENT: a description is something a person may need byte for byte, so a
@@ -24,7 +24,7 @@
  * the statement runs, so the caller's transaction rolls back whole. Imports are covered because they write
  * through the same handle.
  *
- * WHAT IT DOES NOT DO (ADR-0232, honest limits): rewrite or report-and-continue; touch jsonb columns; cover a
+ * WHAT IT DOES NOT DO (ADR-0233, honest limits): rewrite or report-and-continue; touch jsonb columns; cover a
  * raw `pg` client or `psql`; catch a shapeless secret. Existing rows are reported (`contentCredentialReport`),
  * never rewritten.
  */
@@ -129,7 +129,7 @@ export type ContentGuardExclusion =
   | "signed_evidence"
   | "check_constrained";
 
-/** Why each exclusion category is not guarded. Printed into ADR-0232's table by the inventory test. */
+/** Why each exclusion category is not guarded. Printed into ADR-0233's table by the inventory test. */
 export const CONTENT_GUARD_EXCLUSION_REASONS: Readonly<Record<ContentGuardExclusion, string>> = {
   prose_owned_by_adr0102: "already scrubbed by ADR-0102's prose registry; one column, one owner",
   audit_owned_by_adr0099: "audit_log is scrubbed by ADR-0099 before it is hashed",
@@ -258,7 +258,7 @@ export class ContentCredentialError extends Error {
   ) {
     super(
       `${field} looks like it contains a credential (${rules.join(", ") || "credential"}); ` +
-        `remove it and save again (ADR-0232)`,
+        `remove it and save again (ADR-0233)`,
     );
     this.name = "ContentCredentialError";
   }
@@ -400,7 +400,7 @@ export interface ContentCredentialFinding {
 }
 
 /**
- * ADR-0232 — REPORT existing rows, never rewrite them. Scans each guarded column of tables keyed by `id`,
+ * ADR-0233 — REPORT existing rows, never rewrite them. Scans each guarded column of tables keyed by `id`,
  * a bounded number of rows per column (newest-first is not assumed; a full scan is an admin action), and
  * returns where the detector matches. The value never leaves this function.
  */

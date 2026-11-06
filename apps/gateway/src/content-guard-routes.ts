@@ -1,5 +1,5 @@
 /**
- * ADR-0232 (PENDING S6) — the existing-rows REPORT for the content-credential guard.
+ * ADR-0233 (PENDING S6) — the existing-rows REPORT for the content-credential guard.
  *
  * The guard refuses NEW credential-shaped text in name/title/description/summary/body columns. Rows written
  * before it are reported here and never rewritten: rewriting stored content is an edit to the record, and

@@ -635,7 +635,7 @@ export async function insertPack(
   input: z.infer<typeof createCompliancePackSchema>,
   createdByUserId: string | null,
 ): Promise<CompliancePackRow> {
-  // ADR-0232: one transaction, so a refused control (credential_in_content) leaves no control-less pack behind
+  // ADR-0233: one transaction, so a refused control (credential_in_content) leaves no control-less pack behind
   return db.transaction(async (txRaw) => {
     const tx = txRaw as unknown as Db;
     const [pack] = await tx

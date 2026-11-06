@@ -1,4 +1,4 @@
-# ADR-0232 — Refuse credentials typed into content columns (name, title, description, summary, body)
+# ADR-0233 — Refuse credentials typed into content columns (name, title, description, summary, body)
 
 - **Status**: Proposed
 - **Date**: 2026-11-06
@@ -35,7 +35,7 @@ reaches Postgres, with:
 
 ```
 422 { "error": "credential_in_content", "field": "description", "column": "compliance_pack_controls.description",
-      "rules": ["aws_key"], "detail": "description looks like it contains a credential (aws_key); remove it and save again (ADR-0232)" }
+      "rules": ["aws_key"], "detail": "description looks like it contains a credential (aws_key); remove it and save again (ADR-0233)" }
 ```
 
 - The refusal names the API field, the table column and the rule labels. It **never** carries the value.
@@ -129,7 +129,7 @@ migration.
 ## The inventory (generated from the schema)
 
 The registry lives in `packages/db/src/content-guard.ts`. The block below is regenerated from it and pinned by
-`zz-adr0232-content-guard.test.ts`, which also asks Postgres (`information_schema`) for every `text`/`varchar`
+`zz-adr0233-content-guard.test.ts`, which also asks Postgres (`information_schema`) for every `text`/`varchar`
 column matching the S6 shape and fails if any is neither guarded nor excluded, if any is both, or if any listed
 column no longer exists. A column added by a hand-authored migration cannot slip past.
 

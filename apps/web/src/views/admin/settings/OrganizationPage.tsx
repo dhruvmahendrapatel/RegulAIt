@@ -226,7 +226,7 @@ function Loaded(props: { settings: Record<string, unknown> }) {
     vendorDraftAssistEnabled: str(s, "vendorDraftAssistEnabled") || "false",
   });
 
-  // --- 5f. Credentials in content (ADR-0232) ---------------------------------
+  // --- 5f. Credentials in content (ADR-0233) ---------------------------------
   const contentGuard = useSection({
     contentCredentialGuard: str(s, "contentCredentialGuard") || "true",
   });

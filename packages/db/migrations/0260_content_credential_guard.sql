@@ -1,4 +1,4 @@
--- ADR-0232 (PENDING S6) — the content-credential guard.
+-- ADR-0233 (PENDING S6) — the content-credential guard.
 --
 --   * org_settings.content_credential_guard: TRUE (the strict default) = a write that puts
 --     credential-shaped text into a registered name/title/description/summary/body column is

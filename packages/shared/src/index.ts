@@ -2385,7 +2385,7 @@ export const updateOrgSettingsSchema = z
      * detail offers drafts labelled with their sources; nothing is submitted
      * or recorded as an attestation until a person does it. */
     vendorDraftAssistEnabled: z.boolean().optional(),
-    /** ADR-0232 (PENDING S6): refuse credential-shaped text in name/title/description/
+    /** ADR-0233 (PENDING S6): refuse credential-shaped text in name/title/description/
      * summary/body columns? true (default) = refused with 422 credential_in_content.
      * false = stored as typed; turning it off is a relaxation (settings_relax step-up). */
     contentCredentialGuard: z.boolean().optional(),

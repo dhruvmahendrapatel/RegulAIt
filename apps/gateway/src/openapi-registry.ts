@@ -491,7 +491,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/governance/alerts": "internal",
   // ADR-0175 A7 / A15 — the credential inventory and the energy estimate (admin console)
   "GET /v1/admin/credentials": "internal",
-  // ADR-0232 (S6): the existing-rows report for the content-credential guard (admin console)
+  // ADR-0233 (S6): the existing-rows report for the content-credential guard (admin console)
   "GET /v1/admin/content-credential-report": "internal",
   "GET /v1/energy/factors": "internal",
   "PUT /v1/energy/factors": "internal",
