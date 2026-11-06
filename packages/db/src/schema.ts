@@ -15264,7 +15264,7 @@ export const supplierSubmissions = pgTable(
 export type SupplierSubmissionRow = typeof supplierSubmissions.$inferSelect;
 
 // ---------------------------------------------------------------------------
-// ADR-0223 (migration 0269) — drift and explainability for classical (non-LLM) models. Aggregates only: bin edges
+// ADR-0223 (migration 0270) — drift and explainability for classical (non-LLM) models. Aggregates only: bin edges
 // and counts, category labels and counts, one importance value per feature. Written only by
 // `apps/gateway/src/classical-drift.ts`, each write in the same transaction as its audit row.
 // ---------------------------------------------------------------------------
