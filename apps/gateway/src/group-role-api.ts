@@ -31,8 +31,8 @@ import {
   type Db,
 } from "@regulait/db";
 import { scimAssertedGroupsFor } from "./group-roles.js";
-import { isApproverRole, lockApproverRoles } from "./approval-pool.js";
-import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
+import { approverPoolShiftFacts, isApproverRole, lockApproverRoles, sameApproverPoolShift, type ApproverPoolShift } from "./approval-pool.js";
+import { CHANGED_CONCURRENTLY, requireStepUp, requireStepUps, type StepUpCheckArgs } from "./step-up.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -109,14 +109,22 @@ export function registerGroupRoleMappingRoutes(app: FastifyInstance, db: Db): vo
     // holders to that approver pool — the same settings_relax step-up as
     // assigning the role directly, bound to the group and the role
     const approverRole = await isApproverRole(db, body.roleId);
-    if (approverRole) {
-      const facts = { values: { approverRoleGroup: { source: body.source, externalGroup: body.externalGroup, roleId: body.roleId } } };
-      if (!(await requireStepUp(db, req, reply, { kind: "settings_relax", facts })).ok) return reply;
-    }
-    // ADR-0186 A (Class A): decided again under the approver-role lock
+    // issue #668 (ADR-0229): the mapping brings members (not known yet: "any member") into the role, whose approval
+    // rules may then outrank a rule with a narrower pool for their calls: the step-up, bound to the takeover facts
+    const shift: ApproverPoolShift = { change: "member-add", objectType: "role", objectId: body.roleId, userId: null };
+    const takeover = await approverPoolShiftFacts(db, shift);
+    const stepUps: StepUpCheckArgs[] = [
+      ...(approverRole
+        ? [{ kind: "settings_relax" as const, facts: { values: { approverRoleGroup: { source: body.source, externalGroup: body.externalGroup, roleId: body.roleId } } } }]
+        : []),
+      ...(takeover ? [{ kind: "settings_relax" as const, facts: { ...takeover, group: { source: body.source, externalGroup: body.externalGroup } } }] : []),
+    ];
+    if (stepUps.length > 0 && !(await requireStepUps(db, req, reply, stepUps))) return reply;
+    // ADR-0186 A (Class A): decided again under the approver-role lock (then the routing lock)
     const written = await db.transaction(async (tx) => {
       const nowApprover = (await lockApproverRoles(tx as unknown as Db, [body.roleId])).has(body.roleId);
       if (nowApprover && !approverRole) return { moved: true as const };
+      if (!sameApproverPoolShift(await approverPoolShiftFacts(tx as unknown as Db, shift), takeover)) return { moved: true as const };
       const [inserted] = await tx.insert(groupRoleMappings).values(body).onConflictDoNothing().returning();
       return { moved: false as const, row: inserted };
     });
@@ -137,7 +145,7 @@ export function registerGroupRoleMappingRoutes(app: FastifyInstance, db: Db): vo
     }
     await auditAdmin(req.authCtx.userId ?? null, row.id, "group-role-mapping-created",
       `admin mapped ${body.source} group '${body.externalGroup}' to role '${role.name}' — holders of that group gain the role's baseline on their next login/sync, and nothing beyond it (isAdmin is not a role and is not reachable from a mapping)`,
-      { source: body.source, externalGroup: body.externalGroup, roleId: role.id, roleName: role.name });
+      { source: body.source, externalGroup: body.externalGroup, roleId: role.id, roleName: role.name, ...(takeover ? { approverPoolShift: takeover } : {}) });
     return reply.status(201).send({ ...row, roleName: role.name });
   });
 
@@ -162,10 +170,23 @@ export function registerGroupRoleMappingRoutes(app: FastifyInstance, db: Db): vo
       .innerJoin(roles, eq(roles.id, groupRoleMappings.roleId))
       .where(eq(groupRoleMappings.id, mappingId));
     if (!row) return reply.status(404).send({ error: "unknown_mapping" });
-    await db.delete(groupRoleMappings).where(eq(groupRoleMappings.id, mappingId));
+    // issue #668 (ADR-0229): the reconciler removes the role from the group's members on their next sync, with no
+    // request to step up and never withheld (revoking access comes first); so the removal is attested HERE, when it
+    // hands calls the role's approval rules named the signer for to a rule with a wider pool
+    const shift: ApproverPoolShift = { change: "member-remove", objectType: "role", objectId: row.roleId, userId: null };
+    const takeover = await approverPoolShiftFacts(db, shift);
+    const facts = takeover ? { ...takeover, group: { source: row.source, externalGroup: row.externalGroup } } : null;
+    if (facts && !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts })).ok) return reply;
+    const done = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      if (!sameApproverPoolShift(await approverPoolShiftFacts(tx, shift), takeover)) return false;
+      await tx.delete(groupRoleMappings).where(eq(groupRoleMappings.id, mappingId));
+      return true;
+    });
+    if (!done) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     await auditAdmin(req.authCtx.userId ?? null, mappingId, "group-role-mapping-deleted",
       `admin removed the mapping of ${row.source} group '${row.externalGroup}' to role '${row.roleName}' — the group-derived assignments it created are reconciled away on each holder's next login/sync; admin-direct assignments of the same role are untouched`,
-      { source: row.source, externalGroup: row.externalGroup, roleId: row.roleId, roleName: row.roleName });
+      { source: row.source, externalGroup: row.externalGroup, roleId: row.roleId, roleName: row.roleName, ...(facts ? { approverPoolShift: facts } : {}) });
     return { removed: true };
   });
 

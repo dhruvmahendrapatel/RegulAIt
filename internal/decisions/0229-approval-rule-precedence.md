@@ -246,3 +246,45 @@ binding need not carry the extent to be safe. Adding it would only make the prom
 - the deploy-mode route variant (one binding);
 - the copilot `policy_tightening` path (`applyRuleEdit` with no step-up) failing closed;
 - a unit test pinning `approvalRuleMatchWidens`.
+
+## Amendment 6 (2026-11-06, issue #668): cascade deletes and membership changes move who signs
+
+Closes the round-4 "known gap" above and the round-5/6 non-blocking finding filed as #668.
+
+15. **A change outside the rule writers that moves who signs to a wider pool needs the `settings_relax` step-up,
+    bound to the takeover facts, and is audited.** `approverPoolShiftFacts` (`apps/gateway/src/approval-pool.ts`)
+    decides it with the writers' own comparators (`approvalRulesMayOverlap`, the kernel precedence with its id
+    tie-break, `approvalRuleLoosens` on the pool alone) and is conservative the same way (N5: a group's rules reach
+    every member; every surviving overlapping rule counts as a possible taker). It covers:
+    - **cascade deletes** of a role, team, user (as subject or as named approver) or MCP server: each approval rule the
+      FK cascade removes, against every surviving overlapping rule it named the signer over whose pool loosens its own:
+      `{ruleId: M, outrankedByApprovalRules: [O…]}`. Wired on `DELETE /v1/roles/:id` and `DELETE /v1/teams/:id`. No
+      route hard-deletes a user (SCIM delete deactivates) or an MCP server today; the helper is pinned by tests and any
+      future delete route must call it;
+    - **membership changes**: joining a role or team (`POST /v1/users/:id/roles`, `POST /v1/teams/:id/members`, and a
+      group→role mapping as "any member") is `{ruleId: M, outranksApprovalRules: [O…]}` over the rules that already
+      matched the member's calls (fleet rules, their user rules, and the roles and teams they hold now); leaving
+      (`DELETE /v1/users/:id/roles/:roleId` for a direct-only holder, `DELETE /v1/teams/:id/members/:userId`, a mapping
+      delete) is `{ruleId: M, outrankedByApprovalRules: [O…]}`.
+    The step-up body is `{change, objectType, objectId, userId?, values: {approverPoolTakeovers}}` (a mapping adds
+    `group`). It rides beside any step-up the write already owed (an approver role or approval team, through
+    `requireStepUps`).
+16. **Decided early, re-decided under the lock.** The route decides on an unlocked read, steps up, then recomputes the
+    facts inside its transaction under the routing advisory lock (role row lock first where the route takes one) and
+    writes only when they are identical (`sameApproverPoolShift`); otherwise 409 `changed_concurrently`. A grant for
+    the old facts no longer matches once another rule joins them.
+17. **Paths with no request to step up withhold.** The JIT default role (`grantJitDefaultRole`) and the IdP
+    reconciler's group-derived adds withhold a role whose rules would move the pool, exactly as they withhold an
+    approver role (decision 29); an admin can assign it with the step-up. Reconciler **removals** are never withheld
+    (revoking access comes first); the mapping delete that causes them is the attested act.
+
+**Known limits.** Conservative facts may ask for a step-up a third, more specific rule makes unnecessary, and a member
+join re-asks for a takeover the rule's create already attested under N5. Both over-ask; neither under-asks. A SoD
+override that executes a role assignment on approval (`sod.ts`) does not run this check; recorded as an open question
+on the PR. Option (b), the intersection of pools, stays the long-term simplification.
+
+**Tests.** `zz-668-approver-pool-shift.test.ts`: role and team delete (refused from an API key and an ungranted
+session, bound to the facts, admitted with the grant, audited); user (subject and named approver) and MCP server
+cascades at the helper; role assign/unassign, team add/remove and group→role mapping create/delete, each bound to its
+own facts; no takeover means no step-up (same pool, no survivor, a member's own user rule); fail closed (a stale grant
+after the facts change, the JIT default role withheld).

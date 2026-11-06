@@ -61,7 +61,7 @@ import {
   type Db,
   type GroupSource,
 } from "@regulait/db";
-import { lockApproverRoles } from "./approval-pool.js";
+import { approverPoolShiftFacts, lockApproverRoles } from "./approval-pool.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -262,7 +262,9 @@ export async function reconcileGroupRoles(
   //    adds anyone to an APPROVER role (one an approval rule as served names) —
   //    the same rule as the JIT default role (`grantJitDefaultRole`). Decided per
   //    role under the approver-role lock, so a rule edit naming the role cannot
-  //    interleave. Withheld and audited; an admin may assign the role directly,
+  //    interleave. Issue #668: nor to a role whose approval rules would move who
+  //    signs for the user's calls to a wider pool (`approverPoolShiftFacts`).
+  //    Withheld and audited; an admin may assign the role directly,
   //    with the settings_relax step-up a role assignment needs.
   const added: GroupReconcileResult["added"] = [];
   const withheld: GroupReconcileResult["withheld"] = [];
@@ -270,6 +272,10 @@ export async function reconcileGroupRoles(
     const outcome = await db.transaction(async (rawTx) => {
       const tx = rawTx as unknown as Db;
       if ((await lockApproverRoles(tx, [roleId])).has(roleId)) return "withheld" as const;
+      // issue #668: nor one whose approval rules would move who signs for this user's calls to a wider pool
+      if (await approverPoolShiftFacts(tx, { change: "member-add", objectType: "role", objectId: roleId, userId })) {
+        return "withheld" as const;
+      }
       await tx.insert(roleAssignments).values({ userId, roleId, origin: "group" }).onConflictDoNothing();
       return "granted" as const;
     });
