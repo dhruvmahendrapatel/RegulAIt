@@ -78,6 +78,7 @@ import {
 } from "@regulait/shared";
 import { auditLog } from "./schema.js";
 import { captureDecisionFacts } from "./decision-facts.js";
+import { RLS_SYSTEM_SETTING } from "./rls.js";
 
 /**
  * The advisory-lock key every append serializes on. A single global key,
@@ -232,7 +233,16 @@ export async function appendChainedAuditRows(
 
   // Serialize at the tip. Everything from here to COMMIT is the critical
   // section; it is deliberately as short as possible.
-  await tx.execute(sql`select pg_advisory_xact_lock(${AUDIT_CHAIN_LOCK_KEY})`);
+  //
+  // ADR-0233: the same statement enters the `audit_chain` row-level security context. Under a principal
+  // (`withPrincipal`), audit_log shows a non-admin only its own rows, and a tip read through that filter
+  // would chain onto the caller's last row instead of the global tip: a fork. The previous context is read
+  // in the same statement and restored right after the tip and clock reads, so the widening covers exactly
+  // the two reads the lock makes safe. On a superuser or with no policy it is a no-op setting.
+  const locked = (await tx.execute(
+    sql`select pg_advisory_xact_lock(${AUDIT_CHAIN_LOCK_KEY}), s.prev, set_config(${RLS_SYSTEM_SETTING}, 'audit_chain', true) from (select coalesce(current_setting(${RLS_SYSTEM_SETTING}, true), '') as prev) s`,
+  )) as { rows?: Array<{ prev: string | null }> };
+  const prevRlsContext = locked.rows?.[0]?.prev ?? "";
 
   // The tip. `where seq is not null` skips every un-chained legacy row (their
   // seq is NULL, and a plain `order by seq desc` would sort NULLs FIRST and
@@ -255,6 +265,8 @@ export async function appendChainedAuditRows(
   // (`auditChainClock`), `at` never decreases along `seq`. Truncated to milliseconds in SQL (what a `Date`
   // holds), so the value hashed below is the value stored.
   const dbNow = await auditChainClock(tx);
+  // ADR-0233: leave `audit_chain`, back to the caller's context (the insert below runs under it)
+  await tx.execute(sql`select set_config(${RLS_SYSTEM_SETTING}, ${prevRlsContext}, true)`);
 
   let prevHash = tip[0]?.rowHash ?? AUDIT_GENESIS_PREV_HASH;
   let nextSeq = (tip[0]?.seq ?? AUDIT_GENESIS_SEQ - 1) + 1;

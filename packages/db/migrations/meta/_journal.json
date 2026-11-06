@@ -1562,6 +1562,13 @@
       "when": 1785193000000,
       "tag": "0258_vendor_draft_assist",
       "breakpoints": true
+    },
+    {
+      "idx": 260,
+      "version": "7",
+      "when": 1785195000000,
+      "tag": "0260_rls_foundation_slice1",
+      "breakpoints": true
     }
   ]
 }
