@@ -37,7 +37,7 @@ export {
   type AuditActorStamp,
 } from "./audit-chain.js";
 
-// ADR-0233 (PENDING S7) — the row-level security transaction layer: the only way to set the principal or
+// ADR-0234 (PENDING S7) — the row-level security transaction layer: the only way to set the principal or
 // a system context, always transaction-local, so a pooled connection is never left scoped
 export {
   RLS_APP_ROLE,

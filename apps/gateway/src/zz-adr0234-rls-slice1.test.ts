@@ -1,5 +1,5 @@
 /**
- * ADR-0233 (PENDING S7) — row-level security, slice 1: users, auth_mfa_pending, approvals, audit_log.
+ * ADR-0234 (PENDING S7) — row-level security, slice 1: users, auth_mfa_pending, approvals, audit_log.
  *
  * Every query below that is meant to be blocked deliberately SKIPS the application's object-level check:
  * no WHERE on the owner, no scope condition. The only thing standing between the principal and another
@@ -34,7 +34,7 @@ import { dropScratchDatabase } from "./testing/scratch-db.js";
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
 const migrationsFolder = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations");
-const SCRATCH_DB = `rls0233_${process.pid}_${Date.now()}`;
+const SCRATCH_DB = `rls0234_${process.pid}_${Date.now()}`;
 const RLS_TABLES = ["users", "auth_mfa_pending", "approvals", "audit_log"] as const;
 const urlFor = (name: string) => {
   const u = new URL(DATABASE_URL);
@@ -58,7 +58,7 @@ const ids = {
   bobApproval: randomUUID(),
   routedApproval: randomUUID(),
 };
-const bobMfaToken = `rls0233-${randomUUID()}`;
+const bobMfaToken = `rls0234-${randomUUID()}`;
 
 /** the Postgres error text under drizzle's "Failed query" wrapper */
 async function pgError(p: Promise<unknown>): Promise<string> {
@@ -92,7 +92,7 @@ beforeAll(async () => {
     { id: ids.erin, email: `erin-${ids.erin}@rls.test`, displayName: "Erin" },
     { id: ids.root, email: `root-${ids.root}@rls.test`, displayName: "Root", isAdmin: true },
   ]);
-  await su.execute(sql`insert into roles (id, name) values (${ids.role}, ${`rls0233-role-${ids.role}`})`);
+  await su.execute(sql`insert into roles (id, name) values (${ids.role}, ${`rls0234-role-${ids.role}`})`);
   await su.execute(sql`insert into role_assignments (user_id, role_id) values (${ids.carol}, ${ids.role})`);
   await su.insert(approvals).values([
     { id: ids.aliceApproval, userId: ids.alice, approverUserId: ids.root },
@@ -108,7 +108,7 @@ beforeAll(async () => {
   await su.insert(authMfaPending).values({ userId: ids.bob, tokenHash: bobMfaToken, expiresAt: new Date(Date.now() + 60_000) });
   // audit rows: bob's first, then alice's LAST, so the global chain tip is a row bob cannot see
   for (const userId of [ids.bob, ids.bob, ids.alice]) {
-    await su.insert(auditLog).values({ userId, effect: "allow", ruleId: "rls0233", ruleChain: [], reason: "rls0233 fixture" });
+    await su.insert(auditLog).values({ userId, effect: "allow", ruleId: "rls0234", ruleChain: [], reason: "rls0234 fixture" });
   }
 }, 180_000);
 
@@ -122,7 +122,7 @@ afterAll(async () => {
   }
 });
 
-describe("0260: the roles and the inventory", () => {
+describe("0265: the roles and the inventory", () => {
   it("every slice-1 table has row-level security ENABLED and FORCED", async () => {
     const r = await su.execute<{ relname: string; on: boolean; forced: boolean }>(sql`
       select relname, relrowsecurity as on, relforcerowsecurity as forced from pg_class
@@ -332,7 +332,7 @@ describe("the audit chain stays one chain under a principal", () => {
       await su.execute<{ seq: number; row_hash: string }>(sql`select seq::int as seq, row_hash from audit_log where seq is not null order by seq desc limit 1`)
     ).rows[0]!;
     await withPrincipal(su, { userId: ids.bob }, (tx) =>
-      tx.insert(auditLog).values({ userId: ids.bob, effect: "allow", ruleId: "rls0233", ruleChain: [], reason: "rls0233 bob append" }),
+      tx.insert(auditLog).values({ userId: ids.bob, effect: "allow", ruleId: "rls0234", ruleChain: [], reason: "rls0234 bob append" }),
     );
     const appended = (
       await su.execute<{ seq: number; prev_hash: string; user_id: string }>(
@@ -344,10 +344,10 @@ describe("the audit chain stays one chain under a principal", () => {
 });
 
 describe("later migrations that touch rows of an RLS table enter the migration context", () => {
-  it("every migration after 0260 with DML on a slice-1 table sets regulait.system_context = 'migration'", () => {
+  it("every migration after 0265 with DML on a slice-1 table sets regulait.system_context = 'migration'", () => {
     const dml = new RegExp(`\\b(insert\\s+into|update|delete\\s+from)\\s+(public\\.)?"?(${RLS_TABLES.join("|")})"?\\b`, "i");
     const offenders = readdirSync(migrationsFolder)
-      .filter((f) => /^\d{4}_.*\.sql$/.test(f) && Number(f.slice(0, 4)) > 260)
+      .filter((f) => /^\d{4}_.*\.sql$/.test(f) && Number(f.slice(0, 4)) > 265)
       .filter((f) => {
         const body = readFileSync(path.join(migrationsFolder, f), "utf8");
         return dml.test(body) && !/set_config\(\s*'regulait\.system_context'\s*,\s*'migration'\s*,\s*true\s*\)/i.test(body);

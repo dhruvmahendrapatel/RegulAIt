@@ -1,4 +1,4 @@
--- ADR-0233 (PENDING S7, ADR-0200 checklist item 14, ADR-0060 follow-up 6): row-level security, slice 1.
+-- ADR-0234 (PENDING S7, ADR-0200 checklist item 14, ADR-0060 follow-up 6): row-level security, slice 1.
 --
 -- What this migration does, in order:
 --   1. the non-owner runtime role `regulait_app` (NOLOGIN group role) and its grants. The app role
@@ -12,10 +12,10 @@
 -- transaction with no principal and no system context sees ZERO rows, never all rows.
 --
 -- FORCE means the table owner is filtered too. A superuser (the local demo, docker-compose and CI) and a
--- role with BYPASSRLS are not; that is Postgres semantics, and ADR-0233 records how the runtime moves off
+-- role with BYPASSRLS are not; that is Postgres semantics, and ADR-0234 records how the runtime moves off
 -- such a login. A LATER migration that reads or writes rows of these tables must first run
 --   SELECT set_config('regulait.system_context', 'migration', true);
--- or, on a non-superuser owner, it silently touches zero rows. zz-adr0233-rls-slice1.test.ts enforces this.
+-- or, on a non-superuser owner, it silently touches zero rows. zz-adr0234-rls-slice1.test.ts enforces this.
 
 -- 1. The runtime role ----------------------------------------------------------------------------------
 -- Roles are cluster-wide and every test database migrates concurrently, so creation tolerates a race.
@@ -126,7 +126,7 @@ $$;
 
 -- 3. Policies ------------------------------------------------------------------------------------------
 -- Every helper is wrapped in a scalar sub-select so Postgres evaluates it once per statement (an initplan),
--- not once per row. That is what keeps the measured cost in ADR-0233 small.
+-- not once per row. That is what keeps the measured cost in ADR-0234 small.
 
 -- users: the directory is readable by any authenticated principal (approver pickers, display names);
 -- a row is writable by its own user or an admin. Pre-authentication reads (sign-in, session resolution)
@@ -183,8 +183,8 @@ CREATE POLICY auth_mfa_pending_all ON auth_mfa_pending FOR ALL
 -- approver-role member, active delegate, routing assignee by user/role/team, recorded decider). The
 -- gateway's own scope check stays the fine-grained rule; this is the wall behind it. Review-role rows
 -- (ADR-0168) are visible to any principal because review-role membership lives in JSON configuration,
--- not a table: a known widening, recorded in ADR-0233 and narrowed in a later batch.
--- SHAPE (measured, ADR-0233): no correlated subquery. Delegators, groups and the principal's assigned or
+-- not a table: a known widening, recorded in ADR-0234 and narrowed in a later batch.
+-- SHAPE (measured, ADR-0234): no correlated subquery. Delegators, groups and the principal's assigned or
 -- decided approval ids are computed ONCE per statement (initplans and one hashed subplan), so each row costs
 -- a few comparisons and a hash probe. The first, correlated draft cost 10-17x on a 100k-row scan.
 ALTER TABLE approvals ENABLE ROW LEVEL SECURITY;

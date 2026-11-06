@@ -1,4 +1,4 @@
-// ADR-0233 — the measured cost of row-level security, slice 1.
+// ADR-0234 — the measured cost of row-level security, slice 1.
 //
 // Usage (a Postgres 16 with a scratch database you may fill):
 //   pnpm --filter @regulait/db build

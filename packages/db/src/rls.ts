@@ -1,7 +1,7 @@
 /**
- * ADR-0233 (PENDING S7) — the row-level security transaction layer.
+ * ADR-0234 (PENDING S7) — the row-level security transaction layer.
  *
- * Migration 0260 enables and FORCES row-level security on the slice-1 tables. Every policy reads two
+ * Migration 0265 enables and FORCES row-level security on the slice-1 tables. Every policy reads two
  * TRANSACTION-LOCAL settings:
  *
  *   regulait.user_id         the authenticated principal (a user id), or unset
@@ -23,7 +23,7 @@
  * What RLS here defends against: a missing or wrong application predicate (an object-level check that was
  * skipped, a WHERE clause that was dropped). What it does NOT defend against: code that can run arbitrary
  * SQL on the connection, which can set the same settings. Parameterised queries (ADR-0200 item 1) stay the
- * control for that. ADR-0233 says so in its threat model.
+ * control for that. ADR-0234 says so in its threat model.
  */
 import { sql } from "drizzle-orm";
 
@@ -31,11 +31,11 @@ import { sql } from "drizzle-orm";
 export const RLS_PRINCIPAL_SETTING = "regulait.user_id";
 /** the transaction-local setting that carries an explicit system reason */
 export const RLS_SYSTEM_SETTING = "regulait.system_context";
-/** the non-owner runtime role every wrapped transaction runs as (migration 0260) */
+/** the non-owner runtime role every wrapped transaction runs as (migration 0265) */
 export const RLS_APP_ROLE = "regulait_app";
 
 /**
- * The CLOSED registry of system reasons. Identical to the array in migration 0260's
+ * The CLOSED registry of system reasons. Identical to the array in migration 0265's
  * `regulait_rls_system_reason()` (a test compares them); the database raises on any other value.
  *
  * Each reason is reachable only from the tables whose policies name it, so a system context is never a
@@ -52,7 +52,7 @@ export const RLS_SYSTEM_REASONS = [
   "audit_verify",
   /** expiry, SLA and routing sweeps that act on every approval: approvals (all) */
   "approval_maintenance",
-  /** entered only by the SET clause of the 0260 helper functions: users (read) */
+  /** entered only by the SET clause of the 0265 helper functions: users (read) */
   "rls_membership",
   /** a later migration that touches rows of an RLS table: every slice-1 table */
   "migration",
@@ -101,7 +101,7 @@ const systemContextCounts = new Map<RlsCallerSystemReason, number>();
 /**
  * Wire the audit sink for system-context entries (the gateway passes its logger or metrics). A per-entry
  * audit ROW is deliberately not written: `authenticate` runs on every request, and an audit row per request
- * would drown the chain. ADR-0233 decision 5.
+ * would drown the chain. ADR-0234 decision 5.
  */
 export function setRlsSystemContextSink(sink: ((entry: RlsSystemContextEntry) => void) | null): void {
   systemContextSink = sink;

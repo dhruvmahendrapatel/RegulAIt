@@ -234,7 +234,7 @@ export async function appendChainedAuditRows(
   // Serialize at the tip. Everything from here to COMMIT is the critical
   // section; it is deliberately as short as possible.
   //
-  // ADR-0233: the same statement enters the `audit_chain` row-level security context. Under a principal
+  // ADR-0234: the same statement enters the `audit_chain` row-level security context. Under a principal
   // (`withPrincipal`), audit_log shows a non-admin only its own rows, and a tip read through that filter
   // would chain onto the caller's last row instead of the global tip: a fork. The previous context is read
   // in the same statement and restored right after the tip and clock reads, so the widening covers exactly
@@ -265,7 +265,7 @@ export async function appendChainedAuditRows(
   // (`auditChainClock`), `at` never decreases along `seq`. Truncated to milliseconds in SQL (what a `Date`
   // holds), so the value hashed below is the value stored.
   const dbNow = await auditChainClock(tx);
-  // ADR-0233: leave `audit_chain`, back to the caller's context (the insert below runs under it)
+  // ADR-0234: leave `audit_chain`, back to the caller's context (the insert below runs under it)
   await tx.execute(sql`select set_config(${RLS_SYSTEM_SETTING}, ${prevRlsContext}, true)`);
 
   let prevHash = tip[0]?.rowHash ?? AUDIT_GENESIS_PREV_HASH;
