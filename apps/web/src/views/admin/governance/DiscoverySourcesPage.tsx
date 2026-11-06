@@ -19,7 +19,7 @@
  *    scope has been verified.
  */
 import { useEffect, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
 import { fmtDateTime, humanize, plural } from "../../../api/format";
@@ -27,15 +27,14 @@ import ds from "./discoverySources.module.css";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Fieldset, InfoButton, Input, RowActions, Select, Table, Textarea } from "../../../ui/kit";
-import { FoldTable } from "../../../ui/fold";
 import { QueryGate, Stat, useAction } from "../adminKit";
 import v from "../../views.module.css";
 import FederationCard from "./FederationCard";
 import { EndpointImportCard } from "./EndpointImportCard";
 import { EndpointAgentCard } from "./EndpointAgentCard";
+import { FoldTable } from "../../../ui/fold";
+import { DISCOVERY_SOURCES_PATH, ListPreview, runColumns, runsAttention, usePreviewPage, type PreviewSource } from "./discoveryLists";
 import {
-  couldNotRead,
-  describeGap,
   describeSchedule,
   describeScope,
   editablePublicConfig,
@@ -55,9 +54,7 @@ import {
   type ScannerKindView,
 } from "./discoverySourcesModel";
 
-const nowrap = { whiteSpace: "nowrap" } as const;
-/** the page size the Recent runs query asks for (`limit=50`, kept inline in the path) */
-const RUNS_LIMIT = 50;
+const RUNS_PREVIEW: PreviewSource = { endpoint: "/v1/discovery/runs", legacyKey: "runs", sort: { key: "when", dir: "desc" }, queryKey: ["admin", "discovery", "runs"], count: "estimate" };
 const RUN_TONE = { queued: "neutral", running: "info", succeeded: "ok", failed: "danger" } as const;
 
 interface SourceForm {
@@ -80,19 +77,17 @@ interface CredentialForm {
 
 export default function DiscoverySourcesPage() {
   const act = useAction();
+  const queryClient = useQueryClient();
   const scanners = useQuery({ queryKey: ["admin", "discovery", "scanners"], queryFn: () => api.get<{ kinds: ScannerKindView[] }>("/v1/discovery/scanners") });
   const sources = useQuery({
     queryKey: ["admin", "discovery", "sources"],
     queryFn: () => api.get<{ sources: DiscoverySourceView[]; posture: DiscoveryPostureView }>("/v1/discovery/sources"),
   });
-  const runs = useQuery({ queryKey: ["admin", "discovery", "runs"], queryFn: () => api.get<{ runs: DiscoveryRunView[] }>("/v1/discovery/runs?limit=50") });
-  // X6b: a collapsed "Recent runs" still says when a scan failed
-  const failedRuns = (runs.data?.runs ?? []).filter((r) => r.status === "failed").length;
-  // A15: the Recent runs fold header (and its count) waits for the runs read, so a pending or failed read never says
-  // "0 runs"; until then the table shows its skeleton, or the error with Retry
-  const runsFold = runs.data
-    ? ({ contain: true, foldable: true, startCollapsed: true, count: runs.data.runs.length } as const)
-    : ({ contain: true } as const);
+  // P3: the overview previews the newest runs (the full list has its own page); the same small page carries the
+  // total and the failed count across every run, for the preview's heading and the schedule line
+  const runs = usePreviewPage<DiscoveryRunView>(RUNS_PREVIEW);
+  const runTotal = runs.data?.total ?? null;
+  const runTotalText = runTotal === null ? "—" : runs.data?.totalIsEstimate ? `${runTotal.toLocaleString("en-GB")}+ recent runs` : plural(runTotal, "recent run");
   const settings = useQuery({ queryKey: ["admin", "discovery", "settings"], queryFn: () => api.get<DiscoverySettingsView>("/v1/discovery/settings") });
 
   const [form, setForm] = useState<SourceForm>(EMPTY_FORM);
@@ -110,7 +105,7 @@ export default function DiscoverySourcesPage() {
   // a psn: link lands on the prefilled Pseudonym field: scrolled into view and focused, once the page has rendered
   const pseudonymRef = useRef<HTMLInputElement>(null);
   const linkedPseudonym = params.get("pseudonym");
-  const pageReady = !sources.isPending && !scanners.isPending && !sources.error && !scanners.error;
+  const pageReady = !sources.isPending && !scanners.isPending && !sources.error && !scanners.error && !runs.isPending;
   useEffect(() => {
     const el = pseudonymRef.current;
     if (!linkedPseudonym || !pageReady || !el) return;
@@ -128,7 +123,7 @@ export default function DiscoverySourcesPage() {
   const posture = sources.data?.posture;
   const list = sources.data?.sources ?? [];
   const refetchAll = async () => {
-    await Promise.all([sources.refetch(), runs.refetch(), settings.refetch()]);
+    await Promise.all([sources.refetch(), queryClient.invalidateQueries({ queryKey: ["admin", "discovery", "runs"] }), settings.refetch()]);
   };
 
   const submitSource = () => {
@@ -249,7 +244,7 @@ export default function DiscoverySourcesPage() {
             </li>
             <li>
               <span className={ds.stepNo} aria-hidden="true">2</span>
-              <span><strong>Scan on a schedule</strong><span className={v.faint}>{runs.data ? (runs.data.runs.length >= RUNS_LIMIT ? `${RUNS_LIMIT}+ recent runs` : plural(runs.data.runs.length, "recent run")) : "—"}</span></span>
+              <span><strong>Scan on a schedule</strong><span className={v.faint}>{runTotalText}</span></span>
             </li>
             <li>
               <span className={ds.stepNo} aria-hidden="true">3</span>
@@ -485,68 +480,19 @@ export default function DiscoverySourcesPage() {
 
           <EndpointAgentCard sources={list} />
 
-          {/* F20 (#453): Recent runs takes the full width, and Reveal a pseudonym its own row below it */}
-          <Card
+          {/* P3: the newest runs, with failures counted in the heading; every run is on its own page */}
+          <ListPreview<DiscoveryRunView>
+            {...RUNS_PREVIEW}
             title="Recent runs"
-            {...runsFold}
-            // the folding card mounts fresh once the runs are read, so it starts collapsed (a fold reads its start once)
-            key={runs.data ? "runs" : "runs-pending"}
-            // L4: the list is the latest RUNS_LIMIT runs; a full page means older runs exist
-            countIsLimit={(runs.data?.runs.length ?? 0) >= RUNS_LIMIT}
-            countNoun={["run", "runs"]}
-            attention={failedRuns > 0 ? <Badge tone="danger">{failedRuns} failed</Badge> : undefined}
-          >
-            <FoldTable<DiscoveryRunView>
-              rows={runs.data?.runs}
-              loading={runs.isPending}
-              error={runs.error}
-              onRetry={() => void runs.refetch()}
-              rowKey={(r) => r.id}
-              empty={<EmptyState title="No scan has run" body="Runs appear here once an enabled source is scanned." />}
-              columns={[
-                // below 1000 px of table width, Queued folds under Source, Observed / matched under Findings and Reads
-                // under Status; on a phone Findings and Catalogue gaps fold under Source too
-                { key: "source", header: "Source", render: (r) => list.find((s) => s.id === r.sourceId)?.name ?? r.sourceId },
-                { key: "status", header: "Status", render: (r) => (
-                  <>
-                    <Badge tone={RUN_TONE[r.status]}>{r.status}</Badge>
-                    {/* A20: the reason in words, the code as secondary text under it */}
-                    {r.errorCode && (
-                      <>
-                        <div>{humanize(r.errorCode)}{r.errorDetail ? `: ${r.errorDetail}` : ""}</div>
-                        <div className={`${v.faint} ${v.mono}`} style={{ overflowWrap: "anywhere" }}>{r.errorCode}</div>
-                      </>
-                    )}
-                  </>
-                ) },
-                { key: "when", header: "Queued", fold: { md: "source" }, render: (r) => <><span style={nowrap}>{fmtDateTime(r.createdAt)}</span><div className={v.faint}>{r.trigger === "schedule" ? "Scheduled" : "Manual"} · attempt {r.attempt}</div></> },
-                { key: "counts", header: "Observed / matched", fold: { md: "findings" }, render: (r) => `${r.observed} / ${r.matched}` },
-                { key: "findings", header: "Findings", fold: { sm: "source" }, render: (r) => `${r.findingsCreated} new, ${r.findingsUpdated} updated` },
-                {
-                  key: "gaps",
-                  header: "Catalogue gaps",
-                  fold: { sm: "source" },
-                  render: (r) =>
-                    r.catalogueGaps.length ? (
-                      <div className={v.stackTight}>
-                        {r.catalogueGaps.map((g) => {
-                          const d = describeGap(g);
-                          return (
-                            <div key={d.code} data-testid="catalogue-gap">
-                              {d.kind}: <strong>{d.name}</strong>
-                              <div className={`${v.faint} ${v.mono}`}>{d.code}</div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    ) : (
-                      "none"
-                    ),
-                },
-                { key: "reads", header: "Reads", fold: { md: "status" }, render: (r) => couldNotRead(r.readOutcomes) ?? <span className={v.faint} style={nowrap}>all read</span> },
-              ]}
-            />
-          </Card>
+            testId="preview-discovery-runs"
+            noun={["run", "runs"]}
+            attention={runsAttention}
+            columns={runColumns((id) => list.find((s) => s.id === id)?.name ?? id).filter((c) => c.main)}
+            rowKey={(r) => r.id}
+            viewAll={`${DISCOVERY_SOURCES_PATH}/runs`}
+            table={FoldTable}
+            empty={<EmptyState title="No scan has run" body="Runs appear here once an enabled source is scanned." />}
+          />
 
           <Card title="Reveal a pseudonym" actions={<Badge tone="info">Audited · step-up</Badge>}>
             <div className={v.stack}>

@@ -171,10 +171,11 @@ test.describe("ADR-0182 S5: governance alerts — owner, SLA, ticket and the sug
   test("the list shows the SLA chips and owners; a KRI's suggestion files nothing until a person proposes it", async ({ page }) => {
     const cap = await mockApi(page);
     await page.goto("/ui/admin/governance/alerts");
-    const halt = page.getByRole("button", { name: /Claims errors: error rate/ });
+    const halt = page.getByRole("link", { name: /Claims errors: error rate/ });
     await expect(halt).toContainText("SLA due soon");
-    await expect(halt).toContainText("owner Sam Steward");
-    const late = page.getByRole("button", { name: /depends on Acme Models/ });
+    // the Owner column names the owner
+    await expect(halt).toContainText("Sam Steward");
+    const late = page.getByRole("link", { name: /depends on Acme Models/ });
     await expect(late).toContainText("SLA breached");
     await expect(late).toContainText("unowned");
 
@@ -201,9 +202,9 @@ test.describe("ADR-0182 S5: governance alerts — owner, SLA, ticket and the sug
     await mockApi(page);
     await page.goto("/ui/admin/governance/alerts");
     // the same en-GB form as every other date (fmtDateTime), never the UTC string ("Sat, 24 Oct 2026 04:07:26 GMT")
-    const halt = page.getByRole("button", { name: /Claims errors: error rate/ });
+    const halt = page.getByRole("link", { name: /Claims errors: error rate/ });
     // D3 alerts-inbox-05 (A8): the due time is printed on the row, never only in a hover title
-    await expect(halt).toContainText(/ · due \d{1,2} [A-Z][a-z]{2} \d{4}, \d{2}:\d{2}/);
+    await expect(halt).toContainText(/due \d{1,2} [A-Z][a-z]{2} \d{4}, \d{2}:\d{2}/);
     await expect(halt.getByText("SLA due soon")).not.toHaveAttribute("title", /.*/);
     await halt.click();
     const ownership = page.getByTestId("alert-detail").getByTestId("alert-ownership");
@@ -214,7 +215,7 @@ test.describe("ADR-0182 S5: governance alerts — owner, SLA, ticket and the sug
   test("an admin reassigns the owner and files one work item", async ({ page }) => {
     const cap = await mockApi(page);
     await page.goto("/ui/admin/governance/alerts");
-    await page.getByRole("button", { name: /Claims errors: error rate/ }).click();
+    await page.getByRole("link", { name: /Claims errors: error rate/ }).click();
     const own = page.getByTestId("alert-ownership");
     await own.getByLabel("Assign to").selectOption("u2");
     await own.getByRole("button", { name: "Assign" }).click();
@@ -224,7 +225,7 @@ test.describe("ADR-0182 S5: governance alerts — owner, SLA, ticket and the sug
     await expect.poll(() => cap.ticketPosts).toEqual([{ connectionId: "c1" }]);
 
     // an episode already filed shows its item and offers no second one
-    await page.getByRole("button", { name: /depends on Acme Models/ }).click();
+    await page.getByRole("link", { name: /depends on Acme Models/ }).click();
     const filed = page.getByTestId("alert-ticket");
     await expect(filed.getByRole("link", { name: "GOV-12" })).toHaveAttribute("href", "https://pm.example.test/GOV-12");
     await expect(page.getByRole("button", { name: "File work item" })).toHaveCount(0);
@@ -304,7 +305,7 @@ test.describe("Design D3 and FS-19/FS-42/FS-46: the alerts page on the demo path
     await page.route("**/v1/governance/alerts/halt/remediation", (route) => json(route, { ...remediation("halt"), proposals }));
     await page.route((url) => url.pathname === "/v1/governance/remediations", (route) => json(route, { proposals: proposals.map((p) => ({ ...p, alertId: "halt", params: {} })) }));
     await page.goto("/ui/admin/governance/alerts");
-    await page.getByRole("button", { name: /Claims errors: error rate/ }).click();
+    await page.getByRole("link", { name: /Claims errors: error rate/ }).click();
     const drawer = page.getByTestId("alert-detail");
     await expect(drawer.getByRole("link", { name: "Report an incident from this alert" })).toHaveAttribute("href", /\/incidents\?new=1&detectionSource=monitor_alert&sourceRef=halt$/);
     await expect(drawer.getByRole("link", { name: "Open incident", exact: true })).toHaveCount(0);

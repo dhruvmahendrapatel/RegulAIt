@@ -818,23 +818,26 @@ function ApprovalsTab({ approvals, userName }: { approvals: OverviewResponse["ap
   ]} />}</Card>;
 }
 
+/** the Audit tab is a preview: the newest few rows and the count; the audit log, filtered to this use case, holds every row */
+export const AUDIT_PREVIEW_ROWS = 5;
+
 export function AuditTab({ rows, total, useCaseId, isAdmin }: { rows: OverviewResponse["audit"]; total: number | undefined; useCaseId: string; isAdmin: boolean }) {
   // owner decision on #453 (2026-10-20): the full trail of this one use case, deep-linked into the audit log's filter
   const trail = `/admin/audit?objectType=ai_use_case&objectId=${encodeURIComponent(useCaseId)}`;
-  const more = total !== undefined ? total > rows.length : rows.length >= AUDIT_ROW_LIMIT;
+  const shown = rows.slice(0, AUDIT_PREVIEW_ROWS);
+  // the overview returns the newest AUDIT_ROW_LIMIT rows; without a total, a full page means older rows may exist
+  const of = total !== undefined ? total.toLocaleString("en-GB") : rows.length >= AUDIT_ROW_LIMIT ? `${AUDIT_ROW_LIMIT}+` : String(rows.length);
   return (
     <Card title="Recent use-case audit evidence">
-      {rows.length === 0 ? <EmptyState title="No audit rows returned" body="Every registration, review and lifecycle change on this use case writes an audit row. None has been recorded yet." /> : <Table rows={rows} rowKey={(row) => String(row.id)} columns={[{ key: "at", header: "When", render: (row) => <span style={{ whiteSpace: "nowrap" }}>{ago(row.at)}</span> }, { key: "rule", header: "Event", render: (row) => <span style={{ whiteSpace: "nowrap" }}>{humanize(row.ruleId)}</span> }, { key: "effect", header: "Effect", render: (row) => row.effect === "allow" ? <span className={v.dim}>{humanize(row.effect)}</span> : <Badge tone={row.effect === "deny" ? "danger" : "warn"}>{humanize(row.effect)}</Badge> }, { key: "reason", header: "Reason", render: (row) => row.reason }]} />}
-      {more ? (
+      {shown.length === 0 ? <EmptyState title="No audit rows returned" body="Every registration, review and lifecycle change on this use case writes an audit row. None has been recorded yet." /> : <Table rows={shown} rowKey={(row) => String(row.id)} columns={[{ key: "at", header: "When", render: (row) => <span style={{ whiteSpace: "nowrap" }}>{ago(row.at)}</span> }, { key: "rule", header: "Event", render: (row) => <span style={{ whiteSpace: "nowrap" }}>{humanize(row.ruleId)}</span> }, { key: "effect", header: "Effect", render: (row) => row.effect === "allow" ? <span className={v.dim}>{humanize(row.effect)}</span> : <Badge tone={row.effect === "deny" ? "danger" : "warn"}>{humanize(row.effect)}</Badge> }, { key: "reason", header: "Reason", render: (row) => row.reason }]} />}
+      {shown.length > 0 ? (
         <p className={v.dim} data-testid="use-case-audit-partial">
-          {total !== undefined
-            ? `Showing the newest ${rows.length} of ${total} rows. This use case's full audit trail, and its CSV export, hold every row.`
-            : `Showing the newest ${AUDIT_ROW_LIMIT} rows; older rows may exist. The full audit log and its CSV export hold every row.`}
+          {of === String(shown.length) ? `Showing all ${shown.length} ${shown.length === 1 ? "row" : "rows"}.` : `Showing the newest ${shown.length} of ${of} rows.`}
         </p>
       ) : null}
       {/* #465 review L2: the audit log is an admin surface, so only an admin is offered a link into it */}
       {isAdmin ? (
-        <p><Link to={trail}>Open this use case&apos;s full audit trail</Link></p>
+        <p><Link to={trail} aria-label="View all of this use case's audit trail">View all →</Link></p>
       ) : (
         <p className={v.dim} data-testid="use-case-audit-admin-only">The full audit trail and its CSV export are open to administrators. Ask an administrator for this use case&apos;s full trail.</p>
       )}
