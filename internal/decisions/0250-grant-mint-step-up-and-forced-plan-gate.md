@@ -99,6 +99,11 @@ flow was found that needs execute during planning: the seed leaves plan-only bef
     `tools/call`.
   - The project lookup filters `workflow_instances` by `project_id` and non-terminal status without a dedicated index
     (no migration in this batch); add a partial index if the table grows large.
+- Test setup: about 180 gateway suites mint grants in setup with the bootstrap credential, which passes a step-up only
+  while no admin can give one, and the shared test database may hold such an admin left by an earlier file. The
+  setup file `testing/bootstrap-grant-mint.ts` repeats such a mint once inside `relaxStepUpAround` (what suites already
+  do by hand for egress relaxations), and ONLY when the refusal is the bootstrap credential's own; API-key and session
+  mints, and every other refusal, reach the test unchanged.
 - Tests: `adr0250-grant-mint-step-up.test.ts` (all eight routes: admin API key refused, no grant refused, another
   mint's grant refused and unspent, the exact grant allowed and spent); `plan-only.test.ts` (the opt-in regression test
   is replaced by one asserting the refusal; naming another instance does not get round a planning one; the run path;
