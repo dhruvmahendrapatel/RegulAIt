@@ -5,19 +5,20 @@
  *  - a rate card with its entries (`GET /v1/billing/rate-cards/:id`);
  *  - one statement, scope-checked by the gateway (`GET /v1/billing/statements/:id`);
  *  - the full lists: every rate card (`GET /v1/billing/rate-cards`), every
- *    period (`GET /v1/billing/periods`) and statements filtered by period with
- *    the route's own limit (`GET /v1/billing/statements?periodId=&limit=`).
+ *    period (`GET /v1/billing/periods`) and every statement, filtered by period
+ *    and paged by the shared list control (`GET /v1/billing/statements?periodId=`).
  *
  * The lists load when their tab is opened, not with the page.
  */
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago, fmtAt, fmtUsd } from "../../../api/format";
 import { Badge, Button, Card, EmptyState, Field, Select, Table, Tabs, tabIds } from "../../../ui/kit";
 import { KV } from "../adminKit";
 import { DetailDialog } from "../DetailDialog";
-import { BILLING_REFUSALS, STATEMENT_LIMITS, statementHeadline, statementLines, type StatementLine } from "./billingDetailModel";
+import { DataList } from "../../../ui/DataList";
+import { BILLING_REFUSALS, statementHeadline, statementLines, type StatementLine } from "./billingDetailModel";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -196,7 +197,6 @@ const PREFIX = "billing-history";
 export function BillingHistoryCard() {
   const [tab, setTab] = useState<"cards" | "periods" | "statements">("statements");
   const [periodId, setPeriodId] = useState("");
-  const [limit, setLimit] = useState<number>(STATEMENT_LIMITS[0]);
   const [openCard, setOpenCard] = useState<string | null>(null);
   const [openStatement, setOpenStatement] = useState<string | null>(null);
 
@@ -211,14 +211,7 @@ export function BillingHistoryCard() {
     enabled: tab === "periods" || tab === "statements",
     queryFn: () => api.get<{ periods: PeriodRow[]; note: string }>("/v1/billing/periods"),
   });
-  const statements = useQuery({
-    queryKey: ["admin", "billing-statements-all", periodId, limit],
-    enabled: tab === "statements",
-    queryFn: () =>
-      api.get<{ statements: StatementRow[]; disclaimer: string }>(
-        `/v1/billing/statements?limit=${limit}${periodId ? `&periodId=${encodeURIComponent(periodId)}` : ""}`,
-      ),
-  });
+  const statementFilters = useMemo(() => ({ periodId: periodId || undefined }), [periodId]);
   const periodName = new Map((periods.data?.periods ?? []).map((p) => [p.id, periodLabel(p)]));
   const panel = tabIds(PREFIX, tab);
 
@@ -250,33 +243,29 @@ export function BillingHistoryCard() {
                     ))}
                   </Select>
                 </Field>
-                <Field label="Show at most">
-                  <Select value={String(limit)} onChange={(e) => setLimit(Number(e.target.value))}>
-                    {STATEMENT_LIMITS.map((n) => (
-                      <option key={n} value={n}>
-                        {n}
-                      </option>
-                    ))}
-                  </Select>
-                </Field>
               </div>
-              <Table<StatementRow>
-                rows={statements.data?.statements}
-                loading={statements.isLoading}
-                error={statements.error}
-                onRetry={() => void statements.refetch()}
+              <DataList<StatementRow>
+                listId="billing-statements"
+                noun="statements"
+                endpoint="/v1/billing/statements"
+                exportPath="/v1/billing/statements/export.xlsx"
+                queryKey={["admin", "billing-statements-all", "list"]}
+                legacyKey="statements"
+                filters={statementFilters}
+                defaultSort={{ key: "g", dir: "desc" }}
                 rowKey={(s) => s.id}
                 empty={<EmptyState title="No statements match" />}
                 columns={[
-                  { key: "p", header: "Period", render: (s) => periodName.get(s.periodId) ?? "—" },
-                  { key: "v", header: "Version", render: (s) => `v${s.version}` },
-                  { key: "st", header: "Status", render: (s) => <Badge tone={s.status === "issued" ? "ok" : s.status === "superseded" ? "neutral" : "info"}>{s.status}</Badge> },
-                  { key: "rc", header: "Rate card", render: (s) => `${s.rateCardName} v${s.rateCardVersion}` },
-                  { key: "t", header: "Total", align: "right", render: (s) => fmtUsd(s.totalUsd) },
-                  { key: "u", header: "Unpriced", render: (s) => (s.unpricedEventCount > 0 ? <Badge tone="warn">{s.unpricedEventCount}</Badge> : 0) },
-                  { key: "g", header: "Cut", render: (s) => ago(s.generatedAt) },
+                  { key: "p", main: true, sortable: true, header: "Period", render: (s) => periodName.get(s.periodId) ?? "—" },
+                  { key: "v", main: true, sortable: true, header: "Version", render: (s) => `v${s.version}` },
+                  { key: "st", main: true, sortable: true, required: "Status is always shown", header: "Status", render: (s) => <Badge tone={s.status === "issued" ? "ok" : s.status === "superseded" ? "neutral" : "info"}>{s.status}</Badge> },
+                  { key: "rc", main: true, sortable: true, header: "Rate card", render: (s) => `${s.rateCardName} v${s.rateCardVersion}` },
+                  { key: "t", main: true, sortable: true, header: "Total", align: "right", render: (s) => fmtUsd(s.totalUsd) },
+                  { key: "u", main: true, sortable: true, required: "Unpriced usage is always shown", header: "Unpriced", render: (s) => (s.unpricedEventCount > 0 ? <Badge tone="warn">{s.unpricedEventCount}</Badge> : 0) },
+                  { key: "g", main: true, sortable: true, header: "Cut", render: (s) => ago(s.generatedAt) },
                   {
                     key: "o",
+                    action: true,
                     header: "",
                     srHeader: "Actions",
                     align: "right",
@@ -286,11 +275,10 @@ export function BillingHistoryCard() {
                       </Button>
                     ),
                   },
+                  { key: "issued", header: "Issued", sortable: true, render: (s) => (s.issuedAt ? ago(s.issuedAt) : "—") },
+                  { key: "rating", header: "Rating", sortable: true, render: (s) => s.ratingMode },
                 ]}
               />
-              {(statements.data?.statements?.length ?? 0) >= limit && (
-                <p className={v.faint}>Showing the newest {limit}. Choose a period, or raise the limit, for older statements.</p>
-              )}
             </>
           )}
           {tab === "periods" && (

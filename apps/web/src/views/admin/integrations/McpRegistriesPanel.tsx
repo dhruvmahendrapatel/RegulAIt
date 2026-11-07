@@ -14,12 +14,13 @@
  * Admin only: none of these routes is in the gateway's NON_ADMIN_ROUTES, and
  * the page sits under RequireAdmin.
  */
-import { useId, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ApiError, api } from "../../../api/client";
 import { ago, fmtAt } from "../../../api/format";
 import { Badge, Button, Card, ConfirmModal, EmptyState, Field, IdChip, Input, Modal, Select, Table } from "../../../ui/kit";
 import { useAction } from "../adminKit";
+import { DataList } from "../../../ui/DataList";
 import { McpServerNextSteps } from "./McpServerAdmission";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import {
@@ -35,7 +36,6 @@ import {
   updateRegistryBody,
   type CreateRegistryBody,
   type McpRegistry,
-  type McpRegistryEntries,
   type McpRegistryEntry,
   type McpRegistryList,
   type PrivateRanges,
@@ -330,11 +330,15 @@ function EditRegistryDialog(props: { registry: McpRegistry; onClose: () => void 
 }
 
 function RegistryEntriesCard(props: { registry: McpRegistry }) {
-  const q = useQuery({
-    queryKey: mcpRegistryKeys.entries(props.registry.id),
-    queryFn: () => registryCall(() => api.get<McpRegistryEntries>(`/v1/mcp-registries/${props.registry.id}/entries`)),
-  });
   const act = useAction();
+  // the search runs on the server, a moment after typing stops
+  const [search, setSearch] = useState("");
+  const [q, setQ] = useState("");
+  useEffect(() => {
+    const t = window.setTimeout(() => setQ(search.trim()), 300);
+    return () => window.clearTimeout(t);
+  }, [search]);
+  const filters = useMemo(() => ({ q: q || undefined }), [q]);
   const [importing, setImporting] = useState<McpRegistryEntry | null>(null);
   const [imported, setImported] = useState<RegistryImportResult | null>(null);
   return (
@@ -343,17 +347,32 @@ function RegistryEntriesCard(props: { registry: McpRegistry }) {
         What this registry says exists. A row here is not a server. Importing one creates a single MCP server, unscanned, with no tools and no
         grants: nobody can call it until an admin grants it, and its first connect is scanned for admission.
       </p>
-      <Table<McpRegistryEntry>
-        rows={q.data?.entries ?? []}
+      <Field label="Search the catalogue">
+        <Input type="search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Name, title or endpoint" />
+      </Field>
+      <DataList<McpRegistryEntry>
+        listId="mcp-registry-entries"
+        noun="catalogue entries"
+        endpoint={`/v1/mcp-registries/${props.registry.id}/entries`}
+        exportPath={`/v1/mcp-registries/${props.registry.id}/entries/export.xlsx`}
+        queryKey={[...mcpRegistryKeys.entries(props.registry.id), "list"]}
+        legacyKey="entries"
+        filters={filters}
+        defaultSort={{ key: "name", dir: "asc" }}
         rowKey={(e) => e.id}
-        loading={q.isLoading}
-        error={q.error}
-        onRetry={() => void q.refetch()}
-        empty={<EmptyState title="The catalogue is empty" body="Sync the registry to pull its listing. A disabled registry can still be synced by hand." />}
+        empty={
+          q ? (
+            <EmptyState title="No entries match" body="Try a different search." />
+          ) : (
+            <EmptyState title="The catalogue is empty" body="Sync the registry to pull its listing. A disabled registry can still be synced by hand." />
+          )
+        }
         columns={[
           {
             key: "name",
             header: "Entry",
+            main: true,
+            sortable: true,
             render: (e) => (
               <span>
                 <span className={v.mono}>{e.upstreamName}</span> <span className={v.faint}>v{e.upstreamVersion}</span>
@@ -364,12 +383,17 @@ function RegistryEntriesCard(props: { registry: McpRegistry }) {
           {
             key: "kind",
             header: "Kind",
+            main: true,
+            sortable: true,
             render: (e) => (e.kind === "remote" ? <Badge tone="info">remote · {e.remoteTransport ?? "transport not reported"}</Badge> : <Badge tone="neutral">catalogue only</Badge>),
           },
-          { key: "endpoint", header: "Endpoint", render: (e) => (e.remoteUrl ? <span className={v.mono}>{e.remoteUrl}</span> : <span className={v.faint}>none listed</span>) },
+          { key: "endpoint", header: "Endpoint", main: true, sortable: true, render: (e) => (e.remoteUrl ? <span className={v.mono}>{e.remoteUrl}</span> : <span className={v.faint}>none listed</span>) },
           {
             key: "state",
             header: "State",
+            main: true,
+            sortable: true,
+            required: "Conflicts, moved endpoints and imports are always shown",
             render: (e) => (
               <span className={v.stackTight}>
                 {e.upstreamStatus && e.upstreamStatus !== "active" && <Badge tone="warn">{e.upstreamStatus}</Badge>}
@@ -391,6 +415,7 @@ function RegistryEntriesCard(props: { registry: McpRegistry }) {
           {
             key: "import",
             header: "Import",
+            action: true,
             align: "right",
             render: (e) => {
               const can = entryImportability(e);
@@ -401,6 +426,7 @@ function RegistryEntriesCard(props: { registry: McpRegistry }) {
               );
             },
           },
+          { key: "lastSeen", header: "Last seen", sortable: true, render: (e) => (e.lastSeenAt ? ago(e.lastSeenAt) : "—") },
         ]}
       />
       {act.error && (
@@ -437,7 +463,6 @@ function RegistryEntriesCard(props: { registry: McpRegistry }) {
             // an import from a registry that allows private ranges is a relaxation the gateway steps up (settings_relax)
             const out = await registryCall(() => withStepUp((h) => stepUpApi.post<RegistryImportResult>(`/v1/mcp-registries/entries/${e.id}/import`, {}, h)), "import");
             setImported(out);
-            await q.refetch();
           }, `Imported ${e.upstreamName}. Nobody can use it until granted.`);
         }}
       />
