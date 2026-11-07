@@ -149,6 +149,8 @@ test("a refused save is shown inline and the page goes back to the palette it ha
 test("Settings › Organisation › Themes saves the default and the lock", async ({ page }) => {
   const gw = mockGateway(page, { org: { defaultPalette: "aurora", locked: false }, isAdmin: true });
   await page.goto("/ui/admin/organization");
+  // I-2 rollout H: the themes card lives on the Themes tab
+  await page.getByRole("tablist", { name: "Organisation settings" }).getByRole("tab", { name: "Themes", exact: true }).click();
   const card = page.getByTestId("org-themes");
   await expect(card).toBeVisible();
   await card.getByLabel("Organisation default theme").selectOption("evergreen");
