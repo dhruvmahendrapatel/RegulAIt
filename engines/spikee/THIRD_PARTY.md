@@ -31,7 +31,6 @@ admitted for the build, NOT a recorded owner acceptance for spikee.
 | Subject | Licence | Garak decision |
 |---|---|---|
 | `python` (the base image's CPython runtime) | PSF-2.0 | 193 |
-| `aiohappyeyeballs` | PSF-2.0 | 193 |
 | `typing_extensions` | PSF-2.0 | 193 |
 | `certifi` | MPL-2.0 (only while unmodified: RECORD hash check) | 193 |
 | `tqdm` | MPL-2.0 AND MIT (MPL only while unmodified) | 193 |
@@ -40,41 +39,33 @@ admitted for the build, NOT a recorded owner acceptance for spikee.
 | `numpy.libs/libgfortran` | GPL-3.0-or-later WITH GCC-exception-3.1 | 106 |
 | `numpy.libs/libquadmath` | LGPL-2.1-or-later | 106 |
 
-Not scanned by the gate (CI's image scan covers them): the shared objects `pyarrow` ships inside its own package
-directory (Arrow and its statically linked dependencies, listed in pyarrow's LICENSE.txt and NOTICE.txt), and the base
-image's OS layer.
+Not scanned by the gate (CI's image scan covers it): the base image's OS layer.
 
-## The Python closure (all 70 distributions, as the gate reads them)
+**Not installed (2026-11-07, fsspec CVE-2026-104851).** spikee declares `datasets==4.8.4`, which caps `fsspec` at the
+vulnerable 2026.2.0, but no module spikee runs imports it (only the Hub fetch scripts the image removes). So `datasets`
+and the 18 distributions only it needs are not in the lockfile, and the build drops the requirement from spikee's
+installed metadata (`drop-unused-requirement.py`, pinned to the reviewed METADATA's sha256) and asserts they are absent.
+
+## The Python closure (all 51 distributions, as the gate reads them)
 
 | Distribution | Version | Licence |
 |---|---|---|
-| `aiohappyeyeballs` | `2.7.1` | PSF-2.0 |
-| `aiohttp` | `3.14.5` | Apache-2.0 AND MIT |
-| `aiosignal` | `1.4.0` | Apache-2.0 |
 | `annotated-types` | `0.8.0` | MIT |
 | `anthropic` | `0.125.0` | MIT |
 | `any-llm-sdk` | `1.43.0` | Apache-2.0 |
 | `anyio` | `4.16.0` | MIT |
-| `attrs` | `26.1.0` | MIT |
 | `blinker` | `1.9.0` | MIT |
 | `certifi` | `2026.10.23` | MPL-2.0 |
 | `charset-normalizer` | `3.5.2` | MIT |
 | `click` | `8.5.1` | BSD-3-Clause |
-| `datasets` | `4.8.4` | Apache-2.0 |
-| `dill` | `0.4.1` | BSD-3-Clause |
 | `distro` | `1.9.0` | Apache-2.0 |
 | `docstring_parser` | `0.18.0` | MIT |
-| `filelock` | `4.2.9` | MIT |
 | `flask` | `3.1.3` | BSD-3-Clause |
-| `frozenlist` | `1.8.0` | Apache-2.0 |
-| `fsspec` | `2026.2.0` | BSD-3-Clause |
 | `h11` | `0.16.0` | MIT |
-| `hf-xet` | `1.8.0` | Apache-2.0 |
 | `httpcore2` | `2.16.0` | BSD-3-Clause |
 | `httpcore` | `1.0.9` | BSD-3-Clause |
 | `httpx2` | `2.16.0` | BSD-3-Clause |
 | `httpx` | `0.28.1` | BSD-3-Clause |
-| `huggingface_hub` | `1.33.0` | Apache-2.0 |
 | `idna` | `3.20` | BSD-3-Clause |
 | `inquirerpy` | `0.3.4` | MIT |
 | `itsdangerous` | `2.2.0` | BSD-3-Clause |
@@ -84,23 +75,17 @@ image's OS layer.
 | `markdown` | `3.10.2` | BSD-3-Clause |
 | `markupsafe` | `3.0.4` | BSD-3-Clause |
 | `mdurl` | `0.1.2` | MIT |
-| `multidict` | `7.2.1` | Apache-2.0 |
-| `multiprocess` | `0.70.19` | BSD-3-Clause |
 | `numpy` | `2.5.4` | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 |
 | `openai` | `3.46.0` | Apache-2.0 |
 | `openresponses-types` | `2.4.0` | Apache-2.0 |
-| `packaging` | `26.3` | Apache-2.0 OR BSD-2-Clause |
 | `pandas` | `3.0.1` | BSD-3-Clause AND Apache-2.0 AND MIT AND BSD-2-Clause |
 | `pfzy` | `0.3.4` | MIT |
 | `prompt_toolkit` | `3.0.53` | BSD-3-Clause |
-| `propcache` | `0.5.4` | Apache-2.0 |
-| `pyarrow` | `26.0.1` | Apache-2.0 |
 | `pydantic_core` | `2.50.4` | MIT |
 | `pydantic` | `2.14.3` | MIT |
 | `pygments` | `2.21.0` | BSD-2-Clause |
 | `python-dateutil` | `4.0.0` | BSD-3-Clause |
 | `python-dotenv` | `1.2.2` | BSD-3-Clause |
-| `pyyaml` | `6.0.3` | MIT |
 | `regex` | `2026.11.7` | Apache-2.0 AND CNRI-Python |
 | `requests` | `2.33.0` | Apache-2.0 |
 | `rich` | `14.3.3` | MIT |
@@ -116,5 +101,3 @@ image's OS layer.
 | `urllib3` | `2.8.0` | MIT |
 | `wcwidth` | `0.9.4` | MIT |
 | `werkzeug` | `3.1.9` | BSD-3-Clause |
-| `xxhash` | `4.0.2` | BSD-2-Clause |
-| `yarl` | `1.25.1` | Apache-2.0 |

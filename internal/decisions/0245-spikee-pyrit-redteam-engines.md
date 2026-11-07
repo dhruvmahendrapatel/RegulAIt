@@ -206,7 +206,7 @@ image (70 hash-pinned wheels, a licence gate, a data prune and the THIRD_PARTY n
 - **Guards.** Every guard was shown red once by breaking it (the builder's report on the PR lists them).
 - **Image.** It built locally, with the sandbox's TLS proxy CA passed only as a BuildKit secret. `pip check` passes,
   the prune removed 8 excluded paths, and the licence gate reports 77 allowed, 9 admitted by the allow file and
-  0 denied. Inside the image (`--network=none`, uid 10001), the offline generate step works.
+  0 denied (before the fsspec fix below; after it, 57 allowed, 8 admitted, 0 denied). Inside the image (`--network=none`, uid 10001), the offline generate step works.
 
 **Catalogue corrections from reading the 0.9.4 wheel:**
 - `plugin:mask` is `cloud_only`: it asks a hosted LLM which words to mask.
@@ -216,9 +216,8 @@ image (70 hash-pinned wheels, a licence gate, a data prune and the THIRD_PARTY n
 - `dataset:sysmsg-extraction-2025-04` is generated with `--include-system-message`. Its regex judge looks for
   Spikee's own demo system message, so without it every reply would read as a false pass.
 
-**Licences outside the ADR-0176 list.** Nine are listed in `engines/spikee/licence-allow.json` as "reused from
-ADR-0187 decision 193 (or 106) for spikee; owner to confirm (ADR-0245)": PSF-2.0 (python, aiohappyeyeballs,
-typing_extensions), MPL-2.0 unmodified (certifi, tqdm), CNRI-Python (regex), and numpy's Zlib, libgfortran and
+**Licences outside the ADR-0176 list.** Eight are listed in `engines/spikee/licence-allow.json` as "reused from
+ADR-0187 decision 193 (or 106) for spikee; owner to confirm (ADR-0245)": PSF-2.0 (python, typing_extensions), MPL-2.0 unmodified (certifi, tqdm), CNRI-Python (regex), and numpy's Zlib, libgfortran and
 libquadmath. The gate accepts that wording as a third form, which admits like "pending". This is open question 3.
 
 **PyRIT: designed, not built in this slice.** Two builder attempts were stopped by a content-safety filter while
@@ -287,3 +286,28 @@ path is to admit Spikee's plugin, not a new engine.
 **Open question 5 (owner).** Should a governed multimodal compat route (image and audio parts) be built? It would
 unlock multimodal red-teaming (Spikee's `text2image`, or another tool) under the same entitlement, cost and audit
 path.
+
+## As built (2026-11-07): fsspec CVE-2026-104851 in the Spikee closure
+
+CI's image scan of the first Spikee build found **CVE-2026-104851** (HIGH, fixed in 2026.6.0) in `fsspec` 2026.2.0.
+Spikee pins `datasets==4.8.4`, and that release caps `fsspec<=2026.2.0`, so fsspec cannot be upgraded while `datasets`
+is installed.
+
+No module Spikee runs imports `datasets`. Its only importers are the five Hub fetch scripts the image already removes.
+So the dependency is **removed, not allow-listed** (the security checklist forbids allow-listing a vulnerable
+dependency):
+- **The lockfile** drops `datasets` and the 18 distributions only it needs: the aiohttp stack, attrs, dill, filelock,
+  fsspec, hf-xet, huggingface-hub, multiprocess, packaging, pyarrow, pyyaml and xxhash. 70 pins become 51.
+- **The metadata.** `drop-unused-requirement.py` deletes exactly the `Requires-Dist: datasets==4.8.4` line from
+  Spikee's installed METADATA. The script is pinned to the reviewed file's sha256, fails if that line is not there
+  exactly once, and rewrites RECORD. `pip check` then runs unchanged.
+- **The build** asserts that `datasets`, `fsspec`, `huggingface_hub`, `pyarrow` and `aiohttp` cannot be found.
+- **The licence gate** has one allow entry fewer (`aiohappyeyeballs` is gone): 57 allowed, 8 admitted, 0 denied.
+
+Measured in the pinned base image: the trimmed closure installs by hash, `pip check` passes, the absence check passes,
+the prune passes, and the offline `spikee generate` of `mini-test` writes its dataset.
+
+The other image-scan failures on this PR (promptfoo, modelscan and Spikee: zlib1g CVE-2026-76844 and CVE-2026-85091,
+fixed in `+deb13u1`) come from the shared pinned Debian bases, not from this change. They are left for a base-digest
+bump across all engines once upstream rebuilds.
+

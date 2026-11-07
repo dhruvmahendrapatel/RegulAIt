@@ -13,7 +13,9 @@
 # Every base is pinned by digest (the same node and python bases as garak's). What the build does offline after the
 # pinned download:
 #   - spikee 0.9.4 (no extras) and its closure from OUR lockfile (requirements.txt: every wheel by sha256,
-#     `--require-hashes --no-deps --only-binary :all:`), into a venv; `pip check` must pass; the version is asserted;
+#     `--require-hashes --no-deps --only-binary :all:`), into a venv; spikee's unused `datasets` requirement is dropped
+#     from its installed metadata (drop-unused-requirement.py: fsspec CVE-2026-104851; neither datasets nor its closure
+#     is installed, and the build asserts it); `pip check` must pass; the version is asserted;
 #   - prune-data.py checks the local seed folders are the files the shared catalogue was read from
 #     (SPIKEE_LOCAL_SEEDS_SHA256) and removes what the catalogue excludes (excluded-data.txt: the Hub fetch scripts and
 #     the workspace LLM judges; a listed path that is missing fails the build);
@@ -35,10 +37,12 @@ FROM --platform=linux/amd64 node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a
 FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635c12fcd0a3d74c21a5b93a54 AS closure
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 WORKDIR /build
-COPY engines/spikee/requirements.txt engines/spikee/licence-gate.mjs engines/spikee/licence-allow.json engines/spikee/licence-readings.json engines/spikee/excluded-data.txt engines/spikee/prune-data.py ./
+COPY engines/spikee/requirements.txt engines/spikee/licence-gate.mjs engines/spikee/licence-allow.json engines/spikee/licence-readings.json engines/spikee/excluded-data.txt engines/spikee/prune-data.py engines/spikee/drop-unused-requirement.py ./
 RUN python -m venv /opt/spikee/venv \
  && /opt/spikee/venv/bin/pip install --no-cache-dir --disable-pip-version-check --require-hashes --no-deps --only-binary :all: -r requirements.txt \
+ && /opt/spikee/venv/bin/python -I drop-unused-requirement.py /opt/spikee/venv/lib/python3.12/site-packages 9b8d089a59db502eb23055cdf4e1fcb30528ba98802224e3727dcfb50ff1a5fa \
  && /opt/spikee/venv/bin/pip check --disable-pip-version-check \
+ && /opt/spikee/venv/bin/python -I -c "import importlib.util as u, sys; found = [m for m in ('datasets', 'fsspec', 'huggingface_hub', 'pyarrow', 'aiohttp') if u.find_spec(m)]; sys.exit(f'must not be installed: {found}' if found else 0)" \
  && /opt/spikee/venv/bin/python -I -c "import importlib.metadata as m, sys; v = m.version('spikee'); sys.exit(0 if v == '0.9.4' else f'expected spikee 0.9.4, got {v}')" \
  && /opt/spikee/venv/bin/python -I prune-data.py /opt/spikee/venv/lib/python3.12/site-packages excluded-data.txt 99d04872d9f3b6ac6c49a29129f23afc753afe594551ea6183850b4799062567 \
  && /opt/spikee/venv/bin/pip uninstall -y --disable-pip-version-check pip \

@@ -53,7 +53,8 @@ describe("the spikee image's inputs", () => {
     expect(dockerfile).toMatch(/pip check/);
     // every wheel: an exact version and ONE sha256
     expect(pins(requirements).length).toBe(entries(requirements).length);
-    expect(pins(requirements).length).toBe(70);
+    // 70 resolved, less spikee's unused `datasets` and the 18 packages only it needs (fsspec CVE-2026-104851)
+    expect(pins(requirements).length).toBe(51);
     const spikee = pins(requirements).find((r) => r[1] === "spikee");
     expect(spikee?.[2]).toBe(SPIKEE_ENGINE_VERSION);
     expect(spikee?.[3]).toBe("3768463052de5d89f94ec4a4c4dd11c492c6e2f7b31e09b45eade9e57ffaa3d6");
@@ -86,6 +87,25 @@ describe("the spikee image's inputs", () => {
     expect([...listed].sort()).toEqual(local);
   });
 
+  it("fsspec CVE-2026-104851: spikee's unused `datasets` requirement and its closure are not installed, and the build proves it", () => {
+    // neither datasets nor what only it pulls in is in the lockfile (datasets 4.8.4 caps fsspec at the vulnerable 2026.2.0)
+    const pinned = [...requirements.matchAll(/^([A-Za-z0-9_.-]+)==/gm)].map((m) => m[1]!.toLowerCase());
+    for (const gone of ["datasets", "fsspec", "huggingface-hub", "pyarrow", "aiohttp", "multiprocess", "dill", "xxhash"]) expect(pinned, gone).not.toContain(gone);
+    // the requirement is dropped from the reviewed METADATA (by sha256) before `pip check`, which still runs strictly
+    const install = dockerfile.indexOf("--require-hashes --no-deps --only-binary :all: -r requirements.txt");
+    const drop = dockerfile.indexOf("drop-unused-requirement.py /opt/spikee/venv/lib/python3.12/site-packages 9b8d089a59db502eb23055cdf4e1fcb30528ba98802224e3727dcfb50ff1a5fa");
+    const check = dockerfile.indexOf("pip check --disable-pip-version-check");
+    expect(install).toBeGreaterThan(0);
+    expect(drop).toBeGreaterThan(install);
+    expect(check).toBeGreaterThan(drop);
+    expect(dockerfile).toContain("for m in ('datasets', 'fsspec', 'huggingface_hub', 'pyarrow', 'aiohttp') if u.find_spec(m)");
+    const script = readFileSync(path.join(dir, "drop-unused-requirement.py"), "utf8");
+    expect(script).toContain('DROP = "Requires-Dist: datasets==4.8.4"');
+    expect(script).toContain("if len(hits) != 1:");
+    // no admitted seed folder needs it: its only importers are the fetch scripts the prune removes
+    for (const f of excluded.filter((e) => e.endsWith("fetch_and_convert_dataset.py"))) expect(f).toMatch(/^workspace\/datasets\/seeds-[a-z0-9-]+\/fetch_and_convert_dataset\.py$/);
+  });
+
   it("the excluded paths are the Hub fetch scripts and the workspace LLM judges, and only cloud-only seed folders lose files", () => {
     const fetch = excluded.filter((p) => p.endsWith("/fetch_and_convert_dataset.py"));
     expect(fetch.length).toBe(5);
@@ -108,7 +128,7 @@ describe("the spikee image's inputs", () => {
       const g = garakAllow.find((x) => x.subject === e.subject && x.licence === e.licence);
       expect(g?.decision, `${e.subject} ${e.licence}`).toMatch(new RegExp(`\\(ADR-0187 decision ${m![1]}\\)$`));
     }
-    expect(allowFile.map((e) => e.subject).sort()).toEqual(["aiohappyeyeballs", "certifi", "numpy", "numpy.libs/libgfortran", "numpy.libs/libquadmath", "python", "regex", "tqdm", "typing_extensions"]);
+    expect(allowFile.map((e) => e.subject).sort()).toEqual(["certifi", "numpy", "numpy.libs/libgfortran", "numpy.libs/libquadmath", "python", "regex", "tqdm", "typing_extensions"]);
     for (const e of allowFile.filter((x) => x.licence === "MPL-2.0")) expect(e.condition, e.subject).toBe("unmodified");
     // the gate accepts only the exact reuse wording, never a free-form acceptance
     expect(gate.decisionValid("reused from ADR-0187 decision 193 for spikee; owner to confirm (ADR-0245)")).toBe(true);

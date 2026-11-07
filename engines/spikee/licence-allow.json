@@ -6,12 +6,6 @@
     "why": "the CPython runtime of the base image (the same pinned python:3.12-slim-trixie as garak's); PSF-2.0, permissive, not on the ADR-0176 list. Accepted for garak on 2026-10-10 (ADR-0187 decision 193)."
   },
   {
-    "subject": "aiohappyeyeballs",
-    "licence": "PSF-2.0",
-    "decision": "reused from ADR-0187 decision 193 for spikee; owner to confirm (ADR-0245)",
-    "why": "a dependency of aiohttp in spikee's closure (the same 2.7.1 as garak's); PSF-2.0, permissive, not on the list. Accepted for garak (ADR-0187 decision 193)."
-  },
-  {
     "subject": "typing_extensions",
     "licence": "PSF-2.0",
     "decision": "reused from ADR-0187 decision 193 for spikee; owner to confirm (ADR-0245)",
