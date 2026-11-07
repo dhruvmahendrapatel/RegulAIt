@@ -1,5 +1,5 @@
 /**
- * ADR-0200 addendum (2026-11-06, normalized schema), batch N1: the foreign keys migration 0303 adds exist,
+ * ADR-0200 addendum (2026-11-06, normalized schema), batch N1: the foreign keys migration `normalize_n1_foreign_keys` adds exist,
  * are VALIDATED (not left NOT VALID), carry the intended delete rule, and actually refuse a dangling write.
  *
  * Review of #683: on a populated database the cleanup clears ORPHANS only. Valid pointers survive, also when the
@@ -7,7 +7,7 @@
  * owner (ADR-0234), because the file enters the `migration` system context first. A RESTRICT orphan fails it loudly.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,11 +19,11 @@ const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
 const migrationsFolder = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations");
 const SCRATCH_DB = `n1fk_${process.pid}_${Date.now()}`;
-/** a second scratch database, migrated to just BELOW 0303 and populated before 0303 is applied by hand */
+/** a second scratch database, migrated to just BELOW `normalize_n1_foreign_keys` and populated before `normalize_n1_foreign_keys` is applied by hand */
 const PRE_DB = `n1fk_pre_${process.pid}_${Date.now()}`;
 /** a cluster-wide, non-superuser role standing in for ADR-0234's non-superuser migration owner */
 const RLS_ROLE = `n1fk_owner_${process.pid}_${Date.now()}`;
-const N1_FILE = "0303_normalize_n1_foreign_keys";
+const N1_FILE = "normalize_n1_foreign_keys";
 
 /** table, column, referenced table, confdeltype ('n' = SET NULL, 'r' = RESTRICT) */
 const EXPECTED: ReadonlyArray<readonly [string, string, string, "n" | "r"]> = [
@@ -69,7 +69,7 @@ afterAll(async () => {
   }
 });
 
-describe("0303: the N1 foreign keys", () => {
+describe("`normalize_n1_foreign_keys`: the N1 foreign keys", () => {
   it("each exists, is validated, points at the right table and has the intended delete rule", async () => {
     const r = await db.execute<{ t: string; c: string; ref: string; del: string; valid: boolean }>(sql`
       select k.conrelid::regclass::text as t, a.attname as c, k.confrelid::regclass::text as ref,
@@ -96,9 +96,9 @@ describe("0303: the N1 foreign keys", () => {
 
 // --------------------------------------------------------------------------------------------- review of #683
 
-/** the 0303 statements, as the migrator splits them; `withoutContext` drops the set_config lines (the defect) */
+/** the `normalize_n1_foreign_keys` statements, as the migrator splits them; `withoutContext` drops the set_config lines (the defect) */
 function n1Statements(withoutContext = false): string[] {
-  const text = readFileSync(path.join(migrationsFolder, `${N1_FILE}.sql`), "utf8");
+  const text = readFileSync(path.join(migrationsFolder, "pending", `${N1_FILE}.sql`), "utf8");
   return text
     .split("--> statement-breakpoint")
     .map((x) => x.trim())
@@ -106,7 +106,7 @@ function n1Statements(withoutContext = false): string[] {
     .filter((x) => !(withoutContext && x.includes("set_config('regulait.system_context'")));
 }
 
-describe("0303 on a populated database (review of #683)", () => {
+describe("`normalize_n1_foreign_keys` on a populated database (review of #683)", () => {
   const ids = {
     approver: randomUUID(),
     approval: randomUUID(),
@@ -127,14 +127,10 @@ describe("0303 on a populated database (review of #683)", () => {
   ];
 
   beforeAll(async () => {
-    // a copy of the migrations folder whose journal stops just below 0303
+    // a copy of the migrations folder without this pending migration (ADR-0252: it has no journal entry until merge)
     preFolder = mkdtempSync(path.join(os.tmpdir(), "n1fk-pre-"));
     cpSync(migrationsFolder, preFolder, { recursive: true });
-    const journalPath = path.join(preFolder, "meta", "_journal.json");
-    const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: Array<{ tag: string }> };
-    journal.entries = journal.entries.filter((e) => e.tag !== N1_FILE);
-    writeFileSync(journalPath, JSON.stringify(journal, null, 2));
-    rmSync(path.join(preFolder, `${N1_FILE}.sql`));
+    rmSync(path.join(preFolder, "pending", `${N1_FILE}.sql`));
 
     await admin.execute(sql.raw(`DROP DATABASE IF EXISTS ${PRE_DB} WITH (FORCE)`));
     await admin.execute(sql.raw(`CREATE DATABASE ${PRE_DB}`));
@@ -174,7 +170,7 @@ describe("0303 on a populated database (review of #683)", () => {
     }
   }, 240_000);
 
-  /** runs 0303 as the non-superuser owner in one transaction; returns the pointers as they then stand */
+  /** runs `normalize_n1_foreign_keys` as the non-superuser owner in one transaction; returns the pointers as they then stand */
   async function apply(opts: { withoutContext?: boolean; commit: boolean; before?: string[] }) {
     const client = await pre!.$client.connect();
     try {
