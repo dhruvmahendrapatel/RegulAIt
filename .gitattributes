@@ -29,3 +29,5 @@ agents/endpoint/**/testdata/** -text
 agents/endpoint/packaging/macos/scripts/* text eol=lf
 # ADR-0201: project memory and internal docs never ship; `git archive` source exports leave them out
 internal/ export-ignore
+# ADR-0257 (M-069): the client compatibility images build and run these on Linux
+apps/gateway/client-compat/clients/** text eol=lf
