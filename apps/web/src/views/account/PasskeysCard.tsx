@@ -9,11 +9,13 @@
  * kept on record (what they signed stays attributable) and never work again.
  */
 import { useState, type FormEvent } from "react";
+import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { startRegistration, type PublicKeyCredentialCreationOptionsJSON } from "@simplewebauthn/browser";
 import { ApiError, codeSentence } from "../../api/client";
 import { ago } from "../../api/format";
 import { Badge, Button, Card, EmptyState, Field, Input, Table } from "../../ui/kit";
+import { PREVIEW_ROWS } from "../../ui/ListPreview";
 import { RemoveButton } from "../admin/adminKit";
 import { api, withStepUp } from "../../stepup/stepUp";
 import v from "../views.module.css";
@@ -47,7 +49,12 @@ function reasonOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-export default function PasskeysCard() {
+/**
+ * P3 (#453): on the Account page this is a preview (the first five passkeys, the active count in the title, the same
+ * add, rename and revoke, and a link to the full list); on its own page (`preview` false, AccountSubpages) it lists
+ * every passkey.
+ */
+export default function PasskeysCard(props: { preview?: boolean }) {
   const qc = useQueryClient();
   const [label, setLabel] = useState("");
   const [busy, setBusy] = useState(false);
@@ -95,6 +102,13 @@ export default function PasskeysCard() {
           {passkeys.length > 0 ? <Badge tone="ok">{passkeys.length} active</Badge> : <Badge>none</Badge>}
         </span>
       }
+      actions={
+        props.preview ? (
+          <Link to="/account/passkeys" aria-label="View all passkeys">
+            View all →
+          </Link>
+        ) : undefined
+      }
       infoLabel="passkeys"
       info={
         <p>
@@ -104,7 +118,7 @@ export default function PasskeysCard() {
         </p>
       }
     >
-      <div className={v.stack}>
+      <div className={v.stack} data-preview={props.preview ? "/v1/auth/passkeys" : undefined}>
         {!rpConfigured && (
           <div className={v.errLine} role="alert">
             Passkeys aren't available yet: an administrator has to set this deployment's public address first.
@@ -151,7 +165,7 @@ export default function PasskeysCard() {
               ),
             },
           ]}
-          rows={passkeys}
+          rows={props.preview ? passkeys.slice(0, PREVIEW_ROWS) : passkeys}
           rowKey={(p) => p.id}
           loading={q.isLoading}
           error={q.error}
