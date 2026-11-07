@@ -158,6 +158,7 @@ import {
 import { ownerChangeGate, resolveRegistrationOwner, withOwnership } from "./ownership.js";
 import { CHANGED_CONCURRENTLY, checkStepUp, requireStepUp } from "./step-up.js";
 import { checkModelRateLimit } from "./model-rate-limits.js";
+import { resolveDispatchUsage } from "./usage-extractors.js";
 import {
   prepareConversationContext,
   type PreparedConversationContext,
@@ -2264,6 +2265,16 @@ async function dispatchAttempt(
   // invented dollar figure. ADR-0212 (P12 b): when the provider reports image or
   // audio tokens, each modality is priced at its own list price (falling back to
   // the text price); with no modality data this is the text-only formula, unchanged.
+  // ADR-0241 (P21): when the org switch is on and the served agent has an active, tested usage mapping, the
+  // counts priced below are the mapping's reading of the provider's response; a mapping that cannot read it
+  // leaves the adapter's built-in counts in place (fail closed, audited, stamped on the usage row).
+  const dispatchUsage = await resolveDispatchUsage(db, {
+    agentId: served.id,
+    userId,
+    projectId: args.projectId ?? null,
+    result,
+  });
+  result = { ...result, usage: dispatchUsage.usage };
   const priced = priceDispatchUsage(served, result.usage);
   const costUsd = priced.costUsd;
   // The measured version of routing's savings claim: what the baseline agent
@@ -2393,6 +2404,8 @@ async function dispatchAttempt(
     measuredCostSavedUsd,
     // ADR-0212 (P12 b): the text/image/audio split; NULL without modality data
     modalityUsage: priced.modality,
+    // ADR-0241: which usage-mapping version produced these counts (NULL = the adapter's own)
+    usageExtractorVersionId: dispatchUsage.versionId,
     stopReason: result.stopReason,
     refusal: result.refusal,
     providerMessageId: result.providerMessageId,
@@ -2431,6 +2444,7 @@ async function dispatchAttempt(
           }
         : {}),
       ...(customDestination ? { customProviderId: served.customProviderId, egress: customDestination } : {}),
+      ...(dispatchUsage.outcome ? { usageExtractor: dispatchUsage.outcome } : {}),
       ...(args.detail ?? {}),
       ...piiDetail,
       ...guardrailDetail,
