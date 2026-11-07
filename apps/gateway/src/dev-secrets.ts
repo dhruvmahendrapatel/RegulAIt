@@ -155,6 +155,16 @@ export function assessDevSecrets(
   return { findings, refusing, networkFacingSignal: signal, loopbackOnly, exposure, overridden, refuse, bootstrapLine };
 }
 
+/** is there a live (enabled) admin user? (first-admin, ADR-0194, keys off this) */
+export async function realAdminExists(db: Pick<Db, "select">): Promise<boolean> {
+  const [row] = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(and(eq(users.isAdmin, true), isNull(users.disabledAt)))
+    .limit(1);
+  return Boolean(row);
+}
+
 /**
  * Is there an ACTIVE admin, i.e. is the bootstrap token still needed at all?
  * Active = enabled, an admin, and has signed in with a credential of their own
@@ -163,7 +173,7 @@ export function assessDevSecrets(
  * the token can still issue that admin's first password or key; the moment the
  * admin uses it, the token retires.
  */
-export async function realAdminExists(db: Pick<Db, "select">): Promise<boolean> {
+export async function activeAdminExists(db: Pick<Db, "select">): Promise<boolean> {
   const [row] = await db
     .select({ id: users.id })
     .from(users)
@@ -197,7 +207,7 @@ const retirementRecorded = new WeakSet<object>();
 
 /**
  * Is the bootstrap credential retired right now? It is while an active admin
- * exists (see `realAdminExists`), unless the relaxation is set. Checked on
+ * exists (see `activeAdminExists`), unless the relaxation is set. Checked on
  * every presentation of the token, so it costs one query only for a request
  * that already matched the token. If every admin is later disabled the token
  * works again: it is the break-glass path for exactly that lockout.
@@ -208,7 +218,7 @@ const retirementRecorded = new WeakSet<object>();
  */
 export async function bootstrapRetired(db: Db, afterAdmin: boolean): Promise<boolean> {
   if (afterAdmin) return false;
-  if (!(await realAdminExists(db))) return false;
+  if (!(await activeAdminExists(db))) return false;
   if (!retirementRecorded.has(db)) {
     retirementRecorded.add(db);
     await db

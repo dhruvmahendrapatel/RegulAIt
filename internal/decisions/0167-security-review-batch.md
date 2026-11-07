@@ -617,7 +617,7 @@ migration and removes break-glass for a full admin lockout. A new step-up kind f
 A native `pnpm start` with `HOST=127.0.0.1` (the documented laptop path) is unchanged. No migration. The admin portal's
 "Issue API key" for another user now goes through the step-up prompt (`UsersPage.tsx`, wrapped in `withStepUp`).
 
-**As built.** `apps/gateway/src/dev-secrets.ts` (the decision, `realAdminExists`, `bootstrapRetired`,
+**As built.** `apps/gateway/src/dev-secrets.ts` (the decision, `activeAdminExists` (an admin who has signed in; `realAdminExists`, used by first-admin, keeps its meaning), `bootstrapRetired`,
 `recordDevSecretsOptIn`), `auth.ts` (`authenticate`, `resolveSession`, the `bootstrap_retired` refusal), `app.ts` (the
 key route's step-up, `BuildAppOptions.bootstrapAfterAdmin`), `boot.ts` (listen host, banner, audit), `docker-compose.yml`.
 Tests: `dev-secrets-s02.test.ts` (new) and `dev-secrets.test.ts` (updated to the new rule).

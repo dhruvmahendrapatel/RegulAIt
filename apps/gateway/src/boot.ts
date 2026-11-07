@@ -59,7 +59,7 @@ import {
   DevSecretsBootError,
   assessDevSecrets,
   bootstrapAfterAdminRelaxed,
-  realAdminExists,
+  activeAdminExists,
   recordDevSecretsOptIn,
 } from "./dev-secrets.js";
 import { checkReceiptSigningKey } from "./receipt-signing-key.js";
@@ -207,7 +207,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   const secrets = assessDevSecrets(env, {
     bootstrapToken: appOpts.bootstrapToken,
     dataKey: appOpts.dataKey,
-    realAdminExists: await realAdminExists(db).catch(() => false),
+    realAdminExists: await activeAdminExists(db).catch(() => false),
     listenHost: host,
     bootstrapAfterAdmin,
   });

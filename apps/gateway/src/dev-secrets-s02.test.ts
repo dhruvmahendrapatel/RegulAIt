@@ -37,7 +37,7 @@ import {
   bootstrapAfterAdminRelaxed,
   isLoopbackListen,
   networkFacingSignal,
-  realAdminExists,
+  activeAdminExists,
   recordDevSecretsOptIn,
 } from "./dev-secrets.js";
 import { hashToken } from "./token-hash.js";
@@ -215,7 +215,7 @@ describe("S-02: the bootstrap credential retires once an active admin exists", (
     });
     expect(created.statusCode, created.body).toBe(201);
     adminId = created.json().id;
-    expect(await realAdminExists(db)).toBe(false);
+    expect(await activeAdminExists(db)).toBe(false);
     expect((await strict.inject({ method: "GET", url: "/v1/users", headers: AUTH })).statusCode).toBe(200);
     // a bootstrap-exchanged browser session works too, for now
     bootSession = await signInSession(null, "bootstrap");
@@ -225,7 +225,7 @@ describe("S-02: the bootstrap credential retires once an active admin exists", (
 
   it("once the admin has signed in, the token authenticates nothing, says why, and is audited once", async () => {
     await signInSession(adminId, "password");
-    expect(await realAdminExists(db)).toBe(true);
+    expect(await activeAdminExists(db)).toBe(true);
     const before = await auditCount("bootstrap-retired");
     const r = await strict.inject({ method: "GET", url: "/v1/users", headers: AUTH });
     expect(r.statusCode).toBe(401);
@@ -253,14 +253,14 @@ describe("S-02: the bootstrap credential retires once an active admin exists", (
     const [second] = await db.insert(users).values({ email: "s02-keyadmin@example.com", displayName: "Key Admin", isAdmin: true }).returning();
     const { tokenHash } = generateToken();
     await db.insert(apiKeys).values({ userId: second!.id, name: "used", tokenHash });
-    expect(await realAdminExists(db)).toBe(false);
+    expect(await activeAdminExists(db)).toBe(false);
     await db.update(apiKeys).set({ lastUsedAt: new Date() }).where(eq(apiKeys.tokenHash, tokenHash));
-    expect(await realAdminExists(db)).toBe(true);
+    expect(await activeAdminExists(db)).toBe(true);
     await db.update(users).set({ disabledAt: new Date() }).where(eq(users.id, second!.id));
   });
 
   it("when every admin is disabled the break-glass token works again (the lockout it exists for)", async () => {
-    expect(await realAdminExists(db)).toBe(false);
+    expect(await activeAdminExists(db)).toBe(false);
     expect((await strict.inject({ method: "GET", url: "/v1/users", headers: AUTH })).statusCode).toBe(200);
     await db.update(users).set({ disabledAt: null }).where(eq(users.id, adminId));
     expect((await strict.inject({ method: "GET", url: "/v1/users", headers: AUTH })).statusCode).toBe(401);
