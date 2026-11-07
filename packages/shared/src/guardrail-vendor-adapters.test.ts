@@ -166,3 +166,13 @@ describe("overlapping windows (design reference: Gravitee AI prompt guard rails)
     expect(mergeWindowVerdicts([{ score: 0.1, reasons: ["a"] }, { score: 0.9, reasons: ["b", "a"] }])).toEqual({ score: 0.9, reasons: ["a", "b"] });
   });
 });
+
+describe("label and URL helpers run in linear time (CodeQL js/polynomial-redos)", () => {
+  it("long runs of separators are handled correctly (linear scans, no backtracking regex)", () => {
+    expect(vendorLabel("_".repeat(100_000) + "x")).toBe("x");
+    expect(vendorLabel("/".repeat(50_000) + "hate" + "/".repeat(50_000))).toBe("hate");
+    expect(vendorLabel("__Self--Harm__")).toBe("self_harm");
+    const req = buildVendorHttpRequest("lakera_guard", "https://api.lakera.ai" + "/".repeat(100_000), { kind: "guardrail_pii", phase: "input", text: "t" }, null);
+    expect(req.url).toBe("https://api.lakera.ai/v2/guard");
+  });
+});

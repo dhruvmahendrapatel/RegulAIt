@@ -195,8 +195,15 @@ export interface VendorHttpRequest {
   body: Record<string, unknown>;
 }
 
+/** the index after the last char of `s` that is not `ch` (a linear scan: no backtracking regex on vendor or admin input) */
+function trimEnd(s: string, ch: string): string {
+  let end = s.length;
+  while (end > 0 && s[end - 1] === ch) end -= 1;
+  return s.slice(0, end);
+}
+
 function joinUrl(base: string, path: string): string {
-  return `${base.replace(/\/+$/, "")}${path}`;
+  return `${trimEnd(base, "/")}${path}`;
 }
 
 /** Azure and Lakera are called over plain HTTPS; the full URL and body for one call */
@@ -233,11 +240,21 @@ const BARE = /^[a-z][a-z0-9_]{0,39}$/;
 
 /** a vendor category name as a bare label (`harassment/threatening` -> `harassment_threatening`), or null */
 export function vendorLabel(raw: string): string | null {
-  const label = raw
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .slice(0, 40);
+  // one linear pass: runs of anything but [a-z0-9] become one "_", leading and trailing ones are dropped
+  let label = "";
+  let pendingSep = false;
+  for (const c of raw.toLowerCase()) {
+    if (label.length > 40) break;
+    if ((c >= "a" && c <= "z") || (c >= "0" && c <= "9")) {
+      if (pendingSep && label.length > 0) label += "_";
+      pendingSep = false;
+      label += c;
+    } else {
+      pendingSep = true;
+    }
+  }
+  label = label.slice(0, 40);
+  if (label.endsWith("_")) label = label.slice(0, -1);
   return BARE.test(label) ? label : null;
 }
 
