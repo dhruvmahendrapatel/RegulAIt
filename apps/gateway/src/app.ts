@@ -525,7 +525,7 @@ import { registerSchedulerRoutes } from "./scheduler-api.js";
 // ADR-0186 (batch 4) — the foundation registers every §4.9 route; each module
 // answers 501 not_built until its slice lands (A/B Claude, R/S/V Codex)
 import { registerPasskeyRoutes } from "./passkeys.js";
-import { approvalRuleStepUp, CHANGED_CONCURRENTLY, checkStepUp, ownerChangeStepUpArgs, registerStepUpRoutes, requireStepUp, requireStepUps, revocationLiftStepUp, type StepUpCheckArgs } from "./step-up.js";
+import { approvalRuleStepUp, CHANGED_CONCURRENTLY, checkStepUp, ownerChangeStepUpArgs, registerStepUpRoutes, requireStepUp, requireStepUps, revocationLiftStepUp, grantMintStepUp, type StepUpCheckArgs } from "./step-up.js";
 import { ApprovalRuleWriteRefusedError, approverPoolShiftFacts, isApproverRole, lockApprovalRuleRouting, lockApproverRoles, namedApproverSeatExists, sameApproverPoolShift, type ApproverPoolShift } from "./approval-pool.js";
 import {
   decisionView,
@@ -2589,6 +2589,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
+    // ADR-0250 (review S-04): minting widens default deny — a fresh step-up bound to exactly this grant
+    const toolMint = grantMintStepUp({ kind: "tool", userId: body.userId, serverId: body.serverId, toolName: body.toolName });
+    if (!(await requireStepUp(db, req, reply, toolMint)).ok) return reply;
     // PR #181 review: a minted grant relaxes this person's default deny, so the
     // success is on the trail (actor, grantee, server, grant name) in the same
     // transaction as the row — not only the refused SoD mints
@@ -2621,6 +2624,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
+    // ADR-0250 (review S-04): minting widens default deny — a fresh step-up bound to exactly this grant
+    const serverMint = grantMintStepUp({ kind: "server", userId: body.userId, serverId: body.serverId, readOnlyAll: true });
+    if (!(await requireStepUp(db, req, reply, serverMint)).ok) return reply;
     // a server read-only grant relaxes this person's default deny on every read tool, present and future, so it is
     // on the trail in the same transaction as the row, exactly like a tool grant (PR #181 review)
     const row = await db.transaction(async (tx) => {
@@ -2685,6 +2691,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
+    // ADR-0250 (review S-04): a role grant widens default deny for every holder — a fresh step-up bound to it
+    if (!(await requireStepUp(db, req, reply, grantMintStepUp({ kind: "role_tool", roleId, serverId: body.serverId, toolName: body.toolName }))).ok) return reply;
     // PR #339 review: the role's row FOR NO KEY UPDATE first, serialized with the workload-identity steward check
     // review follow-up: a missing role is refused by name (404, audited), not by the foreign key
     const rows = await insertRoleGrantLocked(db, roleId, { actorUserId: req.authCtx.userId, via: "POST /v1/roles/:roleId/grants/tools" }, (tx) =>
@@ -2705,6 +2713,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
+    // ADR-0250 (review S-04): a role grant widens default deny for every holder — a fresh step-up bound to it
+    if (!(await requireStepUp(db, req, reply, grantMintStepUp({ kind: "role_server", roleId, serverId: body.serverId, readOnlyAll: body.readOnlyAll }))).ok) return reply;
     // PR #339 review: the role's row FOR NO KEY UPDATE first, serialized with the workload-identity steward check
     // review follow-up: a missing role is refused by name (404, audited), not by the foreign key
     const rows = await insertRoleGrantLocked(db, roleId, { actorUserId: req.authCtx.userId, via: "POST /v1/roles/:roleId/grants/servers" }, (tx) =>
@@ -2726,6 +2736,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
+    // ADR-0250 (review S-04): a role grant widens default deny for every holder — a fresh step-up bound to it
+    if (!(await requireStepUp(db, req, reply, grantMintStepUp({ kind: "role_agent", roleId, agentId: body.agentId, allowedModes: body.allowedModes ?? null }))).ok) return reply;
     // PR #339 review: the role's row FOR NO KEY UPDATE first, serialized with the workload-identity steward check
     // review follow-up: a missing role is refused by name (404, audited), not by the foreign key
     const rows = await insertRoleGrantLocked(db, roleId, { actorUserId: req.authCtx.userId, via: "POST /v1/roles/:roleId/grants/agents" }, (tx) =>
@@ -2745,6 +2757,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
+    // ADR-0250 (review S-04): a role grant widens default deny for every holder — a fresh step-up bound to it
+    if (!(await requireStepUp(db, req, reply, grantMintStepUp({ kind: "role_connector", roleId, connectorId: body.connectorId, mode: body.mode, allowedObjects: body.allowedObjects ?? null }))).ok) return reply;
     // PR #339 review: the role's row FOR NO KEY UPDATE first, serialized with the workload-identity steward check
     // review follow-up: a missing role is refused by name (404, audited), not by the foreign key
     const rows = await insertRoleGrantLocked(db, roleId, { actorUserId: req.authCtx.userId, via: "POST /v1/roles/:roleId/grants/connectors" }, (tx) =>

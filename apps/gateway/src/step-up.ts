@@ -78,8 +78,12 @@
  * `person_stdio_relax` and (ADR-0197 Q3) `person_stdio_renew` (a person's own
  * stdio call relaxation and its renewal), (ADR-0197 Q13)
  * `endpoint_enrolment_token_long_expiry` (an enrolment token past 30 days),
- * and `federation_enable` (turning workload-identity federation on with the
- * named key; federation-signing-keys.ts, ADR-0195 SD2b).
+ * `federation_enable` (turning workload-identity federation on with the
+ * named key; federation-signing-keys.ts, ADR-0195 SD2b), and (ADR-0250, review
+ * S-04) `grant_mint`: minting a person or role grant of an MCP tool, an MCP
+ * server's read tools, an agent or a connector — each one widens somebody's
+ * default deny, so it needs the same fresh proof as the smaller relaxations
+ * (`grantMintStepUp`). Deleting a grant narrows access and needs none.
  *
  * METHODS: `passkey` (an enrolled, unrevoked passkey and a configured
  * relying party), `totp` (an enrolled authenticator; replay-protected by the
@@ -673,6 +677,15 @@ export function revocationLiftStepUp(
   userId?: string,
 ): StepUpCheckArgs {
   return { kind: "settings_relax", facts: { values: { revocationLifted: { kind, revocationId, ...(userId ? { userId } : {}) } } } };
+}
+/**
+ * ADR-0250 (review S-04): minting a grant widens default deny for a person (or every holder of a role), so it is a
+ * `settings_relax` step-up bound to `{op: "grant_mint", grant}` — what is granted, to whom, on what, in which modes —
+ * and a grant made for one mint is refused for any other. An admin API key can never give one, so a leaked admin key
+ * can no longer widen anyone's access.
+ */
+export function grantMintStepUp(grant: Record<string, unknown>): StepUpCheckArgs {
+  return { kind: "settings_relax", facts: { op: "grant_mint", grant } };
 }
 export function revocationScopeStepUp(kind: "mcp" | "connectors", revocationId: string, scope: string): StepUpCheckArgs {
   return { kind: "settings_relax", facts: { values: { revocationScope: { kind, revocationId, scope } } } };
