@@ -5474,6 +5474,17 @@ user or server that an approval rule is scoped to (cascade delete). **Amendment 
 match re-owes every takeover; option (b) (pool intersection) is the recorded long-term simplification. Open follow-ups: a
 rule-editor warning for shadowed tightenings and equal-specificity overlaps, and option (b).
 
+**ADR-0241 (builder, 2026-11-07, Proposed): a configurable usage extractor (backlog P21).** An admin maps a provider's
+decoded response body to usage counts per agent with RFC 6901 pointers (`@hyperjump/json-pointer` 1.1.3) plus one
+bounded `arraySum` step: text in/out (required), image and audio in/out (ADR-0212 split), cache read/write (counted,
+not priced). Bounded mapping (4 KiB, 256-char/12-segment pointers) and body (20k values, depth 64, 1 MiB text); no code
+execution. Versions are immutable; a version activates only on a passing exact-count sample test (sample hash only) and
+a settings_relax step-up; the org switch `usage_extractor_enabled` is off by default, step-up to enable. Runs at the one
+pricing point before `priceDispatchUsage`; the usage row names the version. Fail closed = the adapter's built-in counts
+(the call has already run), audited and stamped; the pre-dispatch unpriced-under-budget refusals are unchanged.
+Migration 0297. API only: the mapping editor UI is on #453 for the Governed Designer (seven routes in KNOWN_UI_GAPS,
+ratchet raised 0 to 7 for the master's review).
+
 **ADR-0234 (builder, 2026-11-06, Proposed): Postgres row-level security (PENDING S7), batch 1.** No table has an org
 or tenant key (ADR-0041), so on the owner's instruction ("the best, most secure") RLS is keyed on the authenticated
 principal: policies read a transaction-local `regulait.user_id` or a registered `regulait.system_context`, set only by
@@ -5483,6 +5494,19 @@ setting means zero rows. Migration 0272 covers users, auth_mfa_pending, approval
 its tip under `audit_chain`. Measured: queue page 24.7 to 39.9 ms on 100k approvals, point lookups +1.5 ms. Batches 2-7
 (gateway adoption, credentials, approval satellites and membership, project-scoped, the rest, runtime login cut-over)
 follow, one PR each. Until batch 7 a non-superuser table-owner runtime is unsupported; none exists.
+
+**ADR-0234 batch 2 (builder, 2026-11-07, Proposed): request-scoped RLS adoption.**
+- **Mechanism:** every authenticated gateway request now runs as its principal through an AsyncLocalStorage scope that
+  the pool applies per statement and per transaction (`runWithRlsPrincipal`, `scopePoolForRls` in `createDb`), not
+  ~1,100 wrapped call sites. Credential resolution runs under `authenticate`.
+- **Migration 0313:**
+  - the column guard on `users` (the #682 hard gate);
+  - the chain writer's `audit_subject` reason for rows that name a sponsor or subject;
+  - the approvals requester self-route guard is removed (self-approval stays a per-flow product rule).
+- **Named steps:** decide, bulk-decide, the lazy SLA sweep and workflow and engine-run approval effects run as the
+  principal plus `approval_maintenance`.
+- **Still unscoped:** unauthenticated routes, the bootstrap token, the scheduler and background work (batch 7).
+- **Measured:** +0.2 to +0.8 ms a statement.
 
 **ADR-0230 (design, 2026-11-06, Proposed): SAP business agents over MCP (P19).**
 - **Where it lives:** `create_sales_order` (`API_SALES_ORDER_SRV`) goes in the regulAIt-ABAP MCP server, and the gateway's existing MCP path governs it.

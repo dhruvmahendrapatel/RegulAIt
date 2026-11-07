@@ -95,6 +95,7 @@ import {
   teamMembers,
   usageEvents,
   users,
+  withinSystemReason,
   type Db,
   type PolicySimulationRow,
   type PolicySimulationSettingsRow,
@@ -331,7 +332,10 @@ async function inSimulationTransaction<T>(
       // an integer we computed, never input: SET takes no bind parameters
       await tx.execute(sql.raw(`SET LOCAL statement_timeout = ${Math.floor(ms)}`));
     }
-    return fn(tx);
+    // ADR-0234 batch 2: a replay reads other people's recorded traffic within the caller's simulation scope
+    // (visibleSubjectsFor: their team, or the org for an admin), so its ledger reads run under audit_verify as the
+    // principal; the subject filter is the authorization
+    return withinSystemReason(tx, "audit_verify", "policy-simulation.replay", () => fn(tx));
   });
 }
 
