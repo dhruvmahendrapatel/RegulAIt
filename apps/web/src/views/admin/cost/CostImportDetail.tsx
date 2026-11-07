@@ -11,7 +11,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { fmtAt, fmtUsd, shortId } from "../../../api/format";
-import { Badge, EmptyState, Table } from "../../../ui/kit";
+import { Badge, EmptyState } from "../../../ui/kit";
+import { DataList } from "../../../ui/DataList";
 import { KV, useNameMaps } from "../adminKit";
 import { DetailDialog } from "../DetailDialog";
 import v from "../../views.module.css";
@@ -104,50 +105,53 @@ export function CostImportDetail(props: { importId: string; onClose: () => void 
               ["Outcome", d.import.reason],
             ]}
           />
-          {d.lines.length === 0 ? (
-            <EmptyState
-              title="No lines held for this batch"
-              body={
-                d.import.status === "revoked"
-                  ? "This batch was revoked: its lines were withdrawn and the batch row is kept as the record."
-                  : d.import.status === "refused" || d.import.mode === "dry_run"
-                    ? "A refused import or a dry run stores no lines; the counts above are what the parse found."
-                    : "The gateway holds no lines for this batch."
-              }
-            />
-          ) : (
-            <Table<ImportedLine>
-              rows={d.lines}
-              rowKey={(l) => l.id}
-              columns={[
-                { key: "row", header: "File line", render: (l) => <span className={v.num}>{l.sourceRow}</span> },
-                { key: "acct", header: "Vendor account", render: (l) => <code>{l.accountRef}</code> },
-                {
-                  key: "who",
-                  header: "Attributed to",
-                  render: (l) =>
-                    l.resolvedUserId ? (
-                      <span title={l.resolutionDetail}>
-                        {names.userName.get(l.resolvedUserId) ?? shortId(l.resolvedUserId)} <span className={v.faint}>({METHOD_WORDS[l.resolutionMethod] ?? l.resolutionMethod})</span>
-                      </span>
-                    ) : (
-                      <Badge tone="warn" title={l.resolutionDetail}>
-                        unattributed
-                      </Badge>
-                    ),
-                },
-                { key: "svc", header: "Service", render: (l) => l.service ?? l.description ?? "—" },
-                { key: "kind", header: "Kind", render: (l) => l.billingKind },
-                { key: "amt", header: "Imported amount", align: "right", render: (l) => <span className={v.num}>{amountText(l)}</span> },
-                { key: "cc", header: "Cost center", render: (l) => l.costCenter ?? "—" },
-              ]}
-            />
-          )}
-          {d.linesTruncated && (
-            <p className={v.faint} role="note">
-              The gateway returns the first 500 lines by file order; this batch has more. The totals above cover the whole batch.
-            </p>
-          )}
+          <DataList<ImportedLine>
+            listId="cost-import-lines"
+            noun="imported lines"
+            endpoint={`/v1/cost-imports/${encodeURIComponent(props.importId)}`}
+            exportPath={`/v1/cost-imports/${encodeURIComponent(props.importId)}/export.xlsx`}
+            queryKey={["admin", "cost-import", props.importId, "lines"]}
+            legacyKey="lines"
+            defaultSort={{ key: "row", dir: "asc" }}
+            rowKey={(l) => l.id}
+            empty={
+              <EmptyState
+                title="No lines held for this batch"
+                body={
+                  d.import.status === "revoked"
+                    ? "This batch was revoked: its lines were withdrawn and the batch row is kept as the record."
+                    : d.import.status === "refused" || d.import.mode === "dry_run"
+                      ? "A refused import or a dry run stores no lines; the counts above are what the parse found."
+                      : "The gateway holds no lines for this batch."
+                }
+              />
+            }
+            columns={[
+              { key: "row", header: "File line", main: true, sortable: true, render: (l) => <span className={v.num}>{l.sourceRow}</span> },
+              { key: "acct", header: "Vendor account", main: true, sortable: true, render: (l) => <code>{l.accountRef}</code> },
+              {
+                key: "who",
+                header: "Attributed to",
+                main: true,
+                sortable: true,
+                required: "Whether a line is attributed is always shown",
+                render: (l) =>
+                  l.resolvedUserId ? (
+                    <span title={l.resolutionDetail}>
+                      {names.userName.get(l.resolvedUserId) ?? shortId(l.resolvedUserId)} <span className={v.faint}>({METHOD_WORDS[l.resolutionMethod] ?? l.resolutionMethod})</span>
+                    </span>
+                  ) : (
+                    <Badge tone="warn" title={l.resolutionDetail}>
+                      unattributed
+                    </Badge>
+                  ),
+              },
+              { key: "svc", header: "Service", main: true, sortable: true, render: (l) => l.service ?? l.description ?? "—" },
+              { key: "kind", header: "Kind", sortable: true, render: (l) => l.billingKind },
+              { key: "amt", header: "Imported amount", main: true, sortable: true, align: "right", render: (l) => <span className={v.num}>{amountText(l)}</span> },
+              { key: "cc", header: "Cost center", main: true, sortable: true, render: (l) => l.costCenter ?? "—" },
+            ]}
+          />
         </div>
       )}
     </DetailDialog>

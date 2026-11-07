@@ -32,7 +32,8 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Select, Table } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Select } from "../../../ui/kit";
+import { DataList } from "../../../ui/DataList";
 import { KV, QueryGate, Stat, useAction } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
@@ -94,10 +95,6 @@ export default function DataKeyPage() {
     queryKey: ["admin", "data-key"],
     queryFn: () => api.get<Status>("/v1/security/data-key"),
   });
-  const list = useQuery({
-    queryKey: ["admin", "data-key-attestations"],
-    queryFn: () => api.get<{ attestations: Attestation[] }>("/v1/security/data-key/attestations"),
-  });
 
   const s = status.data;
 
@@ -114,7 +111,6 @@ export default function DataKeyPage() {
       setLocationHint("");
       setNote("");
       await status.refetch();
-      await list.refetch();
     }, "Custody attestation recorded");
 
   return (
@@ -255,25 +251,25 @@ export default function DataKeyPage() {
           </Card>
 
           <Card title="Attestation history">
-            {(list.data?.attestations ?? []).length === 0 ? (
-              <EmptyState title="No attestations" body="Nobody has stated that this key is held anywhere else." />
-            ) : (
-              <Table
-                rows={list.data?.attestations ?? []}
-                rowKey={(r) => r.id}
-                columns={[
-                  { key: "at", header: "When", render: (r) => r.attestedAt },
-                  { key: "who", header: "Who", render: (r) => r.attestedByLabel },
-                  { key: "how", header: "Method", render: (r) => <Badge tone="info">{r.method}</Badge> },
-                  {
-                    key: "where",
-                    header: "Pointer",
-                    render: (r) => r.locationHint ?? <span className={v.faint}>—</span>,
-                  },
-                  { key: "fp", header: "Fingerprint", render: (r) => <code>{r.fingerprint}</code> },
-                ]}
-              />
-            )}
+            <DataList<Attestation>
+              listId="data-key-attestations"
+              noun="attestations"
+              endpoint="/v1/security/data-key/attestations"
+              exportPath="/v1/security/data-key/attestations/export.xlsx"
+              queryKey={["admin", "data-key-attestations", "list"]}
+              legacyKey="attestations"
+              defaultSort={{ key: "at", dir: "desc" }}
+              rowKey={(r) => r.id}
+              empty={<EmptyState title="No attestations" body="Nobody has stated that this key is held anywhere else." />}
+              columns={[
+                { key: "at", header: "When", main: true, sortable: true, render: (r) => r.attestedAt },
+                { key: "who", header: "Who", main: true, sortable: true, render: (r) => r.attestedByLabel },
+                { key: "how", header: "Method", main: true, sortable: true, render: (r) => <Badge tone="info">{r.method}</Badge> },
+                { key: "where", header: "Pointer", main: true, sortable: true, render: (r) => r.locationHint ?? <span className={v.faint}>—</span> },
+                { key: "fp", header: "Fingerprint", main: true, sortable: true, render: (r) => <code>{r.fingerprint}</code> },
+                { key: "note", header: "Note", render: (r) => r.note ?? <span className={v.faint}>—</span> },
+              ]}
+            />
           </Card>
         </QueryGate>
         {/* ADR-0063: the re-encryption walk after a rotation (its own read, so a failure here hides nothing above) */}
