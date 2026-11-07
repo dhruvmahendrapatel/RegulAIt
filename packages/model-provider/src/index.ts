@@ -21,6 +21,23 @@
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { findSentinel, stripSentinels, trimTrailingPunctuation } from "./sentinels.js";
+import { GoogleProvider as AiSdkGoogleProvider } from "./google-ai-sdk.js";
+import {
+  DEFAULT_MAX_TOKENS,
+  GOOGLE_DEFAULT_BASE,
+  ModelProviderError,
+  STREAM_THRESHOLD_TOKENS,
+  cacheUsage,
+  deadlineBoundFetch,
+  geminiModality,
+  isModelDeadlineError,
+  modelDispatchTimeout,
+  openAiChatModality,
+  reportedModel,
+  type GeminiUsageMetadata,
+  type ModalityTokenCounts,
+} from "./core.js";
+export * from "./core.js";
 
 export const MODEL_PROVIDER_KINDS = [
   "anthropic",
@@ -53,20 +70,6 @@ export type ModelProviderKind = (typeof MODEL_PROVIDER_KINDS)[number];
 
 export function isModelProviderKind(value: string): value is ModelProviderKind {
   return (MODEL_PROVIDER_KINDS as readonly string[]).includes(value);
-}
-
-export class ModelProviderError extends Error {
-  constructor(
-    message: string,
-    readonly status?: number,
-    /** ADR-0034: the ORIGINAL failure, preserved. The SDKs flatten a transport
-     * failure to "Connection error.", which would turn an egress-guard refusal
-     * (a governance decision) into an opaque network blip. Callers walk this
-     * chain to report the real reason. */
-    options?: { cause?: unknown },
-  ) {
-    super(message, options);
-  }
 }
 
 /** A tool the model may call during a turn (pillar 7 tool-using workers). The
@@ -249,73 +252,6 @@ export interface ModelDispatchResult {
   servedModel?: string | null;
 }
 
-/** ADR-0212: image/audio token counts out of a provider's usage block (structurally the shared type) */
-export interface ModalityTokenCounts {
-  image?: { inputTokens: number; outputTokens: number };
-  audio?: { inputTokens: number; outputTokens: number };
-}
-
-const positiveCount = (n: unknown): number => (typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.trunc(n) : 0);
-
-/** spread into `usage`: `{ modality }` only when some image or audio count is positive */
-function modalityUsage(m: ModalityTokenCounts): { modality?: ModalityTokenCounts } {
-  const out: ModalityTokenCounts = {};
-  for (const k of ["image", "audio"] as const) {
-    const v = m[k];
-    const inputTokens = positiveCount(v?.inputTokens);
-    const outputTokens = positiveCount(v?.outputTokens);
-    if (inputTokens > 0 || outputTokens > 0) out[k] = { inputTokens, outputTokens };
-  }
-  return out.image || out.audio ? { modality: out } : {};
-}
-
-/** OpenAI chat completions: `prompt_tokens_details` / `completion_tokens_details` carry `audio_tokens`
- * (and, on some compatible endpoints, `image_tokens`) */
-export function openAiChatModality(usage: unknown): { modality?: ModalityTokenCounts } {
-  const u = (usage ?? {}) as {
-    prompt_tokens_details?: { audio_tokens?: unknown; image_tokens?: unknown } | null;
-    completion_tokens_details?: { audio_tokens?: unknown; image_tokens?: unknown } | null;
-  };
-  return modalityUsage({
-    image: {
-      inputTokens: positiveCount(u.prompt_tokens_details?.image_tokens),
-      outputTokens: positiveCount(u.completion_tokens_details?.image_tokens),
-    },
-    audio: {
-      inputTokens: positiveCount(u.prompt_tokens_details?.audio_tokens),
-      outputTokens: positiveCount(u.completion_tokens_details?.audio_tokens),
-    },
-  });
-}
-
-/** Gemini `usageMetadata`: per-modality `promptTokensDetails` / `candidatesTokensDetails` */
-export function geminiModality(meta: GeminiUsageMetadata | undefined): { modality?: ModalityTokenCounts } {
-  const sum = (details: GeminiModalityCount[] | undefined, modality: string) =>
-    (details ?? []).filter((d) => d?.modality === modality).reduce((n, d) => n + positiveCount(d.tokenCount), 0);
-  return modalityUsage({
-    image: {
-      inputTokens: sum(meta?.promptTokensDetails, "IMAGE") + sum(meta?.promptTokensDetails, "VIDEO"),
-      outputTokens: sum(meta?.candidatesTokensDetails, "IMAGE"),
-    },
-    audio: {
-      inputTokens: sum(meta?.promptTokensDetails, "AUDIO"),
-      outputTokens: sum(meta?.candidatesTokensDetails, "AUDIO"),
-    },
-  });
-}
-
-/** the provider's prompt-cache counts, only when positive (see `usage`) */
-function cacheUsage(read: unknown, creation: unknown): { cacheReadInputTokens?: number; cacheCreationInputTokens?: number } {
-  const pos = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
-  return { ...(pos(read) ? { cacheReadInputTokens: read } : {}), ...(pos(creation) ? { cacheCreationInputTokens: creation } : {}) };
-}
-
-/** the provider-reported model id, or null — a blank or non-string value is
- * "not reported", never coerced */
-function reportedModel(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
 export interface ModelProvider {
   readonly kind: ModelProviderKind;
   dispatch(req: ModelDispatchRequest): Promise<ModelDispatchResult>;
@@ -331,10 +267,6 @@ function chatTurns(req: ModelDispatchRequest): ModelChatMessage[] {
     : [{ role: "user", content: req.input }];
 }
 
-const DEFAULT_MAX_TOKENS = 1024;
-/** above this, the Anthropic adapter streams internally even without a
- * caller onText — long generations must not ride a single request timeout */
-const STREAM_THRESHOLD_TOKENS = 16_000;
 
 // ---------------------------------------------------------------------------
 // Anthropic adapter — official SDK, injectable fetch (same testability
@@ -1225,7 +1157,6 @@ export interface GoogleAdapterOptions {
   fetchImpl?: typeof fetch;
 }
 
-const GOOGLE_DEFAULT_BASE = "https://generativelanguage.googleapis.com/v1beta";
 const GOOGLE_REFUSAL_REASONS = new Set(["SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII"]);
 
 interface GeminiFunctionCall {
@@ -1246,19 +1177,6 @@ interface GeminiChunk {
   }>;
   promptFeedback?: { blockReason?: string };
   usageMetadata?: GeminiUsageMetadata;
-}
-
-export interface GeminiModalityCount {
-  modality?: string;
-  tokenCount?: number;
-}
-
-export interface GeminiUsageMetadata {
-  promptTokenCount?: number;
-  candidatesTokenCount?: number;
-  /** ADR-0212: per-modality breakdowns (TEXT, IMAGE, VIDEO, AUDIO) */
-  promptTokensDetails?: GeminiModalityCount[];
-  candidatesTokensDetails?: GeminiModalityCount[];
 }
 
 /** JSON-Schema keywords Gemini's Schema dialect shares verbatim — everything
@@ -1414,7 +1332,23 @@ function mapGoogleStop(finishReason: string | null | undefined): ModelDispatchRe
   return "other";
 }
 
+/** ADR-0253 (P29) migration switch: which Gemini adapter serves. Temporary —
+ * removed with the legacy adapter once both pass the same suite. */
+const googleAdapter: "legacy" | "ai-sdk" =
+  process.env["REGULAIT_P29_GOOGLE_ADAPTER"] === "ai-sdk" ? "ai-sdk" : "legacy";
+
 export class GoogleProvider implements ModelProvider {
+  readonly kind = "google" as const;
+  private readonly inner: ModelProvider;
+  constructor(opts: GoogleAdapterOptions) {
+    this.inner = googleAdapter === "ai-sdk" ? new AiSdkGoogleProvider(opts) : new LegacyGoogleProvider(opts);
+  }
+  dispatch(req: ModelDispatchRequest): Promise<ModelDispatchResult> {
+    return this.inner.dispatch(req);
+  }
+}
+
+class LegacyGoogleProvider implements ModelProvider {
   readonly kind = "google" as const;
   private readonly apiKey: string;
   private readonly base: string;
@@ -2594,97 +2528,6 @@ export interface ModelProviderConfig {
   wireProtocol?: CustomWireProtocol | null;
 }
 
-/**
- * ROADMAP G2 — the deadline every real SDK client is constructed with.
- *
- * WHY THIS LIVES HERE AND THE ENV VAR DOES NOT. The number belongs to the
- * package that uses it, so there is one definition; the gateway's `timeouts.ts`
- * IMPORTS this default and is the only thing that reads
- * `REGULAIT_MODEL_TIMEOUT_MS`, then pushes the resolved value in. One number,
- * one env reader, no mirrored constant to drift — this repo has already been
- * bitten once by a hand-maintained mirror (ADR-0121's connector-kind list).
- *
- * WHY IT MATTERS. Both SDKs default to a TEN-MINUTE timeout and both retry
- * twice, so the real worst case for one held request was around half an hour,
- * inherited silently from a vendor default nobody chose. Five minutes is
- * deliberately not aggressive: a long completion is legitimate work and this is
- * a governance layer, not a latency budget.
- */
-export const MODEL_DISPATCH_TIMEOUT_MS_DEFAULT = 300_000;
-
-let modelDispatchTimeoutMs: number = MODEL_DISPATCH_TIMEOUT_MS_DEFAULT;
-
-/** Called by the gateway once at start-up, and by tests that need a short one. */
-export function setModelDispatchTimeoutMs(ms: number): void {
-  modelDispatchTimeoutMs = ms;
-}
-
-export function modelDispatchTimeout(): number {
-  return modelDispatchTimeoutMs;
-}
-
-/** marker so wrapping twice is a no-op rather than two armed signals */
-const DEADLINE_BOUND = Symbol.for("regulait.model.deadlineBoundFetch");
-
-/**
- * AER-021 — THE DEADLINE EVERY RAW-FETCH ADAPTER GETS WHETHER ITS AUTHOR
- * THOUGHT ABOUT IT OR NOT.
- *
- * ADR-0126 bounded model dispatch by passing `modelDispatchTimeout()` to each
- * SDK constructor — which covered Anthropic, OpenAI, xAI and custom, and missed
- * `GoogleProvider` completely, because Google is the one adapter written against
- * raw `fetch`. A hung Gemini endpoint could hold gateway work forever, ignoring
- * the operator's `REGULAIT_MODEL_TIMEOUT_MS` entirely, while the ADR and the
- * roadmap both claimed no unbounded wait remained on any model path.
- *
- * The narrow fix is to add a signal in `GoogleProvider.dispatch`. That was
- * rejected: it leaves the NEXT raw-fetch adapter free to omit it just as
- * silently. This wrapper is applied in `resolveModelProvider`, the single funnel
- * every production dispatch is built through, so a provider added later inherits
- * the bound without its author doing anything — the omission becomes structurally
- * impossible rather than something to remember.
- *
- * ── WHY THE TIMER IS NEVER CLEARED EARLY ───────────────────────────────────
- * `AbortSignal.timeout` is the same primitive `mcp-egress.ts` uses for the MCP
- * connect deadline, and it is the right one here for a reason specific to
- * streaming: aborting the signal a fetch was given **also errors the response
- * BODY stream**, so the deadline stays live through `reader.read()` and
- * `res.json()` — which is exactly where the Google adapter used to hang after
- * headers had already arrived. A wrapper cannot know when the caller has
- * finished reading a body, so there is nothing to clear on; the signal simply
- * expires. `AbortSignal.timeout` does not hold the event loop open, and an abort
- * that lands after a fully-consumed body is a no-op.
- *
- * A caller-supplied signal is PRESERVED and composed with `AbortSignal.any`, so
- * this can never take away a cancellation the caller already arranged.
- */
-export function deadlineBoundFetch(inner: typeof fetch = fetch): typeof fetch {
-  if ((inner as { [DEADLINE_BOUND]?: true })[DEADLINE_BOUND]) return inner;
-  const bound: typeof fetch = (input, init) => {
-    const deadline = AbortSignal.timeout(modelDispatchTimeout());
-    const caller = init?.signal ?? null;
-    return inner(input, {
-      ...init,
-      signal: caller ? AbortSignal.any([caller, deadline]) : deadline,
-    });
-  };
-  Object.defineProperty(bound, DEADLINE_BOUND, { value: true });
-  return bound;
-}
-
-/**
- * Was this failure our model deadline rather than the provider's refusal?
- *
- * `AbortSignal.timeout` rejects with a DOMException named `TimeoutError`; an
- * abort from a composed caller signal is `AbortError`. Both are distinguished
- * from a provider error so the ledger can say "we stopped waiting" rather than
- * "the vendor failed" — they send an operator to different places.
- */
-export function isModelDeadlineError(err: unknown): boolean {
-  const e = err as { name?: string } | null;
-  return e?.name === "TimeoutError" || e?.name === "AbortError";
-}
-
 /** shared mock instance so state persists across resolutions in one process */
 const sharedMock = new MockModelProvider();
 
@@ -2803,7 +2646,7 @@ export function resolveModelProvider(
 export const ANTHROPIC_DEFAULT_BASE = "https://api.anthropic.com";
 /** `openai`'s own default base URL. */
 export const OPENAI_DEFAULT_BASE = "https://api.openai.com/v1";
-export { GOOGLE_DEFAULT_BASE, XAI_DEFAULT_BASE };
+export { XAI_DEFAULT_BASE };
 
 /**
  * The endpoint a provider kind reaches when NO `baseUrl` override is supplied.

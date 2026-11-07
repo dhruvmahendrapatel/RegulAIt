@@ -18,8 +18,11 @@
     "test": "vitest run --dir src"
   },
   "dependencies": {
+    "@ai-sdk/google": "4.0.113",
+    "@ai-sdk/provider": "4.0.36",
     "@anthropic-ai/sdk": "^0.113.0",
-    "openai": "^6.49.0"
+    "openai": "^6.49.0",
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@types/node": "26.6.6",
