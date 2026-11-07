@@ -165,7 +165,11 @@ async function expectAxeClean(page: Page, label: string) {
   await setTheme(page, "light");
 }
 
-const entry = (page: Page, title: string) => page.getByRole("listitem").filter({ has: page.getByText(title, { exact: true }) });
+// I-2 (#453): an entry is a timeline row plus, once opened, its detail region (dates in words, summary, impact, source)
+const entry = (page: Page, title: string) =>
+  page.getByRole("row").filter({ has: page.getByText(title, { exact: true }) }).or(page.getByRole("region", { name: `Details: ${title}` }));
+const open = (page: Page, title: string) => page.getByRole("button", { name: `Details: ${title}` }).click();
+const TIMELINE = "Regulatory effective-date timeline";
 
 test.describe("ADR-0179 G14-FEED: regulatory intelligence statuses and kinds", () => {
   test("withdrawn, voluntary and enforcement-dated entries say what they are; axe-clean in both themes", async ({ page }) => {
@@ -180,6 +184,7 @@ test.describe("ADR-0179 G14-FEED: regulatory intelligence statuses and kinds", (
     await expect(stat("Voluntary standards")).toHaveText(/^1\s*Voluntary standards$/);
     await expect(stat("In force")).toHaveText(/^1\s*In force$/);
 
+    await open(page, "CFPB Circular 2022-03 — Adverse-action notices for complex algorithms (withdrawn)");
     const cfpb = entry(page, "CFPB Circular 2022-03 — Adverse-action notices for complex algorithms (withdrawn)");
     await expect(cfpb.getByText("Withdrawn", { exact: true })).toBeVisible();
     await expect(cfpb.getByText(/Withdrawn on 12 May 2025\./)).toBeVisible();
@@ -187,17 +192,19 @@ test.describe("ADR-0179 G14-FEED: regulatory intelligence statuses and kinds", (
     await expect(cfpb.getByText(/\d+ gaps?$/)).toHaveCount(0);
     await expect(cfpb.getByText("Guidance", { exact: true })).toBeVisible();
 
+    await open(page, "NIST AI RMF 1.0 — Voluntary framework for managing AI risks");
     const nist = entry(page, "NIST AI RMF 1.0 — Voluntary framework for managing AI risks");
     await expect(nist.getByText("Voluntary standard", { exact: true })).toBeVisible();
     await expect(nist.getByText("Voluntary standard: published, not law in force.")).toBeVisible();
     await expect(nist.getByText("In force", { exact: true })).toHaveCount(0);
     await expect(nist.getByText(/^published .* ago$/)).toBeVisible();
 
+    await open(page, "NYC Local Law 144 — Automated employment decision tool bias audits");
     const nyc = entry(page, "NYC Local Law 144 — Automated employment decision tool bias audits");
     await expect(nyc.getByText("Effective 1 Jan 2023 · enforced from 5 Jul 2023")).toBeVisible();
     // F32: the generated line, entry dates and verified dates use the shared en-GB form (F16), never the browser's
     await expect(page.getByText(/^Generated 5 Oct 2026, \d{2}:\d{2} · impact window/)).toBeVisible();
-    await expect(page.getByRole("list", { name: "Regulatory effective-date timeline" }).locator("time", { hasText: "26 May 2022" }).first()).toBeVisible();
+    await expect(page.getByRole("region", { name: TIMELINE }).locator("time", { hasText: "26 May 2022" }).first()).toBeVisible();
     await expect(page.getByText("Verified on 5 Oct 2026").first()).toBeVisible();
     await expect(page.getByText(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2}, \d{4}/)).toHaveCount(0);
 
@@ -208,12 +215,14 @@ test.describe("ADR-0179 G14-FEED: regulatory intelligence statuses and kinds", (
   test("D5: the impact detail puts the scope basis and statuses into words, never gateway codes", async ({ page }) => {
     await mockApi(page);
     await page.goto("/ui/admin/governance/regulatory");
+    await open(page, "Colorado SB 26-189 — Automated decision-making technology in consequential decisions");
     const co = entry(page, "Colorado SB 26-189 — Automated decision-making technology in consequential decisions");
     await co.getByText("Mapped controls and impacted use cases").click();
     await expect(co.getByText(/^Scope basis: EU AI Act tier · 1\/2 mapped controls evidenced$/)).toBeVisible();
     await expect(co.getByText("Not in active pack", { exact: true })).toBeVisible();
     await expect(co.getByText("Under review · EU AI Act tier high")).toBeVisible();
     await expect(co.getByText(/eu ai act tier|not in active pack|under review/)).toHaveCount(0);
+    await open(page, "NIST AI RMF 1.0 — Voluntary framework for managing AI risks");
     const nist = entry(page, "NIST AI RMF 1.0 — Voluntary framework for managing AI risks");
     await nist.getByText("Mapped controls and impacted use cases").click();
     await expect(nist.getByText(/^Scope basis: All live use cases · /)).toBeVisible();
@@ -226,13 +235,13 @@ test.describe("ADR-0179 G14-FEED: regulatory intelligence statuses and kinds", (
     await expect(page.getByRole("heading", { name: "Regulatory & policy intelligence" })).toBeVisible();
 
     await page.getByLabel("Status").selectOption("withdrawn");
-    await expect(page.getByRole("list", { name: "Regulatory effective-date timeline" }).getByRole("listitem")).toHaveCount(1);
+    await expect(page.getByRole("region", { name: TIMELINE }).getByRole("button", { name: /^Details: / })).toHaveCount(1);
     await expect(page.getByText("CFPB Circular 2022-03 — Adverse-action notices for complex algorithms (withdrawn)")).toBeVisible();
     expect(queries).toContain("?status=withdrawn");
 
     await page.getByLabel("Status").selectOption("");
     await page.getByLabel("Instrument kind").selectOption("voluntary_standard");
-    await expect(page.getByRole("list", { name: "Regulatory effective-date timeline" }).getByRole("listitem")).toHaveCount(1);
+    await expect(page.getByRole("region", { name: TIMELINE }).getByRole("button", { name: /^Details: / })).toHaveCount(1);
     await expect(page.getByText("NIST AI RMF 1.0 — Voluntary framework for managing AI risks")).toBeVisible();
     expect(queries).toContain("?kind=voluntary_standard");
 

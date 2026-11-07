@@ -74,6 +74,7 @@ export const NO_REMOVE_BY_DESIGN = new Map([
   ["/v1/agents/setup-assist", "not a collection: the POST returns a suggested agent draft and stores nothing but an audit row"],
   ["/v1/privacy/processing-records", "a record of processing is retired with PATCH status \"retired\", not deleted, so past dispatch decisions stay traceable to it"],
   ["/v1/servers/:x/tools", "tools come from the server's manifest; a tool is stopped with halt, and the server's own lifecycle is G4"],
+  ["/v1/model-drift/monitors/:x/reports", "a drift report is the point-in-time comparison its alerts cite; reports go only with their monitor (DELETE /v1/model-drift/monitors/:id, audited with the count removed)"],
 ]);
 
 /**
