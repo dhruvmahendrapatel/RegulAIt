@@ -174,3 +174,23 @@ merge.
   binding, error is deny, and a differential over enforcement on/off x no limit, under and at the limit agreeing with
   `checkModelRateLimit`). ADR-0212's own suite now pins on-by-default.
 
+### Slice 3: A2A (2026-11-07)
+
+- Kernel `evaluateA2a` (in `resource.ts`): the execution posture first (kill switch, subject halt, read-only,
+  the approval dial, AI literacy; a message to a remote agent counts as a write and has no queue, so the dial's
+  `require_approval` refuses it), then the lead ceiling, then the person's grant (default deny). The lead-ceiling and
+  no-grant refusals keep the route's rule ids (`lead-ceiling`, `a2a-default-deny`), status (403 `forbidden`) and
+  reason text.
+- `executeGovernedA2aCall` calls `evaluateA2a` and then `governedEvaluateResource` (`canQueue: false`) in place of its
+  own steps 3 and 4. Org setting, agent and skill checks stay before it; project attribution, the budget gate, PII,
+  egress and the credential stay after it. New refusal codes: 403 `execution_refused`, 409 `attribution_required`,
+  429 `rate_limited`, 403 `approval_required`, 503 `governed_core_error`.
+- A2A decision rows (allowed, upstream error, refused) now carry `receiptClass: "decision"`, so the A2A window counts
+  read them the same way as connector rows.
+- Tests: `resource.test.ts` (evaluateA2a: grants, ceiling, every stop), `zz-adr0251-a2a-core.test.ts` (the three
+  stops refuse and audit, mandate on by default and relaxable, rate limit 429, approval rule refusal bound to its
+  subject, error is deny, and a differential over 45 cases of grant shape, requested skill and lead ceiling against a
+  transcription of the pre-ADR-0251 route checks). The P10 suite relaxes `a2aAttributionRequired` by name.
+- Intended new denials, as listed above: A2A under the kill switch, read-only or approval dial; a person whose AI
+  literacy is not current; an unattributed A2A call; a call over an A2A rate limit or matching an A2A approval rule.
+

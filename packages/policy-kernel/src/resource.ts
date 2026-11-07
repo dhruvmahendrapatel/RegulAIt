@@ -12,7 +12,8 @@
  * A call over its limit is refused before it is queued for anyone's sign-off, and an approval only ever turns an
  * allow into a hold: it is consulted strictly after an entitlement allow (AER-017's order on the MCP path).
  */
-import type { AbacDecision, RuleScope } from "./index.js";
+import type { AbacDecision, ExecutionPosture, RuleScope } from "./index.js";
+import { executionGate } from "./index.js";
 
 export type GovernedResourceType = "model" | "connector" | "a2a";
 
@@ -248,3 +249,60 @@ export function governedCoreErrorDecision(resource: GovernedResource, err: unkno
   };
 }
 
+
+/** ADR-0251 slice 3 — a person's grant on a remote agent (`a2a_agent_grants`); `skillId` null = the whole agent. */
+export interface A2aGrant {
+  id: string;
+  userId: string;
+  agentId: string;
+  skillId: string | null;
+}
+
+export interface EvaluateA2aInput {
+  userId: string;
+  /** ADR-0124 — REQUIRED, as on every other kernel path, so the compiler finds every caller */
+  execution: ExecutionPosture;
+  agent: { id: string; name?: string | null };
+  skillId: string | null;
+  grants: readonly A2aGrant[];
+  /** §5.1 lead ceiling: the agent ids a worker's lead chain permits; null/undefined = none. Only ever narrows. */
+  ceilingAgentIds?: readonly string[] | null;
+}
+
+/** the rule ids the A2A route already used, kept so a refusal reads the same before and after ADR-0251 */
+export const A2A_KERNEL_RULE_IDS = { leadCeiling: "lead-ceiling", noGrant: "a2a-default-deny" } as const;
+
+/**
+ * ADR-0251 slice 3 (review S-05) — the A2A entitlement decision, moved into the kernel so a remote agent call meets
+ * the kill switch, the safe modes and the AI literacy gate like every other call type. Order: posture → lead ceiling
+ * → the person's grant (default deny). A message to a remote agent is treated as a write (it can make the agent
+ * act), and it has no approval queue, so the dial's `require_approval` mode refuses it.
+ */
+export function evaluateA2a(input: EvaluateA2aInput): EntitlementDecision {
+  const subject = label({ type: "a2a", id: input.agent.id, name: input.agent.name ?? null, skillId: input.skillId });
+  const gated = executionGate(input.execution, true, subject, false);
+  if (gated) {
+    return { effect: "deny", ruleId: gated.ruleId, reason: gated.reason, ruleChain: [{ rule: gated.ruleId, outcome: "deny" }] };
+  }
+  if (input.ceilingAgentIds && !input.ceilingAgentIds.includes(input.agent.id)) {
+    return {
+      effect: "deny",
+      ruleId: A2A_KERNEL_RULE_IDS.leadCeiling,
+      reason: "this worker's lead does not allow it to call this agent",
+      ruleChain: [{ rule: "a2a-lead-ceiling", outcome: "deny" }],
+    };
+  }
+  const skillId = input.skillId;
+  const grant = input.grants.find(
+    (g) => g.userId === input.userId && g.agentId === input.agent.id && (skillId === null ? g.skillId === null : g.skillId === null || g.skillId === skillId),
+  );
+  if (!grant) {
+    return {
+      effect: "deny",
+      ruleId: A2A_KERNEL_RULE_IDS.noGrant,
+      reason: skillId === null ? "you have no access to this agent" : `you have no access to this agent's skill '${skillId}'`,
+      ruleChain: [{ rule: "a2a-allow-list", outcome: "no-match" }, { rule: "default-deny", outcome: "deny" }],
+    };
+  }
+  return { effect: "allow", ruleId: grant.id, reason: `${subject} allowed by the person's grant`, ruleChain: [{ rule: "a2a-allow-list", outcome: "allow", grantId: grant.id }] };
+}

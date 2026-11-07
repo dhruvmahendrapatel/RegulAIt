@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  A2A_KERNEL_RULE_IDS,
   composeResourceDecision,
+  evaluateA2a,
   governedCoreErrorDecision,
   RESOURCE_RULE_IDS,
   type ComposeResourceInput,
@@ -101,5 +103,33 @@ describe("ADR-0251 composeResourceDecision", () => {
     const d = governedCoreErrorDecision(write, new TypeError("boom"));
     expect(d).toMatchObject({ effect: "deny", ruleId: RESOURCE_RULE_IDS.coreError });
     expect(d.reason).not.toContain("boom");
+  });
+});
+
+describe("ADR-0251 evaluateA2a (S-05: A2A meets the kill switch)", () => {
+  const AG = "44444444-4444-4444-8444-444444444444";
+  const U = "55555555-5555-4555-8555-555555555555";
+  const grant = { id: "gr-1", userId: U, agentId: AG, skillId: null };
+  const base = { userId: U, agent: { id: AG, name: "joule" }, skillId: null as string | null, grants: [grant], execution: { mode: "normal" as const } };
+
+  it("allows with a whole-agent grant; a skill grant covers only its skill", () => {
+    expect(evaluateA2a(base)).toMatchObject({ effect: "allow", ruleId: "gr-1" });
+    const skillOnly = { ...base, grants: [{ ...grant, skillId: "s1" }] };
+    expect(evaluateA2a({ ...skillOnly, skillId: "s1" }).effect).toBe("allow");
+    expect(evaluateA2a({ ...skillOnly, skillId: "s2" }).ruleId).toBe(A2A_KERNEL_RULE_IDS.noGrant);
+    expect(evaluateA2a(skillOnly).ruleId).toBe(A2A_KERNEL_RULE_IDS.noGrant);
+  });
+
+  it("default-denies another person's grant and narrows by the lead ceiling", () => {
+    expect(evaluateA2a({ ...base, grants: [{ ...grant, userId: "x" }] }).ruleId).toBe(A2A_KERNEL_RULE_IDS.noGrant);
+    expect(evaluateA2a({ ...base, ceilingAgentIds: ["other"] }).ruleId).toBe(A2A_KERNEL_RULE_IDS.leadCeiling);
+    expect(evaluateA2a({ ...base, ceilingAgentIds: [AG] }).effect).toBe("allow");
+  });
+
+  it("is refused by every stop: halted, read-only (a message is a write), the approval dial (no queue), literacy", () => {
+    expect(evaluateA2a({ ...base, execution: { mode: "halted" } }).ruleId).toBe("execution-halted");
+    expect(evaluateA2a({ ...base, execution: { mode: "read_only" } }).ruleId).toBe("execution-read-only");
+    expect(evaluateA2a({ ...base, execution: { mode: "require_approval", approverUserId: "a" } })).toMatchObject({ effect: "deny", ruleId: "execution-require-approval" });
+    expect(evaluateA2a({ ...base, execution: { mode: "normal", literacy: { required: true, current: false } } }).ruleId).toBe("ai-literacy-not-current");
   });
 });
