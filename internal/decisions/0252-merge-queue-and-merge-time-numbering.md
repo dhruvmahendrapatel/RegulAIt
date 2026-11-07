@@ -97,3 +97,28 @@ Existing numbered migrations, journal entries and ADR rows are untouched.
   that report on `merge_group`. ADR numbers are still claimed upfront; the same scheme can take them later.
 - Follow-ups: Drizzle v1's journal-free migrator; a schema-to-SQL parity test (C-03); per-PR status checklists and a
   per-lane cap on open PRs (R-08), which is process, not code.
+
+## Addendum (2026-11-07): fast checks on a PR, the full suite at merge time
+
+**Owner decision, 2026-11-07.** The free public-repo runner pool runs about 20 jobs at once, and a full CI run was
+about 30 jobs, so only one PR's CI ran at a time and nearly 200 runs were queued. CI is split. Built in #734
+(`.github/actions/ci-scope` and the workflow triggers), documented in CONTRIBUTING_PARALLEL_SESSIONS §4.8.
+
+- **On `pull_request`:** build, typecheck, the package suites, the static pre-flights (migration guard, licence gate)
+  and the four gateway shards when code changed; every security gate, always, unchanged (CodeQL, gitleaks, dependency
+  audit, Trivy); the UI tokens, baseline and bundle-size job; the mocked SPA shards and the enterprise browser jobs only
+  when the web app or what it is built from changed; the engine build-and-compare only when engine files changed.
+- **On `merge_group`, a push to `main` and nightly:** everything, adding the SPA journeys, the docker build, the demo
+  journeys and gVisor, and every shard whatever changed. The merge queue is where the full suite gates a merge.
+- **Required checks report on every PR and merge group.** Jobs are gated by a job-level `if:` on the `scope` job's
+  outputs, never by a workflow-level path filter, so a skipped job still reports. `build-and-test` passes only if
+  every part succeeded, or (a docs-only PR) every part was skipped. Required names: `build-and-test`,
+  `SAST (CodeQL)`, `Secret scan (gitleaks)`, `Dependency audit (pnpm)`, `Image scan and SBOMs (Trivy)`,
+  `ui enterprise / tokens, baseline guard, bundle size`.
+- `cancel-in-progress` applies to `pull_request` runs only.
+- Open source checked (ADR-0176): `dorny/paths-filter` (MIT) would do the diff, but ci.yml already refuses a
+  third-party paths action in the CI path as a supply-chain surface; the decision is a `git diff` of the PR's merge
+  commit in a 30-line composite action.
+- Trade-off accepted: a PR can be green and still fail in the queue on a journey, demo or browser job it did not run.
+  Any branch can run the full suite by `workflow_dispatch`. The push-to-main run repeats the merge group's run on the
+  same tree; the owner asked for it, and it can be dropped if runner time binds again.
