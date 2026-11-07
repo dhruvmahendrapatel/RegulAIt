@@ -10,6 +10,23 @@ Ordered by what actually blocks a sale, not by ADR number.
 
 ---
 
+## 0. New items, newest first (ADR-0252)
+
+A PR adds a new item as a fragment file under `internal/fragments/` whose first line is `<!-- fold: pending -->`;
+the assign-at-merge step moves it here after the merge. Move an item into its section below when you next edit
+this file.
+
+<!-- fold:pending newest-first -->
+
+**Q1 — Turn on the merge queue (owner settings, ADR-0252).** Blocked on the owner. Enable the merge queue on `main`
+with merge method "merge commit"; make the required checks ones that report on `merge_group` (`ci.yml`'s
+`build-and-test`, `security.yml`, `import-cycles.yml`, `ui-enterprise.yml`), not a path-filtered workflow. Then the
+master switches its loop to `gh pr merge <n> --merge --auto` and opens each `assign-at-merge/*` branch's PR.
+Follow-ups: Drizzle v1's journal-free migrator; a schema-to-SQL parity test (C-03); a per-lane cap on open PRs and
+per-PR status checklists (R-08).
+
+---
+
 ## 1. The three that gate an enterprise deal
 
 | # | Gap | Why it blocks | Where it's recorded |
@@ -30,7 +47,7 @@ Ordered by what actually blocks a sale, not by ADR number.
 | **S6** | **Content columns store operator text verbatim** — `name`, `title`, `description`, `summary`, `body` across templates, agents, projects and packs. **DECIDED 2026-11-06 in [ADR-0233](../decisions/0233-content-column-credential-guard.md) (Proposed; PR pending owner/master release), migration 0273.** Content is not redacted (a description may be needed byte-exact); a write carrying a credential shape is REFUSED with `422 credential_in_content`, naming the field and rule labels, never the value. Same detector as ADR-0099/0102 (`scrubAuditText`, by reference; includes the vendored open-source pipelock pack). Sited as a third `createDb` wrapper, so imports and raw writes are covered. An admin may relax it (`content_credential_guard`, `settings_relax` step-up, audited). Existing rows are reported (`GET /v1/admin/content-credential-report`), never rewritten. The count was stale: the schema has **151** matching text columns, **84 guarded and 67 excluded by category**, pinned against `information_schema`. | Residuals: jsonb bodies (`config_versions.body` and six summaries) are not guarded (owner question in ADR-0233); ingested columns (MCP tool names/descriptions, registry entries, IdP display names) are not guarded; application-layer only; shape-based. |
 | **S3** | **No real release keypair.** ADR-0041's update-bundle verifier and ADR-0052's license verifier both pin a **dev** public key whose private half was not retained. | Generate offline, rotate per `infra/release-keys/` runbook, retire the dev key. |
 | **S4** | Deferred by owner decision, still open: SAST/SCA/secret-scanning in CI (D3), third-party pen test (D4), WAF/DDoS at the edge (D5), HSM/FIPS option (D7). **2026-10-02 ([ADR-0167](../decisions/0167-security-review-batch.md), SEC-02/CFG-05):** `@xmldom/xmldom` is pinned to 0.8.15 by a root `pnpm.overrides` entry — the ONE runtime-reachable HIGH advisory in `pnpm audit` (9 open advisories on 0.8.13, incl. quadratic parsing, under the auth-exempt SAML ACS); node-saml 5.1.0 / xml-crypto 6.1.2 declare `^0.8.10`, so the pin is in range. Remove the override once they raise their own floor. The remaining HIGHs (fastify schema/URL, drizzle identifier escaping, fast-uri, ip-address, js-yaml, react-router) were each traced to an unreachable or dev-only path; the `pnpm audit --audit-level=high` CI gate stays deferred with D3 until that upgrade batch lands, because it would fail today on advisories that do not apply. | ENTERPRISE_READINESS_PLAN Bucket 3 |
-| **S7** | **Postgres row-level security is not enabled** (owner, 2026-10-24: post-demo backlog, #453 comment 6390166382). No migration enables RLS; each deployment is single-tenant with one org ([ADR-0041](../decisions/0041-byoc-primary-motion.md)) and tenant scoping relies on the gateway's object-level checks. Item 14 of the [ADR-0200](../decisions/0200-engineering-best-practice-guidelines.md) security checklist asks for RLS on tenant-scoped tables as defence in depth; [ADR-0060](../decisions/0060-tamper-evident-audit.md) lists it as a follow-up. | **In progress (2026-11-06): [ADR-0234](../decisions/0234-postgres-row-level-security.md) (Proposed).** The inventory found no org or tenant key, so RLS is keyed on the authenticated principal. Batch 1 (migration 0272: the `regulait_app` role, the transaction layer, users, auth_mfa_pending, approvals, audit_log, the measured cost) is the first PR; batches 2-7 follow in the ADR's rollout order. Not demo-blocking. |
+| **S7** | **Postgres row-level security is not enabled** (owner, 2026-10-24: post-demo backlog, #453 comment 6390166382). No migration enables RLS; each deployment is single-tenant with one org ([ADR-0041](../decisions/0041-byoc-primary-motion.md)) and tenant scoping relies on the gateway's object-level checks. Item 14 of the [ADR-0200](../decisions/0200-engineering-best-practice-guidelines.md) security checklist asks for RLS on tenant-scoped tables as defence in depth; [ADR-0060](../decisions/0060-tamper-evident-audit.md) lists it as a follow-up. | **In progress (2026-11-06): [ADR-0234](../decisions/0234-postgres-row-level-security.md) (Proposed).** The inventory found no org or tenant key, so RLS is keyed on the authenticated principal. Batch 1 (migration 0272: the `regulait_app` role, the transaction layer, users, auth_mfa_pending, approvals, audit_log, the measured cost) merged in #682; batch 2 (migration 0313, request-scoped adoption in the gateway) is the next PR; batches 3-7 follow in the ADR's rollout order. Not demo-blocking. |
 
 ---
 

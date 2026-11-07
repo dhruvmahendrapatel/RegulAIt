@@ -68,6 +68,7 @@ import {
   users,
   virtualKeys,
   workflowInstances,
+  withinSystemReason,
   type Db,
   type EngineRunRow,
 } from "@regulait/db";
@@ -470,7 +471,9 @@ export async function createEngineRun(db: Db, input: CreateEngineRunInput, ctx: 
       .returning();
     let approvalId: string | null = null;
     if (needsApproval) {
-      const [a] = await tx
+      // ADR-0234 batch 2: the run's approval is the run-as user's request, often created by someone else (an
+      // approver whose decision started the workflow check that queued it): routing, under approval_maintenance
+      const [a] = await withinSystemReason(tx, "approval_maintenance", "engine-runs.run-approval", () => tx
         .insert(approvals)
         .values({
           userId: ctx.runAsUserId,
@@ -483,7 +486,7 @@ export async function createEngineRun(db: Db, input: CreateEngineRunInput, ctx: 
           stageId: `__engine_run__:${run!.id}`,
           status: "pending",
         })
-        .returning({ id: approvals.id });
+        .returning({ id: approvals.id }));
       approvalId = a!.id;
       await tx.update(engineRuns).set({ approvalId }).where(eq(engineRuns.id, run!.id));
     }
