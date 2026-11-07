@@ -31,6 +31,7 @@ import {
 import {
   composeResourceDecision,
   governedCoreErrorDecision,
+  RESOURCE_RULE_IDS,
   type AbacDecision,
   type EntitlementDecision,
   type GovernedResource,
@@ -39,6 +40,7 @@ import {
   type ResourceRateLimit,
 } from "@regulait/policy-kernel";
 import { NOT_ADVISORY_SQL } from "@regulait/shared";
+import { checkModelRateLimit } from "./model-rate-limits.js";
 
 export interface ResourceRestrictions {
   approvalRules: ResourceApprovalRule[];
@@ -177,4 +179,72 @@ export async function governedEvaluateResource(db: Db, input: GovernedResourceIn
   } catch (err) {
     return governedCoreErrorDecision(input.resource, err);
   }
+}
+
+export interface ModelGateRefusal {
+  ok: false;
+  status: number;
+  error: string;
+  detail: string;
+  ruleId: string;
+  retryAfterSeconds?: number;
+  auditLogId?: string | null;
+}
+
+/**
+ * ADR-0251 slice 2 — the core's restriction layer on a MODEL dispatch, run once in the shared dispatch core after
+ * the caller's own `evaluateAgent` allowed (so `base` is that allow; a deny never reaches here). Steps: the model
+ * rate limit (ADR-0212's `checkModelRateLimit`, its 429 and audit row unchanged; enforced by default since 0307),
+ * then approval rules. A model call has no per-call approval queue yet, so a matching rule REFUSES (403
+ * `approval_required`) rather than sending. The attribution mandate on this path stays where it was (compat
+ * `requireProjectAttribution`, native `dispatchAttributionRequired`). Error is deny.
+ */
+export async function governedModelGate(
+  db: Db,
+  args: { userId: string; agentId: string; agentName: string; mode: string; projectId: string | null },
+): Promise<ModelGateRefusal | null> {
+  const resource: GovernedResource = { type: "model", id: args.agentId, name: args.agentName, mode: args.mode };
+  let decision: GovernedResourceDecision;
+  try {
+    const limited = await checkModelRateLimit(db, { userId: args.userId, agentId: args.agentId, agentName: args.agentName, projectId: args.projectId });
+    if (limited) return limited;
+    decision = await governedEvaluateResource(db, {
+      userId: args.userId,
+      resource,
+      projectId: args.projectId,
+      base: { effect: "allow", ruleId: "agent-entitlement", reason: `model '${args.agentName}' allowed by its entitlement decision`, ruleChain: [] },
+      canQueue: false,
+    });
+  } catch (err) {
+    decision = governedCoreErrorDecision(resource, err);
+  }
+  if (decision.effect === "allow") return null;
+  const coreError = decision.ruleId === RESOURCE_RULE_IDS.coreError;
+  const [row] = await db
+    .insert(auditLog)
+    .values({
+      userId: args.userId,
+      objectType: "agent",
+      objectId: args.agentId,
+      detail: {
+        phase: "governed-core",
+        mode: args.mode,
+        ...(args.projectId ? { projectId: args.projectId } : {}),
+        ...(decision.matchedApprovalRuleIds.length ? { matchedApprovalRuleIds: decision.matchedApprovalRuleIds } : {}),
+        receiptClass: "decision",
+      },
+      effect: "deny",
+      ruleId: decision.ruleId,
+      ruleChain: decision.ruleChain,
+      reason: decision.reason,
+    })
+    .returning({ id: auditLog.id });
+  return {
+    ok: false,
+    status: coreError ? 503 : 403,
+    error: coreError ? "governed_core_error" : "approval_required",
+    detail: decision.reason,
+    ruleId: decision.ruleId,
+    auditLogId: row?.id ?? null,
+  };
 }

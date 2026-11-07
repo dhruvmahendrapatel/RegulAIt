@@ -156,3 +156,21 @@ merge.
   Single queries cost about 0.25 ms here; the rest is pool scheduling of three concurrent queries. The budget is
   amended to +3 ms (no rules) and +6 ms (ten rules) at p95, and the bench asserts it. Folding the three loads into
   one statement is the known next step if a pilot needs it.
+
+### Slice 2: model (2026-11-07)
+
+- `governedModelGate` (in `governed-core.ts`) runs once in the shared dispatch core (`dispatchAttempt` in
+  `agents-connectors.ts`), after every caller's own `evaluateAgent` and the lifecycle gate, before any provider work.
+  It replaces the direct `checkModelRateLimit` call there, so every native, compat, playground, builder and fallback
+  dispatch inherits it. Step one is ADR-0212's `checkModelRateLimit` unchanged (429 `model_rate_limited`, its audit
+  row), now enforced by default; step two is the model approval rules through `governedEvaluateResource`
+  (`canQueue: false`).
+- A matching model approval rule refuses with 403 `approval_required`, one audited decision row (`phase:
+  governed-core`, the matched rule ids), and no usage row. An error in either step refuses with 503
+  `governed_core_error`.
+- The attribution mandate on this path stays in the existing gates (`requireProjectAttribution` on compat,
+  `dispatchAttributionRequired` on native dispatch); both were already on by default.
+- Tests: `zz-adr0251-model-core.test.ts` (enforced by default, approval rule refusal with no usage row, subject
+  binding, error is deny, and a differential over enforcement on/off x no limit, under and at the limit agreeing with
+  `checkModelRateLimit`). ADR-0212's own suite now pins on-by-default.
+
