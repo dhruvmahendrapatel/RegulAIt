@@ -80,6 +80,9 @@ function inputFor(
   } as EvaluationInput;
 }
 
+/** The property tests make thousands of wasm calls; on a loaded CI runner that outlasts vitest's 5 s default. */
+const PROPERTY_TIMEOUT_MS = 120_000;
+
 describe("ADR-0239 — Cedar rate limits agree with the hand-written evaluator", () => {
   it("returns the same verdict on a large generated input set", () => {
     fc.assert(
@@ -96,7 +99,7 @@ describe("ADR-0239 — Cedar rate limits agree with the hand-written evaluator",
       }),
       { numRuns: 5000 },
     );
-  });
+  }, PROPERTY_TIMEOUT_MS);
 
   it("produces the same kernel Decision (effect, rule id, trace and reason)", () => {
     fc.assert(
@@ -107,7 +110,7 @@ describe("ADR-0239 — Cedar rate limits agree with the hand-written evaluator",
       }),
       { numRuns: 2000 },
     );
-  });
+  }, PROPERTY_TIMEOUT_MS);
 
   it("agrees past the cached policy-set size", () => {
     fc.assert(
@@ -119,7 +122,7 @@ describe("ADR-0239 — Cedar rate limits agree with the hand-written evaluator",
       }),
       { numRuns: 20 },
     );
-  });
+  }, PROPERTY_TIMEOUT_MS);
 });
 
 describe("ADR-0239 — the Cedar rate-limit policies", () => {
