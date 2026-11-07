@@ -31,7 +31,8 @@
  * House pattern: react-router + TanStack Query + the owned kit.
  */
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { DataList } from "../../../ui/DataList";
 import { api } from "../../../api/client";
 import { ago, fmtUsd, shortId } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
@@ -339,10 +340,7 @@ export default function CostConsolidationPage() {
     queryKey: ["admin", "cost-import-adapters"],
     queryFn: () => api.get<AdaptersResponse>("/v1/cost-imports/adapters"),
   });
-  const history = useQuery({
-    queryKey: ["admin", "cost-imports"],
-    queryFn: () => api.get<{ imports: ImportBatch[]; basisStatement: string }>("/v1/cost-imports"),
-  });
+  const qc = useQueryClient();
   const mappings = useQuery({
     queryKey: ["admin", "cost-import-mappings"],
     queryFn: () => api.get<MappingsResponse>("/v1/cost-imports/mappings"),
@@ -406,7 +404,7 @@ export default function CostConsolidationPage() {
   const adapter = (adapters.data?.adapters ?? []).find((x) => x.id === adapterId) ?? null;
 
   const refreshAll = () => {
-    void history.refetch();
+    void qc.invalidateQueries({ queryKey: ["admin", "cost-imports"] });
     void mappings.refetch();
     void consolidated.refetch();
     void reconciliation.refetch();
@@ -1368,23 +1366,28 @@ export default function CostConsolidationPage() {
 
         {/* --- import history ------------------------------------------------ */}
         <Card title="Import history">
-          <QueryGate
-            loading={history.isLoading}
-            error={history.error}
-            onRetry={() => void history.refetch()}
-          >
-            <Table<ImportBatch>
-              rows={history.data?.imports ?? []}
+          <div className={v.stack}>
+            <DataList<ImportBatch>
+              listId="cost-imports"
+              noun="imports"
+              endpoint="/v1/cost-imports"
+              exportPath="/v1/cost-imports/export.xlsx"
+              queryKey={["admin", "cost-imports", "list"]}
+              legacyKey="imports"
+              defaultSort={{ key: "when", dir: "desc" }}
               rowKey={(r) => r.id}
               empty={<EmptyState title="Nothing imported yet" />}
               columns={[
-                { key: "when", header: "When", render: (r) => ago(r.createdAt) },
-                { key: "adapter", header: "Adapter", render: (r) => <code>{r.adapter}</code> },
-                { key: "vendor", header: "Vendor", render: (r) => r.vendor },
-                { key: "mode", header: "Mode", render: (r) => r.mode },
+                { key: "when", main: true, sortable: true, header: "When", render: (r) => ago(r.createdAt) },
+                { key: "adapter", sortable: true, header: "Adapter", render: (r) => <code>{r.adapter}</code> },
+                { key: "vendor", main: true, sortable: true, header: "Vendor", render: (r) => r.vendor },
+                { key: "mode", main: true, sortable: true, header: "Mode", render: (r) => r.mode },
                 {
                   key: "status",
                   header: "Status",
+                  main: true,
+                  sortable: true,
+                  required: "Status is always shown",
                   render: (r) => (
                     <Badge
                       tone={
@@ -1404,6 +1407,8 @@ export default function CostConsolidationPage() {
                 {
                   key: "rows",
                   header: "Parsed / accepted / refused",
+                  main: true,
+                  sortable: true,
                   render: (r) => (
                     <span className={v.num}>
                       {r.rowsParsed} / {r.rowsAccepted} / {r.rowsRefused}
@@ -1413,12 +1418,14 @@ export default function CostConsolidationPage() {
                 {
                   key: "usd",
                   header: "Imported",
+                  sortable: true,
                   render: (r) =>
                     r.totalUsd === null ? <span className={v.faint}>no single figure</span> : fmtUsd(r.totalUsd),
                 },
-                { key: "reason", header: "Outcome", render: (r) => <span className={v.dim}>{r.reason}</span> },
+                { key: "reason", main: true, sortable: true, required: "Why an import was refused is always shown", header: "Outcome", render: (r) => <span className={v.dim}>{r.reason}</span> },
                 {
                   key: "act",
+                  action: true,
                   header: "",
                   srHeader: "Actions",
                   render: (r) => (
@@ -1441,7 +1448,7 @@ export default function CostConsolidationPage() {
               invoice and it would not parse&rdquo; is exactly the kind of thing an auditor asks about
               later. Revoking withdraws a batch&apos;s lines and keeps the batch row.
             </p>
-          </QueryGate>
+          </div>
         </Card>
       </div>
 
