@@ -650,6 +650,18 @@ its own page) first declared every sub-page as its own lazy route in `App.tsx`, 
   unchanged.
 - Entry JS measured 138,266 B before and 137,998 B after on the same lockfile; all JS fell to 1,066,609 B. No ceiling
   changes; entry stays well under 138.5 kB.
+
+## Addendum / As built (2026-10-31) — the P3 Discovery sources long-page split adds ~0 to the entry bundle
+
+The P3 split (the Discovery sources page keeps a preview of its runs, enrolment tokens and devices, and moves each full
+list to its own page) first declared every sub-page as its own lazy route in `App.tsx`.
+
+- The area is now **one** lazy route with a splat (`shadow-ai/discovery-sources/*`). Its module owns a nested `<Routes>`
+  — the overview at the index, the full runs, tokens and devices lists each on their own nested route — reached through
+  the Shadow AI screen barrel, so `App.tsx` adds no new import specifier and no new entry chunk reference. Every URL,
+  the `?pseudonym=` reveal deep-link, the access gate and the breadcrumbs are unchanged.
+- Entry JS measured 138,037 B before and 137,922 B after; all JS 1,062,749 B. No ceiling changes; entry stays well
+  under 138.5 kB.
 - The SPA route census (`scripts/ui-spa-routes.mjs`) now follows a splat whose element is such a lazy area module —
   through its screen barrel's `export … from` re-export — into that module's `<Routes>`, so every sub-page is still
   enumerated for the enterprise harness and the census output is unchanged.

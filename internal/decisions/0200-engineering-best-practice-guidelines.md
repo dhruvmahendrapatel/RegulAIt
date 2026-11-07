@@ -137,3 +137,40 @@ practices (owner, 2026-10-29)". Each practice is written as an imperative rule t
   - The bundle ceilings and air-gapped constraints still win. No practice adds a CDN, an analytics tracker or a
     third-party heatmap.
 - **Reviews.** A missed UX practice on new or touched UI is a review finding, not a nit.
+
+## Addendum — 2026-11-06: database tables are normalized (owner)
+
+**Owner, 2026-11-06, in a builder session:** "Normalize the database tables wherever needed (add this rule in our design
+guidelines and principles)." The rule joins the Data guidelines in CLAUDE.md. `internal/DESIGN_GUIDELINES.md` covers
+UI only, so it carries a pointer rather than the rule.
+
+1. **The rule.** New and changed tables are in third normal form:
+   - one fact lives in one place;
+   - every reference to another row is a foreign key, with an explicit `ON DELETE`;
+   - a list of references is a join table with foreign keys, never a jsonb array or `uuid[]` of ids, and never a
+     delimited text list;
+   - a mutable attribute of another row (a name, an email, a status) is joined for, not copied next to its id;
+   - no repeating column groups (`x_1`, `x_2`) and no parallel arrays;
+   - one vocabulary per concept: an enum's values are declared once and imported, not restated in a second package.
+2. **Deliberate exceptions.** Each is written as a comment on the column, and in an ADR when it shapes a whole table:
+   - **Point-in-time snapshots and evidence.** Append-only and hash-chained rows (ADR-0060 audit, decision facts,
+     BOMs, signatures) and "as queued" copies (for example the approver pool snapshotted on an approval) record what was
+     true then. Normalizing them would rewrite history or break a hash. They are never normalized.
+   - **Configuration documents.** A versioned jsonb document validated by a schema at the write path, read and written
+     as a whole.
+   - **Verbatim external payloads.** What a provider, IdP or PM tool sent, kept as received.
+   - **A measured read model or cache.** Allowed only with a measurement, the named source of truth and the rule that
+     keeps it in step. Caching rules (never across users or an authorisation decision) still apply.
+3. **Strength.** Stronger than "wherever practical" for new and changed tables: there it is the default. A new
+   denormalized column without its exception comment is a review finding. Existing tables are brought into line in
+   batches. They are not refactored only to meet the rule outside a planned batch.
+4. **How existing tables are normalized.**
+   - An audit lists the candidates and the deliberate snapshots it excluded.
+   - Each batch is one PR with hand-written migrations, never `drizzle-kit generate`
+     (CONTRIBUTING_PARALLEL_SESSIONS §4.1).
+   - Changes follow expand-contract: add the new structure, backfill it, switch readers and writers, then drop the old
+     column in a later migration. No deploy sees a schema its code cannot read.
+   - The batch keeps or extends the tests of every touched path.
+   - A batch that touches an RLS table (ADR-0233) gives its data steps the `migration` system context.
+5. **Precedence.** Secure by default (ADR-0180), open source first (ADR-0176) and evidence immutability (ADR-0060)
+   win over this rule. Where normalizing would weaken one of them, the column stays as it is with an exception comment.
