@@ -6,11 +6,11 @@ and fetched only at image build (ADR-0176 record).
 
 | Image | Direct dependency | Version | Licence | Lockfile |
 |---|---|---|---|---|
-| `node-sdks` | `openai` | 7.43.0 | Apache-2.0 | `clients/node-sdks/package-lock.json` |
+| `node-sdks` | `openai` | 7.43.0 | Apache-2.0 | `node-sdks/package-lock.json` |
 | `node-sdks` | `@anthropic-ai/sdk` | 1.3.0 | Apache-2.0 | same |
-| `laravel-ai` | `laravel/ai` | v1.3.0 | MIT | `clients/laravel-ai/composer.lock` |
+| `laravel-ai` | `laravel/ai` | v1.3.0 | MIT | `laravel-ai/composer.lock` |
 | `laravel-ai` | `orchestra/testbench` (boots a minimal Laravel app, as laravel/ai's own tests do) | v10.12.0 | MIT | same |
-| `dart-mcp` | `dart_mcp` | 0.5.2 | BSD-3-Clause | `clients/dart-mcp/pubspec.lock` |
+| `dart-mcp` | `dart_mcp` | 0.5.2 | BSD-3-Clause | `dart-mcp/pubspec.lock` |
 | `dart-mcp` | `json_rpc_2`, `stream_channel` | 4.1.0, 2.1.4 | BSD-3-Clause | same |
 
 Transitive closures:

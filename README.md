@@ -306,7 +306,7 @@ Locally (docker and a Postgres on `DATABASE_URL`):
 
 ```bash
 for c in node-sdks laravel-ai dart-mcp; do
-  docker build -t "regulait-client-compat/$c:local" "apps/gateway/client-compat/clients/$c"
+  docker build -t "regulait-client-compat/$c:local" "client-compat/$c"
 done
 pnpm --filter "@regulait/gateway..." build
 cd apps/gateway && pnpm exec vitest run --config client-compat/vitest.config.ts

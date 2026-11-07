@@ -25,7 +25,11 @@ tests with real third-party clients, without adding SDK languages:
 
 1. **One harness, three client images.** `apps/gateway/client-compat/harness.test.ts` (its own vitest config, outside
    the gateway suite) boots a real gateway against Postgres with the `mock` model provider and an in-process upstream
-   MCP server, seeds a project, a priced mock agent and one allow/deny user pair per lane, and runs each client image:
+   MCP server, seeds a project, a priced mock agent and one allow/deny user pair per lane, and runs each client image.
+   The images live in a top-level `client-compat/` directory, outside `apps/`: every product and engine Dockerfile
+   copies `apps/` whole, and a test client's `package.json` there would enter those build contexts (the ENG-IMG publish
+   gate refuses it). Their manifest/lock pairs (`composer.json`/`composer.lock`, `pubspec.yaml`/`pubspec.lock`) join
+   `go.mod`/`go.sum` as toolchain-mandated pairs the basename-collision guard admits:
 
    | Image | Client (pinned) | Surface |
    |---|---|---|
@@ -51,7 +55,7 @@ tests with real third-party clients, without adding SDK languages:
 5. **Cheap.** A separate workflow, `.github/workflows/client-compat.yml`: on pull requests that touch the compat or
    MCP surfaces (or the harness), nightly at 03:37 UTC, and on demand. Never on every PR.
 6. **Test-only dependencies.** None of these packages ships. They are listed in
-   `apps/gateway/client-compat/THIRD_PARTY.md` for the ADR-0176 record; every one is MIT, BSD, Apache-2.0 or
+   `client-compat/THIRD_PARTY.md` for the ADR-0176 record; every one is MIT, BSD, Apache-2.0 or
    Unlicense.
 
 ## Findings
