@@ -27,6 +27,8 @@ on:
       - 'internal/**'
       - '.gitignore'
       - 'LICENSE'
+      # ADR-0252 addendum, PR trim: the web app cannot add a gateway import edge (the same rule as ci-scope's `gateway`)
+      - 'apps/web/**'
   # ADR-0252 addendum: also at merge time, on each push to main and nightly
   merge_group:
     types: [checks_requested]

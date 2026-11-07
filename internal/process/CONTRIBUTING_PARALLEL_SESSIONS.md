@@ -222,11 +222,14 @@ a time and over 200 runs queued. Since 2026-11-07 (ADR-0252 addendum):
 
 | Event | What runs |
 |---|---|
-| `pull_request`, code changed | `ci.yml`: build, typecheck, package suites, static pre-flights (migration guard, licence gate), the four gateway shards. `security.yml`: everything (CodeQL, gitleaks, dependency audit, Trivy, engine image scans). `ui-enterprise.yml`: tokens, baseline guard and bundle size. `import-cycles.yml`. |
-| `pull_request`, `apps/web/**` (or `packages/shared/**`, the lockfile) changed | also the mocked SPA shards and the three enterprise browser jobs and screenshot pack |
-| `pull_request`, docs only | every `ci.yml` and `ui-enterprise.yml` job is skipped by `if:`; `build-and-test` still reports, and passes only if every part was skipped. Security still runs. |
-| `pull_request`, engine files changed | the engine build-and-compare, as before |
-| `merge_group`, push to `main`, nightly 03:17 UTC | everything: the above plus the SPA journeys, docker build, every SPA and browser shard, the demo journeys, gVisor and the engine build-and-compare |
+| `pull_request`, code changed | `ci.yml`: build, typecheck, package suites, static pre-flights (migration guard, licence gate). `security.yml`: CodeQL, gitleaks, dependency audit. `ui-enterprise.yml`: tokens, baseline guard and bundle size. |
+| `pull_request`, code outside `apps/web/**` changed (`gateway`) | also the four gateway shards and their coverage check, `import-cycles.yml`, and `integrations.yml` when its paths match |
+| `pull_request`, `apps/web/**` (or `packages/shared/**`, the lockfile) changed (`web`) | also the mocked SPA shards and the Chromium enterprise browser job |
+| `pull_request`, the root image's build context changed (`image`) | also Trivy: the root `Dockerfile`, `.dockerignore`, the workspace manifests and lockfile, `apps/**` and `packages/**` (not tests or `apps/web/e2e`), `security.yml` |
+| `pull_request`, an engine image input changed (`engines`) | also the engine image scans and SBOMs, and the engine build-and-compare: `engines/**`, any `Dockerfile`, the lockfile, the engine packages and scripts, the image workflows |
+| `pull_request`, docs only | every scope-gated job is skipped by `if:`; `build-and-test` and `ui enterprise / all` still report. gitleaks and the dependency audit still run. |
+| `pull_request`, the scope rules themselves changed | everything, as a full run (`scripts/ci-scope.mjs`, its test, `.github/actions/ci-scope`) |
+| `merge_group`, push to `main`, nightly 03:17 UTC (`security.yml` 05:17 UTC) | everything: the above plus the SPA journeys, docker build, every SPA shard, Firefox, WebKit and the screenshot pack, every engine image scan, the demo journeys, gVisor and the engine build-and-compare |
 
 What this means for a builder:
 
@@ -238,14 +241,20 @@ What this means for a builder:
   concurrency group of its own (`github.run_id`), because GitHub cancels an older *pending* run in a shared group
   whatever `cancel-in-progress` says.
 - The scope fails closed (`scripts/ci-scope.mjs`): a rename counts at both its paths, and a diff it cannot read means
-  a full run.
+  a full run. A required job gated directly on the scope (CodeQL, Trivy) runs unless the scope said `'false'`
+  (`!cancelled() && ... != 'false'`), so a scope that failed runs it; the gated jobs behind `build-and-test` and
+  `ui enterprise / all` are judged by those aggregates against their own outputs.
 - Required checks (set by the owner when the queue is enabled) are names that report on every PR and every merge
   group: `build-and-test`, `SAST (CodeQL)`, `Secret scan (gitleaks)`, `Dependency audit (pnpm)`, `Image scan and SBOMs
   (Trivy)` and `ui enterprise / all`. Never require a job gated by `scope` directly (a skip counts as a pass), a
   path-filtered workflow (`import-cycles`, `integrations`, `endpoint-agent`, `engine-images-build`, `gvisor`, `demo`)
   or a workflow without a `merge_group` trigger.
 - No job is gated by a workflow-level path filter any more where it can be required. Gate a new job on the `scope`
-  job's outputs (`.github/actions/ci-scope`): `code`, `web` or `full`.
+  job's outputs (`.github/actions/ci-scope`): `full`, `code`, `web`, `gateway`, `image` or `engines`, and add a case
+  to `scripts/ci-scope.test.mjs`.
+- PR trim (owner decision 2026-11-07, measured about 37 check runs per PR before it): a web-only PR runs about 18 jobs
+  and a gateway-only PR about 19, against 37 before. The largest remaining items are the five mocked SPA shards and the
+  four gateway shards.
 
 ## 5. Shared machine resources
 

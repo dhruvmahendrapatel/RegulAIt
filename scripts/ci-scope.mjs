@@ -6,7 +6,17 @@
 // its old and its new path: moving apps/x.ts to docs/x.md is a code change. If the diff cannot be read (no merge
 // commit, a missing parent in a shallow clone, any git error) or is empty, the run is full.
 //
-// usage: node scripts/ci-scope.mjs   (reads GITHUB_EVENT_NAME; appends full=, code=, web= to $GITHUB_OUTPUT if set)
+// A change to this scope machinery itself (this script, its test, the composite action) is a full run too: the rules
+// that would skip a job are the thing under change.
+//
+// Outputs (each 'true' or 'false'; every one is 'true' on a full run):
+//   code     any changed file that is not documentation
+//   web      the web app or what it is built from
+//   gateway  any code outside apps/web/** (the gateway suites, the Kong integrations, the import-cycle ratchet)
+//   image    an input of the root Dockerfile image (Trivy)
+//   engines  an input of an engine image (engines/**, any Dockerfile, the lockfile, the image workflows)
+//
+// usage: node scripts/ci-scope.mjs   (reads GITHUB_EVENT_NAME; appends the outputs to $GITHUB_OUTPUT if set)
 import { execFileSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
 import path from "node:path";
@@ -17,13 +27,36 @@ export const DOCS_RE = /^(internal|docs)\/|\.md$|^\.gitignore$|^LICENSE$/;
 /** the web app, the shared package it imports, the workspace manifests, and the workflows and action that run its suites */
 export const WEB_RE = /^(apps\/web\/|packages\/shared\/|pnpm-lock\.yaml$|pnpm-workspace\.yaml$|package\.json$|\.github\/workflows\/(ci|ui-enterprise|mock-ui-shards)\.yml$|\.github\/actions\/|scripts\/ci-scope\.mjs$)/;
 
-export const FULL = Object.freeze({ full: true, code: true, web: true, reason: "" });
+/** the web app alone: a change here (and docs) cannot move the gateway, the Kong integrations or the import cycles */
+export const WEB_ONLY_RE = /^apps\/web\//;
+/** the root image's build context (Dockerfile COPYs the workspace manifests, packages/ and apps/; .dockerignore
+ *  drops tests and apps/web/e2e) and the workflow that scans it */
+export const IMAGE_RE = /^(Dockerfile|\.dockerignore|pnpm-lock\.yaml|pnpm-workspace\.yaml|package\.json|tsconfig\.base\.json)$|^(apps|packages)\/|^\.github\/workflows\/security\.yml$/;
+/** files the root image's .dockerignore leaves out of the build context */
+export const IMAGE_IGNORED_RE = /\.(test|spec)\.ts$|^apps\/web\/e2e\//;
+/** an engine image's inputs: its directory, any Dockerfile, the lockfile, the engine packages and scripts, the image workflows */
+export const ENGINES_RE = /^engines\/|(^|\/)Dockerfile$|^pnpm-lock\.yaml$|^packages\/engine-|^scripts\/(build-engine-image\.sh|engine-images-[a-z-]+\.mjs)$|^\.github\/workflows\/(security|engine-images|engine-images-build)\.yml$/;
+/** the scope machinery: changing it is a full run */
+export const SELF_RE = /^(scripts\/ci-scope(\.test)?\.mjs|\.github\/actions\/ci-scope\/.*)$/;
+
+export const FULL = Object.freeze({ full: true, code: true, web: true, gateway: true, image: true, engines: true, reason: "" });
+export const OUTPUTS = Object.freeze(["full", "code", "web", "gateway", "image", "engines"]);
 
 /** the scope for a list of changed paths (null = could not be read) */
 export function scopeOf(files) {
   if (!files) return { ...FULL, reason: "the PR's changed files could not be read" };
   if (files.length === 0) return { ...FULL, reason: "the PR's diff is empty" };
-  return { full: false, code: files.some((f) => !DOCS_RE.test(f)), web: files.some((f) => WEB_RE.test(f)), reason: "" };
+  if (files.some((f) => SELF_RE.test(f))) return { ...FULL, reason: "the PR changes the CI scope rules themselves" };
+  const code = files.filter((f) => !DOCS_RE.test(f));
+  return {
+    full: false,
+    code: code.length > 0,
+    web: files.some((f) => WEB_RE.test(f)),
+    gateway: code.some((f) => !WEB_ONLY_RE.test(f)),
+    image: code.some((f) => IMAGE_RE.test(f) && !IMAGE_IGNORED_RE.test(f)),
+    engines: code.some((f) => ENGINES_RE.test(f)),
+    reason: "",
+  };
 }
 
 /** the PR's changed paths from the merge commit at HEAD, both sides of every rename; null when that cannot be done */
@@ -47,6 +80,7 @@ export function scopeForEvent(event, cwd) {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   const s = scopeForEvent(process.env.GITHUB_EVENT_NAME ?? "");
-  console.log(s.reason ? `full run: ${s.reason}` : `full=${s.full} code=${s.code} web=${s.web}`);
-  if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `full=${s.full}\ncode=${s.code}\nweb=${s.web}\n`);
+  const lines = OUTPUTS.map((k) => `${k}=${s[k]}`);
+  console.log(s.reason ? `full run: ${s.reason}` : lines.join(" "));
+  if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, lines.join("\n") + "\n");
 }

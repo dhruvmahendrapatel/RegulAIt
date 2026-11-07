@@ -114,7 +114,7 @@ about 30 jobs, so only one PR's CI ran at a time and nearly 200 runs were queued
   outputs, never by a workflow-level path filter, so a skipped job still reports. `build-and-test` passes only if
   every part succeeded, or (a docs-only PR) every part was skipped. Required names: `build-and-test`,
   `SAST (CodeQL)`, `Secret scan (gitleaks)`, `Dependency audit (pnpm)`, `Image scan and SBOMs (Trivy)`,
-  `ui enterprise / tokens, baseline guard, bundle size`.
+  `ui enterprise / all` (the aggregate #734's review asked for).
 - `cancel-in-progress` applies to `pull_request` runs only.
 - Open source checked (ADR-0176): `dorny/paths-filter` (MIT) would do the diff, but ci.yml already refuses a
   third-party paths action in the CI path as a supply-chain surface; the decision is a `git diff` of the PR's merge
@@ -122,3 +122,24 @@ about 30 jobs, so only one PR's CI ran at a time and nearly 200 runs were queued
 - Trade-off accepted: a PR can be green and still fail in the queue on a journey, demo or browser job it did not run.
   Any branch can run the full suite by `workflow_dispatch`. The push-to-main run repeats the merge group's run on the
   same tree; the owner asked for it, and it can be dropped if runner time binds again.
+
+### PR trim (owner decision 2026-11-07, later the same day)
+
+Measured on #604 after #734: a PR still ran about 37 check runs, which queue 15 to 20 minutes on the ~20-job pool.
+The full suite on `merge_group`, a push to `main` and nightly is unchanged. On a `pull_request`:
+
+- **ui enterprise:** Chromium only. Firefox, WebKit and the screenshot pack run on a full run. `ui enterprise / all`
+  stays the one required check; it requires the browser matrix when `web` and the screenshot pack when `full`.
+- **CodeQL:** only when code changed (`code`). Its job runs unless the scope said `'false'`, so a failed scope runs it.
+- **Engine image scans and SBOMs, and the engine build-and-compare:** only when an engine input changed (`engines`:
+  `engines/**`, any `Dockerfile`, the lockfile, the engine packages and scripts, the image workflows). **Trivy** for
+  the root image only when its build context changed (`image`). Trivy fails closed like CodeQL. `security.yml` now runs
+  nightly instead of weekly, so the scans keep a nightly full run.
+- **Gateway shards and their coverage check, import cycles, the Kong integrations:** skipped on a PR whose code changes
+  are all under `apps/web/**` (`gateway`). #604 at 2c3aa886 was not designer-only: it changed 13 files under
+  `apps/gateway/src/` and two migrations, so `code` correctly chose the gateway; the over-inclusion was that a truly
+  web-only PR also ran it, and `gateway` fixes that.
+- **Fail closed:** unchanged. An unreadable diff, an empty diff and a change to the scope rules themselves are full runs.
+  `build-and-test` judges the build against `code` and the gateway parts against `gateway`.
+- The required check names do not change.
+
