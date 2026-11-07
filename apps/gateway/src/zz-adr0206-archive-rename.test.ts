@@ -3,7 +3,7 @@
  *
  * G1: admin-only; refused while approvals, runs or delegations are open; the archive and its audit row are one
  * write; an archived project is left out of the default list, refuses member/context/settings writes (gateway 409
- * and migration 0276's insert guard) and every attributed call (the pre-dispatch gate), so a pinned engine key stops
+ * and migration 0284's insert guard) and every attributed call (the pre-dispatch gate), so a pinned engine key stops
  * working; unarchive needs a `settings_relax` step-up bound to that project.
  *
  * G10: admin-only; a plain rename saves and is audited; a taken name is refused; a rename whose old name an access
@@ -294,7 +294,7 @@ describe("G1 project archive (ADR-0206)", () => {
       expect(await auditsFor("execution-project-sensitivity-set", id)).toHaveLength(0);
     });
 
-    it("the database refuses a new member even past the gateway (migration 0276)", async () => {
+    it("the database refuses a new member even past the gateway (migration 0284)", async () => {
       const err = await db
         .insert(projectMembers)
         .values({ projectId: id, userId: adminId, role: "viewer" })

@@ -6,7 +6,7 @@
 ## Context
 
 The owner approved the after-demo lifecycle proposals on 2026-10-29 (#453, comment 6509969403) and unparked them on
-2026-10-30 (#453, comment 6522492997), reserving migrations 0217 and 0218 (renumbered 0283 and 0276 above main at merge) and this ADR number for G1 and G10. The
+2026-10-30 (#453, comment 6522492997), reserving migrations 0217 and 0218 (renumbered 0283 and 0284 above main at merge) and this ADR number for G1 and G10. The
 decisions, as the owner wrote them:
 
 - **G1 Project archive.** "Admins only. Archived projects are hidden from the default list and shown behind the
@@ -39,7 +39,7 @@ team could not be renamed.
    call can be attributed to an archived project and **an engine key pinned to it stops working** without being
    revoked; it works again after an unarchive. Its budget is therefore no longer enforced: there is nothing left to
    enforce it on.
-5. **The database holds the line too.** Migration 0276 adds a `BEFORE INSERT` guard on `project_members` and
+5. **The database holds the line too.** Migration 0284 adds a `BEFORE INSERT` guard on `project_members` and
    `project_context_items` that refuses a row for an archived project, reading the project row `FOR SHARE` so a write
    racing an archive either lands first (and the archive sees it) or is refused. Its function pins `search_path`
    (migration 0185). It guards INSERT only, so it is not an append-only trigger and needs no TRUNCATE guard.
@@ -87,7 +87,7 @@ team could not be renamed.
 
 ## As built (2026-10-30)
 
-- Migrations `0283_project_archive.sql` and `0276_project_archive_write_guard.sql` (reserved as 0217–0218; renumbered
+- Migrations `0283_project_archive.sql` and `0284_project_archive_write_guard.sql` (reserved as 0217–0218; renumbered
   above main at merge), hand-written, journal `when` 1785210000000 and 1785211000000.
 - Gateway: `project-archive.ts`, `role-team-rename.ts`, and the archived check in `projects.ts`
   (`preDispatchProjectGate`, `applyProjectPatch`, the member, context and classification routes).
