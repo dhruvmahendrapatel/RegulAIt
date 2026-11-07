@@ -137,6 +137,15 @@ tool tiers plus lazy tool-loading into P11. The other two are new items:
 | **P21** | **A configurable usage extractor for every provider.** Cost attribution reads token counts through per-adapter code, and modality pricing ([ADR-0212](../decisions/0212-modality-pricing-and-model-rate-limits.md)) only works where an adapter reports a modality split. A new or custom provider cannot be priced without a code change. | An admin-defined mapping from a provider's response (JSON pointers) to text, image, audio and cached input and output token counts. It feeds the existing pillar 5 attribution and ADR-0212 modality pricing, validated and bounded, with a sample-response test before activation, and audited. Reference: `gravitee-io/gravitee-policy-ai-prompt-token-tracking` (Apache-2.0, Java; its custom JSON-pointer extractor covers text tokens only). Extend it to modalities and cached tokens. |
 | **P22** | **A Kubernetes operator for BYOC installs.** Pillar 3's BYOC mode is deployed from Terraform and container images, with no declarative, in-cluster way for a customer to run and upgrade RegulAIt. | An operator with CRDs for a RegulAIt deployment, covering version, mode (byoc / air_gapped), the data-key reference, backup policy and egress posture. It reconciles toward the signed update bundle (ADR-0041) and reports drift (pillar 3). Air-gapped: no image pulls outside the customer registry. Reference: `gravitee-io/gravitee-kubernetes-operator` (Apache-2.0, Go) for CRD shape and reconcile design. Use an established operator framework (ADR-0176). Post-demo, needs its own ADR. |
 
+## 2h. From the SDK and platform review (owner, 2026-11-07)
+
+The owner approved these on 2026-11-07. Each needs its own ADR, and open source is checked first (ADR-0176). Other
+builders add P30–P33 to this table.
+
+| # | Gap | What it would take |
+|---|---|---|
+| **P29** | **Adopt the AI SDK provider packages as the vendor-neutral model layer.** **Built 2026-11-07 ([ADR-0253](../decisions/0253-ai-sdk-provider-packages.md)).** `@ai-sdk/provider` and `@ai-sdk/google`, never the `ai` core or Vercel's AI Gateway. The hand-written Gemini adapter is replaced through one bridge; Anthropic, OpenAI, xAI and custom stay on their official vendor SDKs (recorded reason and re-check triggers). Guards and an egress test enforce the no-gateway rule. | Open: whether pillar 5 should count Gemini `thoughtsTokenCount` and `toolUsePromptTokenCount` (never counted; P21 / #453), and carrying P21's `usageSource` into `google-ai-sdk.ts`, whichever PR merges second. |
+
 ## 3. Structural gaps — the ADR shipped, a named half did not
 
 These are cases where an ADR is Accepted and genuinely working, but a specific clause is
