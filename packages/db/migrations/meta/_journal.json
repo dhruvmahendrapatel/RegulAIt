@@ -1620,10 +1620,17 @@
       "breakpoints": true
     },
     {
-      "idx": 293,
+      "idx": 297,
       "version": "7",
-      "when": 1785220000000,
-      "tag": "0293_upstream_token_exchange",
+      "when": 1785224000000,
+      "tag": "0297_usage_extractor",
+      "breakpoints": true
+    },
+    {
+      "idx": 299,
+      "version": "7",
+      "when": 1785225000000,
+      "tag": "0299_upstream_token_exchange",
       "breakpoints": true
     }
   ]
