@@ -10,6 +10,31 @@ import { RED_TEAM_ATTACK_CLASSES } from "./redteam.js";
 // updateOrgSettingsSchema below, so it is imported as well as re-exported.
 import { MCP_ADMISSION_MODES } from "./mcp-admission.js";
 import { MCP_DEFINITION_PIN_MODES } from "./mcp-definition-pins.js";
+import { MCP_HIGH_RISK_MODES } from "./mcp-offensive-tools.js";
+
+// ADR-0246 addendum — offensive MCP tool servers as high-risk: classification, targets, redaction
+export {
+  applyHighRiskPolicySchema,
+  AUTHORISED_TARGET_KINDS,
+  checkTargets,
+  classifyOffensiveTools,
+  createAuthorisedTargetSchema,
+  extractTargets,
+  MCP_HIGH_RISK_MODES,
+  normaliseAuthorisedTarget,
+  normaliseTarget,
+  OFFENSIVE_CLASSIFIER_VERSION,
+  OFFENSIVE_TOOL_CATEGORIES,
+  OFFENSIVE_TOOL_RULES,
+  redactArgumentsForAudit,
+  TARGET_ARGUMENT_KEYS,
+  type AuthorisedTarget,
+  type AuthorisedTargetKind,
+  type McpHighRiskMode,
+  type OffensiveClassification,
+  type OffensiveToolCategory,
+  type OffensiveToolFinding,
+} from "./mcp-offensive-tools.js";
 // ADR-0104: the approval-scope vocabulary is needed IN SCOPE here (not merely
 // re-exported below) so `createApprovalRuleSchema` validates against the one
 // authoritative list rather than a second copy of the two strings.
@@ -2356,6 +2381,9 @@ export const updateOrgSettingsSchema = z
      * refuses it until an admin re-approves it against the diff; 'warn' serves it and audits the change. Relaxing
      * to 'warn' needs a settings_relax step-up and is audited. */
     mcpDefinitionPinMode: z.enum(MCP_DEFINITION_PIN_MODES).optional(),
+    /** ADR-0246 addendum: 'enforce' (strict default) gates every call to a server classified high-risk (offensive
+     * tooling) on the policy template and the authorised-targets list; 'off' is a step-up, audited relaxation. */
+    mcpHighRiskMode: z.enum(MCP_HIGH_RISK_MODES).optional(),
     /** ADR-0175 A5: the release-age cooldown in days. 0 (default) = off. While
      * on, a newly registered MCP server, a changed manifest, a federated import
      * and a new skill version stay in quarantine until this deployment has

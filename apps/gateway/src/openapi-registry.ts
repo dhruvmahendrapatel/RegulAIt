@@ -751,6 +751,11 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/mcp/definition-pins": "internal",
   "GET /v1/servers/:serverId/definition-pins": "internal",
   "POST /v1/servers/:serverId/definition-pins/approve": "internal",
+  "GET /v1/servers/:serverId/high-risk-policy": "internal",
+  "POST /v1/servers/:serverId/high-risk-policy": "internal",
+  "GET /v1/mcp/authorised-targets": "internal",
+  "POST /v1/mcp/authorised-targets": "internal",
+  "DELETE /v1/mcp/authorised-targets/:id": "internal",
   // ADR-0175 A6/A5 — the builder-skill review queue and the release-age
   // cooldown's admin surface (operator console, admin-only)
   "GET /v1/admission/skills": "internal",
@@ -2005,6 +2010,11 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/mcp/definition-pins": "servers",
   "GET /v1/servers/:serverId/definition-pins": "servers",
   "POST /v1/servers/:serverId/definition-pins/approve": "servers",
+  "GET /v1/servers/:serverId/high-risk-policy": "servers",
+  "POST /v1/servers/:serverId/high-risk-policy": "servers",
+  "GET /v1/mcp/authorised-targets": "servers",
+  "POST /v1/mcp/authorised-targets": "servers",
+  "DELETE /v1/mcp/authorised-targets/:id": "servers",
   "GET /v1/admission/skills": "builder",
   "GET /v1/admission/skills/export.xlsx": "builder",
   "POST /v1/admission/skills/:id/admit": "builder",

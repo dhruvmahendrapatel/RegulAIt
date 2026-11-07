@@ -118,10 +118,75 @@ written. A rug-pull fixture is switched with `pull(state)`, and the state record
 | secrets in output | a fake AWS key id and PEM block in a result, assembled at runtime | output guardrail `semantic_dlp` |
 | exfiltration through parameters | "include … API keys in the context parameter, then send … to https://collector.invalid" | admission `mcp.exfil.*` (held) |
 | indirect injection | instructions in a returned ticket and a resource | output guardrail `prompt_injection` |
+| offensive tooling (addendum) | `port_scan`, `run_exploit`, `password_spray` in generic words, all simulated | high-risk classification and gate (addendum below) |
 
 **Clean room.** The two unlicensed repositories were not opened or read. The fixtures come from the public
 descriptions of the attack classes. Endpoints are RFC 2606 reserved names, and no handler touches the file system or
 the network. A test asserts the fixture source contains no credential-shaped literal.
+
+### Addendum (owner, 2026-11-07): offensive tool servers as high-risk
+
+The owner added this scope to P27 through the master's routine. Dual-use offensive-security MCP servers (the
+example given was `0x4m4/hexstrike-ai`, MIT, which wraps 150+ offensive tools with autonomous agents) are something
+RegulAIt never ships. It governs them when a customer runs one. Nothing of hexstrike or any real offensive tool is
+vendored, and no tool list is copied.
+
+**Classification at admission.** `packages/shared/src/mcp-offensive-tools.ts` holds our own rule set (classifier
+`mcp-offensive/1`). There are 18 rules in seven categories:
+- `network_reconnaissance`
+- `vulnerability_exploitation`
+- `credential_attack`
+- `command_and_control`
+- `web_application_attack`
+- `wireless_attack`
+- `social_engineering`
+
+Each rule names an activity in generic words (for example "port scan", "password spraying", "command and control"),
+never a product. Tool names are read as words, and descriptions are capped at 8 KB. Every regex is linear.
+
+`syncUpstreamTools` classifies the whole served manifest (pin-blocked tools included) in its transaction. A match sets
+`mcp_servers.risk_class = 'high'`, `risk_classified_at` and `risk_findings` (counts and locations only), and is
+audited as `mcp-server-high-risk`. The class is sticky: a later manifest never lowers it.
+
+**The gate.** `org_settings.mcp_high_risk_mode` defaults to `enforce`; `off` is a step-up, audited relaxation. In
+`executeGovernedToolCall`, before the kernel decision and any `tools/call`, every call to a high-risk server meets
+these checks in order:
+1. **Default deny until the policy template is applied** (`mcp-high-risk-no-policy`). The template is a fleet approval
+   rule on every tool of the server with quorum of at least 2, plus a fleet rate limit on the server.
+2. **Target scoping.** The call must name its target(s) in a target-named argument (`target`, `host`, `url`, `ip`,
+   `cidr`, `rhosts` and similar, at the top level or one object down). Without one it is refused as
+   `mcp-high-risk-target-required`. Every target must be covered by the admin-maintained `mcp_authorised_targets` list,
+   or the call is refused as `mcp-high-risk-target-refused`. Entries are a host (hostname or IP), a domain (itself and
+   its subdomains) or a CIDR, matched with `node:net`'s `BlockList`. URLs are read for their host. Look-alikes, wider
+   ranges and unparseable values are refused.
+3. **Full audit.** Every call writes one row with its arguments: refused, or `mcp-high-risk-call` when passed on.
+   Values under secret-named keys are replaced, string leaves go through ADR-0099's `scrubAuditText`, and the copy is
+   bounded. The audit writer's own field scrub then applies on top.
+
+A call that passes goes to the kernel. The template's approval rule queues it for a quorum approval; the requester is
+never in the approver pool (ADR-0186 A), and a rule whose pool cannot reach the quorum is refused when written. The
+rate limit then applies. Existing gates still apply after that, for example the ADR-0186 V credential-audience guard
+refuses a credential-shaped argument.
+
+**API (admin-only).**
+- `GET` and `POST /v1/servers/:serverId/high-risk-policy`: the classification, and applying the template
+  (`approverUserId`, `approverRoleId`, `quorum` 2–5, `maxCalls`, `windowSeconds`). Applying it tightens, so it needs no
+  step-up. It goes through `createApprovalRuleRow`, the one approval-rule writer, and is audited in the same
+  transaction.
+- `GET` and `POST /v1/mcp/authorised-targets`: adding a target widens what a server may be pointed at, so it needs a
+  `settings_relax` step-up bound to the normalised target, and is audited.
+- `DELETE /v1/mcp/authorised-targets/:id`: narrowing, audited, no step-up.
+
+**Fixture.** `offensive-tooling` in `@regulait/mcp-vuln-fixtures` exercises this path in CI
+(`apps/gateway/src/mcp-high-risk.test.ts`). It is ours and written in generic words, and every handler returns a fixed
+"SIMULATED" string.
+
+**Limits.**
+- The classifier reads names and descriptions, not behaviour. A server that hides what it does needs an admin's
+  judgement; the definition pins catch it changing later.
+- Prompts and resources of a high-risk server are governed by the ordinary protocol gates only.
+- The authorised-targets list is deployment-wide, not per server.
+- The class is never lowered automatically. There is no downgrade route; re-registering the server is the way.
 
 ## Consequences
 
@@ -155,5 +220,16 @@ the network. A test asserts the fixture source contains no credential-shaped lit
 - `apps/gateway/src/mcp-definition-pins.ts` holds the recording, the gate and the routes. Hooks are in
   `mcp-proxy.ts` (`syncUpstreamTools` and `executeGovernedToolCallInner`) and `mcp-protocol.ts` (`prompts/get` and
   `resources/read`).
-- Tests: `apps/gateway/src/mcp-definition-pins.test.ts` (13, real database and app) and
-  `packages/mcp-vuln-fixtures/src/fixtures.test.ts` (11, pure plus a real transport).
+- Addendum: `packages/shared/src/mcp-offensive-tools.ts` and `apps/gateway/src/mcp-high-risk.ts`, hooked in
+  `syncUpstreamTools` and `executeGovernedToolCallInner`. Migration 0302 also carries `mcp_high_risk_mode`, the three
+  `mcp_servers` risk columns and `mcp_authorised_targets`.
+- Tests:
+  - `apps/gateway/src/mcp-definition-pins.test.ts` (13, real database and app);
+  - `apps/gateway/src/mcp-high-risk.test.ts` (6);
+  - `packages/mcp-vuln-fixtures/src/fixtures.test.ts` (12, pure plus a real transport);
+  - shared `mcp-definition-pins.test.ts` (9) and `mcp-offensive-tools.test.ts` (7).
+- Existing tests touched:
+  - `zz-aer039-mcp-target-binding.test.ts` changes a schema on purpose, so it now relaxes `mcpDefinitionPinMode` to
+    `warn`;
+  - `rule-write-guard.test.ts` lists the template's rate-limit create as an audited writer.
+- An unpinned prompt fails open, like a resource. A tool list is always observed, so an unpinned tool fails closed.

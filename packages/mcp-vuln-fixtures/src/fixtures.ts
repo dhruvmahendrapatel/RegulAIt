@@ -17,6 +17,7 @@ export const MCP_ATTACK_CLASSES = [
   "secret-leak",
   "param-exfiltration",
   "indirect-injection",
+  "offensive-tooling",
 ] as const;
 export type McpAttackClass = (typeof MCP_ATTACK_CLASSES)[number];
 
@@ -336,6 +337,51 @@ const indirectInjection: VulnerableMcpFixture = {
   },
 };
 
+/** 8. OFFENSIVE TOOLING (dual use): a server whose tools perform attacks for whoever calls them. Written in generic
+ * words for this repository; it wraps no real tool and every handler only returns a fixed "simulated" string. */
+const offensiveTooling: VulnerableMcpFixture = {
+  id: "offensive-tooling",
+  title: "An offensive-security tool server",
+  attack:
+    "A dual-use server exposes attack capabilities (scanning, exploitation, credential attacks) to an agent, which " +
+    "can then point them at any host it is told to.",
+  expected:
+    "ADR-0246 addendum: classified high-risk at admission; every call is refused until the policy template is " +
+    "applied, must name an authorised target, needs a quorum approval, is rate limited and is audited with its " +
+    "arguments redacted.",
+  phases: {
+    approved: {
+      tools: [
+        {
+          name: "port_scan",
+          description: "Runs a port scan against a target host and lists the open services.",
+          inputSchema: objectSchema({ target: { type: "string", description: "Host, IP or CIDR to scan" }, ports: { type: "string" } }, ["target"]),
+          returns: "SIMULATED: 22/tcp open, 443/tcp open",
+        },
+        {
+          name: "run_exploit",
+          description: "Search for and launch an exploit against a target service.",
+          inputSchema: objectSchema({ target: { type: "string" }, module: { type: "string" }, api_key: { type: "string" } }, ["target", "module"]),
+          returns: "SIMULATED: no session opened",
+        },
+        {
+          name: "password_spray",
+          description: "Password spraying against a login endpoint.",
+          inputSchema: objectSchema({ url: { type: "string" }, usernames: { type: "array", items: { type: "string" } } }, ["url"]),
+          returns: "SIMULATED: 0 valid credentials",
+        },
+        {
+          name: "tool_version",
+          description: "Returns the server version.",
+          inputSchema: objectSchema({}),
+          annotations: { readOnlyHint: true },
+          returns: "1.0.0",
+        },
+      ],
+    },
+  },
+};
+
 export const MCP_VULN_FIXTURES: Readonly<Record<McpAttackClass, VulnerableMcpFixture>> = {
   "tool-poisoning": toolPoisoning,
   "tool-shadowing": toolShadowing,
@@ -344,6 +390,7 @@ export const MCP_VULN_FIXTURES: Readonly<Record<McpAttackClass, VulnerableMcpFix
   "secret-leak": secretLeak,
   "param-exfiltration": paramExfiltration,
   "indirect-injection": indirectInjection,
+  "offensive-tooling": offensiveTooling,
 };
 
 export function vulnFixture(id: McpAttackClass): VulnerableMcpFixture {

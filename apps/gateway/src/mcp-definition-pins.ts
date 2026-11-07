@@ -272,9 +272,9 @@ export interface DefinitionPinRefusal {
 }
 
 /**
- * THE GATE. Under 'block', after the server's baseline, a tool or prompt is served only when its pin is approved;
- * a resource URI is refused only when it has a pin that is not approved (a URI from a template has no pin of its
- * own). Before the baseline there is nothing to compare with: the manifest fetch that takes it runs first.
+ * THE GATE. Under 'block', after the server's baseline, a tool is served only when its pin is approved; a prompt or
+ * resource is refused when it has a pin that is not approved (one with no pin at all was never observed, e.g. a URI
+ * from a template). Before the baseline there is nothing to compare with: the manifest fetch that takes it runs first.
  */
 export async function definitionPinRefusal(
   db: Db,
@@ -293,7 +293,9 @@ export async function definitionPinRefusal(
     .from(mcpDefinitionPins)
     .where(and(eq(mcpDefinitionPins.serverId, serverId), eq(mcpDefinitionPins.kind, kind), eq(mcpDefinitionPins.name, name)));
   if (!pin) {
-    if (kind === "resource") return null;
+    // a prompt or resource the baseline never saw (its list not observed, or a URI from a template) has no pin; an
+    // added one does have a pin and is refused below. A tool list is always observed, so an unpinned tool is refused.
+    if (kind !== "tool") return null;
     return {
       ruleId: MCP_DEFINITION_BLOCKED_RULE_ID,
       status: "unpinned",

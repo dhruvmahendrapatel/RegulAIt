@@ -107,6 +107,7 @@ import {
   type McpAdmissionTrigger,
 } from "./mcp-admission.js";
 import { definitionPinRefusal, observeServedDefinitions, recordDefinitionPins } from "./mcp-definition-pins.js";
+import { highRiskRefusal, recordRiskClassification } from "./mcp-high-risk.js";
 import { loadEntitlements } from "./entitlements.js";
 // ADR-0185 G3 — the non-tool MCP methods
 import {
@@ -930,6 +931,14 @@ async function executeGovernedToolCallInner(
       }
       // (a tool this sync found is approved: under 'block' syncUpstreamTools returns no other)
       kind = toolKind(found);
+    }
+
+    // ADR-0246 addendum: a high-risk (offensive) server needs its policy template and an authorised target, and
+    // every call's arguments are audited, redacted; refused here before the kernel decision and any tool call
+    const highRisk = await highRiskRefusal(db, { userId, serverId, toolName, arguments: args.arguments, projectId: projectId ?? null });
+    if (highRisk) {
+      if (upstream) await operationSucceeded();
+      return { kind: "denied", decision: { effect: "deny", ruleId: highRisk.ruleId, ruleChain: [], reason: highRisk.reason } };
     }
 
     // The generation was read before the server/tool snapshot above. A first
@@ -2032,6 +2041,8 @@ export async function syncUpstreamTools(
   await db.transaction(async (rawTx) => {
     const tx = rawTx as unknown as Db;
     const pins = await recordDefinitionPins(tx, serverId, served, trigger);
+    // ADR-0246 addendum: offensive tooling makes the server high-risk (over the whole served manifest)
+    await recordRiskClassification(tx, serverId, tools, trigger);
     returned = pins.blockedTools.size > 0 ? tools.filter((t) => !pins.blockedTools.has(t.name)) : tools;
     for (const tool of returned) {
       await tx

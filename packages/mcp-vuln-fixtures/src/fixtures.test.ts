@@ -7,6 +7,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
+  classifyOffensiveTools,
   evaluateGuardrails,
   pinnableDefinitions,
   planDefinitionPins,
@@ -113,6 +114,19 @@ describe("each attack class against the control meant to catch it", () => {
     for (const text of [fixture.tools[0]!.returns!, fixture.resources![0]!.text]) {
       const evaluation = outputScan(text);
       expect(evaluation.findings.map((f) => f.detector)).toContain("prompt_injection");
+    }
+  });
+});
+
+describe("offensive tooling (ADR-0246 addendum)", () => {
+  it("is classified high-risk on our own rules, and no other fixture is", () => {
+    const verdict = classifyOffensiveTools(tools("offensive-tooling"));
+    expect(verdict.highRisk).toBe(true);
+    expect(verdict.categories).toEqual(["network_reconnaissance", "vulnerability_exploitation", "credential_attack"]);
+    expect(verdict.findings.map((f) => f.tool)).not.toContain("tool_version");
+    for (const id of MCP_ATTACK_CLASSES.filter((c) => c !== "offensive-tooling")) {
+      expect(classifyOffensiveTools(tools(id)).highRisk, id).toBe(false);
+      expect(classifyOffensiveTools(tools(id, "pulled")).highRisk, id).toBe(false);
     }
   });
 });

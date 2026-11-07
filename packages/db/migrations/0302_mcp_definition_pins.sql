@@ -9,6 +9,9 @@
 -- 3. `mcp_definition_pins`: one row per tool, prompt, resource or resource template, with the approved and the
 --    observed digest and definition. Status is derived from the two digests, never stored. The definitions are
 --    point-in-time evidence (the ADR-0200 normalisation exception) for the admin diff.
+-- 4. ADR-0246 addendum, offensive tool servers as high-risk: `org_settings.mcp_high_risk_mode` (default 'enforce'),
+--    `mcp_servers.risk_class` / `risk_classified_at` / `risk_findings` (the classifier verdict, sticky 'high'), and
+--    `mcp_authorised_targets`, the admin-maintained list a high-risk call's targets must fall within.
 -- No functions or triggers. Not a tenant table: like `mcp_servers` it is deployment configuration read by the
 -- admin-only API, so it is outside the ADR-0234 row-level-security slices.
 
@@ -54,3 +57,36 @@ CREATE INDEX IF NOT EXISTS "mcp_definition_pins_drift_idx"
   WHERE "approved_digest" IS DISTINCT FROM "observed_digest";
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "mcp_definition_pins_approved_by_idx" ON "mcp_definition_pins" ("approved_by");
+--> statement-breakpoint
+ALTER TABLE "org_settings" ADD COLUMN IF NOT EXISTS "mcp_high_risk_mode" text DEFAULT 'enforce' NOT NULL;
+--> statement-breakpoint
+ALTER TABLE "org_settings" DROP CONSTRAINT IF EXISTS "org_settings_mcp_high_risk_mode_check";
+--> statement-breakpoint
+ALTER TABLE "org_settings" ADD CONSTRAINT "org_settings_mcp_high_risk_mode_check" CHECK ("mcp_high_risk_mode" IN ('enforce', 'off'));
+--> statement-breakpoint
+ALTER TABLE "mcp_servers" ADD COLUMN IF NOT EXISTS "risk_class" text DEFAULT 'standard' NOT NULL;
+--> statement-breakpoint
+ALTER TABLE "mcp_servers" ADD COLUMN IF NOT EXISTS "risk_classified_at" timestamp with time zone;
+--> statement-breakpoint
+ALTER TABLE "mcp_servers" ADD COLUMN IF NOT EXISTS "risk_findings" jsonb;
+--> statement-breakpoint
+ALTER TABLE "mcp_servers" DROP CONSTRAINT IF EXISTS "mcp_servers_risk_class_check";
+--> statement-breakpoint
+ALTER TABLE "mcp_servers" ADD CONSTRAINT "mcp_servers_risk_class_check" CHECK ("risk_class" IN ('standard', 'high'));
+--> statement-breakpoint
+COMMENT ON COLUMN "mcp_servers"."risk_findings" IS
+  'ADR-0200 exception: point-in-time evidence, the offensive-tooling classifier verdict (counts and locations only)';
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "mcp_authorised_targets" (
+  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+  "kind" text NOT NULL,
+  "value" text NOT NULL,
+  "note" text NOT NULL,
+  "created_by" uuid REFERENCES "users"("id") ON DELETE SET NULL,
+  "created_at" timestamp with time zone DEFAULT now() NOT NULL,
+  CONSTRAINT "mcp_authorised_targets_kind_check" CHECK ("kind" IN ('host', 'domain', 'cidr'))
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "mcp_authorised_targets_kind_value_uq" ON "mcp_authorised_targets" ("kind", "value");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "mcp_authorised_targets_created_by_idx" ON "mcp_authorised_targets" ("created_by");

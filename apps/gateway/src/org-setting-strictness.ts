@@ -272,6 +272,8 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   mcpAdmissionMode: notEqual("enforce"),
   // ADR-0246: 'warn' serves a tool, prompt or resource that changed since approval instead of refusing it
   mcpDefinitionPinMode: notEqual("block"),
+  // ADR-0246 addendum: 'off' lets calls to an offensive-tooling server through without the template or target checks
+  mcpHighRiskMode: notEqual("enforce"),
   minReleaseAgeDays: atLeast(7),
   credentialUnusedDays: atMost(90),
   staleCredentialAlerts: notEqual(true),

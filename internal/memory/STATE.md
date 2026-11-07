@@ -21,7 +21,7 @@ roadmap: ../product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
-**2026-11-07 - backlog P27 built on `builder/p27-mcp-pinning-fixtures` ([ADR-0246](../decisions/0246-mcp-definition-pinning-and-vuln-fixtures.md), migration 0302):** MCP rug-pull detection (per-item definition pins at admission, compared on every manifest fetch, a changed item blocked by default until an admin re-approves it against an RFC 6902 diff) and the test-only clean-room `@regulait/mcp-vuln-fixtures` (seven attack classes, kept out of the image). API only; the review UI goes to #453.
+**2026-11-07 - backlog P27 built on `builder/p27-mcp-pinning-fixtures` ([ADR-0246](../decisions/0246-mcp-definition-pinning-and-vuln-fixtures.md), migration 0302):** MCP rug-pull detection (per-item definition pins at admission, compared on every manifest fetch, a changed item blocked by default until an admin re-approves it against an RFC 6902 diff) and the test-only clean-room `@regulait/mcp-vuln-fixtures` (eight attack classes, kept out of the image). Addendum (owner, same day): offensive tool servers are classified high-risk, and every call needs a policy template (quorum approval, rate limit), an authorised target and a redacted-argument audit. API only; the review UI goes to #453.
 
 **2026-10-29 - the customer demo moves to one date, Saturday 2026-10-31 (owner, #453 c6508111468).**
 - **Date:** the internal run-through on Sun 11-01 and the external demo on Tue 11-03 are dropped; there is one run, on
@@ -5548,7 +5548,10 @@ changed or added tool is neither stored nor served, and a call to it, or `prompt
 item, is refused (`mcp-definition-blocked`) before any connect. `warn` is a settings_relax relaxation. Re-approval
 (`POST /v1/servers/:id/definition-pins/approve`) is bound by step-up to the exact reviewed digests, compare-and-set,
 audited. `@regulait/mcp-vuln-fixtures` (test-only, `.dockerignore`d, gateway devDependency) serves seven attack classes
-over real MCP; the two unlicensed upstream projects were not read. Migration 0302 (`when` 1785229000000). Open: the UI
+over real MCP; the two unlicensed upstream projects were not read. Addendum: our own offensive-tooling rule set marks a
+server `risk_class = 'high'` (sticky); under `mcp_high_risk_mode = 'enforce'` each call is refused until the policy
+template (fleet approval rule, quorum >= 2, plus a rate limit) is applied, must name targets covered by
+`mcp_authorised_targets` (adding one is a step-up), and is audited with redacted arguments. Migration 0302 (`when` 1785229000000). Open: the UI
 (#453), P23's scanners on the fixtures, and comparison per call rather than per listing.
 
 ## Open Questions

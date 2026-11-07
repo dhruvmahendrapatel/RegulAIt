@@ -212,7 +212,8 @@ describe("ADR-0246: a rug pull under the strict default", () => {
     expect((await definitionPinRefusal(db, rug.serverId, "prompt", "summarise"))?.status).toBe("changed");
     expect((await definitionPinRefusal(db, rug.serverId, "resource", "notes://index"))?.status).toBe("changed");
     expect(await definitionPinRefusal(db, rug.serverId, "resource", "notes://from-a-template/7")).toBeNull();
-    expect((await definitionPinRefusal(db, rug.serverId, "prompt", "never-served"))?.status).toBe("unpinned");
+    expect(await definitionPinRefusal(db, rug.serverId, "prompt", "never-served")).toBeNull();
+    expect((await definitionPinRefusal(db, rug.serverId, "tool", "never-served"))?.status).toBe("unpinned");
   });
 
   it("re-approval needs the step-up, is a compare-and-set on the reviewed digest, and is audited", async () => {

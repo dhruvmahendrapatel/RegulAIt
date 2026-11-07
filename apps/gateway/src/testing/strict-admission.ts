@@ -29,6 +29,7 @@ import { loadOrgSettings } from "../org-settings.js";
 export const SC_LAX_POSTURE = {
   mcpAdmissionMode: "off",
   mcpDefinitionPinMode: "warn",
+  mcpHighRiskMode: "off",
   minReleaseAgeDays: 0,
   mcpPrivateRangesDefault: true,
   egressCompiledDefaultPolicy: "inherit",
@@ -40,6 +41,7 @@ export const SC_LAX_POSTURE = {
 export const SC_STRICT_DEFAULTS = {
   mcpAdmissionMode: "enforce",
   mcpDefinitionPinMode: "block",
+  mcpHighRiskMode: "enforce",
   minReleaseAgeDays: 7,
   mcpPrivateRangesDefault: false,
   egressCompiledDefaultPolicy: "strict",

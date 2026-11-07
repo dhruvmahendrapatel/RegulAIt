@@ -43,7 +43,7 @@ import { executeGovernedToolCall } from "./mcp-proxy.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
-import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+import { LOCAL_MCP_DOUBLE, relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 import { relaxApprovalSigningForTest } from "./testing/approval-signing-posture.js";
 // ADR-0186 A2+B: this suite pins pre-0186 single-approver tool-call approvals (decided
 // through API keys, unsigned); signing and the sensitive quorum are relaxed for its run
@@ -243,7 +243,9 @@ beforeAll(async () => {
   db = createDb(scratchUrl.toString());
   await runMigrations(db, migrationsFolder);
   restoreApprovalSigning = await relaxApprovalSigningForTest(db);
-  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
+  // ADR-0246: this file changes a tool schema ON PURPOSE to prove consent invalidation; definition pinning would
+  // refuse the changed tool first (its own tests are mcp-definition-pins.test.ts), so it is put in 'warn' here
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db, [...LOCAL_MCP_DOUBLE, "mcpDefinitionPinMode"]);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "e".repeat(64) });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { requireMcpAttribution: false });
   gatewayUrl = await app.listen({ port: 0, host: "127.0.0.1" });
