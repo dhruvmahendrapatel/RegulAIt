@@ -16,7 +16,9 @@
  * so no result is ever recorded without saying which model it covers.
  *
  * INGESTION. `POST /v1/model-drift/monitors/:monitorId/reports` is admin-only like every route here (the app's
- * global gate): a pipeline uses an admin's API key, a person uses the page's upload. It is rate-limited twice: the
+ * global gate): a person uses the page's upload. A pipeline uses the monitor's own write-only ingestion credential
+ * on `POST /v1/model-drift/ingest/:monitorId/reports` (ADR-0223 amendment 1, `drift-ingest-credentials.ts`); both
+ * routes go through `recordDriftReport`, the one write path. It is rate-limited twice: the
  * gateway's per-credential limiter, and a per-monitor hourly cap counted in the database under a transaction lock,
  * so parallel replicas share one count. The body is bounded (`INGEST_BODY_LIMIT`) and validated before anything is
  * written. Aggregates only: histograms and category tables, never rows.
@@ -36,6 +38,7 @@ import {
   governanceAlerts,
   lt,
   modelCards,
+  modelDriftIngestCredentials,
   modelDriftMonitors,
   modelDriftReports,
   modelDriftSettings,
@@ -152,15 +155,27 @@ const reportBody = z
     modelVersion: modelVersionSchema.optional(),
   })
   .strict();
+export type DriftReportBody = z.infer<typeof reportBody>;
+/** the summary body an ingestion credential may send: the admin body, always a `push` */
+export const ingestReportBody = reportBody.extend({ source: z.literal("push").default("push") });
+
+/**
+ * THE one "is this ingestion credential live" predicate (M-075), on the database clock: unrevoked and unexpired.
+ * Used by the pre-check, the in-transaction gate and the admin list, so no path tests a different subset.
+ */
+export function liveIngestCredential() {
+  return sql`(${modelDriftIngestCredentials.revokedAt} IS NULL AND ${modelDriftIngestCredentials.expiresAt} > now())`;
+}
+
 const cardParam = z.object({ id: z.string().uuid() });
-const monitorParam = z.object({ monitorId: z.string().uuid() });
+export const monitorParam = z.object({ monitorId: z.string().uuid() });
 const artefactParam = z.object({ id: z.string().uuid(), artefactId: z.string().uuid() });
 const listQuery = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
   before: z.iso.datetime({ offset: true }).optional(),
 });
 
-const DISABLED = {
+export const MODEL_DRIFT_DISABLED = {
   error: "model_drift_disabled",
   detail: "Classical model drift is off. An admin turns it on under Model risk, Drift and explainability; that needs a step-up.",
 } as const;
@@ -373,7 +388,7 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
   app.post("/v1/mrm/cards/:id/drift-monitors", { bodyLimit: INGEST_BODY_LIMIT }, async (req, reply) => {
     const { id } = cardParam.parse(req.params);
     const body = createMonitorBody.parse(req.body);
-    if (!(await loadDriftSettings(db)).enabled) return reply.status(409).send(DISABLED);
+    if (!(await loadDriftSettings(db)).enabled) return reply.status(409).send(MODEL_DRIFT_DISABLED);
     const [card] = await db.select({ id: modelCards.id, pinnedModelVersion: modelCards.pinnedModelVersion }).from(modelCards).where(eq(modelCards.id, id));
     if (!card) return reply.status(404).send({ error: "unknown_model_card" });
     // an early refusal before any step-up; the version recorded is re-decided under the row lock below
@@ -439,7 +454,7 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
   app.patch("/v1/model-drift/monitors/:monitorId", async (req, reply) => {
     const { monitorId } = monitorParam.parse(req.params);
     const body = z.object({ thresholds: thresholdsSchema }).strict().parse(req.body);
-    if (!(await loadDriftSettings(db)).enabled) return reply.status(409).send(DISABLED);
+    if (!(await loadDriftSettings(db)).enabled) return reply.status(409).send(MODEL_DRIFT_DISABLED);
     const [m] = await db.select().from(modelDriftMonitors).where(eq(modelDriftMonitors.id, monitorId));
     if (!m) return reply.status(404).send({ error: "unknown_drift_monitor" });
     const current = thresholdsOf(m);
@@ -474,7 +489,7 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
   /** removes the monitor and every report recorded against it: evidence removal, so a step-up */
   app.delete("/v1/model-drift/monitors/:monitorId", async (req, reply) => {
     const { monitorId } = monitorParam.parse(req.params);
-    if (!(await loadDriftSettings(db)).enabled) return reply.status(409).send(DISABLED);
+    if (!(await loadDriftSettings(db)).enabled) return reply.status(409).send(MODEL_DRIFT_DISABLED);
     const [m] = await db.select().from(modelDriftMonitors).where(eq(modelDriftMonitors.id, monitorId));
     if (!m) return reply.status(404).send({ error: "unknown_drift_monitor" });
     if (!(await stepUp(db, req, reply, { modelDriftMonitorId: monitorId, values: { deleted: true } }))) return reply;
@@ -501,142 +516,8 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
   app.post("/v1/model-drift/monitors/:monitorId/reports", { bodyLimit: INGEST_BODY_LIMIT }, async (req, reply) => {
     const { monitorId } = monitorParam.parse(req.params);
     const body = reportBody.parse(req.body);
-    const settings = await loadDriftSettings(db);
-    if (!settings.enabled) return reply.status(409).send(DISABLED);
-    const [m] = await db
-      .select({ monitor: modelDriftMonitors, agentId: modelCards.agentId, pinnedModelVersion: modelCards.pinnedModelVersion })
-      .from(modelDriftMonitors)
-      .innerJoin(modelCards, eq(modelCards.id, modelDriftMonitors.cardId))
-      .where(eq(modelDriftMonitors.id, monitorId));
-    if (!m) return reply.status(404).send({ error: "unknown_drift_monitor" });
-    const windowStart = new Date(body.windowStart);
-    const windowEnd = new Date(body.windowEnd);
-    if (!(windowEnd > windowStart)) return reply.status(422).send({ error: "window_invalid", detail: "the window must end after it starts" });
-    const early = resolveModelVersion(m.pinnedModelVersion, body.modelVersion, true);
-    if (!early.ok) return reply.status(early.status).send(early.body);
-    const pii = personalDataRefusal([...featureTexts(body.features), ...(body.modelVersion ? [body.modelVersion] : [])]);
-    if (pii) return reply.status(422).send(pii);
-    let computed: ReturnType<typeof computeDrift>;
-    try {
-      computed = computeDrift(m.monitor.reference as DriftFeature[], body.features, thresholdsOf(m.monitor), settings.minSamples);
-    } catch (e) {
-      if (e instanceof DriftShapeError) return reply.status(422).send({ error: e.code, feature: e.feature, detail: e.message });
-      throw e;
-    }
-    const sha = payloadSha256(body.features);
-    const userId = req.authCtx.userId ?? null;
-    const card = { id: m.monitor.cardId, agentId: m.agentId };
-    const outcome = await db.transaction(async (rawTx) => {
-      const tx = rawTx as unknown as Db;
-      // one count per monitor across replicas: the lock serialises concurrent submissions to the same monitor
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${"model-drift:" + monitorId}))`);
-      let version: Awaited<ReturnType<typeof boundModelVersion>>;
-      try {
-        version = await boundModelVersion(tx, card.id, body.modelVersion, true);
-      } catch (e) {
-        // nothing is written yet; returning ends the transaction with only the advisory lock taken
-        if (e instanceof ModelVersionRefusal) return { versionRefusal: e };
-        throw e;
-      }
-      const now = await databaseNow(tx);
-      if (windowEnd.getTime() > now.getTime() + WINDOW_SKEW_MS) return { refused: "window_future" as const };
-      const [{ recent } = { recent: 0 }] = await tx
-        .select({ recent: sql<number>`count(*)::int` })
-        .from(modelDriftReports)
-        .where(and(eq(modelDriftReports.monitorId, monitorId), sql`${modelDriftReports.createdAt} > now() - interval '1 hour'`));
-      if (recent >= settings.maxReportsPerHour) return { refused: "rate" as const };
-      const [report] = await tx
-        .insert(modelDriftReports)
-        .values({
-          monitorId,
-          source: body.source,
-          windowStart,
-          windowEnd,
-          sampleCount: computed.sampleCount,
-          summary: body.features,
-          summarySha256: sha,
-          results: computed.results,
-          status: computed.status,
-          driftedFeatures: computed.driftedFeatures,
-          modelVersion: version.modelVersion!,
-          modelVersionSource: version.source!,
-          submittedBy: userId,
-        })
-        .returning();
-      await tx.insert(auditLog).values({
-        userId: userId ?? NO_IDENTITY,
-        objectType: "model_card",
-        objectId: card.id,
-        detail: {
-          phase: "drift-report",
-          monitorId,
-          reportId: report!.id,
-          source: body.source,
-          summarySha256: sha,
-          referenceSha256: m.monitor.referenceSha256,
-          modelVersion: version.modelVersion,
-          modelVersionSource: version.source,
-          status: computed.status,
-          driftedFeatures: computed.driftedFeatures,
-          sampleCount: computed.sampleCount,
-        },
-        effect: computed.status === "drift" ? "deny" : "allow",
-        ruleId: MODEL_DRIFT_AUDIT_RULE_IDS.report,
-        ruleChain: [],
-        reason: `a production summary for model version '${version.modelVersion}' was checked against drift monitor '${m.monitor.name}': ${computed.status}`,
-      });
-      let raisedId: string | null = null;
-      if (computed.status === "drift") {
-        const finding = driftFinding(card, m.monitor, { id: report!.id, driftedFeatures: computed.driftedFeatures, results: computed.results });
-        const ownership = await alertOwnershipAtRaise(tx, finding, now);
-        const [inserted] = await tx
-          .insert(governanceAlerts)
-          .values({
-            ruleId: finding.ruleId,
-            subjectKey: finding.subjectKey,
-            severity: finding.severity,
-            title: finding.title,
-            detail: finding.detail,
-            firstDetectedAt: now,
-            lastDetectedAt: now,
-            ownerUserId: ownership.ownerUserId,
-            ownerSource: ownership.ownerSource,
-            dueAt: ownership.dueAt,
-          })
-          .onConflictDoNothing()
-          .returning({ id: governanceAlerts.id });
-        if (inserted) {
-          raisedId = inserted.id;
-          await tx.insert(auditLog).values({
-            userId: userId ?? NO_IDENTITY,
-            objectType: "governance_alert",
-            objectId: inserted.id,
-            detail: { ruleId: finding.ruleId, subjectKey: finding.subjectKey, severity: finding.severity },
-            effect: "allow",
-            ruleId: ALERT_RAISED_RULE_ID,
-            ruleChain: [],
-            reason: `governance alert raised (${finding.severity}): ${finding.title}`,
-          });
-        } else {
-          await tx
-            .update(governanceAlerts)
-            .set({ lastDetectedAt: now, title: finding.title, detail: finding.detail })
-            .where(and(eq(governanceAlerts.ruleId, finding.ruleId), eq(governanceAlerts.subjectKey, finding.subjectKey), ne(governanceAlerts.status, "resolved")));
-        }
-      }
-      return { report: report!, raisedId };
-    });
-    if ("versionRefusal" in outcome && outcome.versionRefusal) return reply.status(outcome.versionRefusal.status).send(outcome.versionRefusal.body);
-    if ("refused" in outcome) {
-      return outcome.refused === "rate"
-        ? reply.status(429).send({
-            error: "drift_report_rate_limited",
-            detail: `this monitor accepts at most ${settings.maxReportsPerHour} summaries an hour; try again later`,
-          })
-        : reply.status(422).send({ error: "window_future", detail: "the window ends in the future" });
-    }
-    if (outcome.raisedId) await notifyGovernanceAlerts(db, [outcome.raisedId], userId).catch((err: unknown) => req.log.warn({ err }, "drift alert chat notification failed"));
-    return reply.status(201).send({ report: reportView(outcome.report), alertRaised: outcome.raisedId !== null });
+    const out = await recordDriftReport(db, req, monitorId, body, { kind: "user", userId: req.authCtx.userId ?? null });
+    return reply.status(out.status).send(out.body);
   });
 
   app.get("/v1/model-drift/monitors/:monitorId/reports", async (req, reply) => {
@@ -660,7 +541,7 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
   app.post("/v1/mrm/cards/:id/explainability", { bodyLimit: INGEST_BODY_LIMIT }, async (req, reply) => {
     const { id } = cardParam.parse(req.params);
     const body = explainabilitySchema.parse(req.body);
-    if (!(await loadDriftSettings(db)).enabled) return reply.status(409).send(DISABLED);
+    if (!(await loadDriftSettings(db)).enabled) return reply.status(409).send(MODEL_DRIFT_DISABLED);
     const [card] = await db.select({ id: modelCards.id, pinnedModelVersion: modelCards.pinnedModelVersion }).from(modelCards).where(eq(modelCards.id, id));
     if (!card) return reply.status(404).send({ error: "unknown_model_card" });
     const early = resolveModelVersion(card.pinnedModelVersion, body.modelVersion, true);
@@ -735,7 +616,7 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
 
   app.delete("/v1/mrm/cards/:id/explainability/:artefactId", async (req, reply) => {
     const { id, artefactId } = artefactParam.parse(req.params);
-    if (!(await loadDriftSettings(db)).enabled) return reply.status(409).send(DISABLED);
+    if (!(await loadDriftSettings(db)).enabled) return reply.status(409).send(MODEL_DRIFT_DISABLED);
     const [a] = await db
       .select()
       .from(modelExplainabilityArtefacts)
@@ -757,4 +638,202 @@ export function registerClassicalDriftRoutes(app: FastifyInstance, db: Db): void
     });
     return { deleted: true };
   });
+}
+
+/** who is submitting a summary: a platform identity (the admin route) or a monitor's ingestion credential */
+export type DriftReportActor =
+  | { kind: "user"; userId: string | null }
+  | { kind: "credential"; credentialId: string; credentialName: string; idempotencyKey: string };
+
+export type DriftReportOutcome = { status: number; body: Record<string, unknown> };
+
+/** the refusal every dead ingestion credential gets (unknown, malformed, revoked, expired): one body, one status */
+export const INGEST_CREDENTIAL_REFUSED = {
+  error: "invalid_ingest_credential",
+  detail: "This ingestion credential is not valid. An admin issues or rotates one on the drift monitor.",
+} as const;
+
+/**
+ * Check one production summary against a monitor and record it, with its audit row (and any alert) in one
+ * transaction. The ONE write path for both the admin route and the ADR-0223 amendment-1 credential route.
+ *
+ * For a credential actor, the credential's liveness is re-checked INSIDE the transaction on the database clock
+ * (`revoked_at IS NULL AND expires_at > now()`, bound to this monitor) by the same UPDATE that stamps
+ * `last_used_at`, after the per-monitor lock: a revocation that commits first is always seen, so revocation takes
+ * effect on the next request. The idempotency key is checked under the same lock: a repeat with the same summary
+ * returns the original report (200, `replayed: true`, nothing written); a repeat with a different summary is 409.
+ */
+export async function recordDriftReport(
+  db: Db,
+  req: FastifyRequest,
+  monitorId: string,
+  body: DriftReportBody,
+  actor: DriftReportActor,
+): Promise<DriftReportOutcome> {
+  const send = (status: number, b: Record<string, unknown>): DriftReportOutcome => ({ status, body: b });
+  const settings = await loadDriftSettings(db);
+  if (!settings.enabled) return send(409, MODEL_DRIFT_DISABLED);
+  const [m] = await db
+    .select({ monitor: modelDriftMonitors, agentId: modelCards.agentId, pinnedModelVersion: modelCards.pinnedModelVersion })
+    .from(modelDriftMonitors)
+    .innerJoin(modelCards, eq(modelCards.id, modelDriftMonitors.cardId))
+    .where(eq(modelDriftMonitors.id, monitorId));
+  if (!m) return send(404, { error: "unknown_drift_monitor" });
+  const windowStart = new Date(body.windowStart);
+  const windowEnd = new Date(body.windowEnd);
+  if (!(windowEnd > windowStart)) return send(422, { error: "window_invalid", detail: "the window must end after it starts" });
+  const early = resolveModelVersion(m.pinnedModelVersion, body.modelVersion, true);
+  if (!early.ok) return send(early.status, early.body);
+  const pii = personalDataRefusal([...featureTexts(body.features), ...(body.modelVersion ? [body.modelVersion] : [])]);
+  if (pii) return send(422, pii);
+  let computed: ReturnType<typeof computeDrift>;
+  try {
+    computed = computeDrift(m.monitor.reference as DriftFeature[], body.features, thresholdsOf(m.monitor), settings.minSamples);
+  } catch (e) {
+    if (e instanceof DriftShapeError) return send(422, { error: e.code, feature: e.feature, detail: e.message });
+    throw e;
+  }
+  const sha = payloadSha256(body.features);
+  const userId = actor.kind === "user" ? actor.userId : null;
+  const credential = actor.kind === "credential" ? actor : null;
+  const actorDetail = credential ? { actor: { type: "drift_ingest_credential", id: credential.credentialId, name: credential.credentialName } } : {};
+  const card = { id: m.monitor.cardId, agentId: m.agentId };
+  const outcome = await db.transaction(async (rawTx) => {
+    const tx = rawTx as unknown as Db;
+    // one count per monitor across replicas: the lock serialises concurrent submissions to the same monitor
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${"model-drift:" + monitorId}))`);
+    if (credential) {
+      // THE liveness predicate for an ingestion credential, on the database clock, bound to this monitor
+      const live = await tx
+        .update(modelDriftIngestCredentials)
+        .set({ lastUsedAt: sql`now()` })
+        .where(and(eq(modelDriftIngestCredentials.id, credential.credentialId), eq(modelDriftIngestCredentials.monitorId, monitorId), liveIngestCredential()))
+        .returning({ id: modelDriftIngestCredentials.id });
+      if (live.length === 0) return { refused: "credential" as const };
+      const [prior] = await tx
+        .select()
+        .from(modelDriftReports)
+        .where(and(eq(modelDriftReports.monitorId, monitorId), eq(modelDriftReports.idempotencyKey, credential.idempotencyKey)));
+      if (prior) return prior.summarySha256 === sha && prior.windowStart.getTime() === windowStart.getTime() && prior.windowEnd.getTime() === windowEnd.getTime()
+        ? { replayed: prior }
+        : { refused: "idempotency" as const };
+    }
+    let version: Awaited<ReturnType<typeof boundModelVersion>>;
+    try {
+      version = await boundModelVersion(tx, card.id, body.modelVersion, true);
+    } catch (e) {
+      // nothing is written yet; returning ends the transaction with only the advisory lock taken
+      if (e instanceof ModelVersionRefusal) return { versionRefusal: e };
+      throw e;
+    }
+    const now = await databaseNow(tx);
+    if (windowEnd.getTime() > now.getTime() + WINDOW_SKEW_MS) return { refused: "window_future" as const };
+    const [{ recent } = { recent: 0 }] = await tx
+      .select({ recent: sql<number>`count(*)::int` })
+      .from(modelDriftReports)
+      .where(and(eq(modelDriftReports.monitorId, monitorId), sql`${modelDriftReports.createdAt} > now() - interval '1 hour'`));
+    if (recent >= settings.maxReportsPerHour) return { refused: "rate" as const };
+    const [report] = await tx
+      .insert(modelDriftReports)
+      .values({
+        monitorId,
+        source: body.source,
+        windowStart,
+        windowEnd,
+        sampleCount: computed.sampleCount,
+        summary: body.features,
+        summarySha256: sha,
+        results: computed.results,
+        status: computed.status,
+        driftedFeatures: computed.driftedFeatures,
+        modelVersion: version.modelVersion!,
+        modelVersionSource: version.source!,
+        submittedBy: userId,
+        ingestCredentialId: credential?.credentialId ?? null,
+        idempotencyKey: credential?.idempotencyKey ?? null,
+      })
+      .returning();
+    await tx.insert(auditLog).values({
+      userId: userId ?? NO_IDENTITY,
+      objectType: "model_card",
+      objectId: card.id,
+      detail: {
+        phase: "drift-report",
+        ...actorDetail,
+        monitorId,
+        reportId: report!.id,
+        source: body.source,
+        summarySha256: sha,
+        referenceSha256: m.monitor.referenceSha256,
+        modelVersion: version.modelVersion,
+        modelVersionSource: version.source,
+        status: computed.status,
+        driftedFeatures: computed.driftedFeatures,
+        sampleCount: computed.sampleCount,
+      },
+      effect: computed.status === "drift" ? "deny" : "allow",
+      ruleId: MODEL_DRIFT_AUDIT_RULE_IDS.report,
+      ruleChain: [],
+      reason: `a production summary for model version '${version.modelVersion}' was checked against drift monitor '${m.monitor.name}': ${computed.status}`,
+    });
+    let raisedId: string | null = null;
+    if (computed.status === "drift") {
+      const finding = driftFinding(card, m.monitor, { id: report!.id, driftedFeatures: computed.driftedFeatures, results: computed.results });
+      const ownership = await alertOwnershipAtRaise(tx, finding, now);
+      const [inserted] = await tx
+        .insert(governanceAlerts)
+        .values({
+          ruleId: finding.ruleId,
+          subjectKey: finding.subjectKey,
+          severity: finding.severity,
+          title: finding.title,
+          detail: finding.detail,
+          firstDetectedAt: now,
+          lastDetectedAt: now,
+          ownerUserId: ownership.ownerUserId,
+          ownerSource: ownership.ownerSource,
+          dueAt: ownership.dueAt,
+        })
+        .onConflictDoNothing()
+        .returning({ id: governanceAlerts.id });
+      if (inserted) {
+        raisedId = inserted.id;
+        await tx.insert(auditLog).values({
+          userId: userId ?? NO_IDENTITY,
+          objectType: "governance_alert",
+          objectId: inserted.id,
+          detail: { ruleId: finding.ruleId, subjectKey: finding.subjectKey, severity: finding.severity, ...actorDetail },
+          effect: "allow",
+          ruleId: ALERT_RAISED_RULE_ID,
+          ruleChain: [],
+          reason: `governance alert raised (${finding.severity}): ${finding.title}`,
+        });
+      } else {
+        await tx
+          .update(governanceAlerts)
+          .set({ lastDetectedAt: now, title: finding.title, detail: finding.detail })
+          .where(and(eq(governanceAlerts.ruleId, finding.ruleId), eq(governanceAlerts.subjectKey, finding.subjectKey), ne(governanceAlerts.status, "resolved")));
+      }
+    }
+    return { report: report!, raisedId };
+  });
+  if ("versionRefusal" in outcome && outcome.versionRefusal) return send(outcome.versionRefusal.status, outcome.versionRefusal.body);
+  if ("replayed" in outcome && outcome.replayed) return send(200, { report: reportView(outcome.replayed), replayed: true });
+  if ("refused" in outcome) {
+    if (outcome.refused === "credential") return send(401, { ...INGEST_CREDENTIAL_REFUSED });
+    if (outcome.refused === "idempotency") {
+      return send(409, {
+        error: "idempotency_key_reused",
+        detail: "this idempotency key already recorded a different summary for this monitor; send a new key for a new summary",
+      });
+    }
+    return outcome.refused === "rate"
+      ? send(429, {
+          error: "drift_report_rate_limited",
+          detail: `this monitor accepts at most ${settings.maxReportsPerHour} summaries an hour; try again later`,
+        })
+      : send(422, { error: "window_future", detail: "the window ends in the future" });
+  }
+  if (outcome.raisedId) await notifyGovernanceAlerts(db, [outcome.raisedId], userId).catch((err: unknown) => req.log.warn({ err }, "drift alert chat notification failed"));
+  return send(201, { report: reportView(outcome.report!), alertRaised: outcome.raisedId !== null });
 }

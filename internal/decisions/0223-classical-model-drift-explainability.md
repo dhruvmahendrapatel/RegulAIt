@@ -110,3 +110,78 @@ re-testing after a model change (#615).
   held while off, and the "not evaluable" streak. Round 2: "not evaluable" moved to its own subject key (it had
   refreshed, and so downgraded, an open drift episode), and the pin is read under a row lock in the transaction.
 - Web: a lazy-loaded "Drift and explainability" tab on a card in Model risk.
+
+## Amendment 1 (2026-11-07): a scoped, write-only ingestion credential per monitor
+
+**Context.** The #628 security review tracked the admin-API-key ingestion path above as a follow-up: a pipeline that
+only needs to push summaries to one monitor held a credential that could do anything an admin can. The master
+session dispatched this follow-up (requirements: one monitor, write-only, admin-only issue/rotate/revoke with step-up,
+audited in the same transaction, shown once and stored as a hash, immediate revocation, expiry by default, rate
+limits, replay-safe, off unless issued). Migration `0290_drift_ingest_credentials.sql`.
+
+**Decision.**
+
+1. **One credential, one monitor, one route.** `model_drift_ingest_credentials` binds an `rgldi_` token to ONE
+   monitor. It opens only `POST /v1/model-drift/ingest/:monitorId/reports`, which is auth-exempt and non-admin for the
+   platform hooks (`route-classes.ts`) and authenticates in-route on `Authorization: Bearer rgldi_…` only: no session,
+   cookie or platform key is read there, and an admin API key presented there is refused like any other non-ingest
+   token. The token is not in `api_keys`, so on every other route it is an ordinary 401. Only POST is registered on
+   the path, and the response carries only the report just recorded, so the credential reads nothing. A live
+   credential naming a different monitor is 403 `credential_not_for_monitor` and audited as a denial; nothing is
+   written there. The monitor comes from the row, never from the request.
+2. **The secret.** 32 random bytes, base64url, behind the `rgldi_` prefix; shown once in the issue or rotate response
+   (`Cache-Control: no-store`) and stored only as its SHA-256 through the shared `hashToken` (no salt or work factor:
+   256 bits of randomness; the same reasoning as SCIM tokens and supplier links). It never appears in a list, an audit
+   row or a log line (the `authorization` header is already redacted).
+3. **Lifetime and revocation.** Every credential expires: 90 days by default, 1–365 by choice, with a database CHECK
+   capping it at 365 days after issue on the database clock. At most two are live per monitor. Revocation sets
+   `revoked_at`. One liveness predicate (`liveIngestCredential()`: unrevoked and `expires_at > now()`) is used by the
+   pre-check, the admin list, and the gate inside the report's own transaction: after the per-monitor lock, an UPDATE
+   that stamps `last_used_at` only on a live, monitor-bound row. Nothing is cached, so a revocation that commits
+   first refuses the next request. Rotation revokes the old row and issues a new one (`replaces_id`) in one
+   transaction; the old secret dies at once.
+4. **Admin only, with step-up, audited.** Listing, issuing, rotating and revoking are admin routes under
+   `/v1/model-drift/monitors/:monitorId/ingest-credentials` (the default admin gate). Issue, rotate and revoke each
+   need an `identity_manage` step-up bound to the exact facts (the operation, the monitor, the credential, the name
+   and the lifetime); it is a non-human credential, the same kind as ADR-0221's supplier grants, so no new step-up
+   kind. Each writes its audit row (object type `model_drift_ingest_credential`) in the same transaction. Issue and
+   rotate need the drift feature on, as every drift write does; revoke works whether it is on or off. A push is
+   audited by the existing report row with `detail.actor = { type: "drift_ingest_credential", id, name }`, and the
+   report records `ingest_credential_id`.
+5. **Replay.** The ChatOps / webhook HMAC pattern does not fit: verifying a signature needs the server to hold the
+   secret, which contradicts hash-only storage. Instead every push carries an `Idempotency-Key` (16–128 characters,
+   one linear character class). Under the per-monitor lock one key records one report per monitor (a partial unique
+   index backs it): the same key with the same summary and window returns the original report (200,
+   `replayed: true`, nothing written); the same key with a different summary is 409 `idempotency_key_reused`. TLS
+   protects the bearer in transit, as for every API key.
+6. **Rate limits.** Per address before the token lookup and per credential after it (120 and 60 per 15 minutes, on
+   the gateway's `@fastify/rate-limit` buckets, the feedback-link and supplier-portal pattern), plus the existing
+   per-monitor hourly cap counted in the database.
+7. **Off unless issued (ADR-0180).** No row, no access: the route is 401 for every request until an admin issues a
+   credential. The admin-API-key path stays for a person's upload and is unchanged.
+8. **Inventory.** The credential appears in the ADR-0175 non-human credential inventory as
+   `drift_ingest_credential` (last used recorded, always expiring, scope "push production summaries to drift monitor
+   X only").
+
+**Deviation from the Consequences above.** They expected "a new virtual-key purpose, which is a shared contract".
+A virtual key (`rglv_`) authenticates through the platform auth hook on behalf of a user, so it would still be read
+on every route; scoping it to one write needs that shared contract changed. A separate trust path, like SCIM and the
+supplier portal, gives the narrower guarantee without touching the shared contract, so this amendment uses one.
+
+**Open source first (ADR-0176).** No new dependency: `node:crypto` for the token, the existing `hashToken`,
+`@fastify/rate-limit` buckets and the step-up module. No library fits the policy itself (one monitor, write-only,
+audited), which is RegulAIt's own governance semantics.
+
+**UI.** API and backend only. The admin panel for issuing, showing once, rotating and revoking a credential is
+posted on #453 for the Governed Designer session.
+
+### As built (2026-11-07)
+
+- Migration `0290_drift_ingest_credentials.sql` (`when` 1785217000000): the table, and two nullable columns on
+  `model_drift_reports` (`ingest_credential_id`, `idempotency_key`) with a partial unique index. No function or
+  trigger.
+- Gateway: `drift-ingest-credentials.ts` (the admin routes and the ingest route); `classical-drift.ts` now exposes
+  `recordDriftReport`, the one write path both ingestion routes use.
+- Tests: `zz-adr0223-a1-ingest-credential.test.ts` (off unless issued, step-up on every write, hash-only storage,
+  wrong monitor, every read refused, replay, revoked, expired, rotation, the feature switch) and the ADR-0175
+  inventory fixture.
