@@ -123,6 +123,7 @@ import {
   asc,
   auditLog,
   inArray,
+  isNull,
   mcpServers,
   ne,
   sql,
@@ -273,7 +274,16 @@ export async function runMcpAdmissionRescan(
     })
     .from(mcpServers)
     // ADR-0190 I4: stdio servers are skipped here, before any connect (no placement, no refusal row): see EligibleRow
-    .where(and(inArray(mcpServers.admissionState, [...MCP_RESCAN_ELIGIBLE_STATES]), ne(mcpServers.transport, "stdio")))
+    // ADR-0207 (G4): a disabled server is not a candidate at all, so it is neither counted as eligible nor examined,
+    // and never reaches the connect gate that would write a deny row for it. The in-loop `continue` below stays for
+    // a server disabled mid-pass.
+    .where(
+      and(
+        inArray(mcpServers.admissionState, [...MCP_RESCAN_ELIGIBLE_STATES]),
+        ne(mcpServers.transport, "stdio"),
+        isNull(mcpServers.disabledAt),
+      ),
+    )
     .orderBy(priority, sql`${mcpServers.admissionScannedAt} asc nulls first`, asc(mcpServers.id))) as EligibleRow[];
 
   const eligible = candidates.length;
