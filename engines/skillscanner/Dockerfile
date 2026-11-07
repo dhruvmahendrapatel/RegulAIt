@@ -71,6 +71,14 @@ LABEL org.opencontainers.image.title="regulait-engine-skillscanner" \
       org.regulait.engine-version="2.3.2" \
       org.regulait.analyzers="static,bytecode,pipeline,correlation" \
       org.regulait.excluded="pcodedmp,oletools-xxxswf"
+# ADR-0184 / ADR-0200 (patch, never allow-list): CVE-2026-76844 and CVE-2026-85091 (zlib1g, HIGH), as #735 did
+# for the other engine images. The pinned base digest is still the newest published one and ships
+# 1:1.3.dfsg+really1.3.1-1+b1; the fix is in Debian trixie-security. Upgrade exactly that package to exactly the
+# fixed version, then drop what apt and dpkg wrote with wall-clock content, so the layer stays byte-reproducible.
+# Remove this when a rebuilt base digest already carries the fix.
+RUN apt-get update \
+ && apt-get install -y --only-upgrade --no-install-recommends zlib1g=1:1.3.dfsg+really1.3.1-1+deb13u1 \
+ && rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log /var/cache/ldconfig/aux-cache
 RUN rm -rf /usr/local/lib/python3.12/site-packages/pip /usr/local/lib/python3.12/site-packages/pip-* \
            /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.12
 COPY --from=closure /opt/skillscanner /opt/skillscanner
