@@ -85,7 +85,7 @@ jobs:
     # that is already running; a later push that runs it does
     concurrency:
       group: demo-journey-${{ github.event.pull_request.number || github.ref }}
-      cancel-in-progress: true
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
     # 12, down from 30 (ADR-0183 2.4). Measured 2026-10-06 (ADR-0182, D4 specs):
     # the job reached 20m02s, of which the serial mocked suite was 16.0 min
@@ -302,7 +302,7 @@ jobs:
     if: needs.changes.outputs.demo == 'true'
     concurrency:
       group: demo-live-${{ github.event.pull_request.number || github.ref }}
-      cancel-in-progress: true
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 12
 
@@ -439,7 +439,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     concurrency:
       group: demo-rehearsal-${{ github.ref }}
-      cancel-in-progress: true
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
 
@@ -575,7 +575,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && needs.changes.outputs.demo == 'true'
     concurrency:
       group: demo-mock-${{ github.event.pull_request.number || github.ref }}
-      cancel-in-progress: true
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     uses: ./.github/workflows/mock-ui-shards.yml
     with:
       artifact-prefix: demo-mock
@@ -589,7 +589,7 @@ jobs:
     if: needs.changes.outputs.review == 'true'
     concurrency:
       group: approval-review-${{ github.event.pull_request.number || github.ref }}
-      cancel-in-progress: true
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
 

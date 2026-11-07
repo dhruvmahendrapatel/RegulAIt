@@ -147,7 +147,7 @@ on:
 # Rapid follow-up pushes cancel the older in-flight run for the same PR.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Least privilege for GITHUB_TOKEN (CodeQL "workflow does not contain permissions"): every job here only
 # checks out code and uploads artifacts; nothing writes to the repository, issues, PRs or packages.
