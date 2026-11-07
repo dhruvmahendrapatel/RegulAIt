@@ -360,6 +360,28 @@ export interface RoleToolGrant {
   toolName: string;
 }
 
+/**
+ * ADR-0236 (P11) — a tool granted through a governed MCP bundle. The gateway pre-filters these to the bundles the
+ * evaluated user holds (directly, through an assigned role or through a team) at the bundle's CURRENT version, and
+ * only while the org setting is on. Exact (server, tool) pairs: a bundle has no wildcard and no read-only-all form.
+ * A bundle grant sits at the ROLE tier: a per-user revocation subtracts from it exactly as from a role grant, so a
+ * bundle can never hand back what a person's own override took away, and every restriction after the grant step
+ * (lead ceiling, ABAC, data scope, rate limits, approvals, the actor intersection) still applies to it.
+ */
+export interface BundleToolGrant {
+  /** the mcp_bundle_grants row that put the bundle in reach — the audit's grant id */
+  id: string;
+  bundleId: string;
+  /** optional display name — reason prose only */
+  bundleName?: string | null;
+  /** the bundle version the item comes from */
+  version: number;
+  /** how the user holds the bundle */
+  via: "user" | "role" | "team";
+  serverId: string;
+  toolName: string;
+}
+
 export interface RoleServerGrant {
   id: string;
   roleId: string;
@@ -582,6 +604,8 @@ export interface EvaluationInput {
   /** role-derived grants, pre-filtered by the gateway to the user's assigned roles */
   roleToolGrants?: readonly RoleToolGrant[];
   roleServerGrants?: readonly RoleServerGrant[];
+  /** ADR-0236 — bundle-derived grants, pre-filtered by the gateway to the user's bundles; absent/empty = none */
+  bundleToolGrants?: readonly BundleToolGrant[];
   revocations?: readonly Revocation[];
   approvalRules?: readonly ApprovalRule[];
   rateLimits?: readonly RateLimit[];
@@ -672,6 +696,8 @@ export type RuleName =
   | "role-tool-allow-list"
   | "server-read-only-all"
   | "role-server-read-only-all"
+  /** ADR-0236 — a tool granted through a governed MCP bundle (role tier: revocations subtract from it) */
+  | "bundle-tool-allow-list"
   | "data-scope"
   | "rate-limit"
   | "approval-required"
@@ -1009,6 +1035,29 @@ function evaluateTool(input: EvaluationInput): Decision {
     } else {
       chain.push({ rule: "role-tool-allow-list", outcome: "no-match" });
     }
+
+    // ADR-0236 — a governed MCP bundle, at the role tier: consulted only when no direct or role tool grant matched,
+    // and a per-user revocation suppresses it exactly as it suppresses a role grant. Absent/empty input pushes
+    // NOTHING, so every decision without a bundle is byte-identical to the pre-0236 kernel.
+    const bundleGrants = input.bundleToolGrants ?? [];
+    if (!grantId && bundleGrants.length > 0) {
+      const bundleToolGrant = bundleGrants.find((g) => g.serverId === serverId && g.toolName === tool.name);
+      if (!bundleToolGrant) {
+        chain.push({ rule: "bundle-tool-allow-list", outcome: "no-match" });
+      } else {
+        const revocation = revocationFor(tool.name);
+        if (revocation) {
+          chain.push({ rule: "bundle-tool-allow-list", outcome: "revoked", grantId: revocation.id });
+        } else {
+          chain.push({ rule: "bundle-tool-allow-list", outcome: "allow", grantId: bundleToolGrant.id });
+          grantId = bundleToolGrant.id;
+          grantReason =
+            `tool '${tool.name}' on server ${serverRef} is in MCP bundle ` +
+            `${refLabel(bundleToolGrant.bundleId, bundleToolGrant.bundleName)} v${bundleToolGrant.version}, ` +
+            `held ${bundleToolGrant.via === "user" ? "directly" : `through a ${bundleToolGrant.via}`}`;
+        }
+      }
+    }
   }
 
   if (!grantId) {
@@ -1314,6 +1363,8 @@ export interface Entitlements {
   serverGrants: readonly ServerGrant[];
   roleToolGrants?: readonly RoleToolGrant[];
   roleServerGrants?: readonly RoleServerGrant[];
+  /** ADR-0236 — bundle-derived grants (see BundleToolGrant) */
+  bundleToolGrants?: readonly BundleToolGrant[];
   revocations?: readonly Revocation[];
 }
 

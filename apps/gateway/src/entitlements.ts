@@ -4,6 +4,14 @@ import {
   connectorRevocations,
   eq,
   inArray,
+  isNull,
+  mcpBundleGrants,
+  mcpBundleVersionItems,
+  mcpBundleVersions,
+  mcpBundles,
+  or,
+  ORG_SETTINGS_ID,
+  orgSettings,
   revocations,
   roleAgentGrants,
   roleAssignments,
@@ -18,6 +26,7 @@ import {
 } from "@regulait/db";
 import type {
   AgentRevocation,
+  BundleToolGrant,
   ConnectorRevocation,
   Entitlements,
   RoleAgentGrant,
@@ -59,7 +68,7 @@ export async function loadEntitlements(
   userId: string,
   serverId: string,
 ): Promise<Entitlements> {
-  const [tGrants, sGrants, assignments, revs] = await Promise.all([
+  const [tGrants, sGrants, assignments, revs, bundleGrants] = await Promise.all([
     db
       .select()
       .from(toolGrants)
@@ -73,6 +82,7 @@ export async function loadEntitlements(
       .select()
       .from(revocations)
       .where(and(eq(revocations.userId, userId), eq(revocations.serverId, serverId))),
+    loadBundleToolGrants(db, userId, serverId),
   ]);
 
   // ADR-0038: DISTINCT — a role held both directly and via a group mapping is
@@ -113,8 +123,67 @@ export async function loadEntitlements(
     serverGrants: sGrants,
     roleToolGrants: rtGrants.map((g) => ({ ...g, roleName: roleName.get(g.roleId) ?? null })),
     roleServerGrants: rsGrants.map((g) => ({ ...g, roleName: roleName.get(g.roleId) ?? null })),
+    // ADR-0236: present only when the user holds a bundle naming a tool on this server, so every other decision's
+    // input (and therefore its rule chain) is exactly what it was before
+    ...(bundleGrants.length > 0 ? { bundleToolGrants: bundleGrants } : {}),
     revocations: revs,
   };
+}
+
+/** ADR-0236: when a user holds the same tool through several bundles, the kernel names the most direct one */
+const BUNDLE_VIA_ORDER = { user: 0, role: 1, team: 2 } as const;
+
+/**
+ * ADR-0236 (P11) — the governed-MCP-bundle grants that reach `userId` on `serverId`: every bundle granted to the user,
+ * to a role the user is assigned, or to a team the user belongs to, at the bundle's CURRENT version, skipping archived
+ * bundles. Returns [] while `org_settings.mcp_bundles_enabled` is false (the default), so the feature switched off
+ * loads nothing and decides nothing. The kernel then applies the per-user revocations to these exactly as to role
+ * grants; this loader only resolves which bundle items are in reach.
+ */
+export async function loadBundleToolGrants(db: Db, userId: string, serverId: string): Promise<BundleToolGrant[]> {
+  const [org] = await db
+    .select({ enabled: orgSettings.mcpBundlesEnabled })
+    .from(orgSettings)
+    .where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  if (!org?.enabled) return [];
+  const { roleIds, teamIds } = await loadScopeMemberships(db, userId);
+  const subject = or(
+    eq(mcpBundleGrants.userId, userId),
+    ...(roleIds.length > 0 ? [inArray(mcpBundleGrants.roleId, roleIds)] : []),
+    ...(teamIds.length > 0 ? [inArray(mcpBundleGrants.teamId, teamIds)] : []),
+  );
+  const rows = await db
+    .select({
+      grantId: mcpBundleGrants.id,
+      grantUserId: mcpBundleGrants.userId,
+      grantRoleId: mcpBundleGrants.roleId,
+      bundleId: mcpBundles.id,
+      bundleName: mcpBundles.name,
+      version: mcpBundleVersions.version,
+      toolName: mcpBundleVersionItems.toolName,
+    })
+    .from(mcpBundleGrants)
+    .innerJoin(mcpBundles, and(eq(mcpBundles.id, mcpBundleGrants.bundleId), isNull(mcpBundles.archivedAt)))
+    .innerJoin(
+      mcpBundleVersions,
+      and(eq(mcpBundleVersions.bundleId, mcpBundles.id), eq(mcpBundleVersions.version, mcpBundles.currentVersion)),
+    )
+    .innerJoin(
+      mcpBundleVersionItems,
+      and(eq(mcpBundleVersionItems.versionId, mcpBundleVersions.id), eq(mcpBundleVersionItems.serverId, serverId)),
+    )
+    .where(subject)
+    .limit(10_000);
+  const grants: BundleToolGrant[] = rows.map((r) => ({
+    id: r.grantId,
+    bundleId: r.bundleId,
+    bundleName: r.bundleName,
+    version: r.version,
+    via: r.grantUserId ? "user" : r.grantRoleId ? "role" : "team",
+    serverId,
+    toolName: r.toolName,
+  }));
+  return grants.sort((a, b) => BUNDLE_VIA_ORDER[a.via] - BUNDLE_VIA_ORDER[b.via] || a.id.localeCompare(b.id));
 }
 
 /**

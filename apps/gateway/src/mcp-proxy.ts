@@ -252,7 +252,15 @@ export const MCP_STDIO_NO_ENTITLEMENT_RULE_ID = "mcp-stdio-no-entitlement";
 
 export async function holdsAnyEntitlement(db: Db, userId: string, serverId: string): Promise<boolean> {
   const e = await loadEntitlements(db, userId, serverId);
-  return e.toolGrants.length + e.serverGrants.length + (e.roleToolGrants?.length ?? 0) + (e.roleServerGrants?.length ?? 0) > 0;
+  return (
+    e.toolGrants.length +
+      e.serverGrants.length +
+      (e.roleToolGrants?.length ?? 0) +
+      (e.roleServerGrants?.length ?? 0) +
+      // ADR-0236: a tool held through a governed MCP bundle is an entitlement on this server too
+      (e.bundleToolGrants?.length ?? 0) >
+    0
+  );
 }
 
 /** the refusal (one deny audit row) for a stdio pre-decision connect by a caller with no entitlement */
