@@ -1620,10 +1620,17 @@
       "breakpoints": true
     },
     {
-      "idx": 291,
+      "idx": 297,
       "version": "7",
-      "when": 1785218000000,
-      "tag": "0291_mcp_bundles",
+      "when": 1785224000000,
+      "tag": "0297_usage_extractor",
+      "breakpoints": true
+    },
+    {
+      "idx": 298,
+      "version": "7",
+      "when": 1785225000000,
+      "tag": "0298_mcp_bundles",
       "breakpoints": true
     }
   ]

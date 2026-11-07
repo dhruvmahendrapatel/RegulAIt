@@ -6,7 +6,7 @@
 - **Extends**: [ADR-0014](0014-role-bundled-agent-connector-grants.md) (role-bundled grants),
   [ADR-0019](0019-per-user-revocation-and-full-attribution.md) (per-user revocations), [ADR-0219](0219-a2a-governance.md)
   (default-off governed surface pattern)
-- **Migration**: 0291 (`0291_mcp_bundles.sql`, `when` 1785218000000)
+- **Migration**: 0298 (`0298_mcp_bundles.sql`, `when` 1785225000000; renumbered from 0291 after main reached 0297)
 - **Backlog item**: [PENDING.md](../product/PENDING.md) P11
 
 ## Context

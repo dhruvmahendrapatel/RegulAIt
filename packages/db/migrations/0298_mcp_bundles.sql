@@ -2,7 +2,7 @@
 -- statement is idempotent.
 --
 -- 1. `org_settings.mcp_bundles_enabled`, default false (ADR-0180). While false no bundle can be created, changed or
---    granted, and the gateway loads no bundle grant at all, so every decision is what it was before 0291. Turning it on
+--    granted, and the gateway loads no bundle grant at all, so every decision is what it was before 0298. Turning it on
 --    goes through the audited `PUT /v1/org/settings` and is a `settings_relax` step-up (strictness registry).
 -- 2. `mcp_bundles`: a named bundle. `current_version` points at the version every grant follows. `archived_at` set =
 --    the bundle grants nothing (its history stays).
