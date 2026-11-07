@@ -811,7 +811,7 @@ func versionShape(s string) bool {
 	return shaped(s, 64, func(r rune) bool {
 		return alnum(r) || r == '^' || r == '~' || r == '*' || r == '<' || r == '>' || r == '='
 	},
-		func(r rune) bool { return alnum(r) || strings.ContainsRune(".-+_^~*<>=|x ", r) })
+		func(r rune) bool { return alnum(r) || strings.ContainsRune(".-+_^~*<>=", r) })
 }
 
 // npmName: `name` or `@scope/name`, npm's lower-case rules, at most 214 characters.

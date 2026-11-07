@@ -123,6 +123,8 @@ import { deploymentEnvironment, identityIssuer } from "./oauth/common.js";
 import { bindPreparedCredentialTx, IdentityAdminError, revokeWorkloadIdentity } from "./oauth/identity-admin.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
 import { requireStepUp, type StepUpCheckArgs } from "./step-up.js";
+import { MCP_CONFIG_KIND, recordMcpServers } from "./endpoint-mcp-config.js";
+import { loadDiscoverySettings } from "./discovery-posture.js";
 import { hashToken } from "./token-hash.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
@@ -805,7 +807,9 @@ export function registerEndpointAgentRoutes(app: FastifyInstance, db: Db, opts: 
       const expires = new Date((sig.iat + ENDPOINT_REPORT_SIGNATURE_MAX_AGE_SECONDS + ENDPOINT_REPORT_SIGNATURE_MAX_FUTURE_SECONDS) * 1000);
       if (!(await claimReplay(db, "client_assertion", `endpoint-report:${cred.jwkThumbprint}:${sig.jti}`, expires))) return refusedWith(400, "report_replayed");
       if (!reportFresh(report.collectedAt, now)) return refusedWith(422, "report_stale");
-      const reduction = reduceReportFacts(report, await loadEnabledCatalogue(db));
+      // ADR-0259: mcp_config facts count only while the org switch is on; otherwise they are refused, never stored
+      const mcpConfigEnabled = (await loadDiscoverySettings(db)).endpointMcpConfig;
+      const reduction = reduceReportFacts(report, await loadEnabledCatalogue(db), mcpConfigEnabled);
       const [row] = await db
         .insert(endpointAgentReports)
         .values({
@@ -821,6 +825,7 @@ export function registerEndpointAgentRoutes(app: FastifyInstance, db: Db, opts: 
           factsReceived: report.facts.length,
           factsEnvRefused: reduction.envRefused,
           factsUnmatched: reduction.unmatched,
+          factsMcpRefused: reduction.mcpRefused,
           droppedSnapshots: report.droppedSnapshots,
           gaps: report.gaps,
           sightings: reduction.sightings,
@@ -829,6 +834,12 @@ export function registerEndpointAgentRoutes(app: FastifyInstance, db: Db, opts: 
         .returning({ id: endpointAgentReports.id });
       if (!row) return reply.status(202).send({ accepted: true, duplicate: true });
       await db.update(endpointDevices).set({ lastReportAt: sql`now()` }).where(eq(endpointDevices.id, agent.deviceId));
+      let mcp = { upserted: 0, pruned: 0 };
+      if (mcpConfigEnabled) {
+        // a report that could not read every MCP config (a gap) never prunes what an earlier one saw
+        const complete = !report.gaps.some((g) => g.kind === MCP_CONFIG_KIND);
+        mcp = await recordMcpServers(db, { deviceId: agent.deviceId, reportId: row.id, collectedAt: new Date(report.collectedAt), sightings: reduction.mcpServers, complete });
+      }
       await db.update(endpointAgentIdentities).set({ lastReportAt: sql`now()` }).where(eq(endpointAgentIdentities.identityId, agent.identityId));
       await audit(db, NIL_UUID, "discovery_source", agent.sourceId, "endpoint-agent-report-accepted", "allow", `an endpoint agent report was accepted: ${report.facts.length} fact(s), ${reduction.sightings.length} catalogue sighting(s) (ADR-0195 SD4b)`, {
         deviceId: agent.deviceId,
@@ -838,6 +849,9 @@ export function registerEndpointAgentRoutes(app: FastifyInstance, db: Db, opts: 
         sightings: reduction.sightings.length,
         envFactsRefused: reduction.envRefused,
         factsUnmatched: reduction.unmatched,
+        mcpFactsRefused: reduction.mcpRefused,
+        mcpServersRecorded: mcp.upserted,
+        mcpServersPruned: mcp.pruned,
         droppedSnapshots: report.droppedSnapshots,
         bodySha256,
       });
