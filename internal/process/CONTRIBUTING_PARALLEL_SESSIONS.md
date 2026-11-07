@@ -185,11 +185,16 @@ What this means for a builder:
   there drops the PR from the queue, and you fix it on the branch like any other red check.
 - To run the full suite on a branch before it is queued, use **Run workflow** (`workflow_dispatch`) on `ci.yml`,
   `ui-enterprise.yml`, `demo.yml` or `gvisor.yml`.
-- `cancel-in-progress` applies to `pull_request` runs only: a newer push to a PR cancels the older run; a merge group,
-  a push to main or a scheduled run always finishes.
+- A newer push to a PR cancels its older run. Every other run (merge group, push to main, schedule, manual) has a
+  concurrency group of its own (`github.run_id`), because GitHub cancels an older *pending* run in a shared group
+  whatever `cancel-in-progress` says.
+- The scope fails closed (`scripts/ci-scope.mjs`): a rename counts at both its paths, and a diff it cannot read means
+  a full run.
 - Required checks (set by the owner when the queue is enabled) are names that report on every PR and every merge
   group: `build-and-test`, `SAST (CodeQL)`, `Secret scan (gitleaks)`, `Dependency audit (pnpm)`, `Image scan and SBOMs
-  (Trivy)` and `ui enterprise / tokens, baseline guard, bundle size`. A path-filtered workflow is never a required check.
+  (Trivy)` and `ui enterprise / all`. Never require a job gated by `scope` directly (a skip counts as a pass), a
+  path-filtered workflow (`import-cycles`, `integrations`, `endpoint-agent`, `engine-images-build`, `gvisor`, `demo`)
+  or a workflow without a `merge_group` trigger.
 - No job is gated by a workflow-level path filter any more where it can be required. Gate a new job on the `scope`
   job's outputs (`.github/actions/ci-scope`): `code`, `web` or `full`.
 

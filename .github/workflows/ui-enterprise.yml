@@ -336,3 +336,23 @@ jobs:
           path: apps/web/test-results/screenshot-pack
           if-no-files-found: error
           retention-days: 30
+
+  # THE CHECK TO REQUIRE for this workflow (ADR-0252 addendum; #734 review finding 3). A job skipped by `if:` counts
+  # as passing, so without this a failed `scope` would skip all three jobs and pass. Green only when the scope
+  # succeeded and each part either succeeded or was skipped because its own condition was false.
+  all:
+    name: ui enterprise / all
+    needs: [scope, static, browsers, screenshots]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Every part ran as its scope required
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "$RESULTS" | jq -e '
+            def ok(want): if want == "true" then .result == "success" else .result == "skipped" end;
+            .scope.outputs as $o |
+            .scope.result == "success" and (.static | ok($o.code)) and (.browsers | ok($o.web)) and (.screenshots | ok($o.web))' > /dev/null
