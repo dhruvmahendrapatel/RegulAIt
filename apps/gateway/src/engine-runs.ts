@@ -93,6 +93,8 @@ import {
   isTerminalEngineRunStatus,
   normaliseEngineResult,
   garakConfigProblem,
+  pyritConfigProblem,
+  spikeeConfigProblem,
   promptfooConfigProblem,
   updateEngineScheduleSchema,
   type CreateEngineRunInput,
@@ -330,7 +332,16 @@ export async function validateEngineRunRequest(
   // plugin's test cases, so a plan of strategies alone would run nothing)
   // B5-G (decision 149): garak takes no run params, so nothing can reach its config unseen
   const configProblem =
-    input.engineId === "promptfoo" ? promptfooConfigProblem(input.config.sets) : input.engineId === "garak" ? garakConfigProblem(input.config) : null;
+    input.engineId === "promptfoo"
+      ? promptfooConfigProblem(input.config.sets)
+      : input.engineId === "garak"
+        ? garakConfigProblem(input.config)
+        : // ADR-0245: spikee needs a dataset; PyRIT takes only max_turns
+          input.engineId === "spikee"
+          ? spikeeConfigProblem(input.config)
+          : input.engineId === "pyrit"
+            ? pyritConfigProblem(input.config)
+            : null;
   if (configProblem) return { ok: false, status: 422, error: "engine_config_invalid", detail: configProblem };
   if (!engine.enabled) {
     return { ok: false, status: 409, error: "engine_disabled", detail: `engine ${input.engineId} is off; an admin enables it after its runner self-test passes` };

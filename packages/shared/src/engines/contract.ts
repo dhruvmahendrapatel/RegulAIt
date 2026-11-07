@@ -27,7 +27,8 @@ import { compactJwsSchema, workloadPublicJwkSchema } from "../identity/contract.
 // ---------------------------------------------------------------------------
 
 /** the engines this build knows (`engines.id`); an admin cannot add one */
-export const ENGINE_IDS = ["promptfoo", "modelscan", "garak"] as const;
+// ADR-0245 (migration 0301): spikee and pyrit join as red-team engines
+export const ENGINE_IDS = ["promptfoo", "modelscan", "garak", "spikee", "pyrit"] as const;
 export type EngineId = (typeof ENGINE_IDS)[number];
 
 /** what an engine measures (`engines.kind`) */

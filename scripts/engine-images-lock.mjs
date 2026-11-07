@@ -40,7 +40,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { bundlePath, checkBundleForEntry, SIGNATURES_DIR, TRUSTED_ROOT, verifyEntrySignature } from "./engine-images-lock-verify.mjs";
 
-export const ENGINE_IDS = ["promptfoo", "modelscan", "garak"];
+export const ENGINE_IDS = ["promptfoo", "modelscan", "garak", "spikee", "pyrit"];
 export const LOCK_SCHEMA = "regulait.engine-images-lock.v1";
 export const UNSET_DIGEST = `sha256:${"0".repeat(64)}`;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
@@ -155,9 +155,25 @@ export function readBundle(id) {
   return existsSync(f) ? JSON.parse(readFileSync(f, "utf8")) : undefined;
 }
 
+/**
+ * ADR-0245: a lock committed before an engine joined `ENGINE_IDS` has no entry for it. Read at that ref, the engine
+ * was never published, which is exactly the all-null entry, so the missing entry is filled in as that and nothing
+ * else: an entry this build does not know still fails validation, and a present entry is never altered.
+ */
+export function withNeverPublishedEngines(lock) {
+  if (!lock || typeof lock !== "object" || !lock.engines || typeof lock.engines !== "object") return lock;
+  const engines = { ...lock.engines };
+  for (const id of ENGINE_IDS) {
+    if (!Object.prototype.hasOwnProperty.call(engines, id)) {
+      engines[id] = { repository: null, manifestDigest: null, imageId: null, publishGeneration: 0, sourceCommit: null, publishedAt: null };
+    }
+  }
+  return { ...lock, engines };
+}
+
 /** the lock as committed on `ref` (git is injectable for tests) */
 export function readLockAt(ref, { git = (args) => execFileSync("git", args, { cwd: ROOT, encoding: "utf8" }) } = {}) {
-  return validateLock(JSON.parse(git(["show", `${ref}:${path.relative(ROOT, PATHS.lock).split(path.sep).join("/")}`])));
+  return validateLock(withNeverPublishedEngines(JSON.parse(git(["show", `${ref}:${path.relative(ROOT, PATHS.lock).split(path.sep).join("/")}`]))));
 }
 
 /** record a publish into the lock (pure): only engines named in the publish change */
@@ -288,7 +304,7 @@ export function renderTs(lock) {
     "  publishedAt: string | null;",
     "}",
     "",
-    `export const ENGINE_IMAGES_LOCK: Readonly<Record<"promptfoo" | "modelscan" | "garak", Readonly<EngineImageLockEntry>>> = Object.freeze({`,
+    `export const ENGINE_IMAGES_LOCK: Readonly<Record<${ENGINE_IDS.map((id) => JSON.stringify(id)).join(" | ")}, Readonly<EngineImageLockEntry>>> = Object.freeze({`,
   ];
   const lit = (v) => (v === null ? "null" : JSON.stringify(v));
   for (const id of ENGINE_IDS) {
