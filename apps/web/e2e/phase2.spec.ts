@@ -264,6 +264,8 @@ test("sso & sessions: OIDC list + sessions policy save", async () => {
   test.setTimeout(150_000); // a step-up's TOTP code may wait for the next 30 s window (B4S-06)
   await nav("SSO & sessions", "SSO & sessions");
   await expect(page.getByText("Single sign-on — OIDC providers")).toBeVisible();
+  // P3: the sign-in/session policy now lives on its own settings tab on /admin/sso
+  await page.getByRole("tab", { name: /^Sessions & step-up/ }).click();
   await page.getByRole("button", { name: "Save sign-in policy" }).click();
   const policySaved = page.getByText("Sign-in policy saved", { exact: false }).first();
   await settleWithStepUp(page, policySaved);
@@ -454,7 +456,8 @@ test("agents: register an agent and save its base system prompt", async () => {
   // the agent now appears in the catalog AND the stewardship table (ADR-0168 item 6)
   await expect(page.getByRole("cell", { name: "e2e-agent", exact: true }).first()).toBeVisible();
 
-  // admin base system prompt (governance artifact)
+  // admin base system prompt (governance artifact); P3 keeps it under the "Pricing & prompts" settings tab
+  await page.getByRole("tab", { name: /^Pricing & prompts/ }).click();
   const promptCard = page.locator("section", { has: page.getByRole("button", { name: "Save prompt" }) });
   await promptCard.getByLabel("Agent").selectOption({ label: "e2e-agent · mock · tier 0" });
   await promptCard.getByLabel("System prompt (empty = clear)").fill("You are the e2e governance agent.");

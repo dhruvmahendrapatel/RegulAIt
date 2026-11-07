@@ -5,3 +5,5 @@ export { default as ChatOpsPage } from "../views/admin/governance/ChatOpsPage";
 export { default as LineagePage } from "../views/admin/governance/LineagePage";
 export { default as ReviewWorkbenchPage } from "../views/admin/governance/ReviewWorkbenchPage";
 export { default as TracesPage } from "../views/admin/observability/TracesPage";
+// P3 (#453): the ChatOps area (overview + full chat-identity-links list) as one lazy chunk reached through this screen.
+export { ChatOpsArea } from "../views/admin/governance/ChatIdentityLinksPage";

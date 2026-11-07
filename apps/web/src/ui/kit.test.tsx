@@ -296,7 +296,7 @@ describe("Table — a column with no visible header is named by the column, not 
     expect(unnamed).toEqual([]);
     // the badge and checkbox columns the review listed are not called Actions
     const statusLike = Object.entries(named).filter(([k]) =>
-      /^(AgentsPage|ConnectorsPage|McpServersPage|LicensingPage|IncidentDetailPage|CompliancePacksPage|EvalsCompareTab|ReviewWorkbenchPage|RetentionHoldsCard)\.tsx/.test(k) && named[k] !== "Actions",
+      /^(AgentsPage|AgentCatalogPage|ConnectorsPage|McpServersPage|LicensingPage|licenceVerifications|IncidentDetailPage|CompliancePacksPage|EvalsCompareTab|ReviewWorkbenchPage|RetentionHoldsCard)\.tsx/.test(k) && named[k] !== "Actions",
     );
     expect(statusLike.length).toBeGreaterThanOrEqual(10);
   });

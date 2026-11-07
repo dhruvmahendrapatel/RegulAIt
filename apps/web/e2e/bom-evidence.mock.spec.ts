@@ -238,7 +238,8 @@ test.describe("ADR-0189 B6: AI BOM on the agents page", () => {
       ],
       download: [{ status: 409, body: { error: "bom_signing_unavailable", missingKey: "export" } }, "ok"],
     });
-    await page.goto("/ui/admin/agents");
+    // P3: AI BOMs open from the full catalog, on its own page
+    await page.goto("/ui/admin/agents/catalog");
     await page.getByRole("button", { name: "AI BOM for Clause triage" }).click();
     const panel = page.getByTestId("ai-bom-panel");
     await expect(panel.getByRole("button", { name: "Open snapshot version 1" })).toBeVisible();

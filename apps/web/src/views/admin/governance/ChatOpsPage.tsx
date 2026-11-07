@@ -22,8 +22,9 @@ import { api } from "../../../api/client";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { DataList } from "../../../ui/DataList";
-import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Select, Table, Textarea } from "../../../ui/kit";
+import { ListPreview } from "../../../ui/ListPreview";
+import type { IdentityLink } from "./ChatIdentityLinksPage";
+import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Select, Table, Tabs, Textarea, tabIds } from "../../../ui/kit";
 import { QueryGate, reconfirmNeeded, StaleAfterWrite, useAction, useConnectors, useSettleAfterWrite, useSingleFlight } from "../adminKit";
 import v from "../../views.module.css";
 import { BuilderRoutesCard, PostApprovalCard } from "./ChatOpsPostAndRoutes";
@@ -169,17 +170,6 @@ interface ConnectionsResponse {
   connections: Connection[];
   posture: string;
 }
-interface IdentityLink {
-  id: string;
-  connectionId: string;
-  chatUserId: string;
-  chatUserEmail: string;
-  userId: string;
-  emailVerifiedSource: string;
-  createdAt: string;
-  /** ADR-0226: the workspace's name, joined by the list contract */
-  connectionName?: string | null;
-}
 
 export default function ChatOpsPage() {
   const queryClient = useQueryClient();
@@ -187,8 +177,7 @@ export default function ChatOpsPage() {
     queryKey: ["chatops", "connections"],
     queryFn: () => api.get<ConnectionsResponse>("/v1/chatops/connections"),
   });
-  // ADR-0226: the identity links are a DataList; the posture sentence arrives beside each page
-  const [linkPosture, setLinkPosture] = useState<string | null>(null);
+  const [tab, setTab] = useState("workspaces");
   const connectors = useConnectors();
   const act = useAction();
 
@@ -208,9 +197,6 @@ export default function ChatOpsPage() {
   const [resendKey, setResendKey] = useState("");
   const [resendFrom, setResendFrom] = useState("");
 
-  const [linkConnection, setLinkConnection] = useState("");
-  const [chatUserId, setChatUserId] = useState("");
-  const [linkEmail, setLinkEmail] = useState("");
 
   const refresh = () => {
     void connections.refetch();
@@ -249,6 +235,50 @@ export default function ChatOpsPage() {
         </div>
       </Card>
 
+      {/* P3: the growing list is a preview; the full list and the link form have their own page */}
+      <ListPreview<IdentityLink>
+        title="Chat ↔ regulAIt identity links"
+        noun="identity links"
+        endpoint="/v1/chatops/identity-links"
+        legacyKey="links"
+        queryKey={["chatops", "links"]}
+        sort={{ key: "created", dir: "desc" }}
+        attention={[{ label: "admin-asserted", filters: { verification: "admin_asserted" } }]}
+        note={
+          <div className={v.row}>
+            <Badge tone="warn">Unverified identity</Badge>
+          </div>
+        }
+        columns={[
+          { key: "chatuser", header: "Chat identity", render: (r) => <code>{r.chatUserId}</code> },
+          { key: "email", header: "Bound to", render: (r) => r.chatUserEmail },
+          {
+            key: "verified",
+            header: "Email verification",
+            render: (r) => <Badge tone={r.emailVerifiedSource === "admin_asserted" ? "warn" : "ok"}>{r.emailVerifiedSource}</Badge>,
+          },
+          { key: "workspace", header: "Workspace", render: (r) => r.connectionName ?? "—" },
+          { key: "created", header: "Created", render: (r) => ago(r.createdAt) },
+        ]}
+        rowKey={(r) => r.id}
+        viewAll="/admin/chatops/identity-links"
+        empty={<EmptyState title="No identity links yet" body="A chat user acts as a regulAIt person only through a link an administrator makes." />}
+      />
+
+      {/* P3: the workspaces and the posting settings are settings, in tabs; workspaces (and their warnings) open first */}
+      <Tabs
+        tabs={[
+          { id: "workspaces", label: "Workspaces" },
+          { id: "routes", label: "Posting & routes" },
+        ]}
+        active={tab}
+        onChange={setTab}
+        idPrefix="chatops"
+        label="ChatOps settings"
+      />
+      <div role="tabpanel" id={tabIds("chatops", tab).panel} aria-labelledby={tabIds("chatops", tab).tab} className={v.stack}>
+        {tab === "workspaces" ? (
+          <>
       <Card title="Workspaces">
         <QueryGate loading={connections.isLoading} error={connections.error} onRetry={refresh}>
           {(connections.data?.connections.length ?? 0) === 0 ? (
@@ -511,88 +541,16 @@ export default function ChatOpsPage() {
         </div>
       </Card>
 
+          </>
+        ) : (
+          <>
       {/* mirror one approval into a channel; which channel each builder agent answers on */}
       <PostApprovalCard connections={connections.data?.connections ?? []} />
       <BuilderRoutesCard />
+          </>
+        )}
+      </div>
 
-      <Card title="Chat ↔ regulAIt identity links" info={linkPosture ? <p>{linkPosture}</p> : undefined}>
-        <div className={v.row}>
-          <Badge tone="warn">Unverified identity</Badge>
-        </div>
-        <DataList<IdentityLink>
-          listId="chat-identity-links"
-          noun="identity links"
-          endpoint="/v1/chatops/identity-links"
-          exportPath="/v1/chatops/identity-links/export.xlsx"
-          queryKey={["chatops", "links", "list"]}
-          legacyKey="links"
-          defaultSort={{ key: "created", dir: "desc" }}
-          rowKey={(r) => r.id}
-          onRows={(_rows, raw) => setLinkPosture(typeof raw.posture === "string" ? raw.posture : null)}
-          empty={<EmptyState title="No identity links yet" body="A chat user acts as a regulAIt person only through a link an administrator makes below." />}
-          columns={[
-            { key: "chatuser", header: "Chat identity", main: true, sortable: true, render: (r) => <code>{r.chatUserId}</code> },
-            { key: "email", header: "Bound to", main: true, sortable: true, render: (r) => r.chatUserEmail },
-            {
-              key: "verified",
-              header: "Email verification",
-              main: true,
-              sortable: true,
-              required: "An admin-asserted link is a warning, so verification is always shown",
-              render: (r) => <Badge tone={r.emailVerifiedSource === "admin_asserted" ? "warn" : "ok"}>{r.emailVerifiedSource}</Badge>,
-            },
-            { key: "workspace", header: "Workspace", main: true, sortable: true, render: (r) => r.connectionName ?? "—" },
-            { key: "created", header: "Created", main: true, sortable: true, render: (r) => ago(r.createdAt) },
-            {
-              key: "remove",
-              header: "",
-              srHeader: "Actions",
-              action: true,
-              render: (r) => (
-                <Button
-                  disabled={act.busy}
-                  onClick={() => void act.run(() => api.del(`/v1/chatops/identity-links/${r.id}`), "Link removed").then((ok) => ok && refresh())}
-                >
-                  Remove
-                </Button>
-              ),
-            },
-          ]}
-        />
-
-        <Field label="Workspace">
-          <Select value={linkConnection} onChange={(e) => setLinkConnection(e.target.value)}>
-            <option value="">select…</option>
-            {(connections.data?.connections ?? []).map((c) => (
-              <option key={c.id} value={c.name}>
-                {c.name}
-              </option>
-            ))}
-          </Select>
-        </Field>
-        <Field label="Chat user id">
-          <Input value={chatUserId} onChange={(e) => setChatUserId(e.target.value)} placeholder="U0123456789" />
-        </Field>
-        <Field label="regulAIt user email (must already exist)">
-          <Input value={linkEmail} onChange={(e) => setLinkEmail(e.target.value)} />
-        </Field>
-        <div className={v.row}>
-          <Button
-            variant="primary"
-            disabled={act.busy}
-            onClick={() =>
-              void act
-                .run(
-                  () => api.post("/v1/chatops/identity-links", { connectionName: linkConnection, chatUserId, email: linkEmail }),
-                  "Identity linked",
-                )
-                .then((ok) => ok && refresh())
-            }
-          >
-            Link identity
-          </Button>
-        </div>
-      </Card>
     </>
   );
 }

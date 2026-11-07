@@ -359,12 +359,15 @@ test.describe("ADR-0172: the model picker", () => {
 
   test("agent registry: provider tiles in the register form, logos beside provider names", async ({ page }) => {
     const cap = await mockApi(page, { admin: true });
-    await page.goto("/ui/admin/agents");
-    await expect(page.getByRole("heading", { level: 1, name: "Agents" })).toBeVisible();
+    // P3: the full catalog has its own page
+    await page.goto("/ui/admin/agents/catalog");
+    await expect(page.getByRole("heading", { level: 1, name: "Agent catalog" })).toBeVisible();
     // the catalog's provider cell keeps its plain text as its accessible name
     const catalog = page.locator("section").filter({ has: page.getByText("Catalog", { exact: true }) }).first();
     await expect(catalog.getByRole("cell", { name: "anthropic", exact: true })).toBeVisible();
     await expect(catalog.getByRole("cell", { name: "anthropic", exact: true }).locator("img")).toHaveCount(1);
+    await page.goto("/ui/admin/agents");
+    await expect(page.getByRole("heading", { level: 1, name: "Agents" })).toBeVisible();
 
     const form = page.locator("form", { has: page.getByRole("button", { name: "Register agent" }) });
     const providers = form.getByRole("group", { name: "Provider" });
