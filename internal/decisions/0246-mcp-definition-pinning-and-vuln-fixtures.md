@@ -238,6 +238,13 @@ refuses a credential-shaped argument.
     call's decision, and the row for a call it passes on is classed as `excluded`;
   - `mcp_definition_pins.name` is an ADR-0233 `ingested` exclusion, and ADR-0233's generated inventory block was
     regenerated.
+- UI pre-flights:
+  - The eight new routes are listed as `KNOWN_UI_GAPS` (`KNOWN_UI_GAPS_MAX` goes from 0 to 8), and the
+    authorised-target DELETE is in `DELIBERATELY_API_ONLY`. The brief was API-only, so these are raised for the
+    master's review on #719, following the P21 precedent; the screens are posted on #453.
+  - The high-risk template is `NO_REMOVE_BY_DESIGN`: its rules are removed through `DELETE /v1/rules/:kind/:ruleId`.
+- `observeServedDefinitions` lives in `mcp-proxy.ts`, so `mcp-definition-pins.ts` imports no upstream code. This keeps
+  the import-cycle ratchet at its baseline.
 - The prompts, resources and templates list reads go through `withUpstreamRetry` with the manifest read's `/metrics`
   labels, so each request is counted once (ADR-0185 G5).
 - An unpinned prompt fails open, like a resource. A tool list is always observed, so an unpinned tool fails closed.

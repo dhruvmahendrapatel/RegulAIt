@@ -95,7 +95,8 @@ describe("affordance census: a notBuilt route counts only when the file defines 
   });
 
   it("no exemption names a stub: a stub is skipped already, so an entry for one is stale", () => {
-    expect(DELIBERATELY_API_ONLY.size).toBe(0);
+    // the one entry is a real handler (ADR-0246, raised for the master's review), not a stub
+    expect([...DELIBERATELY_API_ONLY.keys()]).toEqual(["/v1/mcp/authorised-targets/:x"]);
   });
 });
 
