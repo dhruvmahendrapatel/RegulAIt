@@ -1,6 +1,6 @@
 ---
 phase: demo-prep-live-integrations-merged
-last_updated: 2026-10-29
+last_updated: 2026-11-07
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -20,6 +20,10 @@ roadmap: ../product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-11-07 - P30 spike: `vercel/workflow` rejected for pillar 2 ([ADR-0254](../decisions/0254-workflow-durable-execution-spike.md)).**
+The existing stage runner stays the engine; retry/backoff and in-stage fan-out are follow-ups over graphile-worker or
+pg-boss. Prototype in `spikes/workflow-p30/` (default off), no product or migration change.
 
 **2026-10-29 - the customer demo moves to one date, Saturday 2026-10-31 (owner, #453 c6508111468).**
 - **Date:** the internal run-through on Sun 11-01 and the external demo on Tue 11-03 are dropped; there is one run, on
@@ -5459,6 +5463,18 @@ id tie-break, so breaking a tie the edited rule won is a stepped-up takeover. Fo
 user or server that an approval rule is scoped to (cascade delete). **Amendment 5 (round 5):** widening a rule's
 match re-owes every takeover; option (b) (pool intersection) is the recorded long-term simplification. Open follow-ups: a
 rule-editor warning for shadowed tightenings and equal-specificity overlaps, and option (b).
+
+**ADR-0254 (builder, 2026-11-07, Accepted spike verdict): `vercel/workflow` does not fit as pillar 2's engine (P30).**
+A time-boxed spike ran one real pillar-2 sequence (requirements, sign-off hook with resume across a host restart, three
+fan-out checks, the real kernel `transition()` in durable steps) on `workflow` 5.4.0 + `@workflow/world-postgres` 5.1.1
+inside fastify via the standalone build; 7/7 tests passed twice in a loopback-only network namespace. Verdict "none
+fits" (ADR-0176): hard-coded `workflow`/`workflow_drizzle`/`graphile_worker` schemas and their own 30-migration journal
+(no RLS, plaintext step data), about 14–16 ms per step against 0.7–0.9 ms for the current transaction, 178 versions since
+4.0 with 5.0 on 2026-09-30, an unauthenticated loopback delivery route, audit that cannot share the event's transaction,
+and pinned vulnerable zod/undici. The existing runner stays; retry/backoff and in-stage fan-out go to it over
+graphile-worker or pg-boss, each in its own ADR. trigger.dev is rejected too (owner input, 2026-11-07); its
+wait-for-token, idempotency-key and per-queue concurrency patterns are borrowed. Prototype `spikes/workflow-p30/` behind `REGULAIT_WORKFLOW_DURABLE_P30`
+(default off). No migration; reserved 0309 released. PENDING §2h P30.
 
 **ADR-0234 (builder, 2026-11-06, Proposed): Postgres row-level security (PENDING S7), batch 1.** No table has an org
 or tenant key (ADR-0041), so on the owner's instruction ("the best, most secure") RLS is keyed on the authenticated
