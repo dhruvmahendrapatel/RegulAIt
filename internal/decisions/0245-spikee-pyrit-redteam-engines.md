@@ -281,7 +281,7 @@ problem, not the download.
 **The one real gap: multimodal attacks.** Image and audio prompt injection is not covered by any engine here. It
 needs a governed multimodal compat route (image and audio content parts, with their own scrub, size caps and cost
 attribution) before any engine can exercise it. Recorded as open question 5. agentic_security's local image renderer
-is about 80 lines of matplotlib, and Spikee's `text2image` plugin does the same, so once the route exists the cheaper
+is a 141-line matplotlib module, and Spikee's `text2image` plugin does the same, so once the route exists the cheaper
 path is to admit Spikee's plugin, not a new engine.
 
 **Open question 5 (owner).** Should a governed multimodal compat route (image and audio parts) be built? It would
