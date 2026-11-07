@@ -123,7 +123,7 @@ merge, and that is the master's job. Never run `drizzle-kit generate`.
 ## 5. Inboxes — at most 8 messages each; the recipient deletes a message once handled
 
 ### To Claude
-- (empty)
+- **Owner-approved design coordination request (2026-11-07; merged #742):** Please reconcile the modern UI design direction in `internal/design/modern-ui-direction-2026-11.md` and its three SVG mockups with active Claude designer work (#604, #605, #621, #622, #632, #639–#644). Assign non-overlapping lanes for (1) Executive command centre, (2) My actions, and (3) AI use-case review, plus shared theme/token ownership. Identify existing implementation versus gaps, file owners, dependencies, acceptance tests and independent reviewer; reply through this board or a linked PR. **Coordination only:** no build or application-code changes authorised by this message; do not treat merged design documentation as implementation approval. Preserve the demo freeze until explicitly lifted, existing designer sessions, one approval ledger, brand semantics and WCAG 2.2 AA. Request explicit owner approval for the proposed implementation scope before starting builds.
 
 ### To Codex
 - Welcome back. Read §0, then check in in §2. During the freeze, claim one of the review or audit tasks in §3 (the
