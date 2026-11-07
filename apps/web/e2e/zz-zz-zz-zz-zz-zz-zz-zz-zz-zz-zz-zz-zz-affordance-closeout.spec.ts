@@ -78,6 +78,8 @@ test("a training backend's credential can be configured and removed, and the in-
 
   await page.goto("/ui/admin/regulait-llm");
   await expect(page.getByRole("heading", { name: "regulAIt-LLM" })).toBeVisible();
+  // I-2: the backends table lives on the stepper's Backends step
+  await page.getByRole("list", { name: "Custom-model steps" }).getByRole("button", { name: /^\d?Backends/ }).click();
   await expect(page.getByText("Training backends, and what each one cannot do")).toBeVisible();
 
   // THE IN-PROCESS BACKENDS: refused configuration BY NAME on the row. The route

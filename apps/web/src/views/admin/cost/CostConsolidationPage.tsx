@@ -34,6 +34,7 @@ import { useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ListPreview } from "../../../ui/ListPreview";
+import { ExpandableTable } from "../../../ui/ExpandableTable";
 import { normalisePage, pageUrl } from "../../../ui/listState";
 import { api } from "../../../api/client";
 import { ago, fmtUsd, shortId } from "../../../api/format";
@@ -281,6 +282,8 @@ const CONSOLIDATION_TABS = ["import", "mapping", "consolidated", "reconciliation
 type ConsolidationTab = (typeof CONSOLIDATION_TABS)[number];
 const REFUSED = { status: "refused" };
 
+const subjectKey = (x: Subject) => `${x.subjectKind}:${x.subjectId ?? "null"}`;
+
 function isoDay(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
@@ -485,6 +488,15 @@ export default function CostConsolidationPage() {
   };
 
   const subjects = consolidated.data?.subjects ?? [];
+  // I-2 (#453): which subject rows of the consolidated view are open in place
+  const [openSubjects, setOpenSubjects] = useState<Set<string>>(() => new Set());
+  const toggleSubject = (key: string) =>
+    setOpenSubjects((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
 
   // P3 (#453 c6527514889): the setup flow and its two results as tabs. A tab that hides something unresolved says so
   // in its label, so a refused import, unattributed spend or a reconciliation warning is never one click away.
@@ -1210,36 +1222,73 @@ export default function CostConsolidationPage() {
                           body="Widen the dates, or import a vendor export above."
                         />
                       ) : (
-                        <div className={v.stack} data-testid="cc-subjects">
-                          {subjects.map((s) => (
-                            <Card
-                              key={`${s.subjectKind}:${s.subjectId ?? "null"}`}
-                              title={
-                                <span className={v.row}>
-                                  <span>{s.label}</span>
-                                  {!s.attributed && (
-                                    <Badge tone="danger" title="nobody was resolved for this spend">
-                                      unattributed
-                                    </Badge>
+                        <div data-testid="cc-subjects">
+                          {/* I-2: one expandable row per subject instead of a card each. The two bases stay in two
+                              columns, each naming its basis, and there is no total column: none exists to render. */}
+                          <ExpandableTable<Subject>
+                            rows={subjects}
+                            rowKey={subjectKey}
+                            expand={{
+                              open: (x) => openSubjects.has(subjectKey(x)),
+                              toggle: (x) => toggleSubject(subjectKey(x)),
+                              label: (x) => x.label,
+                              render: (x) => (
+                                <div className={v.stack}>
+                                  <BasisPair subject={x} />
+                                  {/* the API's own sentence about the split, in words */}
+                                  <p className={v.dim}>{x.coverage}</p>
+                                  {x.imported.byBillingKind.length > 0 && (
+                                    <p className={v.faint}>
+                                      Imported by kind:{" "}
+                                      {x.imported.byBillingKind
+                                        .map((k) => `${k.billingKind} ${k.amount.toFixed(2)} ${k.currency}`)
+                                        .join(", ")}
+                                    </p>
                                   )}
-                                </span>
-                              }
-                            >
-                              <div className={v.stack}>
-                                <BasisPair subject={s} />
-                                {/* the API's own sentence about the split, in words */}
-                                <p className={v.dim}>{s.coverage}</p>
-                                {s.imported.byBillingKind.length > 0 && (
-                                  <p className={v.faint}>
-                                    Imported by kind:{" "}
-                                    {s.imported.byBillingKind
-                                      .map((k) => `${k.billingKind} ${k.amount.toFixed(2)} ${k.currency}`)
-                                      .join(", ")}
-                                  </p>
-                                )}
-                              </div>
-                            </Card>
-                          ))}
+                                </div>
+                              ),
+                            }}
+                            columns={[
+                              {
+                                key: "subject",
+                                header: by === "cost_center" ? "Cost centre" : "Person",
+                                render: (x) => (
+                                  // the unattributed warning stays on the row, so a closed row never hides it
+                                  <span className={v.row}>
+                                    <span>{x.label}</span>
+                                    {!x.attributed && (
+                                      <Badge tone="danger" title="nobody was resolved for this spend">
+                                        unattributed
+                                      </Badge>
+                                    )}
+                                  </span>
+                                ),
+                              },
+                              {
+                                key: "metered",
+                                header: "Metered — observed and priced",
+                                render: (x) => (
+                                  <span className={v.row}>
+                                    <span className={v.num}>{fmtUsd(x.metered.usd)}</span>
+                                    <span className={v.faint}>{`metered · ${x.metered.events} call(s)`}</span>
+                                    {x.metered.unpricedEvents > 0 && (
+                                      <Badge tone="warn">{`${x.metered.unpricedEvents} unpriced, never valued at zero`}</Badge>
+                                    )}
+                                  </span>
+                                ),
+                              },
+                              {
+                                key: "imported",
+                                header: "Imported — customer-supplied",
+                                render: (x) => (
+                                  <span className={v.row}>
+                                    <span className={v.num}>{x.imported.usd === null ? "no single figure" : fmtUsd(x.imported.usd)}</span>
+                                    <span className={v.faint}>{`imported · ${x.imported.lines} line(s)`}</span>
+                                  </span>
+                                ),
+                              },
+                            ]}
+                          />
                         </div>
                       )}
                     </QueryGate>
