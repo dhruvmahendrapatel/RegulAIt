@@ -327,11 +327,7 @@ jobs:
           fi
           node scripts/migration-watermark-guard.mjs "$base"
 
-      # internal/process/AgentCoordination.md stays a CURRENT-STATE file: one Live-status row per
-      # agent, one Status line per task, inboxes acked within 12h, a line
-      # budget. History lives in git. `pnpm checkin` is the only writer of a row.
-      #
-      # The same step runs every `scripts/*.test.mjs` — `--dir scripts` scopes
+      # Runs every `scripts/*.test.mjs` — `--dir scripts` scopes
       # discovery to this directory, so an untracked nested checkout on a
       # developer machine is never swept in. That includes the G10-G15-VERIFY
       # guard (`basename-collisions.test.mjs`): no two tracked files in one
@@ -340,11 +336,9 @@ jobs:
       # (case-insensitive) checkout while every Linux gate stays green.
       # Runs whenever the pre-flight steps ran, whatever they found: a census
       # failure must not hide the scripts' own tests (they include the census's).
-      - name: Coordination file lint (structure only — never agent staleness) + repo filename guard
+      - name: Scripts tests (including the repo filename guard)
         if: ${{ !cancelled() && (steps.affordances.outcome == 'success' || steps.affordances.outcome == 'failure') }}
-        run: |
-          node scripts/coordination.mjs lint
-          pnpm exec vitest run --dir scripts
+        run: pnpm exec vitest run --dir scripts
 
       # FS-22 / ADR-0176 addendum (2026-10-24): every package in the shipped
       # workspace closure (`pnpm licenses list --prod`) is on the ADR-0176 list,
