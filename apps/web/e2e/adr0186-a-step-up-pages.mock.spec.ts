@@ -101,6 +101,8 @@ test.describe("ADR-0186 A: per-scope and halt-lifting writes resend once through
     await mockApi(page);
     const su = await requireStepUpOn(page, { method: "PUT", path: `/v1/guardrails/config/agent/${AGENT.id}`, kind: "settings_relax", facts: (b) => ({ scope: "agent", scopeId: AGENT.id, values: (b as { modes: object }).modes as Record<string, unknown> }) });
     await page.goto("/ui/admin/guardrails");
+    // I-2: the overrides live on their own tab
+    await page.getByRole("tab", { name: /^Overrides/ }).click();
     const form = page.locator("form", { has: page.getByRole("button", { name: "Save override" }) });
     await form.getByLabel("Target").selectOption(AGENT.id);
     await form.getByLabel("prompt injection").selectOption("warn");
