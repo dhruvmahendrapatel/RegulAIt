@@ -48,6 +48,7 @@ const DECISION_WRITERS = [
   "playground.ts",
   "privacy-ops.ts", // ADR-0224: the processing limit's dispatch refusal
   "redteam.ts",
+  "upstream-token-exchange.ts", // ADR-0238: a call refused because no down-scoped upstream token can be obtained (insert(auditLog), chained handle)
   "use-case-gate.ts",
   "use-cases.ts",
   "vendors.ts", // ADR-0213: the vendor questionnaire drafter's refused model use (insert(auditLog), chained handle)
