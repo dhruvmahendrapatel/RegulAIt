@@ -314,8 +314,24 @@ export const INDIRECT_UI_CALLS = new Map([
  * until the entry is deleted, and KNOWN_UI_GAPS_MAX is lowered to match.
  */
 export const KNOWN_UI_GAPS = new Map([
-  // empty: batch U4 (ui-gaps-details) closed the last 22. A new entry needs a reason and raises nothing:
-  // KNOWN_UI_GAPS_MAX stays 0, so build the screen instead.
+  // batch U4 (ui-gaps-details) closed the last 22. The three below are an owner decision on #733 (2026-11-07,
+  // option c): ADR-0259's backend landed before its screen; the UI lane builds it on #453, then deletes these and
+  // lowers KNOWN_UI_GAPS_MAX back to 0.
+  [
+    "GET /v1/discovery/endpoint-mcp-servers",
+    {
+      does: "ADR-0259: the MCP servers enrolled devices' host configs name, with risk flags, secret types and the registry diff (linked, registered, unregistered); keyset-paginated, filters status/risky/secrets/deviceId",
+      tracking: "#453",
+    },
+  ],
+  [
+    "POST /v1/discovery/endpoint-mcp-server-links",
+    { does: "ADR-0259: link a configured MCP server identity (package, host or command) to an approved mcp_servers row, audited", tracking: "#453" },
+  ],
+  [
+    "POST /v1/discovery/endpoint-mcp-server-links/remove",
+    { does: "ADR-0259: remove that link, audited", tracking: "#453" },
+  ],
 ]);
 
 /**
@@ -324,7 +340,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 0;
+export const KNOWN_UI_GAPS_MAX = 3;
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 
