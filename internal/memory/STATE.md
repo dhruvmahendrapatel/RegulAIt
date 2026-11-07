@@ -5460,6 +5460,15 @@ user or server that an approval rule is scoped to (cascade delete). **Amendment 
 match re-owes every takeover; option (b) (pool intersection) is the recorded long-term simplification. Open follow-ups: a
 rule-editor warning for shadowed tightenings and equal-specificity overlaps, and option (b).
 
+**ADR-0243 (builder, 2026-11-07): OWASP MCP Top 10 pack and the OWASP LLM Top 10 2026 edition (PENDING P24).**
+Three new seed pack versions in `packages/shared/src/owasp-packs.ts`: `owasp-mcp-top-10@1` (2025 beta list, mapped onto
+MCP admission, grant recertification, release quarantine, sandbox placements, the injection detector, identity
+assertions, the MCP tool ledger, shadow-AI discovery and content trust), `owasp-llm-top-10@1` (2025) and `@2` (2026; v1
+untouched). Both sources are share-alike (MCP also non-commercial), so items are cited by OWASP identifier only. Control
+refs are risk slugs, not numbers, because 2026 reuses numbers for different risks; the v1→v2 diff is ten title changes
+and one description change. No CSA AICM pack (licence). No migration. Open: the MCP list is a beta; the evaluator
+catalog's `owasp:llm:NN` ids stay on 2025 numbering; console labels (UI, #453).
+
 **ADR-0234 (builder, 2026-11-06, Proposed): Postgres row-level security (PENDING S7), batch 1.** No table has an org
 or tenant key (ADR-0041), so on the owner's instruction ("the best, most secure") RLS is keyed on the authenticated
 principal: policies read a transaction-local `regulait.user_id` or a registered `regulait.system_context`, set only by
