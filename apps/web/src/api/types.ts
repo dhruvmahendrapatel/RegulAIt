@@ -1214,3 +1214,62 @@ export interface BuilderBundle {
   agent: { name: string; [k: string]: unknown };
   skills: Array<Record<string, unknown>>;
 }
+
+// ---- ADR-0241 (P21): the configurable usage extractor (admin-only routes, apps/gateway/src/usage-extractors.ts) ----
+
+/** the counts a usage mapping can produce (`USAGE_FIELDS` in @regulait/model-provider); the first two are required */
+export type UsageField =
+  | "inputTokens"
+  | "outputTokens"
+  | "cacheReadInputTokens"
+  | "cacheCreationInputTokens"
+  | "imageInputTokens"
+  | "imageOutputTokens"
+  | "audioInputTokens"
+  | "audioOutputTokens";
+
+/** where one count is read: an RFC 6901 pointer, a sum of pointers, or a sum over a list */
+export type UsageSource =
+  | { pointer: string }
+  | { sum: string[] }
+  | { arraySum: { array: string; value: string; where?: { pointer: string; equals: string[] } } };
+
+export interface UsageMapping {
+  format: "regulait.usage-mapping/v1";
+  totalsInclude?: "all" | "text_only";
+  fields: Partial<Record<UsageField, UsageSource>>;
+}
+
+/** GET /v1/usage-extractors — the org switch and every agent's active version */
+export interface UsageExtractorState {
+  enabled: boolean;
+  active: Array<{ agentId: string; versionId: string; version: number; testId: string; activatedBy: string | null; activatedAt: string }>;
+}
+
+/** one saved (immutable) version, with the latest sample test of that version */
+export interface UsageExtractorVersion {
+  id: string;
+  agentId: string;
+  version: number;
+  mapping: UsageMapping;
+  mappingSha256: string;
+  createdBy: string | null;
+  createdAt: string;
+  latestTest: { id: string; versionId: string; passed: boolean; failure: string | null; testedAt: string } | null;
+}
+
+/** GET /v1/agents/:agentId/usage-extractor/versions */
+export interface UsageExtractorVersions {
+  enabled: boolean;
+  activeVersionId: string | null;
+  versions: UsageExtractorVersion[];
+}
+
+/** POST /v1/agents/:agentId/usage-extractor/versions/:versionId/test */
+export interface UsageExtractorTestResult {
+  testId: string;
+  passed: boolean;
+  /** every count the mapping read (absent = 0); null when it could not read the sample */
+  extracted: Record<UsageField, number> | null;
+  failure: string | null;
+}
