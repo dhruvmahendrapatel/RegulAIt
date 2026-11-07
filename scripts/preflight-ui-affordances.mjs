@@ -75,6 +75,7 @@ export const NO_REMOVE_BY_DESIGN = new Map([
   ["/v1/privacy/processing-records", "a record of processing is retired with PATCH status \"retired\", not deleted, so past dispatch decisions stay traceable to it"],
   ["/v1/servers/:x/high-risk-policy", "ADR-0246: not a collection of its own; applying the template writes an ordinary approval rule and rate limit, each removed with DELETE /v1/rules/:kind/:ruleId (audited)"],
   ["/v1/servers/:x/tools", "tools come from the server's manifest; a tool is stopped with halt, and the server's own lifecycle is G4"],
+  ["/v1/agents/:x/usage-extractor/versions", "ADR-0241: a usage-mapping version is immutable evidence of how a usage row's counts were read (usage_events names it); a newer version supersedes it and POST .../usage-extractor/deactivate stops it, it is never deleted"],
   ["/v1/model-drift/monitors/:x/reports", "a drift report is the point-in-time comparison its alerts cite; reports go only with their monitor (DELETE /v1/model-drift/monitors/:id, audited with the count removed)"],
 ]);
 

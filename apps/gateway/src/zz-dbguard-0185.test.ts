@@ -215,6 +215,9 @@ beforeAll(async () => {
   // migrate to the migration before 0185 only (0185 and anything after it cut from a copy of the journal)
   tmp = mkdtempSync(path.join(tmpdir(), "dbg185-"));
   cpSync(migrationsFolder, tmp, { recursive: true });
+  // ADR-0252: a pending migration in this truncated copy would take the next number above the cut and shadow the
+  // real one (§4.1); it is numbered after the merge, never in an old-shaped database
+  rmSync(path.join(tmp, "pending"), { recursive: true, force: true });
   const journalPath = path.join(tmp, "meta", "_journal.json");
   const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: Array<{ when: number; tag: string }> };
   const cut = journal.entries.find((e) => e.tag === TAG_0185)!.when;

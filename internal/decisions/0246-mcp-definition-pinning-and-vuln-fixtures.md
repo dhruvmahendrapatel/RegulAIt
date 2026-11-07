@@ -2,7 +2,8 @@
 
 - **Status**: Proposed
 - **Date**: 2026-11-07
-- **Backlog**: P27 (owner, 2026-11-07), PENDING §2g
+- **Index**: MCP definition pinning (rug-pull detection), offensive MCP servers as high-risk, and clean-room vulnerable MCP fixtures (P27)
+- **Backlog**: P27 (owner, 2026-11-07); its PENDING item is a fragment folded at merge (ADR-0252)
 
 ## Context
 
@@ -53,7 +54,7 @@ once it lands.
 `_meta`, icons and vendor extensions are not pinned: they reach no model and decide no grant. Annotations are pinned
 (unlike the admission digest) because `readOnlyHint` decides a tool's read or write kind.
 
-**Storage (migration 0302).**
+**Storage (the pending `mcp_definition_pins` migration).**
 - `mcp_definition_pins` has one row per (server, kind, key). It holds the approved digest and definition, who approved
   it and when, and the observed digest and definition and when they were seen.
 - Status is derived from the two digests and never stored (ADR-0200 3NF): equal means approved; both set and different
@@ -216,14 +217,15 @@ refuses a credential-shaped argument.
 
 ## As built
 
-- Migration `0302_mcp_definition_pins` (journal `when` 1785229000000, as assigned). It is renumbered above main's
-  highest migration at merge if main has moved past it (M-108; `scripts/migration-watermark-guard.mjs` enforces it in CI).
+- The migration is `packages/db/migrations/pending/mcp_definition_pins.sql`. Under ADR-0252 it gets its number,
+  journal entry and `when` at merge time from `scripts/assign-at-merge.mjs`. It was first assigned 0302 (`when`
+  1785229000000) and was converted to a pending file on 2026-11-07 when main moved to merge-time numbering.
 - `packages/shared/src/mcp-definition-pins.ts` is pure: digests, plan, status, diff and the approval schema.
 - `apps/gateway/src/mcp-definition-pins.ts` holds the recording, the gate and the routes. Hooks are in
   `mcp-proxy.ts` (`syncUpstreamTools` and `executeGovernedToolCallInner`) and `mcp-protocol.ts` (`prompts/get` and
   `resources/read`).
 - Addendum: `packages/shared/src/mcp-offensive-tools.ts` and `apps/gateway/src/mcp-high-risk.ts`, hooked in
-  `syncUpstreamTools` and `executeGovernedToolCallInner`. Migration 0302 also carries `mcp_high_risk_mode`, the three
+  `syncUpstreamTools` and `executeGovernedToolCallInner`. The `mcp_definition_pins` migration also carries `mcp_high_risk_mode`, the three
   `mcp_servers` risk columns and `mcp_authorised_targets`.
 - Tests:
   - `apps/gateway/src/mcp-definition-pins.test.ts` (13, real database and app);

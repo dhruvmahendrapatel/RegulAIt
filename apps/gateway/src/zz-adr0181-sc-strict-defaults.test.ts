@@ -126,6 +126,9 @@ describe("ADR-0181 SC — a fresh org reads every admission/monitor default STRI
     // a migrations folder whose journal stops before 0159
     tmpMigrations = mkdtempSync(path.join(tmpdir(), "sdsc-mig-"));
     cpSync(migrationsFolder, tmpMigrations, { recursive: true });
+    // ADR-0252: a pending migration in this truncated copy would take the next number above the cut and shadow the
+    // real one (§4.1); it is numbered after the merge, never in an old-shaped database
+    rmSync(path.join(tmpMigrations, "pending"), { recursive: true, force: true });
     const journalPath = path.join(tmpMigrations, "meta", "_journal.json");
     const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: Array<{ idx: number; tag: string }> };
     // cut every entry FROM 0159 on, so 0159 is the newest migration the second

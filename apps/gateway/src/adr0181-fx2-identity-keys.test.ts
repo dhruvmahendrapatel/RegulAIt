@@ -338,6 +338,9 @@ describe("ADR-0181 FX2 migration 0160 — no grandfathering, every change audite
     // a copy of the migrations folder whose journal stops at 0159
     partial = mkdtempSync(path.join(tmpdir(), "fx2-migrations-"));
     cpSync(migrationsFolder, partial, { recursive: true });
+    // ADR-0252: a pending migration in this truncated copy would take the next number above the cut and shadow the
+    // real one (§4.1); it is numbered after the merge, never in an old-shaped database
+    rmSync(path.join(partial, "pending"), { recursive: true, force: true });
     const journalPath = path.join(partial, "meta", "_journal.json");
     const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: Array<{ idx: number; tag: string }> };
     expect(journal.entries.some((e) => e.tag === "0160_strict_identity_followups")).toBe(true);
