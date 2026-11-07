@@ -154,6 +154,11 @@ concurrency:
 permissions:
   contents: read
 
+# ADR-0252: CI databases are disposable, so migrations merged but not yet numbered (packages/db/migrations/pending/)
+# are applied in their provisional order. A long-lived database refuses them (packages/db/src/pending-migrations.ts).
+env:
+  REGULAIT_MIGRATIONS_UNASSIGNED: apply
+
 jobs:
   # What this run must cover (.github/actions/ci-scope). Cheap, and always runs, so the jobs below can be skipped
   # by a job-level `if:` and still report.
@@ -302,16 +307,25 @@ jobs:
       - name: Pre-flight — every gateway route has UI or a reason (route census)
         if: ${{ !cancelled() && (steps.affordances.outcome == 'success' || steps.affordances.outcome == 'failure') }}
         run: node scripts/preflight-ui-route-census.mjs
-      # CONTRIBUTING_PARALLEL_SESSIONS §4.1: a migration added below the base branch's newest `when`
-      # never applies on a database that already ran the base branch (fresh CI databases hide it).
-      - name: Pre-flight — every new migration sits above main's migration watermark
-        if: github.event_name == 'pull_request'
+      # CONTRIBUTING_PARALLEL_SESSIONS §4.1, ADR-0252, review C-03: merged migrations and journal entries are
+      # unchanged, the folder and the journal agree, and the journal grows only by the assign-at-merge step's
+      # numbering of pending files (a new `when` below the base's newest would never apply). In the merge queue
+      # the base is the commit the queued PR is merged onto.
+      - name: Pre-flight — merged migrations unchanged; the journal grows only at merge time
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         env:
           BASE_REF: ${{ github.base_ref }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
         run: |
           set -euo pipefail
-          git fetch --no-tags --depth=1 origin "refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
-          node scripts/migration-watermark-guard.mjs "origin/$BASE_REF"
+          if [ -n "$MG_BASE_SHA" ]; then
+            git fetch --no-tags --depth=1 origin "$MG_BASE_SHA"
+            base="$MG_BASE_SHA"
+          else
+            git fetch --no-tags --depth=1 origin "refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+            base="origin/$BASE_REF"
+          fi
+          node scripts/migration-watermark-guard.mjs "$base"
 
       # internal/process/AgentCoordination.md stays a CURRENT-STATE file: one Live-status row per
       # agent, one Status line per task, inboxes acked within 12h, a line
@@ -622,16 +636,10 @@ jobs:
   docker-build:
     # The quickstart path must never rot: prove the compose image still builds.
     #
-    # But it only rots when something the image is made of changes, so on a PR
-    # this job first asks whether any such file moved and skips the ~5-minute
-    # build if not — paying ~1 minute of runner startup instead. On schedule and
-    # on workflow_dispatch it always builds, which is what stops a slow rot
-    # (e.g. a base-image tag going stale) from hiding behind untouched files.
-    #
-    # Deliberately NOT `dorny/paths-filter` or `tj-actions/changed-files`: a
-    # third-party action in the CI path is a supply-chain surface, and native
-    # `paths:` filters are workflow-level only, not per-job.
-    # ADR-0252 addendum: the full suite only (merge group, push to main, nightly, manual)
+    # ADR-0252 addendum: part of the full suite only (merge group, push to main, nightly, manual), and there it
+    # ALWAYS builds. It used to skip when no image file changed in `HEAD^1..HEAD`; on a merge group that range is
+    # wrong (in a group of several PRs, HEAD^1 is the previous queued PR's temporary commit, not main, so an earlier
+    # PR's Dockerfile or lockfile change would go unseen), and a full run is meant to run everything (#721 review).
     needs: scope
     if: needs.scope.outputs.full == 'true'
     runs-on: ubuntu-24.04
@@ -640,33 +648,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # For a pull_request the checked-out commit is the MERGE commit, so
-          # HEAD^1 is the base and `HEAD^1..HEAD` is exactly the PR's diff.
-          # Depth 2 is all that needs fetching for that.
-          fetch-depth: 2
 
-      - id: scope
-        run: |
-          set -euo pipefail
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            echo "Not a PR (${{ github.event_name }}) — building unconditionally."
-            echo "build=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          changed="$(git diff --name-only HEAD^1 HEAD)"
-          echo "Changed files:"; echo "$changed"
-          # Anything that can alter the produced image: the recipe itself, the
-          # compose stack, the ignore file that decides the build context, the
-          # lockfile, and every package manifest in the workspace.
-          if printf '%s\n' "$changed" | grep -qE '^(Dockerfile|docker-compose\.yml|\.dockerignore|pnpm-lock\.yaml|pnpm-workspace\.yaml|package\.json|(apps|packages)/[^/]+/package\.json)$'; then
-            echo "build=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "No image-relevant file changed — skipping the build to save CI minutes."
-            echo "build=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - if: steps.scope.outputs.build == 'true'
-        run: docker build -t regulait-gateway:ci .
+      - run: docker build -t regulait-gateway:ci .
 
   # F01 — the two SPA journeys that had no gate at all. `phase1.spec.ts` (the
   # developer persona: sign-in with a one-time password, chat, runs, workflows,

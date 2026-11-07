@@ -43,7 +43,7 @@ Inbound sync is **webhooks plus the existing live read-through — no polling sc
   secret (e.g. HMAC), automated drift *resolution* (today it is surfaced, resolution is human),
   and polling as a fallback for tools that cannot call out.
 
-## Amendment 2026-11-07: replay protection on every inbound path (S-03; migration 0304)
+## Amendment 2026-11-07: replay protection on every inbound path (S-03; migration `pm_webhook_deliveries` (pending, numbered at merge))
 
 The 2026-11-07 whole-build review (finding **S-03**, high) found that no inbound path had replay protection: no
 parser checked a timestamp, `pm_sync_events` is a plain append with no unique key (so a replay re-orphaned links,
@@ -53,7 +53,7 @@ or the data key was missing. The ADR-0200 checklist requires "webhook signatures
 and ADR-0180 forbids grandfathering, so the decision text above (point 3's hash-and-header scheme) is superseded as
 follows. The original text is left as written.
 
-1. **A delivery record, once per connection.** `pm_webhook_deliveries` (migration 0304) holds one row per delivery
+1. **A delivery record, once per connection.** `pm_webhook_deliveries` (migration `pm_webhook_deliveries` (pending, numbered at merge)) holds one row per delivery
    that reached processing, unique on `(connection_id, content_sha256)` and, partially, on
    `(connection_id, delivery_id)`. `content_sha256` is the sha256 of the exact body (for the generic contract, of its
    signed `<timestamp>.<body>`). `delivery_id` is the provider's own id where it sends one: Jira
