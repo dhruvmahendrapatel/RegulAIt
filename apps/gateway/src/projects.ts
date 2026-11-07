@@ -1,6 +1,8 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import {
   and,
+  isNotNull,
+  isNull,
   lte,
   approvals,
   auditLog,
@@ -43,6 +45,7 @@ import {
   contributeContextSchema,
   createInitiativeSchema,
   createProjectSchema,
+  projectListQuerySchema,
   createTeamSchema,
   csvRecord,
   deleteTeamSchema,
@@ -79,6 +82,7 @@ import { applyRuleEdit, isRuleEditRefusal } from "./rule-writes.js";
 import { settingTransitions } from "./setting-transitions.js";
 import { approverPoolShiftFacts, isApprovalTeam, sameApproverPoolShift, type ApproverPoolShift } from "./approval-pool.js";
 import { approvalRuleStepUp, CHANGED_CONCURRENTLY, requireStepUp, requireStepUps, type StepUpCheckArgs } from "./step-up.js";
+import { projectArchivedRefusal, refuseIfArchived } from "./project-archive.js";
 import { wantsListContract } from "./list-contract.js";
 import { TEAMS_LIST, answerListExport, answerListPage, teamsFilterQuery, teamsReader, teamsWhere } from "./identity-lists.js";
 import {
@@ -800,6 +804,11 @@ export async function preDispatchProjectGate(
   if (!project) {
     return { ok: false, status: 422, error: "unknown_project", detail: projectId };
   }
+  // ADR-0206 G1: an archived project takes no attributed call, so an engine key pinned to it stops working
+  if (project.archivedAt) {
+    const r = projectArchivedRefusal(project.name);
+    return { ok: false, status: r.status, error: r.body.error, detail: r.body.detail };
+  }
   const now = new Date();
   const periodKey = currentPeriodKey(now);
   // O2 (ADR-0027): the compliance cascade's COST dimensions join the gate.
@@ -1074,7 +1083,7 @@ const ROLE_RANK: Record<string, number> = { viewer: 0, contributor: 1, owner: 2 
  */
 export type ProjectPatchResult =
   | { ok: true; row: ProjectRow; changed: Record<string, unknown> }
-  | { ok: false; status: 404 | 422; error: string; detail: string };
+  | { ok: false; status: 404 | 409 | 422; error: string; detail: string };
 
 export async function applyProjectPatch(
   // AER-035: joins the caller's transaction when there is one — the copilot's
@@ -1097,6 +1106,10 @@ export async function applyProjectPatch(
       error: "unknown_project",
       detail: `no project with id ${projectId} exists`,
     };
+  }
+  if (project.archivedAt) {
+    const r = projectArchivedRefusal(project.name);
+    return { ok: false, status: r.status, error: r.body.error, detail: r.body.detail };
   }
   const merged = {
     name: body.name ?? project.name,
@@ -1381,6 +1394,11 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
 
   // fleet for admins; non-admins see the projects they are members of
   app.get("/v1/projects", async (req, reply) => {
+    // ADR-0206 G1: archived projects are left out unless the caller asks (`?archived=include|only`), so every
+    // picker that lists projects offers only the ones that can still take work
+    const { archived } = projectListQuerySchema.parse(req.query ?? {});
+    const archivedFilter =
+      archived === "only" ? isNotNull(projects.archivedAt) : archived === "exclude" ? isNull(projects.archivedAt) : undefined;
     let memberProjectIds: string[] | null = null;
     if (!req.authCtx.isAdmin) {
       if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_has_no_projects" });
@@ -1393,9 +1411,10 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     }
     const [rows, spend] = await Promise.all([
       db
-        .select()
+        .select({ project: projects, archivedByName: users.displayName })
         .from(projects)
-        .where(memberProjectIds ? inArray(projects.id, memberProjectIds) : undefined),
+        .leftJoin(users, eq(users.id, projects.archivedByUserId))
+        .where(and(memberProjectIds ? inArray(projects.id, memberProjectIds) : undefined, archivedFilter)),
       // REL-10: a member's read aggregates only the projects it will show,
       // not every usage_event in the deployment. (An admin read still walks
       // the table: usage_events has no project_id index yet — a migration,
@@ -1412,8 +1431,9 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     ]);
     const byProject = new Map(spend.map((s) => [s.projectId, s]));
     return {
-      projects: rows.map((p) => ({
+      projects: rows.map(({ project: p, archivedByName }) => ({
         ...p,
+        archivedByName: p.archivedAt ? archivedByName : null,
         spentUsd: byProject.get(p.id)?.costUsd ?? 0,
         usageEvents: byProject.get(p.id)?.events ?? 0,
       })),
@@ -1629,6 +1649,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     const body = addProjectMemberSchema.parse(req.body);
     const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
     if (!project) return reply.status(404).send({ error: "unknown_project" });
+    if (await refuseIfArchived(reply, project)) return reply;
     const gate = await requireRole(req, projectId, "owner");
     if (!gate.ok) return reply.status(gate.status).send({ error: gate.error });
     // provenance team must really be one of the member's teams
@@ -1730,6 +1751,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     const body = patchProjectMemberSchema.parse(req.body);
     const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
     if (!project) return reply.status(404).send({ error: "unknown_project" });
+    if (await refuseIfArchived(reply, project)) return reply;
     const gate = await requireRole(req, projectId, "owner");
     if (!gate.ok) return reply.status(gate.status).send({ error: gate.error });
     const [member] = await db
@@ -1763,6 +1785,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     const { projectId, userId } = memberParams.parse(req.params);
     const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
     if (!project) return reply.status(404).send({ error: "unknown_project" });
+    if (await refuseIfArchived(reply, project)) return reply;
     const gate = await requireRole(req, projectId, "owner");
     if (!gate.ok) return reply.status(gate.status).send({ error: gate.error });
     const [member] = await db
@@ -1809,6 +1832,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
   ) {
     const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
     if (!project) return reply.status(404).send({ error: "unknown_project" });
+    if (await refuseIfArchived(reply, project)) return reply;
     const gate = await requireRole(req, projectId, "contributor");
     if (!gate.ok) return reply.status(gate.status).send({ error: gate.error });
     // Authorship REQUIRES a real authenticated user — a context contribution is
@@ -2403,6 +2427,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     const body = reclassifySchema.parse(req.body);
     const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
     if (!project) return reply.status(404).send({ error: "unknown_project" });
+    if (await refuseIfArchived(reply, project)) return reply;
     const current = (project.classifications ?? []) as string[];
     // ADR-0208: a retired profile takes no new carrier (a tag the project already holds may stay while it is moved off)
     const retiredNew = await retiredTagsAmong(db, body.classifications.filter((t) => !current.includes(t)));

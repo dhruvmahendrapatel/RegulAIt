@@ -1618,6 +1618,20 @@
       "when": 1785209000000,
       "tag": "0282_theme_account_org_lock",
       "breakpoints": true
+    },
+    {
+      "idx": 283,
+      "version": "7",
+      "when": 1785210000000,
+      "tag": "0283_project_archive",
+      "breakpoints": true
+    },
+    {
+      "idx": 284,
+      "version": "7",
+      "when": 1785211000000,
+      "tag": "0284_project_archive_write_guard",
+      "breakpoints": true
     }
   ]
 }

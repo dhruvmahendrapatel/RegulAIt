@@ -4859,6 +4859,8 @@ export * from "./endpoint-discovery/index.js";
 export * from "./provenance/index.js";
 // ADR-0204: a static upstream credential per MCP server (header refusals, the write contract, the read view)
 export * from "./mcp-upstream-credential.js";
+// ADR-0206: G1 project archive and G10 rename roles and teams (bodies, refusal codes, the archive-impact view)
+export * from "./project-archive-rename.js";
 export * from "./library-lifecycle.js";
 // ADR-0220: trained runtime detectors (PII recogniser, injection classifier, harm model) behind the external-scorer contract
 export * from "./trained-detectors.js";
