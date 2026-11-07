@@ -1618,6 +1618,13 @@
       "when": 1785209000000,
       "tag": "0282_theme_account_org_lock",
       "breakpoints": true
+    },
+    {
+      "idx": 288,
+      "version": "7",
+      "when": 1785215000000,
+      "tag": "0288_normalize_n1_foreign_keys",
+      "breakpoints": true
     }
   ]
 }
