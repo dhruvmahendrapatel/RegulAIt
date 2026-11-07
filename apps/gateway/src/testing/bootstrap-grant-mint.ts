@@ -67,7 +67,13 @@ function wrap(app: Injectable): void {
       // imported here, not at the top: a setup file's static imports load before a suite registers its vi.mock()s,
       // and step-up-posture's graph would then cache gateway modules unmocked for that suite
       const { relaxStepUpAround } = await import("./step-up-posture.js");
-      return relaxStepUpAround(suiteDb(), async () => (await inject(o)) as InjectRes);
+      try {
+        return await relaxStepUpAround(suiteDb(), async () => (await inject(o)) as InjectRes);
+      } catch {
+        // the app runs on another database (a suite's own scratch database), which this cannot relax: the suite sees
+        // the original refusal, as it would without this file
+        return res;
+      }
     })();
   };
 }
