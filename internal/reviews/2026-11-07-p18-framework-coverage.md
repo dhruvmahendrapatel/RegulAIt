@@ -96,8 +96,8 @@ public domain/CC0, so their text may be stored. The OECD, UNESCO and G7 texts an
 
 | Node | Status | Evidence | Gap scope |
 |---|---|---|---|
-| EU AI Act Art. 5 | partial | ADR-0085; `packages/shared/src/eu-ai-act.ts:192-219` encodes 4 rules (`p-social-scoring`, `p-manipulative-techniques`, `p-emotion-workplace-education`, `p-rbi-law-enforcement-public`); feed `eu-ai-act-prohibitions-in-force`. A tier informs sign-off, it never blocks (`apps/gateway/src/use-cases.ts:379`). | Ruleset v2 with the remaining Art. 5(1) practices (e.g. vulnerability exploitation, biometric categorisation, untargeted facial scraping, predictive policing). A hard refusal on a prohibited tier would need its own ADR. |
-| EU AI Act Annex III / Art. 6 | partial | ADR-0085 screen (`eu-ai-act.ts:60-103`, `:277`); pack `eu-ai-act` (cascadeTag `eu-ai-act-high-risk`, `compliance-packs.ts:575`) maps Art. 4, 9, 10, 12, 14, 15, 72; Art. 73 clocks (`incident-clocks.ts:120-166`, ADR-0182). | Pack v2 controls for Art. 11 (technical documentation), 13 (instructions for use), 17 (QMS), 27 (FRIA, see controls), 43/49 (conformity, registration). |
+| EU AI Act Art. 5 | partial | ADR-0085; `packages/shared/src/eu-ai-act.ts:190-229` encodes 4 rules (`p-social-scoring`, `p-manipulative-techniques`, `p-emotion-workplace-education`, `p-rbi-law-enforcement-public`); feed `eu-ai-act-prohibitions-in-force`. A tier informs sign-off, it never blocks (`apps/gateway/src/use-cases.ts:379`). | Ruleset v2 with the remaining Art. 5(1) practices (e.g. vulnerability exploitation, biometric categorisation, untargeted facial scraping, predictive policing). A hard refusal on a prohibited tier would need its own ADR. |
+| EU AI Act Annex III / Art. 6 | partial | ADR-0085 screen (domains `eu-ai-act.ts:59-86`, Art. 6(3) screen `:100-110`, high-tier rules `:230-330`); pack `eu-ai-act` (cascadeTag `eu-ai-act-high-risk`, `compliance-packs.ts:575`) maps Art. 4, 9, 10, 12, 14, 15, 72; Art. 73 clocks (`incident-clocks.ts:135-179`, ADR-0182). | Pack v2 controls for Art. 11 (technical documentation), 13 (instructions for use), 17 (QMS), 27 (FRIA, see controls), 43/49 (conformity, registration). |
 | EU AI Act Art. 50 | partial | Rules `l-interaction-transparency`, `l-synthetic-content`; feed `eu-ai-act-transparency-in-force`. | `art-50` pack controls plus evidence (disclosure shown, content marking) through evaluators. |
 | EU AI Act GPAI | missing | Feed `eu-ai-act-gpai-in-force` only; ADR-0085 and ADR-0182 put GPAI out of scope. | GPAI-provider role, pack (Art. 53 documentation, copyright policy, training-content summary; Art. 55 systemic-risk duties), screening questions. Most customers are downstream deployers, so scope with the owner first. |
 | South Korea AI Basic Act | missing | PENDING §2d only. | Feed item plus a pack (high-impact AI duties, generative AI notice). Licence unverified. |
@@ -109,15 +109,15 @@ public domain/CC0, so their text may be stored. The OECD, UNESCO and G7 texts an
 | India DPDP | partial | Aadhaar detection (ADR-0117, `pii-international.ts`); generic DSR/RoPA. | Pack (notice, consent manager), breach clock. |
 | Brazil LGPD | partial | CPF/CNPJ detection (ADR-0117); generic DSR/RoPA. | Pack plus an ANPD incident clock. |
 | Financial model risk | partial | MRM registry ADR-0045 (`mrm.ts`), auto re-test ADR-0217, `finra` pack (`compliance-packs.ts:1028`), feed `cfpb-adverse-action-ai`. SR 11-7 is never cited. | SR 11-7 / PRA SS1/23 pack: validation independence, model tiering, inventory, reusing ADR-0045. |
-| Medical devices | partial | Art. 6(1)/Annex I safety-component route (`eu-ai-act.ts:141`); `hipaa` covers privacy only. | FDA SaMD/PCCP and EU MDR/IVDR packs plus feed items. |
-| Hiring and employment | partial | Annex III point 4 (`h-domain-employment`), emotion-recognition prohibition, Art. 10 bias control, ADR-0222 fairness; feeds `nyc-local-law-144`, `colorado-ai-act-sb26-189`. | LL144 pack with a bias-audit / impact-ratio evaluator and a candidate-notice control. |
+| Medical devices | partial | Art. 6(1)/Annex I safety-component route (`eu-ai-act.ts:231-238`); `hipaa` covers privacy only. | FDA SaMD/PCCP and EU MDR/IVDR packs plus feed items. |
+| Hiring and employment | partial | Annex III point 4 (`h-domain-employment`, `eu-ai-act.ts:276-286`), emotion-recognition prohibition, Art. 10 bias control, ADR-0222 fairness; feeds `nyc-local-law-144`, `colorado-ai-act-sb26-189`. | LL144 pack with a bias-audit / impact-ratio evaluator and a candidate-notice control. |
 | Consumer protection | missing | Feed `cfpb-adverse-action-ai` only. | Packs for CFPB adverse action, FTC Act s.5, Colorado AI Act. |
 | NIS2 | missing | No match. | Pack plus a 24h/72h/1-month incident clock regime; cross-map to the `iso-27001` and `soc-2` packs. |
 | DORA | missing | Feed `eu-dora-in-force` only. | Pack (ICT third-party register, overlapping ADR-0221 vendor risk) plus an ICT-incident clock regime. |
 | Cyber Resilience Act | missing | No match; the CycloneDX AI-BOM export (ADR-0189) is related. | Pack (SBOM, vulnerability handling, 24h exploited-vulnerability report) reusing the BOM. |
 
 Note: `packages/shared/src/demo-intake/regulatory-updates.ts` holds the curated feed items cited above. Whether it is the
-production seed or demo data only is **unverified** (`regulatory-intel.ts:5` calls it demo task G4 data).
+production seed or demo data only is **unverified** (`regulatory-intel.ts:3` calls it demo task G4 data).
 
 ### 2.2 Standards
 
@@ -132,7 +132,7 @@ production seed or demo data only is **unverified** (`regulatory-intel.ts:5` cal
 | OECD AI Principles | missing | PENDING §2d only. | Attestation-led crosswalk pack (5 principles) to existing controls. | Unverified |
 | UNESCO AI Ethics | missing | PENDING §2d only. | Crosswalk pack of values and policy areas, mostly attestation. | Unverified |
 | G7 Hiroshima Code | missing | PENDING §2d only. | Crosswalk of the 11 actions to controls and attestations. | Unverified |
-| OWASP LLM Top 10 | partial | `packages/shared/src/owasp-framework-mappings.ts` (IDs/names from promptfoo 0.125.1, MIT); evaluator catalog cites LLM01, 02, 05–09; red teaming ADR-0057/0068. | Probes or scorers for LLM03 (supply chain), LLM04 (data/model poisoning), LLM10 (unbounded consumption). | CC BY-SA; ID only |
+| OWASP LLM Top 10 | partial | `packages/shared/src/owasp-framework-mappings.ts` (IDs/names from promptfoo 0.125.1, MIT); evaluator catalog cites LLM01, 02, 05–09; red teaming ADR-0057/0068. | Probes or scorers for LLM03, LLM04, LLM10. | CC BY-SA; ID only |
 | OWASP Agentic Top 10 | partial | Same file (`asi01`–`asi10`); catalog cites ASI01, 02, 06, 08, 10; `redteam-agentic.ts`. | Coverage for ASI03, 04, 05, 07, 09. | CC BY-SA; ID only |
 | MITRE ATLAS | partial | ADR-0215 `mitre-atlas`, 44 mitigations (release 2026.10). | Import techniques/tactics and map them to red-team attack classes and evaluators. | Apache-2.0 |
 
@@ -141,7 +141,7 @@ production seed or demo data only is **unverified** (`regulatory-intel.ts:5` cal
 | Node | Status | Evidence | Gap scope |
 |---|---|---|---|
 | Provider | built | ADR-0182: `ai_use_cases.eu_ai_act_role` (`provider` / `deployer` / `both`, default `both`); narrowing is admin-only, reasoned and audited (`apps/gateway/src/eu-ai-act-role.ts`). | Only incident clocks read the role. Pack controls and workflow stages should depend on it (Art. 16 duties). |
-| Deployer | built | Same field; `incident-clocks.ts:105-132` applies `art26-5-inform-provider` when role ≠ provider. | Art. 26 duties beyond incident notice (FRIA trigger, oversight assignment) not tied to the role. |
+| Deployer | built | Same field; `incident-clocks.ts:105` (role) and `:120-133` apply `art26-5-inform-provider` when role ≠ provider. | Art. 26 duties beyond incident notice (FRIA trigger, oversight assignment) not tied to the role. |
 | Importer | missing | Enum has three values. | Change the single field to a role set (an org can hold several), migration plus check constraint, Art. 23 controls. |
 | Distributor | missing | Same. | Same model change, Art. 24 controls. |
 | AI governance board | partial | Approval quorum (`approval_rules.quorum`, `approvals.quorum`, `tool_approval_sensitive_quorum` default 2), workflow-stage quorum, dual control with distinct approvers; starter templates are Builder/Reviewer/Viewer/Operator (`packages/shared/src/onboarding.ts:198`). | "Governance board" starter group with a default quorum rule for high-risk use cases and model cards; no record of membership or decisions as a board. |
