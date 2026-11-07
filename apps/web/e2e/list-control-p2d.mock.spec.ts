@@ -239,6 +239,8 @@ interface PageDef {
   hideId: string;
   required: string;
   filters?: Record<string, string>;
+  /** the page holds more than one list: this one's `data-list` */
+  listId?: string;
 }
 const PAGES: PageDef[] = [
   {
@@ -256,6 +258,8 @@ const PAGES: PageDef[] = [
     hide: "Saved",
     hideId: "saved",
     required: "Project",
+    // the cost events list sits above it on the same page
+    listId: "usage-events",
   },
   {
     name: "golden cases",
@@ -311,10 +315,10 @@ const PAGES: PageDef[] = [
   },
 ];
 
-const list = (page: Page): Locator => page.locator("[data-list]").first();
-const status = (page: Page) => list(page).getByTestId("list-status");
+const list = (page: Page, P?: PageDef): Locator => page.locator(P?.listId ? `[data-list="${P.listId}"]` : "[data-list]").first();
+const status = (page: Page, P?: PageDef) => list(page, P).getByTestId("list-status");
 const lastList = (cap: Capture, endpoint: string) => [...cap.lists].reverse().find((u) => u.pathname === endpoint)!;
-const headers = async (page: Page) => (await list(page).locator("table thead th").allInnerTexts()).map((t) => t.replace(/[▲▼]/g, "").trim()).filter(Boolean);
+const headers = async (page: Page, P?: PageDef) => (await list(page, P).locator("table thead th").allInnerTexts()).map((t) => t.replace(/[▲▼]/g, "").trim()).filter(Boolean);
 const n = (x: number) => x.toLocaleString("en-GB");
 
 const THEMES = ["light", "dark"] as const;
@@ -334,7 +338,7 @@ async function expectAxeClean(page: Page, label: string) {
 async function openList(page: Page, P: PageDef) {
   await page.goto(P.path);
   await P.open(page);
-  await expect(status(page)).toHaveText(`1–10 of ${n(P.total)}`);
+  await expect(status(page, P)).toHaveText(`1–10 of ${n(P.total)}`);
 }
 
 for (const P of PAGES) {
@@ -345,28 +349,28 @@ for (const P of PAGES) {
       const first = lastList(cap, P.endpoint);
       expect(first.searchParams.get("limit")).toBe("10");
       for (const [k, v] of Object.entries(P.filters ?? {})) expect(first.searchParams.get(k)).toBe(v);
-      await expect(list(page).locator("tbody tr")).toHaveCount(10);
-      await list(page).getByRole("button", { name: "Next", exact: true }).click();
-      await expect(status(page)).toHaveText(`11–20 of ${n(P.total)}`);
-      await list(page).getByRole("button", { name: "Previous", exact: true }).click();
-      await expect(status(page)).toHaveText(`1–10 of ${n(P.total)}`);
-      const size = list(page).getByLabel("Rows per page");
+      await expect(list(page, P).locator("tbody tr")).toHaveCount(10);
+      await list(page, P).getByRole("button", { name: "Next", exact: true }).click();
+      await expect(status(page, P)).toHaveText(`11–20 of ${n(P.total)}`);
+      await list(page, P).getByRole("button", { name: "Previous", exact: true }).click();
+      await expect(status(page, P)).toHaveText(`1–10 of ${n(P.total)}`);
+      const size = list(page, P).getByLabel("Rows per page");
       for (const s of [50, 100]) {
         await size.selectOption(String(s));
         const shown = Math.min(s, P.total);
-        await expect(status(page)).toHaveText(`1–${shown} of ${n(P.total)}`);
+        await expect(status(page, P)).toHaveText(`1–${shown} of ${n(P.total)}`);
         expect(lastList(cap, P.endpoint).searchParams.get("limit")).toBe(String(s));
       }
       await size.selectOption("all");
-      await expect(status(page)).toHaveText(`Loaded ${n(P.total)} of ${n(P.total)}`);
+      await expect(status(page, P)).toHaveText(`Loaded ${n(P.total)} of ${n(P.total)}`);
       expect(lastList(cap, P.endpoint).searchParams.get("limit")).toBe("500");
-      await expect(list(page).locator("tbody tr")).toHaveCount(P.total);
+      await expect(list(page, P).locator("tbody tr")).toHaveCount(P.total);
     });
 
     test("a header click asks the server for the sort and direction; Refresh refetches", async ({ page }) => {
       const cap = await mockApi(page);
       await openList(page, P);
-      const th = list(page).locator("thead th").filter({ has: page.getByRole("button", { name: P.sortHeader, exact: true }) });
+      const th = list(page, P).locator("thead th").filter({ has: page.getByRole("button", { name: P.sortHeader, exact: true }) });
       const button = th.getByRole("button", { name: P.sortHeader, exact: true });
       const firstDir = lastList(cap, P.endpoint).searchParams.get("sort") === P.sortId ? (lastList(cap, P.endpoint).searchParams.get("dir") === "asc" ? "desc" : "asc") : "asc";
       await button.click();
@@ -379,9 +383,9 @@ for (const P of PAGES) {
       await expect(th).toHaveAttribute("aria-sort", second === "asc" ? "ascending" : "descending");
       // the first row is the server's answer over every row, not a re-sort of the page on screen
       const top = contract(P.endpoint, new URLSearchParams({ ...P.filters, limit: "10", sort: P.sortId, dir: second })).items[0]!;
-      await expect(list(page).locator("tbody tr").first()).toContainText(String(pick(top, P.sortField)));
+      await expect(list(page, P).locator("tbody tr").first()).toContainText(String(pick(top, P.sortField)));
       const before = cap.lists.filter((u) => u.pathname === P.endpoint).length;
-      await list(page).getByRole("button", { name: `Refresh ${P.noun}` }).click();
+      await list(page, P).getByRole("button", { name: `Refresh ${P.noun}` }).click();
       await expect.poll(() => cap.lists.filter((u) => u.pathname === P.endpoint).length).toBe(before + 1);
       // Refresh asks again for exactly the page on screen
       expect(lastList(cap, P.endpoint).searchParams.get("sort")).toBe(P.sortId);
@@ -392,9 +396,9 @@ for (const P of PAGES) {
     test("the gear hides and shows a column, a required one stays, and Excel asks for the screen's columns in order", async ({ page }) => {
       const cap = await mockApi(page);
       await openList(page, P);
-      expect(await headers(page)).toContain(P.hide);
-      expect(await headers(page)).not.toContain(P.optional);
-      const gear = list(page).getByRole("button", { name: `Choose columns for ${P.noun}` });
+      expect(await headers(page, P)).toContain(P.hide);
+      expect(await headers(page, P)).not.toContain(P.optional);
+      const gear = list(page, P).getByRole("button", { name: `Choose columns for ${P.noun}` });
       await gear.click();
       const dialog = page.getByRole("dialog", { name: `Columns for ${P.noun}` });
       await expect(dialog).toBeVisible();
@@ -410,12 +414,12 @@ for (const P of PAGES) {
       await dialog.getByRole("button", { name: "Done" }).click();
       await expect(dialog).toHaveCount(0);
       await expect(gear).toBeFocused();
-      const after = await headers(page);
+      const after = await headers(page, P);
       expect(after).toContain(P.optional);
       expect(after).not.toContain(P.hide);
       if (P.required) expect(after).toContain(P.required);
 
-      await list(page).getByRole("button", { name: "Download Excel" }).click();
+      await list(page, P).getByRole("button", { name: "Download Excel" }).click();
       await expect.poll(() => cap.exports.length).toBe(1);
       const ex = cap.exports[0]!;
       expect(ex.pathname).toBe(`${P.endpoint}/export.xlsx`);
