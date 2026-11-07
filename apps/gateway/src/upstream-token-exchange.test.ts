@@ -17,18 +17,21 @@ import { classifyUpstreamError } from "./upstream-retry.js";
 import { checkExchangeResponse, tokenFingerprint, UpstreamExchangeHolder, UpstreamExchangeRefusedError } from "./upstream-token-exchange.js";
 
 const NOW = 1_800_000_000;
+// synthetic, zero-entropy values built at runtime (never a real credential)
+const OPAQUE = "o".repeat(40);
+const SYNTHETIC_SECRET = "s".repeat(24);
 const AUD = "https://api.upstream.example";
 const RESOURCE = "https://api.upstream.example/mcp";
 const { privateKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
 
 const base = { status: 200, requestedScopes: ["tickets.read"], audience: AUD, resource: RESOURCE, maxTtlSeconds: 300, nowS: NOW };
-const answer = (o: Record<string, unknown>) => JSON.stringify({ access_token: "opaque-token-value-0123456789", token_type: "Bearer", issued_token_type: "urn:ietf:params:oauth:token-type:access_token", expires_in: 120, ...o });
+const answer = (o: Record<string, unknown>) => JSON.stringify({ access_token: OPAQUE, token_type: "Bearer", issued_token_type: "urn:ietf:params:oauth:token-type:access_token", expires_in: 120, ...o });
 const jwt = (claims: Record<string, unknown>) => new SignJWT(claims).setProtectedHeader({ alg: "ES256", typ: "at+jwt" }).sign(privateKey);
 
 describe("ADR-0238 — the answer is held to the request", () => {
   it("accepts an opaque Bearer access token within the ceiling; no scope in the answer means exactly the request", () => {
     const r = checkExchangeResponse({ ...base, body: answer({}) });
-    expect(r).toEqual({ ok: true, token: "opaque-token-value-0123456789", expiresAt: NOW + 120, grantedScope: "tickets.read", jwt: false, refreshTokenDiscarded: false });
+    expect(r).toEqual({ ok: true, token: OPAQUE, expiresAt: NOW + 120, grantedScope: "tickets.read", jwt: false, refreshTokenDiscarded: false });
   });
 
   it("accepts a narrower scope, and never keeps a refresh token", () => {
@@ -92,9 +95,9 @@ describe("ADR-0238 — the answer is held to the request", () => {
   });
 
   it("the fingerprint is 16 hex characters and is not the token", () => {
-    const f = tokenFingerprint("opaque-token-value-0123456789");
+    const f = tokenFingerprint(OPAQUE);
     expect(f).toMatch(/^[0-9a-f]{16}$/);
-    expect("opaque-token-value-0123456789").not.toContain(f);
+    expect(OPAQUE).not.toContain(f);
   });
 });
 
@@ -145,7 +148,7 @@ describe("ADR-0238 — the admin schema", () => {
     subjectTokenAudience: "https://as.example",
     audience: AUD,
     clientId: "regulait-gateway",
-    clientSecret: "placeholder-secret-0123456789",
+    clientSecret: SYNTHETIC_SECRET,
     scopes: { search_tickets: ["tickets.read"] },
   };
   it("accepts a well-formed configuration", () => {

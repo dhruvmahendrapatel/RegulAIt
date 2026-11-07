@@ -85,7 +85,7 @@ const AS_ID = `https://${AS_HOST}`;
 const AUD = `https://api-${RUN}.example.test`;
 const RESOURCE = `https://api-${RUN}.example.test/mcp`;
 // synthetic placeholders, never a real key
-const CLIENT_SECRET = `te-placeholder-secret-${RUN}-cccc3333`;
+const CLIENT_SECRET = "s".repeat(24) + RUN;
 const prevPublicUrl = process.env.REGULAIT_PUBLIC_URL;
 process.env.REGULAIT_PUBLIC_URL = ORIGIN;
 
