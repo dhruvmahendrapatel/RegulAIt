@@ -13,29 +13,16 @@ name: Demo journey
 # The `changes` job (one billed minute) therefore diffs THIS push against the
 # previous head and the journey runs only when demo code changed in it; it
 # always runs on `workflow_dispatch`.
+# ADR-0252 addendum (owner decision 2026-11-07): the demo journeys are part of the FULL suite, run at merge time
+# (merge group), on each push to main and nightly; a pull request no longer runs them. Before 2026-11-07 they ran on
+# a PR touching apps/web/**, the demo and governance paths of the gateway, packages/shared/src/** or packages/db/**.
 on:
-  pull_request:
-    paths:
-      - 'apps/web/**'
-      - 'apps/gateway/src/demo-*'
-      - 'apps/gateway/src/use-cases.ts'
-      - 'apps/gateway/src/governance-monitor.ts'
-      - 'apps/gateway/src/remediation.ts'
-      - 'apps/gateway/src/deploy-gate.ts'
-      - 'apps/gateway/src/shadow-ai.ts'
-      # #522 finding 21: the Shadow AI remediation, discovery and workflow-engine paths
-      - 'apps/gateway/src/shadow-ai-remediation.ts'
-      - 'apps/gateway/src/discovery-*.ts'
-      - 'apps/gateway/src/workflows.ts'
-      # AER-040: the consent-binding path and the signed-export path (beat 3E)
-      - 'apps/gateway/src/app.ts'
-      - 'apps/gateway/src/mcp-proxy.ts'
-      - 'apps/gateway/src/governed-evaluate.ts'
-      - 'apps/gateway/src/export-bundle.ts'
-      - 'apps/gateway/src/reporting.ts'
-      - 'packages/shared/src/**'
-      - 'packages/db/**'
-      - '.github/workflows/demo.yml'
+  merge_group:
+    types: [checks_requested]
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 3 * * *'
   workflow_dispatch:
 
 # Least privilege for GITHUB_TOKEN (CodeQL "workflow does not contain permissions"): every job here only

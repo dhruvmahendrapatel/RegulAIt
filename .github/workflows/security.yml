@@ -46,6 +46,9 @@ name: Security
 
 on:
   pull_request:
+  # ADR-0252: required security checks must also report in the merge queue. Nothing is skipped on a PR.
+  merge_group:
+    types: [checks_requested]
   push:
     branches: [main]
   # New advisories arrive without a commit of ours: re-run the gates weekly.

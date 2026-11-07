@@ -23,17 +23,14 @@
 # This is CI-runner verification: one GitHub-hosted runner kernel and Docker version, not a customer host.
 name: gVisor
 
+# ADR-0252 addendum (owner decision 2026-11-07): gVisor is part of the FULL suite: a merge group, a push to main
+# that touches the isolation paths, and the nightly schedule. A pull request no longer runs it (before 2026-11-07 it
+# ran on a PR touching the paths listed under push).
 on:
-  pull_request:
-    paths:
-      - "packages/sandbox-executor/**"
-      - "packages/shared/src/isolation/**"
-      - "apps/gateway/src/executor-*"
-      - "docker-compose.yml"
-      - "spikes/isolation-i0/fetch-gvisor.sh"
-      - "spikes/isolation-i0/THIRD_PARTY.md"
-      - ".github/workflows/gvisor.yml"
-      - "scripts/gvisor-l2-gate.mjs"
+  merge_group:
+    types: [checks_requested]
+  schedule:
+    - cron: '17 3 * * *'
   push:
     branches: [main]
     paths:
