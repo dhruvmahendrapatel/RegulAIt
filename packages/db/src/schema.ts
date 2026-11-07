@@ -18,7 +18,7 @@ import {
   type RequiredTestPolicy,
   // ADR-0182 (migration 0162): the accountability vocabularies, in lockstep
   // with the migration's CHECKs by being the same constants
-  // ADR-0218 (migration 0274): the theme palettes and modes, in lockstep with the CHECKs
+  // ADR-0218 (migration 0282): the theme palettes and modes, in lockstep with the CHECKs
   THEME_MODES,
   THEME_PALETTE_IDS,
   ACCOUNTABILITY_GATE_MODES,
@@ -4853,7 +4853,7 @@ export const orgSettings = pgTable(
      * null (strict) = none named. Deleting it stops automatic filing — there is
      * no fallback to another connection (ADR-0180). */
     alertTicketConnectionId: uuid("alert_ticket_connection_id").references(() => pmConnections.id, { onDelete: "set null" }),
-    /** ADR-0218 (migration 0274): the palette everyone starts on, and while `themeLocked` is on the only one besides
+    /** ADR-0218 (migration 0282): the palette everyone starts on, and while `themeLocked` is on the only one besides
      * High contrast (an accessibility palette a lock never takes away) */
     themeDefaultPalette: text("theme_default_palette", { enum: THEME_PALETTE_IDS }).notNull().default("aurora"),
     /** ADR-0218: false (default) = each person picks their own palette; true = everyone uses the default (or High contrast) */
@@ -5057,7 +5057,7 @@ export const orgSettings = pgTable(
       "org_settings_executor_attestation_max_age_minutes_check",
       sql`${t.executorAttestationMaxAgeMinutes} BETWEEN 60 AND 1440`,
     ),
-    // ADR-0218 (migration 0274)
+    // ADR-0218 (migration 0282)
     check(
       "org_settings_theme_default_palette_check",
       sql`${t.themeDefaultPalette} IN ('aurora', 'harbor', 'evergreen', 'graphite', 'orchid', 'contrast')`,
@@ -5072,7 +5072,7 @@ export const orgSettings = pgTable(
 export type OrgSettingsRow = typeof orgSettings.$inferSelect;
 
 /**
- * ADR-0218 (migration 0274): a person's own palette and light/dark mode, saved to the account so it follows them to
+ * ADR-0218 (migration 0282): a person's own palette and light/dark mode, saved to the account so it follows them to
  * any browser (the browser keeps a copy only to paint before the first request). One row per person; written only by
  * `PUT /auth/appearance` for the caller's own user id, with its audit row in the same transaction. A null field means
  * "nothing saved": the palette falls back to the organisation default, the mode to the browser.
