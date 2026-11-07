@@ -1,16 +1,23 @@
 // FS-55: the ADR index (internal/decisions/README.md) has one well-formed row per
 // ADR file, in number order, and every relative link in it resolves.
+//
+// ADR-0252: a PR adds only its ADR file; the assign-at-merge step adds the row after the merge. So the checks run on
+// the index as that step will leave it (`foldAdrIndex`), which also proves every new ADR's header yields a row.
 import { describe, expect, it } from "vitest";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { foldAdrIndex } from "./fold-docs.mjs";
 
 const dir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../internal/decisions");
-const index = readFileSync(path.join(dir, "README.md"), "utf8");
+const files = readdirSync(dir).filter((f) => /^\d{4}-.*\.md$/.test(f)).sort();
+const index = foldAdrIndex(
+  readFileSync(path.join(dir, "README.md"), "utf8"),
+  files.map((name) => ({ name, text: readFileSync(path.join(dir, name), "utf8") })),
+).text;
 const rowLines = index.split("\n").filter((l) => /^\| *\[\d{4}\]/.test(l));
 /** GFM splits a table row on every `|` not escaped as `\|`, code spans included */
 const cells = (line) => line.split(/(?<!\\)\|/).slice(1, -1);
-const files = readdirSync(dir).filter((f) => /^\d{4}-.*\.md$/.test(f)).sort();
 
 describe("ADR index parity (FS-55)", () => {
   it("has one row per ADR file and no row without a file", () => {
