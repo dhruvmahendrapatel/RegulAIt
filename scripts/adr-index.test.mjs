@@ -4,6 +4,7 @@
 // ADR-0252: a PR adds only its ADR file; the assign-at-merge step adds the row after the merge. So the checks run on
 // the index as that step will leave it (`foldAdrIndex`), which also proves every new ADR's header yields a row.
 import { describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -62,5 +63,53 @@ describe("ADR index parity (FS-55)", () => {
       const status = /\*\*Status\*\*:?\s*(.*)/.exec(readFileSync(path.join(dir, file), "utf8").slice(0, 2000))?.[1] ?? "";
       if (/^(partially )?superseded/i.test(status.trim())) expect(cells(l)[2].trim(), id).not.toBe("Accepted");
     }
+  });
+});
+
+// #738 §1: every ADR cited from the repo's process files exists, and every relative Markdown link under them resolves.
+// Tracked files only (`git ls-files`), so an untracked scratch file never fails a run.
+describe("ADR references and relative links resolve (#738)", () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const tracked = execFileSync("git", ["ls-files", "-z", "--", ".github", "scripts", "internal", "CLAUDE.md"], {
+    cwd: root,
+    encoding: "utf8",
+  })
+    .split("\0")
+    .filter((f) => f && existsSync(path.join(root, f)));
+  const read = (f) => readFileSync(path.join(root, f), "utf8");
+  const ids = new Set(files.map((f) => f.slice(0, 4)));
+  // this file names the pattern it looks for; nothing else is exempt
+  const self = "scripts/adr-index.test.mjs";
+
+  it("every ADR-NNNN cited in .github/, scripts/, internal/ or CLAUDE.md has a file in internal/decisions/", () => {
+    expect(tracked.length).toBeGreaterThan(400); // non-vacuity: the real tree
+    const missing = [];
+    for (const f of tracked) {
+      if (f === self || /\.(png|jpe?g|gif|webp|ico|pdf|woff2?|tgz|gz|zip)$/i.test(f)) continue;
+      for (const m of read(f).matchAll(/ADR-(\d{4})/g)) if (!ids.has(m[1])) missing.push(`${f}: ADR-${m[1]}`);
+    }
+    expect([...new Set(missing)]).toEqual([]);
+  });
+
+  it("every relative Markdown link in those trees resolves to a file or folder", () => {
+    const md = tracked.filter((f) => f.endsWith(".md"));
+    expect(md.length).toBeGreaterThan(300);
+    const bad = [];
+    for (const f of md) {
+      // links inside code are examples, not links
+      const text = read(f).replace(/```[\s\S]*?```/g, "").replace(/`[^`\n]*`/g, "");
+      for (const m of text.matchAll(/\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g)) {
+        let target = m[1].split("#")[0];
+        if (!target || /^[a-z][a-z0-9+.-]*:/i.test(target) || target.startsWith("/")) continue;
+        try {
+          target = decodeURIComponent(target);
+        } catch {
+          // a malformed escape is checked as written
+        }
+        target = target.replace(/:\d+(-\d+)?$/, ""); // file.ts:12 or :12-20 line suffix
+        if (!existsSync(path.join(root, path.dirname(f), target))) bad.push(`${f} -> ${m[1]}`);
+      }
+    }
+    expect(bad).toEqual([]);
   });
 });

@@ -2,14 +2,14 @@
 
 - **Status**: Accepted
 - **Date**: 2026-08-07
-- **Relates to**: [ADR-0020](0020-ide-interception-compat-surfaces.md) and
-  [ADR-0024](0024-openai-compat-surface.md) (the two provider-shaped compat shims this builds on),
-  [ADR-0016](0016-real-model-dispatch.md) (`executeGovernedDispatch`, the one dispatch core),
-  [ADR-0019](0019-per-user-revocations.md) and
-  [ADR-0014](0014-roles-as-provisioning-bundles.md) (the entitlement inputs re-evaluated per hop),
+- **Relates to**: [ADR-0020](0020-ide-interception-compat-endpoints.md) and
+  [ADR-0024](0024-interception-depth-metering-scope-custody.md) (the two provider-shaped compat shims this builds on),
+  [ADR-0016](0016-transitive-per-node-budget-ceiling.md) (`executeGovernedDispatch`, the one dispatch core),
+  [ADR-0019](0019-per-user-revocation-and-full-attribution.md) and
+  [ADR-0014](0014-role-bundled-agent-connector-grants.md) (the entitlement inputs re-evaluated per hop),
   [ADR-0062](0062-mode-scoped-egress.md) (the egress *ceiling* shape this copies),
   [ADR-0021](0021-org-settings-configurability-layer.md) (ceilings that may only tighten),
-  [ADR-0025](0025-real-authentication.md) (the API-key hashing scheme reused verbatim),
+  [ADR-0025](0025-secure-human-auth.md) (the API-key hashing scheme reused verbatim),
   [`internal/product/COMPETITIVE_PARITY_PLAN.md`](../product/COMPETITIVE_PARITY_PLAN.md) §1 Slice D
 
 ## Context

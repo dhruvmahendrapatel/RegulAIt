@@ -177,6 +177,21 @@ jobs:
           fetch-depth: 2
       - id: scope
         uses: ./.github/actions/ci-scope
+      # #738 §1: no sibling-branch merges. Every merge in base..head may bring in only commits already on main; a
+      # stacked PR targets its parent's branch and carries the `stacked` label (re-run this job after the label is
+      # added). Here, not in a later job, so a docs-only PR is checked too. The treeless unshallow fetch brings commit
+      # history only (about a second). Not on merge_group: every queue merge's second parent is a PR head.
+      - name: Pre-flight — no sibling-branch merges
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --filter=tree:0 --unshallow origin \
+            "+refs/heads/main:refs/remotes/origin/main" "+$BASE_SHA:refs/remotes/pr/base" "+$HEAD_SHA:refs/remotes/pr/head"
+          node scripts/preflight-branch-merges.mjs "$BASE_SHA" "$HEAD_SHA" --main origin/main --labels "$LABELS"
 
   # ── build-and-test, split (2026-10-10) ─────────────────────────────────────
   # One job ran everything and the gateway suite (372 files, serial against one

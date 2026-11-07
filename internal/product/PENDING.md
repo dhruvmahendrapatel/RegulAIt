@@ -339,7 +339,7 @@ caught on read. **The sweeps buy timeliness, never correctness.**
   Original entry retained below.
 
 - ~~**S11 — `backup_runs` re-opens a miss while a restore is pending**~~ **CLOSED 2026-09-12
-  ([ADR-0110](../decisions/0110-backup-rescan-reopen-and-preflight-gate.md), migration 0109)** —
+  ([ADR-0110](../decisions/0110-rescan-reopens-a-miss-and-the-preflight-runs.md), migration 0109)** —
   owner decided a re-scan **should** re-open. One row per finding; `missed`/`restore_proposed`
   re-open with the superseded proposal audited, `restored` does not; the constraint ADR-0109 refused
   is now added and proven to bite.
