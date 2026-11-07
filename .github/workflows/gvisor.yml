@@ -45,7 +45,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: gvisor-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: gvisor-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Least privilege for GITHUB_TOKEN: the job checks out code and uploads an artifact; it writes nothing to GitHub.

@@ -17,8 +17,10 @@ name: CI
 #     `docker-build` runs only on a full run. Kept for the history of the numbers below:
 #     (1) no push trigger, a green PR being a green main; (2) docs-only changes skipped CI by `paths-ignore`;
 #     (3) docker-build self-skipped unless an image input changed, with a weekly unconditional build.
-#  4. `cancel-in-progress` kills superseded runs when a PR is pushed to again (pull_request only; a merge
-#     group, a push to main and the schedule always run to the end).
+#  4. A newer push to a PR cancels its older run (`cancel-in-progress`, pull_request only). Every other run
+#     (merge group, push to main, schedule, dispatch) gets a group of its own (`github.run_id`): GitHub keeps
+#     only ONE pending run per concurrency group and cancels the older pending one whatever `cancel-in-progress`
+#     says, so a shared group would drop a queued main or nightly run.
 #  5. TIGHT `timeout-minutes`. The expensive failure mode is not a slow job, it
 #     is a HUNG one billing its full cap; 25 -> 20/12 caps that blast radius.
 #     (The 2026-10-10 stopgap of 45 on the unsharded job is gone: every
@@ -141,9 +143,10 @@ on:
     - cron: '17 3 * * *'
   workflow_dispatch:
 
-# Rapid follow-up pushes cancel the older in-flight run for the same PR.
+# A PR's runs share one group and a newer push cancels the older run. Any other run is alone in its group
+# (run_id), so a pending push-to-main, merge-group, scheduled or manual run is never replaced by a newer one.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Least privilege for GITHUB_TOKEN (CodeQL "workflow does not contain permissions"): every job here only

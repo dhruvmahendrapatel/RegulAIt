@@ -44,7 +44,7 @@ on:
 # checks out code and uploads artifacts; nothing writes to the repository, issues, PRs or packages.
 # Cancel a superseded run on a PR branch only; a push, dispatch or merge-group run always completes.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:

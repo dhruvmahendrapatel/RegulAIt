@@ -44,7 +44,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: engine-images-build-${{ github.ref }}
+  group: engine-images-build-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

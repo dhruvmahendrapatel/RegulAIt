@@ -37,7 +37,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: import-cycles-${{ github.event.pull_request.number || github.ref }}
+  group: import-cycles-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:

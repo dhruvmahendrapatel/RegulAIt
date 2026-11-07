@@ -71,7 +71,7 @@ jobs:
     # board check-ins) never enters this group, so it cannot cancel a journey
     # that is already running; a later push that runs it does
     concurrency:
-      group: demo-journey-${{ github.event.pull_request.number || github.ref }}
+      group: demo-journey-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
     # 12, down from 30 (ADR-0183 2.4). Measured 2026-10-06 (ADR-0182, D4 specs):
@@ -288,7 +288,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.demo == 'true'
     concurrency:
-      group: demo-live-${{ github.event.pull_request.number || github.ref }}
+      group: demo-live-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 12
@@ -425,7 +425,7 @@ jobs:
     needs: changes
     if: github.event_name == 'workflow_dispatch'
     concurrency:
-      group: demo-rehearsal-${{ github.ref }}
+      group: demo-rehearsal-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -561,7 +561,7 @@ jobs:
     needs: changes
     if: github.event_name == 'workflow_dispatch' && needs.changes.outputs.demo == 'true'
     concurrency:
-      group: demo-mock-${{ github.event.pull_request.number || github.ref }}
+      group: demo-mock-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     uses: ./.github/workflows/mock-ui-shards.yml
     with:
@@ -575,7 +575,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.review == 'true'
     concurrency:
-      group: approval-review-${{ github.event.pull_request.number || github.ref }}
+      group: approval-review-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
