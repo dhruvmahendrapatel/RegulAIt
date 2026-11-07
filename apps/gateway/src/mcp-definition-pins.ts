@@ -3,9 +3,8 @@
  *
  * `packages/shared/src/mcp-definition-pins.ts` owns the digests, the observation plan and the diff. This module owns:
  *
- *   1. `observeServedDefinitions` — the prompts, resources and resource templates a server serves, fetched on the
- *      connection a manifest sync already opened, and only for a capability the server advertises (a tools-only
- *      server costs no extra request).
+ *   1. (`observeServedDefinitions`, in mcp-proxy.ts beside the manifest read so this module imports no upstream
+ *      code: the prompts, resources and templates a server serves, for the capabilities it advertises.)
  *   2. `recordDefinitionPins` — run inside `syncUpstreamTools`' transaction, BEFORE the manifest is upserted. The
  *      first admitted manifest is the baseline (approved, `approved_by` NULL). Every later one is compared; an item
  *      that changed, appeared or disappeared since approval is recorded with its served definition and audited in
@@ -18,7 +17,6 @@
  *      same transaction).
  */
 import type { FastifyInstance } from "fastify";
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { z } from "zod";
 import {
   and,
@@ -46,9 +44,7 @@ import {
 } from "@regulait/shared";
 import { loadOrgSettings } from "./org-settings.js";
 import { requireStepUp } from "./step-up.js";
-import { timeouts } from "./timeouts.js";
-import { withUpstreamRetry } from "./upstream-retry.js";
-import type { McpUpstreamTransport } from "@regulait/shared";
+
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 
@@ -64,33 +60,6 @@ const KIND_LABEL: Readonly<Record<McpDefinitionKind, string>> = {
   resource: "resource",
   resource_template: "resource template",
 };
-
-/**
- * The prompts, resources and resource templates the upstream serves, for the kinds it advertises. First page only
- * (the pin cap is per kind anyway). A list that fails is `null` (not observed): its stored pins are left alone, so
- * a flaky `prompts/list` never reads as "every prompt was removed".
- */
-export async function observeServedDefinitions(
-  client: Client,
-  tools: readonly unknown[],
-  /** the same `/metrics` labels the manifest read uses, so each list request is counted once (ADR-0185 G5) */
-  observe: { serverId: string; transport?: McpUpstreamTransport | null | undefined },
-): Promise<McpServedDefinitions> {
-  const caps = client.getServerCapabilities() ?? {};
-  const list = async <T>(fetch: (timeout: number) => Promise<T>): Promise<T | null> => {
-    try {
-      return await withUpstreamRetry(({ deadlineMs }) => fetch(deadlineMs), { budgetMs: timeouts().mcpListToolsMs, observe });
-    } catch {
-      return null;
-    }
-  };
-  const prompts = caps.prompts ? await list(async (timeout) => (await client.listPrompts(undefined, { timeout })).prompts) : [];
-  const resources = caps.resources ? await list(async (timeout) => (await client.listResources(undefined, { timeout })).resources) : [];
-  const resourceTemplates = caps.resources
-    ? await list(async (timeout) => (await client.listResourceTemplates(undefined, { timeout })).resourceTemplates)
-    : [];
-  return { tools, prompts, resources, resourceTemplates };
-}
 
 export interface DefinitionPinOutcome {
   mode: McpDefinitionPinMode;

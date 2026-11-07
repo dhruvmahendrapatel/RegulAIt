@@ -46,6 +46,7 @@ import {
   type PiiHit,
   type PreparedPiiApproval,
   type ScannableTool,
+  type McpServedDefinitions,
   type McpUpstreamTransport,
   CONTENT_TRUST_REFUSAL_CODE,
   CONTENT_TRUST_RULE_ID,
@@ -106,7 +107,7 @@ import {
   recordManifestScan,
   type McpAdmissionTrigger,
 } from "./mcp-admission.js";
-import { definitionPinRefusal, observeServedDefinitions, recordDefinitionPins } from "./mcp-definition-pins.js";
+import { definitionPinRefusal, recordDefinitionPins } from "./mcp-definition-pins.js";
 import { highRiskRefusal, recordRiskClassification } from "./mcp-high-risk.js";
 import { loadEntitlements } from "./entitlements.js";
 // ADR-0185 G3 — the non-tool MCP methods
@@ -1998,6 +1999,33 @@ export async function consumeApprovalOrRetire(
  * a manifest, adjudicate it, store what is admissible". `trigger` only labels
  * the audit row the adjudication writes — it changes no threshold, no state
  * rule and no order of operations. */
+/**
+ * The prompts, resources and resource templates the upstream serves, for the kinds it advertises. First page only
+ * (the pin cap is per kind anyway). A list that fails is `null` (not observed): its stored pins are left alone, so
+ * a flaky `prompts/list` never reads as "every prompt was removed".
+ */
+async function observeServedDefinitions(
+  client: Client,
+  tools: readonly unknown[],
+  /** the same `/metrics` labels the manifest read uses, so each list request is counted once (ADR-0185 G5) */
+  observe: { serverId: string; transport?: McpUpstreamTransport | null | undefined },
+): Promise<McpServedDefinitions> {
+  const caps = client.getServerCapabilities() ?? {};
+  const list = async <T>(fetch: (timeout: number) => Promise<T>): Promise<T | null> => {
+    try {
+      return await withUpstreamRetry(({ deadlineMs }) => fetch(deadlineMs), { budgetMs: timeouts().mcpListToolsMs, observe });
+    } catch {
+      return null;
+    }
+  };
+  const prompts = caps.prompts ? await list(async (timeout) => (await client.listPrompts(undefined, { timeout })).prompts) : [];
+  const resources = caps.resources ? await list(async (timeout) => (await client.listResources(undefined, { timeout })).resources) : [];
+  const resourceTemplates = caps.resources
+    ? await list(async (timeout) => (await client.listResourceTemplates(undefined, { timeout })).resourceTemplates)
+    : [];
+  return { tools, prompts, resources, resourceTemplates };
+}
+
 export async function syncUpstreamTools(
   db: Db,
   serverId: string,
