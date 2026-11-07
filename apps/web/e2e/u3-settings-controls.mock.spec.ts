@@ -216,10 +216,10 @@ test.describe("U3: each page carries its settings", () => {
     { path: "/ui/admin/enforcement-posture", card: "evidence-detection-settings", keys: ["decisionReceiptsMode", "auditAnchorTimestampMode", "vendoredDetectionPacks", "outboundCredentialAudience"] },
     { path: "/ui/admin/retention", card: "audit-evidence-retention", keys: ["modeAuditRetention", "canaryObservationRetentionDays"] },
     { path: "/ui/admin/admission", card: "mcp-admission-mode", keys: ["mcpAdmissionMode"] },
-    { path: "/ui/admin/infrastructure", card: "backup-verify-settings", keys: ["backupVerifyEnabled", "backupVerifyIntervalHours"] },
+    { path: "/ui/admin/infrastructure?tab=setup", card: "backup-verify-settings", keys: ["backupVerifyEnabled", "backupVerifyIntervalHours"] },
     { path: "/ui/admin/users", card: "api-key-lifetimes", keys: ["apiKeyDefaultTtlDays", "apiKeyMaxTtlDays"] },
-    { path: "/ui/admin/engines", card: "engine-run-limits", keys: ["engineMaxRunTimeoutMinutes", "engineDefaultRunBudgetUsd", "engineRunApprovalThresholdUsd", "engineRawReportRetentionDays", "engineSensitiveSetApproval"] },
-    { path: "/ui/admin/engines", card: "model-artifact-quotas", keys: ["modelArtifactUploaderQuotaMegabytes", "modelArtifactUploaderQuotaCount", "modelArtifactOrgQuotaMegabytes", "modelArtifactOrgQuotaCount"] },
+    { path: "/ui/admin/engines?tab=settings", card: "engine-run-limits", keys: ["engineMaxRunTimeoutMinutes", "engineDefaultRunBudgetUsd", "engineRunApprovalThresholdUsd", "engineRawReportRetentionDays", "engineSensitiveSetApproval"] },
+    { path: "/ui/admin/engines?tab=settings", card: "model-artifact-quotas", keys: ["modelArtifactUploaderQuotaMegabytes", "modelArtifactUploaderQuotaCount", "modelArtifactOrgQuotaMegabytes", "modelArtifactOrgQuotaCount"] },
     {
       path: "/ui/admin/workload-identities",
       card: "identity-delegation-settings",
