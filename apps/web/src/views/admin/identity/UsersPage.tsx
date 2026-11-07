@@ -37,13 +37,11 @@ import {
   Input,
   IdChip,
   Select,
-  Table,
   Tabs,
 } from "../../../ui/kit";
 import { DataList, type DataColumn } from "../../../ui/DataList";
 import { normalisePage } from "../../../ui/listState";
 import {
-  QueryGate,
   ReasonModal,
   adminKeys,
   RevealCard,
@@ -56,7 +54,6 @@ import {
   useConnectors,
   useServerTools,
   useServers,
-  useUsers,
   type RevealedSecret,
 } from "../adminKit";
 import a from "../admin.module.css";
@@ -516,88 +513,116 @@ function RenameForm(props: { user: AdminUser }) {
 
 // ---- live sessions --------------------------------------------------------
 
-function SessionsPanel(props: { userId: string }) {
-  const q = useQuery({
-    queryKey: ["admin", "sessions", props.userId],
-    queryFn: () => api.get<{ sessions: UserSession[] }>(`/v1/users/${props.userId}/sessions`),
+const sessionLive = (s: UserSession) => !s.revokedAt && new Date(s.expiresAt).getTime() > Date.now();
+
+/** ADR-0226: a user's sessions; the ids and sortable ones match the gateway's SESSIONS_LIST */
+function sessionColumns(userId: string, act: ReturnType<typeof useAction>): Array<DataColumn<UserSession>> {
+  return [
+    { key: "created", header: "Signed in", main: true, sortable: true, render: (s) => ago(s.createdAt) },
+    { key: "seen", header: "Last seen", main: true, sortable: true, render: (s) => ago(s.lastSeenAt) },
+    {
+      key: "ip",
+      header: "IP (current · at sign-in)",
+      main: true,
+      sortable: true,
+      render: (s) => (
+        <span className={v.mono}>
+          {s.lastSeenIp ?? s.ip ?? "—"}
+          {s.lastSeenIp && s.ip && s.lastSeenIp !== s.ip ? ` · ${s.ip}` : ""}
+        </span>
+      ),
+    },
+    {
+      key: "device",
+      header: "Device",
+      main: true,
+      // ADR-0039: the derived browser+OS family — display only, never
+      // a security control; the raw UA stays in the hover title
+      render: (s) => (
+        <span className={v.faint} title={s.userAgent ?? undefined}>
+          {s.deviceLabel}
+        </span>
+      ),
+    },
+    { key: "origin", header: "Origin", main: true, sortable: true, render: (s) => <span className={v.mono}>{s.origin}</span> },
+    {
+      key: "status",
+      header: "Status",
+      main: true,
+      sortable: true,
+      required: "Status is always shown",
+      render: (s) =>
+        s.revokedAt ? (
+          <Badge tone="danger">revoked</Badge>
+        ) : new Date(s.expiresAt).getTime() < Date.now() ? (
+          <Badge>expired</Badge>
+        ) : (
+          <Badge tone="ok">live</Badge>
+        ),
+    },
+    { key: "expires", header: "Expires", sortable: true, render: (s) => ago(s.expiresAt) },
+    {
+      key: "actions",
+      header: "",
+      srHeader: "Actions",
+      action: true,
+      render: (s) =>
+        sessionLive(s) ? (
+          <Button
+            size="sm"
+            variant="danger"
+            disabled={act.busy}
+            onClick={() =>
+              void act.run(() => api.post(`/v1/users/${userId}/sessions/${s.id}/revoke`, {}), "Session revoked (audited)")
+            }
+          >
+            Revoke
+          </Button>
+        ) : null,
+    },
+  ];
+}
+
+/** a contract count from the server (never from the page on screen); an older gateway's whole list is counted as before */
+function useListTotal<T>(key: readonly unknown[], url: string, legacyKey: string, legacyCount: (rows: T[]) => number) {
+  return useQuery({
+    queryKey: key,
+    queryFn: async () => {
+      const page = normalisePage<T>(await api.get<unknown>(url), legacyKey);
+      return page.total ?? legacyCount(page.items);
+    },
   });
+}
+
+function SessionsPanel(props: { userId: string }) {
+  const base = `/v1/users/${props.userId}/sessions`;
+  const live = useListTotal<UserSession>(["admin", "sessions", props.userId, "live"], `${base}?limit=10&count=exact&status=live&sort=created`, "sessions", (rows) => rows.filter(sessionLive).length);
+  const recorded = useListTotal<UserSession>(["admin", "sessions", props.userId, "recorded"], `${base}?limit=10&count=exact&sort=created`, "sessions", (rows) => rows.length);
   const act = useAction();
   const [confirmRevoke, setConfirmRevoke] = useState(false);
-  const sessions = q.data?.sessions ?? [];
-  const live = sessions.filter((s) => !s.revokedAt && new Date(s.expiresAt).getTime() > Date.now());
+  const liveCount = live.data ?? 0;
+  const columns = sessionColumns(props.userId, act);
   return (
-    <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+    <>
       <div className={v.stack}>
         <div className={v.row}>
           <span className={v.dim}>
-            {live.length} live session(s) · {sessions.length} recorded
+            {liveCount} live session(s) · {recorded.data ?? 0} recorded
           </span>
           <span className={v.grow} />
-          <Button size="sm" variant="danger" disabled={live.length === 0} onClick={() => setConfirmRevoke(true)}>
+          <Button size="sm" variant="danger" disabled={liveCount === 0} onClick={() => setConfirmRevoke(true)}>
             Revoke all live sessions
           </Button>
         </div>
-        <Table<UserSession>
-          columns={[
-            { key: "created", header: "Signed in", sort: (s) => s.createdAt, render: (s) => ago(s.createdAt) },
-            { key: "seen", header: "Last seen", render: (s) => ago(s.lastSeenAt) },
-            {
-              key: "ip",
-              header: "IP (current · at sign-in)",
-              render: (s) => (
-                <span className={v.mono}>
-                  {s.lastSeenIp ?? s.ip ?? "—"}
-                  {s.lastSeenIp && s.ip && s.lastSeenIp !== s.ip ? ` · ${s.ip}` : ""}
-                </span>
-              ),
-            },
-            {
-              key: "device",
-              header: "Device",
-              // ADR-0039: the derived browser+OS family — display only, never
-              // a security control; the raw UA stays in the hover title
-              render: (s) => (
-                <span className={v.faint} title={s.userAgent ?? undefined}>
-                  {s.deviceLabel}
-                </span>
-              ),
-            },
-            { key: "origin", header: "Origin", render: (s) => <span className={v.mono}>{s.origin}</span> },
-            {
-              key: "status",
-              header: "Status",
-              render: (s) =>
-                s.revokedAt ? (
-                  <Badge tone="danger">revoked</Badge>
-                ) : new Date(s.expiresAt).getTime() < Date.now() ? (
-                  <Badge>expired</Badge>
-                ) : (
-                  <Badge tone="ok">live</Badge>
-                ),
-            },
-            {
-              key: "actions",
-              header: "",
-              srHeader: "Actions",
-              render: (s) =>
-                !s.revokedAt && new Date(s.expiresAt).getTime() > Date.now() ? (
-                  <Button
-                    size="sm"
-                    variant="danger"
-                    disabled={act.busy}
-                    onClick={() =>
-                      void act.run(
-                        () => api.post(`/v1/users/${props.userId}/sessions/${s.id}/revoke`, {}),
-                        "Session revoked (audited)",
-                      )
-                    }
-                  >
-                    Revoke
-                  </Button>
-                ) : null,
-            },
-          ]}
-          rows={sessions}
+        <DataList<UserSession>
+          listId="user-sessions"
+          noun="sessions"
+          endpoint={`/v1/users/${props.userId}/sessions`}
+          exportPath={`/v1/users/${props.userId}/sessions/export.xlsx`}
+          queryKey={["admin", "sessions", props.userId, "list"]}
+          legacyKey="sessions"
+          defaultSort={{ key: "created", dir: "desc" }}
+          columns={columns}
           rowKey={(s) => s.id}
           empty={<EmptyState title="No browser sessions" body="This user has never signed in with a password." />}
         />
@@ -617,7 +642,7 @@ function SessionsPanel(props: { userId: string }) {
           );
         }}
       />
-    </QueryGate>
+    </>
   );
 }
 
@@ -680,21 +705,6 @@ function OverridesPanel(props: { userId: string }) {
   const connectors = useConnectors();
   const act = useAction();
 
-  const mcpRevs = useQuery({
-    queryKey: ["admin", "revocations"],
-    queryFn: () => api.get<{ revocations: McpRevocation[] }>("/v1/revocations"),
-  });
-  const agentRevs = useQuery({
-    queryKey: ["admin", "agent-revocations", props.userId],
-    queryFn: () =>
-      api.get<{ revocations: ObjectRevocation[] }>(`/v1/users/${props.userId}/revocations/agents`),
-  });
-  const connRevs = useQuery({
-    queryKey: ["admin", "connector-revocations", props.userId],
-    queryFn: () =>
-      api.get<{ revocations: ObjectRevocation[] }>(`/v1/users/${props.userId}/revocations/connectors`),
-  });
-
   const [serverId, setServerId] = useState("");
   const tools = useServerTools(serverId || null);
   const [toolName, setToolName] = useState("");
@@ -707,7 +717,8 @@ function OverridesPanel(props: { userId: string }) {
     () => new Map((servers.data?.servers ?? []).map((s) => [s.id, s.name])),
     [servers.data],
   );
-  const mine = (mcpRevs.data?.revocations ?? []).filter((r) => r.userId === props.userId);
+  const mineFilter = useMemo(() => ({ userId: props.userId }), [props.userId]);
+  const lift = (path: string, msg: string) => void act.run(() => withStepUp((h) => api.delWithHeaders(path, h)), msg);
 
   return (
     <div className={v.stack}>
@@ -753,40 +764,42 @@ function OverridesPanel(props: { userId: string }) {
           Add revocation
         </Button>
       </form>
-      <Table<McpRevocation>
+      <DataList<McpRevocation>
+        listId="mcp-revocations"
+        noun="MCP revocations"
+        endpoint="/v1/revocations"
+        exportPath="/v1/revocations/export.xlsx"
+        queryKey={["admin", "revocations", props.userId, "list"]}
+        legacyKey="revocations"
+        filters={mineFilter}
+        defaultSort={{ key: "created", dir: "desc" }}
         columns={[
-          { key: "server", header: "Server", render: (r) => serverName.get(r.serverId) ?? r.serverId },
-          { key: "tool", header: "Tool", render: (r) => r.toolName ?? "— all role-derived —" },
+          { key: "server", header: "Server", main: true, sortable: true, render: (r) => r.serverName ?? serverName.get(r.serverId) ?? r.serverId },
+          { key: "tool", header: "Tool", main: true, sortable: true, render: (r) => r.toolName ?? "— all role-derived —" },
           {
             key: "scope",
             header: "Scope",
+            main: true,
+            sortable: true,
+            required: "Scope says how much is denied, so it is always shown",
             render: (r) => <RevocationScopeCell kind="mcp" revocationId={r.id} scope={r.scope} />,
           },
-          { key: "created", header: "Created", render: (r) => ago(r.createdAt) },
+          { key: "created", header: "Created", main: true, sortable: true, render: (r) => ago(r.createdAt) },
           {
             key: "actions",
             header: "",
             srHeader: "Actions",
             align: "right",
+            action: true,
+            // B4S-05: lifting a revocation gives an entitlement back (a settings_relax step-up)
             render: (r) => (
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() =>
-                  // B4S-05: lifting a revocation gives an entitlement back (a settings_relax step-up)
-                  void act.run(() => withStepUp((h) => api.delWithHeaders(`/v1/revocations/${r.id}`, h)), "Revocation lifted")
-                }
-              >
+              <Button size="sm" variant="ghost" onClick={() => lift(`/v1/revocations/${r.id}`, "Revocation lifted")}>
                 lift
               </Button>
             ),
           },
         ]}
-        rows={mine}
         rowKey={(r) => r.id}
-        loading={mcpRevs.isLoading}
-        error={mcpRevs.error}
-        onRetry={() => void mcpRevs.refetch()}
         empty={<EmptyState title="No MCP revocations for this user" />}
       />
 
@@ -821,36 +834,32 @@ function OverridesPanel(props: { userId: string }) {
               Revoke agent
             </Button>
           </form>
-          <Table<ObjectRevocation>
+          <DataList<ObjectRevocation>
+            listId="agent-revocations"
+            noun="agent revocations"
+            endpoint={`/v1/users/${props.userId}/revocations/agents`}
+            exportPath={`/v1/users/${props.userId}/revocations/agents/export.xlsx`}
+            queryKey={["admin", "agent-revocations", props.userId, "list"]}
+            legacyKey="revocations"
+            defaultSort={{ key: "created", dir: "desc" }}
             columns={[
-              { key: "agent", header: "Agent", render: (r) => r.agentName ?? "—" },
-              { key: "reason", header: "Reason", render: (r) => r.reason ?? "—" },
+              { key: "agent", header: "Agent", main: true, sortable: true, render: (r) => r.agentName ?? "—" },
+              { key: "reason", header: "Reason", main: true, sortable: true, render: (r) => r.reason ?? "—" },
+              { key: "created", header: "Created", main: true, sortable: true, render: (r) => ago(r.createdAt) },
               {
                 key: "actions",
                 header: "",
                 srHeader: "Actions",
                 align: "right",
+                action: true,
                 render: (r) => (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() =>
-                      void act.run(
-                        () => withStepUp((h) => api.delWithHeaders(`/v1/users/${props.userId}/revocations/agents/${r.id}`, h)),
-                        "Agent revocation lifted",
-                      )
-                    }
-                  >
+                  <Button size="sm" variant="ghost" onClick={() => lift(`/v1/users/${props.userId}/revocations/agents/${r.id}`, "Agent revocation lifted")}>
                     lift
                   </Button>
                 ),
               },
             ]}
-            rows={agentRevs.data?.revocations ?? []}
             rowKey={(r) => r.id}
-            loading={agentRevs.isLoading}
-            error={agentRevs.error}
-            onRetry={() => void agentRevs.refetch()}
             empty={<EmptyState title="No agent revocations" />}
           />
         </div>
@@ -884,43 +893,40 @@ function OverridesPanel(props: { userId: string }) {
               Revoke connector
             </Button>
           </form>
-          <Table<ObjectRevocation>
+          <DataList<ObjectRevocation>
+            listId="connector-revocations"
+            noun="connector revocations"
+            endpoint={`/v1/users/${props.userId}/revocations/connectors`}
+            exportPath={`/v1/users/${props.userId}/revocations/connectors/export.xlsx`}
+            queryKey={["admin", "connector-revocations", props.userId, "list"]}
+            legacyKey="revocations"
+            defaultSort={{ key: "created", dir: "desc" }}
             columns={[
-              { key: "connector", header: "Connector", render: (r) => r.connectorName ?? "—" },
-              { key: "reason", header: "Reason", render: (r) => r.reason ?? "—" },
+              { key: "connector", header: "Connector", main: true, sortable: true, render: (r) => r.connectorName ?? "—" },
+              { key: "reason", header: "Reason", main: true, sortable: true, render: (r) => r.reason ?? "—" },
               {
                 key: "scope",
                 header: "Scope",
-                render: (r) => (
-                  <RevocationScopeCell kind="connectors" revocationId={r.id} scope={r.scope} />
-                ),
+                main: true,
+                sortable: true,
+                required: "Scope says how much is denied, so it is always shown",
+                render: (r) => <RevocationScopeCell kind="connectors" revocationId={r.id} scope={r.scope} />,
               },
+              { key: "created", header: "Created", sortable: true, render: (r) => ago(r.createdAt) },
               {
                 key: "actions",
                 header: "",
                 srHeader: "Actions",
                 align: "right",
+                action: true,
                 render: (r) => (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() =>
-                      void act.run(
-                        () => withStepUp((h) => api.delWithHeaders(`/v1/users/${props.userId}/revocations/connectors/${r.id}`, h)),
-                        "Connector revocation lifted",
-                      )
-                    }
-                  >
+                  <Button size="sm" variant="ghost" onClick={() => lift(`/v1/users/${props.userId}/revocations/connectors/${r.id}`, "Connector revocation lifted")}>
                     lift
                   </Button>
                 ),
               },
             ]}
-            rows={connRevs.data?.revocations ?? []}
             rowKey={(r) => r.id}
-            loading={connRevs.isLoading}
-            error={connRevs.error}
-            onRetry={() => void connRevs.refetch()}
             empty={<EmptyState title="No connector revocations" />}
           />
         </div>
@@ -931,37 +937,42 @@ function OverridesPanel(props: { userId: string }) {
 
 // ---- API keys (fleet-wide) ------------------------------------------------
 
+const KEY_TONE = { active: "ok", expiring: "warn", expired: "danger", revoked: "danger" } as const;
+const keyState = (k: ApiKey) => k.state ?? (k.revokedAt ? "revoked" : "active");
+
 function ApiKeysCard() {
-  const users = useUsers();
-  const q = useQuery({
-    queryKey: ["admin", "keys"],
-    queryFn: () => api.get<{ keys: ApiKey[] }>("/v1/keys"),
-  });
   const act = useAction();
   const [revokeKey, setRevokeKey] = useState<ApiKey | null>(null);
-  const email = useMemo(
-    () => new Map((users.data?.users ?? []).map((u) => [u.id, u.email])),
-    [users.data],
-  );
   return (
     <Card title="API keys — plaintext returned exactly once, sha256 at rest">
-      <Table<ApiKey>
+      <DataList<ApiKey>
+        listId="api-keys"
+        noun="API keys"
+        endpoint="/v1/keys"
+        exportPath="/v1/keys/export.xlsx"
+        queryKey={["admin", "keys", "list"]}
+        legacyKey="keys"
+        defaultSort={{ key: "created", dir: "desc" }}
         columns={[
-          { key: "name", header: "Name", render: (k) => k.name },
-          { key: "user", header: "User", sort: (k) => email.get(k.userId) ?? "", render: (k) => email.get(k.userId) ?? "—" },
-          { key: "created", header: "Created", sort: (k) => k.createdAt, render: (k) => ago(k.createdAt) },
-          { key: "used", header: "Last used", render: (k) => (k.lastUsedAt ? ago(k.lastUsedAt) : "never") },
+          { key: "name", header: "Name", main: true, sortable: true, render: (k) => k.name },
+          { key: "user", header: "User", main: true, sortable: true, render: (k) => k.userEmail ?? "—" },
+          { key: "created", header: "Created", main: true, sortable: true, render: (k) => ago(k.createdAt) },
+          { key: "used", header: "Last used", main: true, sortable: true, render: (k) => (k.lastUsedAt ? ago(k.lastUsedAt) : "never") },
+          { key: "expires", header: "Expires", main: true, sortable: true, render: (k) => (k.expiresAt ? ago(k.expiresAt) : "never") },
           {
             key: "status",
             header: "Status",
-            sort: (k) => (k.revokedAt ? 1 : 0),
-            render: (k) => (k.revokedAt ? <Badge tone="danger">revoked</Badge> : <Badge tone="ok">active</Badge>),
+            main: true,
+            sortable: true,
+            required: "Status is always shown",
+            render: (k) => <Badge tone={KEY_TONE[keyState(k)]}>{keyState(k)}</Badge>,
           },
           {
             key: "actions",
             header: "",
             srHeader: "Actions",
             align: "right",
+            action: true,
             render: (k) =>
               k.revokedAt ? null : (
                 <Button size="sm" variant="danger" onClick={() => setRevokeKey(k)}>
@@ -970,11 +981,7 @@ function ApiKeysCard() {
               ),
           },
         ]}
-        rows={q.data?.keys ?? []}
         rowKey={(k) => k.id}
-        loading={q.isLoading}
-        error={q.error}
-        onRetry={() => void q.refetch()}
         empty={
           <EmptyState
             title="No API keys yet"
@@ -985,7 +992,7 @@ function ApiKeysCard() {
       <ConfirmModal
         open={revokeKey !== null}
         title="Revoke this key for good?"
-        body={`The holder of “${revokeKey?.name}” (${email.get(revokeKey?.userId ?? "") ?? "unknown"}) can no longer authenticate with it. This cannot be undone — issue a new key instead.`}
+        body={`The holder of “${revokeKey?.name}” (${revokeKey?.userEmail ?? "unknown"}) can no longer authenticate with it. This cannot be undone — issue a new key instead.`}
         danger
         confirmLabel="Revoke key"
         onCancel={() => setRevokeKey(null)}
