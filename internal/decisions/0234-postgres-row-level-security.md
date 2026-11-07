@@ -14,7 +14,7 @@ application's object-level checks. ADR-0060 lists database least privilege and R
 migration enabled RLS, every runtime query ran as the table owner (a superuser in the local demo, docker-compose and
 CI), and a forgotten `WHERE` was enough to return another user's rows.
 
-**The inventory found no tenant key.** No table of the 329 in `public` has an `org_id` or `tenant_id` column. That is
+**The inventory found no tenant key.** No table of the 339 in `public` (counted at the 2026-11-07 head; 329 when slice 1 was written, 338 in the whole-build review) has an `org_id` or `tenant_id` column. That is
 deliberate: ADR-0041 decision 1 makes one deployment one customer and one org, and says un-`tenant_id`'d objects are the
 intended shape. An `org_id` with a single value in every row would guard nothing inside a deployment. The row boundaries
 that do exist inside one deployment are the user and the project. The inventory by the column that scopes each table
