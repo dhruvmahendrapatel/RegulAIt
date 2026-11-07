@@ -3,7 +3,7 @@
  * LIVE beside the type select (never a silent match), exactly like the legacy
  * intake; only routable change types are offered.
  */
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
@@ -14,18 +14,31 @@ import {
   Button,
   Card,
   EmptyState,
-  ErrorState,
   Field,
+  IdChip,
   Input,
   RowActions,
   Select,
   StatusBadge,
-  Table,
 } from "../../ui/kit";
+import { DataList, type DataColumn } from "../../ui/DataList";
 import { useToast } from "../../ui/toast";
 import { useSession } from "../../session/SessionContext";
 import { AbortWorkflowDialog, canAbort } from "./workflowAbort";
 import v from "../views.module.css";
+
+/** ADR-0226: the change-requests list's columns; the ids and sortable ones match the gateway's WORKFLOWS_LIST */
+export const WORKFLOW_COLUMNS: Array<DataColumn<WorkflowInstanceSummary>> = [
+  { key: "change", header: "Change", main: true, sortable: true, render: (i) => <span style={{ fontWeight: 550 }}>{i.change?.description ?? ""}</span> },
+  { key: "status", header: "Status", main: true, sortable: true, required: "Status is always shown", render: (i) => <StatusBadge status={i.status} /> },
+  { key: "type", header: "Type", main: true, sortable: true, render: (i) => (i.change?.changeType ? humanize(i.change.changeType) : "") },
+  { key: "created", header: "Created", main: true, sortable: true, render: (i) => <span className={v.faint}>{ago(i.createdAt)}</span> },
+  { key: "updated", header: "Last change", main: true, sortable: true, render: (i) => <span className={v.faint}>{i.updatedAt ? ago(i.updatedAt) : "—"}</span> },
+  { key: "environment", header: "Environment", sortable: true, render: (i) => i.change?.environment ?? <span className={v.faint}>—</span> },
+  { key: "target", header: "Target system", sortable: true, render: (i) => i.change?.targetSystem ?? <span className={v.faint}>—</span> },
+  { key: "project", header: "Project", sortable: true, render: (i) => (i.projectId ? <IdChip id={i.projectId} /> : <span className={v.faint}>—</span>) },
+  { key: "id", header: "Workflow id", sortable: true, render: (i) => <IdChip id={i.id} /> },
+];
 
 export default function WorkflowsPage() {
   const navigate = useNavigate();
@@ -35,21 +48,23 @@ export default function WorkflowsPage() {
   const { auth } = useSession();
   const [aborting, setAborting] = useState<WorkflowInstanceSummary | null>(null);
 
-  const q = useQuery({
-    queryKey: ["workflows"],
-    queryFn: () => api.get<WorkflowListResponse>("/v1/workflows/instances"),
-  });
+  // the intake form's routable change types arrive with each page of the list (one read, not two)
+  const [intake, setIntake] = useState<Pick<WorkflowListResponse, "changeTypes" | "routes">>({});
+  const onRows = useCallback((_rows: WorkflowInstanceSummary[], raw: Record<string, unknown>) => {
+    const body = raw as Pick<WorkflowListResponse, "changeTypes" | "routes">;
+    setIntake({ changeTypes: body.changeTypes ?? [], routes: body.routes ?? [] });
+  }, []);
   const projectsQ = useQuery({
     queryKey: ["projects"],
     queryFn: () => api.get<{ projects: Project[] }>("/v1/projects"),
   });
   const projects = projectsQ.data?.projects ?? [];
-  const changeTypes = q.data?.changeTypes ?? [];
+  const changeTypes = intake.changeTypes ?? [];
   const routes = useMemo(() => {
     const out: Record<string, string[]> = {};
-    for (const r of q.data?.routes ?? []) out[r.changeType] = r.templates ?? [];
+    for (const r of intake.routes ?? []) out[r.changeType] = r.templates ?? [];
     return out;
-  }, [q.data]);
+  }, [intake]);
 
   const [description, setDescription] = useState("");
   const [changeType, setChangeType] = useState("");
@@ -167,77 +182,56 @@ export default function WorkflowsPage() {
         </Card>
 
         <Card title="Your change requests" flush>
-          {q.isError ? (
-            <ErrorState message={(q.error as Error).message} onRetry={() => void q.refetch()} />
-          ) : (
-            <Table
-              columns={[
-                {
-                  key: "change",
-                  header: "Change",
-                  render: (i) => <span style={{ fontWeight: 550 }}>{i.change?.description ?? ""}</span>,
-                  sort: (i) => i.change?.description ?? "",
-                },
-                {
-                  key: "status",
-                  header: "Status",
-                  render: (i) => <StatusBadge status={i.status} />,
-                  sort: (i) => i.status,
-                },
-                {
-                  key: "type",
-                  header: "Type",
-                  render: (i) => (i.change?.changeType ? humanize(i.change.changeType) : ""),
-                  sort: (i) => i.change?.changeType ?? "",
-                },
-                {
-                  key: "created",
-                  header: "Created",
-                  render: (i) => <span className={v.faint}>{ago(i.createdAt)}</span>,
-                  sort: (i) => i.createdAt,
-                },
-                {
-                  key: "actions",
-                  header: "",
-                  srHeader: "Actions",
-                  align: "right",
-                  render: (i) => (
-                    <RowActions
-                      slot="5rem"
-                      secondary={
-                        auth?.userId && canAbort(i.status) && (
-                          <Button
-                            size="sm"
-                            variant="danger"
-                            aria-label={`Abort ${i.change?.description ?? i.id}`}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setAborting(i);
-                            }}
-                          >
-                            Abort
-                          </Button>
-                        )
-                      }
-                    />
-                  ),
-                },
-              ]}
-              rows={q.data?.instances}
-              rowKey={(i) => i.id}
-              loading={q.isLoading}
-              error={q.error}
-              onRetry={() => void q.refetch()}
-              onRowClick={(i) => navigate(`/workflows/${i.id}`)}
-              rowLabel={(i) => `Open workflow ${i.change?.description ?? i.id}`}
-              empty={
-                <EmptyState
-                  title="No workflow instances yet"
-                  body="Start a governed change above — every stage is tracked, every sign-off recorded."
-                />
-              }
-            />
-          )}
+          <DataList<WorkflowInstanceSummary>
+            listId="workflows"
+            noun="change requests"
+            endpoint="/v1/workflows/instances"
+            exportPath="/v1/workflows/instances/export.xlsx"
+            queryKey={["workflows", "list"]}
+            legacyKey="instances"
+            count="estimate"
+            defaultSort={{ key: "created", dir: "desc" }}
+            onRows={onRows}
+            columns={[
+              ...WORKFLOW_COLUMNS,
+              {
+                key: "actions",
+                header: "",
+                srHeader: "Actions",
+                align: "right",
+                action: true,
+                render: (i) => (
+                  <RowActions
+                    slot="5rem"
+                    secondary={
+                      auth?.userId && canAbort(i.status) && (
+                        <Button
+                          size="sm"
+                          variant="danger"
+                          aria-label={`Abort ${i.change?.description ?? i.id}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setAborting(i);
+                          }}
+                        >
+                          Abort
+                        </Button>
+                      )
+                    }
+                  />
+                ),
+              },
+            ]}
+            rowKey={(i) => i.id}
+            onRowClick={(i) => navigate(`/workflows/${i.id}`)}
+            rowLabel={(i) => `Open workflow ${i.change?.description ?? i.id}`}
+            empty={
+              <EmptyState
+                title="No workflow instances yet"
+                body="Start a governed change above — every stage is tracked, every sign-off recorded."
+              />
+            }
+          />
         </Card>
       </div>
       {aborting && (
