@@ -169,6 +169,9 @@ const DEADLINE_BOUND = Symbol.for("regulait.model.deadlineBoundFetch");
  * expires. `AbortSignal.timeout` does not hold the event loop open, and an abort
  * that lands after a fully-consumed body is a no-op.
  *
+ * Since ADR-0253 the Gemini adapter rides `@ai-sdk/google`, which is handed this
+ * same bound fetch, so the binding (and the body-stream half of it) is unchanged.
+ *
  * A caller-supplied signal is PRESERVED and composed with `AbortSignal.any`, so
  * this can never take away a cancellation the caller already arranged.
  */
