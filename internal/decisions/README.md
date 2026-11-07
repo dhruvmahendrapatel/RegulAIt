@@ -18,7 +18,7 @@ Rows are in number order, one per ADR file, four cells each (a `|` inside a cell
 | [0007](0007-six-p0-pillars.md) | Escalate to six co-equal P0 pillars (supersedes token-opt "standard feature" framing) | Accepted | 2026-07-22 |
 | [0008](0008-eight-p0-pillars.md) | Escalate to eight co-equal P0 pillars (multi-agent orchestration, PM-tool integration) | Accepted | 2026-07-24 |
 | [0009](0009-typescript-fastify-stack.md) | TypeScript/Fastify stack with a hand-rolled policy kernel for the governance MVP | Accepted | 2026-07-24 |
-| [0010](0010-pm-inbound-sync-webhooks-plus-read-through.md) | PM-tool inbound sync: webhooks + live read-through, no polling | Accepted | 2026-07-25 |
+| [0010](0010-pm-inbound-sync-webhooks-plus-read-through.md) | PM-tool inbound sync: webhooks + live read-through, no polling. **Amended 2026-11-07 (S-03, migration 0304):** replay protection on every inbound path: a per-connection delivery record (body hash, plus the provider delivery id) answers a duplicate 200, audited and unprocessed; signed timestamps within 300 s for Linear and the generic contract; the static header and the legacy hash fallback are removed. | Accepted | 2026-07-25 |
 | [0011](0011-shared-projects-on-one-project-entity.md) | Shared Projects extend the one `projects` entity; conflicts ride the one approvals queue | Accepted | 2026-07-25 |
 | [0012](0012-admin-portal-single-file-api-client.md) | Admin portal MVP: dependency-free single-file web app, strictly an API client | Accepted | 2026-07-25 |
 | [0013](0013-dev-app-deploy-single-ec2-compose.md) | Dev app deployment: one EC2 box running docker compose, SSM-only, separate Terraform state | Accepted | 2026-07-25 |

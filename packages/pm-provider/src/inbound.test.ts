@@ -10,10 +10,16 @@ import {
   parseJiraInboundWebhook,
   parseLinearInboundWebhook,
   parseMondayInboundWebhook,
+  inboundDeliveryKey,
+  signGenericInboundWebhook,
+  PM_WEBHOOK_REPLAY_WINDOW_SECONDS,
   type InboundWebhookInput,
 } from "./index.js";
 
 const SECRET = "rglwh_test_secret_0123456789abcdef";
+/** the tests own the clock (ms) */
+const NOW = 1_785_000_000_000;
+const NOW_S = NOW / 1000;
 
 const sig = (secret: string, body: string) =>
   createHmac("sha256", secret).update(body).digest("hex");
@@ -24,6 +30,7 @@ const input = (over: Partial<InboundWebhookInput> & { rawBody?: string }): Inbou
   rawBody: "{}",
   secret: SECRET,
   connectionProject: "PROJ",
+  nowMs: NOW,
   ...over,
 });
 
@@ -101,6 +108,7 @@ describe("linear inbound (linear-signature = hex HMAC-SHA256 of the raw body)", 
   const issueBody = JSON.stringify({
     action: "update",
     type: "Issue",
+    webhookTimestamp: NOW,
     data: {
       id: "lin-uuid-1",
       identifier: "REG-9",
@@ -126,7 +134,7 @@ describe("linear inbound (linear-signature = hex HMAC-SHA256 of the raw body)", 
         },
       ],
     });
-    const removeBody = JSON.stringify({ action: "remove", type: "Issue", data: { id: "lin-uuid-1" } });
+    const removeBody = JSON.stringify({ action: "remove", type: "Issue", webhookTimestamp: NOW, data: { id: "lin-uuid-1" } });
     const removed = parseLinearInboundWebhook(
       input({ headers: { "linear-signature": sig(SECRET, removeBody) }, rawBody: removeBody }),
     );
@@ -151,6 +159,7 @@ describe("linear inbound (linear-signature = hex HMAC-SHA256 of the raw body)", 
     const commentBody = JSON.stringify({
       action: "create",
       type: "Comment",
+      webhookTimestamp: NOW,
       data: { id: "cmt-1", body: "nice", issueId: "lin-uuid-1" },
     });
     const commented = parseLinearInboundWebhook(
@@ -160,12 +169,31 @@ describe("linear inbound (linear-signature = hex HMAC-SHA256 of the raw body)", 
       kind: "events",
       events: [{ externalId: "lin-uuid-1", event: "commented", fields: { comment: "nice" } }],
     });
-    const projBody = JSON.stringify({ action: "update", type: "Project", data: { id: "p1" } });
+    const projBody = JSON.stringify({ action: "update", type: "Project", webhookTimestamp: NOW, data: { id: "p1" } });
     expect(
       parseLinearInboundWebhook(
         input({ headers: { "linear-signature": sig(SECRET, projBody) }, rawBody: projBody }),
       ),
     ).toEqual({ kind: "ignored", reason: "linear Project events are not consumed" });
+  });
+
+  it("S-03: the signed webhookTimestamp must be inside the replay window, either side; a body without one is refused", () => {
+    const signed = (body: string) => input({ headers: { "linear-signature": sig(SECRET, body) }, rawBody: body });
+    const at = (ts: number | undefined) =>
+      JSON.stringify({ action: "update", type: "Issue", ...(ts === undefined ? {} : { webhookTimestamp: ts }), data: { id: "x" } });
+    const W = PM_WEBHOOK_REPLAY_WINDOW_SECONDS * 1000;
+    // boundary: exactly the window is accepted (non-vacuity of the refusals below)
+    expect(parseLinearInboundWebhook(signed(at(NOW - W))).kind).toBe("events");
+    expect(parseLinearInboundWebhook(signed(at(NOW + W))).kind).toBe("events");
+    expect(() => parseLinearInboundWebhook(signed(at(NOW - W - 1)))).toThrow(/replay window/);
+    expect(() => parseLinearInboundWebhook(signed(at(NOW + W + 1)))).toThrow(/replay window/);
+    expect(() => parseLinearInboundWebhook(signed(at(undefined)))).toThrow(/no signed webhookTimestamp/);
+    // a stale replay is a verification failure (401), not a malformed payload
+    try {
+      parseLinearInboundWebhook(signed(at(NOW - W - 1)));
+    } catch (err) {
+      expect((err as PmProviderError).status).toBe(401);
+    }
   });
 });
 
@@ -356,44 +384,81 @@ describe("azure_devops inbound (service-hook basic auth; created/updated payload
   });
 });
 
-describe("generic_webhook/mock inbound (signed normalized envelope; legacy header still accepted)", () => {
+describe("generic_webhook/mock inbound (S-03: timestamped signature only; the static header is gone)", () => {
   const body = JSON.stringify({ externalId: "7", event: "updated", state: "in_review" });
+  const ts = String(NOW_S);
+  const genericSig = (secret: string, t: string, b: string) => `sha256=${sig(secret, `${t}.${b}`)}`;
 
-  it("verifies x-regulait-signature (sha256=<hex HMAC>) over the raw body — outbound symmetry", () => {
-    const res = parseGenericInboundWebhook(
-      input({ headers: { "x-regulait-signature": `sha256=${sig(SECRET, body)}` }, rawBody: body }),
-    );
+  it("verifies x-regulait-signature over \"<x-regulait-timestamp>.<raw body>\"", () => {
+    const res = parseGenericInboundWebhook(input({ headers: signGenericInboundWebhook(SECRET, body, NOW_S), rawBody: body }));
     expect(res).toEqual({
       kind: "events",
       events: [{ externalId: "7", event: "updated", state: "in_review" }],
     });
+    expect(signGenericInboundWebhook(SECRET, body, NOW_S)).toEqual({
+      "x-regulait-timestamp": ts,
+      "x-regulait-signature": genericSig(SECRET, ts, body),
+    });
   });
 
-  it("keeps accepting the legacy x-regulait-webhook-secret header; neither mechanism → throws", () => {
-    const res = parseGenericInboundWebhook(
-      input({ headers: { "x-regulait-webhook-secret": SECRET }, rawBody: body }),
-    );
-    expect(res.kind).toBe("events");
+  it("refuses the static x-regulait-webhook-secret header, even holding the right secret", () => {
+    expect(() =>
+      parseGenericInboundWebhook(input({ headers: { "x-regulait-webhook-secret": SECRET }, rawBody: body })),
+    ).toThrow(/requires x-regulait-timestamp and x-regulait-signature/);
     expect(() => parseGenericInboundWebhook(input({ rawBody: body }))).toThrow(PmProviderError);
-    expect(() =>
-      parseGenericInboundWebhook(
-        input({ headers: { "x-regulait-webhook-secret": "wrong" }, rawBody: body }),
-      ),
-    ).toThrow(PmProviderError);
   });
 
-  it("a presented signature takes precedence: a BAD signature is rejected even with a valid legacy header", () => {
+  it("refuses the body-only signature of the first cut, and a timestamp the signature does not cover", () => {
+    // the old contract: a correct HMAC of the body alone, with a timestamp header added
     expect(() =>
       parseGenericInboundWebhook(
-        input({
-          headers: {
-            "x-regulait-signature": `sha256=${sig("wrong-key", body)}`,
-            "x-regulait-webhook-secret": SECRET,
-          },
-          rawBody: body,
-        }),
+        input({ headers: { "x-regulait-timestamp": ts, "x-regulait-signature": `sha256=${sig(SECRET, body)}` }, rawBody: body }),
       ),
-    ).toThrow(/x-regulait-signature/);
+    ).toThrow(/verification failed/);
+    // a valid signature for one timestamp, presented with another (moving a capture into the window)
+    expect(() =>
+      parseGenericInboundWebhook(
+        input({ headers: { "x-regulait-timestamp": String(NOW_S + 1), "x-regulait-signature": genericSig(SECRET, ts, body) }, rawBody: body }),
+      ),
+    ).toThrow(/verification failed/);
+    expect(() =>
+      parseGenericInboundWebhook(input({ headers: { ...signGenericInboundWebhook(SECRET, body, NOW_S), "x-regulait-timestamp": "1e9" }, rawBody: body })),
+    ).toThrow(/not unix seconds/);
+  });
+
+  it("refuses a correctly signed but stale (or future) delivery; the window edge is accepted", () => {
+    const W = PM_WEBHOOK_REPLAY_WINDOW_SECONDS;
+    const at = (s: number) => input({ headers: signGenericInboundWebhook(SECRET, body, s), rawBody: body });
+    expect(parseGenericInboundWebhook(at(NOW_S - W)).kind).toBe("events");
+    expect(parseGenericInboundWebhook(at(NOW_S + W)).kind).toBe("events");
+    expect(() => parseGenericInboundWebhook(at(NOW_S - W - 1))).toThrow(/replay window/);
+    expect(() => parseGenericInboundWebhook(at(NOW_S + W + 1))).toThrow(/replay window/);
+  });
+});
+
+describe("inboundDeliveryKey (S-03 dedup key)", () => {
+  it("is the body sha256 plus the provider delivery id where one is sent", () => {
+    const body = JSON.stringify({ id: "ado-evt-1", eventType: "workitem.updated" });
+    const k = inboundDeliveryKey("azure_devops", input({ rawBody: body }));
+    expect(k.contentSha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(k.deliveryId).toBe("ado-evt-1");
+    expect(inboundDeliveryKey("jira", input({ headers: { "x-atlassian-webhook-identifier": "jw-1" } })).deliveryId).toBe("jw-1");
+    expect(inboundDeliveryKey("linear", input({ headers: { "linear-delivery": "ld-1" } })).deliveryId).toBe("ld-1");
+    expect(
+      inboundDeliveryKey("monday", input({ rawBody: JSON.stringify({ event: { triggerUuid: "tu-1" } }) })).deliveryId,
+    ).toBe("tu-1");
+    expect(inboundDeliveryKey("asana", input({ headers: { "x-atlassian-webhook-identifier": "x" } })).deliveryId).toBeNull();
+    expect(inboundDeliveryKey("generic_webhook", input({})).deliveryId).toBeNull();
+    // a non-JSON body still has a body key
+    expect(inboundDeliveryKey("monday", input({ rawBody: "not json" }))).toMatchObject({ deliveryId: null });
+  });
+
+  it("a different body is a different key; an over-long id is stored as its sha256", () => {
+    const a = inboundDeliveryKey("asana", input({ rawBody: "{\"a\":1}" }));
+    const b = inboundDeliveryKey("asana", input({ rawBody: "{\"a\":2}" }));
+    expect(a.contentSha256).not.toBe(b.contentSha256);
+    const long = inboundDeliveryKey("jira", input({ headers: { "x-atlassian-webhook-identifier": "z".repeat(500) } }));
+    expect(long.deliveryId).toMatch(/^sha256:[0-9a-f]{64}$/);
   });
 });
 
@@ -402,7 +467,7 @@ describe("parseInboundWebhook registry", () => {
     const body = JSON.stringify({ externalId: "1", event: "deleted" });
     const viaMock = parseInboundWebhook(
       "mock",
-      input({ headers: { "x-regulait-webhook-secret": SECRET }, rawBody: body }),
+      input({ headers: signGenericInboundWebhook(SECRET, body, NOW_S), rawBody: body }),
     );
     expect(viaMock).toEqual({ kind: "events", events: [{ externalId: "1", event: "deleted" }] });
     const viaJira = parseInboundWebhook(
