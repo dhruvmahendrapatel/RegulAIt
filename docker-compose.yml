@@ -350,6 +350,18 @@ services:
       REGULAIT_DATABASE_SSL: ${REGULAIT_DATABASE_SSL:-disable}
       REGULAIT_DATA_KEY: ${REGULAIT_DATA_KEY:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
       REGULAIT_BOOTSTRAP_TOKEN: ${REGULAIT_BOOTSTRAP_TOKEN:-dev-bootstrap}
+      # ADR-0167 amendment (S-02): the two published values above are REFUSED
+      # unless the gateway listens on loopback only, which a container never
+      # does (it listens on every interface so Caddy and the port publish can
+      # reach it). So this stack refuses to boot with them until you either set
+      # real values in .env (scripts/install.sh generates them) or opt in for a
+      # laptop with REGULAIT_ALLOW_DEV_SECRETS=1. The opt-in prints a banner and
+      # writes an audit row on every boot. Never set it with --profile tls,
+      # hosted or tunnel.
+      REGULAIT_ALLOW_DEV_SECRETS: ${REGULAIT_ALLOW_DEV_SECRETS:-}
+      # S-02: the bootstrap token retires once an admin has signed in.
+      # REGULAIT_BOOTSTRAP_AFTER_ADMIN=1 keeps it working (a relaxation, printed).
+      REGULAIT_BOOTSTRAP_AFTER_ADMIN: ${REGULAIT_BOOTSTRAP_AFTER_ADMIN:-}
       # ADR-0189 R25 item 12: WHERE THE INSTALL-GENERATED RECEIPT SIGNING KEY LIVES. With no
       # REGULAIT_RECEIPT_SIGNING_KEY / _ID set, the gateway's first boot (and scripts/install.sh)
       # creates one Ed25519 key here, mode 0600, create-exclusive and never overwritten, on the
@@ -409,6 +421,11 @@ services:
       # `scripts/install.sh --mode` writes this into the rendered .env, so an
       # installed deployment gets its real mode without anyone editing a file.
       REGULAIT_DEPLOY_MODE: ${REGULAIT_DEPLOY_MODE:-}
+      # ADR-0029 / ADR-0167 amendment (S-02): the HSTS header the gateway sends,
+      # and a deploy signal the dev-secrets refusal reads. Forwarded with NO
+      # default on purpose: unset here stays unset in the container (the
+      # one-year default), whereas an empty value would mean "no header".
+      REGULAIT_HSTS:
       # ADR-0060 — WHERE THE AUDIT-CHAIN HEAD IS ANCHORED. Naming a bucket is
       # the whole opt-in: with it set the gateway uses the S3 Object-Lock sink,
       # without it the local `./audit-anchors` buffer, and

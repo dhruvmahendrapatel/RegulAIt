@@ -507,6 +507,10 @@ async function main() {
     REGULAIT_DEPLOY_MODE: DEPLOY_MODE,
     DATABASE_URL: `${PG}/${DB}`,
     REGULAIT_BOOTSTRAP_TOKEN: BOOT,
+    // ADR-0167 amendment (S-02): the demo seed creates an active admin, which
+    // retires the bootstrap token by default; this harness drives the gateway
+    // with that token throughout, so it keeps it working (a test-only relaxation).
+    REGULAIT_BOOTSTRAP_AFTER_ADMIN: "1",
     REGULAIT_DATA_KEY: DATA_KEY,
     PORT: String(GATEWAY_PORT),
   };

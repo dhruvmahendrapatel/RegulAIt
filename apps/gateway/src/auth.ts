@@ -5,6 +5,7 @@ import {
   scryptSync,
 } from "node:crypto";
 import { deploymentBaseUrl } from "./public-url.js";
+import { bootstrapAfterAdminRelaxed, bootstrapRetired } from "./dev-secrets.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   and,
@@ -198,6 +199,8 @@ export const AUTH_REFUSALS = [
   "virtual_key_expired",
   "api_key_expired",
   "api_key_revoked",
+  // ADR-0167 amendment (S-02): the bootstrap token once an active admin exists
+  "bootstrap_retired",
 ] as const;
 export type AuthRefusal = (typeof AUTH_REFUSALS)[number];
 
@@ -218,6 +221,9 @@ export const AUTH_REFUSAL_DETAIL: Record<AuthRefusal, string> = {
   api_key_expired:
     "this API key has expired and authenticates nothing — an admin must issue a new one (an expiry cannot be extended)",
   api_key_revoked: "this API key has been revoked and authenticates nothing",
+  bootstrap_retired:
+    "the bootstrap credential is retired because an administrator has signed in: sign in as that administrator " +
+    "(an operator should remove REGULAIT_BOOTSTRAP_TOKEN)",
 };
 
 export const TOKEN_PREFIX = "rgl_";
@@ -240,6 +246,8 @@ export async function authenticate(
   db: Db,
   bootstrapToken: string | undefined,
   authorizationHeader: string | undefined,
+  /** ADR-0167 amendment (S-02): keep the bootstrap token working after an active admin exists (a relaxation) */
+  bootstrapOpts: { afterAdmin?: boolean } = {},
 ): Promise<AuthContext | null | AuthRefusal> {
   // RFC 9110 §11.1: the auth-scheme is case-insensitive ("bearer" and "BEARER" are "Bearer")
   if (typeof authorizationHeader !== "string" || authorizationHeader.slice(0, 7).toLowerCase() !== "bearer ") return null;
@@ -247,6 +255,8 @@ export async function authenticate(
   if (token.length === 0) return null;
 
   if (bootstrapToken && constantTimeEqual(token, bootstrapToken)) {
+    const afterAdmin = bootstrapOpts.afterAdmin ?? bootstrapAfterAdminRelaxed(process.env);
+    if (await bootstrapRetired(db, afterAdmin)) return "bootstrap_retired";
     return { userId: null, isAdmin: true, via: "bootstrap" };
   }
 
@@ -702,7 +712,8 @@ export async function createSession(
 export async function resolveSession(
   db: Db,
   token: string,
-  bootstrapConfigured: boolean,
+  /** ADR-0167 amendment (S-02): a function answers "is the token configured AND not retired" (asked only for a bootstrap session) */
+  bootstrapConfigured: boolean | (() => Promise<boolean>),
   /** ADR-0039: the requesting client IP; when provided it is written into
    * last_seen_ip in the SAME update as the idle-slide (no extra query).
    * Omitted (undefined) leaves the stored value untouched. */
@@ -745,7 +756,7 @@ export async function resolveSession(
   if (row.lastSeenAt.getTime() + idleMinutes * 60_000 <= now) return null;
   if (row.userId === null) {
     // bootstrap-exchanged session: dies with the deploy-time token
-    if (!bootstrapConfigured) return null;
+    if (!(typeof bootstrapConfigured === "function" ? await bootstrapConfigured() : bootstrapConfigured)) return null;
     await db
       .update(authSessions)
       .set({
@@ -906,6 +917,8 @@ export class OidcEgressBlockedError extends Error {
 
 export interface AuthRouteOptions {
   bootstrapToken?: string;
+  /** ADR-0167 amendment (S-02): see BuildAppOptions.bootstrapAfterAdmin */
+  bootstrapAfterAdmin?: boolean;
   dataKey?: string;
 }
 
@@ -1466,7 +1479,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
   app.post("/auth/login-with-key", async (req, reply) => {
     if (!requireCsrfHeader(req, reply)) return reply;
     const body = loginWithKeySchema.parse(req.body);
-    const ctx = await authenticate(db, opts.bootstrapToken, `Bearer ${body.apiKey}`);
+    const ctx = await authenticate(db, opts.bootstrapToken, `Bearer ${body.apiKey}`, { afterAdmin: opts.bootstrapAfterAdmin });
     if (ctx === "disabled") {
       return reply.status(401).send({
         error: "user_disabled",
