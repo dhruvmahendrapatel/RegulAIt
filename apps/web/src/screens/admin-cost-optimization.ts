@@ -4,3 +4,5 @@ export { default as CostConsolidationPage } from "../views/admin/cost/CostConsol
 export { default as CostDashboardPage } from "../views/admin/cost/CostDashboardPage";
 export { default as OptimizationPage } from "../views/admin/cost/OptimizationPage";
 export { default as SpendMonitorPage } from "../views/admin/cost/SpendMonitorPage";
+// P3 (#453): the consolidation area (overview + full import lists) as one lazy chunk reached through this screen.
+export { CostConsolidationArea } from "../views/admin/cost/CostImportsPages";

@@ -166,6 +166,38 @@ docs-only or state-only diff never enters CI, so every §4 assertion is still ch
 *2026-10-24 (FS-55): `scripts/adr-index.test.mjs` checks §4.4 in CI, but only on a run that happens (a PR that
 touches code, or the weekly run of `main`). A docs-only ADR PR still skips CI, so run §6 step 1 by hand.*
 
+### 4.8 CI is split: fast checks on a PR, the full suite at merge time (owner decision, 2026-11-07)
+
+The free public-repo runner pool holds about 20 jobs at once and a full run was about 30, so only one PR's CI ran at
+a time and over 200 runs queued. Since 2026-11-07 (ADR-0252 addendum):
+
+| Event | What runs |
+|---|---|
+| `pull_request`, code changed | `ci.yml`: build, typecheck, package suites, static pre-flights (migration guard, licence gate), the four gateway shards. `security.yml`: everything (CodeQL, gitleaks, dependency audit, Trivy, engine image scans). `ui-enterprise.yml`: tokens, baseline guard and bundle size. `import-cycles.yml`. |
+| `pull_request`, `apps/web/**` (or `packages/shared/**`, the lockfile) changed | also the mocked SPA shards and the three enterprise browser jobs and screenshot pack |
+| `pull_request`, docs only | every `ci.yml` and `ui-enterprise.yml` job is skipped by `if:`; `build-and-test` still reports, and passes only if every part was skipped. Security still runs. |
+| `pull_request`, engine files changed | the engine build-and-compare, as before |
+| `merge_group`, push to `main`, nightly 03:17 UTC | everything: the above plus the SPA journeys, docker build, every SPA and browser shard, the demo journeys, gVisor and the engine build-and-compare |
+
+What this means for a builder:
+
+- A green PR is no longer the whole proof. The merge queue runs the full suite on the combined result; a failure
+  there drops the PR from the queue, and you fix it on the branch like any other red check.
+- To run the full suite on a branch before it is queued, use **Run workflow** (`workflow_dispatch`) on `ci.yml`,
+  `ui-enterprise.yml`, `demo.yml` or `gvisor.yml`.
+- A newer push to a PR cancels its older run. Every other run (merge group, push to main, schedule, manual) has a
+  concurrency group of its own (`github.run_id`), because GitHub cancels an older *pending* run in a shared group
+  whatever `cancel-in-progress` says.
+- The scope fails closed (`scripts/ci-scope.mjs`): a rename counts at both its paths, and a diff it cannot read means
+  a full run.
+- Required checks (set by the owner when the queue is enabled) are names that report on every PR and every merge
+  group: `build-and-test`, `SAST (CodeQL)`, `Secret scan (gitleaks)`, `Dependency audit (pnpm)`, `Image scan and SBOMs
+  (Trivy)` and `ui enterprise / all`. Never require a job gated by `scope` directly (a skip counts as a pass), a
+  path-filtered workflow (`import-cycles`, `integrations`, `endpoint-agent`, `engine-images-build`, `gvisor`, `demo`)
+  or a workflow without a `merge_group` trigger.
+- No job is gated by a workflow-level path filter any more where it can be required. Gate a new job on the `scope`
+  job's outputs (`.github/actions/ci-scope`): `code`, `web` or `full`.
+
 ## 5. Shared machine resources
 
 If both sessions run on **one** machine, these fight:
