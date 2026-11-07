@@ -171,10 +171,10 @@ jobs:
       # is made impossible to miss instead: a warning on the PR and the diff in
       # the job summary. Reviewers check it (docs/ops/SECURITY_CI.md).
       - name: Call out any change to a security allow-list
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
           # the gates' own code and configuration (unquoted on purpose: a path list)
           WATCHED: .gitleaks.toml security/ .github/workflows/security.yml .github/workflows/release-ai-bom.yml scripts/release-ai-bom.mjs packages/shared/src/bom/release-switch.ts packages/shared/src/bom/release-ai-bom.ts packages/shared/src/bom/release-sbom-identity.ts scripts/security-gate.mjs scripts/security-cosign-verify.sh scripts/security-suppressions.mjs scripts/security-runtime-contents.mjs Dockerfile :(glob)engines/*/Dockerfile :(glob)engines/*/licence-gate.mjs :(glob)engines/*/licence-allow.json
         run: |
@@ -193,13 +193,13 @@ jobs:
       - name: Scan the new commits
         env:
           EVENT: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.sha }}
         run: |
           set -euo pipefail
-          if [ "$EVENT" = "pull_request" ]; then
+          if [ "$EVENT" = "pull_request" ] || [ "$EVENT" = "merge_group" ]; then
             range="${BASE_SHA}..${HEAD_SHA}"
           elif [ "$EVENT" = "push" ] && [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
             range="${BEFORE}..${AFTER}"

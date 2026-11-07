@@ -2045,7 +2045,9 @@ export const usageExtractorVersions = pgTable(
   ],
 );
 
-/** ADR-0241: the sample-response test of one mapping version (append-only evidence; only the sample's hash is kept) */
+/** ADR-0241: the sample-response test of one mapping version. No route updates or deletes a test, but a test is not
+ * append-only: it is deleted with its version and agent (ON DELETE CASCADE). The audit rows are the record that outlives
+ * it. Only the sample's hash is kept. */
 export const usageExtractorTests = pgTable(
   "usage_extractor_tests",
   {
@@ -2235,6 +2237,11 @@ export const approvals = pgTable(
     check("approvals_quorum_check", sql`${t.quorum} BETWEEN 1 AND 5`),
     check("approvals_signature_mode_check", sql`${t.signatureMode} IN ('passkey', 'step_up', 'off')`),
     index("approvals_status_idx").on(t.status),
+    // ADR-0234 batch 2 (migration 0313): the participant branches of approvals_select / approvals_update
+    index("approvals_approver_user_idx").on(t.approverUserId),
+    index("approvals_named_approver_user_idx").on(t.namedApproverUserId),
+    index("approvals_decided_by_idx").on(t.decidedBy),
+    index("approvals_approver_role_idx").on(t.approverRoleId),
     check(
       "approvals_review_role_check",
       sql`(${t.reviewRoleId} IS NULL) = (${t.reviewRoleName} IS NULL) AND (${t.reviewRoleId} IS NULL) = (${t.reviewRound} IS NULL)`,
@@ -3522,7 +3529,7 @@ export const projects = pgTable("projects", {
    * fact does not resolve: `policy_unresolved`). Set only by `PUT /v1/execution-project-sensitivities/:projectId`
    * (a `settings_relax` step-up, audited). */
   isolationSensitivity: text("isolation_sensitivity"),
-  /** ADR-0206 G1 (migration 0298): set when an admin archives the project. An archived project keeps its spend,
+  /** ADR-0206 G1 (migration `project_archive`): set when an admin archives the project. An archived project keeps its spend,
    * approvals, context and audit history readable, but takes no new members, context or attributed calls (the
    * pre-dispatch gate refuses `project_archived`, so engine keys pinned to it stop working). NULL = active. Written
    * only by the archive/unarchive routes; the CHECK keeps the three columns together. */
@@ -6459,6 +6466,8 @@ export const approvalAssignments = pgTable(
     uniqueIndex("approval_assignments_approval_uq").on(t.approvalId),
     index("approval_assignments_assignee_idx").on(t.assigneeKind, t.assigneeId),
     index("approval_assignments_due_idx").on(t.slaState, t.dueAt),
+    // ADR-0234 batch 2 (migration 0313): the escalation branch of the approvals policies
+    index("approval_assignments_escalation_assignee_idx").on(t.escalationAssigneeId),
   ],
 );
 
@@ -13126,6 +13135,8 @@ export const approvalDecisions = pgTable(
     ),
     check("approval_decisions_reason_check", sql`${t.reason} IS NULL OR length(${t.reason}) <= 2000`),
     index("approval_decisions_approval_idx").on(t.approvalId, t.decidedAt),
+    // ADR-0234 batch 2 (migration 0313): the decider branch of the approvals policies
+    index("approval_decisions_decider_user_idx").on(t.deciderUserId),
   ],
 );
 export type ApprovalDecisionRow = typeof approvalDecisions.$inferSelect;
