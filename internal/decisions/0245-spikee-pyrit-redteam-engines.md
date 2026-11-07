@@ -84,8 +84,10 @@ goes through its own licence gate at build time (decision 8).
 
 7. **PyRIT's catalogue** (set ids `attack:<name>`). Local: `crescendo`, `tap`, `pair`, `red_teaming` (multi-turn,
    attacker and scorer), and `prompt_sending` and `skeleton_key` (single-turn, scorer). Not run:
-   `many_shot_jailbreak` (`cloud_only`: it fetches its examples from a remote repository) and `gcg` (`cloud_only`:
-   Azure ML and local weights). Objectives come from PyRIT's own seed files inside the MIT wheel. Every admitted
+   `many_shot_jailbreak` (`excluded_licence`: its bundled examples file has no authorship or licence record) and `gcg`
+   (`cloud_only`: Azure ML and local weights). Objectives come only from PyRIT's own AI Red Team seed files
+   (`datasets/seed_datasets/local/airt/*.prompt`, MIT), each pinned by sha256; the seed sets PyRIT took from third
+   parties (AdvBench, 0din, garak, psfuzz) are not used. Every admitted
    attack is classed **`offensive`**, so a PyRIT run waits for an approver (ADR-0187 owner decision 4). Each run spends
    attacker and scorer calls on top of the target's and produces harmful intermediate text by design. One param,
    `max_turns` (an integer from 1 to 10, default 5), bounds a conversation. The run's budget is the hard stop either

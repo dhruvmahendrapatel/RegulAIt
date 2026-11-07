@@ -16,6 +16,7 @@
  *                   come from PyRIT's own MIT seed files inside the wheel;
  *   - `cloud_only`  the attack needs a hosted service (Azure ML for GCG, Azure Content Safety, a remote dataset fetched
  *                   at run time), so it cannot run here;
+ *   - `excluded_licence` its bundled data has no authorship or licence record we could establish;
  *   - `missing_preseed` the attack needs local model weights the image does not carry.
  *
  * CLASSES. Every admitted attack is a jailbreak by conversation. They are classed `offensive` for the approvals rule
@@ -92,7 +93,7 @@ export const PYRIT_ATTACKS: readonly PyritAttackEntry[] = Object.freeze(
     at("red_teaming", "RedTeamingAttack", "local", true, "jailbreak", "high", "PyRIT's generic multi-turn red-teaming bot; attacker and scorer are the run's judge"),
     at("prompt_sending", "PromptSendingAttack", "local", false, "jailbreak", "medium", "single-turn objectives from PyRIT's own seed files, scored by the run's judge"),
     at("skeleton_key", "SkeletonKeyAttack", "local", false, "jailbreak", "high", "the published skeleton-key priming turn, scored by the run's judge"),
-    at("many_shot_jailbreak", "ManyShotJailbreakAttack", "cloud_only", false, null, "high", "fetches its many-shot examples from a remote repository at run time"),
+    at("many_shot_jailbreak", "ManyShotJailbreakAttack", "excluded_licence", false, null, "high", "its bundled many-shot examples (datasets/jailbreak/many_shot_examples.json) carry no authorship or licence record PyRIT's MIT grant can be shown to cover"),
     at("gcg", "GCG", "cloud_only", false, null, "high", "optimises suffixes on Azure ML with local model weights"),
   ].map((e) => Object.freeze(e)),
 );
