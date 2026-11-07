@@ -40,6 +40,11 @@
 import { z } from "zod";
 import { JUDGE_BACKED_SCORER_KINDS } from "./evals.js";
 import { GUARDRAIL_SCORER_KINDS } from "./trained-detectors.js";
+import {
+  EXTERNAL_SCORER_ADAPTERS,
+  vendorAdapterOptionsSchema,
+  vendorAdapterRefusal,
+} from "./guardrail-vendor-adapters.js";
 
 // ---------------------------------------------------------------------------
 // method provenance
@@ -244,8 +249,23 @@ export const createExternalScorerSchema = z
     /** which judge-backed (and, ADR-0220, guardrail) kinds the instrument claims to serve */
     scorerKinds: z.array(externalScorerKindSchema).min(1).max(EXTERNAL_SCORER_CLAIMABLE_KINDS.length),
     allowPlaintextHttp: z.boolean().optional(),
+    /** ADR-0237: which wire dialect the endpoint speaks (default `regulait`, the contract above) */
+    adapter: z.enum(EXTERNAL_SCORER_ADAPTERS).optional(),
+    /** ADR-0237: per-adapter options (OpenAI model, Lakera project) */
+    adapterOptions: vendorAdapterOptionsSchema.nullable().optional(),
+    /** ADR-0237: the vendor's list price per call, attributed on every call (null = unpriced, never invented) */
+    pricePerCallUsd: z.number().min(0).max(100).nullable().optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((b, ctx) => {
+    const refusal = vendorAdapterRefusal({
+      adapter: b.adapter ?? "regulait",
+      scorerKinds: b.scorerKinds,
+      allowPlaintextHttp: b.allowPlaintextHttp ?? false,
+      options: b.adapterOptions,
+    });
+    if (refusal) ctx.addIssue({ code: "custom", path: ["adapter"], message: refusal });
+  });
 export type CreateExternalScorer = z.infer<typeof createExternalScorerSchema>;
 
 export const updateExternalScorerSchema = z
@@ -255,6 +275,9 @@ export const updateExternalScorerSchema = z
     apiKey: z.string().min(1).max(4096).nullable().optional(),
     scorerKinds: z.array(externalScorerKindSchema).min(1).max(EXTERNAL_SCORER_CLAIMABLE_KINDS.length).optional(),
     allowPlaintextHttp: z.boolean().optional(),
+    adapter: z.enum(EXTERNAL_SCORER_ADAPTERS).optional(),
+    adapterOptions: vendorAdapterOptionsSchema.nullable().optional(),
+    pricePerCallUsd: z.number().min(0).max(100).nullable().optional(),
   })
   .strict()
   .refine((p) => Object.values(p).some((v) => v !== undefined), {

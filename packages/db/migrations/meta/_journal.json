@@ -1618,6 +1618,13 @@
       "when": 1785209000000,
       "tag": "0282_theme_account_org_lock",
       "breakpoints": true
+    },
+    {
+      "idx": 292,
+      "version": "7",
+      "when": 1785219000000,
+      "tag": "0292_guardrail_vendor_adapters",
+      "breakpoints": true
     }
   ]
 }
