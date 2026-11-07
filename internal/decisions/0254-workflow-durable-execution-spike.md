@@ -82,7 +82,15 @@ outside the ADR-0176 list or undeclared (`spikes/workflow-p30/THIRD_PARTY.md`).
    It takes a configurable schema, runs no HTTP hop, and can be driven inside our transactions with `add_job` /
    `addJob`. It is evaluated as a queue under the scheduler (`apps/gateway/src/scheduler.ts`), not as an execution engine.
    pg-boss (MIT) is the fallback.
-4. **The prototype stays on the branch as evidence.** It sits behind its default-off switch and no package imports it.
+4. **Patterns borrowed for the follow-up design (owner input, 2026-11-07), from trigger.dev and from this spike:**
+   - *Wait-for-token pauses.* A sign-off parks on a named token, and an authenticated route resumes it. This already
+     matches `blocked_on_approval` plus `applyWorkflowApprovalDecision`. Spike: `createHook({ token })` / `resumeHook()`.
+   - *Idempotency keys* on stage executions and their retries, so a redelivered job never runs a stage twice.
+   - *Per-queue concurrency limits* for the fan-out and retry jobs, for example per check kind and per project.
+
+   Each pattern goes into the runner under its own follow-up ADR, with the audit row kept in the transition's
+   transaction.
+5. **The prototype stays on the branch as evidence.** It sits behind its default-off switch and no package imports it.
    Nothing in `apps/` or `packages/` changes.
 
 ### Other permissively licensed durable-execution options (compared, not spiked)
@@ -98,6 +106,7 @@ re-checked before any re-evaluation.
 | **Temporal** (`@temporalio/*` 1.25.0) | MIT SDK, MIT server† | A separate server cluster with its own persistence | Works air-gapped, but adds a stateful cluster to every BYOC and air-gapped install (pillar 3). Too heavy for one control plane. |
 | **Restate** (`@restatedev/restate-sdk` 1.18.3) | MIT SDK, BSL 1.1 server† | A separate server | Excluded: BSL in shipped code (ADR-0176). |
 | **Inngest** (`inngest` 4.26.2) | Apache-2.0 SDK, SSPL server† | A separate server | Excluded: SSPL in shipped code (ADR-0176). |
+| **trigger.dev** (`@trigger.dev/sdk` 4.8.3, 2026-10-30) | MIT SDK on npm; Apache-2.0 platform† (owner input, 2026-11-07) | A self-hosted platform: webapp, supervisor, runners, Postgres, Redis, ClickHouse, Electric, a registry and object storage | **Rejected (owner input, 2026-11-07; nothing found here to contradict it).** The stack is heavy for every BYOC and air-gapped install. Telemetry is on unless `TRIGGER_TELEMETRY_DISABLED` is set, which fails ADR-0180. Checkpoints, warm starts and autoscaling are Cloud-only. Its runs, approvals and logs would duplicate our audit trail and Approvals Queue outside the gateway. The SDK licence on npm reads MIT, not the Apache-2.0 given in the owner's note; both are permissive, so the verdict stands. |
 
 ## Consequences
 
