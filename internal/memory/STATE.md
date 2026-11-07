@@ -5537,6 +5537,8 @@ audit, tool references, platform copies, ingested, machine, conversation, signed
 against `information_schema` and against the ADR's generated block. Open: whether to guard jsonb
 `config_versions.body` string leaves; ingested columns stay a residual.
 
+**ADR-0247 (builder, 2026-11-07): a permissively licensed injection and harm classifier, served as ONNX (P28).** `agents/trained-detectors/` now bakes `leolee99/PIGuard` (MIT) as the default injection classifier and keeps `protectai/deberta-v3-base-prompt-injection-v2` as `--build-arg INJECTION_MODEL=protectai`; harm stays `unitary/toxic-bert` with reasons mapped to our own labels (`HARM_LABELS.md`). A new `export` build stage (hash-locked `export-requirements.txt`) writes ONNX graphs offline from stock Transformers classes and fails unless they match PyTorch (same token ids, |dp| < 1e-4); the runtime closure (`requirements.txt`) is ONNX Runtime + tokenizers + Presidio/spaCy, no PyTorch. Measured with ADR-0244's `eval_baselines.py` from P25 commit `cc4da9a6` (not yet merged), threshold 0.5: PIGuard NotInject FPR 11.5%, InjecAgent recall 80.0%, AgentDojo recall 76.3% / FPR 11.3%, pooled recall 78.9% / FPR 11.5% (ProtectAI: 42.8%, 84.3%, 72.6% / 3.1%, 80.7% / 33.9%). After P25 merges, re-run `eval_baselines.py --write` on main. Open owner decision: PIGuard's training set includes CC BY-NC 4.0 sources (Alpaca, no_robots); options (a) accept, (b) build the ProtectAI variant, (c) fine-tune deberta-v3-base on the permissive subset. The image stays outside the shipped product (ADR-0220 §8).
+
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
 (b) standing policy for future scaffolds recorded (ADR-0006, no implementation yet — nothing to
