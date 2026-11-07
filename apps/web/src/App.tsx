@@ -7,7 +7,7 @@ import { SkeletonBlock } from "./ui/kit";
 import { RouteFallback, RouteLoadingAnnouncer } from "./shell/RouteFallback";
 import { RootRouteError, ShellRouteBoundary } from "./shell/RouteError";
 import AppShell from "./shell/AppShell";
-import { RequireAdmin } from "./views/admin/adminKit";
+import { RequireAdmin } from "./views/admin/RequireAdmin";
 
 // ADR-0196 U4: the screens load on demand. Each module under ./screens is one chunk, the screens of one console
 // section (the admin groups in shell/suites.tsx) or one workspace area; a section's screens share their code, so
