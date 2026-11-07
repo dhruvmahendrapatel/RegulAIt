@@ -234,12 +234,15 @@ beforeAll(async () => {
   });
   expect(rule.statusCode, rule.body).toBe(201);
 
-  const compat = await app.inject({
-    method: "PUT",
-    headers: AUTH,
-    url: "/v1/interception/settings",
-    payload: { openaiCompatEnabled: true },
-  });
+  // a relaxation through the bootstrap credential: wrapped, as an earlier file may leave a steppable admin behind
+  const compat = await relaxStepUpAround(db, () =>
+    app.inject({
+      method: "PUT",
+      headers: AUTH,
+      url: "/v1/interception/settings",
+      payload: { openaiCompatEnabled: true },
+    }),
+  );
   expect(compat.statusCode, compat.body).toBe(200);
 }, 120_000);
 

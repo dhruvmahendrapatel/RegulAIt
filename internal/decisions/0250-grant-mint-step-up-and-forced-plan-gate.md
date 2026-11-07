@@ -103,7 +103,8 @@ flow was found that needs execute during planning: the seed leaves plan-only bef
   while no admin can give one, and the shared test database may hold such an admin left by an earlier file. The
   setup file `testing/bootstrap-grant-mint.ts` repeats such a mint once inside `relaxStepUpAround` (what suites already
   do by hand for egress relaxations), and ONLY when the refusal is the bootstrap credential's own; API-key and session
-  mints, and every other refusal, reach the test unchanged.
+  mints, and every other refusal, reach the test unchanged. It hooks app instances through Fastify's `fastify.initialization`
+  diagnostics channel and loads no gateway module at setup time, so a suite's own `vi.mock()`s still apply.
 - Tests: `adr0250-grant-mint-step-up.test.ts` (all eight routes: admin API key refused, no grant refused, another
   mint's grant refused and unspent, the exact grant allowed and spent); `plan-only.test.ts` (the opt-in regression test
   is replaced by one asserting the refusal; naming another instance does not get round a planning one; the run path;
