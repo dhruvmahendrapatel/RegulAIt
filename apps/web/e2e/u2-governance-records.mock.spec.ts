@@ -538,6 +538,8 @@ test.describe("U2: governance records", () => {
     await expectAxeClean(page, "run lineage");
 
     await page.goto("/ui/admin/scheduler");
+    // I-2 (#453): a job's full history is in its expanded row
+    await page.getByRole("button", { name: "Details: approval-sla" }).click();
     await page.getByRole("button", { name: "Show the full run history of approval-sla" }).click();
     const history = page.getByTestId("scheduler-history-approval-sla");
     await expect(history).toContainText("database unreachable");

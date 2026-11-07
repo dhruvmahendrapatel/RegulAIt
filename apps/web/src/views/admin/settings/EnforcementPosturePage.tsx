@@ -43,7 +43,7 @@ import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
 import { plural } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, InfoButton, Table, Tabs, tabIds, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, InfoButton, Table, TabPanel, Tabs, type Tone } from "../../../ui/kit";
 import { QueryGate, orgSettingsQuery, useAction } from "../adminKit";
 import { BomPostureCard, receiptKeysQuery, type ReceiptSigningKeyPosture } from "./BomPostureCard";
 import { bomUnresolved, discoveryUnresolved, isolationUnresolved, orgSettingsUnresolved, tabLabel } from "./postureTabs";
@@ -359,19 +359,19 @@ export default function EnforcementPosturePage() {
           />
           {/* every panel stays mounted (hidden when not selected), so an unsaved draft in one card survives a save in another */}
           {/* ADR-0186 R / S / V: receipts, anchor timestamps, vendored detection content, outbound credential audience */}
-          <PosturePanel id="evidence" tab={tab}>
+          <TabPanel idPrefix="posture" id="evidence" active={tab}>
             <OrgSettingsCard title="Evidence and detection" keys={EVIDENCE_KEYS} testId="evidence-detection-settings" />
-          </PosturePanel>
+          </TabPanel>
           {/* ADR-0189 §7 / §10: the receipt key and the BOM settings */}
-          <PosturePanel id="bom" tab={tab}>
+          <TabPanel idPrefix="posture" id="bom" active={tab}>
             <BomPostureCard receiptKey={report?.receiptSigningKey} />
-          </PosturePanel>
+          </TabPanel>
           {/* ADR-0190 decision 11 (owner decision A, enforce-only): the isolation settings, the same card as under Engines */}
-          <PosturePanel id="isolation" tab={tab}>
+          <TabPanel idPrefix="posture" id="isolation" active={tab}>
             <IsolationSettingsCard />
-          </PosturePanel>
+          </TabPanel>
           {/* ADR-0195 SD0: sources enabled, static credentials, stale credentials, write scope unverified */}
-          <PosturePanel id="discovery" tab={tab}>
+          <TabPanel idPrefix="posture" id="discovery" active={tab}>
             {report?.discovery ? (
               <DiscoveryPostureCard posture={report.discovery} />
             ) : (
@@ -379,18 +379,10 @@ export default function EnforcementPosturePage() {
                 <p role="status">This gateway did not report its discovery posture, so it is unknown.</p>
               </Card>
             )}
-          </PosturePanel>
+          </TabPanel>
         </QueryGate>
       </div>
     </>
   );
 }
 
-function PosturePanel(props: { id: string; tab: string; children: ReactNode }) {
-  const ids = tabIds("posture", props.id);
-  return (
-    <div role="tabpanel" id={ids.panel} aria-labelledby={ids.tab} hidden={props.tab !== props.id}>
-      {props.children}
-    </div>
-  );
-}
