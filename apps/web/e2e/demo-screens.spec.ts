@@ -349,6 +349,9 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
       await passPolicyGate(morgan, gate);
     }
     await morgan.goto("/ui/inbox");
+    // the gate can render after the "Welcome back" heading the sign-in resolved on; meet it here too, the same way
+    await expect(morgan.getByRole("heading", { name: "Inbox" }).or(gate)).toBeVisible();
+    await passPolicyGate(morgan, gate);
     await expect(morgan.getByRole("heading", { name: "Inbox" })).toBeVisible();
     const row = morgan
       .locator("div")
@@ -410,6 +413,9 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
     expect(ok, "demo:prepare's output names Avery").toBe(true);
     await passPolicyGate(avery, gate);
     await avery.goto("/ui/inbox");
+    // as for Morgan: the gate can render after the heading the sign-in resolved on
+    await expect(avery.getByRole("heading", { name: "Inbox" }).or(gate)).toBeVisible();
+    await passPolicyGate(avery, gate);
     await expect(avery.getByRole("heading", { name: "Inbox" })).toBeVisible();
     await capture(avery, AVERY, "ds-g2a-avery-inbox");
     const review = avery.getByRole("button", { name: /^Review sign-off for / });

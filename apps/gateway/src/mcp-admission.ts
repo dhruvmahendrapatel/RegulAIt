@@ -45,6 +45,9 @@
  */
 
 import type { FastifyInstance } from "fastify";
+import { wantsListContract, type ListSpec } from "./list-contract.js";
+import { answerListExport, answerListPage, type ContractList } from "./list-contract-route.js";
+import { getTableColumns } from "@regulait/db";
 import {
   and,
   auditLog,
@@ -566,7 +569,34 @@ export function registerMcpAdmissionRoutes(app: FastifyInstance, db: Db) {
    * can see WHAT is held, WHY, and under which scanner version, without
    * needing a second tool.
    */
-  app.get("/v1/mcp/admission", async () => {
+  // ADR-0226: with any of sort/dir/cursor/offset/count the review queue
+  // answers the shared list contract (`state` narrows, e.g. `held`); with
+  // none of them, exactly the response below. Never the server URL: the
+  // held list does not show it, and a URL can carry a credential.
+  const heldList: ContractList<HeldServerRow, { state?: string }> = {
+    spec: MCP_ADMISSION_LIST,
+    filters: z.object({ state: z.string().min(1).max(32).optional() }).strict(),
+    reader: {
+      fetch: (q) =>
+        db
+          .select({ ...HELD_SERVER_COLUMNS, _cursorAt: q.cursorAt })
+          .from(mcpServers)
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset),
+      countable: (where) => db.select({ one: sql`1` }).from(mcpServers).where(where),
+      idOf: (r) => r.id,
+    },
+    where: (_req, f) => and(ne(mcpServers.admissionState, "clean"), f.state ? eq(mcpServers.admissionState, f.state as never) : undefined),
+    extra: async () => {
+      const mode = await loadAdmissionMode(db);
+      return { mode, enforcing: mode === "enforce", holdAt: MCP_ADMISSION_HOLD_AT, scannerVersion: MCP_ADMISSION_SCANNER_VERSION };
+    },
+  };
+  app.get("/v1/mcp/admission/export.xlsx", async (req, reply) => answerListExport(db, req, reply, heldList));
+  app.get("/v1/mcp/admission", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, heldList);
     const mode = await loadAdmissionMode(db);
     const rows = await db
       .select({
@@ -699,3 +729,45 @@ export function registerMcpAdmissionRoutes(app: FastifyInstance, db: Db) {
     return reply.send({ ...cleared.row, ...(aiBomSnapshotWarning ? { aiBomSnapshotWarning } : {}) });
   });
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0226: the MCP admission queue under the shared list contract
+// ---------------------------------------------------------------------------
+
+const HELD_SERVER_COLUMNS = {
+  id: mcpServers.id,
+  name: mcpServers.name,
+  admissionState: mcpServers.admissionState,
+  admissionSeverity: mcpServers.admissionSeverity,
+  admissionScannedAt: mcpServers.admissionScannedAt,
+  admissionFindings: mcpServers.admissionFindings,
+  admissionScannerVersion: mcpServers.admissionScannerVersion,
+};
+type HeldServerRow = Pick<typeof mcpServers.$inferSelect, keyof typeof HELD_SERVER_COLUMNS>;
+const heldFindingText = (f: unknown): string => {
+  const list = Array.isArray(f) ? (f as Array<{ rule?: unknown; where?: unknown; severity?: unknown; count?: unknown }>) : [];
+  return list.length ? list.map((x) => `${String(x.rule)} in ${String(x.where)} (${String(x.severity)}, ×${String(x.count)})`).join("; ") : "no findings recorded";
+};
+
+export const MCP_ADMISSION_LIST: ListSpec<HeldServerRow> = {
+  id: "mcp-admission",
+  sorts: {
+    name: { expr: sql`lower(${mcpServers.name})` },
+    sev: { expr: mcpServers.admissionSeverity },
+    findings: { expr: sql`jsonb_array_length(coalesce(${mcpServers.admissionFindings}, '[]'::jsonb))` },
+    state: { expr: mcpServers.admissionState },
+    scanned: { expr: mcpServers.admissionScannedAt },
+    scanner: { expr: mcpServers.admissionScannerVersion },
+  },
+  columns: {
+    name: { label: "Server", value: (r) => r.name },
+    sev: { label: "Severity", value: (r) => r.admissionSeverity },
+    findings: { label: "Findings", value: (r) => heldFindingText(r.admissionFindings) },
+    state: { label: "State", value: (r) => r.admissionState },
+    scanned: { label: "Scanned", value: (r) => r.admissionScannedAt },
+    scanner: { label: "Scanner version", value: (r) => r.admissionScannerVersion },
+  },
+  filters: ["state"],
+  defaultSort: { col: "scanned", dir: "desc" },
+  idCol: mcpServers.id,
+};
