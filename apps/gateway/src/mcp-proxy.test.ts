@@ -12,7 +12,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { z } from "zod";
-import { and, auditLog, connectors, createDb, eq, inArray, mcpTools, modelCredentials, pmSyncEvents, projects, runMigrations, usageEvents, type Db } from "@regulait/db";
+import { and, auditLog, connectors, createDb, eq, inArray, mcpTools, modelCredentials, pmSyncEvents, pmWebhookDeliveries, projects, runMigrations, usageEvents, type Db } from "@regulait/db";
 // ADR-0104 — the consent fingerprint the approvals queue row is bound to.
 import { approvalArgumentsDigest } from "@regulait/shared";
 import { resolveModelProvider, type MockModelProvider } from "@regulait/model-provider";
@@ -31,7 +31,8 @@ import { relaxApprovalSigningForTest } from "./testing/approval-signing-posture.
 import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
 import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 import { genericInbound } from "./testing/pm-webhook.js";
-import { signGenericInboundWebhook } from "@regulait/pm-provider";
+import { PM_UNSIGNED_DELIVERY_MAX_AGE_DAYS, signGenericInboundWebhook } from "@regulait/pm-provider";
+import { PM_WEBHOOK_DELIVERY_RETENTION_DAYS } from "./pm.js";
 // ADR-0186 A2+B: this suite pins pre-0186 single-approver tool-call approvals (decided
 // through API keys, unsigned); signing and the sensitive quorum are relaxed for its run
 // and restored after (M-068). Dual control and signing are proved in zz-b4ab-*.
@@ -4255,7 +4256,7 @@ describe("provider-native inbound webhooks (pillar 8 depth)", () => {
 
     // phase 2: a signed thin event batch — accepted (202), unlinked gid → matched:false
     const events = JSON.stringify({
-      events: [{ action: "changed", resource: { gid: "asana-task-1", resource_type: "task" } }],
+      events: [{ action: "changed", created_at: new Date().toISOString(), resource: { gid: "asana-task-1", resource_type: "task" } }],
     });
     const signed = await app.inject({
       method: "POST", url: "/v1/pm/webhooks/asana-inbound",
@@ -4302,7 +4303,7 @@ describe("provider-native inbound webhooks (pillar 8 depth)", () => {
     const event = await app.inject({
       method: "POST", url: `/v1/pm/webhooks/monday-inbound?token=${secret}`,
       payload: {
-        event: { type: "update_column_value", pulseId: 4321, boardId: 777, columnId: "status", value: { label: { text: "Done" } } },
+        event: { triggerTime: new Date().toISOString(), type: "update_column_value", pulseId: 4321, boardId: 777, columnId: "status", value: { label: { text: "Done" } } },
       },
     });
     expect(event.statusCode).toBe(202);
@@ -4323,7 +4324,7 @@ describe("provider-native inbound webhooks (pillar 8 depth)", () => {
     const native = await app.inject({
       method: "POST", url: `/v1/pm/webhooks/jira-inbound?token=${secret}`,
       payload: {
-        webhookEvent: "jira:issue_updated",
+        timestamp: Date.now(), webhookEvent: "jira:issue_updated",
         issue: { id: "10042", key: "REG-7", fields: { summary: "Build API", status: { name: "Done" } } },
       },
     });
@@ -4332,14 +4333,14 @@ describe("provider-native inbound webhooks (pillar 8 depth)", () => {
 
     const wrongToken = await app.inject({
       method: "POST", url: "/v1/pm/webhooks/jira-inbound?token=rglwh_wrong",
-      payload: { webhookEvent: "jira:issue_updated", issue: { id: "10042" } },
+      payload: { timestamp: Date.now(), webhookEvent: "jira:issue_updated", issue: { id: "10042" } },
     });
     expect(wrongToken.statusCode).toBe(401);
 
     // valid but irrelevant traffic must 200 — Jira disables erroring webhooks
     const irrelevant = await app.inject({
       method: "POST", url: `/v1/pm/webhooks/jira-inbound?token=${secret}`,
-      payload: { webhookEvent: "sprint_started" },
+      payload: { timestamp: Date.now(), webhookEvent: "sprint_started" },
     });
     expect(irrelevant.statusCode).toBe(200);
     expect(irrelevant.json().ok).toBe(true);
@@ -4361,7 +4362,7 @@ describe("provider-native inbound webhooks (pillar 8 depth)", () => {
       method: "POST" as const,
       url: `/v1/pm/webhooks/jira-replay?token=${secret}`,
       headers: { "content-type": "application/json", "x-atlassian-webhook-identifier": "jira-delivery-1" },
-      payload: JSON.stringify({ webhookEvent: "jira:issue_updated", issue: { id: "REPLAY-1", fields: { status: { name: "Done" } } } }),
+      payload: JSON.stringify({ timestamp: Date.now(), webhookEvent: "jira:issue_updated", issue: { id: "REPLAY-1", fields: { status: { name: "Done" } } } }),
     };
     const countEvents = async () =>
       (await db.select().from(pmSyncEvents).where(eq(pmSyncEvents.connectionId, connId))).length;
@@ -4379,7 +4380,7 @@ describe("provider-native inbound webhooks (pillar 8 depth)", () => {
     // a DIFFERENT body under the same provider delivery id is a duplicate too (a provider retry)
     const retry = await app.inject({
       ...delivery,
-      payload: JSON.stringify({ webhookEvent: "jira:issue_updated", issue: { id: "REPLAY-1", fields: { status: { name: "Doing" } } } }),
+      payload: JSON.stringify({ timestamp: Date.now(), webhookEvent: "jira:issue_updated", issue: { id: "REPLAY-1", fields: { status: { name: "Doing" } } } }),
     });
     expect(retry.json()).toEqual({ ok: true, duplicate: true });
     expect(await countEvents()).toBe(1);
@@ -4388,7 +4389,7 @@ describe("provider-native inbound webhooks (pillar 8 depth)", () => {
     const fresh = await app.inject({
       ...delivery,
       headers: { ...delivery.headers, "x-atlassian-webhook-identifier": "jira-delivery-2" },
-      payload: JSON.stringify({ webhookEvent: "jira:issue_updated", issue: { id: "REPLAY-1", fields: { status: { name: "Review" } } } }),
+      payload: JSON.stringify({ timestamp: Date.now(), webhookEvent: "jira:issue_updated", issue: { id: "REPLAY-1", fields: { status: { name: "Review" } } } }),
     });
     expect(fresh.statusCode).toBe(202);
     expect(await countEvents()).toBe(2);
@@ -4399,7 +4400,52 @@ describe("provider-native inbound webhooks (pillar 8 depth)", () => {
       .where(and(eq(auditLog.ruleId, "pm-webhook-duplicate"), eq(auditLog.objectId, connId)));
     expect(dupAudits).toHaveLength(2);
     expect(dupAudits[0]!.effect).toBe("deny");
+
+    // S-03 review finding 2: once the delivery record is pruned, an OLD capture is still refused by its in-body age
+    await db.delete(pmWebhookDeliveries).where(eq(pmWebhookDeliveries.connectionId, connId));
+    const stale = await app.inject({
+      ...delivery,
+      headers: { ...delivery.headers, "x-atlassian-webhook-identifier": "jira-delivery-old" },
+      payload: JSON.stringify({ timestamp: Date.now() - 8 * 86_400_000, webhookEvent: "jira:issue_updated", issue: { id: "REPLAY-1", fields: { status: { name: "Old" } } } }),
+    });
+    expect(stale.statusCode).toBe(401);
+    expect(await countEvents()).toBe(2);
     expect(JSON.stringify(dupAudits)).not.toContain(secret);
+  });
+
+  it("S-03 review finding 2: the in-body max age is shorter than the delivery-record retention, so no replay falls between them", () => {
+    expect(PM_UNSIGNED_DELIVERY_MAX_AGE_DAYS).toBeGreaterThan(0);
+    expect(PM_UNSIGNED_DELIVERY_MAX_AGE_DAYS).toBeLessThan(PM_WEBHOOK_DELIVERY_RETENTION_DAYS);
+  });
+
+  it("S-03 review finding 3: the same signed delivery sent twice CONCURRENTLY is processed exactly once", async () => {
+    const conn = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/pm/connections",
+      payload: { name: "asana-concurrent", provider: "asana", project: "999", token: "asana-pat-concurrent" },
+    });
+    expect(conn.statusCode).toBe(201);
+    const secret = conn.json().webhookSecret as string;
+    const connId = conn.json().id as string;
+    const body = JSON.stringify({
+      events: [{ action: "changed", created_at: new Date().toISOString(), resource: { gid: "asana-race-1", resource_type: "task" } }],
+    });
+    const delivery = {
+      method: "POST" as const, url: "/v1/pm/webhooks/asana-concurrent",
+      headers: { "content-type": "application/json", "x-hook-signature": createHmac("sha256", secret).update(body).digest("hex") },
+      payload: body,
+    };
+    const [a, b] = await Promise.all([app.inject(delivery), app.inject(delivery)]);
+    const outcomes = [a, b].map((r) => ({ status: r.statusCode, body: r.json() as Record<string, unknown> }));
+    // exactly one processed (202), exactly one acknowledged as a duplicate (200)
+    expect(outcomes.filter((o) => o.status === 202)).toHaveLength(1);
+    expect(outcomes.filter((o) => o.status === 200 && o.body.duplicate === true && o.body.ok === true)).toHaveLength(1);
+    const events = await db.select().from(pmSyncEvents).where(eq(pmSyncEvents.connectionId, connId));
+    expect(events).toHaveLength(1);
+    const dupAudits = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.ruleId, "pm-webhook-duplicate"), eq(auditLog.objectId, connId)));
+    expect(dupAudits).toHaveLength(1);
   });
 
   it("generic_webhook: a timestamped x-regulait-signature verifies inbound traffic; S-03 refuses the old forms and replays", async () => {
@@ -4427,6 +4473,18 @@ describe("provider-native inbound webhooks (pillar 8 depth)", () => {
     const replayed = await app.inject(signedDelivery);
     expect(replayed.statusCode).toBe(200);
     expect(replayed.json()).toEqual({ ok: true, duplicate: true });
+
+    // a bad x-regulait-signature with a fresh timestamp is refused
+    const badSig = await app.inject({
+      method: "POST", url: "/v1/pm/webhooks/generic-inbound",
+      headers: {
+        "content-type": "application/json",
+        "x-regulait-timestamp": String(Math.floor(Date.now() / 1000)),
+        "x-regulait-signature": "sha256=deadbeef",
+      },
+      payload: body,
+    });
+    expect(badSig.statusCode).toBe(401);
 
     // the first cut's body-only signature, and the static header with the right secret: both refused
     const bodyOnly = await app.inject({

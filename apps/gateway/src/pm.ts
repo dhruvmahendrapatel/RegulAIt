@@ -1129,6 +1129,13 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
           results.push(await processInboundEvent(conn, event));
         }
       } catch (err) {
+        // Known limits (review of #717, findings 4 and 5), accepted and recorded in the ADR-0010 amendment:
+        //  - a multi-event batch (Asana) that fails at event N has applied events 1..N-1; the provider's retry applies
+        //    them again. Each is a state report (inbound state, orphan, drift audit), so a repeat re-records the same
+        //    facts rather than inventing new ones.
+        //  - a concurrent duplicate that arrived while this attempt ran was already answered 200 and dropped. With the
+        //    record gone, the event is processed again only if the provider retries THIS attempt's 5xx, which every
+        //    supported provider does.
         await db.delete(pmWebhookDeliveries).where(eq(pmWebhookDeliveries.id, recorded.id));
         throw err;
       }
@@ -1594,7 +1601,8 @@ export async function fileGovernanceAlertTicket(
 export const PM_WEBHOOK_DELIVERY_RETENTION_DAYS = 30;
 
 /** S-03: drop delivery records past the retention, on the database clock. Hygiene, not enforcement: within the
- * retention a replay is refused; past it, the signed-timestamp window (where a provider signs one) still refuses it. */
+ * retention a replay is refused by the record; past it, by the signed-timestamp window (Linear, generic) or by the
+ * in-body creation-time limit (PM_UNSIGNED_DELIVERY_MAX_AGE_DAYS, shorter than the retention) for the rest. */
 export async function prunePmWebhookDeliveries(
   db: Db,
   retentionDays: number = PM_WEBHOOK_DELIVERY_RETENTION_DAYS,

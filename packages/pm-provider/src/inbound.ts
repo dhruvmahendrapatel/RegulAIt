@@ -32,7 +32,9 @@
  *     plus the provider's own delivery id where it sends one. A second
  *     delivery with either value is acknowledged and not processed.
  * Jira, monday, Azure DevOps and Asana sign no timestamp, so for them the
- * delivery record is the only replay wall; that is stated, not hidden.
+ * second wall is the creation time inside the token-guarded or signed body,
+ * no older than PM_UNSIGNED_DELIVERY_MAX_AGE_DAYS (shorter than the record's
+ * retention); see requireRecentUnsignedDelivery.
  */
 
 import { createHash, createHmac } from "node:crypto";
@@ -190,7 +192,7 @@ const jiraPayloadSchema = z
   })
   .passthrough();
 
-export function parseJiraInboundWebhook(input: InboundWebhookInput): InboundWebhookResult {
+function parseJiraVerified(input: InboundWebhookInput): InboundWebhookResult {
   requireUrlToken(input, "jira");
   const parsed = jiraPayloadSchema.safeParse(parseJsonBody(input, "jira"));
   if (!parsed.success) {
@@ -356,7 +358,7 @@ const asanaPayloadSchema = z
   })
   .passthrough();
 
-export function parseAsanaInboundWebhook(input: InboundWebhookInput): InboundWebhookResult {
+function parseAsanaVerified(input: InboundWebhookInput): InboundWebhookResult {
   const hookSecret = input.headers["x-hook-secret"];
   if (typeof hookSecret === "string") {
     // establishment handshake: echo the header, process nothing
@@ -434,7 +436,7 @@ const mondayPayloadSchema = z
   })
   .passthrough();
 
-export function parseMondayInboundWebhook(input: InboundWebhookInput): InboundWebhookResult {
+function parseMondayVerified(input: InboundWebhookInput): InboundWebhookResult {
   requireUrlToken(input, "monday");
   const parsed = mondayPayloadSchema.safeParse(parseJsonBody(input, "monday"));
   if (!parsed.success) {
@@ -540,7 +542,7 @@ function adoFieldValue(v: unknown): string | undefined {
   return undefined;
 }
 
-export function parseAzureDevOpsInboundWebhook(input: InboundWebhookInput): InboundWebhookResult {
+function parseAzureDevOpsVerified(input: InboundWebhookInput): InboundWebhookResult {
   const auth = input.headers.authorization;
   if (typeof auth !== "string" || !auth.startsWith("Basic ")) {
     throw new PmProviderError("azure_devops webhook requires basic-auth credentials", 401);
@@ -671,6 +673,99 @@ export function parseGenericInboundWebhook(input: InboundWebhookInput): InboundW
   // caller's validation error (ZodError → gateway 400), same as before
   return { kind: "events", events: [pmWebhookSchema.parse(parseJsonBody(input, "generic"))] };
 }
+
+// ---------------------------------------------------------------------------
+// S-03 review (#717, finding 2): providers that sign no timestamp. Jira and
+// monday authenticate with a URL token, Azure DevOps with a basic-auth
+// password, and Asana's HMAC covers the body only, so a captured delivery
+// stays verifiable for ever. The delivery record refuses a replay only while
+// it is kept (PM_WEBHOOK_DELIVERY_RETENTION_DAYS in the gateway, 30). So an
+// event delivery from these providers must ALSO carry its own creation time,
+// inside the token-guarded or signed body, no older than
+// PM_UNSIGNED_DELIVERY_MAX_AGE_DAYS and no more than the replay window in the
+// future. The max age is shorter than the retention, so every replay is
+// refused by one wall or the other: inside the max age the record still
+// exists; past it the age check refuses. A delivery with no such timestamp is
+// refused (fail closed). Handshakes and ignored payloads process nothing and
+// are not checked. Fields: jira `timestamp` (ms), asana every
+// `events[].created_at`, monday `event.triggerTime`, azure_devops
+// `createdDate`.
+// ---------------------------------------------------------------------------
+
+/** Oldest accepted in-body creation time for providers that sign no timestamp. Must stay below the gateway's delivery
+ * retention (30 days); the gateway test pins that. Seven days covers every provider's retry schedule. */
+export const PM_UNSIGNED_DELIVERY_MAX_AGE_DAYS = 7;
+
+const timeMs = (v: unknown): number | undefined => {
+  if (typeof v === "number") return v;
+  if (typeof v === "string" && v.trim() !== "") return Date.parse(v);
+  return undefined;
+};
+
+/** Every creation time a delivery carries in its body, or null when it carries none (refused). */
+function unsignedDeliveryTimes(provider: string, rawBody: string): number[] | null {
+  let body: unknown;
+  try {
+    body = JSON.parse(rawBody) as unknown;
+  } catch {
+    return null;
+  }
+  if (body === null || typeof body !== "object") return null;
+  const b = body as Record<string, unknown>;
+  const field = (o: unknown, k: string): unknown =>
+    o !== null && typeof o === "object" ? (o as Record<string, unknown>)[k] : undefined;
+  let raw: unknown[];
+  switch (provider) {
+    case "jira":
+      raw = [b.timestamp];
+      break;
+    case "azure_devops":
+      raw = [b.createdDate];
+      break;
+    case "monday":
+      raw = [field(b.event, "triggerTime")];
+      break;
+    case "asana":
+      raw = Array.isArray(b.events) ? b.events.map((e) => field(e, "created_at")) : [];
+      break;
+    default:
+      return null;
+  }
+  const times = raw.map(timeMs);
+  if (times.length === 0 || times.some((t) => t === undefined)) return null;
+  return times as number[];
+}
+
+function requireRecentUnsignedDelivery(
+  input: InboundWebhookInput,
+  provider: string,
+  result: InboundWebhookResult,
+): InboundWebhookResult {
+  if (result.kind !== "events") return result;
+  const times = unsignedDeliveryTimes(provider, input.rawBody);
+  if (times === null) {
+    throw new PmProviderError(`${provider} webhook delivery carries no creation timestamp in its body`, 401);
+  }
+  const now = input.nowMs ?? Date.now();
+  const oldest = now - PM_UNSIGNED_DELIVERY_MAX_AGE_DAYS * 86_400_000;
+  const newest = now + PM_WEBHOOK_REPLAY_WINDOW_SECONDS * 1000;
+  if (times.some((t) => !Number.isFinite(t) || t < oldest || t > newest)) {
+    throw new PmProviderError(
+      `${provider} webhook delivery timestamp is older than ${PM_UNSIGNED_DELIVERY_MAX_AGE_DAYS} days or in the future`,
+      401,
+    );
+  }
+  return result;
+}
+
+export const parseJiraInboundWebhook = (input: InboundWebhookInput): InboundWebhookResult =>
+  requireRecentUnsignedDelivery(input, "jira", parseJiraVerified(input));
+export const parseAsanaInboundWebhook = (input: InboundWebhookInput): InboundWebhookResult =>
+  requireRecentUnsignedDelivery(input, "asana", parseAsanaVerified(input));
+export const parseMondayInboundWebhook = (input: InboundWebhookInput): InboundWebhookResult =>
+  requireRecentUnsignedDelivery(input, "monday", parseMondayVerified(input));
+export const parseAzureDevOpsInboundWebhook = (input: InboundWebhookInput): InboundWebhookResult =>
+  requireRecentUnsignedDelivery(input, "azure_devops", parseAzureDevOpsVerified(input));
 
 // ---------------------------------------------------------------------------
 // Delivery key — what the gateway records once per connection so a replay is

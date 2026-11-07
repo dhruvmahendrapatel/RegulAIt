@@ -1316,6 +1316,7 @@ export {
   GENERIC_SIGNATURE_HEADER,
   GENERIC_TIMESTAMP_HEADER,
   PM_WEBHOOK_REPLAY_WINDOW_SECONDS,
+  PM_UNSIGNED_DELIVERY_MAX_AGE_DAYS,
   type InboundDeliveryKey,
   type InboundWebhookInput,
   type InboundWebhookResult,
