@@ -900,7 +900,7 @@ export const mcpServers = pgTable("mcp_servers", {
    * ON DELETE SET NULL: the server reads `unowned`/`orphaned`, it is never
    * deleted with its owner. */
   ownerUserId: uuid("owner_user_id").references(() => users.id, { onDelete: "set null" }),
-  /** ADR-0207 (migration 0278): NULL = enabled. Disabling refuses every tool call on the server, for agents and people; it is audited and
+  /** ADR-0207 (migration 0286): NULL = enabled. Disabling refuses every tool call on the server, for agents and people; it is audited and
    * needs a reason (10 to 1000 characters, CHECK); enabling again is a stepped-up relaxation. A delete is
    * allowed only while disabled. */
   disabledAt: timestamp("disabled_at", { withTimezone: true }),

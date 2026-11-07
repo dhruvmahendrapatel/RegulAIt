@@ -59,7 +59,7 @@ same transaction as their write. A refusal has its own code. No response or audi
   audited.
 - `GET /v1/connectors` returns `enabled`, the reason, when, and who disabled it (by email).
 
-### G4 — MCP servers and registries (migration 0278)
+### G4 — MCP servers and registries (migration 0286)
 
 - `POST /v1/servers/:serverId/enabled` as for connectors (`mcp-server-disabled` / `mcp-server-enabled`).
 - A disabled server refuses the proxy route before the transport is hijacked (403 `mcp_server_disabled`) and
@@ -71,7 +71,7 @@ same transaction as their write. A refusal has its own code. No response or audi
   resolution (`resolveNodeToolContext`), the on-demand sync, the protocol calls, the health probe and the rescan:
   no process is started, no socket opened and no stored manifest rewritten. Halts, admission and
   the circuit breaker stay separate facts.
-- 0278 adds a row trigger that advances the policy epoch only when `disabled_at` changes (the proxy rewrites the row
+- 0286 adds a row trigger that advances the policy epoch only when `disabled_at` changes (the proxy rewrites the row
   constantly for breaker state, so a statement trigger would invalidate every in-flight admission), plus a statement
   trigger on delete. It reuses `advance_governance_policy_epoch()`; no new function.
 - `DELETE /v1/servers/:serverId`: 409 `mcp_server_not_disabled`; 409 `mcp_server_in_use` while approvals, agent grants

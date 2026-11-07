@@ -1620,10 +1620,10 @@
       "breakpoints": true
     },
     {
-      "idx": 278,
+      "idx": 286,
       "version": "7",
       "when": 1785213000000,
-      "tag": "0278_mcp_server_disable",
+      "tag": "0286_mcp_server_disable",
       "breakpoints": true
     },
     {
