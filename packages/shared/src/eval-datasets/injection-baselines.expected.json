@@ -1,0 +1,96 @@
+{
+  "schema": "regulait.injection-eval-baselines.v1",
+  "tolerance": {
+    "precision": 0.02,
+    "recall": 0.02,
+    "fpr": 0.02
+  },
+  "detectors": {
+    "heuristic_prompt_injection": {
+      "gated": true,
+      "measuredWith": "promptInjectionDetector.detect (ADR-0042 built-in and vendored rules, no custom terms); flagged = any hit. Re-measured by injection-baselines.test.ts on every CI run.",
+      "threshold": null,
+      "datasets": {
+        "notinject": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "tn": 339,
+          "precision": null,
+          "recall": null,
+          "fpr": 0
+        },
+        "injecagent": {
+          "tp": 184,
+          "fp": 0,
+          "fn": 116,
+          "tn": 0,
+          "precision": 1,
+          "recall": 0.6133,
+          "fpr": null
+        },
+        "agentdojo": {
+          "tp": 27,
+          "fp": 0,
+          "fn": 108,
+          "tn": 97,
+          "precision": 1,
+          "recall": 0.2,
+          "fpr": 0
+        }
+      },
+      "pooled": {
+        "tp": 211,
+        "fp": 0,
+        "fn": 224,
+        "tn": 436,
+        "precision": 1,
+        "recall": 0.4851,
+        "fpr": 0
+      }
+    },
+    "trained_prompt_injection": {
+      "gated": false,
+      "measuredWith": "agents/trained-detectors/eval_baselines.py: protectai/deberta-v3-base-prompt-injection-v2@90c9989b1a342275dd0d1a95aad283c04e075671 through server.load_models and detector_core.score_injection (1,500-character windows, max score), CPU. Offline: the image is not built in CI.",
+      "threshold": 0.5,
+      "datasets": {
+        "notinject": {
+          "tp": 0,
+          "fp": 147,
+          "fn": 0,
+          "tn": 192,
+          "precision": 0.0,
+          "recall": null,
+          "fpr": 0.4336
+        },
+        "injecagent": {
+          "tp": 253,
+          "fp": 0,
+          "fn": 47,
+          "tn": 0,
+          "precision": 1.0,
+          "recall": 0.8433,
+          "fpr": null
+        },
+        "agentdojo": {
+          "tp": 98,
+          "fp": 3,
+          "fn": 37,
+          "tn": 94,
+          "precision": 0.9703,
+          "recall": 0.7259,
+          "fpr": 0.0309
+        }
+      },
+      "pooled": {
+        "tp": 351,
+        "fp": 150,
+        "fn": 84,
+        "tn": 286,
+        "precision": 0.7006,
+        "recall": 0.8069,
+        "fpr": 0.344
+      }
+    }
+  }
+}
