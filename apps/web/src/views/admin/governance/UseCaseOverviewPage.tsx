@@ -4,9 +4,9 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
 import type { DirectoryUser, UseCaseCondition, UseCaseLifecycleDetail, UseCaseResubmission, UseCaseReview, UseCaseRiskAcceptance } from "../../../api/types";
 import { ago, frameworkLabel, humanize, plural, providerLabel } from "../../../api/format";
-import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Modal, Select, Table, Tabs, Textarea, tabIds, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, ErrorState, Field, InfoButton, Input, Modal, RecordError, Select, SkeletonBlock, Table, Tabs, Textarea, tabIds, type Tone } from "../../../ui/kit";
 import { CardBoundary } from "../../../ui/CardBoundary";
-import { QueryGate, RemoveButton, useAction } from "../adminKit";
+import { NotAvailableToYou, QueryGate, RemoveButton, isRefusal, useAction } from "../adminKit";
 import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
 import rec from "./record.module.css";
@@ -26,6 +26,11 @@ import { useSession } from "../../../session/SessionContext";
 import { DecisionRecordTab } from "./DecisionRecordTab";
 import { IncidentsTab } from "./IncidentsTab";
 import { FeedbackTab } from "./FeedbackTab";
+// #453 (owner, 2026-11-07; design #743): the decision summary, the record's first tab
+import { UseCaseSummaryTab, tabHref } from "./UseCaseSummaryTab";
+import { useMarkMetFlow } from "./markMetFlow";
+import { conditionCounts, decisionPanel, nextAction, type Read } from "./useCaseSummaryModel";
+import u from "./useCaseSummary.module.css";
 import {
   EVIDENCE_LABEL,
   MEASUREMENT_STATE_LABEL,
@@ -72,6 +77,8 @@ interface AgentCardResponse {
 
 // A5: twelve tabs in four captioned groups, every one still a single click and its own ?tab= link
 const TABS = [
+  // #453 (owner, 2026-11-07): the decision summary comes first and is the default; every older tab keeps its ?tab= link
+  { id: "summary", label: "Summary", group: "Overview" },
   { id: "overview", label: "Overview", group: "Overview" },
   { id: "frameworks", label: "Frameworks", group: "Assessment" },
   { id: "risks", label: "Risks", group: "Assessment" },
@@ -109,7 +116,7 @@ export default function UseCaseOverviewPage() {
   const { id = "" } = useParams();
   const { auth } = useSession();
   const [params, setParams] = useSearchParams();
-  const tab = TABS.some((item) => item.id === params.get("tab")) ? params.get("tab")! : "overview";
+  const tab = TABS.some((item) => item.id === params.get("tab")) ? params.get("tab")! : "summary";
   const overview = useQuery({ queryKey: ["governance", "use-case-overview", id], queryFn: () => api.get<OverviewResponse>(`/v1/use-cases/${id}/overview`), enabled: Boolean(id) });
   // the approval's lifetime and its conditions ride on the use-case detail read
   const detail = useQuery({ queryKey: ["governance", "use-case-detail", id], queryFn: () => api.get<UseCaseLifecycleDetail>(`/v1/use-cases/${id}`), enabled: Boolean(id) });
@@ -119,7 +126,7 @@ export default function UseCaseOverviewPage() {
   const data = overview.data;
   // FS-46: the record's tab set is a real tablist with one labelled tabpanel
   const panel = tabIds("use-case", tab);
-  const tabLabel = TABS.find((item) => item.id === tab)?.label ?? "Overview";
+  const tabLabel = TABS.find((item) => item.id === tab)?.label ?? "Summary";
   const names = new Map((directory.data?.users ?? []).map((u) => [u.id, u.name ?? ""]));
   const userName = (userId: string | null) => (userId ? names.get(userId) || null : null);
 
@@ -136,119 +143,207 @@ export default function UseCaseOverviewPage() {
   // so while it is loading or failed they are said to be unknown, never empty
   const detailState: DetailState = detail.isSuccess ? "ok" : detail.isError ? "error" : "loading";
   const retryDetail = () => void detail.refetch();
+  const isAdmin = Boolean(auth?.isAdmin);
+  // the decision summary reads the same two reads; unknown is not none
+  const conditionsRead: Read<UseCaseCondition[]> = detail.isSuccess ? { state: "ok", value: conditions } : detail.isError ? { state: "error" } : { state: "loading" };
+  const counts = conditionCounts(conditions);
+  const onTab = (next: string) => setParams({ tab: next });
+
+  // #453 (2026-11-07): a failed read keeps the record's heading and breadcrumb; a 403 or 404 is the server's answer
+  if (!data) {
+    const httpStatus = (overview.error as { status?: number } | null)?.status;
+    return (
+      <>
+        <RecordBand isAdmin={isAdmin} name={null} />
+        {overview.isLoading ? (
+          <Card><SkeletonBlock lines={5} /></Card>
+        ) : httpStatus === 403 ? (
+          <Card>
+            <ErrorState
+              access
+              message="This use case is open to its owner, its reviewers and administrators, and the server refused it for your account. Nothing of the record is shown, so nothing was hidden here and left reachable."
+            />
+          </Card>
+        ) : httpStatus === 404 || httpStatus === 400 ? (
+          <Card><RecordError noun="use case" error={overview.error} action={isAdmin ? <Link to="/admin/use-cases">Back to the AI registry</Link> : <Link to="/">Back to Home</Link>} /></Card>
+        ) : (
+          <Card><ErrorState message={overview.error instanceof Error ? overview.error.message : "The use case could not be loaded."} onRetry={() => void overview.refetch()} /></Card>
+        )}
+      </>
+    );
+  }
+
+  const decision = decisionPanel({
+    status,
+    approvals: data.approvals,
+    reviews: detail.isSuccess ? { state: "ok", value: detail.data?.reviews ?? [] } : detail.isError ? { state: "error" } : { state: "loading" },
+    conditions: conditionsRead,
+    userName,
+  });
+  const next = nextAction({
+    status,
+    conditions: conditionsRead,
+    resubmissionAllowed: Boolean(resubmission),
+    returnReason: resubmission?.returnReason ?? null,
+    // the update form sits in the administration area, which stays admin-only
+    canOpenResubmit: isAdmin,
+  });
 
   return (
-    <QueryGate loading={overview.isLoading} error={overview.error} onRetry={() => void overview.refetch()}>
-      {data ? (
-        <>
-          <header className={rec.band}>
-            <div className={rec.bandMain}>
-              <nav aria-label="Breadcrumb">
-                <ol className={rec.crumbs}>
-                  <li>AI Governance</li>
-                  <li><Link to="/admin/use-cases">AI registry</Link></li>
-                  <li aria-current="page">{data.useCase.name}</li>
-                </ol>
-              </nav>
-              <div className={rec.titleRow}>
-                <span className={rec.typeTag}>AI use case</span>
-                <h1 className={rec.title} tabIndex={-1}>{data.useCase.name}</h1>
-              </div>
-              {data.useCase.description ? <p className={rec.sub}>{data.useCase.description}</p> : null}
-              <ul className={rec.chips} aria-label="Record status">
-                <li className={`${rec.chip} ${rec[`tone-${STATUS_TONE[status] ?? "neutral"}`] ?? ""}`}><span className={rec.chipLabel}>Status</span> {statusLabel(status)}</li>
-                <li className={`${rec.chip} ${data.screening.tier === "prohibited" ? rec["tone-danger"] : data.screening.tier === "high" ? rec["tone-warn"] : ""}`}>
-                  <span className={rec.chipLabel}>EU AI Act</span> {data.screening.screened ? `${humanize(data.screening.tier)} tier` : "Not screened"}
-                  <InfoButton label="the EU AI Act tier">
-                    <p>The tier from the EU AI Act screening rules. High tier brings obligations such as human oversight and logging. This is screening, not legal advice.</p>
-                  </InfoButton>
-                </li>
-                {recertification ? (
-                  <li className={`${rec.chip} ${rec["tone-warn"]}`}>{reReviewText(recertification.dueAt)}</li>
-                ) : approvedUntil ? (
-                  expired
-                    ? <li className={`${rec.chip} ${rec["tone-danger"]}`}>Approval expired {shortDate(approvedUntil)}</li>
-                    : <li className={`${rec.chip} ${rec["tone-ok"]}`}><span className={rec.chipLabel}>Approval valid until</span> {shortDate(approvedUntil)}</li>
-                ) : null}
-                <li className={rec.chip}><span className={rec.chipLabel}>Owner</span> {data.useCase.ownerName ?? "Unassigned"}</li>
-                {/* issue #522 #30: the record remembers where it was found; the finding opens for an admin */}
-                {detail.data?.discovery ? (
-                  <li className={rec.chip} data-testid="use-case-found-by">
-                    <span className={rec.chipLabel}>Found by</span>{" "}
-                    {detail.data.discovery.finding ? (
-                      <Link to="/admin/shadow-ai?tab=findings" aria-label={`discovery: open the Shadow-AI discovery findings (this use case came from ${detail.data.discovery.finding.subject})`}>discovery</Link>
-                    ) : "discovery"}
-                  </li>
-                ) : null}
-              </ul>
-            </div>
-            {resubmission || data.useCase.workflowInstanceId ? (
+    <>
+      <RecordBand
+        isAdmin={isAdmin}
+        name={data.useCase.name}
+        side={
+          <div className={u.bandSide}>
+            {/* status only: nothing here decides; decisions stay in the approval flow */}
+            <section className={u.decision} aria-label="Decision" data-testid="decision-panel">
+              <p className={u.decisionCaption}>Decision</p>
+              <p className={`${u.decisionTitle} ${u[`decision-${decision.tone}`] ?? ""}`}>{decision.title}</p>
+              {decision.by || decision.quorum ? (
+                <p className={u.decisionMeta}>{[decision.by, decision.quorum].filter(Boolean).join(" · ")}</p>
+              ) : null}
+              <Link className={u.decisionLink} to={tabHref("decisions")}>Open the decision records →</Link>
+            </section>
+            {(resubmission && isAdmin) || data.useCase.workflowInstanceId ? (
               <div className={rec.bandActions}>
                 {data.useCase.workflowInstanceId ? <Link className={rec.bandAction} to={`/workflows/${data.useCase.workflowInstanceId}`}>Open intake</Link> : null}
-                {resubmission ? <Link className={rr.bandPrimary} to={resubmitPath(id)}>Update and resubmit</Link> : null}
+                {resubmission && isAdmin ? <Link className={rr.bandPrimary} to={resubmitPath(id)}>Update and resubmit</Link> : null}
               </div>
             ) : null}
-          </header>
-          <div className={v.stack}>
-            <div className={rec.groupedTabs}>
-              <Tabs
-                tabs={TABS.map((t) => withTabCount(t, data))}
-                active={tab}
-                idPrefix="use-case"
-                label="Use case record sections"
-                onChange={(next) => setParams({ tab: next })}
-              />
-            </div>
-            {/* FS-20: a tab that fails to render says so in its own panel; the record, its band and the other tabs stay */}
-            <div role="tabpanel" id={panel.panel} aria-labelledby={panel.tab} className={v.stack}>
-            <CardBoundary key={tab} title={tabLabel}>
-            {tab === "overview" ? (
-              <OverviewTab
-                data={data}
-                status={status}
-                expired={expired}
-                approvedUntil={approvedUntil}
-                conditions={conditions}
-                detailState={detailState}
-                onRetryDetail={retryDetail}
-                rationales={detailRationales(detail.data)}
-                unsure={detailUnsure(detail.data)}
-                openBlocking={openBlocking}
-                recertification={recertification}
-                reviews={detail.data?.reviews ?? []}
-                resubmission={resubmission}
-                acceptance={acceptance}
-                userName={userName}
-                onTab={(next) => setParams({ tab: next })}
-                onRefresh={refresh}
-              />
-            ) : null}
-            {tab === "frameworks" ? <FrameworksTab query={frameworks} /> : null}
-            {tab === "risks" ? <RisksTab useCaseId={id} risks={data.risks} acceptance={acceptance} onRefresh={refresh} /> : null}
-            {tab === "stack" ? <StackTab useCaseId={id} data={data.stack} /> : null}
-            {tab === "dependencies" ? <Card title="Dependencies and inherited risk"><DependencyGraphPanel useCaseId={id} /></Card> : null}
-            {tab === "approvals" ? <ApprovalsTab approvals={data.approvals} userName={userName} /> : null}
-            {tab === "audit" ? <AuditTab rows={data.audit} total={data.auditTotal} useCaseId={data.useCase.id} isAdmin={Boolean(auth?.isAdmin)} /> : null}
-            {tab === "path" ? (
-              <Card title="Decision path">
-                <RunGraph source={{ kind: "use_case", useCaseId: id }} label={`Decision path of ${data.useCase.name}`} refreshKey={status} />
-              </Card>
-            ) : null}
-            {/* ADR-0182 (D4): each tab is its slice's own component file */}
-            {tab === "decisions" ? <DecisionRecordTab useCaseId={id} /> : null}
-            {tab === "incidents" ? <IncidentsTab useCaseId={id} /> : null}
-            {tab === "ai-bom" ? (
-              <Suspense fallback={<p role="status">Loading the AI BOM…</p>}>
-                <AiBomPanel key={id} subject={{ kind: "use_case", id }} />
-              </Suspense>
-            ) : null}
-            {tab === "feedback" ? <FeedbackTab useCaseId={id} /> : null}
-            </CardBoundary>
-            </div>
           </div>
-        </>
-      ) : null}
-    </QueryGate>
+        }
+      >
+        {data.useCase.description ? <p className={rec.sub}>{data.useCase.description}</p> : null}
+        <ul className={rec.chips} aria-label="Record status">
+          <li className={`${rec.chip} ${rec[`tone-${STATUS_TONE[status] ?? "neutral"}`] ?? ""}`}><span className={rec.chipLabel}>Status</span> {statusLabel(status)}</li>
+          {detail.isSuccess && counts.open > 0 ? (
+            <li className={`${rec.chip} ${counts.openBlocking ? rec["tone-warn"] : rec["tone-info"]}`} data-testid="chip-conditions">
+              {counts.open} open {counts.open === 1 ? "condition" : "conditions"} · {counts.openBlocking} before go-live
+            </li>
+          ) : detail.isError ? (
+            <li className={rec.chip} data-testid="chip-conditions">Conditions could not be loaded</li>
+          ) : null}
+          <li className={`${rec.chip} ${data.screening.tier === "prohibited" ? rec["tone-danger"] : data.screening.tier === "high" ? rec["tone-warn"] : ""}`}>
+            <span className={rec.chipLabel}>EU AI Act</span> {data.screening.screened ? `${humanize(data.screening.tier)} tier` : "Not screened"}
+            <InfoButton label="the EU AI Act tier">
+              <p>The tier from the EU AI Act screening rules. High tier brings obligations such as human oversight and logging. This is screening, not legal advice.</p>
+            </InfoButton>
+          </li>
+          {recertification ? (
+            <li className={`${rec.chip} ${rec["tone-warn"]}`}>{reReviewText(recertification.dueAt)}</li>
+          ) : approvedUntil ? (
+            expired
+              ? <li className={`${rec.chip} ${rec["tone-danger"]}`}>Approval expired {shortDate(approvedUntil)}</li>
+              : <li className={`${rec.chip} ${rec["tone-ok"]}`}><span className={rec.chipLabel}>Approval valid until</span> {shortDate(approvedUntil)}</li>
+          ) : null}
+          <li className={rec.chip}><span className={rec.chipLabel}>Owner</span> {data.useCase.ownerName ?? "Unassigned"}</li>
+          {/* issue #522 #30: the record remembers where it was found; the finding opens for an admin */}
+          {detail.data?.discovery ? (
+            <li className={rec.chip} data-testid="use-case-found-by">
+              <span className={rec.chipLabel}>Found by</span>{" "}
+              {detail.data.discovery.finding ? (
+                <Link to="/admin/shadow-ai?tab=findings" aria-label={`discovery: open the Shadow-AI discovery findings (this use case came from ${detail.data.discovery.finding.subject})`}>discovery</Link>
+              ) : "discovery"}
+            </li>
+          ) : null}
+        </ul>
+      </RecordBand>
+      <div className={v.stack}>
+        <div className={rec.groupedTabs}>
+          <Tabs
+            tabs={TABS.map((t) => withTabCount(t, data))}
+            active={tab}
+            idPrefix="use-case"
+            label="Use case record sections"
+            onChange={onTab}
+          />
+        </div>
+        {/* FS-20: a tab that fails to render says so in its own panel; the record, its band and the other tabs stay */}
+        <div role="tabpanel" id={panel.panel} aria-labelledby={panel.tab} className={v.stack}>
+        <CardBoundary key={tab} title={tabLabel}>
+        {tab === "summary" ? (
+          <UseCaseSummaryTab
+            data={data}
+            status={status}
+            conditions={conditionsRead}
+            acceptance={detail.isSuccess ? { state: "ok", value: detail.data?.risks ?? [] } : detail.isError ? { state: "error" } : { state: "loading" }}
+            lifecycle={detail.isSuccess && lifecycle ? { state: "ok", value: { approvedUntil, approvalExpired: expired, recertification: Boolean(lifecycle.recertification), recertificationDueAt: lifecycle.recertificationDueAt ?? null } } : detail.isError ? { state: "error" } : { state: "loading" }}
+            next={next}
+            foundByDiscovery={Boolean(detail.data?.discovery)}
+            onRetryDetail={retryDetail}
+            onRefresh={refresh}
+          />
+        ) : null}
+        {tab === "overview" ? (
+          <OverviewTab
+            data={data}
+            status={status}
+            expired={expired}
+            approvedUntil={approvedUntil}
+            conditions={conditions}
+            detailState={detailState}
+            onRetryDetail={retryDetail}
+            rationales={detailRationales(detail.data)}
+            unsure={detailUnsure(detail.data)}
+            openBlocking={openBlocking}
+            recertification={recertification}
+            reviews={detail.data?.reviews ?? []}
+            resubmission={resubmission}
+            acceptance={acceptance}
+            userName={userName}
+            onTab={onTab}
+            onRefresh={refresh}
+          />
+        ) : null}
+        {tab === "frameworks" ? <FrameworksTab query={frameworks} /> : null}
+        {tab === "risks" ? <RisksTab useCaseId={id} risks={data.risks} acceptance={acceptance} canEdit={isAdmin || Boolean(auth?.userId && auth.userId === data.useCase.ownerUserId)} onRefresh={refresh} /> : null}
+        {tab === "stack" ? <StackTab useCaseId={id} data={data.stack} /> : null}
+        {tab === "dependencies" ? <Card title="Dependencies and inherited risk"><DependencyGraphPanel useCaseId={id} /></Card> : null}
+        {tab === "approvals" ? <ApprovalsTab approvals={data.approvals} userName={userName} /> : null}
+        {tab === "audit" ? <AuditTab rows={data.audit} total={data.auditTotal} useCaseId={data.useCase.id} isAdmin={isAdmin} /> : null}
+        {tab === "path" ? (
+          <Card title="Decision path">
+            <RunGraph source={{ kind: "use_case", useCaseId: id }} label={`Decision path of ${data.useCase.name}`} refreshKey={status} />
+          </Card>
+        ) : null}
+        {/* ADR-0182 (D4): each tab is its slice's own component file */}
+        {tab === "decisions" ? <DecisionRecordTab useCaseId={id} /> : null}
+        {tab === "incidents" ? <IncidentsTab useCaseId={id} /> : null}
+        {tab === "ai-bom" ? (
+          <Suspense fallback={<p role="status">Loading the AI BOM…</p>}>
+            <AiBomPanel key={id} subject={{ kind: "use_case", id }} />
+          </Suspense>
+        ) : null}
+        {tab === "feedback" ? <FeedbackTab useCaseId={id} /> : null}
+        </CardBoundary>
+        </div>
+      </div>
+    </>
+  );
+}
+
+/** the record's dark band: the breadcrumb and heading stay even when the read fails (#453, 2026-11-07) */
+function RecordBand(props: { isAdmin: boolean; name: string | null; side?: ReactNode; children?: ReactNode }) {
+  return (
+    <header className={rec.band}>
+      <div className={rec.bandMain}>
+        <nav aria-label="Breadcrumb">
+          <ol className={rec.crumbs}>
+            <li>AI Governance</li>
+            {/* the registry is an administrative screen; a non-admin owner reads it as a name, not a link that refuses */}
+            <li>{props.isAdmin ? <Link to="/admin/use-cases">AI registry</Link> : "AI registry"}</li>
+            <li aria-current="page">{props.name ?? "Use case"}</li>
+          </ol>
+        </nav>
+        <div className={rec.titleRow}>
+          <span className={rec.typeTag}>AI use case</span>
+          <h1 className={rec.title} tabIndex={-1}>{props.name ?? "AI use-case record"}</h1>
+        </div>
+        {props.children}
+      </div>
+      {props.side}
+    </header>
   );
 }
 
@@ -427,8 +522,6 @@ function OverviewTab(props: {
   );
 }
 
-/** what a before-go-live condition's closing note may hold (the server's limit) */
-const NOTE_MAX = 2000;
 /** what a waiver's reason may hold (the server's limit) */
 const WAIVE_MAX = 2000;
 
@@ -486,20 +579,13 @@ function ConditionsCard(props: {
   const { auth } = useSession();
   const isAdmin = Boolean(auth?.isAdmin);
   const conditions = props.conditions as RecordCondition[];
-  // a before-go-live condition is confirmed with a note saying what was done
-  const [closing, setClosing] = useState<UseCaseCondition | null>(null);
-  const [note, setNote] = useState("");
-  const [noteError, setNoteError] = useState<string | null>(null);
+  // a before-go-live condition is confirmed with a note saying what was done (the shared flow, also the summary's Next action)
+  const markMetFlow = useMarkMetFlow(props.useCaseId, props.onRefresh);
   // ADR-0180 A2: an administrator's waiver, with a reason
   const [waiving, setWaiving] = useState<RecordCondition | null>(null);
   const [waiveReason, setWaiveReason] = useState("");
   const [waiveError, setWaiveError] = useState<string | null>(null);
   const open = conditions.filter((c) => c.status === "open").length;
-  const markMet = (row: UseCaseCondition, body: { note?: string }) =>
-    action.run(async () => {
-      await api.post(`/v1/use-cases/${props.useCaseId}/conditions/${row.id}/met`, body);
-      await props.onRefresh();
-    }, "Condition marked met");
   const evaluateNow = (row: RecordCondition) =>
     action.run(async () => {
       const out = await api.post<{ verdict: { state: string; status: string } }>(`/v1/use-cases/${props.useCaseId}/conditions/${row.id}/evaluate`, {});
@@ -509,22 +595,10 @@ function ConditionsCard(props: {
         ? "Evidence passes: the condition is met"
         : `Evaluated: ${MEASUREMENT_STATE_LABEL[state] ?? out.verdict.state}`;
     });
-  const closeDialog = () => {
-    setClosing(null);
-    setNote("");
-    setNoteError(null);
-  };
   const closeWaive = () => {
     setWaiving(null);
     setWaiveReason("");
     setWaiveError(null);
-  };
-  const confirmClosing = async () => {
-    if (!closing) return;
-    const text = note.trim();
-    if (!text) return setNoteError("Say what was done to meet this condition");
-    if (text.length > NOTE_MAX) return setNoteError(`Keep the note to ${NOTE_MAX} characters or fewer`);
-    if (await markMet(closing, { note: text })) closeDialog();
   };
   const confirmWaive = async () => {
     if (!waiving) return;
@@ -592,12 +666,9 @@ function ConditionsCard(props: {
                   {canMarkMet(row) ? (
                     <Button
                       size="sm"
-                      disabled={action.busy}
+                      disabled={action.busy || markMetFlow.busy}
                       aria-label={`Mark met: ${row.text}`}
-                      onClick={() => {
-                        if (row.blocking) setClosing(row);
-                        else void markMet(row, {});
-                      }}
+                      onClick={() => markMetFlow.start(row)}
                     >
                       Mark met
                     </Button>
@@ -628,38 +699,7 @@ function ConditionsCard(props: {
           A measured condition is closed only when its evidence passes; nobody marks it met by hand, and too few samples never counts as a pass. A waived condition shows at the deploy gate as a warning, never as a pass.
         </p>
       ) : null}
-      <Modal
-        open={closing !== null}
-        title="Mark condition met"
-        onClose={closeDialog}
-        actions={
-          <>
-            <Button onClick={closeDialog}>Cancel</Button>
-            <Button variant="primary" disabled={action.busy} onClick={() => void confirmClosing()}>
-              {action.busy ? "Saving…" : "Mark met"}
-            </Button>
-          </>
-        }
-      >
-        {closing ? (
-          <div className={v.stack}>
-            <p className={v.dim}>{closing.text}</p>
-            <p className={v.faint}>This condition must be met before go-live. Your note is kept with the record.</p>
-            <Field label="What was done" error={noteError}>
-              <Textarea
-                rows={4}
-                maxLength={NOTE_MAX}
-                value={note}
-                aria-invalid={noteError ? true : undefined}
-                onChange={(event) => {
-                  setNote(event.target.value);
-                  if (noteError) setNoteError(null);
-                }}
-              />
-            </Field>
-          </div>
-        ) : null}
-      </Modal>
+      {markMetFlow.dialog}
       <Modal
         open={waiving !== null}
         title="Waive condition"
@@ -725,7 +765,8 @@ const RISK_STATUS_TONE: Record<string, Tone> = { open: "warn", mitigating: "neut
 /** the residual levels: the stored value stays the code, the reader sees the word */
 const LEVEL_OPTIONS = ["low", "medium", "high"].map((level) => <option key={level} value={level}>{humanize(level)}</option>);
 
-function RisksTab({ useCaseId, risks, acceptance, onRefresh }: { useCaseId: string; risks: OverviewRisk[]; acceptance: Map<string, UseCaseRiskAcceptance>; onRefresh: () => Promise<void> }) {
+/** `canEdit`: the risk writes are owner-or-admin in the handler; a reviewer who may read the record reads it without them (#453) */
+function RisksTab({ useCaseId, risks, acceptance, canEdit, onRefresh }: { useCaseId: string; risks: OverviewRisk[]; acceptance: Map<string, UseCaseRiskAcceptance>; canEdit: boolean; onRefresh: () => Promise<void> }) {
   const action = useAction();
   const [controlRefs, setControlRefs] = useState<Record<string, string>>({});
   const [residuals, setResiduals] = useState<Record<string, { likelihood: string; impact: string }>>({});
@@ -736,13 +777,13 @@ function RisksTab({ useCaseId, risks, acceptance, onRefresh }: { useCaseId: stri
         return <Card key={risk.id} title={risk.title} actions={<div className={v.row}><span className={v.faint}>{humanize(risk.dimension)}</span><Badge tone={RISK_STATUS_TONE[risk.status] ?? "neutral"}>{humanize(risk.status)}</Badge></div>}><div className={v.stack}>
           {acceptance.has(risk.id) ? (() => { const a = acceptance.get(risk.id)!; return <p className={rr.acceptedBy}>Accepted by {a.acceptedByName ?? "a risk acceptor"}{a.acceptedAt ? ` on ${shortDate(a.acceptedAt)}` : ""}{a.acceptanceRationale ? ` · ${a.acceptanceRationale}` : ""}</p>; })() : null}
           <p className={s.riskFlow}><span className={v.dim}>Inherent</span> <strong>{humanize(risk.inherent.likelihood)} × {humanize(risk.inherent.impact)}</strong> <span aria-hidden>→</span> <span className={v.dim}>Residual</span> <InfoButton label="residual risk"><p>The risk left after linked controls take effect. The registrant rates it and the reviewer checks it.</p></InfoButton> <strong>{risk.residual ? `${humanize(risk.residual.likelihood)} × ${humanize(risk.residual.impact)}` : "Not measured"}</strong></p>
-          <div><strong>Linked controls</strong>{risk.controls.length === 0 ? <p className={v.dim}>No controls linked.</p> : risk.controls.map((control) => <div key={control.controlRef} className={v.listRow}><span className={v.grow}><code>{control.controlRef}</code><br /><span className={v.faint}>{control.title}</span></span><RemoveButton what={`control ${control.controlRef}`} consequence={<>The control link is removed from this risk. The risk and its audit history remain.</>} onRemove={() => api.del(`/v1/risks/${risk.id}/controls/${encodeURIComponent(control.controlRef)}`)} onDone={() => void onRefresh()} /></div>)}</div>
-          <div className={s.libraryFilters}><Field label="Control reference" helpLabel="the mitigation link created here" help={<p>Enter the canonical reference of an existing control. Linking it records that this control mitigates the selected use-case risk; it does not by itself prove the control is implemented or evidenced.</p>}><Input value={controlRefs[risk.id] ?? ""} onChange={(event) => setControlRefs((current) => ({ ...current, [risk.id]: event.target.value }))} placeholder="Control reference" /></Field><Field label=" "><Button disabled={action.busy || !(controlRefs[risk.id] ?? "").trim()} onClick={() => void action.run(async () => { await api.post(`/v1/risks/${risk.id}/controls`, { controlRef: controlRefs[risk.id]!.trim() }); setControlRefs((current) => ({ ...current, [risk.id]: "" })); await onRefresh(); }, "Control linked")}>Link control</Button></Field></div>
-          <div className={s.libraryFilters}><Field label="Residual likelihood"><Select value={draft.likelihood} onChange={(event) => setResiduals((current) => ({ ...current, [risk.id]: { ...draft, likelihood: event.target.value } }))}><option value="">Choose likelihood</option>{LEVEL_OPTIONS}</Select></Field><Field label="Residual impact"><Select value={draft.impact} onChange={(event) => setResiduals((current) => ({ ...current, [risk.id]: { ...draft, impact: event.target.value } }))}><option value="">Choose impact</option>{LEVEL_OPTIONS}</Select></Field><Field label=" "><Button disabled={action.busy || !draft.likelihood || !draft.impact} onClick={() => void action.run(async () => { await api.put(`/v1/risks/${risk.id}/residual`, draft); await onRefresh(); }, "Residual position updated")}>Save residual</Button></Field></div>
+          <div><strong>Linked controls</strong>{risk.controls.length === 0 ? <p className={v.dim}>No controls linked.</p> : risk.controls.map((control) => <div key={control.controlRef} className={v.listRow}><span className={v.grow}><code>{control.controlRef}</code><br /><span className={v.faint}>{control.title}</span></span>{canEdit ? <RemoveButton what={`control ${control.controlRef}`} consequence={<>The control link is removed from this risk. The risk and its audit history remain.</>} onRemove={() => api.del(`/v1/risks/${risk.id}/controls/${encodeURIComponent(control.controlRef)}`)} onDone={() => void onRefresh()} /> : null}</div>)}</div>
+          {canEdit ? <><div className={s.libraryFilters}><Field label="Control reference" helpLabel="the mitigation link created here" help={<p>Enter the canonical reference of an existing control. Linking it records that this control mitigates the selected use-case risk; it does not by itself prove the control is implemented or evidenced.</p>}><Input value={controlRefs[risk.id] ?? ""} onChange={(event) => setControlRefs((current) => ({ ...current, [risk.id]: event.target.value }))} placeholder="Control reference" /></Field><Field label=" "><Button disabled={action.busy || !(controlRefs[risk.id] ?? "").trim()} onClick={() => void action.run(async () => { await api.post(`/v1/risks/${risk.id}/controls`, { controlRef: controlRefs[risk.id]!.trim() }); setControlRefs((current) => ({ ...current, [risk.id]: "" })); await onRefresh(); }, "Control linked")}>Link control</Button></Field></div>
+          <div className={s.libraryFilters}><Field label="Residual likelihood"><Select value={draft.likelihood} onChange={(event) => setResiduals((current) => ({ ...current, [risk.id]: { ...draft, likelihood: event.target.value } }))}><option value="">Choose likelihood</option>{LEVEL_OPTIONS}</Select></Field><Field label="Residual impact"><Select value={draft.impact} onChange={(event) => setResiduals((current) => ({ ...current, [risk.id]: { ...draft, impact: event.target.value } }))}><option value="">Choose impact</option>{LEVEL_OPTIONS}</Select></Field><Field label=" "><Button disabled={action.busy || !draft.likelihood || !draft.impact} onClick={() => void action.run(async () => { await api.put(`/v1/risks/${risk.id}/residual`, draft); await onRefresh(); }, "Residual position updated")}>Save residual</Button></Field></div></> : null}
         </div></Card>;
       })}
       {/* this use case's own risks come first; the generic library sits below them */}
-      <RiskLibraryPicker useCaseId={useCaseId} onAdded={() => void onRefresh()} />
+      {canEdit ? <RiskLibraryPicker useCaseId={useCaseId} onAdded={() => void onRefresh()} /> : <p className={v.dim}>Adding risks and controls is open to the use case&apos;s owner and administrators.</p>}
     </div>
   );
 }
@@ -760,7 +801,7 @@ function AgentCard({ id, fallback }: { id: string; fallback: OverviewResponse["s
         {/* model-card approval is stated once, in the Model cards section below */}
         {fallback.halted ? <Badge tone="danger">Halted</Badge> : <span className={v.faint}>{humanize(fallback.lifecycleStatus)}</span>}
       </div>
-      {card.isError ? <p className={v.errLine} role="alert">Agent card could not be loaded: {(card.error as Error).message}</p> : card.data ? (
+      {isRefusal(card.error) ? <NotAvailableToYou what="This agent's card" /> : card.isError ? <p className={v.errLine} role="alert">Agent card could not be loaded: {(card.error as Error).message}</p> : card.data ? (
         <div className={v.stack}>
           <p className={v.dim}>
             {providerLabel(card.data.agent.provider)} · {card.data.agent.model ?? "default model"}

@@ -585,7 +585,7 @@ test.describe("the review panel in a review round", () => {
 test.describe("the use-case record in a review round", () => {
   test("one sign-off row per required review, and accepted risks read who accepted them and why", async ({ page }) => {
     await mockGateway(page, { acceptedRisk: true });
-    await page.goto(`/ui/admin/governance/use-cases/${UC}`);
+    await page.goto(`/ui/admin/governance/use-cases/${UC}?tab=overview`);
     await expect(page.getByRole("heading", { level: 1, name: NAME })).toBeVisible();
     const tracker = page.locator("section", { has: page.getByText("Lifecycle tracker", { exact: true }) });
     await expect(tracker.getByRole("row").filter({ hasText: "Sign-off:" })).toHaveCount(3);
@@ -614,7 +614,7 @@ test.describe("the use-case record in a review round", () => {
         { roleId: "model-risk", roleName: "Model risk", status: "superseded", deciderName: null, decidedAt: null, approvalId: AP_MR },
       ],
     });
-    await page.goto(`/ui/admin/governance/use-cases/${UC}`);
+    await page.goto(`/ui/admin/governance/use-cases/${UC}?tab=overview`);
     const tracker = page.locator("section", { has: page.getByText("Lifecycle tracker", { exact: true }) });
     const closed = tracker.getByRole("row").filter({ hasText: "Sign-off: Model risk" });
     await expect(closed).toContainText("Closed — another review ended the round · review 3 of 3");
@@ -625,7 +625,7 @@ test.describe("the use-case record in a review round", () => {
 
   test("a recertification reads Re-review with the expiry date on the band and the tracker", async ({ page }) => {
     await mockGateway(page, { recertification: true });
-    await page.goto(`/ui/admin/governance/use-cases/${UC}`);
+    await page.goto(`/ui/admin/governance/use-cases/${UC}?tab=overview`);
     await expect(page.getByRole("list", { name: "Record status" })).toContainText("Re-review: approval expired 1 Sept 2026");
     await expect(page.getByRole("list", { name: "Record status" })).not.toContainText("Approval valid until");
     await expect(page.locator("section", { has: page.getByText("Lifecycle tracker", { exact: true }) }).getByText("Re-review: approval expired 1 Sept 2026")).toBeVisible();
@@ -636,7 +636,7 @@ test.describe("the use-case record in a review round", () => {
 
   test("a use case sent back shows the reason and one primary action: Update and resubmit", async ({ page }) => {
     await mockGateway(page, { status: "needs_info", resubmission: true, reviews: [] });
-    await page.goto(`/ui/admin/governance/use-cases/${UC}`);
+    await page.goto(`/ui/admin/governance/use-cases/${UC}?tab=overview`);
     const resubmit = page.getByRole("link", { name: "Update and resubmit" });
     await expect(resubmit).toHaveAttribute("href", `/ui/admin/governance/intake?resubmit=${UC}`);
     await expect(page.getByRole("note").filter({ hasText: "Sent back for information by Avery Approver." })).toContainText(REASON);
@@ -651,7 +651,7 @@ test.describe("the use-case record in a review round", () => {
 test.describe("update and resubmit", () => {
   test("prefilled from the record, reason on top; PATCHes what changed, posts a new version, lands on the record", async ({ page }) => {
     const state = await mockGateway(page, { status: "needs_info", resubmission: true, reviews: [] });
-    await page.goto(`/ui/admin/governance/use-cases/${UC}`);
+    await page.goto(`/ui/admin/governance/use-cases/${UC}?tab=overview`);
     await page.getByRole("link", { name: "Update and resubmit" }).click();
     await expect(page).toHaveURL(new RegExp(`/ui/admin/governance/intake\\?resubmit=${UC}$`));
     await expect(page.getByRole("heading", { level: 1, name: "Update and resubmit" })).toBeVisible();
