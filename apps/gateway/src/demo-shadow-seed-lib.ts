@@ -828,8 +828,11 @@ async function ensureProvenance(h: Harness, db: Db, data: DemoShadowDiscoveryDat
     h.report.skipped.push(`provenance records of '${data.contentTrust.connectorName}'`);
     return;
   }
+  // ADR-0250 (S-04): a grant mint is a step-up, which the bootstrap credential cannot give after `seed` enrolled Ada;
+  // `seed` mints this grant during first-admin setup, so here a bootstrap refusal is noted and the reads go ahead
   const grant = await h.call("POST", "/v1/grants/connectors", { userId: dana.id, connectorId, mode: "read" });
-  if (!h.ok(grant.status) && grant.status !== 409) return h.fail(`Dana's read grant on '${data.contentTrust.connectorName}'`, grant);
+  if (h.stepUpRefused(grant)) h.report.notes.push(`Dana's read grant on '${data.contentTrust.connectorName}' is minted by \`seed\`; re-minting it ${STEP_UP_NOTE}`);
+  else if (!h.ok(grant.status) && grant.status !== 409) return h.fail(`Dana's read grant on '${data.contentTrust.connectorName}'`, grant);
   let n = 0;
   for (const object of data.contentTrust.objects) {
     const r = await h.call("POST", `/v1/connectors/${connectorId}/invoke`, { operation: "read", object }, dana.auth);
