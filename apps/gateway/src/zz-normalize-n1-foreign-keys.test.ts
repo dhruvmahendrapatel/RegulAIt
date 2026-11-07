@@ -1,5 +1,5 @@
 /**
- * ADR-0200 addendum (2026-11-06, normalized schema), batch N1: the foreign keys migration 0280 adds exist,
+ * ADR-0200 addendum (2026-11-06, normalized schema), batch N1: the foreign keys migration 0288 adds exist,
  * are VALIDATED (not left NOT VALID), carry the intended delete rule, and actually refuse a dangling write.
  *
  * Review of #683: on a populated database the cleanup clears ORPHANS only. Valid pointers survive, also when the
@@ -19,11 +19,11 @@ const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
 const migrationsFolder = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations");
 const SCRATCH_DB = `n1fk_${process.pid}_${Date.now()}`;
-/** a second scratch database, migrated to just BELOW 0280 and populated before 0280 is applied by hand */
+/** a second scratch database, migrated to just BELOW 0288 and populated before 0288 is applied by hand */
 const PRE_DB = `n1fk_pre_${process.pid}_${Date.now()}`;
 /** a cluster-wide, non-superuser role standing in for ADR-0234's non-superuser migration owner */
 const RLS_ROLE = `n1fk_owner_${process.pid}_${Date.now()}`;
-const N1_FILE = "0280_normalize_n1_foreign_keys";
+const N1_FILE = "0288_normalize_n1_foreign_keys";
 
 /** table, column, referenced table, confdeltype ('n' = SET NULL, 'r' = RESTRICT) */
 const EXPECTED: ReadonlyArray<readonly [string, string, string, "n" | "r"]> = [
@@ -69,7 +69,7 @@ afterAll(async () => {
   }
 });
 
-describe("0280: the N1 foreign keys", () => {
+describe("0288: the N1 foreign keys", () => {
   it("each exists, is validated, points at the right table and has the intended delete rule", async () => {
     const r = await db.execute<{ t: string; c: string; ref: string; del: string; valid: boolean }>(sql`
       select k.conrelid::regclass::text as t, a.attname as c, k.confrelid::regclass::text as ref,
@@ -96,7 +96,7 @@ describe("0280: the N1 foreign keys", () => {
 
 // --------------------------------------------------------------------------------------------- review of #683
 
-/** the 0280 statements, as the migrator splits them; `withoutContext` drops the set_config lines (the defect) */
+/** the 0288 statements, as the migrator splits them; `withoutContext` drops the set_config lines (the defect) */
 function n1Statements(withoutContext = false): string[] {
   const text = readFileSync(path.join(migrationsFolder, `${N1_FILE}.sql`), "utf8");
   return text
@@ -106,7 +106,7 @@ function n1Statements(withoutContext = false): string[] {
     .filter((x) => !(withoutContext && x.includes("set_config('regulait.system_context'")));
 }
 
-describe("0280 on a populated database (review of #683)", () => {
+describe("0288 on a populated database (review of #683)", () => {
   const ids = {
     approver: randomUUID(),
     approval: randomUUID(),
@@ -127,7 +127,7 @@ describe("0280 on a populated database (review of #683)", () => {
   ];
 
   beforeAll(async () => {
-    // a copy of the migrations folder whose journal stops just below 0280
+    // a copy of the migrations folder whose journal stops just below 0288
     preFolder = mkdtempSync(path.join(os.tmpdir(), "n1fk-pre-"));
     cpSync(migrationsFolder, preFolder, { recursive: true });
     const journalPath = path.join(preFolder, "meta", "_journal.json");
@@ -174,7 +174,7 @@ describe("0280 on a populated database (review of #683)", () => {
     }
   }, 240_000);
 
-  /** runs 0280 as the non-superuser owner in one transaction; returns the pointers as they then stand */
+  /** runs 0288 as the non-superuser owner in one transaction; returns the pointers as they then stand */
   async function apply(opts: { withoutContext?: boolean; commit: boolean; before?: string[] }) {
     const client = await pre!.$client.connect();
     try {
