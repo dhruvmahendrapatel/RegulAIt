@@ -9,7 +9,8 @@
   [ADR-0105](0105-consent-context-binding-and-expiry.md) (consent binding), [ADR-0124](0124-kill-switch-and-safe-modes.md)
   (kill switch), [ADR-0180](0180-continuous-assurance-strict-by-default.md) (secure by default), [ADR-0212](0212-modality-pricing-and-model-rate-limits.md)
   (model rate limits), [ADR-0219](0219-a2a-governance.md) (A2A)
-- **Migration**: 0307 (`0307_governed_core_resource_rules.sql`, `when` 1785234000000)
+- **Migration**: pending `governed_core_resource_rules` (`packages/db/migrations/pending/governed_core_resource_rules.sql`; numbered at merge time under ADR-0252.
+  Drafted as 0307 with `when` 1785234000000; converted when main reached 0313.)
 - **Coordinates with**: P8 Cedar consolidation (#707, ADR-0239), P11 MCP bundles (#697), P12d token exchange (#712),
   S-04/P-02 step-up plan gate (`builder/s04-p02-stepup-plan-gate`)
 
@@ -77,7 +78,7 @@ call that is over its limit is refused before it is queued for anyone's sign-off
   sets for the caller's scopes, the window counts, the attribution setting and the ABAC verdict, calls the kernel,
   writes nothing on a pure evaluation, and catches every error as `governed-core-error`. The MCP tool path keeps
   `governedEvaluate` as its implementation of the same contract; it is already complete, so it is not rewritten.
-- **Data** (migration 0307): two tables keyed on a resource type and an optional resource id, with the same subject
+- **Data** (migration `governed_core_resource_rules`): two tables keyed on a resource type and an optional resource id, with the same subject
   dimension as `approval_rules` and `rate_limits`:
   - `resource_approval_rules` (`resource_type` in model, connector, a2a; nullable `agent_id`, `connector_id`,
     `a2a_agent_id` foreign keys, at most one set and matching the type; null = every resource of that type;
@@ -157,7 +158,7 @@ merge.
 
 - Kernel: `packages/policy-kernel/src/resource.ts` (`composeResourceDecision`, `matchingResourceApprovalRules`,
   `governedCoreErrorDecision`), exported from the package root. Gateway: `apps/gateway/src/governed-core.ts`
-  (`loadResourceRestrictions`, `governedEvaluateResource`). Migration 0307 as decided above.
+  (`loadResourceRestrictions`, `governedEvaluateResource`). Migration `governed_core_resource_rules` as decided above.
 - `executeGovernedConnectorCall` loads the core's restrictions before the consent binding, so a matching approval
   rule's id enters the consent's context digest (`connectorWriteBinding` now takes the rule ids; the dial alone keeps
   the pre-ADR-0251 digest byte for byte). The composed decision is what the one decision row records.

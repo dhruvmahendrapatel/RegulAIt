@@ -379,7 +379,7 @@ describe("ADR-0212 (c): rate limits per model", () => {
     expect(row?.effect).toBe("allow");
   });
 
-  // ADR-0251 (migration 0307) changed this default: enforcement is ON by default (ADR-0180), where ADR-0212 shipped
+  // ADR-0251 (migration governed_core_resource_rules) changed this default: enforcement is ON by default (ADR-0180), where ADR-0212 shipped
   // it off. The off-state coverage stays: an admin turns it off (step-up) and then no limit binds.
   it("is ON by default (ADR-0251); once an admin turns it off, a limit binds nothing", async () => {
     const list = await viaKey("GET", "/v1/rules/model-rate-limits");

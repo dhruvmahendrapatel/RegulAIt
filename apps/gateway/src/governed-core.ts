@@ -194,7 +194,7 @@ export interface ModelGateRefusal {
 /**
  * ADR-0251 slice 2 — the core's restriction layer on a MODEL dispatch, run once in the shared dispatch core after
  * the caller's own `evaluateAgent` allowed (so `base` is that allow; a deny never reaches here). Steps: the model
- * rate limit (ADR-0212's `checkModelRateLimit`, its 429 and audit row unchanged; enforced by default since 0307),
+ * rate limit (ADR-0212's `checkModelRateLimit`, its 429 and audit row unchanged; enforced by default since migration governed_core_resource_rules),
  * then approval rules. A model call has no per-call approval queue yet, so a matching rule REFUSES (403
  * `approval_required`) rather than sending. The attribution mandate on this path stays where it was (compat
  * `requireProjectAttribution`, native `dispatchAttributionRequired`). Error is deny.

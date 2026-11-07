@@ -2,7 +2,7 @@
  * ADR-0251 slice 2 — model dispatch through the one governed decision core.
  *
  * The core runs once in the shared dispatch core (`dispatchAttempt`), after the caller's own `evaluateAgent`:
- *  - the model rate limit (ADR-0212) is enforced BY DEFAULT now (migration 0307);
+ *  - the model rate limit (ADR-0212) is enforced BY DEFAULT now (migration governed_core_resource_rules);
  *  - a model approval rule REFUSES the dispatch (403 `approval_required`, audited, no usage row), because a model call
  *    has no per-call approval queue yet; it binds only its subject (and its model: resource.test.ts);
  *  - an error inside the core is a deny;

@@ -158,6 +158,7 @@ import {
 import { ownerChangeGate, resolveRegistrationOwner, withOwnership } from "./ownership.js";
 import { CHANGED_CONCURRENTLY, checkStepUp, requireStepUp } from "./step-up.js";
 import { governedModelGate } from "./governed-core.js";
+import { resolveDispatchUsage } from "./usage-extractors.js";
 import {
   prepareConversationContext,
   type PreparedConversationContext,
@@ -1398,7 +1399,7 @@ async function dispatchAttempt(
   }
 
   // ADR-0251 slice 2 — THE ONE GOVERNED CORE on a model dispatch: the model rate limit (ADR-0212, enforced by
-  // default since migration 0307) and the model approval rules. In this one shared core so every dispatch path
+  // default since migration governed_core_resource_rules) and the model approval rules. In this one shared core so every dispatch path
   // inherits it, after the lifecycle gate and before any provider work: a refusal costs no tokens and writes no
   // usage row (it is audited). An error is a deny.
   const coreRefusal = await governedModelGate(db, {
@@ -2271,6 +2272,16 @@ async function dispatchAttempt(
   // invented dollar figure. ADR-0212 (P12 b): when the provider reports image or
   // audio tokens, each modality is priced at its own list price (falling back to
   // the text price); with no modality data this is the text-only formula, unchanged.
+  // ADR-0241 (P21): when the org switch is on and the served agent has an active, tested usage mapping, the
+  // counts priced below are the mapping's reading of the provider's response; a mapping that cannot read it
+  // leaves the adapter's built-in counts in place (fail closed, audited, stamped on the usage row).
+  const dispatchUsage = await resolveDispatchUsage(db, {
+    agentId: served.id,
+    userId,
+    projectId: args.projectId ?? null,
+    result,
+  });
+  result = { ...result, usage: dispatchUsage.usage };
   const priced = priceDispatchUsage(served, result.usage);
   const costUsd = priced.costUsd;
   // The measured version of routing's savings claim: what the baseline agent
@@ -2400,6 +2411,8 @@ async function dispatchAttempt(
     measuredCostSavedUsd,
     // ADR-0212 (P12 b): the text/image/audio split; NULL without modality data
     modalityUsage: priced.modality,
+    // ADR-0241: which usage-mapping version produced these counts (NULL = the adapter's own)
+    usageExtractorVersionId: dispatchUsage.versionId,
     stopReason: result.stopReason,
     refusal: result.refusal,
     providerMessageId: result.providerMessageId,
@@ -2438,6 +2451,7 @@ async function dispatchAttempt(
           }
         : {}),
       ...(customDestination ? { customProviderId: served.customProviderId, egress: customDestination } : {}),
+      ...(dispatchUsage.outcome ? { usageExtractor: dispatchUsage.outcome } : {}),
       ...(args.detail ?? {}),
       ...piiDetail,
       ...guardrailDetail,

@@ -50,6 +50,7 @@ const DECISION_WRITERS = [
   "playground.ts",
   "privacy-ops.ts", // ADR-0224: the processing limit's dispatch refusal
   "redteam.ts",
+  "usage-extractors.ts", // ADR-0241: a dispatch whose usage mapping could not read the response, kept on built-in counts (insert(auditLog) on the chained handle)
   "use-case-gate.ts",
   "use-cases.ts",
   "vendors.ts", // ADR-0213: the vendor questionnaire drafter's refused model use (insert(auditLog), chained handle)
@@ -122,6 +123,6 @@ it("no production module writes audit_log with raw SQL or builds a handle that s
 it("the shared writer calls the fact capture in the chained append, and the two handle builders wrap with it", () => {
   const chain = readFileSync(path.join(dbSrc, "audit-chain.ts"), "utf8");
   expect(chain).toMatch(/await captureDecisionFacts\(tx as never, rows\);/);
-  expect(readFileSync(path.join(dbSrc, "index.ts"), "utf8")).toMatch(/withAuditChain\(drizzle\(pool/);
+  expect(readFileSync(path.join(dbSrc, "index.ts"), "utf8")).toMatch(/withAuditChain\(drizzle\((scopePoolForRls\()?pool/);
   expect(readFileSync(path.join(dbSrc, "bom-session-lock.ts"), "utf8")).toMatch(/withAuditChain\(drizzle\(client/);
 });
