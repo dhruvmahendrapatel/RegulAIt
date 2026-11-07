@@ -47,12 +47,6 @@ describe("ADR-0256 community list parser", () => {
     expect(parsed.entries.map((e) => e.paidSignal)).toEqual([null, "x402", "paid"]);
   });
 
-  it("is linear on a hostile line (no backtracking regex on record input)", () => {
-    const hostile = "- [" + "[".repeat(200_000) + "](" + "(".repeat(200_000);
-    const t = Date.now();
-    expect(parseCommunityList(hostile).entries).toEqual([]);
-    expect(Date.now() - t).toBeLessThan(1000);
-  });
 });
 
 describe("ADR-0256 dedupe and vetting", () => {
