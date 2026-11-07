@@ -346,6 +346,14 @@ express it until batch 4 moves review-role membership into SQL:
 | `workflows.stage-approval` | a stage's approval is the initiator's request, created by whoever advanced the instance |
 | `workflows.supersede-gates`, `workflows.quorum-any` | a workflow effect on every pending gate of the instance |
 | `engine-runs.run-approval` | an engine run's approval, queued in the run-as user's name |
+| `approvals.signing-options` | the passkey signing-options route: its own eligibility check (named approver, role snapshot, delegation, queue time) is the authorization |
+| `projects.context-conflicts` | the project context view's id-and-stage read of pending conflict approvals, for an already authorized member |
+| `mrm.card-staleness` (`audit_verify`) | the model-risk staleness gate reads the whole ledger: any admin's or risk acceptor's change can stale a card |
+| `copilot.evidence` (`audit_verify`) | the copilot answers over the ledger within the caller's copilot scope (projects and kernel-visible MCP tools) |
+
+`runAsPrincipalStepIfScoped(reason, path, fn)` applies a step only when the request is a principal (no-op otherwise).
+0289 also widens the approvals visibility superset by one branch the gateway already admits: an active delegate of an
+approver-role member (`regulait_rls_delegator_groups()`, ADR-0022 x ADR-0046).
 
 **Measured (batch 2).**
 - Setup: same bench, `packages/db/bench/rls-cost.mjs`, with a request-scope column. Local Postgres 16, 4 vCPU,

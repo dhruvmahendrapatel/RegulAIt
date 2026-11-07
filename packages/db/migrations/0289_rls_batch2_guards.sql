@@ -92,6 +92,48 @@ CREATE POLICY audit_log_select ON audit_log FOR SELECT USING (
 );
 --> statement-breakpoint
 
+-- The roles and teams of the users actively delegating to the principal (ADR-0022 x ADR-0046): an active delegate of
+-- an approver-role member is eligible for that role's approvals (the gateway's eligibilityOf admits it, #700 CI), so
+-- the visibility superset admits it too. Read under rls_membership, like the 0272 helpers.
+CREATE FUNCTION regulait_rls_delegator_groups() RETURNS uuid[]
+  LANGUAGE sql STABLE
+  SET search_path = pg_catalog, public, pg_temp
+  SET regulait.system_context = 'rls_membership'
+AS $$
+  SELECT coalesce(array_agg(DISTINCT g), '{}'::uuid[]) FROM (
+    SELECT ra.role_id AS g FROM public.role_assignments ra
+     WHERE ra.user_id = ANY (public.regulait_rls_principal_delegators())
+    UNION
+    SELECT tm.team_id FROM public.team_members tm
+     WHERE tm.user_id = ANY (public.regulait_rls_principal_delegators())
+  ) s
+$$;
+--> statement-breakpoint
+DROP POLICY approvals_select ON approvals;
+--> statement-breakpoint
+CREATE POLICY approvals_select ON approvals FOR SELECT USING (
+  (SELECT regulait_rls_system_reason()) = ANY (ARRAY['approval_maintenance', 'migration'])
+  OR (SELECT regulait_rls_is_admin())
+  OR user_id = (SELECT regulait_rls_user_id())
+  OR approver_user_id = (SELECT regulait_rls_user_id())
+  OR named_approver_user_id = (SELECT regulait_rls_user_id())
+  OR decided_by = (SELECT regulait_rls_user_id())
+  OR (review_role_id IS NOT NULL AND (SELECT regulait_rls_user_id()) IS NOT NULL)
+  OR approver_role_id = ANY ((SELECT regulait_rls_principal_groups())::uuid[])
+  OR approver_user_id = ANY ((SELECT regulait_rls_principal_delegators())::uuid[])
+  OR approver_role_id = ANY ((SELECT regulait_rls_delegator_groups())::uuid[])
+  OR named_approver_user_id = ANY ((SELECT regulait_rls_principal_delegators())::uuid[])
+  OR id IN (
+    SELECT aa.approval_id FROM approval_assignments aa
+     WHERE aa.assignee_id = (SELECT regulait_rls_user_id())
+        OR aa.escalation_assignee_id = (SELECT regulait_rls_user_id())
+        OR aa.assignee_id = ANY ((SELECT regulait_rls_principal_groups())::uuid[])
+        OR aa.escalation_assignee_id = ANY ((SELECT regulait_rls_principal_groups())::uuid[])
+    UNION ALL
+    SELECT ad.approval_id FROM approval_decisions ad WHERE ad.decider_user_id = (SELECT regulait_rls_user_id()))
+);
+--> statement-breakpoint
+
 -- approvals UPDATE: the slice-1 requester self-route guard is removed. Self-approval is a product decision made per
 -- flow by the gateway (remediation and compliance-profile changes refuse it; a governed tool call's approval may be
 -- decided by its requester when the approval rule names them), and a database rule stricter than the product
@@ -113,6 +155,7 @@ CREATE POLICY approvals_update ON approvals FOR UPDATE
     OR decided_by = (SELECT regulait_rls_user_id())
     OR approver_role_id = ANY ((SELECT regulait_rls_principal_groups())::uuid[])
     OR approver_user_id = ANY ((SELECT regulait_rls_principal_delegators())::uuid[])
+    OR approver_role_id = ANY ((SELECT regulait_rls_delegator_groups())::uuid[])
     OR named_approver_user_id = ANY ((SELECT regulait_rls_principal_delegators())::uuid[])
     OR id IN (
       SELECT aa.approval_id FROM approval_assignments aa
@@ -133,6 +176,7 @@ CREATE POLICY approvals_update ON approvals FOR UPDATE
       OR decided_by = (SELECT regulait_rls_user_id())
       OR approver_role_id = ANY ((SELECT regulait_rls_principal_groups())::uuid[])
       OR approver_user_id = ANY ((SELECT regulait_rls_principal_delegators())::uuid[])
+      OR approver_role_id = ANY ((SELECT regulait_rls_delegator_groups())::uuid[])
       OR named_approver_user_id = ANY ((SELECT regulait_rls_principal_delegators())::uuid[])
       OR id IN (
         SELECT aa.approval_id FROM approval_assignments aa
