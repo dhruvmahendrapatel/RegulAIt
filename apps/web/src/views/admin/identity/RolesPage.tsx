@@ -10,6 +10,7 @@ import { api, ApiError } from "../../../api/client";
 import { withStepUp } from "../../../stepup/stepUp";
 import type { Role, RoleAssignment, RoleGrants } from "../../../api/adminTypes";
 import { ago } from "../../../api/format";
+import { DataList } from "../../../ui/DataList";
 import { PageHeader } from "../../../shell/AppShell";
 import {
   Badge,
@@ -263,10 +264,6 @@ function RoleGrantsPanel(props: { roleId: string }) {
     queryKey: ["admin", "role-grants", props.roleId],
     queryFn: () => api.get<RoleGrants>(`/v1/roles/${props.roleId}/grants`),
   });
-  const assignments = useQuery({
-    queryKey: ["admin", "role-assignments", props.roleId],
-    queryFn: () => api.get<{ assignments: RoleAssignment[] }>(`/v1/roles/${props.roleId}/assignments`),
-  });
 
   const [agentId, setAgentId] = useState("");
   const [connectorId, setConnectorId] = useState("");
@@ -287,33 +284,44 @@ function RoleGrantsPanel(props: { roleId: string }) {
 
   return (
     <QueryGate
-      loading={grants.isLoading || assignments.isLoading}
-      error={grants.error ?? assignments.error}
-      onRetry={() => {
-        void grants.refetch();
-        void assignments.refetch();
-      }}
+      loading={grants.isLoading}
+      error={grants.error}
+      onRetry={() => void grants.refetch()}
     >
       <Card title="Held by">
-        <Table<RoleAssignment>
+        <DataList<RoleAssignment>
+          listId="role-holders"
+          noun="role holders"
+          endpoint={`/v1/roles/${props.roleId}/assignments`}
+          exportPath={`/v1/roles/${props.roleId}/assignments/export.xlsx`}
+          queryKey={["admin", "role-assignments", props.roleId, "list"]}
+          legacyKey="assignments"
+          defaultSort={{ key: "assigned", dir: "desc" }}
           columns={[
+            { key: "user", header: "User", main: true, sortable: true, render: (x) => x.displayName || x.email },
+            { key: "email", header: "Email", main: true, sortable: true, render: (x) => x.email },
             {
-              key: "user",
-              header: "User",
-              render: (x) => (
-                <span>
-                  {x.displayName || x.email}
-                  {x.disabledAt && <Badge tone="danger"> disabled</Badge>}
-                </span>
-              ),
+              key: "account",
+              header: "Account",
+              main: true,
+              sortable: true,
+              required: "A disabled holder is a warning, so the account state is always shown",
+              render: (x) => (x.disabledAt ? <Badge tone="danger">disabled</Badge> : <Badge tone="ok">active</Badge>),
             },
-            { key: "email", header: "Email", render: (x) => x.email },
-            { key: "assigned", header: "Assigned", render: (x) => ago(x.assignedAt) },
+            {
+              key: "origin",
+              header: "Held through",
+              main: true,
+              sortable: true,
+              render: (x) => (x.origin === "group" ? "identity-provider group" : "direct assignment"),
+            },
+            { key: "assigned", header: "Assigned", main: true, sortable: true, render: (x) => ago(x.assignedAt) },
             {
               key: "actions",
               header: "",
               srHeader: "Actions",
               align: "right",
+              action: true,
               render: (x) => (
                 <Button size="sm" variant="ghost" onClick={() => setUnassign(x)}>
                   unassign
@@ -321,8 +329,7 @@ function RoleGrantsPanel(props: { roleId: string }) {
               ),
             },
           ]}
-          rows={assignments.data?.assignments ?? []}
-          rowKey={(x) => x.userId}
+          rowKey={(x) => x.id ?? `${x.userId}:${x.origin ?? ""}`}
           empty={<EmptyState title="Nobody holds this role yet" />}
         />
       </Card>
