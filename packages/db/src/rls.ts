@@ -296,6 +296,19 @@ export function runWithRlsPrincipalStep<T>(principal: RlsPrincipal, reason: RlsC
   return runInScope({ kind: "principal", userId: userId.toLowerCase(), reason, path }, fn);
 }
 
+/**
+ * If the current scope is a principal, run `fn` as that principal plus `reason` (`runWithRlsPrincipalStep`);
+ * otherwise (no scope, or already a system scope) run it unchanged. For a governance computation a request runs
+ * that must read beyond the caller's own rows, such as the model-risk staleness gate reading the ledger.
+ */
+export function runAsPrincipalStepIfScoped<T>(reason: RlsCallerSystemReason, path: string, fn: () => T): T {
+  const scope = rlsScope.getStore();
+  if (scope?.kind === "principal" && scope.reason === undefined) {
+    return runWithRlsPrincipalStep({ userId: scope.userId }, reason, path, fn);
+  }
+  return fn();
+}
+
 /** Run `fn` with every statement it issues (through a scoped pool) under the registered system `reason`. */
 export function runWithRlsSystem<T>(reason: RlsCallerSystemReason, path: string, fn: () => T): T {
   if (!CALLER_REASONS.has(reason)) {

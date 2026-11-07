@@ -24,6 +24,7 @@ import {
   workflowTemplates,
   workflowArtifacts,
   workflowInstances,
+  runAsPrincipalStepIfScoped,
   type Db,
   type SQL,
 } from "@regulait/db";
@@ -1202,7 +1203,10 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     itemIds: string[],
   ): Promise<Map<string, string>> {
     if (itemIds.length === 0) return new Map();
-    const rows = await db
+    // ADR-0234 batch 2: the context view (already authorized for the project member) labels each retained item by
+    // whether its conflict is still pending with the arbiter; the member is usually not a participant of that
+    // approval, so the id-and-stage read runs as the principal plus approval_maintenance (it reads nothing else)
+    const rows = await runAsPrincipalStepIfScoped("approval_maintenance", "projects.context-conflicts", async () => await db
       .select({ id: approvals.id, stageId: approvals.stageId })
       .from(approvals)
       .where(
@@ -1214,7 +1218,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
             itemIds.map((id) => `${CONTEXT_CONFLICT_PREFIX}${id}`),
           ),
         ),
-      );
+      ));
     return new Map(rows.map((r) => [r.stageId!.slice(CONTEXT_CONFLICT_PREFIX.length), r.id]));
   }
 

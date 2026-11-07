@@ -54,6 +54,7 @@ export {
   runWithRlsPrincipal,
   runWithRlsSystem,
   runWithRlsPrincipalStep,
+  runAsPrincipalStepIfScoped,
   runWithoutRlsScope,
   withinSystemReason,
   scopePoolForRls,
