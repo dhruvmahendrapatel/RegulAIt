@@ -1007,6 +1007,9 @@ services:
       REGULAIT_TLS_EMAIL_DIRECTIVE: ${REGULAIT_TLS_EMAIL_DIRECTIVE:-}
       # Where /idp/realms/ and /idp/resources/ go (the `sso` profile's Keycloak).
       REGULAIT_KC_UPSTREAM: ${REGULAIT_KC_UPSTREAM:-keycloak:8080}
+      # ADR-0258: `on` puts the `anubis` profile's bot check in front of the
+      # public pages (infra/caddy/routes.Caddyfile). Default `off`.
+      REGULAIT_ANUBIS: ${REGULAIT_ANUBIS:-off}
     ports:
       - "80:80" # ACME HTTP-01 challenge + redirect to HTTPS
       - "443:443" # TLS
@@ -1072,6 +1075,8 @@ services:
       REGULAIT_PUBLIC_HOST: ${REGULAIT_PUBLIC_HOST:-}
       REGULAIT_TLS_UPSTREAM: ${REGULAIT_TLS_UPSTREAM:-gateway:3000}
       REGULAIT_KC_UPSTREAM: ${REGULAIT_KC_UPSTREAM:-keycloak:8080}
+      # ADR-0258: as for the TLS front above. Default `off`.
+      REGULAIT_ANUBIS: ${REGULAIT_ANUBIS:-off}
       # the listener's own address on `tunnel`, and the one peer it accepts;
       # both must match the ipv4_address pins below
       REGULAIT_TUNNEL_CADDY_ADDR: 192.168.255.250
@@ -1118,6 +1123,69 @@ services:
     networks:
       tunnel:
         ipv4_address: 192.168.255.251
+
+  # --- optional bot check for the public pages (ADR-0258, backlog P34) --------
+  # Anubis answers one question for the TLS or tunnel front: may this client
+  # see the public trust centre, auditor portal or supplier portal? The front
+  # asks only for those paths (forward_auth) and proxies to the gateway itself,
+  # so Anubis has no route to the gateway, the admin console or the API.
+  #
+  #   REGULAIT_ANUBIS=on docker compose --profile tls --profile anubis up -d
+  #
+  # OFF by default: real auditors and suppliers on locked-down browsers can
+  # fail its JavaScript challenge. Turning it on is a deployment choice for an
+  # admin to record (docs/deployment/ANUBIS.md); scripts/install.sh --anubis
+  # sets both the profile and REGULAIT_ANUBIS. With the profile but not the
+  # switch, Anubis runs and is never asked; with the switch but not the profile,
+  # the public pages answer 502 (fail closed).
+  anubis:
+    # pinned: ghcr.io/techarohq/anubis v1.28.2 (MIT), the OCI index digest
+    # resolved against ghcr.io on 2026-11-07. infra/THIRD_PARTY.md.
+    image: ghcr.io/techarohq/anubis:v1.28.2@sha256:5fcbce70ee6168be5b226d19bec90111d0acd0daf13028fa06b044cf3ebbbd5f
+    profiles: ["anubis"]
+    restart: unless-stopped
+    environment:
+      # subrequest mode: Anubis proxies nothing; the front does (Anubis docs,
+      # "Subrequest Authentication", Caddy)
+      TARGET: " "
+      BIND: ":8923"
+      POLICY_FNAME: /etc/anubis/policy.yaml
+      # A pass may only send the visitor back to this deployment's own name.
+      # Unset, Anubis would redirect to any host (an open redirect), so the
+      # default is a `.invalid` placeholder that matches nothing.
+      REDIRECT_DOMAINS: ${REGULAIT_PUBLIC_HOST:-${REGULAIT_TLS_HOST:-set-regulait-public-host.invalid}}
+      # The pass cookie: host-only, HttpOnly, Secure, SameSite=Lax (a sign-in
+      # link opened from an e-mail is a cross-site navigation), bound to the
+      # client address the front vouches for, and valid for 12 hours.
+      COOKIE_HTTP_ONLY: "true"
+      COOKIE_SECURE: "true"
+      COOKIE_SAME_SITE: Lax
+      COOKIE_EXPIRATION_TIME: 12h
+      JWT_RESTRICTION_HEADER: X-Real-IP
+      SERVE_ROBOTS_TXT: "false"
+      OG_PASSTHROUGH: "false"
+      # optional: shown on Anubis's error page so a blocked visitor can ask
+      # for the allow-list. Empty shows nothing.
+      WEBMASTER_EMAIL: ${REGULAIT_ANUBIS_CONTACT_EMAIL:-}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    pids_limit: 64
+    volumes:
+      - ./infra/anubis/policy.yaml:/etc/anubis/policy.yaml:ro
+      # the named-auditor allow-list; point the variable at your own copy
+      - ${REGULAIT_ANUBIS_ALLOWLIST_FILE:-./infra/anubis/allowlist.yaml}:/etc/anubis/allowlist.yaml:ro
+    # Its ops log (decisions, with client address and user agent) stays small
+    # and short-lived: two 5 MB files, oldest dropped first.
+    logging:
+      driver: local
+      options:
+        max-size: 5m
+        max-file: "2"
+    # NO `ports:`. Only the fronts reach it, on the compose network.
+    networks:
+      - regulait
 
 # ADR-0031: an explicit network with a pinned subnet, rather than the implicit
 # default one, purely so the proxy's address is deterministic and can be named
