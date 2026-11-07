@@ -202,6 +202,44 @@ and nothing changes. The engine's say reaches the existing states in two places:
 4. **UI** (posted on #453): the Engines page rows, and the engine's status and findings on the MCP and skill
    admission review pages.
 
+### 7. Scope the owner added on 2026-11-07 (relayed by two scheduled master notes), and what this PR did with it
+
+1. **The `anthropics/skills` corpus as a false-positive measure.** This PR measured it and cites it; it does not
+   vendor it. At commit `2c5958ec`, 18 of the 19 skills under `skills/` carry an Apache-2.0 `LICENSE.txt`, and
+   `doc-coauthoring` carries none. So the corpus is not vendored, and a CI fetch from that pinned commit is a
+   follow-up. Measured with the built skillscanner image (`--network=none --read-only`), with the verdict at the skill
+   hold line (`medium`):
+   - **SKILL.md only**, which is the subject the product scans today: 18 of 19 pass. `docx` is held by
+     `compound_extract_execute` (high, two hits). Its instructions legitimately unzip a document and run scripts, so
+     this is a false positive.
+   - **Full bundles, with the skill's scripts**: 10 of 19 are held. This is the scope a future bundle upload would
+     bring. The owner should decide the hold line and per-rule tuning for bundles before skills arrive with scripts
+     (open question 5).
+2. **Dart's `skills` CLI (dart-lang/ai, BSD-3-Clause) as a second distribution channel.** It is **recorded as a gap,
+   not built.** Skills enter the product only through the builder doors listed in Context, each of which stores a
+   `builder_skills` row, and that row is what this engine scans. Nothing installs skills from packages or git
+   repositories today. When such an import door is added, it must create the same row (and so get the same in-process
+   and engine scans), never a side path.
+3. **SKILL.md frontmatter validation** (`name`, `description`, and the progressive-loading layout; malformed or
+   oversized frontmatter fails admission). This is **a follow-up for the skill import path** (ADR-0175 A6), outside
+   this engine. skill-scanner already reports manifest problems as findings (for example `MANIFEST_MISSING_LICENSE`
+   at `info`). A strict, size-capped frontmatter parse at import is ours to build and is small. It belongs with the
+   import route and its tests, not with the engine contract.
+4. **An offline OSV check at MCP-server admission** (design reference: `StacklokLabs/osv-mcp`, Apache-2.0). **This is
+   a follow-up.** It needs a declared package and version on the server record, which `mcp_servers` does not hold
+   today, and a vendored OSV snapshot with an update path for air-gapped installs. mcp-scanner's own
+   `vulnerable_package` analyzer reaches OSV and PyPI over the network and stays off (§2, §5).
+5. **Agent Threat Rules (ATR; npm `agent-threat-rules`, MIT, latest 4.3.0 as of 2026-11-06, checked in the npm
+   registry).** **For skills, it already applies.** skill-scanner 2.3.2 ships ATR **3.5.6** as its `atr` pack (712
+   signatures in 10 files, MIT per the pack's README). The pack is loaded by the core static analyzer and pinned by our
+   `rules.sha256`. **Follow-ups:**
+   - move the pack to ATR 4.3.0. That is a reviewed rules change, so the digest moves;
+   - carry each ATR rule's MITRE ATLAS and OWASP ids into our findings. Our report keeps only the slugged rule id
+     today;
+   - apply ATR to MCP tool descriptions. mcp-scanner reads YARA, not ATR's Sigma-style YAML, so this needs either a
+     converted rule set or our own matcher over the vendored snapshot.
+   Neither fits this PR cleanly.
+
 ## Consequences
 
 - Phase 1 changes no behaviour on an install: the engines are off and cannot be turned on. It adds two engine rows,
@@ -223,3 +261,5 @@ and nothing changes. The engine's say reaches the existing states in two places:
    binary. Accept them, or replace skill-scanner's YARA-X path?
 4. **oletools' public-domain `oledump` code and BSD `tablestream`/`xglob`** ship as oletools' own thirdparty folder.
    Accept them as listed, or prune skill-scanner's Office-document check (and with it oletools)?
+5. **The hold line for skill bundles with scripts.** On the `anthropics/skills` corpus, 10 of 19 full bundles hold at
+   `medium` (§7.1). Keep `medium` for bundles, or raise it and tune rules first?
