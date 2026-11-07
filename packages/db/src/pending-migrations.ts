@@ -100,10 +100,17 @@ export class UnassignedMigrationsError extends Error {
   }
 }
 
+/** true when the folder holds a numbered migration file the journal does not list (a journal cut short on purpose) */
+function isCutJournal(migrationsFolder: string, journal: Journal): boolean {
+  const listed = new Set(journal.entries.map((e) => `${e.tag}.sql`));
+  return readdirSync(migrationsFolder).some((f) => NUMBERED_RE.test(f) && !listed.has(f));
+}
+
 /**
  * The folder `migrate` should read. With no pending files, the folder itself. With pending files and
  * `REGULAIT_MIGRATIONS_UNASSIGNED=apply`, a temporary copy in which they are numbered as `assignPending` would number
- * them now; `cleanup` removes it. Anything else throws `UnassignedMigrationsError`.
+ * them now; `cleanup` removes it. A journal cut short (see `isCutJournal`) is read as written, without the pending
+ * files. Anything else throws `UnassignedMigrationsError`.
  */
 export function resolveMigrationsFolder(
   migrationsFolder: string,
@@ -111,8 +118,14 @@ export function resolveMigrationsFolder(
 ): { folder: string; provisional: Assignment[]; cleanup: () => void } {
   const pending = pendingFiles(migrationsFolder);
   if (pending.length === 0) return { folder: migrationsFolder, provisional: [], cleanup: () => {} };
+  const current = readJournal(migrationsFolder);
+  // A journal cut short on purpose (a test that migrates to an older migration first: zz-dbguard-0185 and the other
+  // copy-and-cut suites) leaves out numbered files that are still in the folder. Pending files are numbered after the
+  // head, so they do not belong to such a journal: applying them there would give them a provisional `when` below the
+  // head's, and the later full run would apply them a second time. The cut journal is migrated as written.
+  if (isCutJournal(migrationsFolder, current)) return { folder: migrationsFolder, provisional: [], cleanup: () => {} };
   if (env[UNASSIGNED_ENV] !== "apply") throw new UnassignedMigrationsError(pending);
-  const { journal, assignments } = assignPending(readJournal(migrationsFolder), pending);
+  const { journal, assignments } = assignPending(current, pending);
   const tmp = mkdtempSync(path.join(tmpdir(), "regulait-migrations-"));
   mkdirSync(path.join(tmp, "meta"));
   writeFileSync(path.join(tmp, "meta", "_journal.json"), formatJournal(journal));

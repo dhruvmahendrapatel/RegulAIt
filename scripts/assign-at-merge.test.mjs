@@ -234,6 +234,17 @@ describe("pending migrations in runMigrations (ADR-0252)", () => {
     }
     expect(existsSync(staged.folder)).toBe(false);
   });
+
+  it("leaves pending files out of a journal cut short on purpose, so a later full run applies them once", () => {
+    const r = repo();
+    const folder = path.join(r.root, "packages/db/migrations");
+    r.write("packages/db/migrations/pending/gamma.sql", "select 1;\n");
+    // a copy-and-cut test drops the newest entry from the journal but keeps its file
+    r.write("packages/db/migrations/meta/_journal.json", JSON.stringify(journal("0279_a")));
+    const cut = resolveMigrationsFolder(folder, {});
+    expect(cut.folder).toBe(folder);
+    expect(cut.provisional).toEqual([]);
+  });
 });
 
 describe("the doc folds", () => {
