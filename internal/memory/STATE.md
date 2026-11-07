@@ -1,6 +1,6 @@
 ---
 phase: demo-prep-live-integrations-merged
-last_updated: 2026-10-29
+last_updated: 2026-11-07
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -20,6 +20,10 @@ roadmap: ../product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-11-07 - P37 built (builder lane, ADR-0261): a DefenseClaw audit-export ingest adapter.** API and backend
+only, held locally while CI is saturated. Migration 0314 (renumber above main at merge). P1 on-device enforcement stays
+a post-demo clean-room build informed by the DefenseClaw report.
 
 **2026-10-29 - the customer demo moves to one date, Saturday 2026-10-31 (owner, #453 c6508111468).**
 - **Date:** the internal run-through on Sun 11-01 and the external demo on Tue 11-03 are dropped; there is one run, on
@@ -5536,6 +5540,20 @@ the schema: 151 text columns match the S6 shape (S6 said ~34); 84 guarded, 67 ex
 audit, tool references, platform copies, ingested, machine, conversation, signed evidence, check-constrained), pinned
 against `information_schema` and against the ADR's generated block. Open: whether to guard jsonb
 `config_versions.body` string leaves; ingested columns stay a residual.
+
+**ADR-0261 (builder, 2026-11-07, Accepted, backlog P37): ingest Cisco DefenseClaw's audit export as attributed
+third-party evidence.** Option (b) of the DefenseClaw comparison (`internal/reviews/2026-11-07-defenseclaw-comparison.md`).
+`POST /v1/third-party-ingest/defenseclaw/records` takes the HTTP JSONL export (schema family v8, pinned; documented
+fields only), authenticated in-route by one write-only `rgti_` token per source (hash only, shown once; the P13b scoped
+credential had not landed, so this follows the SD4b enrolment-token pattern). A source is off until enabled with a
+`settings_relax` step-up; issuing the token is also a step-up; all audited. The exporter cannot sign bodies, so replay
+protection is a `(source, record_id)` dedup plus a 15-minute/5-minute window on the database clock; 1 MiB, 512 records,
+64 KiB lines, per-line rejects, 100k records per source per hour. Identity, content and paths are dropped at parse time;
+the host becomes the device pseudonym. Records are append-only (`third_party_ingest_records`, migration 0314) and
+name one audit-chain row per batch (`attribution: third_party, enforcement: false`); risky records open
+`defenseclaw/<connector>` ADR-0195 findings (signal source `defenseclaw_export`). API only; the admin screen is a
+follow-up for #453. Follow-ups: OTLP (protobuf decoder, ADR-0176 search), an evidence retention sweep, and a check
+against a real captured sample before a customer install (the envelope is only partly documented).
 
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
