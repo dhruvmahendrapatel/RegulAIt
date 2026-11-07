@@ -25,6 +25,9 @@ import { useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, setUnauthorizedHandler } from "../api/client";
 import type { AuthMeResponse, MeResponse } from "../api/types";
 
+/** ADR-0218: set once an account's appearance has been seen, so a later sign-out is synced too (one provider per page) */
+let appearanceSynced = false;
+
 export interface SessionState {
   /** undefined = probing, null = signed out */
   auth: AuthMeResponse | null | undefined;
@@ -142,6 +145,12 @@ export function SessionProvider(props: { children: ReactNode }) {
     void refresh();
     return () => setUnauthorizedHandler(null);
   }, [refresh, forgetSession]);
+
+  // ADR-0218: repaint in the account's palette and mode (theme/account.ts, loaded on demand once there is an account)
+  useEffect(() => {
+    if ((appearanceSynced ||= Boolean(auth?.appearance)))
+      void import("../theme/account").then((m) => m.syncAccountAppearance(auth)).catch(() => undefined);
+  }, [auth]);
 
   const value = useMemo(
     () => ({ auth, me, refresh, signOut, applyAuth }),
