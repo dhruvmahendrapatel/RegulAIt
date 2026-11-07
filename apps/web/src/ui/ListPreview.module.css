@@ -1,0 +1,25 @@
+/* The long-page preview and its full page's breadcrumb (ListPreview.tsx). Tokens only. */
+
+.preview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  min-width: 0;
+}
+
+.trail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1);
+  margin: 0 0 var(--s1);
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+}
+
+.trail li + li::before {
+  content: "/";
+  margin-inline-end: var(--s1);
+  color: var(--text-faint);
+}
