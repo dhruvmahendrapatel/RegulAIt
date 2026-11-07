@@ -350,6 +350,7 @@ express it until batch 4 moves review-role membership into SQL:
 | `projects.context-conflicts` | the project context view's id-and-stage read of pending conflict approvals, for an already authorized member |
 | `mrm.card-staleness` (`audit_verify`) | the model-risk staleness gate reads the whole ledger: any admin's or risk acceptor's change can stale a card |
 | `copilot.evidence` (`audit_verify`) | the copilot answers over the ledger within the caller's copilot scope (projects and kernel-visible MCP tools) |
+| `policy-simulation.replay` (`audit_verify`) | a policy simulation replays recorded traffic within the caller's simulation scope (their team, or the org for an admin) |
 
 `runAsPrincipalStepIfScoped(reason, path, fn)` applies a step only when the request is a principal (no-op otherwise).
 0289 also widens the approvals visibility superset by one branch the gateway already admits: an active delegate of an
