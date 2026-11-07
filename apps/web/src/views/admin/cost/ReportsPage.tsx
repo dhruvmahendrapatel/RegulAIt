@@ -21,7 +21,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago, fmtUsd } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Select, SkeletonBlock, Table } from "../../../ui/kit";
 import { QueryGate, optionEls, projectOpts, teamOpts, useAction, useProjects, useTeams, useUsers, userOpts } from "../adminKit";
 import { EditReportScheduleButton } from "../editForms";
 import { ReportDefinitionDetail, ReportRunDetail, ReportRunsCard } from "./ReportsHistory";
@@ -114,6 +114,15 @@ export default function ReportsPage() {
   const [runFromDefinition, setRunFromDefinition] = useState(false);
 
   const defs = overview.data?.definitions ?? [];
+  // I-2: one empty state while nothing exists. This is the run history's own first read (same key, one request);
+  // only an answered, empty history counts, and a failed one falls through to the page as it is, where it says so.
+  const runs = useQuery({
+    queryKey: ["admin", "report-runs", "", 50],
+    queryFn: () => api.get<{ runs: Array<{ id: string }> }>("/v1/reports/runs?limit=50"),
+  });
+  // only the first answer is waited for: a card that later refetches this read never flips the page back
+  const settling = overview.isSuccess && defs.length === 0 && runs.dataUpdatedAt === 0 && runs.errorUpdatedAt === 0;
+  const nothingYet = overview.isSuccess && defs.length === 0 && runs.isSuccess && (runs.data?.runs ?? []).length === 0;
 
   return (
     <>
@@ -205,7 +214,28 @@ export default function ReportsPage() {
                   </Button>
                 </Field>
               </div>
-              {defs.length === 0 ? (
+              {settling ? (
+                <SkeletonBlock lines={3} />
+              ) : nothingYet ? (
+                <EmptyState
+                  title="No reports yet"
+                  body={
+                    <>
+                      No definition, no schedule and no run exist yet. A definition describes WHAT to compute and WHO
+                      may run it. It computes nothing until it is generated. Create one above, then generate it or give
+                      it a schedule.
+                      <span className={v.errLine} role="note" style={{ display: "block", marginTop: "var(--s1)" }}>
+                        Nothing in this deployment fires schedules: an operator or an external cron must run them.{" "}
+                        <InfoButton label="schedules">
+                          A schedule is a definition of a cadence; an operator or an external cron must call{" "}
+                          <code>POST /v1/reports/schedules/run-due</code>, or no scheduled report is ever produced.
+                          &ldquo;Last generated: never&rdquo; on a schedule means exactly that.
+                        </InfoButton>
+                      </span>
+                    </>
+                  }
+                />
+              ) : defs.length === 0 ? (
                 <EmptyState title="No report definitions yet" body="A definition describes WHAT to compute and WHO may run it. It computes nothing until it is generated." />
               ) : (
                 <Table
@@ -272,6 +302,8 @@ export default function ReportsPage() {
             </div>
           </Card>
 
+          {!settling && !nothingYet && (
+          <>
           <Card
             title="Schedules"
             info={
@@ -466,6 +498,8 @@ export default function ReportsPage() {
               setOpenRun(id);
             }}
           />
+          </>
+          )}
         </QueryGate>
       </div>
       {openDefinition && (
