@@ -1,6 +1,6 @@
 ---
 phase: demo-prep-live-integrations-merged
-last_updated: 2026-10-29
+last_updated: 2026-11-07
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -20,6 +20,8 @@ roadmap: ../product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-11-07 - backlog P26 built on `builder/p26-spikee-pyrit-engines` ([ADR-0245](../decisions/0245-spikee-pyrit-redteam-engines.md), migration 0301):** Spikee joins garak and promptfoo as a sidecar red-team engine (off until its first signed image publish), the ADR-0217 automatic re-test now repeats red-team engine runs, and PyRIT is designed but its build is deferred (two builder attempts were stopped by a content-safety filter).
 
 **2026-10-29 - the customer demo moves to one date, Saturday 2026-10-31 (owner, #453 c6508111468).**
 - **Date:** the internal run-through on Sun 11-01 and the external demo on Tue 11-03 are dropped; there is one run, on
@@ -5536,6 +5538,18 @@ the schema: 151 text columns match the S6 shape (S6 said ~34); 84 guarded, 67 ex
 audit, tool references, platform copies, ingested, machine, conversation, signed evidence, check-constrained), pinned
 against `information_schema` and against the ADR's generated block. Open: whether to guard jsonb
 `config_versions.body` string leaves; ingested columns stay a residual.
+
+**ADR-0245 (builder, 2026-11-07): Spikee and PyRIT as sidecar red-team engines (backlog P26).** Spikee 0.9.4
+(Apache-2.0, indirect prompt injection in documents) is built as an ADR-0187 / ADR-0190 I5 engine: a pinned,
+hash-locked, licence-gated image built in CI, a gateway-only workspace target, off and `not_built` until its first
+signed publish (a null lock entry, so nothing can enable it before then). PyRIT 1.1.0 is designed in the ADR (attacker
+and scorer = the run's judge through the gateway, every attack `offensive`) but NOT built: two builder attempts were
+stopped by a content-safety filter; the partial work is on `builder/p26-pyrit-wip`, and `pyrit` is in no runtime list.
+Migration 0301 (`when` 1785228000000) widens `engines_id_check`, seeds spikee and gives the ADR-0217 auto re-test a
+third kind, `engine` (`mrm_retest_runs.engine_run_id`), which repeats a person's red-team engine runs of any engine
+after a model change and settles in the transaction that ends the run. The lock reader treats an engine missing from
+an older base lock as never published. Open: finishing PyRIT, owner confirmation of the nine reused licence
+acceptances, Spikee's LLM judge through the gateway, and the UI (#453).
 
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);

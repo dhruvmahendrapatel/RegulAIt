@@ -13,7 +13,7 @@ describe("ENG-IMG double-build comparison", () => {
 
   it("a different manifest digest or image id fails that engine only", () => {
     const rows = compareBuilds(all({ garak: { manifestDigest: `sha256:${"3".repeat(64)}` }, modelscan: { imageId: `sha256:${"4".repeat(64)}` } }));
-    expect(rows.map((r) => [r.engine, r.ok])).toEqual([["promptfoo", true], ["modelscan", false], ["garak", false]]);
+    expect(rows.map((r) => [r.engine, r.ok])).toEqual([["promptfoo", true], ["modelscan", false], ["garak", false], ["spikee", true]]);
     expect(rows[2].why).toMatch(/NOT reproducible/);
   });
 
