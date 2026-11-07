@@ -1,0 +1,54 @@
+# The local gate (#738). One command before a push: `pnpm gate` (the full set, what the pre-push hook runs) or
+# `pnpm gate:fast` (everything except the package test suites, which need Postgres for the gateway).
+#
+# Install the git hook once per checkout: `pnpm exec lefthook install`. It is not installed by `pnpm install` on
+# purpose: the images and CI run `pnpm install` without a git checkout.
+#
+# Every step runs in order and stops at the first failure (`piped`), each with its own exit code and no pipes (M-107).
+# The migration guard compares with origin/main, so the first step refreshes it.
+# The gateway's TypeScript build needs more than Node's default heap.
+
+pre-push:
+  piped: true
+  jobs:
+    - name: fetch origin/main
+      run: git fetch --no-tags origin main
+    - name: build
+      run: pnpm -r build
+      env:
+        NODE_OPTIONS: --max-old-space-size=4096
+    - name: package tests
+      run: pnpm -r test
+      env:
+        NODE_OPTIONS: --max-old-space-size=4096
+    - name: scripts tests
+      run: pnpm exec vitest run --dir scripts
+    - name: migration guard
+      run: node scripts/migration-watermark-guard.mjs origin/main
+    - name: UI affordances
+      run: node scripts/preflight-ui-affordances.mjs
+    - name: UI route census
+      run: node scripts/preflight-ui-route-census.mjs
+    - name: licence gate
+      run: node scripts/licence-gate-workspace.mjs
+
+# `pnpm gate:fast`: the same steps without `pnpm -r test`. It is not a git hook.
+gate-fast:
+  piped: true
+  jobs:
+    - name: fetch origin/main
+      run: git fetch --no-tags origin main
+    - name: build
+      run: pnpm -r build
+      env:
+        NODE_OPTIONS: --max-old-space-size=4096
+    - name: scripts tests
+      run: pnpm exec vitest run --dir scripts
+    - name: migration guard
+      run: node scripts/migration-watermark-guard.mjs origin/main
+    - name: UI affordances
+      run: node scripts/preflight-ui-affordances.mjs
+    - name: UI route census
+      run: node scripts/preflight-ui-route-census.mjs
+    - name: licence gate
+      run: node scripts/licence-gate-workspace.mjs

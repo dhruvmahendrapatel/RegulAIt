@@ -7,9 +7,18 @@ Root `devDependencies` used only by the scripts in this directory. Nothing here 
 | Package | Version | Licence | Used by | Why |
 |---|---|---|---|---|
 | `dependency-cruiser` | 18.7.0 | MIT | `preflight-import-cycles.mjs` (and the module list of `preflight-import-smoke.mjs`) | ADR-0190 I4 follow-ups: finds the static import cycles of the compiled gateway, for the CI ratchet against new ones. It parses (acorn) and resolves (enhanced-resolve); the script only selects, sorts and compares edges. Works offline, no network at run time. Its transitive runtime closure is 42 packages (39 MIT, 3 ISC; checked 2026-10-16), 34 of them new to the lockfile. |
+| `lefthook` | 2.2.2 | MIT | `lefthook.yml` (root `gate`, `gate:fast` and the pre-push hook) | #738: runs the local gate's steps in order, stopping at the first failure. A Go binary shipped as per-platform npm packages (`lefthook-<os>-<arch>`, MIT, same version); the `lefthook` wrapper picks the local one, so its `postinstall` (blocked by pnpm 10) is not needed and nothing is downloaded at run time. Dev only, never in an image. |
 | `js-yaml` | 4.3.2 | MIT | `refresh-framework-imports.mjs` | ADR-0215 (P5): parses the MITRE ATLAS YAML release when a developer refreshes the vendored framework-import snapshots. Safe `JSON_SCHEMA` load only (no custom types). The same version was already in the lockfile through other tools; one dependency (`argparse`, Python-2.0 licence, CLI only and not loaded by `load`). Never runs in the product: the product reads the vendored JSON. |
 
 ## Search record (ADR-0176)
+
+Local gate runner (git hooks), 2026-11-07 (#738):
+
+- `lefthook` 2.2.2 (MIT, evilmartians/lefthook, released 2026-10-13): chosen. Named by the owner in #738; actively
+  maintained; ordered jobs with stop-on-failure (`piped`) and named groups runnable without a hook (`lefthook run`);
+  one static binary per platform from npm, so it works offline and on Windows.
+- `husky` (MIT): hooks only, no ordered job runner or named groups; the steps would live in shell scripts.
+- `simple-git-hooks` (MIT): the same gap as husky.
 
 YAML parsing for the framework-import refresh, 2026-10-30:
 

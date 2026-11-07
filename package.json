@@ -17,11 +17,14 @@
     "typecheck": "pnpm -r typecheck",
     "checkin": "node scripts/coordination.mjs checkin",
     "coord:status": "node scripts/coordination.mjs status",
-    "coord:lint": "node scripts/coordination.mjs lint"
+    "coord:lint": "node scripts/coordination.mjs lint",
+    "gate": "lefthook run pre-push --no-auto-install",
+    "gate:fast": "lefthook run gate-fast --no-auto-install"
   },
   "devDependencies": {
     "dependency-cruiser": "18.7.0",
     "js-yaml": "4.3.2",
+    "lefthook": "2.2.2",
     "typescript": "^5.8.3",
     "vitest": "^4.1.11"
   },

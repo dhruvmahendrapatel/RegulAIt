@@ -223,6 +223,9 @@ logs; vulnerable dependencies patched, never allow-listed.
   once CI is green. Anything production-related still needs explicit sign-off (standing guardrail above).
 - **Local checks are proportionate:** tests for the touched code plus `demo:prepare` locally, and CI runs the full suite.
   Security-sensitive or migration-heavy batches still run the full local gate before the PR.
+- **`pnpm gate` is the one local check** (#738, `lefthook.yml`): build, package tests, scripts tests, the migration guard,
+  the UI pre-flights and the licence gate, in order, stopping at the first failure. `pnpm gate:fast` skips the package
+  tests (no Postgres). Install it as the pre-push hook once per checkout with `pnpm exec lefthook install`.
 
 ## Infrastructure conventions
 
