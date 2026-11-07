@@ -1,0 +1,64 @@
+# Dependabot auto-merge, semver-patch only (owner decision 2026-11-07, #738 section 4 with the owner's amendment 5).
+#
+# A Dependabot PR that is a semver-PATCH update of the root npm workspace or of a pinned GitHub Action is queued for
+# merge with `gh pr merge --auto --merge`: it merges only once every required check is green (branch protection and
+# the merge queue decide, never this job), and as a merge commit (M-067). Everything else waits for a reviewer:
+#   - minor and major updates;
+#   - the engine manifests (engines/**) and base-image digests, which republish the engine images;
+#   - the pip entries (security-fix PRs only, hand-recompiled).
+# A 7-day cooldown in .github/dependabot.yml and `minimumReleaseAge` in pnpm-workspace.yaml keep a version from being
+# proposed, or resolved, until it has been public for a week.
+#
+# `pull_request`, never `pull_request_target`: the job checks out nothing and runs no code from the PR. Its token can
+# only do what the `permissions` below allow. dependabot/fetch-metadata (MIT) reads the update's metadata from the
+# Dependabot commit and refuses a commit that Dependabot did not sign.
+name: Dependabot auto-merge
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: dependabot-auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  patch:
+    name: queue a semver-patch Dependabot update
+    # Dependabot opened it, from this repository (a fork's PR never gets a write token)
+    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.actor == 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write # enable auto-merge
+      pull-requests: write
+    steps:
+      - id: meta
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Queue it when it is a patch update of the workspace or of an action
+        if: >-
+          steps.meta.outputs.update-type == 'version-update:semver-patch' &&
+          ((steps.meta.outputs.package-ecosystem == 'npm_and_yarn' && steps.meta.outputs.directory == '/') ||
+           steps.meta.outputs.package-ecosystem == 'github_actions')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr merge --auto --merge "$PR_URL"
+
+      - name: Say why it was left for a reviewer
+        if: >-
+          !(steps.meta.outputs.update-type == 'version-update:semver-patch' &&
+          ((steps.meta.outputs.package-ecosystem == 'npm_and_yarn' && steps.meta.outputs.directory == '/') ||
+           steps.meta.outputs.package-ecosystem == 'github_actions'))
+        env:
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+          ECOSYSTEM: ${{ steps.meta.outputs.package-ecosystem }}
+          DIRECTORY: ${{ steps.meta.outputs.directory }}
+        run: |
+          echo "Not auto-merged: ${UPDATE_TYPE:-unknown update type} in ${ECOSYSTEM:-unknown} ${DIRECTORY:-}. A reviewer merges it." >> "$GITHUB_STEP_SUMMARY"
