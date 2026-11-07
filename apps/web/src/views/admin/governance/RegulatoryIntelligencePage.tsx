@@ -1,10 +1,11 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
 import { fmtDateTime, fmtDay, frameworkLabel, humanize } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Card, EmptyState, Field, Select } from "../../../ui/kit";
+import { ExpandableTable } from "../../../ui/ExpandableTable";
 import { QueryGate } from "../adminKit";
 import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
@@ -97,6 +98,15 @@ export default function RegulatoryIntelligencePage() {
   const [status, setStatus] = useState<"" | UpdateStatus>("");
   const [kind, setKind] = useState<"" | InstrumentKind>("");
   const [framework, setFramework] = useState("");
+  // I-2 (#453): which timeline entries are open in place
+  const [openKeys, setOpenKeys] = useState<Set<string>>(() => new Set());
+  const toggleEntry = (key: string) =>
+    setOpenKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
   const query = useQuery({
     queryKey: ["regulatory", "updates", status, kind, framework],
     queryFn: () => {
@@ -174,9 +184,19 @@ export default function RegulatoryIntelligencePage() {
               {updates.length === 0 ? (
                 <EmptyState title={status || kind || framework ? "No entries match these filters" : "No regulatory entries are available"} body={query.data.notes.feed} />
               ) : (
-                <ol className={s.timeline} aria-label="Regulatory effective-date timeline">
-                  {updates.map((update) => <RegulatoryTimelineEntry key={update.key} update={update} />)}
-                </ol>
+                <section aria-label="Regulatory effective-date timeline">
+                  <ExpandableTable
+                    rows={updates}
+                    rowKey={(update) => update.key}
+                    expand={{
+                      open: (update) => openKeys.has(update.key),
+                      toggle: (update) => toggleEntry(update.key),
+                      label: (update) => update.title,
+                      render: (update) => <RegulatoryEntryDetail update={update} />,
+                    }}
+                    columns={TIMELINE_COLUMNS}
+                  />
+                </section>
               )}
 
               <Card title="How to read this feed">
@@ -197,87 +217,110 @@ export default function RegulatoryIntelligencePage() {
   );
 }
 
-function RegulatoryTimelineEntry({ update }: { update: RegulatoryUpdate }) {
+/** the timeline as table columns: what a reader scans, and every warning, stay on the row */
+const TIMELINE_COLUMNS: Array<{ key: string; header: string; render: (update: RegulatoryUpdate) => ReactNode }> = [
+  {
+    key: "date",
+    header: "Date",
+    render: (update) => (
+      <div className={v.stackTight}>
+        <time className={s.timelineDate} dateTime={update.effectiveDate}>{formatDate(update.effectiveDate)}</time>
+        <span className={v.faint}>{dateCaption(update)}</span>
+      </div>
+    ),
+  },
+  {
+    key: "entry",
+    header: "Entry",
+    render: (update) => (
+      <div>
+        <strong>{update.title}</strong>
+        <p className={v.faint}>{update.jurisdiction} · {update.instrument}</p>
+      </div>
+    ),
+  },
+  {
+    key: "status",
+    header: "Status",
+    render: (update) => (
+      <span className={v.row}>
+        {/* status is a lifecycle state, not a rating: neutral; withdrawn is the one a reader must not miss */}
+        <Badge tone={update.status === "withdrawn" ? "warn" : "neutral"}>{STATUS_LABELS[update.status] ?? humanize(update.status)}</Badge>
+        <Badge tone="neutral">{update.instrumentKind ? KIND_LABELS[update.instrumentKind] : "Instrument kind not stated"}</Badge>
+      </span>
+    ),
+  },
+  {
+    key: "frameworks",
+    header: "Frameworks",
+    render: (update) => (
+      <span className={v.row}>
+        {update.frameworks.map((item) => (
+          <Badge key={item.framework} tone={item.packActive ? "neutral" : "danger"} title={item.packActive ? `Active pack version ${item.activeVersion ?? "unknown"}` : "No active pack: framework gap"}>
+            {frameworkLabel(item.framework)}{item.packActive ? ` v${item.activeVersion ?? "?"}` : " · pack not active (gap)"}
+          </Badge>
+        ))}
+      </span>
+    ),
+  },
+  {
+    key: "gaps",
+    header: "Gaps",
+    render: (update) => {
+      const gaps = update.impact.controlGaps + update.impact.frameworkGaps;
+      if (update.status === "withdrawn") return <span className={v.faint}>Not counted: withdrawn</span>;
+      return gaps ? <Badge tone="danger">{`${gaps} gap${gaps === 1 ? "" : "s"}`}</Badge> : <span className={v.faint}>0 gaps</span>;
+    },
+  },
+];
+
+/** an open timeline row: the dates in words, the summary, the mapped controls and use cases, and the source */
+function RegulatoryEntryDetail({ update }: { update: RegulatoryUpdate }) {
   const withdrawn = update.status === "withdrawn";
   const voluntary = update.instrumentKind === "voluntary_standard";
   return (
-    <li className={s.timelineEntry}>
-      <span className={s.timelineDot} aria-hidden />
-      <Card>
-        <div className={v.stack}>
-          <div className={v.row}>
-            <time className={s.timelineDate} dateTime={update.effectiveDate}>{formatDate(update.effectiveDate)}</time>
-            {/* status is a lifecycle state, not a rating: neutral; withdrawn is the one a reader must not miss */}
-            <Badge tone={withdrawn ? "warn" : "neutral"}>{STATUS_LABELS[update.status] ?? humanize(update.status)}</Badge>
-            <Badge tone="neutral">{update.instrumentKind ? KIND_LABELS[update.instrumentKind] : "Instrument kind not stated"}</Badge>
-            <span className={v.faint}>{dateCaption(update)}</span>
-            <span className={v.grow} />
-            {withdrawn ? (
-              <span className={v.faint}>Not counted: withdrawn</span>
-            ) : update.impact.controlGaps || update.impact.frameworkGaps ? (
-              <Badge tone="danger">
-                {update.impact.controlGaps + update.impact.frameworkGaps} gap{update.impact.controlGaps + update.impact.frameworkGaps === 1 ? "" : "s"}
-              </Badge>
-            ) : (
-              <span className={v.faint}>0 gaps</span>
-            )}
-          </div>
-          <div>
-            <strong>{update.title}</strong>
-            <p className={v.faint}>{update.jurisdiction} · {update.instrument}</p>
-          </div>
-          {withdrawn && update.withdrawnOn ? (
-            <p className={v.dim}><strong>Withdrawn on {formatDate(update.withdrawnOn)}.</strong> It no longer applies as issued; it is listed so earlier reliance on it can be reviewed.</p>
-          ) : null}
-          {voluntary ? <p className={v.dim}>Voluntary standard: published, not law in force.</p> : null}
-          {update.enforcementDate ? (
-            <p className={v.dim}>Effective {formatDate(update.effectiveDate)} · enforced from <time dateTime={update.enforcementDate}>{formatDate(update.enforcementDate)}</time></p>
-          ) : null}
-          <p className={v.dim}>{update.summary}</p>
-          <div className={v.row}>
-            {update.frameworks.map((item) => (
-              <Badge key={item.framework} tone={item.packActive ? "neutral" : "danger"} title={item.packActive ? `Active pack version ${item.activeVersion ?? "unknown"}` : "No active pack: framework gap"}>
-                {frameworkLabel(item.framework)}{item.packActive ? ` v${item.activeVersion ?? "?"}` : " · pack not active (gap)"}
-              </Badge>
+    <div className={v.stack}>
+      {withdrawn && update.withdrawnOn ? (
+        <p className={v.dim}><strong>Withdrawn on {formatDate(update.withdrawnOn)}.</strong> It no longer applies as issued; it is listed so earlier reliance on it can be reviewed.</p>
+      ) : null}
+      {voluntary ? <p className={v.dim}>Voluntary standard: published, not law in force.</p> : null}
+      {update.enforcementDate ? (
+        <p className={v.dim}>Effective {formatDate(update.effectiveDate)} · enforced from <time dateTime={update.enforcementDate}>{formatDate(update.enforcementDate)}</time></p>
+      ) : null}
+      <p className={v.dim}>{update.summary}</p>
+      <div className={v.stack}>
+        <strong>Mapped controls and impacted use cases</strong>
+        <p className={v.faint}>Scope basis: {SCOPE_BASIS_LABELS[update.impact.scopeBasis] ?? humanize(update.impact.scopeBasis)} · {update.impact.controlsEvidenced}/{update.impact.controlsMapped} mapped controls evidenced</p>
+        {update.controls.length ? (
+          <div className={v.stackTight}>
+            {update.controls.map((control) => (
+              <div className={s.controlRow} key={`${control.controlRef}:${control.status}`}>
+                <code>{control.controlRef}</code>
+                <span className={v.dim}>{control.title ?? "Not present in the active pack"}</span>
+                <Badge tone={controlTone(control.status)}>{humanize(control.status)}</Badge>
+              </div>
             ))}
           </div>
-          <details>
-            <summary>Mapped controls and impacted use cases</summary>
-            <div className={v.stack}>
-              <p className={v.faint}>Scope basis: {SCOPE_BASIS_LABELS[update.impact.scopeBasis] ?? humanize(update.impact.scopeBasis)} · {update.impact.controlsEvidenced}/{update.impact.controlsMapped} mapped controls evidenced</p>
-              {update.controls.length ? (
-                <div className={v.stackTight}>
-                  {update.controls.map((control) => (
-                    <div className={s.controlRow} key={`${control.controlRef}:${control.status}`}>
-                      <code>{control.controlRef}</code>
-                      <span className={v.dim}>{control.title ?? "Not present in the active pack"}</span>
-                      <Badge tone={controlTone(control.status)}>{humanize(control.status)}</Badge>
-                    </div>
-                  ))}
-                </div>
-              ) : <p className={v.faint}>No controls are mapped to this entry.</p>}
-              <div>
-                <strong>In-scope use cases</strong>
-                {update.impact.useCases.length ? (
-                  <ul className={s.useCaseLinks}>
-                    {update.impact.useCases.map((useCase) => (
-                      <li key={useCase.id}>
-                        <Link to={`/admin/governance/use-cases/${useCase.id}`}>{useCase.name}</Link>
-                        <span className={v.faint}>{humanize(useCase.status)} · EU AI Act tier {useCase.euAiActTier ?? "not screened"}</span>
-                      </li>
-                    ))}
-                  </ul>
-                ) : <p className={v.faint}>No current use case matches the declared scope.</p>}
-              </div>
-            </div>
-          </details>
-          <div className={v.row}>
-            <a href={update.sourceUrl} target="_blank" rel="noreferrer">Primary source</a>
-            <span className={v.faint}>Verified on {formatDate(update.verifiedOn)}</span>
-          </div>
+        ) : <p className={v.faint}>No controls are mapped to this entry.</p>}
+        <div>
+          <strong>In-scope use cases</strong>
+          {update.impact.useCases.length ? (
+            <ul className={s.useCaseLinks}>
+              {update.impact.useCases.map((useCase) => (
+                <li key={useCase.id}>
+                  <Link to={`/admin/governance/use-cases/${useCase.id}`}>{useCase.name}</Link>
+                  <span className={v.faint}>{humanize(useCase.status)} · EU AI Act tier {useCase.euAiActTier ?? "not screened"}</span>
+                </li>
+              ))}
+            </ul>
+          ) : <p className={v.faint}>No current use case matches the declared scope.</p>}
         </div>
-      </Card>
-    </li>
+      </div>
+      <div className={v.row}>
+        <a href={update.sourceUrl} target="_blank" rel="noreferrer">Primary source</a>
+        <span className={v.faint}>Verified on {formatDate(update.verifiedOn)}</span>
+      </div>
+    </div>
   );
 }
 
