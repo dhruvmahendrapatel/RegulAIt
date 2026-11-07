@@ -21,7 +21,7 @@ roadmap: ../product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
-**2026-11-07 - S-02 closed: published dev secrets need loopback or an opt-in; the bootstrap credential retires (PR #PR_NUMBER, [ADR-0167 amendment](../decisions/0167-security-review-batch.md)).**
+**2026-11-07 - S-02 closed: published dev secrets need loopback or an opt-in; the bootstrap credential retires (PR #728, [ADR-0167 amendment](../decisions/0167-security-review-batch.md)).**
 - The published `dev-bootstrap` token and 64×`a` data key boot only on a loopback-only listener with no deploy signal, or
   with `REGULAIT_ALLOW_DEV_SECRETS=1` (a boot banner and a `dev-secrets-opt-in` audit row). Every compose bring-up now
   needs the opt-in in `.env` or real values; the README quickstart says so.
