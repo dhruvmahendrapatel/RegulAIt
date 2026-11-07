@@ -43,7 +43,8 @@ const POLICIES = [
 ];
 
 type Reply = { status: number; body: unknown };
-async function open(page: Page, replies: { retireResource?: Reply[]; retirePolicy?: Reply; patchResource?: Reply }) {
+/** P3: the resource row actions live on the resources ledger page; the policies on the overview's Set up tab */
+async function open(page: Page, replies: { retireResource?: Reply[]; retirePolicy?: Reply; patchResource?: Reply }, at: "resources" | "setup" = "resources") {
   const queue = [...(replies.retireResource ?? [])];
   const mocked = await mockApi(page, (p, method, _b, route) => {
     if (p === "/v1/infra/resources" && method === "GET") return json(route, { resources: RESOURCES });
@@ -60,8 +61,14 @@ async function open(page: Page, replies: { retireResource?: Reply[]; retirePolic
     if (p === `/v1/infra/policies/${POL_R1}/retire` && method === "POST" && replies.retirePolicy) return json(route, replies.retirePolicy.body, replies.retirePolicy.status);
     return undefined;
   });
-  await page.goto("/ui/admin/infrastructure");
-  await expect(page.getByRole("button", { name: "Retire resource prod-cp" })).toBeVisible({ timeout: 30_000 });
+  if (at === "resources") {
+    await page.goto("/ui/admin/infrastructure/resources");
+    await expect(page.getByRole("button", { name: "Retire resource prod-cp" })).toBeVisible({ timeout: 30_000 });
+  } else {
+    await page.goto("/ui/admin/infrastructure");
+    await page.getByRole("tab", { name: /^Set up/ }).click();
+    await expect(page.getByRole("button", { name: "Retire policy for prod-cp" })).toBeVisible({ timeout: 30_000 });
+  }
   return mocked;
 }
 
@@ -74,7 +81,8 @@ test("retire resource: refused while remediations are pending, shown in the dial
   });
   await page.getByText("Resources — with cascade-derived floors").evaluate((el) => el.scrollIntoView({ block: "start" }));
   await page.screenshot({ path: test.info().outputPath("g8-infra.png") });
-  // a retired resource is read-only: no Edit, no Retire
+  // a retired resource is read-only: no Edit, no Retire, and its name carries the retired badge
+  await expect(page.getByRole("row").filter({ hasText: "legacy-runtime" }).getByText("retired", { exact: true })).toBeVisible();
   await expect(page.getByText("Read-only · retired 2026-10-29").first()).toBeVisible();
   await expect(page.getByRole("button", { name: "Edit legacy-runtime" })).toHaveCount(0);
 
@@ -99,7 +107,7 @@ test("retire resource: refused while remediations are pending, shown in the dial
 test("retire policy: the confirm states the fleet fallback; the fleet policy and a retired policy offer no retire", async ({ page }) => {
   const { calls } = await open(page, {
     retirePolicy: { status: 200, body: { policy: { ...POLICIES[1], status: "retired", retiredAt: ISO, retiredReason: REASON }, fallback: { ...FLEET_POLICY, policyId: FLEET } } },
-  });
+  }, "setup");
   await expect(page.getByText("Fleet default: edit, not retire")).toBeVisible();
   await expect(page.getByRole("button", { name: "Retire policy for legacy-runtime" })).toHaveCount(0);
   await page.getByRole("button", { name: "Retire policy for prod-cp" }).click();

@@ -27,17 +27,18 @@ on:
       - 'internal/**'
       - '.gitignore'
       - 'LICENSE'
-  # ADR-0252: the merge queue tests the combined result of the queued PRs (review R-03, R-06) before main moves.
-  # `merge_group` takes no path filter, so a queued docs-only PR runs this too, which a PR run skips.
+  # ADR-0252 addendum: also at merge time, on each push to main and nightly
   merge_group:
     types: [checks_requested]
+  push:
+    branches: [main]
   schedule:
-    - cron: '0 6 * * 1'
+    - cron: '17 3 * * *'
   workflow_dispatch:
 
 concurrency:
-  group: import-cycles-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: import-cycles-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
