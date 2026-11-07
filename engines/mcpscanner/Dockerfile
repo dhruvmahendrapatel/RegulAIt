@@ -26,11 +26,17 @@
 FROM --platform=linux/amd64 python:3.12-trixie@sha256:cad37dd20c7cac861af9003af8796d03ea7a998ec1e3a664429740fc9d7d2691 AS yara
 WORKDIR /build
 COPY engines/mcpscanner/requirements-build.txt engines/mcpscanner/requirements-sdist.txt ./
-# the headers go first, so setup.py's OpenSSL probe fails and the HASH module is not compiled in
+# the headers go first, so setup.py's OpenSSL probe fails and the HASH module is not compiled in. The sdist (sha256
+# checked by --require-hashes) is built in a FIXED directory, without debug info and with that directory mapped away:
+# pip's own build dir is random, and the .so carried its path, so two builds differed (engine-images-build repro).
 RUN rm -rf /usr/include/openssl /usr/include/x86_64-linux-gnu/openssl \
  && python -m venv /opt/build \
  && /opt/build/bin/pip install --no-cache-dir --disable-pip-version-check --require-hashes --no-deps --only-binary :all: -r requirements-build.txt \
- && /opt/build/bin/pip wheel --no-cache-dir --disable-pip-version-check --require-hashes --no-deps --no-build-isolation --no-binary :all: -w /wheels -r requirements-sdist.txt \
+ && /opt/build/bin/pip download --no-cache-dir --disable-pip-version-check --require-hashes --no-deps --no-build-isolation --no-binary :all: -d /sdist -r requirements-sdist.txt \
+ && mkdir /build/src && tar -xzf /sdist/yara_python-4.5.4.tar.gz -C /build/src \
+ && cd /build/src/yara_python-4.5.4 \
+ && CFLAGS="-g0 -ffile-prefix-map=/build/src/yara_python-4.5.4=." \
+    /opt/build/bin/pip wheel --no-cache-dir --disable-pip-version-check --no-deps --no-build-isolation -w /wheels . \
  && ls /wheels/yara_python-4.5.4-cp312-cp312-linux_x86_64.whl
 
 # ---- stage 2: the Python closure ----------------------------------------------------------------------------
@@ -93,6 +99,8 @@ RUN --network=none /opt/mcpscanner/venv/bin/python -I /opt/mcpscanner/scan.py /o
  && /opt/mcpscanner/venv/bin/python -I -c "import json,sys; r=json.load(open('/work/bad.json')); sys.exit(0 if r['status']=='completed' and any(f['severity'] in ('high','critical') for f in r['findings']) else 'bad fixture not flagged')" \
  && /opt/mcpscanner/venv/bin/python -I /opt/mcpscanner/scan.py /opt/mcpscanner/fixtures/clean /work/clean.json \
  && /opt/mcpscanner/venv/bin/python -I -c "import json,sys; r=json.load(open('/work/clean.json')); sys.exit(0 if r['status']=='completed' and not r['findings'] else 'clean fixture flagged')" \
- && rm -f /work/bad.json /work/clean.json
+ && rm -f /work/bad.json /work/clean.json \
+ && leftover="$(ls -A /work /tmp | grep -v -e '^/' -e '^$' || true)" \
+ && { [ -z "$leftover" ] || { echo "the smoke scan left files in the image (they would make it unreproducible): $leftover" >&2; exit 1; }; }
 ENTRYPOINT ["/opt/mcpscanner/venv/bin/python", "-I", "/opt/mcpscanner/scan.py"]
 CMD ["/in", "/out/report.json"]

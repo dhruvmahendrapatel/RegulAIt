@@ -93,6 +93,7 @@ ENV HOME=/work \
     LITELLM_LOCAL_MODEL_COST_MAP=True \
     LITELLM_TELEMETRY=False \
     HF_HUB_OFFLINE=1 \
+    ORT_DISABLE_TELEMETRY=1 \
     REGULAIT_SKILLSCANNER_RULES_DIR=/opt/skillscanner/venv/lib/python3.12/site-packages/skill_scanner/data/packs \
     REGULAIT_SKILLSCANNER_RULES_MANIFEST=/opt/skillscanner/rules.sha256
 USER 10001:10001
@@ -104,6 +105,8 @@ RUN --network=none /opt/skillscanner/venv/bin/python -I /opt/skillscanner/selfte
  && /opt/skillscanner/venv/bin/python -I -c "import json,sys; r=json.load(open('/work/bad.json')); sys.exit(0 if r['status']=='completed' and any(f['severity'] in ('high','critical') for f in r['findings']) else 'bad fixture not flagged')" \
  && /opt/skillscanner/venv/bin/python -I /opt/skillscanner/scan.py /opt/skillscanner/fixtures/clean /work/clean.json \
  && /opt/skillscanner/venv/bin/python -I -c "import json,sys; r=json.load(open('/work/clean.json')); sys.exit(0 if r['status']=='completed' and not [f for f in r['findings'] if f['severity'] in ('medium','high','critical')] else 'clean fixture flagged')" \
- && rm -f /work/bad.json /work/clean.json
+ && rm -f /work/bad.json /work/clean.json \
+ && leftover="$(ls -A /work /tmp | grep -v -e '^/' -e '^$' || true)" \
+ && { [ -z "$leftover" ] || { echo "the smoke scan left files in the image (they would make it unreproducible): $leftover" >&2; exit 1; }; }
 ENTRYPOINT ["/opt/skillscanner/venv/bin/python", "-I", "/opt/skillscanner/scan.py"]
 CMD ["/in", "/out/report.json"]

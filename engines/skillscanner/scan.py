@@ -43,7 +43,9 @@ REMOTE_SWITCHES = (
     "GOOGLE_APPLICATION_CREDENTIALS",
     "AZURE_OPENAI_API_KEY",
 )
-OFFLINE_ENV = {"LITELLM_LOCAL_MODEL_COST_MAP": "True", "LITELLM_TELEMETRY": "False", "HF_HUB_OFFLINE": "1"}
+# ORT_DISABLE_TELEMETRY: onnxruntime (under magika, the file-type check) otherwise writes a random device id and a
+# session file under $HOME/.cache and /tmp on its first model load (measured in the 2.3.2 image)
+OFFLINE_ENV = {"LITELLM_LOCAL_MODEL_COST_MAP": "True", "LITELLM_TELEMETRY": "False", "HF_HUB_OFFLINE": "1", "ORT_DISABLE_TELEMETRY": "1"}
 SEVERITIES = {"INFO": "info", "LOW": "low", "MEDIUM": "medium", "HIGH": "high", "CRITICAL": "critical", "SAFE": "info"}
 
 
