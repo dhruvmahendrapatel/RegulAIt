@@ -24,7 +24,7 @@ the one tool or connector operation the person was just allowed to use.
 
 Add an outbound token exchange, generic over MCP servers and connectors, off by default.
 
-1. **Configuration** (migration 0299). At most one `upstream_token_exchanges` row per MCP server or connector: the
+1. **Configuration** (pending migration `upstream_token_exchange`). At most one `upstream_token_exchanges` row per MCP server or connector: the
    token endpoint (https only), the subject token's audience (the authorization server's identifier), the pinned
    `audience` and optional RFC 8707 `resource` of the issued token, the client id, the client secret (data-key envelope,
    in `CIPHERTEXT_COLUMNS`, `secret_set_at` stamped by the 0142 trigger, rotated by a PUT that carries a new one), a
@@ -124,7 +124,7 @@ form parameters of step 4. That is a migration and a small branch, decided when 
 
 ## As built
 
-- Migration `0299_upstream_token_exchange` (journal `when` 1785225000000; renumbered from 0293 when 0297 reached main first, so it would not fall under the watermark); Drizzle tables in `packages/db/src/schema.ts`.
+- Migration `packages/db/migrations/pending/upstream_token_exchange.sql` (ADR-0252: numbered at merge; it was hand-numbered 0293, then 0299, before that process landed); Drizzle tables in `packages/db/src/schema.ts`.
 - Contract: `packages/shared/src/identity/upstream-token-exchange.ts`; `upstream_exchanged_token` in `REPLAY_NAMESPACES`.
 - Gateway: `apps/gateway/src/upstream-token-exchange.ts`; wired in `mcp-proxy.ts` (`tools/call`), `mcp-protocol.ts`
   (governed protocol methods), `mcp-egress.ts` (the middleware), `connector-call.ts`, `app.ts` (routes, url move),

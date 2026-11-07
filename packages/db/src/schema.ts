@@ -955,7 +955,7 @@ export const mcpServerUpstreamCredentials = pgTable(
 export type McpServerUpstreamCredentialRow = typeof mcpServerUpstreamCredentials.$inferSelect;
 
 /**
- * ADR-0238 (P12(d), migration 0299) — RFC 8693 token exchange for DOWN-SCOPED upstream credentials. At most one row
+ * ADR-0238 (P12(d), migration `upstream_token_exchange`, pending) — RFC 8693 token exchange for DOWN-SCOPED upstream credentials. At most one row
  * per MCP server or per connector (exactly one foreign key set). No row, or `enabled` false (the default), exchanges
  * nothing. Written only by the admin routes (settings_relax step-up), each write audited in its transaction. The
  * client secret is the data-key envelope (CIPHERTEXT_COLUMNS); `secretSetAt` is stamped by `regulait_stamp_secret_set`.
@@ -2099,7 +2099,9 @@ export const usageExtractorVersions = pgTable(
   ],
 );
 
-/** ADR-0241: the sample-response test of one mapping version (append-only evidence; only the sample's hash is kept) */
+/** ADR-0241: the sample-response test of one mapping version. No route updates or deletes a test, but a test is not
+ * append-only: it is deleted with its version and agent (ON DELETE CASCADE). The audit rows are the record that outlives
+ * it. Only the sample's hash is kept. */
 export const usageExtractorTests = pgTable(
   "usage_extractor_tests",
   {
@@ -2289,6 +2291,11 @@ export const approvals = pgTable(
     check("approvals_quorum_check", sql`${t.quorum} BETWEEN 1 AND 5`),
     check("approvals_signature_mode_check", sql`${t.signatureMode} IN ('passkey', 'step_up', 'off')`),
     index("approvals_status_idx").on(t.status),
+    // ADR-0234 batch 2 (migration 0313): the participant branches of approvals_select / approvals_update
+    index("approvals_approver_user_idx").on(t.approverUserId),
+    index("approvals_named_approver_user_idx").on(t.namedApproverUserId),
+    index("approvals_decided_by_idx").on(t.decidedBy),
+    index("approvals_approver_role_idx").on(t.approverRoleId),
     check(
       "approvals_review_role_check",
       sql`(${t.reviewRoleId} IS NULL) = (${t.reviewRoleName} IS NULL) AND (${t.reviewRoleId} IS NULL) = (${t.reviewRound} IS NULL)`,
@@ -6502,6 +6509,8 @@ export const approvalAssignments = pgTable(
     uniqueIndex("approval_assignments_approval_uq").on(t.approvalId),
     index("approval_assignments_assignee_idx").on(t.assigneeKind, t.assigneeId),
     index("approval_assignments_due_idx").on(t.slaState, t.dueAt),
+    // ADR-0234 batch 2 (migration 0313): the escalation branch of the approvals policies
+    index("approval_assignments_escalation_assignee_idx").on(t.escalationAssigneeId),
   ],
 );
 
@@ -13169,6 +13178,8 @@ export const approvalDecisions = pgTable(
     ),
     check("approval_decisions_reason_check", sql`${t.reason} IS NULL OR length(${t.reason}) <= 2000`),
     index("approval_decisions_approval_idx").on(t.approvalId, t.decidedAt),
+    // ADR-0234 batch 2 (migration 0313): the decider branch of the approvals policies
+    index("approval_decisions_decider_user_idx").on(t.deciderUserId),
   ],
 );
 export type ApprovalDecisionRow = typeof approvalDecisions.$inferSelect;

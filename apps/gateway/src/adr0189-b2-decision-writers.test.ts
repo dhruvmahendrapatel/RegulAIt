@@ -122,6 +122,6 @@ it("no production module writes audit_log with raw SQL or builds a handle that s
 it("the shared writer calls the fact capture in the chained append, and the two handle builders wrap with it", () => {
   const chain = readFileSync(path.join(dbSrc, "audit-chain.ts"), "utf8");
   expect(chain).toMatch(/await captureDecisionFacts\(tx as never, rows\);/);
-  expect(readFileSync(path.join(dbSrc, "index.ts"), "utf8")).toMatch(/withAuditChain\(drizzle\(pool/);
+  expect(readFileSync(path.join(dbSrc, "index.ts"), "utf8")).toMatch(/withAuditChain\(drizzle\((scopePoolForRls\()?pool/);
   expect(readFileSync(path.join(dbSrc, "bom-session-lock.ts"), "utf8")).toMatch(/withAuditChain\(drizzle\(client/);
 });
