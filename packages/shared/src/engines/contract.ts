@@ -26,7 +26,7 @@ import { compactJwsSchema, workloadPublicJwkSchema } from "../identity/contract.
 // Vocabularies (each mirrors a CHECK in migration 0173)
 // ---------------------------------------------------------------------------
 
-/** the engines this build knows (`engines.id`); an admin cannot add one. ADR-0242 (migration 0298): the two
+/** the engines this build knows (`engines.id`); an admin cannot add one. ADR-0242 (pending migration `admission_engine_scans`): the two
  * admission-scan engines (Cisco mcp-scanner and skill-scanner). */
 export const ENGINE_IDS = ["promptfoo", "modelscan", "garak", "mcpscanner", "skillscanner"] as const;
 export type EngineId = (typeof ENGINE_IDS)[number];

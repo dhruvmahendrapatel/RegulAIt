@@ -403,7 +403,7 @@ describe("secure by default", () => {
     const r = await inject("GET", "/v1/engines", alice.key);
     expect(r.statusCode, r.body).toBe(200);
     const list = r.json().engines as Array<{ id: string; enabled: boolean; maxConcurrent: number; signature: string }>;
-    // ADR-0242 (migration 0298): the two admission-scan engines are listed too, off and unpublished
+    // ADR-0242 (pending migration `admission_engine_scans`): the two admission-scan engines are listed too, off and unpublished
     expect(list.map((e) => e.id).sort()).toEqual(["garak", "mcpscanner", "modelscan", "promptfoo", "skillscanner"]);
     for (const id of ["mcpscanner", "skillscanner"]) expect(list.find((e) => e.id === id)!.signature).toBe("not_built");
     expect(list.every((e) => e.enabled === false && e.maxConcurrent === 1)).toBe(true);

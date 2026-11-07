@@ -77,13 +77,21 @@ jobs:
 
       # Compared with the PR's base branch; on a schedule or manual run there is nothing to compare with.
       - name: No enterprise baseline grew
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         env:
           BASE_REF: ${{ github.base_ref }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
         run: |
           set -euo pipefail
-          git fetch --no-tags --depth=1 origin "refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
-          node scripts/ui-enterprise-baseline.mjs --guard "origin/$BASE_REF"
+          # ADR-0252: in the merge queue, compare with the commit the queued PR is merged onto
+          if [ -n "$MG_BASE_SHA" ]; then
+            git fetch --no-tags --depth=1 origin "$MG_BASE_SHA"
+            base="$MG_BASE_SHA"
+          else
+            git fetch --no-tags --depth=1 origin "refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+            base="origin/$BASE_REF"
+          fi
+          node scripts/ui-enterprise-baseline.mjs --guard "$base"
 
       - name: No new hard-coded colour or spacing in apps/web (design-token ratchet)
         if: success() || failure()

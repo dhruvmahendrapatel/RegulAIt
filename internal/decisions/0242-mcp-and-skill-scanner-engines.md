@@ -1,7 +1,8 @@
 # ADR-0242: Cisco mcp-scanner and skill-scanner as offline admission-scan engines (P23)
 
-- **Status:** Proposed (phase 1 built; phase 2 named below)
-- **Date:** 2026-11-07
+- **Status**: Proposed (phase 1 built; phase 2 named below)
+- **Date**: 2026-11-07
+- **Index**: Cisco mcp-scanner 4.8.7 and skill-scanner 2.3.2 as offline admission-scan engines (P23), phase 1
 - **Deciders:** owner (backlog item P23 approved 2026-11-07); the builder's defaults are marked and open to the owner
 - **Builds on:** ADR-0187 (the sidecar engine contract), ADR-0097 and ADR-0100 (MCP admission scanning and re-scans),
   ADR-0175 A6 (builder-skill admission), ADR-0176 (open source first), ADR-0180 (secure by default), ADR-0200
@@ -68,7 +69,7 @@ opposite of the sidecar model (no socket, no network), so they are left out (§5
 ### 1. Two ADR-0187 engines of a new kind, `admission_scan`
 
 `mcpscanner` (Cisco mcp-scanner 4.8.7) and `skillscanner` (Cisco skill-scanner 2.3.2) join `ENGINE_IDS`, with kind
-`admission_scan`. Migration 0298 widens the 0173 CHECKs and inserts both rows. Their manifest entries follow the
+`admission_scan`. The pending migration `admission_engine_scans` widens the 0173 CHECKs and inserts both rows. Their manifest entries follow the
 ADR-0187 contract: `needsModelAccess: false`, one `scan` set, a worker-attested offline switch, and **no image
 digest** until the image is published and recorded in `engines/images.lock.json`. With no digest, no self-test can
 match the build, so **neither engine can be enabled yet** (ADR-0187 decision 3; ADR-0180). This is deliberate: an
@@ -157,7 +158,7 @@ The hold line is the subject's own: `high` for an MCP server (MCP_ADMISSION_HOLD
 (SKILL_ADMISSION_HOLD_AT). An `info` finding, such as skill-scanner's missing-licence note, is advice and not a
 finding.
 
-`admission_engine_scans` (migration 0298) holds one row per scan of one subject at one digest. The subject is a real
+`admission_engine_scans` (pending migration `admission_engine_scans`) holds one row per scan of one subject at one digest. The subject is a real
 foreign key (`mcp_server_id` or `builder_skill_id`, exactly one set). `findings` is a point-in-time evidence snapshot,
 the ADR-0200 addendum exception. With the engine **on**, only a `pass` for the subject's **current digest** admits;
 no scan yet (`pending`), `unknown` and `fail` all hold. With it **off**, the shipped default, the engine has no say
