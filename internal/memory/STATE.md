@@ -21,6 +21,17 @@ roadmap: ../product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-11-07 - backlog P36: review workflow patterns ([ADR-0260](../decisions/0260-review-workflow-patterns.md), builder, branch `builder/p36-review-workflow-patterns`).**
+- **Our process:** reviewers follow `internal/process/REVIEW_CHECKLISTS.md` (two loops; numbered findings with a
+  severity; READY lists each finding with its fixing commit; verdicts start `APPROVE at <sha>` / `SECURITY APPROVE at
+  <sha>`; post without asking; delta reviews cover non-merge commits since the last verdict); the `regulait-review`
+  skill loads it. Adapted from OneRedOak/claude-code-workflows (MIT, credited in apps/gateway/THIRD_PARTY.md).
+- **Product:** a review-bound check (`reviews` on an `automated_check` stage: code, OWASP Top 10 security, design/UI)
+  runs as a governed dispatch as the instance initiator and returns numbered structured findings; any finding above a
+  nit fails by default; four gallery shapes, off unless assigned. No migration.
+- **Open (PENDING §2i P36):** a PR diff read on the git providers, a governed Playwright step for the design review,
+  and the UI (posted to #453).
+
 **2026-10-29 - the customer demo moves to one date, Saturday 2026-10-31 (owner, #453 c6508111468).**
 - **Date:** the internal run-through on Sun 11-01 and the external demo on Tue 11-03 are dropped; there is one run, on
   10-31. LIVE is never re-prepared, so every beat, state-changing ones included, runs on LIVE once, at the demo; the
@@ -5536,6 +5547,16 @@ the schema: 151 text columns match the S6 shape (S6 said ~34); 84 guarded, 67 ex
 audit, tool references, platform copies, ingested, machine, conversation, signed evidence, check-constrained), pinned
 against `information_schema` and against the ADR's generated block. Open: whether to guard jsonb
 `config_versions.body` string leaves; ingested columns stay a residual.
+
+**ADR-0260 (builder, 2026-11-07, Accepted): review patterns from OneRedOak/claude-code-workflows (backlog P36).**
+- **Process:** `internal/process/REVIEW_CHECKLISTS.md` and `.claude/skills/regulait-review/SKILL.md`; the security review
+  keeps rate limiting, audit logging and hardening in scope (the source excludes them).
+- **Product:** `reviews: [{check, agent, profile, failOn?, maxTokens?}]` on an `automated_check` stage, a third
+  machine-decided check kind beside evals (ADR-0044) and engines (ADR-0187); the shared eval decider, the `evals`
+  model feature, project cost, the dispatch audit; evidence in a delimited untrusted block; zod-validated findings
+  numbered F1…; fails closed; cannot be reported; unknown reviewer refused at template creation; `reviewerAgent`
+  required when creating a review gallery shape. Gallery: `code-review-check`, `security-review-check`,
+  `design-review-check`, `build-and-review`. No migration.
 
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);

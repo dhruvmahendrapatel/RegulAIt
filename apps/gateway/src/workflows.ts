@@ -45,6 +45,7 @@ import {
   evalDatasets,
 } from "@regulait/db";
 import { evalDatasetNamesBoundBy, evalDatasetRetiredDetail, retiredEvalDatasetNames, runEvalSuite } from "./evals.js";
+import { runStageReviewChecks, type ReviewCheckOutcome } from "./workflow-review-checks.js";
 import {
   resolveProvider,
   gitDefaultBaseUrl,
@@ -758,7 +759,11 @@ export function checkStageGuardsAtClaim(
   ctx: Record<string, unknown>,
   round: number,
 ): boolean {
-  const bound = new Set([...(stage.evals ?? []).map((e) => e.check), ...(stage.engines ?? []).map((e) => e.check)]);
+  const bound = new Set([
+    ...(stage.evals ?? []).map((e) => e.check),
+    ...(stage.engines ?? []).map((e) => e.check),
+    ...(stage.reviews ?? []).map((e) => e.check),
+  ]);
   const reported = new Map(
     normalizeCheckReports(ctx[`reported:${stage.id}`])
       .filter((r) => r.round === undefined || r.round === round)
@@ -1063,6 +1068,8 @@ type EvaluatedCheck = {
   eval?: Record<string, unknown>;
   /** ADR-0187: present only for engine-bound checks — the run, its status and verdict */
   engine?: Record<string, unknown>;
+  /** ADR-0260: present only for review-bound checks — the reviewer, the numbered findings and the verdict */
+  review?: Record<string, unknown>;
 };
 
 /** the shape one named check resolves to inside the check executor */
@@ -1445,6 +1452,9 @@ async function runGitExecutions(
       // which then flows into the SAME check_failed event every other failing
       // check uses; there is no second failure path.
       const evalBound = new Set((stage.evals ?? []).map((e) => e.check));
+      // ADR-0260: review-bound checks are decided the same way — by a governed
+      // review dispatch, once per stage entry, never reported or auto-passed
+      const reviewBound = new Set((stage.reviews ?? []).map((e) => e.check));
       const refusal = stage.offlineAutoPass === true ? offlineAutoPassRefusal(process.env) : null;
       const autoPassHonoured = stage.offlineAutoPass === true && refusal === null;
       // The evals run ONCE per stage entry, as they did before AER-047, not
@@ -1458,10 +1468,14 @@ async function runGitExecutions(
       // episode and re-runs them, and a re-open clears the episode.
       const waitKey = `awaitingReport:${stage.id}`;
       const episodeEvals = new Map<string, CheckOutcome>();
+      const episodeReviews = new Map<string, ReviewCheckOutcome>();
       if (typeof context[waitKey] === "string" && Array.isArray(context[`checks:${stage.id}`])) {
         for (const r of context[`checks:${stage.id}`] as EvaluatedCheck[]) {
           if (r && evalBound.has(r.check) && r.status === "passed" && r.eval) {
             episodeEvals.set(r.check, { check: r.check, status: "passed", severity: r.severity, detail: r.detail, eval: r.eval });
+          }
+          if (r && reviewBound.has(r.check) && r.status === "passed" && r.review) {
+            episodeReviews.set(r.check, { check: r.check, status: "passed", severity: r.severity, detail: r.detail, review: r.review });
           }
         }
       }
@@ -1472,6 +1486,17 @@ async function runGitExecutions(
         declaredEvals.length > 0 && declaredEvals.every((n) => episodeEvals.has(n))
           ? episodeEvals
           : await runStageEvalChecks(db, instance, stage, dataKey);
+      const declaredReviews = declaredChecks.filter((n) => reviewBound.has(n));
+      const reviewOutcomes =
+        declaredReviews.length > 0 && declaredReviews.every((n) => episodeReviews.has(n))
+          ? episodeReviews
+          : await runStageReviewChecks(
+              db,
+              dataKey,
+              { ...instance, round: guard.round, context },
+              stage,
+              def,
+            );
       // ADR-0187: engine-bound checks are decided by a sidecar engine run, started
       // here on first sight as the instance initiator on the instance's project
       // and read back on every evaluation: pending while it runs, failed when it
@@ -1503,6 +1528,11 @@ async function runGitExecutions(
           const results: EvaluatedCheck[] = declaredChecks.map((name): EvaluatedCheck => {
             const ev = evalOutcomes.get(name);
             if (ev) return ev;
+            const rv = reviewOutcomes.get(name);
+            if (rv) return rv;
+            if (reviewBound.has(name)) {
+              return { check: name, status: "failed", severity: "high", detail: "the review produced no outcome — the check could not run, so it does not pass" };
+            }
             const en = engineOutcomes.get(name);
             if (en) return { check: name, status: en.status, severity: en.severity, detail: en.detail, engine: en.engine };
             if (engineBound.has(name)) {
@@ -2563,6 +2593,25 @@ export async function createWorkflowTemplateValidated(
       },
     };
   }
+  // ADR-0260: a review-bound check names its reviewer; a template must never
+  // promise a review by an agent that is not in the registry
+  const reviewAgents = [...new Set(definition.stages.flatMap((st) => (st.reviews ?? []).map((r) => r.agent)))];
+  if (reviewAgents.length > 0) {
+    const found = await db.select({ name: agents.name }).from(agents).where(inArray(agents.name, reviewAgents));
+    const known = new Set(found.map((r) => r.name));
+    const unknown = reviewAgents.filter((n) => !known.has(n));
+    if (unknown.length > 0) {
+      return {
+        ok: false,
+        status: 422,
+        body: {
+          error: "unknown_review_agent",
+          detail: `the review check(s) name agent(s) ${unknown.map((n) => `'${n}'`).join(", ")}, which are not in the registry`,
+          agents: unknown,
+        },
+      };
+    }
+  }
   const named = definition.stages
     .flatMap((st) => st.approvers ?? [])
     .filter((a) => a !== "requesting_user" && a !== APPROVER_ADMIN_NOT_INITIATOR);
@@ -3436,6 +3485,15 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       return reply.status(422).send({
         error: "eval_check_cannot_be_reported",
         detail: `check(s) ${usurped.join(", ")} are decided by running their eval dataset; a reported result cannot stand in for one`,
+      });
+    }
+    // ADR-0260: the same for a check bound to a governed review
+    const reviewBoundChecks = new Set((stage.reviews ?? []).map((e) => e.check));
+    const usurpedReview = body.results.filter((r) => reviewBoundChecks.has(r.check)).map((r) => r.check);
+    if (usurpedReview.length > 0) {
+      return reply.status(422).send({
+        error: "review_check_cannot_be_reported",
+        detail: `check(s) ${usurpedReview.join(", ")} are decided by a governed review; a reported result cannot stand in for one`,
       });
     }
     // ADR-0187: the same for a check bound to a sidecar engine run
