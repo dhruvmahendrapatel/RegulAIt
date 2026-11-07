@@ -61,6 +61,53 @@
    }
   },
   {
+   "id": "jailbreakbench",
+   "title": "JailbreakBench (artifacts and JBB-Behaviors)",
+   "upstream": "github.com/JailbreakBench/artifacts",
+   "commit": "909e68c01d94222b8ad2e397a017e2e12e2adb73",
+   "licence": "MIT",
+   "copyright": "Copyright (c) 2024 JailbreakBench Team and artifacts authors",
+   "licenceFile": "LICENSE-jailbreakbench",
+   "licenceSha256": "09017abee723a7b715866bbcd1bd2569e0a5fa7e996dd1d9d1ec4b36fb5ca51c",
+   "file": "jailbreakbench.json",
+   "sha256": "7667e027695aca79fa703b2a86c0f9faaf5f0b01273a2a8238e0404625c1c3bd",
+   "bytes": 186089,
+   "cases": 250,
+   "injection": 150,
+   "benign": 100,
+   "sampling": {
+    "method": "attack prompts: deduplicated by text per method, then Python random.Random(seed).sample per method (pool sorted by id); benign: complete",
+    "seed": 20261107,
+    "perMethod": 30,
+    "methods": [
+     "DSN",
+     "GCG",
+     "JBC",
+     "PAIR",
+     "prompt_with_random_search"
+    ],
+    "population": 1637,
+    "uniquePerMethod": {
+     "DSN": 195,
+     "GCG": 200,
+     "JBC": 100,
+     "PAIR": 237,
+     "prompt_with_random_search": 365
+    },
+    "injection": "the adversarial prompt each attack submitted (field `prompt`); model responses are never read into the snapshot. Label `injection` here means an adversarial jailbreak prompt.",
+    "benign": "the 100 JBB-Behaviors benign behaviours (topic-matched to the harmful ones), the over-refusal counterweight",
+    "notUsed": "the 100 plain harmful goals (harmful requests, not adversarial text) and the test-artifact directory"
+   },
+   "second": {
+    "upstream": "huggingface.co/datasets/JailbreakBench/JBB-Behaviors",
+    "commit": "886acc352a31533ffbcf4ef22c744658688086fc",
+    "licence": "MIT",
+    "copyright": "Copyright (c) 2023 JailbreakBench Team",
+    "licenceFile": "LICENSE-jailbreakbench-behaviors",
+    "licenceSha256": "7e1ae8f3676f39ff6e62af1743385c176a9476b1157f35bb9d05b4e6c65b7d94"
+   }
+  },
+  {
    "id": "agentdojo",
    "title": "AgentDojo (benchmark v1)",
    "upstream": "github.com/ethz-spylab/agentdojo",

@@ -14,6 +14,10 @@
  *               so FPR is n/a)
  *   agentdojo   135 injection texts (27 goals x 5 task-independent attacks)
  *               and the 97 benign user-task prompts of benchmark v1
+ *   jailbreakbench  150 adversarial jailbreak prompts (30 per attack method,
+ *               seeded, deduplicated; responses never vendored) and the 100
+ *               benign JBB-Behaviors. These are jailbreaks, not injections, so
+ *               they measure the injection detectors outside their target.
  *
  * plus one set of OUR OWN content, written for RegulAIt (proprietary, like the
  * rest of the repository), pinned in the same manifest:
@@ -42,7 +46,7 @@ import { z } from "zod";
 /** relative to `packages/shared/src/eval-datasets/` */
 export const INJECTION_BASELINE_VENDOR_DIR = "vendor/injection-baselines";
 
-export const INJECTION_BASELINE_DATASET_IDS = ["notinject", "injecagent", "agentdojo", "regulait-web-agent"] as const;
+export const INJECTION_BASELINE_DATASET_IDS = ["notinject", "injecagent", "agentdojo", "jailbreakbench", "regulait-web-agent"] as const;
 export type InjectionBaselineDatasetId = (typeof INJECTION_BASELINE_DATASET_IDS)[number];
 
 /** the snapshot pins; `MANIFEST.json` carries the same values and the test keeps them equal */
@@ -73,6 +77,14 @@ export const INJECTION_BASELINE_FILES: Record<
     injection: 135,
     benign: 97,
     commit: "089ed468cf3ed0322acc66b0211f26d9d90dbf60",
+  },
+  jailbreakbench: {
+    file: "jailbreakbench.json",
+    sha256: "7667e027695aca79fa703b2a86c0f9faaf5f0b01273a2a8238e0404625c1c3bd",
+    cases: 250,
+    injection: 150,
+    benign: 100,
+    commit: "909e68c01d94222b8ad2e397a017e2e12e2adb73",
   },
   /** our own content (no upstream): see the module comment */
   "regulait-web-agent": {

@@ -38,6 +38,8 @@ OUT = ROOT / "packages/shared/src/eval-datasets/vendor/injection-baselines"
 SEED = 20261107
 #: InjecAgent cases kept per stratum (kind x setting x attack type: 12 strata)
 INJECAGENT_PER_STRATUM = 25
+#: JailbreakBench attack prompts kept per attack method (5 methods)
+JBB_PER_METHOD = 30
 
 SOURCES = {
     "notinject": {
@@ -55,6 +57,22 @@ SOURCES = {
         "licence": "MIT",
         "licenceFile": "LICENCE",
         "copyright": "Copyright (c) 2023 Qiusi Zhan",
+    },
+    "jailbreakbench": {
+        "title": "JailbreakBench (artifacts and JBB-Behaviors)",
+        "repo": "JailbreakBench/artifacts",
+        "commit": "909e68c01d94222b8ad2e397a017e2e12e2adb73",
+        "licence": "MIT",
+        "licenceFile": "LICENSE",
+        "copyright": "Copyright (c) 2024 JailbreakBench Team and artifacts authors",
+        # the benign behaviours come from the Hugging Face dataset repository, also MIT (its own LICENSE file)
+        "second": {
+            "url": "https://huggingface.co/datasets/JailbreakBench/JBB-Behaviors",
+            "dir": "JBB-Behaviors",
+            "commit": "886acc352a31533ffbcf4ef22c744658688086fc",
+            "licenceFile": "LICENSE",
+            "copyright": "Copyright (c) 2023 JailbreakBench Team",
+        },
     },
     "agentdojo": {
         "title": "AgentDojo (benchmark v1)",
@@ -98,9 +116,9 @@ def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def checkout(repo: str, commit: str, src: Path | None, tmp: Path) -> Path:
+def checkout(repo: str, commit: str, src: Path | None, tmp: Path, url: str | None = None, name: str | None = None) -> Path:
     """a checkout of `repo` at exactly `commit` (fetched, or read from --from)"""
-    name = repo.split("/")[1]
+    name = name or repo.split("/")[1]
     if src is not None:
         d = src / name
         head = subprocess.run(["git", "-C", str(d), "rev-parse", "HEAD"], capture_output=True, text=True, check=True)
@@ -109,7 +127,7 @@ def checkout(repo: str, commit: str, src: Path | None, tmp: Path) -> Path:
         return d
     d = tmp / name
     subprocess.run(["git", "init", "-q", str(d)], check=True)
-    subprocess.run(["git", "-C", str(d), "fetch", "-q", "--depth", "1", f"https://github.com/{repo}.git", commit], check=True)
+    subprocess.run(["git", "-C", str(d), "fetch", "-q", "--depth", "1", url or f"https://github.com/{repo}.git", commit], check=True)
     subprocess.run(["git", "-C", str(d), "checkout", "-q", "FETCH_HEAD"], check=True)
     return d
 
@@ -168,6 +186,68 @@ def build_injecagent(d: Path) -> tuple[list[dict], dict]:
         "population": total,
         "populationPerStratum": {s: len(v) for s, v in sorted(by_stratum.items())},
         "textField": "Tool Response (the tool output carrying the attacker instruction, what the agent reads next)",
+    }
+    return cases, sampling
+
+
+# ----------------------------------------------------------- JailbreakBench
+JBB_METHODS = ("DSN", "GCG", "JBC", "PAIR", "prompt_with_random_search")
+
+
+def build_jailbreakbench(artifacts: Path, behaviors: Path) -> tuple[list[dict], dict]:
+    """attack prompts only (never the model responses), deduplicated, sampled per method;
+    and every benign behaviour. The plain harmful goals are not used: they are harmful
+    requests, not injected or adversarial text."""
+    by_method: dict[str, dict[str, dict]] = {m: {} for m in JBB_METHODS}
+    population = 0
+    for f in sorted((artifacts / "attack-artifacts").glob("*/*/*.json")):
+        method = f.parts[-3]
+        if method not in by_method:
+            continue  # test-artifact and anything new is left out until reviewed
+        doc = json.loads(f.read_text("utf-8"))
+        for j in doc["jailbreaks"]:
+            prompt = j.get("prompt")
+            if not isinstance(prompt, str) or not prompt.strip():
+                continue  # not submitted for this behaviour
+            population += 1
+            text = norm_text(prompt)
+            key = hashlib.sha256(text.encode()).hexdigest()
+            if key not in by_method[method]:
+                model = f.stem
+                by_method[method][key] = {
+                    "id": f"jailbreakbench/{method}/{f.parts[-2]}/{model}/{int(j['index']):03d}",
+                    "label": "injection",
+                    "stratum": f"attack/{method}",
+                    "text": text,
+                }
+    rng = random.Random(SEED)
+    cases: list[dict] = []
+    for method in JBB_METHODS:
+        pool = sorted(by_method[method].values(), key=lambda c: c["id"])
+        k = min(JBB_PER_METHOD, len(pool))
+        cases.extend(pool[i] for i in sorted(rng.sample(range(len(pool)), k)))
+    import csv
+
+    with open(behaviors / "data/benign-behaviors.csv", newline="", encoding="utf-8") as fh:
+        for r in csv.DictReader(fh):
+            cases.append(
+                {
+                    "id": f"jailbreakbench/benign/{int(r['Index']):03d}",
+                    "label": "benign",
+                    "stratum": f"benign/{r['Category']}",
+                    "text": norm_text(r["Goal"]),
+                }
+            )
+    sampling = {
+        "method": "attack prompts: deduplicated by text per method, then Python random.Random(seed).sample per method (pool sorted by id); benign: complete",
+        "seed": SEED,
+        "perMethod": JBB_PER_METHOD,
+        "methods": list(JBB_METHODS),
+        "population": population,
+        "uniquePerMethod": {m: len(v) for m, v in by_method.items()},
+        "injection": "the adversarial prompt each attack submitted (field `prompt`); model responses are never read into the snapshot. Label `injection` here means an adversarial jailbreak prompt.",
+        "benign": "the 100 JBB-Behaviors benign behaviours (topic-matched to the harmful ones), the over-refusal counterweight",
+        "notUsed": "the 100 plain harmful goals (harmful requests, not adversarial text) and the test-artifact directory",
     }
     return cases, sampling
 
@@ -422,7 +502,11 @@ def main() -> None:
         for sid, meta in SOURCES.items():
             d = checkout(meta["repo"], meta["commit"], args.src, tmp)
             sampling = {"method": "complete, no sampling"}
-            if sid == "notinject":
+            second = meta.get("second")
+            d2 = checkout("", second["commit"], args.src, tmp, url=second["url"], name=second["dir"]) if second else None
+            if sid == "jailbreakbench":
+                cases, sampling = build_jailbreakbench(d, d2)
+            elif sid == "notinject":
                 cases = build_notinject(d)
             elif sid == "injecagent":
                 cases, sampling = build_injecagent(d)
@@ -433,6 +517,20 @@ def main() -> None:
                 sys.exit(f"{sid}: duplicate case ids")
             licence = (d / meta["licenceFile"]).read_bytes()
             (OUT / f"LICENSE-{sid}").write_bytes(licence)
+            extra = {}
+            if second:
+                licence2 = (d2 / second["licenceFile"]).read_bytes()
+                (OUT / f"LICENSE-{sid}-behaviors").write_bytes(licence2)
+                extra = {
+                    "second": {
+                        "upstream": second["url"].removeprefix("https://"),
+                        "commit": second["commit"],
+                        "licence": "MIT",
+                        "copyright": second["copyright"],
+                        "licenceFile": f"LICENSE-{sid}-behaviors",
+                        "licenceSha256": sha256(licence2),
+                    }
+                }
             data = write_json(OUT / f"{sid}.json", {"source": sid, "cases": cases})
             manifest_sources.append(
                 {
@@ -451,6 +549,7 @@ def main() -> None:
                     "injection": sum(1 for c in cases if c["label"] == "injection"),
                     "benign": sum(1 for c in cases if c["label"] == "benign"),
                     "sampling": sampling,
+                    **extra,
                 }
             )
     data, sampling = check_own()

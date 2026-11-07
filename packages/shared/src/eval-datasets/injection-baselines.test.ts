@@ -43,6 +43,7 @@ interface ManifestSource {
   injection: number;
   benign: number;
   sampling: { method: string; seed?: number };
+  second?: { licenceFile: string; licenceSha256: string };
 }
 const manifest = JSON.parse(read("MANIFEST.json").toString("utf8")) as {
   seed: number;
@@ -70,12 +71,18 @@ describe("vendored injection snapshots (pins, licences, manifest)", () => {
       const licence = read(s.licenceFile as string);
       expect(snapshotSha256(licence)).toBe(s.licenceSha256);
       expect(licence.toString("utf8")).toMatch(/^MIT License/);
+      if (s.second) {
+        const second = read(s.second.licenceFile);
+        expect(snapshotSha256(second)).toBe(s.second.licenceSha256);
+        expect(second.toString("utf8")).toMatch(/^MIT License/);
+      }
     }
   });
 
   it("records the sampling seed, and why HackAPrompt is not vendored", () => {
     expect(manifest.seed).toBe(20261107);
     expect(manifest.sources.find((s) => s.id === "injecagent")?.sampling).toMatchObject({ seed: 20261107 });
+    expect(manifest.sources.find((s) => s.id === "jailbreakbench")?.sampling).toMatchObject({ seed: 20261107 });
     expect(manifest.excluded.map((e) => e.id)).toEqual(["wasp", "hackaprompt"]);
   });
 

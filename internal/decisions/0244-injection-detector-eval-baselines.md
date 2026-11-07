@@ -25,13 +25,14 @@ its delta and CI fails on a regression. Until now the only numbers were small sy
    refused before it is parsed. No upstream code is executed: AgentDojo's tasks are Python classes, read with `ast` and
    an evaluator that accepts only string constants, f-strings over names already resolved, string `+` and
    `"sep".join(list of strings)`, and fails the refresh on anything else.
-2. **Licences checked by hand, data and code.** The four named candidates are MIT; WASP, considered later, is not.
+2. **Licences checked by hand, data and code.** The four named candidates are MIT, as is JailbreakBench (added later); WASP, also added later, is not.
 
    | Source | Data licence | Code licence | Access | Vendored |
    |---|---|---|---|---|
    | NotInject | MIT (HF card `license:mit`, ungated; the copy used is in the PIGuard repo) | MIT (`leolee99/PIGuard` LICENSE, © 2024 Hao Li) | public | yes, complete: 339 benign prompts |
    | InjecAgent | MIT (repo LICENCE covers `data/`) | MIT (`uiuc-kang-lab/InjecAgent` LICENCE, © 2023 Qiusi Zhan) | public | yes, a sample: 300 of 2,108 |
    | AgentDojo | MIT (task suites are code in the package) | MIT (`ethz-spylab/agentdojo` LICENSE, © 2024 Debenedetti et al.) | public | yes, complete for benchmark v1 |
+   | JailbreakBench (added 2026-11-07) | MIT: `JailbreakBench/JBB-Behaviors` on HF (card `license: mit`, its own LICENSE, © 2023 JailbreakBench Team, ungated) and `JailbreakBench/artifacts` (LICENSE, © 2024 JailbreakBench Team and artifacts authors). The behaviours' upstream sources, AdvBench (`llm-attacks/llm-attacks`), HarmBench and the TDC 2023 starter kit (`centerforaisafety/*`), are MIT too | MIT (`JailbreakBench/jailbreakbench`) | public | yes, a sample: 150 attack prompts and all 100 benign behaviours |
    | HackAPrompt | MIT (`hackaprompt/hackaprompt-dataset`, card `license: mit`) | n/a (data only) | gated, auto-approval: the account must agree to share its HF username and email | **no** |
 
    **WASP is left out** (`facebookresearch/wasp`, arXiv:2504.18575): its LICENSE is CC BY-NC 4.0 (non-commercial),
@@ -54,6 +55,13 @@ its delta and CI fails on a regression. Until now the only numbers were small sy
      `important_instructions_no_names`), 135 texts. A text detector sees the same string for every user task an
      injection is paired with, so the 629 user-by-injection pairs reduce to these 135. The attacks that depend on the
      user task or name a model (`tool_knowledge`, the named `important_instructions` variants) are not included.
+   - **JailbreakBench** (186 kB): from the artifacts repository at `909e68c0`, the `prompt` each attack submitted for
+     the five attack methods (DSN, GCG, JBC, PAIR, prompt_with_random_search; `test-artifact` left out), deduplicated
+     by text within a method and sampled 30 per method with the same seed (1,637 submitted prompts, 1,097 distinct).
+     The model responses are never read into the snapshot. Benign: all 100 JBB-Behaviors benign behaviours (HF
+     revision `886acc35`), which mirror the harmful ones' topics. The 100 plain harmful goals are not used: they are
+     harmful requests, not adversarial text. These are jailbreak prompts, not injections, so for the injection
+     detectors this set measures how far they reach beyond their target; `label: injection` here means adversarial.
 4. **Wired into the eval harness as a gated baseline.** `injection-baselines.ts` (pure) holds the pins, the record
    schema, the confusion matrix and metrics, and the comparison. `injection-baselines.expected.json` pins the measured
    numbers per detector and dataset, plus a pooled row, and a tolerance per metric (2 percentage points each).
@@ -95,8 +103,9 @@ Trained: `protectai/deberta-v3-base-prompt-injection-v2` at revision `90c9989b`,
 | NotInject | 0 / 339 | n/a (no positives: 0 TP, 0 FP) | n/a | **0.0%** (0/339) | 0.0% (0 TP, 147 FP) | n/a | **43.4%** (147/339) |
 | InjecAgent | 300 / 0 | 100% (trivial) | **61.3%** (184/300) | n/a | 100% (trivial) | **84.3%** (253/300) | n/a |
 | AgentDojo | 135 / 97 | 100% (27/27) | **20.0%** (27/135) | **0.0%** (0/97) | 97.0% (98/101) | **72.6%** (98/135) | **3.1%** (3/97) |
+| JailbreakBench | 150 / 100 | n/a (0 TP, 0 FP) | **0.0%** (0/150) | **0.0%** (0/100) | 99.1% (113/114) | **75.3%** (113/150) | **1.0%** (1/100) |
 | RegulAIt web-agent (own) | 50 / 50 | 25.0% (1/4) | **2.0%** (1/50) | **6.0%** (3/50) | 54.5% (30/55) | **60.0%** (30/50) | **50.0%** (25/50) |
-| Pooled | 485 / 486 | 98.6% | 43.7% (212/485) | 0.6% (3/486) | 68.5% | 78.6% (381/485) | 36.0% (175/486) |
+| Pooled | 635 / 586 | 98.6% | 33.4% (212/635) | 0.5% (3/586) | 73.7% | 77.8% (494/635) | 30.0% (176/586) |
 
 What the numbers say:
 - The heuristic never fires on benign text in these sets, and it catches only literal override phrasing: on AgentDojo
@@ -110,6 +119,9 @@ What the numbers say:
   HTML comment, the limit ADR-0042 already names. The trained classifier catches 30 of 50 but also flags half of the
   look-alikes: on short web fragments it cannot tell an instruction aimed at the agent from a help text addressed
   to a person.
+- On JailbreakBench the heuristic injection detector flags nothing, as expected for jailbreaks; for context, the
+  ADR-0042 heuristic `jailbreak` detector also catches 0 of the 150 prompts (measured once, not pinned). The trained
+  classifier catches 75% with a single false alarm on the benign behaviours.
 - Pooled precision is driven by the dataset mix (NotInject is all benign, InjecAgent all injection), so the
   per-dataset rows are the ones to read.
 
@@ -119,8 +131,9 @@ What the numbers say:
   test log, and a regression beyond 2 points fails CI for the heuristic.
 - The trained numbers can go stale without CI noticing; the ADR-0220 follow-up (a CI job that builds a smaller ONNX
   image) would let them be gated too.
-- 330 kB of vendored data (including our 32 kB web-agent set); the attack texts are benchmark material and carry no secrets or personal data (InjecAgent's
-  and AgentDojo's names and addresses are synthetic).
+- 520 kB of vendored data (including our 32 kB web-agent set and the 186 kB JailbreakBench sample); the attack texts are benchmark material and carry no secrets or personal data (InjecAgent's
+  and AgentDojo's names and addresses are synthetic). The JailbreakBench prompts ask for harmful content by design; no
+  model response is vendored.
 
 ## Open source first (ADR-0176)
 
@@ -131,6 +144,7 @@ itself is the open-source part, used as published.
 
 ## Not done
 
+- Pinning the heuristic `jailbreak` detector on JailbreakBench as its own baseline.
 - HackAPrompt (owner decision on the gate, above). WASP (non-commercial licence; our own set covers its categories).
 - More than one scenario per category and carrier in the web-agent set, and multi-step scenarios.
 - AgentDojo's task-dependent attacks, and the injection rendered inside each tool output (that needs the AgentDojo
@@ -141,7 +155,8 @@ itself is the open-source part, used as published.
 ## Tests
 
 `packages/shared/src/eval-datasets/injection-baselines.test.ts` (8): every snapshot and licence file rehashes to its
-pin and the manifest agrees with the code; the seed and the WASP and HackAPrompt exclusions are recorded; the web-agent set covers every category in every carrier
+pin and the manifest agrees with the code; the seeds (InjecAgent, JailbreakBench) and the WASP and HackAPrompt exclusions are recorded, and JailbreakBench's
+second licence rehashes; the web-agent set covers every category in every carrier
 with ten look-alikes per carrier; a drifted file is
 refused before parsing; metrics are undefined without their denominator class; the regression rule fires only on a
 change worse than the tolerance in the right direction; the heuristic does not regress on any dataset; the trained
