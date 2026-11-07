@@ -3427,7 +3427,7 @@ export const projects = pgTable("projects", {
    * fact does not resolve: `policy_unresolved`). Set only by `PUT /v1/execution-project-sensitivities/:projectId`
    * (a `settings_relax` step-up, audited). */
   isolationSensitivity: text("isolation_sensitivity"),
-  /** ADR-0206 G1 (migration 0275): set when an admin archives the project. An archived project keeps its spend,
+  /** ADR-0206 G1 (migration 0283): set when an admin archives the project. An archived project keeps its spend,
    * approvals, context and audit history readable, but takes no new members, context or attributed calls (the
    * pre-dispatch gate refuses `project_archived`, so engine keys pinned to it stop working). NULL = active. Written
    * only by the archive/unarchive routes; the CHECK keeps the three columns together. */

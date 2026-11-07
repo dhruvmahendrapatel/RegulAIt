@@ -6,7 +6,7 @@
 ## Context
 
 The owner approved the after-demo lifecycle proposals on 2026-10-29 (#453, comment 6509969403) and unparked them on
-2026-10-30 (#453, comment 6522492997), reserving migrations 0217 and 0218 (renumbered 0275 and 0276 above main at merge) and this ADR number for G1 and G10. The
+2026-10-30 (#453, comment 6522492997), reserving migrations 0217 and 0218 (renumbered 0283 and 0276 above main at merge) and this ADR number for G1 and G10. The
 decisions, as the owner wrote them:
 
 - **G1 Project archive.** "Admins only. Archived projects are hidden from the default list and shown behind the
@@ -29,7 +29,7 @@ team could not be renamed.
    (workflow instances not yet terminal, planned or running orchestration runs, engine runs not yet terminal) and
    `project_has_open_delegations` (unrevoked, unexpired delegation grants). A second archive is
    `project_already_archived`; unarchiving an active project is `project_not_archived`.
-3. **What an archive does.** It sets `archived_at`, `archived_reason` and `archived_by_user_id` (migration 0275) and
+3. **What an archive does.** It sets `archived_at`, `archived_reason` and `archived_by_user_id` (migration 0283) and
    writes the audit row (`project-archived`, naming the reason and the pinned engine keys) in the same transaction,
    under `FOR UPDATE` on the project row. Nothing the project already holds is deleted or rewritten.
 4. **An archived project takes nothing new.** The gateway answers `409 project_archived` to member adds, role changes
@@ -87,7 +87,7 @@ team could not be renamed.
 
 ## As built (2026-10-30)
 
-- Migrations `0275_project_archive.sql` and `0276_project_archive_write_guard.sql` (reserved as 0217–0218; renumbered
+- Migrations `0283_project_archive.sql` and `0276_project_archive_write_guard.sql` (reserved as 0217–0218; renumbered
   above main at merge), hand-written, journal `when` 1785210000000 and 1785211000000.
 - Gateway: `project-archive.ts`, `role-team-rename.ts`, and the archived check in `projects.ts`
   (`preDispatchProjectGate`, `applyProjectPatch`, the member, context and classification routes).
