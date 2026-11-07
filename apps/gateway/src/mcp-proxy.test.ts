@@ -175,7 +175,7 @@ beforeAll(async () => {
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
   // ADR-0188 S4: every agent this suite creates is granted itself, so its workers act under the strict `own_grants` default
   autoGrantCreatedAgentsForTest(app, db);
-  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireMcpAttribution: false, keyCustodyEnforced: false });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, connectorAttributionRequired: false, requireMcpAttribution: false, keyCustodyEnforced: false });
 
   upstream = await startUpstream();
 

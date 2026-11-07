@@ -10,6 +10,7 @@ import { resolvePmProvider, type MockPmProvider } from "@regulait/pm-provider";
 import { resolveConnectorProvider } from "@regulait/connector-provider";
 import type { MockConnectorProvider } from "@regulait/connector-provider";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 
 /**
  * SLICE-9 ADVERSARIAL PROBE — integrations breadth (git providers, PM
@@ -85,6 +86,7 @@ const AUTH = { authorization: `Bearer ${BOOT}` };
 const RUN = Date.now().toString(36);
 
 let db: Db;
+let restoreConnectorAttribution: (() => Promise<void>) | undefined;
 let app: ReturnType<typeof buildApp>;
 let userId: string;
 let userAuth: { authorization: string };
@@ -115,6 +117,8 @@ async function lastAudit(ruleId: string) {
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0251: these calls pin behaviour other than the attribution mandate, so they relax it by name
+  restoreConnectorAttribution = await relaxGovernanceGatesForTest(db, { connectorAttributionRequired: false });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "b9".repeat(32) });
 
   const user = await makeUser("s9-user@example.com");
@@ -135,6 +139,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreConnectorAttribution?.();
   // M-012 / M-068: hand the shared allow-list back exactly as found; asserted after the rest of the teardown
   const loopback = await removeEgressAllowEntry(app, AUTH, { id: allowHostId });
   try {
