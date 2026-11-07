@@ -91,3 +91,45 @@ follows. The original text is left as written.
 **Not changed:** the outbound generic contract (`x-regulait-signature` over the body only, sent to a customer's
 receiver). Moving it to the timestamped form is a named follow-up in PENDING.md, so a receiver can apply the same
 window.
+
+### Amendment 2026-11-07 (b): review of #717 — providers that sign no timestamp
+
+The #717 review (code and security, findings 2 to 5) found point 2 above too weak for **Jira, monday, Azure DevOps
+and Asana**. They were accepted with only the expiring delivery record, so once the 30-day prune removed it, a captured
+delivery could be replayed. This was worst for Asana, whose body-only HMAC never expires. Under ADR-0180 that was an
+insecure default.
+
+**Decision: a second wall rather than a per-connection opt-in.** An event delivery from any of these four providers
+must carry its own creation time inside the token-guarded or signed body, within these limits:
+
+- **Fields:** Jira `timestamp` (ms), Asana *every* `events[].created_at`, monday `event.triggerTime`, Azure DevOps
+  `createdDate`.
+- **Age:** no older than `PM_UNSIGNED_DELIVERY_MAX_AGE_DAYS` (7), and no more than 300 s in the future.
+- **Missing or unparseable:** refused 401 (fail closed).
+
+The age check runs only after the signature or token has verified. Handshakes and ignored payloads process nothing and
+are not checked.
+
+The 7-day limit is shorter than the 30-day retention, and a gateway test pins that ordering. So every replay is refused
+by one wall or the other:
+
+- inside 7 days, the delivery record still exists and refuses it;
+- after 7 days, the age check refuses it.
+
+**Why not the default-off opt-in the review offered first.** ADR-0180's strict default is "refuse until an admin
+relaxes it". Here the strict behaviour can be built without asking anyone to relax anything. These four tools cannot
+sign a timestamp, and that is a fact about the vendor, not a setting an admin could tighten. An opt-in flag would
+therefore only move the same residual risk behind a switch that every customer of these tools must turn on. The
+in-body age check closes the post-prune gap for everyone, by default, with no setting to relax.
+
+What it does not close: a replay inside the 7-day age window of a delivery whose record was deleted early. Only a
+manual database delete or a gateway that fails mid-processing (below) can delete a record early.
+
+**Known limits, accepted (findings 4 and 5; also commented at the delete in `apps/gateway/src/pm.ts`):**
+
+- **A batch that fails part-way is re-applied.** If processing fails at event N of a multi-event batch (Asana), events
+  1 to N−1 are already applied. The record is removed and the provider's retry applies them again. Each event is a
+  state report (inbound state, orphan mark, drift audit), so a repeat re-records the same facts and invents nothing.
+- **A concurrent duplicate is dropped.** If a duplicate arrives while the first attempt is still processing, it is
+  answered 200 and dropped. If the first attempt then fails, the event is processed again only when the provider
+  retries the first attempt's 5xx. Every supported provider does that.
