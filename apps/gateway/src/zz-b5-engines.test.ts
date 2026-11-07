@@ -403,10 +403,13 @@ describe("secure by default", () => {
     const r = await inject("GET", "/v1/engines", alice.key);
     expect(r.statusCode, r.body).toBe(200);
     const list = r.json().engines as Array<{ id: string; enabled: boolean; maxConcurrent: number; signature: string }>;
-    expect(list.map((e) => e.id).sort()).toEqual(["garak", "modelscan", "promptfoo"]);
+    expect(list.map((e) => e.id).sort()).toEqual(["garak", "modelscan", "promptfoo", "pyrit", "spikee"]);
     expect(list.every((e) => e.enabled === false && e.maxConcurrent === 1)).toBe(true);
     // this suite's manifest has no modelscan image: nothing can enable it
     expect(list.find((e) => e.id === "modelscan")!.signature).toBe("not_built");
+    // ADR-0245: spikee and PyRIT have no published image yet (null in the lock), so they cannot be enabled either
+    expect(list.find((e) => e.id === "spikee")!.signature).toBe("not_built");
+    expect(list.find((e) => e.id === "pyrit")!.signature).toBe("not_built");
     const [org] = await db.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
     expect({
       engineMaxRunTimeoutMinutes: org!.engineMaxRunTimeoutMinutes,
