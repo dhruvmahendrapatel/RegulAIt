@@ -32,6 +32,14 @@ export default defineConfig({
     outDir: "dist",
     sourcemap: false,
     chunkSizeWarningLimit: 900,
+    // The shipped code already needs these engines at run time: Array.prototype.at (src/ui/kit.tsx, in the entry) and
+    // Object.hasOwn need Chrome/Edge 92-93, Firefox 90-92 and Safari 15.4. Vite's default JS target ("modules":
+    // Chrome 87, Safari 14) made esbuild rewrite class fields, private members and `??=` into helper calls for engines
+    // that could not run the app anyway; matching the target to that floor drops about 20 kB gzipped from the all-JS
+    // total with no change for any browser the app runs on. The CSS target stays Vite's default, so the CSS is
+    // byte-for-byte what it was.
+    target: ["chrome93", "edge93", "firefox92", "safari15.4"],
+    cssTarget: ["es2020", "edge88", "firefox78", "chrome87", "safari14"],
     // the polyfill only emulates <link rel="modulepreload"> on browsers without native support (older Firefox and
     // Safari, which the default target still includes). Those still load every lazy chunk correctly, just without
     // fetching its imports ahead; dropping it saves about 0.6 kB of the all-JS budget
