@@ -270,6 +270,8 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   // ADR-0219 (P10): turning on calls to remote A2A agents opens a new egress path and a new callable
   a2aEnabled: notEqual(false),
   mcpAdmissionMode: notEqual("enforce"),
+  // ADR-0246: 'warn' serves a tool, prompt or resource that changed since approval instead of refusing it
+  mcpDefinitionPinMode: notEqual("block"),
   minReleaseAgeDays: atLeast(7),
   credentialUnusedDays: atMost(90),
   staleCredentialAlerts: notEqual(true),

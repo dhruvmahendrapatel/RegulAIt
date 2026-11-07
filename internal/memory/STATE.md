@@ -1,6 +1,6 @@
 ---
 phase: demo-prep-live-integrations-merged
-last_updated: 2026-10-29
+last_updated: 2026-11-07
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -20,6 +20,8 @@ roadmap: ../product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-11-07 - backlog P27 built on `builder/p27-mcp-pinning-fixtures` ([ADR-0246](../decisions/0246-mcp-definition-pinning-and-vuln-fixtures.md), migration 0302):** MCP rug-pull detection (per-item definition pins at admission, compared on every manifest fetch, a changed item blocked by default until an admin re-approves it against an RFC 6902 diff) and the test-only clean-room `@regulait/mcp-vuln-fixtures` (seven attack classes, kept out of the image). API only; the review UI goes to #453.
 
 **2026-10-29 - the customer demo moves to one date, Saturday 2026-10-31 (owner, #453 c6508111468).**
 - **Date:** the internal run-through on Sun 11-01 and the external demo on Tue 11-03 are dropped; there is one run, on
@@ -5536,6 +5538,18 @@ the schema: 151 text columns match the S6 shape (S6 said ~34); 84 guarded, 67 ex
 audit, tool references, platform copies, ingested, machine, conversation, signed evidence, check-constrained), pinned
 against `information_schema` and against the ADR's generated block. Open: whether to guard jsonb
 `config_versions.body` string leaves; ingested columns stay a residual.
+
+**ADR-0246 (builder, 2026-11-07): MCP definition pinning and clean-room vulnerable MCP fixtures (backlog P27).** The
+first admitted manifest of a server is its baseline: every tool (name, title, description, input/output schema,
+annotations), prompt, resource and resource template gets a SHA-256 over its RFC 8785 form in `mcp_definition_pins`
+(approved and observed digest and definition; status derived, never stored). Every manifest fetch compares, audited
+(`mcp-definition-changed`) in the sync's transaction. `org_settings.mcp_definition_pin_mode` defaults to `block`: a
+changed or added tool is neither stored nor served, and a call to it, or `prompts/get` / `resources/read` of a changed
+item, is refused (`mcp-definition-blocked`) before any connect. `warn` is a settings_relax relaxation. Re-approval
+(`POST /v1/servers/:id/definition-pins/approve`) is bound by step-up to the exact reviewed digests, compare-and-set,
+audited. `@regulait/mcp-vuln-fixtures` (test-only, `.dockerignore`d, gateway devDependency) serves seven attack classes
+over real MCP; the two unlicensed upstream projects were not read. Migration 0302 (`when` 1785229000000). Open: the UI
+(#453), P23's scanners on the fixtures, and comparison per call rather than per listing.
 
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);

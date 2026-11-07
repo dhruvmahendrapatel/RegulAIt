@@ -14,3 +14,6 @@ graphify-out
 **/*.spec.ts
 apps/web/e2e
 scratchpad
+# ADR-0246: the deliberately vulnerable MCP server fixtures are CI-only and never enter the image. The gateway takes
+# them as a devDependency, used only by *.test.ts (already excluded above).
+packages/mcp-vuln-fixtures

@@ -1,0 +1,29 @@
+{
+  "name": "@regulait/mcp-vuln-fixtures",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "description": "TEST ONLY. Deliberately vulnerable MCP servers for CI (ADR-0246). Never shipped: excluded from the image by .dockerignore and depended on only as a devDependency.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --dir src"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2"
+  },
+  "devDependencies": {
+    "@regulait/shared": "workspace:*",
+    "@types/node": "26.6.6",
+    "vitest": "^4.1.11"
+  }
+}

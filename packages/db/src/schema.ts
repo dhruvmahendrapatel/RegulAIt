@@ -884,6 +884,10 @@ export const mcpServers = pgTable("mcp_servers", {
    * changed manifest. Our own clock, never a publisher's date. */
   releaseDigest: text("release_digest"),
   releaseSeenAt: timestamp("release_seen_at", { withTimezone: true }).notNull().defaultNow(),
+  /** ADR-0246 (migration 0302): when this server's tool, prompt and resource definitions were first pinned
+   * (`mcp_definition_pins`). NULL = no admitted manifest has been seen yet, so the next one is the baseline. Set
+   * once; a later empty manifest is a change against the baseline, never a second baseline. */
+  definitionsPinnedAt: timestamp("definitions_pinned_at", { withTimezone: true }),
   /** ADR-0185 G4 (migration 0169) — how the gateway reaches this upstream.
    * `streamable_http` (the default, so every pre-0169 row keeps what it used)
    * and `sse` connect to `url` through the egress guard; `stdio` starts
@@ -1138,6 +1142,54 @@ export const mcpTools = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex("mcp_tools_server_name_uq").on(t.serverId, t.name)],
+);
+
+/**
+ * ADR-0246 (migration 0302) — MCP DEFINITION PINNING (rug-pull detection). One row per tool, prompt, resource or
+ * resource template a server has served since its admission baseline, keyed by (server, kind, name). A tool's
+ * name is its name; a resource's is its URI; a template's is its URI template.
+ *
+ * The approved pair is what an admin (or the admission baseline) accepted; the observed pair is what the server
+ * served at its latest manifest fetch. The item's status is derived, never stored: equal digests = approved; both
+ * set and different = changed; no approved digest = added after approval; no observed digest = removed. Under the
+ * strict default (`org_settings.mcp_definition_pin_mode = 'block'`) anything not approved is refused until an
+ * admin re-approves it against the observed digest they reviewed.
+ */
+export const mcpDefinitionPins = pgTable(
+  "mcp_definition_pins",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    serverId: uuid("server_id")
+      .notNull()
+      .references(() => mcpServers.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: ["tool", "prompt", "resource", "resource_template"] }).notNull(),
+    name: text("name").notNull(),
+    approvedDigest: text("approved_digest"),
+    /** Point-in-time evidence (ADR-0200 normalisation exception): the exact definition that was approved, kept
+     * verbatim so the admin diff shows what changed even after the server stops serving it. */
+    approvedDefinition: jsonb("approved_definition").$type<Record<string, unknown>>(),
+    /** NULL = baseline taken at admission; otherwise the admin who re-approved this definition. */
+    approvedBy: uuid("approved_by").references(() => users.id, { onDelete: "set null" }),
+    approvedAt: timestamp("approved_at", { withTimezone: true }),
+    observedDigest: text("observed_digest"),
+    /** Point-in-time evidence (ADR-0200 normalisation exception): the definition as the server served it at
+     * `observedAt`, kept verbatim for the admin diff. Never sent to a model while the item is not approved. */
+    observedDefinition: jsonb("observed_definition").$type<Record<string, unknown>>(),
+    observedAt: timestamp("observed_at", { withTimezone: true }).notNull().defaultNow(),
+    /** when the observed digest last moved away from the approved one; NULL while approved */
+    changedAt: timestamp("changed_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("mcp_definition_pins_server_kind_name_uq").on(t.serverId, t.kind, t.name),
+    index("mcp_definition_pins_approved_by_idx").on(t.approvedBy),
+    index("mcp_definition_pins_drift_idx")
+      .on(t.serverId)
+      .where(sql`${t.approvedDigest} IS DISTINCT FROM ${t.observedDigest}`),
+    check("mcp_definition_pins_kind_check", sql`${t.kind} IN ('tool', 'prompt', 'resource', 'resource_template')`),
+    check("mcp_definition_pins_some_digest", sql`${t.approvedDigest} IS NOT NULL OR ${t.observedDigest} IS NOT NULL`),
+    check("mcp_definition_pins_approved_pair", sql`(${t.approvedDigest} IS NULL) = (${t.approvedDefinition} IS NULL)`),
+    check("mcp_definition_pins_observed_pair", sql`(${t.observedDigest} IS NULL) = (${t.observedDefinition} IS NULL)`),
+  ],
 );
 
 export const toolGrants = pgTable(
@@ -4516,6 +4568,12 @@ export const orgSettings = pgTable(
     mcpAdmissionMode: text("mcp_admission_mode", { enum: ["off", "log", "enforce"] })
       .notNull()
       .default("enforce"),
+    /** ADR-0246 (migration 0302): what a tool, prompt or resource that changed since approval does. 'block' (the
+     * strict default, ADR-0180) refuses it until an admin re-approves it against the reviewed diff; 'warn' lets it
+     * serve and only audits the change. Relaxing to 'warn' needs a settings_relax step-up and is audited. */
+    mcpDefinitionPinMode: text("mcp_definition_pin_mode", { enum: ["block", "warn"] })
+      .notNull()
+      .default("block"),
     /** ADR-0175 A5 (migration 0140): the release-age cooldown in days. 7
      * (DEFAULT since ADR-0181, migration 0159). 0 = off; an admin may relax
      * it (audited). */

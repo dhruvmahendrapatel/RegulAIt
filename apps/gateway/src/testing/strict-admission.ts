@@ -28,6 +28,7 @@ import { loadOrgSettings } from "../org-settings.js";
 /** the lax value of each strict default this helper may relax */
 export const SC_LAX_POSTURE = {
   mcpAdmissionMode: "off",
+  mcpDefinitionPinMode: "warn",
   minReleaseAgeDays: 0,
   mcpPrivateRangesDefault: true,
   egressCompiledDefaultPolicy: "inherit",
@@ -38,6 +39,7 @@ export const SC_LAX_POSTURE = {
 /** the strict value ADR-0181 ships for each (what a fresh org reads) */
 export const SC_STRICT_DEFAULTS = {
   mcpAdmissionMode: "enforce",
+  mcpDefinitionPinMode: "block",
   minReleaseAgeDays: 7,
   mcpPrivateRangesDefault: false,
   egressCompiledDefaultPolicy: "strict",

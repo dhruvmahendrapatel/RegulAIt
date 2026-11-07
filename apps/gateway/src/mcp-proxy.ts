@@ -106,6 +106,7 @@ import {
   recordManifestScan,
   type McpAdmissionTrigger,
 } from "./mcp-admission.js";
+import { definitionPinRefusal, observeServedDefinitions, recordDefinitionPins } from "./mcp-definition-pins.js";
 import { loadEntitlements } from "./entitlements.js";
 // ADR-0185 G3 — the non-tool MCP methods
 import {
@@ -885,7 +886,20 @@ async function executeGovernedToolCallInner(
       : errMessage(err));
   };
 
+  // ADR-0246: a tool that changed since approval is refused before any connect (under 'block')
+  const refuseChangedDefinition = async (): Promise<GovernedToolCallOutcome | null> => {
+    const pinned = await definitionPinRefusal(db, serverId, "tool", toolName);
+    if (!pinned) return null;
+    const decision: Decision = { effect: "deny", ruleId: pinned.ruleId, ruleChain: [], reason: pinned.reason };
+    await db.insert(auditLog).values({ userId, serverId, toolName, ...decision, detail: { projectId, phase: "definition-pins", status: pinned.status, receiptClass: "decision" } });
+    return { kind: "denied", decision };
+  };
+
   try {
+    if (kind) {
+      const pinned = await refuseChangedDefinition();
+      if (pinned) return pinned;
+    }
     if (!kind) {
       // B3S-01: this sync is a connect BEFORE any decision; for stdio it
       // starts a process, so it needs an entitlement on the server first
@@ -912,8 +926,9 @@ async function executeGovernedToolCallInner(
       const found = upstreamTools.find((t) => t.name === toolName);
       if (!found) {
         await operationSucceeded();
-        return { kind: "unknown_tool" };
+        return (await refuseChangedDefinition()) ?? { kind: "unknown_tool" };
       }
+      // (a tool this sync found is approved: under 'block' syncUpstreamTools returns no other)
       kind = toolKind(found);
     }
 
@@ -2009,9 +2024,16 @@ export async function syncUpstreamTools(
         `and no tool from it was returned. An admin must review and clear the server.`,
     );
   }
+  // ADR-0246 — DEFINITION PINNING. The prompts and resources lists are read on this same connection (only for a
+  // capability the server advertises), before the transaction; the comparison, its audit row and the manifest
+  // upsert then commit together. Under 'block' a tool that changed since approval is neither stored nor returned.
+  const served = await observeServedDefinitions(client, tools);
+  let returned: Tool[] = tools;
   await db.transaction(async (rawTx) => {
     const tx = rawTx as unknown as Db;
-    for (const tool of tools) {
+    const pins = await recordDefinitionPins(tx, serverId, served, trigger);
+    returned = pins.blockedTools.size > 0 ? tools.filter((t) => !pins.blockedTools.has(t.name)) : tools;
+    for (const tool of returned) {
       await tx
         .insert(mcpTools)
         .values({
@@ -2026,9 +2048,9 @@ export async function syncUpstreamTools(
           set: { kind: toolKind(tool), description: tool.description ?? null, inputSchema: tool.inputSchema },
         });
     }
-    if (onStored) await onStored(tx, tools);
+    if (onStored) await onStored(tx, returned);
   });
-  return tools;
+  return returned;
 }
 
 

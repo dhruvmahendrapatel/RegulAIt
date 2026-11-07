@@ -97,6 +97,7 @@
     "@regulait/engine-garak": "workspace:*",
     "@regulait/engine-modelscan": "workspace:*",
     "@regulait/engine-promptfoo": "workspace:*",
+    "@regulait/mcp-vuln-fixtures": "workspace:*",
     "@types/node": "26.6.6",
     "fflate": "0.8.3",
     "simple-statistics": "7.12.1",

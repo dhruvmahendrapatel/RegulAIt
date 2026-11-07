@@ -9,6 +9,7 @@ import { RED_TEAM_ATTACK_CLASSES } from "./redteam.js";
 // ADR-0097: the admission-mode enum is DEFINED in mcp-admission.ts and used by
 // updateOrgSettingsSchema below, so it is imported as well as re-exported.
 import { MCP_ADMISSION_MODES } from "./mcp-admission.js";
+import { MCP_DEFINITION_PIN_MODES } from "./mcp-definition-pins.js";
 // ADR-0104: the approval-scope vocabulary is needed IN SCOPE here (not merely
 // re-exported below) so `createApprovalRuleSchema` validates against the one
 // authoritative list rather than a second copy of the two strings.
@@ -585,6 +586,30 @@ export {
   type McpAdmissionScan,
   type ScannableTool,
 } from "./mcp-admission.js";
+
+// ADR-0246 — MCP definition pinning (rug-pull detection): digests, the observation plan, the derived status, the diff
+export {
+  approveMcpDefinitionPinsSchema,
+  definitionDiff,
+  definitionPinStatus,
+  MCP_DEFINITION_KEY_MAX,
+  MCP_DEFINITION_KINDS,
+  MCP_DEFINITION_PIN_LIMIT_PER_KIND,
+  MCP_DEFINITION_PIN_MODES,
+  MCP_DEFINITION_PINNED_FIELDS,
+  pinnableDefinition,
+  pinnableDefinitions,
+  planDefinitionPins,
+  type ApproveMcpDefinitionPins,
+  type DefinitionPinPlan,
+  type McpDefinitionKind,
+  type McpDefinitionPinMode,
+  type McpDefinitionPinStatus,
+  type McpServedDefinitions,
+  type PinnableDefinition,
+  type PinnableSet,
+  type StoredDefinitionPin,
+} from "./mcp-definition-pins.js";
 
 // ADR-0175 A6 — admission scanning for builder skills (the ADR-0097 rule set
 // through `scanAdmissionUnits`, plus confusable and exfiltration-URL detectors).
@@ -2327,6 +2352,10 @@ export const updateOrgSettingsSchema = z
      * contributes no tools to discovery, until an admin clears it with a
      * reason. */
     mcpAdmissionMode: z.enum(MCP_ADMISSION_MODES).optional(),
+    /** ADR-0246: what a tool, prompt or resource that changed since approval does. 'block' (the strict default)
+     * refuses it until an admin re-approves it against the diff; 'warn' serves it and audits the change. Relaxing
+     * to 'warn' needs a settings_relax step-up and is audited. */
+    mcpDefinitionPinMode: z.enum(MCP_DEFINITION_PIN_MODES).optional(),
     /** ADR-0175 A5: the release-age cooldown in days. 0 (default) = off. While
      * on, a newly registered MCP server, a changed manifest, a federated import
      * and a new skill version stay in quarantine until this deployment has
