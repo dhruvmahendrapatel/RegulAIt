@@ -4804,6 +4804,7 @@ export * from "./modality-pricing.js";
 export * from "./batch3.js";
 export {
   ACCOUNTABILITY_MONITOR_RULE_IDS,
+  MODEL_DRIFT_MONITOR_RULE_ID,
   suggestedHaltFor,
   type AccountabilityMonitorRuleId,
 } from "./governance-monitor.js";

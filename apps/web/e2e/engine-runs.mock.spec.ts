@@ -64,6 +64,10 @@ async function open(page: Page, where: "redteam" | "evals", init?: Parameters<ty
   if (where === "evals") {
     await expect(page.getByRole("tab", { name: "Engine runs" })).toBeVisible({ timeout: 30_000 });
     await page.getByRole("tab", { name: "Engine runs" }).click();
+  } else {
+    // I-2: Red-teaming keeps its engine runs on their own tab
+    await expect(page.getByRole("tab", { name: "Engines" })).toBeVisible({ timeout: 30_000 });
+    await page.getByRole("tab", { name: "Engines" }).click();
   }
   await expect(page.getByText("Run an engine", { exact: true })).toBeVisible({ timeout: 30_000 });
   return state;

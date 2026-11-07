@@ -669,6 +669,8 @@ test.describe("Red-teaming — recurring engine runs (ADR-0187)", () => {
       return json(route, { schedule: s });
     });
     await page.goto("/ui/admin/redteam");
+    // I-2: Red-teaming keeps its engine runs, and their schedules, on the Engines tab
+    await page.getByRole("tab", { name: "Engines" }).click({ timeout: 30_000 });
     await expect(page.getByText("Recurring runs", { exact: true })).toBeVisible({ timeout: 30_000 });
     const schedule = page.getByRole("button", { name: "Schedule this run" });
     await expect(schedule).toBeDisabled();

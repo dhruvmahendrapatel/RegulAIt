@@ -61,6 +61,8 @@ test("real unbuilt engines refuse enabling/self-test; disabled engines and unava
   await evidence(page, info, "engines-refused");
   for (const path of ["/ui/admin/redteam", "/ui/admin/evals?tab=engines"]) {
     await page.goto(path);
+    // Red-teaming opens on Overview; its engine runs sit behind the Engines tab (I-2)
+    if (path.includes("redteam")) await activate(page, page.getByRole("tab", { name: "Engines", exact: true }));
     await expect(page.getByText("No engine is enabled", { exact: true })).toBeVisible();
     await expect(page.getByText("No engine runs yet", { exact: true })).toBeVisible();
     await expect(page.getByTestId("engine-verdict")).toHaveCount(0);
