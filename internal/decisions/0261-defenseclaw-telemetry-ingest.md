@@ -71,7 +71,7 @@ none of DefenseClaw's code.
    - Every API view says `attribution: third_party, enforcedByRegulAIt: false`.
    - Nothing on this path authorises, refuses or rate-limits a governed call.
 
-The adapter is API and backend only. The admin screen is a follow-up, posted on #453.
+The adapter is API and backend only. The admin screen is a follow-up, posted on #453. On 2026-11-07 the owner decided that the six admin routes are listed as `KNOWN_UI_GAPS` (tracking #453) and that `KNOWN_UI_GAPS_MAX` is raised by exactly six, rather than building UI in this lane.
 
 ## Consequences
 
