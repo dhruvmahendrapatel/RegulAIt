@@ -2690,7 +2690,7 @@ export const connectors = pgTable("connectors", {
   /** ADR-0185 I9 (migration 0169) — the accountable owner; default the
    * registering admin. ON DELETE SET NULL, like mcp_servers.owner_user_id. */
   ownerUserId: uuid("owner_user_id").references(() => users.id, { onDelete: "set null" }),
-  /** ADR-0207 (migration 0277): NULL = enabled. Disabling refuses every governed call to the connector; it is audited and
+  /** ADR-0207 (migration 0285): NULL = enabled. Disabling refuses every governed call to the connector; it is audited and
    * needs a reason (10 to 1000 characters, CHECK); enabling again is a stepped-up relaxation. A delete is
    * allowed only while disabled. */
   disabledAt: timestamp("disabled_at", { withTimezone: true }),
