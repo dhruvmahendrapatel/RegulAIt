@@ -5546,7 +5546,8 @@ turns it off. After the governed decision, the action's mapped scopes (unmapped 
 ES256 assertion for the person, through `oauth4webapi` over the egress-guarded fetch; the answer must stay within
 scope, the pinned audience and a ≤ 900 s lifetime, is claimed against replay, audited without the token, attached to
 that one call only and never cached. UI needs posted on #453. Follow-ups in the ADR (connector base_url move, reverse
-conflict refusals, private_key_jwt, ADR-0231 jwt-bearer profile).
+conflict refusals, private_key_jwt, ADR-0231 jwt-bearer profile, and MCP-spec OAuth 2.1/DCR on our own MCP
+endpoint, out of scope per ADR-0097). Design reference cited (ideas only): loglux/authmcp-gateway (MIT).
 
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);

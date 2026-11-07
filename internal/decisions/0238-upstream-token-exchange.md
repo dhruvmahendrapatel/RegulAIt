@@ -64,6 +64,28 @@ authentication and validates the response, with our guarded fetch as its `custom
 and decodes an issued JWT; the MCP SDK's `createMiddleware` attaches it. Nothing is added to the tree. Ours is the
 policy: when a token may be obtained, for which scopes, and what the answer may say.
 
+### Design reference (owner-approved, ideas only)
+
+[loglux/authmcp-gateway](https://github.com/loglux/authmcp-gateway) (MIT, 2026) is an MCP authentication proxy:
+OAuth 2.0 with dynamic client registration (RFC 7591) in front of MCP servers, JWT authentication, RBAC, rate limits
+and an admin dashboard. It was read only as a reference for how the MCP specification's inbound OAuth 2.1/DCR flow
+and outbound upstream credentials sit on either side of one proxy. No code was copied, and nothing from it is in the
+tree; it is young, and the decisions here follow from our own controls (pillar 1 default-deny, ADR-0180, ADR-0200).
+The idea taken: keep the two sides separate. How a client authenticates TO the gateway decides who the person is; what
+the gateway sends ONWARD is decided per call from that person's entitlement, and is never the client's own token passed
+through. This ADR is the onward side only.
+
+### MCP-spec OAuth 2.1 / DCR on our own MCP endpoint (out of scope, follow-up)
+
+Checked: `POST /mcp/:serverId` already serves RFC 9728 protected-resource metadata and a `WWW-Authenticate` challenge
+(ADR-0097 part B, `mcp-auth-metadata.ts`), and accepts RegulAIt API keys, the session cookie and ADR-0188 delegated
+tokens. It does not offer the MCP specification's authorization-code + PKCE flow for third-party MCP clients, nor
+RFC 7591 dynamic client registration; ADR-0097 records both as deliberately out of scope. They are an inbound concern
+and do not affect this ADR (the subject of an exchange is the already-authenticated person, however they signed in), so
+they stay out of scope here and are recorded as a follow-up below. If taken up, `oidc-provider` (already pinned) offers
+both the authorization-code flow and `registration` (DCR), which would be switched on with an initial-access-token and
+an admin approval, never open registration (ADR-0180).
+
 ### How this serves ADR-0231 later (no SAP code here)
 
 ADR-0231 (SAP Joule over A2A, still Proposed, awaiting the owner) needs a user-bound token per call and found that SAP
@@ -97,6 +119,8 @@ form parameters of step 4. That is a migration and a small branch, decided when 
   exchanged token replaces a static Bearer value).
 - `private_key_jwt` client authentication with the gateway's issuer key instead of a client secret.
 - ADR-0231's `jwt_bearer` profile and A2A target, once the owner decides.
+- MCP-specification OAuth 2.1 (authorization code + PKCE) and RFC 7591 dynamic client registration on our own MCP
+  endpoint, for third-party MCP clients (out of scope per ADR-0097; see above). Owner decision needed before building.
 
 ## As built
 
