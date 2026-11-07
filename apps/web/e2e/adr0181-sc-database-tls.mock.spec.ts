@@ -90,9 +90,11 @@ test.describe("ADR-0181: database TLS on the Enforcement posture page", () => {
     await mockApi(page, "required");
     await page.goto("/ui/admin/enforcement-posture");
     await expect(page.getByRole("heading", { name: "Enforcement posture", level: 1 })).toBeVisible();
-    await expect(page.getByText("database TLS", { exact: true })).toBeVisible();
+    // I-2: the verdict line carries the database hop as one chip; the control matrix shows its observed value
+    await expect(page.getByRole("group", { name: "This deployment" }).getByText("DB TLS: required", { exact: true })).toBeVisible();
     await expect(page.getByText("required", { exact: true }).first()).toBeVisible();
     await expect(page.getByText("DB TLS: disabled")).toHaveCount(0);
+    await expect(page.getByRole("alert")).toHaveCount(0);
   });
 
   test("relaxed (REGULAIT_DATABASE_SSL=disable): the page says 'DB TLS: disabled' and why; axe-clean", async ({ page }) => {
@@ -100,10 +102,13 @@ test.describe("ADR-0181: database TLS on the Enforcement posture page", () => {
     await page.goto("/ui/admin/enforcement-posture");
     await expect(page.getByRole("heading", { name: "Enforcement posture", level: 1 })).toBeVisible();
     await expect(page.getByText("DB TLS: disabled", { exact: true })).toBeVisible();
+    // I-2: the relaxation is a red banner above everything else, with its fix in words
+    await expect(page.getByRole("alert").filter({ hasText: "DB TLS: disabled" })).toContainText("unset REGULAIT_DATABASE_SSL, or set it to require");
     await page.getByRole("button", { name: "What is DB TLS: disabled?" }).click();
     await expect(page.getByRole("note")).toContainText(/REGULAIT_DATABASE_SSL=disable is set/);
     await expect(page.getByText("relaxed", { exact: true }).first()).toBeVisible();
-    // ADR-0190: the isolation settings card is on this page too, measured and editable
+    // ADR-0190: the isolation settings card is on this page too, measured and editable (I-2: behind its tab)
+    await page.getByRole("tab", { name: /^Isolation/ }).click();
     const isolation = page.locator("section[data-rg-card]").filter({ has: page.getByRole("button", { name: "Save isolation settings" }) });
     await expect(isolation).toHaveCount(1);
     await expect(isolation.getByText("Isolation settings", { exact: true })).toBeVisible();
