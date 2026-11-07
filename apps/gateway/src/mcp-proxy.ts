@@ -2036,7 +2036,7 @@ export async function syncUpstreamTools(
   // ADR-0246 — DEFINITION PINNING. The prompts and resources lists are read on this same connection (only for a
   // capability the server advertises), before the transaction; the comparison, its audit row and the manifest
   // upsert then commit together. Under 'block' a tool that changed since approval is neither stored nor returned.
-  const served = await observeServedDefinitions(client, tools);
+  const served = await observeServedDefinitions(client, tools, { serverId, transport });
   let returned: Tool[] = tools;
   await db.transaction(async (rawTx) => {
     const tx = rawTx as unknown as Db;

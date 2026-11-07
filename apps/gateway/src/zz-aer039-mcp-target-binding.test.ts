@@ -43,7 +43,7 @@ import { executeGovernedToolCall } from "./mcp-proxy.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
-import { LOCAL_MCP_DOUBLE, relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+import { relaxMcpPinningForTest, relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 import { relaxApprovalSigningForTest } from "./testing/approval-signing-posture.js";
 // ADR-0186 A2+B: this suite pins pre-0186 single-approver tool-call approvals (decided
 // through API keys, unsigned); signing and the sensitive quorum are relaxed for its run
@@ -53,6 +53,7 @@ let restoreApprovalSigning: (() => Promise<void>) | undefined;
 // ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
 // seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
 let restoreStrictAdmission: (() => Promise<void>) | undefined;
+let restorePinning: (() => Promise<void>) | undefined;
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -245,7 +246,8 @@ beforeAll(async () => {
   restoreApprovalSigning = await relaxApprovalSigningForTest(db);
   // ADR-0246: this file changes a tool schema ON PURPOSE to prove consent invalidation; definition pinning would
   // refuse the changed tool first (its own tests are mcp-definition-pins.test.ts), so it is put in 'warn' here
-  restoreStrictAdmission = await relaxStrictAdmissionForTest(db, [...LOCAL_MCP_DOUBLE, "mcpDefinitionPinMode"]);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
+  restorePinning = await relaxMcpPinningForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "e".repeat(64) });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { requireMcpAttribution: false });
   gatewayUrl = await app.listen({ port: 0, host: "127.0.0.1" });
@@ -260,6 +262,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await restoreApprovalSigning?.();
+  await restorePinning?.();
   await restoreStrictAdmission?.();
   // the upstreams die with this file: rows left pointing at them would be dead
   // weight in every later estate-wide sweep (ADR-0100 re-scan, health probe)

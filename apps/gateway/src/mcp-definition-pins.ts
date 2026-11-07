@@ -47,6 +47,8 @@ import {
 import { loadOrgSettings } from "./org-settings.js";
 import { requireStepUp } from "./step-up.js";
 import { timeouts } from "./timeouts.js";
+import { withUpstreamRetry } from "./upstream-retry.js";
+import type { McpUpstreamTransport } from "@regulait/shared";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 
@@ -68,24 +70,26 @@ const KIND_LABEL: Readonly<Record<McpDefinitionKind, string>> = {
  * (the pin cap is per kind anyway). A list that fails is `null` (not observed): its stored pins are left alone, so
  * a flaky `prompts/list` never reads as "every prompt was removed".
  */
-export async function observeServedDefinitions(client: Client, tools: readonly unknown[]): Promise<McpServedDefinitions> {
+export async function observeServedDefinitions(
+  client: Client,
+  tools: readonly unknown[],
+  /** the same `/metrics` labels the manifest read uses, so each list request is counted once (ADR-0185 G5) */
+  observe: { serverId: string; transport?: McpUpstreamTransport | null | undefined },
+): Promise<McpServedDefinitions> {
   const caps = client.getServerCapabilities() ?? {};
-  const timeout = timeouts().mcpListToolsMs;
-  const safely = async (fetch: () => Promise<readonly unknown[]>): Promise<readonly unknown[] | null> => {
+  const list = async <T>(fetch: (timeout: number) => Promise<T>): Promise<T | null> => {
     try {
-      return await fetch();
+      return await withUpstreamRetry(({ deadlineMs }) => fetch(deadlineMs), { budgetMs: timeouts().mcpListToolsMs, observe });
     } catch {
       return null;
     }
   };
-  return {
-    tools,
-    prompts: caps.prompts ? await safely(async () => (await client.listPrompts(undefined, { timeout })).prompts) : [],
-    resources: caps.resources ? await safely(async () => (await client.listResources(undefined, { timeout })).resources) : [],
-    resourceTemplates: caps.resources
-      ? await safely(async () => (await client.listResourceTemplates(undefined, { timeout })).resourceTemplates)
-      : [],
-  };
+  const prompts = caps.prompts ? await list(async (timeout) => (await client.listPrompts(undefined, { timeout })).prompts) : [];
+  const resources = caps.resources ? await list(async (timeout) => (await client.listResources(undefined, { timeout })).resources) : [];
+  const resourceTemplates = caps.resources
+    ? await list(async (timeout) => (await client.listResourceTemplates(undefined, { timeout })).resourceTemplates)
+    : [];
+  return { tools, prompts, resources, resourceTemplates };
 }
 
 export interface DefinitionPinOutcome {

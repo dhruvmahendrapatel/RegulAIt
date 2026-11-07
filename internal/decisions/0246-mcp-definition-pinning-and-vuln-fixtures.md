@@ -195,7 +195,8 @@ refuses a credential-shaped argument.
 - Busy servers with dynamic resource lists will raise changes more often. That is the strict default working as
   intended; `warn` is the audited relaxation.
 - Tests that change a fixture's manifest on purpose and expect it served can relax `mcpDefinitionPinMode` through
-  `relaxStrictAdmissionForTest(db, ["mcpDefinitionPinMode"])`. It is not in the default `LOCAL_MCP_DOUBLE` list.
+  `relaxMcpPinningForTest(db)`. This helper is kept apart from the ADR-0181 set, which a test replays against the
+  database as it stood at migration 0159.
 - Not row-level-security scoped: like `mcp_servers`, the table is deployment configuration behind admin-only routes,
   so it is outside the ADR-0234 slices.
 
@@ -231,5 +232,12 @@ refuses a credential-shaped argument.
 - Existing tests touched:
   - `zz-aer039-mcp-target-binding.test.ts` changes a schema on purpose, so it now relaxes `mcpDefinitionPinMode` to
     `warn`;
-  - `rule-write-guard.test.ts` lists the template's rate-limit create as an audited writer.
+  - `mcp-redaction.test.ts` invents a tool name per fixture, so it uses `relaxMcpPinningForTest` too;
+  - `rule-write-guard.test.ts` lists the template's rate-limit create as an audited writer;
+  - `adr0189-b2-decision-writers.test.ts` lists `mcp-high-risk.ts` as a decision writer: its refusal row is the
+    call's decision, and the row for a call it passes on is classed as `excluded`;
+  - `mcp_definition_pins.name` is an ADR-0233 `ingested` exclusion, and ADR-0233's generated inventory block was
+    regenerated.
+- The prompts, resources and templates list reads go through `withUpstreamRetry` with the manifest read's `/metrics`
+  labels, so each request is counted once (ADR-0185 G5).
 - An unpinned prompt fails open, like a resource. A tool list is always observed, so an unpinned tool fails closed.

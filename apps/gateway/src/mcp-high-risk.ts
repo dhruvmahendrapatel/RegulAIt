@@ -173,7 +173,8 @@ export async function highRiskRefusal(
     detail: {
       phase: "high-risk",
       projectId: call.projectId,
-      receiptClass: "decision",
+      // a refusal here is the call's decision; a pass-on is a record of the arguments, and the kernel's row decides
+      ...(refusal ? { receiptClass: "decision" as const } : { receiptClass: "excluded" as const }),
       arguments: redacted,
       targets: targets.map((t) => redactArgumentsForAudit(t)),
       refusedTargets: refused.map((t) => redactArgumentsForAudit(t)),
@@ -273,7 +274,7 @@ export function registerMcpHighRiskRoutes(app: FastifyInstance, db: Db): void {
       if (!inserted) return null;
       await tx.insert(auditLog).values({
         userId: req.authCtx.userId ?? NIL_USER,
-        detail: { phase: "authorised-targets", via: req.authCtx.via, targetId: inserted.id, kind: target.kind, value: target.value, note: body.note },
+        detail: { receiptClass: "configuration", phase: "authorised-targets", via: req.authCtx.via, targetId: inserted.id, kind: target.kind, value: target.value, note: body.note },
         effect: "allow",
         ruleId: MCP_HIGH_RISK_RULE_IDS.targetAdded,
         ruleChain: [],
@@ -294,7 +295,7 @@ export function registerMcpHighRiskRoutes(app: FastifyInstance, db: Db): void {
       if (!row) return null;
       await tx.insert(auditLog).values({
         userId: req.authCtx.userId ?? NIL_USER,
-        detail: { phase: "authorised-targets", via: req.authCtx.via, targetId: id, kind: row.kind, value: row.value },
+        detail: { receiptClass: "configuration", phase: "authorised-targets", via: req.authCtx.via, targetId: id, kind: row.kind, value: row.value },
         effect: "allow",
         ruleId: MCP_HIGH_RISK_RULE_IDS.targetRemoved,
         ruleChain: [],
