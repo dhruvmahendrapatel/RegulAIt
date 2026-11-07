@@ -2016,6 +2016,95 @@ export const modelRateLimits = pgTable(
   ],
 );
 
+/**
+ * ADR-0241 (P21, migration 0297): one immutable saved version of an agent's usage mapping. A change is a new row with
+ * the next version number; no route updates or deletes one.
+ */
+export const usageExtractorVersions = pgTable(
+  "usage_extractor_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    /** ADR-0200 exception: a schema-validated configuration document (validateUsageMapping, 4 KiB cap) */
+    mapping: jsonb("mapping").notNull(),
+    mappingSha256: text("mapping_sha256").notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("usage_extractor_versions_agent_version_uq").on(t.agentId, t.version),
+    check("usage_extractor_versions_version_check", sql`${t.version} >= 1`),
+    check(
+      "usage_extractor_versions_mapping_check",
+      sql`jsonb_typeof(${t.mapping}) = 'object' AND octet_length(${t.mapping}::text) <= 8192`,
+    ),
+    check("usage_extractor_versions_sha_check", sql`${t.mappingSha256} ~ '^[0-9a-f]{64}$'`),
+  ],
+);
+
+/** ADR-0241: the sample-response test of one mapping version. No route updates or deletes a test, but a test is not
+ * append-only: it is deleted with its version and agent (ON DELETE CASCADE). The audit rows are the record that outlives
+ * it. Only the sample's hash is kept. */
+export const usageExtractorTests = pgTable(
+  "usage_extractor_tests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    versionId: uuid("version_id")
+      .notNull()
+      .references(() => usageExtractorVersions.id, { onDelete: "cascade" }),
+    sampleSha256: text("sample_sha256").notNull(),
+    passed: boolean("passed").notNull(),
+    /** ADR-0200 exception: point-in-time evidence snapshots of the counts the admin expected and the mapping produced */
+    expected: jsonb("expected").notNull(),
+    extracted: jsonb("extracted"),
+    failure: text("failure"),
+    testedBy: uuid("tested_by").references(() => users.id, { onDelete: "set null" }),
+    testedAt: timestamp("tested_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("usage_extractor_tests_version_idx").on(t.versionId, t.testedAt.desc()),
+    check("usage_extractor_tests_sha_check", sql`${t.sampleSha256} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "usage_extractor_tests_expected_check",
+      sql`jsonb_typeof(${t.expected}) = 'object' AND octet_length(${t.expected}::text) <= 2048`,
+    ),
+    check(
+      "usage_extractor_tests_extracted_check",
+      sql`${t.extracted} IS NULL OR (jsonb_typeof(${t.extracted}) = 'object' AND octet_length(${t.extracted}::text) <= 2048)`,
+    ),
+    check("usage_extractor_tests_failure_check", sql`${t.failure} IS NULL OR char_length(${t.failure}) <= 500`),
+    check(
+      "usage_extractor_tests_outcome_check",
+      sql`(${t.passed} AND ${t.failure} IS NULL) OR (NOT ${t.passed} AND ${t.failure} IS NOT NULL)`,
+    ),
+  ],
+);
+
+/** ADR-0241: the one active mapping version of an agent, activated on a passing test of that exact version */
+export const usageExtractorActive = pgTable(
+  "usage_extractor_active",
+  {
+    agentId: uuid("agent_id")
+      .primaryKey()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    versionId: uuid("version_id")
+      .notNull()
+      .references(() => usageExtractorVersions.id, { onDelete: "cascade" }),
+    testId: uuid("test_id")
+      .notNull()
+      .references(() => usageExtractorTests.id, { onDelete: "cascade" }),
+    activatedBy: uuid("activated_by").references(() => users.id, { onDelete: "set null" }),
+    activatedAt: timestamp("activated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("usage_extractor_active_version_idx").on(t.versionId),
+    index("usage_extractor_active_test_idx").on(t.testId),
+  ],
+);
+
 // §6 Approvals Queue: one pending entry per paused call. Approved entries are
 // consumed by exactly one retried call. The audit log remains the permanent
 // record; queue rows may cascade away with their user/server.
@@ -2148,6 +2237,11 @@ export const approvals = pgTable(
     check("approvals_quorum_check", sql`${t.quorum} BETWEEN 1 AND 5`),
     check("approvals_signature_mode_check", sql`${t.signatureMode} IN ('passkey', 'step_up', 'off')`),
     index("approvals_status_idx").on(t.status),
+    // ADR-0234 batch 2 (migration 0313): the participant branches of approvals_select / approvals_update
+    index("approvals_approver_user_idx").on(t.approverUserId),
+    index("approvals_named_approver_user_idx").on(t.namedApproverUserId),
+    index("approvals_decided_by_idx").on(t.decidedBy),
+    index("approvals_approver_role_idx").on(t.approverRoleId),
     check(
       "approvals_review_role_check",
       sql`(${t.reviewRoleId} IS NULL) = (${t.reviewRoleName} IS NULL) AND (${t.reviewRoleId} IS NULL) = (${t.reviewRound} IS NULL)`,
@@ -3316,6 +3410,11 @@ export const usageEvents = pgTable(
      * tokens and cost. NULL = the provider reported no modality data (every
      * pre-0230 row, every connector/MCP row) — never inferred. */
     modalityUsage: jsonb("modality_usage").$type<ModalitySplit | null>(),
+    /** ADR-0241 (P21, migration 0297): the usage-mapping version that produced this row's token counts. FK-free like
+     * every attribution column here (point-in-time evidence outlives its configuration). NULL = the adapter's
+     * built-in extraction (every pre-0297 row; a mapping that failed and fell back is NULL too, with the outcome in
+     * `detail.usageExtractor`). */
+    usageExtractorVersionId: uuid("usage_extractor_version_id"),
     detail: jsonb("detail"),
     /** ADR-0188 (migration 0180): the agent principal and delegation grant this spend was made under (NULL = a human's own call) */
     actorIdentityId: uuid("actor_identity_id"),
@@ -4387,6 +4486,10 @@ export const orgSettings = pgTable(
     /** ADR-0212 (P12 c, migration 0230): model rate limits are enforced only once an
      * admin opts in (step-up, audited) through PUT /v1/rules/model-rate-limits/enforcement */
     modelRateLimitsEnabled: boolean("model_rate_limits_enabled").notNull().default(false),
+    /** ADR-0241 (P21, migration 0297): admin-defined usage mappings are read at dispatch only once an admin opts in
+     * (settings_relax step-up, audited) through PUT /v1/usage-extractors/enabled. Off = every count is the adapter's
+     * built-in extraction. */
+    usageExtractorEnabled: boolean("usage_extractor_enabled").notNull().default(false),
     /** ADR-0022 (portal defect fix): the org's default infra-remediation
      * approver. Persisted so the Infrastructure page's approver pick survives
      * reloads and admins; each propose call still names its approver
@@ -6352,6 +6455,8 @@ export const approvalAssignments = pgTable(
     uniqueIndex("approval_assignments_approval_uq").on(t.approvalId),
     index("approval_assignments_assignee_idx").on(t.assigneeKind, t.assigneeId),
     index("approval_assignments_due_idx").on(t.slaState, t.dueAt),
+    // ADR-0234 batch 2 (migration 0313): the escalation branch of the approvals policies
+    index("approval_assignments_escalation_assignee_idx").on(t.escalationAssigneeId),
   ],
 );
 
@@ -13019,6 +13124,8 @@ export const approvalDecisions = pgTable(
     ),
     check("approval_decisions_reason_check", sql`${t.reason} IS NULL OR length(${t.reason}) <= 2000`),
     index("approval_decisions_approval_idx").on(t.approvalId, t.decidedAt),
+    // ADR-0234 batch 2 (migration 0313): the decider branch of the approvals policies
+    index("approval_decisions_decider_user_idx").on(t.deciderUserId),
   ],
 );
 export type ApprovalDecisionRow = typeof approvalDecisions.$inferSelect;

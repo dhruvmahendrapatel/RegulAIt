@@ -115,6 +115,8 @@ export class GoogleProvider implements ModelProvider {
     let finishRaw: string | undefined;
     const raw: GeminiRaw = {};
     let usageMeta: GeminiUsageMetadata | null | undefined;
+    /** ADR-0241 (P21): the decoded vendor object the usage block came from, exactly as the legacy adapter reported it */
+    let usageSource: unknown;
     let responseId: string | null;
 
     if (useStream) {
@@ -123,7 +125,10 @@ export class GoogleProvider implements ModelProvider {
         raw.responseId ??= chunk?.responseId;
         raw.modelVersion ??= reportedModel(chunk?.modelVersion) ?? undefined;
         raw.promptFeedback ??= confirmedBlock(chunk?.promptFeedback?.blockReason) ? chunk.promptFeedback : undefined;
-        if (chunk?.usageMetadata) usageMeta = chunk.usageMetadata;
+        if (chunk?.usageMetadata) {
+          usageMeta = chunk.usageMetadata;
+          usageSource = chunk;
+        }
       }
       text = s.text;
       calls = toolCallsOf(s.content);
@@ -142,6 +147,7 @@ export class GoogleProvider implements ModelProvider {
       const meta = (result.providerMetadata?.google ?? {}) as { usageMetadata?: GeminiUsageMetadata | null };
       // the SDK's per-hop sum when Gemini continued a long output, else the body's own block
       usageMeta = meta.usageMetadata ?? body.usageMetadata;
+      if (body.usageMetadata) usageSource = body;
       text = result.content.map((c) => (c.type === "text" ? c.text : "")).join("");
       calls = toolCallsOf(result.content);
       finishRaw = result.finishReason.raw;
@@ -164,6 +170,7 @@ export class GoogleProvider implements ModelProvider {
         outputTokens: usageMeta?.candidatesTokenCount ?? 0,
         ...geminiModality(usageMeta ?? undefined),
       },
+      ...(usageSource !== undefined ? { usageSource } : {}),
       providerMessageId: responseId,
       servedModel: raw.modelVersion ?? null,
     };

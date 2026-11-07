@@ -100,3 +100,10 @@ Every model adapter lives in `packages/model-provider`. Each was checked against
   legacy Gemini adapter this ADR deletes. Whichever PR merges second carries it into `google-ai-sdk.ts`: the raw
   response body on the non-streaming path, and the last raw chunk that carried `usageMetadata` when streaming. Both
   are already in hand there.
+
+## As built (2026-11-07, merge with P21)
+
+P21 (ADR-0241) merged first, so this PR carried `usageSource` into `google-ai-sdk.ts`: the response body when not
+streaming, and the last raw event that carried `usageMetadata` when streaming. That is the same object the legacy
+adapter reported. `src/google-usage-source.test.ts` pins both paths. Under ADR-0252 the STATE and PENDING entries
+are fragments in `internal/fragments/`, and the index row is generated from this file's header at merge time.
