@@ -10,7 +10,8 @@
 # approves or enables auto-merge. The master opens the PR from the branch and enqueues it, so the change goes
 # through the merge queue and its full CI like any other (a PR opened with GITHUB_TOKEN would start no CI).
 #
-# One assignment in flight: while an assign-at-merge PR is open, a run pushes nothing. When that PR merges, its own
+# One assignment in flight: while an assign-at-merge PR is open, or an `assign-at-merge/*` branch has commits main
+# does not, a run pushes nothing. When that PR merges, its own
 # push to main (it deletes pending files and fragments) starts this job again, which picks up anything that merged in
 # the meantime. The script is deterministic, so a human can run it by hand on a branch from main and get the same
 # result (CONTRIBUTING_PARALLEL_SESSIONS §4.1).
@@ -78,6 +79,24 @@ jobs:
           open="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --json headRefName --jq '[.[] | select(.headRefName | startswith("assign-at-merge/"))] | length')"
           if [ "$open" != "0" ]; then
             echo "An assign-at-merge PR is already open; when it merges, its push starts this job again for anything newer." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # #721 review 5: a branch pushed by an earlier run that no PR has merged yet numbers the same files. Pushing a
+          # second one would leave two competing numberings, so wait for that one (or for the master to delete it).
+          unmerged=()
+          while read -r _ ref; do
+            b="${ref#refs/heads/}"
+            ahead="$(gh api "repos/${GITHUB_REPOSITORY}/compare/main...${b}" --jq '.ahead_by')"
+            if [ "$ahead" != "0" ]; then unmerged+=("$b"); fi
+          done < <(git ls-remote --heads origin 'assign-at-merge/*')
+          if [ "${#unmerged[@]}" -ne 0 ]; then
+            {
+              echo "### Not pushed: an earlier assignment branch is not merged yet"
+              echo ""
+              printf -- '- `%s`\n' "${unmerged[@]}"
+              echo ""
+              echo "Open a PR from the newest one and enqueue it, or delete the stale ones (CONTRIBUTING_PARALLEL_SESSIONS §8). Its merge starts this job again."
+            } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           main="$(git rev-parse HEAD)"

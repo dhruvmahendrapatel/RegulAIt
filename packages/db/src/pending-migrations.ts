@@ -63,6 +63,10 @@ export function assignPending(journal: Journal, pending: readonly string[]): { j
   const bad = pending.filter((f) => !f.endsWith(".sql") || !SLUG_RE.test(f.slice(0, -4)));
   if (bad.length) throw new Error(`pending migration names must be <slug>.sql with a lowercase slug of words joined by "_": ${bad.join(", ")}`);
   if (new Set(pending).size !== pending.length) throw new Error("a pending migration is listed twice");
+  // A slug names one migration: `CONCURRENT_INDEXES` and readers may name a migration by its slug (#721 review 4).
+  const taken = new Set(journal.entries.map((e) => e.tag.replace(/^\d+_/, "")));
+  const reused = pending.filter((f) => taken.has(f.slice(0, -4)));
+  if (reused.length) throw new Error(`a pending migration reuses the slug of a numbered one; pick a new slug: ${reused.join(", ")}`);
   const entries = journal.entries.slice();
   const last = entries[entries.length - 1];
   let number = Math.max(0, ...entries.map((e) => Math.max(tagNumber(e.tag), e.idx)));

@@ -85,6 +85,11 @@ export function migrationTreeProblems(base, head) {
   for (const p of headPending) {
     if (p.includes("/") || !SLUG_RE.test(p.slice(0, -4))) out.push(`${PENDING_DIR}/${p}: a pending migration is named <slug>.sql, lowercase words joined by "_".`);
   }
+  // a slug names one migration (#721 review 4): a pending slug may not repeat a numbered migration's slug
+  const takenSlugs = new Set(he.map((e) => e.tag.replace(/^\d+_/, "")));
+  for (const p of headPending) {
+    if (takenSlugs.has(p.slice(0, -4))) out.push(`${PENDING_DIR}/${p}: the slug is already a numbered migration's (${he.find((e) => e.tag.replace(/^\d+_/, "") === p.slice(0, -4)).tag}); pick a new slug.`);
+  }
 
   // new entries are exactly the assignment of the pending files this diff numbers
   const added = he.slice(be.length);

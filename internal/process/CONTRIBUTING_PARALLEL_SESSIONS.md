@@ -318,5 +318,6 @@ For a builder lane, from branch to merge:
 
 **For the master:** enqueue instead of merging. When an `assign-at-merge/<sha>` branch appears, open a PR from the
 newest one (title "chore: assign migration numbers and fold docs at merge (ADR-0252)") and enqueue it. Keep one
-open at a time, and delete older `assign-at-merge/*` branches that never got a PR. If the job cannot run,
+open at a time, and delete older `assign-at-merge/*` branches that never got a PR: while one is unmerged, the job
+pushes no new branch and its summary names the one waiting. If the job cannot run,
 `node scripts/assign-at-merge.mjs --write` on a branch from main gives the same result.

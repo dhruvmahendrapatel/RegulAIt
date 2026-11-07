@@ -174,6 +174,13 @@ describe("the migration guard against the base branch (C-03)", () => {
     expect(migrationTreeProblems(base(r), head(r)).join("\n")).toMatch(/0281_b: a merged journal entry was removed/);
   });
 
+  it("refuses a pending migration whose slug a numbered migration already has (#721 review 4)", () => {
+    const r = repo();
+    const taken = JSON.parse(r.read("packages/db/migrations/meta/_journal.json")).entries.at(-1).tag.replace(/^\d+_/, "");
+    r.write(`packages/db/migrations/pending/${taken}.sql`, "select 1;\n");
+    expect(migrationTreeProblems(base(r), head(r)).join("\n")).toMatch(new RegExp(`pending/${taken}\\.sql: the slug is already a numbered migration's`));
+  });
+
   it("refuses a numbered file with no journal entry, and a pending file with a bad name", () => {
     const r = repo();
     r.write("packages/db/migrations/0290_stray.sql", "select 1;\n");
@@ -203,6 +210,11 @@ describe("pending migrations in runMigrations (ADR-0252)", () => {
     ]);
     expect(j.entries).toHaveLength(4);
     expect(() => assignPending(journal("0001_a"), ["Bad-Name.sql"])).toThrow(/<slug>\.sql/);
+  });
+
+  it("refuses a pending slug that a numbered migration already has (#721 review 4)", () => {
+    expect(() => assignPending(journal("0279_a", "0281_b"), ["b.sql"])).toThrow(/reuses the slug of a numbered one; pick a new slug: b\.sql/);
+    expect(() => assignPending(journal("0279_a"), ["a_b.sql"])).not.toThrow();
   });
 
   it("refuses a folder with pending files by default, and stages a numbered copy only for a disposable database", () => {

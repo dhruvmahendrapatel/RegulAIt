@@ -39,6 +39,12 @@ on:
       # harness starts is built from. A bump that touches nothing under the
       # paths above still changes that gateway, so it runs this gate too.
       - "pnpm-lock.yaml"
+  # ADR-0252: part of the full suite at merge time. `merge_group` takes no path filter, so every merge group runs it;
+  # so does each push to main (#721 review finding 3).
+  merge_group:
+    types: [checks_requested]
+  push:
+    branches: [main]
 
 # Least privilege for GITHUB_TOKEN (CodeQL "workflow does not contain permissions"): every job here only
 # checks out code and uploads artifacts; nothing writes to the repository, issues, PRs or packages.
