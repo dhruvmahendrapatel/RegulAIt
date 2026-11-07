@@ -111,6 +111,20 @@ was copied from it.
 - The hold applies to the bundle path only. A direct or role grant keeps its own rules, and a tool held both ways is
   decided by the direct or role grant first, as before.
 
+### 5a. Comparison with open-source MCP gateways (owner-approved design references, 2026-11-07)
+
+These were read for their models only (their READMEs). No code, text or schema was copied.
+
+| Project (licence) | Their unit | Their default | What we take or leave |
+|---|---|---|---|
+| Lunar / MCPX (`TheLunarCompany/lunar`, MIT) | an aggregator over many MCP servers with fine-grained tool-access rules and live usage and cost metering | rules are configured per deployment and can allow by default | **Same as ours:** a named group of tools granted as one unit. **Already ours:** per-call metering (pillar 5 usage rows, priced per tool). **Not taken:** an allow-by-default posture, which ADR-0180 rules out. **Follow-up:** a per-bundle usage view, grouping the existing usage rows by the grant id the kernel records. |
+| AISIX (`api7/aisix`, Apache-2.0) | an MCP gateway with per-server tool namespaces and per-caller access, keyed on caller API keys and policy scopes | access is listed per caller | **Same as ours:** items are exact `(server, tool)` pairs, so two servers' tools with one name never collide. **Ours is stricter:** access is per person (pillar 1), not per API key, and every grant goes through the person's revocations and the actor intersection. |
+| MetaMCP (`metatool-ai/metatool-app`, MIT) | a namespace aggregates servers into one endpoint. Servers and tools can be turned on or off per namespace, and tool names, descriptions and annotations can be overridden. | everything in a namespace is exposed unless turned off | **Same as ours:** a bundle is the governed counterpart of a namespace's tool selection. Our tool lists already omit what a person cannot call (`visibleTools`). **Not taken:** turning tools on and off in place, because our change is a new immutable version under compare-and-set. Also not taken: overriding a tool's name, description or `readOnlyHint` per bundle, because the kernel and the audit match on the inventory's own name and kind. An override would let an annotation decide a tier. Our tier comes from the inventory and an admin flag, and the stricter source wins. |
+
+**Dependency decision (ADR-0176):** none of them fits as a dependency, because policy semantics (grant tiers,
+revocation precedence, the actor intersection, approvals) are core to RegulAIt. The three projects confirm the shape
+of the unit (a named, server-qualified tool set). None offers a control that would make our default-deny stricter.
+
 ### 6. API (admin-only through the default gate; `internal` in the stability registry)
 
 - `GET /v1/mcp-bundles`, `GET /v1/mcp-bundles/:bundleId`, `GET /v1/mcp-bundles/:bundleId/versions/:version`
@@ -141,6 +155,8 @@ pillar-1 grant tiers). Built only on what is already in use: Drizzle, zod, Fasti
 
 ## Follow-ups (not in this slice)
 
+- **Per-bundle usage view** (Lunar metering idea): group the existing pillar-5 usage rows and audit rows by the bundle
+  grant id the kernel already records as the decision's rule id. This is read-only and adds no new collection.
 - **Dynamic lazy tool-loading** (Gravitee design reference, pillar 6). Instead of sending every tool schema up
   front, expose a small meta-surface (`list_scopes`, `list_tools`, `describe_tool_input`, `execute_tool`) so the
   model loads a schema only when it needs one. Every `execute_tool` still goes through the same per-user entitlement
