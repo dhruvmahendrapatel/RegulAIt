@@ -27,6 +27,8 @@ on:
       - 'internal/**'
       - '.gitignore'
       - 'LICENSE'
+      # ADR-0252 addendum, PR trim: the web app cannot add a gateway import edge (the same rule as ci-scope's `gateway`)
+      - 'apps/web/**'
   # ADR-0252 addendum: also at merge time, on each push to main and nightly
   merge_group:
     types: [checks_requested]
@@ -70,18 +72,26 @@ jobs:
       # base to compare with, so only the ratchet below runs. A base without the file (the PR that introduced it)
       # is skipped.
       - name: The import-cycle baseline only shrinks
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         env:
           BASE_REF: ${{ github.base_ref }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
         run: |
           set -euo pipefail
+          # ADR-0252: in the merge queue, compare with the commit the queued PR is merged onto
+          if [ -n "$MG_BASE_SHA" ]; then
+            git fetch --no-tags --depth=1 origin "$MG_BASE_SHA"
+            base="$MG_BASE_SHA"
+          else
+            git fetch --no-tags --depth=1 origin "refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+            base="origin/$BASE_REF"
+          fi
           f=scripts/import-cycles-gateway.baseline.txt
-          git fetch --no-tags --depth=1 origin "refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
-          if ! git cat-file -e "origin/$BASE_REF:$f" 2>/dev/null; then
-            echo "origin/$BASE_REF has no $f yet; nothing to compare."
+          if ! git cat-file -e "$base:$f" 2>/dev/null; then
+            echo "$base has no $f yet; nothing to compare."
             exit 0
           fi
-          added="$(git diff --no-ext-diff "origin/$BASE_REF" -- "$f" | grep '^+[^#+]' || true)"
+          added="$(git diff --no-ext-diff "$base" -- "$f" | grep '^+[^#+]' || true)"
           if [ -n "$added" ]; then
             echo "::error file=$f::the import-cycle baseline gained edges; break the cycle instead of listing it:"
             echo "$added"

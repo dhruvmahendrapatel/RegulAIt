@@ -125,10 +125,10 @@ name: CI
 # that never runs CI is a draft nobody can trust.
 # ADR-0252 addendum (owner decision 2026-11-07): FAST checks on a pull request, the FULL suite at merge time.
 # The free public-repo runner pool (~20 concurrent jobs) against ~30 jobs per PR meant one PR's CI at a time.
-#   pull_request   the `scope` job reads the PR's diff. Code changed: build, typecheck, lint, the package suites,
-#                  the static pre-flights (migration guard, licence gate) and the gateway suite. The web app
-#                  changed: also the mocked SPA shards. Docs only: every job is skipped and `build-and-test`
-#                  still reports (a skipped dependency is allowed only then).
+#   pull_request   the `scope` job reads the PR's diff. Code changed: build, typecheck, lint, the package suites
+#                  and the static pre-flights (migration guard, licence gate). Code outside apps/web/** changed:
+#                  also the gateway shards. The web app changed: also the mocked SPA shards. Docs only: every job
+#                  is skipped and `build-and-test` still reports (it allows a skip only where the scope said so).
 #   merge_group    everything, on the combined result of the queued PRs: the above plus the SPA journeys and
 #   push to main   the docker build. The merge queue is where the full suite gates a merge.
 #   nightly        everything, for rot with no commit of ours to blame (a moved base image, a yanked dependency).
@@ -154,6 +154,11 @@ concurrency:
 permissions:
   contents: read
 
+# ADR-0252: CI databases are disposable, so migrations merged but not yet numbered (packages/db/migrations/pending/)
+# are applied in their provisional order. A long-lived database refuses them (packages/db/src/pending-migrations.ts).
+env:
+  REGULAIT_MIGRATIONS_UNASSIGNED: apply
+
 jobs:
   # What this run must cover (.github/actions/ci-scope). Cheap, and always runs, so the jobs below can be skipped
   # by a job-level `if:` and still report.
@@ -165,6 +170,7 @@ jobs:
       full: ${{ steps.scope.outputs.full }}
       code: ${{ steps.scope.outputs.code }}
       web: ${{ steps.scope.outputs.web }}
+      gateway: ${{ steps.scope.outputs.gateway }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -302,16 +308,25 @@ jobs:
       - name: Pre-flight — every gateway route has UI or a reason (route census)
         if: ${{ !cancelled() && (steps.affordances.outcome == 'success' || steps.affordances.outcome == 'failure') }}
         run: node scripts/preflight-ui-route-census.mjs
-      # CONTRIBUTING_PARALLEL_SESSIONS §4.1: a migration added below the base branch's newest `when`
-      # never applies on a database that already ran the base branch (fresh CI databases hide it).
-      - name: Pre-flight — every new migration sits above main's migration watermark
-        if: github.event_name == 'pull_request'
+      # CONTRIBUTING_PARALLEL_SESSIONS §4.1, ADR-0252, review C-03: merged migrations and journal entries are
+      # unchanged, the folder and the journal agree, and the journal grows only by the assign-at-merge step's
+      # numbering of pending files (a new `when` below the base's newest would never apply). In the merge queue
+      # the base is the commit the queued PR is merged onto.
+      - name: Pre-flight — merged migrations unchanged; the journal grows only at merge time
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         env:
           BASE_REF: ${{ github.base_ref }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
         run: |
           set -euo pipefail
-          git fetch --no-tags --depth=1 origin "refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
-          node scripts/migration-watermark-guard.mjs "origin/$BASE_REF"
+          if [ -n "$MG_BASE_SHA" ]; then
+            git fetch --no-tags --depth=1 origin "$MG_BASE_SHA"
+            base="$MG_BASE_SHA"
+          else
+            git fetch --no-tags --depth=1 origin "refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+            base="origin/$BASE_REF"
+          fi
+          node scripts/migration-watermark-guard.mjs "$base"
 
       # internal/process/AgentCoordination.md stays a CURRENT-STATE file: one Live-status row per
       # agent, one Status line per task, inboxes acked within 12h, a line
@@ -357,7 +372,8 @@ jobs:
   gateway-tests:
     name: gateway shard ${{ matrix.shard }}
     needs: scope
-    if: needs.scope.outputs.code == 'true'
+    # ADR-0252 addendum (PR trim): a PR that changes only apps/web/** and docs cannot move the gateway
+    if: needs.scope.outputs.gateway == 'true'
     runs-on: ubuntu-24.04
     # A blast-radius cap, not a target: the slowest shard plus setup is well
     # under it (see the arithmetic above). If a shard nears it, add a shard to
@@ -557,8 +573,8 @@ jobs:
     name: gateway / every test file ran exactly once
     needs: [scope, gateway-tests]
     # runs when a shard failed too, so a red run still says whether the shards
-    # covered the suite; it does not run on a cancelled (superseded) run, or on a docs-only PR
-    if: ${{ !cancelled() && needs.scope.outputs.code == 'true' }}
+    # covered the suite; it does not run on a cancelled (superseded) run, or when the shards were skipped
+    if: ${{ !cancelled() && needs.scope.outputs.gateway == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -601,8 +617,9 @@ jobs:
   # runs whenever a dependency failed (`!cancelled()`, not the default
   # `success()`, which would skip it) and checks each result itself.
   #
-  # ADR-0252 addendum: the parts are skipped on a docs-only PR, and only then. The scope must have succeeded; with
-  # code changed every part must be a success, and with no code changed every part must be skipped.
+  # ADR-0252 addendum: a part is skipped only when its own scope output is false. The scope must have succeeded; the
+  # build and static pre-flights must succeed when code changed (else be skipped), and the gateway shards and their
+  # coverage check must succeed when code outside apps/web/** changed (else be skipped).
   build-and-test:
     needs: [scope, build-and-test-base, gateway-tests, gateway-coverage]
     if: ${{ !cancelled() }}
@@ -615,9 +632,10 @@ jobs:
         run: |
           echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
           echo "$RESULTS" | jq -e '
+            def ok(want): if want == "true" then .result == "success" else .result == "skipped" end;
+            .scope.outputs as $o |
             length == 4 and .scope.result == "success" and
-            (del(.scope) | to_entries | map(.value.result)) as $parts |
-            if .scope.outputs.code == "true" then all($parts[]; . == "success") else all($parts[]; . == "skipped") end' > /dev/null
+            (."build-and-test-base" | ok($o.code)) and (."gateway-tests" | ok($o.gateway)) and (."gateway-coverage" | ok($o.gateway))' > /dev/null
 
   docker-build:
     # The quickstart path must never rot: prove the compose image still builds.
@@ -648,7 +666,8 @@ jobs:
       - id: scope
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
+          # a merge-group commit is a merge too: HEAD^1 is what the queued PR is merged onto
+          if [ "${{ github.event_name }}" != "pull_request" ] && [ "${{ github.event_name }}" != "merge_group" ]; then
             echo "Not a PR (${{ github.event_name }}) — building unconditionally."
             echo "build=true" >> "$GITHUB_OUTPUT"
             exit 0

@@ -8,7 +8,7 @@
 # still reports its check (as skipped, which branch protection counts as passing), so a required check never goes
 # missing on a docs-only PR. A required aggregate decides for itself whether a skip was allowed.
 name: CI scope
-description: Whether this run is a full run, and on a PR whether it changes code or the web app
+description: Whether this run is a full run, and on a PR which parts of the repository it changes
 outputs:
   full:
     description: "'true' on merge_group, push, schedule and workflow_dispatch"
@@ -19,11 +19,21 @@ outputs:
   web:
     description: "'true' when the web app or what it is built from changed (always on a full run)"
     value: ${{ steps.scope.outputs.web }}
+  gateway:
+    description: "'true' when code outside apps/web/** changed: the gateway suites, Kong integrations, import cycles"
+    value: ${{ steps.scope.outputs.gateway }}
+  image:
+    description: "'true' when an input of the root Dockerfile image changed (the Trivy scan)"
+    value: ${{ steps.scope.outputs.image }}
+  engines:
+    description: "'true' when an engine image input changed: engines/**, any Dockerfile, the lockfile, the image workflows"
+    value: ${{ steps.scope.outputs.engines }}
 runs:
   using: composite
   steps:
     # scripts/ci-scope.mjs (tested by scripts/ci-scope.test.mjs): renames count at both paths, and anything it cannot
-    # read (no merge commit, a shallow clone missing the base, a git error, an empty diff) means a FULL run.
+    # read (no merge commit, a shallow clone missing the base, a git error, an empty diff) means a FULL run, and so does a
+    # change to the scope rules themselves.
     - id: scope
       shell: bash
       env:

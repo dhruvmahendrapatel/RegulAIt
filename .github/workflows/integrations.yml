@@ -39,6 +39,8 @@ on:
       # harness starts is built from. A bump that touches nothing under the
       # paths above still changes that gateway, so it runs this gate too.
       - "pnpm-lock.yaml"
+      # ADR-0252 addendum, PR trim: a Markdown file under packages/** or apps/gateway/src/** changes no code
+      - "!**/*.md"
 
 # Least privilege for GITHUB_TOKEN (CodeQL "workflow does not contain permissions"): every job here only
 # checks out code and uploads artifacts; nothing writes to the repository, issues, PRs or packages.
@@ -49,6 +51,11 @@ concurrency:
 
 permissions:
   contents: read
+
+# ADR-0252: CI databases are disposable, so migrations merged but not yet numbered (packages/db/migrations/pending/)
+# are applied in their provisional order. A long-lived database refuses them (packages/db/src/pending-migrations.ts).
+env:
+  REGULAIT_MIGRATIONS_UNASSIGNED: apply
 
 jobs:
   # ADR-0179 (AER-028, AER-036): the plugin's decision logic with `kong`
