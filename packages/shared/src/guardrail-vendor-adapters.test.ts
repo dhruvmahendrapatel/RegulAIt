@@ -8,6 +8,8 @@ import { describe, expect, it } from "vitest";
 import {
   buildVendorHttpRequest,
   createExternalScorerSchema,
+  mergeWindowVerdicts,
+  vendorTextWindows,
   parseAzureAnalyze,
   parseAzureShieldPrompt,
   parseLakeraGuard,
@@ -137,5 +139,30 @@ describe("strict reply parsing", () => {
     expect(vendorLabel("Self-Harm")).toBe("self_harm");
     expect(vendorLabel("1234")).toBeNull();
     expect(Object.keys(VENDOR_ADAPTER_KINDS)).toEqual(["openai_moderation", "azure_content_safety", "lakera_guard"]);
+  });
+});
+
+describe("overlapping windows (design reference: Gravitee AI prompt guard rails)", () => {
+  it("text within the limit is one window", () => {
+    expect(vendorTextWindows("abc", 10)).toEqual(["abc"]);
+  });
+
+  it("an attack split across a window boundary is whole in the next window", () => {
+    const text = "a".repeat(95) + "ATTACK" + "b".repeat(30);
+    const w = vendorTextWindows(text, 100, 20)!;
+    expect(w[0]).not.toContain("ATTACK");
+    expect(w.some((x) => x.includes("ATTACK"))).toBe(true);
+    expect(w.every((x) => x.length <= 100)).toBe(true);
+    // the windows cover the text with the overlap between neighbours
+    expect(w.map((x, i) => (i === 0 ? x : x.slice(20))).join("")).toBe(text);
+  });
+
+  it("more windows than the bound is null (the caller fails closed), never a partial scan", () => {
+    expect(vendorTextWindows("x".repeat(100 + 8 * 80), 100, 20, 8)).toBeNull();
+    expect(vendorTextWindows("x".repeat(100 + 7 * 80), 100, 20, 8)).toHaveLength(8);
+  });
+
+  it("the merged verdict is the highest score and the union of labels", () => {
+    expect(mergeWindowVerdicts([{ score: 0.1, reasons: ["a"] }, { score: 0.9, reasons: ["b", "a"] }])).toEqual({ score: 0.9, reasons: ["a", "b"] });
   });
 });

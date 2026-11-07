@@ -374,6 +374,25 @@ describe("ADR-0237 third-party guardrail adapters", () => {
     expect(JSON.stringify(failed)).not.toContain("upstream fell over");
   });
 
+  it("long input is scanned in overlapping windows: an attack across the 10,000-character Azure boundary still blocks", async () => {
+    const sw = await relaxStepUpAround(db, () => putDetector("prompt_injection", { enabled: true, scorerId: scorerIds.azure }));
+    expect(sw.statusCode, sw.body).toBe(200);
+    seen.length = 0;
+    const straddling = "a".repeat(9_995) + "<<gva-attack>>" + "b".repeat(2_000);
+    expect((await invoke(straddling)).statusCode).toBe(403);
+    const shields = seen.filter((s) => s.host === HOSTS.azure && s.path.includes("text:shieldPrompt"));
+    expect(shields).toHaveLength(2);
+    expect(String(shields[0]!.body.userPrompt)).not.toContain("<<gva-attack>>");
+    expect(String(shields[1]!.body.userPrompt)).toContain("<<gva-attack>>");
+    const rows = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.objectId, scorerIds.azure), eq(auditLog.ruleId, "guardrail-vendor-call")))
+      .orderBy(desc(auditLog.at))
+      .limit(2);
+    expect(rows.map((r) => (r.detail as { window?: { of: number } }).window?.of)).toEqual([2, 2]);
+  });
+
   it("air-gapped refuses registration, enable and the call itself, sending nothing", async () => {
     process.env.REGULAIT_DEPLOY_MODE = "air_gapped";
     try {

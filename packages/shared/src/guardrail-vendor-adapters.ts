@@ -24,8 +24,10 @@
  *     never a 0. In particular a Lakera breakdown with no detector for the
  *     requested kind is an error: the vendor's policy did not run that check,
  *     and "not run" is not "clean".
- *  2. NO TRUNCATION. Text over the vendor's documented limit takes the failure
- *     path (ADR-0220's rule: a truncated scan would pass what it never read).
+ *  2. NO TRUNCATION. Text over the vendor's documented limit is scanned in
+ *     overlapping windows (at most VENDOR_MAX_WINDOWS); beyond that it takes
+ *     the failure path (ADR-0220's rule: a truncated scan would pass what it
+ *     never read).
  *  3. BARE LABELS ONLY. Reasons are vendor category names normalised to
  *     `^[a-z][a-z0-9_]{0,39}$`; nothing else from the reply survives.
  *  4. GUARDRAIL KINDS ONLY. A vendor adapter cannot claim an evaluation kind,
@@ -74,7 +76,7 @@ export const VENDOR_ADAPTER_LABEL: Record<ExternalScorerAdapter, string> = {
   lakera_guard: "Lakera Guard",
 };
 
-/** documented per-request text limits; longer text fails (fail closed), it is never cut */
+/** documented per-request text limits; longer text is scanned in overlapping windows, never cut */
 export const VENDOR_MAX_TEXT_CHARS: Record<VendorScorerAdapter, number> = {
   // OpenAI documents no character cap; this bound keeps one call well inside the model's context
   openai_moderation: 100_000,
@@ -83,6 +85,42 @@ export const VENDOR_MAX_TEXT_CHARS: Record<VendorScorerAdapter, number> = {
   // Lakera chunks long content itself; the ADR-0220 bound applies
   lakera_guard: 256_000,
 };
+
+/**
+ * Overlapping windows (design reference: Gravitee's AI prompt guard rails policy, Apache-2.0, which scans 500-character
+ * windows with 50 characters of overlap; no code is copied). Text over a vendor's per-request limit is scanned in
+ * windows of that limit that overlap by this many characters, so an attack split across a window boundary is still
+ * seen whole by one window. More windows than VENDOR_MAX_WINDOWS take the failure path (fail closed), never a partial scan.
+ */
+export const VENDOR_WINDOW_OVERLAP_CHARS = 500;
+export const VENDOR_MAX_WINDOWS = 8;
+
+/** the windows to scan, or null when the text needs more than `maxWindows` (the caller fails closed) */
+export function vendorTextWindows(
+  text: string,
+  size: number,
+  overlap: number = VENDOR_WINDOW_OVERLAP_CHARS,
+  maxWindows: number = VENDOR_MAX_WINDOWS,
+): string[] | null {
+  if (text.length <= size) return [text];
+  if (overlap < 0 || overlap >= size) throw new Error("window overlap must be in [0, size)");
+  const step = size - overlap;
+  const windows: string[] = [];
+  for (let start = 0; ; start += step) {
+    windows.push(text.slice(start, start + size));
+    if (windows.length > maxWindows) return null;
+    if (start + size >= text.length) return windows;
+  }
+}
+
+/** the verdict for a windowed scan: the highest score of any window, the union of their labels */
+export function mergeWindowVerdicts(verdicts: readonly ExternalScorerVerdict[]): ExternalScorerVerdict {
+  if (verdicts.length === 0) throw new Error("no window verdicts to merge");
+  return {
+    score: Math.max(...verdicts.map((v) => v.score)),
+    reasons: [...new Set(verdicts.flatMap((v) => v.reasons))].slice(0, 20),
+  };
+}
 
 export const AZURE_CONTENT_SAFETY_API_VERSION = "2024-09-01";
 export const OPENAI_MODERATION_DEFAULT_MODEL = "omni-moderation-latest";

@@ -30,7 +30,10 @@ import {
   parseVendorReply,
   VENDOR_ADAPTER_PROVIDER,
   VENDOR_MAX_TEXT_CHARS,
+  VENDOR_MAX_WINDOWS,
   OPENAI_MODERATION_DEFAULT_MODEL,
+  mergeWindowVerdicts,
+  vendorTextWindows,
   type ExternalScorerVerdict,
   type GuardrailScorerKind,
   type VendorScoreInput,
@@ -129,9 +132,13 @@ async function callHttps(
 }
 
 /**
- * ONE vendor call. Throws `VendorScorerError` on any failure; the caller turns
- * that into ADR-0220's fail-closed `trained_unavailable` hit (or a failed
- * connection test). Records spend and audit whatever the outcome.
+ * ONE vendor scoring request. Text over the vendor's per-request limit is
+ * scanned in overlapping windows (ADR-0237 §3), each its own call, in parallel
+ * under the same time limit; the verdict is the highest score of any window.
+ * Throws `VendorScorerError` on any failure, including any one window failing;
+ * the caller turns that into ADR-0220's fail-closed `trained_unavailable` hit
+ * (or a failed connection test). Every call is recorded (spend and audit),
+ * whatever its outcome.
  */
 export async function callVendorScorer(
   db: Db,
@@ -141,27 +148,58 @@ export async function callVendorScorer(
   timeoutMs: number,
 ): Promise<ExternalScorerVerdict> {
   const adapter = scorer.row.adapter as VendorScorerAdapter;
+  const refuse = async (message: string, errorClass: VendorScorerError["errorClass"]): Promise<never> => {
+    await recordVendorCall(db, scorer.row, adapter, req.scorerKind, attribution, { ok: false, score: null, errorClass, latencyMs: 0 });
+    throw new VendorScorerError(message, errorClass);
+  };
+  if (!isGuardrailScorerKind(req.scorerKind)) return refuse(`adapter '${adapter}' serves guardrail kinds only`, "non_conforming");
+  if (!scorer.apiKey) return refuse(`external scorer '${scorer.row.name}' has no API key`, "non_conforming");
+  const windows = vendorTextWindows(req.text, VENDOR_MAX_TEXT_CHARS[adapter]);
+  if (!windows) {
+    return refuse(
+      `text of ${req.text.length} characters needs more than ${VENDOR_MAX_WINDOWS} windows of ${VENDOR_MAX_TEXT_CHARS[adapter]} characters for '${adapter}'`,
+      "too_long",
+    );
+  }
+  const kind: GuardrailScorerKind = req.scorerKind;
+  const apiKey = scorer.apiKey;
+  const settled = await Promise.allSettled(
+    windows.map((text, i) =>
+      callVendorWindow(db, scorer, apiKey, kind, req.phase, text, attribution, timeoutMs, windows.length > 1 ? { index: i, of: windows.length } : null),
+    ),
+  );
+  const failed = settled.find((r): r is PromiseRejectedResult => r.status === "rejected");
+  if (failed) {
+    throw failed.reason instanceof VendorScorerError
+      ? failed.reason
+      : new VendorScorerError(`external scorer '${scorer.row.name}' failed`, "network");
+  }
+  return mergeWindowVerdicts(settled.map((r) => (r as PromiseFulfilledResult<ExternalScorerVerdict>).value));
+}
+
+/** one HTTP call for one window, recorded whatever its outcome (a failed record fails the call) */
+async function callVendorWindow(
+  db: Db,
+  scorer: { row: ExternalScorerRow; fetchImpl: typeof fetch },
+  apiKey: string,
+  kind: GuardrailScorerKind,
+  phase: "input" | "output",
+  text: string,
+  attribution: VendorCallAttribution,
+  timeoutMs: number,
+  window: { index: number; of: number } | null,
+): Promise<ExternalScorerVerdict> {
+  const adapter = scorer.row.adapter as VendorScorerAdapter;
   const started = Date.now();
   let verdict: ExternalScorerVerdict | null = null;
   let errorClass: VendorScorerError["errorClass"] | null = null;
   try {
-    if (!isGuardrailScorerKind(req.scorerKind)) {
-      throw new VendorScorerError(`adapter '${adapter}' serves guardrail kinds only`, "non_conforming");
-    }
-    const kind: GuardrailScorerKind = req.scorerKind;
-    if (!scorer.apiKey) throw new VendorScorerError(`external scorer '${scorer.row.name}' has no API key`, "non_conforming");
-    if (req.text.length > VENDOR_MAX_TEXT_CHARS[adapter]) {
-      throw new VendorScorerError(
-        `text of ${req.text.length} characters is over the ${VENDOR_MAX_TEXT_CHARS[adapter]}-character limit of '${adapter}'`,
-        "too_long",
-      );
-    }
     let reply: unknown;
     try {
       reply =
         adapter === "openai_moderation"
-          ? await callOpenAiModeration(scorer.row, scorer.apiKey, scorer.fetchImpl, req.text, timeoutMs)
-          : await callHttps(scorer.row, adapter, scorer.apiKey, scorer.fetchImpl, { kind, phase: req.phase, text: req.text }, timeoutMs);
+          ? await callOpenAiModeration(scorer.row, apiKey, scorer.fetchImpl, text, timeoutMs)
+          : await callHttps(scorer.row, adapter, apiKey, scorer.fetchImpl, { kind, phase, text }, timeoutMs);
     } catch (err) {
       rethrow(scorer.row, err, timeoutMs);
     }
@@ -175,11 +213,12 @@ export async function callVendorScorer(
     errorClass = err instanceof VendorScorerError ? err.errorClass : "network";
     throw err instanceof VendorScorerError ? err : new VendorScorerError(`external scorer '${scorer.row.name}' failed`, "network");
   } finally {
-    await recordVendorCall(db, scorer.row, adapter, req.scorerKind, attribution, {
+    await recordVendorCall(db, scorer.row, adapter, kind, attribution, {
       ok: verdict !== null,
       score: verdict?.score ?? null,
       errorClass,
       latencyMs: Date.now() - started,
+      window,
     });
   }
 }
@@ -191,7 +230,7 @@ async function recordVendorCall(
   adapter: VendorScorerAdapter,
   scorerKind: string,
   attribution: VendorCallAttribution,
-  outcome: { ok: boolean; score: number | null; errorClass: string | null; latencyMs: number },
+  outcome: { ok: boolean; score: number | null; errorClass: string | null; latencyMs: number; window?: { index: number; of: number } | null },
 ): Promise<void> {
   const userId = attribution.userId ?? NIL_UUID;
   await db.insert(usageEvents).values({
@@ -220,6 +259,7 @@ async function recordVendorCall(
       score: outcome.score,
       errorClass: outcome.errorClass,
       latencyMs: outcome.latencyMs,
+      ...(outcome.window ? { window: outcome.window } : {}),
       priced: outcome.ok && row.pricePerCallUsd != null,
     },
     effect: outcome.ok ? "allow" : "deny",

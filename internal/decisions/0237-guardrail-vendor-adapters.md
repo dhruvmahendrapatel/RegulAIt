@@ -50,9 +50,13 @@ already buys one does not have to write and host a shim.
    1 when any breakdown detector for the kind (`prompt_attack`, `pii/*`, `moderated_content/*`) has `detected: true`.
    Lakera's top-level `flagged` is never read, because a project in detect mode forces it to false.
 
-3. **Strict parsing, no truncation, bare labels.** A reply missing the field the mapping reads is an error, never a 0.
-   A Lakera policy that ran no detector for the requested kind is an error ("not run is not clean"). Text over a
-   vendor's documented limit (Azure 10,000 characters) takes the failure path. Reasons are vendor category names
+3. **Strict parsing, overlapping windows, bare labels.** A reply missing the field the mapping reads is an error, never
+   a 0. A Lakera policy that ran no detector for the requested kind is an error ("not run is not clean"). Text over a
+   vendor's documented per-request limit (Azure 10,000 characters, OpenAI 100,000 by our bound, Lakera 256,000) is
+   never cut: it is scanned in windows of that limit overlapping by 500 characters, so an attack split across a boundary
+   is whole in one window. The windows are separate calls, in parallel under the detector's one time limit, each priced
+   and audited (`detail.window`). The verdict is the highest window score, and any window failing fails the whole scan.
+   More than 8 windows takes the failure path (fail closed). Reasons are vendor category names
    reduced to `^[a-z][a-z0-9_]{0,39}$`; nothing else from a reply survives, and error messages never quote the reply
    body.
 
@@ -98,6 +102,29 @@ already buys one does not have to write and host a shim.
 11. **API and backend only.** The External scorers and project cost pages need the adapter selector, options, price
     field and the new breakdown; that UI need is posted on issue #453 for the Governed Designer.
 
+## Design reference: Gravitee AI prompt guard rails (owner-approved scope, 2026-11-07)
+
+`gravitee-io/gravitee-policy-ai-prompt-guard-rails` (Apache-2.0, a Java APIM plugin) was used as a **design reference
+only**. No code is copied, and it is not a dependency (it cannot be one: it is a Java gateway plugin).
+
+| Gravitee idea | Here |
+|---|---|
+| Detect, then act, with a configurable threshold | ADR-0220 detectors: a vendor verdict at or above the detector's threshold (default 0.5) is a finding, enforced at the detector's mode |
+| Long input scanned in overlapping windows (500 characters, 50 overlap) | Decision 3: windows of the vendor's own limit, 500 characters of overlap, at most 8, fail closed beyond |
+| Separate checks per label (toxicity, jailbreak), each with its own threshold | One detector per kind (`harm`, `prompt_injection`, `pii`), each with its own mode, threshold, scorer and timeout (ADR-0220) |
+
+The differences the owner requires, and how they hold:
+
+- **The default action is block, not Gravitee's `LOG_REQUEST`.** A newly enabled detector starts at mode `block`
+  and fails closed (ADR-0220 defaults, ADR-0180). Moving it to `log` or `warn`, or to `heuristic` on failure, is a
+  relaxation behind a `settings_relax` step-up, audited in the same transaction (ADR-0220 decision 6). Nothing in this
+  ADR changes that.
+- **No local classifier is added in this slice.** Every adapter here is a vendor API. A future local classifier must
+  be a permissively licensed ONNX model on a Node ONNX runtime that works air-gapped (ADR-0176). Llama Prompt Guard is
+  excluded (the Llama Community License is not on the ADR-0176 list). Gravitee's `detoxify-onnx` conversion was not
+  used; anyone who proposes it must first verify the licence of the underlying unitaryai Detoxify weights and record
+  it in `THIRD_PARTY.md`.
+
 ## Consequences
 
 - An operator with an OpenAI, Azure or Lakera account can put that vendor on the ADR-0220 detectors without hosting a
@@ -112,4 +139,5 @@ already buys one does not have to write and host a shim.
 - AWS Bedrock `ApplyGuardrail` (SigV4) and Google Model Armor adapters.
 - Azure Content Safety in disconnected containers for air-gapped sites (today refused with the other vendor adapters).
 - Lakera `payload` spans for PII masking (today counts only).
+- A local ONNX classifier, under the constraints in the Gravitee section above.
 - The UI on #453.
