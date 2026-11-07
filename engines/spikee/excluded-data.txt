@@ -1,0 +1,15 @@
+# ADR-0245 — spikee 0.9.4 data and modules REMOVED from the image, relative to site-packages/spikee/data. prune-data.py
+# removes every path listed and FAILS the build if one is missing (an upstream change must be re-reviewed, never silently
+# skipped). The catalogue never plans what these serve (packages/shared/src/engines/spikee.ts: cloud_only).
+#
+# the Hub fetch scripts: each downloads a third-party dataset at run time (the engines network has no route out, and
+# the datasets' licences are not on the ADR-0176 list or are gated: toxic-chat is CC-BY-NC-4.0, wildguardmix needs a token)
+workspace/datasets/seeds-in-the-wild-jailbreak-prompts/fetch_and_convert_dataset.py
+workspace/datasets/seeds-simsonsun-high-quality-jailbreaks/fetch_and_convert_dataset.py
+workspace/datasets/seeds-toxic-chat/fetch_and_convert_dataset.py
+workspace/datasets/seeds-wildguardmix-harmful/fetch_and_convert_dataset.py
+workspace/datasets/seeds-wildguardmix-harmful-fp/fetch_and_convert_dataset.py
+# the workspace LLM judges (`spikee init` copies them): each calls a hosted model, and loads `.env`
+workspace/judges/llm_judge_harmful.py
+workspace/judges/llm_judge_objective.py
+workspace/judges/llm_judge_output_criteria.py

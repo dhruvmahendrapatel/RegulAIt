@@ -49,7 +49,7 @@ set -euo pipefail
 
 engine="${1:-}"
 mode="${2:-}"
-case "$engine" in promptfoo | modelscan | garak) ;; *)
+case "$engine" in promptfoo | modelscan | garak | spikee) ;; *)
   echo "usage: $0 <promptfoo|modelscan|garak> build | repro <out.json> | push <repository> <out.json>" >&2
   exit 2
   ;;

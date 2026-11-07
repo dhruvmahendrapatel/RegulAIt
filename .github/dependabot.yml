@@ -54,6 +54,20 @@ updates:
       garak-minor-patch:
         update-types: ["minor", "patch"]
 
+  - package-ecosystem: "pip" # spikee engine image (hash-pinned requirements, ADR-0245)
+    directory: "/engines/spikee"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 0
+    commit-message:
+      prefix: "chore(engines)"
+    groups:
+      spikee-minor-patch:
+        update-types: ["minor", "patch"]
+
   - package-ecosystem: "pip" # modelscan engine image
     directory: "/engines/modelscan"
     schedule:
@@ -98,6 +112,7 @@ updates:
       - "/packages/sandbox-executor"
       - "/packages/sandbox-executor/stdio-base"
       - "/engines/garak"
+      - "/engines/spikee"
       - "/engines/promptfoo"
       - "/engines/modelscan"
     schedule:
