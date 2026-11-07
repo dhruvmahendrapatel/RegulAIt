@@ -32,6 +32,10 @@ export default defineConfig({
     testTimeout: 20_000,
     hookTimeout: 30_000,
     env: {
+      // ADR-0252: the suite's databases are disposable (dropped and recreated, M-009), so migrations merged but not
+      // yet numbered (packages/db/migrations/pending/) are applied in their provisional order. A long-lived database
+      // refuses them.
+      REGULAIT_MIGRATIONS_UNASSIGNED: "apply",
       // ADR-0031 item 4: the HTTP rate limiter is ON by default in a real
       // deployment (see rate-limit.ts). The suite drives thousands of requests
       // from one address in seconds — auth.test.ts alone deliberately fails

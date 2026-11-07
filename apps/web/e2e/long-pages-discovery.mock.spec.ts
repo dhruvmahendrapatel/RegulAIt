@@ -90,7 +90,7 @@ async function mockApi(p: Page): Promise<Capture> {
     }
     if (path === `/v1/discovery/sources/${SOURCE_AGENT}/enrolment-tokens`) {
       cap.lists.push(url);
-      const expired = TOKENS.filter((t) => !t.revokedAt && Date.parse(t.expiresAt) <= Date.now()).length;
+      const expired = TOKENS.filter((t) => !t.revokedAt && Date.parse(t.expiresAt) <= NOW).length;
       return json(route, page(TOKENS, q, { created: "createdAt", expires: "expiresAt", label: "label" }, { summary: { tokens: TOKENS.length, expired, revoked: TOKENS.filter((t) => t.revokedAt).length } }));
     }
     if (path === `/v1/discovery/sources/${SOURCE_AGENT}/endpoint-devices`) {

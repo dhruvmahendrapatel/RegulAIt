@@ -2,6 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-11-07
+- **Index**: Grant mints need a step-up; the plan-only gate is forced at project level (whole-build review S-04, P-02)
 - **Driver**: the whole-build review of `main` at 6a06dc1 (`internal/reviews/2026-11-07-whole-build-review.md`,
   PR #701), findings **S-04** (medium) and **P-02** (high), dispatched by the master session.
 - **Migration**: none. S-04 reuses the existing `settings_relax` step-up kind (no change to

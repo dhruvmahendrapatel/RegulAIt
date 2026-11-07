@@ -20,6 +20,7 @@ import {
   workflowEvents,
   workflowInstances,
   workflowTemplates,
+  withinSystemReason,
   type Db,
 } from "@regulait/db";
 import {
@@ -333,10 +334,14 @@ async function applyEvent(
     // stages: it is superseded together with its run, below, and only when the
     // run is cancelled — never left pending on a run nothing can release.
     if (event.kind === "artifact_submitted" || event.kind === "reopen" || isDenial || isReturn) {
-      await tx
-        .update(approvals)
-        .set({ status: "superseded" })
-        .where(and(eq(approvals.instanceId, instance.id), eq(approvals.status, "pending"), ne(approvals.objectType, "engine_run")));
+      // ADR-0234 batch 2: a workflow effect on EVERY pending gate of the instance, whoever triggered it (one review
+      // role's denial closes the other roles' rows): routing, under approval_maintenance
+      await withinSystemReason(tx, "approval_maintenance", "workflows.supersede-gates", async () => {
+        await tx
+          .update(approvals)
+          .set({ status: "superseded" })
+          .where(and(eq(approvals.instanceId, instance.id), eq(approvals.status, "pending"), ne(approvals.objectType, "engine_run")));
+      });
     }
     // ADR-0187 PR #203 review round 2 [21]: an instance that ends takes its
     // live engine runs with it (cancelled, key revoked, approval superseded);
@@ -363,15 +368,20 @@ async function applyEvent(
               : [resolveApprover(approver, instance.initiatorUserId)];
           for (const id of ids) if (!approverIds.includes(id)) approverIds.push(id);
         }
-        for (const approverUserId of approverIds) {
-          await tx.insert(approvals).values({
-            userId: instance.initiatorUserId,
-            objectType: "workflow",
-            instanceId: instance.id,
-            stageId: effect.stageId,
-            approverUserId,
-          });
-        }
+        // ADR-0234 batch 2: the stage's approval is the INITIATOR's request, created by whoever advanced the
+        // instance (an approver deciding the previous gate, an admin, a sweep); it is routing, so it is written
+        // under the registered approval_maintenance reason rather than as the advancing principal
+        await withinSystemReason(tx, "approval_maintenance", "workflows.stage-approval", async () => {
+          for (const approverUserId of approverIds) {
+            await tx.insert(approvals).values({
+              userId: instance.initiatorUserId,
+              objectType: "workflow",
+              instanceId: instance.id,
+              stageId: effect.stageId,
+              approverUserId,
+            });
+          }
+        });
       }
     }
     return {
@@ -571,16 +581,19 @@ export async function applyWorkflowApprovalDecision(
       if (quorum === "any") {
         // first-approval-wins: supersede the stage's other pending rows so no
         // ghost gate outlives the advance, then let the grant through.
-        await tx
-          .update(approvals)
-          .set({ status: "superseded" })
-          .where(
-            and(
-              eq(approvals.instanceId, instanceId),
-              eq(approvals.stageId, stageId),
-              eq(approvals.status, "pending"),
-            ),
-          );
+        // ADR-0234 batch 2: the other rows name other approvers; routing, under approval_maintenance
+        await withinSystemReason(tx, "approval_maintenance", "workflows.quorum-any", async () => {
+          await tx
+            .update(approvals)
+            .set({ status: "superseded" })
+            .where(
+              and(
+                eq(approvals.instanceId, instanceId),
+                eq(approvals.stageId, stageId),
+                eq(approvals.status, "pending"),
+              ),
+            );
+        });
         return true;
       }
       const pending = await tx
