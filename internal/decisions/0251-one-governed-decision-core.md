@@ -95,6 +95,28 @@ call that is over its limit is refused before it is queued for anyone's sign-off
   `policy-kernel/src/abac.ts`; until then the core's ABAC slot evaluates to "no active policy for this action", which
   is exactly true (no policy can be written for these actions yet).
 
+### Delegated calls (pillar 7): a worker never exceeds the person who started the run
+
+When a lead agent hands off to a worker, every call the worker makes (model, connector, MCP tool, A2A) goes through
+this same core, decided **as the initiating user**, and can only be narrower than that user's own call:
+
+- **Entitlement** is the kernel's intersection for an actor chain (ADR-0188: `evaluateConnector` / `evaluateAgent`
+  with the stored `GovernedActor`, `evaluateDelegatedAgentCall` on dispatch), plus the §5.1 lead ceiling
+  (`ceilingTools`, `ceilingAgentIds`), which only narrows. A worker has no grant of its own.
+- **Restrictions** (attribution mandate, rate limits, approval rules, ABAC) are loaded for the initiating user's
+  subject scopes, so a worker's calls count against, and are held by, the same limits and rules as that user's own.
+  Fanning work out to many workers therefore cannot multiply anyone's rate allowance.
+- **Budget**: the per-run delegation budget (`delegation-budget` in the actor chain, ADR-0016's transitive per-node
+  ceiling) and the project budget gate (`preDispatchProjectGate`) both apply on the worker's call, on the project the
+  run is attributed to.
+- **Error is deny** holds for a worker's call exactly as for a person's.
+
+Design references for the hand-off and role model, cited only (no code copied, and neither is a dependency: both are
+Python, and crewAI ships telemetry on by default, which fails ADR-0180): `openai/openai-agents-python` (MIT), for agent
+hand-offs and guardrail hooks around them; `crewAIInc/crewAI` (MIT), for the role, task and crew model and Flows.
+What we take from them is the shape (a hand-off is a call, and a guard runs on every call), not their trust model:
+both let a hand-off carry the caller's full tool set, where ours carries the intersection.
+
 ### Migration plan per call type
 
 Each slice is one commit with tests, in this order. Every existing test keeps passing; a **differential test** per
