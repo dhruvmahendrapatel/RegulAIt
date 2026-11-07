@@ -6,5 +6,26 @@
     // The MCP SDK's option types aren't authored for exactOptionalPropertyTypes.
     "exactOptionalPropertyTypes": false
   },
-  "include": ["src"]
+  "include": ["src"],
+  "references": [
+    { "path": "../../packages/api-client" },
+    { "path": "../../packages/cloud-discovery" },
+    { "path": "../../packages/connector-provider" },
+    { "path": "../../packages/db" },
+    { "path": "../../packages/engine-garak" },
+    { "path": "../../packages/engine-modelscan" },
+    { "path": "../../packages/engine-promptfoo" },
+    { "path": "../../packages/engine-runner" },
+    { "path": "../../packages/git-provider" },
+    { "path": "../../packages/infra-provider" },
+    { "path": "../../packages/model-provider" },
+    { "path": "../../packages/optimizer-kernel" },
+    { "path": "../../packages/orchestration-kernel" },
+    { "path": "../../packages/pm-provider" },
+    { "path": "../../packages/policy-kernel" },
+    { "path": "../../packages/sandbox-executor" },
+    { "path": "../../packages/shared" },
+    { "path": "../../packages/training-provider" },
+    { "path": "../../packages/workflow-kernel" }
+  ]
 }

@@ -1,5 +1,10 @@
 {
   "compilerOptions": {
+    "composite": true,
+    "incremental": true,
+    // beside the output, so deleting dist/ also forgets the build state (a stale .tsbuildinfo beside tsconfig.json
+    // makes tsc skip the emit and leaves dist/ empty)
+    "tsBuildInfoFile": "${configDir}/dist/tsconfig.tsbuildinfo",
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
