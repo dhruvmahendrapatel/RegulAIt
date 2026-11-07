@@ -657,7 +657,7 @@ test.describe("Red-teaming — recurring engine runs (ADR-0187)", () => {
       ["GET", /^\/v1\/redteam\/(libraries|runs)$/, () => ({ body: { libraries: [], runs: [], note: "" } })],
     ]);
     await installEnginesMock(page);
-    await page.route(/\/v1\/engine-schedules(\/|$)/, async (route) => {
+    await page.route(/\/v1\/engine-schedules(\/|\?|$)/, async (route) => {
       const req = route.request();
       const p = new URL(req.url()).pathname;
       const body = req.method() === "GET" ? undefined : req.postDataJSON();
@@ -669,6 +669,8 @@ test.describe("Red-teaming — recurring engine runs (ADR-0187)", () => {
       return json(route, { schedule: s });
     });
     await page.goto("/ui/admin/redteam");
+    // I-2: Red-teaming keeps its engine runs, and their schedules, on the Engines tab
+    await page.getByRole("tab", { name: "Engines" }).click({ timeout: 30_000 });
     await expect(page.getByText("Recurring runs", { exact: true })).toBeVisible({ timeout: 30_000 });
     const schedule = page.getByRole("button", { name: "Schedule this run" });
     await expect(schedule).toBeDisabled();

@@ -51,7 +51,10 @@
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
+import { wantsListContract, type ListSpec } from "./list-contract.js";
+import { answerListExport, answerListPage, type ContractList } from "./list-contract-route.js";
 import {
+  getTableColumns,
   agents,
   and,
   asc,
@@ -549,7 +552,39 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
     return reply.send(await adminExecutorView(db, row));
   });
 
+  // ADR-0226: with any of sort/dir/cursor/offset/count one executor's
+  // self-test history answers the shared list contract (every report, a
+  // total); with none of them, exactly the newest-100 response below. The
+  // report body is never in the Excel file: the list shows only its digest.
+  const attestationsList: ContractList<AttestationListRow, Record<string, never>> = {
+    spec: EXECUTOR_ATTESTATIONS_LIST,
+    filters: z.object({}).strict() as unknown as z.ZodType<Record<string, never>>,
+    reader: {
+      fetch: async (q) => {
+        const rows = await db
+          .select({ ...getTableColumns(executorAttestations), _cursorAt: q.cursorAt })
+          .from(executorAttestations)
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset);
+        return rows.map((a) => ({ ...attestationView(a), _cursorAt: a._cursorAt }));
+      },
+      countable: (where) => db.select({ one: sql`1` }).from(executorAttestations).where(where),
+      idOf: (r) => r.id,
+    },
+    where: async (req) => {
+      const p = idParam.safeParse(req.params);
+      if (!p.success) return null;
+      const [row] = await db.select({ id: executors.id }).from(executors).where(eq(executors.id, p.data.executorId));
+      return row ? eq(executorAttestations.executorId, row.id) : null;
+    },
+    refusal: { status: 404, body: { error: "executor_not_found" } },
+    extra: () => ({ attestationStrength: "software_attested" }),
+  };
+  app.get("/v1/executors/:executorId/attestations/export.xlsx", async (req, reply) => answerListExport(db, req, reply, attestationsList));
   app.get("/v1/executors/:executorId/attestations", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, attestationsList);
     const row = await byId(req, reply);
     if (!row) return reply;
     const rows = await db
@@ -559,16 +594,7 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
       .orderBy(desc(executorAttestations.observedAt), desc(executorAttestations.createdAt))
       .limit(100);
     return reply.send({
-      attestations: rows.map((a) => ({
-        id: a.id,
-        profileDigest: a.profileDigest,
-        class: a.class,
-        verdict: a.verdict,
-        reportSha256: a.reportSha256,
-        report: a.report,
-        observedAt: a.observedAt.toISOString(),
-        expiresAt: a.expiresAt.toISOString(),
-      })),
+      attestations: rows.map(attestationView),
       attestationStrength: "software_attested",
     });
   });
@@ -834,3 +860,45 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
     });
   });
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0226: an executor's self-test history under the shared list contract
+// ---------------------------------------------------------------------------
+
+function attestationView(a: typeof executorAttestations.$inferSelect) {
+  return {
+    id: a.id,
+    profileDigest: a.profileDigest,
+    class: a.class,
+    verdict: a.verdict,
+    reportSha256: a.reportSha256,
+    report: a.report,
+    observedAt: a.observedAt.toISOString(),
+    expiresAt: a.expiresAt.toISOString(),
+  };
+}
+type AttestationListRow = ReturnType<typeof attestationView>;
+
+export const EXECUTOR_ATTESTATIONS_LIST: ListSpec<AttestationListRow> = {
+  id: "executor-attestations",
+  sorts: {
+    at: { expr: executorAttestations.observedAt, keysetAt: executorAttestations.observedAt },
+    class: { expr: executorAttestations.class },
+    verdict: { expr: executorAttestations.verdict },
+    expires: { expr: executorAttestations.expiresAt, keysetAt: executorAttestations.expiresAt },
+    report: { expr: executorAttestations.reportSha256 },
+    profile: { expr: executorAttestations.profileDigest },
+  },
+  columns: {
+    at: { label: "Observed", value: (r) => new Date(r.observedAt) },
+    class: { label: "Class", value: (r) => r.class },
+    // the recorded verdict; whether a pass still counts (backend, expiry) is read on screen, not frozen into a file
+    verdict: { label: "Verdict", value: (r) => r.verdict },
+    expires: { label: "Expires", value: (r) => new Date(r.expiresAt) },
+    report: { label: "Report SHA-256", value: (r) => r.reportSha256 },
+    profile: { label: "Profile digest", value: (r) => r.profileDigest },
+  },
+  filters: [],
+  defaultSort: { col: "at", dir: "desc" },
+  idCol: executorAttestations.id,
+};

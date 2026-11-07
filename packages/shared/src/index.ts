@@ -34,6 +34,8 @@ import { IDENTITY_ASSERTION_PROFILES, IDENTITY_ASSERTION_SCOPE_MAX } from "./ide
 import { bomOrgSettingsFields } from "./bom/settings.js";
 // ADR-0190 (batch 6 item 3): the isolation settings ride the same PUT
 import { isolationOrgSettingsFields } from "./isolation/settings.js";
+// ADR-0218: the organisation default palette and the theme lock
+import { appearanceOrgSettingsFields } from "./appearance.js";
 
 export { detectPII, redactPII, PII_REDACTION_VERSION, type PiiHit, type PiiCategory, type BasePiiCategory } from "./pii.js";
 export {
@@ -2385,6 +2387,10 @@ export const updateOrgSettingsSchema = z
      * detail offers drafts labelled with their sources; nothing is submitted
      * or recorded as an attestation until a person does it. */
     vendorDraftAssistEnabled: z.boolean().optional(),
+    /** ADR-0233 (PENDING S6): refuse credential-shaped text in name/title/description/
+     * summary/body columns? true (default) = refused with 422 credential_in_content.
+     * false = stored as typed; turning it off is a relaxation (settings_relax step-up). */
+    contentCredentialGuard: z.boolean().optional(),
     /** ADR-0215 (migration 0248): may an admin import vendored framework content
      * (new draft pack versions) and accept imported feed entries? false (default) =
      * the import routes refuse. Turning it on is a relaxation (settings_relax step-up). */
@@ -2542,6 +2548,8 @@ export const updateOrgSettingsSchema = z
     ...bomOrgSettingsFields,
     // ADR-0190 (batch 6 item 3): isolation enforcement, the class floors and the executor attestation lifetime
     ...isolationOrgSettingsFields,
+    // ADR-0218 (migration 0282): the organisation default palette and the theme lock (High contrast stays open)
+    ...appearanceOrgSettingsFields,
     // ADR-0225 (P13 d): the public trust pages and auditor access, shipped off
     ...trustPagesOrgSettingsFields,
     /** ADR-0039 self-lockout guard (mirrors the sso_only guard): saving
@@ -3015,6 +3023,7 @@ export {
 export {
   AUDIT_SCRUB_FINGERPRINT_HEX,
   AUDIT_SCRUB_MARKER_PREFIX,
+  addedAuditScrubRules,
   containsAuditScrubMarker,
   scrubAuditDetail,
   scrubAuditRow,
@@ -4799,6 +4808,7 @@ export * from "./modality-pricing.js";
 export * from "./batch3.js";
 export {
   ACCOUNTABILITY_MONITOR_RULE_IDS,
+  MODEL_DRIFT_MONITOR_RULE_ID,
   suggestedHaltFor,
   type AccountabilityMonitorRuleId,
 } from "./governance-monitor.js";
@@ -4816,6 +4826,7 @@ export * from "./identity/index.js";
 export * from "./bom/index.js";
 // ADR-0190 (batch 6 item 3): isolation and execution profiles
 export * from "./isolation/index.js";
+export * from "./appearance.js";
 export {
   injectionText,
   vendoredCompileProblems,

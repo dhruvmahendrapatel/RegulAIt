@@ -18,6 +18,9 @@ import {
   type RequiredTestPolicy,
   // ADR-0182 (migration 0162): the accountability vocabularies, in lockstep
   // with the migration's CHECKs by being the same constants
+  // ADR-0218 (migration 0282): the theme palettes and modes, in lockstep with the CHECKs
+  THEME_MODES,
+  THEME_PALETTE_IDS,
   ACCOUNTABILITY_GATE_MODES,
   AI_POLICY_ACK_METHODS,
   AI_POLICY_KINDS,
@@ -4711,6 +4714,11 @@ export const orgSettings = pgTable(
      * audited) = drafts labelled with their sources; nothing is submitted or
      * recorded as an attestation until a person does it. */
     vendorDraftAssistEnabled: boolean("vendor_draft_assist_enabled").notNull().default(false),
+    /** ADR-0233 (migration 0273, PENDING S6): refuse a write that puts credential-shaped
+     * text into a registered name/title/description/summary/body column. TRUE (default) =
+     * refused with 422 credential_in_content; FALSE (an admin relaxation: step-up, audited)
+     * = stored as typed. Read by `withContentGuard` only when its detector has matched. */
+    contentCredentialGuard: boolean("content_credential_guard").notNull().default(true),
 
     // --- ADR-0046 (migration 0058): review-workbench bulk fences ------------
     /** hard cap on items per bulk approve/deny/reassign. Not a UI convenience:
@@ -4845,6 +4853,11 @@ export const orgSettings = pgTable(
      * null (strict) = none named. Deleting it stops automatic filing — there is
      * no fallback to another connection (ADR-0180). */
     alertTicketConnectionId: uuid("alert_ticket_connection_id").references(() => pmConnections.id, { onDelete: "set null" }),
+    /** ADR-0218 (migration 0282): the palette everyone starts on, and while `themeLocked` is on the only one besides
+     * High contrast (an accessibility palette a lock never takes away) */
+    themeDefaultPalette: text("theme_default_palette", { enum: THEME_PALETTE_IDS }).notNull().default("aurora"),
+    /** ADR-0218: false (default) = each person picks their own palette; true = everyone uses the default (or High contrast) */
+    themeLocked: boolean("theme_locked").notNull().default(false),
     /** ADR-0225 (P13 d, migration 0247): the public trust centre and the auditor portal — built, shipped OFF
      * (ADR-0180). Off, both answer 404 and nothing can be published or granted. */
     trustPagesEnabled: boolean("trust_pages_enabled").notNull().default(false),
@@ -5044,6 +5057,11 @@ export const orgSettings = pgTable(
       "org_settings_executor_attestation_max_age_minutes_check",
       sql`${t.executorAttestationMaxAgeMinutes} BETWEEN 60 AND 1440`,
     ),
+    // ADR-0218 (migration 0282)
+    check(
+      "org_settings_theme_default_palette_check",
+      sql`${t.themeDefaultPalette} IN ('aurora', 'harbor', 'evergreen', 'graphite', 'orchid', 'contrast')`,
+    ),
     check(
       "org_settings_fairness_dataset_retention_days_check",
       sql`${t.fairnessDatasetRetentionDays} BETWEEN 1 AND 365`,
@@ -5052,6 +5070,31 @@ export const orgSettings = pgTable(
 );
 
 export type OrgSettingsRow = typeof orgSettings.$inferSelect;
+
+/**
+ * ADR-0218 (migration 0282): a person's own palette and light/dark mode, saved to the account so it follows them to
+ * any browser (the browser keeps a copy only to paint before the first request). One row per person; written only by
+ * `PUT /auth/appearance` for the caller's own user id, with its audit row in the same transaction. A null field means
+ * "nothing saved": the palette falls back to the organisation default, the mode to the browser.
+ */
+export const userAppearance = pgTable(
+  "user_appearance",
+  {
+    userId: uuid("user_id")
+      .primaryKey()
+      .references(() => users.id, { onDelete: "cascade" }),
+    palette: text("palette", { enum: THEME_PALETTE_IDS }),
+    mode: text("mode", { enum: THEME_MODES }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "user_appearance_palette_check",
+      sql`${t.palette} IS NULL OR ${t.palette} IN ('aurora', 'harbor', 'evergreen', 'graphite', 'orchid', 'contrast')`,
+    ),
+    check("user_appearance_mode_check", sql`${t.mode} IS NULL OR ${t.mode} IN ('light', 'dark', 'system')`),
+  ],
+);
 
 // ---------------------------------------------------------------------------
 // ADR-0173 §3 (migration 0138) — the model allow-list matrix
@@ -15476,3 +15519,150 @@ export const supplierSubmissions = pgTable(
   ],
 );
 export type SupplierSubmissionRow = typeof supplierSubmissions.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0223 (migration 0281) — drift and explainability for classical (non-LLM) models. Aggregates only: bin edges
+// and counts, category labels and counts, one importance value per feature. Written only by
+// `apps/gateway/src/classical-drift.ts`, each write in the same transaction as its audit row.
+// ---------------------------------------------------------------------------
+
+/** one row, absent until first saved; absent = OFF (ADR-0180) */
+export const modelDriftSettings = pgTable(
+  "model_drift_settings",
+  {
+    id: text("id").primaryKey().default("singleton"),
+    enabled: boolean("enabled").notNull().default(false),
+    maxReportsPerHour: integer("max_reports_per_hour").notNull().default(12),
+    minSamples: integer("min_samples").notNull().default(100),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("model_drift_settings_singleton_check", sql`${t.id} = 'singleton'`),
+    check("model_drift_settings_rate_check", sql`${t.maxReportsPerHour} BETWEEN 1 AND 120`),
+    check("model_drift_settings_min_samples_check", sql`${t.minSamples} BETWEEN 1 AND 1000000`),
+  ],
+);
+export type ModelDriftSettingsRow = typeof modelDriftSettings.$inferSelect;
+
+/** one reference feature distribution for one model card, with its alert thresholds (strict defaults) */
+export const modelDriftMonitors = pgTable(
+  "model_drift_monitors",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    cardId: uuid("card_id")
+      .notNull()
+      .references(() => modelCards.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    reference: jsonb("reference").$type<unknown[]>().notNull(),
+    referenceSha256: text("reference_sha256").notNull(),
+    featureCount: integer("feature_count").notNull(),
+    referenceSamples: integer("reference_samples").notNull(),
+    psiWarn: doublePrecision("psi_warn").notNull().default(0.1),
+    psiAlert: doublePrecision("psi_alert").notNull().default(0.25),
+    ksAlert: doublePrecision("ks_alert").notNull().default(0.1),
+    jsAlert: doublePrecision("js_alert").notNull().default(0.05),
+    /** the model version the reference was built from, where known (the card's pin, or the version declared) */
+    referenceModelVersion: text("reference_model_version"),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("model_drift_monitors_name_check", sql`char_length(btrim(${t.name})) BETWEEN 1 AND 120`),
+    check("model_drift_monitors_reference_check", sql`jsonb_typeof(${t.reference}) = 'array'`),
+    check("model_drift_monitors_sha_check", sql`${t.referenceSha256} ~ '^[0-9a-f]{64}$'`),
+    check("model_drift_monitors_features_check", sql`${t.featureCount} BETWEEN 1 AND 200`),
+    check("model_drift_monitors_samples_check", sql`${t.referenceSamples} > 0`),
+    check(
+      "model_drift_monitors_thresholds_check",
+      sql`${t.psiWarn} > 0 AND ${t.psiAlert} >= ${t.psiWarn} AND ${t.psiAlert} <= 10 AND ${t.ksAlert} > 0 AND ${t.ksAlert} <= 1 AND ${t.jsAlert} > 0 AND ${t.jsAlert} <= 0.7`,
+    ),
+    check(
+      "model_drift_monitors_model_version_check",
+      sql`${t.referenceModelVersion} IS NULL OR char_length(${t.referenceModelVersion}) BETWEEN 1 AND 200`,
+    ),
+    unique("model_drift_monitors_card_name_uq").on(t.cardId, t.name),
+  ],
+);
+export type ModelDriftMonitorRow = typeof modelDriftMonitors.$inferSelect;
+
+export const MODEL_DRIFT_REPORT_SOURCES = ["push", "upload"] as const;
+export const MODEL_DRIFT_STATUSES = ["within", "warn", "drift", "insufficient"] as const;
+/** where a report's or artefact's `model_version` came from: the card's pin at write time, or the submission */
+export const MODEL_VERSION_SOURCES = ["card_pinned", "declared"] as const;
+/** one production summary against a monitor, with the statistics the gateway computed from it */
+export const modelDriftReports = pgTable(
+  "model_drift_reports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    monitorId: uuid("monitor_id")
+      .notNull()
+      .references(() => modelDriftMonitors.id, { onDelete: "cascade" }),
+    source: text("source", { enum: MODEL_DRIFT_REPORT_SOURCES }).notNull(),
+    windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
+    windowEnd: timestamp("window_end", { withTimezone: true }).notNull(),
+    sampleCount: integer("sample_count").notNull(),
+    summary: jsonb("summary").$type<unknown[]>().notNull(),
+    summarySha256: text("summary_sha256").notNull(),
+    results: jsonb("results").$type<unknown[]>().notNull(),
+    status: text("status", { enum: MODEL_DRIFT_STATUSES }).notNull(),
+    driftedFeatures: integer("drifted_features").notNull(),
+    /** the model version this summary was checked for (migration 0281 header) */
+    modelVersion: text("model_version").notNull(),
+    modelVersionSource: text("model_version_source", { enum: MODEL_VERSION_SOURCES }).notNull(),
+    submittedBy: uuid("submitted_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("model_drift_reports_source_check", sql`${t.source} IN ('push', 'upload')`),
+    check("model_drift_reports_window_check", sql`${t.windowEnd} > ${t.windowStart}`),
+    check("model_drift_reports_samples_check", sql`${t.sampleCount} > 0`),
+    check("model_drift_reports_summary_check", sql`jsonb_typeof(${t.summary}) = 'array' AND jsonb_typeof(${t.results}) = 'array'`),
+    check("model_drift_reports_sha_check", sql`${t.summarySha256} ~ '^[0-9a-f]{64}$'`),
+    check("model_drift_reports_status_check", sql`${t.status} IN ('within', 'warn', 'drift', 'insufficient')`),
+    check("model_drift_reports_drifted_check", sql`${t.driftedFeatures} >= 0`),
+    check("model_drift_reports_model_version_check", sql`char_length(${t.modelVersion}) BETWEEN 1 AND 200`),
+    check("model_drift_reports_model_version_source_check", sql`${t.modelVersionSource} IN ('card_pinned', 'declared')`),
+    index("model_drift_reports_monitor_idx").on(t.monitorId, t.createdAt.desc(), t.id.desc()),
+  ],
+);
+export type ModelDriftReportRow = typeof modelDriftReports.$inferSelect;
+
+export const MODEL_EXPLAINABILITY_KINDS = ["global_importance", "shap_summary"] as const;
+/** global feature importance or a SHAP summary from the customer's pipeline, recorded as evidence on a card */
+export const modelExplainabilityArtefacts = pgTable(
+  "model_explainability_artefacts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    cardId: uuid("card_id")
+      .notNull()
+      .references(() => modelCards.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: MODEL_EXPLAINABILITY_KINDS }).notNull(),
+    method: text("method").notNull(),
+    importances: jsonb("importances").$type<Array<{ feature: string; value: number }>>().notNull(),
+    featureCount: integer("feature_count").notNull(),
+    payloadSha256: text("payload_sha256").notNull(),
+    note: text("note"),
+    /** the model version this artefact explains (migration 0281 header) */
+    modelVersion: text("model_version").notNull(),
+    modelVersionSource: text("model_version_source", { enum: MODEL_VERSION_SOURCES }).notNull(),
+    submittedBy: uuid("submitted_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("model_explainability_artefacts_kind_check", sql`${t.kind} IN ('global_importance', 'shap_summary')`),
+    check("model_explainability_artefacts_method_check", sql`char_length(btrim(${t.method})) BETWEEN 1 AND 120`),
+    check("model_explainability_artefacts_importances_check", sql`jsonb_typeof(${t.importances}) = 'array'`),
+    check("model_explainability_artefacts_features_check", sql`${t.featureCount} BETWEEN 1 AND 500`),
+    check("model_explainability_artefacts_sha_check", sql`${t.payloadSha256} ~ '^[0-9a-f]{64}$'`),
+    check("model_explainability_artefacts_note_check", sql`${t.note} IS NULL OR char_length(${t.note}) <= 2000`),
+    check("model_explainability_artefacts_model_version_check", sql`char_length(${t.modelVersion}) BETWEEN 1 AND 200`),
+    check(
+      "model_explainability_artefacts_model_version_source_check",
+      sql`${t.modelVersionSource} IN ('card_pinned', 'declared')`,
+    ),
+    index("model_explainability_artefacts_card_idx").on(t.cardId, t.createdAt.desc()),
+  ],
+);
+export type ModelExplainabilityArtefactRow = typeof modelExplainabilityArtefacts.$inferSelect;

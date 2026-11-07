@@ -131,14 +131,15 @@ async function setup(page: Page, opts: { isAdmin?: boolean; seed?: Partial<Recor
   await page.route("**/v1/mrm/status", (route) =>
     json(route, { enforced: false, warnDays: 30, stalenessRecertEnabled: true, stalenessRecertThreshold: 1, posture: "declared", label: "declared", cards: 1, approved: 0, expiring: 0, expired: 0, pending: 0, unsigned: 1, revoked: 0, note: "" }),
   );
-  await page.route("**/v1/mrm/expiring", (route) => json(route, { warnDays: 30, items: [] }));
-  await page.route("**/v1/mrm/cards", (route) => json(route, { cards: [card], enforced: false }));
+  // ADR-0226: the lists ask with the contract's query string, so match the path, not the whole URL
+  await page.route((u) => u.pathname === "/v1/mrm/expiring", (route) => json(route, { warnDays: 30, items: [] }));
+  await page.route((u) => u.pathname === "/v1/mrm/cards", (route) => json(route, { cards: [card], enforced: false }));
   await page.route(`**/v1/mrm/cards/${CARD}`, (route) => json(route, { card: { ...card, autofill: null, staleness: null } }));
   // the evaluation dataset page
   const evalRow = { id: EVAL_DS, name: "golden", version: 2, note: null, scorerKind: "contains", scorerConfig: {}, caseCount: 1, runCount: 0, frozen: false, createdAt: iso(90) };
   await page.route("**/v1/evals/scorers", (route) => json(route, { scorers: [{ id: "contains", deterministic: true, modelBacked: false, summary: "Contains.", limits: "Lexical." }], note: "Scorers." }));
   await page.route("**/v1/evals/scoring-semantics", (route) => json(route, { current: 2, versions: [{ version: 2, adr: "ADR-0072", summary: "Current." }], evalRuns: [], stalePinnedBaselines: [], note: "Semantics." }));
-  await page.route("**/v1/evals/datasets", (route) => json(route, { datasets: [evalRow], note: "Datasets freeze." }));
+  await page.route(/\/v1\/evals\/datasets(\?|$)/, (route) => json(route, { datasets: [evalRow], note: "Datasets freeze." }));
   await page.route(`**/v1/evals/datasets/${EVAL_DS}`, (route) => json(route, { dataset: evalRow, cases: [{ id: "c1", input: "What is the status?", expected: "ok", scorerKind: null, tags: [] }], frozen: false }));
   await page.route(/\/v1\/evals\/runs\?/, (route) => json(route, { runs: [] }));
   // the training dataset page

@@ -575,7 +575,8 @@ export function Card(props: CardProps) {
     const check = () => {
       // expanded: keep the Expand trigger until the dialog hands focus back to it
       if (host.parentElement !== el) return;
-      const refused = host.querySelector(KEEP_VISIBLE) != null;
+      // a list's own view controls (page size, columns: [data-list-view]) only change how the rows show, so they never refuse
+      const refused = Array.from(host.querySelectorAll(KEEP_VISIBLE)).some((n) => !n.closest("[data-list-view]"));
       if (refused && !warned && import.meta.env.DEV) {
         warned = true;
         console.warn(`Card "${name}": contain refused, the body holds a form, warning, decision or step-up control`);
@@ -1299,6 +1300,19 @@ export function ConfirmModal(props: {
 
 /** the ids that tie a tab to its panel (see `Tabs` `idPrefix`) */
 export const tabIds = (prefix: string, id: string) => ({ tab: `${prefix}-tab-${id}`, panel: `${prefix}-panel-${id}` });
+
+/**
+ * A panel for `Tabs` with `idPrefix`: `role="tabpanel"`, labelled by its tab, and kept mounted (`hidden`) while another
+ * tab is open, so a draft or a pick inside it survives a tab switch
+ */
+export function TabPanel(props: { idPrefix: string; id: string; active: string; className?: string; children: ReactNode }) {
+  const ids = tabIds(props.idPrefix, props.id);
+  return (
+    <div role="tabpanel" id={ids.panel} aria-labelledby={ids.tab} hidden={props.active !== props.id} className={props.className}>
+      {props.children}
+    </div>
+  );
+}
 
 export function Tabs(props: {
   /**

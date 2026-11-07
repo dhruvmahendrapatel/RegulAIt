@@ -27,6 +27,7 @@ import type pg from "pg";
 import * as schema from "./schema.js";
 import { withAuditChain } from "./audit-chain.js";
 import { withProseScrub } from "./prose-scrub.js";
+import { withContentGuard } from "./content-guard.js";
 import { BOM_SUBJECT_LOCK_NAMESPACE } from "./bom-locks.js";
 
 /** PR #287: the longest a writer waits for a subject's lock before it is told the subject is busy */
@@ -49,7 +50,8 @@ const inFlight = new Set<string>();
 
 /** the handle `fn` receives: the same wrappers as `createDb`, bound to ONE connection */
 export type BoundBomDb = ReturnType<typeof bind>;
-const bind = (client: pg.PoolClient) => withProseScrub(withAuditChain(drizzle(client, { schema })));
+// ADR-0233 review finding 1: the content guard composes here too, outermost, exactly as in `createDb`
+const bind = (client: pg.PoolClient) => withContentGuard(withProseScrub(withAuditChain(drizzle(client, { schema }))));
 
 export async function withAiBomSubjectSessionLock<T>(
   db: { $client: unknown },

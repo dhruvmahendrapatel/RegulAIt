@@ -25,7 +25,7 @@ import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Input, Modal, Table } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
 import { QueryGate, RemoveButton, useAction, useEgressAllowHosts } from "../adminKit";
-import { NewestNote } from "../../../ui/fold";
+import { DataList } from "../../../ui/DataList";
 import { selectorCovers, webhookSelectors } from "../../builder/promptsLogic";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
@@ -178,35 +178,41 @@ function SecretReveal(props: { name: string; secret: string; onDismiss: () => vo
 
 function DeliveriesModal(props: { sub: Subscription | null; onClose: () => void }) {
   const act = useAction();
-  const deliveries = useQuery({
-    queryKey: KEYS.deliveries(props.sub?.id ?? ""),
-    queryFn: () => api.get<{ deliveries: Delivery[] }>(`/v1/webhooks/${props.sub!.id}/deliveries?limit=50`),
-    enabled: !!props.sub,
-  });
+  const sub = props.sub;
   return (
-    <Modal open={props.sub !== null} title={`Deliveries — ${props.sub?.name ?? ""}`} onClose={props.onClose} wide actions={<Button onClick={props.onClose}>Close</Button>}>
-      <QueryGate loading={deliveries.isLoading} error={deliveries.error} onRetry={() => void deliveries.refetch()}>
-        <NewestNote shown={deliveries.data?.deliveries?.length ?? 0} limit={50} noun="deliveries" />
-        <Table
-          rows={deliveries.data?.deliveries ?? []}
+    <Modal open={sub !== null} title={`Deliveries — ${sub?.name ?? ""}`} onClose={props.onClose} wide actions={<Button onClick={props.onClose}>Close</Button>}>
+      {sub && (
+        <DataList<Delivery>
+          listId="webhook-deliveries"
+          noun="deliveries"
+          endpoint={`/v1/webhooks/${sub.id}/deliveries`}
+          exportPath={`/v1/webhooks/${sub.id}/deliveries/export.xlsx`}
+          queryKey={[...KEYS.deliveries(sub.id), "list"]}
+          legacyKey="deliveries"
+          defaultSort={{ key: "when", dir: "desc" }}
           rowKey={(r) => r.id}
           empty={<EmptyState title="Nothing sent yet" body="Deliveries appear here when a subscribed event happens or a test is sent." />}
           columns={[
-            { key: "event", header: "Event", render: (r) => <code>{r.event}</code> },
-            { key: "status", header: "Status", render: (r) => <Badge tone={STATUS_TONE[r.status]}>{r.status}</Badge> },
-            { key: "attempts", header: "Attempts", render: (r) => `${r.attempts} of ${r.maxAttempts}` },
-            { key: "code", header: "Response", render: (r) => (r.responseCode ?? "—") },
+            { key: "event", header: "Event", main: true, sortable: true, render: (r) => <code>{r.event}</code> },
+            { key: "status", header: "Status", main: true, sortable: true, required: "Status is always shown", render: (r) => <Badge tone={STATUS_TONE[r.status]}>{r.status}</Badge> },
+            { key: "attempts", header: "Attempts", main: true, sortable: true, render: (r) => `${r.attempts} of ${r.maxAttempts}` },
+            { key: "code", header: "Response", main: true, sortable: true, render: (r) => (r.responseCode ?? "—") },
             {
               key: "when",
               header: "When",
+              main: true,
+              sortable: true,
               render: (r) =>
                 r.status === "pending" && r.nextRetryAt ? `next try ${ago(r.nextRetryAt)}` : r.lastAttemptAt ? `last try ${ago(r.lastAttemptAt)}` : ago(r.createdAt),
             },
-            { key: "error", header: "Error", render: (r) => <span className={v.faint}>{r.lastError ?? ""}</span> },
+            { key: "error", header: "Error", main: true, sortable: true, required: "A delivery's error is always shown", render: (r) => <span className={v.faint}>{r.lastError ?? ""}</span> },
+            { key: "delivered", header: "Delivered", sortable: true, render: (r) => (r.deliveredAt ? ago(r.deliveredAt) : "—") },
+            { key: "message", header: "Message id", sortable: true, render: (r) => <code>{r.messageId}</code> },
             {
               key: "actions",
               header: "",
               srHeader: "Actions",
+              action: true,
               render: (r) =>
                 r.status === "failed" && r.event !== "webhook.test" ? (
                   <Button
@@ -214,7 +220,7 @@ function DeliveriesModal(props: { sub: Subscription | null; onClose: () => void 
                     variant="ghost"
                     disabled={act.busy}
                     aria-label={`Retry delivery of ${r.event}`}
-                    onClick={() => void act.run(() => api.post(`/v1/webhooks/deliveries/${r.id}/retry`, {}), `Delivery of ${r.event} requeued`).then(() => deliveries.refetch())}
+                    onClick={() => void act.run(() => api.post(`/v1/webhooks/deliveries/${r.id}/retry`, {}), `Delivery of ${r.event} requeued`)}
                   >
                     Retry
                   </Button>
@@ -222,7 +228,7 @@ function DeliveriesModal(props: { sub: Subscription | null; onClose: () => void 
             },
           ]}
         />
-      </QueryGate>
+      )}
     </Modal>
   );
 }

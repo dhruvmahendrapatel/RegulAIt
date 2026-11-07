@@ -1597,6 +1597,27 @@
       "when": 1785207000000,
       "tag": "0272_rls_foundation_slice1",
       "breakpoints": true
+    },
+    {
+      "idx": 273,
+      "version": "7",
+      "when": 1785208000000,
+      "tag": "0273_content_credential_guard",
+      "breakpoints": true
+    },
+    {
+      "idx": 281,
+      "version": "7",
+      "when": 1785208500000,
+      "tag": "0281_classical_model_drift",
+      "breakpoints": true
+    },
+    {
+      "idx": 282,
+      "version": "7",
+      "when": 1785209000000,
+      "tag": "0282_theme_account_org_lock",
+      "breakpoints": true
     }
   ]
 }

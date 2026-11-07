@@ -704,7 +704,7 @@ export interface AttestationRecord {
   expiresAt: number;
 }
 
-function parseAttestationRecord(raw: unknown): AttestationRecord | null {
+export function parseAttestationRecord(raw: unknown): AttestationRecord | null {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
   const a = raw as Record<string, unknown>;
   const observedAt = isoMs(a.observedAt);

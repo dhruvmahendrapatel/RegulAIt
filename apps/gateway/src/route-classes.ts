@@ -229,6 +229,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/builder/agents/:id/export",
   "POST /v1/builder/agents/:id/chat",
   "GET /v1/builder/threads",
+  // ADR-0226: the list's Excel export, under the same scope as the list
+  "GET /v1/builder/threads/export.xlsx",
   "GET /v1/builder/threads/:id",
   "PATCH /v1/builder/threads/:id",
   "POST /v1/builder/threads/:id/steps/:stepId/confirm",
@@ -307,6 +309,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // pipeline runs as the service account that owns the use case it ships)
   "POST /v1/gates/deploy",
   "GET /v1/use-cases",
+  // ADR-0226: the Excel export of the same list, under the same scope
+  "GET /v1/use-cases/export.xlsx",
   "GET /v1/use-cases/:useCaseId",
   // ADR-0058 mapping view. Non-admin for the same reason the detail route is:
   // it is the owner's own use case. The EVIDENCE half is separately gated by
@@ -388,6 +392,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // decisions of the linked assessment instance on the one queue.
   "POST /v1/vendors",
   "GET /v1/vendors",
+  // ADR-0226: the Excel export of the same list, under the same scope
+  "GET /v1/vendors/export.xlsx",
   "GET /v1/vendors/:vendorId",
   "PATCH /v1/vendors/:vendorId",
   "POST /v1/vendors/:vendorId/attestations",
@@ -443,6 +449,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "DELETE /v1/traces/:traceId/tags/:key",
   "POST /v1/traces/tags",
   "GET /v1/cost-events",
+  // ADR-0226: the list's Excel export, under the same scope as the list
+  "GET /v1/cost-events/export.xlsx",
   "GET /v1/usage-events",
   // the windowed by-agent / by-connector aggregate of the same ledger; the
   // handler applies the identical self-scoping (userId forced to self)
@@ -456,6 +464,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // board report contains, and who receives it, stays admin.
   "POST /v1/reports/definitions/:id/generate",
   "GET /v1/reports/runs",
+  // ADR-0226: the list's Excel export, under the same scope as the list
+  "GET /v1/reports/runs/export.xlsx",
   "GET /v1/reports/runs/:id",
   "GET /v1/reports/runs/:id/export",
   // ADR-0059: running and reading a BLAST-RADIUS PREVIEW. Non-admin for the
@@ -466,6 +476,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // preview-required-before-activate dial is conspicuously NOT here.
   "POST /v1/policy-simulations",
   "GET /v1/policy-simulations",
+  // ADR-0226: the Excel export of the same list, under the same scope
+  "GET /v1/policy-simulations/export.xlsx",
   "GET /v1/policy-simulations/:id",
   // ADR-0058: EVALUATING a compliance pack and reading the resulting scorecard.
   // Same reasoning, same function: the handler applies `evaluateReportAccess`
@@ -477,6 +489,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // organisation's behalf that an organisational control is met, stays admin.
   "POST /v1/compliance/packs/:id/evaluate",
   "GET /v1/compliance/pack-reports",
+  // ADR-0226: the list's Excel export, under the same scope as the list
+  "GET /v1/compliance/pack-reports/export.xlsx",
   "GET /v1/compliance/pack-reports/:id",
   // ADR-0056: the governance copilot. NON-ADMIN ON PURPOSE — the compliance
   // officer asking "who accessed PII last quarter" is exactly the person this
@@ -490,8 +504,12 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/copilot/tools",
   "POST /v1/copilot/ask",
   "GET /v1/copilot/queries",
+  // ADR-0226: the Excel export of the same list, under the same scope
+  "GET /v1/copilot/queries/export.xlsx",
   "POST /v1/copilot/proposals",
   "GET /v1/copilot/proposals",
+  // ADR-0226: the Excel export of the same list, under the same scope
+  "GET /v1/copilot/proposals/export.xlsx",
   // ADR-0049: a team lead reading THEIR OWN forecast and THEIR OWN project's
   // anomaly flags. Both resolve the caller's entitlement to a CONCRETE
   // project-id set through ADR-0047's `evaluateReportAccess` — the same
@@ -502,6 +520,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // reading every project's ledger to find out, stays admin.
   "GET /v1/spend/forecast",
   "GET /v1/spend/anomalies",
+  // ADR-0226: the list's Excel export, under the same scope as the list
+  "GET /v1/spend/anomalies/export.xlsx",
   // ADR-0051: a team lead cutting and reading THEIR OWN team's billing view.
   // Same mechanism as ADR-0047/0049 — `evaluateReportAccess` resolves the
   // caller to a CONCRETE project-id set and every usage_events query is built
@@ -512,6 +532,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // conspicuously NOT here: deciding what a customer owes stays admin.
   "POST /v1/billing/periods/:id/statements",
   "GET /v1/billing/statements",
+  // ADR-0226: the list's Excel export, under the same scope as the list
+  "GET /v1/billing/statements/export.xlsx",
   "GET /v1/billing/statements/:id",
   "GET /v1/billing/statements/:id/export",
   "POST /v1/billing/statements/:id/reconcile",
@@ -592,6 +614,9 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /auth/sessions",
   "POST /auth/sessions/:sessionId/revoke",
   "POST /auth/sessions/revoke-others",
+  // ADR-0218: a person's OWN palette and mode — the row is keyed by the caller's user id alone (no id in the
+  // path or body), like change-password above. Whether a palette is allowed is the org's lock, read in the handler.
+  "PUT /auth/appearance",
   "GET /auth/oidc/providers",
   "GET /auth/oidc/:providerId/start",
   "GET /auth/oidc/callback",
@@ -631,6 +656,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // ADR-0226: the Excel export of the same list, under the same scope (a non-admin gets only their own runs)
   "GET /v1/runs/export.xlsx",
   "GET /v1/workflows/instances",
+  // ADR-0226: the list's Excel export, under the same scope as the list
+  "GET /v1/workflows/instances/export.xlsx",
   "GET /v1/projects",
   "GET /v1/users/directory",
   // ADR-0061: see the AUTH_EXEMPT note above. The admin gate keys on a USER's
@@ -744,6 +771,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // AUTH_EXEMPT_ROUTES above).
   "POST /v1/use-cases/:useCaseId/feedback",
   "GET /v1/feedback",
+  // ADR-0226: the Excel export of the same list, under the same scope
+  "GET /v1/feedback/export.xlsx",
   "GET /v1/feedback/:feedbackId",
   "PATCH /v1/feedback/:feedbackId",
   "POST /v1/feedback/:feedbackId/open-incident",
@@ -808,16 +837,22 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/engines/:engineId",
   "POST /v1/engine-runs",
   "GET /v1/engine-runs",
+  // ADR-0226: the list's Excel export, under the same scope as the list
+  "GET /v1/engine-runs/export.xlsx",
   "GET /v1/engine-runs/:runId",
   "POST /v1/engine-runs/:runId/cancel",
   "POST /v1/engine-schedules",
   "GET /v1/engine-schedules",
+  // ADR-0226: the list's Excel export, under the same scope as the list
+  "GET /v1/engine-schedules/export.xlsx",
   "PATCH /v1/engine-schedules/:scheduleId",
   // ADR-0208 G9: soft delete by the schedule's owner or an admin, checked in-handler
   "DELETE /v1/engine-schedules/:scheduleId",
   "POST /v1/model-artifacts",
   // B5-M: the caller's own uploads (an admin sees all), checked in-handler
   "GET /v1/model-artifacts",
+  // ADR-0226: the list's Excel export, under the same scope as the list
+  "GET /v1/model-artifacts/export.xlsx",
   "GET /v1/model-artifacts/:artifactId",
   // ADR-0187 decision 127: the uploader deletes their own (an admin any), with a step-up, checked in-handler
   "DELETE /v1/model-artifacts/:artifactId",
