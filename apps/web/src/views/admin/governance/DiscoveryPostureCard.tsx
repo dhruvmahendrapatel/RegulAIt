@@ -7,6 +7,7 @@
 import { Link } from "react-router-dom";
 import { Badge, Card, Table } from "../../../ui/kit";
 import v from "../../views.module.css";
+import ps from "../settings/posture.module.css";
 import type { DiscoveryPostureView } from "./discoverySourcesModel";
 
 interface Row {
@@ -50,7 +51,7 @@ export function DiscoveryPostureCard(props: { posture: DiscoveryPostureView | un
           { key: "names", header: "Sources", render: (r) => <span className={v.faint}>{r.names.join(", ") || "none"}</span> },
         ]}
       />
-      <p className={v.faint}>
+      <p className={`${v.faint} ${ps.inlineLinks}`}>
         Manage sources on <Link to="/admin/shadow-ai/discovery-sources">Discovery sources</Link>.
       </p>
     </Card>

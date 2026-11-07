@@ -139,6 +139,7 @@ export const SUPERSEDED = new Map([
   ["POST /v1/redteam/scheduled-sweep", { replacement: "POST /v1/scheduler/jobs/:name/run", job: "redteam-sweep", reason: "the job runs runScheduledRedTeamSweep, as this door does" }],
   ["POST /v1/builder/schedules/sweep", { replacement: "POST /v1/scheduler/jobs/:name/run", job: "builder-agent-schedules", reason: "the job runs runBuilderScheduleSweep, as this door does" }],
   ["POST /v1/governance/recertification/sweep", { replacement: "POST /v1/scheduler/jobs/:name/run", job: "use-case-recertification", reason: "the job runs runUseCaseRecertificationSweep, as this door does" }],
+  ["GET /v1/model-drift/settings", { replacement: "GET /v1/mrm/cards/:id/drift", reason: "ADR-0223: the card's drift view carries the org drift settings the panel shows; the panel writes them through the PUT" }],
   ["POST /v1/risks/:riskId/accept", { replacement: "POST /v1/risks/:riskId/acceptances", reason: "ADR-0180 §6: /accept is a wrapper over the acceptance write path the panel calls" }],
 ]);
 
@@ -280,7 +281,6 @@ export const INDIRECT_UI_CALLS = new Map([
     ["GET /v1/mcp-registries/:registryId/entries", "apps/web/src/views/admin/integrations/McpRegistriesPanel.tsx"],
     ["GET /v1/model-artifacts", "apps/web/src/views/admin/governance/ModelArtifactsTab.tsx"],
     ["GET /v1/onboarding/imports", "apps/web/src/views/admin/settings/OnboardingImportsCards.tsx"],
-    ["GET /v1/reports/runs", "apps/web/src/views/admin/cost/ReportsHistory.tsx"],
     ["GET /v1/scheduler/jobs/:name/runs", "apps/web/src/views/admin/settings/SchedulerJobHistory.tsx"],
     ["GET /v1/security/data-key/attestations", "apps/web/src/views/admin/settings/DataKeyPage.tsx"],
     ["GET /v1/spend/anomalies", "apps/web/src/views/admin/cost/SpendHistory.tsx"],

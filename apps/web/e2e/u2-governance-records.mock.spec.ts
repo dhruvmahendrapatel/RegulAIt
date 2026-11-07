@@ -492,6 +492,8 @@ test.describe("U2: governance records", () => {
   test("a published red-team library mints its next version as a draft", async ({ page }) => {
     const calls = await mockApi(page);
     await page.goto("/ui/admin/redteam");
+    // I-2: the libraries are on their own tab, which counts them
+    await page.getByRole("tab", { name: /^Libraries \(\d+\)$/ }).click();
     await page.getByRole("cell", { name: "core" }).first().click();
     const mint = page.getByRole("form", { name: "Mint the next library version" });
     await mint.getByLabel("Note for the new version (optional)").fill("add jailbreaks");
@@ -536,6 +538,8 @@ test.describe("U2: governance records", () => {
     await expectAxeClean(page, "run lineage");
 
     await page.goto("/ui/admin/scheduler");
+    // I-2 (#453): a job's full history is in its expanded row
+    await page.getByRole("button", { name: "Details: approval-sla" }).click();
     await page.getByRole("button", { name: "Show the full run history of approval-sla" }).click();
     const history = page.getByTestId("scheduler-history-approval-sla");
     await expect(history).toContainText("database unreachable");
