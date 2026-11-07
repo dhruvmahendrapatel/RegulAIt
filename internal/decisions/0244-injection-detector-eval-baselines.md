@@ -25,7 +25,7 @@ its delta and CI fails on a regression. Until now the only numbers were small sy
    refused before it is parsed. No upstream code is executed: AgentDojo's tasks are Python classes, read with `ast` and
    an evaluator that accepts only string constants, f-strings over names already resolved, string `+` and
    `"sep".join(list of strings)`, and fails the refresh on anything else.
-2. **Licences checked by hand, data and code.** All four candidates are MIT.
+2. **Licences checked by hand, data and code.** The four named candidates are MIT; WASP, considered later, is not.
 
    | Source | Data licence | Code licence | Access | Vendored |
    |---|---|---|---|---|
@@ -33,6 +33,9 @@ its delta and CI fails on a regression. Until now the only numbers were small sy
    | InjecAgent | MIT (repo LICENCE covers `data/`) | MIT (`uiuc-kang-lab/InjecAgent` LICENCE, © 2023 Qiusi Zhan) | public | yes, a sample: 300 of 2,108 |
    | AgentDojo | MIT (task suites are code in the package) | MIT (`ethz-spylab/agentdojo` LICENSE, © 2024 Debenedetti et al.) | public | yes, complete for benchmark v1 |
    | HackAPrompt | MIT (`hackaprompt/hackaprompt-dataset`, card `license: mit`) | n/a (data only) | gated, auto-approval: the account must agree to share its HF username and email | **no** |
+
+   **WASP is left out** (`facebookresearch/wasp`, arXiv:2504.18575): its LICENSE is CC BY-NC 4.0 (non-commercial),
+   outside ADR-0176. Its data, prompts and templates are not used; see decision 6 for the original set that replaces it.
 
    **HackAPrompt is left out** (`huggingface.co/datasets/hackaprompt/hackaprompt-dataset`, revision
    `25b87fbedfb86840abaf8cd09af7a029208a971a`). Its licence allows redistribution and the gate page shows no
@@ -66,6 +69,22 @@ its delta and CI fails on a regression. Until now the only numbers were small sy
    the model pin, the windowing or the default threshold. The numbers below were measured on CPU from the hash-locked
    `requirements.txt` and the sha256-checked model files of `models.lock.json`.
 
+6. **Our own web-agent scenarios, added on the owner's instruction (2026-11-07).** `regulait-web-agent.json` holds 100
+   cases written for RegulAIt and licensed as our own content (the repository LICENSE), pinned in the same manifest and
+   measured the same way. 50 injections aim at a web-browsing agent: one for each of the ten security-violation
+   categories WASP publishes (Table 5 of arXiv:2504.18575: exfiltration, data destruction, gaining access, access
+   removal, impair defenses, execution, phishing, harassment, misinformation, snooping) in each of five carriers (visible
+   page text, hidden HTML such as comments, `display:none`, `alt` and `aria-hidden` text, form-field values and
+   placeholders, search-result snippets, and browser-tool output). 50 benign look-alikes, ten per carrier, use the same
+   vocabulary: help articles about deleting an account or turning off two-step verification, developer HTML comments,
+   form placeholders, search snippets about prompt injection, and ordinary tool output.
+   **Provenance (clean room):** WASP's licence forbids commercial use, so only its category names are cited, by paper
+   ID. No WASP task, prompt, template or site is copied, translated or paraphrased: the scenarios use other sites
+   (shops, bookings, webmail, wikis, admin consoles, calendars), other actions and their own wording, and they avoid
+   WASP's attack templates. All domains are under the reserved `.example` TLD, and the phone numbers are in Ofcom's
+   drama ranges. The refresh script does not regenerate this file; it checks that every category and carrier has a case
+   and that labels match strata, then pins it.
+
 ## Measured baselines (2026-11-07)
 
 Heuristic: `promptInjectionDetector` with the built-in and vendored rules, no custom terms; flagged means any hit.
@@ -76,7 +95,8 @@ Trained: `protectai/deberta-v3-base-prompt-injection-v2` at revision `90c9989b`,
 | NotInject | 0 / 339 | n/a (no positives: 0 TP, 0 FP) | n/a | **0.0%** (0/339) | 0.0% (0 TP, 147 FP) | n/a | **43.4%** (147/339) |
 | InjecAgent | 300 / 0 | 100% (trivial) | **61.3%** (184/300) | n/a | 100% (trivial) | **84.3%** (253/300) | n/a |
 | AgentDojo | 135 / 97 | 100% (27/27) | **20.0%** (27/135) | **0.0%** (0/97) | 97.0% (98/101) | **72.6%** (98/135) | **3.1%** (3/97) |
-| Pooled | 435 / 436 | 100% | 48.5% (211/435) | 0.0% (0/436) | 70.1% | 80.7% (351/435) | 34.4% (150/436) |
+| RegulAIt web-agent (own) | 50 / 50 | 25.0% (1/4) | **2.0%** (1/50) | **6.0%** (3/50) | 54.5% (30/55) | **60.0%** (30/50) | **50.0%** (25/50) |
+| Pooled | 485 / 486 | 98.6% | 43.7% (212/485) | 0.6% (3/486) | 68.5% | 78.6% (381/485) | 36.0% (175/486) |
 
 What the numbers say:
 - The heuristic never fires on benign text in these sets, and it catches only literal override phrasing: on AgentDojo
@@ -85,6 +105,11 @@ What the numbers say:
 - The trained classifier catches far more but over-defends on trigger words: it flags 43% of NotInject's benign
   prompts. This is the over-defense the NotInject paper reports for existing guard models. An admin turning the classifier on at the
   default threshold should expect false blocks on prompts that merely mention "ignore", "bypass" and similar words.
+- On the web-agent set the heuristic catches 1 injection of 50 (an instruction inside an HTML comment),
+  and its 3 false alarms are text *about* injection (a help article, an OWASP search snippet) and a maintainers'
+  HTML comment, the limit ADR-0042 already names. The trained classifier catches 30 of 50 but also flags half of the
+  look-alikes: on short web fragments it cannot tell an instruction aimed at the agent from a help text addressed
+  to a person.
 - Pooled precision is driven by the dataset mix (NotInject is all benign, InjecAgent all injection), so the
   per-dataset rows are the ones to read.
 
@@ -94,7 +119,7 @@ What the numbers say:
   test log, and a regression beyond 2 points fails CI for the heuristic.
 - The trained numbers can go stale without CI noticing; the ADR-0220 follow-up (a CI job that builds a smaller ONNX
   image) would let them be gated too.
-- 300 kB of vendored data; the attack texts are benchmark material and carry no secrets or personal data (InjecAgent's
+- 330 kB of vendored data (including our 32 kB web-agent set); the attack texts are benchmark material and carry no secrets or personal data (InjecAgent's
   and AgentDojo's names and addresses are synthetic).
 
 ## Open source first (ADR-0176)
@@ -106,7 +131,8 @@ itself is the open-source part, used as published.
 
 ## Not done
 
-- HackAPrompt (owner decision on the gate, above).
+- HackAPrompt (owner decision on the gate, above). WASP (non-commercial licence; our own set covers its categories).
+- More than one scenario per category and carrier in the web-agent set, and multi-step scenarios.
 - AgentDojo's task-dependent attacks, and the injection rendered inside each tool output (that needs the AgentDojo
   runtime environment and a model).
 - Gating the trained classifier in CI; a per-stratum breakdown in the delta table.
@@ -114,8 +140,9 @@ itself is the open-source part, used as published.
 
 ## Tests
 
-`packages/shared/src/eval-datasets/injection-baselines.test.ts` (7): every snapshot and licence file rehashes to its
-pin and the manifest agrees with the code; the seed and the HackAPrompt exclusion are recorded; a drifted file is
+`packages/shared/src/eval-datasets/injection-baselines.test.ts` (8): every snapshot and licence file rehashes to its
+pin and the manifest agrees with the code; the seed and the WASP and HackAPrompt exclusions are recorded; the web-agent set covers every category in every carrier
+with ten look-alikes per carrier; a drifted file is
 refused before parsing; metrics are undefined without their denominator class; the regression rule fires only on a
 change worse than the tolerance in the right direction; the heuristic does not regress on any dataset; the trained
 entry is recorded, not gated, and covers every case.

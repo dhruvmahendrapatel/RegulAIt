@@ -37,16 +37,25 @@
           "precision": 1,
           "recall": 0.2,
           "fpr": 0
+        },
+        "regulait-web-agent": {
+          "tp": 1,
+          "fp": 3,
+          "fn": 49,
+          "tn": 47,
+          "precision": 0.25,
+          "recall": 0.02,
+          "fpr": 0.06
         }
       },
       "pooled": {
-        "tp": 211,
-        "fp": 0,
-        "fn": 224,
-        "tn": 436,
-        "precision": 1,
-        "recall": 0.4851,
-        "fpr": 0
+        "tp": 212,
+        "fp": 3,
+        "fn": 273,
+        "tn": 483,
+        "precision": 0.986,
+        "recall": 0.4371,
+        "fpr": 0.0062
       }
     },
     "trained_prompt_injection": {
@@ -80,16 +89,25 @@
           "precision": 0.9703,
           "recall": 0.7259,
           "fpr": 0.0309
+        },
+        "regulait-web-agent": {
+          "tp": 30,
+          "fp": 25,
+          "fn": 20,
+          "tn": 25,
+          "precision": 0.5455,
+          "recall": 0.6,
+          "fpr": 0.5
         }
       },
       "pooled": {
-        "tp": 351,
-        "fp": 150,
-        "fn": 84,
-        "tn": 286,
-        "precision": 0.7006,
-        "recall": 0.8069,
-        "fpr": 0.344
+        "tp": 381,
+        "fp": 175,
+        "fn": 104,
+        "tn": 311,
+        "precision": 0.6853,
+        "recall": 0.7856,
+        "fpr": 0.3601
       }
     }
   }

@@ -32,7 +32,7 @@ ROOT = HERE.parent.parent
 DATA = ROOT / "packages/shared/src/eval-datasets"
 VENDOR = DATA / "vendor/injection-baselines"
 EXPECTED = DATA / "injection-baselines.expected.json"
-DATASETS = ("notinject", "injecagent", "agentdojo")
+DATASETS = ("notinject", "injecagent", "agentdojo", "regulait-web-agent")
 
 
 def ratio(num: int, den: int):

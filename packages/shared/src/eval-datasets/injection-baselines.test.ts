@@ -32,10 +32,10 @@ const read = (rel: string) => readFileSync(path.join(vendor, rel));
 
 interface ManifestSource {
   id: string;
-  commit: string;
+  commit: string | null;
   licence: string;
-  licenceFile: string;
-  licenceSha256: string;
+  licenceFile: string | null;
+  licenceSha256: string | null;
   file: string;
   sha256: string;
   bytes: number;
@@ -61,8 +61,13 @@ describe("vendored injection snapshots (pins, licences, manifest)", () => {
       const bytes = read(s.file);
       expect(snapshotSha256(bytes)).toBe(pin.sha256);
       expect(s).toMatchObject({ file: pin.file, sha256: pin.sha256, bytes: bytes.length, cases: pin.cases, injection: pin.injection, benign: pin.benign, commit: pin.commit });
+      if (s.id === "regulait-web-agent") {
+        // our own content: no upstream, no third-party licence file
+        expect(s).toMatchObject({ licence: "LicenseRef-RegulAIt-Proprietary", licenceFile: null, commit: null });
+        continue;
+      }
       expect(s.licence).toBe("MIT");
-      const licence = read(s.licenceFile);
+      const licence = read(s.licenceFile as string);
       expect(snapshotSha256(licence)).toBe(s.licenceSha256);
       expect(licence.toString("utf8")).toMatch(/^MIT License/);
     }
@@ -71,7 +76,16 @@ describe("vendored injection snapshots (pins, licences, manifest)", () => {
   it("records the sampling seed, and why HackAPrompt is not vendored", () => {
     expect(manifest.seed).toBe(20261107);
     expect(manifest.sources.find((s) => s.id === "injecagent")?.sampling).toMatchObject({ seed: 20261107 });
-    expect(manifest.excluded.map((e) => e.id)).toEqual(["hackaprompt"]);
+    expect(manifest.excluded.map((e) => e.id)).toEqual(["wasp", "hackaprompt"]);
+  });
+
+  it("covers every WASP category in every carrier, with benign look-alikes in each carrier", () => {
+    const cases = parseInjectionBaselineSnapshot("regulait-web-agent", read(INJECTION_BASELINE_FILES["regulait-web-agent"].file));
+    const categories = ["exfiltration", "data_destruction", "gaining_access", "access_removal", "impair_defenses", "execution", "phishing", "harassment", "misinformation", "snooping"];
+    const carriers = ["page_text", "hidden_html", "form_field", "search_result", "tool_output"];
+    const strata = new Set(cases.map((c) => c.stratum));
+    for (const k of categories) for (const v of carriers) expect(strata.has(`${k}/${v}`), `${k}/${v}`).toBe(true);
+    for (const v of carriers) expect(cases.filter((c) => c.stratum === `lookalike/${v}` && c.label === "benign").length).toBe(10);
   });
 
   it("refuses a snapshot whose bytes drifted, before parsing it", () => {

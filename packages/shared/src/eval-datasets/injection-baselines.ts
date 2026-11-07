@@ -15,6 +15,16 @@
  *   agentdojo   135 injection texts (27 goals x 5 task-independent attacks)
  *               and the 97 benign user-task prompts of benchmark v1
  *
+ * plus one set of OUR OWN content, written for RegulAIt (proprietary, like the
+ * rest of the repository), pinned in the same manifest:
+ *
+ *   regulait-web-agent  50 injections aimed at a web-browsing agent (the ten
+ *               security-violation categories WASP publishes, arXiv:2504.18575,
+ *               x five carriers: page text, hidden HTML, form fields, search
+ *               results, tool output) and 50 benign look-alikes. WASP itself is
+ *               CC BY-NC, so none of its tasks, prompts or templates is used;
+ *               its category names are cited only.
+ *
  * `injection-baselines.expected.json` pins the measured numbers per detector
  * and dataset with a tolerance. The test re-measures the heuristic detector on
  * every run and fails on a regression beyond the tolerance, printing the delta
@@ -32,13 +42,13 @@ import { z } from "zod";
 /** relative to `packages/shared/src/eval-datasets/` */
 export const INJECTION_BASELINE_VENDOR_DIR = "vendor/injection-baselines";
 
-export const INJECTION_BASELINE_DATASET_IDS = ["notinject", "injecagent", "agentdojo"] as const;
+export const INJECTION_BASELINE_DATASET_IDS = ["notinject", "injecagent", "agentdojo", "regulait-web-agent"] as const;
 export type InjectionBaselineDatasetId = (typeof INJECTION_BASELINE_DATASET_IDS)[number];
 
 /** the snapshot pins; `MANIFEST.json` carries the same values and the test keeps them equal */
 export const INJECTION_BASELINE_FILES: Record<
   InjectionBaselineDatasetId,
-  { file: string; sha256: string; cases: number; injection: number; benign: number; commit: string }
+  { file: string; sha256: string; cases: number; injection: number; benign: number; commit: string | null }
 > = {
   notinject: {
     file: "notinject.json",
@@ -63,6 +73,15 @@ export const INJECTION_BASELINE_FILES: Record<
     injection: 135,
     benign: 97,
     commit: "089ed468cf3ed0322acc66b0211f26d9d90dbf60",
+  },
+  /** our own content (no upstream): see the module comment */
+  "regulait-web-agent": {
+    file: "regulait-web-agent.json",
+    sha256: "07c96b4ae5615bb89d57b03a310d067c56091246af0ad1db54b8a9d86d6d860d",
+    cases: 100,
+    injection: 50,
+    benign: 50,
+    commit: null,
   },
 };
 
@@ -245,7 +264,7 @@ export function formatInjectionBaselineDeltas(detector: string, deltas: readonly
   const lines = [`${detector}: scope metric pinned -> measured (delta)`];
   for (const d of deltas) {
     const delta = d.delta === null ? "shape changed" : `${d.delta >= 0 ? "+" : ""}${(d.delta * 100).toFixed(1)} pt`;
-    lines.push(`  ${d.scope.padEnd(10)} ${d.metric.padEnd(9)} ${pct(d.pinned).padStart(6)} -> ${pct(d.measured).padStart(6)} (${delta})${d.regression ? "  REGRESSION" : ""}`);
+    lines.push(`  ${d.scope.padEnd(18)} ${d.metric.padEnd(9)} ${pct(d.pinned).padStart(6)} -> ${pct(d.measured).padStart(6)} (${delta})${d.regression ? "  REGRESSION" : ""}`);
   }
   return lines.join("\n");
 }

@@ -69,6 +69,17 @@ SOURCES = {
 #: checked and left out; the manifest carries the reason so the gap stays visible
 EXCLUDED = [
     {
+        "id": "wasp",
+        "title": "WASP (Web Agent Security against Prompt injection)",
+        "upstream": "github.com/facebookresearch/wasp; arXiv:2504.18575",
+        "licence": "CC BY-NC 4.0",
+        "reason": (
+            "Non-commercial licence, outside ADR-0176. No WASP data, prompt or template is vendored, copied, translated "
+            "or paraphrased; only its published security-violation category names are cited, to organise the original "
+            "regulait-web-agent scenarios."
+        ),
+    },
+    {
         "id": "hackaprompt",
         "title": "HackAPrompt",
         "upstream": "huggingface.co/datasets/hackaprompt/hackaprompt-dataset (revision 25b87fbedfb86840abaf8cd09af7a029208a971a)",
@@ -359,6 +370,40 @@ def build_agentdojo(d: Path) -> tuple[list[dict], dict]:
     return cases, sampling
 
 
+# ------------------------------------------------- our own web-agent scenarios
+#: authored by RegulAIt in the vendor directory (not downloaded); this script only validates and pins it
+OWN_ID = "regulait-web-agent"
+#: the security-violation categories of WASP (Evtimov et al., arXiv:2504.18575, Table 5), cited by name only.
+#: WASP is CC BY-NC, so none of its tasks, prompts or templates are used; every scenario is written fresh.
+WASP_CATEGORIES = (
+    "exfiltration", "data_destruction", "gaining_access", "access_removal", "impair_defenses",
+    "execution", "phishing", "harassment", "misinformation", "snooping",
+)
+CARRIERS = ("page_text", "hidden_html", "form_field", "search_result", "tool_output")
+
+
+def check_own() -> tuple[bytes, dict]:
+    data = (OUT / f"{OWN_ID}.json").read_bytes()
+    doc = json.loads(data)
+    cases = doc.get("cases")
+    if doc.get("source") != OWN_ID or not isinstance(cases, list):
+        sys.exit(f"{OWN_ID}: unexpected file shape")
+    want = {f"{c}/{v}" for c in WASP_CATEGORIES for v in CARRIERS} | {f"lookalike/{v}" for v in CARRIERS}
+    for c in cases:
+        if set(c) != {"id", "label", "stratum", "text"} or c["stratum"] not in want:
+            sys.exit(f"{OWN_ID}: bad case {c.get('id')}")
+        if (c["label"] == "benign") != c["stratum"].startswith("lookalike/"):
+            sys.exit(f"{OWN_ID}: {c['id']} label does not match its stratum")
+    if len({c["id"] for c in cases}) != len(cases) or {c["stratum"] for c in cases} != want:
+        sys.exit(f"{OWN_ID}: duplicate ids or a category/carrier without a case")
+    return data, {
+        "method": "complete; original content written for RegulAIt (clean room)",
+        "categories": "WASP security-violation categories (arXiv:2504.18575, Table 5), cited by name only",
+        "carriers": list(CARRIERS),
+        "benign": "look-alikes per carrier: help text, developer comments, form placeholders, search snippets and tool output using the same vocabulary",
+    }
+
+
 # ---------------------------------------------------------------- write
 def write_json(path: Path, doc) -> bytes:
     data = (json.dumps(doc, ensure_ascii=False, indent=1) + "\n").encode("utf-8")
@@ -408,6 +453,27 @@ def main() -> None:
                     "sampling": sampling,
                 }
             )
+    data, sampling = check_own()
+    cases = json.loads(data)["cases"]
+    manifest_sources.append(
+        {
+            "id": OWN_ID,
+            "title": "RegulAIt web-agent prompt-injection scenarios (original)",
+            "upstream": "none: written for RegulAIt; categories cite WASP (arXiv:2504.18575) by name only, no WASP content",
+            "commit": None,
+            "licence": "LicenseRef-RegulAIt-Proprietary",
+            "copyright": "Copyright (c) 2026 Dhruv Patel (the repository LICENSE)",
+            "licenceFile": None,
+            "licenceSha256": None,
+            "file": f"{OWN_ID}.json",
+            "sha256": sha256(data),
+            "bytes": len(data),
+            "cases": len(cases),
+            "injection": sum(1 for c in cases if c["label"] == "injection"),
+            "benign": sum(1 for c in cases if c["label"] == "benign"),
+            "sampling": sampling,
+        }
+    )
     write_json(
         OUT / "MANIFEST.json",
         {
@@ -419,7 +485,7 @@ def main() -> None:
         },
     )
     for s in manifest_sources:
-        print(f"{s['id']:<11} {s['cases']:>4} cases ({s['injection']} injection, {s['benign']} benign)  {s['bytes']:>7} B  {s['sha256']}")
+        print(f"{s['id']:<18} {s['cases']:>4} cases ({s['injection']} injection, {s['benign']} benign)  {s['bytes']:>7} B  {s['sha256']}")
 
 
 if __name__ == "__main__":

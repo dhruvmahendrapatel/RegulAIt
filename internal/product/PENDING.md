@@ -128,7 +128,7 @@ its own ADR, and open source is checked first (ADR-0176).
 
 | # | Gap | What it would take |
 |---|---|---|
-| **P25** | **Measured injection-detector baselines.** The heuristic and trained prompt-injection detectors had no recall or false-positive numbers on public benchmarks. | **Built (ADR-0244).** NotInject, InjecAgent (sampled) and AgentDojo v1 vendored as pinned snapshots; CI gates the heuristic at a 2-point tolerance, the trained classifier is measured offline. Left: HackAPrompt (owner to accept its gate), AgentDojo's task-dependent attacks, gating the trained classifier once its image builds in CI. |
+| **P25** | **Measured injection-detector baselines.** The heuristic and trained prompt-injection detectors had no recall or false-positive numbers on public benchmarks. | **Built (ADR-0244).** NotInject, InjecAgent (sampled) and AgentDojo v1 vendored as pinned snapshots, plus our own 100 web-agent scenarios (WASP categories, clean room); CI gates the heuristic at a 2-point tolerance, the trained classifier is measured offline. Left: HackAPrompt (owner to accept its gate), AgentDojo's task-dependent attacks, gating the trained classifier once its image builds in CI. |
 
 ## 3. Structural gaps — the ADR shipped, a named half did not
 
