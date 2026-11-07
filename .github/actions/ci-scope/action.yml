@@ -1,8 +1,8 @@
 # ADR-0252 addendum (owner decision 2026-11-07): fast checks on a PR, the full suite at merge time.
 #
 # Decides what a run must cover. On a merge group, a push to main, the nightly schedule or a manual run, the answer is
-# always everything (`full`). On a pull request it reads the PR's own diff: for a pull_request the checked-out commit
-# is GitHub's merge commit, so HEAD^1 is the base and `HEAD^1..HEAD` is exactly the PR (check out with fetch-depth: 2).
+# always everything (`full`). On a pull request it reads the PR's own diff from GitHub's merge commit (check out with
+# fetch-depth: 2), renames counted at both paths, and fails closed: if the diff cannot be read the run is full.
 #
 # Jobs gate on these outputs with a job-level `if:`, never with a workflow-level path filter: a job skipped by `if:`
 # still reports its check (as skipped, which branch protection counts as passing), so a required check never goes
@@ -22,22 +22,10 @@ outputs:
 runs:
   using: composite
   steps:
+    # scripts/ci-scope.mjs (tested by scripts/ci-scope.test.mjs): renames count at both paths, and anything it cannot
+    # read (no merge commit, a shallow clone missing the base, a git error, an empty diff) means a FULL run.
     - id: scope
       shell: bash
       env:
-        EVENT: ${{ github.event_name }}
-      run: |
-        set -euo pipefail
-        if [ "$EVENT" != "pull_request" ]; then
-          echo "Not a PR ($EVENT): full run."
-          { echo "full=true"; echo "code=true"; echo "web=true"; } >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-        changed="$(git diff --name-only HEAD^1 HEAD)"
-        echo "Changed files:"; printf '%s\n' "$changed"
-        code=false; web=false
-        if printf '%s\n' "$changed" | grep -vqE '^(internal/|docs/)|\.md$|^\.gitignore$|^LICENSE$'; then code=true; fi
-        # the web app, the shared package it imports, the lockfile, and the workflows and action that run its suites
-        if printf '%s\n' "$changed" | grep -qE '^(apps/web/|packages/shared/|pnpm-lock\.yaml$|pnpm-workspace\.yaml$|package\.json$|\.github/workflows/(ci|ui-enterprise|mock-ui-shards)\.yml$|\.github/actions/)'; then web=true; fi
-        echo "full=false code=$code web=$web"
-        { echo "full=false"; echo "code=$code"; echo "web=$web"; } >> "$GITHUB_OUTPUT"
+        GITHUB_EVENT_NAME: ${{ github.event_name }}
+      run: node scripts/ci-scope.mjs
