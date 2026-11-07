@@ -14,6 +14,7 @@
  * org-settings.ts, so putting it in either would make an import cycle.
  */
 import { and, auditLog, auditorLinks, auditorSessions, eq, isNull, orgSettings, ORG_SETTINGS_ID, type Db } from "@regulait/db";
+import { revokePortalChallenges } from "./external-mfa.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -29,11 +30,13 @@ export async function revokeAuditorAccessOnDisable(tx: Db, userId: string | null
     .set({ revokedAt: now })
     .where(and(isNull(auditorLinks.usedAt), isNull(auditorLinks.revokedAt)))
     .returning({ id: auditorLinks.id });
+  // ADR-0240: a second-factor step under way ends too, so turning the pages on again does not finish it
+  const challenges = await revokePortalChallenges(tx, "auditor");
   await tx.insert(auditLog).values({
     userId: userId ?? NO_IDENTITY,
     objectType: "auditor_grant",
     objectId: null,
-    detail: { sessionsRevoked: sessions.length, linksRevoked: links.length },
+    detail: { sessionsRevoked: sessions.length, linksRevoked: links.length, mfaChallengesRevoked: challenges },
     effect: "allow",
     ruleId: "auditor-access-revoked-pages-off",
     ruleChain: [],

@@ -61,6 +61,13 @@ import {
 } from "@regulait/db";
 import {
   AI_VENDOR_ATTESTATION_DISCLAIMER,
+  EXTERNAL_MFA_CHALLENGE_REFUSAL,
+  EXTERNAL_MFA_CODE_REFUSAL,
+  EXTERNAL_MFA_COOKIE,
+  EXTERNAL_MFA_LIMITS,
+  EXTERNAL_MFA_LOCKED,
+  EXTERNAL_MFA_UNAVAILABLE,
+  externalMfaVerifySchema,
   createSupplierAccessSchema,
   createSupplierQuestionnaireSchema,
   decideSupplierSubmissionSchema,
@@ -87,6 +94,16 @@ import { CSRF_HEADER, readCookie, requestIsSecure } from "./auth.js";
 import { notFoundBody } from "./compat-core.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { deploymentBaseUrl } from "./public-url.js";
+import {
+  challengeCookie,
+  challengeCookieFor,
+  externalMfaLimiter,
+  loadFactorView,
+  resetFactor,
+  revokePortalChallenges,
+  startChallenge,
+  verifyChallenge,
+} from "./external-mfa.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { requireStepUp } from "./step-up.js";
 import { hashToken } from "./token-hash.js";
@@ -210,6 +227,7 @@ const accessParam = z.object({ vendorId: z.string().uuid(), accessId: z.string()
 const submissionParam = z.object({ vendorId: z.string().uuid(), submissionId: z.string().uuid() });
 const questionnaireParam = z.object({ questionnaireId: z.string().uuid() });
 const downloadQuery = z.object({ acknowledgeUnscanned: z.literal("1").optional() });
+const mfaResetSchema = z.object({ reason: z.string().trim().min(1).max(500) }).strict();
 
 /** a Postgres unique violation, however the driver wraps it */
 function isUniqueViolation(e: unknown): boolean {
@@ -254,6 +272,7 @@ function supplierLimiter(app: FastifyInstance) {
 
 export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts: SupplierPortalOptions = {}): void {
   const limit = supplierLimiter(app);
+  const limitMfa = externalMfaLimiter(app);
 
   async function audit(
     tx: Db,
@@ -299,6 +318,7 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
     return {
       enabled: settings.supplierPortalEnabled,
       acceptUnscannedFiles: settings.supplierPortalAcceptUnscannedFiles,
+      mfaRequired: settings.supplierPortalMfaRequired,
       scannerConfigured: Boolean(opts.fileScanner),
     };
   });
@@ -311,19 +331,29 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
     const next = {
       enabled: body.enabled ?? current.supplierPortalEnabled,
       acceptUnscannedFiles: body.acceptUnscannedFiles ?? current.supplierPortalAcceptUnscannedFiles,
+      mfaRequired: body.mfaRequired ?? current.supplierPortalMfaRequired,
     };
     const changed: string[] = [];
     if (next.enabled !== current.supplierPortalEnabled) changed.push("supplierPortalEnabled");
     if (next.acceptUnscannedFiles !== current.supplierPortalAcceptUnscannedFiles) changed.push("supplierPortalAcceptUnscannedFiles");
+    if (next.mfaRequired !== current.supplierPortalMfaRequired) changed.push("supplierPortalMfaRequired");
     if (changed.length === 0) return { ...next, changed: false };
     const relaxed = [
       ...(next.enabled && !current.supplierPortalEnabled ? ["supplierPortalEnabled"] : []),
       ...(next.acceptUnscannedFiles && !current.supplierPortalAcceptUnscannedFiles ? ["supplierPortalAcceptUnscannedFiles"] : []),
+      // ADR-0240: the second factor ships required; turning it off lets a spent link alone open a session
+      ...(!next.mfaRequired && current.supplierPortalMfaRequired ? ["supplierPortalMfaRequired"] : []),
     ];
     if (relaxed.length > 0) {
       const su = await requireStepUp(db, req, reply, {
         kind: "settings_relax",
-        facts: { setting: "supplierPortal", relaxed, enabled: next.enabled, acceptUnscannedFiles: next.acceptUnscannedFiles },
+        facts: {
+          setting: "supplierPortal",
+          relaxed,
+          enabled: next.enabled,
+          acceptUnscannedFiles: next.acceptUnscannedFiles,
+          mfaRequired: next.mfaRequired,
+        },
       });
       if (!su.ok) return reply;
     }
@@ -331,7 +361,11 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
       const tx = rawTx as unknown as Db;
       await tx
         .update(orgSettings)
-        .set({ supplierPortalEnabled: next.enabled, supplierPortalAcceptUnscannedFiles: next.acceptUnscannedFiles })
+        .set({
+          supplierPortalEnabled: next.enabled,
+          supplierPortalAcceptUnscannedFiles: next.acceptUnscannedFiles,
+          supplierPortalMfaRequired: next.mfaRequired,
+        })
         .where(eq(orgSettings.id, ORG_SETTINGS_ID));
       let revokedSessions = 0;
       let revokedLinks = 0;
@@ -346,6 +380,8 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
             .where(and(isNull(supplierInvitations.revokedAt), isNull(supplierInvitations.usedAt)))
             .returning({ id: supplierInvitations.id })
         ).length;
+        // ADR-0240: a sign-in step under way ends too, so a later re-enable does not finish it
+        await revokePortalChallenges(tx, "supplier");
       }
       const parts = [
         changed.includes("supplierPortalEnabled")
@@ -357,6 +393,11 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
           ? next.acceptUnscannedFiles
             ? "unscanned supplier files ACCEPTED while no scanner is configured"
             : "unscanned supplier files refused again"
+          : null,
+        changed.includes("supplierPortalMfaRequired")
+          ? next.mfaRequired
+            ? "a second factor (TOTP) is required again after a supplier sign-in link"
+            : "the supplier second factor is OFF: a spent sign-in link alone opens a session"
           : null,
       ].filter(Boolean);
       await audit(tx, {
@@ -370,6 +411,7 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
           fields: changed,
           supplierPortalEnabled: next.enabled,
           supplierPortalAcceptUnscannedFiles: next.acceptUnscannedFiles,
+          supplierPortalMfaRequired: next.mfaRequired,
           relaxed,
           revokedSessions,
           revokedLinks,
@@ -766,6 +808,60 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
     return reply.send({ id: accessId, revokedAt: revokedAt.toISOString(), changed: true });
   });
 
+  // ---- ADR-0240: the grant's second factor (state, and the inviting admin's reset: the only recovery) ----
+
+  app.get("/v1/vendors/:vendorId/supplier-access/:accessId/mfa", async (req, reply) => {
+    const { vendorId, accessId } = accessParam.parse(req.params);
+    const [a] = await db
+      .select({ id: supplierAccess.id })
+      .from(supplierAccess)
+      .where(and(eq(supplierAccess.id, accessId), eq(supplierAccess.vendorId, vendorId)));
+    if (!a) return reply.status(404).send({ error: "not_found" });
+    return { accessId, ...(await loadFactorView(db, "supplier", accessId)) };
+  });
+
+  app.post("/v1/vendors/:vendorId/supplier-access/:accessId/mfa/reset", async (req, reply) => {
+    const { vendorId, accessId } = accessParam.parse(req.params);
+    const body = mfaResetSchema.parse(req.body);
+    const [a] = await db
+      .select()
+      .from(supplierAccess)
+      .where(and(eq(supplierAccess.id, accessId), eq(supplierAccess.vendorId, vendorId)));
+    if (!a) return reply.status(404).send({ error: "not_found" });
+    const su = await requireStepUp(db, req, reply, { kind: "identity_manage", facts: { op: "supplier_mfa_reset", accessId } });
+    if (!su.ok) return reply;
+    const out = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      const gone = await resetFactor(tx, "supplier", accessId);
+      // a reset answers a lost or compromised authenticator: any session the factor opened ends with it
+      const sessions = await tx
+        .update(supplierSessions)
+        .set({ revokedAt: sql`now()` })
+        .where(and(eq(supplierSessions.accessId, accessId), isNull(supplierSessions.revokedAt)))
+        .returning({ id: supplierSessions.id });
+      await audit(tx, {
+        userId: req.authCtx.userId,
+        objectType: "supplier_access",
+        objectId: accessId,
+        ruleId: "supplier-mfa-reset",
+        reason:
+          `second factor of supplier ${a.supplierEmail} reset by an admin (${gone ? (gone.lockedAt ? "it was locked" : "it was enrolled") : "none was enrolled"}; ` +
+          `${sessions.length} live session(s) ended); the next sign-in link enrols again: ${body.reason}`,
+        detail: {
+          phase: "mfa-reset",
+          vendorId,
+          hadFactor: Boolean(gone),
+          wasLocked: Boolean(gone?.lockedAt),
+          sessionsEnded: sessions.length,
+          reason: body.reason,
+          stepUp: su.method,
+        },
+      });
+      return { hadFactor: Boolean(gone), sessionsEnded: sessions.length };
+    });
+    return reply.send({ accessId, reset: true, ...out, notice: "Issue a new sign-in link: the supplier enrols a new authenticator with it." });
+  });
+
   // ---- reviewing what suppliers submitted ----
 
   app.get("/v1/vendors/:vendorId/supplier-submissions", async (req, reply) => {
@@ -972,14 +1068,56 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
     return row;
   }
 
+  /** open the session a spent link (or a proved second factor) earned, audited, inside the caller's transaction */
+  async function openSession(tx: Db, access: SupplierAccessRow, vendorName: string, invitationId: string, mfa: "totp" | "totp-enrolled" | "not_required") {
+    const { token, tokenHash } = newToken(SUPPLIER_SESSION_TOKEN_PREFIX);
+    const [session] = await tx
+      .insert(supplierSessions)
+      .values({
+        accessId: access.id,
+        tokenHash,
+        expiresAt: sql`least(now() + make_interval(hours => ${L.sessionAbsoluteHours}), (select expires_at from supplier_access where id = ${access.id}))`,
+      })
+      .returning();
+    await audit(tx, {
+      userId: null,
+      objectType: "supplier_access",
+      objectId: access.id,
+      ruleId: "supplier-session-started",
+      reason:
+        `supplier ${access.supplierEmail} signed in to the portal for vendor '${vendorName}'` +
+        (mfa === "not_required" ? " (second factor not required: relaxed by an admin)" : mfa === "totp-enrolled" ? " after enrolling a second factor" : " with a second factor"),
+      detail: { phase: "session-started", invitationId, sessionId: session!.id, vendorId: access.vendorId, actor: "supplier", mfa },
+    });
+    return { token, session: session! };
+  }
+
+  function sendSession(
+    req: FastifyRequest,
+    reply: FastifyReply,
+    out: { token: string; session: { expiresAt: Date } },
+    framework: string,
+    vendorName: string,
+    alsoSet?: string,
+  ) {
+    const maxAge = Math.max(1, Math.floor((out.session.expiresAt.getTime() - Date.now()) / 1000));
+    const cookie = sessionCookie(out.token, requestIsSecure(req), maxAge);
+    return reply
+      .header("set-cookie", alsoSet ? [alsoSet, cookie] : cookie)
+      .header("cache-control", "no-store")
+      .send({ vendorName, framework, sessionExpiresAt: out.session.expiresAt.toISOString() });
+  }
+
   app.post(`${SUPPLIER_API_PREFIX}/session`, async (req, reply) => {
     if (!(await gate(req, reply))) return reply;
     if (!(await csrf(req, reply))) return reply;
     const parsed = supplierSessionStartSchema.safeParse(req.body);
     const refuse = () => reply.status(401).send(SUPPLIER_LINK_REFUSAL);
     if (!parsed.success || !SUPPLIER_INVITE_TOKEN_RE.test(parsed.data.token)) return refuse();
+    // ADR-0240: required (the shipped default) means a spent link opens a challenge, never a session by itself
+    const mfaRequired = (await loadOrgSettings(db)).supplierPortalMfaRequired;
+    if (mfaRequired && !opts.dataKey) return reply.status(503).header("cache-control", "no-store").send(EXTERNAL_MFA_UNAVAILABLE);
     const tokenHash = hashToken(parsed.data.token);
-    const { token, tokenHash: sessionHash } = newToken(SUPPLIER_SESSION_TOKEN_PREFIX);
     const out = await db.transaction(async (rawTx) => {
       const tx = rawTx as unknown as Db;
       const [row] = await tx
@@ -1014,32 +1152,105 @@ export function registerSupplierPortalRoutes(app: FastifyInstance, db: Db, opts:
           reason: "a supplier sign-in link was presented after it was used, revoked or expired",
           detail: { phase: "link-refused", invitationId: row.inv.id, vendorId: row.access.vendorId, actor: "supplier" },
         });
-        return { refused: true as const };
+        return { kind: "refused" as const };
       }
-      const [session] = await tx
-        .insert(supplierSessions)
-        .values({
-          accessId: row.access.id,
-          tokenHash: sessionHash,
-          expiresAt: sql`least(now() + make_interval(hours => ${L.sessionAbsoluteHours}), (select expires_at from supplier_access where id = ${row.access.id}))`,
-        })
-        .returning();
-      await audit(tx, {
-        userId: null,
-        objectType: "supplier_access",
-        objectId: row.access.id,
-        ruleId: "supplier-session-started",
-        reason: `supplier ${row.access.supplierEmail} signed in to the portal for vendor '${row.vendorName}'`,
-        detail: { phase: "session-started", invitationId: row.inv.id, sessionId: session!.id, vendorId: row.access.vendorId, actor: "supplier" },
-      });
-      return { refused: false as const, session: session!, access: row.access, vendorName: row.vendorName };
+      if (mfaRequired) {
+        const started = await startChallenge(tx, { portal: "supplier", grantId: row.access.id, linkId: row.inv.id }, opts.dataKey!, row.access.supplierEmail);
+        if (started.kind === "locked") {
+          await audit(tx, {
+            userId: null,
+            objectType: "supplier_access",
+            objectId: row.access.id,
+            ruleId: "supplier-mfa-locked-refused",
+            effect: "deny",
+            reason: `supplier ${row.access.supplierEmail} presented a sign-in link while the second factor is locked; an admin must reset it`,
+            detail: { phase: "mfa-locked", invitationId: row.inv.id, factorId: started.factorId, actor: "supplier" },
+          });
+          return { kind: "locked" as const };
+        }
+        await audit(tx, {
+          userId: null,
+          objectType: "supplier_access",
+          objectId: row.access.id,
+          ruleId: "supplier-mfa-challenge",
+          reason: started.enrol
+            ? `supplier ${row.access.supplierEmail} spent a sign-in link and is enrolling a second factor (first use)`
+            : `supplier ${row.access.supplierEmail} spent a sign-in link; a second-factor code is required`,
+          detail: { phase: started.enrol ? "mfa-enrol" : "mfa-verify", invitationId: row.inv.id, factorId: started.factorId, actor: "supplier" },
+        });
+        return { kind: "mfa" as const, started, access: row.access, vendorName: row.vendorName };
+      }
+      const opened = await openSession(tx, row.access, row.vendorName, row.inv.id, "not_required");
+      return { kind: "session" as const, opened, access: row.access, vendorName: row.vendorName };
     });
-    if (!out || out.refused) return refuse();
-    const maxAge = Math.max(1, Math.floor((out.session.expiresAt.getTime() - Date.now()) / 1000));
-    return reply
-      .header("set-cookie", sessionCookie(token, requestIsSecure(req), maxAge))
-      .header("cache-control", "no-store")
-      .send({ vendorName: out.vendorName, framework: out.access.framework, sessionExpiresAt: out.session.expiresAt.toISOString() });
+    if (!out || out.kind === "refused") return refuse();
+    if (out.kind === "locked") return reply.status(423).header("cache-control", "no-store").send(EXTERNAL_MFA_LOCKED);
+    if (out.kind === "mfa") {
+      const { started } = out;
+      return reply
+        .header("set-cookie", challengeCookieFor("supplier", started.token, started.expiresAt, requestIsSecure(req)))
+        .header("cache-control", "no-store")
+        .send({
+          vendorName: out.vendorName,
+          framework: out.access.framework,
+          ...(started.enrol
+            ? { mfa: "enrol" as const, secret: started.enrol.secret, otpauthUri: started.enrol.otpauthUri }
+            : { mfa: "verify" as const }),
+          challengeExpiresAt: started.expiresAt.toISOString(),
+        });
+    }
+    return sendSession(req, reply, out.opened, out.access.framework, out.vendorName);
+  });
+
+  // ADR-0240: the code that turns a challenge into a session (enrolment is proved by the same first code)
+  app.post(`${SUPPLIER_API_PREFIX}/session/mfa`, { bodyLimit: 1024 }, async (req, reply) => {
+    void reply.header("cache-control", "no-store");
+    if (!(await gate(req, reply))) return reply;
+    if (!(await csrf(req, reply))) return reply;
+    const clear = challengeCookie("supplier", "", requestIsSecure(req), 0);
+    const challengeToken = readCookie(req.headers.cookie, EXTERNAL_MFA_COOKIE);
+    if (!challengeToken || !opts.dataKey) return reply.status(401).header("set-cookie", clear).send(EXTERNAL_MFA_CHALLENGE_REFUSAL);
+    if (await limitMfa(req, reply, challengeToken)) return reply;
+    const parsed = externalMfaVerifySchema.safeParse(req.body);
+    if (!parsed.success) return reply.status(401).send(EXTERNAL_MFA_CODE_REFUSAL);
+    const dataKey = opts.dataKey;
+    const out = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      const v = await verifyChallenge(tx, "supplier", challengeToken, parsed.data.code, dataKey);
+      if (!v.ok && v.reason === "challenge") return { kind: "challenge" as const };
+      const accessId = v.factor.supplierAccessId!;
+      if (!v.ok) {
+        await audit(tx, {
+          userId: null,
+          objectType: "supplier_access",
+          objectId: accessId,
+          ruleId: v.reason === "code" && v.lockedNow ? "supplier-mfa-lockout" : "supplier-mfa-code-rejected",
+          effect: "deny",
+          reason:
+            v.reason === "locked"
+              ? "a supplier second-factor code was presented while the factor is locked"
+              : v.lockedNow
+                ? `supplier second factor LOCKED after ${v.failures} wrong or replayed codes; only an admin reset recovers it`
+                : `a supplier presented a wrong or replayed second-factor code (${v.failures} of ${EXTERNAL_MFA_LIMITS.failuresBeforeLock})`,
+          detail: { phase: v.reason === "code" && v.lockedNow ? "mfa-lockout" : "mfa-code-rejected", factorId: v.factor.id, failures: v.factor.failedAttempts, actor: "supplier" },
+        });
+        if (v.reason === "locked" || v.lockedNow) return { kind: "locked" as const };
+        return { kind: "code" as const };
+      }
+      // the grant must still be live on the database clock (revoked, expired or retired since the link was spent)
+      const [live] = await tx
+        .select({ access: supplierAccess, vendorName: aiVendors.name, vendorStatus: aiVendors.status })
+        .from(supplierAccess)
+        .innerJoin(aiVendors, eq(aiVendors.id, supplierAccess.vendorId))
+        .where(and(eq(supplierAccess.id, accessId), isNull(supplierAccess.revokedAt), gt(supplierAccess.expiresAt, sql`now()`)));
+      if (!live || live.vendorStatus === "retired") return { kind: "challenge" as const };
+      const opened = await openSession(tx, live.access, live.vendorName, v.challenge.supplierInvitationId!, v.enrolled ? "totp-enrolled" : "totp");
+      return { kind: "session" as const, opened, access: live.access, vendorName: live.vendorName };
+    });
+    if (out.kind === "challenge") return reply.status(401).header("set-cookie", clear).send(EXTERNAL_MFA_CHALLENGE_REFUSAL);
+    if (out.kind === "locked") return reply.status(423).header("set-cookie", clear).send(EXTERNAL_MFA_LOCKED);
+    if (out.kind === "code") return reply.status(401).send(EXTERNAL_MFA_CODE_REFUSAL);
+    return sendSession(req, reply, out.opened, out.access.framework, out.vendorName, clear);
   });
 
   app.post(`${SUPPLIER_API_PREFIX}/session/end`, async (req, reply) => {

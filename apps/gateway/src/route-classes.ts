@@ -151,6 +151,8 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // audited. Listed in NON_ADMIN_ROUTES too, so they are `public`.
   "/v1/trust-center",
   "/v1/auditor/session",
+  // ADR-0240: the auditor's second factor (challenge cookie + TOTP code; authenticated in-route)
+  "/v1/auditor/session/mfa",
   "/v1/auditor/items/:slug",
   // ADR-0221 (P4) — the SUPPLIER PORTAL: the routes a supplier, who holds no platform credential, signs in to and
   // answers one assessment through. They authenticate IN-ROUTE on the supplier's own cookie (supplier-portal.ts) and
@@ -789,6 +791,7 @@ export const NON_ADMIN_ROUTES = new Set([
   // ADMIN-ONLY. These are the public reads and the auditor portal (also in AUTH_EXEMPT_ROUTES above).
   "GET /v1/trust-center",
   "POST /v1/auditor/session",
+  "POST /v1/auditor/session/mfa",
   "GET /v1/auditor/session",
   "DELETE /v1/auditor/session",
   "GET /v1/auditor/items/:slug",
