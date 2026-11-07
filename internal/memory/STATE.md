@@ -5537,6 +5537,14 @@ audit, tool references, platform copies, ingested, machine, conversation, signed
 against `information_schema` and against the ADR's generated block. Open: whether to guard jsonb
 `config_versions.body` string leaves; ingested columns stay a residual.
 
+**ADR-0258 (builder, 2026-11-07, Proposed): Anubis in front of the public pages only (backlog P34).** Off by default;
+`install.sh --anubis` (or profile `anubis` plus `REGULAIT_ANUBIS=on`) turns it on, and the admin records the choice
+(docs/deployment/ANUBIS.md). Caddy asks Anubis by `forward_auth` about the trust centre, auditor portal and supplier
+portal paths only and still proxies to the gateway itself. Pinned v1.28.2 by digest, air-gapped policy, allow-list for
+named auditors, 403 for known scrapers, good bots commented out, a Kubernetes hook. Neither Caddy nor Anubis was run in
+the build session: a live run is needed before the first deployment that turns it on. UI follow-up on #453: the public
+pages should handle a pass cookie that expires mid-page.
+
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
 (b) standing policy for future scaffolds recorded (ADR-0006, no implementation yet — nothing to
