@@ -106,6 +106,7 @@ export const MACHINE_ONLY = new Map([
 
   // ---- inbound callbacks and provisioning -----------------------------------
   ["POST /v1/pm/webhooks/:connectionName", "inbound callback: PM-tool webhooks, signature-verified in route (ADR-0061)"],
+  ["POST /v1/model-drift/ingest/:monitorId/reports", "pipeline push: a drift monitor's write-only ingestion credential, authenticated in route (ADR-0223 amendment 1)"],
   ["POST /v1/chatops/:connectionName/interactions", "inbound callback: Slack/Teams button interactions, signature-verified in route (ADR-0061)"],
   ["POST /v1/chatops/:connectionName/events", "inbound callback: Slack Events API to builder agents (ADR-0173)"],
   ["POST /v1/chatops/:connectionName/messages", "inbound callback: Teams outgoing webhook to builder agents (ADR-0173)"],
