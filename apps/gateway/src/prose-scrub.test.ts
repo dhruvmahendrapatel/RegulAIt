@@ -563,6 +563,7 @@ describe("6. the covered / NOT-covered inventory", () => {
     "model_card_approvals.decision_reason",
     "model_card_evidence.note",
     "model_cards.note",
+    "model_explainability_artefacts.note",
     "onboarding_imports.reason",
     "policy_simulations.note",
     "redteam_libraries.note",
