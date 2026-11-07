@@ -85,7 +85,7 @@ export default function BuilderInboxPage() {
       <div className={s.inbox}>
         <Card flush>
           {threads.isLoading ? (
-            <div style={{ padding: 16 }}>
+            <div className={s.threadsLoading}>
               <SkeletonBlock lines={4} />
             </div>
           ) : threads.isError ? (
@@ -93,7 +93,7 @@ export default function BuilderInboxPage() {
           ) : visible.length === 0 ? (
             query ? <EmptyState title="No matching threads" body="Try a different search." /> : <EmptyState title={EMPTY[tab].title} body={EMPTY[tab].body} />
           ) : (
-            <ul aria-label="Threads" style={{ listStyle: "none", margin: 0, padding: 0 }}>
+            <ul aria-label="Threads" className={s.threadList}>
               {visible.map((th) => (
                 <li key={th.id}>
                   <button

@@ -1426,3 +1426,13 @@
   gap: 8px;
   flex-wrap: wrap;
 }
+
+/* the inbox's thread list: a plain list, and its loading placeholder (spacing from the scale, not literals) */
+.threadsLoading {
+  padding: var(--s2);
+}
+.threadList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
