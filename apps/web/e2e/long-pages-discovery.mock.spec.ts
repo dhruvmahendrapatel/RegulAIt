@@ -14,7 +14,9 @@ import { expect, test, type Page, type Route } from "@playwright/test";
 
 type Json = Record<string, unknown>;
 const json = (route: Route, body: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
-const NOW = Date.parse("2026-10-30T12:00:00Z");
+// Relative to the real clock: the route mock below counts expiry with Date.now(), so a fixed date here
+// made the "ahead" tokens expire with the calendar (every run after 2026-11-07T20:00Z saw "6 expired").
+const NOW = Date.now();
 const ago = (h: number) => new Date(NOW - h * 3_600_000).toISOString();
 const ahead = (h: number) => new Date(NOW + h * 3_600_000).toISOString();
 const id = (p: string, i: number) => `${p}-0000-4000-8000-${String(i).padStart(12, "0")}`;
