@@ -248,3 +248,42 @@ Findings recorded for that follow-up:
 - a cancel through the real route settles it `reported`, once, with its audit row (red with the hook removed);
 - the database refuses an engine link on a non-engine row.
 
+
+## Addendum (2026-11-07): msoedov/agentic_security coverage diff (owner scope added to P26)
+
+The owner added to P26: compare **msoedov/agentic_security** (Apache-2.0, Python, 1.0.0, released 2026-05-14; the
+previous release was 0.7.4 on 2025-05-27) against garak, promptfoo, Spikee and PyRIT. Add only what fills a real gap.
+Check air-gapped operation, and remove or vendor any remote fetch.
+
+**Method.** I read the 1.0.0 sdist from PyPI (no wheel is published) by its code and metadata only: URLs, dataset
+ids, network calls and module structure. No probe text was read. The licence is the Apache License 2.0 (`LICENSE`).
+
+| Area | What agentic_security 1.0.0 does | Already covered here | Air-gapped? | Verdict |
+|---|---|---|---|---|
+| Jailbreak prompt sets | `probe_data/data.py` downloads its sets at run time: `load_dataset` on Hub datasets (JailbreakHub, JailbreakBench, rubend18, sevdeawesome, an AdvBench-derived set) and raw GitHub CSVs (verazuo/jailbreak_llms, tml-epfl harmful behaviours). None of it ships in the package. | garak's admitted probes, Spikee's local seeds, promptfoo's plugins | No | Not added. The data is third-party with no licence established for these copies, and the in-the-wild set is the one Spikee already marks `cloud_only`. |
+| `prompts.csv` | A user-supplied CSV read from `./datasets/` (an example in the README); none is shipped. | A customer's own red-team library (ADR-0057) does this, governed | Yes | Not added; it is a format, not data. |
+| Fuzzing / encodings | `stenography_fn.py`: rot13, rot5, base64, mirroring, case and scrambling noise, Caesar, substitution and Vigenère ciphers. | Spikee's plugins (base64, hex, leetspeak, atbash, caesar, homoglyph, ascii_smuggler, best_of_n, ...) and garak's encoding probes | Yes | Not added; no gap. |
+| Many-shot | `msj_data.py` loads its examples with `load_dataset` at run time. | (PyRIT's many-shot is `excluded_licence`, decision 7) | No | Not added: remote, third-party data. |
+| Multimodal: image | `image_generator.py` renders the prompt text into an image (matplotlib) and sends it base64-encoded. | None | Yes, it renders locally | **Real gap, not fillable yet.** The gateway's compat route that engines use carries text only, which is why Spikee's `text2image` is `unsupported_format`. It needs a governed multimodal route first (follow-up below). |
+| Multimodal: audio | `audio_generator.py` uses gTTS (Google's hosted text-to-speech), or macOS `say`. | None | No (gTTS is hosted) | **Real gap, not fillable**: a hosted service and a text-only route. |
+| RL-guided selection | `rl_model.py`'s default is `CloudRLPromptSelector`, which posts to a hosted service with a token hard-coded in the source (`AS_TOKEN` default). A local `QLearningPromptSelector` picks the next prompt from refusal feedback. `fine_tuned.py` calls a hosted model at `mcp.metaheuristic.co/infer`. | Adaptive attacker search is PyRIT's TAP/PAIR (designed, decision 7) | Cloud default: no; local Q-learning: yes | Not added. The default is hosted. The local selector only reorders prompts from the remote sets above, and its refusal signal is a bundled scikit-learn model loaded from `.joblib` pickles of unknown training data, an arbitrary-code-on-load format we do not admit (the ADR-0187 modelscan stance). |
+| Garak and Inspect bridges | `garak_tool.py` and `inspect_ai_tool.py` shell out to those tools. | garak is our own engine | n/a | Not added; it duplicates garak. |
+| Telemetry | `routes/telemetry.py` starts Sentry with `send_default_pii=True` and full tracing unless `DISABLE_TELEMETRY` is set. | n/a | No | It must be off in any use. Recorded, not used. |
+| Providers | `llm_providers/`, plus hard-coded hosted endpoints (OpenAI, Anthropic, Together, Groq, DeepSeek, Cohere, Replicate, OpenRouter, AssemblyAI). | The gateway is the only route | No | Never used. |
+
+**Decision.** Nothing from agentic_security is added, as probe data or as an engine. Every part that would fill a gap
+either needs data downloaded at run time from third parties with no established licence, a hosted service, or a
+multimodal route the gateway does not yet offer. What is left (encodings, a CSV format, a garak bridge) is already
+covered. A third engine is therefore not justified: it would ship a FastAPI app, Sentry, gTTS and a joblib-pickle
+classifier to run nothing the existing engines do not. Vendoring the remote sets is not done: their licences are the
+problem, not the download.
+
+**The one real gap: multimodal attacks.** Image and audio prompt injection is not covered by any engine here. It
+needs a governed multimodal compat route (image and audio content parts, with their own scrub, size caps and cost
+attribution) before any engine can exercise it. Recorded as open question 5. agentic_security's local image renderer
+is about 80 lines of matplotlib, and Spikee's `text2image` plugin does the same, so once the route exists the cheaper
+path is to admit Spikee's plugin, not a new engine.
+
+**Open question 5 (owner).** Should a governed multimodal compat route (image and audio parts) be built? It would
+unlock multimodal red-teaming (Spikee's `text2image`, or another tool) under the same entitlement, cost and audit
+path.
