@@ -5,13 +5,14 @@
  * create/edit, and initiatives (reporting-only rollup).
  */
 import { useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { AdminProject, Initiative, UnattributedCosts } from "../../../api/adminTypes";
 import type { ProjectCosts } from "../../../api/types";
 import { fmtUsd } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Meter, Table } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, Input, Meter, Table, Tabs, tabIds } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
 import {
   BarChart,
@@ -36,6 +37,18 @@ export default function CostDashboardPage() {
     queryKey: ["admin", "initiatives"],
     queryFn: () => api.get<{ initiatives: Initiative[] }>("/v1/initiatives"),
   });
+  // P3 (#453 c6527514889): spend (budgets, the rollup, the unattributed bucket) and the set-up forms as two tabs.
+  // Every budget warning is on the Spend tab, which is the default; the set-up tab hides nothing unresolved.
+  const [params, setParams] = useSearchParams();
+  const tab = params.get("tab") === "setup" ? "setup" : "spend";
+  const panel = tabIds("cost", tab);
+  const setTab = (id: string) =>
+    setParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (id === "spend") next.delete("tab");
+      else next.set("tab", id);
+      return next;
+    });
   const iname = useMemo(
     () => new Map((initiatives.data?.initiatives ?? []).map((x) => [x.id, x.name])),
     [initiatives.data],
@@ -47,95 +60,112 @@ export default function CostDashboardPage() {
         title="Cost dashboard"
         info={<p>Real-time per-project AI spend attribution applied at the point of every gateway call — budget-vs-actual, forecast, showback, chargeback. Built into the gateway, not bolted on.</p>}
       />
-      <div className={v.stack}>
-        <Card flush title="Projects — fleet spend">
-          <Table<AdminProject>
-            columns={[
-              { key: "name", header: "Project", sort: (p) => p.name, render: (p) => p.name },
-              { key: "costCenter", header: "Cost center", render: (p) => p.costCenter ?? "—" },
-              { key: "initiative", header: "Initiative", render: (p) => iname.get(p.initiativeId ?? "") ?? "—" },
-              {
-                key: "budget",
-                header: "Budget vs actual",
-                width: "260px",
-                render: (p) =>
-                  p.budgetUsd == null ? (
-                    <span className={v.faint}>no budget set</span>
-                  ) : (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                      <span className={v.faint}>
-                        {fmtUsd(p.spentUsd)} of {fmtUsd(p.budgetUsd)}
-                        {p.budgetPeriod === "monthly" ? " this month" : ""}
+      <Tabs
+        tabs={[
+          { id: "spend", label: "Spend" },
+          { id: "setup", label: "Projects and initiatives" },
+        ]}
+        active={tab}
+        idPrefix="cost"
+        label="Cost dashboard sections"
+        onChange={setTab}
+      />
+      <div role="tabpanel" id={panel.panel} aria-labelledby={panel.tab} className={v.stack}>
+        {tab === "spend" ? (
+          <>
+            <Card flush title="Projects — fleet spend">
+              <Table<AdminProject>
+                columns={[
+                  { key: "name", header: "Project", sort: (p) => p.name, render: (p) => p.name },
+                  { key: "costCenter", header: "Cost center", render: (p) => p.costCenter ?? "—" },
+                  { key: "initiative", header: "Initiative", render: (p) => iname.get(p.initiativeId ?? "") ?? "—" },
+                  {
+                    key: "budget",
+                    header: "Budget vs actual",
+                    width: "260px",
+                    render: (p) =>
+                      p.budgetUsd == null ? (
+                        <span className={v.faint}>no budget set</span>
+                      ) : (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                          <span className={v.faint}>
+                            {fmtUsd(p.spentUsd)} of {fmtUsd(p.budgetUsd)}
+                            {p.budgetPeriod === "monthly" ? " this month" : ""}
+                          </span>
+                          <Meter
+                            value={p.spentUsd}
+                            max={p.budgetUsd}
+                            warn={
+                              p.alertThresholdPct != null &&
+                              p.alertThresholdPct < 100 &&
+                              p.spentUsd >= (p.budgetUsd * p.alertThresholdPct) / 100
+                            }
+                            over={p.spentUsd > p.budgetUsd}
+                            markPct={p.alertThresholdPct ?? undefined}
+                            label={`${p.name} budget`}
+                          />
+                        </div>
+                      ),
+                  },
+                  {
+                    key: "spent",
+                    header: "Spent",
+                    align: "right",
+                    sort: (p) => p.spentUsd,
+                    render: (p) => <span className={v.num}>{fmtUsd(p.spentUsd)}</span>,
+                  },
+                  {
+                    key: "classifications",
+                    header: "Classifications",
+                    render: (p) => (
+                      <span className={v.rowTight}>
+                        {(p.classifications ?? []).map((c) => (
+                          <Badge key={c} tone="info">
+                            {c}
+                          </Badge>
+                        ))}
                       </span>
-                      <Meter
-                        value={p.spentUsd}
-                        max={p.budgetUsd}
-                        warn={
-                          p.alertThresholdPct != null &&
-                          p.alertThresholdPct < 100 &&
-                          p.spentUsd >= (p.budgetUsd * p.alertThresholdPct) / 100
-                        }
-                        over={p.spentUsd > p.budgetUsd}
-                        markPct={p.alertThresholdPct ?? undefined}
-                        label={`${p.name} budget`}
-                      />
-                    </div>
-                  ),
-              },
-              {
-                key: "spent",
-                header: "Spent",
-                align: "right",
-                sort: (p) => p.spentUsd,
-                render: (p) => <span className={v.num}>{fmtUsd(p.spentUsd)}</span>,
-              },
-              {
-                key: "classifications",
-                header: "Classifications",
-                render: (p) => (
-                  <span className={v.rowTight}>
-                    {(p.classifications ?? []).map((c) => (
-                      <Badge key={c} tone="info">
-                        {c}
-                      </Badge>
-                    ))}
-                  </span>
-                ),
-              },
-            ]}
-            rows={projects.data?.projects ?? []}
-            rowKey={(p) => p.id}
-            loading={projects.isLoading}
-            error={projects.error}
-            onRetry={() => void projects.refetch()}
-            onRowClick={(p) => setRollupId(p.id === rollupId ? null : p.id)}
-            rowLabel={(p) => `Open cost rollup for ${p.name}`}
-            empty={
-              <EmptyState
-                title="No projects yet"
-                body="Budgets and cost attribution hang off projects; calls without one land in the Unattributed bucket."
+                    ),
+                  },
+                ]}
+                rows={projects.data?.projects ?? []}
+                rowKey={(p) => p.id}
+                loading={projects.isLoading}
+                error={projects.error}
+                onRetry={() => void projects.refetch()}
+                onRowClick={(p) => setRollupId(p.id === rollupId ? null : p.id)}
+                rowLabel={(p) => `Open cost rollup for ${p.name}`}
+                empty={
+                  <EmptyState
+                    title="No projects yet"
+                    body="Budgets and cost attribution hang off projects; calls without one land in the Unattributed bucket."
+                  />
+                }
               />
-            }
-          />
-        </Card>
+            </Card>
 
-        {rollupId && (
-          <ProjectRollup
-            key={rollupId}
-            projectId={rollupId}
-            projectName={(projects.data?.projects ?? []).find((p) => p.id === rollupId)?.name ?? "project"}
-          />
+            {rollupId && (
+              <ProjectRollup
+                key={rollupId}
+                projectId={rollupId}
+                projectName={(projects.data?.projects ?? []).find((p) => p.id === rollupId)?.name ?? "project"}
+              />
+            )}
+
+            <UnattributedCard />
+            {/* ADR-0175 A15 — the factors behind the energy estimate */}
+            <EnergyFactorsCard />
+          </>
+        ) : (
+          <>
+            <CreateProjectCard />
+            <EditProjectCard
+              projects={projects.data?.projects ?? []}
+              initiatives={initiatives.data?.initiatives ?? []}
+            />
+            <InitiativesCard initiatives={initiatives.data?.initiatives ?? []} loading={initiatives.isLoading} />
+          </>
         )}
-
-        <UnattributedCard />
-        {/* ADR-0175 A15 — the factors behind the energy estimate */}
-        <EnergyFactorsCard />
-        <CreateProjectCard />
-        <EditProjectCard
-          projects={projects.data?.projects ?? []}
-          initiatives={initiatives.data?.initiatives ?? []}
-        />
-        <InitiativesCard initiatives={initiatives.data?.initiatives ?? []} loading={initiatives.isLoading} />
       </div>
     </>
   );
