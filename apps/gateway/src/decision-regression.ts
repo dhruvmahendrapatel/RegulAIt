@@ -127,11 +127,42 @@ import {
   type UseCaseDecisionRecordView,
 } from "@regulait/shared";
 import { loadOrgSettings } from "./org-settings.js";
+import { EU_AI_ACT_TIER_RANK, type EuAiActTier } from "@regulait/shared";
+import { exportInMemory, pageInMemory, type MemoryListSpec } from "./list-memory.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 const POLICY_ID = "default";
 /** reviewer-override cases kept live at once (a preview runs them all) */
 export const MAX_ACTIVE_OVERRIDE_CASES = 500;
+
+/**
+ * ADR-0226 (P2 batch D): the golden cases under the shared list contract. The list is computed in memory (every live
+ * case replayed against the live configuration), so it pages and exports through `list-memory.ts`.
+ */
+const expectationText = (c: DecisionRegressionCaseView) => (c.unmetExpectation.length === 0 ? "Kept" : `Differs: ${c.unmetExpectation.join(", ")}`);
+export const GOLDEN_CASES_LIST: MemoryListSpec<DecisionRegressionCaseView> = {
+  id: "decision-regression-cases",
+  sorts: {
+    label: { value: (c) => c.label.toLowerCase() },
+    source: { value: (c) => c.source },
+    tier: { value: (c) => (c.outcome.tier ? (EU_AI_ACT_TIER_RANK[c.outcome.tier as EuAiActTier] ?? null) : null) },
+    expect: { value: (c) => c.unmetExpectation.length },
+    created: { value: (c) => (c.createdAt ? new Date(c.createdAt) : null) },
+    by: { value: (c) => c.createdByName?.toLowerCase() ?? null },
+  },
+  columns: {
+    label: { label: "Case", value: (c) => c.label },
+    source: { label: "Source", value: (c) => (c.source === "override" ? "Reviewer" : "Shipped") },
+    tier: { label: "Tier now", value: (c) => c.outcome.tier ?? "unscreened" },
+    expect: { label: "Expectation", value: expectationText },
+    created: { label: "Added", value: (c) => (c.createdAt ? new Date(c.createdAt) : null) },
+    by: { label: "Added by", value: (c) => c.createdByName },
+  },
+  filters: ["source"],
+  defaultSort: { col: "label", dir: "asc" },
+  idOf: (c) => c.id,
+};
+const casesFilterQuery = z.object({ source: z.enum(["shipped", "override"]).optional() }).strict();
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type Writer = Db | Tx;
@@ -1030,7 +1061,39 @@ export function registerDecisionRegressionRoutes(app: FastifyInstance, db: Db): 
     return runView(row, await namesOf(db, [row.createdBy]), settings.decisionRegressionMaxAgeMinutes);
   });
 
-  app.get("/v1/governance/decision-regression/cases", async () => {
+  // ADR-0226: with any of sort/dir/cursor/offset/count the golden cases answer the shared list contract (computed in
+  // memory, paged by offset); with none of them, exactly the response below. Admin only, like the list.
+  app.get("/v1/governance/decision-regression/cases/export.xlsx", async (req, reply) => {
+    try {
+      const filters = casesFilterQuery.parse(filterParams(req.query));
+      const { cases } = await goldenCaseViews();
+      await exportInMemory(db, req, reply, casesFiltered(cases, filters), req.query, GOLDEN_CASES_LIST, filters);
+      return reply;
+    } catch (e) {
+      return sendListError(reply, e);
+    }
+  });
+  app.get("/v1/governance/decision-regression/cases", async (req, reply) => {
+    if (wantsListContract(req.query)) {
+      try {
+        const filters = casesFilterQuery.parse(filterParams(req.query));
+        const { cases } = await goldenCaseViews();
+        return {
+          ...pageInMemory(casesFiltered(cases, filters), req.query, GOLDEN_CASES_LIST),
+          versions: decisionRuleVersions(),
+          outcomeFields: DECISION_OUTCOME_FIELDS,
+        };
+      } catch (e) {
+        return sendListError(reply, e);
+      }
+    }
+    const { cases: views } = await goldenCaseViews();
+    return { cases: views, versions: decisionRuleVersions(), outcomeFields: DECISION_OUTCOME_FIELDS };
+  });
+  const casesFiltered = (cases: DecisionRegressionCaseView[], f: z.infer<typeof casesFilterQuery>) =>
+    f.source ? cases.filter((c) => c.source === f.source) : cases;
+  /** every live golden case, replayed against the live configuration */
+  async function goldenCaseViews(): Promise<{ cases: DecisionRegressionCaseView[] }> {
     const live = await loadLiveDecisionConfig(db);
     const cases = await loadRegressionCases(db);
     const rows = await db.select().from(decisionRegressionCases).where(isNull(decisionRegressionCases.retiredAt));
@@ -1053,8 +1116,8 @@ export function registerDecisionRegressionRoutes(app: FastifyInstance, db: Db): 
         unmetExpectation: res.unmetExpectation,
       };
     });
-    return { cases: views, versions: decisionRuleVersions(), outcomeFields: DECISION_OUTCOME_FIELDS };
-  });
+    return { cases: views };
+  }
 
   app.post("/v1/governance/decision-regression/cases", async (req, reply) => {
     const parsed = createDecisionRegressionCaseSchema.safeParse(req.body ?? {});
