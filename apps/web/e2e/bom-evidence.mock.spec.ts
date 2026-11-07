@@ -335,10 +335,17 @@ test.describe("ADR-0189 B6: Decision BOM from an audit row", () => {
   });
 });
 
+/** I-2: the posture page's settings cards sit behind tabs; a tab's label starts with its name, then what is unresolved */
+const postureTab = (page: Page, name: string) => page.getByRole("tab", { name: new RegExp(`^${name}`) });
+const openPostureTab = (page: Page, name: string) => postureTab(page, name).click();
+
 test.describe("ADR-0189 B6: BOM posture", () => {
   test("no receipt key reads as Decision BOM unavailable; a setting change sends exactly what was confirmed", async ({ page }) => {
     const st = await mockApi(page);
     await page.goto("/ui/admin/enforcement-posture");
+    // the missing key is a warning the BOM tab names before it is opened
+    await expect(postureTab(page, "BOM evidence")).toHaveText("BOM evidence · 1 warning");
+    await openPostureTab(page, "BOM evidence");
     const card = page.getByTestId("bom-posture");
     await expect(card.getByText("Decision BOM: unavailable (no signing key)")).toBeVisible();
     await expect(card.getByTestId("receipt-key-posture")).toContainText("missing");
@@ -357,6 +364,8 @@ test.describe("ADR-0189 B6: BOM posture", () => {
     expect(st.calls.filter((c) => c.method === "PUT" && c.path === "/v1/org/settings").map((c) => c.body)).toEqual([{ decisionFactsCapture: "off" }]);
     await expect(card.getByText("Decision BOM: not captured", { exact: true })).toBeVisible();
     await expect(card.getByTestId("bom-setting-decisionFactsCapture").getByText("relaxed (audited)")).toBeVisible();
+    // and the relaxation joins the tab's count
+    await expect(postureTab(page, "BOM evidence")).toHaveText("BOM evidence · 2 warnings");
     await expectAxeClean(page, "BOM posture");
   });
 
@@ -373,6 +382,7 @@ test.describe("ADR-0189 B6: BOM posture", () => {
       retireRefusal: { status: 409, body: { error: "receipt_key_only_active", detail: "only active" } },
     });
     await page.goto("/ui/admin/enforcement-posture");
+    await openPostureTab(page, "BOM evidence");
     const table = page.getByTestId("receipt-keys");
     // the key this gateway signs with is not offered, and says why; a retired key is listed for verification
     await expect(table.getByRole("row").filter({ hasText: "receipt-2026b" })).toContainText("This gateway signs with this key");
@@ -411,7 +421,9 @@ test.describe("ADR-0189 B6: BOM posture", () => {
   test("an unsaved isolation draft survives a BOM save on the same page, and is not sent with it", async ({ page }) => {
     const st = await mockApi(page);
     await page.goto("/ui/admin/enforcement-posture");
+    await openPostureTab(page, "Isolation");
     await isolationFloor(page).selectOption("microvm");
+    await openPostureTab(page, "BOM evidence");
     const row = page.getByTestId("bom-posture").getByTestId("bom-setting-decisionFactsCapture");
     await row.getByLabel("Decision BOM facts").selectOption("off");
     await row.getByRole("button", { name: "Review change" }).click();
@@ -420,6 +432,7 @@ test.describe("ADR-0189 B6: BOM posture", () => {
     await expect(dialog).toBeHidden();
     await expect(row.getByText("relaxed (audited)")).toBeVisible();
     expect(puts(st)).toEqual([{ decisionFactsCapture: "off" }]);
+    await openPostureTab(page, "Isolation");
     await expect(isolationFloor(page)).toHaveValue("microvm");
     await page.getByRole("button", { name: "Save isolation settings", exact: true }).click();
     await expect(page.getByText("Isolation settings saved", { exact: true })).toBeVisible();
@@ -429,12 +442,15 @@ test.describe("ADR-0189 B6: BOM posture", () => {
   test("an unsaved BOM draft survives an isolation save on the same page, and is not sent with it", async ({ page }) => {
     const st = await mockApi(page);
     await page.goto("/ui/admin/enforcement-posture");
+    await openPostureTab(page, "BOM evidence");
     const row = page.getByTestId("bom-posture").getByTestId("bom-setting-decisionFactsCapture");
     await row.getByLabel("Decision BOM facts").selectOption("off");
+    await openPostureTab(page, "Isolation");
     await isolationFloor(page).selectOption("microvm");
     await page.getByRole("button", { name: "Save isolation settings", exact: true }).click();
     await expect(page.getByText("Isolation settings saved", { exact: true })).toBeVisible();
     expect(puts(st)).toEqual([{ isolationFloorPublic: "microvm" }]);
+    await openPostureTab(page, "BOM evidence");
     await expect(row.getByLabel("Decision BOM facts")).toHaveValue("off");
     await row.getByRole("button", { name: "Review change" }).click();
     await page.getByRole("dialog", { name: "Change decision bom facts?" }).getByRole("button", { name: "Save setting" }).click();

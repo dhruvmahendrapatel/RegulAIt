@@ -113,6 +113,7 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.redteamLibraries, ["name"]],
   [s.trainingDatasets, ["name"]],
   [s.fairnessDatasets, ["name", "description"]],
+  [s.modelDriftMonitors, ["name"]],
   [s.trainingJobs, ["name"]],
   [s.monitoringDashboards, ["name"]],
   [s.automationRules, ["name"]],
