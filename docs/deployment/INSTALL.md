@@ -493,9 +493,13 @@ route, method, client IP and the **kind** of credential presented (never the cre
 
 The boot posture block (`proxy / hsts / egress / data key / bootstrap / secrets / database /
 logging / scheduler`) is printed once at startup; `secrets: DEV-GRADE` lines mean the
-published compose defaults are in use, and a deployment with `REGULAIT_DEPLOY_MODE` or
-`REGULAIT_HSTS` set **refuses to start** on them (override, if you really mean it, with
-`REGULAIT_ALLOW_DEV_SECRETS=1`).
+published compose defaults are in use. The gateway **refuses to start** on them unless it listens
+on loopback only and nothing says the box is deployed (`REGULAIT_DEPLOY_MODE`, `REGULAIT_HSTS`, or an
+https non-loopback `REGULAIT_PUBLIC_URL`). A container never listens on loopback only, so every
+compose bring-up needs real values or the laptop opt-in `REGULAIT_ALLOW_DEV_SECRETS=1`, which prints a
+banner and writes an audit row on every boot (ADR-0167 amendment, S-02). The `bootstrap:` line also
+says whether the token is `RETIRED`: it stops authenticating once an admin has signed in with their own
+credential (`REGULAIT_BOOTSTRAP_AFTER_ADMIN=1` keeps it, printed).
 
 **Strict by default (ADR-0181).** Two environment knobs now default to their strict value:
 

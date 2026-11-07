@@ -35,6 +35,9 @@ The fastest path (Docker):
 # or relaxations (ADR-0181). The demo dataset needs an explicit demo signal:
 echo 'REGULAIT_DEMO_LICENSE=1' >> .env    # the prepared demo (below), or …
 echo 'REGULAIT_PUBLIC_URL=http://localhost:3000' >> .env   # needed for 0 FAIL (endpoint device enrolment)
+# the compose defaults are the PUBLISHED dev secrets: the gateway refuses them unless you opt in
+# for a laptop (a banner and an audit row on every boot; never with --profile tls/hosted/tunnel)
+echo 'REGULAIT_ALLOW_DEV_SECRETS=1' >> .env   # … or put real REGULAIT_BOOTSTRAP_TOKEN / REGULAIT_DATA_KEY values there
 docker compose up --build                 # … `SEED_DEMO=1 docker compose up --build` for the seed alone
 # one-time sign-in passwords AND demo API keys are printed once, at the end of
 # the gateway's first-boot log:
@@ -306,6 +309,7 @@ written anchor, so a full-recompute forgery diverges from a head nobody can
 rewrite.
 
 ```bash
+# the bootstrap token retires once an admin has signed in (ADR-0167 amendment, S-02): use an admin's API key then
 curl -s localhost:3000/v1/audit/verify -H "authorization: Bearer dev-bootstrap" | jq .anchor
 # → { "source": "worm_sink", "sinkMode": "compliance", "tamperResistant": true, "disclosure": "…" }
 ```
@@ -382,7 +386,9 @@ file, and a downgrade.
 | `REGULAIT_SHUTDOWN_GRACE_MS` | `15000` | On SIGTERM/SIGINT the gateway stops accepting, lets in-flight requests and the scheduler tick finish, ends the pool and exits 0 — within this budget, past which it exits 1. A second signal exits at once. Compose's `stop_grace_period` for the gateway is 30 s so the drain is never SIGKILLed. |
 | `REGULAIT_OUTBOUND_TIMEOUT_MS` | `60000` | The deadline a guarded outbound fetch gets when its caller supplied none (OTLP export, OIDC discovery/token, connectors). MCP, scorer and model calls carry their own deadlines, which always win. |
 | `REGULAIT_WORKFLOW_CLAIM_TTL_MS` | `900000` | How long a workflow stage's execution claim may go unreleased (a process killed mid-stage) before `/advance` may re-take it. The re-take is audited as `workflow-stage-claim-expired`. |
-| `REGULAIT_OFFLINE_CHECKS` | *unset* (refused) | Set to exactly `1` to declare an offline/demo box on which a workflow template's `offlineAutoPass` may pass a named check nobody reported (labelled and audited). Unset, or on a box with `REGULAIT_DEPLOY_MODE` or `REGULAIT_HSTS` set, unreported checks stay pending (ADR-0167 amendment, AER-047). Never set it where real CI should gate a change. |
+| `REGULAIT_ALLOW_DEV_SECRETS` | *unset* (refused) | Set to exactly `1` to boot with the published dev secrets (`dev-bootstrap`, the 64×`a` data key) or a data key with no entropy where they would be refused: on any listener that is not loopback-only (every container), or on a box with a deploy signal (`REGULAIT_DEPLOY_MODE`, `REGULAIT_HSTS`, or an https non-loopback `REGULAIT_PUBLIC_URL`). Prints a banner and writes an audit row (`dev-secrets-opt-in`) on every boot. A laptop only (ADR-0167 amendment, S-02). |
+| `REGULAIT_BOOTSTRAP_AFTER_ADMIN` | *unset* (retires) | The bootstrap token stops authenticating (401 `bootstrap_retired`, audited) once an enabled admin has signed in with their own credential. Set to exactly `1` to keep it working (printed at boot); the test suites and the demo workflow set it. It works again on its own if every admin is disabled (ADR-0167 amendment, S-02). |
+| `REGULAIT_OFFLINE_CHECKS` | *unset* (refused) | Set to exactly `1` to declare an offline/demo box on which a workflow template's `offlineAutoPass` may pass a named check nobody reported (labelled and audited). Unset, or on a box with `REGULAIT_DEPLOY_MODE` or `REGULAIT_HSTS` set (or an https non-loopback `REGULAIT_PUBLIC_URL`), unreported checks stay pending (ADR-0167 amendment, AER-047). Never set it where real CI should gate a change. |
 | `REGULAIT_PUBLIC_URL` | *unset* (no mail courier) | The https origin this deployment is reached at, optionally with a base path (`http` only for localhost/loopback; no credentials, query or fragment). The ONLY origin links in outbound mail use — never a request's Host header. While unset, registering or posting to an Outlook ChatOps workspace is refused (422 `public_url_required`); a set-but-invalid value refuses the boot. Reported by `GET /v1/org/posture` and `GET /v1/setup/status` (ADR-0121 amendment). |
 | `REGULAIT_RATE_LIMIT_MAX` / `REGULAIT_RATE_LIMIT_WINDOW_MS` | `1200` / `60000` | The general per-client-IP bucket. |
 | `REGULAIT_AUTH_RATE_LIMIT_MAX` / `REGULAIT_AUTH_RATE_LIMIT_WINDOW_MS` | `10` / `300000` | The stricter bucket on `/auth/login`, `/auth/mfa/verify` and `/auth/login-with-key`. |

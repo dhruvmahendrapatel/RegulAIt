@@ -50,7 +50,8 @@ describe("the decision", () => {
     expect(a.findings).toEqual([]);
     expect(a.refuse).toBe(false);
     expect(a.bootstrapLine).toContain("CONFIGURED");
-    expect(a.bootstrapLine).toContain("remove REGULAIT_BOOTSTRAP_TOKEN");
+    // S-02: the token now retires itself once the first admin signs in
+    expect(a.bootstrapLine).toContain("retires itself once the first admin exists");
   });
 
   it("no bootstrap token: the door is reported shut", () => {
@@ -61,18 +62,27 @@ describe("the decision", () => {
 
   it("a real admin already existing is said out loud — the token has done its one job", () => {
     const a = assessDevSecrets(clean, { bootstrapToken: REAL_TOKEN, dataKey: REAL_KEY, realAdminExists: true });
-    expect(a.bootstrapLine).toContain("a real admin already exists");
+    // S-02: and it is RETIRED, not merely reported
+    expect(a.bootstrapLine).toContain("RETIRED");
+    expect(a.bootstrapLine).toContain("remove REGULAIT_BOOTSTRAP_TOKEN");
+    const relaxed = assessDevSecrets(clean, { bootstrapToken: REAL_TOKEN, realAdminExists: true, bootstrapAfterAdmin: true });
+    expect(relaxed.bootstrapLine).toContain("REGULAIT_BOOTSTRAP_AFTER_ADMIN=1");
   });
 
-  it("the published defaults are named, and refused ONLY on a deployed box", () => {
+  it("the published defaults are named, and accepted ONLY on a loopback-only listener of an undeployed box (S-02)", () => {
     for (const token of ["dev-bootstrap", "seed-bootstrap"]) {
-      const laptop = assessDevSecrets(clean, { bootstrapToken: token, dataKey: PUBLISHED_DATA_KEY });
+      const laptop = assessDevSecrets(clean, { bootstrapToken: token, dataKey: PUBLISHED_DATA_KEY, listenHost: "127.0.0.1" });
       expect(laptop.findings).toHaveLength(2);
       expect(laptop.refusing).toHaveLength(2);
-      expect(laptop.refuse).toBe(false); // nothing says this box is deployed
+      expect(laptop.refuse).toBe(false); // loopback only, and nothing says this box is deployed
       expect(laptop.networkFacingSignal).toBeNull();
 
-      const box = assessDevSecrets(deployed, { bootstrapToken: token, dataKey: PUBLISHED_DATA_KEY });
+      // S-02: every interface (a container, a bare `pnpm start`) refuses with no deploy signal at all
+      const container = assessDevSecrets(clean, { bootstrapToken: token, dataKey: PUBLISHED_DATA_KEY, listenHost: "0.0.0.0" });
+      expect(container.refuse).toBe(true);
+      expect(container.exposure).toContain("0.0.0.0");
+
+      const box = assessDevSecrets(deployed, { bootstrapToken: token, dataKey: PUBLISHED_DATA_KEY, listenHost: "127.0.0.1" });
       expect(box.refuse).toBe(true);
       expect(box.networkFacingSignal).toBe("REGULAIT_DEPLOY_MODE=hosted");
     }
@@ -117,6 +127,7 @@ describe("the decision", () => {
     const a = assessDevSecrets(deployed, { bootstrapToken: "dev-bootstrap", dataKey: PUBLISHED_DATA_KEY });
     const err = new DevSecretsBootError(a);
     expect(err.message).toContain("REGULAIT_DEPLOY_MODE=hosted");
+    expect(err.message).toContain("HOST=127.0.0.1");
     expect(err.message).toContain("dev-bootstrap");
     expect(err.message).toContain("REGULAIT_DATA_KEY is the published dev default");
     expect(err.message).toContain("scripts/install.sh");
@@ -237,7 +248,9 @@ describe("the real boot", () => {
     );
     expect(r.error).toBeNull();
     try {
-      expect(r.log.find((l) => l.includes("booting anyway"))).toBeTruthy();
+      // S-02: a banner, and the boot is recorded
+      expect(r.log.find((l) => l.includes("DEV SECRETS ACCEPTED"))).toBeTruthy();
+      expect(r.log.find((l) => l.includes("Audit: recorded"))).toBeTruthy();
     } finally {
       await r.app!.close();
     }

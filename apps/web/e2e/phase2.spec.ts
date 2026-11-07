@@ -196,8 +196,10 @@ test("users: create a user, issue a one-time password and an API key (one-time r
   await shot(page, "phase2-03-users-otp-reveal");
   await page.getByRole("button", { name: "Dismiss" }).click();
 
-  // issue an API key — a fresh one-time reveal
+  // issue an API key — a fresh one-time reveal. ADR-0167 amendment (S-02): a key for someone
+  // else is an identity_manage step-up, so Ada confirms with her authenticator again
   await page.getByRole("button", { name: "Issue API key" }).click();
+  await settleWithStepUp(page, page.getByTestId("revealed-secret"));
   await expect(page.getByTestId("revealed-secret")).toBeVisible();
   await shot(page, "phase2-04-users-key-reveal");
   await page.getByRole("button", { name: "Dismiss" }).click();

@@ -71,7 +71,8 @@ await runMigrations(
   db,
   path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations"),
 );
-const app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+// in-process operator tool holding DATABASE_URL: the token is not a network credential here (ADR-0167 amendment, S-02)
+const app = buildApp(db, { bootstrapToken: BOOT, bootstrapAfterAdmin: true, dataKey: DATA_KEY });
 
 type Json = Record<string, any>;
 async function call(

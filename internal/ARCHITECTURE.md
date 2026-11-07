@@ -108,8 +108,8 @@ In hook order in `apps/gateway/src/app.ts`:
      MFA enrolment gate;
    - workload token: `DPoP` or certificate-bound access token, verified in `oauth/resource.ts`, accepted only on the
      workload routes (`/mcp/:serverId` and the model compat endpoints);
-   - bearer credential (`authenticate()`): bootstrap token, virtual key (never admin), engine credential, or hashed API
-     key (refused if its owner lacks MFA the org requires).
+   - bearer credential (`authenticate()`): bootstrap token (retired once an active admin exists, ADR-0167 S-02), virtual
+     key (never admin), engine credential, or hashed API key (refused if its owner lacks MFA the org requires).
 5. **Credential-tier rate limit**, the **virtual-key route allow-list**, **admin-only gating**, and the **audit actor
    context** for delegated callers.
 
