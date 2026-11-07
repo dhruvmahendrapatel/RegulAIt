@@ -4872,3 +4872,5 @@ export * from "./framework-imports.js";
 export * from "./supplier-portal.js";
 // ADR-0222 (P13(a)): fairness testing — the group metrics, thresholds and outcome (pure)
 export * from "./fairness.js";
+// ADR-0261 (P37): third-party security telemetry ingest — the DefenseClaw JSONL parser and mapping (pure)
+export * from "./third-party-ingest/index.js";
