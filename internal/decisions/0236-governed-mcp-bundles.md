@@ -92,20 +92,41 @@ bundles the kernel names the most direct holding (user, then role, then team).
 - Revoking a grant and archiving a bundle are never refused by the setting: taking access away is always allowed.
 - No row = nothing granted.
 
-### 5. API (admin-only through the default gate; `internal` in the stability registry)
+### 5. Scope tiers: read < write < dangerous (owner-approved scope added 2026-11-07)
+
+Design reference: the read / write / dangerous scopes of the Gravitee APIM MCP server
+(`gravitee-io/gravitee-apim-mcp-server`). **Ideas only.** That repository shows no licence, so no code, text or schema
+was copied from it.
+
+- A tool's tier comes from the inventory: `mcp_tools.kind` (read or write), or `dangerous` when an admin has set
+  `mcp_tools.dangerous`. The manifest re-sync never touches the flag. Setting it is a tightening and is only
+  audited. Clearing it is a `settings_relax` step-up (`PUT /v1/mcp-tools/:toolId/dangerous`).
+- Every bundle grant carries `max_tier`, which **defaults to `read`** (ADR-0180). A grant reaches a bundled tool only
+  when the tool's tier is within the grant's max tier. The kernel uses the stricter of the inventory tier and the
+  call's own tool kind, so a disagreement between the two can only narrow access.
+- A **dangerous** tool reached only through a bundle always pauses for the bundle's approver
+  (`mcp_bundles.approver_user_id`, rule id `bundle-dangerous-tool`), through the same Approvals Queue as every other
+  hold. With no approver it is refused (fail closed). A grant with `max_tier = dangerous` is refused (400) while the
+  bundle names no approver.
+- The hold applies to the bundle path only. A direct or role grant keeps its own rules, and a tool held both ways is
+  decided by the direct or role grant first, as before.
+
+### 6. API (admin-only through the default gate; `internal` in the stability registry)
 
 - `GET /v1/mcp-bundles`, `GET /v1/mcp-bundles/:bundleId`, `GET /v1/mcp-bundles/:bundleId/versions/:version`
-- `POST /v1/mcp-bundles` `{ name, description?, items }`, `PATCH /v1/mcp-bundles/:bundleId` `{ description }`,
+- `POST /v1/mcp-bundles` `{ name, description?, approverUserId?, items }`, `PATCH /v1/mcp-bundles/:bundleId`
+  `{ description?, approverUserId? }`,
   `PUT /v1/mcp-bundles/:bundleId/items` `{ expectedVersion, items }`, `DELETE /v1/mcp-bundles/:bundleId` (archive)
-- `GET|POST /v1/mcp-bundles/:bundleId/grants` `{ userId | roleId | teamId }`,
+- `GET|POST /v1/mcp-bundles/:bundleId/grants` `{ userId | roleId | teamId, maxTier? }`,
   `DELETE /v1/mcp-bundles/:bundleId/grants/:grantId`
+- `PUT /v1/mcp-tools/:toolId/dangerous` `{ dangerous }`
 
 Every write audits in the same transaction as the row (`objectType: "mcp_bundle"`, rule ids `mcp-bundle-*`). Inputs
 are bounded (200 items per version, name pattern, description length). The override view
 `GET /v1/users/:userId/servers/:serverId/entitlements` lists bundle-held tools with `source: "bundle"`, the bundle, its
 version and how it is held, flagged when revoked.
 
-### 6. Open source first (ADR-0176)
+### 7. Open source first (ADR-0176)
 
 Nothing to adopt: this is policy semantics and our own grant model (Cedar, OPA and the MCP SDK have no notion of our
 pillar-1 grant tiers). Built only on what is already in use: Drizzle, zod, Fastify, the existing kernel.
@@ -119,6 +140,13 @@ pillar-1 grant tiers). Built only on what is already in use: Drizzle, zod, Fasti
 - One extra indexed query per MCP evaluation when the setting is on (none when off beyond reading the flag).
 
 ## Follow-ups (not in this slice)
+
+- **Dynamic lazy tool-loading** (Gravitee design reference, pillar 6). Instead of sending every tool schema up
+  front, expose a small meta-surface (`list_scopes`, `list_tools`, `describe_tool_input`, `execute_tool`) so the
+  model loads a schema only when it needs one. Every `execute_tool` still goes through the same per-user entitlement
+  check (`governedEvaluate`) and is audited as the underlying tool. It overlaps with the TOKEN_OPTIMIZATION_SPEC
+  lazy tool-loading item and the existing `max_tools_in_manifest` setting, so it needs its own design. Too large for
+  this PR.
 
 - **UI**: a bundle editor and grant screen on the MCP governance pages (posted on #453 for the Governed Designer
   session).

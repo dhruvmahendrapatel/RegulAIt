@@ -10,9 +10,16 @@
 --    (server, tool) pairs. No wildcard: a tool a server adds later is in no bundle until a new version names it.
 --    Both tables are append-only (regulait_refuse_mutation + no TRUNCATE); a version is a point-in-time snapshot.
 -- 4. `mcp_bundle_grants`: who holds a bundle - exactly one of a user, a role or a team. No row = nothing granted.
+--    `max_tier` caps the tools the grant reaches: read < write < dangerous. Default 'read' (ADR-0180): a grant reaches
+--    a bundle's write tools only when the admin says so.
+-- 5. Scope tiers (design reference: the read/write/dangerous scopes of the Gravitee APIM MCP server; ideas only, no
+--    code): `mcp_tools.dangerous` is an admin flag, default false. A dangerous tool held through a bundle always pauses
+--    for `mcp_bundles.approver_user_id`; with no approver it is refused (fail closed).
 -- Every change to 2-4 advances the governance policy epoch, so a decision taken before a bundle change is re-checked.
 
 ALTER TABLE "org_settings" ADD COLUMN IF NOT EXISTS "mcp_bundles_enabled" boolean DEFAULT false NOT NULL;
+--> statement-breakpoint
+ALTER TABLE "mcp_tools" ADD COLUMN IF NOT EXISTS "dangerous" boolean DEFAULT false NOT NULL;
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "mcp_bundles" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
@@ -20,6 +27,7 @@ CREATE TABLE IF NOT EXISTS "mcp_bundles" (
   "description" text,
   "current_version" integer DEFAULT 1 NOT NULL,
   "archived_at" timestamp with time zone,
+  "approver_user_id" uuid REFERENCES "users"("id") ON DELETE SET NULL,
   "created_by" uuid REFERENCES "users"("id") ON DELETE SET NULL,
   "created_at" timestamp with time zone DEFAULT now() NOT NULL,
   "updated_at" timestamp with time zone DEFAULT now() NOT NULL,
@@ -59,8 +67,10 @@ CREATE TABLE IF NOT EXISTS "mcp_bundle_grants" (
   "user_id" uuid REFERENCES "users"("id") ON DELETE CASCADE,
   "role_id" uuid REFERENCES "roles"("id") ON DELETE CASCADE,
   "team_id" uuid REFERENCES "teams"("id") ON DELETE CASCADE,
+  "max_tier" text DEFAULT 'read' NOT NULL,
   "granted_by" uuid REFERENCES "users"("id") ON DELETE SET NULL,
   "created_at" timestamp with time zone DEFAULT now() NOT NULL,
+  CONSTRAINT "mcp_bundle_grants_max_tier_check" CHECK ("max_tier" IN ('read', 'write', 'dangerous')),
   CONSTRAINT "mcp_bundle_grants_one_subject_check" CHECK (num_nonnulls("user_id", "role_id", "team_id") = 1)
 );
 --> statement-breakpoint

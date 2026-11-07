@@ -10,6 +10,8 @@
  *  - a bundle reaches a user directly, through an assigned role or through a team, and nobody else;
  *  - a change is a new immutable version (compare-and-set); adding a tool is a step-up, removing one is not;
  *  - revoking a grant and archiving a bundle take effect at the next evaluation.
+ *  - scope tiers: a grant reaches read tools unless it says otherwise; a dangerous tool needs a dangerous-tier grant
+ *    and pauses for the bundle's approver every time, and with no approver it is refused.
  * Scoped to the rows this file creates (M-008).
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -37,7 +39,7 @@ import {
   teams,
   type Db,
 } from "@regulait/db";
-import { visibleTools, type ToolRef } from "@regulait/policy-kernel";
+import { BUNDLE_DANGEROUS_RULE_ID, visibleTools, type ToolRef } from "@regulait/policy-kernel";
 import { loadEntitlements } from "./entitlements.js";
 import { buildApp } from "./app.js";
 import { governedEvaluate } from "./governed-evaluate.js";
@@ -65,6 +67,8 @@ let viaRole: string;
 let viaTeam: string;
 let outsider: string;
 let adminKey: Record<string, string>;
+let adminId: string;
+let tiered: string;
 let userKey: Record<string, string>;
 
 const READ: ToolRef = { serverId: "", name: `p11_read_${RUN}`, kind: "read" };
@@ -129,7 +133,9 @@ beforeAll(async () => {
   viaTeam = await mkUser("team");
   outsider = await mkUser("outsider");
   userKey = await keyFor(direct);
-  adminKey = await keyFor(await mkUser("admin", true));
+  adminId = await mkUser("admin", true);
+  adminKey = await keyFor(adminId);
+  tiered = await mkUser("tiered");
 
   const [r] = await db.insert(roles).values({ name: `p11-role-${RUN}` }).returning({ id: roles.id });
   roleId = r!.id;
@@ -206,7 +212,7 @@ describe("MCP bundles: enforcement is bounded by each person's own entitlement",
   });
 
   it("a user grant allows exactly the bundle's tools, never one outside it", async () => {
-    const g = await req("POST", `/v1/mcp-bundles/${bundleId}/grants`, { userId: direct });
+    const g = await req("POST", `/v1/mcp-bundles/${bundleId}/grants`, { userId: direct, maxTier: "write" });
     expect(g.statusCode, g.body).toBe(201);
     directGrantId = g.json().id;
     expect((await lastAudit(MCP_BUNDLE_RULE_IDS.granted, bundleId))?.effect).toBe("allow");
@@ -312,5 +318,72 @@ describe("MCP bundles: revocation", () => {
     expect((await decide(viaRole, READ)).effect).toBe("deny");
     expect((await req("POST", `/v1/mcp-bundles/${bundleId}/grants`, { userId: direct })).statusCode).toBe(409);
     expect((await req("PUT", `/v1/mcp-bundles/${bundleId}/items`, { expectedVersion: 3, items: [] })).statusCode).toBe(409);
+  });
+});
+
+describe("MCP bundles: scope tiers (read < write < dangerous)", () => {
+  let tiersId: string;
+  let writeToolId: string;
+  let grantId: string;
+
+  it("a grant reaches read tools only, unless it names a higher tier", async () => {
+    const r = await mkBundle("p11-tiers", [item(READ), item(WRITE)]);
+    expect(r.statusCode, r.body).toBe(201);
+    tiersId = r.json().id;
+    const g = await req("POST", `/v1/mcp-bundles/${tiersId}/grants`, { userId: tiered });
+    expect(g.statusCode, g.body).toBe(201);
+    expect(g.json().maxTier).toBe("read");
+    grantId = g.json().id;
+    expect((await decide(tiered, READ)).effect).toBe("allow");
+    expect((await decide(tiered, WRITE)).effect).toBe("deny");
+    expect(await visible(tiered)).toEqual([READ.name]);
+  });
+
+  it("flagging a tool dangerous is audited and needs no step-up; a write-tier grant then no longer reaches it", async () => {
+    const [t] = await db.select({ id: mcpTools.id }).from(mcpTools).where(and(eq(mcpTools.serverId, serverId), eq(mcpTools.name, WRITE.name)));
+    writeToolId = t!.id;
+    const f = await req("PUT", `/v1/mcp-tools/${writeToolId}/dangerous`, { dangerous: true }, adminKey);
+    expect(f.statusCode, f.body).toBe(200);
+    expect(f.json().dangerous).toBe(true);
+    expect((await lastAudit(MCP_BUNDLE_RULE_IDS.toolTierChanged, serverId))?.detail).toMatchObject({ dangerous: true });
+    expect((await req("DELETE", `/v1/mcp-bundles/${tiersId}/grants/${grantId}`)).statusCode).toBe(204);
+    const g = await req("POST", `/v1/mcp-bundles/${tiersId}/grants`, { userId: tiered, maxTier: "write" });
+    expect(g.statusCode, g.body).toBe(201);
+    grantId = g.json().id;
+    expect((await decide(tiered, WRITE)).effect).toBe("deny");
+  });
+
+  it("a dangerous-tier grant needs the bundle to name an approver, and every call then pauses for them", async () => {
+    expect((await req("DELETE", `/v1/mcp-bundles/${tiersId}/grants/${grantId}`)).statusCode).toBe(204);
+    const refused = await req("POST", `/v1/mcp-bundles/${tiersId}/grants`, { userId: tiered, maxTier: "dangerous" });
+    expect(refused.statusCode, refused.body).toBe(400);
+    expect(refused.json()).toMatchObject({ error: "approver_required" });
+    expect((await req("PATCH", `/v1/mcp-bundles/${tiersId}`, { approverUserId: outsider.replace(/./g, "0") })).statusCode).toBe(400);
+    const p = await req("PATCH", `/v1/mcp-bundles/${tiersId}`, { approverUserId: adminId });
+    expect(p.statusCode, p.body).toBe(200);
+    expect((await lastAudit(MCP_BUNDLE_RULE_IDS.updated, tiersId))?.detail).toMatchObject({ approverAfter: adminId });
+    const g = await req("POST", `/v1/mcp-bundles/${tiersId}/grants`, { userId: tiered, maxTier: "dangerous" });
+    expect(g.statusCode, g.body).toBe(201);
+    const d = await decide(tiered, WRITE);
+    expect(d.effect).toBe("require_approval");
+    expect(d.ruleId).toBe(BUNDLE_DANGEROUS_RULE_ID);
+    expect(d.approverUserId).toBe(adminId);
+    expect(await visible(tiered)).toEqual([READ.name, WRITE.name].sort());
+  });
+
+  it("with the approver removed, a dangerous call is refused (fail closed)", async () => {
+    expect((await req("PATCH", `/v1/mcp-bundles/${tiersId}`, { approverUserId: null })).statusCode).toBe(200);
+    const d = await decide(tiered, WRITE);
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe(BUNDLE_DANGEROUS_RULE_ID);
+  });
+
+  it("clearing the dangerous flag is a relaxation: an API key is asked for a step-up", async () => {
+    const asked = await req("PUT", `/v1/mcp-tools/${writeToolId}/dangerous`, { dangerous: false }, adminKey);
+    expect(asked.statusCode, asked.body).toBe(403);
+    expect(asked.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax" });
+    const ok = await req("PUT", `/v1/mcp-tools/${writeToolId}/dangerous`, { dangerous: false });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect((await decide(tiered, WRITE)).effect).toBe("allow");
   });
 });

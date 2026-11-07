@@ -3332,6 +3332,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           bundleId: g.bundleId,
           bundleVersion: g.version,
           via: g.via,
+          toolTier: g.toolTier ?? "read",
+          maxTier: g.maxTier ?? "read",
           grantId: g.id,
           revoked: Boolean(rev),
           ...(rev ? { revocationId: rev.id } : {}),

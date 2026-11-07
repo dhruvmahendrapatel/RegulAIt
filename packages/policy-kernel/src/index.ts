@@ -380,6 +380,28 @@ export interface BundleToolGrant {
   via: "user" | "role" | "team";
   serverId: string;
   toolName: string;
+  /** the tool's scope tier from the inventory (`mcp_tools.kind`, or 'dangerous' when flagged); absent = read */
+  toolTier?: BundleScopeTier;
+  /** the highest tier this grant reaches; absent = read (the strict default) */
+  maxTier?: BundleScopeTier;
+  /** who signs off a call to a dangerous tool through this bundle; null = such a call is refused (fail closed) */
+  approverUserId?: string | null;
+  approverName?: string | null;
+}
+
+/** ADR-0236 scope tiers, in order. Design reference: the read/write/dangerous scopes of the Gravitee APIM MCP server
+ * (ideas only; no code taken). */
+export const BUNDLE_SCOPE_TIERS = ["read", "write", "dangerous"] as const;
+export type BundleScopeTier = (typeof BUNDLE_SCOPE_TIERS)[number];
+const tierRank = (t: BundleScopeTier | undefined): number => BUNDLE_SCOPE_TIERS.indexOf(t ?? "read");
+
+/**
+ * The tier a bundle grant must reach for this call: the higher of the inventory's tier and the call's own ToolRef
+ * kind, so a disagreement between the two can only make the check stricter.
+ */
+function bundleCallTier(grant: BundleToolGrant, tool: ToolRef): BundleScopeTier {
+  const fromRef: BundleScopeTier = tool.kind === "write" ? "write" : "read";
+  return tierRank(grant.toolTier) >= tierRank(fromRef) ? (grant.toolTier ?? "read") : fromRef;
 }
 
 export interface RoleServerGrant {
@@ -717,6 +739,8 @@ export type RuleName =
   | "default-deny";
 
 export const DEFAULT_DENY_RULE_ID = "default-deny";
+/** ADR-0236: the rule id of the hold (or fail-closed refusal) on a dangerous tool reached through an MCP bundle */
+export const BUNDLE_DANGEROUS_RULE_ID = "bundle-dangerous-tool";
 
 /**
  * Reference label for reason strings: "'name' (id8…)" when the caller passed
@@ -982,6 +1006,8 @@ function evaluateTool(input: EvaluationInput): Decision {
 
   let grantId: string | undefined;
   let grantReason = "";
+  /** ADR-0236: set when the call is granted ONLY through a bundle and the tool is in the dangerous tier */
+  let dangerousBundleGrant: BundleToolGrant | undefined;
 
   // A revocation only ever suppresses ROLE-DERIVED entitlements (§5): direct
   // user grants are themselves per-user overrides and always survive.
@@ -1039,9 +1065,15 @@ function evaluateTool(input: EvaluationInput): Decision {
     // ADR-0236 — a governed MCP bundle, at the role tier: consulted only when no direct or role tool grant matched,
     // and a per-user revocation suppresses it exactly as it suppresses a role grant. Absent/empty input pushes
     // NOTHING, so every decision without a bundle is byte-identical to the pre-0236 kernel.
+    // ADR-0236 scope tiers: a grant reaches the tool only when the tool's tier is within the grant's max tier.
     const bundleGrants = input.bundleToolGrants ?? [];
     if (!grantId && bundleGrants.length > 0) {
-      const bundleToolGrant = bundleGrants.find((g) => g.serverId === serverId && g.toolName === tool.name);
+      const bundleToolGrant = bundleGrants.find(
+        (g) =>
+          g.serverId === serverId &&
+          g.toolName === tool.name &&
+          tierRank(bundleCallTier(g, tool)) <= tierRank(g.maxTier),
+      );
       if (!bundleToolGrant) {
         chain.push({ rule: "bundle-tool-allow-list", outcome: "no-match" });
       } else {
@@ -1051,6 +1083,7 @@ function evaluateTool(input: EvaluationInput): Decision {
         } else {
           chain.push({ rule: "bundle-tool-allow-list", outcome: "allow", grantId: bundleToolGrant.id });
           grantId = bundleToolGrant.id;
+          if (bundleCallTier(bundleToolGrant, tool) === "dangerous") dangerousBundleGrant = bundleToolGrant;
           grantReason =
             `tool '${tool.name}' on server ${serverRef} is in MCP bundle ` +
             `${refLabel(bundleToolGrant.bundleId, bundleToolGrant.bundleName)} v${bundleToolGrant.version}, ` +
@@ -1258,6 +1291,39 @@ function evaluateTool(input: EvaluationInput): Decision {
           `${toolLabel}. Nothing runs unattended while this mode is set; the call is queued, ` +
           "not refused.",
         approverUserId: executionHold.approverUserId,
+      };
+    }
+  }
+
+  // ADR-0236: a DANGEROUS tool reached only through an MCP bundle always pauses for the bundle's approver, whatever
+  // else applies; it is satisfied by the same already-approved queue entry. FAIL CLOSED with no approver.
+  if (dangerousBundleGrant) {
+    const g = dangerousBundleGrant;
+    if (!g.approverUserId) {
+      chain.push({ rule: "bundle-tool-allow-list", outcome: "deny", grantId: g.id });
+      return {
+        effect: "deny",
+        ruleId: BUNDLE_DANGEROUS_RULE_ID,
+        ruleChain: chain,
+        reason:
+          `'${tool.name}' on server ${serverRef} is a dangerous tool held through MCP bundle ` +
+          `${refLabel(g.bundleId, g.bundleName)}, which names no approver — failing closed`,
+      };
+    }
+    if (input.approvedApprovalId) {
+      chain.push({ rule: "bundle-tool-allow-list", outcome: "satisfied-by-approval", grantId: input.approvedApprovalId });
+    } else {
+      chain.push({ rule: "bundle-tool-allow-list", outcome: "require-approval", grantId: g.id });
+      return {
+        effect: "require_approval",
+        ruleId: BUNDLE_DANGEROUS_RULE_ID,
+        ruleChain: chain,
+        reason:
+          `'${tool.name}' on server ${serverRef} is a dangerous tool held through MCP bundle ` +
+          `${refLabel(g.bundleId, g.bundleName)}: every call needs sign-off by approver ` +
+          refLabel(g.approverUserId, g.approverName),
+        approverUserId: g.approverUserId,
+        ...(g.approverName ? { approverName: g.approverName } : {}),
       };
     }
   }

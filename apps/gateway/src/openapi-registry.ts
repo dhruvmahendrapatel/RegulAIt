@@ -726,6 +726,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/mcp-bundles/:bundleId/grants": "internal",
   "POST /v1/mcp-bundles/:bundleId/grants": "internal",
   "DELETE /v1/mcp-bundles/:bundleId/grants/:grantId": "internal",
+  "PUT /v1/mcp-tools/:toolId/dangerous": "internal",
   // ADR-0204: a server's static upstream credential (admin-only; the secret is write-only)
   "GET /v1/servers/:serverId/upstream-credential": "internal",
   "PUT /v1/servers/:serverId/upstream-credential": "internal",
@@ -1990,6 +1991,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/mcp-bundles/:bundleId/grants": "servers",
   "POST /v1/mcp-bundles/:bundleId/grants": "servers",
   "DELETE /v1/mcp-bundles/:bundleId/grants/:grantId": "servers",
+  "PUT /v1/mcp-tools/:toolId/dangerous": "servers",
   // ADR-0210: the OIDC-profile MCP identity assertion issuer (an MCP server setting, not an ADR-0188 identity route)
   "GET /mcp-identity/.well-known/openid-configuration": "servers",
   "GET /mcp-identity/.well-known/jwks.json": "servers",

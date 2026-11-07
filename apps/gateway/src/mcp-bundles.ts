@@ -45,6 +45,7 @@ import {
   type Db,
   type McpBundleRow,
 } from "@regulait/db";
+import { BUNDLE_SCOPE_TIERS } from "@regulait/policy-kernel";
 import { isReservedToolName } from "./mcp-protocol.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { refuseSodMint, type SodMint } from "./sod.js";
@@ -62,6 +63,7 @@ export const MCP_BUNDLE_RULE_IDS = Object.freeze({
   archived: "mcp-bundle-archived",
   granted: "mcp-bundle-granted",
   grantRemoved: "mcp-bundle-grant-removed",
+  toolTierChanged: "mcp-tool-tier-changed",
   disabled: "mcp-bundle-disabled",
 });
 
@@ -69,17 +71,33 @@ const nameSchema = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/);
 const itemSchema = z.object({ serverId: z.string().uuid(), toolName: z.string().min(1).max(256) }).strict();
 const itemsSchema = z.array(itemSchema).max(MCP_BUNDLE_MAX_ITEMS);
 const createSchema = z
-  .object({ name: nameSchema, description: z.string().max(1000).nullable().optional(), items: itemsSchema })
+  .object({
+    name: nameSchema,
+    description: z.string().max(1000).nullable().optional(),
+    approverUserId: z.string().uuid().nullable().optional(),
+    items: itemsSchema,
+  })
   .strict();
-const patchSchema = z.object({ description: z.string().max(1000).nullable() }).strict();
+const patchSchema = z
+  .object({ description: z.string().max(1000).nullable().optional(), approverUserId: z.string().uuid().nullable().optional() })
+  .strict()
+  .refine((p) => p.description !== undefined || p.approverUserId !== undefined, { message: "nothing to change" });
 const versionSchema = z.object({ expectedVersion: z.number().int().min(1), items: itemsSchema }).strict();
 const grantSchema = z
-  .object({ userId: z.string().uuid().optional(), roleId: z.string().uuid().optional(), teamId: z.string().uuid().optional() })
+  .object({
+    userId: z.string().uuid().optional(),
+    roleId: z.string().uuid().optional(),
+    teamId: z.string().uuid().optional(),
+    /** ADR-0236 scope tier cap; default 'read' (ADR-0180) */
+    maxTier: z.enum(BUNDLE_SCOPE_TIERS).optional(),
+  })
   .strict()
   .refine((g) => [g.userId, g.roleId, g.teamId].filter(Boolean).length === 1, { message: "exactly one subject" });
 const bundleParam = z.object({ bundleId: z.string().uuid() });
 const versionParam = z.object({ bundleId: z.string().uuid(), version: z.coerce.number().int().min(1).max(1_000_000) });
 const grantParam = z.object({ bundleId: z.string().uuid(), grantId: z.string().uuid() });
+const toolParam = z.object({ toolId: z.string().uuid() });
+const dangerousSchema = z.object({ dangerous: z.boolean() }).strict();
 
 type Item = z.infer<typeof itemSchema>;
 const itemKey = (i: { serverId: string | null; toolName: string }) => `${i.serverId ?? ""}\u0000${i.toolName}`;
@@ -95,6 +113,7 @@ export function bundleView(row: McpBundleRow, extra: { grantCount?: number } = {
     id: row.id,
     name: row.name,
     description: row.description,
+    approverUserId: row.approverUserId,
     currentVersion: row.currentVersion,
     archivedAt: row.archivedAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
@@ -179,6 +198,15 @@ export function registerMcpBundleRoutes(app: FastifyInstance, db: Db): void {
     return true;
   };
 
+  /** an approver must be an existing, enabled person */
+  const refuseBadApprover = async (approverUserId: string | null | undefined, reply: FastifyReply): Promise<boolean> => {
+    if (!approverUserId) return false;
+    const [u] = await db.select({ id: users.id, disabledAt: users.disabledAt }).from(users).where(eq(users.id, approverUserId));
+    if (u && !u.disabledAt) return false;
+    await reply.status(400).send({ error: "unknown_approver", detail: "the approver must be an existing, enabled person. Nothing was saved." });
+    return true;
+  };
+
   const refuseUnknownItems = async (items: readonly Item[], reply: FastifyReply): Promise<boolean> => {
     const unknown = await unknownItems(db, items);
     if (unknown.length === 0) return false;
@@ -236,10 +264,17 @@ export function registerMcpBundleRoutes(app: FastifyInstance, db: Db): void {
     if (await refuseWhenDisabled(req, reply, null, "create")) return reply;
     const items = normaliseItems(parsed.data.items);
     if (await refuseUnknownItems(items, reply)) return reply;
+    if (await refuseBadApprover(parsed.data.approverUserId, reply)) return reply;
     const created = await db.transaction(async (tx) => {
       const [bundle] = await tx
         .insert(mcpBundles)
-        .values({ name: parsed.data.name, description: parsed.data.description ?? null, currentVersion: 1, createdBy: req.authCtx.userId ?? null })
+        .values({
+          name: parsed.data.name,
+          description: parsed.data.description ?? null,
+          approverUserId: parsed.data.approverUserId ?? null,
+          currentVersion: 1,
+          createdBy: req.authCtx.userId ?? null,
+        })
         .onConflictDoNothing()
         .returning();
       if (!bundle) return null;
@@ -249,6 +284,7 @@ export function registerMcpBundleRoutes(app: FastifyInstance, db: Db): void {
         phase: "create",
         name: bundle.name,
         version: 1,
+        approverUserId: bundle.approverUserId,
         items,
       });
       return bundle;
@@ -260,17 +296,32 @@ export function registerMcpBundleRoutes(app: FastifyInstance, db: Db): void {
   app.patch("/v1/mcp-bundles/:bundleId", async (req, reply) => {
     const { bundleId } = bundleParam.parse(req.params);
     const parsed = patchSchema.safeParse(req.body);
-    if (!parsed.success) return reply.status(400).send({ error: "invalid_request", detail: "expected { description }" });
-    if (!(await loadBundle(bundleId))) return reply.status(404).send({ error: "unknown_bundle" });
+    if (!parsed.success) return reply.status(400).send({ error: "invalid_request", detail: "expected { description?, approverUserId? }" });
+    const before = await loadBundle(bundleId);
+    if (!before) return reply.status(404).send({ error: "unknown_bundle" });
     if (await refuseWhenDisabled(req, reply, bundleId, "update")) return reply;
+    if (await refuseBadApprover(parsed.data.approverUserId, reply)) return reply;
     const row = await db.transaction(async (tx) => {
       const [updated] = await tx
         .update(mcpBundles)
-        .set({ description: parsed.data.description, updatedAt: sql`now()` })
+        .set({
+          ...(parsed.data.description !== undefined ? { description: parsed.data.description } : {}),
+          ...(parsed.data.approverUserId !== undefined ? { approverUserId: parsed.data.approverUserId } : {}),
+          updatedAt: sql`now()`,
+        })
         .where(eq(mcpBundles.id, bundleId))
         .returning();
       if (!updated) return null;
-      await audit(tx as unknown as Db, req, bundleId, MCP_BUNDLE_RULE_IDS.updated, "allow", `MCP bundle '${updated.name}': description changed`, { phase: "update" });
+      const approverChanged = parsed.data.approverUserId !== undefined && parsed.data.approverUserId !== before.approverUserId;
+      await audit(
+        tx as unknown as Db,
+        req,
+        bundleId,
+        MCP_BUNDLE_RULE_IDS.updated,
+        "allow",
+        `MCP bundle '${updated.name}': ${[parsed.data.description !== undefined ? "description" : null, approverChanged ? "approver for dangerous tools" : null].filter(Boolean).join(" and ") || "nothing"} changed`,
+        { phase: "update", ...(approverChanged ? { approverBefore: before.approverUserId, approverAfter: updated.approverUserId } : {}) },
+      );
       return updated;
     });
     if (!row) return reply.status(404).send({ error: "unknown_bundle" });
@@ -374,6 +425,7 @@ export function registerMcpBundleRoutes(app: FastifyInstance, db: Db): void {
         roleName: roles.name,
         teamId: mcpBundleGrants.teamId,
         teamName: teams.name,
+        maxTier: mcpBundleGrants.maxTier,
         grantedBy: mcpBundleGrants.grantedBy,
         createdAt: mcpBundleGrants.createdAt,
       })
@@ -390,11 +442,18 @@ export function registerMcpBundleRoutes(app: FastifyInstance, db: Db): void {
   app.post("/v1/mcp-bundles/:bundleId/grants", async (req, reply) => {
     const { bundleId } = bundleParam.parse(req.params);
     const parsed = grantSchema.safeParse(req.body);
-    if (!parsed.success) return reply.status(400).send({ error: "invalid_request", detail: "expected exactly one of { userId, roleId, teamId }" });
+    if (!parsed.success) return reply.status(400).send({ error: "invalid_request", detail: "expected exactly one of { userId, roleId, teamId }, and maxTier? (read, write or dangerous)" });
+    const maxTier = parsed.data.maxTier ?? "read";
     const bundle = await loadBundle(bundleId);
     if (!bundle) return reply.status(404).send({ error: "unknown_bundle" });
     if (await refuseWhenDisabled(req, reply, bundleId, "grant")) return reply;
     if (bundle.archivedAt) return reply.status(409).send({ error: "bundle_archived", detail: "an archived bundle cannot be granted. Nothing was saved." });
+    if (maxTier === "dangerous" && !bundle.approverUserId) {
+      return reply.status(400).send({
+        error: "approver_required",
+        detail: "a grant that reaches dangerous tools needs the bundle to name an approver (every such call pauses for them). Nothing was saved.",
+      });
+    }
     const subject: Subject = parsed.data.userId
       ? { kind: "user", id: parsed.data.userId }
       : parsed.data.roleId
@@ -418,6 +477,7 @@ export function registerMcpBundleRoutes(app: FastifyInstance, db: Db): void {
           userId: subject.kind === "user" ? subject.id : null,
           roleId: subject.kind === "role" ? subject.id : null,
           teamId: subject.kind === "team" ? subject.id : null,
+          maxTier,
           grantedBy: req.authCtx.userId ?? null,
         })
         .onConflictDoNothing()
@@ -429,13 +489,13 @@ export function registerMcpBundleRoutes(app: FastifyInstance, db: Db): void {
         bundleId,
         MCP_BUNDLE_RULE_IDS.granted,
         "allow",
-        `MCP bundle '${bundle.name}' (version ${bundle.currentVersion}, ${items.length} tool(s)) granted to ${subject.kind} ${label}; each person's own revocations still apply`,
-        { phase: "grant", grantId: created.id, subjectKind: subject.kind, subjectId: subject.id, version: bundle.currentVersion },
+        `MCP bundle '${bundle.name}' (version ${bundle.currentVersion}, ${items.length} tool(s)) granted to ${subject.kind} ${label} up to the ${maxTier} tier; each person's own revocations still apply`,
+        { phase: "grant", grantId: created.id, subjectKind: subject.kind, subjectId: subject.id, version: bundle.currentVersion, maxTier },
       );
       return created;
     });
     if (!row) return reply.status(409).send({ error: "grant_exists", detail: `this ${subject.kind} already holds this bundle` });
-    return reply.status(201).send({ id: row.id, bundleId, userId: row.userId, roleId: row.roleId, teamId: row.teamId, createdAt: row.createdAt.toISOString() });
+    return reply.status(201).send({ id: row.id, bundleId, userId: row.userId, roleId: row.roleId, teamId: row.teamId, maxTier: row.maxTier, createdAt: row.createdAt.toISOString() });
   });
 
   /** revocation is never refused by the org setting: taking access away is always allowed */
@@ -460,5 +520,51 @@ export function registerMcpBundleRoutes(app: FastifyInstance, db: Db): void {
     });
     if (!removed) return reply.status(404).send({ error: "unknown_grant" });
     return reply.status(204).send();
+  });
+
+  // --- scope tiers ------------------------------------------------------------
+
+  /**
+   * ADR-0236: flag a tool as DANGEROUS (the top scope tier). Flagging tightens and needs no step-up; clearing the flag
+   * lets bundle holders call it without a per-call approval again, so it is a `settings_relax` step-up. Audited either
+   * way. Not gated by the bundle setting: it is a property of the tool.
+   */
+  app.put("/v1/mcp-tools/:toolId/dangerous", async (req, reply) => {
+    const { toolId } = toolParam.parse(req.params);
+    const parsed = dangerousSchema.safeParse(req.body);
+    if (!parsed.success) return reply.status(400).send({ error: "invalid_request", detail: "expected { dangerous: boolean }" });
+    const [tool] = await db.select().from(mcpTools).where(eq(mcpTools.id, toolId));
+    if (!tool) return reply.status(404).send({ error: "unknown_tool" });
+    if (tool.dangerous === parsed.data.dangerous) return { id: tool.id, serverId: tool.serverId, name: tool.name, kind: tool.kind, dangerous: tool.dangerous };
+    if (!parsed.data.dangerous) {
+      const su = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { op: "mcp_tool_dangerous_clear", toolId } });
+      if (!su.ok) return reply;
+    }
+    const out = await db.transaction(async (tx) => {
+      // compare-and-set: the step-up was decided on the flag read above
+      const [updated] = await tx
+        .update(mcpTools)
+        .set({ dangerous: parsed.data.dangerous })
+        .where(and(eq(mcpTools.id, toolId), eq(mcpTools.dangerous, tool.dangerous)))
+        .returning();
+      if (!updated) return null;
+      await tx.insert(auditLog).values({
+        userId: actor(req),
+        serverId: updated.serverId,
+        toolName: updated.name,
+        objectType: "mcp_server",
+        objectId: updated.serverId,
+        detail: { phase: "tool-tier", toolId, dangerous: updated.dangerous },
+        effect: "allow",
+        ruleId: MCP_BUNDLE_RULE_IDS.toolTierChanged,
+        ruleChain: [],
+        reason: updated.dangerous
+          ? `tool '${updated.name}' flagged dangerous: through an MCP bundle it needs a dangerous-tier grant and every call pauses for the bundle's approver`
+          : `tool '${updated.name}' is no longer flagged dangerous`,
+      });
+      return updated;
+    });
+    if (!out) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
+    return { id: out.id, serverId: out.serverId, name: out.name, kind: out.kind, dangerous: out.dangerous };
   });
 }

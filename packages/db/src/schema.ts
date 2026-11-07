@@ -1135,6 +1135,9 @@ export const mcpTools = pgTable(
      * the manifest re-sync upsert (kind/description only) provably never
      * clobbers an admin-set price. Null = no override = the server price. */
     pricePerCallUsd: doublePrecision("price_per_call_usd"),
+    /** ADR-0236 (migration 0291): an admin flag for the top scope tier (read < write < dangerous). A dangerous tool
+     * held through an MCP bundle always pauses for the bundle's approver. The manifest re-sync never touches it. */
+    dangerous: boolean("dangerous").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex("mcp_tools_server_name_uq").on(t.serverId, t.name)],
@@ -1188,6 +1191,8 @@ export const mcpBundles = pgTable("mcp_bundles", {
   description: text("description"),
   currentVersion: integer("current_version").notNull().default(1),
   archivedAt: timestamp("archived_at", { withTimezone: true }),
+  /** who signs off a call to a DANGEROUS tool held through this bundle; null = such a call is refused */
+  approverUserId: uuid("approver_user_id").references(() => users.id, { onDelete: "set null" }),
   createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1239,6 +1244,8 @@ export const mcpBundleGrants = pgTable(
     userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
     roleId: uuid("role_id").references(() => roles.id, { onDelete: "cascade" }),
     teamId: uuid("team_id").references(() => teams.id, { onDelete: "cascade" }),
+    /** the highest scope tier this grant reaches (read < write < dangerous); default 'read' (ADR-0180) */
+    maxTier: text("max_tier", { enum: ["read", "write", "dangerous"] }).notNull().default("read"),
     grantedBy: uuid("granted_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -1249,6 +1256,7 @@ export const mcpBundleGrants = pgTable(
     index("mcp_bundle_grants_user_idx").on(t.userId).where(sql`${t.userId} IS NOT NULL`),
     index("mcp_bundle_grants_role_idx").on(t.roleId).where(sql`${t.roleId} IS NOT NULL`),
     index("mcp_bundle_grants_team_idx").on(t.teamId).where(sql`${t.teamId} IS NOT NULL`),
+    check("mcp_bundle_grants_max_tier_check", sql`${t.maxTier} IN ('read', 'write', 'dangerous')`),
     check("mcp_bundle_grants_one_subject_check", sql`num_nonnulls(${t.userId}, ${t.roleId}, ${t.teamId}) = 1`),
   ],
 );

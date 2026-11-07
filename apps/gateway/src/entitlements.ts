@@ -9,6 +9,7 @@ import {
   mcpBundleVersionItems,
   mcpBundleVersions,
   mcpBundles,
+  mcpTools,
   or,
   ORG_SETTINGS_ID,
   orgSettings,
@@ -22,6 +23,7 @@ import {
   serverGrants,
   teamMembers,
   toolGrants,
+  users,
   type Db,
 } from "@regulait/db";
 import type {
@@ -157,10 +159,15 @@ export async function loadBundleToolGrants(db: Db, userId: string, serverId: str
       grantId: mcpBundleGrants.id,
       grantUserId: mcpBundleGrants.userId,
       grantRoleId: mcpBundleGrants.roleId,
+      maxTier: mcpBundleGrants.maxTier,
       bundleId: mcpBundles.id,
       bundleName: mcpBundles.name,
+      approverUserId: mcpBundles.approverUserId,
+      approverName: users.displayName,
       version: mcpBundleVersions.version,
       toolName: mcpBundleVersionItems.toolName,
+      toolKind: mcpTools.kind,
+      toolDangerous: mcpTools.dangerous,
     })
     .from(mcpBundleGrants)
     .innerJoin(mcpBundles, and(eq(mcpBundles.id, mcpBundleGrants.bundleId), isNull(mcpBundles.archivedAt)))
@@ -172,6 +179,9 @@ export async function loadBundleToolGrants(db: Db, userId: string, serverId: str
       mcpBundleVersionItems,
       and(eq(mcpBundleVersionItems.versionId, mcpBundleVersions.id), eq(mcpBundleVersionItems.serverId, serverId)),
     )
+    // the tier comes from the inventory; an item whose tool left the inventory grants nothing (fail closed)
+    .innerJoin(mcpTools, and(eq(mcpTools.serverId, mcpBundleVersionItems.serverId), eq(mcpTools.name, mcpBundleVersionItems.toolName)))
+    .leftJoin(users, eq(users.id, mcpBundles.approverUserId))
     .where(subject)
     .limit(10_000);
   const grants: BundleToolGrant[] = rows.map((r) => ({
@@ -182,6 +192,10 @@ export async function loadBundleToolGrants(db: Db, userId: string, serverId: str
     via: r.grantUserId ? "user" : r.grantRoleId ? "role" : "team",
     serverId,
     toolName: r.toolName,
+    toolTier: r.toolDangerous ? "dangerous" : r.toolKind,
+    maxTier: r.maxTier,
+    approverUserId: r.approverUserId,
+    approverName: r.approverName,
   }));
   return grants.sort((a, b) => BUNDLE_VIA_ORDER[a.via] - BUNDLE_VIA_ORDER[b.via] || a.id.localeCompare(b.id));
 }
