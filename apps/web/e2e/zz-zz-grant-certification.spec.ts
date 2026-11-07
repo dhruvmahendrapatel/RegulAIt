@@ -13,6 +13,8 @@
  */
 import { expect, test, type Page } from "@playwright/test";
 import { passTotp } from "./totp-sign-in";
+import { steppedUpAs } from "./demo-credentials";
+import { ADMIN_EMAIL } from "./admin-api";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -57,6 +59,8 @@ async function signIn(page: Page, email: string, candidates: string[], settleOn:
 }
 
 test("a campaign is opened with a scope preview, one item kept, one revoked — and the revoked grant is really gone", async ({ page }) => {
+  // ADR-0250: the sign-in and each grant's step-up spend a TOTP step (may wait a 30 s window)
+  test.setTimeout(180_000);
   await signIn(page, "admin@regulait.local", [ADMIN_PASSWORD, state.passwords.admin], ADMIN_PASSWORD);
 
   // --- seed via the bootstrap API: a holder with two agent grants ----------
@@ -78,8 +82,9 @@ test("a campaign is opened with a scope preview, one item kept, one revoked — 
   const agentKeep = await mkAgent("zz-cert-agent-keep");
   const agentRevoke = await mkAgent("zz-cert-agent-revoke");
   for (const agentId of [agentKeep, agentRevoke]) {
-    const g = await page.request.post("/v1/grants/agents", { headers: BOOT, data: { userId: holderId, agentId } });
-    expect(g.status()).toBe(201);
+    // ADR-0250: a grant mint is a settings_relax step-up the bootstrap token cannot give; Ada's page answers it
+    const g = await steppedUpAs(page.request, ADMIN_EMAIL, "POST", "/v1/grants/agents", { userId: holderId, agentId });
+    expect(g.status(), await g.text()).toBe(201);
   }
 
   // --- open the campaign through the page, preview first -------------------

@@ -111,7 +111,7 @@ import { loadAgentRevocations, loadRoleAgentGrants } from "./entitlements.js";
 import { loadModelPolicy, withModelPolicy, type ModelPolicyGate } from "./model-policy.js";
 import { assertProjectAttribution, projectPiiMode } from "./projects.js";
 // ADR-0079: the plan-only gate, shared verbatim with the invoke path.
-import { guardInstanceAttributedCall, isPlanSafeMode } from "./plan-only.js";
+import { engineKeyWorkflowInstance, guardInstanceAttributedCall, guardProjectPlanOnly, isPlanSafeMode } from "./plan-only.js";
 import { loadInterceptionSettings } from "./compat-core.js";
 import { mirrorNodeStatus } from "./pm.js";
 import { handleNestedRunCompletion } from "./workflows.js";
@@ -2056,6 +2056,9 @@ export async function planRun(
   workflowInstanceId: string | null,
   projectId: string | null = null,
   dataKey?: string,
+  /** ADR-0250: the workflow instance this run is the ENGINE's own work for (the nested build-stage run, or a run
+   * made with an engine run's key) — the one audited exception to the project-level plan gate. Default: none. */
+  planGate: { engineInstanceId: string | null } = { engineInstanceId: null },
 ): Promise<PlanRunResult> {
   let graph: TaskGraph;
   try {
@@ -2089,6 +2092,7 @@ export async function planRun(
   // a build stage is never a planning stage, so that path is untouched — and
   // the instance link, previously unvalidated on POST /v1/runs, is now checked
   // like `projectId` is instead of failing later on a foreign key.
+  let instanceProjectId: string | null = null;
   if (workflowInstanceId) {
     const mutating = graph.nodes.filter((n) => !isPlanSafeMode(n.mode));
     const gate = await guardInstanceAttributedCall(db, {
@@ -2105,6 +2109,31 @@ export async function planRun(
     });
     if (!gate.ok) {
       return { ok: false, status: gate.status, body: { error: gate.error, detail: gate.detail } };
+    }
+    instanceProjectId = gate.instance.projectId ?? null;
+  }
+  // ADR-0250 (review P-02): FORCED at project level — a run with any mutating node, on a project any of whose live
+  // instances rests in planning, is refused whether or not it names that instance (audited on that instance's trail)
+  {
+    const mutating = graph.nodes.filter((n) => !isPlanSafeMode(n.mode));
+    const projectGate = await guardProjectPlanOnly(db, {
+      projectIds: [projectId, instanceProjectId],
+      userId,
+      surface: "runs",
+      mutating: mutating.length > 0,
+      mode: mutating[0]?.mode ?? "plan",
+      what:
+        `run '${graph.run}' node${mutating.length > 1 ? "s" : ""} ` +
+        mutating.map((n) => `'${n.id}' (mode '${n.mode}')`).join(", "),
+      detail: { run: graph.run, nodes: graph.nodes.map((n) => n.id) },
+      engineInstanceId: planGate.engineInstanceId,
+    });
+    if (!projectGate.ok) {
+      return {
+        ok: false,
+        status: projectGate.status,
+        body: { error: projectGate.error, detail: projectGate.detail, instanceId: projectGate.instanceId, stageId: projectGate.stageId },
+      };
     }
   }
 
@@ -2429,6 +2458,7 @@ export function registerOrchestrationRoutes(
       body.workflowInstanceId ?? null,
       body.projectId ?? null,
       opts.dataKey,
+      { engineInstanceId: await engineKeyWorkflowInstance(db, req) },
     );
     if (!planned.ok) return reply.status(planned.status).send(planned.body);
     return reply.status(201).send({

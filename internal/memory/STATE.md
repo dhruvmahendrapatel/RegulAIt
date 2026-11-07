@@ -1,6 +1,6 @@
 ---
 phase: demo-prep-live-integrations-merged
-last_updated: 2026-10-29
+last_updated: 2026-11-07
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -5459,6 +5459,8 @@ id tie-break, so breaking a tie the edited rule won is a stepped-up takeover. Fo
 user or server that an approval rule is scoped to (cascade delete). **Amendment 5 (round 5):** widening a rule's
 match re-owes every takeover; option (b) (pool intersection) is the recorded long-term simplification. Open follow-ups: a
 rule-editor warning for shadowed tightenings and equal-specificity overlaps, and option (b).
+
+**ADR-0250 (builder, 2026-11-07, Accepted): grant mints need a step-up; the plan-only gate is forced at project level (whole-build review S-04, P-02; PENDING S8 closed).** The eight grant-mint POSTs take a `settings_relax` step-up bound to `{op: "grant_mint", grant}` (`grantMintStepUp`), so an admin API key can no longer mint; DELETE is unchanged; no new kind, no migration. `guardProjectPlanOnly` (plan-only.ts) refuses a mutating call 409 `plan_only_stage` while any live instance of the attributed project rests in planning, on invoke, runs, compat and MCP write tools, audited on that instance's trail; the engine's own work for another instance (nested build-stage run, engine-run key) is the one audited exception. The demo seed mints its grants before Ada enrols; the admin UI's grant buttons go through `withStepUp`. Limits (ADR-0250): a call naming no project is not plan-gated; an instance without a project is gated only when named. Follow-up: a partial index on `workflow_instances(project_id)` for live statuses if the table grows.
 
 **ADR-0234 (builder, 2026-11-06, Proposed): Postgres row-level security (PENDING S7), batch 1.** No table has an org
 or tenant key (ADR-0041), so on the owner's instruction ("the best, most secure") RLS is keyed on the authenticated
