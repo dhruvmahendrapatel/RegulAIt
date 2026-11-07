@@ -532,6 +532,7 @@ import {
 } from "./org-settings.js";
 import { registerAppearanceRoutes } from "./appearance.js";
 import { registerModelRateLimitRoutes } from "./model-rate-limits.js";
+import { registerUsageExtractorRoutes } from "./usage-extractors.js";
 // ADR-0202 decision 4 — the per-beat simulated fallback for the hosted demo (admin-only, audited)
 import { registerDemoBeatRoutes } from "./demo-beats.js";
 // ADR-0185 G5 — request metrics (a no-op seam until the meter lands)
@@ -5868,6 +5869,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerOrgSettingsRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0212 (P12 b/c): model rate limits, their org opt-in, and per-modality agent prices
   registerModelRateLimitRoutes(app, db);
+  // ADR-0241 (P21): admin usage mappings (versioned, sample-tested, step-up to activate; off by default)
+  registerUsageExtractorRoutes(app, db);
   // ADR-0202 decision 4 — the demo beats' simulated fallback; admin-only (not in NON_ADMIN_ROUTES), audited
   registerDemoBeatRoutes(app, db);
   registerPosturePresetRoutes(app, db, { sink: anchorSink, bootstrapConfigured: Boolean(opts.bootstrapToken) });
